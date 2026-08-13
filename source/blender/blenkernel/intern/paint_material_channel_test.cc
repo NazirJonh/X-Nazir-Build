@@ -1409,6 +1409,105 @@ TEST_F(PaintMaterialChannelTest, PrepareForSavePurgesPresetsOfDeletedLocalBrushe
   BKE_id_free(bmain, scene);
 }
 
+TEST_F(PaintMaterialChannelTest, BaseColorSyncWritesImagePaintUnifiedColor)
+{
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "BaseColorSyncScene"));
+  Sculpt *sculpt_data = MEM_new<Sculpt>(__func__);
+  scene->toolsettings->sculpt = sculpt_data;
+  sculpt_data->paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  sculpt_data->paint.runtime->ob_mode = OB_MODE_SCULPT;
+  scene->toolsettings->imapaint.paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  scene->toolsettings->imapaint.paint.runtime->ob_mode = OB_MODE_TEXTURE_PAINT;
+
+  scene->toolsettings->paint_mode.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
+  scene->toolsettings->paint_mode.material_paint_flag = PAINT_MATERIAL_BRUSH_SYNC;
+  sculpt_data->paint.unified_paint_settings.flag |= UNIFIED_PAINT_COLOR;
+  scene->toolsettings->imapaint.paint.unified_paint_settings.flag |= UNIFIED_PAINT_COLOR;
+
+  Brush *brush = BKE_brush_add(bmain, "BaseColorSyncBrush", OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT);
+  BKE_brush_material_paint_ensure(brush);
+  brush->material_paint->use_sync_base_color_with_brush = 1;
+  sculpt_data->paint.brush = brush;
+  scene->toolsettings->imapaint.paint.brush = brush;
+
+  copy_v3_v3(sculpt_data->paint.unified_paint_settings.color, float3(1.0f, 0.0f, 0.0f));
+  copy_v3_v3(scene->toolsettings->imapaint.paint.unified_paint_settings.color,
+             float3(0.0f, 1.0f, 0.0f));
+  copy_v3_v3(brush->material_paint->base_color, float3(0.2f, 0.4f, 0.8f));
+
+  BKE_brush_material_paint_base_color_sync_to_brush(&sculpt_data->paint, brush, scene);
+
+  EXPECT_TRUE(equals_v3v3(sculpt_data->paint.unified_paint_settings.color,
+                          brush->material_paint->base_color));
+  EXPECT_TRUE(equals_v3v3(scene->toolsettings->imapaint.paint.unified_paint_settings.color,
+                          brush->material_paint->base_color))
+      << "Image Editor Color uses Image Paint unified settings, not only the PBR Base Color field";
+
+  BKE_id_free(bmain, scene);
+}
+
+TEST_F(PaintMaterialChannelTest, BrushSyncAfterLoadSharesSculptBrushWithImagePaint)
+{
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "LoadSyncScene"));
+  Sculpt *sculpt_data = MEM_new<Sculpt>(__func__);
+  scene->toolsettings->sculpt = sculpt_data;
+  sculpt_data->paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  sculpt_data->paint.runtime->ob_mode = OB_MODE_SCULPT;
+
+  scene->toolsettings->imapaint.paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  scene->toolsettings->imapaint.paint.runtime->ob_mode = OB_MODE_TEXTURE_PAINT;
+
+  scene->toolsettings->paint_mode.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
+  scene->toolsettings->paint_mode.material_paint_flag = PAINT_MATERIAL_BRUSH_SYNC;
+
+  Brush *sculpt_brush = BKE_brush_add(bmain, "LoadSyncSculpt", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(sculpt_brush);
+  sculpt_brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_NORMAL].use = 1;
+  sculpt_data->paint.brush = sculpt_brush;
+
+  Brush *image_brush = BKE_brush_add(bmain, "LoadSyncImage", OB_MODE_TEXTURE_PAINT);
+  BKE_brush_material_paint_ensure(image_brush);
+  image_brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_NORMAL].use = 0;
+  scene->toolsettings->imapaint.paint.brush = image_brush;
+
+  BKE_paint_material_brush_sync_after_load(bmain);
+
+  EXPECT_EQ(scene->toolsettings->imapaint.paint.brush, sculpt_brush)
+      << "after load, Image Paint must share the Sculpt brush so channel Use flags are the same "
+         "datablock";
+  EXPECT_TRUE(sculpt_brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_NORMAL].use);
+
+  BKE_id_free(bmain, scene);
+}
+
+TEST_F(PaintMaterialChannelTest, BrushSyncAfterLoadIsNoOpWhenSyncDisabled)
+{
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "LoadSyncOffScene"));
+  Sculpt *sculpt_data = MEM_new<Sculpt>(__func__);
+  scene->toolsettings->sculpt = sculpt_data;
+  sculpt_data->paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  sculpt_data->paint.runtime->ob_mode = OB_MODE_SCULPT;
+  scene->toolsettings->imapaint.paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  scene->toolsettings->imapaint.paint.runtime->ob_mode = OB_MODE_TEXTURE_PAINT;
+
+  scene->toolsettings->paint_mode.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
+  scene->toolsettings->paint_mode.material_paint_flag = ePaintMaterialFlag(0);
+
+  Brush *sculpt_brush = BKE_brush_add(bmain, "LoadSyncOffSculpt", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(sculpt_brush);
+  sculpt_data->paint.brush = sculpt_brush;
+
+  Brush *image_brush = BKE_brush_add(bmain, "LoadSyncOffImage", OB_MODE_TEXTURE_PAINT);
+  BKE_brush_material_paint_ensure(image_brush);
+  scene->toolsettings->imapaint.paint.brush = image_brush;
+
+  BKE_paint_material_brush_sync_after_load(bmain);
+
+  EXPECT_EQ(scene->toolsettings->imapaint.paint.brush, image_brush);
+
+  BKE_id_free(bmain, scene);
+}
+
 TEST_F(PaintMaterialChannelTest, LocalBrushChannelDataSurvivesSaveReload)
 {
   Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "PersistScene"));

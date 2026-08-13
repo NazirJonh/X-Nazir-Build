@@ -955,7 +955,7 @@ void BKE_brush_material_paint_base_color_sync_to_channel(const Paint *paint, Bru
   brush_material_paint_base_color_sync_guard = false;
 }
 
-void BKE_brush_material_paint_base_color_sync_to_brush(Paint *paint, Brush *brush)
+void BKE_brush_material_paint_base_color_sync_to_brush(Paint *paint, Brush *brush, Scene *scene)
 {
   BrushMaterialPaint *settings = brush_material_paint_sync_settings_get(brush);
   if (settings == nullptr || paint == nullptr) {
@@ -963,12 +963,18 @@ void BKE_brush_material_paint_base_color_sync_to_brush(Paint *paint, Brush *brus
   }
 
   const float3 color = float3(settings->base_color);
-  if (equals_v3v3(BKE_brush_color_get(paint, brush), color)) {
+  Paint *other = scene != nullptr ? BKE_paint_material_sync_target_get(scene, paint) : nullptr;
+  if (equals_v3v3(BKE_brush_color_get(paint, brush), color) &&
+      (other == nullptr || equals_v3v3(BKE_brush_color_get(other, brush), color)))
+  {
     return;
   }
 
   brush_material_paint_base_color_sync_guard = true;
   BKE_brush_color_set(paint, brush, color);
+  if (other != nullptr) {
+    BKE_brush_color_set(other, brush, color);
+  }
   brush_material_paint_base_color_sync_guard = false;
 }
 

@@ -402,6 +402,28 @@ std::optional<AssetWeakReference> WM_toolsystem_last_brush_asset_from_brush_type
   return BKE_paint_brush_type_default_reference(paint->runtime->paint_mode, std::nullopt);
 }
 
+/**
+ * Image Paint tool restore uses its own last-used brush. That runs on first draw after file load
+ * (#AREA_FLAG_ACTIVE_TOOL_UPDATE), after #BKE_paint_material_brush_sync_after_load, and splits the
+ * Sculpt / Image Paint pair until the user presses Sync Brush. Sculpt stays the source, matching
+ * #rna_PaintModeSettings_brush_sync_update.
+ */
+static void toolsystem_material_brush_sync_from_sculpt(Scene *scene)
+{
+  if (scene == nullptr || scene->toolsettings == nullptr || scene->toolsettings->sculpt == nullptr)
+  {
+    return;
+  }
+
+  Paint *sculpt_paint = &scene->toolsettings->sculpt->paint;
+  if (BKE_paint_material_sync_target_get(scene, sculpt_paint) == nullptr) {
+    return;
+  }
+
+  BKE_paint_material_brush_sync(scene, sculpt_paint);
+  toolsystem_main_brush_binding_update_from_active(&scene->toolsettings->imapaint.paint);
+}
+
 static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
                                                                     const WorkSpace *workspace,
                                                                     const bToolRef *tref)
@@ -420,17 +442,29 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
     BKE_paint_ensure_from_paintmode(scene, paint_mode);
     Paint *paint = BKE_paint_get_active_from_paintmode(scene, paint_mode);
 
-    /* Attempt to re-activate a brush remembered for this brush type, as stored in a brush
-     * binding. */
-    if (std::optional<AssetWeakReference> brush_asset_reference =
-            WM_toolsystem_last_brush_asset_from_brush_type(scene, tref_rt->brush_type, paint_mode))
-    {
-      BKE_paint_brush_set_synced(*bmain, *scene, *paint, *brush_asset_reference);
-      if (tref_rt->brush_type == -1) {
-        /* Update the bindings so the main brush reference matches the currently active brush. */
-        toolsystem_main_brush_binding_update_from_active(paint);
+    /* With Material brush sync on, Image Paint must not restore a different remembered brush:
+     * that is what undoes load-time sync. Sculpt still restores from its own binding, then the
+     * pair is aligned below. */
+    const bool skip_image_restore_for_sync = paint == &scene->toolsettings->imapaint.paint &&
+                                             BKE_paint_material_sync_target_get(scene, paint) !=
+                                                 nullptr;
+
+    if (!skip_image_restore_for_sync) {
+      /* Attempt to re-activate a brush remembered for this brush type, as stored in a brush
+       * binding. */
+      if (std::optional<AssetWeakReference> brush_asset_reference =
+              WM_toolsystem_last_brush_asset_from_brush_type(
+                  scene, tref_rt->brush_type, paint_mode))
+      {
+        BKE_paint_brush_set_synced(*bmain, *scene, *paint, *brush_asset_reference);
+        if (tref_rt->brush_type == -1) {
+          /* Update the bindings so the main brush reference matches the currently active brush. */
+          toolsystem_main_brush_binding_update_from_active(paint);
+        }
       }
     }
+
+    toolsystem_material_brush_sync_from_sculpt(scene);
   }
 }
 

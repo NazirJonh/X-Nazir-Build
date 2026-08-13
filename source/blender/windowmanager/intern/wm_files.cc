@@ -854,6 +854,10 @@ static void wm_file_read_post(bContext *C,
       /* Ensure tools are registered. */
       WM_toolsystem_init(C);
     }
+    /* After editors and the tool system have restored per-mode brushes: otherwise Sculpt and Image
+     * Paint keep the brushes they were saved with and channel toggles (e.g. Normal) do not match
+     * until the user presses Sync Brush. */
+    BKE_paint_material_brush_sync_after_load(bmain);
   }
 }
 

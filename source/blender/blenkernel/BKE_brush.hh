@@ -140,8 +140,14 @@ void BKE_brush_material_paint_base_color_sync_to_channel(const Paint *paint, Bru
 /**
  * Copy the Base Color channel into the brush's paint color, when Sync with Brush is enabled.
  * The inverse of #BKE_brush_material_paint_base_color_sync_to_channel; shares its guard.
+ *
+ * \a scene, when non-null and Material brush sync is on, also writes the color onto the paired
+ * paint mode's #UnifiedPaintSettings. Image Editor Color reads that struct, not the shared
+ * #BrushMaterialPaint, so omitting it left the Image Editor brush color stale.
  */
-void BKE_brush_material_paint_base_color_sync_to_brush(Paint *paint, Brush *brush);
+void BKE_brush_material_paint_base_color_sync_to_brush(Paint *paint,
+                                                       Brush *brush,
+                                                       Scene *scene = nullptr);
 
 /**
  * Tag a linked brush as having changed settings so an indicator can be displayed to the user,

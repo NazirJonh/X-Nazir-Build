@@ -3989,6 +3989,27 @@ void BKE_paint_material_brush_sync(Scene *scene, Paint *source)
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
+void BKE_paint_material_brush_sync_after_load(Main *bmain)
+{
+  if (bmain == nullptr) {
+    return;
+  }
+
+  for (Scene &scene : bmain->scenes) {
+    if (scene.toolsettings == nullptr) {
+      continue;
+    }
+    /* Runtime is not stored in the file; without it #BKE_paint_material_brush_sync cannot opt the
+     * brush into Image Paint's object mode. */
+    BKE_paint_ensure_from_paintmode(&scene, PaintMode::Sculpt);
+    BKE_paint_ensure_from_paintmode(&scene, PaintMode::Texture2D);
+    if (scene.toolsettings->sculpt == nullptr) {
+      continue;
+    }
+    BKE_paint_material_brush_sync(&scene, &scene.toolsettings->sculpt->paint);
+  }
+}
+
 /** \} */
 
 }  // namespace blender

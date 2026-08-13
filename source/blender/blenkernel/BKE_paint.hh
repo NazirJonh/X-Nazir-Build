@@ -943,6 +943,15 @@ Paint *BKE_paint_material_sync_target_get(Scene *scene, Paint *source);
 void BKE_paint_material_brush_sync(Scene *scene, Paint *source);
 
 /**
+ * Align Image Paint with the Sculpt brush after a blend file or startup is loaded.
+ *
+ * Not sufficient on its own: the Image Editor tool still restores its last brush on first draw.
+ * #toolsystem_brush_activate_from_toolref_for_object_paint re-applies this afterwards. No-op when
+ * sync is off or the canvas is not #PAINT_CANVAS_SOURCE_MATERIAL.
+ */
+void BKE_paint_material_brush_sync_after_load(Main *bmain);
+
+/**
  * Mirror \a source's #UnifiedPaintSettings (size, strength, color, jitter) onto the paired paint
  * mode. Kept separate from #BKE_paint_material_brush_sync because these change far more often than
  * the active brush and are driven from a different callback.

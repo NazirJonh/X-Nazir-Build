@@ -1176,7 +1176,7 @@ static void rna_BrushMaterialPaint_base_color_update(bContext *C, PointerRNA *pt
 {
   Brush *brush = reinterpret_cast<Brush *>(ptr->owner_id);
   Paint *paint = BKE_paint_get_active_from_context(C);
-  BKE_brush_material_paint_base_color_sync_to_brush(paint, brush);
+  BKE_brush_material_paint_base_color_sync_to_brush(paint, brush, CTX_data_scene(C));
   rna_BrushMaterialPaint_update(CTX_data_main(C), CTX_data_scene(C), ptr);
 }
 

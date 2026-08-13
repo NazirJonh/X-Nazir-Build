@@ -1506,7 +1506,6 @@ static void rna_def_paint_mode(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "use_brush_sync", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "material_paint_flag", PAINT_MATERIAL_BRUSH_SYNC);
-  RNA_def_property_boolean_default(prop, true);
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_ui_text(prop,
                            "Sync Brush",

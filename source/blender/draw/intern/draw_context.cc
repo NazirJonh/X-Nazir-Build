@@ -472,6 +472,19 @@ void DRWContext::acquire_data()
       float4x4 viewmat;
       BLI_rctf_transform_calc_m4_pivot_min(&v2d->cur, &region_space, viewmat.ptr());
 
+      /* Rotate the overlay-engine view so grid / mask / UDIM-border / stencil overlays stay locked
+       * to the canvas-rotated image. `v2d->rotation` is synced from the Image Editor space (0
+       * elsewhere and in the UV editor), and `view2d_view_rotation_matrix` is the same
+       * aspect-correct Rot(-rotation) used by `view2d_view_ortho` and the POST_VIEW callback, so
+       * all overlay paths share one rotation. persmat = winmat * viewmat maps view space to NDC,
+       * so post-multiplying viewmat by the rotation applies it in view space, exactly like the
+       * ortho path. */
+      if (v2d->rotation != 0.0f) {
+        float4x4 rotmat;
+        ui::view2d_view_rotation_matrix(v2d, rotmat.ptr());
+        viewmat = viewmat * rotmat;
+      }
+
       float4x4 winmat = float4x4::identity();
       winmat[0][0] = winmat[1][1] = 2.0f;
       winmat[3][0] = winmat[3][1] = -1.0f;
@@ -1482,6 +1495,17 @@ static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
 
     wmOrtho2(v2d.cur.xmin, v2d.cur.xmax, v2d.cur.ymin, v2d.cur.ymax);
 
+    /* Rotate the view-space callback matrix so Python POST_VIEW overlays (and view-space
+     * annotations) rotate together with the canvas. Non-zero only for the Image Editor. Guarded by
+     * push/pop so a callback cannot leak the model-view change. */
+    const bool apply_canvas_rotation = (v2d.rotation != 0.0f);
+    if (apply_canvas_rotation) {
+      GPU_matrix_push();
+      float rotmat[4][4];
+      ui::view2d_view_rotation_matrix(&v2d, rotmat);
+      GPU_matrix_mul(rotmat);
+    }
+
     if (do_annotations) {
       ED_annotation_draw_view2d(draw_ctx.evil_C, true);
     }
@@ -1489,6 +1513,10 @@ static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
     GPU_depth_test(GPU_DEPTH_NONE);
 
     ED_region_draw_cb_draw(draw_ctx.evil_C, draw_ctx.region, REGION_DRAW_POST_VIEW);
+
+    if (apply_canvas_rotation) {
+      GPU_matrix_pop();
+    }
 
     GPU_matrix_pop_projection();
     /* Callback can be nasty and do whatever they want with the state.

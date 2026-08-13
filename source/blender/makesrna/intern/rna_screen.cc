@@ -586,13 +586,26 @@ static void rna_def_view2d_api(StructRNA *srna)
 static void rna_def_view2d(BlenderRNA *brna)
 {
   StructRNA *srna;
-  // PropertyRNA *prop;
+  PropertyRNA *prop;
 
   srna = RNA_def_struct(brna, "View2D", nullptr);
   RNA_def_struct_ui_text(srna, "View2D", "Scroll and zoom for a 2D region");
   RNA_def_struct_sdna(srna, "View2D");
 
-  /* TODO: more View2D properties could be exposed here (read-only). */
+  prop = RNA_def_property(srna, "rotation", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "rotation");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Rotation",
+      "Canvas rotation of this view, in radians. Region coordinate conversions already account "
+      "for it; this is for add-ons that must counter-rotate screen-facing content such as text");
+
+  prop = RNA_def_property(srna, "rotation_pivot", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "rotation_pivot");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Rotation Pivot", "Pivot of the canvas rotation, in view space");
 
   rna_def_view2d_api(srna);
 }

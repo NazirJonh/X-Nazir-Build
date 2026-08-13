@@ -180,11 +180,20 @@ struct View2D {
   /** Pivot point for transforms (rotate and scale). */
   short around = 0;
 
+  /** Canvas rotation (radians) applied on top of the axis-aligned cur<->mask mapping.
+   * Runtime value, re-synced from the space each redraw (mirrors how `cur` derives from zoom/pan).
+   * `0` means no rotation - a strict no-op for every editor that does not set it. */
+  float rotation = 0;
+  /** Pivot for #rotation in view coordinates (image UV space for the Image Editor). */
+  float rotation_pivot[2] = {0.5f, 0.5f};
+
   /* Usually set externally (as in, not in view2d files). */
   /** Alpha of vertical and horizontal scroll-bars (range is [0, 255]). */
   char alpha_vert = 0, alpha_hor = 0;
 
-  char _pad[2] = {};
+  /* Pad to keep the following pointers 8-byte aligned and the struct size a multiple of 8
+   * after the 12 bytes added by #rotation and #rotation_pivot. */
+  char _pad[6] = {};
   /**
    * When set (not 0), determines how many pixels to scroll when scrolling an entire page.
    * Otherwise the height of #View2D.mask is used.

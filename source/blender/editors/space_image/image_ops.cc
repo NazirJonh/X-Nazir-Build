@@ -7,6 +7,7 @@
  */
 
 #include <cerrno>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -313,6 +314,19 @@ static void image_view_all(SpaceImage *sima, ARegion *region, wmOperator *op)
     h *= y_tiles;
   }
 
+  /* Under canvas rotation the content's screen-space bounds are the bounding box of the rotated
+   * rect, which is larger than the axis-aligned one. Fit to that instead, or the corners overflow
+   * the region. */
+  const float rotation = region->v2d.rotation;
+  if (rotation != 0.0f) {
+    const float c = fabsf(cosf(rotation));
+    const float s = fabsf(sinf(rotation));
+    const float w_rot = w * c + h * s;
+    const float h_rot = w * s + h * c;
+    w = w_rot;
+    h = h_rot;
+  }
+
   /* check if the image will fit in the image with (zoom == 1) */
   width = BLI_rcti_size_x(&region->winrct) + 1;
   height = BLI_rcti_size_y(&region->winrct) + 1;
@@ -586,7 +600,7 @@ static void image_view_zoom_init(bContext *C, wmOperator *op, const wmEvent *eve
   vpd->snap = false;
   vpd->launch_event = WM_userdef_event_type_from_keymap_type(event->type);
 
-  ui::view2d_region_to_view(
+  ui::view2d_region_to_view_zoom_anchor(
       &region->v2d, event->mval[0], event->mval[1], &vpd->location[0], &vpd->location[1]);
 
   if (U.viewzoom == USER_ZOOM_CONTINUE) {
@@ -650,7 +664,7 @@ static wmOperatorStatus image_view_zoom_invoke(bContext *C, wmOperator *op, cons
     ARegion *region = CTX_wm_region(C);
     float delta, factor, location[2];
 
-    ui::view2d_region_to_view(
+    ui::view2d_region_to_view_zoom_anchor(
         &region->v2d, event->mval[0], event->mval[1], &location[0], &location[1]);
 
     delta = event->prev_xy[0] - event->xy[0] + event->prev_xy[1] - event->xy[1];
@@ -1067,6 +1081,18 @@ static wmOperatorStatus image_view_selected_exec(bContext *C, wmOperator * /*op*
   /* add some margin */
   BLI_rctf_scale(&bounds, 1.4f);
 
+  /* Under canvas rotation the content's screen-space bounds are the bounding box of the rotated
+   * rect, which is larger than the axis-aligned one. Fit to that instead, or the corners overflow
+   * the region. */
+  const float rotation = region->v2d.rotation;
+  if (rotation != 0.0f) {
+    const float c = fabsf(cosf(rotation));
+    const float s = fabsf(sinf(rotation));
+    const float w = BLI_rctf_size_x(&bounds);
+    const float h = BLI_rctf_size_y(&bounds);
+    BLI_rctf_resize(&bounds, w * c + h * s, w * s + h * c);
+  }
+
   sima_zoom_set_from_bounds(sima, region, &bounds);
 
   ED_region_tag_redraw(region);
@@ -1120,7 +1146,7 @@ static wmOperatorStatus image_view_zoom_in_invoke(bContext *C,
   ARegion *region = CTX_wm_region(C);
   float location[2];
 
-  ui::view2d_region_to_view(
+  ui::view2d_region_to_view_zoom_anchor(
       &region->v2d, event->mval[0], event->mval[1], &location[0], &location[1]);
   RNA_float_set_array(op->ptr, "location", location);
 
@@ -1181,7 +1207,7 @@ static wmOperatorStatus image_view_zoom_out_invoke(bContext *C,
   ARegion *region = CTX_wm_region(C);
   float location[2];
 
-  ui::view2d_region_to_view(
+  ui::view2d_region_to_view_zoom_anchor(
       &region->v2d, event->mval[0], event->mval[1], &location[0], &location[1]);
   RNA_float_set_array(op->ptr, "location", location);
 
@@ -1282,7 +1308,7 @@ static wmOperatorStatus image_view_zoom_border_exec(bContext *C, wmOperator *op)
 
   WM_operator_properties_border_to_rctf(op, &bounds);
 
-  ui::view2d_region_to_view_rctf(&region->v2d, &bounds, &bounds);
+  ui::view2d_region_to_view_rctf_zoom_bounds(&region->v2d, &bounds, &bounds);
 
   struct {
     float xof;
@@ -1326,14 +1352,14 @@ void IMAGE_OT_view_zoom_border(wmOperatorType *ot)
   WM_operator_properties_gesture_box_zoom(ot);
 }
 
+/** \} */
+
 /* load/replace/save callbacks */
 static void image_filesel(bContext *C, wmOperator *op, const char *path)
 {
   RNA_string_set(op->ptr, "filepath", path);
   WM_event_add_fileselect(C, op);
 }
-
-/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Open Image Operator
@@ -3697,7 +3723,7 @@ bool ED_space_image_color_sample(
     return false;
   }
   float uv[2];
-  ui::view2d_region_to_view(&region->v2d, mval[0], mval[1], &uv[0], &uv[1]);
+  ED_image_mouse_pos(sima, region, mval, uv);
   int tile = BKE_image_get_tile_from_pos(sima->image, uv, uv, nullptr);
 
   void *lock;

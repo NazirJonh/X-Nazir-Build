@@ -32,6 +32,7 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 
@@ -79,6 +80,18 @@ struct BrushPainterCache {
   // int image_size[2]; /* UNUSED. */
 };
 
+/**
+ * Affine mapping from a brush image-buffer pixel `(x, y)` to a texture sample coordinate:
+ * `texco = origin + x * du + y * dv`. The full 2D basis (`du`, `dv`) can encode canvas rotation
+ * (and non-uniform scaling), which an axis-aligned `rctf` cannot. With no canvas rotation this
+ * reduces to `du = {xmax, 0}`, `dv = {0, ymax}`, `origin = {xmin, ymin}`.
+ */
+struct BrushImbufMapping {
+  float origin[2];
+  float du[2];
+  float dv[2];
+};
+
 struct BrushPainter {
   Scene *scene;
   const Paint *paint;
@@ -90,9 +103,12 @@ struct BrushPainter {
 
   bool firsttouch; /* first paint op */
 
-  ImagePool *pool;   /* image pool */
-  rctf tex_mapping;  /* texture coordinate mapping */
-  rctf mask_mapping; /* mask texture coordinate mapping */
+  ImagePool *pool; /* image pool */
+  /* Affine mapping from a brush image-buffer pixel to a texture sample coordinate. A full 2D
+   * basis (rather than an axis-aligned `rctf`) is required so that canvas rotation can be
+   * represented; see #brush_imbuf_tex_co. */
+  BrushImbufMapping tex_mapping;  /* texture coordinate mapping */
+  BrushImbufMapping mask_mapping; /* mask texture coordinate mapping */
 
   bool cache_invert;
 };
@@ -127,6 +143,7 @@ struct ImagePaintTile {
 struct ImagePaintState {
   BrushPainter *painter;
   SpaceImage *sima;
+  ARegion *region;
   View2D *v2d;
   Scene *scene;
   const Paint *paint;
@@ -219,10 +236,10 @@ static void brush_painter_cache_2d_free(BrushPainterCache *cache)
   }
 }
 
-static void brush_imbuf_tex_co(const rctf *mapping, int x, int y, float texco[3])
+static void brush_imbuf_tex_co(const BrushImbufMapping *mapping, int x, int y, float texco[3])
 {
-  texco[0] = mapping->xmin + x * mapping->xmax;
-  texco[1] = mapping->ymin + y * mapping->ymax;
+  texco[0] = mapping->origin[0] + x * mapping->du[0] + y * mapping->dv[0];
+  texco[1] = mapping->origin[1] + x * mapping->du[1] + y * mapping->dv[1];
   texco[2] = 0.0f;
 }
 
@@ -230,7 +247,7 @@ static void brush_imbuf_tex_co(const rctf *mapping, int x, int y, float texco[3]
 static ushort *brush_painter_mask_ibuf_new(BrushPainter *painter, const int size)
 {
   Brush *brush = painter->brush;
-  rctf mask_mapping = painter->mask_mapping;
+  BrushImbufMapping mask_mapping = painter->mask_mapping;
   ImagePool *pool = painter->pool;
 
   float texco[3];
@@ -266,7 +283,7 @@ static void brush_painter_mask_imbuf_update(BrushPainter *painter,
 {
   Brush *brush = painter->brush;
   BrushPainterCache *cache = &tile->cache;
-  rctf tex_mapping = painter->mask_mapping;
+  BrushImbufMapping tex_mapping = painter->mask_mapping;
   ImagePool *pool = painter->pool;
   ushort res;
 
@@ -395,7 +412,7 @@ static ImBuf *brush_painter_imbuf_new(
   Brush *brush = painter->brush;
   BrushPainterCache *cache = &tile->cache;
 
-  rctf tex_mapping = painter->tex_mapping;
+  BrushImbufMapping tex_mapping = painter->tex_mapping;
   ImagePool *pool = painter->pool;
 
   const bool is_float = cache->is_float;
@@ -488,7 +505,7 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
   const MTex *mtex = &brush->mtex;
   BrushPainterCache *cache = &tile->cache;
 
-  rctf tex_mapping = painter->tex_mapping;
+  BrushImbufMapping tex_mapping = painter->tex_mapping;
   ImagePool *pool = painter->pool;
 
   const bool is_float = cache->is_float;
@@ -524,8 +541,10 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
   float *ibuf_float_data = ibuf->float_data_for_write();
   uchar *texibuf_byte_data = texibuf->byte_data_for_write();
   float *texibuf_float_data = texibuf->float_data_for_write();
-  const uchar *oldtexibuf_byte_data = (oldtexibuf) ? oldtexibuf->byte_data() : nullptr;
-  const float *oldtexibuf_float_data = (oldtexibuf) ? oldtexibuf->float_data() : nullptr;
+  /* `oldtexibuf` is null when sampling brand-new areas (see callers); these pointers are only read
+   * under `use_texture_old`, so guard the access to avoid dereferencing null. */
+  const uchar *oldtexibuf_byte_data = use_texture_old ? oldtexibuf->byte_data() : nullptr;
+  const float *oldtexibuf_float_data = use_texture_old ? oldtexibuf->float_data() : nullptr;
   for (y = origy; y < h; y++) {
     for (x = origx; x < w; x++) {
       /* sample texture and multiply with brush color */
@@ -679,10 +698,11 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
                                          const float pos[2],
                                          const float mouse[2],
                                          int mapmode,
-                                         rctf *r_mapping)
+                                         BrushImbufMapping *r_mapping)
 {
-  float invw = 1.0f / float(tile->canvas->x);
-  float invh = 1.0f / float(tile->canvas->y);
+  const float invw = 1.0f / float(tile->canvas->x);
+  const float invh = 1.0f / float(tile->canvas->y);
+  const float center = diameter * 0.5f;
   float start[2];
 
   /* find start coordinate of brush in canvas */
@@ -690,40 +710,88 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
   start[1] = pos[1] - diameter / 2.0f;
 
   if (mapmode == MTEX_MAP_MODE_STENCIL) {
-    /* map from view coordinates of brush to region coordinates */
-    float xmin, ymin, xmax, ymax;
-    ui::view2d_view_to_region_fl(s->v2d, start[0] * invw, start[1] * invh, &xmin, &ymin);
-    ui::view2d_view_to_region_fl(
-        s->v2d, (start[0] + diameter) * invw, (start[1] + diameter) * invh, &xmax, &ymax);
+    /* The stencil texture is pinned to a fixed region position (`stencil_pos`) with region-space
+     * dimensions, so each brush pixel must sample at its true region coordinate (region pixels,
+     * zoom included). Deriving the basis from #ED_image_point_pos__reverse makes the mapping
+     * rotation- and zoom-aware exactly like the displayed image (a rotated canvas yields a rotated
+     * `du`/`dv`). */
+    auto uv_to_region = [&](const float cx, const float cy, float r_out[2]) {
+      const float uv[2] = {cx * invw, cy * invh};
+      ED_image_point_pos__reverse(s->sima, s->region, uv, r_out);
+    };
+    float origin[2], step_x[2], step_y[2];
+    uv_to_region(start[0], start[1], origin);
+    uv_to_region(start[0] + 1.0f, start[1], step_x);
+    uv_to_region(start[0], start[1] + 1.0f, step_y);
 
-    /* output r_mapping from brush ibuf x/y to region coordinates */
-    r_mapping->xmax = (xmax - xmin) / float(diameter);
-    r_mapping->ymax = (ymax - ymin) / float(diameter);
-    r_mapping->xmin = xmin + (tile->uv_origin[0] * tile->size[0] * r_mapping->xmax);
-    r_mapping->ymin = ymin + (tile->uv_origin[1] * tile->size[1] * r_mapping->ymax);
+    r_mapping->du[0] = step_x[0] - origin[0];
+    r_mapping->du[1] = step_x[1] - origin[1];
+    r_mapping->dv[0] = step_y[0] - origin[0];
+    r_mapping->dv[1] = step_y[1] - origin[1];
+    /* Offset for the tile origin (UDIM), expressed along the mapping basis. */
+    const float off_u = tile->uv_origin[0] * tile->size[0];
+    const float off_v = tile->uv_origin[1] * tile->size[1];
+    r_mapping->origin[0] = origin[0] + off_u * r_mapping->du[0] + off_v * r_mapping->dv[0];
+    r_mapping->origin[1] = origin[1] + off_u * r_mapping->du[1] + off_v * r_mapping->dv[1];
+    return;
   }
-  else if (mapmode == MTEX_MAP_MODE_3D) {
-    /* 3D mapping, just mapping to canvas 0..1. */
-    r_mapping->xmin = 2.0f * (start[0] * invw - 0.5f);
-    r_mapping->ymin = 2.0f * (start[1] * invh - 0.5f);
-    r_mapping->xmax = 2.0f * invw;
-    r_mapping->ymax = 2.0f * invh;
+
+  /* Canvas rotation is applied to the sample lattice as `Rot(-canvas_rotation)` (the image is
+   * displayed as `Rot(-rotation)`), so the painted texture stays locked to the view. */
+  const float canvas_rotation = (s->sima) ? s->sima->rotation : 0.0f;
+  float cos_a = 1.0f, sin_a = 0.0f;
+  if (canvas_rotation != 0.0f) {
+    cos_a = cosf(canvas_rotation);
+    sin_a = -sinf(canvas_rotation);
   }
-  else if (ELEM(mapmode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_RANDOM)) {
-    /* view mapping */
-    r_mapping->xmin = mouse[0] - diameter * 0.5f + 0.5f;
-    r_mapping->ymin = mouse[1] - diameter * 0.5f + 0.5f;
-    r_mapping->xmax = 1.0f;
-    r_mapping->ymax = 1.0f;
+
+  if (mapmode == MTEX_MAP_MODE_TILED) {
+    /* Tiled repeats across the view (matching the overlay). Keep the canvas-pixel scale (as the
+     * unrotated code does) but rotate the unit lattice into view space and anchor it globally to
+     * the stroke start, so the mapping is a single consistent function of the canvas pixel. A
+     * per-dab (`pos`-dependent) anchor would otherwise shift the tile phase between dabs and shear
+     * the pattern. Composed with the display rotation this yields a screen-locked tiling. */
+    r_mapping->du[0] = cos_a;
+    r_mapping->du[1] = sin_a;
+    r_mapping->dv[0] = -sin_a;
+    r_mapping->dv[1] = cos_a;
+    /* `texco = Rot(-a) * (P - floor(start_paintpos))`, with `P = start + (x, y)`. */
+    const float anchor[2] = {start[0] - floorf(tile->start_paintpos[0]),
+                             start[1] - floorf(tile->start_paintpos[1])};
+    r_mapping->origin[0] = r_mapping->du[0] * anchor[0] + r_mapping->dv[0] * anchor[1];
+    r_mapping->origin[1] = r_mapping->du[1] * anchor[0] + r_mapping->dv[1] * anchor[1];
+    return;
   }
-  else /* if (mapmode == MTEX_MAP_MODE_TILED) */ {
-    r_mapping->xmin = int(-diameter * 0.5) + int(floorf(pos[0])) -
-                      int(floorf(tile->start_paintpos[0]));
-    r_mapping->ymin = int(-diameter * 0.5) + int(floorf(pos[1])) -
-                      int(floorf(tile->start_paintpos[1]));
-    r_mapping->xmax = 1.0f;
-    r_mapping->ymax = 1.0f;
+
+  /* VIEW/RANDOM re-anchor to the mouse each dab; 3D is canvas-space (no overlay). Both use an
+   * axis-aligned linear mapping `texco = {xmin, ymin} + (x, y) * {xmax, ymax}`, with the lattice
+   * rotated about the brush center for the view-locked modes. */
+  float xmin, ymin, xmax, ymax;
+  if (mapmode == MTEX_MAP_MODE_3D) {
+    /* 3D mapping, just mapping to canvas 0..1. Canvas-space, so no rotation. */
+    xmin = 2.0f * (start[0] * invw - 0.5f);
+    ymin = 2.0f * (start[1] * invh - 0.5f);
+    xmax = 2.0f * invw;
+    ymax = 2.0f * invh;
+    cos_a = 1.0f;
+    sin_a = 0.0f;
   }
+  else /* MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_RANDOM */ {
+    xmin = mouse[0] - diameter * 0.5f + 0.5f;
+    ymin = mouse[1] - diameter * 0.5f + 0.5f;
+    xmax = 1.0f;
+    ymax = 1.0f;
+  }
+
+  r_mapping->du[0] = cos_a * xmax;
+  r_mapping->du[1] = sin_a * xmax;
+  r_mapping->dv[0] = -sin_a * ymax;
+  r_mapping->dv[1] = cos_a * ymax;
+
+  /* Rotate the lattice about the brush center: `texco = center_texco + (p - center) * basis`. */
+  const float center_texco[2] = {xmin + center * xmax, ymin + center * ymax};
+  r_mapping->origin[0] = center_texco[0] - center * (r_mapping->du[0] + r_mapping->dv[0]);
+  r_mapping->origin[1] = center_texco[1] - center * (r_mapping->du[1] + r_mapping->dv[1]);
 }
 
 static void brush_painter_2d_refresh_cache(ImagePaintState *s,
@@ -1490,11 +1558,6 @@ static void paint_2d_canvas_free(ImagePaintState *s)
   }
 }
 
-static void paint_2d_transform_mouse(View2D *v2d, const float in[2], float out[2])
-{
-  ui::view2d_region_to_view(v2d, in[0], in[1], &out[0], &out[1]);
-}
-
 static bool is_inside_tile(const int size[2], const float pos[2], const float brush[2])
 {
   return (pos[0] >= -brush[0]) && (pos[0] < size[0] + brush[0]) && (pos[1] >= -brush[1]) &&
@@ -1621,7 +1684,8 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
   ImagePaintState *s = MEM_new_zeroed<ImagePaintState>(__func__);
 
   s->sima = CTX_wm_space_image(C);
-  s->v2d = &CTX_wm_region(C)->v2d;
+  s->region = CTX_wm_region(C);
+  s->v2d = &s->region->v2d;
   s->scene = scene;
   s->paint = paint;
 
@@ -1864,7 +1928,7 @@ void paint_2d_bucket_fill(const bContext *C,
   View2D *v2d = s ? s->v2d : &CTX_wm_region(C)->v2d;
   float uv_origin[2];
   float image_init[2];
-  paint_2d_transform_mouse(v2d, mouse_init, image_init);
+  ui::view2d_region_to_view(v2d, mouse_init[0], mouse_init[1], &image_init[0], &image_init[1]);
 
   int tile_number = BKE_image_get_tile_from_pos(ima, image_init, image_init, uv_origin);
 
@@ -2074,8 +2138,10 @@ void paint_2d_gradient_fill(
     return;
   }
 
-  paint_2d_transform_mouse(s->v2d, mouse_final, image_final);
-  paint_2d_transform_mouse(s->v2d, mouse_init, image_init);
+  ui::view2d_region_to_view(
+      s->v2d, mouse_final[0], mouse_final[1], &image_final[0], &image_final[1]);
+  ui::view2d_region_to_view(
+      s->v2d, mouse_init[0], mouse_init[1], &image_init[0], &image_init[1]);
   sub_v2_v2(image_init, uv_origin);
   sub_v2_v2(image_final, uv_origin);
 

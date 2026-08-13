@@ -824,19 +824,34 @@ void Instance::draw_node(Manager &manager, View &view)
 
 void Instance::draw_v2d(Manager &manager, View &view)
 {
+  const double4 clear_color(0.0);
+
   image_prepass.draw_on_render(resources.render_fb, manager, view);
   regular.mesh_uvs.draw_on_render(resources.render_fb, manager, view);
 
-  GPU_framebuffer_bind(resources.overlay_output_color_only_fb);
-  GPU_framebuffer_clear_color(resources.overlay_output_color_only_fb, double4(0.0));
+  {
+    /* Overlay (+Line) pass. Rendered to the intermediate overlay and line targets, so the regular
+     * viewport anti-aliasing resolve below can smooth the grid, UDIM outlines and axes. */
+    GPU_framebuffer_bind(resources.overlay_line_fb);
+    GPU_framebuffer_clear_color(resources.overlay_line_fb, clear_color);
 
-  background.draw_output(resources.overlay_output_color_only_fb, manager, view);
-  grid.draw_line(resources.overlay_output_fb, manager, view);
-  regular.mesh_uvs.draw(resources.overlay_output_fb, manager, view);
+    grid.draw_line(resources.overlay_line_fb, manager, view);
+    regular.mesh_uvs.draw(resources.overlay_line_fb, manager, view);
+    /* Axes are submitted last so they end up above the tile outlines. */
+    grid.draw_line_only(resources.overlay_line_fb, manager, view);
+  }
+  {
+    /* Output pass. */
+    GPU_framebuffer_bind(resources.overlay_output_color_only_fb);
+    GPU_framebuffer_clear_color(resources.overlay_output_color_only_fb, clear_color);
 
-  draw_text(resources.overlay_output_color_only_fb);
+    background.draw_output(resources.overlay_output_color_only_fb, manager, view);
+    anti_aliasing.draw_output(resources.overlay_output_color_only_fb, manager, view);
 
-  cursor.draw_output(resources.overlay_output_color_only_fb, manager, view);
+    draw_text(resources.overlay_output_color_only_fb);
+
+    cursor.draw_output(resources.overlay_output_color_only_fb, manager, view);
+  }
 }
 
 void Instance::draw_v3d(Manager &manager, View &view)
@@ -1012,6 +1027,7 @@ void Instance::draw_text(Framebuffer &framebuffer)
   GPU_framebuffer_bind(framebuffer);
 
   GPU_depth_test(GPU_DEPTH_NONE);
+
   DRW_text_cache_draw(state.dt, state.region, state.v3d);
 }
 

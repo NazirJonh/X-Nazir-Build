@@ -17,6 +17,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_vector.h"
 #include "BLI_string_utf8.h"
 #include "BLI_threads.h"
 
@@ -37,6 +38,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include "ED_asset_shelf.hh"
+#include "ED_gizmo_utils.hh"
 #include "ED_image.hh"
 #include "ED_mask.hh"
 #include "ED_node.hh"
@@ -227,6 +229,10 @@ static void image_operatortypes()
   WM_operatortype_append(IMAGE_OT_view_zoom_out);
   WM_operatortype_append(IMAGE_OT_view_zoom_ratio);
   WM_operatortype_append(IMAGE_OT_view_zoom_border);
+  WM_operatortype_append(IMAGE_OT_view_rotate_cw);
+  WM_operatortype_append(IMAGE_OT_view_rotate_ccw);
+  WM_operatortype_append(IMAGE_OT_view_rotate_reset);
+  WM_operatortype_append(IMAGE_OT_view_rotate_interactive);
 #ifdef WITH_INPUT_NDOF
   WM_operatortype_append(IMAGE_OT_view_ndof);
 #endif
@@ -682,6 +688,18 @@ static void image_main_region_set_view2d(SpaceImage *sima, ARegion *region)
   region->v2d.cur.xmax /= w;
   region->v2d.cur.ymin /= h;
   region->v2d.cur.ymax /= h;
+
+  /* Sync canvas rotation into the View2D so the ortho matrix and the POST_VIEW callback matrix pick
+   * it up (mirrors how `cur` above derives from zoom/pan). Gated by supported modes so a stored
+   * rotation never leaks into the UV editor. */
+  if (ED_space_image_rotation_supported(sima)) {
+    region->v2d.rotation = sima->rotation;
+    copy_v2_v2(region->v2d.rotation_pivot, sima->rotation_pivot);
+  }
+  else {
+    region->v2d.rotation = 0.0f;
+    copy_v2_fl(region->v2d.rotation_pivot, 0.5f);
+  }
 }
 
 /* add handlers, stuff you only do once or on area/region changes */
@@ -776,10 +794,18 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
     rcti render_region;
     BLI_rcti_init(
         &render_region, center_x, render_size_x + center_x, center_y, render_size_y + center_y);
-    ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &x, &y);
+    /* Find window pixel coordinates of origin. Navigation frame: the zoom scaling inside
+     * #ED_region_render_region_draw is relative to the un-rotated origin; the rotation is
+     * applied around it below instead. */
+    float anchor[2];
+    ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+    x = int(anchor[0]);
+    y = int(anchor[1]);
 
+    ui::view2d_matrix_push_rotation(&region->v2d);
     ED_region_render_region_draw(
         x, y, &render_region, zoomx, zoomy, sima->overlay.passepartout_alpha);
+    ui::view2d_matrix_pop_rotation();
   }
 
   draw_image_main_helpers(C, region);
@@ -797,8 +823,17 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
       int x, y;
       rctf frame;
       BLI_rctf_init(&frame, 0.0f, ibuf->x, 0.0f, ibuf->y);
-      ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &x, &y);
+      /* Find window pixel coordinates of origin. Navigation frame: the zoom scaling inside
+       * #ED_region_image_metadata_draw is relative to the un-rotated origin; the rotation is
+       * applied around it below instead. */
+      float anchor[2];
+      ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+      x = int(anchor[0]);
+      y = int(anchor[1]);
+
+      ui::view2d_matrix_push_rotation(&region->v2d);
       ED_region_image_metadata_draw(x, y, ibuf, &frame, zoomx, zoomy);
+      ui::view2d_matrix_pop_rotation();
     }
     ED_space_image_release_buffer(sima, ibuf, lock);
   }

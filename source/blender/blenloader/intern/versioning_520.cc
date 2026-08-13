@@ -20,10 +20,12 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
 
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -911,6 +913,23 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  /* Canvas rotation was added to the Image Editor. Files written before it have the new
+   * #SpaceImage.rotation_pivot zero-filled rather than centered, which would rotate about the
+   * image corner. */
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_IMAGE) {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+            sima->rotation = 0.0f;
+            copy_v2_fl(sima->rotation_pivot, 0.5f);
+          }
+        }
+      }
+    }
   }
 
   /**

@@ -22,13 +22,24 @@ void main()
 {
   /* Test if a vertex output position overlaps with an active axis line. */
   constexpr float axis_epsilon = 2e-7f;
-  bool3 axis_mask = bool3(
-      flag_test(grid_flag, AXIS_X) && is_equal(vertex_out.pos.yz, float2(0.0), axis_epsilon),
-      flag_test(grid_flag, AXIS_Y) && is_equal(vertex_out.pos.xz, float2(0.0), axis_epsilon),
-      flag_test(grid_flag, AXIS_Z) && is_equal(vertex_out.pos.xy, float2(0.0), axis_epsilon));
+  bool3 axis_mask;
+  if (flag_test(grid_flag, GRID_SIMA)) {
+    /* Image Editor axes lie at the UDIM origin, which maps to the lower-left clip-space corner. */
+    axis_mask = bool3(flag_test(grid_flag, AXIS_X) &&
+                          abs(vertex_out.pos.y) <= axis_epsilon,
+                      flag_test(grid_flag, AXIS_Y) &&
+                          abs(vertex_out.pos.x) <= axis_epsilon,
+                      false);
+  }
+  else {
+    axis_mask = bool3(
+        flag_test(grid_flag, AXIS_X) && is_equal(vertex_out.pos.yz, float2(0.0), axis_epsilon),
+        flag_test(grid_flag, AXIS_Y) && is_equal(vertex_out.pos.xz, float2(0.0), axis_epsilon),
+        flag_test(grid_flag, AXIS_Z) && is_equal(vertex_out.pos.xy, float2(0.0), axis_epsilon));
+  }
 
   /* If an axis line overlaps, the fragment can be discarded. */
-  if (any(axis_mask) && flag_test(grid_flag, SHOW_GRID)) {
+  if (any(axis_mask) && flag_test(grid_flag, SHOW_GRID) && !flag_test(grid_flag, GRID_SIMA)) {
     gpu_discard_fragment();
   }
 

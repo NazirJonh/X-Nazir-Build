@@ -32,6 +32,7 @@ class Grid : Overlay {
  private:
   /* Shader data */
   PassSimple grid_ps_ = {"grid_ps_"};
+  PassSimple axis_ps_ = {"axis_ps_"};
   UniformBuffer<OVERLAY_GridData> grid_ubo_;
   StorageVectorBuffer<float4> tile_pos_buf_;
 
@@ -39,6 +40,7 @@ class Grid : Overlay {
   float2 grid_offs_ = float2(0.0f);
   int grid_flag_ = 0;
   int axis_flag_ = 0;
+  bool defer_axes_ = false;
   uint num_iters_ = 0;
 
  public:
@@ -47,6 +49,7 @@ class Grid : Overlay {
     enabled_ = init(state);
     if (!enabled_) {
       grid_ps_.init();
+      axis_ps_.init();
       return;
     }
 
@@ -56,6 +59,10 @@ class Grid : Overlay {
     grid_ps_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
     grid_ps_.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
     grid_ps_.state_set(ps_draw_state);
+
+    axis_ps_.init();
+    axis_ps_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+    axis_ps_.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
 
     /* Background quad draw in UV/Image editor. */
     if (state.is_space_image()) {
@@ -69,6 +76,20 @@ class Grid : Overlay {
       sub.push_constant("ucolor", color_back);
       sub.push_constant("tile_scale", tile_scale);
       sub.draw(res.shapes.quad_solid.get());
+    }
+
+    /* Outline draw in UV/Image editors. */
+    if (state.is_space_image()) {
+      float4 theme_color;
+      ui::theme::get_color_shade_4fv(TH_BACK, 60, theme_color);
+      srgb_to_linearrgb_v4(theme_color, theme_color);
+
+      auto &sub = grid_ps_.sub("wire_border");
+      sub.shader_set(res.shaders->grid_image.get());
+      sub.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_ALWAYS | DRW_STATE_BLEND_ALPHA);
+      sub.push_constant("ucolor", theme_color);
+      sub.bind_ssbo("tile_pos_buf", &tile_pos_buf_);
+      sub.draw(res.shapes.quad_wire.get(), tile_pos_buf_.size());
     }
 
     /* Grid and axis line draws. */
@@ -94,7 +115,7 @@ class Grid : Overlay {
         }
 
         sub.push_constant("grid_iter", grid_iter);
-        if (axis_flag_) {
+        if (axis_flag_ && !defer_axes_) {
           sub.push_constant("grid_flag", &axis_flag_);
           sub.draw_procedural(GPUPrimType::GPU_PRIM_LINES, -1, axis_vertex_count, 0);
         }
@@ -105,17 +126,17 @@ class Grid : Overlay {
       }
     }
 
-    /* Outline draw in UV/Image editors. */
-    if (state.is_space_image()) {
-      float4 theme_color;
-      ui::theme::get_color_shade_4fv(TH_BACK, 60, theme_color);
-      srgb_to_linearrgb_v4(theme_color, theme_color);
-
-      auto &sub = grid_ps_.sub("wire_border");
-      sub.shader_set(res.shaders->grid_image.get());
-      sub.push_constant("ucolor", theme_color);
-      sub.bind_ssbo("tile_pos_buf", &tile_pos_buf_);
-      sub.draw(res.shapes.quad_wire.get(), tile_pos_buf_.size());
+    if (axis_flag_ && defer_axes_) {
+      const uint axis_vertex_count = 6;
+      auto &sub = axis_ps_.sub("axis");
+      sub.shader_set(res.shaders->grid.get());
+      sub.state_set(ps_draw_state | DRW_STATE_DEPTH_ALWAYS | DRW_STATE_BLEND_ADD);
+      sub.bind_ubo("grid_buf", &grid_ubo_);
+      for (int grid_iter = 0; grid_iter < num_iters_; grid_iter++) {
+        sub.push_constant("grid_flag", &axis_flag_);
+        sub.push_constant("grid_iter", grid_iter);
+        sub.draw_procedural(GPUPrimType::GPU_PRIM_LINES, -1, axis_vertex_count, 0);
+      }
     }
   }
 
@@ -130,11 +151,25 @@ class Grid : Overlay {
     manager.submit(grid_ps_, view);
   }
 
+  void draw_line_only(Framebuffer &framebuffer, Manager &manager, View &view) final
+  {
+    /* Guard on #defer_axes_ as well: outside of the Image Editor the axes are part of #grid_ps_
+     * and #axis_ps_ is left empty on purpose. */
+    if (!enabled_ || !axis_flag_ || !defer_axes_) {
+      return;
+    }
+
+    grid_ubo_.push_update();
+    GPU_framebuffer_bind(framebuffer);
+    manager.submit(axis_ps_, view);
+  }
+
  private:
   bool init(const State &state)
   {
     /* Set config flags to default values. */
     grid_flag_ = axis_flag_ = 0;
+    defer_axes_ = false;
 
     if (state.hide_overlays) {
       return false;
@@ -163,8 +198,14 @@ class Grid : Overlay {
 
     /* Configure grid flags s.t. GRID_OVER_IMAGE is taken into account. */
     grid_flag_ = SHOW_GRID | GRID_SIMA;
+    /* Draw the UDIM origin axes through the same grid pass. */
+    if (sima->image && sima->image->source == IMA_SRC_TILED) {
+      axis_flag_ = SHOW_AXES | GRID_SIMA | AXIS_X | AXIS_Y;
+      defer_axes_ = true;
+    }
     if (sima->flag & SI_GRID_OVER_IMAGE) {
       grid_flag_ |= GRID_OVER_IMAGE;
+      axis_flag_ |= GRID_OVER_IMAGE;
     }
 
     /* Query grid step/level scaling; these can differ per axis. */

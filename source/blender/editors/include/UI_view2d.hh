@@ -324,10 +324,20 @@ void view2d_listview_view_to_cell(float columnwidth,
 /** \name Coordinate Conversion
  * \{ */
 
+/**
+ * \warning Axis-aligned (navigation frame) and **permanently so**: a rotated `x'` depends on both
+ * `x` and `y`, so a rotation cannot be expressed in a single-component function. Code that needs
+ * the display frame must use the two-component form.
+ */
 float view2d_region_to_view_x(const View2D *v2d, float x);
 float view2d_region_to_view_y(const View2D *v2d, float y);
 /**
- * Convert from screen/region space to 2d-View space
+ * Convert from screen/region space to 2d-View space.
+ *
+ * \note **Display frame.** This is the exact inverse of what #view2d_view_ortho draws: it undoes
+ * the canvas rotation. Anything that *finds or places data* on the canvas wants this. Code that
+ * writes `cur` / zoom / pan wants #view2d_region_to_view_zoom_anchor instead — see its docs for
+ * why that distinction is load-bearing and not cosmetic.
  *
  * \param x, y: coordinates to convert
  * \param r_view_x, r_view_y: resultant coordinates
@@ -337,6 +347,52 @@ void view2d_region_to_view(const View2D *v2d, float x, float y, float *r_view_x,
 void view2d_region_to_view_rctf(const View2D *v2d, const rctf *rect_src, rctf *rect_dst)
     ATTR_NONNULL();
 
+/**
+ * Map the four corners of a region-space rect into view space, counter-clockwise from min.
+ *
+ * \note Display frame. Under canvas rotation a screen-aligned drag is a rotated quad in view
+ * space, which #view2d_region_to_view_rctf can only bound, not represent. Gesture consumers that
+ * must match what the user actually dragged want this.
+ */
+void view2d_region_to_view_quad(const View2D *v2d, const rcti *rect_src, float r_corners[4][2])
+    ATTR_NONNULL();
+
+/**
+ * Convert a region point to the view point that a zoom operation must keep fixed on screen.
+ *
+ * \note This is the **navigation frame**: the axis-aligned `mask -> cur` map, *without* the
+ * canvas rotation. It is not a mistake. The display maps view to screen as
+ * `Rot_{A(pivot)}(-rotation) . A`, and zoom scales `cur` uniformly, so the on-screen fixed point
+ * of a zoom is `A(anchor)` — the *axis-aligned* projection. Feeding a rotation-aware point here
+ * makes the image swing about the pivot on every zoom step. Only zoom code may call this.
+ */
+void view2d_region_to_view_zoom_anchor(
+    const View2D *v2d, float x, float y, float *r_view_x, float *r_view_y) ATTR_NONNULL();
+
+/**
+ * Axis-aligned preimage of a border-zoom rect: the `cur` a zoom-to-border must adopt.
+ *
+ * \note Navigation frame, same reasoning as #view2d_region_to_view_zoom_anchor. `cur' = A^-1(B)`
+ * is the provably correct answer here — a rotated quad would be wrong, not better.
+ */
+void view2d_region_to_view_rctf_zoom_bounds(const View2D *v2d,
+                                            const rctf *rect_src,
+                                            rctf *rect_dst) ATTR_NONNULL();
+
+/**
+ * Axis-aligned view-to-region projection.
+ *
+ * \note Navigation frame. For code that reasons about `cur` / zoom / pan / the rotation pivot
+ * itself, where the canvas rotation must not be applied.
+ */
+void view2d_view_to_region_navigation_fl(
+    const View2D *v2d, float x, float y, float *r_region_x, float *r_region_y) ATTR_NONNULL();
+
+/**
+ * \warning Axis-aligned (navigation frame) and **permanently so**: a rotated `x'` depends on both
+ * `x` and `y`, so a rotation cannot be expressed in a single-component function. Code that needs
+ * the display frame must use the two-component form.
+ */
 float view2d_view_to_region_x(const View2D *v2d, float x);
 float view2d_view_to_region_y(const View2D *v2d, float y);
 /**
@@ -368,10 +424,48 @@ void view2d_view_to_region(const View2D *v2d, float x, float y, int *r_region_x,
 void view2d_view_to_region_fl(
     const View2D *v2d, float x, float y, float *r_region_x, float *r_region_y) ATTR_NONNULL();
 void view2d_view_to_region_m4(const View2D *v2d, float matrix[4][4]) ATTR_NONNULL();
+/**
+ * \warning Axis-aligned (navigation frame). Under canvas rotation the image of a view rect is a
+ * rotated quad, which an #rcti cannot represent. Drawing code must project the four corners with
+ * #view2d_view_to_region_fl instead; only code that genuinely wants the un-rotated rect (scrollers,
+ * region layout) should use this.
+ */
 void view2d_view_to_region_rcti(const View2D *v2d, const rctf *rect_src, rcti *rect_dst)
     ATTR_NONNULL();
+/** \warning Axis-aligned (navigation frame), see #view2d_view_to_region_rcti. */
 bool view2d_view_to_region_rcti_clip(const View2D *v2d, const rctf *rect_src, rcti *rect_dst)
     ATTR_NONNULL();
+
+/* -------------------------------------------------------------------- */
+/** \name Canvas Rotation
+ *
+ * Building blocks shared by every path that has to reproduce #View2D.rotation: the GPU matrix
+ * stack, the DRW engines and the interactive tools. They are the single definition of the rotation
+ * convention - the display maps view space to screen as `Rot(-rotation)` about the pivot - so new
+ * consumers must be built from these rather than re-deriving the trigonometry.
+ * \{ */
+
+/** Pivot of #View2D.rotation converted to region (pixel) space via the axis-aligned mapping. */
+void view2d_rotation_pivot_region(const View2D *v2d, float r_pivot_px[2]) ATTR_NONNULL();
+/** Rotate a region-space point about the rotation pivot. No-op when rotation is 0.
+ * `inverse` selects the screen->view direction. */
+void view2d_rotate_region_point(const View2D *v2d, float xy[2], bool inverse) ATTR_NONNULL();
+/** Aspect-correct model-view matrix that applies #View2D.rotation in screen space.
+ * Identity when rotation is 0. Multiply into the GPU matrix after the ortho projection. */
+void view2d_view_rotation_matrix(const View2D *v2d, float r_mat[4][4]) ATTR_NONNULL();
+/**
+ * Push the GPU model-view matrix and pre-multiply the canvas rotation, expressed as a screen-space
+ * rotation about the pivot's pixel position.
+ *
+ * For code that draws in *region pixel* space (as opposed to the view space set up by
+ * #view2d_view_ortho, which already carries the rotation). Always pushes, so it must be paired with
+ * #view2d_matrix_pop_rotation even when the rotation is 0.
+ */
+void view2d_matrix_push_rotation(const View2D *v2d) ATTR_NONNULL();
+/** Counterpart of #view2d_matrix_push_rotation. */
+void view2d_matrix_pop_rotation();
+
+/** \} */
 
 /** \} */
 

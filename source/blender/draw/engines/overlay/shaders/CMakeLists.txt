@@ -76,6 +76,7 @@ set(SRC_GLSL_VERT
   overlay_facing_vert.glsl
   overlay_fullscreen_vert.glsl
   overlay_grid_vert.glsl
+  overlay_grid_image_vert.glsl
   overlay_image_vert.glsl
   overlay_motion_path_line_vert.glsl
   overlay_motion_path_point_vert.glsl
@@ -125,6 +126,7 @@ set(SRC_GLSL_FRAG
   overlay_extra_wire_frag.glsl
   overlay_facing_frag.glsl
   overlay_grid_frag.glsl
+  overlay_grid_image_frag.glsl
   overlay_image_frag.glsl
   overlay_motion_path_line_frag.glsl
   overlay_outline_detect_frag.glsl

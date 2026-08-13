@@ -95,6 +95,7 @@ class IMAGE_MT_view(Menu):
         layout.operator("image.view_center_cursor", text="Center View to Cursor")
 
         layout.menu("IMAGE_MT_view_zoom")
+        layout.menu("IMAGE_MT_view_rotation")
 
         layout.separator()
 
@@ -139,6 +140,20 @@ class IMAGE_MT_view_zoom(Menu):
         layout.operator("image.view_zoom_out")
         layout.operator("image.view_all", text="Zoom to Fit").fit_view = True
         layout.operator("image.view_zoom_border", text="Zoom Region...")
+
+
+class IMAGE_MT_view_rotation(Menu):
+    bl_label = "Canvas Rotation"
+
+    def draw(self, _context):
+        layout = self.layout
+
+        # The operators poll for the modes that support canvas rotation.
+        layout.operator("image.view_rotate_ccw", text="Rotate 90° Counter-Clockwise", icon='LOOP_BACK')
+        layout.operator("image.view_rotate_cw", text="Rotate 90° Clockwise", icon='LOOP_FORWARDS')
+
+        layout.separator()
+        layout.operator("image.view_rotate_reset", text="Reset Rotation", icon='FILE_REFRESH')
 
 
 class IMAGE_MT_select(Menu):
@@ -1840,6 +1855,7 @@ class IMAGE_AST_brush_paint(ImageAssetShelf, AssetShelf):
 classes = (
     IMAGE_MT_view,
     IMAGE_MT_view_zoom,
+    IMAGE_MT_view_rotation,
     IMAGE_MT_select,
     IMAGE_MT_select_all_by_trait,
     IMAGE_MT_select_linked,

@@ -33,7 +33,10 @@ void DRW_text_cache_add(DRWTextStore *dt,
                         short flag,
                         const uchar col[4],
                         const bool shadow = false,
-                        const bool align_center = false);
+                        const bool align_center = false,
+                        /** Draw a semi-transparent dark plate behind the string to keep it
+                         * readable over busy backgrounds. */
+                        const bool backdrop = false);
 
 void DRW_text_cache_draw(const DRWTextStore *dt, const ARegion *region, const View3D *v3d);
 

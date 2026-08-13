@@ -103,11 +103,18 @@ void ED_space_image_scopes_update(const bContext *C,
 void ED_space_image_paint_update(Main *bmain, wmWindowManager *wm, Scene *scene);
 
 void ED_image_get_uv_aspect(Image *ima, ImageUser *iuser, float *r_aspx, float *r_aspy);
-/** Takes `event->mval`. */
+/**
+ * Region pixel to normalized image coordinate. Takes `event->mval`.
+ *
+ * \note Accounts for the canvas rotation, so this - not a bare View2D conversion - is what tools
+ * that pick or place data on the image must use.
+ */
 void ED_image_mouse_pos(SpaceImage *sima, const ARegion *region, const int mval[2], float co[2]);
 void ED_image_view_center_to_point(SpaceImage *sima, float x, float y);
+/** Region pixel to normalized image coordinate, see #ED_image_mouse_pos. */
 void ED_image_point_pos(
     SpaceImage *sima, const ARegion *region, float x, float y, float *r_x, float *r_y);
+/** Normalized image coordinate to region pixel, the inverse of #ED_image_point_pos. */
 void ED_image_point_pos__reverse(SpaceImage *sima,
                                  const ARegion *region,
                                  const float co[2],
@@ -244,5 +251,14 @@ ListBaseT<ImageFrameRange> ED_image_filesel_detect_sequences(StringRefNull blend
 
 bool ED_image_tools_paint_poll(bContext *C);
 void ED_paint_cursor_start(Paint *paint, bool (*poll)(bContext *C));
+
+/**
+ * Whether canvas rotation applies to the current Image Editor mode.
+ *
+ * This is the single definition of that policy: the operator polls, the DRW image engine and the
+ * View2D sync all go through it, so a stored rotation can never leak into a mode that does not
+ * support it (the UV editor). Null-safe.
+ */
+bool ED_space_image_rotation_supported(const SpaceImage *sima);
 
 }  // namespace blender

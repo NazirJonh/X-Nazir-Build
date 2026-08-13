@@ -551,6 +551,7 @@ static wmOperatorStatus grab_clone_modal(bContext *C, wmOperator *op, const wmEv
   ToolSettings *settings = scene->toolsettings;
   ImagePaintSettings &image_paint_settings = settings->imapaint;
   ARegion *region = CTX_wm_region(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
   GrabClone *cmv = static_cast<GrabClone *>(op->customdata);
   float startfx, startfy, fx, fy, delta[2];
   int xmin = region->winrct.xmin, ymin = region->winrct.ymin;
@@ -563,9 +564,8 @@ static wmOperatorStatus grab_clone_modal(bContext *C, wmOperator *op, const wmEv
       return OPERATOR_FINISHED;
     case MOUSEMOVE:
       /* mouse moved, so move the clone image */
-      ui::view2d_region_to_view(
-          &region->v2d, cmv->startx - xmin, cmv->starty - ymin, &startfx, &startfy);
-      ui::view2d_region_to_view(&region->v2d, event->xy[0] - xmin, event->xy[1] - ymin, &fx, &fy);
+      ED_image_point_pos(sima, region, cmv->startx - xmin, cmv->starty - ymin, &startfx, &startfy);
+      ED_image_point_pos(sima, region, event->xy[0] - xmin, event->xy[1] - ymin, &fx, &fy);
 
       delta[0] = fx - startfx;
       delta[1] = fy - startfy;

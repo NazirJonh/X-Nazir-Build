@@ -86,6 +86,22 @@ class AbstractSpaceAccessor {
 
   /** \brief Gets the pan offset of the space in image pixel space. */
   virtual float2 get_pan_offset() const = 0;
+
+  /**
+   * \brief Canvas rotation in radians applied to the displayed image.
+   *
+   * Returns 0 when the space does not support canvas rotation (only the Image Editor does).
+   */
+  virtual float get_canvas_rotation() const
+  {
+    return 0.0f;
+  }
+
+  /** \brief Pivot for the canvas rotation in image UV space (0..1, default center). */
+  virtual float2 get_canvas_rotation_pivot() const
+  {
+    return float2(0.5f);
+  }
 };
 
 }  // namespace image_engine

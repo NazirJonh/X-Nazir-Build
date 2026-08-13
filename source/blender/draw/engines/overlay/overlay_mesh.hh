@@ -27,6 +27,8 @@
 
 #include "ED_view3d.hh"
 
+#include "UI_view2d.hh"
+
 #include "GPU_capabilities.hh"
 
 #include "draw_cache.hh"
@@ -944,45 +946,88 @@ class MeshUVs : Overlay {
       auto &pass = image_border_ps_;
       pass.init();
       pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_ALWAYS);
+      /* NOTE: This pass deliberately does not write line data. The anti-aliasing resolve multiplies
+       * a fragment by its line coverage, so a shader that outputs line data without matching
+       * screen-space endpoints makes the tile borders vanish. The outer UDIM outline drawn by
+       * #Grid uses the anti-aliased path instead. */
       pass.shader_set(res.shaders->uv_image_borders.get());
 
-      auto draw_tile = [&](const ImageTile *tile, const bool is_active) {
-        const int tile_x = ((tile->tile_number - 1001) % 10);
-        const int tile_y = ((tile->tile_number - 1001) / 10);
+      /* Grey label on a dark plate, so the active tile number stays readable on top of the
+       * highlighted border and whatever image content sits behind it. */
+      const uchar4 active_text_color(160, 160, 160, 255);
+
+      ListBaseWrapper<ImageTile> tiles(image->tiles);
+
+      /* The UDIM grid spans the user configured tile grid, but existing tiles may reach past it.
+       * Cover both so that empty cells get an outline and a label just like filled ones. */
+      int grid_width = space_image->tile_grid_shape[0];
+      int grid_height = space_image->tile_grid_shape[1];
+      for (const ImageTile *tile : tiles) {
+        const int tile_offset = tile->tile_number - 1001;
+        grid_width = std::max(grid_width, tile_offset % 10 + 1);
+        grid_height = std::max(grid_height, tile_offset / 10 + 1);
+      }
+
+      auto draw_tile = [&](const int tile_x, const int tile_y, const bool is_active) {
         const float3 tile_location(tile_x, tile_y, 0.0f);
         pass.push_constant("tile_pos", tile_location);
         pass.push_constant("ucolor", is_active ? selected_color : theme_color);
         pass.draw(res.shapes.quad_wire.get());
-
-        /* Note: don't draw label twice for active tile. */
-        if (show_tiled_image_label_ && !is_active) {
-          std::string text = std::to_string(tile->tile_number);
-          DRW_text_cache_add(state.dt,
-                             tile_location,
-                             text.c_str(),
-                             text.size(),
-                             10,
-                             10,
-                             DRW_TEXT_CACHE_GLOBALSPACE,
-                             text_color);
-        }
       };
 
-      ListBaseWrapper<ImageTile> tiles(image->tiles);
-      /* image->active_tile_index could point to a non existing ImageTile. To work around this we
-       * get the active tile when looping over all tiles. */
-      const ImageTile *active_tile = nullptr;
-      int tile_index = 0;
-      for (const ImageTile *tile : tiles) {
-        draw_tile(tile, false);
-        if (tile_index == image->active_tile_index) {
-          active_tile = tile;
+      for (const int x : IndexRange(grid_width)) {
+        for (const int y : IndexRange(grid_height)) {
+          draw_tile(x, y, false);
         }
-        tile_index++;
       }
+
+      /* #Image.active_tile_index could point to a non existing #ImageTile, so resolve it while
+       * looping over all tiles. */
+      int active_tile_number = -1;
+      {
+        int tile_index = 0;
+        for (const ImageTile *tile : tiles) {
+          if (tile_index == image->active_tile_index) {
+            active_tile_number = tile->tile_number;
+          }
+          tile_index++;
+        }
+      }
+
       /* Draw active tile on top. */
-      if (show_tiled_image_active_ && active_tile != nullptr) {
-        draw_tile(active_tile, true);
+      if (show_tiled_image_active_ && active_tile_number != -1) {
+        const int tile_offset = active_tile_number - 1001;
+        draw_tile(tile_offset % 10, tile_offset / 10, true);
+      }
+
+      /* Hide the tile numbers once a tile gets too small on screen, as they would otherwise pile up
+       * into unreadable clutter when zooming out over a large UDIM grid. */
+      const float view_scale = math::min(ui::view2d_scale_get_x(&state.region->v2d),
+                                         ui::view2d_scale_get_y(&state.region->v2d));
+      constexpr float tile_label_min_size_px = 45.0f;
+      const bool show_labels = show_tiled_image_label_ &&
+                               view_scale > tile_label_min_size_px * UI_SCALE_FAC;
+
+      if (show_labels) {
+        for (const int x : IndexRange(grid_width)) {
+          for (const int y : IndexRange(grid_height)) {
+            const int tile_number = 1001 + x + 10 * y;
+            const bool is_active = show_tiled_image_active_ && tile_number == active_tile_number;
+            const float3 tile_location(x, y, 0.0f);
+            const std::string text = std::to_string(tile_number);
+            DRW_text_cache_add(state.dt,
+                               tile_location,
+                               text.c_str(),
+                               text.size(),
+                               10,
+                               10,
+                               DRW_TEXT_CACHE_GLOBALSPACE,
+                               is_active ? active_text_color : text_color,
+                               false,
+                               false,
+                               is_active);
+          }
+        }
       }
     }
 

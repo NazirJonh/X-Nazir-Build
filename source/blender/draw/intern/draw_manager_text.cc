@@ -34,10 +34,12 @@
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 
+#include "GPU_immediate.hh"
 #include "GPU_matrix.hh"
 #include "GPU_state.hh"
 
 #include "ED_view3d.hh"
+#include "UI_view2d.hh"
 
 #include "UI_interface.hh"
 #include "UI_resources.hh"
@@ -62,6 +64,7 @@ struct ViewCachedString {
   int str_len;
   bool shadow;
   bool align_center;
+  bool backdrop;
 
   /* str is allocated past the end */
   char str[0];
@@ -96,7 +99,8 @@ void DRW_text_cache_add(DRWTextStore *dt,
                         short flag,
                         const uchar col[4],
                         const bool shadow,
-                        const bool align_center)
+                        const bool align_center,
+                        const bool backdrop)
 {
   int alloc_len;
   ViewCachedString *vos;
@@ -120,6 +124,7 @@ void DRW_text_cache_add(DRWTextStore *dt,
   vos->str_len = str_len;
   vos->shadow = shadow;
   vos->align_center = align_center;
+  vos->backdrop = backdrop;
 
   /* allocate past the end */
   if (flag & DRW_TEXT_CACHE_STRING_PTR) {
@@ -143,12 +148,69 @@ static void drw_text_cache_draw_ex(const DRWTextStore *dt, const ARegion *region
   GPU_matrix_push();
   GPU_matrix_identity_set();
 
+  /* The cached coordinates below are in region pixel space. Apply the Image Editor canvas
+   * rotation after setting up that space, otherwise the matrix setup above would discard it. */
+  if (region->v2d.rotation != 0.0f) {
+    ui::view2d_matrix_push_rotation(&region->v2d);
+  }
+
   BLF_default_size(ui::style_get()->widget.points);
   const int font_id = BLF_set_default();
 
   float outline_dark_color[4] = {0, 0, 0, 0.8f};
   float outline_light_color[4] = {1, 1, 1, 0.8f};
   bool outline_is_dark = true;
+
+  auto string_get = [](const ViewCachedString *vos) -> const char * {
+    return (vos->flag & DRW_TEXT_CACHE_STRING_PTR) ?
+               *(reinterpret_cast<const char *const *>(vos->str)) :
+               vos->str;
+  };
+
+  /* Backdrop plates are drawn up-front, in their own pass, so that the text batching below is not
+   * interrupted by program switches. */
+  {
+    bool has_backdrop = false;
+    BLI_memiter_iter_init(dt->cache_strings, &it);
+    while ((vos = static_cast<ViewCachedString *>(BLI_memiter_iter_step(&it)))) {
+      if (vos->sco[0] != IS_CLIPPED && vos->backdrop) {
+        has_backdrop = true;
+        break;
+      }
+    }
+
+    if (has_backdrop) {
+      const float pad = 2.0f * UI_SCALE_FAC;
+      const GPUBlend blend_prev = GPU_blend_get();
+
+      GPU_blend(GPU_BLEND_ALPHA);
+      const uint pos = GPU_vertformat_attr_add(
+          immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
+      immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+      immUniformColor4ub(0, 0, 0, 128);
+
+      BLI_memiter_iter_init(dt->cache_strings, &it);
+      while ((vos = static_cast<ViewCachedString *>(BLI_memiter_iter_step(&it)))) {
+        if (vos->sco[0] == IS_CLIPPED || !vos->backdrop) {
+          continue;
+        }
+        float width, height;
+        BLF_width_and_height(font_id, string_get(vos), vos->str_len, &width, &height);
+        /* The centering offset is applied locally; the main loop below folds it into the offsets
+         * of its own accord. */
+        float x = float(vos->sco[0] + vos->xoffs);
+        float y = float(vos->sco[1] + vos->yoffs);
+        if (vos->align_center) {
+          x -= width / 2.0f;
+          y -= height / 2.0f;
+        }
+        immRectf(pos, x - pad, y - pad, x + width + pad, y + height + pad);
+      }
+
+      immUnbindProgram();
+      GPU_blend(blend_prev);
+    }
+  }
 
   BLI_memiter_iter_init(dt->cache_strings, &it);
   while ((vos = static_cast<ViewCachedString *>(BLI_memiter_iter_step(&it)))) {
@@ -163,13 +225,7 @@ static void drw_text_cache_draw_ex(const DRWTextStore *dt, const ARegion *region
       if (vos->align_center) {
         /* Measure the size of the string, then offset to align to the vertex. */
         float width, height;
-        BLF_width_and_height(font_id,
-                             (vos->flag & DRW_TEXT_CACHE_STRING_PTR) ?
-                                 *(reinterpret_cast<const char **>(vos->str)) :
-                                 vos->str,
-                             vos->str_len,
-                             &width,
-                             &height);
+        BLF_width_and_height(font_id, string_get(vos), vos->str_len, &width, &height);
         vos->xoffs -= short(width / 2.0f);
         vos->yoffs -= short(height / 2.0f);
       }
@@ -188,11 +244,13 @@ static void drw_text_cache_draw_ex(const DRWTextStore *dt, const ARegion *region
       BLF_draw_default(float(vos->sco[0] + vos->xoffs),
                        float(vos->sco[1] + vos->yoffs),
                        2.0f,
-                       (vos->flag & DRW_TEXT_CACHE_STRING_PTR) ?
-                           *(reinterpret_cast<const char **>(vos->str)) :
-                           vos->str,
+                       string_get(vos),
                        vos->str_len);
     }
+  }
+
+  if (region->v2d.rotation != 0.0f) {
+    ui::view2d_matrix_pop_rotation();
   }
 
   GPU_matrix_pop();

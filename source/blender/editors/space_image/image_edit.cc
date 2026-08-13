@@ -10,8 +10,10 @@
 #include "DNA_mask_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_space_enums.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_rect.h"
 
 #include "BKE_colortools.hh"
@@ -341,16 +343,27 @@ void ED_image_get_uv_aspect(Image *ima, ImageUser *iuser, float *r_aspx, float *
 
 void ED_image_mouse_pos(SpaceImage *sima, const ARegion *region, const int mval[2], float co[2])
 {
-  int sx, sy, width, height;
+  int width, height;
   float zoomx, zoomy;
 
   ED_space_image_get_zoom(sima, region, &zoomx, &zoomy);
   ED_space_image_get_size(sima, &width, &height);
 
-  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+  /* Origin anchor in the navigation frame: the zoom scaling below is relative to the un-rotated
+   * pixel of view (0, 0). The rotation is applied separately, to the input point. */
+  float anchor[2];
+  ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+  const int sx = int(anchor[0]);
+  const int sy = int(anchor[1]);
 
-  co[0] = ((mval[0] - sx) / zoomx) / width;
-  co[1] = ((mval[1] - sy) / zoomy) / height;
+  /* Undo the canvas rotation (screen->view) about the pivot before the axis-aligned mapping.
+   * The image is displayed as `screen = Rot(-rotation) * axis_map(view)`, so the inverse
+   * (screen->view) is a `+rotation` rotation about the pivot (inverse=false). */
+  float p[2] = {float(mval[0]), float(mval[1])};
+  ui::view2d_rotate_region_point(&region->v2d, p, false);
+
+  co[0] = ((p[0] - sx) / zoomx) / width;
+  co[1] = ((p[1] - sy) / zoomy) / height;
 }
 
 void ED_image_view_center_to_point(SpaceImage *sima, float x, float y)
@@ -368,16 +381,26 @@ void ED_image_view_center_to_point(SpaceImage *sima, float x, float y)
 void ED_image_point_pos(
     SpaceImage *sima, const ARegion *region, float x, float y, float *r_x, float *r_y)
 {
-  int sx, sy, width, height;
+  int width, height;
   float zoomx, zoomy;
 
   ED_space_image_get_zoom(sima, region, &zoomx, &zoomy);
   ED_space_image_get_size(sima, &width, &height);
 
-  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+  /* Origin anchor in the navigation frame: the zoom scaling below is relative to the un-rotated
+   * pixel of view (0, 0). The rotation is applied separately, to the input point. */
+  float anchor[2];
+  ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+  const int sx = int(anchor[0]);
+  const int sy = int(anchor[1]);
 
-  *r_x = ((x - sx) / zoomx) / width;
-  *r_y = ((y - sy) / zoomy) / height;
+  /* Undo the canvas rotation (screen->view) about the pivot before the axis-aligned mapping.
+   * See #ED_image_mouse_pos for the direction convention. */
+  float p[2] = {x, y};
+  ui::view2d_rotate_region_point(&region->v2d, p, false);
+
+  *r_x = ((p[0] - sx) / zoomx) / width;
+  *r_y = ((p[1] - sy) / zoomy) / height;
 }
 
 void ED_image_point_pos__reverse(SpaceImage *sima,
@@ -387,14 +410,22 @@ void ED_image_point_pos__reverse(SpaceImage *sima,
 {
   float zoomx, zoomy;
   int width, height;
-  int sx, sy;
 
-  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+  /* Origin anchor in the navigation frame: the zoom scaling below is relative to the un-rotated
+   * pixel of view (0, 0). The rotation is applied separately, to the output point. */
+  float anchor[2];
+  ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+  const int sx = int(anchor[0]);
+  const int sy = int(anchor[1]);
   ED_space_image_get_size(sima, &width, &height);
   ED_space_image_get_zoom(sima, region, &zoomx, &zoomy);
 
   r_co[0] = (co[0] * width * zoomx) + float(sx);
   r_co[1] = (co[1] * height * zoomy) + float(sy);
+
+  /* Apply the canvas rotation (view->screen) about the pivot. The image is displayed as
+   * `screen = Rot(-rotation) * axis_map(view)`, i.e. a `-rotation` rotation (inverse=true). */
+  ui::view2d_rotate_region_point(&region->v2d, r_co, true);
 }
 
 bool ED_image_slot_cycle(Image *image, int direction)
@@ -573,6 +604,25 @@ bool ED_space_image_maskedit_mask_visible_splines_poll(bContext *C)
   const SpaceImage *space_image = CTX_wm_space_image(C);
   return space_image->mask_info.draw_flag & MASK_DRAWFLAG_SPLINE;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Canvas Rotation Support
+ * \{ */
+
+/**
+ * Check if canvas rotation is supported in the current mode.
+ * Rotation is supported in View, Paint, and Mask modes.
+ * Rotation is NOT supported in UV Editor mode.
+ */
+bool ED_space_image_rotation_supported(const SpaceImage *sima)
+{
+  if (sima == nullptr) {
+    return false;
+  }
+  return ELEM(sima->mode, SI_MODE_VIEW, SI_MODE_PAINT, SI_MODE_MASK);
+}
+
+/** \} */
 
 bool ED_space_image_cursor_poll(bContext *C)
 {

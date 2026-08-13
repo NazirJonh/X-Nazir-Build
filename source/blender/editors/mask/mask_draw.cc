@@ -675,8 +675,12 @@ void ED_mask_draw_region(
   float maxdim;
   float xofs, yofs;
 
-  /* find window pixel coordinates of origin */
-  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &x, &y);
+  /* Find window pixel coordinates of origin. Navigation frame: the zoom scaling below is
+   * expressed relative to the un-rotated origin; the rotation is applied to the matrix instead. */
+  float anchor[2];
+  ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+  x = int(anchor[0]);
+  y = int(anchor[1]);
 
   // w = BLI_rctf_size_x(&v2d->tot);
   // h = BLI_rctf_size_y(&v2d->tot);
@@ -717,7 +721,7 @@ void ED_mask_draw_region(
       buf_col[3] = 1.0f;
     }
 
-    GPU_matrix_push();
+    ui::view2d_matrix_push_rotation(&region->v2d);
     GPU_matrix_translate_2f(x, y);
     GPU_matrix_scale_2f(zoomx, zoomy);
     if (stabmat) {
@@ -756,7 +760,7 @@ void ED_mask_draw_region(
                   1.0f,
                   nullptr);
     }
-    GPU_matrix_pop();
+    ui::view2d_matrix_pop_rotation();
 
     if (overlay_mode != MASK_OVERLAY_ALPHACHANNEL) {
       GPU_blend(GPU_BLEND_NONE);
@@ -767,7 +771,7 @@ void ED_mask_draw_region(
 
   /* apply transformation so mask editing tools will assume drawing from the
    * origin in normalized space */
-  GPU_matrix_push();
+  ui::view2d_matrix_push_rotation(&region->v2d);
   GPU_matrix_translate_2f(x + xofs, y + yofs);
   GPU_matrix_scale_2f(zoomx, zoomy);
   if (stabmat) {
@@ -788,7 +792,7 @@ void ED_mask_draw_region(
     ED_region_draw_cb_draw(C, region, REGION_DRAW_POST_VIEW);
   }
 
-  GPU_matrix_pop();
+  ui::view2d_matrix_pop_rotation();
 }
 
 void ED_mask_draw_frames(

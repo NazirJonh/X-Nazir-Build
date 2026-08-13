@@ -6,9 +6,10 @@
  * \ingroup edsculpt
  *
  * Internal API shared between the paint-curve translation units
- * (`paint_curve.cc`, `paint_curve_geometry.cc`, `paint_curve_sync.cc`,
+ * (`paint_curve.cc`, `paint_curve_slide.cc`, `paint_curve_geometry.cc`, `paint_curve_sync.cc`,
  * `paint_curve_convert.cc`, `paint_curve_undo.cc`) and their consumers in the
- * sculpt/paint module. Cross-module entry points live in `ED_paint.hh` instead.
+ * sculpt/paint module (including `paint_curve_patch_edit.cc` for `_from_geometry` pick cores
+ * and 3D point-move/snap). Cross-module entry points live in `ED_paint.hh` instead.
  */
 
 #pragma once
@@ -46,6 +47,7 @@ struct bContext;
 struct PaintCurveSnapContext;
 struct wmKeyConfig;
 struct wmKeyMap;
+struct wmOperator;
 struct wmOperatorType;
 
 /* -------------------------------------------------------------------- */
@@ -79,12 +81,122 @@ bool paintcurve_slide_is_active();
 bool paintcurve_slide_segment_active(int *r_point_a, int *r_point_b);
 
 /**
- * World-space position of the snap marker shown during a 3D paint-curve slide.
+ * Tell the next #PAINTCURVE_OT_slide invoke to no-op: a handle-type cycle or a segment insert
+ * already consumed this click. Defined in `paint_curve_slide.cc`.
+ */
+void paintcurve_skip_next_slide();
+
+/**
+ * Overlay snap marker published by a 3D paint-curve slide or a Curve Patch point drag.
+ * Overlay cannot read operator custom-data, so the hit is stored here in world space.
  * Returns false when no geometry snap is currently active.
  * \param r_world_pos: receives the snapped target in world space for per-viewport projection.
  * \param r_type: receives the active snap elements (#SCE_SNAP_TO_GEOM subset) for marker styling.
  */
 bool paintcurve_snap_marker_get(float r_world_pos[3], int *r_type);
+/** Store an object-space snap hit in world space for per-viewport overlay projection. */
+void paintcurve_snap_marker_update(bContext *C,
+                                   const float ob_to_world[4][4],
+                                   const float hit_obj[3]);
+/** Hide the overlay snap marker. Safe to call when none is active. */
+void paintcurve_snap_marker_clear();
+
+void paintcurve_sync_to_source_if_3d(bContext *C, PaintCurve *pc);
+void paintcurve_sync_after_handle_type_change(bContext *C, PaintCurve *pc);
+bool paintcurve_update_add_index_from_selection(PaintCurve *pc, const bke::CurvesGeometry &geom);
+/**
+ * Paint Curve ID insert under the cursor. Hit-test is
+ * #paintcurve_find_insert_segment_from_geometry; mutation and paint-curve undo stay here.
+ * Curve Patch does not call this.
+ */
+bool paintcurve_try_insert_point_at_mouse(bContext *C,
+                                          wmOperator *op,
+                                          PaintCurve *pc,
+                                          const float loc_fl[2]);
+/**
+ * ID-editor closest-segment pick. Intentionally not a wrapper around
+ * #paintcurve_find_closest_segment_from_geometry: that core uses squared polyline distance,
+ * this path uses the Paint Curve edge-hit metric.
+ */
+bool paintcurve_find_closest_segment(PaintCurve *pc,
+                                     const ViewContext *vc,
+                                     Span<PaintCurvePoint> screen_points,
+                                     const float pos[2],
+                                     float threshold,
+                                     int *r_segment_index,
+                                     int *r_segment_index_next,
+                                     float *r_edge_t);
+/**
+ * Closest Bezier segment to \a pos within \a threshold screen pixels, on a standalone
+ * `CurvesGeometry`. Uses squared polyline distance (#ED_paint_curve_polyline_distance_sq), not
+ * the ID-editor's edge-hit metric in #paintcurve_find_closest_segment. \a use_3d_space /
+ * \a screen_points_fallback match the other `_from_geometry` pick helpers. Also used by
+ * #paintcurve_find_insert_segment_from_geometry.
+ */
+bool paintcurve_find_closest_segment_from_geometry(const bke::CurvesGeometry &geom,
+                                                   bool use_3d_space,
+                                                   const ViewContext *vc,
+                                                   Span<PaintCurvePoint> screen_points_fallback,
+                                                   const float pos[2],
+                                                   float threshold,
+                                                   int *r_segment_index,
+                                                   int *r_segment_index_next,
+                                                   float *r_edge_t,
+                                                   float *r_dist_sq = nullptr);
+/**
+ * Insert-on-segment hit-test over a standalone `CurvesGeometry`. Shared by the Paint Curve ID
+ * editor (#paintcurve_try_insert_point_at_mouse) and Curve Patch Ctrl+RMB. Uses the polyline
+ * metric of #paintcurve_find_closest_segment_from_geometry, not the ID-editor's edge-hit
+ * #paintcurve_find_closest_segment. Returns false when a control point is closer than
+ * #PAINT_CURVE_HOVER_THRESHOLD, no segment is within #PAINT_CURVE_INSERT_SEGMENT_THRESHOLD,
+ * the hit is too close to a segment endpoint, or handle attributes are missing.
+ * \a r_segment_index_next and \a r_dist_sq may be null.
+ */
+bool paintcurve_find_insert_segment_from_geometry(const bke::CurvesGeometry &geom,
+                                                  bool use_3d_space,
+                                                  const ViewContext *vc,
+                                                  const float pos[2],
+                                                  int *r_segment_index,
+                                                  int *r_segment_index_next,
+                                                  float *r_edge_t,
+                                                  float *r_dist_sq = nullptr);
+void paintcurve_object_to_screen(const ViewContext *vc,
+                                 const float ob_to_world[4][4],
+                                 const float ob_co[3],
+                                 float r_screen[2]);
+void paintcurve_screen_to_object(const ViewContext *vc,
+                                 const float pivot_world[3],
+                                 const float world_to_ob[4][4],
+                                 const float screen_co[2],
+                                 float r_ob_co[3]);
+/**
+ * Object-space delta of a screen drag through the plane at \a pivot_world.
+ * Shared by Paint Curve slide (entire-point) and Curve Patch point drag when surface snap misses.
+ */
+void paintcurve_object_delta_from_screen_drag(const ViewContext *vc,
+                                              const float world_to_ob[4][4],
+                                              const float pivot_world[3],
+                                              const float mval_init[2],
+                                              const float mval_curr[2],
+                                              float r_obj_delta[3]);
+/**
+ * Move a control point and both handles by \a obj_delta from drag-start positions.
+ * Does not recalculate Bezier handles -- callers that need that (Curve Patch; surface snap)
+ * do it themselves. Paint Curve entire-point slide historically does not.
+ */
+void paintcurve_apply_point_translate_3d(bke::CurvesGeometry &geom,
+                                         int point_index,
+                                         const float3 initial_loc_3d[3],
+                                         const float3 &obj_delta);
+/**
+ * Snap a control point onto a surface hit: translate from drag-start positions and store
+ * \a hit_no_obj as the point's surface normal. Recalculates Bezier auto/aligned handles.
+ */
+void paintcurve_apply_point_surface_snap(bke::CurvesGeometry &geom,
+                                         int point_index,
+                                         const float3 initial_loc_3d[3],
+                                         const float3 &hit_obj,
+                                         const float3 &hit_no_obj);
 
 /** \} */
 
@@ -256,9 +368,8 @@ int paintcurve_find_in_screen_points(Span<PaintCurvePoint> screen_points,
 /**
  * Reshape the Bezier segment `point_i1` -> `point_i2` so it passes through `mval` at parameter
  * `segment_t` (clamped to [0.1, 0.9]), solving for the two adjacent handles. `depth_world` is the
- * world-space point used as the win-to-3d unprojection plane (matches #paintcurve_apply_handle_move_3d's
- * `pivot_world`). Operates directly on `geom` -- takes no #PaintCurve, unlike most of this file's
- * other apply-move functions, since it never needed one.
+ * world-space point used as the win-to-3d unprojection plane (same plane as
+ * #paintcurve_object_delta_from_screen_drag). Operates directly on `geom` -- takes no #PaintCurve.
  */
 void paintcurve_apply_segment_move_3d(bke::CurvesGeometry &geom,
                                       int point_i1,
@@ -466,6 +577,11 @@ int paintcurve_find_radius_handle_at_pos(const PaintCurve *pc,
                                          const PaintCurvePoint *screen_points,
                                          const float pos[2],
                                          float threshold);
+/** Core of #paintcurve_find_radius_handle_at_pos for a standalone control curve. */
+int paintcurve_find_radius_handle_at_pos_from_geometry(const bke::CurvesGeometry &geom,
+                                                        Span<PaintCurvePoint> screen_points,
+                                                        const float pos[2],
+                                                        float threshold);
 float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScreen *handle,
                                                const float pos[2]);
 
@@ -496,6 +612,9 @@ constexpr float PAINT_CURVE_SPLIT_ENDPOINT_SEPARATION = 0.05f;
 /** Screen-space pixel radius for Ctrl+RMB segment insertion. Wider than #PAINT_CURVE_SEGMENT_HOVER_THRESHOLD
  * so clicks near a tessellated curve wire reliably subdivide instead of extending the spline. */
 constexpr float PAINT_CURVE_INSERT_SEGMENT_THRESHOLD = 30.0f;
+/** Bezier \a t range for subdividing a segment. Hits outside append/extend instead of insert. */
+constexpr float PAINT_CURVE_INSERT_T_MIN = 0.1f;
+constexpr float PAINT_CURVE_INSERT_T_MAX = 0.9f;
 /* The radius-handle endpoint circle radius is shared with the overlay engine, so its single
  * definition lives in `ED_paint_curve_draw.hh`. Re-export it here so the internal translation
  * units can keep using the unqualified name. */

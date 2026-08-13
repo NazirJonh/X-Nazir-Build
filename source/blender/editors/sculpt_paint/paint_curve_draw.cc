@@ -509,8 +509,9 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
         paintcurve_polyline_point_and_tangent_at_bezier_param(
             hover_seg.polyline, bezier_t, preview.point, preview.tangent))
     {
-      /* Match insert_or_add_point: do not preview subdivision near endpoints. */
-      if (bezier_t >= 0.1f && bezier_t <= 0.9f) {
+      /* Match #paintcurve_find_insert_segment_from_geometry: do not preview subdivision near
+       * endpoints. */
+      if (bezier_t >= PAINT_CURVE_INSERT_T_MIN && bezier_t <= PAINT_CURVE_INSERT_T_MAX) {
         if (math::length_squared(preview.tangent) < 1e-6f) {
           preview.tangent = float2(1.0f, 0.0f);
         }

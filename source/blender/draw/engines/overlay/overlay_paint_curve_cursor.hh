@@ -65,7 +65,9 @@ class PaintCurveCursor : Overlay {
 
   ed::sculpt_paint::PaintCurveScreenHandles handles_;
   ed::sculpt_paint::PaintCurveScreenSilhouettes silhouettes_;
-  /** Reused across syncs; #ED_curve_patch_overlay_data_get clears and refills it. */
+  /** Reused across syncs; #ED_curve_patch_overlay_data_get clears and refills it.
+   * Cleared at the start of every #begin_sync so an early return cannot leave last-frame
+   * spline pointers (dangling if the session died between frames). */
   CurvePatchOverlayData patch_overlay_;
 
   Vector<ed::sculpt_paint::PaintCurveCachedObjectSilhouette> silhouette_cache_;
@@ -132,6 +134,10 @@ class PaintCurveCursor : Overlay {
     silhouettes_ = {};
     enabled_ = false;
     snap_marker_active_ = false;
+    /* Drop last-frame spline pointers before any early return. The only reader is later in
+     * this function, after #ED_curve_patch_overlay_data_get refills the buffer. */
+    patch_overlay_.splines.clear();
+    patch_overlay_.active_index = -1;
 
     if (!state.is_space_v3d() && !state.is_space_image()) {
       free_handle_gpu();
@@ -195,6 +201,10 @@ class PaintCurveCursor : Overlay {
                                    float2(state.cursor_mval - origin) :
                                    float2(-1.0e6f);
     ED_curve_patch_overlay_data_get(vc.obact, patch_overlay_);
+    /* Non-empty overlay, not "session has an active item". A half-built session
+     * (`active_patch` out of range with patches still present) still draws every spline;
+     * hover and insert preview stay off because `active_index` is -1. The previous gate
+     * (`has_active_item()`) hid the overlay entirely in that degenerate case. */
     const bool is_curve_patch_active = !patch_overlay_.splines.is_empty();
 
     /* An already-active session keeps its overlay regardless: the gate applies at session entry,
@@ -280,9 +290,9 @@ class PaintCurveCursor : Overlay {
       }
     }
 
-    /* Snap marker: shown only while a 3D slide is snapping to geometry. World position is stored
-     * by the slide modal; project it into each viewport's region space here. */
-    if (state.is_space_v3d() && ed::sculpt_paint::ED_paint_curve_slide_is_active()) {
+    /* Snap marker: shown while a 3D slide or Curve Patch point drag is snapping to geometry.
+     * World position is stored by the modal; project it into each viewport's region space here. */
+    if (state.is_space_v3d()) {
       float world_pos[3];
       int type = 0;
       if (ed::sculpt_paint::ED_paint_curve_snap_marker_get(world_pos, &type) && vc.region) {
@@ -826,7 +836,7 @@ class PaintCurveCursor : Overlay {
       }
     }
 
-    /* --- 9. Snap marker (shown during a 3D slide snapping to geometry) --- */
+    /* --- 9. Snap marker (3D slide or Curve Patch point drag snapping to geometry) --- */
     if (snap_marker_active_) {
       const float2 c = snap_marker_pos_;
       constexpr int SEGS = 24;

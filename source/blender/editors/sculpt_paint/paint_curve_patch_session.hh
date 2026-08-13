@@ -464,7 +464,7 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchSession 
  * Record the CURRENT state as a new step on the session's own undo stack (see
  * `CurvePatchEditState::undo_steps` for why this cannot go through Blender's own undo systems).
  * Called after an action completes -- once per action, not once per event, so a drag is a single
- * step. Defined in `paint_curve_patch_edit.cc`; declared here (rather than kept file-static)
+ * step. Defined in `paint_curve_patch_edit_undo.cc`; declared here (rather than kept file-static)
  * because `paint_curve_patch_session.cc`'s #ED_curve_patch_session_undo_push also needs it, for
  * the Transform system's G/R/S handle drags. */
 void curve_patch_undo_push(CurvePatchSession &patch);

@@ -27,6 +27,9 @@ set(SRC
   paint_curve_geometry.cc
   paint_curve_patch_apply.cc
   paint_curve_patch_edit.cc
+  paint_curve_patch_edit_keymap.cc
+  paint_curve_patch_edit_sync.cc
+  paint_curve_patch_edit_undo.cc
   paint_curve_patch_effect_color.cc
   paint_curve_patch_effect_image.cc
   paint_curve_patch_effect_relief.cc
@@ -35,6 +38,7 @@ set(SRC
   paint_curve_patch_session.cc
   paint_curve_topology.cc
   paint_curve_draw.cc
+  paint_curve_slide.cc
   paint_curve_sync.cc
   paint_curve_undo.cc
   paint_ops.cc
@@ -133,6 +137,7 @@ set(SRC
   paint_cursor.hh
   paint_curve_intern.hh
   paint_curve_patch_apply.hh
+  paint_curve_patch_edit_intern.hh
   paint_curve_patch_effect.hh
   paint_curve_patch_effect_common.hh
   paint_curve_patch_profile.hh

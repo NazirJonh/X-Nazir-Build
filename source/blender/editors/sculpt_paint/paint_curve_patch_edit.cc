@@ -12,7 +12,9 @@
  * whole live-edit session -- point/handle/segment/radius drag, insert, delete, texture-axis
  * toggle, and Enter/Esc commit/cancel. Mouse interaction stays as `switch (event->type)` because
  * hit-tests depend on cursor position. Keyboard actions go through a `WM_modalkeymap` attached to
- * this operator (`curve_patch_edit_modal_keymap`), the same pattern as `PAINTCURVE_OT_slide`.
+ * this operator (`paint_curve_patch_edit_keymap.cc`), the same pattern as `PAINTCURVE_OT_slide`.
+ * Session-local undo lives in `paint_curve_patch_edit_undo.cc`; multi-viewport context sync in
+ * `paint_curve_patch_edit_sync.cc`.
  *
  * That is NOT a tool `wmKeyMap` of small operators. An earlier version split each action into its
  * own short-lived operator bound via a procedural C++ keymap; that left the installed keymap with
@@ -21,16 +23,13 @@
  * assigned to the operator type does not go through that path; bindings live in
  * `blender_default.py` so merge cannot empty the map, and so the user can rebind them.
  *
- * The mouse-delta drag math below mirrors the "move entire point" path of `paintcurve_slide`'s
- * modal (`paint_curve.cc`, `paintcurve_apply_handle_move_3d`) and the radius-handle math of
- * `paintcurve_slide_radius` (`paint_curve.cc`), adapted to operate on `CurvePatchEditState::control_curve`
- * -- a standalone `bke::CurvesGeometry` that is not wrapped in a `PaintCurve` ID. The segment
- * hit-test helpers (`paintcurve_build_screen_segment_polyline_from_geometry`,
- * `paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry`, etc., `paint_curve_sync.cc`/
- * `paint_curve_geometry.cc`) are the `_from_geometry` cores of
- * `paintcurve_build_screen_segment_polyline`/`paintcurve_bezier_param_at_screen_pos_on_segment`,
- * shared with the Stage 06 overlay draw path (`ED_paint_curve_screen_handles_build_from_geometry`,
- * `paint_curve_draw.cc`).
+ * Entire-point drag uses the shared 3D cores (`paintcurve_apply_point_surface_snap`,
+ * `paintcurve_object_delta_from_screen_drag`). Radius drag uses
+ * `paintcurve_radius_from_handle_screen_pos`. Handle drag stays local: Paint Curve slide also
+ * rotates the opposite handle and rewrites Free/Align; this editor only promotes computed
+ * Auto/Vector to Align so a user-chosen Free stays free. Segment hit-tests and insert are the
+ * `_from_geometry` cores in `paint_curve_sync.cc`. Overlay handles come from
+ * `ED_paint_curve_screen_handles_build_from_geometry` (`paint_curve_draw.cc`).
  */
 
 #include <algorithm>
@@ -89,28 +88,14 @@
 #include "UI_interface_layout.hh"
 
 #include "WM_api.hh"
-#include "WM_keymap.hh"
 #include "WM_types.hh"
 
 #include "mesh/sculpt_intern.hh"
 #include "paint_curve_intern.hh"
+#include "paint_curve_patch_edit_intern.hh"
 #include "paint_curve_patch_session.hh"
 
 namespace blender::ed::sculpt_paint {
-
-enum {
-  CURVE_PATCH_MODAL_CONFIRM = 0,
-  CURVE_PATCH_MODAL_CANCEL = 1,
-  CURVE_PATCH_MODAL_UNDO = 2,
-  CURVE_PATCH_MODAL_REDO = 3,
-  CURVE_PATCH_MODAL_TOGGLE_CYCLIC = 4,
-  CURVE_PATCH_MODAL_SWAP_AXIS = 5,
-  CURVE_PATCH_MODAL_TRANSLATE = 6,
-  CURVE_PATCH_MODAL_ROTATE = 7,
-  CURVE_PATCH_MODAL_SCALE = 8,
-  CURVE_PATCH_MODAL_RADIUS = 9,
-  CURVE_PATCH_MODAL_DELETE = 10,
-};
 
 /* Cheap order-sensitive digest of a brush's Curve Patch texture list, used only to detect that the
  * list changed and the patch must be re-stamped. Not a hash with any security or collision
@@ -238,9 +223,7 @@ struct CurvePatchEditOpData {
   float segment_t = 0.0f;
   float2 drag_start_mval = float2(0.0f);
   /* Object-space positions of the active point's left handle / co / right handle, captured when
-   * the drag starts. Mirrors `PointSlideData::point_initial_loc_3d` (paint_curve.cc): every
-   * MOUSEMOVE re-derives the delta from these ORIGINAL positions instead of the current ones, so
-   * floating-point drift never accumulates across a long drag. */
+   * the drag starts. Same as `PointSlideData::point_initial_loc_3d` (`paint_curve_slide.cc`). */
   float3 point_initial_loc_3d[3] = {float3(0.0f), float3(0.0f), float3(0.0f)};
   /* Screen-space radius-handle axis captured once when a radius drag starts (see
    * `paintcurve_slide_radius_invoke`, `paint_curve.cc:2653-2656`); reused unchanged for every
@@ -286,6 +269,7 @@ struct CurvePatchEditOpData {
 /** Release the drag-scoped snap context, if one was created. Safe to call repeatedly. */
 static void curve_patch_edit_snap_ctx_free(CurvePatchEditOpData &data)
 {
+  paintcurve_snap_marker_clear();
   if (data.snap_ctx != nullptr) {
     ED_paintcurve_snap_context_destroy(data.snap_ctx);
     data.snap_ctx = nullptr;
@@ -313,91 +297,10 @@ static bool curve_patch_edit_poll(bContext *C)
 }
 
 /* -------------------------------------------------------------------- */
-/** \name Geometry-Only Radius-Handle Helpers
+/** \name Geometry-Only Hit Tests
  *
- * Thin local wrappers around the shared `_from_geometry` cores (`paint_curve_sync.cc`), which
- * take `bke::CurvesGeometry` directly instead of a `PaintCurve *` and are also used by the
- * Stage 06 overlay draw path (`ED_paint_curve_screen_handles_build_from_geometry`).
+ * Wrappers around the shared `_from_geometry` pick cores (`paint_curve_sync.cc`).
  * \{ */
-
-static int patch_find_radius_handle_at_pos(const bke::CurvesGeometry &geom,
-                                           const Span<PaintCurvePoint> screen_points,
-                                           const float pos[2],
-                                           const float threshold)
-{
-  if (!paintcurve_geometry_is_valid(geom) || screen_points.is_empty()) {
-    return -1;
-  }
-
-  int best_index = -1;
-  float best_dist = threshold;
-
-  for (const int i : IndexRange(geom.points_num())) {
-    PaintCurveRadiusHandleScreen handle;
-    paintcurve_radius_handle_screen_get_from_geometry(geom, screen_points.data(), i, &handle);
-    const float end[2] = {handle.end.x, handle.end.y};
-    const float dist_end = len_v2v2(pos, end);
-    if (dist_end < best_dist) {
-      best_dist = dist_end;
-      best_index = i;
-    }
-  }
-
-  return best_index;
-}
-
-/** Closest Bezier segment to `pos` within `threshold` screen pixels, mirroring
- * #paintcurve_find_closest_segment (paint_curve.cc) but operating on a standalone `geom` --
- * shared by the Ctrl+RMB insert hit-test and the plain-click segment-drag start below, both of
- * which need the same (segment_index, segment_index_next, edge_t) search. */
-static bool patch_find_closest_segment(const bke::CurvesGeometry &geom,
-                                       const ViewContext *vc,
-                                       const float pos[2],
-                                       const float threshold,
-                                       int *r_segment_index,
-                                       int *r_segment_index_next,
-                                       float *r_edge_t,
-                                       float *r_dist_sq = nullptr)
-{
-  if (!paintcurve_geometry_is_valid(geom) || geom.points_num() < 2) {
-    return false;
-  }
-
-  int segment_index = -1;
-  int segment_index_next = -1;
-  float edge_t = 0.0f;
-  float best_dist_sq = square_f(threshold);
-  const float2 mval(pos[0], pos[1]);
-
-  paintcurve_foreach_bezier_segment_from_geometry(geom, [&](const int point_a, const int point_b) {
-    Vector<float2> polyline;
-    paintcurve_build_screen_segment_polyline_from_geometry(
-        geom, true, vc, point_a, point_b, {}, polyline);
-    const float dist_sq = ED_paint_curve_polyline_distance_sq(polyline, mval);
-    if (dist_sq < best_dist_sq) {
-      float bezier_t = 0.0f;
-      if (paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(
-              vc, geom, true, pos, point_a, point_b, {}, bezier_t))
-      {
-        best_dist_sq = dist_sq;
-        segment_index = point_a;
-        segment_index_next = point_b;
-        edge_t = bezier_t;
-      }
-    }
-  });
-
-  if (segment_index < 0) {
-    return false;
-  }
-  *r_segment_index = segment_index;
-  *r_segment_index_next = segment_index_next;
-  *r_edge_t = edge_t;
-  if (r_dist_sq) {
-    *r_dist_sq = best_dist_sq;
-  }
-  return true;
-}
 
 /** Control point under `pos` for X-to-delete, mirroring the combined hit tests in the modal's
  * `LEFTMOUSE` press handler (radius widget, pivot/handles, then segment wire). Returns -1 when
@@ -414,7 +317,7 @@ static int patch_find_point_index_at_pos_for_delete(const bke::CurvesGeometry &g
   Vector<PaintCurvePoint> screen_points;
   paintcurve_build_screen_points_from_geometry(geom, true, vc, screen_points);
 
-  const int radius_hit = patch_find_radius_handle_at_pos(
+  const int radius_hit = paintcurve_find_radius_handle_at_pos_from_geometry(
       geom, screen_points.as_span(), pos, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
   if (radius_hit >= 0) {
     return radius_hit;
@@ -433,13 +336,15 @@ static int patch_find_point_index_at_pos_for_delete(const bke::CurvesGeometry &g
   int segment_index = -1;
   int segment_index_next = -1;
   float edge_t = 0.0f;
-  if (patch_find_closest_segment(geom,
-                                 vc,
-                                 pos,
-                                 PAINT_CURVE_POINT_SELECT_THRESHOLD,
-                                 &segment_index,
-                                 &segment_index_next,
-                                 &edge_t))
+  if (paintcurve_find_closest_segment_from_geometry(geom,
+                                                    true,
+                                                    vc,
+                                                    {},
+                                                    pos,
+                                                    PAINT_CURVE_POINT_SELECT_THRESHOLD,
+                                                    &segment_index,
+                                                    &segment_index_next,
+                                                    &edge_t))
   {
     return edge_t < 0.5f ? segment_index : segment_index_next;
   }
@@ -450,82 +355,14 @@ static int patch_find_point_index_at_pos_for_delete(const bke::CurvesGeometry &g
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Multi-Viewport Context
- * \{ */
-
-/** Point the session's owned `ViewContext` (and `StrokeCache::vc`) at the viewport under edit. */
-static void curve_patch_sync_view_context(bContext *C,
-                                          ScrArea *area,
-                                          ARegion *region,
-                                          CurvePatchSession &patch)
-{
-  if (!area || !region) {
-    return;
-  }
-  CTX_wm_area_set(C, area);
-  CTX_wm_region_set(C, region);
-  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
-  patch.view_context = ED_view3d_viewcontext_init(C, depsgraph);
-  Object *ob = CTX_data_active_object(C);
-  if (ob && ob->runtime->sculpt_session && ob->runtime->sculpt_session->cache) {
-    ob->runtime->sculpt_session->cache->vc = &patch.view_context;
-  }
-}
-
-/**
- * Called from outside the modal (the overlay-redraw poll) to catch windows opened after the
- * session started -- `curve_patch_edit_modal()` re-runs
- * #WM_event_add_modal_handler_all_windows() itself on every tick too, but this covers the gap
- * before the next event reaches it. Discovers the running #SCULPT_OT_curve_patch_edit instance
- * by type: there is always at most one active session, so a type-based search (unlike an
- * instance-match idempotency check) is the right tool here -- there is no already-known
- * `wmOperator *` to compare against yet.
- */
-void ED_paint_curve_patch_modal_handlers_ensure(bContext *C)
-{
-  const Object *ob = CTX_data_active_object(C);
-  if (!ob || !ob->runtime->sculpt_session || !ob->runtime->sculpt_session->curve_patch_session) {
-    return;
-  }
-  wmWindowManager *wm = CTX_wm_manager(C);
-  if (!wm) {
-    return;
-  }
-  const wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_curve_patch_edit", false);
-  if (!ot) {
-    return;
-  }
-  wmOperator *op = nullptr;
-  for (wmWindow &win : wm->windows) {
-    op = WM_operator_find_modal_by_type(&win, ot);
-    if (op) {
-      break;
-    }
-  }
-  if (!op) {
-    return;
-  }
-  WM_event_add_modal_handler_all_windows(C, op, SPACE_VIEW3D, RGN_TYPE_WINDOW);
-}
-
-/** \} */
-
-/* Status-bar hint, refreshed on invoke and every axis toggle. Doubles as a visible signal that
- * an event actually reached this modal handler -- if the text never appears/updates, the
- * event isn't getting here at all (as opposed to it arriving but the texture effect being hard
- * to see for a given brush/texture setup). */
-/* -------------------------------------------------------------------- */
 /** \name Shared Active-Point Actions
  *
  * Bodies shared by the modal's own hotkeys and by the context-menu operators further down, so the
  * two entry points cannot drift apart.
  * \{ */
 
-/* Defined below; the cyclic toggle refreshes the status bar, which spells out what C will do next. */
-static void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &patch);
-
 /** Refresh the paint-curve overlay in every 3D View / Image editor (cheap; per MOUSEMOVE frame). */
-static void curve_patch_tag_overlay_redraw_all(bContext *C)
+void curve_patch_tag_overlay_redraw_all(bContext *C)
 {
   ED_paint_curve_overlay_tag_redraw_all(C);
 }
@@ -536,9 +373,9 @@ static void curve_patch_tag_overlay_redraw_all(bContext *C)
  * handshake -- the same reason #curve_patch_finish_commit issues a second effect-typed flush.
  * Without that second call, Texture Paint (Draw brush / image canvas) keeps a stale GPU preview
  * after moving points or segments even though the ImBuf was already re-stamped. */
-static void curve_patch_tag_viewports_redraw_after_edit(bContext &C,
-                                                       Object &ob,
-                                                       const CurvePatchSession &patch)
+void curve_patch_tag_viewports_redraw_after_edit(bContext &C,
+                                                Object &ob,
+                                                const CurvePatchSession &patch)
 {
   ED_paint_curve_overlay_tag_redraw_all(&C);
   flush_update_done(&C, ob, UpdateType::Position);
@@ -550,83 +387,6 @@ static void curve_patch_tag_viewports_redraw_after_edit(bContext &C,
     flush_update_done(&C, ob, update_type);
   }
 }
-
-/* -------------------------------------------------------------------- */
-/** \name Session-Local Undo
- *
- * See `CurvePatchEditState::undo_steps` for why this cannot go through Blender's own undo systems.
- * \{ */
-
-/* Deep enough for any realistic editing session; the snapshots are a handful of control points
- * each, so the cap exists to bound a pathological session rather than to save meaningful memory. */
-static constexpr int CURVE_PATCH_UNDO_STEPS_MAX = 64;
-
-/* Record the CURRENT state as a new step. Called after an action completes -- once per action, not
- * once per event, so a drag is a single step. Not file-static: declared in
- * `paint_curve_patch_session.hh` and also called from `paint_curve_patch_session.cc`'s
- * #ED_curve_patch_session_undo_push, for the Transform system's G/R/S handle drags. */
-void curve_patch_undo_push(CurvePatchSession &patch)
-{
-  /* Anything above the cursor is a redo branch the new edit invalidates. */
-  patch.edit.undo_steps.resize(patch.edit.undo_step_current + 1);
-
-  CurvePatchEditStep step;
-  step.items.reserve(patch.patches.size());
-  for (const CurvePatchItem &item : patch.patches) {
-    step.items.append({item.control_curve, item.params.swap_axis, item.params.stamp_seed});
-  }
-  step.active_patch = patch.active_patch;
-  patch.edit.undo_steps.append(std::move(step));
-
-  if (patch.edit.undo_steps.size() > CURVE_PATCH_UNDO_STEPS_MAX) {
-    patch.edit.undo_steps.remove(0);
-  }
-  patch.edit.undo_step_current = int(patch.edit.undo_steps.size()) - 1;
-}
-
-static void curve_patch_undo_restore(bContext &C, Object &ob, CurvePatchSession &patch)
-{
-  const CurvePatchEditStep &step = patch.edit.undo_steps[patch.edit.undo_step_current];
-  /* Resized rather than rebuilt: only the three snapshotted fields are restored, so each patch
-   * keeps its surface snapshot and its derived geometry, which the next re-stamp overwrites
-   * anyway. A step can hold fewer patches than the session currently has. */
-  patch.patches.resize(step.items.size());
-  for (const int i : step.items.index_range()) {
-    patch.patches[i].control_curve = step.items[i].curve;
-    patch.patches[i].params.swap_axis = step.items[i].swap_axis;
-    patch.patches[i].params.stamp_seed = step.items[i].stamp_seed;
-  }
-  patch.active_patch = std::min(step.active_patch, int(patch.patches.size()) - 1);
-  /* The restored curve may hold fewer points than the one just replaced. */
-  patch.edit.active_point = -1;
-
-  curve_patch_edit_status_set(&C, patch);
-  curve_patch_restore_and_restamp(C, ob, patch);
-  curve_patch_tag_viewports_redraw_after_edit(C, ob, patch);
-}
-
-/* Returns false when there is nothing left to undo, i.e. the session is back at the state the
- * anchor stroke produced. The caller then cancels the patch outright. */
-static bool curve_patch_undo_step_back(bContext &C, Object &ob, CurvePatchSession &patch)
-{
-  if (patch.edit.undo_step_current <= 0) {
-    return false;
-  }
-  patch.edit.undo_step_current--;
-  curve_patch_undo_restore(C, ob, patch);
-  return true;
-}
-
-static void curve_patch_undo_step_forward(bContext &C, Object &ob, CurvePatchSession &patch)
-{
-  if (patch.edit.undo_step_current + 1 >= int(patch.edit.undo_steps.size())) {
-    return;
-  }
-  patch.edit.undo_step_current++;
-  curve_patch_undo_restore(C, ob, patch);
-}
-
-/** \} */
 
 static bool curve_patch_active_point_is_valid(const CurvePatchSession &patch)
 {
@@ -838,9 +598,12 @@ static void curve_patch_edit_context_menu_open(bContext *C)
 
 /** \} */
 
-/* The keys are read from this operator's modal keymap, so #WorkspaceStatus::opmodal can show
- * whatever the user rebound them to. */
-static void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &patch)
+/* Status-bar hint, refreshed on invoke and every axis toggle. Doubles as a visible signal that
+ * an event actually reached this modal handler -- if the text never appears/updates, the
+ * event isn't getting here at all (as opposed to it arriving but the texture effect being hard
+ * to see for a given brush/texture setup). The keys are read from this operator's modal keymap,
+ * so #WorkspaceStatus::opmodal can show whatever the user rebound them to. */
+void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &patch)
 {
   WorkspaceStatus status(C);
   const wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_curve_patch_edit", true);
@@ -1275,7 +1038,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           bke::CurvesGeometry &geom = patch.patches[i].control_curve;
           Vector<PaintCurvePoint> screen_points;
           paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
-          const int hit = patch_find_radius_handle_at_pos(
+          const int hit = paintcurve_find_radius_handle_at_pos_from_geometry(
               geom, screen_points.as_span(), loc_fl, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
           if (hit < 0) {
             continue;
@@ -1381,14 +1144,16 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           int segment_index_next = -1;
           float edge_t = 0.0f;
           float dist_sq = FLT_MAX;
-          if (patch_find_closest_segment(geom,
-                                         &vc,
-                                         loc_fl,
-                                         PAINT_CURVE_POINT_SELECT_THRESHOLD,
-                                         &segment_index,
-                                         &segment_index_next,
-                                         &edge_t,
-                                         &dist_sq) &&
+          if (paintcurve_find_closest_segment_from_geometry(geom,
+                                                            true,
+                                                            &vc,
+                                                            {},
+                                                            loc_fl,
+                                                            PAINT_CURVE_POINT_SELECT_THRESHOLD,
+                                                            &segment_index,
+                                                            &segment_index_next,
+                                                            &edge_t,
+                                                            &dist_sq) &&
               dist_sq < best_segment_dist_sq)
           {
             best_segment_dist_sq = dist_sq;
@@ -1436,11 +1201,10 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         copy_m4_m4(ob_to_world, ob.object_to_world().ptr());
         copy_m4_m4(world_to_ob, ob.world_to_object().ptr());
 
-        /* Mirrors the "move entire point" path of #paintcurve_apply_handle_move_3d
-         * (paint_curve.cc:2013-2026): re-derive the pivot's CURRENT world position every move (so
-         * the win_to_3d projection plane tracks the point's actual depth) but always apply the
-         * resulting delta on top of the point's ORIGINAL (drag-start) handle positions, so
-         * floating-point drift never accumulates across the drag. */
+        /* Entire-point drag: same cores as Paint Curve slide (`paintcurve_apply_point_surface_snap`
+         * / `paintcurve_object_delta_from_screen_drag`). Re-derive the pivot's current world
+         * position every move so the unprojection plane tracks depth, but apply the delta on the
+         * ORIGINAL handle positions so drift does not accumulate. */
         const float3 &pivot = geom.positions()[patch.edit.active_point];
         float pivot_world[3];
         mul_v3_m4v3(pivot_world, ob_to_world, pivot);
@@ -1451,7 +1215,6 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         /* Keep the point on the surface while it is dragged, same as #paintcurve_point_slide_modal.
          * `use_depth_fallback` is off: the depth-buffer level needs a viewport redraw, which would
          * run on every mouse move. On a miss this falls through to the screen-delta path below. */
-        float obj_delta[3];
         float hit_obj[3];
         float hit_no_obj[3];
         if (data.snap_ctx == nullptr) {
@@ -1466,26 +1229,23 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
                                      hit_obj,
                                      hit_no_obj))
         {
-          sub_v3_v3v3(obj_delta, hit_obj, data.point_initial_loc_3d[1]);
-          paintcurve_geom_set_surface_normal(geom, patch.edit.active_point, float3(hit_no_obj));
+          paintcurve_apply_point_surface_snap(geom,
+                                              patch.edit.active_point,
+                                              data.point_initial_loc_3d,
+                                              float3(hit_obj),
+                                              float3(hit_no_obj));
+          paintcurve_snap_marker_update(C, ob_to_world, hit_obj);
         }
         else {
-          float world_init[3], world_curr[3];
-          ED_view3d_win_to_3d(vc.v3d, vc.region, pivot_world, mval_init, world_init);
-          ED_view3d_win_to_3d(vc.v3d, vc.region, pivot_world, mval_curr, world_curr);
-
-          float obj_init[3], obj_curr[3];
-          mul_v3_m4v3(obj_init, world_to_ob, world_init);
-          mul_v3_m4v3(obj_curr, world_to_ob, world_curr);
-          sub_v3_v3v3(obj_delta, obj_curr, obj_init);
+          paintcurve_snap_marker_clear();
+          float obj_delta[3];
+          paintcurve_object_delta_from_screen_drag(
+              &vc, world_to_ob, pivot_world, mval_init, mval_curr, obj_delta);
+          paintcurve_apply_point_translate_3d(
+              geom, patch.edit.active_point, data.point_initial_loc_3d, float3(obj_delta));
+          geom.calculate_bezier_auto_handles();
+          geom.calculate_bezier_aligned_handles();
         }
-
-        for (int h = 0; h < 3; h++) {
-          add_v3_v3v3(
-              paintcurve_geom_co(geom, patch.edit.active_point, h), obj_delta, data.point_initial_loc_3d[h]);
-        }
-        geom.calculate_bezier_auto_handles();
-        geom.calculate_bezier_aligned_handles();
         geom.tag_positions_changed();
 
         curve_patch_restore_and_restamp(*C, ob, patch);
@@ -1512,21 +1272,21 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         copy_m4_m4(ob_to_world, ob.object_to_world().ptr());
         copy_m4_m4(world_to_ob, ob.world_to_object().ptr());
 
-        /* Unlike the whole-point drag above, a directly-clicked handle simply follows the
-         * cursor -- no drag-start delta needed. This matches #paintcurve_apply_handle_move_3d's
-         * direct-click path (paint_curve.cc): its `pivot_screen + (mval - pivot_screen)` target
-         * algebraically reduces to just `mval`, projected onto the plane through the pivot's
-         * current world position. */
+        /* Direct handle drag: project the cursor onto the pivot plane (#paintcurve_screen_to_object).
+         * Not #paintcurve_apply_handle_move_3d -- that path also rotates the opposite handle and
+         * rewrites Free/Align types. Curve Patch only promotes computed Auto/Vector to Align so a
+         * user-chosen Free stays free. */
         const float3 &pivot = geom.positions()[patch.edit.active_point];
         float pivot_world[3];
         mul_v3_m4v3(pivot_world, ob_to_world, pivot);
 
         const float mval_curr[2] = {float(event_mval[0]), float(event_mval[1])};
-        float world_curr[3];
-        ED_view3d_win_to_3d(vc.v3d, vc.region, pivot_world, mval_curr, world_curr);
-        mul_v3_m4v3(paintcurve_geom_co(geom, patch.edit.active_point, data.handle_is_left ? 0 : 2),
-                    world_to_ob,
-                    world_curr);
+        paintcurve_screen_to_object(
+            &vc,
+            pivot_world,
+            world_to_ob,
+            mval_curr,
+            paintcurve_geom_co(geom, patch.edit.active_point, data.handle_is_left ? 0 : 2));
 
         /* A direct handle drag makes that point's shape freely adjustable, so a COMPUTED handle
          * type (Auto/Vector, whose positions #calculate_bezier_auto_handles() would immediately
@@ -1664,42 +1424,18 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
 
         for (const int i : patch.patches.index_range()) {
           bke::CurvesGeometry &geom = patch.patches[i].control_curve;
-          if (!paintcurve_geometry_is_valid(geom) || geom.points_num() < 2) {
-            continue;
-          }
-          Vector<PaintCurvePoint> screen_points;
-          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
-
-          /* Do not insert when a control point is closer than the segment (matches
-           * #paintcurve_try_insert_point_at_mouse, paint_curve.cc:830-839). */
-          char point_selflag;
-          const bool near_point = paintcurve_find_in_screen_points(screen_points.as_span(),
-                                                                    loc_fl,
-                                                                    false,
-                                                                    PAINT_CURVE_HOVER_THRESHOLD,
-                                                                    &point_selflag) >= 0;
-          if (near_point) {
-            continue;
-          }
-
           int segment_index = -1;
           int segment_index_next = -1;
           float edge_t = 0.0f;
           float dist_sq = FLT_MAX;
-          const bool found_segment = patch_find_closest_segment(
-              geom,
-              &vc,
-              loc_fl,
-              PAINT_CURVE_INSERT_SEGMENT_THRESHOLD,
-              &segment_index,
-              &segment_index_next,
-              &edge_t,
-              &dist_sq);
-
-          /* Clicks near segment endpoints extend the spline instead of subdividing it (same
-           * 0.1/0.9 bounds as #paintcurve_try_insert_point_at_mouse). */
-          if (found_segment && edge_t >= 0.1f && edge_t <= 0.9f &&
-              geom.handle_positions_right().has_value() && geom.handle_positions_left().has_value() &&
+          if (paintcurve_find_insert_segment_from_geometry(geom,
+                                                           true,
+                                                           &vc,
+                                                           loc_fl,
+                                                           &segment_index,
+                                                           &segment_index_next,
+                                                           &edge_t,
+                                                           &dist_sq) &&
               dist_sq < best_segment_dist_sq)
           {
             best_segment_dist_sq = dist_sq;
@@ -1928,40 +1664,6 @@ static bool curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
 static void curve_patch_edit_cancel(bContext *C, wmOperator *op)
 {
   curve_patch_edit_finish(C, op, true);
-}
-
-wmKeyMap *curve_patch_edit_modal_keymap(wmKeyConfig *keyconf)
-{
-  static const EnumPropertyItem modal_items[] = {
-      {CURVE_PATCH_MODAL_CONFIRM, "CONFIRM", 0, "Confirm", "Commit the patch"},
-      {CURVE_PATCH_MODAL_CANCEL, "CANCEL", 0, "Cancel", "Discard the patch"},
-      {CURVE_PATCH_MODAL_UNDO, "UNDO", 0, "Undo", "Undo the last in-session edit"},
-      {CURVE_PATCH_MODAL_REDO, "REDO", 0, "Redo", "Redo the last in-session edit"},
-      {CURVE_PATCH_MODAL_TOGGLE_CYCLIC, "TOGGLE_CYCLIC", 0, "Toggle Cyclic", "Close or open the curve"},
-      {CURVE_PATCH_MODAL_SWAP_AXIS, "SWAP_AXIS", 0, "Swap Texture Axis", "Swap the texture U/V axes"},
-      {CURVE_PATCH_MODAL_TRANSLATE, "TRANSLATE", 0, "Move", "Move the active point"},
-      {CURVE_PATCH_MODAL_ROTATE, "ROTATE", 0, "Rotate", "Rotate the active point"},
-      {CURVE_PATCH_MODAL_SCALE, "SCALE", 0, "Scale", "Scale the active point"},
-      {CURVE_PATCH_MODAL_RADIUS, "RADIUS", 0, "Radius", "Drag the active point's radius"},
-      {CURVE_PATCH_MODAL_DELETE, "DELETE", 0, "Delete Point", "Delete the active point"},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-
-  static const char *name = "Curve Patch Edit Modal Map";
-  wmKeyMap *keymap = WM_modalkeymap_find(keyconf, name);
-  if (keymap && keymap->modal_items) {
-    WM_modalkeymap_assign(keymap, "SCULPT_OT_curve_patch_edit");
-    return keymap;
-  }
-
-  keymap = WM_modalkeymap_ensure(keyconf, name, modal_items);
-  /* Bindings live in `blender_default.py` so key-config merge cannot empty the map (the trap a
-   * C-only tool keymap hit) and so the user can rebind them. This function only attaches the enum
-   * and assigns it to the operator. Industry Compatible (and any preset that does not list this
-   * map) therefore has an empty item list; the modal still swallows Ctrl/Cmd+Z in the raw
-   * `EVT_ZKEY` case so global undo cannot leak. */
-  WM_modalkeymap_assign(keymap, "SCULPT_OT_curve_patch_edit");
-  return keymap;
 }
 
 void SCULPT_OT_curve_patch_edit(wmOperatorType *ot)

@@ -32,6 +32,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 
+#include "ED_paint_curve_draw.hh"
 #include "ED_view3d.hh"
 
 #include "mesh/sculpt_intern.hh"
@@ -650,6 +651,34 @@ void paintcurve_radius_handle_screen_get_from_geometry(const bke::CurvesGeometry
   r_handle->end = pivot + perp * len;
 }
 
+int paintcurve_find_radius_handle_at_pos_from_geometry(const bke::CurvesGeometry &geom,
+                                                        const Span<PaintCurvePoint> screen_points,
+                                                        const float pos[2],
+                                                        const float threshold)
+{
+  if (!paintcurve_geometry_is_valid(geom) || screen_points.is_empty()) {
+    return -1;
+  }
+
+  int best_index = -1;
+  float best_dist = threshold;
+
+  const int point_num = (geom.points_num() < int(screen_points.size())) ? geom.points_num() :
+                                                                         int(screen_points.size());
+  for (const int i : IndexRange(point_num)) {
+    PaintCurveRadiusHandleScreen handle;
+    paintcurve_radius_handle_screen_get_from_geometry(geom, screen_points.data(), i, &handle);
+    const float end[2] = {handle.end.x, handle.end.y};
+    const float dist_end = len_v2v2(pos, end);
+    if (dist_end < best_dist) {
+      best_dist = dist_end;
+      best_index = i;
+    }
+  }
+
+  return best_index;
+}
+
 int paintcurve_find_radius_handle_at_pos(const PaintCurve *pc,
                                          const PaintCurvePoint *screen_points,
                                          const float pos[2],
@@ -663,23 +692,8 @@ int paintcurve_find_radius_handle_at_pos(const PaintCurve *pc,
   if (!paintcurve_geometry_is_valid(geom)) {
     return -1;
   }
-
-  int best_index = -1;
-  float best_dist = threshold;
-
-  for (const int i : IndexRange(geom.points_num())) {
-    PaintCurveRadiusHandleScreen handle;
-    paintcurve_radius_handle_screen_get(pc, screen_points, i, &handle);
-
-    const float end[2] = {handle.end.x, handle.end.y};
-    const float dist_end = len_v2v2(pos, end);
-    if (dist_end < best_dist) {
-      best_dist = dist_end;
-      best_index = i;
-    }
-  }
-
-  return best_index;
+  return paintcurve_find_radius_handle_at_pos_from_geometry(
+      geom, Span(screen_points, geom.points_num()), pos, threshold);
 }
 
 float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScreen *handle,
@@ -691,6 +705,119 @@ float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScree
    * by a fixed minimum so the handle clears the pivot. */
   return max_ff((dist - PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET) / PAINT_CURVE_RADIUS_HANDLE_BASE_LEN,
                 0.0f);
+}
+
+bool paintcurve_find_closest_segment_from_geometry(const bke::CurvesGeometry &geom,
+                                                   const bool use_3d_space,
+                                                   const ViewContext *vc,
+                                                   const Span<PaintCurvePoint> screen_points_fallback,
+                                                   const float pos[2],
+                                                   const float threshold,
+                                                   int *r_segment_index,
+                                                   int *r_segment_index_next,
+                                                   float *r_edge_t,
+                                                   float *r_dist_sq)
+{
+  if (!paintcurve_geometry_is_valid(geom) || geom.points_num() < 2) {
+    return false;
+  }
+
+  int segment_index = -1;
+  int segment_index_next = -1;
+  float edge_t = 0.0f;
+  float best_dist_sq = square_f(threshold);
+  const float2 mval(pos[0], pos[1]);
+
+  paintcurve_foreach_bezier_segment_from_geometry(geom, [&](const int point_a, const int point_b) {
+    Vector<float2> polyline;
+    paintcurve_build_screen_segment_polyline_from_geometry(
+        geom, use_3d_space, vc, point_a, point_b, screen_points_fallback, polyline);
+    const float dist_sq = ed::sculpt_paint::ED_paint_curve_polyline_distance_sq(polyline, mval);
+    if (dist_sq < best_dist_sq) {
+      float bezier_t = 0.0f;
+      if (paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(
+              vc, geom, use_3d_space, pos, point_a, point_b, screen_points_fallback, bezier_t))
+      {
+        best_dist_sq = dist_sq;
+        segment_index = point_a;
+        segment_index_next = point_b;
+        edge_t = bezier_t;
+      }
+    }
+  });
+
+  if (segment_index < 0) {
+    return false;
+  }
+  *r_segment_index = segment_index;
+  *r_segment_index_next = segment_index_next;
+  *r_edge_t = edge_t;
+  if (r_dist_sq) {
+    *r_dist_sq = best_dist_sq;
+  }
+  return true;
+}
+
+bool paintcurve_find_insert_segment_from_geometry(const bke::CurvesGeometry &geom,
+                                                  const bool use_3d_space,
+                                                  const ViewContext *vc,
+                                                  const float pos[2],
+                                                  int *r_segment_index,
+                                                  int *r_segment_index_next,
+                                                  float *r_edge_t,
+                                                  float *r_dist_sq)
+{
+  if (!paintcurve_geometry_is_valid(geom) || geom.points_num() < 2) {
+    return false;
+  }
+  if (!geom.handle_positions_right().has_value() || !geom.handle_positions_left().has_value()) {
+    return false;
+  }
+
+  Vector<PaintCurvePoint> screen_points;
+  paintcurve_build_screen_points_from_geometry(geom, use_3d_space, vc, screen_points);
+
+  char point_selflag;
+  if (paintcurve_find_in_screen_points(screen_points.as_span(),
+                                       pos,
+                                       false,
+                                       PAINT_CURVE_HOVER_THRESHOLD,
+                                       &point_selflag) >= 0)
+  {
+    return false;
+  }
+
+  int segment_index = -1;
+  int segment_index_next = -1;
+  float edge_t = 0.0f;
+  float dist_sq = 0.0f;
+  if (!paintcurve_find_closest_segment_from_geometry(geom,
+                                                     use_3d_space,
+                                                     vc,
+                                                     screen_points.as_span(),
+                                                     pos,
+                                                     PAINT_CURVE_INSERT_SEGMENT_THRESHOLD,
+                                                     &segment_index,
+                                                     &segment_index_next,
+                                                     &edge_t,
+                                                     &dist_sq))
+  {
+    return false;
+  }
+
+  if (edge_t < PAINT_CURVE_INSERT_T_MIN || edge_t > PAINT_CURVE_INSERT_T_MAX) {
+    return false;
+  }
+
+  *r_segment_index = segment_index;
+  if (r_segment_index_next) {
+    *r_segment_index_next = segment_index_next;
+  }
+  *r_edge_t = edge_t;
+  if (r_dist_sq) {
+    *r_dist_sq = dist_sq;
+  }
+  return true;
 }
 
 void paintcurve_build_object_screen_polylines(const bke::CurvesGeometry &geom,

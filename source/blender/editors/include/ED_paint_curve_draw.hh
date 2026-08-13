@@ -118,7 +118,7 @@ void ED_paint_curve_patch_modal_handlers_ensure(bContext *C);
 bool ED_paint_curve_slide_is_active();
 
 /**
- * World-space position of the snap marker shown during a 3D paint-curve slide.
+ * World-space snap marker during a 3D paint-curve slide or Curve Patch point drag.
  * Returns false when no geometry snap is currently active.
  * \param r_world_pos: receives the snapped target in world space for per-viewport projection.
  * \param r_type: receives the active snap elements (#SCE_SNAP_TO_GEOM subset) for marker styling.

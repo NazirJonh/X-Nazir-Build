@@ -168,13 +168,8 @@ static int rna_CurvePoint_index_get_const(const PointerRNA *ptr)
 void rna_Curves_curves_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
   bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
-  rna_iterator_array_begin(iter,
-                           ptr,
-                           geom.offsets_for_write().data(),
-                           sizeof(int),
-                           geom.curves_num(),
-                           false,
-                           nullptr);
+  rna_iterator_array_begin(
+      iter, ptr, geom.offsets_for_write().data(), sizeof(int), geom.curves_num(), false, nullptr);
 }
 
 int rna_Curves_curves_length(PointerRNA *ptr)
@@ -206,10 +201,8 @@ bool rna_Curves_position_data_lookup_int(PointerRNA *ptr, int index, PointerRNA 
   if (index < 0 || index >= geom.points_num()) {
     return false;
   }
-  rna_pointer_create_with_ancestors(*ptr,
-                                    RNA_FloatVectorAttributeValue,
-                                    &geometry_positions_for_write(geom)[index],
-                                    *r_ptr);
+  rna_pointer_create_with_ancestors(
+      *ptr, RNA_FloatVectorAttributeValue, &geometry_positions_for_write(geom)[index], *r_ptr);
   return true;
 }
 
@@ -364,10 +357,11 @@ static void rna_Curves_update_data(Main * /*bmain*/, Scene * /*scene*/, PointerR
  * must not get a second, silent recompute -- its own edit code owns that.
  *
  * No undo step is pushed here, and none should be. RNA property writes in Blender do not push undo
- * themselves -- `Curves` does not either -- and a `PaintCurve` is an ID whose geometry is written to
- * the .blend (`paint_curve_blend_write()`), so the global memfile undo covers a write through this
- * path like any other ID edit. The dedicated paint-curve undo type (`ED_paintcurve_undo_push_*`)
- * exists for the modal operators, which need a granularity finer than a whole file state. */
+ * themselves -- `Curves` does not either -- and a `PaintCurve` is an ID whose geometry is written
+ * to the .blend (`paint_curve_blend_write()`), so the global memfile undo covers a write through
+ * this path like any other ID edit. The dedicated paint-curve undo type
+ * (`ED_paintcurve_undo_push_*`) exists for the modal operators, which need a granularity finer
+ * than a whole file state. */
 void rna_curve_geometry_update_data(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   ID *id = ptr->owner_id;

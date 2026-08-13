@@ -3797,9 +3797,8 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_pointer_funcs(
       prop, "rna_Object_curve_patch_session_get", nullptr, nullptr, nullptr);
-  RNA_def_property_ui_text(prop,
-                           "Curve Patch Session",
-                           "Curve Patch edit currently running on this object, or None");
+  RNA_def_property_ui_text(
+      prop, "Curve Patch Session", "Curve Patch edit currently running on this object, or None");
 
   /* Mesh Symmetry Settings */
 

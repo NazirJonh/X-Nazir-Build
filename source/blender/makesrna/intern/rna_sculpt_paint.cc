@@ -115,11 +115,11 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 #  include "BKE_context.hh"
 #  include "BKE_curve_patch.hh"
 #  include "BKE_curves.hh"
-#  include "BKE_mesh.h"
-#  include "BKE_mesh.hh"
 #  include "BKE_gpencil_legacy.h"
 #  include "BKE_layer.hh"
 #  include "BKE_material.hh"
+#  include "BKE_mesh.h"
+#  include "BKE_mesh.hh"
 #  include "BKE_object.hh"
 #  include "BKE_paint.hh"
 #  include "BKE_paint_types.hh"
@@ -389,10 +389,8 @@ static void rna_PaintCurve_points_set(PaintCurve *pc,
                 int(radii_span.size()));
     return;
   }
-  ED_paintcurve_geometry_points_set(pc,
-                                    Span(reinterpret_cast<const float3 *>(positions), points_num),
-                                    radii_span,
-                                    cyclic);
+  ED_paintcurve_geometry_points_set(
+      pc, Span(reinterpret_cast<const float3 *>(positions), points_num), radii_span, cyclic);
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
@@ -463,8 +461,8 @@ static bool curve_patch_build_for_rna(bContext *C,
   /* An empty weight table means "single texture": which slot a stamp would draw changes what the
    * relief SAMPLES, never where the strip runs or where the stamps land. Resolved here so that a
    * read-back reproduces the stamp-to-slot assignment a live session would produce. */
-  const Array<float> weights_cdf = ED_curve_patch_stamp_texture_weights_from_brush(brush,
-                                                                                   r_params.radius);
+  const Array<float> weights_cdf = ED_curve_patch_stamp_texture_weights_from_brush(
+      brush, r_params.radius);
   bke::curve_patch_build_from_control_curve(
       control_curve, r_params, weights_cdf.as_span(), r_geometry);
   if (r_geometry.spline.is_empty()) {
@@ -531,8 +529,8 @@ static PointCloud *rna_PaintCurve_curve_patch_stamps(PaintCurve *pc,
 
   PointCloud *points_nomain = bke::curve_patch_geometry_to_stamp_points(geometry);
   if (points_nomain == nullptr) {
-    /* Ribbon mode lays out no stamps. Not an error -- the caller asked a question with a legitimate
-     * empty answer. */
+    /* Ribbon mode lays out no stamps. Not an error -- the caller asked a question with a
+     * legitimate empty answer. */
     return nullptr;
   }
 
@@ -950,8 +948,8 @@ static void rna_def_paint_curve(BlenderRNA *brna)
 
   /* Raw access to the position array, for `foreach_get`/`foreach_set`. `points[i].position` writes
    * one point at a time and runs the bezier handle recompute after EACH of them, which is O(N^2)
-   * over a whole curve; `pyrna` calls the update of this collection exactly once, at the end of the
-   * `foreach_set` (`bpy_rna.cc`), so the same write costs one recompute in total.
+   * over a whole curve; `pyrna` calls the update of this collection exactly once, at the end of
+   * the `foreach_set` (`bpy_rna.cc`), so the same write costs one recompute in total.
    *
    * The trade-off is deliberate: this path writes positions straight into the array and does NOT
    * carry the bezier handles along with their points the way `CurvePoint.position` does. AUTO and
@@ -992,8 +990,8 @@ static void rna_def_paint_curve(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Active Spline", "Index of the spline edit operations act on");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
-  /* Building a curve from scratch. The paint curve operators cannot stand in for these: they need a
-   * region and a mouse position, so they are unavailable in background mode. */
+  /* Building a curve from scratch. The paint curve operators cannot stand in for these: they need
+   * a region and a mouse position, so they are unavailable in background mode. */
 
   func = RNA_def_function(srna, "add_point", "rna_PaintCurve_add_point");
   RNA_def_function_ui_description(func, "Append a control point to the active spline");
@@ -1060,8 +1058,8 @@ static void rna_def_paint_curve(BlenderRNA *brna)
    * the context only to reach the sculpt settings the brush's size is unified through, and the
    * depsgraph a target object is evaluated in.
    *
-   * Both answer None when the curve describes nothing to build, and raise only on misuse -- a scene
-   * without sculpt settings, or a target that has no evaluated mesh. */
+   * Both answer None when the curve describes nothing to build, and raise only on misuse -- a
+   * scene without sculpt settings, or a target that has no evaluated mesh. */
 
   func = RNA_def_function(srna, "curve_patch_to_mesh", "rna_PaintCurve_curve_patch_to_mesh");
   RNA_def_function_ui_description(
@@ -1070,12 +1068,13 @@ static void rna_def_paint_curve(BlenderRNA *brna)
   parm = RNA_def_pointer(
       func, "brush", "Brush", "", "Brush supplying the Curve Patch settings and size");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
-  parm = RNA_def_pointer(func,
-                         "target",
-                         "Object",
-                         "",
-                         "Object whose evaluated surface the ribbon is laid onto; when omitted the "
-                         "ribbon stays in the curve's own plane");
+  parm = RNA_def_pointer(
+      func,
+      "target",
+      "Object",
+      "",
+      "Object whose evaluated surface the ribbon is laid onto; when omitted the "
+      "ribbon stays in the curve's own plane");
   RNA_def_int(func,
               "spline_index",
               -1,
@@ -1139,11 +1138,8 @@ static void rna_def_paint_curve(BlenderRNA *brna)
                   "follow the original mesh, which is what a sculpt session stamps onto -- note "
                   "that on Multires a session applies no surface snapshot at all, so the two "
                   "cannot be made to agree there");
-  parm = RNA_def_pointer(func,
-                         "points",
-                         "PointCloud",
-                         "",
-                         "The stamps, or None in Ribbon mode, which lays out none");
+  parm = RNA_def_pointer(
+      func, "points", "PointCloud", "", "The stamps, or None in Ribbon mode, which lays out none");
   RNA_def_function_return(func, parm);
 
   rna_def_attributes_common(srna, AttributeOwnerType::PaintCurve);
@@ -1786,11 +1782,7 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   static const EnumPropertyItem radius_display_items[] = {
-      {SCULPT_PAINT_CURVE_RADIUS_ALL,
-       "ALL",
-       0,
-       "All",
-       "Show radius handles for all points"},
+      {SCULPT_PAINT_CURVE_RADIUS_ALL, "ALL", 0, "All", "Show radius handles for all points"},
       {SCULPT_PAINT_CURVE_RADIUS_SELECT,
        "SELECT",
        0,
@@ -1807,8 +1799,7 @@ static void rna_def_sculpt(BlenderRNA *brna)
   prop = RNA_def_property(srna, "paint_curve_radius_display_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "paint_curve_radius_display_mode");
   RNA_def_property_enum_items(prop, radius_display_items);
-  RNA_def_property_ui_text(
-      prop, "Radius Display Mode", "Which radius handles to display");
+  RNA_def_property_ui_text(prop, "Radius Display Mode", "Which radius handles to display");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 }
 

@@ -640,8 +640,9 @@ enum eBrushCurvePatchStampProjection : char {
   BRUSH_CURVE_PATCH_STAMP_PROJ_PLANAR = 1,
 };
 
-/** #BrushCurvePatchSettings::stamp_texture_source / #BrushCurvePatchSettings::ribbon_texture_source
- * — whether the Curve Patch samples the brush's own texture or the brush's multi-texture data.
+/** #BrushCurvePatchSettings::stamp_texture_source /
+ * #BrushCurvePatchSettings::ribbon_texture_source — whether the Curve Patch samples the brush's
+ * own texture or the brush's multi-texture data.
  *
  * SINGLE is 0 so a file written before these fields existed reads back as today's behavior and no
  * versioning code is needed. */

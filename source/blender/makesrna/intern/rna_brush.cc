@@ -73,11 +73,7 @@ static const EnumPropertyItem sculpt_stroke_method_items[] = {
      "Curve Patch",
      "Anchor-drag a stroke, then edit an explicit control curve with live preview before "
      "committing to the mesh"},
-    {BRUSH_STROKE_ROLL,
-     "ROLL",
-     0,
-     "Roll",
-     "Roll the texture along the freehand stroke path"},
+    {BRUSH_STROKE_ROLL, "ROLL", 0, "Roll", "Roll the texture along the freehand stroke path"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -93,55 +89,94 @@ static const EnumPropertyItem rna_enum_brush_texture_slot_map_all_mode_items[] =
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_length_mode_items[] = {
-    {BRUSH_CURVE_PATCH_LENGTH_DEFAULT, "DEFAULT", 0, "Default",
+    {BRUSH_CURVE_PATCH_LENGTH_DEFAULT,
+     "DEFAULT",
+     0,
+     "Default",
      "Fit one texture tile on short curves and tile by brush radius on longer ones"},
-    {BRUSH_CURVE_PATCH_LENGTH_REPEAT, "REPEAT", 0, "Repeat",
+    {BRUSH_CURVE_PATCH_LENGTH_REPEAT,
+     "REPEAT",
+     0,
+     "Repeat",
      "Repeat the texture a fixed number of times along the curve length"},
-    {BRUSH_CURVE_PATCH_LENGTH_STRETCH, "STRETCH", 0, "Stretch",
+    {BRUSH_CURVE_PATCH_LENGTH_STRETCH,
+     "STRETCH",
+     0,
+     "Stretch",
      "Stretch a single texture tile across the whole curve length"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_end_falloff_items[] = {
-    {BRUSH_CURVE_PATCH_END_HARD, "HARD", 0, "Hard",
+    {BRUSH_CURVE_PATCH_END_HARD,
+     "HARD",
+     0,
+     "Hard",
      "Start and end the relief abruptly at the curve's endpoints"},
-    {BRUSH_CURVE_PATCH_END_SMOOTH, "SMOOTH", 0, "Smooth",
+    {BRUSH_CURVE_PATCH_END_SMOOTH,
+     "SMOOTH",
+     0,
+     "Smooth",
      "Fade the relief in and out over a length at each end of the curve"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_mode_items[] = {
-    {BRUSH_CURVE_PATCH_STAMP_RIBBON, "RIBBON", 0, "Ribbon",
+    {BRUSH_CURVE_PATCH_STAMP_RIBBON,
+     "RIBBON",
+     0,
+     "Ribbon",
      "Project one continuous texture stretched along the whole curve"},
-    {BRUSH_CURVE_PATCH_STAMP_STAMPS, "STAMPS", 0, "Stamps",
+    {BRUSH_CURVE_PATCH_STAMP_STAMPS,
+     "STAMPS",
+     0,
+     "Stamps",
      "Place separate randomized texture stamps spaced along the curve"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_projection_items[] = {
-    {BRUSH_CURVE_PATCH_STAMP_PROJ_CURVE, "CURVE", 0, "Curve-Following",
+    {BRUSH_CURVE_PATCH_STAMP_PROJ_CURVE,
+     "CURVE",
+     0,
+     "Curve-Following",
      "Sample the stamp in the curve's own space, so the texture bends along the curve"},
-    {BRUSH_CURVE_PATCH_STAMP_PROJ_PLANAR, "PLANAR", 0, "Planar",
+    {BRUSH_CURVE_PATCH_STAMP_PROJ_PLANAR,
+     "PLANAR",
+     0,
+     "Planar",
      "Sample the stamp on a rigid frame, so the texture keeps its shape through sharp turns"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_texture_source_items[] = {
-    {BRUSH_CURVE_PATCH_TEX_SINGLE, "SINGLE", 0, "Single",
+    {BRUSH_CURVE_PATCH_TEX_SINGLE,
+     "SINGLE",
+     0,
+     "Single",
      "Stamp the brush's own texture everywhere along the curve"},
     /* Same identifier as the ribbon enum's second item on purpose: both surface the one
      * #BRUSH_CURVE_PATCH_TEX_MULTI value, so a script that copies the setting between the two
      * properties must not hit a `TypeError`. Only the UI name and description differ. */
-    {BRUSH_CURVE_PATCH_TEX_MULTI, "MULTI", 0, "List",
+    {BRUSH_CURVE_PATCH_TEX_MULTI,
+     "MULTI",
+     0,
+     "List",
      "Draw each stamp's texture at random from the brush's texture list"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_ribbon_texture_source_items[] = {
-    {BRUSH_CURVE_PATCH_TEX_SINGLE, "SINGLE", 0, "Single",
+    {BRUSH_CURVE_PATCH_TEX_SINGLE,
+     "SINGLE",
+     0,
+     "Single",
      "Stretch the brush's own texture along the whole curve"},
     /* "MULTI" here too -- see the note on the stamp enum above. */
-    {BRUSH_CURVE_PATCH_TEX_MULTI, "MULTI", 0, "Start/Middle/End",
+    {BRUSH_CURVE_PATCH_TEX_MULTI,
+     "MULTI",
+     0,
+     "Start/Middle/End",
      "Use separate textures for the curve's start and end, repeating the middle one between them"},
     {0, nullptr, 0, nullptr, nullptr},
 };
@@ -1306,9 +1341,9 @@ static void rna_BrushCurvePatchTextureSlot_update(Main * /*bmain*/,
                                                   Scene * /*scene*/,
                                                   PointerRNA *ptr)
 {
-  /* The brush comes from `owner_id`, NOT `ptr->data`: for a property on this sub-struct `ptr->data`
-   * is the slot itself, and `rna_Brush_update()`'s cast would reinterpret 32 bytes of slot as a
-   * `Brush`. Mirrors #rna_BrushCurvesSculptSettings_update. */
+  /* The brush comes from `owner_id`, NOT `ptr->data`: for a property on this sub-struct
+   * `ptr->data` is the slot itself, and `rna_Brush_update()`'s cast would reinterpret 32 bytes of
+   * slot as a `Brush`. Mirrors #rna_BrushCurvesSculptSettings_update. */
   Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
   BKE_brush_tag_unsaved_changes(br);
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
@@ -1385,9 +1420,8 @@ static void rna_BrushCurvePatchSettings_texture_active_set(PointerRNA *ptr,
       value.data);
   /* Unlike #Palette::active_color, the index is a UIList index and never negative, so an unset
    * pointer falls back to the first slot rather than to "none". */
-  settings->texture_active_index = slot == nullptr ?
-                                       0 :
-                                       BLI_findindex(&settings->texture_slots, slot);
+  settings->texture_active_index = slot == nullptr ? 0 :
+                                                     BLI_findindex(&settings->texture_slots, slot);
 }
 
 static void rna_BrushCurvePatchTextureSlot_name_get(PointerRNA *ptr, char *value)
@@ -1508,9 +1542,7 @@ static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
   prop = RNA_def_property(srna, "use_swap_axis", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "swap_axis", 1);
   RNA_def_property_ui_text(
-      prop,
-      "Swap Axis",
-      "Run the texture's U axis along the control curve's length instead of V");
+      prop, "Swap Axis", "Run the texture's U axis along the control curve's length instead of V");
   RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
 
   prop = RNA_def_property(srna, "stamp_size_random", PROP_INT, PROP_PERCENTAGE);
@@ -1525,10 +1557,9 @@ static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
   RNA_def_property_int_sdna(prop, nullptr, "stamp_strength_random");
   RNA_def_property_range(prop, 0, 100);
   RNA_def_property_ui_range(prop, 0, 100, 1, -1);
-  RNA_def_property_ui_text(
-      prop,
-      "Random Strength",
-      "Randomly reduce each stamp's relief strength by up to this fraction");
+  RNA_def_property_ui_text(prop,
+                           "Random Strength",
+                           "Randomly reduce each stamp's relief strength by up to this fraction");
   RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
 
   prop = RNA_def_property(srna, "stamp_projection", PROP_ENUM, PROP_NONE);
@@ -1589,9 +1620,8 @@ static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
   prop = RNA_def_property(srna, "texture_slots", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_collection_sdna(prop, nullptr, "texture_slots", nullptr);
   RNA_def_property_struct_type(prop, "BrushCurvePatchTextureSlot");
-  RNA_def_property_ui_text(prop,
-                           "Curve Patch Textures",
-                           "Textures the Curve Patch Stamps mode picks from at random");
+  RNA_def_property_ui_text(
+      prop, "Curve Patch Textures", "Textures the Curve Patch Stamps mode picks from at random");
   rna_def_brush_curve_patch_texture_slots(brna, prop);
 
   /* Bounded against the list it indexes: without a range, a value set from Python would send the

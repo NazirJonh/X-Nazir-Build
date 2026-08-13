@@ -173,18 +173,18 @@ struct BrushCurvesSculptSettings {
 /** One entry in a brush's Curve Patch texture list (#BrushCurvePatchSettings::texture_slots), used
  * by the Curve Patch STAMPS mode when its texture source is #BRUSH_CURVE_PATCH_TEX_MULTI.
  *
- * Must stay trivially copyable: `brush_copy_data()` duplicates the list with `BLI_duplicatelist()`,
- * which copies each node's bytes through `MEM_dupallocN` and runs no constructor. Adding a member
- * with a non-trivial constructor (a `std::string`, a container) would leave that member's bytes
- * aliased between the two brushes. */
+ * Must stay trivially copyable: `brush_copy_data()` duplicates the list with
+ * `BLI_duplicatelist()`, which copies each node's bytes through `MEM_dupallocN` and runs no
+ * constructor. Adding a member with a non-trivial constructor (a `std::string`, a container) would
+ * leave that member's bytes aliased between the two brushes. */
 struct BrushCurvePatchTextureSlot {
   struct BrushCurvePatchTextureSlot *next = nullptr, *prev = nullptr;
   /** Sampled through a copy of #Brush::mtex with only this `tex` swapped in, so every mapping
    * setting stays shared with the brush. A null `tex` makes the stamp that drew this slot skip
    * itself entirely -- unlike the brush's own null texture, which sculpts flat. */
   struct Tex *tex = nullptr;
-  /** Relative probability weight in the per-stamp draw. Zero disables the slot without deleting it;
-   * a list whose weights all sum to zero falls back to the brush's own texture. */
+  /** Relative probability weight in the per-stamp draw. Zero disables the slot without deleting
+   * it; a list whose weights all sum to zero falls back to the brush's own texture. */
   float weight = 1.0f;
   char _pad[4] = {};
 };
@@ -193,9 +193,9 @@ struct BrushCurvePatchTextureSlot {
  * Curve Patch settings, one set per brush.
  *
  * These lived split across #Brush and #MTex until they were gathered here: the #MTex half was
- * formally per-texture-slot, but nothing ever read it from any slot other than #Brush::mtex, so the
- * split described nothing real and made the Python API address one feature through two unrelated
- * paths.
+ * formally per-texture-slot, but nothing ever read it from any slot other than #Brush::mtex, so
+ * the split described nothing real and made the Python API address one feature through two
+ * unrelated paths.
  *
  * The member order is chosen so that no explicit padding is needed: makesdna does not insert
  * alignment padding on its own (see `check_member_alignment()` in `makesdna.cc`), and the twelve
@@ -221,7 +221,8 @@ struct BrushCurvePatchSettings {
   /** How the relief terminates at the curve's two ends. See #eBrushCurvePatchEndFalloff. */
   char end_falloff = BRUSH_CURVE_PATCH_END_HARD;
   /** SMOOTH end falloff: length of the fade at each end, as a percentage of the curve's total
-   * arc-length (RNA-clamped 0..50). The 50 ceiling keeps the two end zones from ever overlapping. */
+   * arc-length (RNA-clamped 0..50). The 50 ceiling keeps the two end zones from ever overlapping.
+   */
   char end_falloff_percent = 10;
   /** Whether the texture is projected as one continuous stretched sheet along the curve (Ribbon,
    * the original behavior) or as discrete randomized stamps. See #eBrushCurvePatchStampMode. */
@@ -536,9 +537,9 @@ struct Brush {
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve = nullptr;
   struct MeshAutomaskingSettings *mesh_automasking_settings = nullptr;
 
-  /** Every Curve Patch setting of this brush. Embedded by value rather than held by pointer (unlike
-   * #gpencil_settings and #curves_sculpt_settings): there is no optional lifetime here -- the
-   * settings either belong to every brush or to none -- and by-value costs no alloc, free or
+  /** Every Curve Patch setting of this brush. Embedded by value rather than held by pointer
+   * (unlike #gpencil_settings and #curves_sculpt_settings): there is no optional lifetime here --
+   * the settings either belong to every brush or to none -- and by-value costs no alloc, free or
    * blend-file read of its own. */
   BrushCurvePatchSettings curve_patch;
 

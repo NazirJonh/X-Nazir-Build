@@ -214,7 +214,18 @@ void curve_patch_frames_build(const CurvePatchSpline &spline,
       frame.bb_min = math::min(frame.bb_min, p);
       frame.bb_max = math::max(frame.bb_max, p);
     }
-    const float pad = brush_radius * 2.0f;
+    /* Padded by the window's actual widest half-width, not the bare brush radius: `radii[k]` is
+     * the control curve's per-point `radius` attribute (unitless, default 1.0 = "full brush
+     * size" -- see the comment on the matching read in `paint_curve_patch_sampler.cc`), and a
+     * point dragged past 1.0 makes the ribbon at that point wider than `brush_radius` alone. Since
+     * `sample()` above rejects any vertex outside `bb_min`/`bb_max` before ever reaching the LUT,
+     * padding by the un-widened `brush_radius` here clipped the strip's own widened edge the
+     * moment a point's radius handle grew past the frame's base radius. */
+    float sub_radii_max = 1.0f;
+    for (const float r : sub_radii) {
+      sub_radii_max = std::max(sub_radii_max, r);
+    }
+    const float pad = brush_radius * sub_radii_max * 2.0f;
     frame.bb_min -= float3(pad);
     frame.bb_max += float3(pad);
   }

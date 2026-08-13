@@ -1232,6 +1232,19 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
 
   switch (event->type) {
     case LEFTMOUSE:
+      if (event->val == KM_PRESS && data.dragging_radius && !data.dragging_point &&
+          !data.dragging_handle && !data.dragging_segment)
+      {
+        /* A radius drag started by Alt+S (see `EVT_SKEY` below) has no mouse button held down
+         * the way a click-started drag does, so there is no RELEASE to end it on -- the next
+         * click confirms it instead, mirroring how G/R/S transform modals confirm on click. */
+        data.dragging_radius = false;
+        curve_patch_edit_snap_ctx_free(data);
+        curve_patch_undo_push(patch);
+        curve_patch_restore_and_restamp(*C, ob, patch);
+        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
+        break;
+      }
       if (event->val == KM_PRESS) {
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
@@ -1278,6 +1291,14 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
               best_screen_points.data(),
               hit_radius,
               &data.radius_handle);
+          /* Drive the overlay's selected-point highlight (`hd.selected_center`, read from the
+           * geometry's own selection attribute -- see `paintcurve_geom_get_selection` -- not from
+           * `active_point`), matching the classic paint-curve click (`paintcurve.select`,
+           * paint_curve.cc). Without this, clicking a point moves `active_point` (so drags and
+           * hotkeys act on the right point) but the diamond never visibly changes color. */
+          bke::CurvesGeometry &geom_sel = patch.active_item().control_curve;
+          paintcurve_geom_set_all_selection(geom_sel, 0);
+          paintcurve_geom_set_selection(geom_sel, hit_radius, 0x07);
           break;
         }
 
@@ -1312,6 +1333,16 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         if (best_patch >= 0) {
           patch.active_patch = best_patch;
           patch.edit.active_point = hit_point;
+          /* See the matching comment on the radius-handle hit above: this is what makes the
+           * overlay's diamond actually change color on click. */
+          {
+            bke::CurvesGeometry &geom_sel = patch.active_item().control_curve;
+            const uint8_t sel_bit = (best_selflag == SEL_F1) ? 0x01 :
+                                    (best_selflag == SEL_F3) ? 0x04 :
+                                                                0x02;
+            paintcurve_geom_set_all_selection(geom_sel, 0);
+            paintcurve_geom_set_selection(geom_sel, hit_point, sel_bit);
+          }
           if (best_selflag == SEL_F1 || best_selflag == SEL_F3) {
             data.dragging_handle = true;
             data.handle_is_left = (best_selflag == SEL_F1);
@@ -1804,6 +1835,32 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
       }
       break;
+    case EVT_SKEY:
+      /* Alt+S only -- matches Curve Edit's own radius shortcut (`transform.transform` /
+       * CURVE_SHRINKFATTEN, bound Alt+S in `km_paint_curve`/`km_3d_view_tool_sculpt_curves_edit`).
+       * Plain S is deliberately left alone (see the `EVT_YKEY` comment above: this modal runs over
+       * the whole viewport and would otherwise swallow Ctrl+S/Cmd+S save, and plain S is Sculpt
+       * Mode's brush-size shortcut). */
+      if (event->val == KM_PRESS && (event->modifier & KM_ALT) &&
+          !(event->modifier & (KM_CTRL | KM_SHIFT | KM_OSKEY)) && !is_dragging &&
+          curve_patch_active_point_is_valid(patch))
+      {
+        bke::CurvesGeometry &geom = patch.active_item().control_curve;
+        Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+        ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+        Vector<PaintCurvePoint> screen_points;
+        paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+        if (!screen_points.is_empty()) {
+          /* No mouse button is held for this drag (unlike grabbing the radius handle directly),
+           * so `MOUSEMOVE`'s existing `data.dragging_radius` branch is reused unchanged and the
+           * `LEFTMOUSE` press guard above confirms it on the next click instead of a release. */
+          data.dragging_radius = true;
+          paintcurve_radius_handle_screen_get_from_geometry(
+              geom, screen_points.data(), patch.edit.active_point, &data.radius_handle);
+        }
+        break;
+      }
+      return OPERATOR_PASS_THROUGH;
     case EVT_RETKEY:
     case EVT_PADENTER:
       if (event->val == KM_PRESS) {

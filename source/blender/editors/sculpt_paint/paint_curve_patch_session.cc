@@ -500,6 +500,16 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchSession 
 /** \name Session Teardown
  * \{ */
 
+void curve_patch_session_free(Object &ob)
+{
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  MEM_delete(ss.cache);
+  ss.cache = nullptr;
+  MEM_delete(ss.curve_patch_session);
+  ss.curve_patch_session = nullptr;
+  ss.free_curve_patch_session = nullptr;
+}
+
 bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
 {
   SculptSession *ss = ob.runtime->sculpt_session;
@@ -529,11 +539,7 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
     committed = true;
   }
 
-  MEM_delete(ss->cache);
-  ss->cache = nullptr;
-  MEM_delete(session);
-  ss->curve_patch_session = nullptr;
-  ss->free_curve_patch_session = nullptr;
+  curve_patch_session_free(ob);
 
   /* Republish the relief to the EVALUATED mesh, which is what Object Mode draws. Without this the
    * mode exit left the original mesh correct -- the .blend saves and reloads with the relief, and a
@@ -584,11 +590,7 @@ void curve_patch_discard_on_session_end(Object &ob)
   DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
   /* The patch took ownership of the anchor stroke's `StrokeCache` (see
    * #curve_patch_begin_editing), so it dies with the session here too. */
-  MEM_delete(ss->cache);
-  ss->cache = nullptr;
-  MEM_delete(ss->curve_patch_session);
-  ss->curve_patch_session = nullptr;
-  ss->free_curve_patch_session = nullptr;
+  curve_patch_session_free(ob);
 }
 
 void curve_patch_finish_commit(const Scene &scene,

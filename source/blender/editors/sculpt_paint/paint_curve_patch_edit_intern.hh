@@ -19,6 +19,8 @@ struct ARegion;
 struct bContext;
 struct Object;
 struct ScrArea;
+struct wmKeyConfig;
+struct wmKeyMap;
 
 namespace ed::sculpt_paint {
 
@@ -37,6 +39,10 @@ enum {
   CURVE_PATCH_MODAL_RADIUS = 9,
   CURVE_PATCH_MODAL_DELETE = 10,
 };
+
+/** Modal keymap for #SCULPT_OT_curve_patch_edit. Keyboard actions only; mouse stays in the
+ * operator's `switch (event->type)`. Defined in `paint_curve_patch_edit_keymap.cc`. */
+wmKeyMap *curve_patch_edit_modal_keymap(wmKeyConfig *keyconf);
 
 void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &patch);
 

@@ -39,6 +39,7 @@
 
 #include "paint_curve_patch_effect.hh"
 
+namespace blender {
 struct Brush;
 struct Depsgraph;
 struct Object;
@@ -47,6 +48,7 @@ struct ReportList;
 struct Scene;
 struct Sculpt;
 struct bContext;
+}  // namespace blender
 
 namespace blender::ed::sculpt_paint {
 
@@ -74,10 +76,14 @@ using bke::CurvePatchTextureZoneSample;
 /** One patch's contribution to an undo snapshot. */
 struct CurvePatchEditStepItem {
   bke::CurvesGeometry curve;
-  bool swap_axis = false;
-  /* Snapshotted for the same reason as `swap_axis`: the Reseed action changes the visible relief
-   * without touching `curve`, so without this Ctrl+Z could not walk back over a reseed. */
-  uint32_t stamp_seed = 0;
+  /* The full frozen-parameter set (radius, radius_per_size, plane_normal, swap_axis, stamp_seed,
+   * final_quality), not just `swap_axis` / `stamp_seed`: a step can hold MORE items than the
+   * session currently does (redo past a patch delete, once that exists), and restoring such a
+   * newly-grown item needs its frozen fields from somewhere -- there is no live brush value to
+   * fall back on for a patch that already finished its stroke. Live fields get overwritten by the
+   * next poll's #curve_patch_params_live_overlay regardless, so storing the whole struct costs
+   * nothing on the common path. */
+  bke::CurvePatchParams params;
 };
 
 /** One snapshot of the session-local undo stack: everything the user edits inside a live Curve
@@ -164,6 +170,10 @@ struct CurvePatchEditState {
    * anchor stroke produced, and a new snapshot truncates any redo branch above the cursor. */
   Vector<CurvePatchEditStep> undo_steps;
   int undo_step_current = -1;
+  /** True once #CURVE_PATCH_UNDO_STEPS_MAX has forced the oldest step out. Index 0 is then no
+   * longer the anchor stroke's state, so #curve_patch_undo_step_back must not read "back at 0" as
+   * "nothing left to undo, cancel the patch" -- there IS a state at 0, it is just not the start. */
+  bool undo_anchor_trimmed = false;
 };
 
 /** Per-application bookkeeping against the live mesh. */
@@ -510,6 +520,16 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob);
  * its own operator state down (see the liveness guard in `curve_patch_edit_modal()`).
  */
 void curve_patch_discard_on_session_end(Object &ob);
+
+/**
+ * Free `SculptSession::cache` and the Curve Patch session itself, and clear both pointers plus
+ * the teardown callback (#SculptSession::free_curve_patch_session). The shared tail of every path
+ * that ends a live patch -- the modal's own commit/cancel, #curve_patch_commit_on_session_end,
+ * #curve_patch_discard_on_session_end -- once that path's own restore/re-stamp/commit has already
+ * run. Requires a published session (`ob.runtime->sculpt_session->curve_patch_session != nullptr`);
+ * callers already checked that to reach this point.
+ */
+void curve_patch_session_free(Object &ob);
 
 /**
  * Finish a committed Curve Patch edit: close the patch's position undo step, and -- if the brush's

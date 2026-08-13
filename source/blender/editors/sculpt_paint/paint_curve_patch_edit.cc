@@ -1641,11 +1641,7 @@ static bool curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
         committed = true;
       }
     }
-    MEM_delete(ss.cache);
-    ss.cache = nullptr;
-    MEM_delete(patch);
-    ss.curve_patch_session = nullptr;
-    ss.free_curve_patch_session = nullptr;
+    curve_patch_session_free(ob);
   }
 
   CurvePatchEditOpData *op_data = static_cast<CurvePatchEditOpData *>(op->customdata);

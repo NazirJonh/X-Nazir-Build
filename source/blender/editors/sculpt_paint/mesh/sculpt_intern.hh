@@ -1091,9 +1091,8 @@ void SCULPT_OT_brush_stroke(wmOperatorType *ot);
  * texture-axis toggle, commit/cancel) -- see that file's header comment for why this is not
  * split into a `wmKeyMap` of small operators. */
 void SCULPT_OT_curve_patch_edit(wmOperatorType *ot);
-/** Modal keymap for #SCULPT_OT_curve_patch_edit. Keyboard actions only; mouse stays in the
- * operator's `switch (event->type)`. Defined in `paint_curve_patch_edit_keymap.cc`. */
-wmKeyMap *curve_patch_edit_modal_keymap(wmKeyConfig *keyconf);
+/* #curve_patch_edit_modal_keymap(), the modal keymap for #SCULPT_OT_curve_patch_edit, is declared
+ * in `paint_curve_patch_edit_intern.hh` alongside the rest of that split, not here. */
 
 void SCULPT_OT_curve_patch_handle_type_set(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_delete_point(wmOperatorType *ot);

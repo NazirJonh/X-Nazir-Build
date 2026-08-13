@@ -23,12 +23,11 @@ struct SpaceLink;
 struct View3D;
 struct ViewContext;
 struct ViewLayer;
+struct bContext;
 namespace bke {
 class CurvesGeometry;
 }
 }  // namespace blender
-
-struct bContext;
 
 namespace blender::ed::sculpt_paint {
 

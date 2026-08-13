@@ -22,6 +22,7 @@
 #include "BLI_bounds.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_math_base.hh"
 #include "BLI_math_color_blend.h"
 #include "BLI_math_geom.h"
@@ -57,10 +58,6 @@ namespace blender {
 namespace paint_material_channel_perf = bke::paint_material_channel_perf;
 
 namespace ed::sculpt_paint::paint::image {
-
-/* Temporary diagnostic output for validating the projection basis on Cube UV islands. */
-constexpr bool DEBUG_NORMAL_PROJECTION = false;
-constexpr int DEBUG_NORMAL_PROJECTION_MAX_PRIMITIVE = 32;
 
 using namespace blender::bke::pbvh::pixels;
 using namespace blender::bke::image;
@@ -349,6 +346,30 @@ static MutableSpan<float4> read_image_pixels(MutableSpan<float4> image_pixels,
   return scene_linear_pixels;
 }
 
+/** Same formula as #rgba_uchar_to_float, walked as a contiguous 4N buffer so the compiler can
+ * vectorize the byte->float scale that otherwise sits in a per-pixel call. */
+static void unpack_byte_pixels_to_float(const uchar4 *src, MutableSpan<float4> dst)
+{
+  const uchar *in = reinterpret_cast<const uchar *>(src);
+  float *out = reinterpret_cast<float *>(dst.data());
+  const int64_t n = int64_t(dst.size()) * 4;
+  constexpr float scale = 1.0f / 255.0f;
+  for (int64_t i = 0; i < n; i++) {
+    out[i] = float(in[i]) * scale;
+  }
+}
+
+/** Same formula as #rgba_float_to_uchar / #unit_float_to_uchar_clamp per component. */
+static void pack_float_pixels_to_byte(const Span<float4> src, uchar4 *dst)
+{
+  const float *in = reinterpret_cast<const float *>(src.data());
+  uchar *out = reinterpret_cast<uchar *>(dst);
+  const int64_t n = int64_t(src.size()) * 4;
+  for (int64_t i = 0; i < n; i++) {
+    out[i] = unit_float_to_uchar_clamp(in[i]);
+  }
+}
+
 static MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
                                              const TileColorspaceProcessor &processors,
                                              const PackedPixelRow &pixel_row,
@@ -361,9 +382,7 @@ static MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
   const int start_offset = int(pixel_row.start_image_coordinate.y) * width +
                            int(pixel_row.start_image_coordinate.x) + range.start();
 
-  for (int i = 0; i < range.size(); i++) {
-    rgba_uchar_to_float(storage[i], image_pixels[start_offset + i]);
-  }
+  unpack_byte_pixels_to_float(image_pixels.data() + start_offset, storage);
 
   if (processors.is_noop) {
     return storage;
@@ -391,9 +410,7 @@ static void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
   const int start_offset = int(pixel_row.start_image_coordinate.y) * width +
                            int(pixel_row.start_image_coordinate.x) + range.start();
 
-  for (int i = 0; i < range.size(); i++) {
-    rgba_float_to_uchar(image_pixels[start_offset + i], scene_linear_pixels[i]);
-  }
+  pack_float_pixels_to_byte(scene_linear_pixels, image_pixels.data() + start_offset);
 }
 
 static void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
@@ -415,6 +432,35 @@ static void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
   std::copy_n(scene_linear_pixels.begin(), range.size(), image_pixels.begin() + start_offset);
 }
 
+/** Same two MIX steps as the non-fused #blend_colors path: source-alpha mix, then channel MIX. */
+static void mix_paint_over_scene(float4 &paint, const float4 &scene, const float brush_alpha)
+{
+  blend_color_mix_float(paint, scene, paint);
+  paint *= brush_alpha;
+  const float t = paint[3];
+  const float mt = 1.0f - t;
+  paint[0] = mt * scene[0] + paint[0];
+  paint[1] = mt * scene[1] + paint[1];
+  paint[2] = mt * scene[2] + paint[2];
+  paint[3] = mt * scene[3] + t;
+}
+
+/** Same #IMB_BLEND_NORMAL_MIX body as #blend_colors. */
+static void mix_normal_over_scene(float4 &paint,
+                                  const float4 &scene,
+                                  const float brush_alpha,
+                                  const bool is_float_storage)
+{
+  const float t = math::clamp(paint[3] * brush_alpha, 0.0f, 1.0f);
+  float target_n[3] = {paint[0] * 2.0f - 1.0f, paint[1] * 2.0f - 1.0f, paint[2] * 2.0f - 1.0f};
+  float out[3];
+  BKE_pbr_normal_blend_mix(scene, target_n, t, is_float_storage, out);
+  paint[0] = out[0];
+  paint[1] = out[1];
+  paint[2] = out[2];
+  paint[3] = scene[3];
+}
+
 static void blend_colors(MutableSpan<float4> paint_pixels,
                          Span<float4> scene_linear_pixels,
                          const Brush &brush,
@@ -426,16 +472,8 @@ static void blend_colors(MutableSpan<float4> paint_pixels,
 
   if (blend_mode == IMB_BLEND_NORMAL_MIX) {
     for (const int i : paint_pixels.index_range()) {
-      const float t = math::clamp(paint_pixels[i][3] * brush.alpha, 0.0f, 1.0f);
-      float target_n[3] = {paint_pixels[i][0] * 2.0f - 1.0f,
-                           paint_pixels[i][1] * 2.0f - 1.0f,
-                           paint_pixels[i][2] * 2.0f - 1.0f};
-      float out[3];
-      BKE_pbr_normal_blend_mix(scene_linear_pixels[i], target_n, t, is_float_storage, out);
-      paint_pixels[i][0] = out[0];
-      paint_pixels[i][1] = out[1];
-      paint_pixels[i][2] = out[2];
-      paint_pixels[i][3] = scene_linear_pixels[i][3];
+      mix_normal_over_scene(
+          paint_pixels[i], scene_linear_pixels[i], brush.alpha, is_float_storage);
     }
     return;
   }
@@ -445,18 +483,7 @@ static void blend_colors(MutableSpan<float4> paint_pixels,
      * applies the channel blend mode, is also MIX for scalar channels and for erasing. Keep both
      * operations in one loop to avoid traversing the range twice. */
     for (const int i : paint_pixels.index_range()) {
-      const float4 &scene = scene_linear_pixels[i];
-      float4 &paint = paint_pixels[i];
-
-      blend_color_mix_float(paint, scene, paint);
-      paint *= brush.alpha;
-
-      const float t = paint[3];
-      const float mt = 1.0f - t;
-      paint[0] = mt * scene[0] + paint[0];
-      paint[1] = mt * scene[1] + paint[1];
-      paint[2] = mt * scene[2] + paint[2];
-      paint[3] = mt * scene[3] + t;
+      mix_paint_over_scene(paint_pixels[i], scene_linear_pixels[i], brush.alpha);
     }
     return;
   }
@@ -499,6 +526,8 @@ struct PaintLocalData {
   Vector<float3> raw_source_colors;
 
   Vector<float3> sampled_colors;
+  /** Scalar channel gather for one chunk; splatted to #sampled_colors for the shared write path. */
+  Vector<float> sampled_scalars;
 };
 
 /** Destination state for one channel during a shared pixel-range pass. */
@@ -602,6 +631,58 @@ static void write_paint_range(PaintChannelRangeState &state,
   }
 }
 
+/**
+ * One-pass dest write when the buffer is already in scene-linear (#is_noop) for MIX and
+ * NORMAL_MIX. Same math as #read_paint_range + #blend_paint_range + #write_paint_range.
+ */
+static bool apply_noop_fused(PaintChannelRangeState &state,
+                             const PackedPixelRow &pixel_row,
+                             const IndexRange range)
+{
+  if (!state.processors.is_noop ||
+      !ELEM(state.blend_mode, IMB_BLEND_MIX, IMB_BLEND_NORMAL_MIX))
+  {
+    return false;
+  }
+  MutableSpan<float4> paint_pixels = state.tls.paint_pixels;
+  BLI_assert(paint_pixels.size() == range.size());
+  const int start_offset = int(pixel_row.start_image_coordinate.y) * state.image_width +
+                           int(pixel_row.start_image_coordinate.x) + range.start();
+  const float brush_alpha = state.brush.alpha;
+  const bool normal_mix = state.blend_mode == IMB_BLEND_NORMAL_MIX;
+
+  if (!state.float_buffer.is_empty()) {
+    float4 *image = state.float_buffer.data() + start_offset;
+    for (const int i : paint_pixels.index_range()) {
+      const float4 scene = image[i];
+      if (normal_mix) {
+        mix_normal_over_scene(paint_pixels[i], scene, brush_alpha, true);
+      }
+      else {
+        mix_paint_over_scene(paint_pixels[i], scene, brush_alpha);
+      }
+      image[i] = paint_pixels[i];
+    }
+    return true;
+  }
+  if (!state.byte_buffer.is_empty()) {
+    uchar4 *image = state.byte_buffer.data() + start_offset;
+    for (const int i : paint_pixels.index_range()) {
+      float4 scene;
+      rgba_uchar_to_float(scene, image[i]);
+      if (normal_mix) {
+        mix_normal_over_scene(paint_pixels[i], scene, brush_alpha, false);
+      }
+      else {
+        mix_paint_over_scene(paint_pixels[i], scene, brush_alpha);
+      }
+      rgba_float_to_uchar(image[i], paint_pixels[i]);
+    }
+    return true;
+  }
+  return false;
+}
+
 /** Run the destination part of one prepared paint range. */
 static void apply_prepared_paint_range(PaintChannelRangeState &state,
                                        const PackedPixelRow &pixel_row,
@@ -610,7 +691,16 @@ static void apply_prepared_paint_range(PaintChannelRangeState &state,
                                        double *r_blend_seconds = nullptr,
                                        double *r_write_seconds = nullptr)
 {
-  const double read_start = BLI_time_now_seconds();
+  const double dest_start = BLI_time_now_seconds();
+  if (apply_noop_fused(state, pixel_row, range)) {
+    const double dest_end = BLI_time_now_seconds();
+    if (r_write_seconds != nullptr) {
+      *r_write_seconds += dest_end - dest_start;
+    }
+    return;
+  }
+
+  const double read_start = dest_start;
   read_paint_range(state, pixel_row, range);
   const double blend_start = BLI_time_now_seconds();
 #ifdef DEBUG_PIXEL_NODES
@@ -995,9 +1085,6 @@ static void apply_paint_channel(ImageData &image_data,
           const Span<material::TexelSampleContext> row_contexts =
               sampler != nullptr ? tile_cache.row_contexts[row_i].as_span() :
                                    Span<material::TexelSampleContext>();
-          const Span<float3> row_positions = sampler != nullptr ?
-                                                 tile_cache.row_positions[row_i].as_span() :
-                                                 Span<float3>();
           /* Destination tangent basis `T_m` (flat per-triangle, from the UV parametrization) and
            * its handedness; `B_m = bitangent_sign * cross(N_m, T_m)`, `N_m` interpolated below
            * per pixel. Together these express a world/object-space Normal-channel sample in this
@@ -1009,8 +1096,6 @@ static void apply_paint_channel(ImageData &image_data,
           const int tri_position_start = pixel_row.uv_primitive_index * 3;
           const Span<float3> tri_positions =
               pixel_node.uv_primitives.triangle_positions.as_span().slice(tri_position_start, 3);
-          const Span<float2> tri_uvs = pixel_node.uv_primitives.triangle_uvs.as_span().slice(
-              tri_position_start, 3);
           const float tri_bitangent_sign =
               is_normal_channel && sampler != nullptr ?
                   pixel_node.uv_primitives.bitangent_signs[pixel_row.uv_primitive_index] :
@@ -1085,160 +1170,48 @@ static void apply_paint_channel(ImageData &image_data,
                * still carries falloff, so the stroke shape is unchanged. */
               BLI_assert(!row_contexts.is_empty());
               const Span<material::TexelSampleContext> contexts = row_contexts.slice(range);
-              /* Only used by the debug normal-projection printf below, which needs the raw
-               * object-space position rather than the derived sampling context. */
-              const Span<float3> positions = row_positions.slice(range);
               const int thread_id = BLI_task_parallel_thread_id(nullptr);
 
-              /* Base Color's source is typically a byte (non-scene-linear) image; decoding it
-               * one #IMB_colormanagement_colorspace_to_scene_linear_v3 call per pixel is the
-               * dominant cost of painting into that channel (confirmed by profiling: read/blend/
-               * write of the destination buffer is ~8% of paint_pixels, this per-pixel decode is
-               * the rest). Gather the whole chunk undecoded and decode it in one batched call
-               * instead - the batch variant is documented as much faster than per-pixel. */
+              /* Sample the whole chunk inside the sampler so mapping (Area/View/…) is
+               * resolved once, instead of a per-texel #color / #scalar call from this TU. */
               const bool batch_decode_color = is_color_channel && !is_normal_channel &&
                                               sampler->needs_linear_conversion(channel);
-              if (batch_decode_color) {
-                tls.raw_source_colors.resize(range.size());
-                for (const int i : range.index_range()) {
-                  if (factors[i] == 0.0f) {
-                    tls.raw_source_colors[i] = float3(0.0f);
-                    continue;
+              if (!is_normal_channel) {
+                if (is_color_channel) {
+                  tls.sampled_colors.resize(range.size());
+                  sampler->gather_colors(channel,
+                                         contexts,
+                                         factors,
+                                         thread_id,
+                                         !batch_decode_color,
+                                         tls.sampled_colors);
+                  if (batch_decode_color) {
+                    material::ChannelSourceSampler::decode_linear_batch(
+                        tls.sampled_colors, sampler->colorspace(channel));
                   }
-                  tls.raw_source_colors[i] = sampler->color(
-                      channel, contexts[i], thread_id, /*decode_linear=*/false);
-                }
-                material::ChannelSourceSampler::decode_linear_batch(tls.raw_source_colors,
-                                                                    sampler->colorspace(channel));
-              }
-
-              tls.sampled_colors.resize(range.size());
-              for (const int i : range.index_range()) {
-                if (factors[i] == 0.0f) {
-                  tls.sampled_colors[i] = float3(0.0f);
-                  continue;
-                }
-                float3 rgb;
-                if (is_normal_channel) {
-                  /* `sampler->color()` returns the sample still in the decal's own basis (screen
-                   * right/up/backward for a View-mapped texture). The row-level TBN above already
-                   * holds the perspective-corrected screen axes and the surface tangent basis. */
-                  const float3 n_d = sampler->color(channel, contexts[i], thread_id);
-                  const float3 n_local = n_d.x * t_screen + n_d.y * b_screen + n_d.z * n_m;
-                  float3 n_t(
-                      math::dot(n_local, t_m), math::dot(n_local, b_m), math::dot(n_local, n_m));
-                  const float n_t_len = math::length(n_t);
-                  n_t = n_t_len > 1e-6f ? n_t / n_t_len : float3(0.0f, 0.0f, 1.0f);
-                  float packed[3];
-                  BKE_pbr_normal_pack(n_t, false, packed);
-                  rgb = float3(packed[0], packed[1], packed[2]);
-
-                  if (DEBUG_NORMAL_PROJECTION &&
-                      pixel_row.uv_primitive_index < DEBUG_NORMAL_PROJECTION_MAX_PRIMITIVE &&
-                      i == 0)
-                  {
-                    const int pixel_x = int(pixel_row.start_image_coordinate.x) +
-                                        int(range.start()) + i;
-                    /* `row_i` indexes the packed row array, not image-space Y. The cached
-                     * positions/barycentrics for this chunk advance only along the row. */
-                    const int pixel_y = int(pixel_row.start_image_coordinate.y);
-                    const float2 bary12 =
-                        pixel_row.start_barycentric_coord +
-                        pixel_node.uv_primitives
-                                .delta_barycentric_coords[pixel_row.uv_primitive_index] *
-                            float2(float(range.start()) + float(i), 0.0f);
-                    const float3 bary(bary12.x, bary12.y, 1.0f - bary12.x - bary12.y);
-                    const float2 pixel_uv = tri_uvs[0] * bary.x + tri_uvs[1] * bary.y +
-                                            tri_uvs[2] * bary.z;
-                    const float2 pixel_screen = ED_view3d_project_float_v2_m4(
-                        region, positions[i], projection_mat);
-                    printf(
-                        "[NORMAL_PROJECTION] prim=%u pixel=(%d,%d) "
-                        "P=((%.6g,%.6g,%.6g),(%.6g,%.6g,%.6g),(%.6g,%.6g,%.6g)) "
-                        "UV=((%.6g,%.6g),(%.6g,%.6g),(%.6g,%.6g)) "
-                        "b=(%.6g,%.6g,%.6g) uv=(%.6g,%.6g) "
-                        "S=((%.6g,%.6g),(%.6g,%.6g),(%.6g,%.6g)) det=%.6g "
-                        "screenP=(%.6g,%.6g) "
-                        "nD=(%.6g,%.6g,%.6g) nFace=(%.6g,%.6g,%.6g) "
-                        "nInterp=(%.6g,%.6g,%.6g) "
-                        "Ts=(%.6g,%.6g,%.6g) Bs=(%.6g,%.6g,%.6g) "
-                        "Tm=(%.6g,%.6g,%.6g) Bm=(%.6g,%.6g,%.6g) sign=%.1f "
-                        "nLocal=(%.6g,%.6g,%.6g) nT=(%.6g,%.6g,%.6g) "
-                        "packed=(%.6g,%.6g,%.6g)\n",
-                        unsigned(pixel_row.uv_primitive_index),
-                        pixel_x,
-                        pixel_y,
-                        tri_positions[0].x,
-                        tri_positions[0].y,
-                        tri_positions[0].z,
-                        tri_positions[1].x,
-                        tri_positions[1].y,
-                        tri_positions[1].z,
-                        tri_positions[2].x,
-                        tri_positions[2].y,
-                        tri_positions[2].z,
-                        tri_uvs[0].x,
-                        tri_uvs[0].y,
-                        tri_uvs[1].x,
-                        tri_uvs[1].y,
-                        tri_uvs[2].x,
-                        tri_uvs[2].y,
-                        bary.x,
-                        bary.y,
-                        bary.z,
-                        pixel_uv.x,
-                        pixel_uv.y,
-                        screen[0].x,
-                        screen[0].y,
-                        screen[1].x,
-                        screen[1].y,
-                        screen[2].x,
-                        screen[2].y,
-                        det,
-                        pixel_screen.x,
-                        pixel_screen.y,
-                        n_d.x,
-                        n_d.y,
-                        n_d.z,
-                        n_m.x,
-                        n_m.y,
-                        n_m.z,
-                        n_m.x,
-                        n_m.y,
-                        n_m.z,
-                        t_screen.x,
-                        t_screen.y,
-                        t_screen.z,
-                        b_screen.x,
-                        b_screen.y,
-                        b_screen.z,
-                        t_m.x,
-                        t_m.y,
-                        t_m.z,
-                        b_m.x,
-                        b_m.y,
-                        b_m.z,
-                        tri_bitangent_sign,
-                        n_local.x,
-                        n_local.y,
-                        n_local.z,
-                        n_t.x,
-                        n_t.y,
-                        n_t.z,
-                        rgb.x,
-                        rgb.y,
-                        rgb.z);
-                  }
-                }
-                else if (is_color_channel) {
-                  rgb = batch_decode_color ? tls.raw_source_colors[i] :
-                                             sampler->color(channel, contexts[i], thread_id);
                 }
                 else {
-                  const float value = sampler->scalar(channel, contexts[i], thread_id);
-                  rgb = float3(value);
+                  tls.sampled_scalars.resize(range.size());
+                  sampler->gather_scalars(
+                      channel, contexts, factors, thread_id, tls.sampled_scalars);
+                  tls.sampled_colors.resize(range.size());
+                  for (const int i : range.index_range()) {
+                    tls.sampled_colors[i] = float3(tls.sampled_scalars[i]);
+                  }
                 }
-                tls.sampled_colors[i] = rgb;
+              }
+              else {
+                tls.sampled_colors.resize(range.size());
+                sampler->gather_tangent_normals_packed(channel,
+                                                       contexts,
+                                                       factors,
+                                                       thread_id,
+                                                       t_screen,
+                                                       b_screen,
+                                                       n_m,
+                                                       t_m,
+                                                       b_m,
+                                                       tls.sampled_colors);
               }
               prepare_sampled_paint_range(tls, factors, tls.sampled_colors, blend_mode);
             }
@@ -1356,33 +1329,29 @@ static void prepare_channel_samples(PaintLocalData &tls,
                                     const float4 &brush_color,
                                     const int thread_id)
 {
-  if (sampler == nullptr) {
+  if (sampler == nullptr || !sampler->has_usable_source(channel)) {
     prepare_paint_range(tls, factors, brush_color, blend_mode);
     return;
   }
   if (is_color_channel && sampler->needs_linear_conversion(channel)) {
     tls.raw_source_colors.resize(contexts.size());
-    for (const int i : contexts.index_range()) {
-      if (factors[i] == 0.0f) {
-        tls.raw_source_colors[i] = float3(0.0f);
-        continue;
-      }
-      tls.raw_source_colors[i] = sampler->color(channel, contexts[i], thread_id, false);
-    }
+    sampler->gather_colors(channel, contexts, factors, thread_id, false, tls.raw_source_colors);
     material::ChannelSourceSampler::decode_linear_batch(tls.raw_source_colors,
                                                         sampler->colorspace(channel));
     prepare_sampled_paint_range(tls, factors, tls.raw_source_colors, blend_mode);
     return;
   }
+  if (is_color_channel) {
+    tls.sampled_colors.resize(contexts.size());
+    sampler->gather_colors(channel, contexts, factors, thread_id, true, tls.sampled_colors);
+    prepare_sampled_paint_range(tls, factors, tls.sampled_colors, blend_mode);
+    return;
+  }
+  tls.sampled_scalars.resize(contexts.size());
+  sampler->gather_scalars(channel, contexts, factors, thread_id, tls.sampled_scalars);
   tls.sampled_colors.resize(contexts.size());
   for (const int i : contexts.index_range()) {
-    if (factors[i] == 0.0f) {
-      tls.sampled_colors[i] = float3(0.0f);
-      continue;
-    }
-    tls.sampled_colors[i] = is_color_channel ?
-                                sampler->color(channel, contexts[i], thread_id) :
-                                float3(sampler->scalar(channel, contexts[i], thread_id));
+    tls.sampled_colors[i] = float3(tls.sampled_scalars[i]);
   }
   prepare_sampled_paint_range(tls, factors, tls.sampled_colors, blend_mode);
 }
@@ -1475,6 +1444,21 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
     const RowFactorCache &tile_cache = tile_caches[tile_i];
     std::atomic<bool> tile_updated{false};
 
+    Array<MutableSpan<float4>> tile_float_buffers(dest_num);
+    Array<MutableSpan<uchar4>> tile_byte_buffers(dest_num);
+    for (const int dest_i : dests.index_range()) {
+      const int slot = tile_i * dest_num + dest_i;
+      ImBuf *buffer = buffers[slot];
+      if (buffer->float_data()) {
+        tile_float_buffers[dest_i] = MutableSpan(
+            reinterpret_cast<float4 *>(buffer->float_data_for_write()), buffer->x * buffer->y);
+      }
+      else {
+        tile_byte_buffers[dest_i] = MutableSpan(
+            reinterpret_cast<uchar4 *>(buffer->byte_data_for_write()), buffer->x * buffer->y);
+      }
+    }
+
     tile_cache.valid_rows.foreach_index(
         [&](const int row_i) {
           if (!tile_cache.row_changed[row_i]) {
@@ -1524,21 +1508,9 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
 
               const int slot = tile_i * dest_num + dest_i;
               ImBuf *buffer = buffers[slot];
-              MutableSpan<float4> float_buffer;
-              MutableSpan<uchar4> byte_buffer;
-              if (buffer->float_data()) {
-                float_buffer = MutableSpan(
-                    reinterpret_cast<float4 *>(buffer->float_data_for_write()),
-                    buffer->x * buffer->y);
-              }
-              else {
-                byte_buffer = MutableSpan(
-                    reinterpret_cast<uchar4 *>(buffer->byte_data_for_write()),
-                    buffer->x * buffer->y);
-              }
               PaintChannelRangeState state{tls,
-                                           float_buffer,
-                                           byte_buffer,
+                                           tile_float_buffers[dest_i],
+                                           tile_byte_buffers[dest_i],
                                            *processors[slot],
                                            buffer->x,
                                            brush,

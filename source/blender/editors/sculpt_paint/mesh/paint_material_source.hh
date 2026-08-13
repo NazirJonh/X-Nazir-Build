@@ -102,6 +102,7 @@ class ChannelSourceSet {
    * after Area Plane #local_mat * size/ofs. Matches #RE_texture_evaluate placement and
    * #MTEX_FLAT mapping, then bilinear-samples the pinned #ImBuf.
    *
+   * \param r_value: Optional. Intensity is only computed when non-null (scalar channels).
    * \return false when this source is not eligible; the caller must use the texture engine.
    */
   bool sample_image_direct(const ChannelSource &source,
@@ -155,6 +156,9 @@ class ChannelSourceSampler {
    */
   bool channel_source_failed(eMaterialPaintChannel channel) const;
 
+  /** True when \a channel has a source that can be sampled this stroke. */
+  bool has_usable_source(eMaterialPaintChannel channel) const;
+
   /**
    * Target scalar for \a channel at \a position (object space), clamped to the channel range.
    * Falls back to the channel's slider value when there is no usable source.
@@ -192,6 +196,44 @@ class ChannelSourceSampler {
                const TexelSampleContext &ctx,
                int thread,
                bool decode_linear = true) const;
+
+  /**
+   * Same meaning as calling #color once per element of \a contexts. Zero-factor slots are
+   * written as zero so callers can skip them the same way as the per-pixel path.
+   * Mapping (Area/View/…) is resolved once for the chunk instead of once per texel.
+   */
+  void gather_colors(eMaterialPaintChannel channel,
+                     Span<TexelSampleContext> contexts,
+                     Span<float> factors,
+                     int thread,
+                     bool decode_linear,
+                     MutableSpan<float3> r_colors) const;
+
+  /**
+   * Same meaning as calling #scalar once per element of \a contexts. Zero-factor slots are
+   * written as zero.
+   */
+  void gather_scalars(eMaterialPaintChannel channel,
+                      Span<TexelSampleContext> contexts,
+                      Span<float> factors,
+                      int thread,
+                      MutableSpan<float> r_values) const;
+
+  /**
+   * Sample the Normal channel and remap each unpacked decal normal into the destination
+   * surface tangent basis, then pack to 0..1 RGB. Same math as gathering #color and applying the
+   * row TBN in the caller, in one pass so bilinear stays in this translation unit.
+   */
+  void gather_tangent_normals_packed(eMaterialPaintChannel channel,
+                                     Span<TexelSampleContext> contexts,
+                                     Span<float> factors,
+                                     int thread,
+                                     const float3 &t_screen,
+                                     const float3 &b_screen,
+                                     const float3 &n_m,
+                                     const float3 &t_m,
+                                     const float3 &b_m,
+                                     MutableSpan<float3> r_packed) const;
 
   /** Whether a Base Color sample from \a channel needs #decode_linear_batch applied afterward
    * when it was sampled with `decode_linear = false`. Always false for non-color channels. */

@@ -82,7 +82,7 @@
 
 namespace blender::ed::image_grid {
 
-void image_grid_notify_change(bContext &C, const bool is_mask_slot)
+void image_grid_notify_change(bContext &C, const ImageGridSlot grid_slot)
 {
   const std::optional<ed::image_grid::ImageGridOwner> owner = ed::image_grid::image_grid_owner_from_context(
       C);
@@ -90,7 +90,7 @@ void image_grid_notify_change(bContext &C, const bool is_mask_slot)
     return;
   }
 
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, is_mask_slot);
+  ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, grid_slot);
   ed::asset::list::storage_fetch(&state.filter.lib_ref, &C);
   if (state.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
     /* #storage_fetch() above only warms the built-in merged All list, not each real library's own
@@ -170,34 +170,34 @@ const char *image_grid_library_selector_label(const ImageGridUIState &state)
 static bool image_grid_scroll_under_mouse(const ARegion *region,
                                           const int xy[2],
                                           const ed::image_grid::ImageGridOwner owner,
-                                          bool *r_is_mask_slot)
+                                          ImageGridSlot *r_grid_slot)
 {
   /* The grid's scroll position now lives in the shared session registry; hit-test the scrollbar of
    * each slot's session for the host (sidebar/popover) the cursor is in. */
   const bool is_popover = image_grid_region_is_popover(region);
-  for (const bool is_mask : {false, true}) {
+  for (const ImageGridSlot grid_slot_iter : IMAGE_GRID_SLOTS) {
     if (ui::grid_view_session_scroll_button_under_mouse(
-            region, xy, ed::image_grid::image_grid_session_id(owner, is_mask, is_popover)))
+            region, xy, ed::image_grid::image_grid_session_id(owner, grid_slot_iter, is_popover)))
     {
-      *r_is_mask_slot = is_mask;
+      *r_grid_slot = grid_slot_iter;
       return true;
     }
   }
   return false;
 }
 
-static bool image_grid_mouse_over(const ARegion *region, const int xy[2], bool *r_is_mask_slot)
+static bool image_grid_mouse_over(const ARegion *region, const int xy[2], ImageGridSlot *r_grid_slot)
 {
   if (ui::region_view_has_idname_at(region, xy, 0, "image_asset_grid_mask") ||
       ui::region_view_item_has_idname_at(region, xy, "image_asset_grid_mask"))
   {
-    *r_is_mask_slot = true;
+    *r_grid_slot = ImageGridSlot::Mask;
     return true;
   }
   if (ui::region_view_has_idname_at(region, xy, 0, "image_asset_grid") ||
       ui::region_view_item_has_idname_at(region, xy, "image_asset_grid"))
   {
-    *r_is_mask_slot = false;
+    *r_grid_slot = ImageGridSlot::Texture;
     return true;
   }
   return false;
@@ -208,7 +208,7 @@ static bool image_grid_mouse_over(const ARegion *region, const int xy[2], bool *
  * \{ */
 
 /** The image assigned to the active paint brush's main or mask texture slot, or null. */
-static const Image *image_grid_active_slot_image(bContext &C, const bool is_mask_slot)
+static const Image *image_grid_active_slot_image(bContext &C, const ImageGridSlot grid_slot)
 {
   Paint *paint = BKE_paint_get_active_from_context(&C);
   if (!paint) {
@@ -218,7 +218,7 @@ static const Image *image_grid_active_slot_image(bContext &C, const bool is_mask
   if (!brush) {
     return nullptr;
   }
-  const MTex &mtex = is_mask_slot ? brush->mask_mtex : brush->mtex;
+  const MTex &mtex = grid_slot == ImageGridSlot::Mask ? brush->mask_mtex : brush->mtex;
   if (mtex.tex && mtex.tex->type == TEX_IMAGE) {
     return mtex.tex->ima;
   }
@@ -249,18 +249,18 @@ static std::string image_grid_filtered_identifier_for_image(bContext &C,
 
 /** Request every grid layout (N-Panel and Texture popover) to scroll-center on the slot's
  * currently assigned texture. Returns false when there is nothing to focus. */
-static bool image_grid_focus_active_texture(bContext &C, const bool is_mask_slot)
+static bool image_grid_focus_active_texture(bContext &C, const ImageGridSlot grid_slot)
 {
   const std::optional<ed::image_grid::ImageGridOwner> owner =
       ed::image_grid::image_grid_owner_from_context(C);
   if (!owner) {
     return false;
   }
-  const Image *active_image = image_grid_active_slot_image(C, is_mask_slot);
+  const Image *active_image = image_grid_active_slot_image(C, grid_slot);
   if (!active_image) {
     return false;
   }
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, is_mask_slot);
+  ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, grid_slot);
   const std::string identifier = image_grid_filtered_identifier_for_image(C, state, *active_image);
   if (identifier.empty()) {
     return false;
@@ -269,7 +269,7 @@ static bool image_grid_focus_active_texture(bContext &C, const bool is_mask_slot
    * listener refreshes each grid block on #NC_ASSET, so the popover and the N-Panel both re-run
    * #build_image_grid and apply the centered focus scroll. */
   image_grid_request_scroll_to_asset(state, identifier);
-  image_grid_notify_change(C, is_mask_slot);
+  image_grid_notify_change(C, grid_slot);
   return true;
 }
 
@@ -284,13 +284,13 @@ int handle_image_grid_focus_active_event(bContext *C, const wmEvent *event, AReg
     return WM_UI_HANDLER_CONTINUE;
   }
   /* Only react when the cursor is over a grid (or its scrollbar), matching the wheel handler. */
-  bool is_mask_slot = false;
-  if (!image_grid_mouse_over(region, event->xy, &is_mask_slot) &&
-      !image_grid_scroll_under_mouse(region, event->xy, *owner, &is_mask_slot))
+  ImageGridSlot grid_slot = ImageGridSlot::Texture;
+  if (!image_grid_mouse_over(region, event->xy, &grid_slot) &&
+      !image_grid_scroll_under_mouse(region, event->xy, *owner, &grid_slot))
   {
     return WM_UI_HANDLER_CONTINUE;
   }
-  if (!image_grid_focus_active_texture(*C, is_mask_slot)) {
+  if (!image_grid_focus_active_texture(*C, grid_slot)) {
     return WM_UI_HANDLER_CONTINUE;
   }
   ED_region_tag_redraw(region);
@@ -298,7 +298,7 @@ int handle_image_grid_focus_active_event(bContext *C, const wmEvent *event, AReg
   return WM_UI_HANDLER_BREAK;
 }
 
-void image_grid_auto_focus_on_brush_change(bContext &C, const bool is_mask_slot)
+void image_grid_auto_focus_on_brush_change(bContext &C, const ImageGridSlot grid_slot)
 {
   const std::optional<ed::image_grid::ImageGridOwner> owner = ed::image_grid::image_grid_owner_from_context(
       C);
@@ -309,7 +309,7 @@ void image_grid_auto_focus_on_brush_change(bContext &C, const bool is_mask_slot)
   const Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
   const uint32_t brush_uid = brush ? brush->id.session_uid : 0;
 
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, is_mask_slot);
+  ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, grid_slot);
   if (brush_uid == state.viewport.last_auto_focus_brush_uid) {
     return;
   }
@@ -318,7 +318,7 @@ void image_grid_auto_focus_on_brush_change(bContext &C, const bool is_mask_slot)
     state.viewport.last_auto_focus_brush_uid = brush_uid;
     return;
   }
-  const MTex &mtex = is_mask_slot ? brush->mask_mtex : brush->mtex;
+  const MTex &mtex = grid_slot == ImageGridSlot::Mask ? brush->mask_mtex : brush->mtex;
   if (!mtex.tex || mtex.tex->type != TEX_IMAGE || !mtex.tex->ima) {
     state.viewport.last_auto_focus_brush_uid = brush_uid;
     return;
@@ -339,9 +339,9 @@ void image_grid_auto_focus_on_brush_change(bContext &C, const bool is_mask_slot)
 
 /** \} */
 
-int image_grid_effective_rows(const ImageGridOwner owner, const bool is_mask_slot)
+int image_grid_effective_rows(const ImageGridOwner owner, const ImageGridSlot grid_slot)
 {
-  const int stored = owner.slot_dna(is_mask_slot).rows;
+  const int stored = owner.slot_dna(grid_slot).rows;
   return clamp_i(stored ? stored : 1, 1, ui::GRID_VIEW_DEFAULT_MAX_ROWS);
 }
 
@@ -506,9 +506,9 @@ static bool image_grid_assign_image_to_brush(bContext &C,
 static void image_grid_after_image_opened(bContext &C,
                                           const ed::image_grid::ImageGridOwner owner,
                                           Image &image,
-                                          const bool is_mask_slot)
+                                          const ImageGridSlot grid_slot)
 {
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, is_mask_slot);
+  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, grid_slot);
   const AssetLibraryReference local_ref = asset_system::current_file_library_reference();
 
   const AssetLibraryReference old_lib_ref = state.filter.lib_ref;
@@ -518,14 +518,14 @@ static void image_grid_after_image_opened(bContext &C,
     image_grid_catalog_commit_active(state);
   }
 
-  ed::image_grid::image_grid_reset_scroll(owner, is_mask_slot);
+  ed::image_grid::image_grid_reset_scroll(owner, grid_slot);
   image_grid_request_scroll_to_asset(state, image.id.name + 2);
   image_grid_pending_clear(state);
 
-  ed::image_grid::image_grid_state_persist(owner, state, is_mask_slot);
+  ed::image_grid::image_grid_state_persist(owner, state, grid_slot);
   ed::asset::list::storage_fetch(&local_ref, &C);
   image_grid_prepare_browse_shelf(C, state, "VIEW3D_AST_image_texture");
-  image_grid_notify_change(C, is_mask_slot);
+  image_grid_notify_change(C, grid_slot);
 }
 
 /**
@@ -548,7 +548,7 @@ static bool image_grid_assign_image_to_slot(bContext &C,
   if (const std::optional<ed::image_grid::ImageGridOwner> owner =
           ed::image_grid::image_grid_owner_from_context(C))
   {
-    image_grid_after_image_opened(C, *owner, image, use_mask_slot);
+    image_grid_after_image_opened(C, *owner, image, image_grid_slot_from_mask_flag(use_mask_slot));
   }
   return true;
 }
@@ -575,10 +575,10 @@ bool image_grid_assign_dropped_image(bContext &C, const PointerRNA &target_ptr, 
 
 bool image_grid_set_library(bContext &C,
                             ed::image_grid::ImageGridOwner owner,
-                            const bool is_mask_slot,
+                            const ImageGridSlot grid_slot,
                             const AssetLibraryReference &new_ref)
 {
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, is_mask_slot);
+  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, grid_slot);
 
   const bool in_membership = state.filter.catalog_mode == ImageGridCatalogMode::Recent ||
                              state.filter.catalog_mode == ImageGridCatalogMode::Favorites;
@@ -593,13 +593,13 @@ bool image_grid_set_library(bContext &C,
    * catalog filter via #image_grid_catalog_swap_library (skips committing empty membership paths). */
   image_grid_catalog_swap_library(state, old_lib_ref, new_ref);
   image_grid_catalog_commit_active(state);
-  ed::image_grid::image_grid_reset_scroll(owner, is_mask_slot);
+  ed::image_grid::image_grid_reset_scroll(owner, grid_slot);
   image_grid_pending_clear(state);
 
-  ed::image_grid::image_grid_state_persist(owner, state, is_mask_slot);
+  ed::image_grid::image_grid_state_persist(owner, state, grid_slot);
   image_grid_prepare_browse_shelf(C, state, "VIEW3D_AST_image_texture");
 
-  image_grid_notify_change(C);
+  image_grid_notify_change(C, grid_slot);
   return true;
 }
 
@@ -709,7 +709,7 @@ static wmOperatorStatus image_grid_assign_texture_exec(bContext *C, wmOperator *
           ed::image_grid::image_grid_owner_from_context(*C))
   {
     const ed::image_grid::ImageGridOwner owner = *owner_opt;
-    ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, use_mask_slot);
+    ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, image_grid_slot_from_mask_flag(use_mask_slot));
     char asset_identifier[FILE_MAX_LIBEXTRA];
     asset_identifier[0] = '\0';
     if (RNA_struct_property_is_set(op->ptr, "asset_identifier")) {
@@ -731,7 +731,7 @@ static wmOperatorStatus image_grid_assign_texture_exec(bContext *C, wmOperator *
     const int source_cols = max_ii(
         1,
         ui::grid_view_session_cols(
-            ed::image_grid::image_grid_session_id(owner, use_mask_slot, is_popover)));
+            ed::image_grid::image_grid_session_id(owner, image_grid_slot_from_mask_flag(use_mask_slot), is_popover)));
     image_grid_focus_mark_applied(state.viewport, source_cols, /*rows*/ 0);
 
     if (is_popover) {
@@ -746,7 +746,7 @@ static wmOperatorStatus image_grid_assign_texture_exec(bContext *C, wmOperator *
     else {
       /* Refresh the UI (not just redraw) on all grids so build_image_grid re-runs and applies the
        * focus scroll. The NC_BRUSH / NC_ID notifiers sent above only tag a redraw. */
-      image_grid_notify_change(*C, use_mask_slot);
+      image_grid_notify_change(*C, image_grid_slot_from_mask_flag(use_mask_slot));
     }
   }
 
@@ -847,7 +847,7 @@ static bool image_shelf_activate_resolve_brush(bContext *C,
   }
 
   PointerRNA paint_target_ptr;
-  if (image_grid_brush_target_pointer_get(*C, &paint_target_ptr, false)) {
+  if (image_grid_brush_target_pointer_get(*C, &paint_target_ptr, ImageGridSlot::Texture)) {
     Brush *brush = id_cast<Brush *>(
         BKE_libblock_find_session_uid(bmain, ID_BR, paint_target_ptr.owner_id->session_uid));
     if (!brush) {
@@ -857,7 +857,7 @@ static bool image_shelf_activate_resolve_brush(bContext *C,
     *r_use_mask_slot = false;
     return true;
   }
-  if (image_grid_brush_target_pointer_get(*C, &paint_target_ptr, true)) {
+  if (image_grid_brush_target_pointer_get(*C, &paint_target_ptr, ImageGridSlot::Mask)) {
     Brush *brush = id_cast<Brush *>(
         BKE_libblock_find_session_uid(bmain, ID_BR, paint_target_ptr.owner_id->session_uid));
     if (!brush) {
@@ -946,7 +946,7 @@ static wmOperatorStatus image_shelf_activate_asset_exec(bContext *C, wmOperator 
     if (const std::optional<ed::image_grid::ImageGridOwner> owner =
             ed::image_grid::image_grid_owner_from_context(*C))
     {
-      ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, use_mask_slot);
+      ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, image_grid_slot_from_mask_flag(use_mask_slot));
       const ImageGridCatalogMode shelf_mode = image_grid_shelf_catalog_mode(
           *image_texture_shelf);
       const std::optional<std::string> shelf_catalog_path = image_grid_catalog_path_from_shelf(
@@ -1036,9 +1036,9 @@ static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
 
   const int enum_value = RNA_enum_get(op->ptr, "asset_library_reference");
   const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(enum_value);
-  const bool is_mask_slot = image_grid_is_mask_slot_from_context(*C);
+  const ImageGridSlot grid_slot = image_grid_slot_from_context(*C);
 
-  if (!image_grid_set_library(*C, *owner_opt, is_mask_slot, new_ref)) {
+  if (!image_grid_set_library(*C, *owner_opt, grid_slot, new_ref)) {
     return OPERATOR_CANCELLED;
   }
   return OPERATOR_FINISHED;
@@ -1093,22 +1093,22 @@ static wmOperatorStatus image_grid_set_membership_exec(bContext *C, wmOperator *
     return OPERATOR_CANCELLED;
   }
 
-  const bool is_mask_slot = image_grid_is_mask_slot_from_context(*C);
+  const ImageGridSlot grid_slot = image_grid_slot_from_context(*C);
   const ed::image_grid::ImageGridOwner owner = *owner_opt;
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, is_mask_slot);
+  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, grid_slot);
   if (state.filter.catalog_mode == mode) {
     return OPERATOR_CANCELLED;
   }
 
   image_grid_filter_set_membership(state, mode);
   ed::asset::list::storage_fetch(&state.filter.lib_ref, C);
-  ed::image_grid::image_grid_reset_scroll(owner, is_mask_slot);
+  ed::image_grid::image_grid_reset_scroll(owner, grid_slot);
   image_grid_pending_clear(state);
 
-  ed::image_grid::image_grid_state_persist(owner, state, is_mask_slot);
+  ed::image_grid::image_grid_state_persist(owner, state, grid_slot);
   image_grid_prepare_browse_shelf(*C, state, "VIEW3D_AST_image_texture");
 
-  image_grid_notify_change(*C);
+  image_grid_notify_change(*C, grid_slot);
   return OPERATOR_FINISHED;
 }
 
@@ -1162,7 +1162,7 @@ static wmOperatorStatus image_grid_mark_asset_exec(bContext *C, wmOperator * /*o
       ed::image_grid::image_grid_owner_from_context(*C);
   if (owner) {
     ImageGridUIState &state = ed::image_grid::image_grid_state_get(
-        *owner, image_grid_is_mask_slot_from_context(*C));
+        *owner, image_grid_slot_from_context(*C));
     if (!state.filter.enabled_catalog_paths.is_empty()) {
       asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
           asset_system::current_file_library_reference());
@@ -1182,7 +1182,7 @@ static wmOperatorStatus image_grid_mark_asset_exec(bContext *C, wmOperator * /*o
 
   WM_event_add_notifier(C, NC_ASSET | NA_ADDED, nullptr);
   WM_event_add_notifier(C, NC_ID | NA_EDITED, nullptr);
-  image_grid_notify_change(*C, image_grid_is_mask_slot_from_context(*C));
+  image_grid_notify_change(*C, image_grid_slot_from_context(*C));
 
   return OPERATOR_FINISHED;
 }
@@ -1356,11 +1356,11 @@ static wmOperatorStatus image_grid_new_exec(bContext *C, wmOperator *op)
           ed::image_grid::image_grid_owner_from_context(*C))
   {
     if (tex->type == TEX_IMAGE && tex->ima) {
-      image_grid_after_image_opened(*C, *owner_opt, *tex->ima, use_mask_slot);
+      image_grid_after_image_opened(*C, *owner_opt, *tex->ima, image_grid_slot_from_mask_flag(use_mask_slot));
     }
     else {
       const ed::image_grid::ImageGridOwner owner = *owner_opt;
-      ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, use_mask_slot);
+      ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, image_grid_slot_from_mask_flag(use_mask_slot));
       const AssetLibraryReference local_ref = asset_system::current_file_library_reference();
       if (state.filter.lib_ref.type != ASSET_LIBRARY_LOCAL) {
         const AssetLibraryReference old_lib_ref = state.filter.lib_ref;
@@ -1368,12 +1368,12 @@ static wmOperatorStatus image_grid_new_exec(bContext *C, wmOperator *op)
         state.filter.lib_ref = local_ref;
         image_grid_catalog_commit_active(state);
       }
-      ed::image_grid::image_grid_reset_scroll(owner, use_mask_slot);
+      ed::image_grid::image_grid_reset_scroll(owner, image_grid_slot_from_mask_flag(use_mask_slot));
       image_grid_pending_clear(state);
-      ed::image_grid::image_grid_state_persist(owner, state, use_mask_slot);
+      ed::image_grid::image_grid_state_persist(owner, state, image_grid_slot_from_mask_flag(use_mask_slot));
       ed::asset::list::storage_fetch(&local_ref, C);
       image_grid_prepare_browse_shelf(*C, state, "VIEW3D_AST_image_texture");
-      image_grid_notify_change(*C, use_mask_slot);
+      image_grid_notify_change(*C, image_grid_slot_from_mask_flag(use_mask_slot));
     }
   }
 
@@ -1503,9 +1503,9 @@ void image_grid_operatortypes()
   WM_operatortype_append(IMAGE_GRID_OT_move_to_library);
   WM_operatortype_append(IMAGE_GRID_OT_drop_import);
   WM_operatortype_append(VIEW3D_OT_image_shelf_activate_asset);
-  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_enabled_toggle);
-  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_map_type_toggle);
-  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_clear);
+  WM_operatortype_append(IMAGE_GRID_OT_name_match_enabled_toggle);
+  WM_operatortype_append(IMAGE_GRID_OT_name_match_map_type_toggle);
+  WM_operatortype_append(IMAGE_GRID_OT_name_match_clear);
 
   ui::region_pre_button_handler_add(image_grid_ui_event_handler);
 }

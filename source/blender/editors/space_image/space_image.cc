@@ -199,7 +199,7 @@ static void image_free(SpaceLink *sl)
   for (ImageGridSlotDNA *slot : {&simage->image_grid, &simage->image_grid_mask}) {
     ed::image_grid::image_grid_slot_dna_free(*slot);
   }
-  if (simage->image_grid_runtime) {
+  if (simage->runtime.image_grid_state) {
     ed::image_grid::image_grid_state_remove(ed::image_grid::ImageGridOwner::from(*simage));
   }
 }
@@ -224,7 +224,7 @@ static SpaceLink *image_duplicate(SpaceLink *sl)
 
   ed::image_grid::image_grid_slot_dna_duplicate(simagen->image_grid, simago->image_grid);
   ed::image_grid::image_grid_slot_dna_duplicate(simagen->image_grid_mask, simago->image_grid_mask);
-  simagen->image_grid_runtime = nullptr;
+  simagen->runtime = SpaceImage_Runtime{};
 
   return reinterpret_cast<SpaceLink *>(simagen);
 }
@@ -1118,6 +1118,19 @@ static void image_tools_region_listener(const wmRegionListenerParams *params)
     case NC_NODE:
       ED_region_tag_redraw(region);
       break;
+    case NC_ASSET:
+      switch (wmn->data) {
+        case ND_ASSET_CATALOGS:
+        case ND_ASSET_LIST:
+        case ND_ASSET_LIST_READING:
+          ED_region_tag_redraw(region);
+          break;
+        default:
+          if (ELEM(wmn->action, NA_ADDED, NA_REMOVED, NA_EDITED)) {
+            ED_region_tag_redraw(region);
+          }
+      }
+      break;
   }
 }
 
@@ -1316,7 +1329,7 @@ static void image_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
 
   ed::image_grid::image_grid_slot_dna_blend_read(reader, sima->image_grid);
   ed::image_grid::image_grid_slot_dna_blend_read(reader, sima->image_grid_mask);
-  sima->image_grid_runtime = nullptr;
+  sima->runtime = SpaceImage_Runtime{};
 }
 
 static void image_space_blend_write(BlendWriter *writer, SpaceLink *sl)
@@ -1420,6 +1433,9 @@ void ED_spacetype_image()
   art->draw = image_header_region_draw;
 
   BLI_addhead(&st->regiontypes, art);
+  image_grid_catalog_selector_panel_register(art);
+  image_grid_display_panel_register(art);
+  image_grid_name_match_filter_panel_register(art);
 
   /* regions: asset shelf */
   art = MEM_new_zeroed<ARegionType>("spacetype image asset shelf region");

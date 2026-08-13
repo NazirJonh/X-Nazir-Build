@@ -637,11 +637,25 @@ struct SpaceImageOverlay {
   float passepartout_alpha = 0;
 };
 
+/**
+ * Runtime-only Image Editor state. Not written to .blend files; reset on load,
+ * duplicate, and file read. Same role as #View3D_Runtime for the brush-texture
+ * image grid (a typed cache slot instead of a serializable `void *` on #SpaceImage).
+ */
+struct SpaceImage_Runtime {
+  /**
+   * Per-space session state for the brush texture image grid template. Created lazily,
+   * freed with the space. Opaque here to keep DNA free of C++ containers.
+   * See #ImageGridSlotDNA.
+   */
+  void *image_grid_state = nullptr;
+};
+
 struct SpaceImage {
   SpaceLink *next = nullptr, *prev = nullptr;
   /** Storage of regions for inactive spaces. */
   ListBaseT<ARegion> regionbase = {nullptr, nullptr};
-  char spacetype = 0;
+  char spacetype = SPACE_IMAGE;
   eSpace_Link_Flag link_flag = {};
   char _pad0[6] = {};
   /* End 'SpaceLink' header. */
@@ -717,8 +731,7 @@ struct SpaceImage {
   char _pad_image_grid[6] = {};
   ImageGridSlotDNA image_grid;
   ImageGridSlotDNA image_grid_mask;
-  /** Opaque lazy-cache anchor, same role as #View3D_Runtime::image_grid_state. */
-  void *image_grid_runtime = nullptr;
+  SpaceImage_Runtime runtime;
 };
 
 /** \} */

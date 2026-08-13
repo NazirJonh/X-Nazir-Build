@@ -59,18 +59,18 @@ namespace blender::ed::image_grid {
 /** \name Shared Helpers
  * \{ */
 
-static bool image_grid_is_mask_slot_from_op(const bContext *C, wmOperator *op)
+static ImageGridSlot image_grid_slot_from_op(const bContext *C, wmOperator *op)
 {
   if (RNA_struct_property_is_set(op->ptr, "use_mask_slot")) {
-    return RNA_boolean_get(op->ptr, "use_mask_slot");
+    return image_grid_slot_from_mask_flag(RNA_boolean_get(op->ptr, "use_mask_slot"));
   }
-  return image_grid_is_mask_slot_from_context(*C);
+  return image_grid_slot_from_context(*C);
 }
 
 static void image_grid_operation_finish(bContext &C,
                                         const AssetLibraryReference &focus_library,
                                         const StringRefNull focus_identifier,
-                                        const bool is_mask_slot)
+                                        const ImageGridSlot grid_slot)
 {
   const std::optional<image_grid::ImageGridOwner> owner = image_grid::image_grid_owner_from_context(
       C);
@@ -78,7 +78,7 @@ static void image_grid_operation_finish(bContext &C,
     return;
   }
 
-  ImageGridUIState &state = image_grid::image_grid_state_get(*owner, is_mask_slot);
+  ImageGridUIState &state = image_grid::image_grid_state_get(*owner, grid_slot);
   if (state.filter.lib_ref.type != focus_library.type ||
       state.filter.lib_ref.custom_library_index != focus_library.custom_library_index)
   {
@@ -89,14 +89,14 @@ static void image_grid_operation_finish(bContext &C,
   }
 
   if (!focus_identifier.is_empty()) {
-    image_grid::image_grid_reset_scroll(*owner, is_mask_slot);
+    image_grid::image_grid_reset_scroll(*owner, grid_slot);
     image_grid_request_scroll_to_asset(state, focus_identifier);
   }
   image_grid_pending_clear(state);
-  image_grid::image_grid_state_persist(*owner, state, is_mask_slot);
+  image_grid::image_grid_state_persist(*owner, state, grid_slot);
   ed::asset::list::storage_fetch(&focus_library, &C);
   image_grid_prepare_browse_shelf(C, state, "VIEW3D_AST_image_texture");
-  image_grid_notify_change(C, is_mask_slot);
+  image_grid_notify_change(C, grid_slot);
 }
 
 static Image *image_grid_image_from_session_uid(Main *bmain, wmOperator *op)
@@ -261,7 +261,7 @@ static wmOperatorStatus image_grid_relocate_invoke(bContext *C, wmOperator *op, 
         op->ptr, "asset_library_reference", ed::asset::library_reference_to_enum_value(&*dest));
   }
 
-  RNA_boolean_set(op->ptr, "use_mask_slot", image_grid_is_mask_slot_from_context(*C));
+  RNA_boolean_set(op->ptr, "use_mask_slot", image_grid_slot_from_context(*C) == ImageGridSlot::Mask);
 
   return WM_operator_props_dialog_popup(C, op, 400, IFACE_(title), IFACE_("OK"));
 }
@@ -323,9 +323,9 @@ static wmOperatorStatus image_grid_assign_catalog_exec(bContext *C, wmOperator *
   WM_event_add_notifier(C, NC_ASSET | NA_EDITED, nullptr);
   WM_event_add_notifier(C, NC_ID | NA_EDITED, nullptr);
 
-  const bool is_mask_slot = image_grid_is_mask_slot_from_op(C, op);
+  const ImageGridSlot grid_slot = image_grid_slot_from_op(C, op);
   image_grid_operation_finish(
-      *C, asset_system::current_file_library_reference(), image->id.name + 2, is_mask_slot);
+      *C, asset_system::current_file_library_reference(), image->id.name + 2, grid_slot);
 
   return OPERATOR_FINISHED;
 }
@@ -337,7 +337,7 @@ static wmOperatorStatus image_grid_assign_catalog_invoke(bContext *C,
   const AssetLibraryReference local_ref = asset_system::current_file_library_reference();
   RNA_enum_set(
       op->ptr, "asset_library_reference", ed::asset::library_reference_to_enum_value(&local_ref));
-  RNA_boolean_set(op->ptr, "use_mask_slot", image_grid_is_mask_slot_from_context(*C));
+  RNA_boolean_set(op->ptr, "use_mask_slot", image_grid_slot_from_context(*C) == ImageGridSlot::Mask);
   return WM_operator_props_dialog_popup(C, op, 400, IFACE_("Assign to Catalog"), IFACE_("Assign"));
 }
 
@@ -444,9 +444,9 @@ static wmOperatorStatus image_grid_drop_import_exec(bContext *C, wmOperator *op)
   WM_event_add_notifier(C, NC_ID | NA_EDITED, nullptr);
 
   /* Refresh the grid; do not focus/scroll to any item (the user picks a texture manually). */
-  const bool is_mask_slot = image_grid_is_mask_slot_from_op(C, op);
+  const ImageGridSlot grid_slot = image_grid_slot_from_op(C, op);
   image_grid_operation_finish(
-      *C, asset_system::current_file_library_reference(), StringRefNull(""), is_mask_slot);
+      *C, asset_system::current_file_library_reference(), StringRefNull(""), grid_slot);
 
   return OPERATOR_FINISHED;
 }
@@ -724,7 +724,7 @@ static wmOperatorStatus image_grid_copy_move_exec(bContext *C, wmOperator *op, c
   }
 
   const AssetLibraryReference dest_ref = ed::asset::user_library_to_library_ref(*dest_lib);
-  const bool is_mask_slot = image_grid_is_mask_slot_from_op(C, op);
+  const ImageGridSlot grid_slot = image_grid_slot_from_op(C, op);
 
   if (asset_system::AssetRepresentation *asset = image_grid_asset_from_op(*C, *op)) {
     const char *library_root = ed::asset::image_library_editable_root_from_asset_library(
@@ -765,7 +765,7 @@ static wmOperatorStatus image_grid_copy_move_exec(bContext *C, wmOperator *op, c
       }
 
       ed::asset::list::library_refresh(C, &dest_ref);
-      image_grid_operation_finish(*C, dest_ref, moved_relative, is_mask_slot);
+      image_grid_operation_finish(*C, dest_ref, moved_relative, grid_slot);
       return OPERATOR_FINISHED;
     }
   }
@@ -798,7 +798,7 @@ static wmOperatorStatus image_grid_copy_move_exec(bContext *C, wmOperator *op, c
   }
 
   ed::asset::list::library_refresh(C, &dest_ref);
-  image_grid_operation_finish(*C, dest_ref, focus_identifier, is_mask_slot);
+  image_grid_operation_finish(*C, dest_ref, focus_identifier, grid_slot);
 
   return OPERATOR_FINISHED;
 }

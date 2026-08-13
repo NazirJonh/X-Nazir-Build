@@ -289,9 +289,15 @@ void image_grid_catalog_sanitize_selection(ImageGridUIState &state)
   image_grid_catalog_commit_active(state);
 }
 
-bool image_grid_is_mask_slot_from_context(const bContext &C)
+ImageGridSlot image_grid_slot_from_context(const bContext &C)
 {
-  return CTX_data_int_get(&C, "image_grid_is_mask_slot") != 0;
+  return image_grid_slot_from_int(
+      int(CTX_data_int_get(&C, IMAGE_GRID_CONTEXT_SLOT_KEY).value_or(0)));
+}
+
+ImageGridSlot image_grid_slot_from_texture_ptr(const PointerRNA &texture_slot_ptr)
+{
+  return image_grid_slot_from_mask_flag(image_grid_slot_is_mask(texture_slot_ptr));
 }
 
 void image_grid_state_reset_catalog(ImageGridUIState &state)
@@ -529,10 +535,8 @@ int image_grid_foreach_filtered_item(
 /** \} */
 
 struct ImageGridStatesPerOwner {
-  ImageGridUIState texture;
-  ImageGridUIState mask;
-  bool texture_initialized = false;
-  bool mask_initialized = false;
+  ImageGridUIState states[IMAGE_GRID_SLOT_NUM];
+  bool initialized[IMAGE_GRID_SLOT_NUM] = {};
 };
 
 /**
@@ -557,9 +561,9 @@ struct ImageGridOwnerDNAFields {
 };
 
 static ImageGridOwnerDNAFields image_grid_owner_dna_fields(const ImageGridOwner owner,
-                                                           const bool is_mask_slot)
+                                                           const ImageGridSlot grid_slot)
 {
-  ImageGridSlotDNA &slot = owner.slot_dna(is_mask_slot);
+  ImageGridSlotDNA &slot = owner.slot_dna(grid_slot);
   return {slot.library_ref,
           slot.catalog_mode,
           slot.filter_name_match_enabled,
@@ -568,9 +572,9 @@ static ImageGridOwnerDNAFields image_grid_owner_dna_fields(const ImageGridOwner 
 
 static void image_grid_init_state_from_owner_dna(ImageGridUIState &state,
                                                  const ImageGridOwner owner,
-                                                 const bool is_mask_slot)
+                                                 const ImageGridSlot grid_slot)
 {
-  const ImageGridOwnerDNAFields dna = image_grid_owner_dna_fields(owner, is_mask_slot);
+  const ImageGridOwnerDNAFields dna = image_grid_owner_dna_fields(owner, grid_slot);
 
   if (dna.library_ref.type != 0) {
     state.filter.lib_ref = dna.library_ref;
@@ -617,14 +621,15 @@ static void image_grid_init_state_from_owner_dna(ImageGridUIState &state,
   }
 }
 
-ImageGridUIState &image_grid_state_get(const ImageGridOwner owner, const bool is_mask_slot)
+ImageGridUIState &image_grid_state_get(const ImageGridOwner owner, const ImageGridSlot grid_slot)
 {
   ImageGridStatesPerOwner &per_owner = image_grid_states_ensure(owner);
-  ImageGridUIState &state = is_mask_slot ? per_owner.mask : per_owner.texture;
-  bool &initialized = is_mask_slot ? per_owner.mask_initialized : per_owner.texture_initialized;
+  const int index = int(grid_slot);
+  ImageGridUIState &state = per_owner.states[index];
+  bool &initialized = per_owner.initialized[index];
   if (!initialized) {
     initialized = true;
-    image_grid_init_state_from_owner_dna(state, owner, is_mask_slot);
+    image_grid_init_state_from_owner_dna(state, owner, grid_slot);
   }
 
   /* Re-checked on every access, not just on init: the Preferences can change at any time while the
@@ -634,11 +639,11 @@ ImageGridUIState &image_grid_state_get(const ImageGridOwner owner, const bool is
   return state;
 }
 
-bool image_grid_library_is_missing(const ImageGridOwner owner, const bool is_mask_slot)
+bool image_grid_library_is_missing(const ImageGridOwner owner, const ImageGridSlot grid_slot)
 {
   /* #image_grid_state_get already resolved the reference; just ask whether it landed. Using the
    * const #find_from_ref rather than the mutating gate keeps this safe to call from draw. */
-  const ImageGridUIState &state = image_grid_state_get(owner, is_mask_slot);
+  const ImageGridUIState &state = image_grid_state_get(owner, grid_slot);
   if (state.filter.lib_ref.type != ASSET_LIBRARY_CUSTOM) {
     return false;
   }
@@ -646,7 +651,7 @@ bool image_grid_library_is_missing(const ImageGridOwner owner, const bool is_mas
 }
 
 std::string image_grid_session_id(const ImageGridOwner owner,
-                                  const bool is_mask_slot,
+                                  const ImageGridSlot grid_slot,
                                   const bool is_popover)
 {
   /* One shared scroll/grip session per grid variant (texture/mask × sidebar/popover), keyed by the
@@ -655,25 +660,25 @@ std::string image_grid_session_id(const ImageGridOwner owner,
    * #AbstractGridView::use_session_scroll). */
   return fmt::format("img_grid:{}:{}{}",
                      fmt::ptr(owner.identity()),
-                     is_mask_slot ? "mask" : "tex",
+                     grid_slot == ImageGridSlot::Mask ? "mask" : "tex",
                      is_popover ? ":pop" : "");
 }
 
-void image_grid_reset_scroll(const ImageGridOwner owner, const bool is_mask_slot)
+void image_grid_reset_scroll(const ImageGridOwner owner, const ImageGridSlot grid_slot)
 {
   /* A content-set change (filter / library / catalog) makes the old position meaningless: both the
    * sidebar and the popover host of this slot jump back to the top. */
-  ui::grid_view_session_reset_scroll(image_grid_session_id(owner, is_mask_slot, false));
-  ui::grid_view_session_reset_scroll(image_grid_session_id(owner, is_mask_slot, true));
+  ui::grid_view_session_reset_scroll(image_grid_session_id(owner, grid_slot, false));
+  ui::grid_view_session_reset_scroll(image_grid_session_id(owner, grid_slot, true));
 }
 
 void image_grid_state_remove(const ImageGridOwner owner)
 {
   /* Drop this owner's four grid sessions from the shared registry before the state is freed; safe
    * because the space is being torn down, so no live view still references them. */
-  for (const bool is_mask : {false, true}) {
+  for (const ImageGridSlot grid_slot : IMAGE_GRID_SLOTS) {
     for (const bool is_popover : {false, true}) {
-      ui::grid_view_session_remove(image_grid_session_id(owner, is_mask, is_popover));
+      ui::grid_view_session_remove(image_grid_session_id(owner, grid_slot, is_popover));
     }
   }
   void *&slot = owner.runtime_state_slot();
@@ -691,8 +696,9 @@ void image_grid_foreach_live_library_ref(const ImageGridOwner owner,
   if (!owner.runtime_state_slot()) {
     return;
   }
-  fn(image_grid_state_get(owner, false).filter.lib_ref);
-  fn(image_grid_state_get(owner, true).filter.lib_ref);
+  for (const ImageGridSlot grid_slot : IMAGE_GRID_SLOTS) {
+    fn(image_grid_state_get(owner, grid_slot).filter.lib_ref);
+  }
 }
 
 void image_grid_foreach_live_name_match_ids(
@@ -701,8 +707,9 @@ void image_grid_foreach_live_name_match_ids(
   if (!owner.runtime_state_slot()) {
     return;
   }
-  fn(image_grid_state_get(owner, false).filter.name_match.active_map_type_ids);
-  fn(image_grid_state_get(owner, true).filter.name_match.active_map_type_ids);
+  for (const ImageGridSlot grid_slot : IMAGE_GRID_SLOTS) {
+    fn(image_grid_state_get(owner, grid_slot).filter.name_match.active_map_type_ids);
+  }
 }
 
 void image_grid_catalog_selector_after_change(bContext &C)
@@ -711,8 +718,8 @@ void image_grid_catalog_selector_after_change(bContext &C)
   if (!owner) {
     return;
   }
-  const bool is_mask_slot = image_grid_is_mask_slot_from_context(C);
-  ImageGridUIState &state = image_grid_state_get(*owner, is_mask_slot);
+  const ImageGridSlot grid_slot = image_grid_slot_from_context(C);
+  ImageGridUIState &state = image_grid_state_get(*owner, grid_slot);
   image_grid_catalog_load_active(state, state.filter.lib_ref);
   /* A catalog checkbox exits Recent/Favorites membership the same way the old tree did. */
   state.filter.catalog_mode = state.filter.enabled_catalog_paths.is_empty() ?
@@ -720,9 +727,9 @@ void image_grid_catalog_selector_after_change(bContext &C)
                                   ImageGridCatalogMode::CatalogPath;
   image_grid_focus_clear(state.viewport);
   image_grid_pending_clear(state);
-  image_grid_reset_scroll(*owner, is_mask_slot);
-  image_grid_state_persist(*owner, state, is_mask_slot);
-  image_grid_notify_change(C, is_mask_slot);
+  image_grid_reset_scroll(*owner, grid_slot);
+  image_grid_state_persist(*owner, state, grid_slot);
+  image_grid_notify_change(C, grid_slot);
 }
 
 void image_grid_catalog_selector_cleared_all(bContext &C)
@@ -731,8 +738,8 @@ void image_grid_catalog_selector_cleared_all(bContext &C)
   if (!owner) {
     return;
   }
-  const bool is_mask_slot = image_grid_is_mask_slot_from_context(C);
-  ImageGridUIState &state = image_grid_state_get(*owner, is_mask_slot);
+  const ImageGridSlot grid_slot = image_grid_slot_from_context(C);
+  ImageGridUIState &state = image_grid_state_get(*owner, grid_slot);
   if (state.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
     image_grid_filter_set_show_all_for_all_libraries(state);
   }
@@ -741,9 +748,9 @@ void image_grid_catalog_selector_cleared_all(bContext &C)
   }
   image_grid_focus_clear(state.viewport);
   image_grid_pending_clear(state);
-  image_grid_reset_scroll(*owner, is_mask_slot);
-  image_grid_state_persist(*owner, state, is_mask_slot);
-  image_grid_notify_change(C, is_mask_slot);
+  image_grid_reset_scroll(*owner, grid_slot);
+  image_grid_state_persist(*owner, state, grid_slot);
+  image_grid_notify_change(C, grid_slot);
 }
 
 bool image_grid_catalog_selector_is_all_active(bContext &C)
@@ -753,7 +760,7 @@ bool image_grid_catalog_selector_is_all_active(bContext &C)
     return false;
   }
   const ImageGridUIState &state = image_grid_state_get(
-      *owner, image_grid_is_mask_slot_from_context(C));
+      *owner, image_grid_slot_from_context(C));
   if (state.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
     for (asset_system::AssetLibrary *library : image_grid_all_mode_libraries()) {
       if (const std::optional<AssetLibraryReference> lib_ref = library->library_reference()) {
@@ -780,7 +787,7 @@ bool image_grid_catalog_section_is_expanded(bContext &C, const char *library_key
     return false;
   }
   const ImageGridUIState &state = image_grid_state_get(
-      *owner, image_grid_is_mask_slot_from_context(C));
+      *owner, image_grid_slot_from_context(C));
   return state.filter.expanded_library_section_keys.contains(library_key);
 }
 
@@ -795,7 +802,7 @@ void image_grid_catalog_section_set_expanded(bContext &C,
   if (!owner) {
     return;
   }
-  ImageGridUIState &state = image_grid_state_get(*owner, image_grid_is_mask_slot_from_context(C));
+  ImageGridUIState &state = image_grid_state_get(*owner, image_grid_slot_from_context(C));
   if (expanded) {
     state.filter.expanded_library_section_keys.add(library_key);
   }

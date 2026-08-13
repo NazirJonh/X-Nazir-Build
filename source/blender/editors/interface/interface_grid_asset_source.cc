@@ -20,6 +20,7 @@
 #include "BLI_vector.hh"
 
 #include "DNA_asset_types.h"
+#include "DNA_ID.h"
 
 #include "ED_asset.hh"
 #include "ED_asset_list.hh"
@@ -54,13 +55,17 @@ class AssetGridItem : public PreviewGridItem {
                 StringRef identifier,
                 StringRef label,
                 StringRef activate_operator,
-                StringRef drag_operator)
+                StringRef drag_operator,
+                const bool is_active)
       : PreviewGridItem(identifier, label, ICON_NONE),
         asset_(&asset),
         library_ref_(library_ref),
         activate_operator_(activate_operator),
         drag_operator_(drag_operator)
   {
+    if (is_active) {
+      this->set_is_active_fn([]() { return true; });
+    }
   }
 
   void build_grid_tile(const bContext &C, Layout &layout) const override;
@@ -69,9 +74,8 @@ class AssetGridItem : public PreviewGridItem {
 };
 
 /**
- * Only used when \a drag_operator is set on the grid's #AssetGridDataSource: invokes that
- * operator (with the standard asset-reference properties) instead of the default asset/ID
- * drag-and-drop, mirroring #AssetShelfType::drag_operator's behavior for the asset shelf.
+ * Default asset/ID drag, matching #AssetDragController on the asset shelf. When
+ * \a drag_operator is set, the operator is invoked instead and the default drag is disabled.
  */
 class AssetGridItemDragController : public AbstractViewItemDragController {
   asset_system::AssetRepresentation &asset_;
@@ -87,17 +91,39 @@ class AssetGridItemDragController : public AbstractViewItemDragController {
 
   std::optional<eWM_DragDataType> get_drag_type() const override
   {
-    /* Disable the default asset/ID drag, #on_drag_start() below invokes #drag_operator_. */
-    return std::nullopt;
+    if (!drag_operator_.empty()) {
+      /* Disable the default asset/ID drag; #on_drag_start() invokes #drag_operator_. */
+      return std::nullopt;
+    }
+    return asset_.is_local_id() ? WM_DRAG_ID : WM_DRAG_ASSET;
   }
 
   void *create_drag_data() const override
   {
-    return nullptr;
+    if (!drag_operator_.empty()) {
+      return nullptr;
+    }
+    ID *local_id = asset_.local_id();
+    if (local_id) {
+      return static_cast<void *>(local_id);
+    }
+
+    eAssetImportMethod import_method = asset_.get_import_method().value_or(ASSET_IMPORT_PACK);
+    if (U.experimental.no_data_block_packing && import_method == ASSET_IMPORT_PACK) {
+      import_method = ASSET_IMPORT_APPEND_REUSE;
+    }
+
+    AssetImportSettings import_settings{};
+    import_settings.method = import_method;
+    import_settings.use_instance_collections = false;
+    return WM_drag_create_asset_data(&asset_, import_settings);
   }
 
   void on_drag_start(bContext &C, AbstractViewItem & /*item*/) override
   {
+    if (drag_operator_.empty()) {
+      return;
+    }
     wmOperatorType *ot = WM_operatortype_find(drag_operator_.c_str(), true);
     if (!ot) {
       return;
@@ -112,10 +138,8 @@ class AssetGridItemDragController : public AbstractViewItemDragController {
 
 std::unique_ptr<AbstractViewItemDragController> AssetGridItem::create_drag_controller() const
 {
-  if (drag_operator_.empty()) {
-    return nullptr;
-  }
-  return std::make_unique<AssetGridItemDragController>(this->get_view(), *asset_, drag_operator_);
+  return std::make_unique<AssetGridItemDragController>(
+      this->get_view(), *asset_, drag_operator_);
 }
 
 void AssetGridItem::build_grid_tile(const bContext &C, Layout &layout) const
@@ -201,13 +225,15 @@ AssetGridDataSource::AssetGridDataSource(const AssetLibraryReference &library_re
                                          Set<short> filter_id_types,
                                          NameMatchFilterState name_match,
                                          std::string activate_operator,
-                                         std::string drag_operator)
+                                         std::string drag_operator,
+                                         std::string active_identifier)
     : library_ref_(library_ref),
       enabled_catalogs_(std::move(enabled_catalogs)),
       filter_id_types_(std::move(filter_id_types)),
       name_match_(std::move(name_match)),
       activate_operator_(std::move(activate_operator)),
-      drag_operator_(std::move(drag_operator))
+      drag_operator_(std::move(drag_operator)),
+      active_identifier_(std::move(active_identifier))
 {
 }
 
@@ -260,12 +286,15 @@ int AssetGridDataSource::build_window_and_count(const bContext &C,
       },
       [&](asset_system::AssetRepresentation &asset, const int filtered_index) {
         if (window.contains(filtered_index)) {
+          const StringRef identifier = asset.library_relative_identifier();
+          const bool is_active = !active_identifier_.empty() && identifier == active_identifier_;
           view.add_item<AssetGridItem>(asset,
                                        library_ref_,
-                                       asset.library_relative_identifier(),
+                                       identifier,
                                        asset.get_name(),
                                        activate_operator_,
-                                       drag_operator_);
+                                       drag_operator_,
+                                       is_active);
         }
         count++;
         return true;

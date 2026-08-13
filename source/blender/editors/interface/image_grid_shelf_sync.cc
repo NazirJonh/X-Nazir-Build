@@ -397,9 +397,9 @@ bool image_grid_filter_matches_shelf(const ImageGridUIState &state, const AssetS
 
 void image_grid_state_persist(const ImageGridOwner owner,
                               ImageGridUIState &state,
-                              const bool is_mask_slot)
+                              const ImageGridSlot grid_slot)
 {
-  ImageGridSlotDNA &slot = owner.slot_dna(is_mask_slot);
+  ImageGridSlotDNA &slot = owner.slot_dna(grid_slot);
   AssetLibraryReference &library_ref = slot.library_ref;
   ListBaseT<ImageGridLibraryCatalogState> &library_catalog_states = slot.library_catalog_states;
   ListBaseT<AssetCatalogPathLink> &legacy_enabled_catalog_paths = slot.enabled_catalog_paths_legacy;
@@ -543,13 +543,13 @@ void image_grid_pending_apply_if_ready(bContext &C)
 
     bool applied_texture = false;
     bool applied_mask = false;
-    for (const bool is_mask_slot : {false, true}) {
-      ImageGridUIState &state = image_grid_state_get(owner, is_mask_slot);
+    for (const ImageGridSlot grid_slot : IMAGE_GRID_SLOTS) {
+      ImageGridUIState &state = image_grid_state_get(owner, grid_slot);
       if (!state.pending.apply_after_popover) {
         continue;
       }
       image_grid_pending_apply_slot(C, state);
-      if (is_mask_slot) {
+      if (grid_slot == ImageGridSlot::Mask) {
         applied_mask = true;
       }
       else {
@@ -558,12 +558,16 @@ void image_grid_pending_apply_if_ready(bContext &C)
     }
 
     if (applied_texture) {
-      image_grid_state_persist(owner, image_grid_state_get(owner, false), false);
-      image_grid_notify_change(C, false);
+      image_grid_state_persist(owner,
+                               image_grid_state_get(owner, ImageGridSlot::Texture),
+                               ImageGridSlot::Texture);
+      image_grid_notify_change(C, ImageGridSlot::Texture);
     }
     if (applied_mask) {
-      image_grid_state_persist(owner, image_grid_state_get(owner, true), true);
-      image_grid_notify_change(C, true);
+      image_grid_state_persist(owner,
+                               image_grid_state_get(owner, ImageGridSlot::Mask),
+                               ImageGridSlot::Mask);
+      image_grid_notify_change(C, ImageGridSlot::Mask);
     }
   };
 
@@ -696,8 +700,8 @@ static const AssetWeakReference *image_texture_shelf_active_asset_type_callback(
                image_grid::image_grid_owner_from_context(*C))
   {
     const PointerRNA target_ptr = CTX_data_pointer_get(C, "image_grid_target");
-    const bool is_mask_slot = image_grid_slot_is_mask(target_ptr);
-    const ImageGridUIState &state = image_grid::image_grid_state_get(*owner, is_mask_slot);
+    const ImageGridSlot grid_slot = image_grid_slot_from_texture_ptr(target_ptr);
+    const ImageGridUIState &state = image_grid::image_grid_state_get(*owner, grid_slot);
     if (state.shelf_active_asset_valid) {
       weak_ref = state.shelf_active_asset;
     }
@@ -719,14 +723,14 @@ static void image_texture_shelf_pre_popover_invoke(bContext &C, AssetShelfType *
   if (const std::optional<image_grid::ImageGridOwner> owner =
           image_grid::image_grid_owner_from_context(C))
   {
-    ImageGridUIState &state = image_grid::image_grid_state_get(*owner, false);
+    ImageGridUIState &state = image_grid::image_grid_state_get(*owner, ImageGridSlot::Texture);
     image_grid_prepare_browse_shelf(C, state, IMAGE_TEXTURE_SHELF_IDNAME);
   }
 }
 
 static void image_texture_shelf_setup_popover_layout(bContext &C, ui::Layout &layout)
 {
-  image_grid_popover_layout_context_set(layout, C, false);
+  image_grid_popover_layout_context_set(layout, C, ImageGridSlot::Texture);
 }
 
 /**
@@ -749,7 +753,8 @@ static void image_texture_shelf_grid_tile_activate_extra_params(const ui::Layout
     return;
   }
   r_session_uid = target_ptr->owner_id->session_uid;
-  r_use_mask_slot = layout.context_int_get("image_grid_is_mask_slot").value_or(0) != 0;
+  r_use_mask_slot = image_grid_slot_from_int(layout.context_int_get(IMAGE_GRID_CONTEXT_SLOT_KEY)
+                                                 .value_or(0)) == ImageGridSlot::Mask;
 }
 
 /**
@@ -889,7 +894,7 @@ AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
 
 bool image_grid_brush_target_pointer_get(const bContext &C,
                                          PointerRNA *r_target_ptr,
-                                         const bool is_mask_slot)
+                                         const ImageGridSlot grid_slot)
 {
   if (!r_target_ptr || !image_grid::image_grid_owner_from_context(C)) {
     return false;
@@ -904,17 +909,17 @@ bool image_grid_brush_target_pointer_get(const bContext &C,
     return false;
   }
 
-  MTex *mtex = is_mask_slot ? &brush->mask_mtex : &brush->mtex;
+  MTex *mtex = grid_slot == ImageGridSlot::Mask ? &brush->mask_mtex : &brush->mtex;
   *r_target_ptr = RNA_pointer_create_discrete(&brush->id, RNA_BrushTextureSlot, mtex);
   return r_target_ptr->data && r_target_ptr->owner_id && GS(r_target_ptr->owner_id->name) == ID_BR;
 }
 
 void image_grid_popover_layout_context_set(ui::Layout &layout,
                                            bContext &C,
-                                           const bool is_mask_slot)
+                                           const ImageGridSlot grid_slot)
 {
   PointerRNA target_ptr;
-  if (!image_grid_brush_target_pointer_get(C, &target_ptr, is_mask_slot)) {
+  if (!image_grid_brush_target_pointer_get(C, &target_ptr, grid_slot)) {
     return;
   }
 
@@ -929,7 +934,11 @@ void image_grid_popover_layout_context_set(ui::Layout &layout,
    * #image_grid_pending_schedule_from_asset, applied by #image_grid_pending_apply_if_ready from
    * the popover's #PanelType.popover_close. */
   layout.context_ptr_set("image_grid_target", &target_ptr);
-  layout.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
+  layout.context_int_set(IMAGE_GRID_CONTEXT_SLOT_KEY, int(grid_slot));
+  if (const std::optional<ImageGridOwner> owner = image_grid_owner_from_context(C)) {
+    PointerRNA owner_ptr = owner->owner_rna();
+    layout.context_ptr_set(IMAGE_GRID_CONTEXT_OWNER_KEY, &owner_ptr);
+  }
 }
 
 /** \} */

@@ -35,7 +35,9 @@ namespace ui {
  * shown unless \a filter_id_types narrows it down. Activation invokes \a activate_operator
  * with the standard asset-reference properties set on the operator. When \a drag_operator is
  * non-empty, it is invoked (with the same asset-reference properties) instead of the default
- * asset/ID drag-and-drop when the user starts dragging an item.
+ * asset/ID drag-and-drop when the user starts dragging an item. An empty \a drag_operator uses
+ * the default #WM_DRAG_ID / #WM_DRAG_ASSET drag. When \a active_identifier is non-empty, the
+ * matching item is highlighted as active.
  */
 class AssetGridDataSource : public GridDataSource {
   AssetLibraryReference library_ref_;
@@ -44,6 +46,7 @@ class AssetGridDataSource : public GridDataSource {
   NameMatchFilterState name_match_;
   std::string activate_operator_;
   std::string drag_operator_;
+  std::string active_identifier_;
 
  public:
   AssetGridDataSource(const AssetLibraryReference &library_ref,
@@ -51,7 +54,8 @@ class AssetGridDataSource : public GridDataSource {
                       Set<short> filter_id_types,
                       NameMatchFilterState name_match,
                       std::string activate_operator,
-                      std::string drag_operator = "");
+                      std::string drag_operator = "",
+                      std::string active_identifier = "");
 
   int item_count(const bContext &C) const override;
   bool item_count_ready(const bContext &C) const override;

@@ -198,6 +198,7 @@ if(WITH_GTESTS)
     interface_ops_test.cc
     tests/grid_core_math_test.cc
     tests/grid_view_settings_utils_test.cc
+    tests/image_grid_foreach_test.cc
     tests/image_grid_owner_test.cc
   )
 

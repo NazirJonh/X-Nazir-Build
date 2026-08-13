@@ -43,6 +43,18 @@ typedef enum eImageGridCatalogMode {
 } eImageGridCatalogMode;
 
 /**
+ * Independent image-grid slot on a host space. Host DNA still stores named
+ * #ImageGridSlotDNA members (#image_grid / #image_grid_mask); the id is how
+ * owner/runtime/session code addresses them. A third slot is a DNA change, not
+ * a new bool.
+ */
+typedef enum eImageGridSlot {
+  IMAGE_GRID_SLOT_TEXTURE = 0,
+  IMAGE_GRID_SLOT_MASK = 1,
+} eImageGridSlot;
+#define IMAGE_GRID_SLOT_NUM 2
+
+/**
  * Persisted per-slot state for the sculpt/paint brush-texture image grid. Each host space
  * (#View3D, #SpaceImage) keeps one instance per independent slot instead of duplicating each
  * field per slot.

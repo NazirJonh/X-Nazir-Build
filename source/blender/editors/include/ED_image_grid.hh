@@ -29,6 +29,7 @@
 
 struct View3D;
 struct SpaceImage;
+struct SpaceLink;
 struct bContext;
 struct AssetShelf;
 struct Image;
@@ -54,13 +55,47 @@ struct Layout;
 namespace blender::ed::image_grid {
 
 /**
+ * Independent image-grid slot on a host space. Values match #eImageGridSlot.
+ * DNA still stores named #ImageGridSlotDNA members; this id is how owner, session,
+ * and UI context address them.
+ */
+enum class ImageGridSlot : int {
+  Texture = IMAGE_GRID_SLOT_TEXTURE,
+  Mask = IMAGE_GRID_SLOT_MASK,
+};
+
+inline constexpr ImageGridSlot IMAGE_GRID_SLOTS[] = {
+    ImageGridSlot::Texture,
+    ImageGridSlot::Mask,
+};
+
+/** Layout/button context key for the active #ImageGridSlot (int). */
+constexpr const char *IMAGE_GRID_CONTEXT_SLOT_KEY = "image_grid_slot";
+/** Layout/button context key for the host space (#RNA_SpaceView3D / #RNA_SpaceImageEditor). */
+constexpr const char *IMAGE_GRID_CONTEXT_OWNER_KEY = "image_grid_owner";
+
+constexpr const char *IMAGE_GRID_PT_DISPLAY = "IMAGE_GRID_PT_display";
+constexpr const char *IMAGE_GRID_PT_CATALOG_SELECTOR = "IMAGE_GRID_PT_catalog_selector";
+constexpr const char *IMAGE_GRID_PT_NAME_MATCH_FILTER = "IMAGE_GRID_PT_name_match_filter";
+
+inline ImageGridSlot image_grid_slot_from_mask_flag(const bool is_mask)
+{
+  return is_mask ? ImageGridSlot::Mask : ImageGridSlot::Texture;
+}
+
+inline ImageGridSlot image_grid_slot_from_int(const int value)
+{
+  return (value == int(ImageGridSlot::Mask)) ? ImageGridSlot::Mask : ImageGridSlot::Texture;
+}
+
+/**
  * Non-owning accessor over one space's persisted image-grid DNA and runtime
  * cache slot. Constructed via #ImageGridOwner::from(); carries no context or
  * lifetime ownership, so it is passed by value like a reference.
  */
 class ImageGridOwner {
  public:
-  ImageGridSlotDNA &slot_dna(bool is_mask_slot) const;
+  ImageGridSlotDNA &slot_dna(ImageGridSlot grid_slot) const;
   short &preview_size_dna() const;
   /** Opaque lazy-cache anchor, equivalent to #View3D_Runtime::image_grid_state. */
   void *&runtime_state_slot() const;
@@ -68,8 +103,14 @@ class ImageGridOwner {
    * owning space's address). */
   const void *identity() const;
 
-  /** Concrete-space downcasts for code that must construct a space-specific #PointerRNA (RNA
-   * property panels); returns null when the owner wraps a different kind. */
+  /**
+   * Space RNA pointer for property panels (preview size, rows). Prefer this over
+   * #as_view3d() / #as_space_image(); those remain for the few call sites that still
+   * need a concrete space.
+   */
+  PointerRNA owner_rna() const;
+
+  /** Concrete-space downcasts; returns null when the owner wraps a different kind. */
   View3D *as_view3d() const;
   SpaceImage *as_space_image() const;
 
@@ -86,6 +127,13 @@ class ImageGridOwner {
 };
 
 std::optional<ImageGridOwner> image_grid_owner_from_context(const bContext &C);
+/** Host space from #SpaceLink::spacetype; null when \a space is not View3D or Image Editor. */
+std::optional<ImageGridOwner> image_grid_owner_from_space(SpaceLink *space);
+/**
+ * Host space from a layout/RNA pointer (#RNA_SpaceView3D or #RNA_SpaceImageEditor).
+ * Empty when \a ptr is null or a different struct type.
+ */
+std::optional<ImageGridOwner> image_grid_owner_from_rna(const PointerRNA &ptr);
 
 /**
  * How the image grid interprets its library/catalog filter relative to the shared
@@ -216,8 +264,9 @@ struct ImageGridUIState {
   AssetWeakReference shelf_active_asset{};
 };
 
-ImageGridUIState &image_grid_state_get(ImageGridOwner owner, bool is_mask_slot = false);
-bool image_grid_library_is_missing(ImageGridOwner owner, bool is_mask_slot);
+ImageGridUIState &image_grid_state_get(ImageGridOwner owner,
+                                       ImageGridSlot grid_slot = ImageGridSlot::Texture);
+bool image_grid_library_is_missing(ImageGridOwner owner, ImageGridSlot grid_slot);
 void image_grid_state_remove(ImageGridOwner owner);
 void image_grid_foreach_live_library_ref(ImageGridOwner owner,
                                          blender::FunctionRef<void(AssetLibraryReference &)> fn);
@@ -228,21 +277,22 @@ void image_grid_foreach_live_library_ref(ImageGridOwner owner,
  */
 void image_grid_foreach_live_name_match_ids(
     ImageGridOwner owner, blender::FunctionRef<void(blender::Set<std::string> &)> fn);
-std::string image_grid_session_id(ImageGridOwner owner, bool is_mask_slot, bool is_popover);
-void image_grid_reset_scroll(ImageGridOwner owner, bool is_mask_slot);
+std::string image_grid_session_id(ImageGridOwner owner, ImageGridSlot grid_slot, bool is_popover);
+void image_grid_reset_scroll(ImageGridOwner owner, ImageGridSlot grid_slot);
 
-int image_grid_effective_rows(ImageGridOwner owner, bool is_mask_slot);
+int image_grid_effective_rows(ImageGridOwner owner, ImageGridSlot grid_slot);
 int image_grid_preview_size_get(ImageGridOwner owner);
 void image_grid_state_persist(ImageGridOwner owner,
                               ImageGridUIState &state,
-                              bool is_mask_slot = false);
+                              ImageGridSlot grid_slot = ImageGridSlot::Texture);
 
 void image_grid_slot_dna_free(ImageGridSlotDNA &slot);
 void image_grid_slot_dna_duplicate(ImageGridSlotDNA &dst, const ImageGridSlotDNA &src);
 void image_grid_slot_dna_blend_read(blender::BlendDataReader *reader, ImageGridSlotDNA &slot);
 void image_grid_slot_dna_blend_write(blender::BlendWriter *writer, const ImageGridSlotDNA &slot);
 
-bool image_grid_is_mask_slot_from_context(const bContext &C);
+ImageGridSlot image_grid_slot_from_context(const bContext &C);
+ImageGridSlot image_grid_slot_from_texture_ptr(const PointerRNA &texture_slot_ptr);
 /** True when #ImageGridUIState::filter's library no longer exists in the Preferences (§5). */
 void image_grid_state_reset_catalog(ImageGridUIState &state);
 /**
@@ -296,7 +346,7 @@ blender::Vector<asset_system::AssetLibrary *> image_grid_all_mode_libraries();
  * merged file-list, not each real library's own #AssetList.
  */
 void image_grid_fetch_all_mode_libraries(const bContext &C);
-void image_grid_notify_change(bContext &C, bool is_mask_slot = false);
+void image_grid_notify_change(bContext &C, ImageGridSlot grid_slot = ImageGridSlot::Texture);
 
 /**
  * Catalog-selector tree callbacks for the shared #CatalogCheckboxSetConfig host.
@@ -367,12 +417,12 @@ void image_grid_request_scroll_to_asset(ImageGridUIState &state,
 
 /**
  * When the active paint brush changes, request the grid to scroll to the image assigned to its
- * texture slot (main or mask depending on \a is_mask_slot). No-op when the brush is unchanged,
+ * texture slot (main or mask depending on \a grid_slot). No-op when the brush is unchanged,
  * has no image texture assigned, the image is absent from the current library, or the library has
  * not finished loading yet (an #NC_ASSET notifier will retrigger a redraw when it does).
  * Call once per template redraw, before #image_grid_apply_focus_scroll runs.
  */
-void image_grid_auto_focus_on_brush_change(bContext &C, bool is_mask_slot);
+void image_grid_auto_focus_on_brush_change(bContext &C, ImageGridSlot grid_slot);
 
 /** Clear a pending scroll-to-asset request and all per-layout applied flags. */
 void image_grid_focus_clear(ImageGridViewport &viewport);
@@ -457,14 +507,14 @@ bool image_grid_assign_dropped_image(bContext &C, const PointerRNA &target_ptr, 
  */
 bool image_grid_brush_target_pointer_get(const bContext &C,
                                          PointerRNA *r_target_ptr,
-                                         bool is_mask_slot = false);
+                                         ImageGridSlot grid_slot = ImageGridSlot::Texture);
 
 /**
  * Set layout context members required by the image-texture asset shelf browse popover.
  */
 void image_grid_popover_layout_context_set(ui::Layout &layout,
                                            bContext &C,
-                                           bool is_mask_slot = false);
+                                           ImageGridSlot grid_slot = ImageGridSlot::Texture);
 
 /**
  * True when \a asset and \a image are the same texture source: identical local ID, or matching
@@ -524,12 +574,12 @@ int image_grid_foreach_filtered_item(
  */
 bool image_grid_set_library(bContext &C,
                             ImageGridOwner owner,
-                            bool is_mask_slot,
+                            ImageGridSlot grid_slot,
                             const AssetLibraryReference &new_ref);
 
 /**
- * Register #IMAGE_GRID_OT_* / remaining #VIEW3D_OT_image_grid_* operators and the numpad-period
- * focus-active pre-button handler. Called from #operatortypes_ui.
+ * Register #IMAGE_GRID_OT_* operators and the numpad-period focus-active pre-button handler.
+ * Called from #operatortypes_ui.
  */
 void image_grid_operatortypes();
 
@@ -548,9 +598,9 @@ void IMAGE_GRID_OT_copy_to_library(wmOperatorType *ot);
 void IMAGE_GRID_OT_move_to_library(wmOperatorType *ot);
 void IMAGE_GRID_OT_drop_import(wmOperatorType *ot);
 void VIEW3D_OT_image_shelf_activate_asset(wmOperatorType *ot);
-void VIEW3D_OT_image_grid_name_match_enabled_toggle(wmOperatorType *ot);
-void VIEW3D_OT_image_grid_name_match_map_type_toggle(wmOperatorType *ot);
-void VIEW3D_OT_image_grid_name_match_clear(wmOperatorType *ot);
+void IMAGE_GRID_OT_name_match_enabled_toggle(wmOperatorType *ot);
+void IMAGE_GRID_OT_name_match_map_type_toggle(wmOperatorType *ot);
+void IMAGE_GRID_OT_name_match_clear(wmOperatorType *ot);
 
 void image_grid_catalog_selector_panel_register(ARegionType *region_type);
 void image_grid_display_panel_register(ARegionType *region_type);

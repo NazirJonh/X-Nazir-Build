@@ -111,19 +111,23 @@ void foreach_library_reference(Main &bmain, FunctionRef<void(AssetLibraryReferen
             fn(sfile.asset_params->asset_library_ref);
           }
         }
-        else if (sl.spacetype == SPACE_VIEW3D) {
-          View3D &v3d = reinterpret_cast<View3D &>(sl);
-          for (ImageGridSlotDNA *slot : {&v3d.image_grid, &v3d.image_grid_mask}) {
-            fn(slot->library_ref);
-            for (ImageGridLibraryCatalogState &state : slot->library_catalog_states) {
+        else if (sl.spacetype == SPACE_VIEW3D || sl.spacetype == SPACE_IMAGE) {
+          /* Persist + live runtime for both image-grid hosts. Rename must update DNA and the
+           * already-initialized #ImageGridUIState (seeded once from DNA, never re-synced). */
+          const ed::image_grid::ImageGridOwner owner =
+              (sl.spacetype == SPACE_VIEW3D) ?
+                  ed::image_grid::ImageGridOwner::from(reinterpret_cast<View3D &>(sl)) :
+                  ed::image_grid::ImageGridOwner::from(reinterpret_cast<SpaceImage &>(sl));
+          for (const ed::image_grid::ImageGridSlot grid_slot :
+               ed::image_grid::IMAGE_GRID_SLOTS)
+          {
+            ImageGridSlotDNA &slot = owner.slot_dna(grid_slot);
+            fn(slot.library_ref);
+            for (ImageGridLibraryCatalogState &state : slot.library_catalog_states) {
               fn(state.library_ref);
             }
           }
-          /* Also update the runtime cache (Task 6's #ImageGridUIState), which is seeded from DNA
-           * once and never automatically re-synced -- without this, a rename while the grid is
-           * open would leave the live filter pointing at the old name until the file is reloaded. */
-          ed::image_grid::image_grid_foreach_live_library_ref(
-              ed::image_grid::ImageGridOwner::from(v3d), fn);
+          ed::image_grid::image_grid_foreach_live_library_ref(owner, fn);
         }
 
         /* Mirrors #type_unlink()'s walk: the active space's regions live on #ScrArea, every other

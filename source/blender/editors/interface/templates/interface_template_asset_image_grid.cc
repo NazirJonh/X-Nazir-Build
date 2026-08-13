@@ -123,8 +123,8 @@ static void image_grid_block_listener(const wmRegionListenerParams *params)
       }
       break;
     case NC_SPACE:
-      if (wmn->data == ND_SPACE_VIEW3D) {
-        /* View3D display settings changed (e.g. preview size) — rebuild the grid. */
+      if (ELEM(wmn->data, ND_SPACE_VIEW3D, ND_SPACE_IMAGE)) {
+        /* Host-space display settings changed (e.g. preview size / rows) — rebuild the grid. */
         ED_region_tag_redraw(params->region);
         ED_region_tag_refresh_ui(params->region);
       }
@@ -452,7 +452,7 @@ class ImageAssetGridItem : public PreviewGridItem {
   void set_grid_item_operator_props(const bContext &C, PointerRNA &props) const
   {
     RNA_boolean_set(
-        &props, "use_mask_slot", ed::image_grid::image_grid_is_mask_slot_from_context(C) ? 1 : 0);
+        &props, "use_mask_slot", ed::image_grid::image_grid_slot_from_context(C) == ed::image_grid::ImageGridSlot::Mask);
     if (kind_ == ImageGridItemKind::Asset) {
       RNA_enum_set(&props,
                    "asset_library_reference",
@@ -853,7 +853,7 @@ class ImageGridStateAccess : public GridStateAccess {
   GridSessionState &session_;
   ed::image_grid::ImageGridOwner owner_;
   std::string idname_;
-  bool is_mask_slot_;
+  ed::image_grid::ImageGridSlot grid_slot_;
   /** True when drawn inside a popover; only affects the DNA fallback (popover height is not
    * persisted). Sidebar and popover use separate sessions (distinct #idname_), so grip/scroll are
    * independent without an is-popover branch on every access. */
@@ -863,12 +863,12 @@ class ImageGridStateAccess : public GridStateAccess {
   ImageGridStateAccess(GridSessionState &session,
                        const ed::image_grid::ImageGridOwner owner,
                        std::string idname,
-                       const bool is_mask_slot,
+                       const ed::image_grid::ImageGridSlot grid_slot,
                        const bool is_popover)
       : session_(session),
         owner_(owner),
         idname_(std::move(idname)),
-        is_mask_slot_(is_mask_slot),
+        grid_slot_(grid_slot),
         is_popover_(is_popover)
   {
   }
@@ -942,7 +942,7 @@ class ImageGridStateAccess : public GridStateAccess {
     if (is_popover_) {
       return 3;
     }
-    return ed::image_grid::image_grid_effective_rows(owner_, is_mask_slot_);
+    return ed::image_grid::image_grid_effective_rows(owner_, grid_slot_);
   }
 
   std::function<void(bContext &)> make_scroll_widget_fn(const int /*store_cols*/,
@@ -950,13 +950,13 @@ class ImageGridStateAccess : public GridStateAccess {
   {
     /* The pixel-scale widget already wrote the new #scroll_px directly. Dismiss any pending focus so
      * a manual scroll is not overridden on the next redraw, then redraw. */
-    const bool is_mask_slot = is_mask_slot_;
-    return [is_mask_slot](bContext &C) {
+    const ed::image_grid::ImageGridSlot grid_slot = grid_slot_;
+    return [grid_slot](bContext &C) {
       if (const std::optional<ed::image_grid::ImageGridOwner> owner =
               ed::image_grid::image_grid_owner_from_context(C))
       {
         ed::image_grid::image_grid_focus_clear(
-            ed::image_grid::image_grid_state_get(*owner, is_mask_slot).viewport);
+            ed::image_grid::image_grid_state_get(*owner, grid_slot).viewport);
       }
       if (ARegion *region = CTX_wm_region(&C)) {
         ED_region_tag_redraw(region);
@@ -969,7 +969,7 @@ class ImageGridStateAccess : public GridStateAccess {
   {
     const bool is_popover = is_popover_;
     return [is_popover](bContext &C) {
-      WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+      WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
       if (ARegion *region = CTX_wm_region(&C)) {
         /* Keep the sidebar panels region's scroll offset for this value-apply pass. The build-time
          * level-trigger (#build_image_grid) covers the frames the grip is the active button; this
@@ -1022,13 +1022,13 @@ static void image_grid_header_popover(Layout &row,
                                       const bContext &C,
                                       const StringRefNull panel_id,
                                       const int icon,
-                                      const bool is_mask_slot)
+                                      const ed::image_grid::ImageGridSlot grid_slot)
 {
   Block *block = row.block();
   Layout &popover_row = row.row(false);
   popover_row.emboss_set(EmbossType::Emboss);
   popover_row.ui_units_x_set(1.6f);
-  popover_row.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
+  popover_row.context_int_set(ed::image_grid::IMAGE_GRID_CONTEXT_SLOT_KEY, int(grid_slot));
   const int64_t buttons_num_before = block->buttons_ptrs.size();
   popover_row.popover(&C, panel_id, "", icon);
   /* #Layout::popover() adds no button (and warns) when `panel_id` isn't a registered panel type. */
@@ -1044,11 +1044,12 @@ static void image_grid_header_popover(Layout &row,
  * (#Layout::op_menu_enum) lays folder headings out as side-by-side columns; a menu reads top to
  * bottom. Folder headings become labels; each library is an operator row that sets the library and
  * closes the menu. The slot (texture vs mask) is re-applied to the menu's own context because the
- * operator resolves it from there (#image_grid_is_mask_slot_from_context). */
+ * operator resolves it from there (#image_grid_slot_from_context). */
 static void image_grid_library_selector_menu_draw(bContext * /*C*/, Layout *layout, void *arg)
 {
-  const bool is_mask_slot = POINTER_AS_INT(arg) != 0;
-  layout->context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
+  const ed::image_grid::ImageGridSlot grid_slot =
+      ed::image_grid::image_grid_slot_from_int(POINTER_AS_INT(arg));
+  layout->context_int_set(ed::image_grid::IMAGE_GRID_CONTEXT_SLOT_KEY, int(grid_slot));
 
   Layout &col = layout->column(false);
 
@@ -1115,7 +1116,8 @@ static void image_grid_library_selector_menu_draw(bContext * /*C*/, Layout *layo
  * behavior matches picking an entry from the menu). */
 static bool image_grid_library_selector_menu_step(bContext *C, int direction, void *arg)
 {
-  const bool is_mask_slot = POINTER_AS_INT(arg) != 0;
+  const ed::image_grid::ImageGridSlot grid_slot =
+      ed::image_grid::image_grid_slot_from_int(POINTER_AS_INT(arg));
 
   const std::optional<ed::image_grid::ImageGridOwner> owner_opt =
       ed::image_grid::image_grid_owner_from_context(*C);
@@ -1124,7 +1126,7 @@ static bool image_grid_library_selector_menu_step(bContext *C, int direction, vo
   }
   const ed::image_grid::ImageGridOwner owner = *owner_opt;
   const ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner,
-                                                                                   is_mask_slot);
+                                                                                   grid_slot);
 
   const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
       /*include_readonly=*/true,
@@ -1162,15 +1164,15 @@ static bool image_grid_library_selector_menu_step(bContext *C, int direction, vo
   const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(
       values[next_index]);
 
-  return ed::image_grid::image_grid_set_library(*C, owner, is_mask_slot, new_ref);
+  return ed::image_grid::image_grid_set_library(*C, owner, grid_slot, new_ref);
 }
 
 static void draw_header_row(Layout &layout,
                             ed::image_grid::ImageGridUIState &state,
                             const bContext &C,
-                            const bool is_mask_slot)
+                            const ed::image_grid::ImageGridSlot grid_slot)
 {
-  layout.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
+  layout.context_int_set(ed::image_grid::IMAGE_GRID_CONTEXT_SLOT_KEY, int(grid_slot));
 
   Layout &row = layout.row(true);
   /* Library selector: a vertical menu of asset libraries (the operator's enum dropdown lays folder
@@ -1181,7 +1183,7 @@ static void draw_header_row(Layout &layout,
     row.menu_fn(ed::image_grid::image_grid_library_selector_label(state),
                 ICON_ASSET_MANAGER,
                 image_grid_library_selector_menu_draw,
-                POINTER_FROM_INT(is_mask_slot ? 1 : 0));
+                POINTER_FROM_INT(int(grid_slot)));
     /* Wire Ctrl-Wheel cycling (#button_supports_cycling / #do_but_BLOCK): a plain #menu_fn button
      * has no RNA enum property to step through, so it is skipped unless a #menu_step_func is set
      * explicitly. #button_type_set_menu_from_pulldown matches the type this button would get in a
@@ -1201,12 +1203,12 @@ static void draw_header_row(Layout &layout,
   }
   /* Catalog selector: opens a popover with the catalog tree of the active library. */
   image_grid_header_popover(
-      row, C, "VIEW3D_PT_image_grid_catalog_selector", ICON_COLLAPSEMENU, is_mask_slot);
+      row, C, ed::image_grid::IMAGE_GRID_PT_CATALOG_SELECTOR, ICON_COLLAPSEMENU, grid_slot);
     /* Name-match filter: master toggle + Map Types popover (no Tags). */
   {
     Layout &nm_row = row.row(true);
     const bool enabled = state.filter.name_match.enabled;
-    PointerRNA props = nm_row.op("VIEW3D_OT_image_grid_name_match_enabled_toggle",
+    PointerRNA props = nm_row.op("IMAGE_GRID_OT_name_match_enabled_toggle",
                                  "",
                                  enabled ? ICON_FILTER_FILLED : ICON_FILTER);
     UNUSED_VARS(props);
@@ -1217,11 +1219,11 @@ static void draw_header_row(Layout &layout,
     Layout &popover_row = nm_row.row(false);
     popover_row.emboss_set(EmbossType::Emboss);
     popover_row.enabled_set(true);
-    popover_row.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
-    popover_row.popover(&C, "VIEW3D_PT_image_grid_name_match_filter", "", ICON_DOWNARROW_HLT);
+    popover_row.context_int_set(ed::image_grid::IMAGE_GRID_CONTEXT_SLOT_KEY, int(grid_slot));
+    popover_row.popover(&C, ed::image_grid::IMAGE_GRID_PT_NAME_MATCH_FILTER, "", ICON_DOWNARROW_HLT);
   }
   /* Display settings: preview thumbnail size (shared between texture and mask grids). */
-  image_grid_header_popover(row, C, "VIEW3D_PT_image_grid_display", ICON_IMGDISPLAY, is_mask_slot);
+  image_grid_header_popover(row, C, ed::image_grid::IMAGE_GRID_PT_DISPLAY, ICON_IMGDISPLAY, grid_slot);
 }
 
 static void build_image_grid(Layout &layout,
@@ -1229,7 +1231,7 @@ static void build_image_grid(Layout &layout,
                              ed::image_grid::ImageGridUIState &state,
                              PointerRNA &ptr,
                              PropertyRNA *prop,
-                             const bool is_mask_slot,
+                             const ed::image_grid::ImageGridSlot grid_slot,
                              const bool is_popover)
 {
   Block *block = layout.block();
@@ -1241,7 +1243,7 @@ static void build_image_grid(Layout &layout,
   /* Scroll/grip live in the shared session registry (Stage 4). Ensure this variant's session up
    * front so the column fallback and focus below read/write the pixel truth directly; the view
    * attaches to the same session via #use_session_scroll after it is built. */
-  const std::string grid_id = ed::image_grid::image_grid_session_id(*owner, is_mask_slot, is_popover);
+  const std::string grid_id = ed::image_grid::image_grid_session_id(*owner, grid_slot, is_popover);
   GridSessionState &session = grid_session_state_ensure(grid_id);
 
   /* While the N-Panel sidebar grid's resize-grip is the region's active button, keep the panels
@@ -1282,7 +1284,7 @@ static void build_image_grid(Layout &layout,
           clamp_i(int(divide_ceil_u(uint(grip_height), uint(tile_h_hint))),
                   1,
                   IMAGE_GRID_HOST.max_rows) :
-          (is_popover ? 3 : ed::image_grid::image_grid_effective_rows(*owner, is_mask_slot));
+          (is_popover ? 3 : ed::image_grid::image_grid_effective_rows(*owner, grid_slot));
 
   /* Column count for this panel's width; falls back to the session's last count when the width is
    * not yet known. Sidebar and popover use separate sessions, so neither reuses the other's.
@@ -1319,7 +1321,7 @@ static void build_image_grid(Layout &layout,
       C, state, state.filter.lib_ref, ptr, prop, cols_est, is_popover);
   view_unique->set_tile_size(tile_w, ui::preview_tile_size_y_no_label(preview_size));
   view_unique->set_cols_per_row_hint(cols_est);
-  const char *grid_view_id = is_mask_slot ? "image_asset_grid_mask" : "image_asset_grid";
+  const char *grid_view_id = grid_slot == ed::image_grid::ImageGridSlot::Mask ? "image_asset_grid_mask" : "image_asset_grid";
   AbstractGridView *grid_view = block_add_view(*block, grid_view_id, std::move(view_unique));
   /* Attach to the shared session so scroll survives the per-refresh rebuild and the unified input
    * handler drives this grid; keyed per variant so all four positions stay independent. */
@@ -1344,11 +1346,11 @@ static void build_image_grid(Layout &layout,
       const short row_count = short(clamp_i(round_fl_to_int(float(grip) / float(tile_h)),
                                             1,
                                             IMAGE_GRID_HOST.max_rows));
-      owner->slot_dna(is_mask_slot).rows = row_count;
+      owner->slot_dna(grid_slot).rows = row_count;
     }
   }
 
-  ImageGridStateAccess state_access(session, *owner, grid_id, is_mask_slot, is_popover);
+  ImageGridStateAccess state_access(session, *owner, grid_id, grid_slot, is_popover);
   build_grid_view(C,
                   grid_box,
                   *grid_view,
@@ -1373,26 +1375,31 @@ void template_asset_image_grid(
 
   /* Expose the texture-slot pointer to the whole template (tiles included), not just the
    * New/Open/Browse row below, so widget drop-target lookups (e.g. #brush_texture_slot_drop_target_get)
-   * can identify this slot regardless of where in the grid the pointer lands. */
+   * can identify this slot regardless of where in the grid the pointer lands. Host space and
+   * slot go on the same store so popovers/operators do not depend on #CTX_wm_view3d /
+   * #CTX_wm_space_image. */
+  const ed::image_grid::ImageGridSlot grid_slot = ed::image_grid::image_grid_slot_from_texture_ptr(*ptr);
   layout->context_ptr_set("image_grid_target", ptr);
+  PointerRNA owner_ptr = owner->owner_rna();
+  layout->context_ptr_set(ed::image_grid::IMAGE_GRID_CONTEXT_OWNER_KEY, &owner_ptr);
+  layout->context_int_set(ed::image_grid::IMAGE_GRID_CONTEXT_SLOT_KEY, int(grid_slot));
 
-  const bool is_mask_slot = ed::image_grid::image_grid_slot_is_mask(*ptr);
-  ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, is_mask_slot);
+  ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, grid_slot);
 
   ed::image_grid::image_grid_catalog_sanitize_selection(state);
   /* Called inside the template redraw; NC_BRUSH already triggered this pass, so
    * #image_grid_notify_change must not be called here to avoid a recursive refresh. */
-  ed::image_grid::image_grid_auto_focus_on_brush_change(*C, is_mask_slot);
+  ed::image_grid::image_grid_auto_focus_on_brush_change(*C, grid_slot);
 
   Block *block = layout->block();
 
   block_add_dynamic_listener(block, ed::asset::list::asset_reading_region_listen_fn);
   block_add_dynamic_listener(block, image_grid_block_listener);
 
-  if (ed::image_grid::image_grid_library_is_missing(*owner, is_mask_slot)) {
+  if (ed::image_grid::image_grid_library_is_missing(*owner, grid_slot)) {
     /* The header row is drawn first on purpose: it carries the library selector, which is how
      * the user recovers from a missing library. */
-    draw_header_row(*layout, state, *C, is_mask_slot);
+    draw_header_row(*layout, state, *C, grid_slot);
     layout->label(fmt::format(fmt::runtime(IFACE_("Library \"{}\" not found")),
                               state.filter.lib_ref.custom_library_name)
                       .c_str(),
@@ -1401,8 +1408,8 @@ void template_asset_image_grid(
     return;
   }
 
-  draw_header_row(*layout, state, *C, is_mask_slot);
-  build_image_grid(*layout, *C, state, *ptr, prop, is_mask_slot, is_popover);
+  draw_header_row(*layout, state, *C, grid_slot);
+  build_image_grid(*layout, *C, state, *ptr, prop, grid_slot, is_popover);
   add_browse_image_button(*layout, *C, state, *ptr);
 }
 

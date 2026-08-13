@@ -776,7 +776,13 @@ PaintMaterialBrushPreset *BKE_paint_material_brush_preset_ensure(Scene &scene, c
 
 void BKE_paint_material_brush_preset_apply(Scene &scene, Brush &brush)
 {
-  PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_ensure(scene, brush);
+  /* Do not create a default preset or allocate #Brush.material_paint here. That is the PBR Paint
+   * opt-in (#PAINT_OT_material_paint_brush_ensure). Switching brushes must not expand the PBR UI
+   * for a brush the user has never set up. */
+  PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_find(scene, brush);
+  if (preset == nullptr) {
+    return;
+  }
   BKE_brush_material_paint_ensure(&brush);
   BKE_brush_material_paint_copy_into(*brush.material_paint, *preset->material_paint);
 }
@@ -3782,6 +3788,72 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
   *r_image = image;
   *r_iuser = &storage->iuser;
   return true;
+}
+
+int BKE_paint_material_images_ensure_writable(Main &bmain,
+                                              Object &ob,
+                                              const BrushMaterialPaint &brush_paint,
+                                              const PaintModeSettings &mode_settings)
+{
+  BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
+
+  int created = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.socket_name == nullptr) {
+      continue;
+    }
+    if (!BKE_paint_material_channel_writes_to_target(brush_paint, mode_settings, info.channel)) {
+      continue;
+    }
+    Image *existing = nullptr;
+    ImageUser *existing_iuser = nullptr;
+    const bool already_had = BKE_paint_principled_channel_image_get(
+        ob, info.channel, &existing, &existing_iuser);
+
+    Image *image = nullptr;
+    ImageUser *iuser = nullptr;
+    if (!BKE_paint_principled_channel_image_ensure(
+            bmain, ob, info.channel, mode_settings.new_channel_image_size, &image, &iuser))
+    {
+      continue;
+    }
+    if (!already_had) {
+      created++;
+    }
+  }
+  return created;
+}
+
+void BKE_paint_material_enable_added_visible_channels(Scene &scene, const int added_channel_bits)
+{
+  if (added_channel_bits == 0 || scene.toolsettings == nullptr) {
+    return;
+  }
+
+  auto enable_on_brush = [added_channel_bits](Brush *brush) {
+    if (brush == nullptr || brush->material_paint == nullptr) {
+      return;
+    }
+    bool changed = false;
+    for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+      if ((added_channel_bits & (1 << channel)) == 0) {
+        continue;
+      }
+      BrushMaterialPaintChannel &entry = brush->material_paint->channels[channel];
+      if (entry.use == 0) {
+        entry.use = 1;
+        changed = true;
+      }
+    }
+    if (changed) {
+      BKE_brush_tag_unsaved_changes(brush);
+    }
+  };
+
+  if (scene.toolsettings->sculpt != nullptr) {
+    enable_on_brush(BKE_paint_brush(&scene.toolsettings->sculpt->paint));
+  }
+  enable_on_brush(BKE_paint_brush(&scene.toolsettings->imapaint.paint));
 }
 
 bool BKE_paint_material_face_matches_active_slot(const Object &ob, const int face_material_index)

@@ -5424,10 +5424,8 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   {
     Mesh &mesh = *id_cast<Mesh *>(ob.data);
     bool any_created = false;
-    /* Per-channel settings are lazily allocated; seed them so a first stroke on a fresh brush
-     * paints instead of silently no-opping. `brush` above is const (for-read); fetch a mutable
-     * handle to the same brush just to ensure the storage. */
-    BKE_brush_material_paint_ensure(BKE_paint_brush(&sd.paint));
+    /* Per-channel settings are allocated by the PBR Paint opt-in button, not by the first
+     * stroke. A fresh brush without that setup paints nothing on this canvas. */
     if (brush->material_paint != nullptr) {
       const BrushMaterialPaint &brush_paint = *brush->material_paint;
       for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
@@ -5479,17 +5477,17 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
     }
   }
 
-  /* Material canvas: do not create Image IDs or nodetree links here. That mutates Main without
-   * a memfile undo step; maps are created by #PAINT_OT_material_paint_images_ensure. Invalidate
-   * the resolve cache so this stroke does not write into a stale Image after undo or a Shader
-   * Editor edit. */
+  /* Material canvas: create missing Image Texture maps for enabled channels so a stroke can
+   * write. Invalidate the resolve cache so this stroke does not write into a stale Image after
+   * undo or a Shader Editor edit. */
   if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
       paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL && ob.type == OB_MESH)
   {
-    BKE_brush_material_paint_ensure(BKE_paint_brush(&sd.paint));
     BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
     if (brush->material_paint != nullptr) {
       const BrushMaterialPaint &brush_paint = *brush->material_paint;
+      BKE_paint_material_images_ensure_writable(
+          *CTX_data_main(C), ob, brush_paint, paint_mode_init);
       for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
         if (info.socket_name == nullptr) {
           continue;

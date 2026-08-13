@@ -1296,6 +1296,21 @@ TEST_F(PaintMaterialChannelTest, PresetKeyDoesNotCollideBetweenTwoLocalBrushes)
   BKE_id_free(bmain, scene);
 }
 
+TEST_F(PaintMaterialChannelTest, ApplyDoesNotCreateMaterialPaintWithoutPreset)
+{
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "NoPresetApplyScene"));
+  Brush *brush = BKE_brush_add(bmain, "NeverOptedIn", OB_MODE_SCULPT);
+  ASSERT_EQ(brush->material_paint, nullptr);
+
+  BKE_paint_material_brush_preset_apply(*scene, *brush);
+
+  EXPECT_EQ(brush->material_paint, nullptr)
+      << "switching onto a brush must not opt it into PBR Paint";
+  EXPECT_EQ(BKE_paint_material_brush_preset_find(*scene, *brush), nullptr);
+
+  BKE_id_free(bmain, scene);
+}
+
 TEST_F(PaintMaterialChannelTest, ApplyCopiesPresetOntoBrush)
 {
   Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "ApplyScene"));
@@ -1312,6 +1327,24 @@ TEST_F(PaintMaterialChannelTest, ApplyCopiesPresetOntoBrush)
   ASSERT_NE(brush->material_paint, nullptr);
   EXPECT_TRUE(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_NORMAL].use);
   EXPECT_FLOAT_EQ(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[2], 0.5f);
+
+  BKE_id_free(bmain, scene);
+}
+
+TEST_F(PaintMaterialChannelTest, EnableAddedVisibleChannelsSetsUse)
+{
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "VisibleUseScene"));
+  Sculpt *sculpt_data = MEM_new<Sculpt>(__func__);
+  scene->toolsettings->sculpt = sculpt_data;
+  sculpt_data->paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  Brush *brush = BKE_brush_add(bmain, "VisibleUseBrush", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+  brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA].use = 0;
+  sculpt_data->paint.brush = brush;
+
+  BKE_paint_material_enable_added_visible_channels(*scene, 1 << PAINT_MATERIAL_CHANNEL_ALPHA);
+
+  EXPECT_TRUE(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA].use);
 
   BKE_id_free(bmain, scene);
 }

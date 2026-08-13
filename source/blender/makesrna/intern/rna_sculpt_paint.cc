@@ -532,6 +532,20 @@ static void rna_PaintModeSettings_brush_sync_update(bContext *C, PointerRNA * /*
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
 }
 
+static void rna_PaintModeSettings_visible_material_channels_set(PointerRNA *ptr, int value)
+{
+  PaintModeSettings *settings = static_cast<PaintModeSettings *>(ptr->data);
+  const int added = value & ~settings->visible_material_channels;
+  settings->visible_material_channels = value;
+  Scene *scene = reinterpret_cast<Scene *>(ptr->owner_id);
+  if (scene != nullptr) {
+    BKE_paint_material_enable_added_visible_channels(*scene, added);
+    if (added != 0) {
+      WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);
+    }
+  }
+}
+
 /** \} */
 
 static bool rna_ImaPaint_detect_data(ImagePaintSettings *imapaint)
@@ -1564,6 +1578,8 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "list and painted during strokes; hidden channels keep their settings "
                            "but are skipped until shown again");
   RNA_def_property_enum_sdna(prop, nullptr, "visible_material_channels");
+  RNA_def_property_enum_funcs(
+      prop, nullptr, "rna_PaintModeSettings_visible_material_channels_set", nullptr);
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_enum_flag(srna,

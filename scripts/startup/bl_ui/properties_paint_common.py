@@ -1474,9 +1474,10 @@ def draw_material_paint_visibility_popover(_context, layout, paint_mode_settings
     Material Paint vertex color canvas) a second checkbox for whether each channel's painted data
     is displayed in the 3D Viewport.
 
-    The "PBR Paint list" checkbox is independent of each channel's `use` (paint-enabled) flag -
-    hiding a channel here does not clear its value or source texture, but it removes the channel
-    from the UI and skips it during painting until shown again.
+    The "PBR Paint list" checkbox is independent of hiding: turning a channel on here also
+    enables its paint `use` flag so the channel row appears ready to assign a source texture.
+    Hiding a channel does not clear `use`, its value, or source texture, but it removes the
+    channel from the UI and skips it during painting until shown again.
 
     The "Shader" checkbox (Material Paint only) is independent of both of the above: painting and
     display are separate concerns; a channel can keep its painted data hidden from shading, or
@@ -1535,6 +1536,29 @@ def draw_material_paint_sync_toggle(layout, paint_mode_settings):
         icon='UV_SYNC_SELECT',
         toggle=True,
     )
+
+
+def material_paint_missing_map_channels(ob, brush, paint_mode_settings):
+    """Channel identifiers that are writable but have no Principled Image Texture yet.
+
+    Height, AO and Custom have no Principled socket, so they cannot be created as maps and are
+    omitted. Returns an empty set when there is no usable brush (distinct from every writable
+    channel already having a map).
+    """
+    writable = material_paint_writable_channels(brush, paint_mode_settings)
+    if writable is None:
+        return set()
+    has_image_fn = getattr(ob, "principled_paint_channel_has_image", None) if ob else None
+    map_ids = {
+        'BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL', 'ALPHA', 'EMISSION',
+    }
+    missing = set()
+    for channel_id in writable:
+        if channel_id not in map_ids:
+            continue
+        if has_image_fn is None or not has_image_fn(channel_id):
+            missing.add(channel_id)
+    return missing
 
 
 def material_paint_writable_channels(brush, paint_mode_settings):
@@ -1650,15 +1674,19 @@ def draw_material_paint_channels(
     # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.
     _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
 
-    # Image maps are created by an undoable operator, not by the first stroke.
+    # Image maps: resolution only matters while at least one enabled channel still needs a map.
     if not show_custom and paint_mode is not None:
-        row = layout.row(align=True)
-        row.operator(
-            "paint.material_paint_images_ensure",
-            text="Create Missing Maps",
-            icon='IMAGE_DATA',
+        missing_maps = material_paint_missing_map_channels(
+            getattr(context, "active_object", None), brush, paint_mode,
         )
-        row.prop(paint_mode, "new_channel_image_size", text="")
+        if missing_maps:
+            row = layout.row(align=True)
+            row.operator(
+                "paint.material_paint_images_ensure",
+                text="Create Missing Maps",
+                icon='IMAGE_DATA',
+            )
+            row.prop(paint_mode, "new_channel_image_size", text="")
 
     if any(channels[channel_id].use for channel_id in toggle_ids):
         layout.separator()

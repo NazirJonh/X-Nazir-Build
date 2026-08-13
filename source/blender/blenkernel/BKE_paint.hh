@@ -889,9 +889,9 @@ PaintMaterialBrushPreset *BKE_paint_material_brush_preset_find(Scene &scene, con
  *  found. Never returns null. */
 PaintMaterialBrushPreset *BKE_paint_material_brush_preset_ensure(Scene &scene, const Brush &brush);
 
-/** Overwrites \a brush's #Brush.material_paint (creating it via
- *  #BKE_brush_material_paint_ensure if needed) from the preset in \a scene matching \a brush's
- *  identity, creating that preset (seeded from \a brush's current state) if none exists yet. */
+/** Overwrites \a brush's #Brush.material_paint from the preset in \a scene matching \a brush's
+ *  identity. No-op if there is no preset yet — does not allocate #Brush.material_paint or create
+ *  a default preset. Opt-in is #PAINT_OT_material_paint_brush_ensure. */
 void BKE_paint_material_brush_preset_apply(Scene &scene, Brush &brush);
 
 /** Overwrites the preset in \a scene matching \a brush's identity (creating it if needed) from
@@ -1047,8 +1047,8 @@ Image *BKE_paint_material_preferred_display_image(Object &ob);
  * socket exists and has no incoming link, creates a generated blank Image with the color space
  * required by the channel, adds an Image Texture node for it, and links it to the socket, then
  * returns it.
- * Intended for #PAINT_OT_material_paint_images_ensure (an undoable operator). Do not call from
- * stroke init: creating Image IDs and nodetree links must be a memfile undo step.
+ * Used by #PAINT_OT_material_paint_images_ensure and by Material-canvas stroke init when a
+ * writable channel has no map yet. Created Image IDs persist if the stroke itself is undone.
  * Does nothing and returns false when there is no material, no node tree, no Principled
  * BSDF, no matching socket, or the socket is already driven by something other than a
  * (missing/invalid) Image Texture. Channels without a socket (Custom) always return false.
@@ -1062,6 +1062,21 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
                                                int image_size,
                                                Image **r_image,
                                                ImageUser **r_iuser);
+
+/**
+ * Create missing Principled maps for every channel this brush currently writes to.
+ * \return number of newly created images.
+ */
+int BKE_paint_material_images_ensure_writable(Main &bmain,
+                                              Object &ob,
+                                              const BrushMaterialPaint &brush_paint,
+                                              const PaintModeSettings &mode_settings);
+
+/**
+ * When channels are newly shown in #PaintModeSettings.visible_material_channels, also enable
+ * their per-brush `use` flag so they can be painted and assigned a source immediately.
+ */
+void BKE_paint_material_enable_added_visible_channels(Scene &scene, int added_channel_bits);
 
 /**
  * One Principled map target for Mode=`Material` multi-channel image paint.

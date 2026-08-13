@@ -668,10 +668,9 @@ static wmOperatorStatus material_paint_images_ensure_exec(bContext *C, wmOperato
   const PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
   Main *bmain = CTX_data_main(C);
   const BrushMaterialPaint &brush_paint = *brush->material_paint;
-  int created = 0;
+  const int created = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings);
   int missing = 0;
-
-  BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(ob, ob->actcol));
 
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (info.socket_name == nullptr) {
@@ -680,25 +679,14 @@ static wmOperatorStatus material_paint_images_ensure_exec(bContext *C, wmOperato
     if (!BKE_paint_material_channel_writes_to_target(brush_paint, mode_settings, info.channel)) {
       continue;
     }
-    Image *existing = nullptr;
-    ImageUser *existing_iuser = nullptr;
-    const bool already_had = BKE_paint_principled_channel_image_get(
-        *ob, info.channel, &existing, &existing_iuser);
-
     Image *image = nullptr;
     ImageUser *iuser = nullptr;
-    if (!BKE_paint_principled_channel_image_ensure(
-            *bmain, *ob, info.channel, mode_settings.new_channel_image_size, &image, &iuser))
-    {
+    if (!BKE_paint_principled_channel_image_get(*ob, info.channel, &image, &iuser)) {
       missing++;
       BKE_reportf(op->reports,
                   RPT_WARNING,
                   "%s channel has no paintable image texture on the active material",
                   info.ui_name);
-      continue;
-    }
-    if (!already_had) {
-      created++;
     }
   }
 

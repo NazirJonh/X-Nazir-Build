@@ -61,6 +61,7 @@
 #include "paint_area_plane_2d.hh"
 #include "paint_material_source.hh"
 
+#include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 
@@ -2981,12 +2982,9 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     }
 
     Brush *brush = BKE_paint_brush(&settings->imapaint.paint);
-    if (brush == nullptr) {
+    if (brush == nullptr || brush->material_paint == nullptr) {
       return nullptr;
     }
-    /* Per-channel settings are lazily allocated. Seeding them here instead of bailing keeps a
-     * first stroke on a fresh brush from silently doing nothing. */
-    BKE_brush_material_paint_ensure(brush);
     const BrushMaterialPaint &brush_paint = *brush->material_paint;
 
     /* #Material.paint_channel_cache is only refreshed on writes made through this API (see its
@@ -2998,9 +2996,10 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
      * below, and removes that whole class of staleness. */
     BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(ob, ob->actcol));
 
-    /* Maps are created by #PAINT_OT_material_paint_images_ensure, not by the stroke. Missing
-     * images are skipped by #BKE_paint_material_image_targets_get; warn so a silent no-op is
-     * not mistaken for a successful stroke. */
+    Main *bmain = CTX_data_main(C);
+    BKE_paint_material_images_ensure_writable(*bmain, *ob, brush_paint, paint_mode);
+    ED_space_image_paint_auto_select_material_canvas(bmain, ob);
+
     for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
       if (info.socket_name == nullptr) {
         continue;

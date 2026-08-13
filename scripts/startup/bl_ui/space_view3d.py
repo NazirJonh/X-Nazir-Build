@@ -1043,17 +1043,6 @@ class VIEW3D_HT_header(Header):
                 icon=VIEW3D_HT_header._texture_mask_icon(tool_settings.image_paint),
                 text="",
             )
-
-            canvas_source = tool_settings.paint_mode.canvas_source
-            # Mode identifiers MATERIAL/IMAGE coincide with icon names; others need a map.
-            match canvas_source:
-                case 'COLOR_ATTRIBUTE':
-                    canvas_icon = 'GROUP_VCOL'
-                case 'MATERIAL_PAINT':
-                    canvas_icon = 'MATERIAL_DATA'
-                case _:
-                    canvas_icon = canvas_source
-            layout.popover(panel="VIEW3D_PT_slots_paint_canvas", icon=canvas_icon)
         else:
             # Transform settings depending on tool header visibility
             VIEW3D_HT_header.draw_xform_template(layout, context)

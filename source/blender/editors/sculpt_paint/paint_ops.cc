@@ -709,6 +709,8 @@ static wmOperatorStatus material_paint_images_ensure_exec(bContext *C, wmOperato
     BKE_reportf(op->reports, RPT_INFO, "Created %d material paint image map(s)", created);
   }
 
+  ED_space_image_paint_auto_select_material_canvas(bmain, ob);
+
   WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, nullptr);
   WM_event_add_notifier(C, NC_NODE | NA_EDITED, nullptr);
   return (created > 0 || missing == 0) ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
@@ -724,6 +726,20 @@ void PAINT_OT_material_paint_images_ensure(wmOperatorType *ot)
   ot->exec = material_paint_images_ensure_exec;
   ot->poll = ED_operator_object_active_editable;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static bool material_paint_brush_sync_poll(bContext *C)
+{
+  if (!ED_operator_object_active_editable(C)) {
+    return false;
+  }
+  /* Texture Paint shares Image Paint's brush with the Image Editor. Sync from that mode would
+   * overwrite an already configured Image Editor: Paint / Sculpt pair. */
+  const Object *ob = CTX_data_active_object(C);
+  if (ob != nullptr && (ob->mode & OB_MODE_TEXTURE_PAINT)) {
+    return false;
+  }
+  return true;
 }
 
 static wmOperatorStatus material_paint_brush_sync_exec(bContext *C, wmOperator *op)
@@ -786,7 +802,7 @@ void PAINT_OT_material_paint_brush_sync(wmOperatorType *ot)
       "Editor Paint), so their channel settings share one Brush datablock instead of drifting "
       "apart";
   ot->exec = material_paint_brush_sync_exec;
-  ot->poll = ED_operator_object_active_editable;
+  ot->poll = material_paint_brush_sync_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 

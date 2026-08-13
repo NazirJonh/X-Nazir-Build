@@ -44,6 +44,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_types.hh"
 #include "BKE_workspace.hh"
 
 #include "RNA_access.hh"
@@ -298,6 +299,17 @@ static void toolsystem_brush_type_binding_update(Paint *paint,
   }
 }
 
+static bool toolsystem_texture3d_must_not_touch_material_brush(const Scene *scene,
+                                                               const PaintMode paint_mode)
+{
+  /* 3D Texture Paint shares #ImagePaintSettings with Image Editor: Paint. Restoring a Texture
+   * Paint brush or syncing from that mode overwrites the Image Editor / Sculpt PBR pair. */
+  if (paint_mode != PaintMode::Texture3D || scene == nullptr || scene->toolsettings == nullptr) {
+    return false;
+  }
+  return scene->toolsettings->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL;
+}
+
 bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *brush)
 {
   const bToolRef *active_tool = toolsystem_active_tool_from_context_or_view3d(C);
@@ -340,12 +352,14 @@ bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *bru
    * single user-facing path for changing the active brush (asset shelf, toolbar, operators), so
    * whichever editor the change came from becomes the source. */
   if (Scene *scene = CTX_data_scene(C)) {
-    if (Paint *synced_paint = BKE_paint_material_sync_target_get(scene, paint)) {
-      BKE_paint_material_brush_sync(scene, paint);
-      /* The receiving editor's tool is not switched - that would require its space to be active -
-       * but its binding must follow the new brush, otherwise the next tool change there restores
-       * the previously remembered brush and silently undoes the sync. */
-      toolsystem_main_brush_binding_update_from_active(synced_paint);
+    if (!toolsystem_texture3d_must_not_touch_material_brush(scene, paint_mode)) {
+      if (Paint *synced_paint = BKE_paint_material_sync_target_get(scene, paint)) {
+        BKE_paint_material_brush_sync(scene, paint);
+        /* The receiving editor's tool is not switched - that would require its space to be active -
+         * but its binding must follow the new brush, otherwise the next tool change there restores
+         * the previously remembered brush and silently undoes the sync. */
+        toolsystem_main_brush_binding_update_from_active(synced_paint);
+      }
     }
   }
 
@@ -448,8 +462,10 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
     const bool skip_image_restore_for_sync = paint == &scene->toolsettings->imapaint.paint &&
                                              BKE_paint_material_sync_target_get(scene, paint) !=
                                                  nullptr;
+    const bool skip_texture3d_material = toolsystem_texture3d_must_not_touch_material_brush(
+        scene, paint_mode);
 
-    if (!skip_image_restore_for_sync) {
+    if (!skip_texture3d_material && !skip_image_restore_for_sync) {
       /* Attempt to re-activate a brush remembered for this brush type, as stored in a brush
        * binding. */
       if (std::optional<AssetWeakReference> brush_asset_reference =
@@ -464,7 +480,9 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
       }
     }
 
-    toolsystem_material_brush_sync_from_sculpt(scene);
+    if (!skip_texture3d_material) {
+      toolsystem_material_brush_sync_from_sculpt(scene);
+    }
   }
 }
 

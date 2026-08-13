@@ -20,6 +20,7 @@ struct ImBuf;
 struct Image;
 struct ImageUser;
 struct Main;
+struct Object;
 struct ReportList;
 struct Scene;
 struct SpaceImage;
@@ -51,6 +52,11 @@ Image *ED_space_image(const SpaceImage *sima);
 void ED_space_image_set(Main *bmain, SpaceImage *sima, Image *ima, bool automatic);
 void ED_space_image_sync(Main *bmain, Image *image, bool ignore_render_viewer);
 void ED_space_image_auto_set(const bContext *C, SpaceImage *sima);
+/**
+ * If an Image Editor is in Paint mode with no image selected, show the preferred Material canvas
+ * map for \a ob (Base Color first; Normal and Alpha last). Does not override a user selection.
+ */
+void ED_space_image_paint_auto_select_material_canvas(Main *bmain, Object *ob);
 Mask *ED_space_image_get_mask(const SpaceImage *sima);
 void ED_space_image_set_mask(bContext *C, SpaceImage *sima, Mask *mask);
 

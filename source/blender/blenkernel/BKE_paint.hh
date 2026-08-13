@@ -1035,6 +1035,14 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
                                             ImageUser **r_iuser);
 
 /**
+ * Image the Image Editor should show for the Material canvas when nothing is selected.
+ *
+ * Prefers Base Color, then other created Principled maps, with Normal and Alpha last.
+ * Returns null when no paintable map is wired on the active material.
+ */
+Image *BKE_paint_material_preferred_display_image(Object &ob);
+
+/**
  * Same as #BKE_paint_principled_channel_image_get, but when \a channel's Principled
  * socket exists and has no incoming link, creates a generated blank Image with the color space
  * required by the channel, adds an Image Texture node for it, and links it to the socket, then

@@ -83,6 +83,7 @@
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
+#include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
@@ -5513,6 +5514,7 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
       ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
           ss, *brush, brush_paint, paint_mode_init);
     }
+    ED_space_image_paint_auto_select_material_canvas(CTX_data_main(C), &ob);
   }
 
   /* CTX_data_ensure_evaluated_depsgraph should be used at the end to include the updates of

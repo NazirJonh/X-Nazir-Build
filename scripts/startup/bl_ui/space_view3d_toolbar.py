@@ -333,14 +333,12 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
     @classmethod
     def poll(cls, context):
         ob = context.active_object
-        if ob is None or ob.mode not in {'TEXTURE_PAINT', 'SCULPT'}:
+        if ob is None or ob.mode != 'SCULPT':
             return False
-        if ob.mode == 'SCULPT':
-            # Material Paint channels only work with the Paint brush type; deformation brushes
-            # (Grab, Smooth, etc.) have no material-channel sampling/blending behind them.
-            brush = context.tool_settings.sculpt.brush
-            return brush is not None and brush.sculpt_brush_type == 'PAINT'
-        return True
+        # Material Paint channels only work with the Paint brush type; deformation brushes
+        # (Grab, Smooth, etc.) have no material-channel sampling/blending behind them.
+        brush = context.tool_settings.sculpt.brush
+        return brush is not None and brush.sculpt_brush_type == 'PAINT'
 
     def draw_header(self, context):
         layout = self.layout
@@ -692,25 +690,18 @@ class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
     @classmethod
     def poll(cls, context):
         ob = context.active_object
-        if ob is None or ob.mode not in {'TEXTURE_PAINT', 'SCULPT'}:
+        if ob is None or ob.mode != 'SCULPT':
             return False
-        if ob.mode == 'SCULPT':
-            # Material Paint channels only work with the Paint brush type; Smear, other sculpt
-            # brushes, and non-brush tools have no material-channel sampling/blending behind them.
-            brush = context.tool_settings.sculpt.brush
-            return brush is not None and brush.sculpt_brush_type == 'PAINT'
-        return True
+        # Material Paint channels only work with the Paint brush type; Smear, other sculpt
+        # brushes, and non-brush tools have no material-channel sampling/blending behind them.
+        brush = context.tool_settings.sculpt.brush
+        return brush is not None and brush.sculpt_brush_type == 'PAINT'
 
     def get_mode_settings(self, context):
         return context.tool_settings.paint_mode
 
     def get_active_brush(self, context):
-        # This popover covers both Sculpt and Texture Paint (see #poll); each mode keeps its
-        # active brush in a different tool_settings slot.
-        ob = context.active_object
-        if ob is not None and ob.mode == 'SCULPT':
-            return context.tool_settings.sculpt.brush
-        return context.tool_settings.image_paint.brush
+        return context.tool_settings.sculpt.brush
 
     def draw_image_interpolation(self, **_kwargs):
         pass

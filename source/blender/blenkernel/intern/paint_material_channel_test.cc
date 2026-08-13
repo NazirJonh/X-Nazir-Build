@@ -110,6 +110,25 @@ class PaintMaterialChannelTest : public bke::BlenderGTestBase {
     tex->id = &image.id;
     return tex;
   }
+
+  void link_image_to_socket(Material &ma, Image &image, const char *socket)
+  {
+    bNodeTree &ntree = *ma.nodetree;
+    bNode *principled = nullptr;
+    for (bNode &node : ntree.nodes) {
+      if (node.type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+        principled = &node;
+        break;
+      }
+    }
+    BLI_assert(principled != nullptr);
+    bNode *tex = add_image_texture(ntree, image);
+    bke::node_add_link(ntree,
+                       *tex,
+                       *bke::node_find_socket(*tex, SOCK_OUT, "Color"_ustr),
+                       *principled,
+                       *bke::node_find_socket(*principled, SOCK_IN, UString(socket)));
+  }
 };
 
 TEST(paint_material_channel, default_value_metallic_is_zero)
@@ -339,6 +358,62 @@ TEST_F(PaintMaterialChannelTest, custom_channel_range_clamps_value)
                                                            PAINT_MATERIAL_CHANNEL_METALLIC);
   EXPECT_FLOAT_EQ(metallic.x, 0.0f);
   EXPECT_FLOAT_EQ(metallic.y, 1.0f);
+}
+
+TEST_F(PaintMaterialChannelTest, preferred_display_image_prefers_base_color)
+{
+  Object *ob = add_mesh_object("PrefBaseOb");
+  Material *ma = add_material_with_principled(*ob, "PrefBaseMat");
+  Image *base = add_image("PrefBaseColor");
+  Image *metallic = add_image("PrefMetallic");
+  Image *normal = add_image("PrefNormal");
+  link_image_to_socket(*ma, *base, "Base Color");
+  link_image_to_socket(*ma, *metallic, "Metallic");
+  link_image_to_socket(*ma, *normal, "Normal");
+
+  EXPECT_EQ(BKE_paint_material_preferred_display_image(*ob), base);
+}
+
+TEST_F(PaintMaterialChannelTest, preferred_display_image_skips_missing_base_color)
+{
+  Object *ob = add_mesh_object("PrefSkipBaseOb");
+  Material *ma = add_material_with_principled(*ob, "PrefSkipBaseMat");
+  Image *metallic = add_image("PrefSkipMetallic");
+  Image *normal = add_image("PrefSkipNormal");
+  link_image_to_socket(*ma, *metallic, "Metallic");
+  link_image_to_socket(*ma, *normal, "Normal");
+
+  EXPECT_EQ(BKE_paint_material_preferred_display_image(*ob), metallic);
+}
+
+TEST_F(PaintMaterialChannelTest, preferred_display_image_normal_before_alpha)
+{
+  Object *ob = add_mesh_object("PrefNormalAlphaOb");
+  Material *ma = add_material_with_principled(*ob, "PrefNormalAlphaMat");
+  Image *normal = add_image("PrefOnlyNormal");
+  Image *alpha = add_image("PrefOnlyAlpha");
+  link_image_to_socket(*ma, *normal, "Normal");
+  link_image_to_socket(*ma, *alpha, "Alpha");
+
+  EXPECT_EQ(BKE_paint_material_preferred_display_image(*ob), normal);
+}
+
+TEST_F(PaintMaterialChannelTest, preferred_display_image_alpha_when_only_map)
+{
+  Object *ob = add_mesh_object("PrefAlphaOb");
+  Material *ma = add_material_with_principled(*ob, "PrefAlphaMat");
+  Image *alpha = add_image("PrefSoloAlpha");
+  link_image_to_socket(*ma, *alpha, "Alpha");
+
+  EXPECT_EQ(BKE_paint_material_preferred_display_image(*ob), alpha);
+}
+
+TEST_F(PaintMaterialChannelTest, preferred_display_image_none_without_maps)
+{
+  Object *ob = add_mesh_object("PrefEmptyOb");
+  add_material_with_principled(*ob, "PrefEmptyMat");
+
+  EXPECT_EQ(BKE_paint_material_preferred_display_image(*ob), nullptr);
 }
 
 TEST_F(PaintMaterialChannelTest, principled_direct_image_found)

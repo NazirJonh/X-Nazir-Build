@@ -3647,6 +3647,29 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
   return true;
 }
 
+Image *BKE_paint_material_preferred_display_image(Object &ob)
+{
+  /* Base Color first, then the other created maps, Normal and Alpha last so a missing color map
+   * does not land the Image Editor on a tangent or mask image. */
+  static const eMaterialPaintChannel priority[] = {
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      PAINT_MATERIAL_CHANNEL_METALLIC,
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_SPECULAR,
+      PAINT_MATERIAL_CHANNEL_EMISSION,
+      PAINT_MATERIAL_CHANNEL_NORMAL,
+      PAINT_MATERIAL_CHANNEL_ALPHA,
+  };
+  for (const eMaterialPaintChannel channel : priority) {
+    Image *image = nullptr;
+    ImageUser *iuser = nullptr;
+    if (BKE_paint_principled_channel_image_get(ob, channel, &image, &iuser)) {
+      return image;
+    }
+  }
+  return nullptr;
+}
+
 bool BKE_paint_principled_channel_image_ensure(Main &bmain,
                                                Object &ob,
                                                eMaterialPaintChannel channel,

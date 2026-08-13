@@ -731,21 +731,27 @@ void ED_object_texture_paint_mode_enter_ex(Main &bmain,
 
   ED_paint_proj_mesh_data_check(scene, ob, nullptr, nullptr, nullptr, nullptr);
 
-  /* entering paint mode also sets image to editors */
-  if (imapaint.mode == IMAGEPAINT_MODE_MATERIAL) {
-    /* set the current material active paint slot on image editor */
-    Material *ma = BKE_object_material_get(&ob, ob.actcol);
+  /* Entering Texture Paint used to push the active paint slot into every unpinned Image Editor.
+   * With the Material canvas that overwrites Image Editor: Paint after the user already chose a
+   * map (or left it empty for PBR auto-select). Classic IMAGE canvas still syncs. */
+  const bool skip_image_editor_sync =
+      scene.toolsettings->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL;
+  if (!skip_image_editor_sync) {
+    if (imapaint.mode == IMAGEPAINT_MODE_MATERIAL) {
+      /* set the current material active paint slot on image editor */
+      Material *ma = BKE_object_material_get(&ob, ob.actcol);
 
-    if (ma && ma->texpaintslot) {
-      ima = ma->texpaintslot[ma->paint_active_slot].ima;
+      if (ma && ma->texpaintslot) {
+        ima = ma->texpaintslot[ma->paint_active_slot].ima;
+      }
     }
-  }
-  else if (imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
-    ima = imapaint.canvas;
-  }
+    else if (imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
+      ima = imapaint.canvas;
+    }
 
-  if (ima) {
-    ED_space_image_sync(&bmain, ima, false);
+    if (ima) {
+      ED_space_image_sync(&bmain, ima, false);
+    }
   }
 
   ob.mode |= OB_MODE_TEXTURE_PAINT;

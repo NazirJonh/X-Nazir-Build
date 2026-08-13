@@ -1760,20 +1760,24 @@ static bool paint_2d_use_area_plane(const BrushPainter *painter)
          painter->area_plane_mesh->is_valid();
 }
 
-static void paint_2d_sample_area_mtex(const BrushPainter *painter,
-                                      const MTex *mtex,
-                                      const float4x4 &local_mat,
-                                      const float3 &position,
-                                      const int thread,
-                                      ImagePool *pool,
-                                      float *r_value,
-                                      float4 &r_rgba)
+static void paint_2d_sample_area_mtex(
+    const BrushPainter *painter,
+    const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source,
+    const float4x4 &local_mat,
+    const float3 &position,
+    const int thread,
+    ImagePool *pool,
+    float *r_value,
+    float4 &r_rgba)
 {
   float3 point = position;
   mul_m4_v3(local_mat.ptr(), point);
+  const MTex *mtex = source.mtex;
   const float tex_x = point.x * mtex->size[0] + mtex->ofs[0];
   const float tex_y = point.y * mtex->size[1] + mtex->ofs[1];
-  paint_get_tex_pixel(mtex, tex_x, tex_y, pool, thread, r_value, r_rgba);
+  if (!painter->channel_sources->sample_image_direct(source, tex_x, tex_y, r_value, r_rgba)) {
+    paint_get_tex_pixel(mtex, tex_x, tex_y, pool, thread, r_value, r_rgba);
+  }
   add_v3_fl(r_rgba, painter->brush->texture_sample_bias);
   *r_value -= painter->brush->texture_sample_bias;
 }
@@ -1850,7 +1854,7 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
       painter->channel_sources->source(channel);
   float value;
   float4 sampled;
-  paint_2d_sample_area_mtex(painter, source.mtex, local_mat, position, thread, pool, &value, sampled);
+  paint_2d_sample_area_mtex(painter, source, local_mat, position, thread, pool, &value, sampled);
 
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
@@ -1891,7 +1895,7 @@ static float paint_2d_area_sample_alpha_factor(const BrushPainter *painter,
     float value;
     float4 sampled;
     paint_2d_sample_area_mtex(painter,
-                              painter->channel_sources->source(PAINT_MATERIAL_CHANNEL_ALPHA).mtex,
+                              painter->channel_sources->source(PAINT_MATERIAL_CHANNEL_ALPHA),
                               alpha_local_mat,
                               position,
                               thread,

@@ -21,7 +21,7 @@
  * Set to 1 to enable all PBR debug logging, 0 to compile it all out.
  * \{ */
 
-#define PBR_PAINT_DEBUG_LOG 0
+#define PBR_PAINT_DEBUG_LOG 1
 
 /** \} */
 

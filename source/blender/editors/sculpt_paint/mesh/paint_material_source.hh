@@ -20,6 +20,7 @@
 struct Brush;
 struct BrushMaterialPaint;
 struct ImagePool;
+struct ImBuf;
 struct Object;
 struct PaintModeSettings;
 struct SculptSession;
@@ -69,6 +70,17 @@ class ChannelSourceSet {
      * texel/vertex sample of a stroke.
      */
     bool flip_green_channel = false;
+    /**
+     * Pinned #ImBuf for a #TEX_IMAGE source, acquired from the stroke pool at construct.
+     * Null when the source is not a loadable image. Released in #ChannelSourceSet's destructor.
+     * Read-only for the rest of the stroke.
+     */
+    ImBuf *ibuf = nullptr;
+    /**
+     * True when this source is a plain image texture that #sample_image_direct can sample
+     * without #RE_texture_evaluate (no nodes, no UDIM, default crop/filter/color).
+     */
+    bool image_direct_sample = false;
   };
 
  private:
@@ -84,6 +96,19 @@ class ChannelSourceSet {
   bool channel_source_failed(eMaterialPaintChannel channel) const;
   const ChannelSource &source(int channel) const;
   ImagePool *pool() const;
+
+  /**
+   * Sample \a source at the same (\a tex_x, \a tex_y) that #paint_get_tex_pixel would receive
+   * after Area Plane #local_mat * size/ofs. Matches #RE_texture_evaluate placement and
+   * #MTEX_FLAT mapping, then bilinear-samples the pinned #ImBuf.
+   *
+   * \return false when this source is not eligible; the caller must use the texture engine.
+   */
+  bool sample_image_direct(const ChannelSource &source,
+                           float tex_x,
+                           float tex_y,
+                           float *r_value,
+                           float4 &r_rgba) const;
 };
 
 /**

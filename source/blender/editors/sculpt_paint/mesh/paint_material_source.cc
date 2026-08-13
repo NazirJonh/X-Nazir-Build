@@ -16,9 +16,11 @@
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf_types.hh"
+#include "IMB_interp.hh"
 
 #include "BLI_assert.h"
 #include "BLI_index_range.hh"
+#include "BLI_math_color.h"
 #include "BLI_math_vector.hh"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
@@ -34,6 +36,64 @@ namespace blender::ed::sculpt_paint::material {
  * spends time on strokes with many source images. Remove once the perf work is done.
  * Toggle all logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
 #include "paint_debug.hh"
+
+/**
+ * True when a #TEX_IMAGE source can be bilinear-sampled from its pinned #ImBuf instead of
+ * going through #RE_texture_evaluate. Anything that would change the look (nodes, UDIM, crop,
+ * colorband, non-flat mapping, non-default filter/color) stays on the texture engine.
+ */
+static bool channel_source_image_direct_ok(const Tex *tex, const MTex *mtex, const ImBuf *ibuf)
+{
+  if (tex->use_nodes && tex->nodetree != nullptr) {
+    return false;
+  }
+  if (tex->ima == nullptr || tex->ima->source == IMA_SRC_TILED) {
+    return false;
+  }
+  if (mtex->mapping != MTEX_FLAT) {
+    return false;
+  }
+  if (mtex->projx != PROJ_X || mtex->projy != PROJ_Y) {
+    return false;
+  }
+  if (!ELEM(tex->extend, TEX_REPEAT, TEX_EXTEND, TEX_CLIP)) {
+    return false;
+  }
+  if (tex->flag & TEX_COLORBAND) {
+    return false;
+  }
+  if (tex->imaflag & TEX_IMAROT) {
+    return false;
+  }
+  if ((tex->imaflag & TEX_INTERPOL) == 0) {
+    return false;
+  }
+  if (tex->xrepeat > 1 || tex->yrepeat > 1) {
+    return false;
+  }
+  if (tex->cropxmin != 0.0f || tex->cropxmax != 1.0f || tex->cropymin != 0.0f ||
+      tex->cropymax != 1.0f)
+  {
+    return false;
+  }
+  if (tex->filtersize != 1.0f) {
+    return false;
+  }
+  if (tex->bright != 1.0f || tex->contrast != 1.0f || tex->saturation != 1.0f ||
+      tex->rfac != 1.0f || tex->gfac != 1.0f || tex->bfac != 1.0f)
+  {
+    return false;
+  }
+  if (ibuf->float_data() != nullptr) {
+    if (ibuf->channels != 4) {
+      return false;
+    }
+  }
+  else if (ibuf->byte_data() == nullptr) {
+    return false;
+  }
+  return true;
+}
 
 ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
                                    const PaintModeSettings &settings)
@@ -103,21 +163,34 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
        * per-channel Tex duplication (each channel owns its own Tex/MTex even when pointing at
        * the same Image) is causing redundant decodes across channels. */
       const double acquire_seconds = BLI_time_now_seconds() - acquire_start;
-      printf("[pbr_paint] source probe: channel=%d image=%s size=%dx%d acquire=%.3fms %s\n",
-             i,
-             tex->ima->id.name + 2,
-             ibuf != nullptr ? ibuf->x : 0,
-             ibuf != nullptr ? ibuf->y : 0,
-             acquire_seconds * 1000.0,
-             acquire_seconds > 0.001 ? "(likely decode)" : "(cache hit)");
-      probed_image_num++;
 #endif
       source.usable = ibuf != nullptr;
       if (ibuf && ibuf->float_data() == nullptr) {
         source.do_linear_conversion = true;
         source.colorspace = ibuf->byte_buffer.colorspace;
       }
-      BKE_image_pool_release_ibuf(tex->ima, ibuf, pool_);
+      /* Keep the ImBuf pinned for the stroke when a direct bilinear sample can replace
+       * #RE_texture_evaluate. Otherwise release as before; usability is already decided. */
+      const bool direct_sample = ibuf != nullptr &&
+                                 channel_source_image_direct_ok(tex, source.mtex, ibuf);
+      if (direct_sample) {
+        source.ibuf = ibuf;
+        source.image_direct_sample = true;
+      }
+      else {
+        BKE_image_pool_release_ibuf(tex->ima, ibuf, pool_);
+      }
+#if PBR_PAINT_SOURCE_PROFILE
+      printf("[pbr_paint] source probe: channel=%d image=%s size=%dx%d acquire=%.3fms %s%s\n",
+             i,
+             tex->ima->id.name + 2,
+             ibuf != nullptr ? ibuf->x : 0,
+             ibuf != nullptr ? ibuf->y : 0,
+             acquire_seconds * 1000.0,
+             acquire_seconds > 0.001 ? "(likely decode)" : "(cache hit)",
+             direct_sample ? " direct_sample" : "");
+      probed_image_num++;
+#endif
     }
     else {
       source.usable = true;
@@ -136,6 +209,15 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
 ChannelSourceSet::~ChannelSourceSet()
 {
   if (pool_ != nullptr) {
+    for (ChannelSource &source : sources_) {
+      if (source.ibuf == nullptr || source.mtex == nullptr || source.mtex->tex == nullptr ||
+          source.mtex->tex->ima == nullptr)
+      {
+        continue;
+      }
+      BKE_image_pool_release_ibuf(source.mtex->tex->ima, source.ibuf, pool_);
+      source.ibuf = nullptr;
+    }
     BKE_image_pool_free(pool_);
   }
 }
@@ -159,6 +241,59 @@ const ChannelSourceSet::ChannelSource &ChannelSourceSet::source(const int channe
 ImagePool *ChannelSourceSet::pool() const
 {
   return pool_;
+}
+
+bool ChannelSourceSet::sample_image_direct(const ChannelSource &source,
+                                           const float tex_x,
+                                           const float tex_y,
+                                           float *r_value,
+                                           float4 &r_rgba) const
+{
+  if (!source.image_direct_sample || source.ibuf == nullptr || source.mtex == nullptr) {
+    return false;
+  }
+
+  const MTex *mtex = source.mtex;
+  const Tex *tex = mtex->tex;
+  const ImBuf *ibuf = source.ibuf;
+  if (tex == nullptr || ibuf->x <= 0 || ibuf->y <= 0) {
+    return false;
+  }
+
+  /* Same placement as #RE_texture_evaluate: size/ofs applied again on top of the already
+   * mapped \a tex_x / \a tex_y, then #do_2d_mapping for #MTEX_FLAT. */
+  const float vx = mtex->size[0] * (tex_x + mtex->ofs[0]);
+  const float vy = mtex->size[1] * (tex_y + mtex->ofs[1]);
+  const float u = (vx + 1.0f) * 0.5f;
+  const float v = (vy + 1.0f) * 0.5f;
+
+  if (tex->extend == TEX_CLIP) {
+    const int x = int(math::floor(u * float(ibuf->x)));
+    const int y = int(math::floor(v * float(ibuf->y)));
+    if (x < 0 || y < 0 || x >= ibuf->x || y >= ibuf->y) {
+      r_rgba = float4(0.0f);
+      *r_value = 0.0f;
+      return true;
+    }
+  }
+
+  /* Pixel coordinates matching #imagewrap's `fx * ibuf->x` (no half-texel offset). */
+  const float px = u * float(ibuf->x);
+  const float py = v * float(ibuf->y);
+  const bool wrap = tex->extend == TEX_REPEAT;
+
+  if (ibuf->float_data() != nullptr) {
+    r_rgba = wrap ? imbuf::interpolate_bilinear_wrap_fl(ibuf, px, py) :
+                    imbuf::interpolate_bilinear_fl(ibuf, px, py);
+  }
+  else {
+    const uchar4 col = wrap ? imbuf::interpolate_bilinear_wrap_byte(ibuf, px, py) :
+                              imbuf::interpolate_bilinear_byte(ibuf, px, py);
+    rgba_uchar_to_float(r_rgba, col);
+  }
+
+  *r_value = IMB_colormanagement_get_luminance(r_rgba);
+  return true;
 }
 
 ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,

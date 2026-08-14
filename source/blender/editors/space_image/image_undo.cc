@@ -326,8 +326,7 @@ static void ptile_restore_runtime_map(PaintTileMap *paint_tile_map)
                     tile_copy_size);
     }
 
-    /* Force OpenGL reload (maybe partial update will operate better?) */
-    BKE_image_free_gputextures(image);
+    BKE_image_partial_update_mark_full_update(image);
 
     if (ibuf->float_data()) {
       ibuf->userflags |= IB_RECT_INVALID; /* force recreate of char rect */
@@ -795,7 +794,8 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
 
         UndoImageTile *utile = MEM_new_zeroed<UndoImageTile>("UndoImageTile");
         utile->users = 1;
-        utile->ibuf = IMB_dupImBuf(ptile->ptile_ibuf);
+        utile->ibuf = ptile->ptile_ibuf;
+        ptile->ptile_ibuf = nullptr;
         const uint tile_index = index_from_xy(ptile->x_tile, ptile->y_tile, ubuf_pre->tiles_dims);
 
         BLI_assert(ubuf_pre->tiles[tile_index] == nullptr);

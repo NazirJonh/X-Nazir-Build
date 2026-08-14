@@ -155,7 +155,11 @@ struct BrushPainter {
    * Alpha source (or its slider fallback). The Alpha channel itself is never clipped this way. */
   bool material_alpha_masking = false;
   float material_alpha_fallback = 1.0f;
-  /** Canvas-space mapping for the shared source #MTex (View / Tiled / Stencil). */
+  /**
+   * Dab-pixel → sample-coordinate mapping for the shared source #MTex.
+   * View / Random / Tiled produce region coordinates (Tiled matches 3D #DirectSampleLayout);
+   * Stencil produces region coordinates for #BKE_brush_sample_tex_3d's stencil branch.
+   */
   rctf source_mapping = {};
 };
 
@@ -322,8 +326,28 @@ static bool paint_2d_channel_source_usable_2d(const BrushPainter *painter,
 }
 
 /**
+ * Shared PBR source mapping (not per-channel #source_mtex). Falls back to the sampled channel's
+ * effective #MTex when the brush pointer is missing.
+ */
+static short paint_2d_shared_source_map_mode(const BrushPainter *painter)
+{
+  if (painter->brush != nullptr && painter->brush->material_paint != nullptr) {
+    return painter->brush->material_paint->shared_source_mapping.brush_map_mode;
+  }
+  if (paint_2d_channel_source_usable_2d(painter, painter->material_channel)) {
+    return painter->channel_sources->source(painter->material_channel).mtex->brush_map_mode;
+  }
+  if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
+    return painter->channel_sources->source(PAINT_MATERIAL_CHANNEL_ALPHA).mtex->brush_map_mode;
+  }
+  return MTEX_MAP_MODE_VIEW;
+}
+
+/**
  * Sample one channel source at a dab-buffer pixel using Image Editor 2D mapping
  * (View / Tiled / Stencil / Random; Area Plane and 3D are remapped to View).
+ * Tiled and Stencil receive region coordinates in \a painter->source_mapping, matching
+ * #BKE_brush_sample_tex_3d / 3D #DirectSampleLayout.
  *
  * \return Texture intensity (mask/factor). RGB is written to \a r_rgba in scene-linear for color
  * sources; Normal skips colorspace decode.
@@ -346,7 +370,7 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
    * Copy and remap so the default shared mapping actually reads the source image. */
   MTex mtex_2d = dna::shallow_copy(*source.mtex);
   mtex_2d.brush_map_mode = eMTex_BrushMapMode(
-      paint_2d_source_map_mode_for_2d(mtex_2d.brush_map_mode));
+      paint_2d_source_map_mode_for_2d(paint_2d_shared_source_map_mode(painter)));
   const float intensity = BKE_brush_sample_tex_3d(
       painter->paint, painter->brush, &mtex_2d, texco, r_rgba, thread, pool);
 
@@ -650,7 +674,11 @@ static ImBuf *brush_painter_imbuf_new(
           IMB_colormanagement_scene_linear_to_colorspace_v3(rgba, cache->byte_colorspace);
         }
 
-        mul_v3_v3(rgba, brush_rgb);
+        /* Classic Image Paint tints the brush texture with Color. PBR Paint matches Sculpt:
+         * a source (or the texture itself) is the color, the Color slider does not multiply. */
+        if (!painter->use_material_channel_color) {
+          mul_v3_v3(rgba, brush_rgb);
+        }
       }
       else {
         copy_v3_v3(rgba, brush_rgb);
@@ -754,7 +782,11 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
             IMB_colormanagement_scene_linear_to_colorspace_v3(rgba, cache->byte_colorspace);
           }
 
-          mul_v3_v3(rgba, brush_rgb);
+          /* Classic Image Paint tints the brush texture with Color. PBR Paint matches Sculpt:
+           * a source (or the texture itself) is the color, the Color slider does not multiply. */
+          if (!painter->use_material_channel_color) {
+            mul_v3_v3(rgba, brush_rgb);
+          }
         }
         else {
           copy_v3_v3(rgba, brush_rgb);
@@ -974,23 +1006,21 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   const bool use_2d_channel_source =
       paint_2d_channel_source_usable_2d(painter, painter->material_channel);
-  if (painter->channel_sources != nullptr && painter->use_material_channel_color) {
-    short source_map_mode = MTEX_MAP_MODE_VIEW;
-    bool have_map = false;
-    if (use_2d_channel_source) {
-      source_map_mode = paint_2d_source_map_mode_for_2d(
-          painter->channel_sources->source(painter->material_channel).mtex->brush_map_mode);
-      have_map = true;
-    }
-    else if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
-      source_map_mode = paint_2d_source_map_mode_for_2d(
-          painter->channel_sources->source(PAINT_MATERIAL_CHANNEL_ALPHA).mtex->brush_map_mode);
-      have_map = true;
-    }
-    if (have_map) {
-      brush_painter_2d_tex_mapping(
-          s, tile, diameter, pos, mouse, source_map_mode, &painter->source_mapping);
-    }
+  if (painter->channel_sources != nullptr && painter->use_material_channel_color &&
+      (use_2d_channel_source ||
+       paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)))
+  {
+    /* #BKE_brush_sample_tex_3d Tiled/View expect region coordinates (3D #DirectSampleLayout
+     * uses #view_point_2d). The Tiled branch of #brush_painter_2d_tex_mapping is canvas pixels
+     * for the classic brush texture; feeding those into the 3D sampler makes Tiled look like
+     * View. Map Tiled with the View rect so dab pixels are region coords, then sample as Tiled.
+     * Stencil mapping already emits region coordinates. */
+    const short source_map_mode = paint_2d_source_map_mode_for_2d(
+        paint_2d_shared_source_map_mode(painter));
+    const short mapping_mode = (source_map_mode == MTEX_MAP_MODE_TILED) ? MTEX_MAP_MODE_VIEW :
+                                                                          source_map_mode;
+    brush_painter_2d_tex_mapping(
+        s, tile, diameter, pos, mouse, mapping_mode, &painter->source_mapping);
   }
   /* Source samples change with the dab; never reuse a previous buffer. */
   const bool do_source_rebuild = painter->channel_sources != nullptr &&

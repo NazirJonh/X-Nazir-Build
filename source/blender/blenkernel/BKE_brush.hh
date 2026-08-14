@@ -236,8 +236,15 @@ const MTex *BKE_brush_color_texture_get(const Brush *brush, eObjectMode object_m
 
 /**
  * Radial control.
+ *
+ * \param r_is_color: When non-null, set true if the preview stores RGB (Material Paint source)
+ * rather than a single intensity channel. The F-key overlay uses this to skip the brush-color
+ * tint so a Base Color map is visible.
  */
-ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br, bool secondary, bool display_gradient);
+ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br,
+                                          bool secondary,
+                                          bool display_gradient,
+                                          bool *r_is_color = nullptr);
 
 /* Unified strength size and color. */
 

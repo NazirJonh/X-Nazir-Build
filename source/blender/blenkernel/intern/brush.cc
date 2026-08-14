@@ -33,6 +33,7 @@
 #include "BKE_grease_pencil.hh"
 #include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
+#include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
 #include "BKE_lib_remap.hh"
@@ -1862,38 +1863,175 @@ float BKE_brush_curve_strength_clamped(const Brush *br, float p, const float len
   return strength;
 }
 
+static const MTex *brush_radial_preview_mtex(const Brush *br,
+                                             const bool use_secondary,
+                                             MTex &r_storage)
+{
+  /* Image Paint F / Shift+F set #RadialControl.use_secondary_tex because the keymap also binds
+   * mask-texture rotation (Ctrl+Alt+F). With no mask texture that would preview an empty slot
+   * (solid black). Fall through to the primary / Material Paint source, matching Ctrl+F. */
+  if (use_secondary && br->mask_mtex.tex != nullptr) {
+    return &br->mask_mtex;
+  }
+  if (br->mtex.tex != nullptr) {
+    return &br->mtex;
+  }
+  if (br->material_paint == nullptr) {
+    return &br->mtex;
+  }
+  const BrushMaterialPaint &brush_paint = *br->material_paint;
+  PaintModeSettings mode_settings{};
+  mode_settings.visible_material_channels = (1 << PAINT_MATERIAL_CHANNEL_NUM) - 1;
+  if (BKE_paint_material_preview_mtex_get(brush_paint, mode_settings, r_storage)) {
+    return &r_storage;
+  }
+  /* Same priority as the cursor overlay, but ignore canvas/visibility so F still previews a
+   * source when #PaintModeSettings is not in context (radial control only has the Brush). */
+  static const eMaterialPaintChannel priority[] = {
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      PAINT_MATERIAL_CHANNEL_ALPHA,
+      PAINT_MATERIAL_CHANNEL_METALLIC,
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_SPECULAR,
+      PAINT_MATERIAL_CHANNEL_CUSTOM,
+      PAINT_MATERIAL_CHANNEL_HEIGHT,
+      PAINT_MATERIAL_CHANNEL_AO,
+      PAINT_MATERIAL_CHANNEL_EMISSION,
+      PAINT_MATERIAL_CHANNEL_NORMAL,
+  };
+  for (const eMaterialPaintChannel channel : priority) {
+    const BrushMaterialPaintChannel &paint_channel = brush_paint.channels[channel];
+    if (paint_channel.use == 0 || !BKE_paint_material_channel_has_source(paint_channel)) {
+      continue;
+    }
+    BKE_paint_material_channel_effective_mtex(brush_paint, paint_channel, r_storage);
+    return &r_storage;
+  }
+  return &br->mtex;
+}
+
+static const MTex *brush_radial_alpha_mask_mtex(const Brush *br,
+                                                const bool use_secondary,
+                                                MTex &r_storage)
+{
+  /* Classic mask-texture preview (Ctrl+Alt+F) is not a PBR Alpha stroke mask. */
+  if (use_secondary && br->mask_mtex.tex != nullptr) {
+    return nullptr;
+  }
+  if (br->material_paint == nullptr) {
+    return nullptr;
+  }
+  const BrushMaterialPaint &brush_paint = *br->material_paint;
+  PaintModeSettings mode_settings{};
+  mode_settings.visible_material_channels = (1 << PAINT_MATERIAL_CHANNEL_NUM) - 1;
+  if (!BKE_paint_material_channel_masks_stroke(brush_paint, mode_settings)) {
+    return nullptr;
+  }
+  const BrushMaterialPaintChannel &alpha_channel =
+      brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA];
+  if (!BKE_paint_material_channel_has_source(alpha_channel)) {
+    return nullptr;
+  }
+  BKE_paint_material_channel_effective_mtex(brush_paint, alpha_channel, r_storage);
+  if (r_storage.tex == nullptr) {
+    return nullptr;
+  }
+  return &r_storage;
+}
+
 /* TODO: should probably be unified with BrushPainter stuff? */
 static bool brush_gen_texture(const Brush *br,
                               const int side,
                               const bool use_secondary,
-                              float *rect)
+                              float *rect,
+                              bool *r_is_color)
 {
-  const MTex *mtex = (use_secondary) ? &br->mask_mtex : &br->mtex;
+  MTex material_preview = {};
+  MTex alpha_mask_storage = {};
+  const MTex *mtex = brush_radial_preview_mtex(br, use_secondary, material_preview);
   if (mtex->tex == nullptr) {
     return false;
+  }
+  const MTex *alpha_mtex = brush_radial_alpha_mask_mtex(br, use_secondary, alpha_mask_storage);
+  const bool is_color_preview = mtex != &br->mtex && mtex != &br->mask_mtex;
+  if (r_is_color != nullptr) {
+    *r_is_color = is_color_preview;
+  }
+
+  ImagePool *pool = BKE_image_pool_new();
+  /* #RE_texture_evaluate returns byte-buffer values in the image's stored encoding, not scene
+   * linear. Match the paint cursor overlay: linearize sRGB (or other display spaces), then encode
+   * once for the GPU. Data/"Non-Color" spaces are already the stored 0–1 values — applying
+   * #linearrgb_to_srgb on top washes the preview. */
+  bool convert_to_linear = false;
+  const ColorSpace *colorspace = nullptr;
+  bool colorspace_is_data = false;
+  if (is_color_preview && mtex->tex != nullptr && mtex->tex->type == TEX_IMAGE &&
+      mtex->tex->ima != nullptr)
+  {
+    ImBuf *tex_ibuf = BKE_image_pool_acquire_ibuf(mtex->tex->ima, &mtex->tex->iuser, pool);
+    if (tex_ibuf != nullptr && tex_ibuf->float_data() == nullptr) {
+      convert_to_linear = true;
+      colorspace = tex_ibuf->byte_buffer.colorspace;
+      colorspace_is_data = IMB_colormanagement_space_is_data(colorspace);
+    }
+    BKE_image_pool_release_ibuf(mtex->tex->ima, tex_ibuf, pool);
   }
 
   const float step = 2.0 / side;
   int ix, iy;
   float x, y;
 
-  /* Do normalized canonical view coords for texture. */
+  /* Normalized canonical view coords; write RGBA (the ImBuf is 4-channel). */
   for (y = -1.0, iy = 0; iy < side; iy++, y += step) {
     for (x = -1.0, ix = 0; ix < side; ix++, x += step) {
       const float co[3] = {x, y, 0.0f};
-
       float intensity;
-      float rgba_dummy[4];
-      RE_texture_evaluate(mtex, co, 0, nullptr, false, false, &intensity, rgba_dummy);
-
-      rect[iy * side + ix] = intensity;
+      float rgba[4];
+      const bool has_rgb = RE_texture_evaluate(
+          mtex, co, 0, pool, false, false, &intensity, rgba);
+      float *px = &rect[(iy * side + ix) * 4];
+      if (has_rgb) {
+        if (is_color_preview) {
+          if (convert_to_linear && colorspace != nullptr && !colorspace_is_data) {
+            IMB_colormanagement_colorspace_to_scene_linear_v3(rgba, colorspace);
+            linearrgb_to_srgb_v3_v3(rgba, rgba);
+          }
+          else if (!convert_to_linear) {
+            /* Float buffers are already scene linear. */
+            linearrgb_to_srgb_v3_v3(rgba, rgba);
+          }
+        }
+        px[0] = rgba[0];
+        px[1] = rgba[1];
+        px[2] = rgba[2];
+        px[3] = 1.0f;
+      }
+      else {
+        px[0] = intensity;
+        px[1] = intensity;
+        px[2] = intensity;
+        px[3] = 1.0f;
+      }
+      if (alpha_mtex != nullptr) {
+        float mask_intensity;
+        float mask_rgba[4];
+        RE_texture_evaluate(
+            alpha_mtex, co, 0, pool, false, false, &mask_intensity, mask_rgba);
+        CLAMP(mask_intensity, 0.0f, 1.0f);
+        px[3] *= mask_intensity;
+      }
     }
   }
 
+  BKE_image_pool_free(pool);
   return true;
 }
 
-ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br, bool secondary, bool display_gradient)
+ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br,
+                                          bool secondary,
+                                          bool display_gradient,
+                                          bool *r_is_color)
 {
   int side = 512;
   int half = side / 2;
@@ -1902,7 +2040,12 @@ ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br, bool secondary, bool displa
 
   ImBuf *im = IMB_allocImBuf(side, side, ImBufFlags::FloatData);
 
-  const bool have_texture = brush_gen_texture(br, side, secondary, im->float_data_for_write());
+  bool is_color = false;
+  const bool have_texture = brush_gen_texture(
+      br, side, secondary, im->float_data_for_write(), &is_color);
+  if (r_is_color != nullptr) {
+    *r_is_color = have_texture && is_color;
+  }
 
   if (display_gradient || have_texture) {
     float *float_data = im->float_data_for_write();
@@ -1910,7 +2053,18 @@ ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br, bool secondary, bool displa
       for (int j = 0; j < side; j++) {
         const float magn = sqrtf(pow2f(i - half) + pow2f(j - half));
         const float strength = BKE_brush_curve_strength_clamped(br, magn, half);
-        float_data[i * side + j] = (have_texture) ? float_data[i * side + j] * strength : strength;
+        float *px = &float_data[(i * side + j) * 4];
+        if (have_texture) {
+          /* Keep source RGB; fade with falloff in alpha so the region outside the curve is
+           * transparent instead of opaque black. */
+          px[3] *= strength;
+        }
+        else {
+          px[0] = strength;
+          px[1] = strength;
+          px[2] = strength;
+          px[3] = 1.0f;
+        }
       }
     }
   }

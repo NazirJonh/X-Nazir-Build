@@ -48,7 +48,8 @@ struct PaintCursorContext {
   MTex material_preview_mtex_storage = {};
   /** Material paint channel source to preview in the alpha/stencil overlay instead of the
    * brush's own #mtex, so the user can see the pattern they are about to paint. Null when the
-   * brush is not a Material Paint brush, or no enabled channel has a usable source. Points at
+   * brush is not a Material Paint brush, or no enabled channel has a usable source. Filled for
+   * Sculpt Paint and Image Editor (#PaintMode::Texture2D). Points at
    * #material_preview_mtex_storage when set. */
   const MTex *material_preview_mtex = nullptr;
 

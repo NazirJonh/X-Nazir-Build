@@ -3419,11 +3419,15 @@ bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
 {
   static const eMaterialPaintChannel priority[] = {
       PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      PAINT_MATERIAL_CHANNEL_ALPHA,
       PAINT_MATERIAL_CHANNEL_METALLIC,
       PAINT_MATERIAL_CHANNEL_ROUGHNESS,
-      PAINT_MATERIAL_CHANNEL_NORMAL,
-      PAINT_MATERIAL_CHANNEL_HEIGHT,
       PAINT_MATERIAL_CHANNEL_SPECULAR,
+      PAINT_MATERIAL_CHANNEL_CUSTOM,
+      PAINT_MATERIAL_CHANNEL_HEIGHT,
+      PAINT_MATERIAL_CHANNEL_AO,
+      PAINT_MATERIAL_CHANNEL_EMISSION,
+      PAINT_MATERIAL_CHANNEL_NORMAL,
   };
   for (const eMaterialPaintChannel channel : priority) {
     if (!BKE_paint_material_channel_is_enabled(brush_paint, mode_settings, channel)) {

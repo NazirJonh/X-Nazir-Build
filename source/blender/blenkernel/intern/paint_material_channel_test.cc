@@ -1093,6 +1093,60 @@ TEST_F(PaintMaterialChannelTest, channel_has_source_follows_tex_pointer)
   EXPECT_FALSE(BKE_paint_material_channel_has_source(channel));
 }
 
+TEST_F(PaintMaterialChannelTest, preview_mtex_prefers_base_color_then_alpha)
+{
+  PaintModeSettings mode_settings{};
+  mode_settings.visible_material_channels = paint_material_channel_test_default_visibility();
+  BrushMaterialPaint brush_paint{};
+  Tex *base_tex = BKE_texture_add(bmain, "PreviewBase");
+  Tex *alpha_tex = BKE_texture_add(bmain, "PreviewAlpha");
+  Tex *metallic_tex = BKE_texture_add(bmain, "PreviewMetallic");
+  Tex *normal_tex = BKE_texture_add(bmain, "PreviewNormal");
+
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].source_mtex.tex = base_tex;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].source_mtex.tex = alpha_tex;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].source_mtex.tex = metallic_tex;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_NORMAL].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_NORMAL].source_mtex.tex = normal_tex;
+
+  MTex preview{};
+  EXPECT_TRUE(BKE_paint_material_preview_mtex_get(brush_paint, mode_settings, preview));
+  EXPECT_EQ(preview.tex, base_tex);
+
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = 0;
+  EXPECT_TRUE(BKE_paint_material_preview_mtex_get(brush_paint, mode_settings, preview));
+  EXPECT_EQ(preview.tex, alpha_tex);
+
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].use = 0;
+  EXPECT_TRUE(BKE_paint_material_preview_mtex_get(brush_paint, mode_settings, preview));
+  EXPECT_EQ(preview.tex, metallic_tex);
+
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 0;
+  EXPECT_TRUE(BKE_paint_material_preview_mtex_get(brush_paint, mode_settings, preview));
+  EXPECT_EQ(preview.tex, normal_tex);
+}
+
+TEST_F(PaintMaterialChannelTest, preview_mtex_normal_is_last)
+{
+  PaintModeSettings mode_settings{};
+  mode_settings.visible_material_channels = paint_material_channel_test_default_visibility();
+  BrushMaterialPaint brush_paint{};
+  Tex *roughness_tex = BKE_texture_add(bmain, "PreviewRoughnessLast");
+  Tex *normal_tex = BKE_texture_add(bmain, "PreviewNormalLast");
+
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].source_mtex.tex = roughness_tex;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_NORMAL].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_NORMAL].source_mtex.tex = normal_tex;
+
+  MTex preview{};
+  EXPECT_TRUE(BKE_paint_material_preview_mtex_get(brush_paint, mode_settings, preview));
+  EXPECT_EQ(preview.tex, roughness_tex);
+}
+
 TEST_F(PaintMaterialChannelTest, MaterialPaintCopyIsIndependent)
 {
   Brush *brush = BKE_brush_add(bmain, "CopySource", OB_MODE_SCULPT);

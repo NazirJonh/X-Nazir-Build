@@ -170,6 +170,18 @@ struct StencilControlData {
   short launch_event;
 };
 
+static bool brush_primary_stencil_mapping(const Brush *br)
+{
+  if (br == nullptr) {
+    return false;
+  }
+  if (br->mtex.brush_map_mode == MTEX_MAP_MODE_STENCIL) {
+    return true;
+  }
+  return br->material_paint != nullptr &&
+         br->material_paint->shared_source_mapping.brush_map_mode == MTEX_MAP_MODE_STENCIL;
+}
+
 static void stencil_set_target(StencilControlData *scd)
 {
   Brush *br = scd->br;
@@ -184,6 +196,22 @@ static void stencil_set_target(StencilControlData *scd)
     scd->pos_target = br->mask_stencil_pos;
 
     sub_v2_v2v2(mdiff, scd->init_mouse, br->mask_stencil_pos);
+  }
+  else if (br->material_paint != nullptr &&
+           br->material_paint->shared_source_mapping.brush_map_mode == MTEX_MAP_MODE_STENCIL &&
+           br->mtex.brush_map_mode != MTEX_MAP_MODE_STENCIL)
+  {
+    /* PBR sources share mapping; position/scale live on #Brush.stencil_* (same fields 3D
+     * #DirectSampleLayout reads) while rotation is #shared_source_mapping.rot. */
+    copy_v2_v2(scd->init_sdim, br->stencil_dimension);
+    copy_v2_v2(scd->init_spos, br->stencil_pos);
+    scd->init_rot = br->material_paint->shared_source_mapping.rot;
+
+    scd->dim_target = br->stencil_dimension;
+    scd->rot_target = &br->material_paint->shared_source_mapping.rot;
+    scd->pos_target = br->stencil_pos;
+
+    sub_v2_v2v2(mdiff, scd->init_mouse, br->stencil_pos);
   }
   else {
     copy_v2_v2(scd->init_sdim, br->stencil_dimension);
@@ -217,7 +245,7 @@ static wmOperatorStatus stencil_control_invoke(bContext *C, wmOperator *op, cons
     }
   }
   else {
-    if (br->mtex.brush_map_mode != MTEX_MAP_MODE_STENCIL) {
+    if (!brush_primary_stencil_mapping(br)) {
       return OPERATOR_CANCELLED;
     }
   }
@@ -379,7 +407,7 @@ static bool stencil_control_poll(bContext *C)
 
   paint = BKE_paint_get_active_from_context(C);
   br = BKE_paint_brush(paint);
-  return (br && (br->mtex.brush_map_mode == MTEX_MAP_MODE_STENCIL ||
+  return (br && (brush_primary_stencil_mapping(br) ||
                  br->mask_mtex.brush_map_mode == MTEX_MAP_MODE_STENCIL));
 }
 
@@ -427,9 +455,23 @@ static wmOperatorStatus stencil_fit_image_aspect_exec(bContext *C, wmOperator *o
   bool do_mask = RNA_boolean_get(op->ptr, "mask");
   Tex *tex = nullptr;
   MTex *mtex = nullptr;
+  MTex material_mtex_storage = {};
   if (br) {
-    mtex = do_mask ? &br->mask_mtex : &br->mtex;
-    tex = mtex->tex;
+    if (do_mask) {
+      mtex = &br->mask_mtex;
+    }
+    else if (br->mtex.tex != nullptr) {
+      mtex = &br->mtex;
+    }
+    else if (br->material_paint != nullptr) {
+      const PaintModeSettings &mode_settings = CTX_data_tool_settings(C)->paint_mode;
+      if (BKE_paint_material_preview_mtex_get(
+              *br->material_paint, mode_settings, material_mtex_storage))
+      {
+        mtex = &material_mtex_storage;
+      }
+    }
+    tex = mtex != nullptr ? mtex->tex : nullptr;
   }
 
   if (tex && tex->type == TEX_IMAGE && tex->ima) {

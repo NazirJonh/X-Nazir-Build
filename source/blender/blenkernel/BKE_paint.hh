@@ -862,8 +862,8 @@ void BKE_paint_material_channel_effective_mtex(const BrushMaterialPaint &brush_p
 /**
  * Fills \a r_mtex with the effective #MTex (see #BKE_paint_material_channel_effective_mtex) to
  * preview in the brush cursor overlay for \a brush_paint, chosen by the priority a user painting
- * a pattern expects: Base Color if enabled and sourced, else the first of Metallic, Roughness,
- * Normal, Height, Specular that is.
+ * a pattern expects: Base Color if enabled and sourced, else Alpha, else the first remaining
+ * enabled sourced channel, with Normal always last.
  *
  * \return false when no enabled channel has a source, in which case \a r_mtex is zeroed and the
  * cursor should fall back to the brush's own texture.

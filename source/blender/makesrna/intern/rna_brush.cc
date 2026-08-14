@@ -435,6 +435,43 @@ static bool rna_TextureCapabilities_has_texture_angle_source_get(PointerRNA *ptr
   return ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_AREA, MTEX_MAP_MODE_RANDOM);
 }
 
+/**
+ * Ctrl+F writes #Brush.texture_slot.angle (#MTex.rot on #Brush.mtex). PBR Paint stores Angle in
+ * Image Transform Settings (#BrushMaterialPaint.shared_source_mapping.rot). Redirect the primary
+ * slot so the operator and the panel stay on the same field. Mask and the shared slot itself keep
+ * their own #rot.
+ */
+static float *rna_BrushTextureSlot_pbr_shared_angle(PointerRNA *ptr)
+{
+  ID *id = ptr->owner_id;
+  if (id == nullptr || GS(id->name) != ID_BR) {
+    return nullptr;
+  }
+  Brush *br = reinterpret_cast<Brush *>(id);
+  const MTex *mtex = static_cast<const MTex *>(ptr->data);
+  if (br->material_paint == nullptr || mtex != &br->mtex) {
+    return nullptr;
+  }
+  return &br->material_paint->shared_source_mapping.rot;
+}
+
+static float rna_BrushTextureSlot_angle_get(PointerRNA *ptr)
+{
+  if (float *rot = rna_BrushTextureSlot_pbr_shared_angle(ptr)) {
+    return *rot;
+  }
+  return static_cast<const MTex *>(ptr->data)->rot;
+}
+
+static void rna_BrushTextureSlot_angle_set(PointerRNA *ptr, float value)
+{
+  if (float *rot = rna_BrushTextureSlot_pbr_shared_angle(ptr)) {
+    *rot = value;
+    return;
+  }
+  static_cast<MTex *>(ptr->data)->rot = value;
+}
+
 static bool rna_BrushCapabilities_has_overlay_get(PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
@@ -780,9 +817,16 @@ static void rna_TextureSlot_brush_angle_update(bContext *C, PointerRNA *ptr)
   const Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   MTex *mtex = static_cast<MTex *>(ptr->data);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  ID *id = ptr->owner_id;
+  Brush *br = (id != nullptr && GS(id->name) == ID_BR) ? reinterpret_cast<Brush *>(id) : nullptr;
+  /* PBR Ctrl+F writes the shared mapping through #rna_BrushTextureSlot_angle_set; #Brush.mtex.tex
+   * is empty so the usual tex-identity overlay invalidation would miss. */
+  if (br != nullptr && br->material_paint != nullptr && mtex == &br->mtex) {
+    BKE_paint_invalidate_overlay_all();
+  }
   /* skip invalidation of overlay for stencil mode */
-  if (mtex->brush_map_mode != MTEX_MAP_MODE_STENCIL) {
-    ViewLayer *view_layer = CTX_data_view_layer(C);
+  else if (mtex->brush_map_mode != MTEX_MAP_MODE_STENCIL) {
     BKE_paint_invalidate_overlay_tex(*bmain, scene, view_layer, mtex->tex);
   }
 
@@ -1608,7 +1652,8 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
       srna, "Brush Texture Slot", "Texture slot for textures in a Brush data-block");
 
   prop = RNA_def_property(srna, "angle", PROP_FLOAT, PROP_ANGLE);
-  RNA_def_property_float_sdna(prop, nullptr, "rot");
+  RNA_def_property_float_funcs(
+      prop, "rna_BrushTextureSlot_angle_get", "rna_BrushTextureSlot_angle_set", nullptr);
   RNA_def_property_range(prop, 0, M_PI * 2);
   RNA_def_property_ui_text(prop, "Angle", "Brush texture rotation");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);

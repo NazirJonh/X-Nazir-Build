@@ -46,6 +46,7 @@
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
 
+#include "ED_object.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
@@ -615,6 +616,9 @@ bool ED_paintcurve_export_to_scene_object(bContext *C,
       const Curve &src_curve = *id_cast<const Curve *>(existing_src->data);
       legacy_curve_copy_settings(curve, src_curve);
     }
+    /* The exported geometry is always transformed into 3D space (see src_from_paint above),
+     * regardless of whether an existing source curve was copied from. */
+    curve.flag |= CU_3D;
     paintcurve_geometry_to_legacy_curve(curve, export_geom, src_from_paint);
   }
   else {
@@ -701,6 +705,29 @@ void ED_paintcurve_detach_source(bContext *C)
    * Python, and reachable from any generic property copy or preset. Wiping the canvas is
    * #PAINTCURVE_OT_clear's job now. */
   sculpt->paint_curve_sync_to_source = 0;
+
+  /* The former source curve object was left selected/active as a side effect of being assigned
+   * (see BKE_object_add()/base_activate() call sites). Clearing the source should not leave it
+   * highlighted in the viewport, since the user may want to start a fresh curve right after. */
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  if (view_layer != nullptr) {
+    Main *bmain = CTX_data_main(C);
+    BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+    Base *base_active = BKE_view_layer_active_base_get(view_layer);
+    if (base_active != nullptr && base_active->object != nullptr &&
+        ELEM(base_active->object->type, OB_CURVES_LEGACY, OB_CURVES))
+    {
+      /* Always drop the selection highlight, even if this curve object is the one currently in
+       * Sculpt Mode (self-reference: sculpting a Curves object with itself picked as source).
+       * Only clear "active" status when it is not the object being sculpted, since nulling
+       * basact out from under an active sculpt session would break it. */
+      blender::ed::object::base_select(base_active, blender::ed::object::BA_DESELECT);
+      if ((base_active->object->mode & OB_MODE_SCULPT) == 0) {
+        view_layer->basact = nullptr;
+      }
+      WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, scene);
+    }
+  }
 
   /* Force the paint-cursor overlay to repaint so the control-point display clears immediately.
    * NC_PAINTCURVE notifiers are not observed by the 3D viewport, so we go through the paint

@@ -2094,6 +2094,7 @@ struct AreaPlaneDabGeom {
 static bool paint_2d_area_plane_triangle_aabb(const ImagePaintTile *tile,
                                               const ed::sculpt_paint::AreaPlaneTriangle &tri,
                                               const float3 &dab_origin,
+                                              const float4x4 &unfold_mat,
                                               const float radius_object,
                                               int &r_x0,
                                               int &r_y0,
@@ -2117,12 +2118,16 @@ static bool paint_2d_area_plane_triangle_aabb(const ImagePaintTile *tile,
   }
 
   /* Clip the UV AABB to the dab's projection onto this triangle. Neighbor islands sit far from
-   * the cursor UV, so clipping to the cursor would drop them; the 3D closest point mapped back
-   * to this triangle's UV is the right center. */
+   * the cursor UV, so clipping to the cursor would drop them; the dab center mapped back to this
+   * triangle's UV is the right center. The center must be folded back through #unfold_mat, the
+   * same net the falloff is measured in — the raw 3D closest point is the foot of the
+   * perpendicular onto a rotated face, which drifts away from the seam and would clip off the
+   * far half of the disc. */
   float2 uv_c((min_u + max_u) * 0.5f, (min_v + max_v) * 0.5f);
+  const float3 folded_origin = math::transform_point(math::invert(unfold_mat), dab_origin);
   float3 closest;
   closest_on_tri_to_point_v3(
-      closest, dab_origin, tri.position[0], tri.position[1], tri.position[2]);
+      closest, folded_origin, tri.position[0], tri.position[1], tri.position[2]);
   float bary_p[3];
   interp_weights_tri_v3(bary_p, tri.position[0], tri.position[1], tri.position[2], closest);
   uv_c = tri.uv[0] * bary_p[0] + tri.uv[1] * bary_p[1] + tri.uv[2] * bary_p[2];
@@ -2302,6 +2307,7 @@ static bool paint_2d_area_plane_build_tri_coverage(
   if (!paint_2d_area_plane_triangle_aabb(tile,
                                          tri,
                                          dab_origin,
+                                         unfold_mat,
                                          radius_object,
                                          r_cov.x0,
                                          r_cov.y0,
@@ -2338,13 +2344,16 @@ static bool paint_2d_area_plane_build_tri_coverage(
 
         const float3 position = tri.position[0] * bary[0] + tri.position[1] * bary[1] +
                                 tri.position[2] * bary[2];
-        float strength;
-        if (!paint_2d_area_plane_falloff(brush, object_to_brush, position, &strength)) {
-          continue;
-        }
         float3 sample_position = math::transform_point(unfold_mat, position);
         sample_position += dab_normal * (math::dot(dab_normal, dab_origin) -
                                          math::dot(dab_normal, sample_position));
+        /* Measure the falloff in the unfolded net, the same space the source is sampled in.
+         * Measuring the raw 3D distance instead gives every folded face its own disc centered on
+         * its perpendicular foot, so the stamp splits into offset lobes across a crease. */
+        float strength;
+        if (!paint_2d_area_plane_falloff(brush, object_to_brush, sample_position, &strength)) {
+          continue;
+        }
         float alpha = 1.0f;
         if (capture_alpha) {
           alpha = paint_2d_area_sample_alpha_factor(

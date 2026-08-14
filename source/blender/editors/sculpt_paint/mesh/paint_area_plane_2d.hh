@@ -33,7 +33,11 @@
  * - A neighbor is unfolded into the dab plane along a path of UV-sewn edges first (the image
  *   net), then 3D-only seams. Direct 3D hinges that are not sewn in UV (front–top at a cube
  *   corner while the net goes front–right–top) rotate the stamp 90° on the third island.
- *   Coplanar steps are identity. Falloff still uses the original object-space point.
+ *   Coplanar steps are identity. Falloff is measured on the unfolded point, in the same net the
+ *   source is sampled in: a 3D distance from the dab center would give each folded face a disc
+ *   centered on its own perpendicular foot, splitting the stamp into offset lobes at a crease.
+ *   Coverage (#AreaPlaneMesh::triangles_in_sphere) stays a 3D sphere — unfolding is an isometry,
+ *   so the unfolded distance never falls below the 3D one and the sphere is a safe superset.
  */
 
 #include "BLI_array.hh"

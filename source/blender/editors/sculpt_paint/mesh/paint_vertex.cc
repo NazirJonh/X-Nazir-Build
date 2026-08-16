@@ -69,6 +69,7 @@
 
 #include "../paint_intern.hh" /* own include */
 #include "mesh_brush_common.hh"
+#include "paint_vertex_channel_mask.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_pose.hh"
@@ -621,6 +622,63 @@ static ColorPaint4f vpaint_get_current_col(VPaint &vp, bool secondary)
   return ColorPaint4f(brush_color.x, brush_color.y, brush_color.z, 1.0f);
 }
 
+/* Forward declaration: defined below, but referenced by #vpaint_blend_with_channels. */
+template<typename Color, typename Traits>
+static Color vpaint_blend(const VPaint &vp,
+                          Color color_curr,
+                          Color color_orig,
+                          Color color_paint,
+                          const typename Traits::ValueType alpha,
+                          const typename Traits::BlendType brush_alpha_value);
+
+/* Variant of #vpaint_blend that writes only to the channels enabled in the brush's
+ * #Brush.vertex_paint_channel_flag, keeping the current value of the disabled channels. */
+template<typename Color, typename Traits>
+static Color vpaint_blend_with_channels(const VPaint &vp,
+                                        Color color_curr,
+                                        Color color_orig,
+                                        Color color_paint,
+                                        const typename Traits::ValueType alpha,
+                                        const typename Traits::BlendType brush_alpha_value,
+                                        const blender::ed::sculpt_paint::VPaintChannelMask &mask)
+{
+  /* For channel-specific painting, we need to preserve inactive channels from current color.
+   * This ensures that when painting only Red, for example, the Green and Blue channels
+   * remain unchanged. */
+  Color color_paint_for_blend = color_paint;
+
+  /* Replace inactive channels with current color values. */
+  if (!mask.r) {
+    color_paint_for_blend.r = color_curr.r;
+  }
+  if (!mask.g) {
+    color_paint_for_blend.g = color_curr.g;
+  }
+  if (!mask.b) {
+    color_paint_for_blend.b = color_curr.b;
+  }
+  if (!mask.a) {
+    color_paint_for_blend.a = color_curr.a;
+  }
+
+  /* Perform blending. */
+  Color color_blended = vpaint_blend<Color, Traits>(vp,
+                                                     color_curr,
+                                                     color_orig,
+                                                     color_paint_for_blend,
+                                                     alpha,
+                                                     brush_alpha_value);
+
+  /* Preserve original values for disabled channels (applies to both modes). */
+  Color result;
+  result.r = mask.r ? color_blended.r : color_curr.r;
+  result.g = mask.g ? color_blended.g : color_curr.g;
+  result.b = mask.b ? color_blended.b : color_curr.b;
+  result.a = mask.a ? color_blended.a : color_curr.a;
+
+  return result;
+}
+
 /* wpaint has 'wpaint_blend' */
 template<typename Color, typename Traits>
 static Color vpaint_blend(const VPaint &vp,
@@ -697,6 +755,10 @@ static Color vpaint_blend_stroke(const VPaint &vp,
                                  float brush_strength,
                                  int index)
 {
+  const Brush &brush = *BKE_paint_brush_for_read(&vp.paint);
+  const blender::ed::sculpt_paint::VPaintChannelMask channel_mask =
+      blender::ed::sculpt_paint::VPaintChannelMask::from_flag(brush.vertex_paint_channel_flag);
+
   Color result;
   if (!vwpaint::brush_use_accumulate(vp)) {
     BLI_assert(!stroke_buffer.is_empty());
@@ -718,20 +780,22 @@ static Color vpaint_blend_stroke(const VPaint &vp,
                                                          stroke_buffer[index],
                                                          stroke_buffer[index].a);
 
-    result = vpaint_blend<Color, Traits>(vp,
-                                         vertex_colors[index],
-                                         prev_vertex_colors[index],
-                                         stroke_buffer[index],
-                                         brush_mark_alpha,
-                                         Traits::range * brush_strength);
+    result = vpaint_blend_with_channels<Color, Traits>(vp,
+                                                       vertex_colors[index],
+                                                       prev_vertex_colors[index],
+                                                       stroke_buffer[index],
+                                                       brush_mark_alpha,
+                                                       Traits::range * brush_strength,
+                                                       channel_mask);
   }
   else {
-    result = vpaint_blend<Color, Traits>(vp,
-                                         vertex_colors[index],
-                                         Color() /* unused in accumulate mode */,
-                                         brush_mark_color,
-                                         brush_mark_alpha,
-                                         Traits::range * brush_strength);
+    result = vpaint_blend_with_channels<Color, Traits>(vp,
+                                                       vertex_colors[index],
+                                                       Color() /* unused in accumulate mode */,
+                                                       brush_mark_color,
+                                                       brush_mark_alpha,
+                                                       Traits::range * brush_strength,
+                                                       channel_mask);
   }
   return result;
 }
@@ -1215,12 +1279,16 @@ static void do_vpaint_brush_blur_loops(const Depsgraph &depsgraph,
                                         brush_alpha_pressure;
               /* Mix the new color with the original
                * based on the brush strength and the curve. */
-              colors[corner] = vpaint_blend<Color, Traits>(vp,
-                                                           colors[corner],
-                                                           color_orig,
-                                                           *col,
-                                                           final_alpha,
-                                                           Traits::range * brush_strength);
+              const blender::ed::sculpt_paint::VPaintChannelMask channel_mask =
+                  blender::ed::sculpt_paint::VPaintChannelMask::from_flag(
+                      brush.vertex_paint_channel_flag);
+              colors[corner] = vpaint_blend_with_channels<Color, Traits>(vp,
+                                                                         colors[corner],
+                                                                         color_orig,
+                                                                         *col,
+                                                                         final_alpha,
+                                                                         Traits::range * brush_strength,
+                                                                         channel_mask);
             }
           });
         }
@@ -1362,14 +1430,18 @@ static void do_vpaint_brush_blur_verts(const Depsgraph &depsgraph,
             }
             const float final_alpha = Traits::range * brush_fade * brush_strength *
                                       brush_alpha_pressure;
+            const blender::ed::sculpt_paint::VPaintChannelMask channel_mask =
+                blender::ed::sculpt_paint::VPaintChannelMask::from_flag(
+                    brush.vertex_paint_channel_flag);
             /* Mix the new color with the original
              * based on the brush strength and the curve. */
-            colors[vert] = vpaint_blend<Color, Traits>(vp,
-                                                       colors[vert],
-                                                       color_orig,
-                                                       color_final,
-                                                       final_alpha,
-                                                       Traits::range * brush_strength);
+            colors[vert] = vpaint_blend_with_channels<Color, Traits>(vp,
+                                                                     colors[vert],
+                                                                     color_orig,
+                                                                     color_final,
+                                                                     final_alpha,
+                                                                     Traits::range * brush_strength,
+                                                                     channel_mask);
           });
         }
       },
@@ -1565,12 +1637,16 @@ static void do_vpaint_brush_smear(const Depsgraph &depsgraph,
               }
               /* Mix the new color with the original
                * based on the brush strength and the curve. */
-              colors[elem_index] = vpaint_blend<Color, Traits>(vp,
-                                                               colors[elem_index],
-                                                               color_orig,
-                                                               color_final,
-                                                               final_alpha,
-                                                               Traits::range * brush_strength);
+              const blender::ed::sculpt_paint::VPaintChannelMask channel_mask =
+                  blender::ed::sculpt_paint::VPaintChannelMask::from_flag(
+                      brush.vertex_paint_channel_flag);
+              colors[elem_index] = vpaint_blend_with_channels<Color, Traits>(vp,
+                                                                             colors[elem_index],
+                                                                             color_orig,
+                                                                             color_final,
+                                                                             final_alpha,
+                                                                             Traits::range * brush_strength,
+                                                                             channel_mask);
 
               color_curr[elem_index] = colors[elem_index];
             }

@@ -20,6 +20,7 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
 
@@ -564,6 +565,28 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         UnifiedPaintSettings &settings =
             scene.toolsettings->gp_paint->paint.unified_paint_settings;
         settings.flag &= ~(UNIFIED_PAINT_SIZE | UNIFIED_PAINT_ALPHA | UNIFIED_PAINT_COLOR);
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 17)) {
+    /* Initialize the vertex paint channel output flags for existing brushes. */
+    for (Brush &brush : bmain->brushes) {
+      brush.vertex_paint_channel_flag = (BRUSH_VPAINT_CHANNEL_R | BRUSH_VPAINT_CHANNEL_G |
+                                         BRUSH_VPAINT_CHANNEL_B);
+    }
+
+    /* Initialize the vertex paint channel display flags for the 3D viewport overlay. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            if (v3d->overlay.vertex_paint_channel_flag == 0) {
+              v3d->overlay.vertex_paint_channel_flag = V3D_OVERLAY_VPAINT_SHOW_RGB_MASK;
+            }
+          }
+        }
       }
     }
   }

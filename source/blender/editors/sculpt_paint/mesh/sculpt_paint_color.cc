@@ -30,6 +30,7 @@
 #include "IMB_colormanagement.hh"
 
 #include "mesh_brush_common.hh"
+#include "paint_vertex_channel_mask.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_color.hh"
 #include "sculpt_intern.hh"
@@ -476,7 +477,16 @@ static void do_paint_brush_task(const Depsgraph &depsgraph,
                                    verts[i]);
   }
 
+  const blender::ed::sculpt_paint::VPaintChannelMask channel_mask =
+      blender::ed::sculpt_paint::VPaintChannelMask::from_flag(brush.vertex_paint_channel_flag);
+
   for (const int i : verts.index_range()) {
+    /* Current color before this blend step, used to restore channels the brush's
+     * #Brush.vertex_paint_channel_flag disables. Using the pre-blend color (not #orig_colors,
+     * which predates the whole stroke) keeps disabled channels stable across multiple samples
+     * of the same stroke. */
+    const float4 color_curr = new_colors[i];
+
     /* Brush paint color, brush test falloff and flow. */
     float4 paint_color = brush_color * factors[i] * ss.cache->paint_brush.flow;
     float4 wet_mix_color = wet_mix_sampled_color * factors[i] * ss.cache->paint_brush.flow;
@@ -493,6 +503,19 @@ static void do_paint_brush_task(const Depsgraph &depsgraph,
 
     IMB_blend_color_float(new_colors[i], orig_colors[i], buffer_color, IMB_BlendMode(brush.blend));
     new_colors[i] = math::clamp(new_colors[i], 0.0f, 1.0f);
+
+    if (!channel_mask.r) {
+      new_colors[i].x = color_curr.x;
+    }
+    if (!channel_mask.g) {
+      new_colors[i].y = color_curr.y;
+    }
+    if (!channel_mask.b) {
+      new_colors[i].z = color_curr.z;
+    }
+    if (!channel_mask.a) {
+      new_colors[i].w = color_curr.w;
+    }
   }
 
   scatter_data_mesh(color_buffer.as_span(), verts, mix_colors);

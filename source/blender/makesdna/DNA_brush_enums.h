@@ -612,4 +612,12 @@ ENUM_OPERATORS(eBrushColorJitterSettings_Flag)
 #define MAX_BRUSH_PIXEL_RADIUS 500
 #define MAX_BRUSH_PIXEL_DIAMETER 1000
 
+/** #Brush.vertex_paint_channel_flag */
+enum eBrushVertexPaintChannel {
+  BRUSH_VPAINT_CHANNEL_R = (1 << 0),
+  BRUSH_VPAINT_CHANNEL_G = (1 << 1),
+  BRUSH_VPAINT_CHANNEL_B = (1 << 2),
+  BRUSH_VPAINT_CHANNEL_A = (1 << 3),
+};
+
 }  // namespace blender

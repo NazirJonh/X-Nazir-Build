@@ -747,6 +747,7 @@ void wm_event_do_notifiers(bContext *C)
       MEM_delete(note);
       continue;
     }
+
     /* NOTE: no need to set `wm->runtime->notifier_current` since it's been removed from the queue.
      */
 

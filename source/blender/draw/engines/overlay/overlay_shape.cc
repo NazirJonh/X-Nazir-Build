@@ -877,14 +877,14 @@ ShapeCache::ShapeCache()
     const Vector<float2> triangle = {{-1.0f, 1.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}};
     Vector<Vertex> verts;
     /* Wire */
-    append_line_loop(verts, triangle, 1.0f, VCLASS_CAMERA_FRAME);
+    append_line_loop(verts, triangle, 1.0f, VCLASS_CAMERA_TRIA);
     camera_tria_wire = BatchPtr(
         GPU_batch_create_ex(GPU_PRIM_LINES, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));
 
     verts.clear();
     /* Triangle */
     for (const float2 &point : triangle) {
-      verts.append({{point.x, point.y, 1.0f}, VCLASS_CAMERA_FRAME});
+      verts.append({{point.x, point.y, 1.0f}, VCLASS_CAMERA_TRIA});
     }
     camera_tria = BatchPtr(
         GPU_batch_create_ex(GPU_PRIM_TRIS, vbo_from_vector(verts), nullptr, GPU_BATCH_OWNS_VBO));

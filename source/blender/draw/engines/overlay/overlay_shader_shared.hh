@@ -64,6 +64,7 @@ enum [[host_shared]] VertexClass : uint32_t {
   VCLASS_CAMERA_FRAME = 1 << 5,
   VCLASS_CAMERA_DIST = 1 << 6,
   VCLASS_CAMERA_VOLUME = 1 << 7,
+  VCLASS_CAMERA_TRIA = 1 << 15,
 
   VCLASS_SCREENSPACE = 1 << 8,
   VCLASS_SCREENALIGNED = 1 << 9,

@@ -32,6 +32,7 @@ void draw_image_main_helpers(const bContext *C, ARegion *region);
 void draw_image_cache(const bContext *C, ARegion *region);
 void draw_image_sample_line(SpaceImage *sima);
 void draw_image_uv_custom_region(const ARegion *region, const rctf &custom_region);
+void draw_image_paint_selection_mask(const bContext *C, ARegion *region);
 
 /* `image_ops.cc` */
 
@@ -78,6 +79,7 @@ void IMAGE_OT_flip(wmOperatorType *ot);
 void IMAGE_OT_rotate_orthogonal(wmOperatorType *ot);
 void IMAGE_OT_invert(wmOperatorType *ot);
 void IMAGE_OT_resize(wmOperatorType *ot);
+void IMAGE_OT_crop_selection(wmOperatorType *ot);
 
 void IMAGE_OT_cycle_render_slot(wmOperatorType *ot);
 void IMAGE_OT_clear_render_slot(wmOperatorType *ot);

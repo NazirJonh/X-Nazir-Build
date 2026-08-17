@@ -11,6 +11,7 @@
 
 #include "BLI_compiler_attrs.h"
 #include "BLI_function_ref.hh"
+#include "BLI_map.hh"
 #include "BLI_mutex.hh"
 #include "BLI_string_ref.hh"
 
@@ -62,6 +63,45 @@ constexpr int IMAGE_GPU_PASS_NONE = std::numeric_limits<short>::max();
 constexpr int IMAGE_GPU_LAYER_NONE = std::numeric_limits<short>::max();
 constexpr int IMAGE_GPU_VIEW_NONE = std::numeric_limits<short>::max();
 
+/* Image paint selection masks (runtime, per-tile). */
+
+/** A mask pixel is considered selected when its value exceeds this threshold. */
+inline constexpr float IMAGE_PAINT_SELECTION_MASK_THRESHOLD = 0.5f;
+
+/** Outward compositing feather in pixels (extends past the binary mask boundary). */
+inline constexpr int IMAGE_PAINT_SELECTION_BLEND_RADIUS_PX = 1;
+
+/** Edge weight gamma (>1 lowers opacity in the feather zone; interior stays 1). */
+inline constexpr float IMAGE_PAINT_SELECTION_BLEND_EDGE_GAMMA = 2.5f;
+
+/**
+ * Compositing edge policy for image paint selection (runtime mask + floating fragments).
+ * Single source of truth for hard vs outward-feather edges and feather parameters.
+ */
+struct PaintSelectionEdgePolicy {
+  /** When false, mask edges stay binary for paint, extract padding, and GPU preview. */
+  bool use_outward_feather = true;
+  /** Outward feather extent in pixels (extends past the binary mask boundary). */
+  int blend_radius_px = IMAGE_PAINT_SELECTION_BLEND_RADIUS_PX;
+  /** Edge weight gamma (>1 lowers opacity in the feather zone; interior stays 1). */
+  float edge_gamma = IMAGE_PAINT_SELECTION_BLEND_EDGE_GAMMA;
+};
+
+/**
+ * Cached bounding box of the selected pixels of one UDIM tile. Computing it is O(width * height),
+ * so it is memoized against #bke::ImageRuntime::paint_selection_revision.
+ */
+struct PaintSelectionBounds {
+  /** Inclusive lower corner [x, y]. Only meaningful when #has_selection is true. */
+  int min[2] = {0, 0};
+  /** Exclusive upper corner [x, y]. Only meaningful when #has_selection is true. */
+  int max[2] = {0, 0};
+  /** False when the tile's mask holds no pixel above #IMAGE_PAINT_SELECTION_MASK_THRESHOLD. */
+  bool has_selection = false;
+};
+
+/* The functions operating on these masks live in #BKE_image_paint_selection.hh. */
+
 namespace bke {
 
 struct ImageRuntime {
@@ -93,6 +133,40 @@ struct ImageRuntime {
 
   float view_offset[2] = {};
   float view_zoom = 1.0f;
+
+  /* Per-tile selection masks for 2D image paint (runtime only). */
+  Map<int, ImBuf *> paint_selection_masks;
+  /* Cached smooth blend weights derived from #paint_selection_masks (runtime only). */
+  Map<int, ImBuf *> paint_selection_blend_masks;
+  /** Edge compositing policy for the active selection (box=all hard, lasso/circle=feathered). */
+  PaintSelectionEdgePolicy paint_selection_edge_policy;
+  /**
+   * Monotonically increasing counter bumped whenever #paint_selection_masks may have changed.
+   * Consumers cache derived data (such as the editor's outline batch) against it. See
+   * #BKE_image_paint_selection_mask_revision_get.
+   */
+  uint64_t paint_selection_revision = 0;
+  /**
+   * Memoized per-tile results of #BKE_image_paint_selection_mask_bounds, valid only while
+   * #paint_selection_bounds_revision still equals #paint_selection_revision.
+   *
+   * \note The revision counter is global to the image rather than per-tile, so editing any tile
+   * drops every tile's cached box. That is conservative but never stale, and it keeps a single
+   * invalidation signal shared with the editor's outline batch cache. Making it per-tile would
+   * require splitting that signal, which the outline batch consumes as one value.
+   */
+  Map<int, PaintSelectionBounds> paint_selection_bounds_cache;
+  uint64_t paint_selection_bounds_revision = 0;
+  /**
+   * Opaque handle of the editor holding a live floating selection session (move / transform /
+   * warp / gradient) against this image, or null when the canvas is free. The mask is owned by
+   * the image and can be edited from any Image Editor showing it, but a floating session lifts
+   * pixels off the canvas into editor-local buffers; a second editor painting or gesturing on
+   * those same tiles while they are lifted would work on holes the first editor is about to fill
+   * back in. This is BKE-opaque (compared with `==` only) so this header does not need to know
+   * about `SpaceImage`; see `ED_paint.hh` for the typed accessors that set and check it.
+   */
+  const void *paint_selection_borrowed_by = nullptr;
 };
 
 }  // namespace bke

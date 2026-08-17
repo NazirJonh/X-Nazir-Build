@@ -14,6 +14,7 @@
 #include "GPU_shader_builtin.hh"
 #include "GPU_state.hh"
 #include "GPU_texture.hh"
+#include "GPU_texture_pool.hh"
 
 #include "gpu_context_private.hh"
 #include "gpu_shader_private.hh"
@@ -133,29 +134,38 @@ static void update_mipmaps(Texture &texture, Shader &shader)
   int mip_count = texture.mip_count();
   const bool is_srgb = texture.format_flag_get() & GPU_FORMAT_SRGB;
   const bool is_layered = texture.type_get() & GPU_TEXTURE_ARRAY;
-  /* SRGB textures cannot be used with image load/store. Create a temp texture with mip0 in an
-   * non-srgb texture. */
+  /* SRGB textures cannot be used with image load/store. Acquire a temporary non-srgb texture with
+   * mip0 to run the compute shader on.
+   *
+   * The temporary is taken from the per-context texture pool rather than freshly allocated: for a
+   * large texture (e.g. a 4K UDIM array) it is hundreds of MB, and the mipmap chain is rebuilt on
+   * every partial image update. Reallocating and freeing it each call made interactive image
+   * editing allocate faster than the asynchronous backend could release, exhausting GPU memory and
+   * crashing the driver. The pool recycles the backing memory between calls. */
   if (is_srgb) {
+    TexturePool &texture_pool = TexturePool::get();
+    const int2 extent(texture.width_get(), texture.height_get());
+    const eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE;
     if (is_layered) {
-      texture_ptr = GPU_texture_create_2d_array(__func__,
-                                                texture.width_get(),
-                                                texture.height_get(),
-                                                layer_count,
-                                                texture.mip_count(),
-                                                TextureFormat::UNORM_8_8_8_8,
-                                                GPU_TEXTURE_USAGE_SHADER_READ |
-                                                    GPU_TEXTURE_USAGE_SHADER_WRITE,
-                                                nullptr);
+      texture_ptr = texture_pool.acquire_texture_2d_array(
+          extent, layer_count, mip_count, TextureFormat::UNORM_8_8_8_8, usage, __func__);
     }
     else {
-      texture_ptr = GPU_texture_create_2d(__func__,
-                                          texture.width_get(),
-                                          texture.height_get(),
-                                          texture.mip_count(),
-                                          TextureFormat::UNORM_8_8_8_8,
-                                          GPU_TEXTURE_USAGE_SHADER_READ |
-                                              GPU_TEXTURE_USAGE_SHADER_WRITE,
-                                          nullptr);
+      texture_ptr = texture_pool.acquire_texture_2d(
+          extent, mip_count, TextureFormat::UNORM_8_8_8_8, usage, __func__);
+    }
+    /* Guard against a failed acquisition instead of feeding a null texture into #copy_to, whose
+     * `BLI_assert(dst)` would otherwise abort (see #VKTexture::copy_to). */
+    if (texture_ptr == nullptr) {
+      CLOG_ERROR(&LOG,
+                 "SRGB mipmap: temporary texture acquisition failed "
+                 "(%dx%d, mips=%d, layers=%d, layered=%d). Skipping mipmap update.",
+                 texture.width_get(),
+                 texture.height_get(),
+                 mip_count,
+                 layer_count,
+                 int(is_layered));
+      return;
     }
     texture.copy_to(texture_ptr, IndexRange(1));
   }
@@ -166,9 +176,10 @@ static void update_mipmaps(Texture &texture, Shader &shader)
   }
 
   if (is_srgb) {
-    /* Copy result (mip1 and higher) to original texture and free temporary resources. */
+    /* Copy result (mip1 and higher) to the original texture and release the temporary back to the
+     * pool for reuse on the next call. */
     texture_ptr->copy_to(&texture, IndexRange::from_begin_end(1, mip_count));
-    GPU_texture_free(texture_ptr);
+    TexturePool::get().release_texture(texture_ptr);
     texture_ptr = nullptr;
   }
 

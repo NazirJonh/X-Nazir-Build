@@ -517,6 +517,8 @@ static void push_undo(const PixelNode &node_data,
                       const TileNumber tile_number,
                       ImBuf &image_buffer)
 {
+  image_user.tile = tile_number;
+
   for (const UDIMTileUndo &tile_undo : node_data.undo_regions) {
     if (tile_undo.tile_number != tile_number) {
       continue;

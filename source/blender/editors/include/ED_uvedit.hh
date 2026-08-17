@@ -323,6 +323,19 @@ BMLoop *ED_uvedit_active_edge_loop_get(const ToolSettings *ts, BMesh *bm);
  */
 char ED_uvedit_select_mode_get(const Scene *scene);
 bool ED_uvedit_select_island_check(const ToolSettings *ts);
+/**
+ * Tag all faces belonging to UV island(s) connected to any of \a seed_face_indices.
+ * Uses the same flood-fill rules as UV linked island selection (no delimit by default).
+ *
+ * \param delimit_mode: #UVDelimitMode flags, or 0 for no delimiting.
+ * \param r_island_face_tag: Array of size `bm->totface`; tagged faces are set to true.
+ */
+void ED_uvedit_uv_islands_tag_from_face_indices(const Scene *scene,
+                                                BMesh *bm,
+                                                const BMUVOffsets &offsets,
+                                                const Span<int> seed_face_indices,
+                                                int delimit_mode,
+                                                MutableSpan<bool> r_island_face_tag);
 void ED_uvedit_select_sync_flush(const ToolSettings *ts, BMesh *bm, bool select);
 
 /* `uvedit_unwrap_ops.cc` */

@@ -13,6 +13,7 @@
 #include "BKE_gtest_base.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_main.hh"
 
 #include "MEM_guardedalloc.h"
@@ -218,8 +219,6 @@ TEST_F(UdimTest, image_set_filepath_from_tile_number)
 }
 
 class ImageTest : public BlenderGTestBase {
-  Main *bmain_ = nullptr;
-
   RenderResult *get_image_render_result(Image &image)
   {
     ImageUser iuser{};
@@ -232,6 +231,8 @@ class ImageTest : public BlenderGTestBase {
   }
 
  protected:
+  Main *bmain_ = nullptr;
+
   void SetUp() override
   {
     bmain_ = BKE_main_new();
@@ -365,6 +366,27 @@ TEST_F(ImageTest, multilayer)
     EXPECT_THAT(get_image_pass_names_for_layer(*image, ""),
                 Pointwise(Eq(), {"C", "N", "albedo", "depth"}));
   }
+}
+
+TEST_F(ImageTest, paint_selection_mask_freed_when_udim_tile_removed)
+{
+  const float color[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  Image *ima = BKE_image_add_generated(
+      bmain_, 8, 8, "PaintSelectTile", 32, true, 0, color, false, false, true);
+  ASSERT_NE(ima, nullptr);
+  ASSERT_EQ(ima->source, IMA_SRC_TILED);
+
+  ImageTile *tile_1002 = BKE_image_add_tile(ima, 1002, "tile");
+  ASSERT_NE(tile_1002, nullptr);
+
+  ImBuf *mask = BKE_image_paint_selection_mask_get(ima, 1002, 8, 8);
+  ASSERT_NE(mask, nullptr);
+  EXPECT_TRUE(BKE_image_paint_selection_mask_has_any(ima));
+
+  ASSERT_TRUE(BKE_image_remove_tile(ima, tile_1002));
+
+  EXPECT_EQ(BKE_image_paint_selection_mask_lookup(const_cast<const Image *>(ima), 1002), nullptr);
+  EXPECT_FALSE(BKE_image_paint_selection_mask_has_any(ima));
 }
 
 }  // namespace blender::bke::tests

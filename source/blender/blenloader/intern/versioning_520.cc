@@ -24,6 +24,7 @@
 #include "DNA_xr_types.h"
 
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -32,6 +33,7 @@
 #include "BKE_anim_visualization.h"
 #include "BKE_animsys.h"
 #include "BKE_attribute.hh"
+#include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_curves.hh"
 #include "BKE_idprop.hh"
@@ -911,6 +913,25 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    /* Members missing from an old file's SDNA are zeroed by blenloader, never left with garbage.
+     * Zero happens to be the intended default for `gradient_type`, `gradient_repeat` and
+     * `gradient_blend_mode`, but it is out of range or wrong for the rest: `gradient_opacity`
+     * would be fully transparent, `warp_grid_size` would fall outside the RNA range [2, 10], and
+     * the embedded #ColorBand needs an explicit runtime init to hold any stops. Assign the whole
+     * block so the DNA defaults and the versioned values cannot drift apart. */
+    for (Scene &scene : bmain->scenes) {
+      ImagePaintSettings &imapaint = scene.toolsettings->imapaint;
+      imapaint.gradient_type = IMAGE_PAINT_GRADIENT_LINEAR;
+      imapaint.gradient_repeat = IMAGE_PAINT_GRADIENT_REPEAT_NONE;
+      imapaint.gradient_blend_mode = 0;
+      imapaint.gradient_opacity = 1.0f;
+      imapaint.warp_grid_size = 4;
+      imapaint.warp_interpolation = IMAGE_PAINT_WARP_INTERP_LINEAR;
+      BKE_colorband_init(&imapaint.gradient_colorband, true);
+    }
   }
 
   /**

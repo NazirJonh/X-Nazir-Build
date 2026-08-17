@@ -76,6 +76,10 @@ struct SpaceSpreadsheet_Runtime;
 struct SpreadsheetColumnRuntime;
 }  // namespace ed::spreadsheet
 
+namespace ed::image {
+struct SpaceImage_Runtime;
+}  // namespace ed::image
+
 namespace ed::outliner {
 struct TreeElement;
 }
@@ -699,6 +703,9 @@ struct SpaceImage {
 
   MaskSpaceInfo mask_info;
   SpaceImageOverlay overlay;
+
+  /* Runtime data, not written to .blend. */
+  ed::image::SpaceImage_Runtime *runtime = nullptr;
 };
 
 /** \} */

@@ -12,6 +12,16 @@
 #include <cstdio>
 #include <cstring>
 
+#ifndef IMAGE_SELECT_DEBUG
+#  define IMAGE_SELECT_DEBUG 0
+#endif
+#if IMAGE_SELECT_DEBUG
+#  define IMG_SEL_DBG_PAINT(fmt, ...) \
+    printf("[image_select] %s:%d: " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
+#else
+#  define IMG_SEL_DBG_PAINT(fmt, ...) ((void)0)
+#endif
+
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
@@ -268,6 +278,20 @@ static Brush *image_paint_brush(bContext *C)
 
 static bool image_paint_poll_ex(bContext *C, bool check_tool)
 {
+  /* Any live floating session -- in this editor, or in another Image Editor sharing the same
+   * Image -- holds an open image-undo step and/or lifted pixels. The brush must not start a new
+   * stroke over it (ED_image_undo_push_begin would free that step, or paint into holes the other
+   * editor's session is about to fill back in). Keymap stays alive via #image_texture_paint_poll
+   * so confirm/cancel/gizmo still run in the owning editor. */
+  if (image_select_canvas_paint_blocked(C)) {
+    const wmWindow *win = CTX_wm_window(C);
+    const wmEvent *ev = (win && win->runtime) ? win->runtime->eventstate : nullptr;
+    if (ev && ev->type == LEFTMOUSE && ev->val == KM_PRESS) {
+      IMG_SEL_DBG_PAINT("image_paint_poll: FAIL (floating session blocks brush LMB)");
+    }
+    return false;
+  }
+
   if (!image_paint_brush(C)) {
     return false;
   }
@@ -953,6 +977,12 @@ float3 seed_hsv_jitter()
 bool image_texture_paint_poll(bContext *C)
 {
   if (CTX_wm_space_image(C)) {
+    /* Keep the Image Paint keymap active while any floating session is live so confirm/cancel,
+     * undo-step, and transform-drag operators still receive events. Brush strokes are gated
+     * separately by #image_paint_poll_ex. */
+    if (image_select_session_is_floating(C)) {
+      return true;
+    }
     return ED_image_tools_paint_poll(C);
   }
 

@@ -528,6 +528,15 @@ struct ButtonHSVCube : public Button {
 /** Derived struct for #ButtonType::ColorBand. */
 struct ButtonColorBand : public Button {
   ColorBand *edit_coba = nullptr;
+  /**
+   * When true, clicking an empty area of the ramp inserts a new color stop at the cursor, while
+   * clicking near an existing stop still selects and drags it. Holding Ctrl always inserts,
+   * regardless of this flag.
+   *
+   * This is part of the public `UILayout.template_color_ramp(compact=True)` behavior (see
+   * #template_color_ramp), not an internal detail of any single tool.
+   */
+  bool insert_on_click = false;
 };
 
 /** Derived struct for #ButtonType::CurveProfile. */

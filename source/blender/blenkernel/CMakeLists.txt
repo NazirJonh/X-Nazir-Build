@@ -151,6 +151,7 @@ set(SRC
   intern/image_format.cc
   intern/image_gen.cc
   intern/image_gpu.cc
+  intern/image_paint_selection.cc
   intern/image_partial_update.cc
   intern/image_save.cc
   intern/instances.cc
@@ -424,6 +425,7 @@ set(SRC
   BKE_idtype.hh
   BKE_image.hh
   BKE_image_format.hh
+  BKE_image_paint_selection.hh
   BKE_image_partial_update.hh
   BKE_image_save.hh
   BKE_image_wrappers.hh

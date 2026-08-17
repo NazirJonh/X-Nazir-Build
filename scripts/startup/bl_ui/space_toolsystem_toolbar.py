@@ -2105,6 +2105,29 @@ class _defs_texture_paint:
         )
 
     @ToolDef.from_fn
+    def selection_gradient():
+        def draw_settings(context, layout, _tool):
+            imapaint = context.tool_settings.image_paint
+            layout.prop(imapaint, "gradient_type", text="Type")
+            layout.template_color_ramp(imapaint, "color_ramp", expand=True, compact=True)
+            layout.popover("IMAGE_PT_paint_select_gradient_advanced", text="Color Ramp Advanced")
+            layout.prop(imapaint, "gradient_opacity", text="Opacity")
+            layout.prop(imapaint, "gradient_blend_mode", text="Blend")
+            layout.prop(imapaint, "gradient_repeat", text="Repeat")
+            sima = context.space_data
+            if sima.image and sima.image.source == 'TILED':
+                layout.prop(imapaint, "use_gradient_multi_udim", text="All UDIM Tiles")
+
+        return dict(
+            idname="builtin.select_gradient",
+            label="Gradient",
+            icon="ops.paint.weight_gradient",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Gradient",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def mask():
         return dict(
             idname="builtin_brush.mask",
@@ -2112,6 +2135,113 @@ class _defs_texture_paint:
             icon="brush.paint_texture.mask",
             options={'USE_BRUSHES'},
             brush_type='MASK',
+        )
+
+
+class _defs_image_paint_select:
+
+    @staticmethod
+    def draw_select_uv_island(context, layout):
+        imapaint = context.tool_settings.image_paint
+        layout.prop(imapaint, "use_selection_uv_island", text="UV Island")
+
+    @ToolDef.from_fn
+    def move():
+        return dict(
+            idname="builtin.select_move",
+            label="Move Selection",
+            icon="ops.transform.translate",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Move Selection",
+        )
+
+    @ToolDef.from_fn
+    def transform():
+        return dict(
+            idname="builtin.select_transform",
+            label="Transform Selection",
+            icon="ops.transform.transform",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Transform Select",
+        )
+
+    @ToolDef.from_fn
+    def warp():
+        def draw_settings(context, layout, _tool):
+            imapaint = context.tool_settings.image_paint
+            layout.prop(imapaint, "warp_interpolation", text="Interpolation")
+            layout.prop(imapaint, "warp_grid_size", text="Grid Size")
+
+        return dict(
+            idname="builtin.select_warp",
+            label="Warp Selection",
+            # No dedicated warp icon asset; reuse the transform icon.
+            icon="ops.transform.transform",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Warp Selection",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def box():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_box")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
+            _defs_image_paint_select.draw_select_uv_island(context, layout)
+
+        return dict(
+            idname="builtin.select_box",
+            label="Select Box",
+            icon="ops.generic.select_box",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Select Box",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def lasso():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_lasso")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
+            _defs_image_paint_select.draw_select_uv_island(context, layout)
+
+        return dict(
+            idname="builtin.select_lasso",
+            label="Select Lasso",
+            icon="ops.generic.select_lasso",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Select Lasso",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def circle():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_circle")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
+            layout.prop(props, "radius")
+            _defs_image_paint_select.draw_select_uv_island(context, layout)
+
+        def draw_cursor(_context, tool, xy):
+            from gpu_extras.presets import draw_circle_2d
+            props = tool.operator_properties("paint.image_select_circle")
+            radius = props.radius
+            draw_circle_2d(xy, (1.0,) * 4, radius, segments=32)
+
+        return dict(
+            idname="builtin.select_circle",
+            label="Select Circle",
+            icon="ops.generic.select_circle",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Select Circle",
+            draw_settings=draw_settings,
+            draw_cursor=draw_cursor,
         )
 
 
@@ -3552,6 +3682,17 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
         ),
     )
 
+    _tools_image_paint_select = (
+        (
+            _defs_image_paint_select.box,
+            _defs_image_paint_select.circle,
+            _defs_image_paint_select.lasso,
+            _defs_image_paint_select.move,
+            _defs_image_paint_select.transform,
+            _defs_image_paint_select.warp,
+        ),
+    )
+
     # Private tools dictionary, store data to implement `tools_all` & `tools_from_context`.
     # The keys match image spaces modes: `context.space_data.mode`.
     # The values represent the tools, see `ToolSelectPanelHelper` for details.
@@ -3594,7 +3735,10 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_texture_paint.smear,
             _defs_texture_paint.clone,
             _defs_texture_paint.fill,
+            _defs_texture_paint.selection_gradient,
             _defs_texture_paint.mask,
+            None,
+            *_tools_image_paint_select,
             None,
             *_tools_annotate,
         ],

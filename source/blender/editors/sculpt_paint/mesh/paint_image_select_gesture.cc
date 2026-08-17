@@ -146,17 +146,24 @@ static void image_select_apply_deselect(bContext *C, Image *image)
 }
 
 /**
- * Pixels are rasterized unconditionally unless island expansion is enabled, in which case only
- * ADD and SUB still need the raw gesture footprint on top of the expanded islands.
+ * Pixels are rasterized unconditionally in Pixels mode. Face mode never rasterizes the raw
+ * gesture (only complete faces). Island mode still rasterizes the gesture for ADD and SUB so the
+ * raw footprint sits on top of the expanded islands.
  */
 static bool image_paint_selection_should_rasterize_gesture(const Scene *scene,
                                                            const eSelectOp sel_op)
 {
   const ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
-  if (!imapaint.use_selection_uv_island) {
-    return true;
+  switch (eImagePaint_SelectionExpand(imapaint.selection_expand)) {
+    case IMAGE_PAINT_SELECT_EXPAND_FACE:
+      return false;
+    case IMAGE_PAINT_SELECT_EXPAND_ISLAND:
+      return ELEM(sel_op, SEL_OP_ADD, SEL_OP_SUB);
+    case IMAGE_PAINT_SELECT_EXPAND_PIXELS:
+    case IMAGE_PAINT_SELECT_EXPAND_MESH:
+      return true;
   }
-  return ELEM(sel_op, SEL_OP_ADD, SEL_OP_SUB);
+  return true;
 }
 
 static bool image_paint_selection_tile_intersection_get(const float2 &uv_origin,
@@ -241,10 +248,10 @@ wmOperatorStatus image_select_gesture_exec_generic(bContext *C,
 
   ED_image_undo_push_begin_selection(shape.undo_name(), image);
 
-  /* Subtract: expand islands before filling pixels so we seed from the gesture geometry,
+  /* Subtract: expand faces/islands before filling pixels so we seed from the gesture geometry,
    * not from remaining selected pixels (which would wrongly deselect unrelated islands). */
   if (sel_op == SEL_OP_SUB) {
-    image_paint_selection_expand_uv_islands(C, image, sel_op, &gesture_uv_bounds);
+    image_paint_selection_expand(C, image, sel_op, &gesture_uv_bounds);
   }
 
   if (sel_op == SEL_OP_SET) {
@@ -255,9 +262,9 @@ wmOperatorStatus image_select_gesture_exec_generic(bContext *C,
     image_select_gesture_rasterize_tiles(sima, image, gesture_uv_bounds, shape, fill_value);
   }
 
-  /* Add/set: expand to full UV islands touched by the gesture. */
+  /* Add/set: expand to faces or UV islands touched by the gesture. */
   if (sel_op != SEL_OP_SUB) {
-    image_paint_selection_expand_uv_islands(C, image, sel_op, &gesture_uv_bounds);
+    image_paint_selection_expand(C, image, sel_op, &gesture_uv_bounds);
   }
 
   DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);

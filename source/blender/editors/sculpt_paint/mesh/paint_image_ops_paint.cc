@@ -13,6 +13,7 @@
 
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
+#include "BLI_utildefines.h"
 
 #include "BKE_brush.hh"
 #include "BKE_colortools.hh"
@@ -212,14 +213,32 @@ class ProjectionPaintMode : public AbstractPaintMode {
                   float mouse_start[2],
                   float mouse_end[2])
   {
-    paint_proj_stroke(C,
-                      stroke_handle,
-                      mouse_start,
-                      mouse_end,
-                      stroke->stroke_flipped(),
-                      1.0,
-                      0.0,
-                      BKE_brush_radius_get(paint, brush));
+    if (brush && (brush->flag & BRUSH_USE_GRADIENT) == 0 &&
+        ELEM(brush->fill_expand,
+             IMAGE_PAINT_SELECT_EXPAND_FACE,
+             IMAGE_PAINT_SELECT_EXPAND_ISLAND,
+             IMAGE_PAINT_SELECT_EXPAND_MESH))
+    {
+      float color[3];
+      if (stroke->stroke_inverted()) {
+        copy_v3_v3(color, BKE_brush_secondary_color_get(paint, brush));
+      }
+      else {
+        copy_v3_v3(color, BKE_brush_color_get(paint, brush));
+      }
+      Object *ob = CTX_data_active_object(C);
+      paint_image_proj_geometry_fill(C, color, brush, ob, mouse_start);
+    }
+    else {
+      paint_proj_stroke(C,
+                        stroke_handle,
+                        mouse_start,
+                        mouse_end,
+                        stroke->stroke_flipped(),
+                        1.0,
+                        0.0,
+                        BKE_brush_radius_get(paint, brush));
+    }
     /* two redraws, one for GPU update, one for notification */
     paint_proj_redraw(C, stroke_handle, false);
     paint_proj_redraw(C, stroke_handle, true);

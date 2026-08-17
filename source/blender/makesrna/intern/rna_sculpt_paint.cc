@@ -1644,12 +1644,32 @@ static void rna_def_image_paint(BlenderRNA *brna)
    * active is derived from the per-image runtime mask data, which #ImagePaintSettings cannot
    * reach; operator polls query #BKE_image_paint_selection_mask_has_any instead. */
 
-  prop = RNA_def_property(srna, "use_selection_uv_island", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "use_selection_uv_island", 1);
+  static const EnumPropertyItem selection_expand_items[] = {
+      {IMAGE_PAINT_SELECT_EXPAND_PIXELS,
+       "PIXELS",
+       ICON_IMAGE,
+       "Pixels",
+       "Select the exact pixels covered by the gesture"},
+      {IMAGE_PAINT_SELECT_EXPAND_FACE,
+       "FACE",
+       ICON_UV_FACESEL,
+       "Face",
+       "Expand the selection to entire faces that overlap the gesture"},
+      {IMAGE_PAINT_SELECT_EXPAND_ISLAND,
+       "ISLAND",
+       ICON_UV_ISLANDSEL,
+       "Island",
+       "Expand the selection to entire UV islands that overlap the gesture"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "selection_expand", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "selection_expand");
+  RNA_def_property_enum_items(prop, selection_expand_items);
   RNA_def_property_ui_text(
       prop,
-      "UV Island",
-      "When selecting, expand the result to include entire UV islands that overlap the selection");
+      "Selection Expand",
+      "How a paint selection gesture is expanded onto the UV layout");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "warp_grid_size", PROP_INT, PROP_NONE);

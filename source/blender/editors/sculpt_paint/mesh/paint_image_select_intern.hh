@@ -40,6 +40,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_customdata.hh"
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
 
@@ -59,8 +60,11 @@
 
 struct ImBuf;
 struct ARegion;
+struct BMesh;
 struct Image;
 struct ImageUser;
+struct Object;
+struct Scene;
 struct SpaceImage;
 struct bContext;
 struct wmEvent;
@@ -125,6 +129,26 @@ inline float2 image_select_udim_tile_uv_origin(int tile_number)
   const int2 col_row = image_select_udim_tile_col_row(tile_number);
   return float2(float(col_row.x), float(col_row.y));
 }
+
+/**
+ * Which operation is asking for canvas objects.
+ *
+ * The two callers need different strictness. A selection mask is reversible, so a
+ * generous candidate set is acceptable and is what makes the common "unwrap, open an
+ * image, paint" workflow behave. A geometry fill writes pixels irreversibly, so it must
+ * not touch an object that merely happens to overlap in UV space.
+ */
+enum class ImagePaintCanvasPurpose {
+  /** Selection mask: reversible, generous candidate set. */
+  Mask,
+  /** Geometry fill: destructive, only objects that actually use the image. */
+  Fill,
+};
+
+Vector<Object *> image_paint_selection_canvas_objects_get(const bContext *C,
+                                                          const Image *image,
+                                                          ImagePaintCanvasPurpose purpose);
+BMUVOffsets image_paint_selection_uv_offsets_get(BMesh *bm, Object *ob, const Scene *scene);
 
 /* Gradient floating-state helpers. The gradient rasterization API lives in
  * paint_image_select_gradient.hh; these operate on the runtime floating session. */

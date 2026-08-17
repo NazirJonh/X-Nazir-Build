@@ -2668,9 +2668,14 @@ void ED_uvedit_uv_islands_tag_from_face_indices(const Scene *scene,
 
   const UVDelimitMode delimit = UVDelimitMode(delimit_mode);
 
+  UNUSED_VARS(scene);
+
   BM_mesh_elem_table_ensure(bm, BM_FACE);
 
-  UvVertMap *vmap = BM_uv_vert_map_create(bm, true, true);
+  /* `use_select = false`: paint masks are independent of mesh/UV selection. With `true`, an
+   * Object-mode conversion (no faces selected) and Edit Mode with an empty face selection both
+   * make #BM_uv_vert_map_create return nullptr, so the caller would write an empty mask. */
+  UvVertMap *vmap = BM_uv_vert_map_create(bm, false, true);
   if (vmap == nullptr) {
     return;
   }
@@ -2685,9 +2690,6 @@ void ED_uvedit_uv_islands_tag_from_face_indices(const Scene *scene,
     }
     BMFace *efa = BM_face_at_index(bm, face_i);
     if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
-      continue;
-    }
-    if (!uvedit_face_visible_test(scene, efa)) {
       continue;
     }
     if (flag[face_i]) {

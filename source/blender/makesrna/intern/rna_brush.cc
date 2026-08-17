@@ -2372,6 +2372,30 @@ static void rna_def_brush(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem brush_fill_expand_items[] = {
+      {IMAGE_PAINT_SELECT_EXPAND_PIXELS,
+       "PIXELS",
+       ICON_IMAGE,
+       "Pixels",
+       "Current color / view fill"},
+      {IMAGE_PAINT_SELECT_EXPAND_FACE,
+       "FACE",
+       ICON_UV_FACESEL,
+       "Face",
+       "Fill the entire face under the cursor"},
+      {IMAGE_PAINT_SELECT_EXPAND_ISLAND,
+       "ISLAND",
+       ICON_UV_ISLANDSEL,
+       "Island",
+       "Fill the entire UV island under the cursor"},
+      {IMAGE_PAINT_SELECT_EXPAND_MESH,
+       "MESH",
+       ICON_MESH_DATA,
+       "Mesh",
+       "Fill all faces of the vertex-connected mesh under the cursor"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   static const EnumPropertyItem brush_gradient_items[] = {
       {BRUSH_GRADIENT_PRESSURE, "PRESSURE", 0, "Pressure", ""},
       {BRUSH_GRADIENT_SPACING_REPEAT, "SPACING_REPEAT", 0, "Repeat", ""},
@@ -3555,6 +3579,12 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "fill_threshold");
   RNA_def_property_ui_text(
       prop, "Fill Threshold", "Threshold above which filling is not propagated");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "fill_expand", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "fill_expand");
+  RNA_def_property_enum_items(prop, brush_fill_expand_items);
+  RNA_def_property_ui_text(prop, "Fill Mode", "How a fill click is expanded onto the UV layout");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "blur_kernel_radius", PROP_INT, PROP_NONE);

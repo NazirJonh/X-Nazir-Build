@@ -327,6 +327,11 @@ bool ED_uvedit_select_island_check(const ToolSettings *ts);
  * Tag all faces belonging to UV island(s) connected to any of \a seed_face_indices.
  * Uses the same flood-fill rules as UV linked island selection (no delimit by default).
  *
+ * Paint-selection callers must not depend on mesh or UV element selection: only hidden faces are
+ * skipped. #uvedit_face_visible_test is intentionally not applied (it requires #BM_ELEM_SELECT
+ * when UV sync is off, which would drop every seed on an Object-mode BMesh and on an Edit-mode
+ * mesh with no faces selected).
+ *
  * \param delimit_mode: #UVDelimitMode flags, or 0 for no delimiting.
  * \param r_island_face_tag: Array of size `bm->totface`; tagged faces are set to true.
  */

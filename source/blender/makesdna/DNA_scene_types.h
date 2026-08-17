@@ -1316,6 +1316,22 @@ enum eImagePaint_WarpInterpolation : int8_t {
   IMAGE_PAINT_WARP_INTERP_SMOOTH = 1,
 };
 
+/** Image Paint face/island expansion mode.
+ *
+ * Used by #ImagePaintSettings::selection_expand (Select Box/Lasso/Circle)
+ * and #Brush::fill_expand (Fill brush pick).
+ *
+ * Stored in the same byte that used to be the boolean `use_selection_uv_island`.
+ * `0` and `1` keep their old meanings so existing files need no versioning.
+ * #IMAGE_PAINT_SELECT_EXPAND_MESH is Fill-brush only (`Brush::fill_expand`).
+ */
+enum eImagePaint_SelectionExpand : int8_t {
+  IMAGE_PAINT_SELECT_EXPAND_PIXELS = 0,
+  IMAGE_PAINT_SELECT_EXPAND_ISLAND = 1,
+  IMAGE_PAINT_SELECT_EXPAND_FACE = 2,
+  IMAGE_PAINT_SELECT_EXPAND_MESH = 3,
+};
+
 /** Texture/Image Editor. */
 struct ImagePaintSettings {
   Paint paint;
@@ -1353,8 +1369,8 @@ struct ImagePaintSettings {
    * runtime data (see #BKE_image_paint_selection_mask_has_any), so it is not stored in the file.
    */
   char _pad3[1] = {};
-  /** Expand paint selection to full UV islands (like UV Editor island select). */
-  char use_selection_uv_island = 0;
+  /** #eImagePaint_SelectionExpand */
+  char selection_expand = IMAGE_PAINT_SELECT_EXPAND_PIXELS;
   /** #eImagePaint_GradientType */
   char gradient_type = IMAGE_PAINT_GRADIENT_LINEAR;
   /** #eImagePaint_GradientRepeat */

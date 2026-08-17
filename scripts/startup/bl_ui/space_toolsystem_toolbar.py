@@ -2141,9 +2141,10 @@ class _defs_texture_paint:
 class _defs_image_paint_select:
 
     @staticmethod
-    def draw_select_uv_island(context, layout):
+    def draw_select_expand(context, layout):
         imapaint = context.tool_settings.image_paint
-        layout.prop(imapaint, "use_selection_uv_island", text="UV Island")
+        row = layout.row(align=True)
+        row.prop(imapaint, "selection_expand", text="", expand=True)
 
     @ToolDef.from_fn
     def move():
@@ -2189,7 +2190,7 @@ class _defs_image_paint_select:
             row = layout.row()
             row.use_property_split = False
             row.prop(props, "mode", text="", expand=True, icon_only=True)
-            _defs_image_paint_select.draw_select_uv_island(context, layout)
+            _defs_image_paint_select.draw_select_expand(context, layout)
 
         return dict(
             idname="builtin.select_box",
@@ -2207,7 +2208,7 @@ class _defs_image_paint_select:
             row = layout.row()
             row.use_property_split = False
             row.prop(props, "mode", text="", expand=True, icon_only=True)
-            _defs_image_paint_select.draw_select_uv_island(context, layout)
+            _defs_image_paint_select.draw_select_expand(context, layout)
 
         return dict(
             idname="builtin.select_lasso",
@@ -2226,7 +2227,7 @@ class _defs_image_paint_select:
             row.use_property_split = False
             row.prop(props, "mode", text="", expand=True, icon_only=True)
             layout.prop(props, "radius")
-            _defs_image_paint_select.draw_select_uv_island(context, layout)
+            _defs_image_paint_select.draw_select_expand(context, layout)
 
         def draw_cursor(_context, tool, xy):
             from gpu_extras.presets import draw_circle_2d

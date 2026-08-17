@@ -479,6 +479,20 @@ void paint_2d_bucket_fill(const bContext *C,
                           const float mouse_init[2],
                           const float mouse_final[2],
                           void *ps);
+/**
+ * 3D Texture Paint Face/Island fill.
+ *
+ * Ray-casts the original mesh / Edit BMesh of \a ob (not the evaluated mesh) so the hit
+ * face index matches 2D Image Editor fill and selection expand. Rasterizes in UV space
+ * onto `imapaint.canvas` or the hit face's material image.
+ *
+ * \return true if any tile was written.
+ */
+bool paint_image_proj_geometry_fill(const bContext *C,
+                                    const float color[3],
+                                    Brush *br,
+                                    Object *ob,
+                                    const float mouse[2]);
 void paint_2d_gradient_fill(
     const bContext *C, Brush *br, const float mouse_init[2], const float mouse_final[2], void *ps);
 void *paint_proj_new_stroke(bContext *C,

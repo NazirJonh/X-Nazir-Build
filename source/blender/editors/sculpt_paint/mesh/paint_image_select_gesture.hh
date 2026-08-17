@@ -9,9 +9,9 @@
  * (box / lasso / circle).
  *
  * Every gesture operator runs the exact same sequence: simple-click detection, committing a
- * floating move-selection fragment, opening an image undo step, seeding UV-island expansion,
- * clearing the mask in SET mode, rasterizing into each intersecting UDIM tile, expanding islands
- * again for ADD/SET, and finally tagging updates and closing the undo step.
+ * floating move-selection fragment, opening an image undo step, seeding Face/Island expansion,
+ * clearing the mask in SET mode, rasterizing into each intersecting UDIM tile, expanding faces
+ * or islands again for ADD/SET, and finally tagging updates and closing the undo step.
  *
  * Only two things differ per tool: how the gesture's UV bounds are derived, and how its pixels are
  * rasterized into one tile. #ImageSelectGestureShape captures exactly those two decisions (plus
@@ -108,14 +108,15 @@ void image_select_gesture_drag_detect(wmOperator *op, const wmEvent *event);
 void image_select_gesture_properties(wmOperatorType *ot);
 
 /**
- * Grow the selection to the full UV islands touched by \a gesture_uv_bounds.
+ * Grow the selection to the faces or UV islands touched by \a gesture_uv_bounds,
+ * according to #ImagePaintSettings::selection_expand.
  *
  * Implemented in `paint_image_select_mask.cc` next to the BMesh/UV machinery it needs; declared
  * here because the shared gesture sequence drives it.
  */
-void image_paint_selection_expand_uv_islands(bContext *C,
-                                             Image *image,
-                                             eSelectOp sel_op,
-                                             const rctf *gesture_uv_bounds);
+void image_paint_selection_expand(bContext *C,
+                                  Image *image,
+                                  eSelectOp sel_op,
+                                  const rctf *gesture_uv_bounds);
 
 }  // namespace blender

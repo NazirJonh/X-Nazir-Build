@@ -80,6 +80,8 @@ set(SRC
   mesh/paint_hide.cc
   mesh/paint_image.cc
   mesh/paint_image_2d.cc
+  mesh/paint_image_uv_geom.cc
+  mesh/paint_image_uv_symmetry.cc
   mesh/paint_image_select_mask.cc
   mesh/paint_image_select_gesture.cc
   mesh/paint_image_select_fragment.cc
@@ -136,6 +138,8 @@ set(SRC
 
   mesh/mesh_brush_common.hh
   mesh/paint_hide.hh
+  mesh/paint_image_uv_geom.hh
+  mesh/paint_image_uv_symmetry.hh
   mesh/paint_mask.hh
   mesh/sculpt_automask.hh
   mesh/sculpt_boundary.hh
@@ -221,6 +225,8 @@ if(WITH_GTESTS)
     mesh/mesh_brush_common_tests.cc
     mesh/paint_test.cc
     mesh/paint_image_select_warp_tests.cc
+    mesh/paint_image_uv_geom_tests.cc
+    mesh/paint_image_uv_symmetry_tests.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc
     mesh/sculpt_undo_test.cc

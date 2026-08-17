@@ -96,6 +96,7 @@
 #include "paint_image_select_intern.hh"
 /* #ED_image_paint_select_transform_state_free only. */
 #include "paint_image_select_transform_intern.hh"
+#include "paint_image_uv_geom.hh"
 
 namespace blender {
 
@@ -139,104 +140,6 @@ bool image_paint_selection_poll(bContext *C)
   return true;
 }
 
-/**
- * Visit every pixel center covered by a triangle given in tile-local pixel space.
- * \a fn is invoked as `fn(x, y)` and returns `true` to continue or `false` to stop early.
- * Returns `false` if \a fn requested an early stop, otherwise `true`.
- */
-template<typename Fn>
-static bool foreach_triangle_pixel(const float2 &p0,
-                                   const float2 &p1,
-                                   const float2 &p2,
-                                   const int width,
-                                   const int height,
-                                   Fn &&fn)
-{
-  int min_x = int(floorf(std::min({p0.x, p1.x, p2.x})));
-  int max_x = int(ceilf(std::max({p0.x, p1.x, p2.x})));
-  int min_y = int(floorf(std::min({p0.y, p1.y, p2.y})));
-  int max_y = int(ceilf(std::max({p0.y, p1.y, p2.y})));
-
-  min_x = max_ii(min_x, 0);
-  min_y = max_ii(min_y, 0);
-  max_x = min_ii(max_x, width - 1);
-  max_y = min_ii(max_y, height - 1);
-
-  const auto edge_fn = [](const float2 &a, const float2 &b, const float fx, const float fy) {
-    return (fx - a.x) * (b.y - a.y) - (fy - a.y) * (b.x - a.x);
-  };
-
-  for (int y = min_y; y <= max_y; y++) {
-    for (int x = min_x; x <= max_x; x++) {
-      const float fx = float(x) + 0.5f;
-      const float fy = float(y) + 0.5f;
-      const float w0 = edge_fn(p1, p2, fx, fy);
-      const float w1 = edge_fn(p2, p0, fx, fy);
-      const float w2 = edge_fn(p0, p1, fx, fy);
-      const bool has_neg = (w0 < 0.0f) || (w1 < 0.0f) || (w2 < 0.0f);
-      const bool has_pos = (w0 > 0.0f) || (w1 > 0.0f) || (w2 > 0.0f);
-      if (has_neg == has_pos) {
-        continue;
-      }
-      if (!fn(x, y)) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-/**
- * Tessellate a face's UV polygon into tile-local pixel space and visit every covered pixel.
- * Coordinates are mapped to pixels via `(uv - uv_origin) * size`; the point-in-triangle test is
- * orientation-preserving under this map, so the same primitive serves both reads and writes.
- * See #foreach_triangle_pixel for the \a fn contract; an early stop propagates across triangles.
- *
- * The polygon is triangulated with #BLI_polyfill_calc rather than fanned from vertex 0: a face
- * that is convex in 3D can still be concave in UV space, and a fan over a concave polygon emits
- * triangles that cover area outside the face, flooding the mask beyond the UV island.
- */
-template<typename Fn>
-static void foreach_face_pixel(const BMFace *efa,
-                               const BMUVOffsets &offsets,
-                               const float2 &uv_origin,
-                               const int width,
-                               const int height,
-                               Fn &&fn)
-{
-  Vector<float2, 8> px_verts;
-  BMIter liter;
-  BMLoop *l;
-  BM_ITER_ELEM (l, &liter, const_cast<BMFace *>(efa), BM_LOOPS_OF_FACE) {
-    const float *uv = BM_ELEM_CD_GET_FLOAT_P(l, offsets.uv);
-    px_verts.append(float2((uv[0] - uv_origin.x) * width, (uv[1] - uv_origin.y) * height));
-  }
-
-  const int verts_num = px_verts.size();
-  if (verts_num < 3) {
-    return;
-  }
-
-  if (verts_num == 3) {
-    foreach_triangle_pixel(px_verts[0], px_verts[1], px_verts[2], width, height, fn);
-    return;
-  }
-
-  Vector<uint3, 8> tris(verts_num - 2);
-  BLI_polyfill_calc(reinterpret_cast<const float (*)[2]>(px_verts.data()),
-                    uint(verts_num),
-                    0,
-                    reinterpret_cast<uint(*)[3]>(tris.data()));
-
-  for (const uint3 &tri : tris) {
-    if (!foreach_triangle_pixel(
-            px_verts[tri[0]], px_verts[tri[1]], px_verts[tri[2]], width, height, fn))
-    {
-      return;
-    }
-  }
-}
-
 /** Return true if any mask pixel covered by \a efa exceeds \a threshold. */
 static bool face_uv_tri_intersects_mask(const BMFace *efa,
                                         const BMUVOffsets &offsets,
@@ -248,13 +151,14 @@ static bool face_uv_tri_intersects_mask(const BMFace *efa,
   const int width = mask->x;
 
   bool found = false;
-  foreach_face_pixel(efa, offsets, uv_origin, width, mask->y, [&](const int x, const int y) {
-    if (data[y * width + x] > threshold) {
-      found = true;
-      return false;
-    }
-    return true;
-  });
+  foreach_face_pixel(
+      efa, offsets, uv_origin, width, mask->y, [&](const int x, const int y, const bool /*strict*/) {
+        if (data[y * width + x] > threshold) {
+          found = true;
+          return false;
+        }
+        return true;
+      });
   return found;
 }
 
@@ -268,10 +172,11 @@ static void rasterize_face_to_mask(const BMFace *efa,
   float *data = mask->float_data_for_write();
   const int width = mask->x;
 
-  foreach_face_pixel(efa, offsets, uv_origin, width, mask->y, [&](const int x, const int y) {
-    data[y * width + x] = fill_value;
-    return true;
-  });
+  foreach_face_pixel(
+      efa, offsets, uv_origin, width, mask->y, [&](const int x, const int y, const bool /*strict*/) {
+        data[y * width + x] = fill_value;
+        return true;
+      });
 }
 
 /** Same image datablock, or the same file on disk (duplicate Image IDs are common). */
@@ -347,6 +252,24 @@ static bool mesh_object_has_uv_maps(const Object *ob)
   }
   const Mesh *mesh = id_cast<const Mesh *>(ob->data);
   return mesh && !mesh->uv_map_names().is_empty();
+}
+
+/** True when \a ob has a UV layout on its Mesh or (in Edit Mode) on the BMesh. */
+static bool mesh_object_has_uv_layout(Object *ob)
+{
+  if (!ob || ob->type != OB_MESH) {
+    return false;
+  }
+  if (ob->mode & OB_MODE_EDIT) {
+    BMEditMesh *em = BKE_editmesh_from_object(ob);
+    if (em && em->bm) {
+      const BMUVOffsets offsets = BM_uv_map_offsets_get(em->bm);
+      if (offsets.uv >= 0) {
+        return true;
+      }
+    }
+  }
+  return mesh_object_has_uv_maps(ob);
 }
 
 /**
@@ -448,8 +371,9 @@ static void image_paint_object_collect_from_user(Image *ima,
   }
 }
 
-static Vector<Object *> image_paint_selection_canvas_objects_get(const bContext *C,
-                                                                 const Image *image)
+Vector<Object *> image_paint_selection_canvas_objects_get(const bContext *C,
+                                                          const Image *image,
+                                                          const ImagePaintCanvasPurpose purpose)
 {
   Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
@@ -479,23 +403,45 @@ static Vector<Object *> image_paint_selection_canvas_objects_get(const bContext 
     }
   }
 
+  if (purpose == ImagePaintCanvasPurpose::Fill) {
+    /* A fill writes pixels. Adding an object that merely overlaps in UV space would
+     * stamp an unrelated layout into the texture, so stop at objects that really use
+     * this image; the active object still qualifies through the same test. */
+    add_if_uses_image(CTX_data_active_object(C));
+    return objects;
+  }
+
+  /* Image Editor paints `sima->image` directly and does not require the image to be assigned to a
+   * material. Filtering these through #mesh_object_uses_image drops every candidate in the typical
+   * "unwrap, open image, paint" workflow, and SET+UV-Island then writes an empty mask because it
+   * skips gesture rasterization. Safe here only because a mask is reversible. */
+
   for (Object *ob : BKE_view_layer_array_from_objects_in_edit_mode_unique_data_with_uvs(
            *bmain, scene, view_layer, nullptr))
   {
-    add_if_uses_image(ob);
+    image_paint_selection_object_add_unique(objects, ob);
   }
 
-  /* The Image Editor paints sima->image directly, so the active object is a legitimate canvas even
-   * when no material references the image; #mesh_object_uses_image covers that case. There is
-   * deliberately no "no object matched, so use every mesh in the view layer" fallback: rasterizing
-   * the UV islands of arbitrary scene objects into the mask bleeds the selection across unrelated
-   * UV layouts, which is both surprising and hard to diagnose. */
-  add_if_uses_image(CTX_data_active_object(C));
+  for (Object *ob : BKE_view_layer_array_from_objects_in_mode_unique_data(
+           *bmain, scene, view_layer, nullptr, OB_MODE_TEXTURE_PAINT))
+  {
+    if (mesh_object_has_uv_layout(ob)) {
+      image_paint_selection_object_add_unique(objects, ob);
+    }
+  }
+
+  Object *active = CTX_data_active_object(C);
+  if (!active) {
+    active = BKE_view_layer_active_object_get(view_layer);
+  }
+  if (mesh_object_has_uv_layout(active)) {
+    image_paint_selection_object_add_unique(objects, active);
+  }
 
   return objects;
 }
 
-static BMUVOffsets image_paint_selection_uv_offsets_get(BMesh *bm, Object *ob, const Scene *scene)
+BMUVOffsets image_paint_selection_uv_offsets_get(BMesh *bm, Object *ob, const Scene *scene)
 {
   const ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
 
@@ -547,13 +493,16 @@ static bool face_uv_intersects_rect(const BMFace *efa,
 /**
  * \param gesture_uv_bounds: When non-null, seed faces are those whose UV bounds intersect the
  * gesture region in UV space (box/lasso/circle). This matches Image Editor selection geometry.
+ * \param expand_islands: When true, flood-fill from the seed faces to their UV islands. When
+ * false, only the seed faces themselves are rasterized (Face expand mode).
  */
-static void image_paint_selection_expand_uv_islands_for_object(Scene *scene,
-                                                               Object *ob,
-                                                               Image *image,
-                                                               const float fill_value,
-                                                               const float threshold,
-                                                               const rctf *gesture_uv_bounds)
+static void image_paint_selection_expand_for_object(Scene *scene,
+                                                    Object *ob,
+                                                    Image *image,
+                                                    const float fill_value,
+                                                    const float threshold,
+                                                    const rctf *gesture_uv_bounds,
+                                                    const bool expand_islands)
 {
   BMesh *bm = nullptr;
   bool owns_bm = false;
@@ -646,24 +595,17 @@ static void image_paint_selection_expand_uv_islands_for_object(Scene *scene,
     return;
   }
 
-  /* ED_uvedit_uv_islands_tag_from_face_indices calls uvedit_face_visible_test which
-   * requires BM_ELEM_SELECT when UV sync is off.  A BMesh freshly converted from an
-   * Object-mode mesh has no face selection state, so every seed would be rejected.
-   * Mark all non-hidden faces as selected so the flood-fill can reach them. */
-  if (owns_bm) {
-    BMIter fiter_sel;
-    BMFace *efa_sel;
-    BM_ITER_MESH (efa_sel, &fiter_sel, bm, BM_FACES_OF_MESH) {
-      if (!BM_elem_flag_test(efa_sel, BM_ELEM_HIDDEN)) {
-        BM_elem_flag_enable(efa_sel, BM_ELEM_SELECT);
-      }
+  Array<bool> faces_to_write(bm->totface, false);
+  if (expand_islands) {
+    ED_uvedit_uv_islands_tag_from_face_indices(scene, bm, offsets, seed_faces, 0, faces_to_write);
+  }
+  else {
+    for (const int face_index : seed_faces) {
+      faces_to_write[face_index] = true;
     }
   }
 
-  Array<bool> island_tags(bm->totface);
-  ED_uvedit_uv_islands_tag_from_face_indices(scene, bm, offsets, seed_faces, 0, island_tags);
-
-  /* Bucket island faces by the UDIM tile(s) their UVs fall on, in a single pass over the mesh.
+  /* Bucket selected faces by the UDIM tile(s) their UVs fall on, in a single pass over the mesh.
    * This avoids re-scanning every face once per tile during rasterization (was O(tiles * faces)).
    * A face straddling a tile border is registered with every tile it overlaps; the rasterizer
    * clips to each tile's pixel bounds, so per-tile clipping stays correct. */
@@ -673,7 +615,7 @@ static void image_paint_selection_expand_uv_islands_for_object(Scene *scene,
     BMFace *efa;
     int face_index;
     BM_ITER_MESH_INDEX (efa, &fiter, bm, BM_FACES_OF_MESH, face_index) {
-      if (!island_tags[face_index]) {
+      if (!faces_to_write[face_index]) {
         continue;
       }
       rctf face_uv_bounds;
@@ -698,6 +640,9 @@ static void image_paint_selection_expand_uv_islands_for_object(Scene *scene,
             continue;
           }
           const int tile_number = 1001 + ty * 10 + tx;
+          if (tile_number > IMA_UDIM_MAX) {
+            continue;
+          }
           tile_faces.lookup_or_add_default(tile_number).append(face_index);
         }
       }
@@ -745,13 +690,14 @@ static void image_paint_selection_expand_uv_islands_for_object(Scene *scene,
   }
 }
 
-void image_paint_selection_expand_uv_islands(bContext *C,
-                                             Image *image,
-                                             const eSelectOp sel_op,
-                                             const rctf *gesture_uv_bounds)
+void image_paint_selection_expand(bContext *C,
+                                  Image *image,
+                                  const eSelectOp sel_op,
+                                  const rctf *gesture_uv_bounds)
 {
   Scene *scene = CTX_data_scene(C);
-  if (!scene->toolsettings->imapaint.use_selection_uv_island) {
+  const char expand = scene->toolsettings->imapaint.selection_expand;
+  if (!ELEM(expand, IMAGE_PAINT_SELECT_EXPAND_FACE, IMAGE_PAINT_SELECT_EXPAND_ISLAND)) {
     return;
   }
   if (sel_op == SEL_OP_SUB && !BKE_image_paint_selection_mask_has_any(image)) {
@@ -760,12 +706,14 @@ void image_paint_selection_expand_uv_islands(bContext *C,
 
   const float fill_value = (sel_op == SEL_OP_SUB) ? 0.0f : 1.0f;
   const float threshold = SELECTION_MASK_THRESHOLD;
+  const bool expand_islands = (expand == IMAGE_PAINT_SELECT_EXPAND_ISLAND);
 
-  Vector<Object *> objects = image_paint_selection_canvas_objects_get(C, image);
+  Vector<Object *> objects = image_paint_selection_canvas_objects_get(
+      C, image, ImagePaintCanvasPurpose::Mask);
 
   for (Object *ob : objects) {
-    image_paint_selection_expand_uv_islands_for_object(
-        scene, ob, image, fill_value, threshold, gesture_uv_bounds);
+    image_paint_selection_expand_for_object(
+        scene, ob, image, fill_value, threshold, gesture_uv_bounds, expand_islands);
   }
 }
 

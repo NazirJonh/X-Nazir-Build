@@ -493,6 +493,16 @@ bool paint_image_proj_geometry_fill(const bContext *C,
                                     Brush *br,
                                     Object *ob,
                                     const float mouse[2]);
+/**
+ * Single-shot texture fill from 3D viewport screen coords.
+ * Solid color only (v1). Geometry expand or pixel flood depending on \a brush.fill_expand.
+ */
+bool paint_image_viewport_fill_at_mouse(const bContext *C,
+                                        const Paint *paint,
+                                        Brush *brush,
+                                        Object *ob,
+                                        bool stroke_inverted,
+                                        const float mouse[2]);
 void paint_2d_gradient_fill(
     const bContext *C, Brush *br, const float mouse_init[2], const float mouse_final[2], void *ps);
 void *paint_proj_new_stroke(bContext *C,

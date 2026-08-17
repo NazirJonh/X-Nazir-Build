@@ -1033,6 +1033,10 @@ def brush_settings(layout, context, brush, popover=False):
             row = layout.row()
             row.prop(brush, "tip_scale_x")
 
+        elif sculpt_brush_type == 'TEXTURE_FILL':
+            if brush.color_type == 'COLOR':
+                draw_image_paint_fill_expand(layout, brush)
+
         elif sculpt_brush_type == 'SMEAR':
             col = layout.column()
             col.prop(brush, "smear_deform_type")
@@ -1526,7 +1530,9 @@ def draw_auto_masking_panel(layout, brush):
 
 def draw_image_paint_fill_expand(layout, brush):
     """Horizontal Pixels / Face / Island / Mesh buttons for Image/Texture Paint Fill."""
-    if brush.image_brush_type != 'FILL' or brush.color_type != 'COLOR':
+    is_sculpt_texture_fill = getattr(brush, 'sculpt_brush_type', None) == 'TEXTURE_FILL'
+    is_image_fill = brush.image_brush_type == 'FILL'
+    if (not is_image_fill and not is_sculpt_texture_fill) or brush.color_type != 'COLOR':
         return False
     row = layout.row(align=True)
     row.use_property_split = False
@@ -1541,7 +1547,8 @@ def draw_color_settings(context, layout, brush, color_type=False):
     if color_type:
         row = layout.row()
         row.use_property_split = False
-        row.prop(brush, "color_type", expand=True)
+        if getattr(brush, 'sculpt_brush_type', None) != 'TEXTURE_FILL':
+            row.prop(brush, "color_type", expand=True)
 
     # Color wheel
     if brush.color_type == 'COLOR':

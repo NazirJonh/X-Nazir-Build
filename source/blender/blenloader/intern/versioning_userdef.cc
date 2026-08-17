@@ -688,6 +688,7 @@ static void keymap_update_mesh_sculpt_brushes(wmKeyMap *keymap)
     map.add_new("builtin_brush.Paint", "builtin_brush.paint");
     map.add_new("builtin_brush.Mask", "builtin_brush.mask");
     map.add_new("builtin_brush.Draw Face Sets", "builtin_brush.draw_face_sets");
+    map.add_new("builtin_brush.texture_fill", "builtin_brush.texture_fill");
     return map;
   }();
 
@@ -724,6 +725,7 @@ static void keymap_update_mesh_sculpt_brushes(wmKeyMap *keymap)
     map.add_new(SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER, "Erase Multires Displacement");
     map.add_new(SCULPT_BRUSH_TYPE_DISPLACEMENT_SMEAR, "Smear Multires Displacement");
     map.add_new(SCULPT_BRUSH_TYPE_PAINT, "Paint Hard");
+    map.add_new(SCULPT_BRUSH_TYPE_TEXTURE_FILL, "Fill");
     map.add_new(SCULPT_BRUSH_TYPE_SMEAR, "Smear");
     return map;
   }();

@@ -6013,6 +6013,9 @@ static void project_state_init(bContext *C,
   if (ps->brush) {
     Brush *brush = ps->brush;
     ps->brush_type = brush->image_brush_type;
+    if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_TEXTURE_FILL) {
+      ps->brush_type = IMAGE_PAINT_BRUSH_TYPE_FILL;
+    }
     ps->blend = brush->blend;
     if (brush_switch_mode == BrushSwitchMode::Smooth) {
       ps->brush_type = IMAGE_PAINT_BRUSH_TYPE_SOFTEN;
@@ -6192,8 +6195,8 @@ void *paint_proj_new_stroke(bContext *C,
   for (int i = 0; i < ps_handle->ps_views_tot; i++) {
     ProjPaintState *ps = ps_handle->ps_views[i];
 
-    ps->source = (ps->brush_type == IMAGE_PAINT_BRUSH_TYPE_FILL) ? PROJ_SRC_VIEW_FILL :
-                                                                   PROJ_SRC_VIEW;
+    ps->source = ELEM(ps->brush_type, IMAGE_PAINT_BRUSH_TYPE_FILL) ? PROJ_SRC_VIEW_FILL :
+                                                                     PROJ_SRC_VIEW;
     project_image_refresh_tagged(ps);
 
     /* re-use! */

@@ -571,7 +571,7 @@ class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
         if tool.use_brushes:
             brush = context.tool_settings.sculpt.brush
             if brush:
-                is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'SMEAR'}
+                is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'SMEAR', 'TEXTURE_FILL'}
         else:
             # TODO: The property use_paint_canvas doesn't work anymore since its associated
             # C++ function 'rna_WorkSpaceTool_use_paint_canvas_get' passes in a nullptr for

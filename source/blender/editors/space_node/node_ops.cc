@@ -123,6 +123,8 @@ void node_operatortypes()
 
   WM_operatortype_append(NODE_OT_link_drag_operation_test);
 
+  WM_operatortype_append(NODE_OT_driver_from_property);
+
   for (bke::bNodeType *ntype : bke::node_types_get()) {
     if (ntype->register_operators) {
       ntype->register_operators();

@@ -10,16 +10,28 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
+#include "DNA_ID.h"
 #include "DNA_array_utils.hh"
 #include "DNA_node_types.h"
 
 #include "BLI_easing.h"
 #include "BLI_listbase.h"
 #include "BLI_math_geom.h"
+#include "BLI_rect.h"
 #include "BLI_stack.hh"
+#include "BLI_string.h"
 #include "BLI_vector.hh"
 
+#include "BKE_anim_data.hh"
 #include "BKE_context.hh"
+#include "BKE_fcurve.hh"
+#include "BKE_fcurve_driver.h"
+#include "BKE_idprop.hh"
+#include "BKE_idtype.hh"
+#include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_main_invariants.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
@@ -27,6 +39,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_screen.hh"
 
+#include "ED_keyframing.hh"
 #include "ED_node.hh" /* own include */
 #include "ED_render.hh"
 #include "ED_screen.hh"
@@ -35,11 +48,15 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_path.hh"
 #include "RNA_prototypes.hh"
+#include "RNA_types.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "UI_interface.hh"
+#include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
 #include "UI_resources.hh"
 #include "UI_view2d.hh"

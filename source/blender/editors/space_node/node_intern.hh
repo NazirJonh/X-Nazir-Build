@@ -318,6 +318,9 @@ struct SpaceNode_Runtime {
    * is reset when something changes that may affect what nodes need to be synced.
    */
   Map<int, bool> node_can_sync_states;
+
+  /** Input socket highlighted as a driver-drop target by #NODE_OT_driver_from_property. */
+  const bNodeSocket *highlighted_socket = nullptr;
 };
 
 enum NodeResizeDirection {
@@ -656,6 +659,9 @@ void invoke_node_link_drag_add_menu(bContext &C,
                                     const float2 &cursor);
 
 void NODE_OT_link_drag_operation_test(wmOperatorType *ot);
+
+/* `node_add_driver.cc` */
+void NODE_OT_driver_from_property(wmOperatorType *ot);
 
 /* `add_menu_assets.cc` */
 

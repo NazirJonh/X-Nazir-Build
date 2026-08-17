@@ -36,6 +36,7 @@
 
 #include "attribute_convert.hh"
 #include "bmesh.hh"
+#include "draw_cache.hh"
 
 namespace blender {
 
@@ -71,14 +72,22 @@ struct OrigMeshData {
   int face_set_default;
   int face_set_seed;
   bke::AttributeAccessor attributes;
-  OrigMeshData(const Mesh &mesh)
+  /**
+   * Poly Paint: unlike the members above this is scene rather than mesh state, but it is needed
+   * in the same place - #attribute_format, which otherwise only knows an attribute's name. See
+   * #DrawCache::ensure_tris_batches. Null when the caller has no tool settings to resolve
+   * against, which only costs the material paint shader-input aliases.
+   */
+  const PaintModeSettings *paint_mode;
+  OrigMeshData(const Mesh &mesh, const PaintModeSettings *paint_mode = nullptr)
       : active_color(mesh.active_color_attribute),
         default_color(mesh.default_color_attribute),
         active_uv_map(mesh.active_uv_map_name()),
         default_uv_map(mesh.default_uv_map_name()),
         face_set_default(mesh.face_sets_color_default),
         face_set_seed(mesh.face_sets_color_seed),
-        attributes(mesh.attributes())
+        attributes(mesh.attributes()),
+        paint_mode(paint_mode)
   {
   }
 };
@@ -158,6 +167,7 @@ class DrawCacheImpl : public DrawCache {
 
   Span<gpu::Batch *> ensure_tris_batches(const Object &object,
                                          const ViewportRequest &request,
+                                         const PaintModeSettings *paint_mode,
                                          const IndexMask &nodes_to_update) override;
 
   Span<gpu::Batch *> ensure_lines_batches(const Object &object,
@@ -311,7 +321,7 @@ static GPUVertFormat attribute_format(const OrigMeshData &orig_mesh_data,
 {
   GPUVertFormat format = init_format_for_attribute(data_type, "data");
 
-  bool is_render, is_active;
+  bool is_render = false, is_active = false;
   const char *prefix = "a";
 
   if (CD_TYPE_AS_MASK(*bke::attr_type_to_custom_data_type(data_type))) {
@@ -326,6 +336,15 @@ static GPUVertFormat attribute_format(const OrigMeshData &orig_mesh_data,
   }
 
   DRW_cdlayer_attr_aliases_add(&format, prefix, data_type, name, is_render, is_active);
+
+  /* Poly Paint: the Workbench prepass reads the scalar material attributes through fixed vertex
+   * input names. The generic alias generated above is `a` + safe-name (and a hashed form for
+   * names longer than 8 chars), which does not match, so add the explicit alias. */
+  const char *alias = DRW_material_paint_vertex_input_alias(name, orig_mesh_data.paint_mode);
+  if (alias != nullptr) {
+    GPU_vertformat_alias_add(&format, alias);
+  }
+
   return format;
 }
 
@@ -1883,10 +1902,11 @@ Span<gpu::IndexBufPtr> DrawCacheImpl::ensure_tri_indices(const Object &object,
 
 Span<gpu::Batch *> DrawCacheImpl::ensure_tris_batches(const Object &object,
                                                       const ViewportRequest &request,
+                                                      const PaintModeSettings *paint_mode,
                                                       const IndexMask &nodes_to_update)
 {
   const Object &object_orig = *DEG_get_original(&object);
-  const OrigMeshData orig_mesh_data{*id_cast<const Mesh *>(object_orig.data)};
+  const OrigMeshData orig_mesh_data{*id_cast<const Mesh *>(object_orig.data), paint_mode};
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 
   this->ensure_use_flat_layout(object, orig_mesh_data);

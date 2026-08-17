@@ -11,6 +11,7 @@
 #include "DNA_mesh_types.h"
 #include "DNA_scene_types.h"
 #include "draw_attributes.hh"
+#include "draw_cache.hh"
 #include "draw_context_private.hh"
 #include "draw_view.hh"
 
@@ -46,6 +47,25 @@ float3 SculptBatch::debug_color()
   };
 
   return colors[debug_index % 9];
+}
+
+/**
+ * Poly Paint: tool settings the material paint channel/attribute mapping is resolved against.
+ *
+ * Read from the draw context rather than threaded through every engine's batch request: this file
+ * already depends on it for the paint/navigation state above, and both this and #sculpt_batches_get
+ * run on the sync thread where the context is set. Null outside a draw context.
+ */
+static const PaintModeSettings *sculpt_paint_mode_settings_get()
+{
+  if (!DRWContext::is_active()) {
+    return nullptr;
+  }
+  const Scene *scene = DRW_context_get()->scene;
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return nullptr;
+  }
+  return &scene->toolsettings->paint_mode;
 }
 
 static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
@@ -113,7 +133,8 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
     batches = draw_data.ensure_lines_batches(*ob, {{}, fast_mode}, nodes_to_update);
   }
   else {
-    batches = draw_data.ensure_tris_batches(*ob, {attrs, fast_mode}, nodes_to_update);
+    batches = draw_data.ensure_tris_batches(
+        *ob, {attrs, fast_mode}, sculpt_paint_mode_settings_get(), nodes_to_update);
   }
 
   const Span<int> material_indices = draw_data.ensure_material_indices(*ob);
@@ -156,6 +177,31 @@ Vector<SculptBatch> sculpt_batches_get(const Object *ob, SculptBatchFeature feat
     const StringRef uv_name = mesh->active_uv_map_name();
     if (!uv_name.is_empty()) {
       attrs.append(pbvh::GenericRequest(uv_name));
+    }
+  }
+
+  if (features & SCULPT_BATCH_MATERIAL_PROPS) {
+    const PaintModeSettings *paint_mode = sculpt_paint_mode_settings_get();
+    const bke::AttributeAccessor mesh_attrs = mesh->attributes();
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      /* The attribute a stroke would actually write, which is not the built-in name once an
+       * add-on has bound a layer attribute to the channel. Requesting the built-in name there
+       * would upload an abandoned attribute and show nothing of what is being painted. */
+      const StringRef attr_name = paint_mode ? BKE_paint_material_channel_attribute_name(
+                                                   *paint_mode, info.channel) :
+                                               StringRef(info.attribute_name);
+      if (attr_name.is_empty() ||
+          DRW_material_paint_vertex_input_alias(attr_name, paint_mode) == nullptr)
+      {
+        continue;
+      }
+      const std::optional<bke::AttributeMetaData> meta_data = mesh_attrs.lookup_meta_data(
+          attr_name);
+      if (meta_data && meta_data->data_type == bke::AttrType::Float &&
+          meta_data->domain == bke::AttrDomain::Point)
+      {
+        attrs.append(pbvh::GenericRequest(attr_name));
+      }
     }
   }
 

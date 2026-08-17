@@ -218,6 +218,8 @@ enum IMB_BlendMode {
   IMB_BLEND_LUMINOSITY = 22,
   IMB_BLEND_COLOR = 23,
   IMB_BLEND_INTERPOLATE = 24,
+  /** Renormalizing mix for tangent-space normal maps. */
+  IMB_BLEND_NORMAL_MIX = 25,
 
   IMB_BLEND_COPY_RGB = 1001,
   IMB_BLEND_COPY_ALPHA = 1002,

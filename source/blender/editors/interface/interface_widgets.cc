@@ -2789,6 +2789,47 @@ static void widget_draw_extra_icons(const uiWidgetColors *wcol,
   }
 }
 
+/**
+ * Draws a colored node-socket dot centered on \a rect, sized as a fraction of the rect's own
+ * height so it matches the classic node socket regardless of caller (radius is not tied to
+ * #U.widget_unit, since callers may draw the dot into buttons of any size).
+ */
+static void widget_draw_socket_color_at_rect(const rcti *rect,
+                                             const uchar col[4],
+                                             const float alpha,
+                                             const float outline_thickness,
+                                             const float aspect,
+                                             const bool force_opaque_outline = false)
+{
+  ColorTheme4f socket_color;
+  rgba_uchar_to_float(socket_color, col);
+  socket_color[3] *= alpha;
+
+  ColorTheme4f outline_color;
+  theme::get_color_type_4fv(TH_WIRE, SPACE_NODE, outline_color);
+  outline_color[3] = force_opaque_outline ? 1.0f : outline_color[3] * alpha;
+
+  const float radius = 0.25f * BLI_rcti_size_y(rect);
+  const float2 center = {BLI_rcti_cent_x_fl(rect), BLI_rcti_cent_y_fl(rect)};
+  const rctf draw_rect = {
+      center.x - radius,
+      center.x + radius,
+      center.y - radius,
+      center.y + radius,
+  };
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  widgetbase_draw_cache_flush();
+  GPU_blend(GPU_BLEND_NONE);
+
+  ed::space_node::node_draw_nodesocket(&draw_rect,
+                                       socket_color,
+                                       outline_color,
+                                       outline_thickness,
+                                       SOCK_DISPLAY_SHAPE_CIRCLE,
+                                       aspect);
+}
+
 static void widget_draw_node_link_socket(const uiWidgetColors *wcol,
                                          const rcti *rect,
                                          Button *but,
@@ -2808,6 +2849,10 @@ static void widget_draw_node_link_socket(const uiWidgetColors *wcol,
 
     ed::space_node::node_socket_draw(
         static_cast<bNodeSocket *>(but->custom_data), rect, col, scale);
+  }
+  else if (but->col[3] != 0) {
+    const float scale = 0.9f / but->block->aspect;
+    widget_draw_socket_color_at_rect(rect, but->col, alpha, U.pixelsize * scale, 1.0f / scale);
   }
   else {
     widget_draw_icon(but, ICON_LAYER_USED, alpha, rect, wcol->text);
@@ -4456,33 +4501,10 @@ static void widget_nodesocket(Button *but,
                               int /*roundboxalign*/,
                               const float zoom)
 {
-  ColorTheme4f socket_color;
-  rgba_uchar_to_float(socket_color, but->col);
-
-  ColorTheme4f outline_color;
-  theme::get_color_type_4fv(TH_WIRE, SPACE_NODE, outline_color);
-  outline_color.a = 1.0f;
-
-  const int cent_x = BLI_rcti_cent_x(rect);
-  const int cent_y = BLI_rcti_cent_y(rect);
-  const int socket_radius = 0.25f * BLI_rcti_size_y(rect);
-
-  rctf socket_rect;
-  socket_rect.xmin = cent_x - socket_radius;
-  socket_rect.xmax = cent_x + socket_radius;
-  socket_rect.ymin = cent_y - socket_radius;
-  socket_rect.ymax = cent_y + socket_radius;
-
-  GPU_blend(GPU_BLEND_ALPHA);
-  widgetbase_draw_cache_flush();
-  GPU_blend(GPU_BLEND_NONE);
-
-  ed::space_node::node_draw_nodesocket(&socket_rect,
-                                       socket_color,
-                                       outline_color,
-                                       U.pixelsize,
-                                       SOCK_DISPLAY_SHAPE_CIRCLE,
-                                       1.0f / zoom);
+  /* Radius comes from the rect itself (see #widget_draw_socket_color_at_rect), matching every
+   * other node socket in the UI regardless of #U.widget_unit; only the outline thickness/aspect
+   * need the view zoom. Outline alpha is forced opaque, as sockets are never itself faded. */
+  widget_draw_socket_color_at_rect(rect, but->col, 1.0f, U.pixelsize, 1.0f / zoom, true);
 }
 
 static void widget_numslider(Button *but,
@@ -5740,6 +5762,11 @@ void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but
         draw_but_COLORBAND(but, &tui->wcol_regular, rect);
         break;
       }
+
+      case ButtonType::MaterialPaintValue:
+        /* Padding is applied inside the draw/hit helper so both share one track rect. */
+        draw_but_MATERIAL_PAINT_VALUE(but, &tui->wcol_regular, rect);
+        break;
 
       case ButtonType::Unitvec:
         wt = widget_type(WidgetStyle::Unitvec);

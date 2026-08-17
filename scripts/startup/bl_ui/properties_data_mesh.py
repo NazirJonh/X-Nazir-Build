@@ -579,6 +579,52 @@ class DATA_PT_mesh_attributes(MeshButtonsPanel, Panel):
         draw_attribute_warnings(context, layout, None)
 
 
+class DATA_PT_material_attributes(MeshButtonsPanel, Panel):
+    bl_label = "Material Attributes (Poly Paint)"
+    bl_options = {'DEFAULT_CLOSED'}
+    COMPAT_ENGINES = {
+        'BLENDER_RENDER',
+        'BLENDER_EEVEE',
+        'BLENDER_WORKBENCH',
+    }
+
+    # Channels shown as fixed rows, with their UI label. The attribute names come from the
+    # channel table in C, so they are never spelled out here. Base Color is not listed: it is the
+    # mesh's active/default color attribute, already managed by the Color Attributes panel.
+    # Normal, Height, Emission and Custom are omitted: they are map-only (Normal, Height,
+    # Emission) or need a user-provided name (Custom), so they use the Custom row below instead.
+    _fixed_channels = (
+        ('METALLIC', "Metallic"),
+        ('ROUGHNESS', "Roughness"),
+        ('SPECULAR', "Specular"),
+        ('AO', "AO"),
+        ('ALPHA', "Alpha"),
+    )
+
+    def draw(self, context):
+        mesh = context.mesh
+
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        col = layout.column(align=True)
+
+        for channel, label in self._fixed_channels:
+            attr_name = mesh.material_paint_attribute_name(channel)
+            row = col.row(align=True)
+            row.label(text=label)
+            if attr_name in mesh.attributes:
+                row.operator("paint.material_attribute_remove", text="", icon='X').channel = channel
+            else:
+                row.operator("paint.material_attribute_add", text="", icon='ADD').channel = channel
+
+        # The custom channel is named per scene, so it always offers the add popup.
+        row = col.row(align=True)
+        row.label(text="Custom")
+        row.operator("paint.material_attribute_add", text="", icon='ADD').channel = 'CUSTOM'
+
+
 # `attribute` is list of attributes in current UI list
 # None for vgroup and mesh. Those are already utilized in comparison.
 def draw_attribute_warnings(context, layout, attributes):
@@ -732,6 +778,7 @@ classes = (
     DATA_PT_uv_texture,
     DATA_PT_vertex_colors,
     DATA_PT_mesh_attributes,
+    DATA_PT_material_attributes,
     DATA_PT_texture_space,
     DATA_PT_remesh,
     DATA_PT_customdata,

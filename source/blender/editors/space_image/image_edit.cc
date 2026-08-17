@@ -100,6 +100,41 @@ void ED_space_image_sync(Main *bmain, Image *image, bool ignore_render_viewer)
   }
 }
 
+void ED_space_image_paint_auto_select_material_canvas(Main *bmain, Object *ob)
+{
+  if (bmain == nullptr || ob == nullptr || ob->type != OB_MESH) {
+    return;
+  }
+
+  Image *image = BKE_paint_material_preferred_display_image(*ob);
+  if (image == nullptr) {
+    return;
+  }
+
+  wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first);
+  if (wm == nullptr) {
+    return;
+  }
+  for (wmWindow &win : wm->windows) {
+    const bScreen *screen = WM_window_get_active_screen(&win);
+    if (screen == nullptr) {
+      continue;
+    }
+    for (ScrArea &area : screen->areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        if (sl.spacetype != SPACE_IMAGE) {
+          continue;
+        }
+        SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+        if (sima->mode != SI_MODE_PAINT || sima->image != nullptr) {
+          continue;
+        }
+        ED_space_image_set(bmain, sima, image, true);
+      }
+    }
+  }
+}
+
 void ED_space_image_auto_set(const bContext *C, SpaceImage *sima)
 {
   if (sima->mode != SI_MODE_UV || sima->pin) {

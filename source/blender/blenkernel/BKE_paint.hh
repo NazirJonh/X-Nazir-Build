@@ -26,6 +26,8 @@
 #include "DNA_brush_enums.h"
 #include "DNA_meshdata_types.h"
 #include "DNA_object_enums.h"
+/* For #eMaterialPaintChannel and #PAINT_MATERIAL_CHANNEL_NUM. */
+#include "DNA_scene_types.h"
 
 namespace blender {
 
@@ -38,6 +40,8 @@ struct BlendDataReader;
 struct BlendWriter;
 struct Brush;
 struct BrushColorJitterSettings;
+struct BrushMaterialPaint;
+struct BrushMaterialPaintChannel;
 struct CurveMapping;
 struct Depsgraph;
 struct EnumPropertyItem;
@@ -63,8 +67,10 @@ struct ImagePool;
 struct ImageUser;
 struct KeyBlock;
 struct Main;
+struct Material;
 struct Mesh;
 struct MDeformVert;
+struct MTex;
 struct MultiresModifierData;
 struct Object;
 struct Paint;
@@ -223,7 +229,22 @@ bool BKE_paint_brush_set(Paint *paint, Brush *brush);
 bool BKE_paint_brush_set(Main *bmain,
                          Paint *paint,
                          const AssetWeakReference &brush_asset_reference);
-bool BKE_paint_brush_set_default(Main *bmain, Paint *paint);
+/**
+ * Like #BKE_paint_brush_set(Paint*, Brush*), but also snapshots the outgoing brush's PBR
+ * Paint state into \a scene's preset list before switching, and applies the incoming
+ * brush's matching preset after. Use this at genuine user-facing brush-activation sites
+ * (tool system, brush-asset revert, cross-editor brush sync); the plain
+ * #BKE_paint_brush_set() remains the right call for transient Sculpt/Grease-Pencil
+ * modifier-key brush toggles, which never touch material-paint-capable brushes.
+ */
+bool BKE_paint_brush_set_synced(Scene &scene, Paint &paint, Brush *brush);
+
+/** Asset-reference-taking counterpart of #BKE_paint_brush_set_synced(Scene&, Paint&, Brush*). */
+bool BKE_paint_brush_set_synced(Main &bmain,
+                                Scene &scene,
+                                Paint &paint,
+                                const AssetWeakReference &brush_asset_reference);
+bool BKE_paint_brush_set_default(Main *bmain, Scene *scene, Paint *paint);
 bool BKE_paint_brush_set_essentials(Main *bmain, Paint *paint, const char *name);
 void BKE_paint_previous_asset_reference_set(Paint *paint,
                                             AssetWeakReference &&asset_weak_reference);
@@ -242,8 +263,8 @@ void BKE_paint_brushes_set_default_references(ToolSettings *ts);
  *
  * Also handles the active eraser brush asset.
  */
-void BKE_paint_brushes_ensure(Main *bmain, Paint *paint);
-void BKE_paint_brushes_validate(Main *bmain, Paint *paint);
+void BKE_paint_brushes_ensure(Main *bmain, Scene *scene, Paint *paint);
+void BKE_paint_brushes_validate(Main *bmain, Scene *scene, Paint *paint);
 
 /* Secondary eraser brush. */
 
@@ -638,7 +659,19 @@ bool BKE_object_sculpt_use_dyntopo(const Object *object);
  * Create a key that can be used to compare with previous ones to identify changes.
  * The resulting 'string' is owned by the caller.
  */
-std::string BKE_paint_canvas_key_get(PaintModeSettings *settings, Object *ob);
+std::string BKE_paint_canvas_key_get(PaintModeSettings *settings,
+                                     Object *ob,
+                                     const Brush *brush,
+                                     int visible_material_channels);
+
+/**
+ * Layout key for PBVH pixel encoding of \a image: seam margin and each tile's
+ * (tile_number, width, height). Images that share this key can reuse the same
+ * #bke::pbvh::pixels::PixelData without re-encoding.
+ */
+std::string BKE_paint_pixels_layout_key_get(Image &image,
+                                            ImageUser &image_user,
+                                            StringRef uv_map_name);
 
 bool BKE_paint_canvas_image_get(PaintModeSettings *settings,
                                 Object *ob,
@@ -648,5 +681,500 @@ std::optional<StringRef> BKE_paint_canvas_uvmap_name_get(const PaintModeSettings
                                                          Object *ob);
 CurveMapping *BKE_sculpt_default_cavity_curve();
 CurveMapping *BKE_paint_default_curve();
+
+/* -------------------------------------------------------------------- */
+/** \name Material Painting (Poly Paint)
+ *
+ * Everything that distinguishes one material paint channel from another is described by the
+ * descriptor table below. Adding a channel means adding an #eMaterialPaintChannel value, bumping
+ * #PAINT_MATERIAL_CHANNEL_NUM and adding one table row; no call site should switch on the channel.
+ * \{ */
+
+/**
+ * Static description of one material paint channel.
+ *
+ * \note The scalar range applies to the fixed channels only. #PAINT_MATERIAL_CHANNEL_CUSTOM
+ * targets an arbitrary float attribute, so its range is user-defined and stored per scene in
+ * #PaintModeSettings.channel_custom_range; use #BKE_paint_material_channel_range for a range that
+ * accounts for both.
+ */
+struct MaterialPaintChannelInfo {
+  eMaterialPaintChannel channel;
+  /** Untranslated UI name, e.g. `"Metallic"`. */
+  const char *ui_name;
+  /**
+   * Mesh attribute painted in #PAINT_CANVAS_SOURCE_MATERIAL_PAINT mode. Null for Custom, whose
+   * name is entirely user-configured; see #BKE_paint_material_channel_attribute_name.
+   */
+  const char *attribute_name;
+  /** Principled BSDF input socket for #PAINT_CANVAS_SOURCE_MATERIAL mode. Null when unmapped. */
+  const char *socket_name;
+  /** Inclusive value range of the scalar channels. */
+  float value_min;
+  float value_max;
+  /**
+   * True for channels written through the generic color-attribute path (not specifically Base
+   * Color). All `is_color = true` channels share the same write path; which attribute gets written
+   * is determined by `attribute_name`, not by an implicit "must be Base Color" assumption.
+   */
+  bool is_color;
+  /**
+   * True when the channel can be painted into a per-vertex mesh attribute in
+   * #PAINT_CANVAS_SOURCE_MATERIAL_PAINT mode. Channels that only make sense as a texture map
+   * (Normal, Height), that have no fixed storage (Custom) or that nothing displays per-vertex
+   * (Emission) are map-only: they stay available for #PAINT_CANVAS_SOURCE_MATERIAL, but the
+   * vertex canvas never creates, paints or snapshots an attribute for them.
+   */
+  bool supports_vertex_paint;
+  /**
+   * True when the channel can be painted into an image map in #PAINT_CANVAS_SOURCE_MATERIAL mode.
+   *
+   * This is the raster (Texture Paint) canvas, the primary one, and this flag is what decides
+   * whether a channel participates in it. It is declared per channel rather than derived from
+   * #socket_name so that lifting the current restriction is a local change: a channel that today
+   * has no Principled input (Height, AO, Custom) only needs a way to resolve its image - a
+   * different node, a user-assigned map - and this flag flipped, with no rule elsewhere to find
+   * and update.
+   *
+   * NOTE: while every current entry with this set also has a #socket_name, code must go through
+   * this flag and not test #socket_name, precisely so that the two can diverge.
+   */
+  bool supports_image_paint;
+};
+
+/**
+ * The material paint channels, ordered by #eMaterialPaintChannel and indexable by it.
+ * Base Color comes first so painting and undo process the color channel before the scalars.
+ */
+Span<MaterialPaintChannelInfo> BKE_paint_material_channels();
+
+/** The single descriptor for \a channel. */
+const MaterialPaintChannelInfo &BKE_paint_material_channel_info(eMaterialPaintChannel channel);
+
+/**
+ * Returns whether \a channel is active for painting: `use` is set, the channel is listed in
+ * \a visible_material_channels (Custom is exempt — it uses the draw-time
+ * `show_custom` gate instead), and a non-empty attribute name is available on \a mode_settings.
+ */
+bool BKE_paint_material_channel_is_enabled(const BrushMaterialPaint &brush_paint,
+                                            const PaintModeSettings &mode_settings,
+                                            int visible_material_channels,
+                                            eMaterialPaintChannel channel);
+
+/**
+ * Returns whether \a channel's painted values are written to its target map/attribute this stroke.
+ * For Alpha, additionally requires #BrushMaterialPaint.use_alpha_map; other channels follow
+ * #BKE_paint_material_channel_is_enabled.
+ */
+bool BKE_paint_material_channel_writes_to_target(const BrushMaterialPaint &brush_paint,
+                                                  const PaintModeSettings &mode_settings,
+                                                  int visible_material_channels,
+                                                  eMaterialPaintChannel channel);
+
+/**
+ * Returns whether the enabled Alpha channel should mask other channels' writes this stroke
+ * (#BrushMaterialPaint.use_alpha_stroke_mask).
+ */
+bool BKE_paint_material_channel_masks_stroke(const BrushMaterialPaint &brush_paint,
+                                              const PaintModeSettings &mode_settings,
+                                              int visible_material_channels);
+
+/**
+ * Returns the scalar paint value for \a channel from \a brush_paint, clamped to the channel range
+ * from \a mode_settings.
+ * Base Color has no scalar value and returns 0.0f (use #BKE_paint_material_base_color_get).
+ */
+float BKE_paint_material_channel_value(const BrushMaterialPaint &brush_paint,
+                                       const PaintModeSettings &mode_settings,
+                                       eMaterialPaintChannel channel);
+
+/**
+ * Returns the blend mode a stroke should use for \a channel.
+ *
+ * Only Base Color is blendable. It is a color, which is what the #IMB_BlendMode operations are
+ * defined on, so Multiply, Screen, Add and friends all mean what the user expects, and it is the
+ * one channel where #BrushMaterialPaintChannel.blend is read.
+ *
+ * Every other channel uses a plain interpolation:
+ * - The scalar channels (Metallic, Roughness, Specular, Custom) are data, not light. They are
+ *   blended by expanding the value to a gray color, so a mode like Add or Screen would compute a
+ *   photometric result for a quantity that has no such meaning, and Custom can hold values outside
+ *   0..1 where those modes are not even bounded. Mix is the only operation that stays a valid
+ *   interpolation between the old and new value.
+ * - Normal always uses #IMB_BLEND_NORMAL_MIX, because the other modes operate per component and
+ *   would produce non-unit tangents.
+ * - When \a invert is set the stroke is erasing toward the channel default, which is only
+ *   meaningful as a plain #IMB_BLEND_MIX interpolation.
+ *
+ * \return an #IMB_BlendMode, stored as a `short` the same way #Brush.blend and
+ * #BrushMaterialPaintChannel.blend are. The enum lives in `IMB_imbuf.hh`, which no blenkernel
+ * header includes; callers cast at the point of use, as they already do for #Brush.blend.
+ */
+short BKE_paint_material_channel_blend_mode(const BrushMaterialPaint &brush_paint,
+                                            eMaterialPaintChannel channel,
+                                            bool invert);
+
+/**
+ * Returns the channel's neutral/default scalar value — what a freshly created texture or
+ * attribute is filled with, and what the eraser blends toward instead of an arbitrary brush
+ * value. Base Color has no scalar default (0.0f); use #BrushMaterialPaint.base_color
+ * for its reset value instead. For Normal, returns the Z of a flat tangent (1.0f); the full
+ * flat tangent is `(0, 0, 1)`.
+ */
+float BKE_paint_material_channel_default_value(eMaterialPaintChannel channel);
+
+/**
+ * Pack a tangent-space normal for storage in an ImBuf.
+ * Byte buffers use (n * 0.5 + 0.5); float buffers store n directly.
+ */
+void BKE_pbr_normal_pack(const float n[3], bool is_float, float r_packed[3]);
+
+/**
+ * Blend a tangent-space normal already stored in an ImBuf toward a target normal, then
+ * renormalize. `current_packed` is the value read from the buffer in the same packed convention
+ * selected by `is_float`. `t` is the MIX factor in [0, 1]. Renormalization is mandatory: a
+ * non-unit tangent normal breaks shading.
+ */
+void BKE_pbr_normal_blend_mix(const float current_packed[3],
+                              const float target_n[3],
+                              float t,
+                              bool is_float,
+                              float r_packed[3]);
+
+/**
+ * Unpack a tangent-space normal sampled from a source normal map.
+ *
+ * Normal maps store `n * 0.5 + 0.5`, so the sample is mapped back to `[-1, 1]` and normalized:
+ * a non-unit tangent normal breaks shading, the same reason #BKE_pbr_normal_blend_mix
+ * renormalizes.
+ *
+ * \param rgb: the sampled color, expected in `[0, 1]`. Alpha is not used.
+ * \param r_normal: the unit tangent normal, only written when this returns true.
+ * \return false when the unpacked vector is degenerate (a mid-gray or black sample), in which
+ * case the caller must fall back to the channel's own value rather than normalize a zero vector.
+ */
+bool BKE_paint_material_normal_from_sample(const float rgb[3], float r_normal[3]);
+
+/**
+ * Whether \a channel has a source texture assigned at all.
+ *
+ * This only reflects the pointer. Whether the source can actually be sampled (its image may be
+ * missing or fail to load) is decided once per stroke by the paint code, not here.
+ */
+bool BKE_paint_material_channel_has_source(const BrushMaterialPaintChannel &channel);
+
+/**
+ * Fills \a r_mtex with \a channel's own source #Tex combined with \a brush_paint's mapping
+ * shared by every channel (see #BrushMaterialPaint.shared_source_mapping: map_mode, size,
+ * offset, angle). Sampling and cursor-preview code read mapping through this instead of
+ * #BrushMaterialPaintChannel.source_mtex directly, so every channel's texture samples with
+ * identical mapping and multi-channel patterns (a Base Color texture with a matching
+ * Normal/Roughness texture) stay aligned.
+ *
+ * Out-parameter rather than a return value: #MTex disables copy/move (see
+ * #DNA_DEFINE_CXX_METHODS) so callers own the storage and this only ever assigns into it via
+ * #dna::shallow_copy.
+ */
+void BKE_paint_material_channel_effective_mtex(const BrushMaterialPaint &brush_paint,
+                                               const BrushMaterialPaintChannel &channel,
+                                               MTex &r_mtex);
+
+/**
+ * Fills \a r_mtex with the effective #MTex (see #BKE_paint_material_channel_effective_mtex) to
+ * preview in the brush cursor overlay for \a brush_paint, chosen by the priority a user painting
+ * a pattern expects: Base Color if enabled and sourced, else Alpha, else the first remaining
+ * enabled sourced channel, with Normal always last.
+ *
+ * \a visible_material_channels is the owning #Paint's channel set, so a hidden channel is never
+ * previewed; pass #PAINT_MATERIAL_CHANNELS_VISIBLE_ALL where no #Paint is in context (radial
+ * control only has the #Brush).
+ *
+ * \return false when no enabled channel has a source, in which case \a r_mtex is zeroed and the
+ * cursor should fall back to the brush's own texture.
+ */
+bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
+                                         const PaintModeSettings &mode_settings,
+                                         int visible_material_channels,
+                                         MTex &r_mtex);
+
+/**
+ * Returns the valid value range for \a channel: the descriptor range for the fixed channels and
+ * #PaintModeSettings.channel_custom_range for Custom.
+ */
+float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
+                                        eMaterialPaintChannel channel);
+
+/** Finds the preset in \a scene matching \a brush's identity, or null if none exists yet.
+ *  See #PaintMaterialBrushPreset for the matching rule. */
+PaintMaterialBrushPreset *BKE_paint_material_brush_preset_find(Scene &scene, const Brush &brush);
+
+/** Like #BKE_paint_material_brush_preset_find, but creates and appends a new preset —
+ *  seeded from \a brush's current #Brush.material_paint state, or from
+ *  #BKE_brush_material_paint_ensure's defaults if \a brush has none yet — when none is
+ *  found. Never returns null. */
+PaintMaterialBrushPreset *BKE_paint_material_brush_preset_ensure(Scene &scene, const Brush &brush);
+
+/** Overwrites \a brush's #Brush.material_paint from the preset in \a scene matching \a brush's
+ *  identity. No-op if there is no preset yet — does not allocate #Brush.material_paint or create
+ *  a default preset. Opt-in is #PAINT_OT_material_paint_brush_ensure. */
+void BKE_paint_material_brush_preset_apply(Scene &scene, Brush &brush);
+
+/** Overwrites the preset in \a scene matching \a brush's identity (creating it if needed) from
+ *  \a brush's current #Brush.material_paint. No-op — does not create or touch any preset — if
+ *  \a brush.material_paint is null. */
+void BKE_paint_material_brush_preset_snapshot(Scene &scene, const Brush &brush);
+
+/** Frees \a preset and everything it owns. No-op if \a preset is null. The caller is responsible
+ *  for unlinking it from its list first.
+ *  \param do_user_refcount: forwarded to #BKE_brush_material_paint_free. True for remove/purge
+ *  (no ID foreach_id will run). False when freeing a Scene (foreach_id already dropped the Tex
+ *  counts). */
+void BKE_paint_material_brush_preset_free(PaintMaterialBrushPreset *preset,
+                                          bool do_user_refcount = false);
+
+/** Removes and frees the preset in \a scene matching \a brush's identity, if any. Call when a
+ *  brush is deleted, so its preset does not outlive it and keep #Tex references alive. */
+void BKE_paint_material_brush_preset_remove(Scene &scene, const Brush &brush);
+
+/**
+ * Brings every Scene's preset list in \a bmain into the state that should be written to disk:
+ * snapshots the currently active brush of every material-paint-capable Paint (Sculpt, Image
+ * Paint) — so edits made without ever switching away from the active brush are not lost — and
+ * drops presets that can no longer belong to any brush. Intended to run immediately before a
+ * blend-file write, alongside #ed::asset::pre_save_assets().
+ */
+void BKE_paint_material_brush_presets_prepare_for_save(Main *bmain);
+
+/* Cross-mode brush synchronization lives in #BKE_paint_material_sync.hh. */
+
+/**
+ * Gradient shape for the scalar material-paint value ramp widget.
+ * Unipolar: [0,1] black→white. Bipolar: [-1,1] white→black→white.
+ */
+enum class MaterialPaintValueGradientMode {
+  Unipolar, /* [0,1] black→white */
+  Bipolar,  /* [-1,1] white→black→white */
+};
+
+MaterialPaintValueGradientMode BKE_paint_material_value_gradient_mode(float value_min,
+                                                                      float value_max);
+
+/** t in [0,1] → RGB in [0,1]. */
+void BKE_paint_material_value_gradient_color(float value_min,
+                                             float value_max,
+                                             float t,
+                                             float r_rgb[3]);
+
+float BKE_paint_material_value_from_t(float value_min, float value_max, float t);
+float BKE_paint_material_t_from_value(float value_min, float value_max, float value);
+
+/** value' = clamp(min+max-value, min, max) after computing mirror. */
+float BKE_paint_material_value_invert(float value_min, float value_max, float value);
+
+/**
+ * Returns the mesh attribute name for \a channel via
+ * #PaintModeSettings.channel_layer_bindings: an add-on-managed layer override (falling back to
+ * the fixed descriptor name) for the fixed channels, or the user-configured name for Custom. May
+ * be empty for an unconfigured Custom channel.
+ */
+StringRef BKE_paint_material_channel_attribute_name(const PaintModeSettings &settings,
+                                                    eMaterialPaintChannel channel);
+
+/**
+ * Returns the channel whose fixed attribute name is \a attribute_name, if any. Never matches
+ * Custom, whose name is not fixed. Used by the draw engines to decide whether a mesh attribute is
+ * a material paint channel without hard-coding names.
+ */
+std::optional<eMaterialPaintChannel> BKE_paint_material_channel_from_attribute_name(
+    StringRef attribute_name);
+
+/**
+ * Override-aware inverse of #BKE_paint_material_channel_attribute_name: the channel \a
+ * attribute_name currently feeds, taking #PaintModeSettings.channel_layer_bindings into account.
+ *
+ * This is the form the draw engines must use. A redirected channel is fed by its bound name and
+ * no longer by its built-in one, so resolving through the fixed table alone would both miss the
+ * layer attribute a stroke actually writes and keep claiming an abandoned one. Unlike the
+ * settings-free overload this can match Custom, whose name only exists in the bindings.
+ */
+std::optional<eMaterialPaintChannel> BKE_paint_material_channel_from_attribute_name(
+    const PaintModeSettings &settings, StringRef attribute_name);
+
+/**
+ * Effective RGB for Base Color strokes: invert uses brush secondary color;
+ * otherwise #BrushMaterialPaint.base_color.
+ */
+float3 BKE_paint_material_base_color_get(const BrushMaterialPaint &brush_paint,
+                                         const Paint &paint,
+                                         const Brush &brush,
+                                         bool invert);
+
+/**
+ * Effective RGB for a color channel (#MaterialPaintChannelInfo.is_color).
+ * Base Color delegates to #BKE_paint_material_base_color_get. Other color channels (Emission)
+ * read #BrushMaterialPaintChannel.value; invert interpolates toward the channel default.
+ */
+float3 BKE_paint_material_channel_color_get(const BrushMaterialPaint &brush_paint,
+                                            const Paint &paint,
+                                            const Brush &brush,
+                                            eMaterialPaintChannel channel,
+                                            bool invert);
+
+/**
+ * Clears per-material Principled-socket image resolution cache entries.
+ * Call after node-tree or material slot changes that can alter resolved targets.
+ */
+void BKE_paint_material_channel_cache_invalidate(Material *ma);
+
+/**
+ * Resolves the Image Texture directly linked to the Principled BSDF input for
+ * \a channel on the active material of \a ob.
+ * Channels without a socket (Custom) always return false. Only a direct link is followed;
+ * anything routed through an intermediate node (Math, Mix, etc.) is left alone, since there is no
+ * single image such a chain could be said to paint into.
+ * \param mode_settings: When given and \a channel has a non-null
+ * #PaintModeSettings.channel_image_bindings entry, that Image is returned directly and the
+ * Principled BSDF socket is never consulted. Null (the default) preserves the socket-only
+ * resolution every existing caller relied on before this override existed.
+ * \return true when \a r_image and \a r_iuser were set.
+ */
+bool BKE_paint_principled_channel_image_get(Object &ob,
+                                            eMaterialPaintChannel channel,
+                                            Image **r_image,
+                                            ImageUser **r_iuser,
+                                            PaintModeSettings *mode_settings = nullptr);
+
+/**
+ * Image the Image Editor should show for the Material canvas when nothing is selected.
+ *
+ * Prefers Base Color, then other created Principled maps, with Normal and Alpha last.
+ * Returns null when no paintable map is wired on the active material.
+ */
+Image *BKE_paint_material_preferred_display_image(Object &ob);
+
+/**
+ * Same as #BKE_paint_principled_channel_image_get, but when \a channel's Principled
+ * socket exists and has no incoming link, creates a generated blank Image with the color space
+ * required by the channel, adds an Image Texture node for it, and links it to the socket, then
+ * returns it.
+ * Used by #PAINT_OT_material_paint_images_ensure and by Material-canvas stroke init when a
+ * writable channel has no map yet. Created Image IDs persist if the stroke itself is undone.
+ * Does nothing and returns false when there is no material, no node tree, no Principled
+ * BSDF, no matching socket, or the socket is already driven by something other than a
+ * (missing/invalid) Image Texture. Channels without a socket (Custom) always return false.
+ * \param image_size: Width and height (in pixels) used for a newly created image. Ignored when
+ * the channel already resolves to an existing image.
+ * \param mode_settings: Forwarded to #BKE_paint_principled_channel_image_get; when \a channel has
+ * an image override, it is returned as-is and nothing is created or wired into the shader graph.
+ * \return true when \a r_image and \a r_iuser were set.
+ */
+bool BKE_paint_principled_channel_image_ensure(Main &bmain,
+                                               Object &ob,
+                                               eMaterialPaintChannel channel,
+                                               int image_size,
+                                               Image **r_image,
+                                               ImageUser **r_iuser,
+                                               PaintModeSettings *mode_settings = nullptr);
+
+/**
+ * Create missing Principled maps for every channel this brush currently writes to. Channels with
+ * a #PaintModeSettings.channel_image_bindings override never create anything - the add-on manages
+ * that Image's lifetime itself.
+ * \return number of newly created images.
+ */
+int BKE_paint_material_images_ensure_writable(Main &bmain,
+                                               Object &ob,
+                                               const BrushMaterialPaint &brush_paint,
+                                               PaintModeSettings &mode_settings,
+                                               int visible_material_channels);
+
+/**
+ * When channels are newly shown in a #Paint's visible material channels, also enable
+ * their per-brush `use` flag so they can be painted and assigned a source immediately.
+ */
+void BKE_paint_material_enable_added_visible_channels(Paint &paint, int added_channel_bits);
+
+/**
+ * One Principled map target for Mode=`Material` multi-channel image paint.
+ * Scalar \a value is written as RGB `(v, v, v)`.
+ * Base Color and Normal use \a color with \a is_color_channel / \a is_normal_channel set.
+ */
+struct PaintMaterialImageTarget {
+  eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_METALLIC;
+  Image *image = nullptr;
+  ImageUser *iuser = nullptr;
+  float value = 0.0f;
+  float color[3] = {0.0f, 0.0f, 0.0f};
+  bool is_color_channel = false;
+  bool is_normal_channel = false;
+};
+
+/**
+ * Collects enabled channels that successfully resolve to a target Image on \a ob - either a
+ * Principled Image Texture, or an add-on's #PaintModeSettings.channel_image_bindings override.
+ * Missing maps are skipped. Channels without a socket (Custom) are never included.
+ * Order follows #BKE_paint_material_channels.
+ * When \a brush_paint is null, returns an empty list (no channels enabled).
+ */
+Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
+    Object &ob,
+    PaintModeSettings &mode_settings,
+    const BrushMaterialPaint *brush_paint,
+    int visible_material_channels);
+
+/**
+ * Whether a face with \a face_material_index should receive image writes while painting
+ * Mode=Material with the object's current active slot (#Object.actcol).
+ * When the object has only one material slot, all faces match.
+ */
+bool BKE_paint_material_face_matches_active_slot(const Object &ob, int face_material_index);
+
+/** Why a material paint channel could not be prepared on a mesh. */
+enum class MaterialPaintAttributeStatus {
+  /** The attribute exists with the required type and domain, or was just created. */
+  Ok,
+  /** An attribute of that name exists with an incompatible type or domain. */
+  TypeMismatch,
+  /** The name is empty (an unconfigured Custom channel). */
+  InvalidName,
+  /** Creating the attribute failed. */
+  CreationFailed,
+};
+
+/**
+ * Ensure a float point attribute named \a attr_name exists on \a mesh.
+ * \param r_created: when non-null, set to true only if a new attribute was added by this call.
+ */
+MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh,
+                                                                      StringRef attr_name,
+                                                                      bool *r_created = nullptr);
+
+/**
+ * Ensure the color attribute of \a channel (which must have `is_color` set) exists on the mesh.
+ * Accepts an existing Point- or Corner-domain ColorFloat or ColorByte; otherwise creates a
+ * Point-domain ColorFloat. Only #PAINT_MATERIAL_CHANNEL_BASE_COLOR is additionally made the
+ * active and default color attribute.
+ * \param r_created: when non-null, set to true only if a new attribute was added by this call.
+ */
+MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure(
+    Mesh &mesh, eMaterialPaintChannel channel, bool *r_created = nullptr);
+
+/**
+ * Ensures \a attribute_name exists on \a mesh as a color attribute (Point or Corner domain,
+ * ColorFloat or ColorByte type), creating it with default values if missing. Unlike
+ * #BKE_paint_mesh_material_color_attribute_ensure, this targets an arbitrary attribute name
+ * instead of a channel's fixed one, and never changes the mesh's active/default color attribute -
+ * that would be wrong for an add-on-managed layer attribute, which is not "the" mesh color.
+ */
+MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure_named(
+    Mesh &mesh, StringRef attribute_name, bool *r_created = nullptr);
+
+/**
+ * Human-readable reason for a non-#MaterialPaintAttributeStatus::Ok status, for operator reports.
+ * Returns an untranslated format-free message; \a attr_name is not embedded.
+ */
+const char *BKE_paint_material_attribute_status_message(MaterialPaintAttributeStatus status);
+
+/** \} */
 
 }  // namespace blender

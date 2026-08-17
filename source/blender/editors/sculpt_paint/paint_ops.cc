@@ -21,6 +21,8 @@
 #include "IMB_interp.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_object_enums.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_brush.hh"
@@ -29,7 +31,9 @@
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
@@ -38,10 +42,12 @@
 #include "ED_screen.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 
 #include "IMB_colormanagement.hh"
 
@@ -50,6 +56,7 @@
 #include "curves/sculpt_intern.hh"
 #include "mesh/paint_hide.hh"
 #include "mesh/paint_mask.hh"
+#include "mesh/paint_material_attribute.hh"
 #include "mesh/sculpt_intern.hh"
 
 namespace blender {
@@ -164,6 +171,18 @@ struct StencilControlData {
   short launch_event;
 };
 
+static bool brush_primary_stencil_mapping(const Brush *br)
+{
+  if (br == nullptr) {
+    return false;
+  }
+  if (br->mtex.brush_map_mode == MTEX_MAP_MODE_STENCIL) {
+    return true;
+  }
+  return br->material_paint != nullptr &&
+         br->material_paint->shared_source_mapping.brush_map_mode == MTEX_MAP_MODE_STENCIL;
+}
+
 static void stencil_set_target(StencilControlData *scd)
 {
   Brush *br = scd->br;
@@ -178,6 +197,22 @@ static void stencil_set_target(StencilControlData *scd)
     scd->pos_target = br->mask_stencil_pos;
 
     sub_v2_v2v2(mdiff, scd->init_mouse, br->mask_stencil_pos);
+  }
+  else if (br->material_paint != nullptr &&
+           br->material_paint->shared_source_mapping.brush_map_mode == MTEX_MAP_MODE_STENCIL &&
+           br->mtex.brush_map_mode != MTEX_MAP_MODE_STENCIL)
+  {
+    /* PBR sources share mapping; position/scale live on #Brush.stencil_* (same fields 3D
+     * #DirectSampleLayout reads) while rotation is #shared_source_mapping.rot. */
+    copy_v2_v2(scd->init_sdim, br->stencil_dimension);
+    copy_v2_v2(scd->init_spos, br->stencil_pos);
+    scd->init_rot = br->material_paint->shared_source_mapping.rot;
+
+    scd->dim_target = br->stencil_dimension;
+    scd->rot_target = &br->material_paint->shared_source_mapping.rot;
+    scd->pos_target = br->stencil_pos;
+
+    sub_v2_v2v2(mdiff, scd->init_mouse, br->stencil_pos);
   }
   else {
     copy_v2_v2(scd->init_sdim, br->stencil_dimension);
@@ -211,7 +246,7 @@ static wmOperatorStatus stencil_control_invoke(bContext *C, wmOperator *op, cons
     }
   }
   else {
-    if (br->mtex.brush_map_mode != MTEX_MAP_MODE_STENCIL) {
+    if (!brush_primary_stencil_mapping(br)) {
       return OPERATOR_CANCELLED;
     }
   }
@@ -373,7 +408,7 @@ static bool stencil_control_poll(bContext *C)
 
   paint = BKE_paint_get_active_from_context(C);
   br = BKE_paint_brush(paint);
-  return (br && (br->mtex.brush_map_mode == MTEX_MAP_MODE_STENCIL ||
+  return (br && (brush_primary_stencil_mapping(br) ||
                  br->mask_mtex.brush_map_mode == MTEX_MAP_MODE_STENCIL));
 }
 
@@ -421,9 +456,25 @@ static wmOperatorStatus stencil_fit_image_aspect_exec(bContext *C, wmOperator *o
   bool do_mask = RNA_boolean_get(op->ptr, "mask");
   Tex *tex = nullptr;
   MTex *mtex = nullptr;
+  MTex material_mtex_storage = {};
   if (br) {
-    mtex = do_mask ? &br->mask_mtex : &br->mtex;
-    tex = mtex->tex;
+    if (do_mask) {
+      mtex = &br->mask_mtex;
+    }
+    else if (br->mtex.tex != nullptr) {
+      mtex = &br->mtex;
+    }
+    else if (br->material_paint != nullptr) {
+      const PaintModeSettings &mode_settings = CTX_data_tool_settings(C)->paint_mode;
+      if (BKE_paint_material_preview_mtex_get(*br->material_paint,
+                                              mode_settings,
+                                              paint->visible_material_channels,
+                                              material_mtex_storage))
+      {
+        mtex = &material_mtex_storage;
+      }
+    }
+    tex = mtex != nullptr ? mtex->tex : nullptr;
   }
 
   if (tex && tex->type == TEX_IMAGE && tex->ima) {
@@ -525,6 +576,296 @@ static wmOperatorStatus stencil_reset_transform_exec(bContext *C, wmOperator *op
   return OPERATOR_FINISHED;
 }
 
+static wmOperatorStatus material_paint_brush_ensure_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint brush");
+    return OPERATOR_CANCELLED;
+  }
+  BKE_brush_material_paint_ensure(brush);
+
+  /* #BKE_brush_material_paint_ensure seeds Base Color to white because it has no #Paint to resolve
+   * the effective (unified or per-brush) color from. Pull the current color in here, otherwise the
+   * Base Color swatch contradicts the brush's own color swatch until the user next edits it. */
+  BKE_brush_material_paint_base_color_sync_to_channel(paint, brush);
+
+  /* Sync after the channel settings exist, so the paired editor adopts a brush that is already set
+   * up. No-op when sync is off or the canvas is not Material. */
+  BKE_paint_material_brush_sync(CTX_data_scene(C), paint);
+
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus material_channel_value_invert_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active material paint brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  const eMaterialPaintChannel channel_id = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  BrushMaterialPaintChannel &channel = brush->material_paint->channels[channel_id];
+
+  const Scene *scene = CTX_data_scene(C);
+  const PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
+  const float2 range = BKE_paint_material_channel_range(mode_settings, channel_id);
+  channel.value[0] = BKE_paint_material_value_invert(range[0], range[1], channel.value[0]);
+
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_channel_value_invert(wmOperatorType *ot)
+{
+  ot->name = "Invert Value";
+  ot->idname = "PAINT_OT_material_channel_value_invert";
+  ot->description = "Invert this channel's value within its range (min + max - value)";
+  ot->exec = material_channel_value_invert_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  ot->prop = RNA_def_enum(ot->srna,
+                          "channel",
+                          rna_enum_material_paint_channel_items,
+                          PAINT_MATERIAL_CHANNEL_METALLIC,
+                          "Channel",
+                          "Material paint channel to invert");
+}
+
+static wmOperatorStatus material_channel_source_clear_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active material paint brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  const eMaterialPaintChannel channel_id = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  BrushMaterialPaintChannel &channel = brush->material_paint->channels[channel_id];
+
+  /* Drop the whole Tex, not just its image: this also recovers a source left in a broken state
+   * (e.g. its image was deleted from Main), which the source_image pointer alone cannot express
+   * since it already reads as unset. */
+  if (channel.source_mtex.tex != nullptr) {
+    id_us_min(&channel.source_mtex.tex->id);
+    channel.source_mtex.tex = nullptr;
+  }
+
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_channel_source_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Source";
+  ot->idname = "PAINT_OT_material_channel_source_clear";
+  ot->description = "Remove this channel's source texture, including one left in a broken state";
+  ot->exec = material_channel_source_clear_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  ot->prop = RNA_def_enum(ot->srna,
+                          "channel",
+                          rna_enum_material_paint_channel_items,
+                          PAINT_MATERIAL_CHANNEL_METALLIC,
+                          "Channel",
+                          "Material paint channel whose source texture should be cleared");
+}
+
+void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
+{
+  ot->name = "Enable Material Paint Channels for Brush";
+  ot->idname = "PAINT_OT_material_paint_brush_ensure";
+  ot->description = "Initialize per-channel material paint values for the active brush";
+  ot->exec = material_paint_brush_ensure_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus material_paint_images_ensure_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr || ob->type != OB_MESH) {
+    BKE_report(op->reports, RPT_ERROR, "Active object must be a mesh");
+    return OPERATOR_CANCELLED;
+  }
+
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint brush");
+    return OPERATOR_CANCELLED;
+  }
+  BKE_brush_material_paint_ensure(brush);
+  if (brush->material_paint == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Scene *scene = CTX_data_scene(C);
+  PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
+  Main *bmain = CTX_data_main(C);
+  const BrushMaterialPaint &brush_paint = *brush->material_paint;
+  const int created = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, paint->visible_material_channels);
+  int missing = 0;
+
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint) {
+      continue;
+    }
+    if (!BKE_paint_material_channel_writes_to_target(
+            brush_paint, mode_settings, paint->visible_material_channels, info.channel))
+    {
+      continue;
+    }
+    Image *image = nullptr;
+    ImageUser *iuser = nullptr;
+    if (!BKE_paint_principled_channel_image_get(*ob, info.channel, &image, &iuser, &mode_settings))
+    {
+      missing++;
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "%s channel has no paintable image texture on the active material",
+                  info.ui_name);
+    }
+  }
+
+  if (created == 0 && missing == 0) {
+    BKE_report(op->reports, RPT_INFO, "All enabled channels already have image maps");
+  }
+  else if (created > 0) {
+    BKE_reportf(op->reports, RPT_INFO, "Created %d material paint image map(s)", created);
+  }
+
+  ED_space_image_paint_auto_select_material_canvas(bmain, ob);
+
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, nullptr);
+  WM_event_add_notifier(C, NC_NODE | NA_EDITED, nullptr);
+  return (created > 0 || missing == 0) ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+void PAINT_OT_material_paint_images_ensure(wmOperatorType *ot)
+{
+  ot->name = "Create PBR Paint Maps";
+  ot->idname = "PAINT_OT_material_paint_images_ensure";
+  ot->description =
+      "Create missing Image Texture nodes on the active material's Principled BSDF for enabled "
+      "PBR Paint channels";
+  ot->exec = material_paint_images_ensure_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static bool material_paint_brush_sync_poll(bContext *C)
+{
+  if (!ED_operator_object_active_editable(C)) {
+    return false;
+  }
+  /* Texture Paint shares Image Paint's brush with the Image Editor. Sync from that mode would
+   * overwrite an already configured Image Editor: Paint / Sculpt pair. */
+  const Object *ob = CTX_data_active_object(C);
+  if (ob != nullptr && (ob->mode & OB_MODE_TEXTURE_PAINT)) {
+    return false;
+  }
+  return true;
+}
+
+enum eMaterialPaintBrushSyncDirection {
+  MATERIAL_PAINT_BRUSH_SYNC_IMAGE_TO_SCULPT = 0,
+  MATERIAL_PAINT_BRUSH_SYNC_SCULPT_TO_IMAGE = 1,
+};
+
+static const EnumPropertyItem material_paint_brush_sync_direction_items[] = {
+    {MATERIAL_PAINT_BRUSH_SYNC_IMAGE_TO_SCULPT,
+     "IMAGE_TO_SCULPT",
+     0,
+     "Image Editor to Sculpt Mode",
+     "Use the Image Editor Paint brush and settings in Sculpt Mode"},
+    {MATERIAL_PAINT_BRUSH_SYNC_SCULPT_TO_IMAGE,
+     "SCULPT_TO_IMAGE",
+     0,
+     "Sculpt Mode to Image Editor",
+     "Use the Sculpt Mode brush and settings in the Image Editor"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static wmOperatorStatus material_paint_brush_sync_exec(bContext *C, wmOperator *op)
+{
+  Scene *scene = CTX_data_scene(C);
+  ToolSettings *ts = scene->toolsettings;
+  if (ts->sculpt == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Sculpt Mode paint is not available");
+    return OPERATOR_CANCELLED;
+  }
+  Paint *sculpt_paint = &ts->sculpt->paint;
+  Paint *image_paint = &ts->imapaint.paint;
+
+  const int direction = RNA_enum_get(op->ptr, "direction");
+  const bool image_to_sculpt = direction == MATERIAL_PAINT_BRUSH_SYNC_IMAGE_TO_SCULPT;
+  Paint *source = image_to_sculpt ? image_paint : sculpt_paint;
+  Paint *destination = image_to_sculpt ? sculpt_paint : image_paint;
+
+  Brush *source_brush = BKE_paint_brush(source);
+  if (source_brush == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "The source editor has no active brush to sync from");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* This is a one-shot copy: it deliberately bypasses the automatic sync flag and, just as
+   * deliberately, leaves that flag alone so the two editors stay independent afterwards. Make the
+   * source brush valid for the receiving mode before assigning it. */
+  BLI_assert(destination->runtime != nullptr);
+  if (!BKE_paint_can_use_brush(destination, source_brush)) {
+    source_brush->ob_mode |= destination->runtime->ob_mode;
+    BKE_brush_tag_unsaved_changes(source_brush);
+    BKE_reportf(op->reports,
+                RPT_INFO,
+                "Enabled this paint mode on brush \"%s\" so it could be synced here",
+                source_brush->id.name + 2);
+  }
+
+  if (!BKE_paint_material_brush_sync_directional(scene, source, destination)) {
+    BKE_report(op->reports, RPT_ERROR, "Sync Brush requires the Material canvas in both editors");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Keep the receiving editor's tool and its brush bindings pointing at the brush that was just
+   * assigned; only possible for the editor the operator was called from. */
+  if (destination == BKE_paint_get_active_from_context(C)) {
+    WM_toolsystem_activate_brush_and_tool(C, destination, source_brush);
+  }
+
+  WM_event_add_notifier(C, NC_BRUSH | NA_SELECTED, source_brush);
+  WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_paint_brush_sync(wmOperatorType *ot)
+{
+  ot->name = "Sync Brush";
+  ot->idname = "PAINT_OT_material_paint_brush_sync";
+  ot->description =
+      "Copy the brush and PBR paint settings once between Sculpt Mode and the Image Editor, "
+      "without turning on automatic sync";
+  ot->exec = material_paint_brush_sync_exec;
+  ot->poll = material_paint_brush_sync_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->prop = RNA_def_enum(ot->srna,
+                          "direction",
+                          material_paint_brush_sync_direction_items,
+                          0,
+                          "Direction",
+                          "Choose which editor provides the brush and PBR paint settings");
+}
+
 static void BRUSH_OT_stencil_reset_transform(wmOperatorType *ot)
 {
   /* identifiers */
@@ -604,6 +945,11 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_project_image);
   WM_operatortype_append(PAINT_OT_image_from_view);
   WM_operatortype_append(PAINT_OT_brush_colors_flip);
+  WM_operatortype_append(PAINT_OT_material_paint_brush_ensure);
+  WM_operatortype_append(PAINT_OT_material_paint_images_ensure);
+  WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
+  WM_operatortype_append(PAINT_OT_material_channel_value_invert);
+  WM_operatortype_append(PAINT_OT_material_channel_source_clear);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 
@@ -653,6 +999,10 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_face_select_loop);
 
   WM_operatortype_append(PAINT_OT_face_vert_reveal);
+
+  /* material attributes (Poly Paint) */
+  WM_operatortype_append(PAINT_OT_material_attribute_add);
+  WM_operatortype_append(PAINT_OT_material_attribute_remove);
 
   /* partial visibility */
   WM_operatortype_append(hide::PAINT_OT_hide_show_all);

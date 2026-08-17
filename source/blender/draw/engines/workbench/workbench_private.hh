@@ -243,6 +243,16 @@ struct SceneResources {
 
   TextureFromPool object_id_tx = "wb_object_id_tx";
 
+  /**
+   * Poly Paint: set during #Instance::object_sync (via #mesh_sync/#sculpt_sync) whenever the
+   * synced object has at least one vertex-painted material channel visible in the shader (see
+   * #material_props_usage_get). Read once per frame by #OpaquePass::draw to decide whether the
+   * full-precision material_ext G-buffer texture is worth allocating this frame at all - kept
+   * false (the default, reset every frame in #SceneResources::init) for every frame without such
+   * an object, so those frames pay no extra VRAM or bandwidth for it.
+   */
+  bool material_ext_needed = false;
+
   TextureRef color_tx;
   TextureRef depth_tx;
   TextureRef depth_in_front_tx;
@@ -332,6 +342,8 @@ class OpaquePass {
  public:
   TextureFromPool gbuffer_normal_tx = {"gbuffer_normal_tx"};
   TextureFromPool gbuffer_material_tx = {"gbuffer_material_tx"};
+  /** Poly Paint: only acquired/attached when #use_material_ext_ below. */
+  TextureFromPool gbuffer_material_ext_tx = {"gbuffer_material_ext_tx"};
 
   Texture shadow_depth_stencil_tx = {"shadow_depth_stencil_tx"};
   gpu::Texture *deferred_ps_stencil_tx = nullptr;
@@ -346,12 +358,28 @@ class OpaquePass {
   Framebuffer clear_fb = {"Opaque.Clear"};
 
   void sync(const SceneState &scene_state, SceneResources &resources);
+  /**
+   * Builds #deferred_ps_. Split out of #sync because it is the one pass whose setup depends on
+   * #SceneResources::material_ext_needed, which is only complete once every object of the frame
+   * has been synced - so this must be called from `end_sync`, not `begin_sync`.
+   */
+  void sync_deferred(const SceneState &scene_state, SceneResources &resources);
   void draw(Manager &manager,
             View &view,
             SceneResources &resources,
             int2 resolution,
             class ShadowPass *shadow_pass);
   bool is_empty() const;
+
+ private:
+  /**
+   * Poly Paint: whether the frames drawn from this sync need the full-precision material buffer.
+   * Latched in #sync_deferred rather than read from #SceneResources at draw time, because
+   * #SceneResources::material_ext_needed is reset every frame but only refilled on frames that
+   * actually re-sync - reading it in #draw would drop the attachment on the first non-sync frame
+   * while #deferred_ps_ still expects it.
+   */
+  bool use_material_ext_ = false;
 };
 
 class TransparentPass {

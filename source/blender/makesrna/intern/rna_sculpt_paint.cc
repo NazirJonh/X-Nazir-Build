@@ -8,6 +8,8 @@
 
 #include <cstdlib>
 
+#include <fmt/format.h>
+
 #include "BLI_math_base.h"
 
 #include "BLT_translation.hh"
@@ -18,9 +20,11 @@
 #include "rna_internal.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_image_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_paint.hh"
+#include "BKE_paint_material_sync.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -28,6 +32,45 @@
 #include "bmesh.hh"
 
 namespace blender {
+
+/* Mirrors the descriptor table in #BKE_paint_material_channels. */
+const EnumPropertyItem rna_enum_material_paint_channel_items[] = {
+    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", "Base color channel"},
+    {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", "Metallic channel"},
+    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", "Roughness channel"},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", "Specular channel"},
+    {PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", "Tangent-space normal map channel"},
+    {PAINT_MATERIAL_CHANNEL_CUSTOM,
+     "CUSTOM",
+     0,
+     "Custom",
+     "User-named float attribute, vertex painting only"},
+    {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", "Scalar height/displacement channel"},
+    {PAINT_MATERIAL_CHANNEL_ALPHA,
+     "ALPHA",
+     0,
+     "Alpha",
+     "Scalar alpha channel; also masks writes to other active channels while enabled"},
+    {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Ambient occlusion channel"},
+    {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", "Emission color channel"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Bit-flag values for #Paint.visible_material_channels. Must not reuse
+ * #rna_enum_material_paint_channel_items: that table stores channel indices (0..9), while
+ * PROP_ENUM_FLAG requires each item to be a unique power-of-two bit. */
+static const EnumPropertyItem rna_enum_visible_material_paint_channel_items[] = {
+    {1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
 
 const EnumPropertyItem rna_enum_particle_edit_hair_brush_items[] = {
     {PE_BRUSH_COMB, "COMB", 0, "Comb", "Comb hairs"},
@@ -85,6 +128,11 @@ static const EnumPropertyItem rna_enum_canvas_source_items[] = {
     {PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE, "COLOR_ATTRIBUTE", 0, "Color Attribute", ""},
     {PAINT_CANVAS_SOURCE_MATERIAL, "MATERIAL", 0, "Material", ""},
     {PAINT_CANVAS_SOURCE_IMAGE, "IMAGE", 0, "Image", ""},
+    {PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
+     "MATERIAL_PAINT",
+     0,
+     "PolyPaint",
+     "Paint per-vertex material attribute channels"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -110,7 +158,9 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 #  include "BKE_colortools.hh"
 #  include "BKE_context.hh"
 #  include "BKE_gpencil_legacy.h"
+#  include "BKE_image.hh"
 #  include "BKE_layer.hh"
+#  include "BKE_lib_id.hh"
 #  include "BKE_material.hh"
 #  include "BKE_object.hh"
 #  include "BKE_paint.hh"
@@ -340,6 +390,154 @@ static std::optional<std::string> rna_ImagePaintSettings_path(const PointerRNA *
   return "tool_settings.image_paint";
 }
 
+static void rna_PaintModeSettings_channel_layer_bindings_begin(CollectionPropertyIterator *iter,
+                                                               PointerRNA *ptr)
+{
+  PaintModeSettings *settings = static_cast<PaintModeSettings *>(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           settings->channel_layer_bindings,
+                           sizeof(MaterialPaintChannelLayerBinding),
+                           ARRAY_SIZE(settings->channel_layer_bindings),
+                           0,
+                           nullptr);
+}
+
+/* One binding per channel; the array length is kept in sync with the enum by a static_assert in
+ * `paint.cc`. */
+static int rna_PaintModeSettings_channel_layer_bindings_length(PointerRNA * /*ptr*/)
+{
+  return PAINT_MATERIAL_CHANNEL_NUM;
+}
+
+/**
+ * The bindings are a fixed DNA array on #PaintModeSettings (reached via Scene -> ToolSettings),
+ * so a binding's own channel index can only be recovered from where \a ptr points inside that
+ * array. Mirrors #rna_BrushMaterialPaintChannel_channel_get (`rna_brush.cc`) exactly, adapted to
+ * PaintModeSettings's owner chain instead of Brush's.
+ */
+static std::optional<eMaterialPaintChannel> rna_MaterialPaintChannelLayerBinding_channel_get(
+    const PointerRNA *ptr)
+{
+  const Scene *scene = reinterpret_cast<const Scene *>(ptr->owner_id);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return std::nullopt;
+  }
+  const MaterialPaintChannelLayerBinding *bindings =
+      scene->toolsettings->paint_mode.channel_layer_bindings;
+  const MaterialPaintChannelLayerBinding *binding =
+      static_cast<const MaterialPaintChannelLayerBinding *>(ptr->data);
+  const int index = int(binding - bindings);
+  if (index < 0 || index >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return std::nullopt;
+  }
+  return eMaterialPaintChannel(index);
+}
+
+/**
+ * Explicit path func for the same reason #rna_BrushMaterialPaintChannel_path exists: the generic
+ * ID-to-property path walk cannot address a fixed-array iterator's elements on its own.
+ */
+static std::optional<std::string> rna_MaterialPaintChannelLayerBinding_path(const PointerRNA *ptr)
+{
+  const std::optional<eMaterialPaintChannel> channel =
+      rna_MaterialPaintChannelLayerBinding_channel_get(ptr);
+  if (!channel) {
+    return std::nullopt;
+  }
+  return fmt::format("tool_settings.paint_mode.channel_layer_bindings[{}]", int(*channel));
+}
+
+static int rna_MaterialPaintChannelLayerBinding_channel_get_rna(PointerRNA *ptr)
+{
+  if (const std::optional<eMaterialPaintChannel> channel =
+          rna_MaterialPaintChannelLayerBinding_channel_get(ptr))
+  {
+    return int(*channel);
+  }
+  return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+}
+
+static void rna_PaintModeSettings_channel_image_bindings_begin(CollectionPropertyIterator *iter,
+                                                               PointerRNA *ptr)
+{
+  PaintModeSettings *settings = static_cast<PaintModeSettings *>(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           settings->channel_image_bindings,
+                           sizeof(MaterialPaintChannelImageBinding),
+                           ARRAY_SIZE(settings->channel_image_bindings),
+                           0,
+                           nullptr);
+}
+
+/* See #rna_PaintModeSettings_channel_layer_bindings_length. */
+static int rna_PaintModeSettings_channel_image_bindings_length(PointerRNA * /*ptr*/)
+{
+  return PAINT_MATERIAL_CHANNEL_NUM;
+}
+
+/** Mirrors #rna_MaterialPaintChannelLayerBinding_channel_get for the image-binding array. */
+static std::optional<eMaterialPaintChannel> rna_MaterialPaintChannelImageBinding_channel_get(
+    const PointerRNA *ptr)
+{
+  const Scene *scene = reinterpret_cast<const Scene *>(ptr->owner_id);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return std::nullopt;
+  }
+  const MaterialPaintChannelImageBinding *bindings =
+      scene->toolsettings->paint_mode.channel_image_bindings;
+  const MaterialPaintChannelImageBinding *binding =
+      static_cast<const MaterialPaintChannelImageBinding *>(ptr->data);
+  const int index = int(binding - bindings);
+  if (index < 0 || index >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return std::nullopt;
+  }
+  return eMaterialPaintChannel(index);
+}
+
+/** Mirrors #rna_MaterialPaintChannelLayerBinding_path for the image-binding array. */
+static std::optional<std::string> rna_MaterialPaintChannelImageBinding_path(const PointerRNA *ptr)
+{
+  const std::optional<eMaterialPaintChannel> channel =
+      rna_MaterialPaintChannelImageBinding_channel_get(ptr);
+  if (!channel) {
+    return std::nullopt;
+  }
+  return fmt::format("tool_settings.paint_mode.channel_image_bindings[{}]", int(*channel));
+}
+
+static int rna_MaterialPaintChannelImageBinding_channel_get_rna(PointerRNA *ptr)
+{
+  if (const std::optional<eMaterialPaintChannel> channel =
+          rna_MaterialPaintChannelImageBinding_channel_get(ptr))
+  {
+    return int(*channel);
+  }
+  return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+}
+
+/**
+ * Initializes the binding's own #ImageUser the same way #PaintModeSettings.image_user is set up
+ * for #canvas_image: a freshly assigned Image must not be left with a zeroed user (frame 0, no
+ * ok flag), or the first stroke resolves no buffer at all.
+ */
+static void rna_MaterialPaintChannelImageBinding_image_set(PointerRNA *ptr,
+                                                           PointerRNA value,
+                                                           ReportList * /*reports*/)
+{
+  MaterialPaintChannelImageBinding *binding = static_cast<MaterialPaintChannelImageBinding *>(
+      ptr->data);
+  Image *image = static_cast<Image *>(value.data);
+  if (binding->image == image) {
+    return;
+  }
+  id_us_min(reinterpret_cast<ID *>(binding->image));
+  binding->image = image;
+  id_us_plus(reinterpret_cast<ID *>(binding->image));
+  BKE_imageuser_default(&binding->iuser);
+}
+
 static std::optional<std::string> rna_PaintModeSettings_path(const PointerRNA * /*ptr*/)
 {
   return "tool_settings.paint_mode";
@@ -462,6 +660,69 @@ static void rna_PaintModeSettings_canvas_source_update(bContext *C, PointerRNA *
     DEG_id_tag_update(&ob->id, 0);
     WM_main_add_notifier(NC_GEOM | ND_DATA, &ob->id);
   }
+
+  /* Switching to the Material canvas is the moment both editors start sharing a target, so align
+   * them right away when automatic brush sync is enabled. */
+  if (scene != nullptr && scene->toolsettings != nullptr && scene->toolsettings->sculpt != nullptr)
+  {
+    if (scene->toolsettings->paint_mode.material_paint_flag & PAINT_MATERIAL_BRUSH_SYNC) {
+      BKE_paint_material_brush_sync(scene, &scene->toolsettings->sculpt->paint);
+    }
+  }
+}
+
+static void rna_PaintModeSettings_brush_sync_update(bContext *C, PointerRNA * /*ptr*/)
+{
+  Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return;
+  }
+
+  /* Align immediately only when enabling. Disabling is deliberately passive: it must not change
+   * either editor's PBR settings. */
+  ToolSettings *ts = scene->toolsettings;
+  const bool use_brush_sync = (ts->paint_mode.material_paint_flag & PAINT_MATERIAL_BRUSH_SYNC) != 0;
+  if (!use_brush_sync) {
+    BKE_paint_material_brush_sync_disable(CTX_data_main(C), scene);
+  }
+  else if (ts->sculpt != nullptr) {
+    /* Sculpt Mode is the source: PBR Paint is set up there, and the Image Editor is the follower
+     * in that workflow. */
+    BKE_paint_material_brush_sync(scene, &ts->sculpt->paint);
+  }
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
+}
+
+static void rna_paint_visible_material_channels_set(PointerRNA *ptr, Paint *paint, int value)
+{
+  const int added = value & ~paint->visible_material_channels;
+  paint->visible_material_channels = value;
+
+  BKE_paint_material_enable_added_visible_channels(*paint, added);
+  if (added != 0) {
+    WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);
+  }
+
+  /* While the two editors share a brush they must also share the channel set, otherwise the
+   * follower keeps painting channels the user just hid until the next brush change. */
+  Scene *scene = reinterpret_cast<Scene *>(ptr->owner_id);
+  Paint *target = scene != nullptr ? BKE_paint_material_sync_target_get(scene, paint) : nullptr;
+  if (target != nullptr) {
+    target->visible_material_channels = value;
+    BKE_paint_material_enable_added_visible_channels(*target, added);
+  }
+}
+
+static void rna_Sculpt_visible_material_channels_set(PointerRNA *ptr, int value)
+{
+  Sculpt *sculpt = static_cast<Sculpt *>(ptr->data);
+  rna_paint_visible_material_channels_set(ptr, &sculpt->paint, value);
+}
+
+static void rna_ImaPaint_visible_material_channels_set(PointerRNA *ptr, int value)
+{
+  ImagePaintSettings *imapaint = static_cast<ImagePaintSettings *>(ptr->data);
+  rna_paint_visible_material_channels_set(ptr, &imapaint->paint, value);
 }
 
 /** \} */
@@ -561,12 +822,28 @@ static void rna_MeshAutomaskingSettings_update(bContext *C, PointerRNA *ptr)
   }
 }
 
-static void rna_UnifiedPaintSettings_update(bContext *C, PointerRNA * /*ptr*/)
+static void rna_UnifiedPaintSettings_update(bContext *C, PointerRNA *ptr)
 {
   const Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
   Brush *br = BKE_paint_brush(BKE_paint_get_active(*bmain, scene, view_layer));
+
+  /* Every unified setting routes through this callback, so mirroring here covers size, strength,
+   * color and jitter in one place - including the radial control modal, which updates through RNA
+   * as well. The owning #Paint is found by address: #PointerRNA.data is the settings struct
+   * embedded in it. */
+  if (scene != nullptr && scene->toolsettings != nullptr) {
+    ToolSettings *ts = scene->toolsettings;
+    Paint *paints[2] = {ts->sculpt != nullptr ? &ts->sculpt->paint : nullptr, &ts->imapaint.paint};
+    for (Paint *paint : paints) {
+      if (paint != nullptr && &paint->unified_paint_settings == ptr->data) {
+        BKE_paint_material_unified_settings_sync(scene, paint);
+        break;
+      }
+    }
+  }
+
   /* TODO: Verify if tagging the brush for these settings being changed is correct. */
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
@@ -577,6 +854,15 @@ static void rna_UnifiedPaintSettings_color_update(bContext *C, PointerRNA *ptr)
   UnifiedPaintSettings *ups = static_cast<UnifiedPaintSettings *>(ptr->data);
   rna_UnifiedPaintSettings_update(C, ptr);
   BKE_brush_color_sync_legacy(ups);
+
+  /* Sync Base Color channel from active brush color when Sync with Brush is on. */
+  const Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  Paint *paint = BKE_paint_get_active(*bmain, scene, view_layer);
+  Brush *brush = BKE_paint_brush(paint);
+  BKE_brush_material_paint_base_color_sync_to_channel(paint, brush);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, brush);
 }
 
 static void rna_UnifiedPaintSettings_size_set(PointerRNA *ptr, int value)
@@ -688,6 +974,30 @@ static void rna_def_paint_curve_visibility_flag(StructRNA *srna,
   prop = RNA_def_property(srna, prop_name, PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "curve_visibility_flags", flag);
   RNA_def_property_ui_text(prop, ui_name, nullptr);
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
+/**
+ * Define #Paint.visible_material_channels on \a srna, reached through \a sdna_path.
+ *
+ * Deliberately not part of #rna_def_paint: only Sculpt Mode and Image Paint paint PBR material
+ * channels, and exposing the property on every #Paint sub-type (Vertex/Weight/Grease Pencil/Curves
+ * Sculpt) would add API surface that is neither versioned nor meaningful there.
+ */
+static void rna_def_paint_visible_material_channels(StructRNA *srna,
+                                                    const char *sdna_path,
+                                                    const char *set_func)
+{
+  PropertyRNA *prop = RNA_def_enum_flag(
+      srna,
+      "visible_material_channels",
+      rna_enum_visible_material_paint_channel_items,
+      PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT,
+      "Visible Channels",
+      "Which material paint channels are shown in the PBR Paint channel list and painted during "
+      "strokes; hidden channels keep their settings but are skipped until shown again");
+  RNA_def_property_enum_sdna(prop, nullptr, sdna_path);
+  RNA_def_property_enum_funcs(prop, nullptr, set_func, nullptr);
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
@@ -1201,6 +1511,9 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_struct_ui_text(srna, "Sculpt", "");
   RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
 
+  rna_def_paint_visible_material_channels(
+      srna, "paint.visible_material_channels", "rna_Sculpt_visible_material_channels_set");
+
   prop = RNA_def_property(srna, "lock_x", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flags", SCULPT_LOCK_X);
   RNA_def_property_ui_text(prop, "Lock X", "Disallow changes to the X axis of vertices");
@@ -1399,6 +1712,74 @@ static void rna_def_paint_mode(BlenderRNA *brna)
   StructRNA *srna;
   PropertyRNA *prop;
 
+  srna = RNA_def_struct(brna, "MaterialPaintChannelLayerBinding", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialPaintChannelLayerBinding");
+  RNA_def_struct_path_func(srna, "rna_MaterialPaintChannelLayerBinding_path");
+  RNA_def_struct_ui_text(srna,
+                         "Material Paint Channel Layer Binding",
+                         "Attribute a material paint channel writes into: an add-on managed "
+                         "override for a fixed channel, or the user-configured attribute name "
+                         "for the Custom channel");
+  /* Same reason #PaintModeSettings clears it: tool settings are not undo-tracked, and a nested
+   * struct that still pushes undo steps would make its owner's behavior inconsistent. */
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  /* Read-only, mirroring #BrushMaterialPaintChannel.channel: the bindings are a fixed array, so
+   * this is what lets Python (and add-ons) key them by channel instead of hard-coding indices
+   * that would silently drift if a channel is added or reordered. */
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintChannelLayerBinding_channel_get_rna", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Channel", "Which material paint channel this binding redirects");
+
+  prop = RNA_def_property(srna, "attribute_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "attribute_name");
+  RNA_def_property_ui_text(
+      prop,
+      "Attribute Name",
+      "Name of the mesh attribute this channel paints into. For a fixed channel, empty means "
+      "paint its built-in attribute as normal; for Custom, empty means unconfigured. Takes "
+      "effect for the next stroke, not necessarily mid-stroke");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  srna = RNA_def_struct(brna, "MaterialPaintChannelImageBinding", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialPaintChannelImageBinding");
+  RNA_def_struct_path_func(srna, "rna_MaterialPaintChannelImageBinding_path");
+  RNA_def_struct_ui_text(srna,
+                         "Material Paint Channel Image Binding",
+                         "Add-on managed Image a material paint channel writes into on the "
+                         "image/texture canvas, instead of whatever the Principled BSDF socket "
+                         "resolves to");
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  /* Read-only; see #MaterialPaintChannelLayerBinding.channel. */
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintChannelImageBinding_channel_get_rna", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Channel", "Which material paint channel this binding redirects");
+
+  prop = RNA_def_property(srna, "image", PROP_POINTER, PROP_NONE);
+  /* An explicit setter rather than the generic one: the binding owns an #ImageUser that has to be
+   * reset alongside the pointer, and the reference has to be counted so the Image is not freed
+   * while a channel still paints into it. */
+  RNA_def_property_pointer_funcs(prop,
+                                 nullptr,
+                                 "rna_MaterialPaintChannelImageBinding_image_set",
+                                 nullptr,
+                                 "rna_Image_no_renderresult_or_viewer_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_ui_text(
+      prop,
+      "Image",
+      "Image this channel paints into on the PAINT_CANVAS_SOURCE_MATERIAL canvas; empty to "
+      "resolve it from the active material's node tree as normal. Takes effect for the next "
+      "stroke, not necessarily mid-stroke");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
   srna = RNA_def_struct(brna, "PaintModeSettings", nullptr);
   RNA_def_struct_sdna(srna, "PaintModeSettings");
   RNA_def_struct_path_func(srna, "rna_PaintModeSettings_path");
@@ -1411,11 +1792,101 @@ static void rna_def_paint_mode(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Source", "Source to select canvas from");
   RNA_def_property_update(prop, 0, "rna_PaintModeSettings_canvas_source_update");
 
+  prop = RNA_def_property(srna, "use_brush_sync", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "material_paint_flag", PAINT_MATERIAL_BRUSH_SYNC);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_ui_text(prop,
+                           "Sync Brush",
+                           "Use the same brush and brush settings in Sculpt Mode and the Image "
+                           "Editor while painting the Material canvas");
+  RNA_def_property_update(prop, 0, "rna_PaintModeSettings_brush_sync_update");
+
   prop = RNA_def_property(srna, "canvas_image", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_funcs(
       prop, nullptr, nullptr, nullptr, "rna_Image_no_renderresult_or_viewer_poll");
   RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
   RNA_def_property_ui_text(prop, "Texture", "Image used as painting target");
+
+  /* Custom channel value range stays scene-level; enable/value/blend live on
+   * #Brush.material_paint. Custom's attribute name is exposed via #channel_layer_bindings below,
+   * the same collection every other channel's redirect/name uses. */
+  prop = RNA_def_property(srna, "channel_custom_range", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "channel_custom_range");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_range(prop, -10000.0f, 10000.0f, 0.01, 3);
+  RNA_def_property_ui_text(
+      prop, "Custom Range", "Range painted values of the custom channel are clamped to");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "channel_layer_bindings", PROP_COLLECTION, PROP_NONE);
+  /* Empty length name: fixed DNA array (same pattern as BrushMaterialPaint.channels). */
+  RNA_def_property_collection_sdna(prop, nullptr, "channel_layer_bindings", "");
+  RNA_def_property_struct_type(prop, "MaterialPaintChannelLayerBinding");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_PaintModeSettings_channel_layer_bindings_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_PaintModeSettings_channel_layer_bindings_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Channel Layer Bindings",
+      "Per-channel material paint attribute redirect, indexed by material paint channel");
+
+  prop = RNA_def_property(srna, "channel_image_bindings", PROP_COLLECTION, PROP_NONE);
+  /* Empty length name: fixed DNA array (same pattern as channel_layer_bindings above). */
+  RNA_def_property_collection_sdna(prop, nullptr, "channel_image_bindings", "");
+  RNA_def_property_struct_type(prop, "MaterialPaintChannelImageBinding");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_PaintModeSettings_channel_image_bindings_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_PaintModeSettings_channel_image_bindings_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Channel Image Bindings",
+      "Per-channel material paint image redirect for the image/texture canvas, indexed by "
+      "material paint channel");
+
+  static const EnumPropertyItem new_channel_image_size_items[] = {
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_256, "SIZE_256", 0, "256 (256 x 256)", "256 x 256"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_512, "SIZE_512", 0, "512 (512 x 512)", "512 x 512"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_1K, "SIZE_1K", 0, "1K (1024 x 1024)", "1024 x 1024"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_2K, "SIZE_2K", 0, "2K (2048 x 2048)", "2048 x 2048"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_4K, "SIZE_4K", 0, "4K (4096 x 4096)", "4096 x 4096"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_8K, "SIZE_8K", 0, "8K (8192 x 8192)", "8192 x 8192"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "new_channel_image_size", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "new_channel_image_size");
+  RNA_def_property_enum_items(prop, new_channel_image_size_items);
+  RNA_def_property_enum_default(prop, PAINT_NEW_CHANNEL_IMAGE_SIZE_4K);
+  RNA_def_property_ui_text(prop,
+                           "New Channel Image Size",
+                           "Width and height used for material paint channel images that "
+                           "are auto-created when a channel is enabled");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_enum_flag(srna,
+                           "material_shader_visible_channels",
+                           rna_enum_visible_material_paint_channel_items,
+                           PAINT_MATERIAL_CHANNELS_SHADER_VISIBLE_DEFAULT,
+                           "Shader Visible Channels",
+                           "Which material paint channels the Material Paint (vertex color) "
+                           "canvas displays in the 3D Viewport, independent of whether the "
+                           "channel is enabled for painting or shown in the PBR Paint list: a "
+                           "channel keeps its painted data and can be hidden from shading, or "
+                           "shown, without either affecting painting");
+  RNA_def_property_enum_sdna(prop, nullptr, "material_shader_visible_channels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 static void rna_def_image_paint(BlenderRNA *brna)
@@ -1453,6 +1924,9 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_struct_path_func(srna, "rna_ImagePaintSettings_path");
   RNA_def_struct_ui_text(srna, "Image Paint", "Properties of image and texture painting mode");
   RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  rna_def_paint_visible_material_channels(
+      srna, "paint.visible_material_channels", "rna_ImaPaint_visible_material_channels_set");
 
   /* functions */
   func = RNA_def_function(srna, "detect_data", "rna_ImaPaint_detect_data");

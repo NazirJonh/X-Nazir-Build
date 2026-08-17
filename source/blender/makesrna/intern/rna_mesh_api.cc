@@ -9,8 +9,11 @@
 #include <cstdlib>
 
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 
 #include "DNA_customdata_types.h"
+/* For #eMaterialPaintChannel. */
+#include "DNA_scene_types.h"
 
 #include "BLI_math_base.h"
 
@@ -29,7 +32,10 @@
 #  include "BKE_mesh_mapping.hh"
 #  include "BKE_mesh_runtime.hh"
 #  include "BKE_mesh_tangent.hh"
+#  include "BKE_paint.hh"
 #  include "BKE_report.hh"
+
+#  include "BLI_string.h"
 
 #  include "ED_mesh.hh"
 
@@ -252,6 +258,16 @@ static bool rna_Mesh_validate_material_indices(Mesh *mesh)
   return !bke::mesh_validate_material_indices(*mesh);
 }
 
+static void rna_Mesh_material_paint_attribute_name(Mesh * /*mesh*/,
+                                                   const int channel,
+                                                   char *r_name)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  /* The Custom channel is named per scene rather than per mesh, so it has no fixed name here. */
+  BLI_strncpy(r_name, info.attribute_name ? info.attribute_name : "", MAX_CUSTOMDATA_LAYER_NAME);
+}
+
 }  // namespace blender
 
 #else
@@ -263,6 +279,22 @@ void RNA_api_mesh(StructRNA *srna)
   FunctionRNA *func;
   PropertyRNA *parm;
   const int normals_array_dim[] = {1, 3};
+
+  func = RNA_def_function(
+      srna, "material_paint_attribute_name", "rna_Mesh_material_paint_attribute_name");
+  RNA_def_function_ui_description(func,
+                                  "Return the attribute name a fixed material paint channel is "
+                                  "stored in, or an empty string for the Custom channel");
+  parm = RNA_def_enum(func,
+                      "channel",
+                      rna_enum_material_paint_channel_items,
+                      PAINT_MATERIAL_CHANNEL_METALLIC,
+                      "Channel",
+                      "Material paint channel");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "name", nullptr, MAX_CUSTOMDATA_LAYER_NAME, "", "Attribute name");
+  RNA_def_parameter_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  RNA_def_function_output(func, parm);
 
   func = RNA_def_function(srna, "transform", "rna_Mesh_transform");
   RNA_def_function_ui_description(func,

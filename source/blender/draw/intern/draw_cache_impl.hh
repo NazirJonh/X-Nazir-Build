@@ -37,6 +37,7 @@ struct Curves;
 struct Lattice;
 struct Mesh;
 struct Object;
+struct PaintModeSettings;
 struct Scene;
 struct PointCloud;
 struct Volume;
@@ -209,6 +210,21 @@ Span<gpu::Batch *> DRW_mesh_batch_cache_get_surface_shaded(Object &object,
 Span<gpu::Batch *> DRW_mesh_batch_cache_get_surface_texpaint(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_texpaint_single(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_vertpaint(Object &object, Mesh &mesh);
+/**
+ * \param paint_mode: Poly Paint tool settings the requested material paint attributes are
+ * resolved against, so an add-on-managed layer attribute bound to a channel is uploaded (and
+ * aliased to that channel's shader input) instead of the abandoned built-in one. Null requests
+ * the built-in names only.
+ */
+gpu::Batch *DRW_mesh_batch_cache_get_surface_material_props(Object &object,
+                                                            Mesh &mesh,
+                                                            const PaintModeSettings *paint_mode);
+/** \copydoc DRW_mesh_batch_cache_get_surface_material_props */
+Span<gpu::Batch *> DRW_mesh_batch_cache_get_surface_shaded_material_props(
+    Object &object,
+    Mesh &mesh,
+    Span<const GPUMaterial *> materials,
+    const PaintModeSettings *paint_mode);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_sculpt(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_weights(Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_sculpt_overlays(Mesh &mesh);

@@ -192,6 +192,9 @@ DNA_STRUCT_RENAME_MEMBER(Object, restrictflag, visibility_flag)
 DNA_STRUCT_RENAME_MEMBER(Object, size, scale)
 DNA_STRUCT_RENAME_MEMBER(OpacityGpencilModifierData, hardeness, hardness)
 DNA_STRUCT_RENAME_MEMBER(Paint, num_input_samples, num_input_samples_deprecated)
+DNA_STRUCT_RENAME_MEMBER(PaintModeSettings,
+                         visible_material_channels,
+                         visible_material_channels_deprecated)
 DNA_STRUCT_RENAME_MEMBER(ParticleSettings, child_nbr, child_percent)
 DNA_STRUCT_RENAME_MEMBER(ParticleSettings, dup_group, instance_collection)
 DNA_STRUCT_RENAME_MEMBER(ParticleSettings, dup_ob, instance_object)

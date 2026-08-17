@@ -15,6 +15,7 @@ from bl_ui.properties_paint_common import (
     brush_basic_grease_pencil_weight_settings,
     brush_basic_grease_pencil_vertex_settings,
     BrushAssetShelf,
+    draw_material_paint_channels,
 )
 from bl_ui.properties_grease_pencil_common import (
     AnnotationDataPanel,
@@ -278,12 +279,18 @@ class _draw_tool_settings_context_mode:
         ups = paint.unified_paint_settings
 
         if capabilities.has_color:
+            material_paint = brush.material_paint
             row = layout.row(align=True)
+            row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
             row.ui_units_x = 4
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
             row.separator()
-            layout.prop(brush, "blend", text="", expand=False)
+            blend_row = layout.row()
+            blend_row.active = context.tool_settings.paint_mode.canvas_source not in {
+                'MATERIAL', 'MATERIAL_PAINT',
+            }
+            blend_row.prop(brush, "blend", text="", expand=False)
 
         size = "size"
         size_owner = ups if ups.use_unified_size else brush
@@ -972,7 +979,7 @@ class VIEW3D_HT_header(Header):
                 paint = tool_settings.sculpt
                 brush = paint.brush
                 if brush:
-                    is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'SMEAR'}
+                    is_paint_tool = brush.sculpt_brush_type == 'PAINT'
             else:
                 is_paint_tool = tool and tool.use_paint_canvas
 
@@ -982,15 +989,19 @@ class VIEW3D_HT_header(Header):
             row = layout.row()
             row.active = is_paint_tool and color_type == 'VERTEX'
 
-            if context.preferences.experimental.use_sculpt_texture_paint:
-                canvas_source = tool_settings.paint_mode.canvas_source
-                icon = 'GROUP_VCOL' if canvas_source == 'COLOR_ATTRIBUTE' else canvas_source
-                row.popover(panel="VIEW3D_PT_slots_paint_canvas", icon=icon)
-                # TODO: Update this boolean condition so that the Canvas button is only active when
-                # the appropriate color types are selected in Solid mode, I.E. 'TEXTURE'
-                row.active = is_paint_tool
-            else:
-                row.popover(panel="VIEW3D_PT_slots_color_attributes", icon='GROUP_VCOL')
+            canvas_source = tool_settings.paint_mode.canvas_source
+            # Mode identifiers MATERIAL/IMAGE coincide with icon names; others need a map.
+            match canvas_source:
+                case 'COLOR_ATTRIBUTE':
+                    icon = 'GROUP_VCOL'
+                case 'MATERIAL_PAINT':
+                    icon = 'MATERIAL_DATA'
+                case _:
+                    icon = canvas_source
+            row.popover(panel="VIEW3D_PT_slots_paint_canvas", icon=icon)
+            # TODO: Update this boolean condition so that the Canvas button is only active when
+            # the appropriate color types are selected in Solid mode, I.E. 'TEXTURE'
+            row.active = is_paint_tool
 
             layout.popover(
                 panel="VIEW3D_PT_sculpt_snapping",
@@ -8810,10 +8821,18 @@ class VIEW3D_PT_paint_texture_context_menu(Panel):
         capabilities = brush.image_paint_capabilities
 
         if capabilities.has_color:
+            material_paint = brush.material_paint
             split = layout.split(factor=0.1)
+            split.active = (
+                material_paint is None or material_paint.use_sync_base_color_with_brush
+            )
             UnifiedPaintPanel.prop_unified_color(split, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color_picker(split, context, brush, "color", value_slider=True)
-            layout.prop(brush, "blend", text="")
+            blend_row = layout.row()
+            blend_row.active = context.tool_settings.paint_mode.canvas_source not in {
+                'MATERIAL', 'MATERIAL_PAINT',
+            }
+            blend_row.prop(brush, "blend", text="")
 
         if capabilities.has_radius:
             UnifiedPaintPanel.prop_unified(
@@ -8981,7 +9000,11 @@ class VIEW3D_PT_sculpt_context_menu(Panel):
         capabilities = brush.sculpt_capabilities
 
         if capabilities.has_color:
+            material_paint = brush.material_paint
             split = layout.split(factor=0.1)
+            split.active = (
+                material_paint is None or material_paint.use_sync_base_color_with_brush
+            )
             UnifiedPaintPanel.prop_unified_color(split, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color_picker(split, context, brush, "color", value_slider=True)
             layout.prop(brush, "blend", text="")

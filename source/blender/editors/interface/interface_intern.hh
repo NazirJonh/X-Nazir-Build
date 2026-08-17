@@ -1300,6 +1300,13 @@ void draw_but_VECTORSCOPE(const bContext *C,
                           const uiWidgetColors *wcol,
                           const rcti *recti);
 void draw_but_COLORBAND(Button *but, const uiWidgetColors *wcol, const rcti *rect);
+void draw_but_MATERIAL_PAINT_VALUE(Button *but, const uiWidgetColors *wcol, const rcti *rect);
+/**
+ * Inner gradient track for #ButtonType::MaterialPaintValue.
+ * Applies the same height/6 side padding and #U.pixelsize inset used when drawing, so absolute
+ * click/drag mapping matches the visible strip. Works in block or draw space.
+ */
+void button_material_paint_value_track_x(const rctf &but_rect, float *r_x1, float *r_sizex);
 void draw_but_UNITVEC(Button *but, const uiWidgetColors *wcol, const rcti *rect, float radius);
 void draw_but_CURVE(ARegion *region, Button *but, const uiWidgetColors *wcol, const rcti *rect);
 /**

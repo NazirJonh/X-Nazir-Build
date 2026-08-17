@@ -410,13 +410,16 @@ void object_sculpt_mode_enter(Main &bmain,
     BKE_report(reports, RPT_WARNING, "Object has negative scale, sculpting may be unpredictable");
   }
 
-  if (USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint)) {
+  /* Only the image-backed canvases need the texture paint slots, and refreshing them walks every
+   * material node tree of the object. Entering Sculpt mode to sculpt geometry should not pay for
+   * that. */
+  PaintModeSettings *paint_settings = &scene.toolsettings->paint_mode;
+  if (ELEM(paint_settings->canvas_source, PAINT_CANVAS_SOURCE_MATERIAL, PAINT_CANVAS_SOURCE_IMAGE))
+  {
     BKE_texpaint_slots_refresh_object(&scene, &ob);
 
-    PaintModeSettings *paint_settings = &scene.toolsettings->paint_mode;
     Image *image;
     ImageUser *image_user;
-
     if (BKE_paint_canvas_image_get(paint_settings, &ob, &image, &image_user)) {
       ED_space_image_sync(&bmain, image, false);
     }
@@ -577,7 +580,7 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
       depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
     }
     object_sculpt_mode_enter(bmain, *depsgraph, scene, ob, false, op->reports);
-    BKE_paint_brushes_validate(&bmain, &ts.sculpt->paint);
+    BKE_paint_brushes_validate(&bmain, &scene, &ts.sculpt->paint);
 
     if (ob.mode & mode_flag) {
       Mesh *mesh = id_cast<Mesh *>(ob.data);

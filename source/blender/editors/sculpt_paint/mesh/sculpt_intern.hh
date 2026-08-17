@@ -8,7 +8,10 @@
 
 #pragma once
 
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
 
 #include "BKE_brush.hh"
 #include "BKE_bvhutils.hh"
@@ -18,11 +21,13 @@
 #include "BKE_subdiv_ccg.hh"
 
 #include "BLI_array.hh"
+#include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_quaternion_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
 #include "BLI_span.hh"
+#include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
 #include "IMB_colormanagement.hh"
@@ -43,6 +48,9 @@ struct SculptBoundary;
 }
 namespace cloth {
 struct SimulationData;
+}
+namespace material {
+class ChannelSourceSampler;
 }
 namespace pose {
 struct IKChain;
@@ -174,11 +182,140 @@ struct ImageData : NonCopyable {
 
   ~ImageData();
 
-  static std::unique_ptr<ImageData> init_active_image(Object &ob,
-                                                      PaintModeSettings &paint_mode_settings);
+  static std::unique_ptr<ImageData> from_image(Image *image, ImageUser *image_user);
 };
 
+/**
+ * One image canvas written during a sculpt paint dab.
+ * When #color_override is set (Mode=`Material` channel), that color is used
+ * instead of the brush color. Scalar channels freeze grayscale `(v,v,v)` for paint;
+ * invert re-targets to #channel default with #IMB_BLEND_MIX each dab.
+ * Base Color sets #is_color_channel so each dab can recompute RGB for invert.
+ * Normal sets #is_normal_channel and always uses #IMB_BLEND_NORMAL_MIX.
+ */
+struct ImagePaintTarget {
+  std::unique_ptr<ImageData> data;
+  std::optional<float4> color_override;
+  bool is_color_channel = false;
+  bool is_normal_channel = false;
+  /**
+   * Whether this target is a Principled channel map rather than the single Mode=`Image` canvas.
+   * Only these use the per-channel blend mode and the material blend math; a plain image canvas
+   * keeps the stock #Brush.blend behavior unchanged.
+   */
+  bool is_material_channel = false;
+  eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_METALLIC;
+  const char *channel_name = nullptr;
+};
+
+/**
+ * Per-stroke pre-stroke color and coverage accumulator for material channel maps.
+ *
+ * The raster engine normally blends each dab straight into the live image. That converges for Mix
+ * - re-mixing toward the same target changes nothing - but every other mode compounds: a slow drag
+ * is dozens of dabs, so Add saturates to white and Multiply crushes to black, and wherever the
+ * stroke overlaps itself the application count jumps, leaving hard edges along the overlap.
+ *
+ * So for the non-Mix modes the engine switches to the model the vertex engine already uses (see
+ * #StrokeCache::material_mix_base_color): accumulate the stroke's coverage separately, and blend
+ * that once against a pre-stroke value frozen at the texel's first touch. This is what lets
+ * paint_material_blend.hh's promise - that a channel value means the same thing in both engines -
+ * hold for modes other than Mix.
+ *
+ * Storage is lazy per #block_size square of texels, so it costs memory only where the stroke
+ * actually lands, and only for a stroke that needs it.
+ */
+class MaterialStrokeAccum {
+ public:
+  /** Side of one lazily allocated texel block, matching the image undo tile grid. */
+  static constexpr int block_size = 64;
+  static constexpr int block_texel_num = block_size * block_size;
+
+  struct Block {
+    /** Scene-linear color from before the stroke, captured per texel by #orig_valid. */
+    Array<float4> orig = Array<float4>(block_texel_num);
+    /** Stroke coverage so far, pre-multiplied exactly like #StrokeCache::material_mix_base_color. */
+    Array<float4> mix = Array<float4>(block_texel_num, float4(0.0f));
+    /**
+     * Whether the matching #orig entry has been captured yet. A texel is always read before it is
+     * written, so the image still holds its pre-stroke value at that first touch.
+     *
+     * Deliberately a byte per texel rather than a bit set: neighboring texels of one block are
+     * filled by different threads, and distinct bytes can be written concurrently where bits
+     * sharing a word cannot.
+     */
+    Array<bool> orig_valid = Array<bool>(block_texel_num, false);
+  };
+
+  /**
+   * The block covering (\a block_x, \a block_y) of \a buffer, allocating it on first use.
+   *
+   * \note Only the allocation is serialized. Callers then write disjoint texels of the returned
+   * block in parallel, which is safe for all three arrays above.
+   */
+  Block &block_ensure(const ImBuf *buffer, const int block_x, const int block_y)
+  {
+    const Key key{buffer, block_x, block_y};
+    std::lock_guard lock(mutex_);
+    return *blocks_.lookup_or_add_cb(key, []() { return std::make_unique<Block>(); });
+  }
+
+ private:
+  struct Key {
+    const ImBuf *buffer;
+    int block_x;
+    int block_y;
+
+    bool operator==(const Key &other) const
+    {
+      return buffer == other.buffer && block_x == other.block_x && block_y == other.block_y;
+    }
+
+    uint64_t hash() const
+    {
+      /* Knuth's multiplicative constant, folded in one field at a time. */
+      constexpr uint64_t mul = 0x9E3779B97F4A7C15ull;
+      uint64_t value = uint64_t(uintptr_t(buffer));
+      value = value * mul + uint64_t(uint32_t(block_x));
+      value = value * mul + uint64_t(uint32_t(block_y));
+      return value;
+    }
+  };
+
+  Map<Key, std::unique_ptr<Block>> blocks_;
+  std::mutex mutex_;
+};
+
+/** Builds paint targets for Mode=`Image` (one canvas) or Mode=`Material` (Principled maps). */
+Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
+                                                   PaintModeSettings &paint_mode_settings,
+                                                   const Brush *brush,
+                                                   int visible_material_channels);
+
 }  // namespace paint::image
+
+namespace material {
+
+/**
+ * The parts of a texture lookup that depend only on the sampled position, not on which channel
+ * is being sampled. Built once per position and reused by every channel that samples there.
+ *
+ * Defined here rather than next to the rest of #material below because #StrokeCache stores a
+ * buffer of these by value (see #StrokeCache::MaterialDabScratch).
+ */
+struct TexelSampleContext {
+  /** \a brush_point minus the stroke's plane offset; used as-is by #MTEX_MAP_MODE_3D. */
+  float3 point;
+  /** #point after radial-symmetry rotation and mirror flip; used by #MTEX_MAP_MODE_AREA before
+   * its own brush-local-matrix multiply, and as the input to the view projection below. */
+  float3 symm_point;
+  /** #symm_point projected to region space; used by every mode except #MTEX_MAP_MODE_3D and
+   * #MTEX_MAP_MODE_AREA (i.e. #MTEX_MAP_MODE_VIEW, #MTEX_MAP_MODE_TILED,
+   * #MTEX_MAP_MODE_RANDOM). */
+  float2 view_point_2d;
+};
+
+}  // namespace material
 
 struct StrokeToggleSettings {
   /**
@@ -315,6 +452,14 @@ struct StrokeCache {
   float3 view_normal_symm = float3(0);
   float3 view_origin = float3(0);
   float3 view_origin_symm = float3(0);
+  /* Camera right/up axes in object space. A View-mapped Normal-channel source texture is
+   * sampled in this screen-aligned basis, not object space: painting projects the sample's
+   * right/up components onto the destination surface's own tangent plane (its "outward" axis is
+   * the surface normal, not #view_normal), so a neutral sample stays neutral regardless of the
+   * surface's orientation to the camera. See ChannelSourceSampler::color() and
+   * sculpt_paint_image.cc's apply_paint_channel(). */
+  float3 view_right = float3(0);
+  float3 view_up = float3(0);
 
   /**
    * The primary direction of influence for a brush stroke.
@@ -372,6 +517,73 @@ struct StrokeCache {
     Array<float4> mix_colors;
     Array<float4> prev_colors;
   } paint_brush;
+
+  /**
+   * Source texture sampling for material paint channels, built once per stroke so the image pool
+   * is acquired and released exactly once. Non-null when the brush has material_paint; inactive
+   * (no usable sources) is reported via #ChannelSourceSampler::is_active.
+   */
+  std::unique_ptr<material::ChannelSourceSampler> material_source_sampler;
+
+  /**
+   * Poly Paint: scratch shared by every channel pass of a single dab.
+   *
+   * All three buffers use one flat layout: the dab's nodes concatenated in #IndexMask order, so
+   * the slice belonging to the node at position `i` in the mask is `offsets[i]..offsets[i + 1]`
+   * (see #node_range). Element `j` of a slice corresponds to element `j` of that node's
+   * #bke::pbvh::MeshNode::verts().
+   *
+   * They live here, rather than being allocated inside the dab, for two reasons. Buffers indexed
+   * by *node index* would have to be sized for the whole PBVH (thousands of nodes) even though a
+   * dab touches a few dozen, and a per-node heap allocation inside the dab loop costs more than
+   * the work it holds. Keeping them in the stroke cache means the memory is reused by every dab
+   * of the stroke and only grows when a dab needs more than the previous high-water mark.
+   *
+   * Contents are dab-scoped and rebuilt at the start of every dab; nothing may be read across
+   * dabs.
+   */
+  struct MaterialDabScratch {
+    /** Brush falloff * hardness * strength * texture * automasking, per touched vertex. */
+    Vector<float> factors;
+    /** Texture-sample coordinates, same layout. Empty when no channel has a usable source. */
+    Vector<material::TexelSampleContext> contexts;
+    /** Alpha channel factor masking the other channels' writes, same layout. Empty when the
+     * stroke does not use Alpha as a mask. */
+    Vector<float> alpha;
+    /** Slice starts, one per node in the dab's mask, plus a final total. */
+    Vector<int> offsets;
+
+    IndexRange node_range(const int mask_position) const
+    {
+      return IndexRange::from_begin_end(this->offsets[mask_position],
+                                        this->offsets[mask_position + 1]);
+    }
+  };
+  MaterialDabScratch material_dab;
+
+  /**
+   * Poly Paint: per-vertex accumulated coverage for Base Color and each enabled scalar channel,
+   * mirroring #paint_brush.mix_colors. Each dab composites into these buffers with Mix (regardless
+   * of the channel's own configured blend mode), and the buffer is then blended once per dab
+   * against the stroke's *original* (pre-stroke) value using the configured blend mode - see
+   * #do_paint_color_task and #do_paint_scalar_task. Blending a dab directly onto the live
+   * (already-modified-by-earlier-dabs) attribute instead would make a stroke of many overlapping
+   * dabs (a slow drag, or a soft brush stamped repeatedly) visibly darken/lighten in rings wherever
+   * dabs overlap, since applying Mix N times does not converge to the same result as applying it
+   * once with the dabs' combined coverage.
+   *
+   * Unlike #material_dab above these are mesh-wide and persist for the whole stroke, since a
+   * vertex touched by an early dab must keep its accumulated coverage when a later dab reaches it
+   * again. Lazily allocated on first use, like #paint_brush.mix_colors; #material_mix_scalars is
+   * indexed directly by #eMaterialPaintChannel, one entry per channel.
+   *
+   * A scalar channel's coverage only ever needs the accumulated value and its alpha, so it is
+   * stored as #float2 rather than the #float4 Base Color needs - at #PAINT_MATERIAL_CHANNEL_NUM
+   * channels on a multi-million-vertex mesh, the two redundant components would be tens of
+   * megabytes of pure waste, plus the blend work to maintain them.
+   */
+  Array<float4> material_mix_base_color;
+  Array<Array<float2>> material_mix_scalars{PAINT_MATERIAL_CHANNEL_NUM};
 
   /* Pose brush */
   std::unique_ptr<pose::IKChain> pose_ik_chain;
@@ -444,7 +656,18 @@ struct StrokeCache {
   float4x4 stroke_local_mat = float4x4::identity();
   float multiplane_scrape_angle = 0.0f;
 
-  std::unique_ptr<paint::image::ImageData> image_data;
+  Vector<paint::image::ImagePaintTarget> image_paint_targets;
+
+  /**
+   * Pre-stroke color and coverage for the material channel maps, allocated on the first dab of a
+   * stroke that paints with a mode other than Mix. See #paint::image::MaterialStrokeAccum.
+   */
+  std::unique_ptr<paint::image::MaterialStrokeAccum> material_raster_accum;
+
+  /** Poly Paint: material paint attributes (scalar or color) created by #brush_stroke_init for
+   * this stroke, as opposed to attributes that already existed. Undo removes these instead of
+   * leaving a zeroed attribute behind; see #undo::StepData::MaterialAttributeInfo::created. */
+  Vector<std::string> material_created_attribute_names;
 
   StrokeCache();
   ~StrokeCache();
@@ -782,6 +1005,69 @@ const float *brush_frontface_normal_from_falloff_shape(const SculptSession &ss,
                                                        char falloff_shape);
 void cube_tip_init(const Sculpt &sd, const Object &ob, const Brush &brush, float mat[4][4]);
 
+/**
+ * Sample \a mtex at \a brush_point using the brush's stroke state.
+ *
+ * \a brush_point is in object space for every map mode: this maps it to whatever coordinate
+ * system the mode needs — object space for 3D, the brush local matrix for Area, and region
+ * space for the view-relative modes.
+ *
+ * \a pool owns ImBuf acquires for this sample path (stroke-local for channel sources; typically
+ * #SculptSession.tex_pool for the brush texture). Passed last so callers that already supply
+ * outputs can append the pool without reshuffling mid-argument lists.
+ *
+ * \a area_local_mat overrides #StrokeCache.brush_local_mat for #MTEX_MAP_MODE_AREA. Callers
+ * sampling a texture other than the brush's own (e.g. a material paint channel's source, whose
+ * rotation may differ from the brush's) must pass their own matrix from
+ * #material::calc_area_local_mat; null reuses the brush's matrix as before.
+ */
+void sculpt_apply_texture(const SculptSession &ss,
+                          const Brush &brush,
+                          const MTex &mtex,
+                          const float brush_point[3],
+                          int thread_id,
+                          float *r_value,
+                          float4 &r_rgba,
+                          ImagePool *pool,
+                          const float4x4 *area_local_mat = nullptr);
+
+namespace material {
+
+/* NOTE: #TexelSampleContext itself is declared above #StrokeCache, which stores a buffer of them.
+ *
+ * It exists because the part of texture-sample coordinate derivation that depends only on
+ * \a brush_point and the stroke's view/symmetry state, not on any particular #MTex, is otherwise
+ * recomputed from scratch by every #sculpt_apply_texture call; when several #MTex slots (e.g. one
+ * per material paint channel) are sampled at the same point, building this once with
+ * #sculpt_texel_sample_context avoids repeating that work per slot. */
+
+/** Build the shared coordinate context for \a brush_point once, to be reused across multiple
+ * #sculpt_apply_texture calls at the same point (see #TexelSampleContext). */
+TexelSampleContext sculpt_texel_sample_context(const SculptSession &ss,
+                                               const float brush_point[3]);
+
+/**
+ * The #MTEX_MAP_MODE_AREA local-space matrix for \a rotation, i.e. #StrokeCache.brush_local_mat
+ * built for a texture rotation other than the brush's own #MTex.rot. Depends on the current
+ * dab's location and motion direction, so must be recomputed every dab the same as
+ * #StrokeCache.brush_local_mat itself — never cache this across dabs.
+ */
+float4x4 calc_area_local_mat(const Object &ob, float rotation);
+
+}  // namespace material
+
+/** Same as the \a brush_point overload above, but reusing a #material::TexelSampleContext already
+ * built for this point instead of recomputing it. */
+void sculpt_apply_texture(const SculptSession &ss,
+                          const Brush &brush,
+                          const MTex &mtex,
+                          const material::TexelSampleContext &ctx,
+                          int thread_id,
+                          float *r_value,
+                          float4 &r_rgba,
+                          ImagePool *pool,
+                          const float4x4 *area_local_mat = nullptr);
+
 /** Sample the brush's texture value. */
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
@@ -873,6 +1159,42 @@ inline Span<float4> orig_color_data_get_mesh(const Object &object, const bke::pb
   return *orig_color_data_lookup_mesh(object, node);
 }
 
+/**
+ * Poly Paint: position of \a attribute_name in the current #Type::Material undo step's attribute
+ * list, or -1 when the step is not a Material step or does not cover the attribute (the channel
+ * was not enabled for this stroke).
+ *
+ * Resolve this once per channel and pass the result to #orig_material_scalar_data_lookup_mesh,
+ * rather than letting every node of every dab re-run the name comparison.
+ */
+int orig_material_scalar_attribute_index(StringRef attribute_name);
+
+/**
+ * Poly Paint: the value of the point float attribute at \a attribute_index (from
+ * #orig_material_scalar_attribute_index) from before this stroke, for #Type::Material undo steps.
+ * `std::nullopt` when this PBVH node has no undo data in the current step.
+ */
+std::optional<Span<float>> orig_material_scalar_data_lookup_mesh(const Object &object,
+                                                                 const bke::pbvh::MeshNode &node,
+                                                                 int attribute_index);
+
+/**
+ * Poly Paint: position of \a attribute_name in the current #Type::Material undo step's color
+ * attribute list, or -1 when the step is not a Material step or does not cover the attribute.
+ * Mirrors #orig_material_scalar_attribute_index for color-shaped channels.
+ */
+int orig_material_color_attribute_index(StringRef attribute_name);
+
+/**
+ * Poly Paint: the value of the color attribute at \a attribute_index (from
+ * #orig_material_color_attribute_index) from before this stroke, for #Type::Material undo steps.
+ * `std::nullopt` when this PBVH node has no undo data in the current step, or for plain
+ * #Type::Color steps - use #orig_color_data_lookup_mesh for those.
+ */
+std::optional<Span<float4>> orig_material_color_data_lookup_mesh(const Object &object,
+                                                                 const bke::pbvh::MeshNode &node,
+                                                                 int attribute_index);
+
 std::optional<Span<int>> orig_face_set_data_lookup_mesh(const Object &object,
                                                         const bke::pbvh::MeshNode &node);
 
@@ -925,10 +1247,14 @@ float object_space_radius_get(const ViewContext &vc,
  * \{ */
 
 void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
-                                 const Sculpt &sd,
-                                 Object &ob,
-                                 const IndexMask &node_mask);
-bool SCULPT_use_image_paint_brush(PaintModeSettings &settings, Object &ob);
+                                  PaintModeSettings &paint_mode_settings,
+                                  const Sculpt &sd,
+                                  Object &ob,
+                                  const IndexMask &node_mask);
+bool SCULPT_use_image_paint_brush(PaintModeSettings &settings,
+                                  Object &ob,
+                                  const Brush *brush,
+                                  int visible_material_channels);
 
 /** \} */
 

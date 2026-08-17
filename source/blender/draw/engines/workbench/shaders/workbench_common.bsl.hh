@@ -13,6 +13,16 @@
 
 #define CAVITY_BUFFER_RANGE 4.0f
 
+/**
+ * Poly Paint: neutral value of the per-vertex Specular channel, i.e. what every object that is not
+ * painting it writes.
+ *
+ * #get_world_lighting maps Specular to dielectric F0 as `0.08 * specular`, the same way Principled
+ * BSDF's "IOR Level" does. 0.625f is the value for which that yields exactly the fixed 0.05f
+ * reflectance Workbench used before per-vertex Specular existed, so an unpainted scene shades
+ * bit-for-bit as it did before. Do not "round" this to 0.5f: that is the Principled default, not
+ * Workbench's, and would darken the specular of every existing scene.
+ */
 namespace workbench {
 
 struct World {
@@ -42,7 +52,14 @@ float2 normal_encode(bool front_face, float3 n)
   return n.xy;
 }
 
-/* Encoding into the alpha of a RGBA16F texture. (10bit mantissa) */
+/* Encoding into the alpha of a RGBA16F texture. (10bit mantissa)
+ *
+ * NOTE: Poly Paint deliberately does NOT change this packing. Squeezing a third value in here
+ * would have to come out of Roughness's or Metallic's bits, and 2 bits cannot even represent the
+ * unpainted Specular default of 0.5f - every ordinary Workbench scene would shift its dielectric
+ * reflectance as a side effect. Painted objects get full float precision from #material_ext_tx
+ * instead (see #WORKBENCH_MATERIAL_EXT_DEFAULT_SPECULAR), which is exactly what that texture is
+ * for, so the packed path stays byte-for-byte what it was before Poly Paint. */
 #define TARGET_BITCOUNT 8u
 #define METALLIC_BITS 3u /* Metallic channel is less important. */
 #define ROUGHNESS_BITS (TARGET_BITCOUNT - METALLIC_BITS)

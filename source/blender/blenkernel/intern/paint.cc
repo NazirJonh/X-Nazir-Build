@@ -17,22 +17,26 @@
 
 #include "DNA_asset_types.h"
 #include "DNA_brush_types.h"
+#include "DNA_image_types.h"
 #include "DNA_key_types.h"
+#include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_meshdata_types.h"
 #include "DNA_modifier_types.h"
+#include "DNA_node_types.h"
 #include "DNA_object_enums.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
-#include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 #include "DNA_workspace_types.h"
 
 #include "BLI_hash.h"
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
+#include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_noise.hh"
 #include "BLI_string.h"
@@ -57,19 +61,26 @@
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "BKE_main_invariants.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_runtime.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
 #include "BKE_subdiv_ccg.hh"
 
+#include "WM_api.hh"
+
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "PRF_profile.hh"
@@ -79,6 +90,8 @@
 #include "BLO_read_write.hh"
 
 #include "IMB_colormanagement.hh"
+/* For #IMB_BlendMode, which #BKE_paint_material_channel_blend_mode returns as a `short`. */
+#include "IMB_imbuf.hh"
 
 #include "bmesh.hh"
 
@@ -640,7 +653,7 @@ bool BKE_paint_use_unified_color(const Paint *paint)
  * After changing #Paint.brush_asset_reference, call this to activate the matching brush, importing
  * it if necessary. Has no effect if #Paint.brush is set already.
  */
-static bool paint_brush_update_from_asset_reference(Main *bmain, Paint *paint)
+static bool paint_brush_update_from_asset_reference(Main *bmain, Scene *scene, Paint *paint)
 {
   /* Don't resolve this during file read, it will be done after. */
   if (bmain->is_locked_for_linking) {
@@ -667,6 +680,9 @@ static bool paint_brush_update_from_asset_reference(Main *bmain, Paint *paint)
   }
 
   paint->brush = brush;
+  if (scene != nullptr) {
+    BKE_paint_material_brush_preset_apply(*scene, *brush);
+  }
   return true;
 }
 
@@ -697,6 +713,151 @@ static AssetWeakReference *asset_reference_create_from_brush(Brush *brush)
   }
 
   return nullptr;
+}
+
+static bool material_brush_preset_matches(const PaintMaterialBrushPreset &preset,
+                                          const Brush &brush)
+{
+  if (ID_IS_LINKED(&brush.id)) {
+    if (preset.asset_ref == nullptr) {
+      return false;
+    }
+    const std::optional<AssetWeakReference> brush_ref = bke::asset_edit_weak_reference_from_id(
+        brush.id);
+    return brush_ref.has_value() && *preset.asset_ref == *brush_ref;
+  }
+  return preset.local_name != nullptr && STREQ(preset.local_name, brush.id.name + 2);
+}
+
+PaintMaterialBrushPreset *BKE_paint_material_brush_preset_find(Scene &scene, const Brush &brush)
+{
+  for (PaintMaterialBrushPreset &preset :
+       scene.toolsettings->paint_mode.material_paint_brush_presets)
+  {
+    if (preset.asset_ref == nullptr && preset.local_name == nullptr) {
+      /* Malformed node (hand-edited or corrupted file); never matches. */
+      continue;
+    }
+    if (material_brush_preset_matches(preset, brush)) {
+      return &preset;
+    }
+  }
+  return nullptr;
+}
+
+PaintMaterialBrushPreset *BKE_paint_material_brush_preset_ensure(Scene &scene, const Brush &brush)
+{
+  if (PaintMaterialBrushPreset *existing = BKE_paint_material_brush_preset_find(scene, brush)) {
+    return existing;
+  }
+
+  PaintMaterialBrushPreset *preset = MEM_new<PaintMaterialBrushPreset>(__func__);
+  if (ID_IS_LINKED(&brush.id)) {
+    if (const std::optional<AssetWeakReference> brush_ref = bke::asset_edit_weak_reference_from_id(
+            brush.id))
+    {
+      preset->asset_ref = MEM_new<AssetWeakReference>(__func__, *brush_ref);
+    }
+  }
+  else {
+    preset->local_name = BLI_strdup(brush.id.name + 2);
+  }
+
+  if (brush.material_paint != nullptr) {
+    preset->material_paint = BKE_brush_material_paint_copy(*brush.material_paint, 0);
+  }
+  else {
+    preset->material_paint = BKE_brush_material_paint_create_default();
+  }
+
+  BLI_addtail(&scene.toolsettings->paint_mode.material_paint_brush_presets, preset);
+  return preset;
+}
+
+void BKE_paint_material_brush_preset_apply(Scene &scene, Brush &brush)
+{
+  /* Do not create a default preset or allocate #Brush.material_paint here. That is the PBR Paint
+   * opt-in (#PAINT_OT_material_paint_brush_ensure). Switching brushes must not expand the PBR UI
+   * for a brush the user has never set up. */
+  PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_find(scene, brush);
+  if (preset == nullptr) {
+    return;
+  }
+  BKE_brush_material_paint_ensure(&brush);
+  BKE_brush_material_paint_copy_into(*brush.material_paint, *preset->material_paint);
+}
+
+void BKE_paint_material_brush_preset_snapshot(Scene &scene, const Brush &brush)
+{
+  if (brush.material_paint == nullptr) {
+    return;
+  }
+  PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_ensure(scene, brush);
+  BKE_brush_material_paint_copy_into(*preset->material_paint, *brush.material_paint);
+}
+
+void BKE_paint_material_brush_preset_free(PaintMaterialBrushPreset *preset,
+                                          const bool do_user_refcount)
+{
+  if (preset == nullptr) {
+    return;
+  }
+  BKE_brush_material_paint_free(preset->material_paint, do_user_refcount);
+  MEM_delete(preset->asset_ref);
+  MEM_delete(preset->local_name);
+  MEM_delete(preset);
+}
+
+void BKE_paint_material_brush_preset_remove(Scene &scene, const Brush &brush)
+{
+  PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_find(scene, brush);
+  if (preset == nullptr) {
+    return;
+  }
+  BLI_remlink(&scene.toolsettings->paint_mode.material_paint_brush_presets, preset);
+  BKE_paint_material_brush_preset_free(preset, true);
+}
+
+/**
+ * Drops presets that can no longer belong to any brush: malformed nodes, and local-brush presets
+ * whose brush is gone from \a bmain. Asset presets are kept even when the asset brush is not
+ * currently loaded into \a bmain, since not being loaded says nothing about the asset still
+ * existing on disk.
+ */
+static void paint_material_brush_presets_purge_unused(Main *bmain, Scene &scene)
+{
+  ListBaseT<PaintMaterialBrushPreset> &presets =
+      scene.toolsettings->paint_mode.material_paint_brush_presets;
+  for (PaintMaterialBrushPreset &preset : presets.items_mutable()) {
+    const bool is_malformed = preset.asset_ref == nullptr && preset.local_name == nullptr;
+    /* Passing null for the library restricts the lookup to local IDs, which is what a
+     * #PaintMaterialBrushPreset.local_name key refers to. */
+    const bool is_orphaned_local = preset.local_name != nullptr &&
+                                   BKE_libblock_find_name(
+                                       bmain, ID_BR, preset.local_name, nullptr) == nullptr;
+    if (is_malformed || is_orphaned_local) {
+      BLI_remlink(&presets, &preset);
+      BKE_paint_material_brush_preset_free(&preset, true);
+    }
+  }
+}
+
+void BKE_paint_material_brush_presets_prepare_for_save(Main *bmain)
+{
+  for (Scene &scene : bmain->scenes) {
+    if (scene.toolsettings == nullptr) {
+      continue;
+    }
+    if (scene.toolsettings->sculpt != nullptr) {
+      if (Brush *brush = scene.toolsettings->sculpt->paint.brush) {
+        BKE_paint_material_brush_preset_snapshot(scene, *brush);
+      }
+    }
+    if (Brush *brush = scene.toolsettings->imapaint.paint.brush) {
+      BKE_paint_material_brush_preset_snapshot(scene, *brush);
+    }
+    paint_material_brush_presets_purge_unused(bmain, scene);
+  }
 }
 
 bool BKE_paint_brush_set(Main *bmain,
@@ -750,6 +911,44 @@ bool BKE_paint_brush_set(Paint *paint, Brush *brush)
 
   BKE_paint_invalidate_overlay_all();
 
+  return true;
+}
+
+bool BKE_paint_brush_set_synced(Scene &scene, Paint &paint, Brush *brush)
+{
+  Brush *previous = paint.brush;
+  if (!BKE_paint_brush_set(&paint, brush)) {
+    return false;
+  }
+  if (previous != brush) {
+    if (previous != nullptr) {
+      BKE_paint_material_brush_preset_snapshot(scene, *previous);
+    }
+    if (brush != nullptr) {
+      BKE_paint_material_brush_preset_apply(scene, *brush);
+    }
+  }
+  return true;
+}
+
+bool BKE_paint_brush_set_synced(Main &bmain,
+                                Scene &scene,
+                                Paint &paint,
+                                const AssetWeakReference &brush_asset_reference)
+{
+  Brush *previous = paint.brush;
+  if (!BKE_paint_brush_set(&bmain, &paint, brush_asset_reference)) {
+    return false;
+  }
+  Brush *current = paint.brush;
+  if (previous != current) {
+    if (previous != nullptr) {
+      BKE_paint_material_brush_preset_snapshot(scene, *previous);
+    }
+    if (current != nullptr) {
+      BKE_paint_material_brush_preset_apply(scene, *current);
+    }
+  }
   return true;
 }
 
@@ -1098,16 +1297,16 @@ void BKE_paint_brushes_set_default_references(ToolSettings *ts)
   paint_brush_set_default_reference(&ts->imapaint.paint);
 }
 
-bool BKE_paint_brush_set_default(Main *bmain, Paint *paint)
+bool BKE_paint_brush_set_default(Main *bmain, Scene *scene, Paint *paint)
 {
   paint_brush_set_default_reference(paint, true);
-  return paint_brush_update_from_asset_reference(bmain, paint);
+  return paint_brush_update_from_asset_reference(bmain, scene, paint);
 }
 
 bool BKE_paint_brush_set_essentials(Main *bmain, Paint *paint, const char *name)
 {
   paint_brush_set_essentials_reference(paint, name);
-  return paint_brush_update_from_asset_reference(bmain, paint);
+  return paint_brush_update_from_asset_reference(bmain, nullptr, paint);
 }
 
 void BKE_paint_previous_asset_reference_set(Paint *paint,
@@ -1124,14 +1323,14 @@ void BKE_paint_previous_asset_reference_clear(Paint *paint)
   MEM_SAFE_DELETE(paint->runtime->previous_active_brush_reference);
 }
 
-void BKE_paint_brushes_validate(Main *bmain, Paint *paint)
+void BKE_paint_brushes_validate(Main *bmain, Scene *scene, Paint *paint)
 {
   /* Clear brush with invalid mode. Unclear if this can still happen,
    * but kept from old paint tool-slots code. */
   Brush *brush = BKE_paint_brush(paint);
   if (brush && (paint->runtime->ob_mode & brush->ob_mode) == 0) {
     BKE_paint_brush_set(paint, nullptr);
-    BKE_paint_brush_set_default(bmain, paint);
+    BKE_paint_brush_set_default(bmain, scene, paint);
   }
 }
 
@@ -1532,14 +1731,23 @@ bool BKE_paint_ensure(ToolSettings *ts, Paint **r_paint)
   return false;
 }
 
-void BKE_paint_brushes_ensure(Main *bmain, Paint *paint)
+void BKE_paint_brushes_ensure(Main *bmain, Scene *scene, Paint *paint)
 {
   if (paint->brush_asset_reference) {
-    paint_brush_update_from_asset_reference(bmain, paint);
+    paint_brush_update_from_asset_reference(bmain, scene, paint);
   }
 
   if (!paint->brush) {
-    BKE_paint_brush_set_default(bmain, paint);
+    BKE_paint_brush_set_default(bmain, scene, paint);
+  }
+
+  /* Apply a scene preset only when the brush has no live PBR state yet. #BKE_paint_brushes_ensure
+   * is an init path (mode enter, paint_init); re-applying here would overwrite channel edits that
+   * have not been snapshotted. Brush switches go through #BKE_paint_brush_set_synced, which
+   * snapshots then applies. Asset restore already applies in
+   * #paint_brush_update_from_asset_reference. */
+  if (scene != nullptr && paint->brush != nullptr && paint->brush->material_paint == nullptr) {
+    BKE_paint_material_brush_preset_apply(*scene, *paint->brush);
   }
 }
 
@@ -1558,7 +1766,7 @@ void BKE_paint_init(Main *bmain, Scene *sce, PaintMode mode, const bool ensure_b
   Paint *paint = BKE_paint_get_active_from_paintmode(sce, mode);
 
   if (ensure_brushes) {
-    BKE_paint_brushes_ensure(bmain, paint);
+    BKE_paint_brushes_ensure(bmain, sce, paint);
   }
 
   if (!paint->cavity_curve) {
@@ -2446,13 +2654,14 @@ static void sculpt_update_object(Depsgraph *depsgraph,
      *
      * The relevant changes are stored/encoded in the paint canvas key.
      * These include the active uv map, and resolutions. */
-    if (USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint)) {
-      std::string paint_canvas_key = BKE_paint_canvas_key_get(&scene->toolsettings->paint_mode,
-                                                              ob);
-      if (!ss.last_paint_canvas_key || paint_canvas_key != ss.last_paint_canvas_key) {
-        ss.last_paint_canvas_key = paint_canvas_key;
-        BKE_pbvh_mark_rebuild_pixels(pbvh);
-      }
+    std::string paint_canvas_key = BKE_paint_canvas_key_get(
+        &scene->toolsettings->paint_mode,
+        ob,
+        BKE_paint_brush(&sd->paint),
+        sd->paint.visible_material_channels);
+    if (!ss.last_paint_canvas_key || paint_canvas_key != ss.last_paint_canvas_key) {
+      ss.last_paint_canvas_key = paint_canvas_key;
+      BKE_pbvh_mark_rebuild_pixels(pbvh);
     }
 
     /* We could be more precise when we have access to the active tool. */
@@ -2501,6 +2710,9 @@ void BKE_sculpt_update_object_before_eval(Object *ob_eval)
     const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*pbvh, memory);
     pbvh->tag_positions_changed(node_mask);
     BKE_pbvh_mark_rebuild_pixels(*pbvh);
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+    bke::paint_material_channel_perf::stroke_eval_rebuild();
+#endif
   }
 }
 
@@ -2831,5 +3043,1115 @@ void BKE_paint_face_set_overlay_color_get(const int face_set, const int seed, uc
              &rgba[2]);
   rgba_float_to_uchar(r_color, rgba);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Material Painting (Poly Paint)
+ * \{ */
+
+/**
+ * The one place channel-specific knowledge lives. Rows are ordered by #eMaterialPaintChannel and
+ * indexed by it, which #BKE_paint_material_channel_info asserts.
+ *
+ * The fixed attribute names are deliberately prefixed: an unprefixed `"roughness"` is a common
+ * name for unrelated geometry-nodes attributes, and the draw engines switch shading based on the
+ * presence of these attributes.
+ */
+/* Fields in order: channel, ui_name, attribute_name, socket_name, value_min, value_max, is_color,
+ * supports_vertex_paint, supports_image_paint. */
+static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
+    {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+     "Base Color",
+     "Color",
+     "Base Color",
+     0.0f,
+     1.0f,
+     true,
+     true,
+     true},
+    {PAINT_MATERIAL_CHANNEL_METALLIC,
+     "Metallic",
+     "material_metallic",
+     "Metallic",
+     0.0f,
+     1.0f,
+     false,
+     true,
+     true},
+    {PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+     "Roughness",
+     "material_roughness",
+     "Roughness",
+     0.0f,
+     1.0f,
+     false,
+     true,
+     true},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR,
+     "Specular",
+     "material_specular",
+     "Specular IOR Level",
+     0.0f,
+     1.0f,
+     false,
+     true,
+     true},
+    /* Normal is authored as a tangent-space map (Image Texture -> Normal Map); a per-vertex float
+     * cannot represent it, so the vertex canvas skips it. */
+    {PAINT_MATERIAL_CHANNEL_NORMAL,
+     "Normal",
+     "material_paint_normal",
+     "Normal",
+     -1.0f,
+     1.0f,
+     false,
+     false,
+     true},
+    /* Custom targets a user-named attribute. Image paint has no way to resolve a map for it yet -
+     * it would need a user-assigned image rather than a Principled input. */
+    {PAINT_MATERIAL_CHANNEL_CUSTOM,
+     "Custom",
+     nullptr,
+     nullptr,
+     0.0f,
+     1.0f,
+     false,
+     true,
+     false},
+    /* Height has no per-vertex display and no Principled input to resolve a map through; it needs
+     * a displacement/bump target before either canvas can take it. */
+    {PAINT_MATERIAL_CHANNEL_HEIGHT,
+     "Height",
+     "material_height",
+     nullptr,
+     -1.0f,
+     1.0f,
+     false,
+     false,
+     false},
+    {PAINT_MATERIAL_CHANNEL_ALPHA,
+     "Alpha",
+     "material_alpha",
+     "Alpha",
+     0.0f,
+     1.0f,
+     false,
+     true,
+     true},
+    /* AO has no Principled BSDF socket to resolve an image through (same as Custom). */
+    {PAINT_MATERIAL_CHANNEL_AO,
+     "AO",
+     "material_ao",
+     nullptr,
+     0.0f,
+     1.0f,
+     false,
+     true,
+     false},
+    /* Emission is a color channel; is_color routes it through the generic color-attribute path. */
+    {PAINT_MATERIAL_CHANNEL_EMISSION,
+     "Emission",
+     "material_emission",
+     "Emission Color",
+     0.0f,
+     1.0f,
+     true,
+     false,
+     true},
+};
+
+static_assert(ARRAY_SIZE(material_paint_channels) == PAINT_MATERIAL_CHANNEL_NUM,
+              "Every material paint channel needs a descriptor row");
+
+/* The per-channel DNA arrays spell their length as a plain literal, because makesdna only parses
+ * numeric array sizes. Catch the literal and the constant drifting apart here, rather than through
+ * a silently truncated channel. */
+static_assert(sizeof(BrushMaterialPaint::channels) / sizeof(BrushMaterialPaintChannel) ==
+                  PAINT_MATERIAL_CHANNEL_NUM,
+              "BrushMaterialPaint::channels must have one entry per channel");
+static_assert(sizeof(Material::paint_channel_cache) / sizeof(MaterialPaintChannelCache) ==
+                  PAINT_MATERIAL_CHANNEL_NUM,
+              "Material::paint_channel_cache must have one entry per channel");
+static_assert(sizeof(PaintModeSettings::channel_layer_bindings) /
+                      sizeof(MaterialPaintChannelLayerBinding) ==
+                  PAINT_MATERIAL_CHANNEL_NUM,
+              "PaintModeSettings::channel_layer_bindings must have one entry per channel");
+static_assert(sizeof(PaintModeSettings::channel_image_bindings) /
+                      sizeof(MaterialPaintChannelImageBinding) ==
+                  PAINT_MATERIAL_CHANNEL_NUM,
+              "PaintModeSettings::channel_image_bindings must have one entry per channel");
+
+Span<MaterialPaintChannelInfo> BKE_paint_material_channels()
+{
+  return Span(material_paint_channels, PAINT_MATERIAL_CHANNEL_NUM);
+}
+
+const MaterialPaintChannelInfo &BKE_paint_material_channel_info(
+    const eMaterialPaintChannel channel)
+{
+  BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+  const MaterialPaintChannelInfo &info = material_paint_channels[channel];
+  BLI_assert(info.channel == channel);
+  return info;
+}
+
+bool BKE_paint_material_channel_is_enabled(const BrushMaterialPaint &brush_paint,
+                                           const PaintModeSettings &mode_settings,
+                                           const int visible_material_channels,
+                                           const eMaterialPaintChannel channel)
+{
+  BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+  if (brush_paint.channels[channel].use == 0) {
+    return false;
+  }
+  /* The vertex canvas stores one float (or color) per vertex; map-only channels have no such
+   * representation. Gating here keeps every caller (stroke init, undo push, paint, draw) from
+   * preparing state for a channel that would never be written. */
+  if (mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT &&
+      !BKE_paint_material_channel_info(channel).supports_vertex_paint)
+  {
+    return false;
+  }
+  /* Custom is gated by the draw-time `show_custom` argument, not this bitmask. */
+  if (channel != PAINT_MATERIAL_CHANNEL_CUSTOM) {
+    if ((visible_material_channels & (1 << channel)) == 0) {
+      return false;
+    }
+  }
+  /* A channel without a fixed attribute name is only usable once the user has named one. */
+  return !BKE_paint_material_channel_attribute_name(mode_settings, channel).is_empty();
+}
+
+bool BKE_paint_material_channel_writes_to_target(const BrushMaterialPaint &brush_paint,
+                                                  const PaintModeSettings &mode_settings,
+                                                  const int visible_material_channels,
+                                                  const eMaterialPaintChannel channel)
+{
+  if (!BKE_paint_material_channel_is_enabled(
+          brush_paint, mode_settings, visible_material_channels, channel))
+  {
+    return false;
+  }
+  if (channel == PAINT_MATERIAL_CHANNEL_ALPHA) {
+    return brush_paint.use_alpha_map != 0;
+  }
+  /* A channel needs a backend on the canvas it is being painted on. Both flags are declared per
+   * channel (see #MaterialPaintChannelInfo), so widening what a canvas supports is a change to
+   * the descriptor table, not to this rule. */
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  if (mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
+    return info.supports_image_paint;
+  }
+  if (mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT) {
+    return info.supports_vertex_paint;
+  }
+  return info.supports_image_paint || info.supports_vertex_paint;
+}
+
+bool BKE_paint_material_channel_masks_stroke(const BrushMaterialPaint &brush_paint,
+                                              const PaintModeSettings &mode_settings,
+                                              const int visible_material_channels)
+{
+  if (!BKE_paint_material_channel_is_enabled(
+          brush_paint, mode_settings, visible_material_channels, PAINT_MATERIAL_CHANNEL_ALPHA))
+  {
+    return false;
+  }
+  return brush_paint.use_alpha_stroke_mask != 0;
+}
+
+float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
+                                        const eMaterialPaintChannel channel)
+{
+  if (channel == PAINT_MATERIAL_CHANNEL_CUSTOM) {
+    const float2 range(settings.channel_custom_range[0], settings.channel_custom_range[1]);
+    /* Guard against an inverted range configured through the API. */
+    return range.x <= range.y ? range : float2(range.y, range.x);
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  return float2(info.value_min, info.value_max);
+}
+
+MaterialPaintValueGradientMode BKE_paint_material_value_gradient_mode(const float value_min,
+                                                                      const float value_max)
+{
+  /* A range that straddles zero has a meaningful "neutral" value to call out (e.g. a
+   * height/displacement channel); a range on one side of zero (e.g. [0,1] factors) does not. */
+  if (value_min < 0.0f && value_max > 0.0f) {
+    return MaterialPaintValueGradientMode::Bipolar;
+  }
+  return MaterialPaintValueGradientMode::Unipolar;
+}
+
+void BKE_paint_material_value_gradient_color(const float value_min,
+                                             const float value_max,
+                                             const float t,
+                                             float r_rgb[3])
+{
+  if (BKE_paint_material_value_gradient_mode(value_min, value_max) ==
+      MaterialPaintValueGradientMode::Bipolar)
+  {
+    /* Zero sits wherever it falls in [value_min, value_max], not necessarily at the midpoint. */
+    const float t_zero = BKE_paint_material_t_from_value(value_min, value_max, 0.0f);
+    if (t <= t_zero) {
+      /* White → black. */
+      const float u = (t_zero > 0.0f) ? (t / t_zero) : 0.0f;
+      const float v = 1.0f - u;
+      r_rgb[0] = v;
+      r_rgb[1] = v;
+      r_rgb[2] = v;
+    }
+    else {
+      /* Black → white. */
+      const float u = (t_zero < 1.0f) ? ((t - t_zero) / (1.0f - t_zero)) : 0.0f;
+      r_rgb[0] = u;
+      r_rgb[1] = u;
+      r_rgb[2] = u;
+    }
+    return;
+  }
+  /* Unipolar (and defensive fallback): black → white. */
+  r_rgb[0] = t;
+  r_rgb[1] = t;
+  r_rgb[2] = t;
+}
+
+float BKE_paint_material_value_from_t(const float value_min, const float value_max, const float t)
+{
+  if (value_max == value_min) {
+    return value_min;
+  }
+  const float t_clamped = math::clamp(t, 0.0f, 1.0f);
+  return value_min + t_clamped * (value_max - value_min);
+}
+
+float BKE_paint_material_t_from_value(const float value_min,
+                                      const float value_max,
+                                      const float value)
+{
+  if (value_max == value_min) {
+    return 0.0f;
+  }
+  const float value_clamped = math::clamp(value, value_min, value_max);
+  return (value_clamped - value_min) / (value_max - value_min);
+}
+
+float BKE_paint_material_value_invert(const float value_min,
+                                      const float value_max,
+                                      const float value)
+{
+  return math::clamp(value_min + value_max - value, value_min, value_max);
+}
+
+float BKE_paint_material_channel_value(const BrushMaterialPaint &brush_paint,
+                                       const PaintModeSettings &mode_settings,
+                                       const eMaterialPaintChannel channel)
+{
+  BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+  if (BKE_paint_material_channel_info(channel).is_color) {
+    return 0.0f;
+  }
+  const float2 range = BKE_paint_material_channel_range(mode_settings, channel);
+  return math::clamp(brush_paint.channels[channel].value[0], range.x, range.y);
+}
+
+short BKE_paint_material_channel_blend_mode(const BrushMaterialPaint &brush_paint,
+                                            const eMaterialPaintChannel channel,
+                                            const bool invert)
+{
+  BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    /* Tangent normals must stay unit length, which only the dedicated mode guarantees. */
+    return IMB_BLEND_NORMAL_MIX;
+  }
+  if (invert) {
+    /* Erasing interpolates toward the channel default; any other mode would fight that. */
+    return IMB_BLEND_MIX;
+  }
+  if (!BKE_paint_material_channel_info(channel).is_color) {
+    /* Scalar channels are data, not color: the non-Mix modes have no meaning for them. */
+    return IMB_BLEND_MIX;
+  }
+  return brush_paint.channels[channel].blend;
+}
+
+float BKE_paint_material_channel_default_value(const eMaterialPaintChannel channel)
+{
+  BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+  switch (channel) {
+    case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
+      return 0.0f;
+    case PAINT_MATERIAL_CHANNEL_METALLIC:
+      return 0.0f;
+    case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
+      return 0.5f;
+    case PAINT_MATERIAL_CHANNEL_SPECULAR:
+      return 0.5f;
+    case PAINT_MATERIAL_CHANNEL_NORMAL:
+      /* Flat tangent Z; full default is (0, 0, 1). */
+      return 1.0f;
+    case PAINT_MATERIAL_CHANNEL_CUSTOM:
+      return 0.5f;
+    case PAINT_MATERIAL_CHANNEL_HEIGHT:
+      return 0.0f;
+    case PAINT_MATERIAL_CHANNEL_ALPHA:
+      /* Neutral = fully opaque / no masking. */
+      return 1.0f;
+    case PAINT_MATERIAL_CHANNEL_AO:
+      /* Neutral = fully lit / no occlusion. */
+      return 1.0f;
+    case PAINT_MATERIAL_CHANNEL_EMISSION:
+      return 0.0f;
+  }
+  BLI_assert_unreachable();
+  return 0.0f;
+}
+
+void BKE_pbr_normal_pack(const float n[3], const bool is_float, float r_packed[3])
+{
+  if (is_float) {
+    copy_v3_v3(r_packed, n);
+  }
+  else {
+    r_packed[0] = n[0] * 0.5f + 0.5f;
+    r_packed[1] = n[1] * 0.5f + 0.5f;
+    r_packed[2] = n[2] * 0.5f + 0.5f;
+  }
+}
+
+void BKE_pbr_normal_blend_mix(const float current_packed[3],
+                              const float target_n[3],
+                              const float t,
+                              const bool is_float,
+                              float r_packed[3])
+{
+  float current_n[3];
+  if (is_float) {
+    copy_v3_v3(current_n, current_packed);
+  }
+  else {
+    current_n[0] = current_packed[0] * 2.0f - 1.0f;
+    current_n[1] = current_packed[1] * 2.0f - 1.0f;
+    current_n[2] = current_packed[2] * 2.0f - 1.0f;
+  }
+  float blended[3];
+  interp_v3_v3v3(blended, current_n, target_n, t);
+  normalize_v3(blended);
+  BKE_pbr_normal_pack(blended, is_float, r_packed);
+}
+
+bool BKE_paint_material_normal_from_sample(const float rgb[3], float r_normal[3])
+{
+  const float3 unpacked = float3(rgb[0], rgb[1], rgb[2]) * 2.0f - 1.0f;
+  const float length = math::length(unpacked);
+  /* Chosen well above float noise but far below any meaningful normal length. */
+  if (length < 1e-6f) {
+    return false;
+  }
+  copy_v3_v3(r_normal, unpacked / length);
+  return true;
+}
+
+bool BKE_paint_material_channel_has_source(const BrushMaterialPaintChannel &channel)
+{
+  return channel.source_mtex.tex != nullptr;
+}
+
+void BKE_paint_material_channel_effective_mtex(const BrushMaterialPaint &brush_paint,
+                                               const BrushMaterialPaintChannel &channel,
+                                               MTex &r_mtex)
+{
+  /* Shallow copy: keeps the channel's own #Tex (and its user-facing image identity) while
+   * mapping below is overwritten with the shared one. */
+  r_mtex = dna::shallow_copy(channel.source_mtex);
+  const MTex &shared = brush_paint.shared_source_mapping;
+  r_mtex.brush_map_mode = shared.brush_map_mode;
+  copy_v3_v3(r_mtex.size, shared.size);
+  copy_v3_v3(r_mtex.ofs, shared.ofs);
+  r_mtex.rot = shared.rot;
+}
+
+bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
+                                         const PaintModeSettings &mode_settings,
+                                         const int visible_material_channels,
+                                         MTex &r_mtex)
+{
+  static const eMaterialPaintChannel priority[] = {
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      PAINT_MATERIAL_CHANNEL_ALPHA,
+      PAINT_MATERIAL_CHANNEL_METALLIC,
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_SPECULAR,
+      PAINT_MATERIAL_CHANNEL_CUSTOM,
+      PAINT_MATERIAL_CHANNEL_HEIGHT,
+      PAINT_MATERIAL_CHANNEL_AO,
+      PAINT_MATERIAL_CHANNEL_EMISSION,
+      PAINT_MATERIAL_CHANNEL_NORMAL,
+  };
+  for (const eMaterialPaintChannel channel : priority) {
+    if (!BKE_paint_material_channel_is_enabled(
+            brush_paint, mode_settings, visible_material_channels, channel))
+    {
+      continue;
+    }
+    const BrushMaterialPaintChannel &paint_channel = brush_paint.channels[channel];
+    if (BKE_paint_material_channel_has_source(paint_channel)) {
+      BKE_paint_material_channel_effective_mtex(brush_paint, paint_channel, r_mtex);
+      return true;
+    }
+  }
+  r_mtex = dna::shallow_copy(MTex());
+  return false;
+}
+
+std::optional<eMaterialPaintChannel> BKE_paint_material_channel_from_attribute_name(
+    const StringRef attribute_name)
+{
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.attribute_name != nullptr && attribute_name == info.attribute_name) {
+      return info.channel;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<eMaterialPaintChannel> BKE_paint_material_channel_from_attribute_name(
+    const PaintModeSettings &settings, const StringRef attribute_name)
+{
+  if (attribute_name.is_empty()) {
+    return std::nullopt;
+  }
+  /* A redirect wins over the fixed table in both directions: the bound name now feeds the
+   * channel, and the channel's built-in name no longer does. Checking the bindings in a separate
+   * first pass matters when one channel is redirected onto another channel's built-in name - the
+   * explicit binding is the answer, whichever order the table happens to be in. */
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (attribute_name == StringRef(settings.channel_layer_bindings[info.channel].attribute_name))
+    {
+      return info.channel;
+    }
+  }
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (settings.channel_layer_bindings[info.channel].attribute_name[0] != '\0') {
+      /* Redirected away; this channel is no longer fed by its built-in name. */
+      continue;
+    }
+    if (info.attribute_name != nullptr && attribute_name == info.attribute_name) {
+      return info.channel;
+    }
+  }
+  return std::nullopt;
+}
+
+StringRef BKE_paint_material_channel_attribute_name(const PaintModeSettings &settings,
+                                                    const eMaterialPaintChannel channel)
+{
+  BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+  /* A fixed channel's slot is an add-on-managed layer override on top of its built-in name;
+   * Custom has no built-in name, so its slot *is* the (user-configured) attribute name. Both
+   * cases resolve through the same array - no channel-specific branch needed. */
+  const StringRef bound_name = settings.channel_layer_bindings[channel].attribute_name;
+  if (!bound_name.is_empty()) {
+    return bound_name;
+  }
+
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  return info.attribute_name ? StringRef(info.attribute_name) : StringRef();
+}
+
+float3 BKE_paint_material_base_color_get(const BrushMaterialPaint &brush_paint,
+                                         const Paint &paint,
+                                         const Brush &brush,
+                                         bool invert)
+{
+  if (invert) {
+    return BKE_brush_secondary_color_get(&paint, &brush);
+  }
+  /* When Sync with Brush is on, #base_color is kept equal to the brush color by the RNA
+   * update callbacks, so it stays the single source of truth here. */
+  return float3(brush_paint.base_color);
+}
+
+float3 BKE_paint_material_channel_color_get(const BrushMaterialPaint &brush_paint,
+                                            const Paint &paint,
+                                            const Brush &brush,
+                                            const eMaterialPaintChannel channel,
+                                            const bool invert)
+{
+  BLI_assert(BKE_paint_material_channel_info(channel).is_color);
+  if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    return BKE_paint_material_base_color_get(brush_paint, paint, brush, invert);
+  }
+  if (invert) {
+    const float value = BKE_paint_material_channel_default_value(channel);
+    return float3(value);
+  }
+  return float3(brush_paint.channels[channel].value);
+}
+
+/**
+ * Finds Principled BSDF connected to Material Output Surface, else the first
+ * Principled in the tree. Returns nullptr when none exist.
+ */
+static bNode *paint_find_principled_bsdf(bNodeTree &ntree)
+{
+  bNode *first_principled = nullptr;
+  for (bNode &node : ntree.nodes) {
+    if (node.type_legacy != SH_NODE_BSDF_PRINCIPLED) {
+      continue;
+    }
+    if (first_principled == nullptr) {
+      first_principled = &node;
+    }
+  }
+
+  for (bNode &node : ntree.nodes) {
+    if (node.type_legacy != SH_NODE_OUTPUT_MATERIAL) {
+      continue;
+    }
+    const bNodeSocket *surface = bke::node_find_socket(node, SOCK_IN, "Surface"_ustr);
+    if (surface == nullptr) {
+      continue;
+    }
+    for (bNodeLink &link : ntree.links) {
+      if (link.tosock != surface) {
+        continue;
+      }
+      if (link.fromnode != nullptr && link.fromnode->type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+        return link.fromnode;
+      }
+    }
+  }
+
+  return first_principled;
+}
+
+static bool paint_material_channel_image_resolve_uncached(Material *ma,
+                                                          eMaterialPaintChannel channel,
+                                                          Image **r_image,
+                                                          ImageUser **r_iuser)
+{
+  *r_image = nullptr;
+  *r_iuser = nullptr;
+
+  const char *socket_name = BKE_paint_material_channel_info(channel).socket_name;
+  if (socket_name == nullptr) {
+    return false;
+  }
+
+  if (ma == nullptr || ma->nodetree == nullptr) {
+    return false;
+  }
+
+  bNodeTree &ntree = *ma->nodetree;
+  bNode *principled = paint_find_principled_bsdf(ntree);
+  if (principled == nullptr) {
+    return false;
+  }
+
+  bNodeSocket *socket = bke::node_find_socket(*principled, SOCK_IN, UString(socket_name));
+  if (socket == nullptr) {
+    return false;
+  }
+
+  for (bNodeLink &link : ntree.links) {
+    if (link.tosock != socket) {
+      continue;
+    }
+    bNode *from_node = link.fromnode;
+    if (from_node == nullptr) {
+      return false;
+    }
+
+    /* Normal maps are typically Image Texture → Normal Map → Principled.Normal. */
+    if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && from_node->type_legacy == SH_NODE_NORMAL_MAP) {
+      bNodeSocket *color_in = bke::node_find_socket(*from_node, SOCK_IN, "Color"_ustr);
+      if (color_in == nullptr) {
+        return false;
+      }
+      for (bNodeLink &color_link : ntree.links) {
+        if (color_link.tosock != color_in) {
+          continue;
+        }
+        bNode *tex_node = color_link.fromnode;
+        if (tex_node == nullptr || tex_node->type_legacy != SH_NODE_TEX_IMAGE) {
+          return false;
+        }
+        if (tex_node->id == nullptr || GS(tex_node->id->name) != ID_IM) {
+          return false;
+        }
+        NodeTexImage *storage = static_cast<NodeTexImage *>(tex_node->storage);
+        if (storage == nullptr) {
+          return false;
+        }
+        *r_image = id_cast<Image *>(tex_node->id);
+        *r_iuser = &storage->iuser;
+        return true;
+      }
+      return false;
+    }
+
+    if (from_node->type_legacy != SH_NODE_TEX_IMAGE) {
+      return false;
+    }
+    if (from_node->id == nullptr || GS(from_node->id->name) != ID_IM) {
+      return false;
+    }
+    NodeTexImage *storage = static_cast<NodeTexImage *>(from_node->storage);
+    if (storage == nullptr) {
+      return false;
+    }
+    *r_image = id_cast<Image *>(from_node->id);
+    *r_iuser = &storage->iuser;
+    return true;
+  }
+
+  return false;
+}
+
+void BKE_paint_material_channel_cache_invalidate(Material *ma)
+{
+  if (ma == nullptr) {
+    return;
+  }
+  for (MaterialPaintChannelCache &entry : ma->paint_channel_cache) {
+    entry = dna::shallow_zero_initialize();
+  }
+}
+
+bool BKE_paint_principled_channel_image_get(Object &ob,
+                                            eMaterialPaintChannel channel,
+                                            Image **r_image,
+                                            ImageUser **r_iuser,
+                                            PaintModeSettings *mode_settings)
+{
+  *r_image = nullptr;
+  *r_iuser = nullptr;
+
+  if (mode_settings != nullptr) {
+    BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+    MaterialPaintChannelImageBinding &binding = mode_settings->channel_image_bindings[channel];
+    if (binding.image != nullptr) {
+      /* An add-on-managed layer image takes over this channel's paint target, bypassing the
+       * Principled BSDF socket resolution entirely - the add-on is responsible for any shader
+       * wiring needed to display it, same contract as #channel_layer_bindings for attributes. */
+      *r_image = binding.image;
+      *r_iuser = &binding.iuser;
+      return true;
+    }
+  }
+
+  const char *socket_name = BKE_paint_material_channel_info(channel).socket_name;
+  if (socket_name == nullptr) {
+    return false;
+  }
+
+  Material *ma = BKE_object_material_get(&ob, ob.actcol);
+  if (ma == nullptr) {
+    return false;
+  }
+
+  BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+  MaterialPaintChannelCache &cache = ma->paint_channel_cache[channel];
+  if (!cache.resolved) {
+    cache.valid = paint_material_channel_image_resolve_uncached(
+        ma, channel, &cache.image, &cache.iuser);
+    cache.resolved = 1;
+  }
+  if (!cache.valid) {
+    return false;
+  }
+  *r_image = cache.image;
+  *r_iuser = cache.iuser;
+  return true;
+}
+
+Image *BKE_paint_material_preferred_display_image(Object &ob)
+{
+  /* Base Color first, then the other created maps, Normal and Alpha last so a missing color map
+   * does not land the Image Editor on a tangent or mask image. */
+  static const eMaterialPaintChannel priority[] = {
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      PAINT_MATERIAL_CHANNEL_METALLIC,
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_SPECULAR,
+      PAINT_MATERIAL_CHANNEL_EMISSION,
+      PAINT_MATERIAL_CHANNEL_NORMAL,
+      PAINT_MATERIAL_CHANNEL_ALPHA,
+  };
+  for (const eMaterialPaintChannel channel : priority) {
+    Image *image = nullptr;
+    ImageUser *iuser = nullptr;
+    if (BKE_paint_principled_channel_image_get(ob, channel, &image, &iuser)) {
+      return image;
+    }
+  }
+  return nullptr;
+}
+
+bool BKE_paint_principled_channel_image_ensure(Main &bmain,
+                                               Object &ob,
+                                               eMaterialPaintChannel channel,
+                                               int image_size,
+                                               Image **r_image,
+                                               ImageUser **r_iuser,
+                                               PaintModeSettings *mode_settings)
+{
+  if (BKE_paint_principled_channel_image_get(ob, channel, r_image, r_iuser, mode_settings)) {
+    return true;
+  }
+
+  const char *socket_name = BKE_paint_material_channel_info(channel).socket_name;
+  if (socket_name == nullptr) {
+    return false;
+  }
+
+  Material *ma = BKE_object_material_get(&ob, ob.actcol);
+  if (ma == nullptr || ma->nodetree == nullptr) {
+    return false;
+  }
+
+  bNodeTree &ntree = *ma->nodetree;
+  bNode *principled = paint_find_principled_bsdf(ntree);
+  if (principled == nullptr) {
+    return false;
+  }
+
+  bNodeSocket *socket = bke::node_find_socket(*principled, SOCK_IN, UString(socket_name));
+  if (socket == nullptr) {
+    return false;
+  }
+
+  /* Only wire up an unconnected socket. A link that isn't a resolvable Image Texture
+   * (invalid image, indirect link, etc.) reflects deliberate user node setup and must not
+   * be replaced. */
+  for (bNodeLink &link : ntree.links) {
+    if (link.tosock == socket) {
+      return false;
+    }
+  }
+
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+
+  char image_name[MAX_ID_NAME - 2];
+  SNPRINTF(image_name, "%s %s", ma->id.name + 2, socket_name);
+  /* Flat tangent packed for Normal maps; black otherwise. */
+  float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    color[0] = 0.5f;
+    color[1] = 0.5f;
+    color[2] = 1.0f;
+  }
+  /* Scalar / Normal channels feed non-color Principled inputs; reading them through sRGB would
+   * silently skew every painted value. Only the Base Color map stays in the default (sRGB) color
+   * space. */
+  Image *image = BKE_image_add_generated(&bmain,
+                                         image_size,
+                                         image_size,
+                                         image_name,
+                                         24,
+                                         false,
+                                         IMA_GENTYPE_BLANK,
+                                         color,
+                                         false,
+                                         !info.is_color,
+                                         false);
+  if (image == nullptr) {
+    return false;
+  }
+
+  bNode *tex_node = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
+  bNodeSocket *tex_out = bke::node_find_socket(*tex_node, SOCK_OUT, UString("Color"));
+  if (tex_out == nullptr) {
+    bke::node_remove_node(&bmain, ntree, *tex_node, false);
+    BKE_id_free(&bmain, image);
+    return false;
+  }
+  /* Assign the Image only after the Color socket is known to exist, so a failed setup cannot
+   * leave a node pointing at an ID that is about to be freed. */
+  tex_node->id = &image->id;
+  bke::node_position_relative(*tex_node, *principled, nullptr, *socket);
+
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    bNode *nor_node = bke::node_add_static_node(nullptr, ntree, SH_NODE_NORMAL_MAP);
+    bNodeSocket *nor_color_in = bke::node_find_socket(*nor_node, SOCK_IN, "Color"_ustr);
+    bNodeSocket *nor_out = bke::node_find_socket(*nor_node, SOCK_OUT, "Normal"_ustr);
+    if (nor_color_in == nullptr || nor_out == nullptr) {
+      bke::node_remove_node(&bmain, ntree, *nor_node, false);
+      tex_node->id = nullptr;
+      bke::node_remove_node(&bmain, ntree, *tex_node, false);
+      BKE_id_free(&bmain, image);
+      return false;
+    }
+    bke::node_add_link(ntree, *tex_node, *tex_out, *nor_node, *nor_color_in);
+    bke::node_add_link(ntree, *nor_node, *nor_out, *principled, *socket);
+    bke::node_position_relative(*nor_node, *principled, nor_out, *socket);
+    bke::node_position_relative(*tex_node, *nor_node, tex_out, *nor_color_in);
+  }
+  else {
+    bke::node_add_link(ntree, *tex_node, *tex_out, *principled, *socket);
+  }
+
+  BKE_main_ensure_invariants(bmain, ntree.id);
+  DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
+  DEG_relations_tag_update(&bmain);
+
+  BKE_paint_material_channel_cache_invalidate(ma);
+
+  NodeTexImage *storage = static_cast<NodeTexImage *>(tex_node->storage);
+  *r_image = image;
+  *r_iuser = &storage->iuser;
+  return true;
+}
+
+int BKE_paint_material_images_ensure_writable(Main &bmain,
+                                               Object &ob,
+                                               const BrushMaterialPaint &brush_paint,
+                                               PaintModeSettings &mode_settings,
+                                               const int visible_material_channels)
+{
+  BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
+
+  int created = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint) {
+      continue;
+    }
+    if (!BKE_paint_material_channel_writes_to_target(
+            brush_paint, mode_settings, visible_material_channels, info.channel))
+    {
+      continue;
+    }
+    Image *existing = nullptr;
+    ImageUser *existing_iuser = nullptr;
+    const bool already_had = BKE_paint_principled_channel_image_get(
+        ob, info.channel, &existing, &existing_iuser, &mode_settings);
+
+    Image *image = nullptr;
+    ImageUser *iuser = nullptr;
+    if (!BKE_paint_principled_channel_image_ensure(bmain,
+                                                   ob,
+                                                   info.channel,
+                                                   mode_settings.new_channel_image_size,
+                                                   &image,
+                                                   &iuser,
+                                                   &mode_settings))
+    {
+      continue;
+    }
+    if (!already_had) {
+      created++;
+    }
+  }
+  return created;
+}
+
+void BKE_paint_material_enable_added_visible_channels(Paint &paint, const int added_channel_bits)
+{
+  if (added_channel_bits == 0) {
+    return;
+  }
+
+  Brush *brush = BKE_paint_brush(&paint);
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    return;
+  }
+  bool changed = false;
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    if ((added_channel_bits & (1 << channel)) == 0) {
+      continue;
+    }
+    BrushMaterialPaintChannel &entry = brush->material_paint->channels[channel];
+    if (entry.use == 0) {
+      entry.use = 1;
+      changed = true;
+    }
+  }
+  if (changed) {
+    BKE_brush_tag_unsaved_changes(brush);
+  }
+}
+
+bool BKE_paint_material_face_matches_active_slot(const Object &ob, const int face_material_index)
+{
+  if (ob.totcol <= 1) {
+    return true;
+  }
+  return face_material_index == math::max(ob.actcol - 1, 0);
+}
+
+Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
+    Object &ob,
+    PaintModeSettings &mode_settings,
+    const BrushMaterialPaint *brush_paint,
+    const int visible_material_channels)
+{
+  Vector<PaintMaterialImageTarget> targets;
+  if (brush_paint == nullptr) {
+    return targets;
+  }
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint) {
+      /* No image backend for this channel yet, so there is no map to paint into. */
+      continue;
+    }
+    if (!BKE_paint_material_channel_writes_to_target(
+            *brush_paint, mode_settings, visible_material_channels, info.channel))
+    {
+      continue;
+    }
+
+    Image *image = nullptr;
+    ImageUser *iuser = nullptr;
+    if (!BKE_paint_principled_channel_image_get(ob, info.channel, &image, &iuser, &mode_settings))
+    {
+      continue;
+    }
+
+    PaintMaterialImageTarget target;
+    target.channel = info.channel;
+    target.image = image;
+    target.iuser = iuser;
+    target.is_color_channel = info.is_color;
+    target.is_normal_channel = (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL);
+    if (info.is_color) {
+      if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+        copy_v3_v3(target.color, brush_paint->base_color);
+      }
+      else {
+        copy_v3_v3(target.color, brush_paint->channels[info.channel].value);
+      }
+      target.value = 0.0f;
+    }
+    else if (target.is_normal_channel) {
+      const float2 range = BKE_paint_material_channel_range(mode_settings, info.channel);
+      target.color[0] = math::clamp(
+          brush_paint->channels[info.channel].value[0], range.x, range.y);
+      target.color[1] = math::clamp(
+          brush_paint->channels[info.channel].value[1], range.x, range.y);
+      target.color[2] = math::clamp(
+          brush_paint->channels[info.channel].value[2], range.x, range.y);
+      normalize_v3(target.color);
+      target.value = 0.0f;
+    }
+    else {
+      target.value = BKE_paint_material_channel_value(*brush_paint, mode_settings, info.channel);
+    }
+    targets.append(target);
+  }
+  return targets;
+}
+
+MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh,
+                                                                      const StringRef attr_name,
+                                                                      bool *r_created)
+{
+  if (r_created) {
+    *r_created = false;
+  }
+  if (attr_name.is_empty()) {
+    return MaterialPaintAttributeStatus::InvalidName;
+  }
+
+  bke::MutableAttributeAccessor attrs = mesh.attributes_for_write();
+
+  if (attrs.contains(attr_name)) {
+    const std::optional<bke::AttributeMetaData> meta_data = attrs.lookup_meta_data(attr_name);
+    if (meta_data && meta_data->data_type == bke::AttrType::Float &&
+        meta_data->domain == bke::AttrDomain::Point)
+    {
+      return MaterialPaintAttributeStatus::Ok;
+    }
+    return MaterialPaintAttributeStatus::TypeMismatch;
+  }
+
+  if (!attrs.add<float>(attr_name, bke::AttrDomain::Point, bke::AttributeInitDefaultValue())) {
+    return MaterialPaintAttributeStatus::CreationFailed;
+  }
+
+  if (r_created) {
+    *r_created = true;
+  }
+  return MaterialPaintAttributeStatus::Ok;
+}
+
+MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure(
+    Mesh &mesh, const eMaterialPaintChannel channel, bool *r_created)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  BLI_assert(info.is_color);
+  /* Each color channel owns its attribute; using Base Color's name for every one of them would
+   * silently make separate channels share (and overwrite) the same storage. */
+  const StringRef attr_name = info.attribute_name;
+
+  bool created = false;
+  const MaterialPaintAttributeStatus status = BKE_paint_mesh_material_color_attribute_ensure_named(
+      mesh, attr_name, &created);
+
+  if (created && channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    /* Only Base Color is the mesh's color: making a secondary color channel the active/default
+     * color attribute would redirect vertex color display and rendering to it. */
+    BKE_id_attributes_active_color_set(&mesh.id, attr_name);
+    BKE_id_attributes_default_color_set(&mesh.id, attr_name);
+  }
+
+  if (r_created) {
+    *r_created = created;
+  }
+  return status;
+}
+
+MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure_named(
+    Mesh &mesh, const StringRef attribute_name, bool *r_created)
+{
+  if (r_created) {
+    *r_created = false;
+  }
+  if (attribute_name.is_empty()) {
+    return MaterialPaintAttributeStatus::InvalidName;
+  }
+
+  bke::MutableAttributeAccessor attrs = mesh.attributes_for_write();
+
+  if (attrs.contains(attribute_name)) {
+    const std::optional<bke::AttributeMetaData> meta_data = attrs.lookup_meta_data(attribute_name);
+    /* Color attributes are commonly authored on the Corner domain (e.g. the default vertex paint
+     * workflow); painting itself supports either domain via #color::color_vert_get/set, so this
+     * must accept both instead of rejecting an existing Corner-domain "Color" attribute. */
+    if (bke::mesh::is_color_attribute(meta_data)) {
+      return MaterialPaintAttributeStatus::Ok;
+    }
+    return MaterialPaintAttributeStatus::TypeMismatch;
+  }
+
+  if (!attrs.add(attribute_name,
+                 bke::AttrDomain::Point,
+                 bke::AttrType::ColorFloat,
+                 bke::AttributeInitDefaultValue()))
+  {
+    return MaterialPaintAttributeStatus::CreationFailed;
+  }
+
+  if (r_created) {
+    *r_created = true;
+  }
+  return MaterialPaintAttributeStatus::Ok;
+}
+
+const char *BKE_paint_material_attribute_status_message(const MaterialPaintAttributeStatus status)
+{
+  switch (status) {
+    case MaterialPaintAttributeStatus::Ok:
+      return "";
+    case MaterialPaintAttributeStatus::TypeMismatch:
+      return N_("An attribute of that name already exists with an incompatible type or domain");
+    case MaterialPaintAttributeStatus::InvalidName:
+      return N_("Material paint channel has no attribute name set");
+    case MaterialPaintAttributeStatus::CreationFailed:
+      return N_("Could not create the material paint attribute");
+  }
+  return "";
+}
+
+/** \} */
 
 }  // namespace blender

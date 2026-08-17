@@ -103,8 +103,18 @@ struct VertOut {
   [[smooth]] float2 uv;
   [[smooth]] float alpha;
   [[flat]] int object_id;
-  [[flat]] float roughness;
-  [[flat]] float metallic;
+  /* Poly Paint: roughness/metallic/specular can now vary per vertex (painted attributes), unlike
+   * the material-uniform values every non-mesh vertex shader below still writes here, so these
+   * must be smooth-interpolated rather than flat. #flat took the provoking vertex's value for the
+   * whole triangle, which is a no-op for a uniform value but turns a painted gradient into
+   * visible per-triangle steps following the mesh's triangulation. Interpolating identical
+   * per-vertex values (the non-mesh paths) is a no-op, so this is safe for every producer. */
+  [[smooth]] float roughness;
+  [[smooth]] float metallic;
+  /** Poly Paint: dielectric F0, see #get_world_lighting. Every vertex shader below writes
+   * #WORKBENCH_DEFAULT_SPECULAR (the value that reproduces Workbench's historical fixed 0.05f
+   * reflectance exactly); only #vert_mesh may override it per-vertex. */
+  [[smooth]] float specular;
 };
 
 struct MeshIn {
@@ -112,6 +122,9 @@ struct MeshIn {
   [[attribute(1)]] float3 nor;
   [[attribute(2)]] float4 ac;
   [[attribute(3)]] float2 au;
+  [[attribute(4)]] float a_metallic;
+  [[attribute(5)]] float a_roughness;
+  [[attribute(6)]] float a_specular;
 };
 
 struct Mesh {
@@ -120,6 +133,14 @@ struct Mesh {
   /** WORKAROUND: This exact compilation constant is checked in Metal backend to enable clip
    * distances. */
   [[compilation_constant]] const bool use_clipping;
+
+  /**
+   * Poly Paint: bitmask over #eMaterialPaintChannel of the channels this draw reads per-vertex
+   * instead of from the material (see #material_props_usage_get). One push constant rather than
+   * one bool per channel: this is set for every mesh draw in the scene, painted or not, so the
+   * command count must not grow with the number of channels.
+   */
+  [[push_constant]] const int vertex_material_props;
 };
 
 [[vertex]] void vert_mesh([[resource_table]] Mesh &mesh,
@@ -153,6 +174,17 @@ struct Mesh {
 
   materials.material_data_get(
       custom_id, v_in.ac.rgb, v_out.color, v_out.alpha, v_out.roughness, v_out.metallic);
+  v_out.specular = WORKBENCH_DEFAULT_SPECULAR;
+
+  if ((mesh.vertex_material_props & WB_VERTEX_PROP_METALLIC) != 0) {
+    v_out.metallic = v_in.a_metallic;
+  }
+  if ((mesh.vertex_material_props & WB_VERTEX_PROP_ROUGHNESS) != 0) {
+    v_out.roughness = v_in.a_roughness;
+  }
+  if ((mesh.vertex_material_props & WB_VERTEX_PROP_SPECULAR) != 0) {
+    v_out.specular = v_in.a_specular;
+  }
 }
 
 struct Curves {
@@ -220,6 +252,7 @@ struct Curves {
   float3 vert_col = curves::get_customdata_vec3(ws_pt.curve_id, curves.ac);
   materials.material_data_get(
       custom_id, vert_col, v_out.color, v_out.alpha, v_out.roughness, v_out.metallic);
+  v_out.specular = WORKBENCH_DEFAULT_SPECULAR;
 
   /* Hairs have lots of layer and can rapidly become the most prominent surface.
    * So we lower their alpha artificially. */
@@ -280,6 +313,7 @@ struct PointCloud {
 
   materials.material_data_get(
       custom_id, float3(1.0f), v_out.color, v_out.alpha, v_out.roughness, v_out.metallic);
+  v_out.specular = WORKBENCH_DEFAULT_SPECULAR;
 
   v_out.object_id = int(id.resource_id<1>() & 0xFFFFu) + 1;
 }
@@ -301,6 +335,17 @@ struct OpaqueOut {
   [[frag_color(0)]] float4 material;
   [[frag_color(1)]] float2 normal;
   [[frag_color(2)]] uint object_id;
+  /* Poly Paint: full-precision Roughness/Metallic/Specular. `material.a` still carries the packed
+   * Roughness/Metallic pair unchanged (see #float_pair_encode); this output is what makes painted
+   * gradients smooth instead of banding at #TARGET_BITCOUNT's discrete levels, and is the only
+   * place per-vertex Specular exists at all.
+   *
+   * Written unconditionally by every object, painted or not - the cost is a few cheap ALU ops,
+   * not a shader permutation - but the framebuffer attachment behind this output only exists in
+   * frames that have at least one object needing it (see #SceneResources::material_ext_needed),
+   * the same way `object_id` above is always written yet its attachment is only bound when
+   * #SceneResources::object_id_tx is valid. An unbound attachment discards the write. */
+  [[frag_color(3)]] float4 material_ext;
 };
 
 [[fragment]] void frag_opaque([[resource_table]] Resources &srt,
@@ -311,7 +356,9 @@ struct OpaqueOut {
   frag_out.object_id = uint(v_out.object_id);
   frag_out.normal = normal_encode(facing, v_out.normal);
 
-  frag_out.material = float4(v_out.color, float_pair_encode(v_out.roughness, v_out.metallic));
+  frag_out.material = float4(v_out.color,
+                             float_pair_encode(v_out.roughness, v_out.metallic));
+  frag_out.material_ext = float4(v_out.roughness, v_out.metallic, v_out.specular, 0.0f);
 
   if (srt.use_texture) [[static_branch]] {
     frag_out.material.rgb = color::image_color(srt.texture, v_out.uv);
@@ -354,7 +401,8 @@ struct TransparentOut {
     shaded_color = get_matcap_lighting(world, srt.matcap_tx, color, N, I);
   }
   else if (srt.lighting_mode == WORKBENCH_LIGHTING_STUDIO) [[static_branch]] {
-    shaded_color = get_world_lighting(world, color, v_out.roughness, v_out.metallic, N, I);
+    shaded_color = get_world_lighting(
+        world, color, v_out.roughness, v_out.metallic, v_out.specular, N, I);
   }
   else if (srt.lighting_mode == WORKBENCH_LIGHTING_FLAT) [[static_branch]] {
     shaded_color = color;

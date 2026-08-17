@@ -996,7 +996,10 @@ GHOST_TCapabilityFlag GHOST_SystemCocoa::getCapabilities() const
            * it's possible another modifier could be optionally used in it's place. */
           GHOST_kCapabilityKeyboardHyperKey |
           /* No support yet for dynamic cursor generation. */
-          GHOST_kCapabilityCursorGenerator));
+          GHOST_kCapabilityCursorGenerator |
+          /* Desktop sampling is implemented with #NSColorSampler, which presents a system
+           * provided picker and only returns once the user confirms a selection. */
+          GHOST_kCapabilityDesktopSampleContinuous));
 }
 
 /* --------------------------------------------------------------------

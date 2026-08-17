@@ -94,6 +94,8 @@
 #include "paint_image_select_gesture.hh"
 #include "paint_image_select_gradient.hh"
 #include "paint_image_select_intern.hh"
+/* #image_select_move_delegate_to_move_operator only. */
+#include "paint_image_select_move_intern.hh"
 /* #ED_image_paint_select_transform_state_free only. */
 #include "paint_image_select_transform_intern.hh"
 #include "paint_image_uv_geom.hh"
@@ -1070,6 +1072,48 @@ static void fill_polygon_float(ImBuf *ibuf, const Span<int2> points, const float
   BLI_bitmap_draw_2d_poly_v2i_n(0, 0, ibuf->x, ibuf->y, points, mask_poly_fill_cb, &fill);
 }
 
+/**
+ * Convert the operator's `path` (region pixels, same RNA as lasso and polyline)
+ * into UV-space points and the axis-aligned UV bounds of that polygon.
+ * \return false when there are fewer than three points (degenerate gesture).
+ */
+static bool image_select_path_to_uv_points(bContext *C,
+                                           const ARegion *region,
+                                           wmOperator *op,
+                                           Vector<float2> &r_uv_points,
+                                           rctf &r_uv_bounds)
+{
+  const Array<int2> mcoords = WM_gesture_lasso_path_to_array(C, op);
+  if (mcoords.size() < 3) {
+    return false;
+  }
+
+  r_uv_points.clear();
+  r_uv_points.reserve(mcoords.size());
+  BLI_rctf_init_minmax(&r_uv_bounds);
+  for (const int2 &p : mcoords) {
+    float co[2] = {float(p.x), float(p.y)};
+    ui::view2d_region_to_view(&region->v2d, co[0], co[1], &co[0], &co[1]);
+    r_uv_points.append(float2(co[0], co[1]));
+    BLI_rctf_do_minmax_v(&r_uv_bounds, co);
+  }
+  return true;
+}
+
+static void image_select_uv_polygon_rasterize_tile(const float2 &uv_origin,
+                                                   const Span<float2> uv_points,
+                                                   ImBuf *mask,
+                                                   const float fill_value)
+{
+  Vector<int2> tile_points;
+  tile_points.reserve(uv_points.size());
+  for (const float2 &uv : uv_points) {
+    tile_points.append(int2(int(roundf((uv.x - uv_origin.x) * mask->x)),
+                            int(roundf((uv.y - uv_origin.y) * mask->y))));
+  }
+  fill_polygon_float(mask, tile_points, fill_value);
+}
+
 /** Freehand gesture; caches its UV-space outline for per-tile rasterization. */
 class ImageSelectLassoShape : public ImageSelectGestureShape {
   bContext *C_;
@@ -1085,21 +1129,7 @@ class ImageSelectLassoShape : public ImageSelectGestureShape {
 
   bool uv_bounds_calc(const ARegion *region, wmOperator *op, rctf &r_uv_bounds) override
   {
-    const Array<int2> mcoords = WM_gesture_lasso_path_to_array(C_, op);
-    if (mcoords.size() < 3) {
-      return false;
-    }
-
-    /* Convert lasso points to UV space once. */
-    uv_points_.reserve(mcoords.size());
-    BLI_rctf_init_minmax(&r_uv_bounds);
-    for (const int2 &p : mcoords) {
-      float co[2] = {float(p.x), float(p.y)};
-      ui::view2d_region_to_view(&region->v2d, co[0], co[1], &co[0], &co[1]);
-      uv_points_.append(float2(co[0], co[1]));
-      BLI_rctf_do_minmax_v(&r_uv_bounds, co);
-    }
-    return true;
+    return image_select_path_to_uv_points(C_, region, op, uv_points_, r_uv_bounds);
   }
 
   void rasterize_tile(const float2 &uv_origin,
@@ -1107,15 +1137,7 @@ class ImageSelectLassoShape : public ImageSelectGestureShape {
                       ImBuf *mask,
                       const float fill_value) const override
   {
-    /* Convert UV points to tile pixel space. */
-    Vector<int2> tile_points;
-    tile_points.reserve(uv_points_.size());
-    for (const float2 &uv : uv_points_) {
-      tile_points.append(int2(int(roundf((uv.x - uv_origin.x) * mask->x)),
-                              int(roundf((uv.y - uv_origin.y) * mask->y))));
-    }
-
-    fill_polygon_float(mask, tile_points, fill_value);
+    image_select_uv_polygon_rasterize_tile(uv_origin, uv_points_, mask, fill_value);
   }
 
   PaintSelectionEdgePolicy edge_policy() const override
@@ -1162,6 +1184,87 @@ void PAINT_OT_image_select_lasso(wmOperatorType *ot)
   ot->flag = IMAGE_SELECT_GESTURE_OPTYPE_FLAGS;
 
   WM_operator_properties_gesture_lasso(ot);
+  WM_operator_properties_select_operation_simple(ot);
+
+  image_select_gesture_properties(ot);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Select Polyline
+ * \{ */
+
+/**
+ * Click-placed polygon; same rasterization as lasso. The WM polyline gesture
+ * writes the same `path` collection, so #image_select_path_to_uv_points works
+ * unchanged. Unlike box/lasso/circle this operator does not participate in
+ * simple-click deselect: the first press starts placing vertices.
+ */
+class ImageSelectPolylineShape : public ImageSelectGestureShape {
+  bContext *C_;
+  Vector<float2> uv_points_;
+
+ public:
+  explicit ImageSelectPolylineShape(bContext *C) : C_(C) {}
+
+  const char *undo_name() const override
+  {
+    return "Polyline Select";
+  }
+
+  bool uv_bounds_calc(const ARegion *region, wmOperator *op, rctf &r_uv_bounds) override
+  {
+    return image_select_path_to_uv_points(C_, region, op, uv_points_, r_uv_bounds);
+  }
+
+  void rasterize_tile(const float2 &uv_origin,
+                      const rctf & /*tile_uv_rect*/,
+                      ImBuf *mask,
+                      const float fill_value) const override
+  {
+    image_select_uv_polygon_rasterize_tile(uv_origin, uv_points_, mask, fill_value);
+  }
+
+  PaintSelectionEdgePolicy edge_policy() const override
+  {
+    return BKE_image_paint_selection_edge_policy_feathered();
+  }
+};
+
+static wmOperatorStatus image_select_polyline_exec(bContext *C, wmOperator *op)
+{
+  ImageSelectPolylineShape shape(C);
+  return image_select_gesture_exec_generic(C, op, shape);
+}
+
+static wmOperatorStatus image_select_polyline_invoke(bContext *C,
+                                                     wmOperator *op,
+                                                     const wmEvent *event)
+{
+  if (image_select_move_delegate_to_move_operator(C, event)) {
+    return OPERATOR_FINISHED;
+  }
+  return WM_gesture_polyline_invoke(C, op, event);
+}
+
+void PAINT_OT_image_select_polyline(wmOperatorType *ot)
+{
+  ot->name = "Select Polyline";
+  ot->idname = "PAINT_OT_image_select_polyline";
+  ot->description = "Select a polygonal region as a paint mask";
+
+  ot->invoke = image_select_polyline_invoke;
+  ot->modal = WM_gesture_polyline_modal;
+  ot->exec = image_select_polyline_exec;
+  /* Without a cancel callback the wmGesture held in `op->customdata` leaks when
+   * the gesture is aborted; the four sculpt polyline operators install the same
+   * handler. */
+  ot->cancel = WM_gesture_polyline_cancel;
+  ot->poll = image_paint_selection_poll;
+  ot->flag = IMAGE_SELECT_GESTURE_OPTYPE_FLAGS;
+
+  WM_operator_properties_gesture_polyline(ot);
   WM_operator_properties_select_operation_simple(ot);
 
   image_select_gesture_properties(ot);

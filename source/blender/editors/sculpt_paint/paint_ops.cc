@@ -677,6 +677,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_select_none);
   WM_operatortype_append(PAINT_OT_image_select_box);
   WM_operatortype_append(PAINT_OT_image_select_lasso);
+  WM_operatortype_append(PAINT_OT_image_select_polyline);
   WM_operatortype_append(PAINT_OT_image_select_circle);
   WM_operatortype_append(PAINT_OT_image_select_invert);
   WM_operatortype_append(PAINT_OT_image_select_move);

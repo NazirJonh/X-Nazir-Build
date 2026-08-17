@@ -7508,6 +7508,22 @@ def km_image_editor_tool_paint_select_lasso(params, *, fallback):
     )
 
 
+def km_image_editor_tool_paint_select_polyline(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Select Polyline", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else
+              _template_items_image_paint_select_lasso_gesture(params)),
+            *([] if (fallback and not params.use_fallback_tool) else
+              _template_items_tool_select_actions_simple(
+                  "paint.image_select_polyline",
+                  type=params.tool_mouse,
+                  value='PRESS')),
+        ]},
+    )
+
+
 def km_image_editor_tool_paint_select_move(params, *, fallback):
     return (
         _fallback_id("Image Editor Tool: Paint, Move Selection", fallback),
@@ -9361,6 +9377,7 @@ def generate_keymaps(params=None):
         *(km_image_editor_tool_paint_select_box(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_circle(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_lasso(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_select_polyline(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_move(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_transform(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_warp(params, fallback=fallback) for fallback in (False, True)),

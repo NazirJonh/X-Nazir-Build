@@ -4471,6 +4471,7 @@ static void gesture_polyline_modal_keymap(wmKeyConfig *keyconf)
   WM_modalkeymap_assign(keymap, "PAINT_OT_mask_polyline_gesture");
   WM_modalkeymap_assign(keymap, "SCULPT_OT_face_set_polyline_gesture");
   WM_modalkeymap_assign(keymap, "SCULPT_OT_trim_polyline_gesture");
+  WM_modalkeymap_assign(keymap, "PAINT_OT_image_select_polyline");
 }
 
 /* Zoom to border modal operators. */

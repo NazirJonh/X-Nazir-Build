@@ -3888,6 +3888,7 @@ def keymap_transform_tool_mmb(keymap):
         r".*\bSelect Box$|"
         r".*\bSelect Circle$|"
         r".*\bSelect Lasso$|"
+        r".*\bSelect Polyline$|"
         r".*\bTweak$)",
     )
     for km_name, _km_args, km_content in keymap:

@@ -6,7 +6,7 @@
  * \ingroup edsculpt
  *
  * Shared pipeline for the gesture-driven Image Paint selection operators
- * (box / lasso / circle).
+ * (box / lasso / circle / polyline).
  *
  * Every gesture operator runs the exact same sequence: simple-click detection, committing a
  * floating move-selection fragment, opening an image undo step, seeding Face/Island expansion,
@@ -15,7 +15,7 @@
  *
  * Only two things differ per tool: how the gesture's UV bounds are derived, and how its pixels are
  * rasterized into one tile. #ImageSelectGestureShape captures exactly those two decisions (plus
- * the edge policy the tool wants), so that adding a new selection shape -- polyline, magic wand,
+ * the edge policy the tool wants), so that adding a new selection shape -- magic wand,
  * select-by-color -- costs roughly 40 lines of shape implementation instead of ~120 lines of
  * copy-pasted operator body.
  */
@@ -87,8 +87,8 @@ class ImageSelectGestureShape {
 /**
  * Run the complete shared gesture-selection sequence for \a shape.
  *
- * This is the single implementation behind `PAINT_OT_image_select_box`, `_lasso` and `_circle`;
- * their `exec` callbacks only build a shape and forward here.
+ * This is the single implementation behind `PAINT_OT_image_select_box`, `_lasso`,
+ * `_circle` and `_polyline`; their `exec` callbacks only build a shape and forward here.
  */
 wmOperatorStatus image_select_gesture_exec_generic(bContext *C,
                                                    wmOperator *op,

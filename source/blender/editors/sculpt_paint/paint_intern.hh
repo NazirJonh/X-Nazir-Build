@@ -540,6 +540,7 @@ void PAINT_OT_image_select_none(wmOperatorType *ot);
 void PAINT_OT_image_select_box(wmOperatorType *ot);
 void PAINT_OT_image_select_lasso(wmOperatorType *ot);
 void PAINT_OT_image_select_circle(wmOperatorType *ot);
+void PAINT_OT_image_select_polyline(wmOperatorType *ot);
 void PAINT_OT_image_select_invert(wmOperatorType *ot);
 void PAINT_OT_image_select_move(wmOperatorType *ot);
 void PAINT_OT_image_select_move_confirm(wmOperatorType *ot);

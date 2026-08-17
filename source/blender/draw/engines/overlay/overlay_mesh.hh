@@ -60,6 +60,7 @@ class Meshes : Overlay {
   PassSimple edit_mesh_edges_ps_ = {"Edges"};
   PassSimple edit_mesh_faces_ps_ = {"Faces"};
   PassSimple edit_mesh_cages_ps_ = {"Cages"}; /* Same as faces but with a different offset. */
+  PassSimple edit_mesh_face_sets_ps_ = {"Face Sets"};
   PassSimple edit_mesh_verts_ps_ = {"Verts"};
   PassSimple edit_mesh_facedots_ps_ = {"FaceDots"};
   PassSimple edit_mesh_skin_roots_ps_ = {"SkinRoots"};
@@ -71,6 +72,7 @@ class Meshes : Overlay {
   bool xray_flag_enabled_ = false;
 
   bool show_retopology_ = false;
+  bool show_face_sets_ = false;
   bool show_mesh_analysis_ = false;
   bool show_face_overlay_ = false;
   bool show_weight_ = false;
@@ -129,7 +131,11 @@ class Meshes : Overlay {
     select_face_dots_ = ((edit_flag & V3D_OVERLAY_EDIT_FACE_DOT) || state.xray_flag_enabled) &
                         select_face_;
 
-    show_retopology_ = (edit_flag & V3D_OVERLAY_EDIT_RETOPOLOGY) && !state.xray_enabled;
+    const bool is_edit_mode = (state.object_mode & OB_MODE_EDIT) != 0;
+    show_retopology_ = (edit_flag & V3D_OVERLAY_EDIT_RETOPOLOGY) && !state.xray_enabled &&
+                       is_edit_mode;
+    show_face_sets_ = (edit_flag & V3D_OVERLAY_EDIT_FACE_SETS) && !state.xray_enabled &&
+                      is_edit_mode;
     show_mesh_analysis_ = (edit_flag & V3D_OVERLAY_EDIT_STATVIS);
     show_face_overlay_ = (edit_flag & V3D_OVERLAY_EDIT_FACES);
     show_weight_ = (edit_flag & V3D_OVERLAY_EDIT_WEIGHT);
@@ -146,8 +152,13 @@ class Meshes : Overlay {
     float backwire_opacity = (state.xray_flag_enabled) ? 0.5f : 1.0f;
     float face_alpha = (show_face_overlay_) ? 1.0f : 0.0f;
     float retopology_offset = state.is_depth_only_drawing ? 0.0f : RETOPOLOGY_OFFSET(state.v3d);
+    float face_sets_opacity = state.overlay.face_sets_opacity;
+    if (show_retopology_ && show_face_sets_) {
+      face_sets_opacity *= 0.5f;
+    }
     /* Cull back-faces for retopology face pass. This makes it so back-faces are not drawn.
-     * Doing so lets us distinguish back-faces from front-faces. */
+     * Doing so lets us distinguish back-faces from front-faces. Face sets alone (without
+     * retopology) must not cull, otherwise back-facing triangles are left untinted. */
     DRWState face_culling = (show_retopology_) ? DRW_STATE_CULL_BACK : DRWState(0);
 
     gpu::Texture **depth_tex = (state.xray_flag_enabled) ? &res.depth_tx : &res.dummy_depth_tx;
@@ -283,6 +294,20 @@ class Meshes : Overlay {
       mesh_edit_common_resource_bind(pass, face_alpha, cage_ndc_offset_);
     }
     {
+      auto &pass = edit_mesh_face_sets_ps_;
+      pass.init();
+      const DRWState blend_mode = (show_retopology_ && show_face_sets_) ? DRW_STATE_BLEND_ALPHA :
+                                                                            DRW_STATE_BLEND_MUL;
+      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | blend_mode | face_culling,
+                     state.clipping_plane_count);
+      pass.shader_set(res.shaders->mesh_edit_face_sets.get());
+      pass.push_constant("retopology_offset", retopology_offset);
+      pass.push_constant("retopology_enabled", show_retopology_);
+      pass.push_constant("face_sets_opacity", face_sets_opacity);
+      pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+      pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+    }
+    {
       auto &pass = edit_mesh_verts_ps_;
       pass.init();
       pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | DRW_STATE_BLEND_ALPHA |
@@ -389,6 +414,10 @@ class Meshes : Overlay {
     {
       gpu::Batch *geom = DRW_mesh_batch_cache_get_edit_triangles(mesh);
       (has_edit_cage ? &edit_mesh_cages_ps_ : &edit_mesh_faces_ps_)->draw(geom, res_handle);
+      if (show_face_sets_) {
+        gpu::Batch *face_sets = DRW_mesh_batch_cache_get_edit_face_sets(mesh);
+        edit_mesh_face_sets_ps_.draw(face_sets, res_handle);
+      }
     }
     if (select_vert_) {
       gpu::Batch *geom = DRW_mesh_batch_cache_get_edit_vertices(mesh);
@@ -417,7 +446,9 @@ class Meshes : Overlay {
     GPU_debug_group_begin("Mesh Edit");
 
     GPU_framebuffer_bind(framebuffer);
-    manager.submit(edit_mesh_prepass_ps_, view);
+    if (show_retopology_ || show_face_sets_) {
+      manager.submit(edit_mesh_prepass_ps_, view);
+    }
     manager.submit(edit_mesh_analysis_ps_, view);
     manager.submit(edit_mesh_weight_ps_, view);
 
@@ -449,6 +480,20 @@ class Meshes : Overlay {
       return;
     }
     symmetry_contour_.end_sync();
+  }
+
+  void draw_on_render(gpu::FrameBuffer *framebuffer, Manager &manager, View &view) final
+  {
+    if (!enabled_ || !show_face_sets_) {
+      return;
+    }
+
+    GPU_framebuffer_bind(framebuffer);
+    /* Face Sets use the retopology depth offset. Populate the render framebuffer's depth buffer
+     * with the same offset before the color pass, otherwise the offset geometry fails the depth
+     * test against the scene surface. */
+    manager.submit(edit_mesh_prepass_ps_, view);
+    manager.submit(edit_mesh_face_sets_ps_, view);
   }
 
   void draw_color_only(Framebuffer &framebuffer, Manager &manager, View &view) final
@@ -492,6 +537,16 @@ class Meshes : Overlay {
       return (editmesh_eval_cage != nullptr) && (editmesh_eval_cage != editmesh_eval_final);
     }
     return false;
+  }
+
+  bool show_retopology() const
+  {
+    return show_retopology_;
+  }
+
+  bool show_face_sets() const
+  {
+    return show_face_sets_;
   }
 
  private:

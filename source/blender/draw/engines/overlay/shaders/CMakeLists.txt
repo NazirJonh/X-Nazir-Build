@@ -53,6 +53,7 @@ set(SRC_GLSL_VERT
   overlay_edit_pointcloud_vert.glsl
   overlay_edit_mesh_analysis_vert.glsl
   overlay_edit_mesh_depth_vert.glsl
+  overlay_edit_mesh_face_sets_vert.glsl
   overlay_edit_mesh_edge_vert.glsl
   overlay_edit_mesh_facedot_vert.glsl
   overlay_edit_mesh_normal_vert.glsl
@@ -115,6 +116,7 @@ set(SRC_GLSL_FRAG
   overlay_background_frag.glsl
   overlay_depth_only_frag.glsl
   overlay_depth_only_gpencil_frag.glsl
+  overlay_edit_mesh_face_sets_frag.glsl
   overlay_edit_mesh_analysis_frag.glsl
   overlay_edit_mesh_frag.glsl
   overlay_edit_uv_edges_frag.glsl

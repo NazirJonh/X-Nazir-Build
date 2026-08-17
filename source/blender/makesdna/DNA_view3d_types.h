@@ -334,6 +334,7 @@ enum eView3DOverlay_EditFlag : int {
   V3D_OVERLAY_EDIT_FACE_ANG = (1 << 17),
   V3D_OVERLAY_EDIT_FACE_AREA = (1 << 18),
   V3D_OVERLAY_EDIT_INDICES = (1 << 19),
+  V3D_OVERLAY_EDIT_FACE_SETS = (1 << 20),
 
   /* Deprecated. */
   // V3D_OVERLAY_EDIT_CU_HANDLES = (1 << 20),
@@ -658,9 +659,9 @@ struct View3DOverlay {
 
   /** Edit mode settings. */
   eView3DOverlay_EditFlag edit_flag = V3D_OVERLAY_EDIT_FACES | V3D_OVERLAY_EDIT_SEAMS |
-                                      V3D_OVERLAY_EDIT_SHARP | V3D_OVERLAY_EDIT_FREESTYLE_EDGE |
-                                      V3D_OVERLAY_EDIT_FREESTYLE_FACE | V3D_OVERLAY_EDIT_CREASES |
-                                      V3D_OVERLAY_EDIT_BWEIGHTS;
+                                       V3D_OVERLAY_EDIT_SHARP | V3D_OVERLAY_EDIT_FREESTYLE_EDGE |
+                                       V3D_OVERLAY_EDIT_FREESTYLE_FACE | V3D_OVERLAY_EDIT_CREASES |
+                                       V3D_OVERLAY_EDIT_BWEIGHTS | V3D_OVERLAY_EDIT_FACE_SETS;
   float normals_length = 0.1f;
   float normals_constant_screen_size = 7.0f;
 
@@ -690,6 +691,7 @@ struct View3DOverlay {
   float wireframe_threshold = 1.0f;
   float wireframe_opacity = 1.0f;
   float retopology_offset = 0.01f;
+  float face_sets_opacity = 0.6f;
 
   /** Grease pencil settings. */
   float gpencil_paper_opacity = 0.5f;
@@ -709,6 +711,7 @@ struct View3DOverlay {
 
   /** Curves sculpt mode settings. */
   float sculpt_curves_cage_opacity = 0;
+  char _pad[4] = {};
 
   /** Symmetry overlay settings. */
   eView3DOverlay_SymmetryFlag symmetry_flag = V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR |
@@ -721,11 +724,9 @@ struct View3DOverlay {
   /** Thickness of the symmetry contour, in pixels. */
   float sculpt_symmetry_contour_thickness = 3.0f;
 
-  /* NOTE: no trailing `_pad` member is needed here, because the 4-byte members above already sum
-   * to a multiple of 8. #View3D depends on that: it embeds this struct directly ahead of
-   * #ViewerPath, whose members must start 8-byte aligned, and any implicit tail padding the
-   * compiler inserted to achieve that would not be described by the SDNA. Re-check when adding
-   * fields: an odd number of new 4-byte members has to be balanced by a `char _pad[4]`. */
+  /* #View3D embeds this struct directly ahead of #ViewerPath, whose members must start 8-byte
+   * aligned. Keep the size a multiple of 8: any implicit compiler tail padding would not be
+   * described by the SDNA. */
 };
 
 struct View3D_Runtime {

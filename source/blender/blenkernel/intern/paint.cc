@@ -2939,7 +2939,10 @@ bool BKE_sculptsession_use_pbvh_draw_for_display(const Object *ob, const RegionV
 
 static void face_set_overlay_color_random(const int face_set, const int seed, uchar r_color[4])
 {
-  float rgba[4];
+  /* #hsv_to_rgb only writes the first three components, but the conversion below reads all four.
+   * Callers that use the alpha channel (the Edit Mode Face Sets overlay treats zero alpha as
+   * "unassigned") would otherwise depend on uninitialized memory. */
+  float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   float random_mod_hue = GOLDEN_RATIO_CONJUGATE * (face_set + (seed % 10));
   random_mod_hue = random_mod_hue - floorf(random_mod_hue);
   const float random_mod_sat = BLI_hash_int_01(face_set + seed + 1);

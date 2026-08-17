@@ -82,6 +82,7 @@ enum class VBOType : int8_t {
   SculptData,
   Orco,
   EditData,
+  EditFaceSet,
   EditUVData,
   EditUVStretchArea,
   EditUVStretchAngle,
@@ -155,6 +156,7 @@ struct MeshBatchList {
   gpu::Batch *surface_weights;
   /* Edit mode */
   gpu::Batch *edit_triangles;
+  gpu::Batch *edit_face_sets;
   gpu::Batch *edit_vertices;
   gpu::Batch *edit_edges;
   gpu::Batch *edit_vnor;
@@ -201,6 +203,7 @@ enum DRWBatchFlag : uint64_t {
   MBC_SURFACE = (1u << MBC_BATCH_INDEX(surface)),
   MBC_SURFACE_WEIGHTS = (1u << MBC_BATCH_INDEX(surface_weights)),
   MBC_EDIT_TRIANGLES = (1u << MBC_BATCH_INDEX(edit_triangles)),
+  MBC_EDIT_FACE_SETS = (1u << MBC_BATCH_INDEX(edit_face_sets)),
   MBC_EDIT_VERTICES = (1u << MBC_BATCH_INDEX(edit_vertices)),
   MBC_EDIT_EDGES = (1u << MBC_BATCH_INDEX(edit_edges)),
   MBC_EDIT_VNOR = (1u << MBC_BATCH_INDEX(edit_vnor)),
@@ -229,7 +232,7 @@ enum DRWBatchFlag : uint64_t {
   MBC_WIRE_LOOPS_UVS = (1u << MBC_BATCH_INDEX(wire_loops_uvs)),
   MBC_WIRE_LOOPS_EDITUVS = (1u << MBC_BATCH_INDEX(wire_loops_edituvs)),
   MBC_SCULPT_OVERLAYS = (1u << MBC_BATCH_INDEX(sculpt_overlays)),
-  MBC_VIEWER_ATTRIBUTE_OVERLAY = (1u << MBC_BATCH_INDEX(surface_viewer_attribute)),
+  MBC_VIEWER_ATTRIBUTE_OVERLAY = (uint64_t(1u) << MBC_BATCH_INDEX(surface_viewer_attribute)),
   MBC_PAINT_OVERLAY_VERTS = (uint64_t(1u) << MBC_BATCH_INDEX(paint_overlay_verts)),
   MBC_PAINT_OVERLAY_SURFACE = (uint64_t(1u) << MBC_BATCH_INDEX(paint_overlay_surface)),
   MBC_SURFACE_PER_MAT = (uint64_t(1u) << MBC_BATCH_LEN),

@@ -1318,6 +1318,14 @@ class ShowHideMenu:
         layout.operator("{:s}.hide".format(self._operator_name), text="Hide Selected").unselected = False
         layout.operator("{:s}.hide".format(self._operator_name), text="Hide Unselected").unselected = True
 
+        if self._operator_name == "mesh":
+            layout.separator()
+            layout.label(text="Face Sets:")
+            layout.operator("mesh.face_set_hide_active", text="Hide Active Face Set")
+            layout.operator("mesh.face_set_hide_inactive", text="Hide Inactive Face Sets")
+            layout.operator("mesh.face_set_show_all", text="Show All Face Sets")
+            layout.operator("mesh.face_set_isolate", text="Isolate Face Set")
+
 
 # Standard transforms which apply to all cases (mix-in class, not used directly).
 class VIEW3D_MT_transform_base:
@@ -7459,6 +7467,18 @@ class VIEW3D_PT_overlay_edit_mesh_shading(Panel):
         sub = row.row()
         sub.active = overlay.show_retopology
         sub.prop(overlay, "retopology_offset", text="Retopology")
+
+        has_face_set_attribute = False
+        obj = context.active_object
+        if obj and obj.type == 'MESH' and obj.data:
+            has_face_set_attribute = obj.data.attributes.get(".sculpt_face_set") is not None
+
+        row = col.row(align=True)
+        row.enabled = has_face_set_attribute
+        row.prop(overlay, "show_face_sets", text="")
+        sub = row.row()
+        sub.enabled = overlay.show_face_sets and has_face_set_attribute
+        sub.prop(overlay, "face_sets_opacity", text="Face Sets")
 
         col.prop(overlay, "show_weight", text="Vertex Group Weights")
         if overlay.show_weight:

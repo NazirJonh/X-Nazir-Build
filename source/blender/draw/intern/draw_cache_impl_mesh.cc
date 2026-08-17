@@ -542,7 +542,8 @@ void DRW_mesh_batch_cache_dirty_tag(Mesh *mesh, eMeshBatchDirtyMode mode)
   MeshBatchCache &cache = *mesh->runtime->batch_cache;
   switch (mode) {
     case BKE_MESH_BATCH_DIRTY_SELECT:
-      discard_buffers(cache, {VBOType::EditData, VBOType::FaceDotNormal}, {});
+      discard_buffers(
+          cache, {VBOType::EditData, VBOType::EditFaceSet, VBOType::FaceDotNormal}, {});
 
       /* Because visible UVs depends on edit mode selection, discard topology. */
       mesh_batch_cache_discard_uvedit_select(cache);
@@ -827,6 +828,13 @@ gpu::Batch *DRW_mesh_batch_cache_get_edit_triangles(Mesh &mesh)
   MeshBatchCache &cache = *mesh_batch_cache_get(mesh);
   cache.batch_requested |= MBC_EDIT_TRIANGLES;
   return DRW_batch_request(&cache.batch.edit_triangles);
+}
+
+gpu::Batch *DRW_mesh_batch_cache_get_edit_face_sets(Mesh &mesh)
+{
+  MeshBatchCache &cache = *mesh_batch_cache_get(mesh);
+  cache.batch_requested |= MBC_EDIT_FACE_SETS;
+  return DRW_batch_request(&cache.batch.edit_face_sets);
 }
 
 gpu::Batch *DRW_mesh_batch_cache_get_edit_edges(Mesh &mesh)
@@ -1408,6 +1416,18 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
       }
       else {
         init_empty_dummy_batch(*cache.batch.edit_triangles);
+      }
+    }
+    if (batches_to_create & MBC_EDIT_FACE_SETS) {
+      if (edit_mapping_valid) {
+        batch_info.append({*cache.batch.edit_face_sets,
+                           GPU_PRIM_TRIS,
+                           list,
+                           IBOType::Tris,
+                           {VBOType::Position, VBOType::EditFaceSet}});
+      }
+      else {
+        init_empty_dummy_batch(*cache.batch.edit_face_sets);
       }
     }
     if (batches_to_create & MBC_EDIT_VERTICES) {

@@ -221,6 +221,7 @@ gpu::Batch *DRW_mesh_batch_cache_get_surface_viewer_attribute(Mesh &mesh);
  * \{ */
 
 gpu::Batch *DRW_mesh_batch_cache_get_edit_triangles(Mesh &mesh);
+gpu::Batch *DRW_mesh_batch_cache_get_edit_face_sets(Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_edit_vertices(Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_edit_edges(Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_edit_vert_normals(Mesh &mesh);

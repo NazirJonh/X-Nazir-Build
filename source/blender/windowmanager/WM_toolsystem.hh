@@ -136,8 +136,15 @@ bool WM_toolsystem_ref_properties_get_ex(bToolRef *tref,
                                          const char *idname,
                                          StructRNA *type,
                                          PointerRNA *r_ptr);
+bool WM_toolsystem_ref_properties_get_for_tool_ex(bToolRef *tref,
+                                                  const char *tool_idname,
+                                                  const char *idname,
+                                                  StructRNA *type,
+                                                  PointerRNA *r_ptr);
 #define WM_toolsystem_ref_properties_get_from_operator(tref, ot, r_ptr) \
   WM_toolsystem_ref_properties_get_ex(tref, (ot)->idname, (ot)->srna, r_ptr)
+#define WM_toolsystem_ref_properties_get_from_operator_for_tool(tref, tool_idname, ot, r_ptr) \
+  WM_toolsystem_ref_properties_get_for_tool_ex(tref, tool_idname, (ot)->idname, (ot)->srna, r_ptr)
 #define WM_toolsystem_ref_properties_get_from_gizmo_group(tref, gzgroup, r_ptr) \
   WM_toolsystem_ref_properties_get_ex(tref, (gzgroup)->idname, (gzgroup)->srna, r_ptr)
 

@@ -35,6 +35,7 @@
 
 #include "WM_api.hh"
 #include "WM_message.hh"
+#include "WM_toolsystem.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -1089,6 +1090,54 @@ void ED_view3d_cursor3d_update(bContext *C,
   DEG_id_tag_update(&scene->id, ID_RECALC_SYNC_TO_EVAL);
 }
 
+/**
+ * Look up the 3D cursor orientation stored in the Cursor tool's settings.
+ *
+ * The value is read from the tool reference without activating the tool, so it is also honored
+ * when the cursor is placed through a shortcut while another tool is active.
+ */
+static bool view3d_cursor3d_tool_orientation_get(bContext *C,
+                                                 wmOperatorType *ot,
+                                                 eV3DCursorOrient *r_orientation)
+{
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  if (workspace == nullptr) {
+    return false;
+  }
+
+  const Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  if (bmain == nullptr || scene == nullptr || view_layer == nullptr) {
+    return false;
+  }
+
+  bToolKey tkey{};
+  tkey.space_type = SPACE_VIEW3D;
+  tkey.mode = WM_toolsystem_mode_from_spacetype(
+      *bmain, scene, view_layer, nullptr, SPACE_VIEW3D);
+
+  bToolRef *tref = WM_toolsystem_ref_find(workspace, &tkey);
+  if (tref == nullptr) {
+    return false;
+  }
+
+  PointerRNA tool_ptr;
+  if (!WM_toolsystem_ref_properties_get_from_operator_for_tool(
+          tref, "builtin.cursor", ot, &tool_ptr))
+  {
+    return false;
+  }
+
+  PropertyRNA *prop = RNA_struct_find_property(&tool_ptr, "orientation");
+  if (prop == nullptr) {
+    return false;
+  }
+
+  *r_orientation = eV3DCursorOrient(RNA_property_enum_get(&tool_ptr, prop));
+  return true;
+}
+
 static wmOperatorStatus view3d_cursor3d_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   bool use_depth = (U.uiflag & USER_DEPTH_CURSOR);
@@ -1101,7 +1150,19 @@ static wmOperatorStatus view3d_cursor3d_invoke(bContext *C, wmOperator *op, cons
       RNA_property_boolean_set(op->ptr, prop, use_depth);
     }
   }
-  const enum eV3DCursorOrient orientation = eV3DCursorOrient(RNA_enum_get(op->ptr, "orientation"));
+  PropertyRNA *prop_orientation = RNA_struct_find_property(op->ptr, "orientation");
+  eV3DCursorOrient orientation = eV3DCursorOrient(
+      RNA_property_enum_get(op->ptr, prop_orientation));
+
+  /* Use the Cursor tool's stored orientation when the operator did not provide one explicitly. */
+  if (!RNA_property_is_set(op->ptr, prop_orientation)) {
+    eV3DCursorOrient tool_orientation;
+    if (view3d_cursor3d_tool_orientation_get(C, op->type, &tool_orientation)) {
+      orientation = tool_orientation;
+      RNA_property_enum_set(op->ptr, prop_orientation, orientation);
+    }
+  }
+
   ED_view3d_cursor3d_update(C, event->mval, use_depth, orientation);
 
   /* Use pass-through to allow click-drag to transform the cursor. */

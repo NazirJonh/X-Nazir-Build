@@ -1307,6 +1307,19 @@ bool WM_toolsystem_ref_properties_get_ex(bToolRef *tref,
   return (prop != nullptr);
 }
 
+bool WM_toolsystem_ref_properties_get_for_tool_ex(bToolRef *tref,
+                                                  const char *tool_idname,
+                                                  const char *idname,
+                                                  StructRNA *type,
+                                                  PointerRNA *r_ptr)
+{
+  IDProperty *tools = tref ? tref->properties : nullptr;
+  IDProperty *tool = tools ? IDP_GetPropertyFromGroup(tools, tool_idname) : nullptr;
+  IDProperty *prop = tool ? IDP_GetPropertyFromGroup(tool, idname) : nullptr;
+  *r_ptr = RNA_pointer_create_discrete(nullptr, type, prop);
+  return (prop != nullptr);
+}
+
 void WM_toolsystem_ref_properties_ensure_ex(bToolRef *tref,
                                             const char *idname,
                                             StructRNA *type,

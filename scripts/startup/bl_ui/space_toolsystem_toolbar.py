@@ -4153,11 +4153,6 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         'SCULPT': [
             _sculpt_tool,
             _defs_sculpt.paint,
-            lambda context: (
-                (_defs_sculpt.texture_fill,)
-                if _defs_sculpt.poll_texture_fill(context)
-                else ()
-            ),
             _defs_sculpt.mask,
             _defs_sculpt.draw_face_sets,
             lambda context: (
@@ -4210,6 +4205,11 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             None,
             _defs_sculpt.face_set_edit,
             _defs_sculpt.mask_by_color,
+            lambda context: (
+                (_defs_sculpt.texture_fill,)
+                if _defs_sculpt.poll_texture_fill(context)
+                else ()
+            ),
             None,
             _defs_transform.translate,
             _defs_transform.rotate,

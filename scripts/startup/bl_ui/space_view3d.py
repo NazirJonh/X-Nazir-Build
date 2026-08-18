@@ -12,6 +12,7 @@ from bpy.types import (
 from bl_ui.properties_paint_common import (
     UnifiedPaintPanel,
     brush_basic_texpaint_settings,
+    draw_image_paint_fill_expand,
     brush_basic_grease_pencil_weight_settings,
     brush_basic_grease_pencil_vertex_settings,
     BrushAssetShelf,
@@ -277,7 +278,10 @@ class _draw_tool_settings_context_mode:
 
         ups = paint.unified_paint_settings
 
-        if capabilities.has_color:
+        if brush.sculpt_brush_type == 'TEXTURE_FILL':
+            draw_image_paint_fill_expand(layout, brush)
+
+        if capabilities.has_color or brush.sculpt_brush_type == 'TEXTURE_FILL':
             row = layout.row(align=True)
             row.ui_units_x = 4
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
@@ -6350,6 +6354,13 @@ class VIEW3D_PT_active_tool(Panel, ToolActivePanelHelper):
     def poll(cls, context):
         return context.area.type == 'VIEW_3D'
 
+    def draw(self, context):
+        super().draw(context)
+        if context.mode == 'SCULPT':
+            brush = context.tool_settings.sculpt.brush
+            if brush and brush.sculpt_brush_type == 'TEXTURE_FILL':
+                draw_image_paint_fill_expand(self.layout, brush)
+
 
 # FIXME(campbell): remove this second panel once 'HIDE_HEADER' works with category tabs,
 # Currently pinning allows ordering headerless panels below panels with headers.
@@ -6363,6 +6374,13 @@ class VIEW3D_PT_active_tool_duplicate(Panel, ToolActivePanelHelper):
     @classmethod
     def poll(cls, context):
         return context.area.type != 'VIEW_3D'
+
+    def draw(self, context):
+        super().draw(context)
+        if context.mode == 'SCULPT':
+            brush = context.tool_settings.sculpt.brush
+            if brush and brush.sculpt_brush_type == 'TEXTURE_FILL':
+                draw_image_paint_fill_expand(self.layout, brush)
 
 
 class VIEW3D_PT_view3d_properties(Panel):

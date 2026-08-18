@@ -1033,10 +1033,6 @@ def brush_settings(layout, context, brush, popover=False):
             row = layout.row()
             row.prop(brush, "tip_scale_x")
 
-        elif sculpt_brush_type == 'TEXTURE_FILL':
-            if brush.color_type == 'COLOR':
-                draw_image_paint_fill_expand(layout, brush)
-
         elif sculpt_brush_type == 'SMEAR':
             col = layout.column()
             col.prop(brush, "smear_deform_type")

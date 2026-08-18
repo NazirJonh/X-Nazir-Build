@@ -658,6 +658,10 @@ struct SpaceImage {
   float xof = 0, yof = 0;
   /** User defined zoom level. */
   float zoom = 0;
+  /** Canvas rotation in radians. */
+  float rotation = 0;
+  /** Pivot point for canvas rotation in UV space (default: 0.5, 0.5 = center). */
+  float rotation_pivot[2] = {0.5f, 0.5f};
   /** Storage for offset while render drawing. */
   float centx = 0, centy = 0;
 
@@ -680,7 +684,7 @@ struct SpaceImage {
   eSpaceImage_Gizmo_Flag gizmo_flag = {};
 
   eSpaceImage_GridShapeSource grid_shape_source = SI_GRID_SHAPE_DYNAMIC;
-  char _pad1[6] = {};
+  char _pad1[10] = {};
 
   eSpaceImage_Flag flag = {};
 

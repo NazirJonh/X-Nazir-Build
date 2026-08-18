@@ -960,7 +960,8 @@ static wmOperatorStatus view_zoomin_invoke(bContext *C, wmOperator *op, const wm
     ARegion *region = CTX_wm_region(C);
 
     /* store initial mouse position (in view space) */
-    view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &vzd->mx_2d, &vzd->my_2d);
+    view2d_region_to_view_zoom_anchor(
+        &region->v2d, event->mval[0], event->mval[1], &vzd->mx_2d, &vzd->my_2d);
     vzd->zoom_to_mouse_pos = true;
   }
 
@@ -1008,7 +1009,8 @@ static wmOperatorStatus view_zoomout_invoke(bContext *C, wmOperator *op, const w
     ARegion *region = CTX_wm_region(C);
 
     /* store initial mouse position (in view space) */
-    view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &vzd->mx_2d, &vzd->my_2d);
+    view2d_region_to_view_zoom_anchor(
+        &region->v2d, event->mval[0], event->mval[1], &vzd->mx_2d, &vzd->my_2d);
     vzd->zoom_to_mouse_pos = true;
   }
 
@@ -1171,7 +1173,8 @@ static wmOperatorStatus view_zoomdrag_invoke(bContext *C, wmOperator *op, const 
     ARegion *region = CTX_wm_region(C);
 
     /* Store initial mouse position (in view space). */
-    view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &vzd->mx_2d, &vzd->my_2d);
+    view2d_region_to_view_zoom_anchor(
+        &region->v2d, event->mval[0], event->mval[1], &vzd->mx_2d, &vzd->my_2d);
     vzd->zoom_to_mouse_pos = true;
   }
 
@@ -1460,7 +1463,7 @@ static wmOperatorStatus view_borderzoom_exec(bContext *C, wmOperator *op)
   /* convert coordinates of rect to `tot` rect coordinates */
   rctf rect;
   WM_operator_properties_border_to_rctf(op, &rect);
-  view2d_region_to_view_rctf(v2d, &rect, &rect);
+  view2d_region_to_view_rctf_zoom_bounds(v2d, &rect, &rect);
 
   /* check if zooming in/out view */
   const bool zoom_in = !RNA_boolean_get(op->ptr, "zoom_out");

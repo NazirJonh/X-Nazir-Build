@@ -1113,6 +1113,16 @@ void view2d_view_ortho(const View2D *v2d)
 
   /* set matrix on all appropriate axes */
   wmOrtho2(curmasked.xmin, curmasked.xmax, curmasked.ymin, curmasked.ymax);
+
+  /* Apply the canvas rotation (only ever non-zero for the Image Editor). The projection maps view
+   * space to the axis-aligned screen; this rotates it about the pivot to match the displayed image.
+   * Model-view is identity by convention after this call, so multiplying leaves it equal to the
+   * rotation. */
+  if (v2d->rotation != 0.0f) {
+    float rotmat[4][4];
+    view2d_view_rotation_matrix(v2d, rotmat);
+    GPU_matrix_mul(rotmat);
+  }
 }
 
 void view2d_view_orthoSpecial(ARegion *region, View2D *v2d, const bool xaxis)
@@ -1645,26 +1655,90 @@ float view2d_region_to_view_y(const View2D *v2d, float y)
           (BLI_rctf_size_y(&v2d->cur) * (y - v2d->mask.ymin) / BLI_rcti_size_y(&v2d->mask)));
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Navigation Frame (axis-aligned core)
+ *
+ * The axis-aligned map `cur <-> mask`. This is the frame `View2D.cur`, zoom and pan are defined
+ * in, and the frame the rotation pivot is projected through. It must never apply the rotation
+ * itself: #view2d_rotation_pivot_region projects the pivot with it, so a rotation-aware core
+ * would recurse infinitely.
+ * \{ */
+
+static void region_to_view_axis_aligned(
+    const View2D *v2d, const float x, const float y, float *r_view_x, float *r_view_y)
+{
+  *r_view_x = v2d->cur.xmin +
+              (BLI_rctf_size_x(&v2d->cur) * (x - v2d->mask.xmin) / BLI_rcti_size_x(&v2d->mask));
+  *r_view_y = v2d->cur.ymin +
+              (BLI_rctf_size_y(&v2d->cur) * (y - v2d->mask.ymin) / BLI_rcti_size_y(&v2d->mask));
+}
+
+static void view_to_region_axis_aligned_fl(
+    const View2D *v2d, const float x, const float y, float *r_region_x, float *r_region_y)
+{
+  const float sx = (x - v2d->cur.xmin) / BLI_rctf_size_x(&v2d->cur);
+  const float sy = (y - v2d->cur.ymin) / BLI_rctf_size_y(&v2d->cur);
+  *r_region_x = v2d->mask.xmin + (sx * BLI_rcti_size_x(&v2d->mask));
+  *r_region_y = v2d->mask.ymin + (sy * BLI_rcti_size_y(&v2d->mask));
+}
+
+/** \} */
+
 void view2d_region_to_view(const View2D *v2d, float x, float y, float *r_view_x, float *r_view_y)
 {
-  *r_view_x = view2d_region_to_view_x(v2d, x);
-  *r_view_y = view2d_region_to_view_y(v2d, y);
+  /* Display frame: undo the canvas rotation about the pivot, then the axis-aligned map. This is
+   * the exact inverse of what #view2d_view_ortho draws. */
+  float region_xy[2] = {x, y};
+  view2d_rotate_region_point(v2d, region_xy, false);
+  region_to_view_axis_aligned(v2d, region_xy[0], region_xy[1], r_view_x, r_view_y);
 }
 
 void view2d_region_to_view_rctf(const View2D *v2d, const rctf *rect_src, rctf *rect_dst)
 {
-  const float cur_size[2] = {BLI_rctf_size_x(&v2d->cur), BLI_rctf_size_y(&v2d->cur)};
-  const float mask_size[2] = {float(BLI_rcti_size_x(&v2d->mask)),
-                              float(BLI_rcti_size_y(&v2d->mask))};
+  if (v2d->rotation == 0.0f) {
+    const float cur_size[2] = {BLI_rctf_size_x(&v2d->cur), BLI_rctf_size_y(&v2d->cur)};
+    const float mask_size[2] = {float(BLI_rcti_size_x(&v2d->mask)),
+                                float(BLI_rcti_size_y(&v2d->mask))};
 
-  rect_dst->xmin = (v2d->cur.xmin +
-                    (cur_size[0] * (rect_src->xmin - v2d->mask.xmin) / mask_size[0]));
-  rect_dst->xmax = (v2d->cur.xmin +
-                    (cur_size[0] * (rect_src->xmax - v2d->mask.xmin) / mask_size[0]));
-  rect_dst->ymin = (v2d->cur.ymin +
-                    (cur_size[1] * (rect_src->ymin - v2d->mask.ymin) / mask_size[1]));
-  rect_dst->ymax = (v2d->cur.ymin +
-                    (cur_size[1] * (rect_src->ymax - v2d->mask.ymin) / mask_size[1]));
+    rect_dst->xmin = (v2d->cur.xmin +
+                      (cur_size[0] * (rect_src->xmin - v2d->mask.xmin) / mask_size[0]));
+    rect_dst->xmax = (v2d->cur.xmin +
+                      (cur_size[0] * (rect_src->xmax - v2d->mask.xmin) / mask_size[0]));
+    rect_dst->ymin = (v2d->cur.ymin +
+                      (cur_size[1] * (rect_src->ymin - v2d->mask.ymin) / mask_size[1]));
+    rect_dst->ymax = (v2d->cur.ymin +
+                      (cur_size[1] * (rect_src->ymax - v2d->mask.ymin) / mask_size[1]));
+    return;
+  }
+
+  /* A rect cannot represent a rotation, so return the bounding box of the rotated quad. Callers
+   * that need the exact shape must use #view2d_region_to_view_quad. */
+  const float corners_px[4][2] = {
+      {rect_src->xmin, rect_src->ymin},
+      {rect_src->xmax, rect_src->ymin},
+      {rect_src->xmax, rect_src->ymax},
+      {rect_src->xmin, rect_src->ymax},
+  };
+  BLI_rctf_init_minmax(rect_dst);
+  for (int i = 0; i < 4; i++) {
+    float view_xy[2];
+    view2d_region_to_view(v2d, corners_px[i][0], corners_px[i][1], &view_xy[0], &view_xy[1]);
+    BLI_rctf_do_minmax_v(rect_dst, view_xy);
+  }
+}
+
+void view2d_region_to_view_quad(const View2D *v2d, const rcti *rect_src, float r_corners[4][2])
+{
+  const float corners_px[4][2] = {
+      {float(rect_src->xmin), float(rect_src->ymin)},
+      {float(rect_src->xmax), float(rect_src->ymin)},
+      {float(rect_src->xmax), float(rect_src->ymax)},
+      {float(rect_src->xmin), float(rect_src->ymax)},
+  };
+  for (int i = 0; i < 4; i++) {
+    view2d_region_to_view(
+        v2d, corners_px[i][0], corners_px[i][1], &r_corners[i][0], &r_corners[i][1]);
+  }
 }
 
 float view2d_view_to_region_x(const View2D *v2d, float x)
@@ -1681,49 +1755,159 @@ float view2d_view_to_region_y(const View2D *v2d, float y)
 bool view2d_view_to_region_clip(
     const View2D *v2d, float x, float y, int *r_region_x, int *r_region_y)
 {
-  /* express given coordinates as proportional values */
-  x = (x - v2d->cur.xmin) / BLI_rctf_size_x(&v2d->cur);
-  y = (y - v2d->cur.ymin) / BLI_rctf_size_y(&v2d->cur);
+  if (v2d->rotation == 0.0f) {
+    /* Express given coordinates as proportional values. */
+    x = (x - v2d->cur.xmin) / BLI_rctf_size_x(&v2d->cur);
+    y = (y - v2d->cur.ymin) / BLI_rctf_size_y(&v2d->cur);
 
-  /* check if values are within bounds */
-  if ((x >= 0.0f) && (x <= 1.0f) && (y >= 0.0f) && (y <= 1.0f)) {
-    *r_region_x = int(v2d->mask.xmin + (x * BLI_rcti_size_x(&v2d->mask)));
-    *r_region_y = int(v2d->mask.ymin + (y * BLI_rcti_size_y(&v2d->mask)));
+    /* Check if values are within bounds. */
+    if ((x >= 0.0f) && (x <= 1.0f) && (y >= 0.0f) && (y <= 1.0f)) {
+      *r_region_x = int(v2d->mask.xmin + (x * BLI_rcti_size_x(&v2d->mask)));
+      *r_region_y = int(v2d->mask.ymin + (y * BLI_rcti_size_y(&v2d->mask)));
+      return true;
+    }
 
+    *r_region_x = *r_region_y = V2D_IS_CLIPPED;
+    return false;
+  }
+
+  /* Under rotation the visible area is a rotated quad in view space, so the clip test cannot be
+   * done in `cur`. Project first, then test against the region rect in pixels. */
+  float region_xy[2];
+  view_to_region_axis_aligned_fl(v2d, x, y, &region_xy[0], &region_xy[1]);
+  view2d_rotate_region_point(v2d, region_xy, true);
+
+  const int rx = int(region_xy[0]);
+  const int ry = int(region_xy[1]);
+  if (BLI_rcti_isect_pt(&v2d->mask, rx, ry)) {
+    *r_region_x = rx;
+    *r_region_y = ry;
     return true;
   }
 
-  /* set initial value in case coordinate lies outside of bounds */
   *r_region_x = *r_region_y = V2D_IS_CLIPPED;
-
   return false;
 }
 
 void view2d_view_to_region(const View2D *v2d, float x, float y, int *r_region_x, int *r_region_y)
 {
-  /* Step 1: express given coordinates as proportional values. */
-  x = (x - v2d->cur.xmin) / BLI_rctf_size_x(&v2d->cur);
-  y = (y - v2d->cur.ymin) / BLI_rctf_size_y(&v2d->cur);
-
-  /* Step 2: convert proportional distances to screen coordinates. */
-  x = v2d->mask.xmin + (x * BLI_rcti_size_x(&v2d->mask));
-  y = v2d->mask.ymin + (y * BLI_rcti_size_y(&v2d->mask));
+  float region_xy[2];
+  view_to_region_axis_aligned_fl(v2d, x, y, &region_xy[0], &region_xy[1]);
+  view2d_rotate_region_point(v2d, region_xy, true);
 
   /* Although we don't clamp to lie within region bounds, we must avoid exceeding size of ints. */
-  *r_region_x = clamp_float_to_int(x);
-  *r_region_y = clamp_float_to_int(y);
+  *r_region_x = clamp_float_to_int(region_xy[0]);
+  *r_region_y = clamp_float_to_int(region_xy[1]);
 }
 
 void view2d_view_to_region_fl(
     const View2D *v2d, float x, float y, float *r_region_x, float *r_region_y)
 {
-  /* express given coordinates as proportional values */
-  x = (x - v2d->cur.xmin) / BLI_rctf_size_x(&v2d->cur);
-  y = (y - v2d->cur.ymin) / BLI_rctf_size_y(&v2d->cur);
+  float region_xy[2];
+  view_to_region_axis_aligned_fl(v2d, x, y, &region_xy[0], &region_xy[1]);
+  view2d_rotate_region_point(v2d, region_xy, true);
+  *r_region_x = region_xy[0];
+  *r_region_y = region_xy[1];
+}
 
-  /* convert proportional distances to screen coordinates */
-  *r_region_x = v2d->mask.xmin + (x * BLI_rcti_size_x(&v2d->mask));
-  *r_region_y = v2d->mask.ymin + (y * BLI_rcti_size_y(&v2d->mask));
+void view2d_rotation_pivot_region(const View2D *v2d, float r_pivot_px[2])
+{
+  /* The pivot is defined in the navigation frame: it is the point the display rotation turns
+   * about, so projecting it through the rotation would be circular. */
+  view_to_region_axis_aligned_fl(
+      v2d, v2d->rotation_pivot[0], v2d->rotation_pivot[1], &r_pivot_px[0], &r_pivot_px[1]);
+}
+
+void view2d_rotate_region_point(const View2D *v2d, float xy[2], const bool inverse)
+{
+  if (v2d->rotation == 0.0f) {
+    return;
+  }
+  float pivot_px[2];
+  view2d_rotation_pivot_region(v2d, pivot_px);
+  const float angle = inverse ? -v2d->rotation : v2d->rotation;
+  const float c = cosf(angle);
+  const float s = sinf(angle);
+  const float dx = xy[0] - pivot_px[0];
+  const float dy = xy[1] - pivot_px[1];
+  xy[0] = pivot_px[0] + dx * c - dy * s;
+  xy[1] = pivot_px[1] + dx * s + dy * c;
+}
+
+void view2d_view_rotation_matrix(const View2D *v2d, float r_mat[4][4])
+{
+  unit_m4(r_mat);
+  if (v2d->rotation == 0.0f) {
+    return;
+  }
+  /* NOTE: The DRW image engine bakes the same aspect-correct rotation about the same pivot into
+   * its screen-space to sampler-space transform (see `Instance::end_sync` in
+   * `draw/engines/image/image_instance.hh`). It works on a different matrix in a different space,
+   * so the two cannot share code directly, but they must stay geometrically equivalent: if the
+   * convention here changes, that one has to change with it or the image will drift away from the
+   * overlays. */
+  /* view->pixel scale per axis, so the screen-space rotation stays square (aspect-correct). */
+  const float sx = float(BLI_rcti_size_x(&v2d->mask) + 1) / BLI_rctf_size_x(&v2d->cur);
+  const float sy = float(BLI_rcti_size_y(&v2d->mask) + 1) / BLI_rctf_size_y(&v2d->cur);
+  const float px = v2d->rotation_pivot[0];
+  const float py = v2d->rotation_pivot[1];
+  const float c = cosf(v2d->rotation);
+  const float s = -sinf(v2d->rotation); /* display maps view->screen as Rot(-rotation) */
+  /* M = T(pivot) * S^-1 * R(-rotation) * S * T(-pivot) applied to view coordinates.
+   * The display maps view/UV space to screen as Rot(-rotation) about the pivot, hence the negated
+   * `s`; the generic formula below in terms of (c, s) then evaluates Rot(-rotation).
+   * The S / S^-1 pair converts the per-axis view scale to square pixels so the rotation is not
+   * sheared on non-square regions. Blender matrices are column-major (`r_mat[col][row]`), so the
+   * translation lives in `r_mat[3][*]`. */
+  const float a = sy / sx; /* couples y into x' */
+  const float b = sx / sy; /* couples x into y' */
+  r_mat[0][0] = c;
+  r_mat[1][0] = -a * s;
+  r_mat[0][1] = b * s;
+  r_mat[1][1] = c;
+  r_mat[3][0] = px - (c * px - a * s * py);
+  r_mat[3][1] = py - (b * s * px + c * py);
+}
+
+/**
+ * The canvas rotation expressed in *region pixel* space: `Rot(-rotation)` about the pivot's pixel
+ * position. Pixels are square by definition, so unlike #view2d_view_rotation_matrix this needs no
+ * aspect correction. Identity when the rotation is 0.
+ */
+static void view2d_rotation_matrix_region_px(const View2D *v2d, float r_mat[4][4])
+{
+  unit_m4(r_mat);
+  if (v2d->rotation == 0.0f) {
+    return;
+  }
+  float pivot_px[2];
+  view2d_rotation_pivot_region(v2d, pivot_px);
+
+  const float c = cosf(-v2d->rotation);
+  const float s = sinf(-v2d->rotation);
+  /* Column-major (`r_mat[col][row]`), so the translation lives in `r_mat[3][*]`. */
+  r_mat[0][0] = c;
+  r_mat[1][0] = -s;
+  r_mat[0][1] = s;
+  r_mat[1][1] = c;
+  r_mat[3][0] = pivot_px[0] - (c * pivot_px[0] - s * pivot_px[1]);
+  r_mat[3][1] = pivot_px[1] - (s * pivot_px[0] + c * pivot_px[1]);
+}
+
+void view2d_matrix_push_rotation(const View2D *v2d)
+{
+  GPU_matrix_push();
+  if (v2d->rotation == 0.0f) {
+    return;
+  }
+  float rot[4][4];
+  view2d_rotation_matrix_region_px(v2d, rot);
+  GPU_matrix_mul(rot);
+}
+
+void view2d_matrix_pop_rotation()
+{
+  GPU_matrix_pop();
 }
 
 bool view2d_view_to_region_segment_clip(const View2D *v2d,
@@ -1789,6 +1973,16 @@ void view2d_view_to_region_m4(const View2D *v2d, float matrix[4][4])
   unit_m4(matrix);
   BLI_rctf_rcti_copy(&mask, &v2d->mask);
   BLI_rctf_transform_calc_m4_pivot_min(&v2d->cur, &mask, matrix);
+
+  if (v2d->rotation == 0.0f) {
+    return;
+  }
+
+  /* Display frame: `Rot_{pivot_px}(-rotation) . A`. The rotation is applied *after* the
+   * axis-aligned map, in pixel space, hence the pre-multiply. */
+  float rot[4][4];
+  view2d_rotation_matrix_region_px(v2d, rot);
+  mul_m4_m4_pre(matrix, rot);
 }
 
 bool view2d_view_to_region_rcti_clip(const View2D *v2d, const rctf *rect_src, rcti *rect_dst)
@@ -1822,6 +2016,36 @@ bool view2d_view_to_region_rcti_clip(const View2D *v2d, const rctf *rect_src, rc
 
   rect_dst->xmin = rect_dst->xmax = rect_dst->ymin = rect_dst->ymax = V2D_IS_CLIPPED;
   return false;
+}
+
+void view2d_region_to_view_zoom_anchor(
+    const View2D *v2d, const float x, const float y, float *r_view_x, float *r_view_y)
+{
+  region_to_view_axis_aligned(v2d, x, y, r_view_x, r_view_y);
+}
+
+void view2d_view_to_region_navigation_fl(
+    const View2D *v2d, const float x, const float y, float *r_region_x, float *r_region_y)
+{
+  view_to_region_axis_aligned_fl(v2d, x, y, r_region_x, r_region_y);
+}
+
+void view2d_region_to_view_rctf_zoom_bounds(const View2D *v2d,
+                                            const rctf *rect_src,
+                                            rctf *rect_dst)
+{
+  const float cur_size[2] = {BLI_rctf_size_x(&v2d->cur), BLI_rctf_size_y(&v2d->cur)};
+  const float mask_size[2] = {float(BLI_rcti_size_x(&v2d->mask)),
+                              float(BLI_rcti_size_y(&v2d->mask))};
+
+  rect_dst->xmin = v2d->cur.xmin +
+                   (cur_size[0] * (rect_src->xmin - v2d->mask.xmin) / mask_size[0]);
+  rect_dst->xmax = v2d->cur.xmin +
+                   (cur_size[0] * (rect_src->xmax - v2d->mask.xmin) / mask_size[0]);
+  rect_dst->ymin = v2d->cur.ymin +
+                   (cur_size[1] * (rect_src->ymin - v2d->mask.ymin) / mask_size[1]);
+  rect_dst->ymax = v2d->cur.ymin +
+                   (cur_size[1] * (rect_src->ymax - v2d->mask.ymin) / mask_size[1]);
 }
 
 /** \} */

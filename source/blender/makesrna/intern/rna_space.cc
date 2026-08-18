@@ -20,6 +20,7 @@
 
 #include "ED_asset.hh"
 #include "ED_buttons.hh"
+#include "ED_image.hh"
 #include "ED_spreadsheet.hh"
 #include "ED_userpref.hh"
 
@@ -6347,6 +6348,20 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_range(prop, .4, 80000);
   RNA_def_property_ui_range(prop, 25, 400, 100, 0);
   RNA_def_property_ui_text(prop, "Zoom", "Zoom percentage");
+
+  /* canvas rotation */
+  prop = RNA_def_property(srna, "rotation", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "rotation");
+  RNA_def_property_ui_text(prop, "Rotation", "Canvas rotation angle");
+  RNA_def_property_range(prop, -M_PI, M_PI);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "rotation_pivot", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "rotation_pivot");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_text(prop, "Rotation Pivot", "Pivot point for canvas rotation in UV space");
+  RNA_def_property_range(prop, 0.0, 1.0);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
   /* image draw */
   prop = RNA_def_property(srna, "show_repeat", PROP_BOOLEAN, PROP_NONE);

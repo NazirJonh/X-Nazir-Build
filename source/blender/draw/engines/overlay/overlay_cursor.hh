@@ -14,6 +14,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 
+#include "ED_image.hh"
 #include "ED_view3d.hh"
 #include "UI_view2d.hh"
 
@@ -68,8 +69,15 @@ class Cursor : Overlay {
     }
     else {
       const SpaceImage *sima = reinterpret_cast<const SpaceImage *>(state.space_data);
-      ui::view2d_view_to_region(
-          &state.region->v2d, sima->cursor[0], sima->cursor[1], &pixel_coord[0], &pixel_coord[1]);
+      /* Rotation-compensated UV->screen projection for the 2D cursor in the Image Editor.
+       * The cast is needed because the whole `ED_space_image_*` size/zoom chain acquires (and so
+       * locks) the image buffer, and therefore takes a mutable #SpaceImage. Nothing here writes to
+       * it. */
+      float cursor_screen[2];
+      ED_image_point_pos__reverse(
+          const_cast<SpaceImage *>(sima), state.region, sima->cursor, cursor_screen);
+      pixel_coord[0] = cursor_screen[0];
+      pixel_coord[1] = cursor_screen[1];
     }
 
     float4x4 cursor_mat = math::from_scale<float4x4>(float2(U.widget_unit));

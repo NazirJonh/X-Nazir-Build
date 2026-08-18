@@ -57,8 +57,15 @@ LineData decode_axis_data(uint vertex_id)
   line.axis = vertex_id >> 1u;
   /* For an axis line, the level is fixed, and the direction is simply the vertex index. */
   line.level = OVERLAY_GRID_STEPS_DRAW - 1;
-  /* Output a vertex as [-N/2, N/2], [0, 0]. */
-  line.P.x = max(float(grid_buf.num_lines >> 1u), 1.0f) * select(1.0f, -1.0f, side);
+  if (flag_test(grid_flag, GRID_SIMA)) {
+    /* Image Editor axes are positive rays starting at the UDIM origin, so output a vertex as
+     * [0, N] instead of centering it on the view. */
+    line.P.x = max(float(grid_buf.num_lines), 1.0f) * select(1.0f, 0.0f, side);
+  }
+  else {
+    /* Output a vertex as [-N/2, N/2], [0, 0]. */
+    line.P.x = max(float(grid_buf.num_lines >> 1u), 1.0f) * select(1.0f, -1.0f, side);
+  }
   line.P.y = 0.0f;
 
   return line;
@@ -117,10 +124,14 @@ void main()
       step_offs.x = round(grid_buf.offset.x / step_size) * step_size;
     }
   }
-  else if (flag_test(grid_flag, SHOW_AXES)) {
+  else if (flag_test(grid_flag, SHOW_AXES) && !flag_test(grid_flag, GRID_SIMA)) {
     /* Store axis value on X-axis for now, it is swapped later. */
     step_offs = float2(drw_view_position()[line.axis], 0.0f);
   } /* else: GRID_SIMA, do nothing. */
+  else if (flag_test(grid_flag, SHOW_AXES)) {
+    /* UDIM axes are anchored at the tile origin, not at the grid background offset. */
+    step_offs = float2(-1.0f);
+  }
 
   /* Output vertex position in [-1,1], which we use to fade level boundaries. */
   vertex_out.coord = line.P / max(float(grid_buf.num_lines >> 1), 1.0f);
@@ -141,15 +152,23 @@ void main()
   /* TODO(not_mark): remove all this horrible axis-swapping BS in BSL port. */
   float2 clip_min = float2(-FLT_MAX), clip_max = float2(FLT_MAX);
   if (flag_test(grid_flag, GRID_SIMA)) {
-    /* SpaceImage view has user-specified clipping rectangle */
-    clip_min = float2(-1.0f);
-    clip_max = grid_buf.clip_rect * 2.0f - 1.0f;
+    if (flag_test(grid_flag, SHOW_AXES)) {
+      /* UDIM axes are positive rays from the origin. Do not clip them to the configured tile grid;
+       * the generated segment is intentionally long enough to cover the visible viewport. */
+      clip_min = float2(-1.0f);
+      clip_max = float2(FLT_MAX);
+    }
+    else {
+      /* SpaceImage view has user-specified clipping rectangle. */
+      clip_min = float2(-1.0f);
+      clip_max = grid_buf.clip_rect * 2.0f - 1.0f;
+    }
   }
   else if (flag_test(grid_flag, SHOW_GRID)) {
     clip_min = step_offs - grid_buf.clip_rect;
     clip_max = step_offs + grid_buf.clip_rect;
   }
-  else /* SHOW_AXES */ {
+  else if (!flag_test(grid_flag, GRID_SIMA)) /* SHOW_AXES */ {
     /* Z-axis does not have a clip value to unpack. */
     float clip_rect = (line.axis == 2) ?
                           grid_buf.clip_rect.x :
@@ -190,13 +209,21 @@ void main()
       vertex_out.pos = float3(line.P * 0.5f + 0.5f, z);
     }
   }
-  else { /* SHOW_AXES */
+  else { /* SHOW_AXES or GRID_SIMA axes */
     /* Test X/Y/Z axis flags per line */
     constexpr uint axis_flags[3] = {AXIS_X, AXIS_Y, AXIS_Z};
     if (!flag_test(grid_flag, axis_flags[line.axis])) {
       return; /* Discard line. */
     }
-    vertex_out.pos[line.axis] = line.P.x;
+    if (flag_test(grid_flag, GRID_SIMA)) {
+      const float z = flag_test(grid_flag, GRID_OVER_IMAGE) ? 0.45f : 0.76f;
+      const float2 axis_pos = line.axis == 0u ? float2(line.P.x, -1.0f) :
+                                                 float2(-1.0f, line.P.x);
+      vertex_out.pos = float3(axis_pos * 0.5f + 0.5f, z);
+    }
+    else {
+      vertex_out.pos[line.axis] = line.P.x;
+    }
   }
 
   /* Additional culling steps to discard occluded lines. */

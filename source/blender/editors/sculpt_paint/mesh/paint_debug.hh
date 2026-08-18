@@ -58,6 +58,28 @@
  */
 #define PBR_PAINT_2D_SYMMETRY_DEBUG 0
 
+/**
+ * paint_image_2d.cc – dab-buffer fill timing (#brush_painter_imbuf_new and
+ * #brush_painter_imbuf_update), reported as a per-stroke total.
+ *
+ * Deliberately independent of the master switch: this is the measurement point for the View Plane
+ * sampling path, and the per-dab dumps the master switch enables would both perturb the timings
+ * and bury the one line this prints per stroke.
+ */
+#define PBR_PAINT_2D_DAB_PROFILE 0
+
+/**
+ * paint_image_2d.cc – per-stroke cross-section of View Plane vs Area Plane.
+ *
+ * Reports wall time of #paint_2d_stroke, plus dab-fill, #paint_2d_op blending, Area Plane raster,
+ * GPU redraw, painter count, imbuf rebuild vs partial update, and a one-shot #DirectSampleKind
+ * dump per channel. Independent of the master switch: the per-dab dumps that master enables would
+ * both perturb timings and bury the few summary lines this prints at stroke end.
+ *
+ * Set to 1 for a profiling session, then back to 0.
+ */
+#define PBR_PAINT_2D_STROKE_PROFILE 0
+
 /** paint_material_source.cc – ChannelSourceSampler construction and image-pool probe timing. */
 #if PBR_PAINT_DEBUG_LOG
 #  define PBR_PAINT_SOURCE_PROFILE 1

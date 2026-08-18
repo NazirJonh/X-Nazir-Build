@@ -9,6 +9,7 @@
  */
 
 #include <array>
+#include <cstdint>
 
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
@@ -29,9 +30,62 @@ namespace blender::ocio {
 class ColorSpace;
 }
 
+namespace blender::bke {
+struct PaintRuntime;
+}
+
 namespace blender::ed::sculpt_paint::material {
 
 struct TexelSampleContext;
+
+/** Which #MTex::brush_map_mode a #DirectSampleLayout was built for. */
+enum class DirectSampleKind : int8_t {
+  /** The source cannot be sampled directly; callers must fall back to the texture engine. */
+  Disabled = 0,
+  Area,
+  View,
+  Tiled,
+  Random,
+  Stencil,
+};
+
+/**
+ * Everything needed to sample one image source without #RE_texture_evaluate, resolved once per
+ * stroke (or per dab, where the mapping moves with the cursor) instead of per texel.
+ *
+ * Built by #make_direct_sample_layout, consumed by #sample_direct_layout. The Sculpt path and the
+ * Image Editor 2D path share both, so the two cannot drift apart on where a brush texture lands.
+ * #Disabled is the "not eligible" state; every consumer must keep a texture-engine fallback.
+ */
+struct DirectSampleLayout {
+  DirectSampleKind kind = DirectSampleKind::Disabled;
+  const float4x4 *local_mat = nullptr;
+  float size_x = 1.0f;
+  float size_y = 1.0f;
+  float ofs_x = 0.0f;
+  float ofs_y = 0.0f;
+  float rotation = 0.0f;
+  float invradius = 1.0f;
+  float tex_mouse_x = 0.0f;
+  float tex_mouse_y = 0.0f;
+  float stencil_pos_x = 0.0f;
+  float stencil_pos_y = 0.0f;
+  float stencil_dim_x = 1.0f;
+  float stencil_dim_y = 1.0f;
+  float sample_bias = 0.0f;
+  bool rotate = false;
+  /** Pinned source image, filled once per chunk when #kind is not Disabled. */
+  const float *float_pixels = nullptr;
+  const uchar *byte_pixels = nullptr;
+  int ibuf_x = 0;
+  int ibuf_y = 0;
+  bool wrap = false;
+  bool clip = false;
+  float eval_size_x = 1.0f;
+  float eval_size_y = 1.0f;
+  float eval_ofs_x = 0.0f;
+  float eval_ofs_y = 0.0f;
+};
 
 /**
  * Which #MTex each material paint channel samples from, and whether it is usable.
@@ -255,5 +309,42 @@ class ChannelSourceSampler {
    * #area_local_mats_ entry rather than the brush's shared local matrix. */
   const float4x4 *area_local_mat_for(int channel, const ChannelSource &source) const;
 };
+
+/**
+ * Resolve how \a source maps onto the brush for the current dab.
+ *
+ * \a paint_runtime supplies the view-relative mapping state (#tex_mouse, #pixel_radius,
+ * #brush_rotation) that #BKE_brush_sample_tex_3d reads, so a layout is only valid for the dab it
+ * was built from. \a area_local_mat is required by #MTEX_MAP_MODE_AREA and ignored otherwise.
+ *
+ * \param mtex: The mapping to plan for. Normally #ChannelSource.mtex, but the Image Editor 2D path
+ * passes its own copy with #MTex.brush_map_mode rewritten, so the layout follows the mode that
+ * will actually be sampled rather than the one stored on the brush.
+ * \return a layout whose #DirectSampleLayout.kind is #DirectSampleKind::Disabled when \a source
+ * is not eligible for direct sampling; the caller must then use the texture engine.
+ */
+DirectSampleLayout make_direct_sample_layout(const ChannelSourceSet::ChannelSource &source,
+                                             const MTex &mtex,
+                                             const bke::PaintRuntime *paint_runtime,
+                                             const Brush &brush,
+                                             const float4x4 *area_local_mat);
+
+/**
+ * Sample \a layout at a point in the space its #DirectSampleLayout.kind expects: region
+ * coordinates for View / Tiled / Random / Stencil, and object space for Area (which also needs
+ * #DirectSampleLayout.local_mat).
+ *
+ * Applies #Brush.texture_sample_bias the same way #BKE_brush_sample_tex_3d and #sculpt_apply_texture
+ * do for the respective mapping modes. Does not apply any colorspace decode: the caller owns that,
+ * so color channels can batch it.
+ *
+ * \param r_value: Optional. Intensity (image luminance) is only computed when non-null.
+ * \return false when \a layout is #DirectSampleKind::Disabled, i.e. nothing was written.
+ */
+bool sample_direct_layout(const DirectSampleLayout &layout,
+                          const float3 &symm_point,
+                          const float2 &view_point_2d,
+                          float *r_value,
+                          float4 &r_rgba);
 
 }  // namespace blender::ed::sculpt_paint::material

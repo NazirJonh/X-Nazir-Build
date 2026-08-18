@@ -13,8 +13,11 @@
 #include "BKE_brush.hh"
 
 #include "BLI_math_vector.h"
+#include "BLI_task.hh"
 
 #include "../paint_intern.hh"
+
+#include <cstring>
 
 namespace blender {
 
@@ -58,8 +61,6 @@ static void update_curve_mask(CurveMaskCache *curve_mask_cache,
   int offset = int(floorf(diameter / 2.0f));
   float clamped_radius = max_ff(radius, 0.5f);
 
-  ushort *m = curve_mask_cache->curve_mask;
-
   const int aa_samples = aa_samples_per_texel_axis(brush, radius);
   const float aa_offset = 1.0f / (2.0f * float(aa_samples));
   const float aa_step = 1.0f / float(aa_samples);
@@ -68,7 +69,7 @@ static void update_curve_mask(CurveMaskCache *curve_mask_cache,
   bpos[0] = cursor_position[0] - floorf(cursor_position[0]) + offset;
   bpos[1] = cursor_position[1] - floorf(cursor_position[1]) + offset;
 
-  float weight_factor = 65535.0f / float(aa_samples * aa_samples);
+  const float weight_factor = 65535.0f / float(aa_samples * aa_samples);
 
   if (aa_samples == 1) {
     /* When AA is disabled, snap the cursor to either the corners or centers of the pixels,
@@ -84,29 +85,33 @@ static void update_curve_mask(CurveMaskCache *curve_mask_cache,
     }
   }
 
-  for (int y = 0; y < diameter; y++) {
-    for (int x = 0; x < diameter; x++, m++) {
-      float pixel_xy[2];
-      pixel_xy[0] = float(x) + aa_offset;
-      float total_weight = 0;
+  threading::parallel_for(IndexRange(diameter), 8, [&](const IndexRange y_range) {
+    for (const int64_t y_index : y_range) {
+      const int y = int(y_index);
+      ushort *m = curve_mask_cache->curve_mask + y * diameter;
+      for (int x = 0; x < diameter; x++, m++) {
+        float pixel_xy[2];
+        pixel_xy[0] = float(x) + aa_offset;
+        float total_weight = 0;
 
-      for (int i = 0; i < aa_samples; i++) {
-        pixel_xy[1] = float(y) + aa_offset;
-        for (int j = 0; j < aa_samples; j++) {
-          const float len = len_v2v2(pixel_xy, bpos);
-          const int sample_index = min_ii((len / clamped_radius) * CurveSamplesBaseLen,
-                                          CurveSamplesLen - 1);
-          const float sample_weight = curve_mask_cache->sampled_curve[sample_index];
+        for (int i = 0; i < aa_samples; i++) {
+          pixel_xy[1] = float(y) + aa_offset;
+          for (int j = 0; j < aa_samples; j++) {
+            const float len = len_v2v2(pixel_xy, bpos);
+            const int sample_index = min_ii((len / clamped_radius) * CurveSamplesBaseLen,
+                                            CurveSamplesLen - 1);
+            const float sample_weight = curve_mask_cache->sampled_curve[sample_index];
 
-          total_weight += sample_weight;
+            total_weight += sample_weight;
 
-          pixel_xy[1] += aa_step;
+            pixel_xy[1] += aa_step;
+          }
+          pixel_xy[0] += aa_step;
         }
-        pixel_xy[0] += aa_step;
+        *m = ushort(total_weight * weight_factor);
       }
-      *m = ushort(total_weight * weight_factor);
     }
-  }
+  });
 }
 
 static bool is_sampled_curve_valid(const CurveMaskCache *curve_mask_cache, const Brush *brush)
@@ -188,6 +193,21 @@ void paint_curve_mask_cache_update(CurveMaskCache *curve_mask_cache,
     curve_mask_allocate(curve_mask_cache, diameter);
   }
   update_curve_mask(curve_mask_cache, brush, diameter, radius, cursor_position);
+}
+
+void paint_curve_mask_cache_copy(CurveMaskCache *dst, const CurveMaskCache *src)
+{
+  if (dst == nullptr || src == nullptr || src->curve_mask == nullptr || src->curve_mask_size == 0)
+  {
+    return;
+  }
+  if (dst->curve_mask_size != src->curve_mask_size) {
+    curve_mask_free(dst);
+    dst->curve_mask = static_cast<ushort *>(
+        MEM_new_uninitialized(src->curve_mask_size, __func__));
+    dst->curve_mask_size = src->curve_mask_size;
+  }
+  memcpy(dst->curve_mask, src->curve_mask, src->curve_mask_size);
 }
 
 }  // namespace blender

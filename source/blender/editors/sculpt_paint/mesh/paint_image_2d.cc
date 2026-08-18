@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -172,11 +173,32 @@ struct BrushPainter {
   bool material_alpha_masking = false;
   float material_alpha_fallback = 1.0f;
   /**
-   * Dab-pixel → sample-coordinate mapping for the shared source #MTex.
-   * View / Random / Tiled produce region coordinates (Tiled matches 3D #DirectSampleLayout);
-   * Stencil produces region coordinates for #BKE_brush_sample_tex_3d's stencil branch.
+   * Dab-pixel → sample-coordinate mapping for the shared source #MTex, built per dab in
+   * #brush_painter_2d_refresh_cache and consumed by #paint_2d_sample_channel_source.
+   *
+   * View / Random / Stencil are produced by #brush_painter_2d_tex_mapping and carry region
+   * coordinates. Tiled is built separately: its origin holds the screen-space phase `region / zoom`
+   * while `du`/`dv` stay at one dab pixel, because #BKE_brush_sample_tex_3d divides by
+   * #PaintRuntime.start_pixel_radius rather than by a zoomed radius.
    */
   BrushImbufMapping source_mapping = {};
+  /**
+   * Per-dab copies of the sampled source #MTex, remapped to the 2D mapping mode and indexed by
+   * #eMaterialPaintChannel. #BKE_brush_sample_tex_3d has no Area Plane branch (AREA would sample
+   * (0, 0) on every pixel), so the mode has to be rewritten before sampling; caching the rewrite
+   * per dab keeps a ~220 byte struct copy and the mapping-mode lookup out of the per-pixel loop.
+   *
+   * Refreshed by #paint_2d_source_mtex_2d_update alongside #source_mapping. Only the channels
+   * #paint_2d_apply_material_sources actually reads are filled; the rest stay default.
+   */
+  std::array<MTex, PAINT_MATERIAL_CHANNEL_NUM> source_mtex_2d;
+  /**
+   * Per-dab direct-sampling plan for each channel in #source_mtex_2d, shared with the Sculpt path
+   * so both agree on where a source lands. #DirectSampleKind::Disabled means this channel must go
+   * through #BKE_brush_sample_tex_3d instead.
+   */
+  std::array<ed::sculpt_paint::material::DirectSampleLayout, PAINT_MATERIAL_CHANNEL_NUM>
+      source_layouts;
 };
 
 struct ImagePaintRegion {
@@ -343,6 +365,38 @@ static bool paint_2d_channel_source_usable_2d(const BrushPainter *painter,
 }
 
 /**
+ * True when #paint_2d_apply_material_sources will actually overwrite \a rgba's RGB for the
+ * painter's active channel, so the brush-texture colorspace encode and Color tint below it
+ * must be skipped to avoid being clobbered (or, when this is false, must still run).
+ */
+static bool paint_2d_material_channel_replaces_rgb(const BrushPainter *painter)
+{
+  return painter->use_material_channel_color &&
+         paint_2d_channel_source_usable_2d(painter, painter->material_channel);
+}
+
+/**
+ * True when a byte source is already stored in the canvas encoding, so decode-to-linear then
+ * encode-to-canvas is an identity. Shared by the View Plane dab batch fill and Area Plane raster.
+ */
+static bool paint_2d_area_source_matches_canvas_encoding(
+    const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source,
+    const BrushPainterCache *cache)
+{
+  if (cache->is_data) {
+    return false;
+  }
+  if (cache->is_srgb) {
+    return source.colorspace == nullptr ||
+           IMB_colormanagement_space_is_srgb(source.colorspace);
+  }
+  if (cache->byte_colorspace != nullptr) {
+    return source.colorspace == cache->byte_colorspace;
+  }
+  return false;
+}
+
+/**
  * Shared PBR source mapping (not per-channel #source_mtex). Falls back to the sampled channel's
  * effective #MTex when the brush pointer is missing.
  */
@@ -361,10 +415,75 @@ static short paint_2d_shared_source_map_mode(const BrushPainter *painter)
 }
 
 /**
+ * Refresh #BrushPainter.source_mtex_2d for the channels the next dab will sample.
+ *
+ * The shared mapping mode is a per-stroke property, and each source #MTex only differs from its
+ * stored form by that one field, so the rewrite is hoisted here out of the per-pixel sampler.
+ * Call sites must keep this in step with #BrushPainter.source_mapping.
+ */
+static void paint_2d_source_mtex_2d_update(BrushPainter *painter)
+{
+  const eMTex_BrushMapMode map_mode = eMTex_BrushMapMode(
+      paint_2d_source_map_mode_for_2d(paint_2d_shared_source_map_mode(painter)));
+  /* Fill every usable channel so extra material painters can copy the plan instead of rebuilding
+   * it. The per-pixel sampler still only reads this painter's own channel and Alpha. */
+  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+    const eMaterialPaintChannel channel = eMaterialPaintChannel(i);
+    if (!paint_2d_channel_source_usable_2d(painter, channel)) {
+      continue;
+    }
+    MTex &mtex_2d = painter->source_mtex_2d[channel];
+    mtex_2d = dna::shallow_copy(*painter->channel_sources->source(channel).mtex);
+    mtex_2d.brush_map_mode = map_mode;
+
+    /* Plan the direct sample against the remapped #MTex, not the stored one, so the layout uses
+     * the 2D mapping mode. Area Plane never reaches this sampler, hence the null local matrix. */
+    painter->source_layouts[channel] = ed::sculpt_paint::material::make_direct_sample_layout(
+        painter->channel_sources->source(channel),
+        mtex_2d,
+        painter->paint->runtime,
+        *painter->brush,
+        nullptr);
+  }
+}
+
+static void paint_2d_painter_copy_shared_source(BrushPainter *dst, const BrushPainter *src)
+{
+  dst->source_mapping = src->source_mapping;
+  dst->tex_mapping = src->tex_mapping;
+  dst->mask_mapping = src->mask_mapping;
+  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+    dst->source_mtex_2d[i] = dna::shallow_copy(src->source_mtex_2d[i]);
+    dst->source_layouts[i] = src->source_layouts[i];
+  }
+}
+
+static const CurveMaskCache *paint_2d_matching_curve_mask(const ImagePaintState *shared_state,
+                                                          const ImagePaintTile *tile,
+                                                          const int diameter)
+{
+  if (shared_state == nullptr || shared_state->tiles == nullptr) {
+    return nullptr;
+  }
+  const size_t expected = size_t(diameter) * size_t(diameter) * sizeof(ushort);
+  for (int i = 0; i < shared_state->num_tiles; i++) {
+    const ImagePaintTile *src_tile = &shared_state->tiles[i];
+    if (src_tile->size[0] == tile->size[0] && src_tile->size[1] == tile->size[1] &&
+        src_tile->cache.curve_mask_cache.curve_mask != nullptr &&
+        src_tile->cache.curve_mask_cache.curve_mask_size == expected)
+    {
+      return &src_tile->cache.curve_mask_cache;
+    }
+  }
+  return nullptr;
+}
+
+/**
  * Sample one channel source at a dab-buffer pixel using Image Editor 2D mapping
  * (View / Tiled / Stencil / Random; Area Plane and 3D are remapped to View).
- * Tiled and Stencil receive region coordinates in \a painter->source_mapping, matching
- * #BKE_brush_sample_tex_3d / 3D #DirectSampleLayout.
+ *
+ * Reads the pre-remapped #BrushPainter.source_mtex_2d, so
+ * #paint_2d_source_mtex_2d_update must have run for \a channel this dab.
  *
  * \return Texture intensity (mask/factor). RGB is written to \a r_rgba in scene-linear for color
  * sources; Normal skips colorspace decode.
@@ -374,7 +493,8 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
                                             const int x,
                                             const int y,
                                             const int thread,
-                                            float4 &r_rgba)
+                                            float4 &r_rgba,
+                                            const bool decode_linear = true)
 {
   const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
       painter->channel_sources->source(channel);
@@ -383,28 +503,234 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
   ImagePool *pool = painter->channel_sources->pool() != nullptr ?
                         painter->channel_sources->pool() :
                         painter->pool;
-  /* #BKE_brush_sample_tex_3d has no Area Plane branch: AREA would sample (0,0) on every pixel.
-   * Copy and remap so the default shared mapping actually reads the source image. */
-  MTex mtex_2d = dna::shallow_copy(*source.mtex);
-  mtex_2d.brush_map_mode = eMTex_BrushMapMode(
-      paint_2d_source_map_mode_for_2d(paint_2d_shared_source_map_mode(painter)));
-  const float intensity = BKE_brush_sample_tex_3d(
-      painter->paint, painter->brush, &mtex_2d, texco, r_rgba, thread, pool);
+  const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
+  float intensity;
+  /* True when #BKE_brush_sample_tex_3d already ran its own decode below, which rules out the
+   * source-level decode that follows. The direct sampler never decodes. */
+  bool decoded_by_engine = false;
+
+  const ed::sculpt_paint::material::DirectSampleLayout &layout = painter->source_layouts[channel];
+  if (!ed::sculpt_paint::material::sample_direct_layout(
+          layout, float3(0.0f), float2(texco.x, texco.y), &intensity, r_rgba))
+  {
+    const MTex &mtex_2d = painter->source_mtex_2d[channel];
+    intensity = BKE_brush_sample_tex_3d(
+        painter->paint, painter->brush, &mtex_2d, texco, r_rgba, thread, pool);
+    decoded_by_engine = paint_runtime != nullptr && paint_runtime->do_linear_conversion;
+  }
 
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
   /* #BKE_brush_sample_tex_3d decodes with the brush texture's colorspace when that flag is set,
    * which is the wrong space for a per-channel source. Only apply the source's own decode when
    * that brush-level conversion did not already run. */
-  if (!is_normal && source.do_linear_conversion &&
-      (paint_runtime == nullptr || !paint_runtime->do_linear_conversion))
-  {
+  if (decode_linear && !is_normal && source.do_linear_conversion && !decoded_by_engine) {
     IMB_colormanagement_colorspace_to_scene_linear_v3(r_rgba, source.colorspace);
   }
   if (source.flip_green_channel) {
     r_rgba[1] = 1.0f - r_rgba[1];
   }
   return intensity;
+}
+
+static bool paint_2d_view_dab_material_batch_enabled(const BrushPainter *painter)
+{
+  if (!painter->use_material_channel_color || painter->channel_sources == nullptr) {
+    return false;
+  }
+  if (paint_2d_channel_source_usable_2d(painter, painter->material_channel)) {
+    return true;
+  }
+  return painter->material_alpha_masking &&
+         painter->material_channel != PAINT_MATERIAL_CHANNEL_ALPHA &&
+         paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA);
+}
+
+/**
+ * Brush dab coverage for the View Plane path. When a material channel source supplies RGB, the
+ * brush texture is still sampled for alpha but its RGB and any post-sample colorspace conversion
+ * are unused.
+ */
+static float paint_2d_view_dab_brush_coverage(const BrushPainter *painter,
+                                              const BrushImbufMapping *tex_mapping,
+                                              const MTex *mtex,
+                                              const bool is_texbrush,
+                                              const int x,
+                                              const int y,
+                                              const int thread,
+                                              ImagePool *pool,
+                                              float4 &r_brush_rgba)
+{
+  if (!is_texbrush) {
+    return 1.0f;
+  }
+  float3 texco;
+  brush_imbuf_tex_co(tex_mapping, x, y, texco);
+  BKE_brush_sample_tex_3d(
+      painter->paint, painter->brush, mtex, texco, r_brush_rgba, thread, pool);
+  return r_brush_rgba[3];
+}
+
+/**
+ * Batch fill for View Plane dabs driven by PBR channel sources.
+ *
+ * Mirrors the Area Plane strategy: sample raw texels in parallel, #decode_linear_batch once, then
+ * encode and write. Skips per-pixel OCIO and brush RGB work when the channel source replaces color.
+ */
+static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
+                                                  ImagePaintTile *tile,
+                                                  const BrushImbufMapping *tex_mapping,
+                                                  const float brush_rgb[3],
+                                                  const bool is_texbrush,
+                                                  const int x0,
+                                                  const int y0,
+                                                  const int w,
+                                                  const int h,
+                                                  ImBuf *ibuf,
+                                                  ImBuf *texibuf)
+{
+  const Brush *brush = painter->brush;
+  const MTex *brush_mtex = &brush->mtex;
+  BrushPainterCache *cache = &tile->cache;
+  ImagePool *pool = painter->pool;
+  const bool is_float = cache->is_float;
+  const int ibuf_stride = ibuf->x;
+  const int64_t pixel_num = int64_t(w) * int64_t(h);
+  if (pixel_num <= 0) {
+    return;
+  }
+
+  const eMaterialPaintChannel channel = painter->material_channel;
+  const bool channel_usable = paint_2d_channel_source_usable_2d(painter, channel);
+  const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+  const bool is_color = ELEM(channel,
+                             PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                             PAINT_MATERIAL_CHANNEL_EMISSION,
+                             PAINT_MATERIAL_CHANNEL_NORMAL);
+  const bool alpha_mask = painter->material_alpha_masking &&
+                          channel != PAINT_MATERIAL_CHANNEL_ALPHA;
+  const bool alpha_usable = alpha_mask &&
+                            paint_2d_channel_source_usable_2d(painter,
+                                                              PAINT_MATERIAL_CHANNEL_ALPHA);
+
+  Array<float3> colors(pixel_num);
+  Array<float> coverages(pixel_num);
+  Array<float> alpha_factors(pixel_num);
+
+  threading::parallel_for(IndexRange(h), 8, [&](const IndexRange y_range) {
+    const int thread = BLI_task_parallel_thread_id(nullptr);
+    float4 brush_rgba;
+    for (const int64_t y_index : y_range) {
+      const int y = y0 + int(y_index);
+      for (int x = x0; x < x0 + w; x++) {
+        const int64_t i = y_index * w + (x - x0);
+        float coverage = paint_2d_view_dab_brush_coverage(
+            painter, tex_mapping, brush_mtex, is_texbrush, x, y, thread, pool, brush_rgba);
+
+        if (channel_usable) {
+          float4 sampled;
+          const float intensity = paint_2d_sample_channel_source(
+              painter, channel, x, y, thread, sampled, false);
+          if (is_color) {
+            colors[i] = float3(sampled[0], sampled[1], sampled[2]);
+          }
+          else {
+            colors[i] = float3(intensity, intensity, intensity);
+          }
+        }
+        else {
+          colors[i] = float3(brush_rgb[0], brush_rgb[1], brush_rgb[2]);
+        }
+
+        if (alpha_usable) {
+          float4 alpha_sampled;
+          alpha_factors[i] = paint_2d_sample_channel_source(painter,
+                                                            PAINT_MATERIAL_CHANNEL_ALPHA,
+                                                            x,
+                                                            y,
+                                                            thread,
+                                                            alpha_sampled,
+                                                            false);
+        }
+        else if (alpha_mask) {
+          alpha_factors[i] = painter->material_alpha_fallback;
+        }
+
+        coverages[i] = coverage;
+      }
+    }
+  });
+
+  if (channel_usable) {
+    const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
+        painter->channel_sources->source(channel);
+    const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
+    const bool batch_decode = !is_normal && source.do_linear_conversion &&
+                              (paint_runtime == nullptr || !paint_runtime->do_linear_conversion);
+    const bool skip_colorspace = batch_decode &&
+                                 paint_2d_area_source_matches_canvas_encoding(source, cache);
+    if (batch_decode && !skip_colorspace) {
+      ed::sculpt_paint::material::ChannelSourceSampler::decode_linear_batch(colors,
+                                                                            source.colorspace);
+    }
+    /* #paint_2d_sample_channel_source already flips green per-texel above; flipping the whole
+     * array again here would cancel it back out. */
+    if (!skip_colorspace && !is_normal && !cache->is_data && !is_float &&
+        cache->byte_colorspace != nullptr)
+    {
+      IMB_colormanagement_scene_linear_to_colorspace(reinterpret_cast<float *>(colors.data()),
+                                                     w,
+                                                     h,
+                                                     3,
+                                                     cache->byte_colorspace);
+    }
+  }
+
+  uchar *ibuf_byte_data = ibuf->byte_data_for_write();
+  float *ibuf_float_data = ibuf->float_data_for_write();
+  uchar *texibuf_byte_data = texibuf != nullptr ? texibuf->byte_data_for_write() : nullptr;
+  float *texibuf_float_data = texibuf != nullptr ? texibuf->float_data_for_write() : nullptr;
+
+  threading::parallel_for(IndexRange(pixel_num), 4096, [&](const IndexRange range) {
+    for (const int64_t i : range) {
+      const int local_x = int(i % w);
+      const int local_y = int(i / w);
+      const int x = x0 + local_x;
+      const int y = y0 + local_y;
+      const int buf_idx = y * ibuf_stride + x;
+
+      float coverage = coverages[i];
+      if (alpha_mask) {
+        coverage *= math::clamp(alpha_factors[i], 0.0f, 1.0f);
+      }
+
+      float4 rgba(colors[i].x, colors[i].y, colors[i].z, coverage);
+
+      if (is_float) {
+        float *bf = ibuf_float_data + buf_idx * 4;
+        mul_v3_v3fl(bf, rgba, rgba[3]);
+        bf[3] = rgba[3];
+        if (texibuf_float_data != nullptr) {
+          copy_v4_v4(texibuf_float_data + buf_idx * 4, rgba);
+        }
+      }
+      else {
+        uchar crgba[4];
+        rgb_float_to_uchar(crgba, rgba);
+        crgba[3] = unit_float_to_uchar_clamp(rgba[3]);
+
+        ibuf_byte_data[buf_idx * 4 + 0] = crgba[0];
+        ibuf_byte_data[buf_idx * 4 + 1] = crgba[1];
+        ibuf_byte_data[buf_idx * 4 + 2] = crgba[2];
+        ibuf_byte_data[buf_idx * 4 + 3] = crgba[3];
+        if (texibuf_byte_data != nullptr) {
+          texibuf_byte_data[buf_idx * 4 + 0] = crgba[0];
+          texibuf_byte_data[buf_idx * 4 + 1] = crgba[1];
+          texibuf_byte_data[buf_idx * 4 + 2] = crgba[2];
+          texibuf_byte_data[buf_idx * 4 + 3] = crgba[3];
+        }
+      }
+    }
+  });
 }
 
 /** Replace slider RGB with the channel source (canvas colorspace), then clip coverage by Alpha. */
@@ -628,8 +954,136 @@ static void brush_painter_mask_imbuf_partial_update(BrushPainter *painter,
 }
 
 /* create imbuf with brush color */
-static ImBuf *brush_painter_imbuf_new(
-    BrushPainter *painter, ImagePaintTile *tile, const int size, float pressure, float distance)
+#if PBR_PAINT_2D_DAB_PROFILE
+/**
+ * Dab-fill totals for the current stroke, reported and reset by #paint_2d_stroke_done.
+ *
+ * Plain statics rather than atomics: dabs are issued from the main thread and the parallel work
+ * inside a dab is joined before these are touched, so there is no concurrent update.
+ */
+static double g_dab_fill_seconds = 0.0;
+static int64_t g_dab_fill_pixels = 0;
+static int g_dab_fill_calls = 0;
+#endif
+
+#if PBR_PAINT_2D_STROKE_PROFILE
+/**
+ * Cross-section of one stroke, reported and reset by #paint_2d_stroke_done.
+ *
+ * Same main-thread rule as the dab-fill counters: parallel work inside a phase is joined before
+ * these are touched.
+ */
+static double g_stroke_wall_seconds = 0.0;
+static int g_stroke_wall_calls = 0;
+static double g_stroke_single_seconds = 0.0;
+static int g_stroke_single_calls = 0;
+static double g_stroke_op_seconds = 0.0;
+static int g_stroke_op_calls = 0;
+static int64_t g_stroke_op_pixels = 0;
+static double g_stroke_dab_fill_seconds = 0.0;
+static int g_stroke_dab_fill_calls = 0;
+static int64_t g_stroke_dab_fill_pixels = 0;
+static double g_stroke_area_seconds = 0.0;
+static int g_stroke_area_calls = 0;
+static int64_t g_stroke_area_pixels = 0;
+static double g_stroke_redraw_seconds = 0.0;
+static int g_stroke_redraw_calls = 0;
+static int g_stroke_painters = 0;
+static int g_stroke_view_path_calls = 0;
+static int g_stroke_area_path_calls = 0;
+static int g_stroke_imbuf_new = 0;
+static int g_stroke_imbuf_update = 0;
+static int g_stroke_imbuf_partial = 0;
+static double g_stroke_curve_mask_seconds = 0.0;
+static int g_stroke_curve_mask_calls = 0;
+static double g_stroke_source_update_seconds = 0.0;
+static int g_stroke_source_update_calls = 0;
+static bool g_stroke_meta_logged = false;
+
+/** Scoped timer accumulating into a seconds/calls pair. */
+struct StrokePhaseTimer {
+  double *accum;
+  int *calls;
+  double start = BLI_time_now_seconds();
+
+  StrokePhaseTimer(double *accum_, int *calls_) : accum(accum_), calls(calls_) {}
+  ~StrokePhaseTimer()
+  {
+    *this->accum += BLI_time_now_seconds() - this->start;
+    (*this->calls)++;
+  }
+};
+
+static const char *paint_2d_direct_sample_kind_name(
+    const ed::sculpt_paint::material::DirectSampleKind kind)
+{
+  using Kind = ed::sculpt_paint::material::DirectSampleKind;
+  switch (kind) {
+    case Kind::Disabled:
+      return "Disabled";
+    case Kind::Area:
+      return "Area";
+    case Kind::View:
+      return "View";
+    case Kind::Tiled:
+      return "Tiled";
+    case Kind::Random:
+      return "Random";
+    case Kind::Stencil:
+      return "Stencil";
+  }
+  return "?";
+}
+
+static const char *paint_2d_map_mode_name(const short map_mode)
+{
+  switch (map_mode) {
+    case MTEX_MAP_MODE_VIEW:
+      return "view";
+    case MTEX_MAP_MODE_TILED:
+      return "tiled";
+    case MTEX_MAP_MODE_3D:
+      return "3d";
+    case MTEX_MAP_MODE_AREA:
+      return "area";
+    case MTEX_MAP_MODE_STENCIL:
+      return "stencil";
+    case MTEX_MAP_MODE_RANDOM:
+      return "random";
+  }
+  return "?";
+}
+#endif
+
+#if PBR_PAINT_2D_DAB_PROFILE || PBR_PAINT_2D_STROKE_PROFILE
+/** Scoped timer accumulating dab-fill into whichever profile counters are compiled in. */
+struct DabFillTimer {
+  double start = BLI_time_now_seconds();
+  int64_t pixels = 0;
+
+  explicit DabFillTimer(const int64_t pixel_num) : pixels(pixel_num) {}
+  ~DabFillTimer()
+  {
+    const double elapsed = BLI_time_now_seconds() - this->start;
+#if PBR_PAINT_2D_DAB_PROFILE
+    g_dab_fill_seconds += elapsed;
+    g_dab_fill_pixels += this->pixels;
+    g_dab_fill_calls++;
+#endif
+#if PBR_PAINT_2D_STROKE_PROFILE
+    g_stroke_dab_fill_seconds += elapsed;
+    g_stroke_dab_fill_pixels += this->pixels;
+    g_stroke_dab_fill_calls++;
+#endif
+  }
+};
+#endif
+
+static void brush_painter_imbuf_fill(BrushPainter *painter,
+                                     ImagePaintTile *tile,
+                                     ImBuf *ibuf,
+                                     float pressure,
+                                     float distance)
 {
   const Paint *paint = painter->paint;
   Brush *brush = painter->brush;
@@ -640,13 +1094,9 @@ static ImBuf *brush_painter_imbuf_new(
 
   const bool is_float = cache->is_float;
   const bool is_texbrush = cache->is_texbrush;
+  const int size = ibuf->x;
 
-  int x, y, thread = 0;
   float brush_rgb[3];
-
-  /* allocate image buffer */
-  ImBuf *ibuf = IMB_allocImBuf(
-      size, size, (is_float) ? ImBufFlags::FloatData : ImBufFlags::ByteData);
 
   /* get brush color */
   if (brush->image_brush_type == IMAGE_PAINT_BRUSH_TYPE_DRAW) {
@@ -674,52 +1124,83 @@ static ImBuf *brush_painter_imbuf_new(
   /* fill image buffer */
   uchar *byte_data = ibuf->byte_data_for_write();
   float *float_data = ibuf->float_data_for_write();
-  for (y = 0; y < size; y++) {
-    for (x = 0; x < size; x++) {
-      /* sample texture and multiply with brush color */
-      float3 texco;
-      float4 rgba;
+#if PBR_PAINT_2D_DAB_PROFILE || PBR_PAINT_2D_STROKE_PROFILE
+  const DabFillTimer fill_timer(int64_t(size) * int64_t(size));
+#endif
+  if (paint_2d_view_dab_material_batch_enabled(painter)) {
+    paint_2d_view_dab_fill_material_batch(painter,
+                                          tile,
+                                          &tex_mapping,
+                                          brush_rgb,
+                                          is_texbrush,
+                                          0,
+                                          0,
+                                          size,
+                                          size,
+                                          ibuf,
+                                          nullptr);
+    return;
+  }
+  /* Rows are independent: each writes its own slice of `ibuf`, and the shared #ImagePool guards
+   * its own lookups. Sampling dominates the cost, so the grain stays small. */
+  threading::parallel_for(IndexRange(size), 8, [&](const IndexRange y_range) {
+    const int thread = BLI_task_parallel_thread_id(nullptr);
+    for (const int64_t y_index : y_range) {
+      const int y = int(y_index);
+      for (int x = 0; x < size; x++) {
+        /* sample texture and multiply with brush color */
+        float3 texco;
+        float4 rgba;
 
-      if (is_texbrush) {
-        brush_imbuf_tex_co(&tex_mapping, x, y, texco);
-        const MTex *mtex = &brush->mtex;
-        BKE_brush_sample_tex_3d(painter->paint, brush, mtex, texco, rgba, thread, pool);
-        if (cache->is_srgb) {
-          IMB_colormanagement_scene_linear_to_srgb_v3(rgba, rgba);
+        if (is_texbrush) {
+          brush_imbuf_tex_co(&tex_mapping, x, y, texco);
+          const MTex *mtex = &brush->mtex;
+          BKE_brush_sample_tex_3d(painter->paint, brush, mtex, texco, rgba, thread, pool);
+          if (!paint_2d_material_channel_replaces_rgb(painter)) {
+            if (cache->is_srgb) {
+              IMB_colormanagement_scene_linear_to_srgb_v3(rgba, rgba);
+            }
+            else if (cache->byte_colorspace) {
+              IMB_colormanagement_scene_linear_to_colorspace_v3(rgba, cache->byte_colorspace);
+            }
+
+            /* Classic Image Paint tints the brush texture with Color. PBR Paint matches Sculpt:
+             * a source (or the texture itself) is the color, the Color slider does not multiply. */
+            mul_v3_v3(rgba, brush_rgb);
+          }
         }
-        else if (cache->byte_colorspace) {
-          IMB_colormanagement_scene_linear_to_colorspace_v3(rgba, cache->byte_colorspace);
+        else {
+          copy_v3_v3(rgba, brush_rgb);
+          rgba[3] = 1.0f;
         }
 
-        /* Classic Image Paint tints the brush texture with Color. PBR Paint matches Sculpt:
-         * a source (or the texture itself) is the color, the Color slider does not multiply. */
-        if (!painter->use_material_channel_color) {
-          mul_v3_v3(rgba, brush_rgb);
+        paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
+
+        if (is_float) {
+          /* write to float pixel */
+          float *dstf = float_data + (y * size + x) * 4;
+          mul_v3_v3fl(dstf, rgba, rgba[3]); /* premultiply */
+          dstf[3] = rgba[3];
         }
-      }
-      else {
-        copy_v3_v3(rgba, brush_rgb);
-        rgba[3] = 1.0f;
-      }
+        else {
+          /* write to byte pixel */
+          uchar *dst = byte_data + (y * size + x) * 4;
 
-      paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
-
-      if (is_float) {
-        /* write to float pixel */
-        float *dstf = float_data + (y * size + x) * 4;
-        mul_v3_v3fl(dstf, rgba, rgba[3]); /* premultiply */
-        dstf[3] = rgba[3];
-      }
-      else {
-        /* write to byte pixel */
-        uchar *dst = byte_data + (y * size + x) * 4;
-
-        rgb_float_to_uchar(dst, rgba);
-        dst[3] = unit_float_to_uchar_clamp(rgba[3]);
+          rgb_float_to_uchar(dst, rgba);
+          dst[3] = unit_float_to_uchar_clamp(rgba[3]);
+        }
       }
     }
-  }
+  });
+}
 
+static ImBuf *brush_painter_imbuf_new(
+    BrushPainter *painter, ImagePaintTile *tile, const int size, float pressure, float distance)
+{
+  const bool is_float = tile->cache.is_float;
+  ImBuf *ibuf = IMB_allocImBuf(
+      size, size, (is_float) ? ImBufFlags::FloatData : ImBufFlags::ByteData);
+  brush_painter_imbuf_fill(painter, tile, ibuf, pressure, distance);
   return ibuf;
 }
 
@@ -746,7 +1227,6 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
   const bool is_texbrush = cache->is_texbrush;
   const bool use_texture_old = (oldtexibuf != nullptr);
 
-  int x, y, thread = 0;
   float brush_rgb[3];
 
   ImBuf *ibuf = cache->ibuf;
@@ -784,95 +1264,122 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
    * under `use_texture_old`, so guard the access to avoid dereferencing null. */
   const uchar *oldtexibuf_byte_data = use_texture_old ? oldtexibuf->byte_data() : nullptr;
   const float *oldtexibuf_float_data = use_texture_old ? oldtexibuf->float_data() : nullptr;
-  for (y = origy; y < h; y++) {
-    for (x = origx; x < w; x++) {
-      /* sample texture and multiply with brush color */
-      float3 texco;
-      float4 rgba;
-
-      if (!use_texture_old) {
-        if (is_texbrush) {
-          brush_imbuf_tex_co(&tex_mapping, x, y, texco);
-          BKE_brush_sample_tex_3d(painter->paint, brush, mtex, texco, rgba, thread, pool);
-          if (cache->is_srgb) {
-            IMB_colormanagement_scene_linear_to_srgb_v3(rgba, rgba);
-          }
-          else if (cache->byte_colorspace) {
-            IMB_colormanagement_scene_linear_to_colorspace_v3(rgba, cache->byte_colorspace);
-          }
-
-          /* Classic Image Paint tints the brush texture with Color. PBR Paint matches Sculpt:
-           * a source (or the texture itself) is the color, the Color slider does not multiply. */
-          if (!painter->use_material_channel_color) {
-            mul_v3_v3(rgba, brush_rgb);
-          }
-        }
-        else {
-          copy_v3_v3(rgba, brush_rgb);
-          rgba[3] = 1.0f;
-        }
-
-        paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
-      }
-
-      if (is_float) {
-        /* handle float pixel */
-        float *bf = ibuf_float_data + (y * ibuf->x + x) * 4;
-        float *tf = texibuf_float_data + (y * texibuf->x + x) * 4;
-
-        /* read from old texture buffer */
-        if (use_texture_old) {
-          const float *otf = oldtexibuf_float_data +
-                             ((y - origy + yt) * oldtexibuf->x + (x - origx + xt)) * 4;
-          copy_v4_v4(rgba, otf);
-          /* Brush coverage/falloff is reused; channel sources are dab-dependent. */
-          paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
-        }
-
-        /* write to new texture buffer */
-        copy_v4_v4(tf, rgba);
-
-        /* output premultiplied float image, mf was already premultiplied */
-        mul_v3_v3fl(bf, rgba, rgba[3]);
-        bf[3] = rgba[3];
-      }
-      else {
-        uchar crgba[4];
-
-        /* handle byte pixel */
-        uchar *b = ibuf_byte_data + (y * ibuf->x + x) * 4;
-        uchar *t = texibuf_byte_data + (y * texibuf->x + x) * 4;
-
-        /* read from old texture buffer */
-        if (use_texture_old) {
-          const uchar *ot = oldtexibuf_byte_data +
-                            ((y - origy + yt) * oldtexibuf->x + (x - origx + xt)) * 4;
-          crgba[0] = ot[0];
-          crgba[1] = ot[1];
-          crgba[2] = ot[2];
-          crgba[3] = ot[3];
-          rgba_uchar_to_float(rgba, crgba);
-          paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
-          rgba_float_to_uchar(crgba, rgba);
-        }
-        else {
-          rgba_float_to_uchar(crgba, rgba);
-        }
-
-        /* write to new texture buffer */
-        t[0] = crgba[0];
-        t[1] = crgba[1];
-        t[2] = crgba[2];
-        t[3] = crgba[3];
-
-        /* write to brush image buffer */
-        b[0] = crgba[0];
-        b[1] = crgba[1];
-        b[2] = crgba[2];
-        b[3] = crgba[3];
-      }
-    }
+#if PBR_PAINT_2D_DAB_PROFILE || PBR_PAINT_2D_STROKE_PROFILE
+  const DabFillTimer fill_timer(int64_t(std::max(0, w - origx)) * int64_t(std::max(0, h - origy)));
+#endif
+  const int fill_w = std::max(0, w - origx);
+  const int fill_h = std::max(0, h - origy);
+  if (!use_texture_old && paint_2d_view_dab_material_batch_enabled(painter)) {
+    paint_2d_view_dab_fill_material_batch(painter,
+                                          tile,
+                                          &tex_mapping,
+                                          brush_rgb,
+                                          is_texbrush,
+                                          origx,
+                                          origy,
+                                          fill_w,
+                                          fill_h,
+                                          ibuf,
+                                          texibuf);
+    return;
   }
+  /* Rows are independent: each writes its own slice of `ibuf` / `texibuf`, and the shared
+   * #ImagePool guards its own lookups. Sampling dominates the cost, so the grain stays
+   * small. The empty-range case matches the original loop, which simply did not run. */
+  threading::parallel_for(
+      IndexRange(origy, fill_h), 8, [&](const IndexRange y_range) {
+        const int thread = BLI_task_parallel_thread_id(nullptr);
+        for (const int64_t y_index : y_range) {
+          const int y = int(y_index);
+          for (int x = origx; x < w; x++) {
+            /* sample texture and multiply with brush color */
+            float3 texco;
+            float4 rgba;
+
+            if (!use_texture_old) {
+              if (is_texbrush) {
+                brush_imbuf_tex_co(&tex_mapping, x, y, texco);
+                BKE_brush_sample_tex_3d(painter->paint, brush, mtex, texco, rgba, thread, pool);
+                if (!paint_2d_material_channel_replaces_rgb(painter)) {
+                  if (cache->is_srgb) {
+                    IMB_colormanagement_scene_linear_to_srgb_v3(rgba, rgba);
+                  }
+                  else if (cache->byte_colorspace) {
+                    IMB_colormanagement_scene_linear_to_colorspace_v3(rgba, cache->byte_colorspace);
+                  }
+
+                  /* Classic Image Paint tints the brush texture with Color. PBR Paint matches Sculpt:
+                   * a source (or the texture itself) is the color, the Color slider does not multiply. */
+                  mul_v3_v3(rgba, brush_rgb);
+                }
+              }
+              else {
+                copy_v3_v3(rgba, brush_rgb);
+                rgba[3] = 1.0f;
+              }
+
+              paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
+            }
+
+            if (is_float) {
+              /* handle float pixel */
+              float *bf = ibuf_float_data + (y * ibuf->x + x) * 4;
+              float *tf = texibuf_float_data + (y * texibuf->x + x) * 4;
+
+              /* read from old texture buffer */
+              if (use_texture_old) {
+                const float *otf = oldtexibuf_float_data +
+                                   ((y - origy + yt) * oldtexibuf->x + (x - origx + xt)) * 4;
+                copy_v4_v4(rgba, otf);
+                /* Brush coverage/falloff is reused; channel sources are dab-dependent. */
+                paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
+              }
+
+              /* write to new texture buffer */
+              copy_v4_v4(tf, rgba);
+
+              /* output premultiplied float image, mf was already premultiplied */
+              mul_v3_v3fl(bf, rgba, rgba[3]);
+              bf[3] = rgba[3];
+            }
+            else {
+              uchar crgba[4];
+
+              /* handle byte pixel */
+              uchar *b = ibuf_byte_data + (y * ibuf->x + x) * 4;
+              uchar *t = texibuf_byte_data + (y * texibuf->x + x) * 4;
+
+              /* read from old texture buffer */
+              if (use_texture_old) {
+                const uchar *ot = oldtexibuf_byte_data +
+                                  ((y - origy + yt) * oldtexibuf->x + (x - origx + xt)) * 4;
+                crgba[0] = ot[0];
+                crgba[1] = ot[1];
+                crgba[2] = ot[2];
+                crgba[3] = ot[3];
+                rgba_uchar_to_float(rgba, crgba);
+                paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
+                rgba_float_to_uchar(crgba, rgba);
+              }
+              else {
+                rgba_float_to_uchar(crgba, rgba);
+              }
+
+              /* write to new texture buffer */
+              t[0] = crgba[0];
+              t[1] = crgba[1];
+              t[2] = crgba[2];
+              t[3] = crgba[3];
+
+              /* write to brush image buffer */
+              b[0] = crgba[0];
+              b[1] = crgba[1];
+              b[2] = crgba[2];
+              b[3] = crgba[3];
+            }
+          }
+        }
+      });
 }
 
 /* update the brush image by trying to reuse the cached texture result. this
@@ -942,6 +1449,20 @@ static void brush_painter_imbuf_partial_update(BrushPainter *painter,
   }
 }
 
+/**
+ * Map a dab's canvas-pixel origin to Image Editor region coordinates.
+ *
+ * The Stencil overlay is drawn in region pixels (`stencil_pos`, the region rect) and
+ * #BKE_brush_sample_tex_3d expects that same space, so the Stencil basis is derived from
+ * #ED_image_point_pos__reverse: sampling it at the dab origin and at one canvas pixel along each
+ * axis makes `du`/`dv` follow the displayed image, canvas rotation included.
+ *
+ * The Tiled branch below serves the classic brush texture and stays in canvas pixels. The PBR
+ * shared source needs the screen-space phase of the overlay instead, so it builds its own Tiled
+ * mapping in #brush_painter_2d_refresh_cache and never reaches this function.
+ *
+ * \param r_mapping: Affine map from dab-buffer pixel (x, y) to sample coordinates.
+ */
 static void brush_painter_2d_tex_mapping(ImagePaintState *s,
                                          ImagePaintTile *tile,
                                          const int diameter,
@@ -1051,7 +1572,8 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
                                            const float mouse[2],
                                            float pressure,
                                            float distance,
-                                           float size)
+                                           float size,
+                                           const ImagePaintState *shared_state)
 {
   const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
   Brush *brush = painter->brush;
@@ -1074,21 +1596,56 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   const bool use_2d_channel_source =
       paint_2d_channel_source_usable_2d(painter, painter->material_channel);
-  if (painter->channel_sources != nullptr && painter->use_material_channel_color &&
-      (use_2d_channel_source ||
-       paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)))
+  const bool copy_shared_source = shared_state != nullptr && shared_state->painter != nullptr &&
+                                  painter->channel_sources != nullptr &&
+                                  painter->use_material_channel_color &&
+                                  paint_2d_matching_curve_mask(shared_state, tile, diameter) !=
+                                      nullptr;
+  if (copy_shared_source) {
+#if PBR_PAINT_2D_STROKE_PROFILE
+    const StrokePhaseTimer source_timer(&g_stroke_source_update_seconds,
+                                        &g_stroke_source_update_calls);
+#endif
+    paint_2d_painter_copy_shared_source(painter, shared_state->painter);
+  }
+  else if (painter->channel_sources != nullptr && painter->use_material_channel_color &&
+           (use_2d_channel_source ||
+            paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)))
   {
-    /* #BKE_brush_sample_tex_3d Tiled/View expect region coordinates (3D #DirectSampleLayout
-     * uses #view_point_2d). The Tiled branch of #brush_painter_2d_tex_mapping is canvas pixels
-     * for the classic brush texture; feeding those into the 3D sampler makes Tiled look like
-     * View. Map Tiled with the View rect so dab pixels are region coords, then sample as Tiled.
-     * Stencil mapping already emits region coordinates. */
+#if PBR_PAINT_2D_STROKE_PROFILE
+    const StrokePhaseTimer source_timer(&g_stroke_source_update_seconds,
+                                        &g_stroke_source_update_calls);
+#endif
     const short source_map_mode = paint_2d_source_map_mode_for_2d(
         paint_2d_shared_source_map_mode(painter));
-    const short mapping_mode = (source_map_mode == MTEX_MAP_MODE_TILED) ? MTEX_MAP_MODE_VIEW :
-                                                                          source_map_mode;
-    brush_painter_2d_tex_mapping(
-        s, tile, diameter, pos, mouse, mapping_mode, &painter->source_mapping);
+    if (source_map_mode == MTEX_MAP_MODE_TILED) {
+      /* The Tiled overlay evaluates `region / (brush_radius * zoom)`, while
+       * #BKE_brush_sample_tex_3d evaluates `texco / start_pixel_radius`. The dab center needs
+       * the screen-space phase `region / zoom`, but neighboring dab pixels are one canvas pixel
+       * apart, so their texco step is one (not `1 / zoom`). Tiled is locked to the screen-space
+       * overlay, not the rotated image canvas.
+       *
+       * The dab is sized in this tile's texels (`diameter` already carries #radius_fac) while the
+       * phase term is in tile-zero texels, so the step is divided by #radius_fac to keep both in
+       * the same units on UDIM sets that mix resolutions. */
+      float zoomx = 1.0f;
+      float zoomy = 1.0f;
+      ED_space_image_get_zoom(s->sima, s->region, &zoomx, &zoomy);
+      const float inv_zoom = 1.0f / max_ff(zoomx, zoomy);
+      const float inv_radius_fac = (tile->radius_fac > 0.0f) ? 1.0f / tile->radius_fac : 1.0f;
+      const float start = diameter * 0.5f;
+      painter->source_mapping.origin[0] = mouse[0] * inv_zoom - (start - 0.5f) * inv_radius_fac;
+      painter->source_mapping.origin[1] = mouse[1] * inv_zoom - (start - 0.5f) * inv_radius_fac;
+      painter->source_mapping.du[0] = inv_radius_fac;
+      painter->source_mapping.du[1] = 0.0f;
+      painter->source_mapping.dv[0] = 0.0f;
+      painter->source_mapping.dv[1] = inv_radius_fac;
+    }
+    else {
+      brush_painter_2d_tex_mapping(
+          s, tile, diameter, pos, mouse, source_map_mode, &painter->source_mapping);
+    }
+    paint_2d_source_mtex_2d_update(painter);
   }
   /* Source samples change with the dab; never reuse a previous buffer. */
   const bool do_source_rebuild = painter->channel_sources != nullptr &&
@@ -1107,8 +1664,10 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       do_partial_update = true;
     }
 
-    brush_painter_2d_tex_mapping(
-        s, tile, diameter, pos, mouse, brush->mtex.brush_map_mode, &painter->tex_mapping);
+    if (!copy_shared_source) {
+      brush_painter_2d_tex_mapping(
+          s, tile, diameter, pos, mouse, brush->mtex.brush_map_mode, &painter->tex_mapping);
+    }
   }
 
   if (cache->is_maskbrush) {
@@ -1149,8 +1708,22 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     }
   }
 
-  /* Re-initialize the curve mask. Mask is always recreated due to the change of position. */
-  paint_curve_mask_cache_update(&cache->curve_mask_cache, brush, diameter, size, pos);
+  /* Re-initialize the curve mask. Mask is always recreated due to the change of position.
+   * Extra material painters share the primary's rasterized mask when the dab diameter matches. */
+#if PBR_PAINT_2D_STROKE_PROFILE
+  {
+    const StrokePhaseTimer curve_timer(&g_stroke_curve_mask_seconds, &g_stroke_curve_mask_calls);
+#endif
+    const CurveMaskCache *shared_mask = paint_2d_matching_curve_mask(shared_state, tile, diameter);
+    if (shared_mask != nullptr) {
+      paint_curve_mask_cache_copy(&cache->curve_mask_cache, shared_mask);
+    }
+    else {
+      paint_curve_mask_cache_update(&cache->curve_mask_cache, brush, diameter, size, pos);
+    }
+#if PBR_PAINT_2D_STROKE_PROFILE
+  }
+#endif
 
   /* detect if we need to recreate image brush buffer */
   const bool stamp_shape_changed = diameter != cache->lastdiameter ||
@@ -1158,24 +1731,37 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
                                    update_color;
   if (stamp_shape_changed || do_source_rebuild)
   {
-    if (stamp_shape_changed && cache->ibuf) {
-      IMB_freeImBuf(cache->ibuf);
-      cache->ibuf = nullptr;
-    }
-
     if (do_partial_update) {
+      if (stamp_shape_changed && cache->ibuf) {
+        IMB_freeImBuf(cache->ibuf);
+        cache->ibuf = nullptr;
+      }
       /* do partial update of texture; material sources are resampled on the reused overlap */
       brush_painter_imbuf_partial_update(painter, tile, pos, diameter);
+#if PBR_PAINT_2D_STROKE_PROFILE
+      g_stroke_imbuf_partial++;
+#endif
     }
-    else if (do_source_rebuild && cache->ibuf != nullptr && cache->texibuf != nullptr &&
-             !stamp_shape_changed)
-    {
-      brush_painter_imbuf_update(
-          painter, tile, nullptr, 0, 0, cache->ibuf->x, cache->ibuf->y, 0, 0);
+    else if (cache->ibuf != nullptr && cache->ibuf->x == diameter && cache->ibuf->y == diameter) {
+      /* View Plane PBR sources change with the cursor, so pixels must be resampled every dab.
+       * The stamp size itself usually does not: reuse the existing #ImBuf instead of allocating
+       * a new one (the previous path required #texibuf, which #brush_painter_imbuf_new never
+       * creates, so every dab leaked the old buffer and paid a full alloc). */
+      brush_painter_imbuf_fill(painter, tile, cache->ibuf, pressure, distance);
+#if PBR_PAINT_2D_STROKE_PROFILE
+      g_stroke_imbuf_update++;
+#endif
     }
     else {
+      if (cache->ibuf) {
+        IMB_freeImBuf(cache->ibuf);
+        cache->ibuf = nullptr;
+      }
       /* create brush from scratch */
       cache->ibuf = brush_painter_imbuf_new(painter, tile, diameter, pressure, distance);
+#if PBR_PAINT_2D_STROKE_PROFILE
+      g_stroke_imbuf_new++;
+#endif
     }
 
     cache->lastdiameter = diameter;
@@ -1189,6 +1775,9 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
     if ((dx != 0) || (dy != 0)) {
       brush_painter_imbuf_partial_update(painter, tile, pos, diameter);
+#if PBR_PAINT_2D_STROKE_PROFILE
+      g_stroke_imbuf_partial++;
+#endif
     }
   }
 }
@@ -1669,6 +2258,9 @@ static int paint_2d_op(void *state,
                        const float lastpos[2],
                        const float pos[2])
 {
+#if PBR_PAINT_2D_STROKE_PROFILE
+  const StrokePhaseTimer op_timer(&g_stroke_op_seconds, &g_stroke_op_calls);
+#endif
   ImagePaintState *s = (static_cast<ImagePaintState *>(state));
   const ImagePaintSettings &image_paint_settings = s->scene->toolsettings->imapaint;
   ImBuf *clonebuf = nullptr, *frombuf;
@@ -1717,6 +2309,13 @@ static int paint_2d_op(void *state,
     paint_2d_set_region(region, bpos[0], bpos[1], 0, 0, frombuf->x, frombuf->y);
     tot = 1;
   }
+
+#if PBR_PAINT_2D_STROKE_PROFILE
+  for (int region_i = 0; region_i < tot; region_i++) {
+    g_stroke_op_pixels += int64_t(std::max(0, region[region_i].width)) *
+                          int64_t(std::max(0, region[region_i].height));
+  }
+#endif
 
   /* blend into canvas */
   for (a = 0; a < tot; a++) {
@@ -1855,7 +2454,26 @@ static bool paint_2d_use_area_plane_mesh(const BrushPainter *painter)
 
 static bool paint_2d_use_area_plane(const BrushPainter *painter)
 {
-  return painter->use_material_channel_color && paint_2d_use_area_plane_mesh(painter);
+  if (!painter->use_material_channel_color || !paint_2d_use_area_plane_mesh(painter)) {
+    return false;
+  }
+
+  if (painter->brush == nullptr) {
+    return false;
+  }
+
+  /* The mesh can also exist solely for symmetry. It must not redirect a screen-space PBR source
+   * (View, Tiled, Stencil, or Random) through the Area Plane rasterizer: those sources are sampled
+   * by the regular 2D dab path so their coordinates match the cursor overlay. */
+  if (painter->channel_sources != nullptr || painter->brush->material_paint != nullptr) {
+    return paint_2d_shared_source_map_mode(painter) == MTEX_MAP_MODE_AREA;
+  }
+
+  /* A stroke with neither channel sources nor material settings is driven by the classic brush
+   * texture alone. Without such a texture there is no screen-space mapping to preserve, so keep
+   * the Area Plane path it used before. */
+  return painter->brush->mtex.tex == nullptr ||
+         painter->brush->mtex.brush_map_mode == MTEX_MAP_MODE_AREA;
 }
 
 static void paint_2d_sample_area_mtex(
@@ -1908,30 +2526,6 @@ static void paint_2d_area_encode_canvas_rgb(const BrushPainterCache *cache,
   else if (cache->byte_colorspace) {
     IMB_colormanagement_scene_linear_to_colorspace_v3(rgb, cache->byte_colorspace);
   }
-}
-
-/**
- * True when a byte source is already stored in the canvas encoding, so decode-to-linear then
- * encode-to-canvas is an identity. The common Image Editor case is sRGB PNG onto an sRGB Base
- * Color map; skipping that roundtrip (and its extra buffers) is what fill ch0 actually spends
- * after source sampling was taken off #RE_texture_evaluate. Float canvases store scene linear
- * and never match an encoded byte source.
- */
-static bool paint_2d_area_source_matches_canvas_encoding(
-    const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source,
-    const BrushPainterCache *cache)
-{
-  if (cache->is_data) {
-    return false;
-  }
-  if (cache->is_srgb) {
-    return source.colorspace == nullptr ||
-           IMB_colormanagement_space_is_srgb(source.colorspace);
-  }
-  if (cache->byte_colorspace != nullptr) {
-    return source.colorspace == cache->byte_colorspace;
-  }
-  return false;
 }
 
 static ed::sculpt_paint::AreaPlaneFrame paint_2d_area_channel_frame(
@@ -2787,6 +3381,10 @@ static bool paint_2d_area_plane_prepare(ImagePaintState *s,
 
 static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom)
 {
+#if PBR_PAINT_2D_STROKE_PROFILE
+  const StrokePhaseTimer area_timer(&g_stroke_area_seconds, &g_stroke_area_calls);
+  int64_t area_pixels = 0;
+#endif
   BrushPainter *painter = s->painter;
   const ed::sculpt_paint::AreaPlaneMesh &mesh = *painter->area_plane_mesh;
   /* Read from the View2D rather than #SpaceImage: it is the value the display actually rotates by,
@@ -2892,6 +3490,9 @@ static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom
         raster_tri_num++;
         pixel_num += int64_t(tri_cov->pixels.size());
 #endif
+#if PBR_PAINT_2D_STROKE_PROFILE
+        area_pixels += int64_t(tri_cov->pixels.size());
+#endif
       }
     }
 
@@ -2910,6 +3511,9 @@ static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom
          coverage_seconds * 1000.0,
          ((BLI_time_now_seconds() - t0) - coverage_seconds) * 1000.0,
          (BLI_time_now_seconds() - t0) * 1000.0);
+#endif
+#if PBR_PAINT_2D_STROKE_PROFILE
+  g_stroke_area_pixels += area_pixels;
 #endif
 }
 
@@ -2979,8 +3583,12 @@ static void paint_2d_stroke_single(ImagePaintState *s,
                                    float distance,
                                    float base_size,
                                    MutableSpan<SymmetryDab> dabs,
-                                   MutableSpan<AreaPlaneDabGeom> geoms)
+                                   MutableSpan<AreaPlaneDabGeom> geoms,
+                                   const ImagePaintState *shared_state)
 {
+#if PBR_PAINT_2D_STROKE_PROFILE
+  const StrokePhaseTimer single_timer(&g_stroke_single_seconds, &g_stroke_single_calls);
+#endif
   float new_uv[2], old_uv[2];
   BrushPainter *painter = s->painter;
 
@@ -2997,6 +3605,9 @@ static void paint_2d_stroke_single(ImagePaintState *s,
   ui::view2d_region_to_view(s->v2d, prev_mval[0], prev_mval[1], &old_uv[0], &old_uv[1]);
 
   if (!eraser && paint_2d_use_area_plane(painter)) {
+#if PBR_PAINT_2D_STROKE_PROFILE
+    g_stroke_area_path_calls++;
+#endif
     const ed::sculpt_paint::AreaPlaneMesh &mesh = *painter->area_plane_mesh;
     const char symm = char(s->symmetry & PAINT_SYMM_AXIS_ALL);
     const float2 uv_new(new_uv[0], new_uv[1]);
@@ -3027,6 +3638,10 @@ static void paint_2d_stroke_single(ImagePaintState *s,
     painter->firsttouch = false;
     return;
   }
+
+#if PBR_PAINT_2D_STROKE_PROFILE
+  g_stroke_view_path_calls++;
+#endif
 
   float start_uv[2];
   ui::view2d_region_to_view(s->v2d, 0.0f, 0.0f, &start_uv[0], &start_uv[1]);
@@ -3166,7 +3781,7 @@ static void paint_2d_stroke_single(ImagePaintState *s,
                                      painter->cache_invert);
 
       brush_painter_2d_refresh_cache(
-          s, painter, tile, new_coord, iter_mval, pressure, distance, size);
+          s, painter, tile, new_coord, iter_mval, pressure, distance, size, shared_state);
 
       if (paint_2d_op(s, tile, old_coord, new_coord)) {
         tile->need_redraw = true;
@@ -3177,6 +3792,53 @@ static void paint_2d_stroke_single(ImagePaintState *s,
   painter->firsttouch = false;
 }
 
+#if PBR_PAINT_2D_STROKE_PROFILE
+/**
+ * One-shot dump of #DirectSampleLayout.kind for every usable PBR source on this stroke.
+ *
+ * Uses the mapping that the upcoming path will actually sample: Area Plane keeps AREA, View Plane
+ * remaps AREA/3D to VIEW. Cheap enough to run once at the first dab; the kind itself does not
+ * depend on cursor position.
+ */
+static void paint_2d_stroke_profile_log_layouts(const BrushPainter *painter)
+{
+  if (painter == nullptr || painter->channel_sources == nullptr) {
+    printf("[PBR-STROKE] layout: no channel_sources\n");
+    return;
+  }
+  const short raw_map = paint_2d_shared_source_map_mode(painter);
+  const eMTex_BrushMapMode layout_map = eMTex_BrushMapMode(
+      paint_2d_use_area_plane(painter) ? raw_map : paint_2d_source_map_mode_for_2d(raw_map));
+  int logged = 0;
+  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+    const eMaterialPaintChannel channel = eMaterialPaintChannel(i);
+    if (!paint_2d_channel_source_usable_2d(painter, channel)) {
+      continue;
+    }
+    MTex mtex_2d = dna::shallow_copy(*painter->channel_sources->source(channel).mtex);
+    mtex_2d.brush_map_mode = layout_map;
+    const ed::sculpt_paint::material::DirectSampleLayout layout =
+        ed::sculpt_paint::material::make_direct_sample_layout(
+            painter->channel_sources->source(channel),
+            mtex_2d,
+            painter->paint != nullptr ? painter->paint->runtime : nullptr,
+            *painter->brush,
+            nullptr);
+    printf("[PBR-STROKE] layout channel=%s kind=%s map=%s raw_map=%s ibuf=%dx%d\n",
+           BKE_paint_material_channel_info(channel).ui_name,
+           paint_2d_direct_sample_kind_name(layout.kind),
+           paint_2d_map_mode_name(layout_map),
+           paint_2d_map_mode_name(raw_map),
+           layout.ibuf_x,
+           layout.ibuf_y);
+    logged++;
+  }
+  if (logged == 0) {
+    printf("[PBR-STROKE] layout: channel_sources active but no usable image sources\n");
+  }
+}
+#endif
+
 void paint_2d_stroke(void *ps,
                      const float prev_mval[2],
                      const float mval[2],
@@ -3185,13 +3847,28 @@ void paint_2d_stroke(void *ps,
                      float distance,
                      float base_size)
 {
+#if PBR_PAINT_2D_STROKE_PROFILE
+  const StrokePhaseTimer wall_timer(&g_stroke_wall_seconds, &g_stroke_wall_calls);
+#endif
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
+#if PBR_PAINT_2D_STROKE_PROFILE
+  if (!g_stroke_meta_logged) {
+    g_stroke_meta_logged = true;
+    g_stroke_painters = 1 + s->material_extra_states_num;
+    printf("[PBR-STROKE] begin painters=%d area_plane=%d canvas=%dx%d\n",
+           g_stroke_painters,
+           int(!eraser && paint_2d_use_area_plane(s->painter)),
+           (s->tiles != nullptr && s->num_tiles > 0) ? s->tiles[0].size[0] : 0,
+           (s->tiles != nullptr && s->num_tiles > 0) ? s->tiles[0].size[1] : 0);
+    paint_2d_stroke_profile_log_layouts(s->painter);
+  }
+#endif
   /* Mirrored centers are mesh-only, so every material channel shares them; the geometry beside
    * them is sized by each state's own image and is not shared. */
   Array<SymmetryDab> dabs(AREA_PLANE_SYMMETRY_SLOTS);
   Array<AreaPlaneDabGeom> geoms(AREA_PLANE_SYMMETRY_SLOTS);
   paint_2d_stroke_single(
-      s, prev_mval, mval, eraser, pressure, distance, base_size, dabs, geoms);
+      s, prev_mval, mval, eraser, pressure, distance, base_size, dabs, geoms, nullptr);
   for (int i = 0; i < s->material_extra_states_num; i++) {
     paint_2d_stroke_single(s->material_extra_states[i],
                            prev_mval,
@@ -3201,7 +3878,8 @@ void paint_2d_stroke(void *ps,
                            distance,
                            base_size,
                            dabs,
-                           geoms);
+                           geoms,
+                           s);
   }
 }
 
@@ -3640,6 +4318,9 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
 #if PBR_PAINT_IMAGE_UPDATE_PROFILE
   const double perf_start = BLI_time_now_seconds();
 #endif
+#if PBR_PAINT_2D_STROKE_PROFILE
+  const StrokePhaseTimer redraw_timer(&g_stroke_redraw_seconds, &g_stroke_redraw_calls);
+#endif
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
 
   paint_2d_redraw_single(C, s, final);
@@ -3670,6 +4351,112 @@ void paint_2d_stroke_done(void *ps)
   s->material_extra_states_num = 0;
 
   paint_2d_stroke_done_single(s, true);
+
+#if PBR_PAINT_2D_DAB_PROFILE
+  if (g_dab_fill_calls > 0) {
+    printf("[PBR-DAB] fill total=%.3f ms calls=%d pixels=%lld (%.1f Mpx/s, %.4f ms/call)\n",
+           g_dab_fill_seconds * 1000.0,
+           g_dab_fill_calls,
+           (long long)g_dab_fill_pixels,
+           g_dab_fill_seconds > 0.0 ?
+               double(g_dab_fill_pixels) / g_dab_fill_seconds / 1000000.0 :
+               0.0,
+           g_dab_fill_seconds * 1000.0 / double(g_dab_fill_calls));
+  }
+  g_dab_fill_seconds = 0.0;
+  g_dab_fill_pixels = 0;
+  g_dab_fill_calls = 0;
+#endif
+
+#if PBR_PAINT_2D_STROKE_PROFILE
+  if (g_stroke_wall_calls > 0 || g_stroke_redraw_calls > 0) {
+    const double leftover = g_stroke_single_seconds - g_stroke_dab_fill_seconds -
+                            g_stroke_op_seconds - g_stroke_area_seconds -
+                            g_stroke_curve_mask_seconds - g_stroke_source_update_seconds;
+    const char *path = "none";
+    if (g_stroke_view_path_calls > 0 && g_stroke_area_path_calls > 0) {
+      path = "mixed";
+    }
+    else if (g_stroke_area_path_calls > 0) {
+      path = "area";
+    }
+    else if (g_stroke_view_path_calls > 0) {
+      path = "view";
+    }
+    const double dab_mpx = g_stroke_dab_fill_seconds > 0.0 ?
+                               double(g_stroke_dab_fill_pixels) / g_stroke_dab_fill_seconds /
+                                   1000000.0 :
+                               0.0;
+    const double area_mpx = g_stroke_area_seconds > 0.0 ?
+                                double(g_stroke_area_pixels) / g_stroke_area_seconds / 1000000.0 :
+                                0.0;
+    printf("[PBR-STROKE] painters=%d path=%s view_calls=%d area_calls=%d "
+           "imbuf_new=%d imbuf_update=%d imbuf_partial=%d\n",
+           g_stroke_painters,
+           path,
+           g_stroke_view_path_calls,
+           g_stroke_area_path_calls,
+           g_stroke_imbuf_new,
+           g_stroke_imbuf_update,
+           g_stroke_imbuf_partial);
+    printf("[PBR-STROKE] wall=%.3f ms calls=%d (%.3f ms/call)  single=%.3f ms leftover=%.3f ms\n",
+           g_stroke_wall_seconds * 1000.0,
+           g_stroke_wall_calls,
+           g_stroke_wall_calls > 0 ? g_stroke_wall_seconds * 1000.0 / double(g_stroke_wall_calls) :
+                                     0.0,
+           g_stroke_single_seconds * 1000.0,
+           leftover * 1000.0);
+    printf("[PBR-STROKE] curve_mask=%.3f ms calls=%d  source_update=%.3f ms calls=%d\n",
+           g_stroke_curve_mask_seconds * 1000.0,
+           g_stroke_curve_mask_calls,
+           g_stroke_source_update_seconds * 1000.0,
+           g_stroke_source_update_calls);
+    printf("[PBR-STROKE] dab_fill=%.3f ms calls=%d px=%lld (%.1f Mpx/s)\n",
+           g_stroke_dab_fill_seconds * 1000.0,
+           g_stroke_dab_fill_calls,
+           static_cast<long long>(g_stroke_dab_fill_pixels),
+           dab_mpx);
+    printf("[PBR-STROKE] blend_op=%.3f ms calls=%d px=%lld\n",
+           g_stroke_op_seconds * 1000.0,
+           g_stroke_op_calls,
+           static_cast<long long>(g_stroke_op_pixels));
+    printf("[PBR-STROKE] area_raster=%.3f ms calls=%d px=%lld (%.1f Mpx/s)\n",
+           g_stroke_area_seconds * 1000.0,
+           g_stroke_area_calls,
+           static_cast<long long>(g_stroke_area_pixels),
+           area_mpx);
+    printf("[PBR-STROKE] redraw=%.3f ms calls=%d  total=%.3f ms\n",
+           g_stroke_redraw_seconds * 1000.0,
+           g_stroke_redraw_calls,
+           (g_stroke_wall_seconds + g_stroke_redraw_seconds) * 1000.0);
+  }
+  g_stroke_wall_seconds = 0.0;
+  g_stroke_wall_calls = 0;
+  g_stroke_single_seconds = 0.0;
+  g_stroke_single_calls = 0;
+  g_stroke_op_seconds = 0.0;
+  g_stroke_op_calls = 0;
+  g_stroke_op_pixels = 0;
+  g_stroke_dab_fill_seconds = 0.0;
+  g_stroke_dab_fill_calls = 0;
+  g_stroke_dab_fill_pixels = 0;
+  g_stroke_area_seconds = 0.0;
+  g_stroke_area_calls = 0;
+  g_stroke_area_pixels = 0;
+  g_stroke_redraw_seconds = 0.0;
+  g_stroke_redraw_calls = 0;
+  g_stroke_painters = 0;
+  g_stroke_view_path_calls = 0;
+  g_stroke_area_path_calls = 0;
+  g_stroke_imbuf_new = 0;
+  g_stroke_imbuf_update = 0;
+  g_stroke_imbuf_partial = 0;
+  g_stroke_curve_mask_seconds = 0.0;
+  g_stroke_curve_mask_calls = 0;
+  g_stroke_source_update_seconds = 0.0;
+  g_stroke_source_update_calls = 0;
+  g_stroke_meta_logged = false;
+#endif
 }
 
 static void paint_2d_fill_add_pixel_byte(const int x_px,

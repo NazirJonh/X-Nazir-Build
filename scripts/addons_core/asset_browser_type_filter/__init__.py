@@ -8,10 +8,10 @@ bl_info = {
     "version": (1, 0, 0),
     "blender": (5, 2, 0),
     "location": "Asset Browser header, left of Display Mode",
-    "description": "Icon filter row for the native Asset Browser: Image/Material/Brush (ID type, "
-                   "shift = multi-select) plus Mask/Opacity-Alpha (Name Matching map types). "
-                   "Note that a plain click on a type button rewrites every data-block filter "
-                   "flag of the browser, not just the three it shows buttons for",
+    "description": "Icon filter row for the native Asset Browser: Image/Material/Brush/Node Tree "
+                   "(ID type, shift = multi-select) plus Mask/Opacity-Alpha (Name Matching map "
+                   "types). Note that a plain click on a type button rewrites every data-block "
+                   "filter flag of the browser, not just the ones it shows buttons for",
     "warning": "",
     "support": 'COMMUNITY',
     "category": "Interface",
@@ -23,9 +23,11 @@ from bpy.types import Operator
 # -------------------------------------------------------------------------
 # Two independent native filter systems are combined here:
 #
-# 1. Image/Material/Brush: FileAssetSelectParams.filter_asset_id booleans
-#    (filter_image, filter_material, filter_brush -- rna_space.cc:7778).
-#    Exclusive by default; Shift-click extends to a multi-selection.
+# 1. Image/Material/Brush/Node Tree: FileAssetSelectParams.filter_asset_id booleans
+#    (filter_image, filter_material, filter_brush, filter_node_tree -- rna_space.cc:7778).
+#    Exclusive by default; Shift-click extends to a multi-selection. Node Tree is drawn after
+#    the Mask/Alpha buttons below (still the same exclusive group for selection logic, just a
+#    later position in the row -- see ID_TYPES_BEFORE_MAP_TYPES / ID_TYPES_AFTER_MAP_TYPES).
 #
 # 2. Mask / Opacity-Alpha: these are NOT ID types, they're built-in Name
 #    Matching map-type identifiers ("MASK", "ALPHA" -- name_matching.cc:510-511),
@@ -42,9 +44,24 @@ from bpy.types import Operator
 #    toggled from the native "Name Match Filter" popover instead of from here.
 # -------------------------------------------------------------------------
 
-ID_TYPES = ("Image", "Material", "Brush")
-ID_TYPE_PROP = {"Image": "filter_image", "Material": "filter_material", "Brush": "filter_brush"}
-ID_TYPE_ICON = {"Image": 'IMAGE_DATA', "Material": 'MATERIAL_DATA', "Brush": 'BRUSH_DATA'}
+ID_TYPES = ("Image", "Material", "Brush", "Node Tree")
+ID_TYPE_PROP = {
+    "Image": "filter_image",
+    "Material": "filter_material",
+    "Brush": "filter_brush",
+    "Node Tree": "filter_node_tree",
+}
+ID_TYPE_ICON = {
+    "Image": 'IMAGE_DATA',
+    "Material": 'MATERIAL_DATA',
+    "Brush": 'BRUSH_DATA',
+    "Node Tree": 'NODETREE',
+}
+# Drawn before the Name Matching map-type buttons (Mask/Alpha).
+ID_TYPES_BEFORE_MAP_TYPES = ("Image", "Material", "Brush")
+# Drawn after them -- kept in the same exclusive ID_TYPES group for selection logic, just
+# placed later in the row.
+ID_TYPES_AFTER_MAP_TYPES = ("Node Tree",)
 
 MAP_TYPES = ("MASK", "ALPHA")
 MAP_TYPE_LABEL = {"MASK": "Mask", "ALPHA": "Opacity / Alpha"}
@@ -354,7 +371,7 @@ def draw_id_type_filter_row(layout, context):
     box = layout.box()
     row = box.row(align=False)
     row.separator()
-    for id_type in ID_TYPES:
+    for id_type in ID_TYPES_BEFORE_MAP_TYPES:
         op = row.operator(
             ASSETFILTER_OT_select_id_type.bl_idname,
             text="",
@@ -371,6 +388,15 @@ def draw_id_type_filter_row(layout, context):
             depress=(identifier in active_maps),
         )
         op.identifier = identifier
+
+    for id_type in ID_TYPES_AFTER_MAP_TYPES:
+        op = row.operator(
+            ASSETFILTER_OT_select_id_type.bl_idname,
+            text="",
+            icon=ID_TYPE_ICON[id_type],
+            depress=(id_type in depressed_ids),
+        )
+        op.id_type = id_type
     row.separator()
 
 

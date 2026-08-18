@@ -184,6 +184,10 @@ class CurvePatchSampler {
   Span<float> mask_;
   ImagePool &tex_pool_;
   float total_length_;
+  /** `radius_at(0.0f)` / `radius_at(total_length_)`, cached because a non-square endpoint's Smooth
+   * end-falloff extension reads them on every vertex, and both are curve-invariant. */
+  float start_endpoint_radius_;
+  float end_endpoint_radius_;
   float2 mtex_size_;
   float2 mtex_ofs_;
 #if CURVE_PATCH_PROFILING

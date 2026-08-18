@@ -624,6 +624,13 @@ enum eBrushCurvePatchEndFalloff : char {
   BRUSH_CURVE_PATCH_END_SMOOTH = 1,
 };
 
+/** #BrushCurvePatchSettings::{start,end}_point_shape — profile of each open curve endpoint. */
+enum eBrushCurvePatchPointShape : char {
+  BRUSH_CURVE_PATCH_POINT_SQUARE = 0,
+  BRUSH_CURVE_PATCH_POINT_ROUND = 1,
+  BRUSH_CURVE_PATCH_POINT_TRIANGLE = 2,
+};
+
 /** #BrushCurvePatchSettings::stamp_mode — one stretched sheet or discrete stamps. */
 enum eBrushCurvePatchStampMode : char {
   BRUSH_CURVE_PATCH_STAMP_RIBBON = 0,

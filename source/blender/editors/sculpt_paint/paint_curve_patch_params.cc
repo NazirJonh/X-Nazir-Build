@@ -62,6 +62,20 @@ static bke::CurvePatchEndFalloff end_falloff_from_dna(const int dna_value)
   return bke::CurvePatchEndFalloff::None;
 }
 
+static bke::CurvePatchPointShape point_shape_from_dna(const int dna_value)
+{
+  switch (eBrushCurvePatchPointShape(dna_value)) {
+    case BRUSH_CURVE_PATCH_POINT_SQUARE:
+      return bke::CurvePatchPointShape::Square;
+    case BRUSH_CURVE_PATCH_POINT_ROUND:
+      return bke::CurvePatchPointShape::Round;
+    case BRUSH_CURVE_PATCH_POINT_TRIANGLE:
+      return bke::CurvePatchPointShape::Triangle;
+  }
+  BLI_assert_unreachable();
+  return bke::CurvePatchPointShape::Square;
+}
+
 static bke::CurvePatchStampMode stamp_mode_from_dna(const int dna_value)
 {
   switch (eBrushCurvePatchStampMode(dna_value)) {
@@ -129,6 +143,8 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
   params.length_repeat = settings.length_repeat;
   params.end_falloff_mode = end_falloff_from_dna(settings.end_falloff);
   params.end_falloff_percent = settings.end_falloff_percent;
+  params.start_point_shape = point_shape_from_dna(settings.start_point_shape);
+  params.end_point_shape = point_shape_from_dna(settings.end_point_shape);
 
   params.stamp_mode = stamp_mode_from_dna(settings.stamp_mode);
   params.stamp_projection = stamp_projection_from_dna(settings.stamp_projection);

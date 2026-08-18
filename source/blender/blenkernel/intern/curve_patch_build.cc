@@ -215,6 +215,23 @@ void curve_patch_geometry_build(const Span<float3> evaluated_positions,
     curve_patch_build_stamps(params, stamp_texture_weights_cdf, r_geometry);
   }
 
+  /* Round and triangle endpoints extend beyond the control curve, unlike the square endpoint. The
+   * LUT has to cover that extension before the sampler can clip it to the requested cap shape. The
+   * builders use one margin for both sides; the sampler rejects an extension on a square endpoint.
+   */
+  const bool has_extended_endpoint = ELEM(
+      params.start_point_shape, CurvePatchPointShape::Round, CurvePatchPointShape::Triangle) ||
+                                     ELEM(params.end_point_shape,
+                                          CurvePatchPointShape::Round,
+                                          CurvePatchPointShape::Triangle);
+  if (!r_geometry.spline.cyclic && has_extended_endpoint) {
+    const float endpoint_radius = math::max(r_geometry.spline.radius_at(0.0f),
+                                            r_geometry.spline.radius_at(
+                                                r_geometry.spline.total_length())) *
+                                  params.radius;
+    r_geometry.ribbon_end_margin = math::max(r_geometry.ribbon_end_margin, endpoint_radius);
+  }
+
   /* Rebuild the ribbon UV LUT the relief action samples in place of
    * `CurvePatchSpline::closest_point()`. Gated on the spline actually carrying per-point normals
    * rather than on `surface.ready`: windowing itself only reads `spline.normals_3d` (see

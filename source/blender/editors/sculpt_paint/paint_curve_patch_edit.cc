@@ -593,6 +593,13 @@ static void curve_patch_edit_context_menu_open(bContext *C)
                     IFACE_("Falloff Length"),
                     ICON_NONE);
       }
+      PropertyRNA *start_point_shape_prop = RNA_struct_find_property(&settings_ptr,
+                                                                       "start_point_shape");
+      layout.prop_menu_enum(
+          &settings_ptr, start_point_shape_prop, IFACE_("Falloff Start Point"), ICON_NONE);
+      PropertyRNA *end_point_shape_prop = RNA_struct_find_property(&settings_ptr, "end_point_shape");
+      layout.prop_menu_enum(
+          &settings_ptr, end_point_shape_prop, IFACE_("Falloff End Point"), ICON_NONE);
     }
     layout.prop(
         &settings_ptr, "use_swap_axis", UI_ITEM_NONE, IFACE_("Swap Texture Axis"), ICON_NONE);

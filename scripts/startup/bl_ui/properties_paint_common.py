@@ -632,10 +632,19 @@ class StrokePanel(BrushPanel):
                 col.row().prop(cp, "length_mode", text="Curve Patch Length", expand=True)
                 if cp.length_mode == 'REPEAT':
                     col.prop(cp, "length_repeat", text="Repeats")
-            col.row().prop(cp, "end_falloff", text="End Falloff", expand=True)
-            sub = col.row()
-            sub.enabled = cp.end_falloff == 'SMOOTH'
-            sub.prop(cp, "end_falloff_percent", text="Falloff Length", slider=True)
+            falloff_header, falloff_panel = col.panel("curve_patch_falloff_panel", default_closed=True)
+            falloff_header.label(text="Falloff")
+            if falloff_panel:
+                falloff_panel.row().prop(cp, "end_falloff", text="End Falloff", expand=True)
+                sub = falloff_panel.row()
+                sub.enabled = cp.end_falloff == 'SMOOTH'
+                sub.prop(cp, "end_falloff_percent", text="Falloff Length", slider=True)
+                start_box = falloff_panel.box()
+                start_box.label(text="Falloff Start Point")
+                start_box.row().prop(cp, "start_point_shape", text="Shape", expand=True)
+                end_box = falloff_panel.box()
+                end_box.label(text="Falloff End Point")
+                end_box.row().prop(cp, "end_point_shape", text="Shape", expand=True)
             col.separator()
 
         # The ROLL half only matters when the Roll stroke hands off to a Curve Patch session,

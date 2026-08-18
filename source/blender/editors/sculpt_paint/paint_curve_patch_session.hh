@@ -64,6 +64,7 @@ using bke::CurvePatchFramesParams;
 using bke::CurvePatchGeometry;
 using bke::CurvePatchLengthMode;
 using bke::CurvePatchParams;
+using bke::CurvePatchPointShape;
 using bke::CurvePatchRibbonLut;
 using bke::CurvePatchSpline;
 using bke::CurvePatchStamp;

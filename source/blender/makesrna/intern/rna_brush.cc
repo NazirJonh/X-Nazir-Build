@@ -121,6 +121,25 @@ static const EnumPropertyItem rna_enum_brush_curve_patch_end_falloff_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_brush_curve_patch_point_shape_items[] = {
+    {BRUSH_CURVE_PATCH_POINT_SQUARE,
+     "SQUARE",
+     0,
+     "Square",
+     "Terminate with a straight edge perpendicular to the curve"},
+    {BRUSH_CURVE_PATCH_POINT_ROUND,
+     "ROUND",
+     0,
+     "Round",
+     "Round the two corners at the curve endpoint"},
+    {BRUSH_CURVE_PATCH_POINT_TRIANGLE,
+     "TRIANGLE",
+     0,
+     "Triangle",
+     "Taper from the curve endpoint to the full ribbon width"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_mode_items[] = {
     {BRUSH_CURVE_PATCH_STAMP_RIBBON,
      "RIBBON",
@@ -1603,6 +1622,18 @@ static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_end_falloff_items);
   RNA_def_property_ui_text(
       prop, "End Falloff", "How the relief terminates at the control curve's two ends");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "start_point_shape", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "start_point_shape");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_point_shape_items);
+  RNA_def_property_ui_text(prop, "Start Point", "Profile of the relief at the start of the curve");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "end_point_shape", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "end_point_shape");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_point_shape_items);
+  RNA_def_property_ui_text(prop, "End Point", "Profile of the relief at the end of the curve");
   RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
 
   /* Named for what it measures. The DNA field, the core parameter and the UI all call this a

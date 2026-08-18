@@ -20,6 +20,7 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
 
+#include "BLI_assert.h"
 #include "BLI_bounds_types.hh"
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
@@ -59,6 +60,8 @@ CurvePatchSampler::CurvePatchSampler(const CurvePatchItem &item,
       mask_(mask),
       tex_pool_(tex_pool),
       total_length_(item.geometry.spline.total_length()),
+      start_endpoint_radius_(item.geometry.spline.radius_at(0.0f) * item.params.radius),
+      end_endpoint_radius_(item.geometry.spline.radius_at(total_length_) * item.params.radius),
       mtex_size_(brush.mtex.size[0], brush.mtex.size[1]),
       mtex_ofs_(brush.mtex.ofs[0], brush.mtex.ofs[1])
 {
@@ -206,11 +209,61 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
     /* In-plane offset reconstructed from the ribbon's normalized across-strip coordinate; the
      * falloff formula below is unchanged. */
     const float lateral = ribbon_uv.x * lateral_scale_at_s;
-    const float radial_dist = std::sqrt(lateral * lateral + normal_dist * normal_dist);
+    /* A Round endpoint's cap is meant to read as the brush's own falloff shape wrapped around the
+     * tip, not a flat disc sliced off hard at its rim: past the endpoint, the vertex's true
+     * distance from the curve is measured from that endpoint, so the along-tangent overshoot has
+     * to join `lateral`/`normal_dist` in quadrature the same way `normal_dist` already does above,
+     * or `radial_dist` stays flat with `s` and the cap's rim -- clipped below by
+     * `endpoint_contains` -- shows up as a hard edge instead of fading out with the rest of the
+     * falloff curve. Zero on every interior sample and past a non-Round endpoint, so nothing else
+     * changes. */
+    float cap_overshoot = 0.0f;
+    if (!item.geometry.spline.cyclic) {
+      if (item.params.start_point_shape == CurvePatchPointShape::Round && s < 0.0f) {
+        cap_overshoot = -s;
+      }
+      else if (item.params.end_point_shape == CurvePatchPointShape::Round && s > total_length) {
+        cap_overshoot = s - total_length;
+      }
+    }
+    const float radial_dist = std::sqrt(lateral * lateral + normal_dist * normal_dist +
+                                        cap_overshoot * cap_overshoot);
     const float lateral_falloff = BKE_brush_curve_strength(
         &brush, radial_dist, falloff_radius_at_s);
     if (lateral_falloff <= 0.0f) {
       return std::nullopt;
+    }
+
+    /* Shape the two endpoints independently. Square stops at the control point. Round and Triangle
+     * instead add a cap OUTSIDE it: a semicircle or a taper to a point respectively. Round's actual
+     * fade to zero across that semicircle already happened above, folded into `radial_dist`; this
+     * disc test is only the matching hard bound that keeps a Round vertex out of the reach checks
+     * below once `lateral_falloff` reaches zero, not the source of its edge shape. Square and
+     * Triangle have no such falloff-side handling and still clip flat here. */
+    if (!item.geometry.spline.cyclic) {
+      const auto endpoint_contains = [&](const CurvePatchPointShape shape,
+                                         const float distance_from_endpoint) {
+        switch (shape) {
+          case CurvePatchPointShape::Square:
+            return distance_from_endpoint >= 0.0f;
+          case CurvePatchPointShape::Round:
+            return distance_from_endpoint >= 0.0f ||
+                   (distance_from_endpoint >= -falloff_radius_at_s &&
+                    distance_from_endpoint * distance_from_endpoint + lateral * lateral <=
+                        falloff_radius_at_s * falloff_radius_at_s);
+          case CurvePatchPointShape::Triangle:
+            return distance_from_endpoint >= 0.0f ||
+                   (distance_from_endpoint >= -falloff_radius_at_s &&
+                    std::abs(lateral) <= falloff_radius_at_s + distance_from_endpoint);
+        }
+        BLI_assert_unreachable();
+        return false;
+      };
+      if (!endpoint_contains(item.params.start_point_shape, s) ||
+          !endpoint_contains(item.params.end_point_shape, total_length - s))
+      {
+        return std::nullopt;
+      }
     }
 
     /* The ribbon's first/last rows sit at the curve's ends, extended outward by
@@ -239,10 +292,21 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
     {
       const float zone = float(item.params.end_falloff_percent) * 0.01f * total_length;
       if (zone > 1e-8f) {
-        /* Clamped at BOTH ends. `s` now runs slightly outside `[0, total_length]` on an extended
-         * strip, and a negative `t` would make `t * t * (3 - 2t)` return a small POSITIVE value
-         * -- a ghost of relief past the curve's end rather than the intended fade to nothing. */
-        const float t = std::clamp(std::min(s, total_length - s) / zone, 0.0f, 1.0f);
+        /* A non-square cap extends the actual relief boundary beyond its control point. Fade to
+         * that outer boundary, rather than to the control point, or Smooth would erase every cap
+         * outside the curve. Square endpoints deliberately keep the historical zero extension. */
+        const float start_extension = ELEM(item.params.start_point_shape,
+                                           CurvePatchPointShape::Round,
+                                           CurvePatchPointShape::Triangle) ?
+                                          start_endpoint_radius_ :
+                                          0.0f;
+        const float end_extension = ELEM(item.params.end_point_shape,
+                                         CurvePatchPointShape::Round,
+                                         CurvePatchPointShape::Triangle) ?
+                                        end_endpoint_radius_ :
+                                        0.0f;
+        const float t = std::clamp(
+            std::min(s + start_extension, total_length + end_extension - s) / zone, 0.0f, 1.0f);
         end_falloff = t * t * (3.0f - 2.0f * t);
       }
     }

@@ -197,9 +197,10 @@ struct BrushCurvePatchTextureSlot {
  * the split described nothing real and made the Python API address one feature through two
  * unrelated paths.
  *
- * The member order is chosen so that no explicit padding is needed: makesdna does not insert
- * alignment padding on its own (see `check_member_alignment()` in `makesdna.cc`), and the twelve
- * `char` fields sit exactly between the list's `int` and the first pointer.
+ * Makesdna does not insert alignment padding on its own (see `check_member_alignment()` in
+ * `makesdna.cc`), so `_pad[6]` sits between `end_point_shape` and `stamp_mode` below to align the
+ * following pointer-containing members to eight bytes; new `char` settings should be appended
+ * after `stamp_mode`'s group, not before the padding.
  */
 struct BrushCurvePatchSettings {
   /** STAMPS mode texture list, active only when #stamp_texture_source is
@@ -224,6 +225,10 @@ struct BrushCurvePatchSettings {
    * arc-length (RNA-clamped 0..50). The 50 ceiling keeps the two end zones from ever overlapping.
    */
   char end_falloff_percent = 10;
+  /** Profile of the relief at the start/end of an open curve. See #eBrushCurvePatchPointShape. */
+  char start_point_shape = BRUSH_CURVE_PATCH_POINT_SQUARE;
+  char end_point_shape = BRUSH_CURVE_PATCH_POINT_SQUARE;
+  char _pad[6] = {};
   /** Whether the texture is projected as one continuous stretched sheet along the curve (Ribbon,
    * the original behavior) or as discrete randomized stamps. See #eBrushCurvePatchStampMode. */
   char stamp_mode = BRUSH_CURVE_PATCH_STAMP_RIBBON;

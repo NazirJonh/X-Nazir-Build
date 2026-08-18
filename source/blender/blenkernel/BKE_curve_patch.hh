@@ -56,6 +56,12 @@ enum class CurvePatchEndFalloff : int8_t {
   Smooth = 1,
 };
 
+enum class CurvePatchPointShape : int8_t {
+  Square = 0,
+  Round = 1,
+  Triangle = 2,
+};
+
 enum class CurvePatchStampMode : int8_t {
   Ribbon = 0,
   Stamps = 1,
@@ -77,7 +83,8 @@ enum class CurvePatchStampProjection : int8_t {
  * live brush except `swap_axis` when the BRUSH itself changed):
  *   `radius`, `radius_per_size`, `plane_normal`, `stamp_seed`, `swap_axis`, `final_quality`.
  * Live from the brush on every modal poll (`operator==` triggers a re-stamp):
- *   length, end falloff, stamps mode/projection/random, spacing, jitter, texture angles.
+ *   length, endpoint falloff/shapes, stamps mode/projection/random, spacing, jitter, texture
+ *   angles.
  * Live but not in this struct (editor watchdogs on the modal): strength, Add/Subtract, mirror
  * symmetry, textures/`MTex`, color, falloff curve.
  */
@@ -95,6 +102,8 @@ struct CurvePatchParams {
   CurvePatchEndFalloff end_falloff_mode = CurvePatchEndFalloff::None;
   /** Fade length at each end, as a percentage of the curve's total arc length. */
   int end_falloff_percent = 0;
+  CurvePatchPointShape start_point_shape = CurvePatchPointShape::Square;
+  CurvePatchPointShape end_point_shape = CurvePatchPointShape::Square;
 
   CurvePatchStampMode stamp_mode = CurvePatchStampMode::Ribbon;
   /** Per-stamp randomization, as fractions in [0, 1] (the DNA fields are percentages). */

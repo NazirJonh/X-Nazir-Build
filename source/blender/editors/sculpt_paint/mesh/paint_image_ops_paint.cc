@@ -77,12 +77,19 @@ bool paint_image_viewport_fill_at_mouse(const bContext *C,
   bContext *C_mut = const_cast<bContext *>(C);
   Scene *scene = CTX_data_scene(C);
   ToolSettings *ts = scene->toolsettings;
-  /* Sculpt fill: projection paint reads imapaint.paint; sync brush pointer for one shot. */
+  /* Sculpt fill: projection paint reads imapaint.paint/mode/canvas, not the sculpt canvas
+   * (ts->paint_mode). Sync both for the duration of this one-shot stroke. */
   Brush *prev_imapaint_brush = ts->imapaint.paint.brush;
+  int prev_imapaint_mode = ts->imapaint.mode;
+  Image *prev_imapaint_canvas = ts->imapaint.canvas;
   ts->imapaint.paint.brush = brush;
+  ts->imapaint.mode = ts->paint_mode.canvas_source;
+  ts->imapaint.canvas = ts->paint_mode.canvas_image;
   void *stroke_handle = paint_proj_new_stroke(
       C_mut, ob, mouse, BrushStrokeMode::Normal, BrushSwitchMode::None);
   ts->imapaint.paint.brush = prev_imapaint_brush;
+  ts->imapaint.mode = prev_imapaint_mode;
+  ts->imapaint.canvas = prev_imapaint_canvas;
   if (stroke_handle == nullptr) {
     return false;
   }

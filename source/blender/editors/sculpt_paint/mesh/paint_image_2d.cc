@@ -2343,9 +2343,9 @@ static Image *paint_image_geometry_fill_canvas_image(const Scene *scene,
                                                      Object *ob,
                                                      const short mat_nr)
 {
-  const ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
-  if (imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
-    return imapaint.canvas;
+  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE) {
+    return paint_mode.canvas_image;
   }
 
   Material *ma = BKE_object_material_get(ob, short(mat_nr + 1));
@@ -2363,8 +2363,8 @@ static BMUVOffsets paint_image_geometry_fill_uv_offsets(BMesh *bm,
                                                         const Scene *scene,
                                                         const short mat_nr)
 {
-  const ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
-  if (imapaint.mode == IMAGEPAINT_MODE_MATERIAL) {
+  const PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
     Material *ma = BKE_object_material_get(ob, short(mat_nr + 1));
     if (ma && ma->texpaintslot && ma->paint_active_slot < ma->tot_slots) {
       const char *uvname = ma->texpaintslot[ma->paint_active_slot].uvname;

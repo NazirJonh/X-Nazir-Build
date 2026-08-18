@@ -485,6 +485,12 @@ static ImBuf *paint_selection_blend_mask_ensure(Image *image, int tile_number)
   }
 
   bke::ImageRuntime *runtime = image->runtime;
+
+  /* Multi-threaded rasterizers (e.g. the gradient tool) call this per-pixel from worker
+   * threads for the same image, so the lazy fill of #paint_selection_blend_masks below must be
+   * serialized: unguarded concurrent inserts corrupt the map / hit its `add_new` assert. */
+  std::scoped_lock lock(runtime->paint_selection_blend_masks_mutex);
+
   ImBuf **blend_ptr = runtime->paint_selection_blend_masks.lookup_ptr(tile_number);
   if (blend_ptr && *blend_ptr && (*blend_ptr)->x == binary->x && (*blend_ptr)->y == binary->y) {
     return *blend_ptr;

@@ -138,6 +138,10 @@ struct ImageRuntime {
   Map<int, ImBuf *> paint_selection_masks;
   /* Cached smooth blend weights derived from #paint_selection_masks (runtime only). */
   Map<int, ImBuf *> paint_selection_blend_masks;
+  /* Guards #paint_selection_blend_masks: lazily filled from #BKE_image_paint_selection_blend_sample_bilinear,
+   * which multi-threaded rasterizers (e.g. the gradient tool) call concurrently from worker
+   * threads for the same image. */
+  Mutex paint_selection_blend_masks_mutex;
   /** Edge compositing policy for the active selection (box=all hard, lasso/circle=feathered). */
   PaintSelectionEdgePolicy paint_selection_edge_policy;
   /**

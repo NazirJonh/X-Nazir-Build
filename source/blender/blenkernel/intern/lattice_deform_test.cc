@@ -132,3 +132,65 @@ TEST_F(LatticeDeformPerformanceTest, performance_no_dvert_10000000)
 
 }  // namespace blender::bke::tests
 #endif
+
+#include "BKE_idtype.hh"
+#include "BKE_lattice.hh"
+
+#include "DNA_curve_types.h"
+#include "DNA_lattice_types.h"
+#include "DNA_mesh_types.h"
+#include "DNA_object_types.h"
+
+#include "BLI_string.h"
+
+namespace blender::bke::tests {
+
+class LatticeDeformUpdatePointTest : public BlenderGTestBase {};
+
+TEST_F(LatticeDeformUpdatePointTest, MatchesFullRebuild)
+{
+  Lattice lattice = {dna::shallow_zero_initialize()};
+  Object ob_lattice = {dna::shallow_zero_initialize()};
+  Mesh mesh = {dna::shallow_zero_initialize()};
+  Object ob_mesh = {dna::shallow_zero_initialize()};
+
+  IDType_ID_LT.init_data(&lattice.id);
+  STRNCPY(lattice.id.name, "LTLattice");
+  IDType_ID_OB.init_data(&ob_lattice.id);
+  ob_lattice.type = OB_LATTICE;
+  ob_lattice.data = &lattice;
+  IDType_ID_OB.init_data(&ob_mesh.id);
+  IDType_ID_ME.init_data(&mesh.id);
+  ob_mesh.type = OB_MESH;
+  ob_mesh.data = &mesh;
+
+  LatticeDeformData *ldd = BKE_lattice_deform_data_create(&ob_lattice, &ob_mesh);
+  ASSERT_NE(ldd, nullptr);
+  ASSERT_NE(lattice.def, nullptr);
+
+  const int index = 0;
+  lattice.def[index].vec[0] += 0.25f;
+  lattice.def[index].vec[1] += 0.15f;
+  lattice.def[index].vec[2] -= 0.10f;
+
+  BKE_lattice_deform_data_update_point(ldd, index);
+
+  float co_update[3] = {0.0f, 0.0f, 0.0f};
+  BKE_lattice_deform_data_eval_co(ldd, co_update, 1.0f);
+
+  BKE_lattice_deform_data_destroy(ldd);
+  ldd = BKE_lattice_deform_data_create(&ob_lattice, &ob_mesh);
+  float co_rebuild[3] = {0.0f, 0.0f, 0.0f};
+  BKE_lattice_deform_data_eval_co(ldd, co_rebuild, 1.0f);
+
+  EXPECT_V3_NEAR(co_update, co_rebuild, 1e-5f);
+
+  BKE_lattice_deform_data_destroy(ldd);
+  IDType_ID_LT.free_data(&lattice.id);
+  IDType_ID_OB.free_data(&ob_lattice.id);
+  IDType_ID_OB.free_data(&ob_mesh.id);
+  IDType_ID_ME.free_data(&mesh.id);
+}
+
+}  // namespace blender::bke::tests
+

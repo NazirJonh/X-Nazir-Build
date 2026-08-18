@@ -150,6 +150,12 @@ bool sculpt_lattice_enter_deform(bContext *C, Object &ob_mesh, LatticeToolData &
     return false;
   }
 
+  if (state.deform_data != nullptr) {
+    BKE_lattice_deform_data_destroy(state.deform_data);
+    state.deform_data = nullptr;
+  }
+  state.deform_data = sculpt_lattice_deform_data_rebuild(state.lattice_ob, &ob_mesh);
+
   state.phase = Phase::Deform;
   return true;
 }

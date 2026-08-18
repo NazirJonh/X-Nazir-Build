@@ -42,6 +42,7 @@
 #include "BKE_lattice.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
+#include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 
@@ -55,8 +56,12 @@ namespace blender::ed::sculpt_paint::lattice {
 
 LatticeDeformData *sculpt_lattice_deform_data_rebuild(Object *lat_ob, Object *mesh_ob)
 {
-  /* Drop evaluated displists so deform reads live #Lattice.def (see BKE_lattice_resize). */
-  BKE_object_free_derived_caches(lat_ob);
+  /* Drop evaluated displists so deform reads live #Lattice.def (see BKE_lattice_resize).
+   * The temp cage is no-main and typically has no curve cache; skip the full derived-cache
+   * walk in that case. */
+  if (lat_ob->runtime->curve_cache) {
+    BKE_object_free_derived_caches(lat_ob);
+  }
 
   /* #Object::object_to_world() returns the runtime matrix, which is refreshed by the dependency
    * graph — not from loc/scale/rot directly. #sculpt_lattice_fit_temp_to_bounds writes only to
@@ -144,6 +149,9 @@ void sculpt_lattice_build_affected_region(const Depsgraph &depsgraph,
   ar.current_coords = {};
   ar.verts.clear();
   ar.mask = {};
+  ar.affected_pbvh_nodes.clear();
+  ar.affected_pbvh = nullptr;
+  ar.affected_pbvh_nodes_num = -1;
 
   if (!state.lattice_ob) {
     return;
@@ -196,6 +204,8 @@ void sculpt_lattice_build_affected_region(const Depsgraph &depsgraph,
 
   /* Seed the applied-position tracker with the rest snapshot: nothing is deformed yet. */
   ar.current_coords = ar.rest_coords;
+
+  sculpt_lattice_ensure_affected_nodes(depsgraph, ob_mesh, ar);
 }
 
 bool sculpt_lattice_sync_tracker_to_mesh(const Depsgraph &depsgraph,
@@ -273,55 +283,81 @@ void sculpt_lattice_deform_apply(const Depsgraph &depsgraph,
   /* `PositionDeformData` is declared in sculpt_intern.hh (full type in editors). */
   const PositionDeformData position_data(depsgraph, ob_mesh);
 
-  Array<float3> translations(ar.verts.size());
+  if (state.translations.size() != ar.verts.size()) {
+    state.translations.reinitialize(ar.verts.size());
+  }
   sculpt_lattice_compute_translations(*state.deform_data,
                                       ar.rest_coords,
                                       ar.mask,
                                       state.strength,
                                       ar.current_coords,
-                                      translations);
+                                      state.translations);
 
-  position_data.deform(translations, ar.verts);
+  position_data.deform(state.translations, ar.verts);
 
   sculpt_lattice_tag_affected_nodes(depsgraph, ob_mesh, ar);
 }
 
-void sculpt_lattice_tag_affected_nodes(const Depsgraph &depsgraph,
-                                       Object &ob_mesh,
-                                       const AffectedRegion &ar)
+void sculpt_lattice_ensure_affected_nodes(const Depsgraph &depsgraph,
+                                          Object &ob_mesh,
+                                          AffectedRegion &ar)
 {
-  if (ar.verts.is_empty()) {
-    return;
-  }
-
-  /* Tag affected PBVH nodes so normals / bounds are recomputed. */
   bke::pbvh::Tree *pbvh = sculpt_lattice_pbvh_find(ob_mesh);
-  if (pbvh == nullptr) {
+  if (pbvh == nullptr || ar.verts.is_empty()) {
+    ar.affected_pbvh_nodes.clear();
+    ar.affected_pbvh = pbvh;
+    ar.affected_pbvh_nodes_num = pbvh ? pbvh->nodes_num() : -1;
     return;
   }
 
-  /* Build a vert set for O(1) lookup, then select nodes whose verts intersect it. */
+  if (ar.affected_pbvh == pbvh && ar.affected_pbvh_nodes_num == pbvh->nodes_num()) {
+    return;
+  }
+
   const int verts_num = bke::pbvh::vert_positions_eval(depsgraph, ob_mesh).size();
   Array<bool> affected(verts_num, false);
   for (const int v : ar.verts) {
     affected[v] = true;
   }
+
   /* Filter the flat node array rather than using #bke::pbvh::search_nodes: that traversal also
    * evaluates the predicate on inner BVH nodes and prunes their whole subtree when it fails.
    * Only leaf nodes carry vertex indices, so the predicate rejects the root and the search
    * returns an empty mask — nothing is tagged and the viewport keeps drawing the pre-deform
    * positions until something else forces a full re-evaluation. */
   const Span<bke::pbvh::MeshNode> nodes = pbvh->nodes<bke::pbvh::MeshNode>();
+  ar.affected_pbvh_nodes.clear();
+  for (const int i : nodes.index_range()) {
+    for (const int nv : nodes[i].all_verts()) {
+      if (affected[nv]) {
+        ar.affected_pbvh_nodes.append(i);
+        break;
+      }
+    }
+  }
+  ar.affected_pbvh = pbvh;
+  ar.affected_pbvh_nodes_num = pbvh->nodes_num();
+}
+
+void sculpt_lattice_tag_affected_nodes(const Depsgraph &depsgraph,
+                                       Object &ob_mesh,
+                                       AffectedRegion &ar)
+{
+  if (ar.verts.is_empty()) {
+    return;
+  }
+
+  bke::pbvh::Tree *pbvh = sculpt_lattice_pbvh_find(ob_mesh);
+  if (pbvh == nullptr) {
+    return;
+  }
+
+  sculpt_lattice_ensure_affected_nodes(depsgraph, ob_mesh, ar);
+
   IndexMaskMemory memory;
-  const IndexMask node_mask = IndexMask::from_predicate(
-      nodes.index_range(), memory, [&](const int i) {
-        for (const int nv : nodes[i].all_verts()) {
-          if (affected[nv]) {
-            return true;
-          }
-        }
-        return false;
-      });
+  const IndexMask node_mask = ar.affected_pbvh_nodes.is_empty() ?
+                                  IndexMask() :
+                                  IndexMask::from_indices(ar.affected_pbvh_nodes.as_span(), memory);
   pbvh->tag_positions_changed(node_mask);
   pbvh->update_bounds(depsgraph, ob_mesh);
 }

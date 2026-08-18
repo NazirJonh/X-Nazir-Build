@@ -56,6 +56,19 @@ struct LatticeDeformData {
   float *lattice_weights;
 };
 
+static void lattice_deform_data_fill_point(float fp[3],
+                                           const float co[3],
+                                           const float fu,
+                                           const float fv,
+                                           const float fw,
+                                           const float imat[4][4])
+{
+  fp[0] = co[0] - fu;
+  fp[1] = co[1] - fv;
+  fp[2] = co[2] - fw;
+  mul_mat3_m4_v3(imat, fp);
+}
+
 LatticeDeformData *BKE_lattice_deform_data_create(const Object *oblatt, const Object *ob)
 {
   /* we make an array with all differences */
@@ -114,19 +127,13 @@ LatticeDeformData *BKE_lattice_deform_data_create(const Object *oblatt, const Ob
     for (v = 0, fv = lt->fv; v < lt->pntsv; v++, fv += lt->dv) {
       for (u = 0, fu = lt->fu; u < lt->pntsu; u++, fp += 3, fu += lt->du) {
         if (dl) {
-          fp[0] = co[0] - fu;
-          fp[1] = co[1] - fv;
-          fp[2] = co[2] - fw;
+          lattice_deform_data_fill_point(fp, co, fu, fv, fw, imat);
           co += 3;
         }
         else {
-          fp[0] = bp->vec[0] - fu;
-          fp[1] = bp->vec[1] - fv;
-          fp[2] = bp->vec[2] - fw;
+          lattice_deform_data_fill_point(fp, bp->vec, fu, fv, fw, imat);
           bp++;
         }
-
-        mul_mat3_m4_v3(imat, fp);
       }
     }
   }
@@ -274,6 +281,33 @@ void BKE_lattice_deform_data_eval_co(LatticeDeformData *lattice_deform_data,
   if (lattice_weights) {
     interp_v3_v3v3(co, co_prev, co, weight_blend);
   }
+}
+
+void BKE_lattice_deform_data_update_point(LatticeDeformData *lattice_deform_data, const int index)
+{
+  BLI_assert(lattice_deform_data);
+  BLI_assert(lattice_deform_data->latticedata);
+  const Lattice *lt = lattice_deform_data->lt;
+  BLI_assert(lt && lt->def);
+
+  const int num_points = lt->pntsu * lt->pntsv * lt->pntsw;
+  if (index < 0 || index >= num_points) {
+    BLI_assert_unreachable();
+    return;
+  }
+
+  int u, v, w;
+  BKE_lattice_index_to_uvw(lt, index, &u, &v, &w);
+
+  float imat[4][4];
+  invert_m4_m4(imat, lattice_deform_data->latmat);
+
+  lattice_deform_data_fill_point(&lattice_deform_data->latticedata[index * 3],
+                                 lt->def[index].vec,
+                                 lt->fu + float(u) * lt->du,
+                                 lt->fv + float(v) * lt->dv,
+                                 lt->fw + float(w) * lt->dw,
+                                 imat);
 }
 
 void BKE_lattice_deform_data_destroy(LatticeDeformData *lattice_deform_data)

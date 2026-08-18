@@ -76,10 +76,20 @@ const bke::pbvh::Tree *sculpt_lattice_pbvh_find(const Object &ob_mesh);
 
 /**
  * (Re)builds lattice deform data from the live #Lattice.def control points.
- * Clears stale evaluated displists so #BKE_lattice_deform_data_create does not
- * read outdated cage geometry from the draw cache.
+ * Drops derived caches only when a curve_cache exists (the no-main temp cage typically
+ * has none). Refreshes #object_to_world from loc/rot/scale.
  */
 LatticeDeformData *sculpt_lattice_deform_data_rebuild(Object *lat_ob, Object *mesh_ob);
+
+struct AffectedRegion;
+
+/**
+ * Rebuilds the cached PBVH node list for \a ar when it is missing or the tree changed.
+ * Cheap when the cache already matches the live PBVH.
+ */
+void sculpt_lattice_ensure_affected_nodes(const Depsgraph &depsgraph,
+                                          Object &ob_mesh,
+                                          AffectedRegion &ar);
 
 /**
  * Screen-space rectangle of a mouse drag on the workplane, in the plane's local XY.

@@ -29,6 +29,7 @@
 
 #include "BLI_bounds.hh"
 #include "BLI_bounds_types.hh"
+#include "BLI_index_mask.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_matrix.hh"
@@ -492,6 +493,18 @@ static void sculpt_lattice_preview_flush(bContext *C);
  * Only meaningful in #Phase::Deform — in #Phase::Placement the cage is neutral and moves nothing,
  * so callers skip it there rather than pushing an empty step per slider tick.
  */
+static void sculpt_lattice_undo_push_affected_nodes(Depsgraph &depsgraph,
+                                                    Object &ob_mesh,
+                                                    AffectedRegion &ar)
+{
+  sculpt_lattice_ensure_affected_nodes(depsgraph, ob_mesh, ar);
+  IndexMaskMemory memory;
+  const IndexMask node_mask = ar.affected_pbvh_nodes.is_empty() ?
+                                  IndexMask() :
+                                  IndexMask::from_indices(ar.affected_pbvh_nodes.as_span(), memory);
+  undo::push_nodes(depsgraph, ob_mesh, node_mask, undo::Type::Position);
+}
+
 static void sculpt_lattice_reapply_with_undo(bContext *C,
                                              Depsgraph &depsgraph,
                                              Object &ob_mesh,
@@ -506,12 +519,8 @@ static void sculpt_lattice_reapply_with_undo(bContext *C,
 
   undo::push_begin_ex(*scene, ob_mesh, undo_name);
 
-  /* Register the position nodes BEFORE the deformation, like #sculpt_lattice_slide_invoke. Pushing
-   * all leaf nodes matches the cancel path; it can be narrowed to the affected nodes later if
-   * profiling requires it. */
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*pbvh, memory);
-  undo::push_nodes(depsgraph, ob_mesh, node_mask, undo::Type::Position);
+  /* Register the position nodes BEFORE the deformation, like #sculpt_lattice_slide_invoke. */
+  sculpt_lattice_undo_push_affected_nodes(depsgraph, ob_mesh, state.current);
 
   sculpt_lattice_deform_apply(depsgraph, ob_mesh, state);
 
@@ -870,7 +879,8 @@ static wmOperatorStatus sculpt_lattice_slide_invoke(bContext *C,
   /* NOTE: the affected region (rest_coords / verts / mask) is built ONCE in
    * #sculpt_lattice_ensure_session against the original positions and is NOT rebuilt here. The
    * cage is the single deformation accumulator; rebuilding rest against the deformed mesh each
-   * drag would double-apply prior drags. Only the deform context (cage geometry) is rebuilt. */
+   * drag would double-apply prior drags. The deform context is created on enter-deform / first
+   * drag and then updated in place for the moved control point. */
 
   /* The session outlives individual operators (ADR-12), so the mesh may have been changed by
    * something else since the previous drag. Re-seed the incremental tracker, and drop the session
@@ -884,11 +894,11 @@ static wmOperatorStatus sculpt_lattice_slide_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  /* (Re)build deform context. */
-  if (state->deform_data) {
-    BKE_lattice_deform_data_destroy(state->deform_data);
+  /* Ensure a deform context exists. Subsequent MOUSEMOVE events update the dragged point in
+   * place rather than destroying and recreating the whole cache. */
+  if (!state->deform_data) {
+    state->deform_data = sculpt_lattice_deform_data_rebuild(state->lattice_ob, ob_mesh);
   }
-  state->deform_data = sculpt_lattice_deform_data_rebuild(state->lattice_ob, ob_mesh);
 
   /* Per-drag undo step (like Mesh Filter). */
   undo::push_begin(*scene, *ob_mesh, op);
@@ -896,13 +906,8 @@ static wmOperatorStatus sculpt_lattice_slide_invoke(bContext *C,
   /* Register position undo nodes BEFORE any deformation: #PositionDeformData::deform writes
    * coordinates directly and does not push undo itself, so without this the per-drag undo step
    * would be empty and Ctrl+Z could not revert the deformation. Mirrors Mesh Filter's
-   * `cache_init` (sculpt_filter_mesh.cc). Pushing all leaf nodes is correct and matches the
-   * cancel path; it can be narrowed to the affected nodes later if profiling requires it. */
-  {
-    IndexMaskMemory memory;
-    const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*pbvh, memory);
-    undo::push_nodes(*depsgraph, *ob_mesh, node_mask, undo::Type::Position);
-  }
+   * `cache_init` (sculpt_filter_mesh.cc). */
+  sculpt_lattice_undo_push_affected_nodes(*depsgraph, *ob_mesh, state->current);
 
   /* Snapshot the control point so the drag can be rolled back (see
    * #sculpt_lattice_slide_drag_cancel). */
@@ -930,9 +935,8 @@ static void sculpt_lattice_slide_update_point(bContext *C,
   /* Use the already-evaluated depsgraph (like Mesh Filter's modal), NOT
    * #CTX_data_ensure_evaluated_depsgraph: the latter forces a full synchronous graph
    * re-evaluation every MOUSEMOVE. That mid-modal re-eval thrashes the sculpt mesh / PBVH and
-   * breaks the live preview. The deform reads the live #Lattice.def directly (see
-   * #sculpt_lattice_deform_data_rebuild), so it does not need the evaluated cage at all during
-   * the drag; the cage is re-evaluated once on drag release instead. */
+   * breaks the live preview. The deform reads the live #Lattice.def directly, so it does not
+   * need the evaluated cage at all during the drag. */
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
   if (!region || !rv3d || !depsgraph) {
     return;
@@ -962,11 +966,13 @@ static void sculpt_lattice_slide_update_point(bContext *C,
    * is what makes the new control-point position appear. (Tagging a depsgraph object dirty here
    * would also discard the fast PBVH draw-buffer refresh #flush_update_step just did on the mesh.) */
 
-  /* Rebuild deform context (cage changed). */
-  if (state.deform_data) {
-    BKE_lattice_deform_data_destroy(state.deform_data);
+  /* The cage object matrix is unchanged; only this control point moved. */
+  if (!state.deform_data) {
+    state.deform_data = sculpt_lattice_deform_data_rebuild(lat_ob, &ob_mesh);
   }
-  state.deform_data = sculpt_lattice_deform_data_rebuild(lat_ob, &ob_mesh);
+  else {
+    BKE_lattice_deform_data_update_point(state.deform_data, state.pending_drag_index);
+  }
 
   if (!sculpt_lattice_pbvh_ensure(*depsgraph, ob_mesh)) {
     return;
@@ -1009,6 +1015,9 @@ static void sculpt_lattice_slide_drag_cancel(bContext *C, Object &ob_mesh, Latti
   if (state.lattice_ob && state.pending_drag_index >= 0) {
     Lattice *lt = id_cast<Lattice *>(state.lattice_ob->data);
     copy_v3_v3(lt->def[state.pending_drag_index].vec, state.drag_start_point);
+    if (state.deform_data) {
+      BKE_lattice_deform_data_update_point(state.deform_data, state.pending_drag_index);
+    }
   }
 
   if (Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C)) {
@@ -1018,14 +1027,16 @@ static void sculpt_lattice_slide_drag_cancel(bContext *C, Object &ob_mesh, Latti
     AffectedRegion &ar = state.current;
     if (sculpt_lattice_pbvh_ensure(*depsgraph, ob_mesh) && !ar.verts.is_empty()) {
       const PositionDeformData position_data(*depsgraph, ob_mesh);
-      Vector<float3> translations(ar.verts.size());
+      if (state.translations.size() != ar.verts.size()) {
+        state.translations.reinitialize(ar.verts.size());
+      }
       for (const int i : ar.verts.index_range()) {
         /* Move from the last position this tool wrote back to rest (see
          * #AffectedRegion::current_coords). */
-        translations[i] = ar.rest_coords[i] - ar.current_coords[i];
+        state.translations[i] = ar.rest_coords[i] - ar.current_coords[i];
         ar.current_coords[i] = ar.rest_coords[i];
       }
-      position_data.deform(translations, ar.verts);
+      position_data.deform(state.translations, ar.verts);
       sculpt_lattice_tag_affected_nodes(*depsgraph, ob_mesh, ar);
     }
     flush_update_step(C, UpdateType::Position);

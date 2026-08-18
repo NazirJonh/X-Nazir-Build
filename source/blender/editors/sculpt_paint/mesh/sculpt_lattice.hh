@@ -103,6 +103,16 @@ struct AffectedRegion {
   Vector<int> verts;
   /** Snapshot of mask[v] for each vert (0..1, full-protection = 1). */
   Array<float> mask;
+
+  /**
+   * PBVH leaf nodes that contain at least one of #verts. Built with the region, reused by
+   * #sculpt_lattice_tag_affected_nodes and per-drag undo. Invalidated when #affected_pbvh
+   * no longer matches the live tree (PBVH rebuilt between drags).
+   */
+  Vector<int> affected_pbvh_nodes;
+  /** Identity of the tree #affected_pbvh_nodes was built against, or null. */
+  const void *affected_pbvh = nullptr;
+  int affected_pbvh_nodes_num = -1;
 };
 
 /**
@@ -130,8 +140,14 @@ struct LatticeToolData {
   /** Snapshot of all mesh positions on session start, for Cancel (Esc). */
   Array<float3> entry_positions;
 
-  /** BKE lattice deform context, rebuilt on every MOUSEMOVE (cage changed). */
+  /**
+   * BKE lattice deform context. Rebuilt when the cage transform or resolution changes;
+   * during a control-point slide only the moved point is updated in place.
+   */
   LatticeDeformData *deform_data = nullptr;
+
+  /** Scratch buffer for #sculpt_lattice_deform_apply, reused across MOUSEMOVE. */
+  Array<float3> translations;
 
   /** Index of the BPoint currently being dragged (screen-space pick result). */
   int pending_drag_index = -1;
@@ -255,7 +271,7 @@ void sculpt_lattice_deform_apply(const Depsgraph &depsgraph,
  */
 void sculpt_lattice_tag_affected_nodes(const Depsgraph &depsgraph,
                                        Object &ob_mesh,
-                                       const AffectedRegion &ar);
+                                       AffectedRegion &ar);
 
 /**
  * Re-seeds #AffectedRegion::current_coords from the live mesh positions.

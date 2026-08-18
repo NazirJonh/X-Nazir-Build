@@ -85,6 +85,14 @@ LatticeDeformData *BKE_lattice_deform_data_create(const Object *oblatt,
 void BKE_lattice_deform_data_eval_co(LatticeDeformData *lattice_deform_data,
                                      float co[3],
                                      float weight);
+/**
+ * Refreshes one preprocessed lattice point after its #BPoint moved.
+ *
+ * The cage object matrix and the rest of #latticedata are left untouched. Reads the live
+ * #Lattice.def (not a displist cache). Vertex-group weights are unchanged by a point move and
+ * are not refreshed.
+ */
+void BKE_lattice_deform_data_update_point(LatticeDeformData *lattice_deform_data, int index);
 void BKE_lattice_deform_data_destroy(LatticeDeformData *lattice_deform_data);
 
 void BKE_lattice_deform_coords(const Object *ob_lattice,

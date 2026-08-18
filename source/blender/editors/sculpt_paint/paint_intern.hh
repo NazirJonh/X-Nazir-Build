@@ -488,11 +488,8 @@ void paint_2d_bucket_fill(const bContext *C,
  *
  * \return true if any tile was written.
  */
-bool paint_image_proj_geometry_fill(const bContext *C,
-                                    const float color[3],
-                                    Brush *br,
-                                    Object *ob,
-                                    const float mouse[2]);
+bool paint_image_proj_geometry_fill(
+    const bContext *C, const float color[3], Brush *br, Object *ob, const float mouse[2]);
 /**
  * Single-shot texture fill from 3D viewport screen coords.
  * Solid color only (v1). Geometry expand or pixel flood depending on \a brush.fill_expand.

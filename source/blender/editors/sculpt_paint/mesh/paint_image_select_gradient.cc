@@ -927,8 +927,8 @@ static void image_select_gradient_collect_affected_tiles(
 
   const bool use_selection_mask = BKE_image_paint_selection_mask_has_any(ima);
   /* Without the multi-UDIM option the gradient is confined to the tile where the drag started. The
-   * tile is stored in the session rather than derived from start_uv: moving the start handle across
-   * a UDIM boundary must not switch the canvas backup or selection mask to another tile. */
+   * tile is stored in the session rather than derived from start_uv: moving the start handle
+   * across a UDIM boundary must not switch the canvas backup or selection mask to another tile. */
   const bool multi_udim = scene && scene->toolsettings->imapaint.gradient_multi_udim;
   int active_tile_number = 1001;
   if (!multi_udim) {

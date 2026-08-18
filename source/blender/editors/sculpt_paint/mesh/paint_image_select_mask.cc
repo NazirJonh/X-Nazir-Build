@@ -153,14 +153,18 @@ static bool face_uv_tri_intersects_mask(const BMFace *efa,
   const int width = mask->x;
 
   bool found = false;
-  foreach_face_pixel(
-      efa, offsets, uv_origin, width, mask->y, [&](const int x, const int y, const bool /*strict*/) {
-        if (data[y * width + x] > threshold) {
-          found = true;
-          return false;
-        }
-        return true;
-      });
+  foreach_face_pixel(efa,
+                     offsets,
+                     uv_origin,
+                     width,
+                     mask->y,
+                     [&](const int x, const int y, const bool /*strict*/) {
+                       if (data[y * width + x] > threshold) {
+                         found = true;
+                         return false;
+                       }
+                       return true;
+                     });
   return found;
 }
 
@@ -174,11 +178,15 @@ static void rasterize_face_to_mask(const BMFace *efa,
   float *data = mask->float_data_for_write();
   const int width = mask->x;
 
-  foreach_face_pixel(
-      efa, offsets, uv_origin, width, mask->y, [&](const int x, const int y, const bool /*strict*/) {
-        data[y * width + x] = fill_value;
-        return true;
-      });
+  foreach_face_pixel(efa,
+                     offsets,
+                     uv_origin,
+                     width,
+                     mask->y,
+                     [&](const int x, const int y, const bool /*strict*/) {
+                       data[y * width + x] = fill_value;
+                       return true;
+                     });
 }
 
 /** Same image datablock, or the same file on disk (duplicate Image IDs are common). */

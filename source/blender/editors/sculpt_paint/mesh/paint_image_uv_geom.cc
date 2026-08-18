@@ -258,19 +258,15 @@ void image_paint_uv_claim_buffer_build(BMesh *bm,
     if (efa == nullptr) {
       continue;
     }
-    foreach_face_pixel(efa,
-                       offsets,
-                       uv_origin,
-                       width,
-                       height,
-                       [&](const int x, const int y, const bool strict) {
-                         const int64_t index = int64_t(y) * int64_t(width) + int64_t(x);
-                         r_claim[index] |= UV_CLAIM_FILL_INCLUSIVE;
-                         if (strict) {
-                           r_claim[index] |= UV_CLAIM_FILL_STRICT;
-                         }
-                         return true;
-                       });
+    foreach_face_pixel(
+        efa, offsets, uv_origin, width, height, [&](const int x, const int y, const bool strict) {
+          const int64_t index = int64_t(y) * int64_t(width) + int64_t(x);
+          r_claim[index] |= UV_CLAIM_FILL_INCLUSIVE;
+          if (strict) {
+            r_claim[index] |= UV_CLAIM_FILL_STRICT;
+          }
+          return true;
+        });
   }
 
   /* Bounds-reject before any per-pixel work: on a dense mesh most faces live on other
@@ -290,16 +286,16 @@ void image_paint_uv_claim_buffer_build(BMesh *bm,
     if (!BLI_rctf_isect(&tile_bounds, &face_bounds, nullptr)) {
       continue;
     }
-    foreach_face_pixel(efa,
-                       offsets,
-                       uv_origin,
-                       width,
-                       height,
-                       [&](const int x, const int y, const bool /*strict*/) {
-                         r_claim[int64_t(y) * int64_t(width) + int64_t(x)] |=
-                             UV_CLAIM_FOREIGN_INCLUSIVE;
-                         return true;
-                       });
+    foreach_face_pixel(
+        efa,
+        offsets,
+        uv_origin,
+        width,
+        height,
+        [&](const int x, const int y, const bool /*strict*/) {
+          r_claim[int64_t(y) * int64_t(width) + int64_t(x)] |= UV_CLAIM_FOREIGN_INCLUSIVE;
+          return true;
+        });
   }
 }
 
@@ -371,8 +367,7 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
   };
 
   Array<uint8_t> claim(int64_t(width) * int64_t(height));
-  image_paint_uv_claim_buffer_build(
-      bm, offsets, face_indices, uv_origin, width, height, claim);
+  image_paint_uv_claim_buffer_build(bm, offsets, face_indices, uv_origin, width, height, claim);
 
   Vector<int2> filled_pixels;
   for (int y = 0; y < height; y++) {

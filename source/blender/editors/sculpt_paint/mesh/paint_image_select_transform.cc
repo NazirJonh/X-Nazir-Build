@@ -784,8 +784,8 @@ void image_select_transform_session_end_for_takeover(bContext *C, SpaceImage *si
 
 static wmOperatorStatus image_select_transform_confirm_exec(bContext *C, wmOperator * /*op*/)
 {
-  ImageSelectTransformState *state = image_select_floating_state_require<ImageSelectTransformState>(
-      C);
+  ImageSelectTransformState *state =
+      image_select_floating_state_require<ImageSelectTransformState>(C);
   if (!state) {
     return OPERATOR_CANCELLED;
   }
@@ -822,8 +822,8 @@ static wmOperatorStatus image_select_transform_confirm_exec(bContext *C, wmOpera
 
 static wmOperatorStatus image_select_transform_cancel_exec(bContext *C, wmOperator * /*op*/)
 {
-  ImageSelectTransformState *state = image_select_floating_state_require<ImageSelectTransformState>(
-      C);
+  ImageSelectTransformState *state =
+      image_select_floating_state_require<ImageSelectTransformState>(C);
   if (!state) {
     return OPERATOR_CANCELLED;
   }

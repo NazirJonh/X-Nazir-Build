@@ -133,11 +133,8 @@ static BMesh *test_bmesh_with_uv()
  * Create a quad whose 3D positions are irrelevant and whose four loop UVs are set
  * counter-clockwise starting at (u0, v0), spanning `size` in both directions.
  */
-static BMFace *test_quad_uv(BMesh *bm,
-                            const BMUVOffsets &offsets,
-                            const float u0,
-                            const float v0,
-                            const float size)
+static BMFace *test_quad_uv(
+    BMesh *bm, const BMUVOffsets &offsets, const float u0, const float v0, const float size)
 {
   BMVert *verts[4] = {
       test_vert(bm, u0, v0),
@@ -146,8 +143,7 @@ static BMFace *test_quad_uv(BMesh *bm,
       test_vert(bm, u0, v0 + size),
   };
   BMFace *efa = BM_face_create_verts(bm, verts, 4, nullptr, BM_CREATE_NOP, true);
-  const float uvs[4][2] = {
-      {u0, v0}, {u0 + size, v0}, {u0 + size, v0 + size}, {u0, v0 + size}};
+  const float uvs[4][2] = {{u0, v0}, {u0 + size, v0}, {u0 + size, v0 + size}, {u0, v0 + size}};
   BMIter liter;
   BMLoop *l;
   int i = 0;
@@ -167,7 +163,8 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedSkipsDisconnectedFaces)
   BMesh *bm = test_bmesh();
   BMFace *fa = test_quad(
       bm, test_vert(bm, 0, 0), test_vert(bm, 1, 0), test_vert(bm, 1, 1), test_vert(bm, 0, 1));
-  test_quad(bm, test_vert(bm, 3, 0), test_vert(bm, 4, 0), test_vert(bm, 4, 1), test_vert(bm, 3, 1));
+  test_quad(
+      bm, test_vert(bm, 3, 0), test_vert(bm, 4, 0), test_vert(bm, 4, 1), test_vert(bm, 3, 1));
   BM_mesh_elem_table_ensure(bm, BM_FACE);
   const int seed[] = {BM_elem_index_get(fa)};
   Array<bool> tags(bm->totface, true);
@@ -199,7 +196,8 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedSkipsHiddenNeighbor)
   BMVert *shared = test_vert(bm, 1, 0);
   BMFace *fa = test_quad(
       bm, test_vert(bm, 0, 0), shared, test_vert(bm, 1, 1), test_vert(bm, 0, 1));
-  BMFace *fb = test_quad(bm, shared, test_vert(bm, 2, 0), test_vert(bm, 2, 1), test_vert(bm, 1, 1));
+  BMFace *fb = test_quad(
+      bm, shared, test_vert(bm, 2, 0), test_vert(bm, 2, 1), test_vert(bm, 1, 1));
   BM_elem_flag_enable(fb, BM_ELEM_HIDDEN);
   BM_mesh_elem_table_ensure(bm, BM_FACE);
   const int seed[] = {BM_elem_index_get(fa)};
@@ -260,7 +258,8 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedWithDirtyFaceIndices)
 TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedEmptySeedAndOutOfRange)
 {
   BMesh *bm = test_bmesh();
-  test_quad(bm, test_vert(bm, 0, 0), test_vert(bm, 1, 0), test_vert(bm, 1, 1), test_vert(bm, 0, 1));
+  test_quad(
+      bm, test_vert(bm, 0, 0), test_vert(bm, 1, 0), test_vert(bm, 1, 1), test_vert(bm, 0, 1));
   BM_mesh_elem_index_ensure(bm, BM_FACE);
   BM_mesh_elem_table_ensure(bm, BM_FACE);
 

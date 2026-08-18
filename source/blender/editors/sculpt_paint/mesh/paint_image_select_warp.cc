@@ -502,12 +502,12 @@ static void draw_select_warp_preview(const bContext *C, ARegion *region, void *a
     }
     else if (frag->byte_buffer.data) {
       state->preview_tex = GPU_texture_create_2d("warp_preview",
-                                                  frag->x,
-                                                  frag->y,
-                                                  1,
-                                                  gpu::TextureFormat::UNORM_8_8_8_8,
-                                                  GPU_TEXTURE_USAGE_SHADER_READ,
-                                                  nullptr);
+                                                 frag->x,
+                                                 frag->y,
+                                                 1,
+                                                 gpu::TextureFormat::UNORM_8_8_8_8,
+                                                 GPU_TEXTURE_USAGE_SHADER_READ,
+                                                 nullptr);
       GPU_texture_update(state->preview_tex, GPU_DATA_UBYTE, frag->byte_buffer.data);
     }
     state->preview_tex_source = frag;

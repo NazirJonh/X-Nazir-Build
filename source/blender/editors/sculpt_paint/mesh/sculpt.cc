@@ -5627,14 +5627,9 @@ static bool over_mesh(Depsgraph &depsgraph,
       depsgraph, vc, sd.paint, &sd, co_dummy, mval, false, check_closest, true);
 }
 
-bool sculpt_brush_uses_image_canvas(const Brush &brush,
-                                    PaintModeSettings &settings,
-                                    Object &ob)
+bool sculpt_brush_uses_image_canvas(const Brush &brush, PaintModeSettings &settings, Object &ob)
 {
-  if (!ELEM(brush.sculpt_brush_type,
-            SCULPT_BRUSH_TYPE_PAINT,
-            SCULPT_BRUSH_TYPE_TEXTURE_FILL))
-  {
+  if (!ELEM(brush.sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_TEXTURE_FILL)) {
     return false;
   }
   return SCULPT_use_image_paint_brush(settings, ob);
@@ -6042,12 +6037,8 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   if (!is_cancel && stroke_started && sculpt_brush_is_texture_fill(*brush)) {
     const Paint *paint = &sd.paint;
     const bool inverted = paint_runtime->draw_inverted;
-    paint_image_viewport_fill_at_mouse(this->evil_C,
-                                       paint,
-                                       brush,
-                                       &ob,
-                                       inverted,
-                                       ss.cache->mouse_event);
+    paint_image_viewport_fill_at_mouse(
+        this->evil_C, paint, brush, &ob, inverted, ss.cache->mouse_event);
     flush_update_step(this->vc, ob, UpdateType::Image);
   }
 

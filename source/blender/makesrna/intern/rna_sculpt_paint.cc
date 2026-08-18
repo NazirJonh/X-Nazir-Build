@@ -1667,9 +1667,7 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "selection_expand");
   RNA_def_property_enum_items(prop, selection_expand_items);
   RNA_def_property_ui_text(
-      prop,
-      "Selection Expand",
-      "How a paint selection gesture is expanded onto the UV layout");
+      prop, "Selection Expand", "How a paint selection gesture is expanded onto the UV layout");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "warp_grid_size", PROP_INT, PROP_NONE);

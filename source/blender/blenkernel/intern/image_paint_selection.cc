@@ -517,8 +517,8 @@ static float paint_selection_blend_mask_sample_imbuf(const ImBuf *blend, const i
 }
 
 float BKE_image_paint_selection_sample_mask_imbuf_bilinear(const ImBuf *mask,
-                                                            const float fx,
-                                                            const float fy)
+                                                           const float fx,
+                                                           const float fy)
 {
   if (!mask || !mask->float_buffer.data) {
     return 1.0f;

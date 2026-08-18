@@ -2247,11 +2247,8 @@ static void paint_2d_geometry_fill(const bContext *C,
  * Hit the original mesh / Edit BMesh under the 3D cursor, not the evaluated mesh.
  * Face indices then match #BM_face_at_index used by 2D fill and selection expand.
  */
-static bool paint_image_geometry_fill_raycast_orig_face(const bContext *C,
-                                                        Object *ob,
-                                                        const float mouse[2],
-                                                        int *r_face_index,
-                                                        float3 *r_hit_position)
+static bool paint_image_geometry_fill_raycast_orig_face(
+    const bContext *C, Object *ob, const float mouse[2], int *r_face_index, float3 *r_hit_position)
 {
   *r_face_index = -1;
   *r_hit_position = float3(0.0f);
@@ -2267,9 +2264,7 @@ static bool paint_image_geometry_fill_raycast_orig_face(const bContext *C,
 
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
   float ray_start[3], ray_normal[3];
-  if (!ED_view3d_win_to_ray_clipped(
-          depsgraph, region, v3d, mouse, ray_start, ray_normal, true))
-  {
+  if (!ED_view3d_win_to_ray_clipped(depsgraph, region, v3d, mouse, ray_start, ray_normal, true)) {
     return false;
   }
 
@@ -2379,11 +2374,8 @@ static BMUVOffsets paint_image_geometry_fill_uv_offsets(BMesh *bm,
   return image_paint_selection_uv_offsets_get(bm, ob, scene);
 }
 
-bool paint_image_proj_geometry_fill(const bContext *C,
-                                    const float color[3],
-                                    Brush *br,
-                                    Object *ob,
-                                    const float mouse[2])
+bool paint_image_proj_geometry_fill(
+    const bContext *C, const float color[3], Brush *br, Object *ob, const float mouse[2])
 {
   if (br == nullptr || ob == nullptr) {
     return false;

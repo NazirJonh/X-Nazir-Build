@@ -982,9 +982,9 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
          * #ut->flags for why `C` cannot be relied upon here. */
         if (C) {
           BKE_report(CTX_wm_reports(C),
-                    RPT_WARNING,
-                    "Image undo: paint data for another image was lost while finalizing this "
-                    "step (see log)");
+                     RPT_WARNING,
+                     "Image undo: paint data for another image was lost while finalizing this "
+                     "step (see log)");
         }
         for (UndoImageBuf &ubuf : uh.buffers.items_mutable()) {
           ubuf_free(&ubuf);

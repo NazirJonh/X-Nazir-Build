@@ -875,13 +875,17 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
 
     @classmethod
     def poll(cls, context):
-        # PBR Paint and PolyPaint assign textures per-channel instead of via the brush texture slot.
-        if context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}:
-            return False
         if (
                 (settings := cls.paint_settings(context)) and
                 (brush := settings.brush)
         ):
+            is_pbr_paint = (
+                context.sculpt_object and
+                brush.sculpt_brush_type == 'PAINT' and
+                context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}
+            )
+            if is_pbr_paint:
+                return False
             if context.sculpt_object or context.vertex_paint_object:
                 return True
             elif context.image_paint_object:
@@ -911,11 +915,14 @@ class VIEW3D_PT_tools_mask_texture(Panel, View3DPaintPanel, TextureMaskPanel):
 
     @classmethod
     def poll(cls, context):
-        # PBR Paint and PolyPaint assign textures per-channel instead of via the brush mask slot.
-        if context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}:
-            return False
         settings = cls.paint_settings(context)
-        return (settings and settings.brush and context.image_paint_object)
+        if not (settings and (brush := settings.brush) and context.image_paint_object):
+            return False
+        return not (
+            context.sculpt_object and
+            brush.sculpt_brush_type == 'PAINT' and
+            context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}
+        )
 
     def draw(self, context):
         layout = self.layout

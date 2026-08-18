@@ -251,52 +251,14 @@ ImagePool *ChannelSourceSet::pool() const
   return pool_;
 }
 
-enum class DirectSampleKind : int8_t {
-  Disabled = 0,
-  Area,
-  View,
-  Tiled,
-  Random,
-  Stencil,
-};
-
-struct DirectSampleLayout {
-  DirectSampleKind kind = DirectSampleKind::Disabled;
-  const float4x4 *local_mat = nullptr;
-  float size_x = 1.0f;
-  float size_y = 1.0f;
-  float ofs_x = 0.0f;
-  float ofs_y = 0.0f;
-  float rotation = 0.0f;
-  float invradius = 1.0f;
-  float tex_mouse_x = 0.0f;
-  float tex_mouse_y = 0.0f;
-  float stencil_pos_x = 0.0f;
-  float stencil_pos_y = 0.0f;
-  float stencil_dim_x = 1.0f;
-  float stencil_dim_y = 1.0f;
-  float sample_bias = 0.0f;
-  bool rotate = false;
-  /** Pinned source image, filled once per chunk when #kind is not Disabled. */
-  const float *float_pixels = nullptr;
-  const uchar *byte_pixels = nullptr;
-  int ibuf_x = 0;
-  int ibuf_y = 0;
-  bool wrap = false;
-  bool clip = false;
-  float eval_size_x = 1.0f;
-  float eval_size_y = 1.0f;
-  float eval_ofs_x = 0.0f;
-  float eval_ofs_y = 0.0f;
-};
-
 static void attach_direct_sample_image(DirectSampleLayout &layout,
-                                       const ChannelSourceSet::ChannelSource &source)
+                                       const ChannelSourceSet::ChannelSource &source,
+                                       const MTex &mtex)
 {
   if (layout.kind == DirectSampleKind::Disabled) {
     return;
   }
-  if (source.ibuf == nullptr || source.mtex == nullptr || source.mtex->tex == nullptr) {
+  if (source.ibuf == nullptr || mtex.tex == nullptr) {
     layout.kind = DirectSampleKind::Disabled;
     return;
   }
@@ -313,26 +275,26 @@ static void attach_direct_sample_image(DirectSampleLayout &layout,
   }
   layout.ibuf_x = ibuf->x;
   layout.ibuf_y = ibuf->y;
-  const Tex *tex = source.mtex->tex;
+  const Tex *tex = mtex.tex;
   layout.wrap = tex->extend == TEX_REPEAT;
   layout.clip = tex->extend == TEX_CLIP;
-  layout.eval_size_x = source.mtex->size[0];
-  layout.eval_size_y = source.mtex->size[1];
-  layout.eval_ofs_x = source.mtex->ofs[0];
-  layout.eval_ofs_y = source.mtex->ofs[1];
+  layout.eval_size_x = mtex.size[0];
+  layout.eval_size_y = mtex.size[1];
+  layout.eval_ofs_x = mtex.ofs[0];
+  layout.eval_ofs_y = mtex.ofs[1];
 }
 
-static DirectSampleLayout make_direct_sample_layout(const ChannelSourceSet::ChannelSource &source,
-                                                    const SculptSession &ss,
-                                                    const Brush &brush,
-                                                    const float4x4 *area_local_mat)
+DirectSampleLayout make_direct_sample_layout(const ChannelSourceSet::ChannelSource &source,
+                                             const MTex &mtex,
+                                             const bke::PaintRuntime *paint_runtime,
+                                             const Brush &brush,
+                                             const float4x4 *area_local_mat)
 {
   DirectSampleLayout layout;
-  if (!source.image_direct_sample || source.mtex == nullptr || ss.cache == nullptr) {
+  if (!source.image_direct_sample) {
     return layout;
   }
 
-  const MTex &mtex = *source.mtex;
   layout.size_x = mtex.size[0];
   layout.size_y = mtex.size[1];
   layout.ofs_x = mtex.ofs[0];
@@ -340,8 +302,11 @@ static DirectSampleLayout make_direct_sample_layout(const ChannelSourceSet::Chan
   layout.sample_bias = brush.texture_sample_bias;
 
   if (mtex.brush_map_mode == MTEX_MAP_MODE_AREA) {
+    if (area_local_mat == nullptr) {
+      return layout;
+    }
     layout.kind = DirectSampleKind::Area;
-    layout.local_mat = area_local_mat != nullptr ? area_local_mat : &ss.cache->brush_local_mat;
+    layout.local_mat = area_local_mat;
   }
   else if (mtex.brush_map_mode == MTEX_MAP_MODE_3D) {
     return layout;
@@ -356,9 +321,6 @@ static DirectSampleLayout make_direct_sample_layout(const ChannelSourceSet::Chan
     layout.stencil_dim_y = brush.stencil_dimension[1];
   }
   else {
-    const bke::PaintRuntime *paint_runtime = ss.cache->paint != nullptr ?
-                                                 ss.cache->paint->runtime :
-                                                 nullptr;
     if (paint_runtime == nullptr) {
       return layout;
     }
@@ -387,7 +349,7 @@ static DirectSampleLayout make_direct_sample_layout(const ChannelSourceSet::Chan
     layout.rotate = layout.rotation > 0.001f || layout.rotation < -0.001f;
   }
 
-  attach_direct_sample_image(layout, source);
+  attach_direct_sample_image(layout, source, mtex);
   return layout;
 }
 
@@ -455,10 +417,34 @@ static bool sample_layout_image(const DirectSampleLayout &layout,
   return true;
 }
 
-static bool sample_with_direct_layout(const DirectSampleLayout &layout,
-                                      const TexelSampleContext &ctx,
-                                      float *r_value,
-                                      float4 &r_rgba)
+/**
+ * #make_direct_sample_layout for the Sculpt path, which reaches the mapping state through the
+ * stroke cache and defaults #MTEX_MAP_MODE_AREA to the brush's shared local matrix.
+ */
+static DirectSampleLayout make_direct_sample_layout_sculpt(
+    const ChannelSourceSet::ChannelSource &source,
+    const SculptSession &ss,
+    const Brush &brush,
+    const float4x4 *area_local_mat)
+{
+  if (ss.cache == nullptr || source.mtex == nullptr) {
+    return {};
+  }
+  const bke::PaintRuntime *paint_runtime = ss.cache->paint != nullptr ? ss.cache->paint->runtime :
+                                                                       nullptr;
+  return make_direct_sample_layout(
+      source,
+      *source.mtex,
+      paint_runtime,
+      brush,
+      area_local_mat != nullptr ? area_local_mat : &ss.cache->brush_local_mat);
+}
+
+bool sample_direct_layout(const DirectSampleLayout &layout,
+                          const float3 &symm_point,
+                          const float2 &view_point_2d,
+                          float *r_value,
+                          float4 &r_rgba)
 {
   float tex_x = 0.0f;
   float tex_y = 0.0f;
@@ -467,15 +453,15 @@ static bool sample_with_direct_layout(const DirectSampleLayout &layout,
       return false;
     }
     case DirectSampleKind::Area: {
-      float3 point = ctx.symm_point;
+      float3 point = symm_point;
       mul_m4_v3(layout.local_mat->ptr(), point);
       tex_x = point.x * layout.size_x + layout.ofs_x;
       tex_y = point.y * layout.size_y + layout.ofs_y;
       break;
     }
     case DirectSampleKind::Stencil: {
-      float x = ctx.view_point_2d[0] - layout.stencil_pos_x;
-      float y = ctx.view_point_2d[1] - layout.stencil_pos_y;
+      float x = view_point_2d[0] - layout.stencil_pos_x;
+      float y = view_point_2d[1] - layout.stencil_pos_y;
       apply_direct_sample_rotation(layout, x, y);
       if (fabsf(x) > layout.stencil_dim_x || fabsf(y) > layout.stencil_dim_y) {
         zero_v4(r_rgba);
@@ -490,16 +476,16 @@ static bool sample_with_direct_layout(const DirectSampleLayout &layout,
     }
     case DirectSampleKind::View:
     case DirectSampleKind::Random: {
-      float x = (ctx.view_point_2d[0] - layout.tex_mouse_x) * layout.invradius;
-      float y = (ctx.view_point_2d[1] - layout.tex_mouse_y) * layout.invradius;
+      float x = (view_point_2d[0] - layout.tex_mouse_x) * layout.invradius;
+      float y = (view_point_2d[1] - layout.tex_mouse_y) * layout.invradius;
       apply_direct_sample_rotation(layout, x, y);
       tex_x = x;
       tex_y = y;
       break;
     }
     case DirectSampleKind::Tiled: {
-      float x = ctx.view_point_2d[0] * layout.invradius;
-      float y = ctx.view_point_2d[1] * layout.invradius;
+      float x = view_point_2d[0] * layout.invradius;
+      float y = view_point_2d[1] * layout.invradius;
       apply_direct_sample_rotation(layout, x, y);
       tex_x = x;
       tex_y = y;
@@ -534,7 +520,7 @@ static void sample_channel_source_with_layout(const DirectSampleLayout &layout,
                                               float *r_value,
                                               float4 &r_rgba)
 {
-  if (sample_with_direct_layout(layout, ctx, r_value, r_rgba)) {
+  if (sample_direct_layout(layout, ctx.symm_point, ctx.view_point_2d, r_value, r_rgba)) {
     return;
   }
   float dummy_value = 0.0f;
@@ -560,7 +546,8 @@ static void sample_channel_source(const ChannelSourceSet &sources,
                                   float *r_value,
                                   float4 &r_rgba)
 {
-  const DirectSampleLayout layout = make_direct_sample_layout(source, ss, brush, area_local_mat);
+  const DirectSampleLayout layout = make_direct_sample_layout_sculpt(
+      source, ss, brush, area_local_mat);
   sample_channel_source_with_layout(
       layout, sources, source, ss, brush, ctx, thread, area_local_mat, r_value, r_rgba);
 }
@@ -893,7 +880,7 @@ void ChannelSourceSampler::gather_colors(const eMaterialPaintChannel channel,
   }
 
   const float4x4 *area_local_mat = area_local_mat_for(channel, source);
-  const DirectSampleLayout layout = make_direct_sample_layout(
+  const DirectSampleLayout layout = make_direct_sample_layout_sculpt(
       source, ss_, brush_, area_local_mat);
 
   for (const int i : contexts.index_range()) {
@@ -942,7 +929,7 @@ void ChannelSourceSampler::gather_scalars(const eMaterialPaintChannel channel,
   }
 
   const float4x4 *area_local_mat = area_local_mat_for(channel, source);
-  const DirectSampleLayout layout = make_direct_sample_layout(
+  const DirectSampleLayout layout = make_direct_sample_layout_sculpt(
       source, ss_, brush_, area_local_mat);
 
   for (const int i : contexts.index_range()) {
@@ -1012,7 +999,7 @@ void ChannelSourceSampler::gather_tangent_normals_packed(const eMaterialPaintCha
   }
 
   const float4x4 *area_local_mat = area_local_mat_for(channel, source);
-  const DirectSampleLayout layout = make_direct_sample_layout(
+  const DirectSampleLayout layout = make_direct_sample_layout_sculpt(
       source, ss_, brush_, area_local_mat);
 
   for (const int i : contexts.index_range()) {

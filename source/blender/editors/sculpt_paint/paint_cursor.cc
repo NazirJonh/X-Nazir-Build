@@ -80,6 +80,7 @@ struct TexSnapshot {
   int winy;
   int old_size;
   float old_zoom;
+  float old_radius;
   bool old_col;
   /** Identity of the cached overlay. Do not store an #MTex pointer: Material Paint previews
    * pass a stack #MTex rebuilt each cursor draw (#PaintCursorContext.material_preview_mtex_storage),
@@ -166,6 +167,7 @@ static int same_tex_snap(TexSnapshot *snap,
                          ViewContext *vc,
                          bool col,
                          float zoom,
+                         float radius,
                          int curve_preset,
                          const Tex *alpha_tex)
 {
@@ -174,7 +176,8 @@ static int same_tex_snap(TexSnapshot *snap,
           //(BKE_brush_size_get(vc->scene, brush) <= snap->BKE_brush_size_get)) &&
 
           (mtex->brush_map_mode != MTEX_MAP_MODE_TILED ||
-           (vc->region->winx == snap->winx && vc->region->winy == snap->winy)) &&
+           (vc->region->winx == snap->winx && vc->region->winy == snap->winy &&
+            radius == snap->old_radius)) &&
           (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL || snap->old_zoom == zoom) &&
           snap->old_col == col && snap->old_tex == mtex->tex &&
           snap->old_map_mode == mtex->brush_map_mode && snap->old_rot == mtex->rot &&
@@ -184,11 +187,13 @@ static int same_tex_snap(TexSnapshot *snap,
 static void make_tex_snap(TexSnapshot *snap,
                           ViewContext *vc,
                           float zoom,
+                          float radius,
                           const MTex *mtex,
                           int curve_preset,
                           const Tex *alpha_tex)
 {
   snap->old_zoom = zoom;
+  snap->old_radius = radius;
   snap->winx = vc->region->winx;
   snap->winy = vc->region->winy;
   snap->old_tex = mtex->tex;
@@ -355,6 +360,7 @@ static int load_tex(Paint *paint,
   TexSnapshot *target;
 
   const MTex *mtex = mtex_override ? mtex_override : (primary) ? &br->mtex : &br->mask_mtex;
+  const float radius = BKE_brush_radius_get(paint, br) * zoom;
   ePaintOverlayControlFlags overlay_flags = BKE_paint_get_overlay_flags();
   uchar *buffer = nullptr;
 
@@ -377,6 +383,7 @@ static int load_tex(Paint *paint,
                            vc,
                            col,
                            zoom,
+                           radius,
                            curve_preset,
                            alpha_mtex != nullptr ? alpha_mtex->tex : nullptr) ||
             (col && (overlay_flags & PAINT_OVERLAY_INVALID_CURVE));
@@ -387,11 +394,10 @@ static int load_tex(Paint *paint,
     ImagePool *pool = nullptr;
     /* Stencil is rotated later. */
     const float rotation = (mtex->brush_map_mode != MTEX_MAP_MODE_STENCIL) ? -mtex->rot : 0.0f;
-    const float radius = BKE_brush_radius_get(paint, br) * zoom;
-
     make_tex_snap(target,
                   vc,
                   zoom,
+                  radius,
                   mtex,
                   curve_preset,
                   alpha_mtex != nullptr ? alpha_mtex->tex : nullptr);

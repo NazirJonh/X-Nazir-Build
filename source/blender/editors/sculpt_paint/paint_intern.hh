@@ -563,6 +563,8 @@ void paint_curve_mask_cache_update(CurveMaskCache *curve_mask_cache,
                                    int diameter,
                                    float radius,
                                    const float cursor_position[2]);
+/** Copy the rasterized mask pixels from \a src into \a dst, reallocating \a dst if needed. */
+void paint_curve_mask_cache_copy(CurveMaskCache *dst, const CurveMaskCache *src);
 
 /* `sculpt_uv.cc` */
 

@@ -21,10 +21,15 @@
 #include "DNA_scene_types.h"
 
 struct wmPaintCursor;
+struct ImBuf;
 
 namespace blender {
 
 struct ReportList;
+
+namespace gpu {
+class Texture;
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Constants
@@ -145,6 +150,24 @@ struct ImageSelectWarpState : public PaintSelectFloatingSession {
   /* Snapshot of all tgt_pts taken before each drag gesture (LMB press), for
    * PAINT_OT_image_select_warp_undo_step (Ctrl+Z while floating). */
   Vector<Array<float2>> drag_position_history;
+
+  /* Preview-draw cache (see #draw_select_warp_preview). #preview_tex holds the fragment's pixels
+   * uploaded once and reused across redraws; it is rebuilt only when #preview_tex_source changes.
+   * #preview_tess_positions/#preview_tess_tex_coords/#preview_tess_tris cache the capture-space
+   * tessellation (view-independent), rebuilt only when the control points, grid size or
+   * interpolation mode actually differ from #preview_tess_key_tgt/#preview_tess_key_src/
+   * #preview_tess_grid_size/#preview_tess_interp; the view2d transform is re-applied every redraw
+   * since that step is cheap. */
+  gpu::Texture *preview_tex = nullptr;
+  const ImBuf *preview_tex_source = nullptr;
+
+  Array<float2> preview_tess_positions;
+  Array<float2> preview_tess_tex_coords;
+  Vector<uint3> preview_tess_tris;
+  Array<float2> preview_tess_key_tgt;
+  Array<float2> preview_tess_key_src;
+  int preview_tess_grid_size = -1;
+  eImagePaint_WarpInterpolation preview_tess_interp = IMAGE_PAINT_WARP_INTERP_LINEAR;
 };
 
 void image_select_warp_state_free(ImageSelectWarpState *state);

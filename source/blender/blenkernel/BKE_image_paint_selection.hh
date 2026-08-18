@@ -179,6 +179,15 @@ float BKE_image_paint_selection_blend_sample_bilinear(const Image *image,
                                                       float fy);
 
 /**
+ * Bilinearly sample an arbitrary single-channel float mask #ImBuf directly, with no image/tile
+ * lookup. Shared by callers that already hold the mask #ImBuf (e.g. a selection fragment) instead
+ * of an #Image + tile number.
+ *
+ * \return 1 when \a mask is null or has no float data, 0 when it has zero-sized dimensions.
+ */
+float BKE_image_paint_selection_sample_mask_imbuf_bilinear(const ImBuf *mask, float fx, float fy);
+
+/**
  * Derive the compositing weights of a binary mask.
  *
  * \return A newly allocated single-channel float #ImBuf the caller must free with

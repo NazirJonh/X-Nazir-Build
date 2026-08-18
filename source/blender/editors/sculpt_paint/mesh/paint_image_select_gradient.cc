@@ -354,7 +354,10 @@ static bool image_paint_gradient_selection_bounds_region(
   }
   const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
   BKE_image_paint_selection_bounds_expand_for_blend(sel_min, sel_max, tile_w, tile_h, edge_policy);
-  BLI_rcti_init(&r_region, sel_min[0], sel_max[0] + 1, sel_min[1], sel_max[1] + 1);
+  /* `sel_max` is already an exclusive upper bound (see #BKE_image_paint_selection_mask_bounds and
+   * #BKE_image_paint_selection_bounds_expand_for_blend), so it must not be incremented again here
+   * or the region can exceed the tile by one row/column. */
+  BLI_rcti_init(&r_region, sel_min[0], sel_max[0], sel_min[1], sel_max[1]);
   return true;
 }
 

@@ -141,32 +141,7 @@ ImBuf *image_select_make_display_ibuf_feather(const ImBuf *src,
 
 float image_select_sample_mask_bilinear(const ImBuf *mask, float fx, float fy)
 {
-  if (!mask || !mask->float_buffer.data) {
-    return 1.0f;
-  }
-
-  const int w = mask->x;
-  const int h = mask->y;
-  if (w <= 0 || h <= 0) {
-    return 0.0f;
-  }
-
-  const float px = std::clamp(fx - 0.5f, 0.0f, float(w) - 1.0001f);
-  const float py = std::clamp(fy - 0.5f, 0.0f, float(h) - 1.0001f);
-  const int x0 = int(px);
-  const int y0 = int(py);
-  const int x1 = std::min(x0 + 1, w - 1);
-  const int y1 = std::min(y0 + 1, h - 1);
-  const float wx = px - float(x0);
-  const float wy = py - float(y0);
-
-  const float *m = mask->float_data();
-  const float v00 = m[y0 * w + x0];
-  const float v10 = m[y0 * w + x1];
-  const float v01 = m[y1 * w + x0];
-  const float v11 = m[y1 * w + x1];
-  return (1.0f - wx) * (1.0f - wy) * v00 + wx * (1.0f - wy) * v10 + (1.0f - wx) * wy * v01 +
-         wx * wy * v11;
+  return BKE_image_paint_selection_sample_mask_imbuf_bilinear(mask, fx, fy);
 }
 
 void image_select_blend_buffer_into_canvas_at(ImBuf *dst_canvas,

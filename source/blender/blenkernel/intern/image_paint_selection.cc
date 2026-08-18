@@ -510,21 +510,23 @@ static float paint_selection_blend_mask_sample_imbuf(const ImBuf *blend, const i
   return blend->float_data()[size_t(y) * blend->x + x];
 }
 
-static float paint_selection_blend_mask_sample_imbuf_bilinear(const ImBuf *blend,
-                                                              const float fx,
-                                                              const float fy)
+float BKE_image_paint_selection_sample_mask_imbuf_bilinear(const ImBuf *mask,
+                                                            const float fx,
+                                                            const float fy)
 {
-  if (!blend || !blend->float_buffer.data) {
+  if (!mask || !mask->float_buffer.data) {
     return 1.0f;
   }
-  const int w = blend->x;
-  const int h = blend->y;
+  const int w = mask->x;
+  const int h = mask->y;
   if (w <= 0 || h <= 0) {
     return 0.0f;
   }
 
-  const float px = std::clamp(fx - 0.5f, 0.0f, float(w) - 1.0001f);
-  const float py = std::clamp(fy - 0.5f, 0.0f, float(h) - 1.0001f);
+  /* `std::max(0.0f, ...)` keeps the clamp range valid (min <= max) for a 1px-wide/tall mask,
+   * where `w - 1.0001f` would otherwise be negative. */
+  const float px = std::clamp(fx - 0.5f, 0.0f, std::max(0.0f, float(w) - 1.0001f));
+  const float py = std::clamp(fy - 0.5f, 0.0f, std::max(0.0f, float(h) - 1.0001f));
   const int x0 = int(px);
   const int y0 = int(py);
   const int x1 = std::min(x0 + 1, w - 1);
@@ -532,7 +534,7 @@ static float paint_selection_blend_mask_sample_imbuf_bilinear(const ImBuf *blend
   const float wx = px - float(x0);
   const float wy = py - float(y0);
 
-  const float *m = blend->float_data();
+  const float *m = mask->float_data();
   const float v00 = m[size_t(y0) * w + x0];
   const float v10 = m[size_t(y0) * w + x1];
   const float v01 = m[size_t(y1) * w + x0];
@@ -577,7 +579,7 @@ float BKE_image_paint_selection_blend_sample_bilinear(const Image *image,
   if (!blend) {
     return 1.0f;
   }
-  return paint_selection_blend_mask_sample_imbuf_bilinear(blend, fx, fy);
+  return BKE_image_paint_selection_sample_mask_imbuf_bilinear(blend, fx, fy);
 }
 
 ImBuf *BKE_image_paint_selection_compute_blend_mask(const ImBuf *binary_mask,

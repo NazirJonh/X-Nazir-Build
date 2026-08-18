@@ -1343,15 +1343,11 @@ static wmOperatorStatus image_select_move_invoke(bContext *C, wmOperator *op, co
 
 static wmOperatorStatus image_select_move_confirm_exec(bContext *C, wmOperator * /*op*/)
 {
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
-    return OPERATOR_CANCELLED;
-  }
-  ImageSelectMoveState *state = image_select_move_state_get(sima);
+  ImageSelectMoveState *state = image_select_floating_state_require<ImageSelectMoveState>(C);
   if (!state) {
     return OPERATOR_CANCELLED;
   }
-  image_select_session_clear(sima);
+  image_select_session_clear(state->owner_sima);
   image_select_move_commit(C, state);
   image_select_move_state_free(state);
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
@@ -1360,15 +1356,11 @@ static wmOperatorStatus image_select_move_confirm_exec(bContext *C, wmOperator *
 
 static wmOperatorStatus image_select_move_cancel_exec(bContext *C, wmOperator * /*op*/)
 {
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
-    return OPERATOR_CANCELLED;
-  }
-  ImageSelectMoveState *state = image_select_move_state_get(sima);
+  ImageSelectMoveState *state = image_select_floating_state_require<ImageSelectMoveState>(C);
   if (!state) {
     return OPERATOR_CANCELLED;
   }
-  image_select_session_clear(sima);
+  image_select_session_clear(state->owner_sima);
   image_select_move_restore_source(C, state);
   image_select_move_state_free(state);
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
@@ -1390,11 +1382,7 @@ static wmOperatorStatus image_select_move_cancel_exec(bContext *C, wmOperator * 
  */
 static wmOperatorStatus image_select_move_undo_step_exec(bContext *C, wmOperator * /*op*/)
 {
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
-    return OPERATOR_CANCELLED;
-  }
-  ImageSelectMoveState *state = image_select_move_state_get(sima);
+  ImageSelectMoveState *state = image_select_floating_state_require<ImageSelectMoveState>(C);
   if (!state) {
     return OPERATOR_CANCELLED;
   }
@@ -1424,7 +1412,7 @@ static wmOperatorStatus image_select_move_undo_step_exec(bContext *C, wmOperator
   }
 
   /* History exhausted -- restore source pixels and end the floating operation. */
-  image_select_session_clear(sima);
+  image_select_session_clear(state->owner_sima);
   image_select_move_restore_source(C, state);
   image_select_move_state_free(state);
   if (region) {

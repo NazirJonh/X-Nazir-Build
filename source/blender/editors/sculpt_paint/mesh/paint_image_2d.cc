@@ -2617,14 +2617,16 @@ void paint_2d_bucket_fill(const bContext *C,
 
         const float mask_val_f = paint_2d_selection_mask_sample(
             scene, ima, tile_number, x_px, y_px);
-        float color_f_masked[4];
-        copy_v4_v4(color_f_masked, color_f);
-        mul_v4_fl(color_f_masked, mask_val_f);
+        if (mask_val_f > 0.001f) {
+          float color_f_masked[4];
+          copy_v4_v4(color_f_masked, color_f);
+          mul_v4_fl(color_f_masked, mask_val_f);
 
-        IMB_blend_color_float(ibuf->float_data_for_write() + 4 * coordinate,
-                              ibuf->float_data_for_write() + 4 * coordinate,
-                              color_f_masked,
-                              IMB_BlendMode(br->blend));
+          IMB_blend_color_float(ibuf->float_data_for_write() + 4 * coordinate,
+                                ibuf->float_data_for_write() + 4 * coordinate,
+                                color_f_masked,
+                                IMB_BlendMode(br->blend));
+        }
 
         paint_2d_fill_add_pixel_float(scene,
                                       ima,
@@ -2718,16 +2720,18 @@ void paint_2d_bucket_fill(const bContext *C,
 
         const float mask_val_b = paint_2d_selection_mask_sample(
             scene, ima, tile_number, x_px, y_px);
-        float color_f_masked_b[4];
-        rgba_uchar_to_float(color_f_masked_b, reinterpret_cast<uchar *>(&color_b));
-        mul_v4_fl(color_f_masked_b, mask_val_b);
-        uchar color_b_masked[4];
-        rgba_float_to_uchar(color_b_masked, color_f_masked_b);
+        if (mask_val_b > 0.001f) {
+          float color_f_masked_b[4];
+          rgba_uchar_to_float(color_f_masked_b, reinterpret_cast<uchar *>(&color_b));
+          mul_v4_fl(color_f_masked_b, mask_val_b);
+          uchar color_b_masked[4];
+          rgba_float_to_uchar(color_b_masked, color_f_masked_b);
 
-        IMB_blend_color_byte(ibuf->byte_data_for_write() + 4 * coordinate,
-                             ibuf->byte_data_for_write() + 4 * coordinate,
-                             color_b_masked,
-                             IMB_BlendMode(br->blend));
+          IMB_blend_color_byte(ibuf->byte_data_for_write() + 4 * coordinate,
+                               ibuf->byte_data_for_write() + 4 * coordinate,
+                               color_b_masked,
+                               IMB_BlendMode(br->blend));
+        }
 
         paint_2d_fill_add_pixel_byte(scene,
                                      ima,

@@ -433,56 +433,86 @@ static void draw_select_warp_preview(const bContext *C, ARegion *region, void *a
     return float2(sx, sy);
   };
 
-  /* Dense tessellation of the deformed grid, textured with the undeformed grid's UVs. */
-  Vector<float2> screen_verts;
-  Vector<float2> tex_coords;
-  screen_verts.reserve(tess_res * tess_res);
-  tex_coords.reserve(tess_res * tess_res);
-  for (int y = 0; y < tess_res; y++) {
-    const float gy = float(y) / float(tess_res - 1) * float(cells);
-    for (int x = 0; x < tess_res; x++) {
-      const float gx = float(x) / float(tess_res - 1) * float(cells);
-      screen_verts.append(
-          to_screen(warp_grid_eval(state->tgt_pts.data(), grid_size, gx, gy, state->interp)));
-      tex_coords.append(warp_grid_eval(state->src_pts.data(), grid_size, gx, gy, state->interp));
+  /* Dense tessellation of the deformed grid, textured with the undeformed grid's UVs. Cached in
+   * capture space (view-independent) and only rebuilt when the control points, grid size or
+   * interpolation actually changed -- this callback runs on every region redraw, not just while
+   * dragging, and the spline evaluation is otherwise wasted work on unrelated redraws (pan, zoom,
+   * unrelated UI repaint). */
+  const bool tess_dirty = state->preview_tess_grid_size != grid_size ||
+                          state->preview_tess_interp != state->interp ||
+                          state->preview_tess_key_tgt.as_span() != state->tgt_pts.as_span() ||
+                          state->preview_tess_key_src.as_span() != state->src_pts.as_span();
+  if (tess_dirty) {
+    state->preview_tess_positions.reinitialize(tess_res * tess_res);
+    state->preview_tess_tex_coords.reinitialize(tess_res * tess_res);
+    for (int y = 0; y < tess_res; y++) {
+      const float gy = float(y) / float(tess_res - 1) * float(cells);
+      for (int x = 0; x < tess_res; x++) {
+        const float gx = float(x) / float(tess_res - 1) * float(cells);
+        const int i = y * tess_res + x;
+        state->preview_tess_positions[i] = warp_grid_eval(
+            state->tgt_pts.data(), grid_size, gx, gy, state->interp);
+        state->preview_tess_tex_coords[i] = warp_grid_eval(
+            state->src_pts.data(), grid_size, gx, gy, state->interp);
+      }
     }
+
+    state->preview_tess_tris.clear();
+    state->preview_tess_tris.reserve((tess_res - 1) * (tess_res - 1) * 2);
+    for (int y = 0; y < tess_res - 1; y++) {
+      for (int x = 0; x < tess_res - 1; x++) {
+        const uint i0 = uint(y * tess_res + x);
+        const uint i1 = i0 + 1;
+        const uint i2 = i0 + uint(tess_res);
+        const uint i3 = i2 + 1;
+        state->preview_tess_tris.append(uint3(i0, i1, i2));
+        state->preview_tess_tris.append(uint3(i1, i3, i2));
+      }
+    }
+
+    state->preview_tess_key_tgt = state->tgt_pts;
+    state->preview_tess_key_src = state->src_pts;
+    state->preview_tess_grid_size = grid_size;
+    state->preview_tess_interp = state->interp;
   }
 
-  Vector<uint3> tris;
-  tris.reserve((tess_res - 1) * (tess_res - 1) * 2);
-  for (int y = 0; y < tess_res - 1; y++) {
-    for (int x = 0; x < tess_res - 1; x++) {
-      const uint i0 = uint(y * tess_res + x);
-      const uint i1 = i0 + 1;
-      const uint i2 = i0 + uint(tess_res);
-      const uint i3 = i2 + 1;
-      tris.append(uint3(i0, i1, i2));
-      tris.append(uint3(i1, i3, i2));
-    }
+  Vector<float2> screen_verts(state->preview_tess_positions.size());
+  for (const int i : state->preview_tess_positions.index_range()) {
+    screen_verts[i] = to_screen(state->preview_tess_positions[i]);
   }
+  const Array<float2> &tex_coords = state->preview_tess_tex_coords;
+  const Vector<uint3> &tris = state->preview_tess_tris;
 
-  /* Create and bind GPU texture from fragment_ibuf. */
+  /* Upload the fragment's pixels to a GPU texture once and reuse it across redraws: the fragment
+   * is the original captured (undeformed) pixels and never changes during the session. */
   const ImBuf *frag = state->fragment.pixels.fragment_ibuf;
-  gpu::Texture *tex = nullptr;
-  if (frag->float_buffer.data) {
-    const int ch = frag->channels ? frag->channels : 4;
-    const gpu::TextureFormat fmt = (ch >= 4) ? gpu::TextureFormat::SFLOAT_16_16_16_16 :
-                                   (ch == 3) ? gpu::TextureFormat::SFLOAT_16_16_16 :
-                                               gpu::TextureFormat::SFLOAT_16;
-    tex = GPU_texture_create_2d(
-        "warp_preview", frag->x, frag->y, 1, fmt, GPU_TEXTURE_USAGE_SHADER_READ, nullptr);
-    GPU_texture_update(tex, GPU_DATA_FLOAT, frag->float_buffer.data);
+  if (state->preview_tex && state->preview_tex_source != frag) {
+    GPU_texture_free(state->preview_tex);
+    state->preview_tex = nullptr;
   }
-  else if (frag->byte_buffer.data) {
-    tex = GPU_texture_create_2d("warp_preview",
-                                frag->x,
-                                frag->y,
-                                1,
-                                gpu::TextureFormat::UNORM_8_8_8_8,
-                                GPU_TEXTURE_USAGE_SHADER_READ,
-                                nullptr);
-    GPU_texture_update(tex, GPU_DATA_UBYTE, frag->byte_buffer.data);
+  if (!state->preview_tex) {
+    if (frag->float_buffer.data) {
+      const int ch = frag->channels ? frag->channels : 4;
+      const gpu::TextureFormat fmt = (ch >= 4) ? gpu::TextureFormat::SFLOAT_16_16_16_16 :
+                                     (ch == 3) ? gpu::TextureFormat::SFLOAT_16_16_16 :
+                                                 gpu::TextureFormat::SFLOAT_16;
+      state->preview_tex = GPU_texture_create_2d(
+          "warp_preview", frag->x, frag->y, 1, fmt, GPU_TEXTURE_USAGE_SHADER_READ, nullptr);
+      GPU_texture_update(state->preview_tex, GPU_DATA_FLOAT, frag->float_buffer.data);
+    }
+    else if (frag->byte_buffer.data) {
+      state->preview_tex = GPU_texture_create_2d("warp_preview",
+                                                  frag->x,
+                                                  frag->y,
+                                                  1,
+                                                  gpu::TextureFormat::UNORM_8_8_8_8,
+                                                  GPU_TEXTURE_USAGE_SHADER_READ,
+                                                  nullptr);
+      GPU_texture_update(state->preview_tex, GPU_DATA_UBYTE, frag->byte_buffer.data);
+    }
+    state->preview_tex_source = frag;
   }
+  gpu::Texture *tex = state->preview_tex;
 
   if (tex) {
     GPU_texture_filter_mode(tex, false);
@@ -507,7 +537,6 @@ static void draw_select_warp_preview(const bContext *C, ARegion *region, void *a
     immEnd();
     immUnbindProgram();
     GPU_texture_unbind(tex);
-    GPU_texture_free(tex);
     GPU_blend(GPU_BLEND_NONE);
   }
 
@@ -1167,15 +1196,11 @@ void image_select_warp_session_cancel(bContext *C, SpaceImage *sima)
 
 static wmOperatorStatus image_select_warp_confirm_exec(bContext *C, wmOperator *op)
 {
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
-    return OPERATOR_CANCELLED;
-  }
-  ImageSelectWarpState *state = image_select_warp_state_get(sima);
+  ImageSelectWarpState *state = image_select_floating_state_require<ImageSelectWarpState>(C);
   if (!state) {
     return OPERATOR_CANCELLED;
   }
-  image_select_session_clear(sima);
+  image_select_session_clear(state->owner_sima);
   image_select_warp_commit(C, state, op->reports);
   image_select_warp_state_free(state);
   ARegion *region = CTX_wm_region(C);
@@ -1201,16 +1226,13 @@ void PAINT_OT_image_select_warp_confirm(wmOperatorType *ot)
 
 static wmOperatorStatus image_select_warp_cancel_exec(bContext *C, wmOperator * /*op*/)
 {
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
-    return OPERATOR_CANCELLED;
-  }
-  ImageSelectWarpState *state = image_select_warp_state_get(sima);
+  ImageSelectWarpState *state = image_select_floating_state_require<ImageSelectWarpState>(C);
   if (!state) {
     return OPERATOR_CANCELLED;
   }
-  image_select_session_clear(sima);
-  image_select_fragment_restore_source(C, sima->image, state->iuser, {state->fragment});
+  image_select_session_clear(state->owner_sima);
+  image_select_fragment_restore_source(
+      C, state->owner_sima->image, state->iuser, {state->fragment});
   image_select_warp_state_free(state);
   ARegion *region = CTX_wm_region(C);
   if (region) {
@@ -1233,18 +1255,15 @@ void PAINT_OT_image_select_warp_cancel(wmOperatorType *ot)
 
 static wmOperatorStatus image_select_warp_undo_step_exec(bContext *C, wmOperator * /*op*/)
 {
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
-    return OPERATOR_CANCELLED;
-  }
-  ImageSelectWarpState *state = image_select_warp_state_get(sima);
+  ImageSelectWarpState *state = image_select_floating_state_require<ImageSelectWarpState>(C);
   if (!state) {
     return OPERATOR_CANCELLED;
   }
   if (state->drag_position_history.is_empty()) {
     /* No history: cancel entirely. */
-    image_select_session_clear(sima);
-    image_select_fragment_restore_source(C, sima->image, state->iuser, {state->fragment});
+    image_select_session_clear(state->owner_sima);
+    image_select_fragment_restore_source(
+        C, state->owner_sima->image, state->iuser, {state->fragment});
     image_select_warp_state_free(state);
   }
   else {
@@ -1421,6 +1440,11 @@ static wmOperatorStatus image_select_warp_modal(bContext *C, wmOperator *op, con
 {
   SpaceImage *sima = CTX_wm_space_image(C);
   if (!sima || !sima->runtime) {
+    /* Mirrors the guard below: the drag cursor is restored unconditionally by
+     * #image_select_floating_drag_end (it only needs `C`), so losing `sima` mid-drag (e.g. the
+     * area is closed) must not skip it either, or the modal cursor is left stuck. */
+    image_select_floating_drag_end(C, nullptr);
+    image_select_floating_status_clear(C);
     op->customdata = nullptr;
     return OPERATOR_FINISHED;
   }
@@ -1627,6 +1651,10 @@ void image_select_warp_state_free(ImageSelectWarpState *state)
     return;
   }
   image_select_floating_draw_handle_clear(*state);
+  if (state->preview_tex) {
+    GPU_texture_free(state->preview_tex);
+    state->preview_tex = nullptr;
+  }
   if (state->paint_cursor) {
     /* If the WM's own runtime is already gone, full application exit is tearing down IDs in
      * reverse index order, so #wmWindowManager was freed before this state's owning Image; its

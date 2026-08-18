@@ -37,6 +37,9 @@
  * `image->runtime`. */
 #include "BKE_image.hh"
 
+/* #CTX_wm_space_image, used by #image_select_floating_state_require. */
+#include "BKE_context.hh"
+
 /* #PaintSelectSession, the single slot the accessors below read and write. This header is the only
  * place the slot is touched directly; it forward-declares #PaintSelectFloatingSession and includes
  * nothing from this module, so the dependency stays one-way. */
@@ -135,6 +138,25 @@ template<typename T> T *image_select_session_get(const SpaceImage *sima)
     return nullptr;
   }
   return static_cast<T *>(session);
+}
+
+/**
+ * Shared guard for the non-modal confirm / cancel / undo-step operators of a floating tool:
+ * resolves the current #SpaceImage and \a T's own live session, or null when either is
+ * unavailable -- every one of those operators' `exec` callbacks returns `OPERATOR_CANCELLED` in
+ * that case. \a T's own #PaintSelectFloatingSession::owner_sima already carries the owning
+ * #SpaceImage, so callers that need it back do not have to call #CTX_wm_space_image again.
+ *
+ * \note Same completeness requirement as #image_select_session_get: instantiate this from the
+ * translation unit that defines \a T.
+ */
+template<typename T> T *image_select_floating_state_require(bContext *C)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (!sima || !sima->runtime) {
+    return nullptr;
+  }
+  return image_select_session_get<T>(sima);
 }
 
 /**

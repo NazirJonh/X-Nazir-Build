@@ -51,6 +51,7 @@
 #include "BKE_image_paint_selection.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_report.hh"
 #include "BKE_undo_system.hh"
 
 #include "DEG_depsgraph.hh"
@@ -975,6 +976,16 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
       if (UNLIKELY(uh.image_ref.ptr == nullptr || uh.image_ref.ptr->runtime == nullptr)) {
         BLI_assert_unreachable();
         CLOG_ERROR(&LOG, "Image undo handle references a dead image, its undo data is dropped");
+        /* CLOG_ERROR alone is invisible to the user in a release build (the assert above is
+         * compiled out there too), so an image silently loses undo data with no indication in
+         * the UI. Report it too when a context is available; see the file-level comment on
+         * #ut->flags for why `C` cannot be relied upon here. */
+        if (C) {
+          BKE_report(CTX_wm_reports(C),
+                    RPT_WARNING,
+                    "Image undo: paint data for another image was lost while finalizing this "
+                    "step (see log)");
+        }
         for (UndoImageBuf &ubuf : uh.buffers.items_mutable()) {
           ubuf_free(&ubuf);
         }

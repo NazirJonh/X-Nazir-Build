@@ -1503,8 +1503,6 @@ class _defs_sculpt:
     def poll_texture_fill(context):
         if context is None:
             return True
-        if not context.preferences.experimental.use_sculpt_texture_paint:
-            return False
         ob = context.sculpt_object
         if ob is None or ob.type != 'MESH':
             return False

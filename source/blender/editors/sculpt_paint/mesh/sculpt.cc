@@ -2897,9 +2897,7 @@ static void update_brush_local_mat(const Sculpt &sd, Object &ob)
 
 static bool sculpt_needs_pbvh_pixels(const Brush &brush, const Object &ob)
 {
-  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-      USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint))
-  {
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
     return ob.runtime->sculpt_session->cache->image_data.get();
   }
 
@@ -5816,7 +5814,7 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     Brush *brush = this->brush;
 
     /* NOTE: This should be removed when paint mode is available. Paint mode can force based on the
-     * canvas it is painting on. (ref. use_sculpt_texture_paint). */
+     * canvas it is painting on. */
     if (brush && brush_type_is_paint(brush->sculpt_brush_type) &&
         !SCULPT_use_image_paint_brush(*paint_mode_settings_, ob))
     {

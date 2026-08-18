@@ -8,7 +8,6 @@
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_object_types.h"
-#include "DNA_userdef_types.h"
 
 #include "ED_paint.hh"
 
@@ -599,9 +598,6 @@ using namespace blender::ed::sculpt_paint::paint::image;
 
 bool SCULPT_use_image_paint_brush(PaintModeSettings &settings, Object &ob)
 {
-  if (!USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint)) {
-    return false;
-  }
   if (ob.type != OB_MESH) {
     return false;
   }

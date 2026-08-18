@@ -696,7 +696,7 @@ class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
         # Material Paint channels only work with the Paint brush type; Smear, other sculpt
         # brushes, and non-brush tools have no material-channel sampling/blending behind them.
         brush = context.tool_settings.sculpt.brush
-        return brush is not None and brush.sculpt_brush_type == 'PAINT'
+        return brush is not None and brush.sculpt_brush_type in {'PAINT', 'TEXTURE_FILL'}
 
     def get_mode_settings(self, context):
         return context.tool_settings.paint_mode

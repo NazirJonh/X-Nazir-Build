@@ -18,15 +18,21 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_brush_types.h"
+#include "DNA_material_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_object_enums.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 #include "DNA_texture_types.h"
+#include "DNA_view3d_types.h"
 
 #include "BLI_array.hh"
 #include "BLI_bitmap.h"
+#include "BLI_kdopbvh.hh"
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_math_bits.h"
 #include "BLI_math_color.h"
 #include "BLI_math_color_blend.h"
@@ -34,28 +40,41 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_mutex.hh"
+#include "BLI_rect.h"
+#include "BLI_set.hh"
+#include "BLI_span.hh"
 #include "BLI_stack.h"
 #include "BLI_task.h"
 #include "BLI_task.hh"
 #include "BLI_time.h"
+#include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
 /* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
 #include "paint_debug.hh"
 
 #include "BKE_brush.hh"
+#include "BKE_bvhutils.hh"
 #include "BKE_colorband.hh"
 #include "BKE_context.hh"
+#include "BKE_customdata.hh"
+#include "BKE_editmesh.hh"
+#include "BKE_editmesh_bvh.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
 #include "BLT_translation.hh"
+#include "bmesh.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -66,6 +85,8 @@
 #include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
+#include "ED_uvedit.hh"
+#include "ED_view3d.hh"
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
@@ -76,7 +97,40 @@
 
 #include "UI_view2d.hh"
 
+#include "../paint_intern.hh"
+#include "paint_image_select_gradient.hh"
+#include "paint_image_select_intern.hh"
+#include "paint_image_uv_geom.hh"
+#include "paint_image_uv_symmetry.hh"
+
 namespace blender {
+
+static float paint_2d_selection_mask_sample(
+    const Scene * /*scene*/, const Image *image, int tile_number, int x, int y)
+{
+  if (!BKE_image_paint_selection_mask_has_any(image)) {
+    return 1.0f;
+  }
+
+  return BKE_image_paint_selection_blend_sample(image, tile_number, x, y);
+}
+
+static float paint_2d_selection_blend_sample_bilinear(
+    const Scene * /*scene*/, const Image *image, int tile_number, const float fx, const float fy)
+{
+  if (!BKE_image_paint_selection_mask_has_any(image)) {
+    return 1.0f;
+  }
+
+  return BKE_image_paint_selection_blend_sample_bilinear(image, tile_number, fx, fy);
+}
+
+/* Brush constraint: binary inside-test (hard edge, no feather weighting). */
+static bool paint_2d_selection_mask_is_inside(const Image *image, int tile_number, int x, int y)
+{
+  return BKE_image_paint_selection_mask_sample(image, tile_number, x, y) >
+         IMAGE_PAINT_SELECTION_MASK_THRESHOLD;
+}
 
 /* Brush Painting for 2D image editor */
 
@@ -1715,7 +1769,10 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     const StrokePhaseTimer curve_timer(&g_stroke_curve_mask_seconds, &g_stroke_curve_mask_calls);
 #endif
     const CurveMaskCache *shared_mask = paint_2d_matching_curve_mask(shared_state, tile, diameter);
-    if (shared_mask != nullptr) {
+    const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(s->image);
+    const bool shared_mask_has_selection = shared_state != nullptr &&
+                                           BKE_image_paint_selection_mask_has_any(shared_state->image);
+    if (shared_mask != nullptr && !has_selection_mask && !shared_mask_has_selection) {
       paint_curve_mask_cache_copy(&cache->curve_mask_cache, shared_mask);
     }
     else {
@@ -1724,6 +1781,38 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 #if PBR_PAINT_2D_STROKE_PROFILE
   }
 #endif
+
+  /* Apply selection mask to the curve mask in-place after it has been recreated. The curve mask
+   * must not be shared after this step: every material target may use a different image selection. */
+  if (has_selection_mask) {
+    const Scene *scene = s->scene;
+    const int tile_number = tile->iuser.tile;
+    const ImBuf *sel_mask = BKE_image_paint_selection_mask_lookup(
+        const_cast<const Image *>(s->image), tile_number);
+    if (!sel_mask) {
+      memset(cache->curve_mask_cache.curve_mask, 0, size_t(diameter) * diameter * sizeof(ushort));
+    }
+    else {
+      const int brush_origin_xi = int(floorf(pos[0] - float(diameter / 2)));
+      const int brush_origin_yi = int(floorf(pos[1] - float(diameter / 2)));
+      ushort *curve_mask = cache->curve_mask_cache.curve_mask;
+      for (int y = 0; y < diameter; y++) {
+        const int my = brush_origin_yi + y;
+        for (int x = 0; x < diameter; x++, curve_mask++) {
+          if (*curve_mask == 0) {
+            continue;
+          }
+          const int mx = brush_origin_xi + x;
+          *curve_mask = ushort(float(*curve_mask) * paint_2d_selection_blend_sample_bilinear(
+                                                   scene,
+                                                   s->image,
+                                                   tile_number,
+                                                   float(mx) + 0.5f,
+                                                   float(my) + 0.5f));
+        }
+      }
+    }
+  }
 
   /* detect if we need to recreate image brush buffer */
   const bool stamp_shape_changed = diameter != cache->lastdiameter ||
@@ -3108,6 +3197,28 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
                              PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                              PAINT_MATERIAL_CHANNEL_EMISSION,
                              PAINT_MATERIAL_CHANNEL_NORMAL);
+  const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(s->image);
+  const int tile_number = tile->iuser.tile;
+  /* Coverage is shared between material channels, but selection masks belong to an Image. Keep
+   * the filter here, where the destination image and its tile are known, rather than baking it
+   * into #AreaPlaneTriCoverage for the first channel. */
+  const ImBuf *selection_mask = has_selection_mask ?
+                                    BKE_image_paint_selection_mask_lookup(
+                                        const_cast<const Image *>(s->image), tile_number) :
+                                    nullptr;
+  const auto pixel_strength = [&](const AreaPlaneCoveragePixel &pixel) {
+    const ushort strength = paint_2d_area_plane_pixel_strength(pixel, is_alpha_dest);
+    if (!has_selection_mask) {
+      return strength;
+    }
+    if (selection_mask == nullptr) {
+      return ushort(0);
+    }
+    const int x = cov.x0 + int(pixel.lx);
+    const int y = cov.y0 + int(pixel.ly);
+    return ushort(float(strength) *
+                  BKE_image_paint_selection_blend_sample(s->image, tile_number, x, y));
+  };
 
   ImBuf *raster_buf = paint_2d_area_plane_ensure_scratch(
       geom, tile->cache.is_float, cov.w, cov.h);
@@ -3128,7 +3239,7 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
     threading::parallel_for(cov.pixels.index_range(), 4096, [&](const IndexRange range) {
       for (const int64_t i : range) {
         const AreaPlaneCoveragePixel &pixel = cov.pixels[i];
-        const ushort strength = paint_2d_area_plane_pixel_strength(pixel, is_alpha_dest);
+        const ushort strength = pixel_strength(pixel);
         if (strength == 0) {
           continue;
         }
@@ -3153,7 +3264,7 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
         const int thread = BLI_task_parallel_thread_id(nullptr);
         for (const int64_t i : range) {
           const AreaPlaneCoveragePixel &pixel = cov.pixels[i];
-          strengths[i] = paint_2d_area_plane_pixel_strength(pixel, is_alpha_dest);
+          strengths[i] = pixel_strength(pixel);
           if (strengths[i] == 0) {
             raw[i] = float3(0.0f);
             continue;
@@ -3194,7 +3305,7 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
         const int thread = BLI_task_parallel_thread_id(nullptr);
         for (const int64_t i : range) {
           const AreaPlaneCoveragePixel &pixel = cov.pixels[i];
-          const ushort strength = paint_2d_area_plane_pixel_strength(pixel, is_alpha_dest);
+          const ushort strength = pixel_strength(pixel);
           if (strength == 0) {
             continue;
           }
@@ -4459,7 +4570,10 @@ void paint_2d_stroke_done(void *ps)
 #endif
 }
 
-static void paint_2d_fill_add_pixel_byte(const int x_px,
+static void paint_2d_fill_add_pixel_byte(const Scene * /*scene*/,
+                                         const Image *image,
+                                         int tile_number,
+                                         const int x_px,
                                          const int y_px,
                                          ImBuf *ibuf,
                                          BLI_Stack *stack,
@@ -4476,6 +4590,12 @@ static void paint_2d_fill_add_pixel_byte(const int x_px,
   coordinate = size_t(y_px) * ibuf->x + x_px;
 
   if (!BLI_BITMAP_TEST(touched, coordinate)) {
+    if (BKE_image_paint_selection_mask_has_any(image)) {
+      if (!paint_2d_selection_mask_is_inside(image, tile_number, x_px, y_px)) {
+        BLI_BITMAP_SET(touched, coordinate, true);
+        return;
+      }
+    }
     float color_f[4];
     const uchar *color_b = ibuf->byte_data() + 4 * coordinate;
     rgba_uchar_to_float(color_f, color_b);
@@ -4488,7 +4608,10 @@ static void paint_2d_fill_add_pixel_byte(const int x_px,
   }
 }
 
-static void paint_2d_fill_add_pixel_float(const int x_px,
+static void paint_2d_fill_add_pixel_float(const Scene * /*scene*/,
+                                          const Image *image,
+                                          int tile_number,
+                                          const int x_px,
                                           const int y_px,
                                           ImBuf *ibuf,
                                           BLI_Stack *stack,
@@ -4505,6 +4628,12 @@ static void paint_2d_fill_add_pixel_float(const int x_px,
   coordinate = size_t(y_px) * ibuf->x + x_px;
 
   if (!BLI_BITMAP_TEST(touched, coordinate)) {
+    if (BKE_image_paint_selection_mask_has_any(image)) {
+      if (!paint_2d_selection_mask_is_inside(image, tile_number, x_px, y_px)) {
+        BLI_BITMAP_SET(touched, coordinate, true);
+        return;
+      }
+    }
     if (len_squared_v4v4(ibuf->float_data() + 4 * coordinate, color) <= threshold_sq) {
       BLI_stack_push(stack, &coordinate);
     }
@@ -4528,6 +4657,480 @@ static ImageUser *paint_2d_get_tile_iuser(ImagePaintState *s, int tile_number)
   return iuser;
 }
 
+struct ImagePaintUVObjectFaces {
+  Object *object = nullptr;
+  BMesh *bm = nullptr;
+  bool owns_bm = false;
+  BMUVOffsets offsets{};
+  Vector<int> faces;
+  Map<int, Vector<int>> tile_faces;
+};
+
+static void paint_2d_geometry_fill_item_discard(ImagePaintUVObjectFaces &item)
+{
+  if (item.owns_bm && item.bm != nullptr) {
+    BM_mesh_free(item.bm);
+    item.bm = nullptr;
+  }
+  item.owns_bm = false;
+}
+
+static void paint_2d_geometry_fill_free_items(MutableSpan<ImagePaintUVObjectFaces> items)
+{
+  for (ImagePaintUVObjectFaces &item : items) {
+    paint_2d_geometry_fill_item_discard(item);
+  }
+}
+
+static bool paint_2d_geometry_fill_init_bm(Object *ob, ImagePaintUVObjectFaces &item)
+{
+  item.object = ob;
+
+  if (ob->mode & OB_MODE_EDIT) {
+    BMEditMesh *em = BKE_editmesh_from_object(ob);
+    if (!em) {
+      return false;
+    }
+    item.bm = em->bm;
+    item.owns_bm = false;
+    return item.bm != nullptr;
+  }
+
+  /* Original mesh, not evaluated: same source as selection expand. */
+  const Mesh *mesh = id_cast<const Mesh *>(ob->data);
+  if (!mesh) {
+    return false;
+  }
+  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(mesh);
+  BMeshCreateParams create_params{};
+  BMeshFromMeshParams convert_params{};
+  convert_params.calc_face_normal = true;
+  convert_params.calc_vert_normal = true;
+  item.bm = BM_mesh_create(&allocsize, &create_params);
+  BM_mesh_bm_from_me(item.bm, mesh, &convert_params);
+  item.owns_bm = true;
+  if (item.bm->totface != mesh->faces_num) {
+    /* #BM_mesh_bm_from_me skips degenerate faces, which would misalign the Mesh face
+     * indices used by the raycast/selection paths below with BMesh face indices. */
+    paint_2d_geometry_fill_item_discard(item);
+    return false;
+  }
+  return item.bm != nullptr;
+}
+
+static void paint_2d_geometry_fill_expand(ImagePaintUVObjectFaces &item,
+                                          Scene *scene,
+                                          const Brush *br,
+                                          const Span<int> seed)
+{
+  if (br->fill_expand == IMAGE_PAINT_SELECT_EXPAND_ISLAND) {
+    Array<bool> tags(item.bm->totface, false);
+    ED_uvedit_uv_islands_tag_from_face_indices(scene, item.bm, item.offsets, seed, 0, tags);
+    for (int i = 0; i < item.bm->totface; i++) {
+      if (tags[i]) {
+        item.faces.append(i);
+      }
+    }
+  }
+  else if (br->fill_expand == IMAGE_PAINT_SELECT_EXPAND_MESH) {
+    Array<bool> tags(item.bm->totface, false);
+    image_paint_tag_mesh_connected_faces(item.bm, seed, tags);
+    for (int i = 0; i < item.bm->totface; i++) {
+      if (tags[i]) {
+        item.faces.append(i);
+      }
+    }
+  }
+  else {
+    item.faces.extend(seed);
+  }
+}
+
+static void paint_2d_geometry_fill_bucket_tiles(ImagePaintUVObjectFaces &item)
+{
+  BM_mesh_elem_table_ensure(item.bm, BM_FACE);
+  for (const int face_index : item.faces) {
+    BMFace *efa = BM_face_at_index(item.bm, face_index);
+    if (efa == nullptr) {
+      continue;
+    }
+    rctf face_uv_bounds;
+    BLI_rctf_init_minmax(&face_uv_bounds);
+    BMIter liter;
+    BMLoop *l;
+    BM_ITER_ELEM (l, &liter, efa, BM_LOOPS_OF_FACE) {
+      const float *uv = BM_ELEM_CD_GET_FLOAT_P(l, item.offsets.uv);
+      BLI_rctf_do_minmax_v(&face_uv_bounds, uv);
+    }
+    const int tx_min = int(floorf(face_uv_bounds.xmin));
+    const int tx_max = int(floorf(face_uv_bounds.xmax));
+    const int ty_min = int(floorf(face_uv_bounds.ymin));
+    const int ty_max = int(floorf(face_uv_bounds.ymax));
+    for (int ty = ty_min; ty <= ty_max; ty++) {
+      if (ty < 0) {
+        continue;
+      }
+      for (int tx = tx_min; tx <= tx_max; tx++) {
+        /* UDIM tiles span columns 0..9; ignore UVs outside the valid grid. */
+        if (tx < 0 || tx > 9) {
+          continue;
+        }
+        const int tile_number = 1001 + ty * 10 + tx;
+        if (tile_number > IMA_UDIM_MAX) {
+          continue;
+        }
+        item.tile_faces.lookup_or_add_default(tile_number).append(face_index);
+      }
+    }
+  }
+}
+
+static bool paint_2d_geometry_fill_commit(const bContext *C,
+                                          const float color[3],
+                                          Brush *br,
+                                          Image *ima,
+                                          SpaceImage *sima,
+                                          MutableSpan<ImagePaintUVObjectFaces> items,
+                                          const bool texpaint)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  const float strength = BKE_brush_alpha_get(paint, br);
+
+  Set<int> tile_numbers;
+  for (const ImagePaintUVObjectFaces &item : items) {
+    for (const int tile_number : item.tile_faces.keys()) {
+      tile_numbers.add(tile_number);
+    }
+  }
+
+  Vector<int> tiles;
+  tiles.reserve(tile_numbers.size());
+  for (const int tile_number : tile_numbers) {
+    tiles.append(tile_number);
+  }
+  std::sort(tiles.begin(), tiles.end());
+
+  ImBuf *last_ibuf = nullptr;
+  ImageUser last_iuser{};
+  bool have_last = false;
+
+  for (const int tile_number : tiles) {
+    ImageUser iuser{};
+    BKE_imageuser_default(&iuser);
+    iuser.tile = tile_number;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(ima, &iuser, nullptr);
+    if (!ibuf) {
+      continue;
+    }
+    if (have_last) {
+      BKE_image_release_ibuf(ima, last_ibuf, nullptr);
+    }
+    last_ibuf = ibuf;
+    last_iuser = iuser;
+    have_last = true;
+
+    const float2 origin = image_select_udim_tile_uv_origin(tile_number);
+    ED_imapaint_dirty_region(ima, ibuf, &last_iuser, 0, 0, ibuf->x, ibuf->y, false);
+
+    for (ImagePaintUVObjectFaces &item : items) {
+      const Vector<int> *faces_on_tile = item.tile_faces.lookup_ptr(tile_number);
+      if (faces_on_tile == nullptr || faces_on_tile->is_empty()) {
+        continue;
+      }
+      image_paint_rasterize_faces_to_ibuf(item.bm,
+                                          item.offsets,
+                                          *faces_on_tile,
+                                          origin,
+                                          ima,
+                                          tile_number,
+                                          ibuf,
+                                          color,
+                                          strength,
+                                          IMB_BlendMode(br->blend));
+    }
+  }
+
+  if (have_last) {
+    imapaint_image_update(sima, ima, last_ibuf, &last_iuser, texpaint);
+    ED_imapaint_clear_partial_redraw();
+    BKE_image_release_ibuf(ima, last_ibuf, nullptr);
+
+    /* Geometry fill never runs `paint_proj_stroke`, so the 3D view is not tagged
+     * via `need_redraw`. Force GPU texture rebuild and shading sync like
+     * `paint_2d_redraw` / `PAINT_OT_project_image`. */
+    if (!(sima && sima->lock)) {
+      BKE_image_free_gputextures(ima);
+    }
+    DEG_id_tag_update(&ima->id, 0);
+    WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
+
+    const Scene *scene = CTX_data_scene(C);
+    Object *object = CTX_data_active_object(C);
+    if (object && object->type == OB_MESH &&
+        (texpaint || (scene && scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE)))
+    {
+      DEG_id_tag_update(&object->id, ID_RECALC_SHADING);
+    }
+    if (texpaint) {
+      if (ARegion *region = CTX_wm_region(C)) {
+        ED_region_tag_redraw(region);
+      }
+    }
+  }
+
+  paint_2d_geometry_fill_free_items(items);
+  return have_last;
+}
+
+static void paint_2d_geometry_fill(const bContext *C,
+                                   const float color[3],
+                                   Brush *br,
+                                   Image *ima,
+                                   SpaceImage *sima,
+                                   Scene *scene,
+                                   const float2 &uv_abs)
+{
+  Vector<ImagePaintUVObjectFaces> items;
+  const Vector<Object *> objects = image_paint_selection_canvas_objects_get(
+      C, ima, ImagePaintCanvasPurpose::Fill);
+
+  for (Object *ob : objects) {
+    ImagePaintUVObjectFaces item;
+    if (!paint_2d_geometry_fill_init_bm(ob, item)) {
+      continue;
+    }
+
+    item.offsets = image_paint_selection_uv_offsets_get(item.bm, ob, scene);
+    if (item.offsets.uv < 0) {
+      paint_2d_geometry_fill_item_discard(item);
+      continue;
+    }
+
+    Vector<int> seed;
+    image_paint_faces_at_uv(item.bm, item.offsets, uv_abs, seed);
+    if (seed.is_empty()) {
+      paint_2d_geometry_fill_item_discard(item);
+      continue;
+    }
+
+    /* A 2D click only yields a UV. Recover the object-space point it maps to so mirroring
+     * uses the same geometry the 3D viewport would. */
+    const Mesh *mesh = id_cast<const Mesh *>(ob->data);
+    if (mesh != nullptr && mesh->symmetry != 0) {
+      BM_mesh_elem_table_ensure(item.bm, BM_FACE);
+      BMFace *seed_face = BM_face_at_index(item.bm, seed[0]);
+      float3 hit_position;
+      if (seed_face != nullptr &&
+          image_paint_uv_to_object_position(seed_face, item.offsets, uv_abs, hit_position))
+      {
+        image_paint_symmetry_mirror_faces(ob, item.bm, hit_position, mesh->symmetry, seed);
+      }
+    }
+
+    paint_2d_geometry_fill_expand(item, scene, br, seed);
+    if (item.faces.is_empty()) {
+      paint_2d_geometry_fill_item_discard(item);
+      continue;
+    }
+
+    paint_2d_geometry_fill_bucket_tiles(item);
+    items.append(std::move(item));
+  }
+
+  if (items.is_empty()) {
+    return;
+  }
+
+  paint_2d_geometry_fill_commit(C, color, br, ima, sima, items, false);
+}
+
+/**
+ * Hit the original mesh / Edit BMesh under the 3D cursor, not the evaluated mesh.
+ * Face indices then match #BM_face_at_index used by 2D fill and selection expand.
+ */
+static bool paint_image_geometry_fill_raycast_orig_face(
+    const bContext *C, Object *ob, const float mouse[2], int *r_face_index, float3 *r_hit_position)
+{
+  *r_face_index = -1;
+  *r_hit_position = float3(0.0f);
+  if (ob == nullptr || ob->type != OB_MESH) {
+    return false;
+  }
+
+  const ARegion *region = CTX_wm_region(C);
+  const View3D *v3d = CTX_wm_view3d(C);
+  if (region == nullptr || v3d == nullptr) {
+    return false;
+  }
+
+  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  float ray_start[3], ray_normal[3];
+  if (!ED_view3d_win_to_ray_clipped(depsgraph, region, v3d, mouse, ray_start, ray_normal, true)) {
+    return false;
+  }
+
+  float imat[4][4];
+  if (!invert_m4_m4(imat, ob->object_to_world().ptr())) {
+    return false;
+  }
+  float ray_start_ob[3], ray_normal_ob[3];
+  mul_v3_m4v3(ray_start_ob, imat, ray_start);
+  copy_v3_v3(ray_normal_ob, ray_normal);
+  mul_mat3_m4_v3(imat, ray_normal_ob);
+  if (normalize_v3(ray_normal_ob) == 0.0f) {
+    return false;
+  }
+
+  if (ob->mode & OB_MODE_EDIT) {
+    BMEditMesh *em = BKE_editmesh_from_object(ob);
+    if (em == nullptr || em->bm == nullptr) {
+      return false;
+    }
+    BM_mesh_elem_index_ensure(em->bm, BM_FACE);
+    BMBVHTree *bmbvh = BKE_bmbvh_new_from_editmesh(em, BMBVH_RESPECT_HIDDEN, nullptr, false);
+    if (bmbvh == nullptr) {
+      return false;
+    }
+    float dist = BVH_RAYCAST_DIST_MAX;
+    BMFace *f = BKE_bmbvh_ray_cast(
+        bmbvh, ray_start_ob, ray_normal_ob, 0.0f, &dist, nullptr, nullptr);
+    BKE_bmbvh_free(bmbvh);
+    if (f == nullptr) {
+      return false;
+    }
+    *r_face_index = BM_elem_index_get(f);
+    /* `dist` holds the distance along the normalized ray at the hit. */
+    *r_hit_position = float3(ray_start_ob) + float3(ray_normal_ob) * dist;
+    return *r_face_index >= 0;
+  }
+
+  const Mesh *mesh = id_cast<const Mesh *>(ob->data);
+  if (mesh == nullptr) {
+    return false;
+  }
+  bke::BVHTreeFromMesh tree_data = mesh->bvh_corner_tris_no_hidden();
+  if (tree_data.tree == nullptr) {
+    return false;
+  }
+
+  BVHTreeRayHit hit{};
+  hit.index = -1;
+  hit.dist = BVH_RAYCAST_DIST_MAX;
+  BLI_bvhtree_ray_cast(tree_data.tree,
+                       ray_start_ob,
+                       ray_normal_ob,
+                       0.0f,
+                       &hit,
+                       tree_data.raycast_callback,
+                       &tree_data);
+  if (hit.index < 0) {
+    return false;
+  }
+  const Span<int> tri_faces = mesh->corner_tri_faces();
+  if (hit.index >= tri_faces.size()) {
+    return false;
+  }
+  *r_face_index = tri_faces[hit.index];
+  *r_hit_position = float3(hit.co);
+  return *r_face_index >= 0;
+}
+
+static Image *paint_image_geometry_fill_canvas_image(const Scene *scene,
+                                                     Object *ob,
+                                                     const short mat_nr)
+{
+  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE) {
+    return paint_mode.canvas_image;
+  }
+
+  Material *ma = BKE_object_material_get(ob, short(mat_nr + 1));
+  if (ma == nullptr) {
+    ma = BKE_object_material_get(ob, ob->actcol);
+  }
+  if (ma && ma->texpaintslot && ma->paint_active_slot < ma->tot_slots) {
+    return ma->texpaintslot[ma->paint_active_slot].ima;
+  }
+  return nullptr;
+}
+
+static BMUVOffsets paint_image_geometry_fill_uv_offsets(BMesh *bm,
+                                                        Object *ob,
+                                                        const Scene *scene,
+                                                        const short mat_nr)
+{
+  const PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
+    Material *ma = BKE_object_material_get(ob, short(mat_nr + 1));
+    if (ma && ma->texpaintslot && ma->paint_active_slot < ma->tot_slots) {
+      const char *uvname = ma->texpaintslot[ma->paint_active_slot].uvname;
+      if (uvname && uvname[0]) {
+        const int layer = CustomData_get_named_layer_index(&bm->ldata, CD_PROP_FLOAT2, uvname);
+        if (layer != -1) {
+          return BM_uv_map_offsets_from_layer(bm, layer);
+        }
+      }
+    }
+  }
+  return image_paint_selection_uv_offsets_get(bm, ob, scene);
+}
+
+bool paint_image_proj_geometry_fill(
+    const bContext *C, const float color[3], Brush *br, Object *ob, const float mouse[2])
+{
+  if (br == nullptr || ob == nullptr) {
+    return false;
+  }
+
+  int face_index = -1;
+  float3 hit_position;
+  if (!paint_image_geometry_fill_raycast_orig_face(C, ob, mouse, &face_index, &hit_position)) {
+    return false;
+  }
+
+  ImagePaintUVObjectFaces item;
+  if (!paint_2d_geometry_fill_init_bm(ob, item)) {
+    return false;
+  }
+
+  BM_mesh_elem_table_ensure(item.bm, BM_FACE);
+  BMFace *efa = BM_face_at_index(item.bm, face_index);
+  if (efa == nullptr || BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
+    paint_2d_geometry_fill_item_discard(item);
+    return false;
+  }
+
+  Scene *scene = CTX_data_scene(C);
+  Image *ima = paint_image_geometry_fill_canvas_image(scene, ob, efa->mat_nr);
+  if (ima == nullptr) {
+    paint_2d_geometry_fill_item_discard(item);
+    return false;
+  }
+
+  item.offsets = paint_image_geometry_fill_uv_offsets(item.bm, ob, scene, efa->mat_nr);
+  if (item.offsets.uv < 0) {
+    paint_2d_geometry_fill_item_discard(item);
+    return false;
+  }
+
+  Vector<int> seed;
+  seed.append(face_index);
+  /* Mirrored faces join the seed set, so expand and rasterization stay symmetry-agnostic. */
+  if (const Mesh *mesh = id_cast<const Mesh *>(ob->data)) {
+    image_paint_symmetry_mirror_faces(ob, item.bm, hit_position, mesh->symmetry, seed);
+  }
+  paint_2d_geometry_fill_expand(item, scene, br, seed);
+  if (item.faces.is_empty()) {
+    paint_2d_geometry_fill_item_discard(item);
+    return false;
+  }
+
+  paint_2d_geometry_fill_bucket_tiles(item);
+  Vector<ImagePaintUVObjectFaces> items;
+  items.append(std::move(item));
+  return paint_2d_geometry_fill_commit(C, color, br, ima, nullptr, items, true);
+}
+
 void paint_2d_bucket_fill(const bContext *C,
                           const float color[3],
                           Brush *br,
@@ -4540,6 +5143,7 @@ void paint_2d_bucket_fill(const bContext *C,
   Image *ima = sima->image;
 
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
+  Scene *scene = CTX_data_scene(C);
 
   ImBuf *ibuf;
   int x_px, y_px;
@@ -4554,11 +5158,32 @@ void paint_2d_bucket_fill(const bContext *C,
   }
 
   View2D *v2d = s ? s->v2d : &CTX_wm_region(C)->v2d;
-  float uv_origin[2];
-  float image_init[2];
-  ui::view2d_region_to_view(v2d, mouse_init[0], mouse_init[1], &image_init[0], &image_init[1]);
+  float uv_abs[2];
+  ui::view2d_region_to_view(v2d, mouse_init[0], mouse_init[1], &uv_abs[0], &uv_abs[1]);
 
-  int tile_number = BKE_image_get_tile_from_pos(ima, image_init, image_init, uv_origin);
+  float image_uv[2];
+  copy_v2_v2(image_uv, uv_abs);
+  float uv_origin[2];
+  int tile_number = BKE_image_get_tile_from_pos(ima, image_uv, image_uv, uv_origin);
+  /* BKE_image_get_tile_from_pos returns 0 for non-UDIM images, but the selection mask
+   * system stores masks under the actual tile number (1001 for non-UDIM). Normalize so
+   * selection mask lookups use the same key as selection operators. */
+  if (tile_number == 0) {
+    const ImageTile *first_tile = static_cast<const ImageTile *>(ima->tiles.first);
+    if (first_tile) {
+      tile_number = first_tile->tile_number;
+    }
+  }
+
+  if (br != nullptr && mouse_final != nullptr && (br->flag & BRUSH_USE_GRADIENT) == 0 &&
+      ELEM(br->fill_expand,
+           IMAGE_PAINT_SELECT_EXPAND_FACE,
+           IMAGE_PAINT_SELECT_EXPAND_ISLAND,
+           IMAGE_PAINT_SELECT_EXPAND_MESH))
+  {
+    paint_2d_geometry_fill(C, color, br, ima, sima, scene, float2(uv_abs[0], uv_abs[1]));
+    return;
+  }
 
   ImageUser local_iuser, *iuser;
   if (s != nullptr) {
@@ -4600,9 +5225,17 @@ void paint_2d_bucket_fill(const bContext *C,
       float *float_data = ibuf->float_data_for_write();
       for (x_px = 0; x_px < ibuf->x; x_px++) {
         for (y_px = 0; y_px < ibuf->y; y_px++) {
+          const float mask_val = paint_2d_selection_mask_sample(
+              scene, ima, tile_number, x_px, y_px);
+          if (mask_val <= 0.001f) {
+            continue;
+          }
+          float color_f_masked[4];
+          copy_v4_v4(color_f_masked, color_f);
+          mul_v4_fl(color_f_masked, mask_val);
           blend_color_mix_float(float_data + 4 * (size_t(y_px) * ibuf->x + x_px),
                                 float_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                                color_f);
+                                color_f_masked);
         }
       }
     }
@@ -4610,9 +5243,19 @@ void paint_2d_bucket_fill(const bContext *C,
       uchar *byte_data = ibuf->byte_data_for_write();
       for (x_px = 0; x_px < ibuf->x; x_px++) {
         for (y_px = 0; y_px < ibuf->y; y_px++) {
+          const float mask_val = paint_2d_selection_mask_sample(
+              scene, ima, tile_number, x_px, y_px);
+          if (mask_val <= 0.001f) {
+            continue;
+          }
+          float color_f_masked[4];
+          rgba_uchar_to_float(color_f_masked, reinterpret_cast<uchar *>(&color_b));
+          mul_v4_fl(color_f_masked, mask_val);
+          uchar color_b_masked[4];
+          rgba_float_to_uchar(color_b_masked, color_f_masked);
           blend_color_mix_byte(byte_data + 4 * (size_t(y_px) * ibuf->x + x_px),
                                byte_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                               reinterpret_cast<uchar *>(&color_b));
+                               color_b_masked);
         }
       }
     }
@@ -4629,10 +5272,10 @@ void paint_2d_bucket_fill(const bContext *C,
      * (assumed in range [0,1]), so need to multiply... */
     float threshold_sq = br->fill_threshold * br->fill_threshold * 3;
 
-    x_px = image_init[0] * ibuf->x;
-    y_px = image_init[1] * ibuf->y;
+    x_px = image_uv[0] * ibuf->x;
+    y_px = image_uv[1] * ibuf->y;
 
-    if (x_px >= ibuf->x || x_px < 0 || y_px > ibuf->y || y_px < 0) {
+    if (x_px >= ibuf->x || x_px < 0 || y_px >= ibuf->y || y_px < 0) {
       BKE_image_release_ibuf(ima, ibuf, nullptr);
       return;
     }
@@ -4661,62 +5304,208 @@ void paint_2d_bucket_fill(const bContext *C,
       while (!BLI_stack_is_empty(stack)) {
         BLI_stack_pop(stack, &coordinate);
 
-        IMB_blend_color_float(ibuf->float_data_for_write() + 4 * (coordinate),
-                              ibuf->float_data_for_write() + 4 * (coordinate),
-                              color_f,
-                              IMB_BlendMode(br->blend));
-
         /* reconstruct the coordinates here */
         x_px = coordinate % width;
         y_px = coordinate / width;
 
-        paint_2d_fill_add_pixel_float(
-            x_px - 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_float(
-            x_px - 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_float(
-            x_px - 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_float(
-            x_px, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_float(
-            x_px, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_float(
-            x_px + 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_float(
-            x_px + 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_float(
-            x_px + 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
+        const float mask_val_f = paint_2d_selection_mask_sample(
+            scene, ima, tile_number, x_px, y_px);
+        if (mask_val_f > 0.001f) {
+          float color_f_masked[4];
+          copy_v4_v4(color_f_masked, color_f);
+          mul_v4_fl(color_f_masked, mask_val_f);
+
+          IMB_blend_color_float(ibuf->float_data_for_write() + 4 * coordinate,
+                                ibuf->float_data_for_write() + 4 * coordinate,
+                                color_f_masked,
+                                IMB_BlendMode(br->blend));
+        }
+
+        paint_2d_fill_add_pixel_float(scene,
+                                      ima,
+                                      tile_number,
+                                      x_px - 1,
+                                      y_px - 1,
+                                      ibuf,
+                                      stack,
+                                      touched,
+                                      pixel_color,
+                                      threshold_sq);
+        paint_2d_fill_add_pixel_float(scene,
+                                      ima,
+                                      tile_number,
+                                      x_px - 1,
+                                      y_px,
+                                      ibuf,
+                                      stack,
+                                      touched,
+                                      pixel_color,
+                                      threshold_sq);
+        paint_2d_fill_add_pixel_float(scene,
+                                      ima,
+                                      tile_number,
+                                      x_px - 1,
+                                      y_px + 1,
+                                      ibuf,
+                                      stack,
+                                      touched,
+                                      pixel_color,
+                                      threshold_sq);
+        paint_2d_fill_add_pixel_float(scene,
+                                      ima,
+                                      tile_number,
+                                      x_px,
+                                      y_px + 1,
+                                      ibuf,
+                                      stack,
+                                      touched,
+                                      pixel_color,
+                                      threshold_sq);
+        paint_2d_fill_add_pixel_float(scene,
+                                      ima,
+                                      tile_number,
+                                      x_px,
+                                      y_px - 1,
+                                      ibuf,
+                                      stack,
+                                      touched,
+                                      pixel_color,
+                                      threshold_sq);
+        paint_2d_fill_add_pixel_float(scene,
+                                      ima,
+                                      tile_number,
+                                      x_px + 1,
+                                      y_px - 1,
+                                      ibuf,
+                                      stack,
+                                      touched,
+                                      pixel_color,
+                                      threshold_sq);
+        paint_2d_fill_add_pixel_float(scene,
+                                      ima,
+                                      tile_number,
+                                      x_px + 1,
+                                      y_px,
+                                      ibuf,
+                                      stack,
+                                      touched,
+                                      pixel_color,
+                                      threshold_sq);
+        paint_2d_fill_add_pixel_float(scene,
+                                      ima,
+                                      tile_number,
+                                      x_px + 1,
+                                      y_px + 1,
+                                      ibuf,
+                                      stack,
+                                      touched,
+                                      pixel_color,
+                                      threshold_sq);
       }
     }
     else {
       while (!BLI_stack_is_empty(stack)) {
         BLI_stack_pop(stack, &coordinate);
 
-        IMB_blend_color_byte(ibuf->byte_data_for_write() + 4 * coordinate,
-                             ibuf->byte_data_for_write() + 4 * coordinate,
-                             reinterpret_cast<uchar *>(&color_b),
-                             IMB_BlendMode(br->blend));
-
         /* reconstruct the coordinates here */
         x_px = coordinate % width;
         y_px = coordinate / width;
 
-        paint_2d_fill_add_pixel_byte(
-            x_px - 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_byte(
-            x_px - 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_byte(
-            x_px - 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_byte(
-            x_px, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_byte(
-            x_px, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_byte(
-            x_px + 1, y_px - 1, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_byte(
-            x_px + 1, y_px, ibuf, stack, touched, pixel_color, threshold_sq);
-        paint_2d_fill_add_pixel_byte(
-            x_px + 1, y_px + 1, ibuf, stack, touched, pixel_color, threshold_sq);
+        const float mask_val_b = paint_2d_selection_mask_sample(
+            scene, ima, tile_number, x_px, y_px);
+        if (mask_val_b > 0.001f) {
+          float color_f_masked_b[4];
+          rgba_uchar_to_float(color_f_masked_b, reinterpret_cast<uchar *>(&color_b));
+          mul_v4_fl(color_f_masked_b, mask_val_b);
+          uchar color_b_masked[4];
+          rgba_float_to_uchar(color_b_masked, color_f_masked_b);
+
+          IMB_blend_color_byte(ibuf->byte_data_for_write() + 4 * coordinate,
+                               ibuf->byte_data_for_write() + 4 * coordinate,
+                               color_b_masked,
+                               IMB_BlendMode(br->blend));
+        }
+
+        paint_2d_fill_add_pixel_byte(scene,
+                                     ima,
+                                     tile_number,
+                                     x_px - 1,
+                                     y_px - 1,
+                                     ibuf,
+                                     stack,
+                                     touched,
+                                     pixel_color,
+                                     threshold_sq);
+        paint_2d_fill_add_pixel_byte(scene,
+                                     ima,
+                                     tile_number,
+                                     x_px - 1,
+                                     y_px,
+                                     ibuf,
+                                     stack,
+                                     touched,
+                                     pixel_color,
+                                     threshold_sq);
+        paint_2d_fill_add_pixel_byte(scene,
+                                     ima,
+                                     tile_number,
+                                     x_px - 1,
+                                     y_px + 1,
+                                     ibuf,
+                                     stack,
+                                     touched,
+                                     pixel_color,
+                                     threshold_sq);
+        paint_2d_fill_add_pixel_byte(scene,
+                                     ima,
+                                     tile_number,
+                                     x_px,
+                                     y_px + 1,
+                                     ibuf,
+                                     stack,
+                                     touched,
+                                     pixel_color,
+                                     threshold_sq);
+        paint_2d_fill_add_pixel_byte(scene,
+                                     ima,
+                                     tile_number,
+                                     x_px,
+                                     y_px - 1,
+                                     ibuf,
+                                     stack,
+                                     touched,
+                                     pixel_color,
+                                     threshold_sq);
+        paint_2d_fill_add_pixel_byte(scene,
+                                     ima,
+                                     tile_number,
+                                     x_px + 1,
+                                     y_px - 1,
+                                     ibuf,
+                                     stack,
+                                     touched,
+                                     pixel_color,
+                                     threshold_sq);
+        paint_2d_fill_add_pixel_byte(scene,
+                                     ima,
+                                     tile_number,
+                                     x_px + 1,
+                                     y_px,
+                                     ibuf,
+                                     stack,
+                                     touched,
+                                     pixel_color,
+                                     threshold_sq);
+        paint_2d_fill_add_pixel_byte(scene,
+                                     ima,
+                                     tile_number,
+                                     x_px + 1,
+                                     y_px + 1,
+                                     ibuf,
+                                     stack,
+                                     touched,
+                                     pixel_color,
+                                     threshold_sq);
       }
     }
 
@@ -4738,117 +5527,68 @@ void paint_2d_gradient_fill(
   SpaceImage *sima = CTX_wm_space_image(C);
   Image *ima = sima->image;
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
+  Scene *scene = CTX_data_scene(C);
 
-  ImBuf *ibuf;
-  int x_px, y_px;
-  uint color_b;
-  float color_f[4];
-  float image_init[2], image_final[2];
-  float tangent[2];
-  float line_len_sq_inv, line_len;
-  const float brush_alpha = BKE_brush_alpha_get(s->paint, br);
-
-  bool do_float;
-
-  if (ima == nullptr) {
+  if (ima == nullptr || s == nullptr) {
     return;
   }
 
   float uv_origin[2];
+  float image_init[2], image_final[2];
+  ui::view2d_region_to_view(
+      s->v2d, mouse_final[0], mouse_final[1], &image_final[0], &image_final[1]);
+  ui::view2d_region_to_view(
+      s->v2d, mouse_init[0], mouse_init[1], &image_init[0], &image_init[1]);
   int tile_number = BKE_image_get_tile_from_pos(ima, image_init, image_init, uv_origin);
+  /* Normalize tile_number for non-UDIM images (same reason as in paint_2d_bucket_fill). */
+  if (tile_number == 0) {
+    const ImageTile *first_tile = static_cast<const ImageTile *>(ima->tiles.first);
+    if (first_tile) {
+      tile_number = first_tile->tile_number;
+    }
+  }
   ImageUser *iuser = paint_2d_get_tile_iuser(s, tile_number);
   if (!iuser) {
     return;
   }
 
-  ibuf = BKE_image_acquire_ibuf(ima, iuser, nullptr);
+  ImBuf *ibuf = BKE_image_acquire_ibuf(ima, iuser, nullptr);
   if (ibuf == nullptr) {
     return;
   }
 
-  ui::view2d_region_to_view(
-      s->v2d, mouse_final[0], mouse_final[1], &image_final[0], &image_final[1]);
-  ui::view2d_region_to_view(
-      s->v2d, mouse_init[0], mouse_init[1], &image_init[0], &image_init[1]);
   sub_v2_v2(image_init, uv_origin);
   sub_v2_v2(image_final, uv_origin);
 
   image_final[0] *= ibuf->x;
   image_final[1] *= ibuf->y;
-
   image_init[0] *= ibuf->x;
   image_init[1] *= ibuf->y;
 
-  /* some math to get needed gradient variables */
-  sub_v2_v2v2(tangent, image_final, image_init);
-  line_len = len_squared_v2(tangent);
-  line_len_sq_inv = 1.0f / line_len;
-  line_len = sqrtf(line_len);
+  const ImagePaintGradientParams params = image_paint_gradient_params_from_brush(s->paint, br);
+  const float2 start_px(image_init[0], image_init[1]);
+  const float2 end_px(image_final[0], image_final[1]);
 
-  do_float = (ibuf->float_data() != nullptr);
+  rcti work_region;
+  image_paint_gradient_calc_work_region(
+      scene, ima, tile_number, ibuf->x, ibuf->y, nullptr, work_region);
 
-  /* this will be substituted by something else when selection is available */
-  ED_imapaint_dirty_region(ima, ibuf, iuser, 0, 0, ibuf->x, ibuf->y, false);
-
-  if (do_float) {
-    float *float_data = ibuf->float_data_for_write();
-    for (x_px = 0; x_px < ibuf->x; x_px++) {
-      for (y_px = 0; y_px < ibuf->y; y_px++) {
-        float f;
-        const float p[2] = {x_px - image_init[0], y_px - image_init[1]};
-
-        switch (br->gradient_fill_mode) {
-          case BRUSH_GRADIENT_LINEAR: {
-            f = dot_v2v2(p, tangent) * line_len_sq_inv;
-            break;
-          }
-          case BRUSH_GRADIENT_RADIAL:
-          default: {
-            f = len_v2(p) / line_len;
-            break;
-          }
-        }
-        BKE_colorband_evaluate(br->gradient, f, color_f);
-        /* convert to premultiplied */
-        mul_v3_fl(color_f, color_f[3]);
-        color_f[3] *= brush_alpha;
-        IMB_blend_color_float(float_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                              float_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                              color_f,
-                              IMB_BlendMode(br->blend));
-      }
-    }
+  if (BLI_rcti_is_empty(&work_region)) {
+    BKE_image_release_ibuf(ima, ibuf, nullptr);
+    return;
   }
-  else {
-    uchar *byte_data = ibuf->byte_data_for_write();
-    for (x_px = 0; x_px < ibuf->x; x_px++) {
-      for (y_px = 0; y_px < ibuf->y; y_px++) {
-        float f;
-        const float p[2] = {x_px - image_init[0], y_px - image_init[1]};
 
-        switch (br->gradient_fill_mode) {
-          case BRUSH_GRADIENT_LINEAR: {
-            f = dot_v2v2(p, tangent) * line_len_sq_inv;
-            break;
-          }
-          case BRUSH_GRADIENT_RADIAL:
-          default: {
-            f = len_v2(p) / line_len;
-            break;
-          }
-        }
+  ED_imapaint_dirty_region(ima,
+                           ibuf,
+                           iuser,
+                           work_region.xmin,
+                           work_region.ymin,
+                           BLI_rcti_size_x(&work_region),
+                           BLI_rcti_size_y(&work_region),
+                           false);
 
-        BKE_colorband_evaluate(br->gradient, f, color_f);
-        IMB_colormanagement_scene_linear_to_colorspace_v3(color_f, ibuf->byte_buffer.colorspace);
-        rgba_float_to_uchar(reinterpret_cast<uchar *>(&color_b), color_f);
-        (reinterpret_cast<uchar *>(&color_b))[3] *= brush_alpha;
-        IMB_blend_color_byte(byte_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                             byte_data + 4 * (size_t(y_px) * ibuf->x + x_px),
-                             reinterpret_cast<uchar *>(&color_b),
-                             IMB_BlendMode(br->blend));
-      }
-    }
-  }
+  image_paint_gradient_apply_region(
+      scene, ima, tile_number, ibuf, params, start_px, end_px, 0.5f, work_region);
 
   imapaint_image_update(sima, ima, ibuf, iuser, false);
   ED_imapaint_clear_partial_redraw();

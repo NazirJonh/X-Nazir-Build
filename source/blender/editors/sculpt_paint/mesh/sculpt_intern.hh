@@ -1207,6 +1207,16 @@ std::optional<Span<float>> orig_mask_data_lookup_mesh(const Object &object,
 std::optional<Span<float>> orig_mask_data_lookup_grids(const Object &object,
                                                        const bke::pbvh::GridsNode &node);
 
+inline bool sculpt_brush_is_texture_fill(const Brush &brush)
+{
+  return brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_TEXTURE_FILL;
+}
+
+bool sculpt_brush_uses_image_canvas(const Brush &brush,
+                                    PaintModeSettings &settings,
+                                    const Paint &paint,
+                                    Object &ob);
+
 inline bool brush_type_is_paint(const int tool)
 {
   return ELEM(tool, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_SMEAR, SCULPT_BRUSH_TYPE_BLUR);

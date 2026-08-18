@@ -507,6 +507,11 @@ struct Brush {
 
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve = nullptr;
   struct MeshAutomaskingSettings *mesh_automasking_settings = nullptr;
+
+  /** #eImagePaint_SelectionExpand — Fill pick mode. Default Pixels = current flood/view fill. */
+  char fill_expand = IMAGE_PAINT_SELECT_EXPAND_PIXELS;
+  /* Keep #Brush 8-byte aligned after the trailing pointer + char. */
+  char _pad_fill[7] = {};
 };
 
 struct PaletteColor {

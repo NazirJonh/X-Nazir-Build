@@ -13,6 +13,7 @@
 
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
+#include "BLI_utildefines.h"
 
 #include "BKE_brush.hh"
 #include "BKE_colortools.hh"
@@ -38,6 +39,71 @@
 #include "ED_image.hh"
 
 #include "../paint_intern.hh"
+
+namespace blender {
+
+bool paint_image_viewport_fill_at_mouse(const bContext *C,
+                                        const Paint *paint,
+                                        Brush *brush,
+                                        Object *ob,
+                                        bool stroke_inverted,
+                                        const float mouse[2])
+{
+  if (brush == nullptr || ob == nullptr) {
+    return false;
+  }
+  if (brush->flag & BRUSH_USE_GRADIENT) {
+    /* v2 — solid fallback for v1 */
+    return false;
+  }
+
+  float color[3];
+  if (stroke_inverted) {
+    copy_v3_v3(color, BKE_brush_secondary_color_get(paint, brush));
+  }
+  else {
+    copy_v3_v3(color, BKE_brush_color_get(paint, brush));
+  }
+
+  if (ELEM(brush->fill_expand,
+           IMAGE_PAINT_SELECT_EXPAND_FACE,
+           IMAGE_PAINT_SELECT_EXPAND_ISLAND,
+           IMAGE_PAINT_SELECT_EXPAND_MESH))
+  {
+    return paint_image_proj_geometry_fill(C, color, brush, ob, mouse);
+  }
+
+  /* Pixel flood — minimal projection stroke session */
+  bContext *C_mut = const_cast<bContext *>(C);
+  Scene *scene = CTX_data_scene(C);
+  ToolSettings *ts = scene->toolsettings;
+  /* Sculpt fill: projection paint reads imapaint.paint/mode/canvas, not the sculpt canvas
+   * (ts->paint_mode). Sync both for the duration of this one-shot stroke. */
+  Brush *prev_imapaint_brush = ts->imapaint.paint.brush;
+  int prev_imapaint_mode = ts->imapaint.mode;
+  Image *prev_imapaint_canvas = ts->imapaint.canvas;
+  ts->imapaint.paint.brush = brush;
+  ts->imapaint.mode = ts->paint_mode.canvas_source;
+  ts->imapaint.canvas = ts->paint_mode.canvas_image;
+  void *stroke_handle = paint_proj_new_stroke(
+      C_mut, ob, mouse, BrushStrokeMode::Normal, BrushSwitchMode::None);
+  ts->imapaint.paint.brush = prev_imapaint_brush;
+  ts->imapaint.mode = prev_imapaint_mode;
+  ts->imapaint.canvas = prev_imapaint_canvas;
+  if (stroke_handle == nullptr) {
+    return false;
+  }
+
+  const float pressure = 1.0f;
+  const float size = BKE_brush_radius_get(paint, brush);
+  paint_proj_stroke(C, stroke_handle, mouse, mouse, 0, pressure, 0.0f, size);
+  paint_proj_redraw(C, stroke_handle, false);
+  paint_proj_redraw(C, stroke_handle, true);
+  paint_proj_stroke_done(stroke_handle);
+  return true;
+}
+
+}  // namespace blender
 
 namespace blender {
 
@@ -208,21 +274,12 @@ class ProjectionPaintMode : public AbstractPaintMode {
                   const Paint *paint,
                   Brush *brush,
                   PaintStroke *stroke,
-                  void *stroke_handle,
+                  void * /*stroke_handle*/,
                   float mouse_start[2],
-                  float mouse_end[2])
+                  float /*mouse_end*/[2])
   {
-    paint_proj_stroke(C,
-                      stroke_handle,
-                      mouse_start,
-                      mouse_end,
-                      stroke->stroke_flipped(),
-                      1.0,
-                      0.0,
-                      BKE_brush_radius_get(paint, brush));
-    /* two redraws, one for GPU update, one for notification */
-    paint_proj_redraw(C, stroke_handle, false);
-    paint_proj_redraw(C, stroke_handle, true);
+    paint_image_viewport_fill_at_mouse(
+        C, paint, brush, CTX_data_active_object(C), stroke->stroke_inverted(), mouse_start);
   }
 };
 

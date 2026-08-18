@@ -2507,6 +2507,9 @@ static float brush_strength(const Sculpt &sd,
       return 0.0f;
     case SCULPT_BRUSH_TYPE_SCENE_PROJECT:
       return flip * alpha * pressure * overlap * feather;
+    case SCULPT_BRUSH_TYPE_TEXTURE_FILL:
+      /* One-shot fill; strength unused (handled in stroke done()). */
+      return 0.0f;
   }
   BLI_assert_unreachable();
   return 0.0f;
@@ -3578,6 +3581,8 @@ static const char *sculpt_brush_type_name(const Brush &brush)
       return "Blur Brush";
     case SCULPT_BRUSH_TYPE_SCENE_PROJECT:
       return "Scene Project Brush";
+    case SCULPT_BRUSH_TYPE_TEXTURE_FILL:
+      return "Texture Fill Brush";
   }
 
   return "Sculpting";
@@ -3878,6 +3883,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
       brushes::do_scene_project_brush(depsgraph, sd, ob, node_mask);
       break;
     case SCULPT_BRUSH_TYPE_SIMPLIFY:
+      break;
+    case SCULPT_BRUSH_TYPE_TEXTURE_FILL:
+      /* One-shot fill; handled in SculptPaintStroke::done(). */
       break;
   }
 
@@ -4491,6 +4499,7 @@ static void brush_delta_update(const Depsgraph &depsgraph,
   };
   int brush_type = brush.sculpt_brush_type;
 
+  /* TEXTURE_FILL intentionally excluded — one-shot fill, no per-step delta. */
   if (!ELEM(brush_type,
             SCULPT_BRUSH_TYPE_PAINT,
             SCULPT_BRUSH_TYPE_GRAB,
@@ -6009,6 +6018,17 @@ static bool over_mesh(Depsgraph &depsgraph,
       depsgraph, vc, sd.paint, &sd, co_dummy, mval, false, check_closest, true);
 }
 
+bool sculpt_brush_uses_image_canvas(const Brush &brush,
+                                    PaintModeSettings &settings,
+                                    const Paint &paint,
+                                    Object &ob)
+{
+  if (!ELEM(brush.sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_TEXTURE_FILL)) {
+    return false;
+  }
+  return SCULPT_use_image_paint_brush(settings, ob, &brush, paint.visible_material_channels);
+}
+
 static void stroke_undo_begin(const Scene &scene,
                               const Brush *brush,
                               PaintModeSettings &paint_mode_settings,
@@ -6018,10 +6038,7 @@ static void stroke_undo_begin(const Scene &scene,
 {
   /* Setup the correct undo system. Image painting and sculpting are mutual exclusive.
    * Color attributes are part of the sculpting undo system. */
-  if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-       SCULPT_use_image_paint_brush(
-           paint_mode_settings, object, brush, paint.visible_material_channels))
-  {
+  if (brush && sculpt_brush_uses_image_canvas(*brush, paint_mode_settings, paint, object)) {
     ED_image_undo_push_begin(op->type->name, PaintMode::Sculpt);
   }
   else {
@@ -6034,10 +6051,7 @@ static void stroke_undo_end(PaintModeSettings &paint_mode_settings,
                             Object &object,
                             Brush *brush)
 {
-  if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-       SCULPT_use_image_paint_brush(
-           paint_mode_settings, object, brush, paint.visible_material_channels))
-  {
+  if (brush && sculpt_brush_uses_image_canvas(*brush, paint_mode_settings, paint, object)) {
     ED_image_undo_push_end();
   }
   else {
@@ -6380,6 +6394,11 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   StrokeCache *cache = ss.cache;
   cache->stroke_distance = this->stroke_distance();
 
+  if (sculpt_brush_is_texture_fill(brush)) {
+    RNA_float_get_array(itemptr, "mouse_event", ss.cache->mouse_event);
+    return;
+  }
+
   stroke_modifiers_check(depsgraph, this->vc.rv3d, sd, ob, &brush);
   stroke_cache_update(itemptr);
   restore_from_undo_step_if_necessary(depsgraph, sd, ob);
@@ -6469,6 +6488,14 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
    * stroke had just done. See "Refactor: Images: Incorrect usage of BKE_image_free_gputextures"
    * upstream: use the partial update mechanism instead. */
 
+  if (!is_cancel && stroke_started && sculpt_brush_is_texture_fill(*brush)) {
+    const Paint *paint = &sd.paint;
+    const bool inverted = paint_runtime->draw_inverted;
+    paint_image_viewport_fill_at_mouse(
+        this->evil_C, paint, brush, &ob, inverted, ss.cache->mouse_event);
+    flush_update_step(this->vc, ob, UpdateType::Image);
+  }
+
   MEM_delete(ss.cache);
   ss.cache = nullptr;
 
@@ -6479,15 +6506,11 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
     flush_update_done(this->vc, *wm_, ob, UpdateType::Mask);
   }
+  else if (sculpt_brush_uses_image_canvas(*brush, *paint_mode_settings_, sd.paint, ob)) {
+    flush_update_done(this->vc, *wm_, ob, UpdateType::Image);
+  }
   else if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
-    if (SCULPT_use_image_paint_brush(
-            *this->paint_mode_settings_, ob, brush, sd.paint.visible_material_channels))
-    {
-      flush_update_done(this->vc, *wm_, ob, UpdateType::Image);
-    }
-    else {
-      flush_update_done(this->vc, *wm_, ob, UpdateType::Color);
-    }
+    flush_update_done(this->vc, *wm_, ob, UpdateType::Color);
   }
   else {
     flush_update_done(this->vc, *wm_, ob, UpdateType::Position);

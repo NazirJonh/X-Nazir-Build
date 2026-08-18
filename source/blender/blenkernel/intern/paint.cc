@@ -1057,6 +1057,9 @@ static void paint_brush_default_essentials_name_get(const PaintMode paint_mode,
           case SCULPT_BRUSH_TYPE_PAINT:
             name = "Paint Hard";
             break;
+          case SCULPT_BRUSH_TYPE_TEXTURE_FILL:
+            name = "Fill";
+            break;
           case SCULPT_BRUSH_TYPE_SIMPLIFY:
             name = "Density";
             break;

@@ -69,6 +69,56 @@ static void lattice_deform_data_fill_point(float fp[3],
   mul_mat3_m4_v3(imat, fp);
 }
 
+static void lattice_deform_data_compute_latmat(const float lattice_to_world[4][4],
+                                               const float (*target_to_world)[4],
+                                               float latmat[4][4],
+                                               float imat[4][4])
+{
+  if (target_to_world == nullptr) {
+    invert_m4_m4(latmat, lattice_to_world);
+    invert_m4_m4(imat, latmat);
+  }
+  else {
+    invert_m4_m4(imat, lattice_to_world);
+    mul_m4_m4m4(latmat, imat, target_to_world);
+    invert_m4_m4(imat, latmat);
+  }
+}
+
+LatticeDeformData *BKE_lattice_deform_data_create_from_lattice(const Lattice *lt,
+                                                               const float lattice_to_world[4][4],
+                                                               const float (*target_to_world)[4])
+{
+  BLI_assert(lt != nullptr && lt->def != nullptr);
+
+  const int32_t num_points = lt->pntsu * lt->pntsv * lt->pntsw;
+  float *fp, imat[4][4], latmat[4][4];
+  float fu, fv, fw;
+  int u, v, w;
+  /* One extra float for SSE2 reads past the last item, see #BKE_lattice_deform_data_create. */
+  fp = MEM_new_array_uninitialized<float>(3 * size_t(num_points) + 1, "latticedata");
+  float *latticedata = fp;
+
+  lattice_deform_data_compute_latmat(lattice_to_world, target_to_world, latmat, imat);
+
+  const BPoint *bp = lt->def;
+  for (w = 0, fw = lt->fw; w < lt->pntsw; w++, fw += lt->dw) {
+    for (v = 0, fv = lt->fv; v < lt->pntsv; v++, fv += lt->dv) {
+      for (u = 0, fu = lt->fu; u < lt->pntsu; u++, fp += 3, fu += lt->du, bp++) {
+        lattice_deform_data_fill_point(fp, bp->vec, fu, fv, fw, imat);
+      }
+    }
+  }
+
+  LatticeDeformData *lattice_deform_data = MEM_new_uninitialized<LatticeDeformData>(
+      "Lattice Deform Data");
+  lattice_deform_data->latticedata = latticedata;
+  lattice_deform_data->lattice_weights = nullptr;
+  lattice_deform_data->lt = lt;
+  copy_m4_m4(lattice_deform_data->latmat, latmat);
+  return lattice_deform_data;
+}
+
 LatticeDeformData *BKE_lattice_deform_data_create(const Object *oblatt, const Object *ob)
 {
   /* we make an array with all differences */

@@ -22,12 +22,15 @@
 
 #include "sculpt_intern.hh"
 
+#include <optional>
+
 #include "MEM_guardedalloc.h"
 
 #include "BLI_array.hh"
 #include "BLI_bounds.hh"
 #include "BLI_bounds_types.hh"
 #include "BLI_index_mask.hh"
+#include "BLI_map.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_types.hh"
@@ -71,7 +74,40 @@ LatticeDeformData *sculpt_lattice_deform_data_rebuild(Object *lat_ob, Object *me
    * ~zero — i.e. no live preview. Recompute the runtime matrix from the DNA transform. */
   BKE_object_to_mat4(lat_ob, lat_ob->runtime->object_to_world.ptr());
 
-  return BKE_lattice_deform_data_create(lat_ob, mesh_ob);
+  return BKE_lattice_deform_data_create_from_lattice(
+      id_cast<const Lattice *>(lat_ob->data),
+      lat_ob->object_to_world().ptr(),
+      mesh_ob->object_to_world().ptr());
+}
+
+void sculpt_lattice_evaluator_reset(LatticeToolData &state)
+{
+  if (state.deform_data) {
+    BKE_lattice_deform_data_destroy(state.deform_data);
+    state.deform_data = nullptr;
+  }
+}
+
+void sculpt_lattice_evaluator_rebuild(LatticeToolData &state, Object &mesh_ob)
+{
+  sculpt_lattice_evaluator_reset(state);
+  if (state.lattice_ob) {
+    state.deform_data = sculpt_lattice_deform_data_rebuild(state.lattice_ob, &mesh_ob);
+  }
+}
+
+void sculpt_lattice_evaluator_ensure(LatticeToolData &state, Object &mesh_ob)
+{
+  if (!state.deform_data) {
+    sculpt_lattice_evaluator_rebuild(state, mesh_ob);
+  }
+}
+
+void sculpt_lattice_evaluator_update_point(LatticeToolData &state, const int index)
+{
+  if (state.deform_data) {
+    BKE_lattice_deform_data_update_point(state.deform_data, index);
+  }
 }
 
 /* -------------------------------------------------------------------- */
@@ -140,29 +176,87 @@ bool sculpt_lattice_compute_deform_bounds(const Depsgraph &depsgraph,
 /** \name Build affected region (snapshot at session start / phase transition)
  * \{ */
 
+static Bounds<float3> sculpt_lattice_transform_bounds(const float4x4 &mat,
+                                                      const Bounds<float3> &src)
+{
+  Bounds<float3> dst(math::transform_point(mat, src.min));
+  const float3 corners[7] = {
+      {src.max.x, src.min.y, src.min.z},
+      {src.min.x, src.max.y, src.min.z},
+      {src.min.x, src.min.y, src.max.z},
+      {src.max.x, src.max.y, src.min.z},
+      {src.max.x, src.min.y, src.max.z},
+      {src.min.x, src.max.y, src.max.z},
+      src.max,
+  };
+  for (const float3 &corner : corners) {
+    math::min_max(math::transform_point(mat, corner), dst.min, dst.max);
+  }
+  return dst;
+}
+
+static bool sculpt_lattice_vert_in_cage(const float3 &mesh_co,
+                                        const float4x4 &mesh_to_lattice,
+                                        const float3 &bmin,
+                                        const float3 &bmax)
+{
+  const float3 local = math::transform_point(mesh_to_lattice, mesh_co);
+  return !(local.x < bmin.x || local.x > bmax.x || local.y < bmin.y || local.y > bmax.y ||
+           local.z < bmin.z || local.z > bmax.z);
+}
+
+static void sculpt_lattice_session_orig_capture(LatticeToolData &state)
+{
+  SessionOrigSnapshot &snap = state.session_orig;
+  for (const AffectedNode &node : state.current.nodes) {
+    if (snap.node_set.add(node.index)) {
+      snap.node_indices.append(node.index);
+    }
+    for (const int i : node.verts.index_range()) {
+      const int v = node.verts[i];
+      if (snap.vert_set.add(v)) {
+        snap.verts.append(v);
+        snap.positions.append(node.rest_coords[i]);
+      }
+    }
+  }
+}
+
+IndexMask sculpt_lattice_affected_node_mask(const AffectedRegion &ar, IndexMaskMemory &memory)
+{
+  if (ar.node_indices.is_empty()) {
+    return {};
+  }
+  return IndexMask::from_indices(ar.node_indices.as_span(), memory);
+}
+
+static void sculpt_lattice_affected_region_clear(AffectedRegion &ar)
+{
+  ar.nodes.clear();
+  ar.node_indices.clear();
+  ar.pbvh = nullptr;
+  ar.pbvh_nodes_num = -1;
+}
+
 void sculpt_lattice_build_affected_region(const Depsgraph &depsgraph,
                                           Object &ob_mesh,
                                           LatticeToolData &state)
 {
   AffectedRegion &ar = state.current;
-  ar.rest_coords = {};
-  ar.current_coords = {};
-  ar.verts.clear();
-  ar.mask = {};
-  ar.affected_pbvh_nodes.clear();
-  ar.affected_pbvh = nullptr;
-  ar.affected_pbvh_nodes_num = -1;
+  sculpt_lattice_affected_region_clear(ar);
 
   if (!state.lattice_ob) {
     return;
   }
 
-  if (sculpt_lattice_pbvh_find(ob_mesh) == nullptr) {
+  bke::pbvh::Tree *pbvh = sculpt_lattice_pbvh_find(ob_mesh);
+  if (pbvh == nullptr) {
     return;
   }
 
   const Mesh &mesh = *id_cast<const Mesh *>(ob_mesh.data);
   const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob_mesh);
+  state.mesh_verts_num = int(positions.size());
   const VArraySpan mask = *mesh.attributes().lookup<float>(".sculpt_mask",
                                                            bke::AttrDomain::Point);
 
@@ -175,37 +269,53 @@ void sculpt_lattice_build_affected_region(const Depsgraph &depsgraph,
   /* Mesh vertex (object-space) -> lattice data-space (same as #Lattice.def). */
   const float4x4 mesh_to_lattice = math::invert(state.lattice_ob->object_to_world()) *
                                    ob_mesh.object_to_world();
+  const float4x4 lattice_to_mesh = math::invert(mesh_to_lattice);
+  const Bounds<float3> cage_mesh = sculpt_lattice_transform_bounds(lattice_to_mesh, *lt_bounds);
 
   const float3 &bmin = lt_bounds->min;
   const float3 &bmax = lt_bounds->max;
 
-  for (const int i : positions.index_range()) {
-    const float3 local = math::transform_point(mesh_to_lattice, positions[i]);
-    if (local.x < bmin.x || local.x > bmax.x || local.y < bmin.y || local.y > bmax.y ||
-        local.z < bmin.z || local.z > bmax.z)
-    {
-      continue;
+  IndexMaskMemory memory;
+  const IndexMask candidates = bke::pbvh::search_nodes(
+      *pbvh, memory, [&](const bke::pbvh::Node &node) {
+        return node.bounds().intersects(cage_mesh);
+      });
+
+  const Span<bke::pbvh::MeshNode> mesh_nodes = pbvh->nodes<bke::pbvh::MeshNode>();
+  candidates.foreach_index([&](const int node_i) {
+    const bke::pbvh::MeshNode &mesh_node = mesh_nodes[node_i];
+    Vector<int> verts;
+    Vector<float3> rest;
+    Vector<float> vert_mask;
+    for (const int v : mesh_node.verts()) {
+      if (!sculpt_lattice_vert_in_cage(positions[v], mesh_to_lattice, bmin, bmax)) {
+        continue;
+      }
+      const float v_mask = mask.is_empty() ? 0.0f : mask[v];
+      if ((1.0f - v_mask) <= state.mask_eps) {
+        continue;
+      }
+      verts.append(v);
+      rest.append(positions[v]);
+      vert_mask.append(v_mask);
     }
-    const float v_mask = mask.is_empty() ? 0.0f : mask[i];
-    if ((1.0f - v_mask) <= state.mask_eps) {
-      continue;
+    if (verts.is_empty()) {
+      return;
     }
-    ar.verts.append(i);
-  }
+    ar.nodes.append({});
+    AffectedNode &dst = ar.nodes.last();
+    dst.index = node_i;
+    dst.verts = std::move(verts);
+    dst.rest_coords = Array<float3>(rest.as_span());
+    dst.current_coords = dst.rest_coords;
+    dst.mask = Array<float>(vert_mask.as_span());
+    ar.node_indices.append(node_i);
+  });
 
-  const int n = int(ar.verts.size());
-  ar.rest_coords.reinitialize(n);
-  ar.mask.reinitialize(n);
-  for (const int j : ar.verts.index_range()) {
-    const int v = ar.verts[j];
-    ar.rest_coords[j] = positions[v];
-    ar.mask[j] = mask.is_empty() ? 0.0f : mask[v];
-  }
+  ar.pbvh = pbvh;
+  ar.pbvh_nodes_num = pbvh->nodes_num();
 
-  /* Seed the applied-position tracker with the rest snapshot: nothing is deformed yet. */
-  ar.current_coords = ar.rest_coords;
-
-  sculpt_lattice_ensure_affected_nodes(depsgraph, ob_mesh, ar);
+  sculpt_lattice_session_orig_capture(state);
 }
 
 bool sculpt_lattice_sync_tracker_to_mesh(const Depsgraph &depsgraph,
@@ -213,13 +323,14 @@ bool sculpt_lattice_sync_tracker_to_mesh(const Depsgraph &depsgraph,
                                          LatticeToolData &state)
 {
   const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob_mesh);
-  if (positions.size() != state.entry_positions.size()) {
+  if (int(positions.size()) != state.mesh_verts_num) {
     return false;
   }
 
-  AffectedRegion &ar = state.current;
-  for (const int i : ar.verts.index_range()) {
-    ar.current_coords[i] = positions[ar.verts[i]];
+  for (AffectedNode &node : state.current.nodes) {
+    for (const int i : node.verts.index_range()) {
+      node.current_coords[i] = positions[node.verts[i]];
+    }
   }
   return true;
 }
@@ -230,7 +341,7 @@ bool sculpt_lattice_sync_tracker_to_mesh(const Depsgraph &depsgraph,
 /** \name Apply live deformation (MOUSEMOVE)
  * \{ */
 
-void sculpt_lattice_compute_translations(LatticeDeformData &deform_data,
+bool sculpt_lattice_compute_translations(LatticeDeformData &deform_data,
                                          const Span<float3> rest_coords,
                                          const Span<float> mask,
                                          const float strength,
@@ -246,56 +357,185 @@ void sculpt_lattice_compute_translations(LatticeDeformData &deform_data,
   threading::parallel_for(rest_coords.index_range(), 512, [&](const IndexRange range) {
     for (const int i : range) {
       const float weight = strength * (1.0f - mask[i]);
-      if (weight <= 0.0f) {
-        r_translations[i] = float3(0.0f);
-        continue;
+      float3 target = rest_coords[i];
+      if (weight > 0.0f) {
+        float deformed[3];
+        copy_v3_v3(deformed, rest_coords[i]);
+        /* #BKE_lattice_deform_data_eval_co mutates `co` in place. It interprets `co` as
+         * object-space of the *target* mesh (the second arg passed to deform_data_create). */
+        BKE_lattice_deform_data_eval_co(&deform_data, deformed, 1.0f);
+        target = math::interpolate(rest_coords[i], float3(deformed), weight);
       }
-      float deformed[3];
-      copy_v3_v3(deformed, rest_coords[i]);
-      /* #BKE_lattice_deform_data_eval_co mutates `co` in place. It interprets `co` as
-       * object-space of the *target* mesh (the second arg passed to deform_data_create). */
-      BKE_lattice_deform_data_eval_co(&deform_data, deformed, 1.0f);
-      const float3 target = math::interpolate(rest_coords[i], float3(deformed), weight);
       /* Absolute rest -> target mapping turned into the increment #PositionDeformData::deform
-       * expects, relative to the last position this tool wrote (see
-       * #AffectedRegion::current_coords). */
+       * expects, relative to the last position this tool wrote. Weight 0 still targets rest so a
+       * live Strength change can roll the mesh back. */
       r_translations[i] = target - current_coords[i];
       current_coords[i] = target;
     }
   });
+
+  for (const float3 &delta : r_translations) {
+    if (!math::is_zero(delta)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool sculpt_lattice_deform_would_change(LatticeToolData &state)
+{
+  AffectedRegion &ar = state.current;
+  if (ar.is_empty() || !state.deform_data) {
+    return false;
+  }
+
+  int max_verts = 0;
+  for (const AffectedNode &node : ar.nodes) {
+    max_verts = math::max(max_verts, int(node.verts.size()));
+  }
+  if (state.translations.size() < max_verts) {
+    state.translations.reinitialize(max_verts);
+  }
+
+  for (const AffectedNode &node : ar.nodes) {
+    const MutableSpan<float3> trans = state.translations.as_mutable_span().take_front(
+        node.verts.size());
+    for (const int i : node.verts.index_range()) {
+      const float weight = state.strength * (1.0f - node.mask[i]);
+      float3 target = node.rest_coords[i];
+      if (weight > 0.0f) {
+        float deformed[3];
+        copy_v3_v3(deformed, node.rest_coords[i]);
+        BKE_lattice_deform_data_eval_co(state.deform_data, deformed, 1.0f);
+        target = math::interpolate(node.rest_coords[i], float3(deformed), weight);
+      }
+      trans[i] = target - node.current_coords[i];
+      if (!math::is_zero(trans[i])) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**
  * Applies the lattice deformation to all affected verts, blending by mask:
  *   new_co = rest_co + (deformed_co - rest_co) * (strength * (1 - mask))
- * `rest_co` is the session-entry snapshot; the cage accumulates across drags.
+ * `rest_co` is the deform-phase snapshot; the cage accumulates across drags.
  * Writes through PositionDeformData (same as Mesh Filter, ADR-6).
+ * Returns false when every translation is zero so callers skip mesh writes and PBVH work.
  */
-void sculpt_lattice_deform_apply(const Depsgraph &depsgraph,
+bool sculpt_lattice_deform_apply(const Depsgraph &depsgraph,
                                  Object &ob_mesh,
                                  LatticeToolData &state)
 {
   AffectedRegion &ar = state.current;
-  if (ar.verts.is_empty() || !state.deform_data) {
+  if (ar.is_empty() || !state.deform_data) {
+    return false;
+  }
+
+  sculpt_lattice_ensure_affected_nodes(depsgraph, ob_mesh, ar);
+
+  int max_verts = 0;
+  for (const AffectedNode &node : ar.nodes) {
+    max_verts = math::max(max_verts, int(node.verts.size()));
+  }
+  if (state.translations.size() < max_verts) {
+    state.translations.reinitialize(max_verts);
+  }
+
+  std::optional<PositionDeformData> position_data;
+  bool changed = false;
+  for (AffectedNode &node : ar.nodes) {
+    MutableSpan<float3> trans = state.translations.as_mutable_span().take_front(node.verts.size());
+    if (!sculpt_lattice_compute_translations(*state.deform_data,
+                                             node.rest_coords,
+                                             node.mask,
+                                             state.strength,
+                                             node.current_coords,
+                                             trans))
+    {
+      continue;
+    }
+    if (!position_data.has_value()) {
+      position_data.emplace(depsgraph, ob_mesh);
+    }
+    position_data->deform(trans, node.verts);
+    changed = true;
+  }
+
+  if (changed) {
+    sculpt_lattice_tag_affected_nodes(depsgraph, ob_mesh, ar);
+    state.session_has_mesh_changes = true;
+  }
+  return changed;
+}
+
+static void sculpt_lattice_rebind_nodes(const Depsgraph &depsgraph,
+                                        Object &ob_mesh,
+                                        AffectedRegion &ar)
+{
+  Vector<int> verts;
+  Vector<float3> rest;
+  Vector<float3> current;
+  Vector<float> mask;
+  for (const AffectedNode &node : ar.nodes) {
+    verts.extend(node.verts);
+    rest.extend(node.rest_coords.as_span());
+    current.extend(node.current_coords.as_span());
+    mask.extend(node.mask.as_span());
+  }
+
+  Map<int, int> vert_to_flat;
+  vert_to_flat.reserve(verts.size());
+  for (const int i : verts.index_range()) {
+    vert_to_flat.add(verts[i], i);
+  }
+
+  sculpt_lattice_affected_region_clear(ar);
+
+  bke::pbvh::Tree *pbvh = sculpt_lattice_pbvh_find(ob_mesh);
+  if (pbvh == nullptr || verts.is_empty()) {
+    ar.pbvh = pbvh;
+    ar.pbvh_nodes_num = pbvh ? pbvh->nodes_num() : -1;
     return;
   }
 
-  /* `PositionDeformData` is declared in sculpt_intern.hh (full type in editors). */
-  const PositionDeformData position_data(depsgraph, ob_mesh);
+  const Span<bke::pbvh::MeshNode> mesh_nodes = pbvh->nodes<bke::pbvh::MeshNode>();
+  IndexMaskMemory memory;
+  const IndexMask leaves = bke::pbvh::all_leaf_nodes(*pbvh, memory);
+  leaves.foreach_index([&](const int node_i) {
+    const bke::pbvh::MeshNode &mesh_node = mesh_nodes[node_i];
+    Vector<int> node_verts;
+    Vector<float3> node_rest;
+    Vector<float3> node_current;
+    Vector<float> node_mask;
+    for (const int v : mesh_node.verts()) {
+      const int *flat = vert_to_flat.lookup_ptr(v);
+      if (flat == nullptr) {
+        continue;
+      }
+      node_verts.append(v);
+      node_rest.append(rest[*flat]);
+      node_current.append(current[*flat]);
+      node_mask.append(mask[*flat]);
+    }
+    if (node_verts.is_empty()) {
+      return;
+    }
+    ar.nodes.append({});
+    AffectedNode &dst = ar.nodes.last();
+    dst.index = node_i;
+    dst.verts = std::move(node_verts);
+    dst.rest_coords = Array<float3>(node_rest.as_span());
+    dst.current_coords = Array<float3>(node_current.as_span());
+    dst.mask = Array<float>(node_mask.as_span());
+    ar.node_indices.append(node_i);
+  });
 
-  if (state.translations.size() != ar.verts.size()) {
-    state.translations.reinitialize(ar.verts.size());
-  }
-  sculpt_lattice_compute_translations(*state.deform_data,
-                                      ar.rest_coords,
-                                      ar.mask,
-                                      state.strength,
-                                      ar.current_coords,
-                                      state.translations);
-
-  position_data.deform(state.translations, ar.verts);
-
-  sculpt_lattice_tag_affected_nodes(depsgraph, ob_mesh, ar);
+  ar.pbvh = pbvh;
+  ar.pbvh_nodes_num = pbvh->nodes_num();
+  (void)depsgraph;
 }
 
 void sculpt_lattice_ensure_affected_nodes(const Depsgraph &depsgraph,
@@ -303,47 +543,23 @@ void sculpt_lattice_ensure_affected_nodes(const Depsgraph &depsgraph,
                                           AffectedRegion &ar)
 {
   bke::pbvh::Tree *pbvh = sculpt_lattice_pbvh_find(ob_mesh);
-  if (pbvh == nullptr || ar.verts.is_empty()) {
-    ar.affected_pbvh_nodes.clear();
-    ar.affected_pbvh = pbvh;
-    ar.affected_pbvh_nodes_num = pbvh ? pbvh->nodes_num() : -1;
-    return;
-  }
-
-  if (ar.affected_pbvh == pbvh && ar.affected_pbvh_nodes_num == pbvh->nodes_num()) {
-    return;
-  }
-
-  const int verts_num = bke::pbvh::vert_positions_eval(depsgraph, ob_mesh).size();
-  Array<bool> affected(verts_num, false);
-  for (const int v : ar.verts) {
-    affected[v] = true;
-  }
-
-  /* Filter the flat node array rather than using #bke::pbvh::search_nodes: that traversal also
-   * evaluates the predicate on inner BVH nodes and prunes their whole subtree when it fails.
-   * Only leaf nodes carry vertex indices, so the predicate rejects the root and the search
-   * returns an empty mask — nothing is tagged and the viewport keeps drawing the pre-deform
-   * positions until something else forces a full re-evaluation. */
-  const Span<bke::pbvh::MeshNode> nodes = pbvh->nodes<bke::pbvh::MeshNode>();
-  ar.affected_pbvh_nodes.clear();
-  for (const int i : nodes.index_range()) {
-    for (const int nv : nodes[i].all_verts()) {
-      if (affected[nv]) {
-        ar.affected_pbvh_nodes.append(i);
-        break;
-      }
+  if (pbvh == nullptr) {
+    if (!ar.is_empty()) {
+      sculpt_lattice_affected_region_clear(ar);
     }
+    return;
   }
-  ar.affected_pbvh = pbvh;
-  ar.affected_pbvh_nodes_num = pbvh->nodes_num();
+  if (ar.pbvh == pbvh && ar.pbvh_nodes_num == pbvh->nodes_num()) {
+    return;
+  }
+  sculpt_lattice_rebind_nodes(depsgraph, ob_mesh, ar);
 }
 
 void sculpt_lattice_tag_affected_nodes(const Depsgraph &depsgraph,
                                        Object &ob_mesh,
                                        AffectedRegion &ar)
 {
-  if (ar.verts.is_empty()) {
+  if (ar.is_empty()) {
     return;
   }
 
@@ -355,9 +571,7 @@ void sculpt_lattice_tag_affected_nodes(const Depsgraph &depsgraph,
   sculpt_lattice_ensure_affected_nodes(depsgraph, ob_mesh, ar);
 
   IndexMaskMemory memory;
-  const IndexMask node_mask = ar.affected_pbvh_nodes.is_empty() ?
-                                  IndexMask() :
-                                  IndexMask::from_indices(ar.affected_pbvh_nodes.as_span(), memory);
+  const IndexMask node_mask = sculpt_lattice_affected_node_mask(ar, memory);
   pbvh->tag_positions_changed(node_mask);
   pbvh->update_bounds(depsgraph, ob_mesh);
 }

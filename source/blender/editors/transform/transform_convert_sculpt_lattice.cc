@@ -104,11 +104,11 @@ static void createTransSculptLattice(bContext * /*C*/, TransInfo *t)
   copy_m3_m4(td->axismtx, lat_ob->object_to_world().ptr());
   normalize_m3(td->axismtx);
 
-  /* Open a sculpt-typed undo step. Without it the OPTYPE_UNDO push at the end of the modal falls
-   * through to the memfile undo type, because the sculpt undo type is registered with no context
-   * poll and can never be selected automatically. A memfile step would reload Main, free the
-   * sculpt session and silently destroy this tool session. */
-  sculpt_paint::lattice::undo_push_begin(*t->scene, *ob_mesh, t->undo_name);
+  /* Remember the pre-transform cage pose. The sculpt undo step is opened only on confirm:
+   * Esc restores loc from #TransData::iloc here and must not leave a dummy undo item, and
+   * opening the step only after confirm still happens before #OPTYPE_UNDO so memfile cannot
+   * claim the operator. */
+  sculpt_paint::lattice::placement_transform_undo_store(*ob_mesh);
 }
 
 /** \} */
@@ -138,16 +138,21 @@ static void recalcData_sculpt_lattice(TransInfo *t)
 static void special_aftertrans_update__sculpt_lattice(bContext * /*C*/, TransInfo *t)
 {
   Object *ob_mesh = nullptr;
-  /* Deliberately ignores whether the cage still exists. Reaching this callback at all means
-   * #createTransSculptLattice found one and opened an undo step, and the session can die in
-   * between — a tool switch frees it, and so does anything that tears down the sculpt session.
-   * Leaving that step open would strand the undo stack, so only the mesh object is required here.
-   * The push begin/end pair must stay balanced on every path out of the transform. */
   sculpt_lattice_cage_get(t, &ob_mesh);
   if (ob_mesh == nullptr) {
     return;
   }
-  sculpt_paint::lattice::undo_push_end(*ob_mesh);
+
+  if (t->state == TRANS_CANCEL) {
+    /* #restoreTransObjects already put loc/quat/scale back; drop the snapshot so Esc is not an
+     * undo item. */
+    sculpt_paint::lattice::placement_transform_undo_abort(*ob_mesh);
+  }
+  else {
+    /* Sculpt-typed step with the pre-transform cage pose, not mesh positions. Required so
+     * #OPTYPE_UNDO does not fall through to memfile and destroy the no-main session. */
+    sculpt_paint::lattice::placement_transform_undo_commit(*t->scene, *ob_mesh, t->undo_name);
+  }
   ED_region_tag_redraw(t->region);
 }
 

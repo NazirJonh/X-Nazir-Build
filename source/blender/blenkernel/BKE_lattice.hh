@@ -82,6 +82,18 @@ extern void (*BKE_lattice_batch_cache_free_cb)(Lattice *lt);
 
 LatticeDeformData *BKE_lattice_deform_data_create(const Object *oblatt,
                                                   const Object *ob) ATTR_WARN_UNUSED_RESULT;
+/**
+ * Same as #BKE_lattice_deform_data_create, but takes the lattice and world matrices directly.
+ * Skips #Object curve-cache lookup and vertex groups, which the Sculpt Lattice no-main cage
+ * does not have.
+ *
+ * \param target_to_world: object-to-world of the deformed mesh, or null for the same
+ * behaviour as passing a null object to #BKE_lattice_deform_data_create.
+ */
+LatticeDeformData *BKE_lattice_deform_data_create_from_lattice(
+    const Lattice *lt,
+    const float lattice_to_world[4][4],
+    const float (*target_to_world)[4]) ATTR_WARN_UNUSED_RESULT;
 void BKE_lattice_deform_data_eval_co(LatticeDeformData *lattice_deform_data,
                                      float co[3],
                                      float weight);

@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "BLI_index_mask_fwd.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
@@ -76,8 +77,30 @@ void push_enter_sculpt_mode(const Scene &scene, Object &ob, const wmOperator *op
  * must match operator name for redo panels to work.
  */
 void push_begin_ex(const Scene &scene, Object &ob, const char *name);
+/** Discards the in-progress Sculpt undo step without changing published history. */
+void push_abort();
 void push_end(Object &ob);
 void push_end_ex(Object &ob, bool use_nested_undo);
+
+/**
+ * Attach a lattice-cage transform snapshot and the data required to recreate its temporary cage to
+ * the in-progress sculpt undo step.
+ * Used by the Placement G/R/S path: the step exists only to keep #OPTYPE_UNDO off memfile,
+ * and this is the data it actually restores. Call between #push_begin_ex and #push_end.
+ */
+void push_lattice_cage(const float undo_loc[3],
+                       const float undo_quat[4],
+                       const float undo_scale[3],
+                       const float redo_loc[3],
+                       const float redo_quat[4],
+                       const float redo_scale[3],
+                       const int3 &resolution,
+                       int interpolation,
+                       float margin,
+                       float mask_eps);
+
+/** Remove placement-only cage steps for \a object from the published sculpt undo history. */
+void purge_lattice_cage_steps(const Object &object);
 
 void restore_from_bmesh_enter_geometry(const StepData &step_data, Mesh &mesh);
 bool has_bmesh_log_entry();

@@ -429,21 +429,15 @@ struct SculptSession : NonCopyable, NonMovable {
   ed::sculpt_paint::filter::Cache *filter_cache = nullptr;
   ed::sculpt_paint::expand::Cache *expand_cache = nullptr;
 
-  /* Lattice Tool state (full type in editors; raw pointer, ADR-13).
-   * Created lazily on first interaction, freed via #sculpt_lattice_session_free
-   * on confirm / cancel / tool-switch / mode-exit. */
+  /* Lattice Tool state (full type in editors; raw pointer, like filter/expand caches).
+   * Created lazily on first interaction, freed via the editor hook on confirm / cancel /
+   * tool-switch / mode-exit / object deletion. */
   ed::sculpt_paint::lattice::LatticeToolData *lattice_tool_state = nullptr;
   /**
-   * Set while the #SCULPT_OT_lattice_slide modal is running. Suppresses the PBVH free in
-   * #BKE_sculpt_update_object_before_eval, which is what keeps the live preview working across the
-   * geometry re-evaluations a drag triggers.
-   *
-   * The single source of truth for "a control point is being dragged", including for the editor
-   * code that could just as well have kept its own copy on #LatticeToolData: that type is opaque
-   * here (ADR-13), so the flag has to live on the session, and two flags moved in lockstep would
-   * only be an opportunity to desynchronize.
+   * When set, #BKE_sculpt_update_object_before_eval will not free the PBVH. Set by editor tools
+   * that write positions across a depsgraph evaluation (currently the lattice slide modal).
    */
-  bool lattice_slide_active = false;
+  bool pbvh_hold = false;
 
   /* Cursor data and active vertex for tools */
   std::optional<int> active_face_index;
@@ -589,19 +583,15 @@ struct SculptSession : NonCopyable, NonMovable {
 void BKE_sculptsession_free(Object *ob);
 
 /**
- * Hook that releases Lattice Tool state (ADR-13). Implemented in editors (sculpt_lattice.cc); the
- * full #LatticeToolData type lives there, and neither blenkernel nor the window manager can call
- * into editors directly.
+ * Hook that releases editor-owned sculpt tool state that outlives a single operator (currently
+ * the Lattice Tool). Implemented in editors; blenkernel cannot call into editors directly.
  *
- * Unlike #SculptSession::filter_cache and #SculptSession::expand_cache, the lattice state spans
- * several operator invocations, so it can still be live when a sculpt session is torn down or when
- * the user leaves the tool. Both are cleanup points and both route through here:
- * #BKE_sculptsession_free covers mode-exit / object deletion / undo Main teardown, and
- * #toolsystem_unlink_ref covers the tool switch. Callers must not free the state themselves.
+ * #BKE_sculptsession_free covers mode-exit / object deletion / undo Main teardown.
+ * Tool switch is handled in the editor via #ED_sculpt_lattice session unlink, not here.
  *
  * Set during editor initialization. May be null if the editor module is not loaded.
  */
-extern void (*BKE_sculpt_lattice_state_free_cb)(Object *ob);
+extern void (*BKE_sculptsession_free_editor_cb)(Object *ob);
 
 void BKE_sculptsession_free_deformMats(SculptSession *ss);
 void BKE_sculptsession_free_pbvh(Object &object);

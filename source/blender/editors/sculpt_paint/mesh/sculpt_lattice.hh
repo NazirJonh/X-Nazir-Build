@@ -23,6 +23,7 @@
 #include "BLI_array.hh"
 #include "BLI_bounds_types.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
@@ -55,6 +56,11 @@ constexpr float SCULPT_LATTICE_MARGIN_DEFAULT = 0.1f;
 constexpr int SCULPT_LATTICE_RESOLUTION_DEFAULT = 3;
 /** Maximum control points per axis, matching the RNA property range. */
 constexpr int SCULPT_LATTICE_MAX_RESOLUTION = 64;
+/**
+ * Above this per-axis resolution the overlay draws only the cage shell, not every interior
+ * control point / edge. Full topology at 64³ is hundreds of thousands of edges per redraw.
+ */
+constexpr int SCULPT_LATTICE_OVERLAY_FULL_RES_MAX = 12;
 
 /** Values of the #SCULPT_OT_lattice_transform `mode` property. */
 enum {
@@ -78,41 +84,46 @@ enum class Phase {
 };
 
 /**
- * Vertices affected by the current deform phase: rest coords, vert indices and mask snapshot.
+ * One PBVH leaf that contains vertices inside the cage. Unique node verts only, so a shared
+ * vertex is deformed once. Parallel arrays are the rest / current / mask snapshot for this node.
+ */
+struct AffectedNode {
+  int index = -1;
+  Vector<int> verts;
+  Array<float3> rest_coords;
+  Array<float3> current_coords;
+  Array<float> mask;
+};
+
+/**
+ * Vertices affected by the current deform phase, grouped by PBVH leaf.
  * Built at session start and at each #Phase::Placement -> #Phase::Deform transition (see
  * #sculpt_lattice_build_affected_region), never rebuilt between drags within one deform phase.
  */
 struct AffectedRegion {
-  /**
-   * Rest positions of affected verts (object-space), captured at session start and re-captured
-   * at each #Phase::Placement -> #Phase::Deform transition; never rebuilt between drags.
-   */
-  Array<float3> rest_coords;
-  /**
-   * Last positions this tool wrote for each affected vert, seeded from #rest_coords at session
-   * start. The lattice deform is an absolute rest -> target mapping, but #PositionDeformData::deform
-   * is incremental (`+=`), so the per-frame translation is `target - current_coords[i]`.
-   *
-   * Tracking the applied position here rather than reading #PositionDeformData::eval keeps the
-   * incremental math independent of when the depsgraph last re-evaluated the mesh. It is re-seeded
-   * from the live positions at the start of every drag (see #SCULPT_OT_lattice_slide invoke) so
-   * that edits made between drags — a global undo, another operator — cannot make it diverge.
-   */
-  Array<float3> current_coords;
-  /** Affected vert indices. */
-  Vector<int> verts;
-  /** Snapshot of mask[v] for each vert (0..1, full-protection = 1). */
-  Array<float> mask;
+  Vector<AffectedNode> nodes;
+  /** Sorted leaf indices, parallel to #nodes, for #IndexMask::from_indices. */
+  Vector<int> node_indices;
+  /** Identity of the tree #nodes was built against, or null. */
+  const void *pbvh = nullptr;
+  int pbvh_nodes_num = -1;
 
-  /**
-   * PBVH leaf nodes that contain at least one of #verts. Built with the region, reused by
-   * #sculpt_lattice_tag_affected_nodes and per-drag undo. Invalidated when #affected_pbvh
-   * no longer matches the live tree (PBVH rebuilt between drags).
-   */
-  Vector<int> affected_pbvh_nodes;
-  /** Identity of the tree #affected_pbvh_nodes was built against, or null. */
-  const void *affected_pbvh = nullptr;
-  int affected_pbvh_nodes_num = -1;
+  bool is_empty() const
+  {
+    return node_indices.is_empty();
+  }
+};
+
+/**
+ * Positions of every vertex this tool has ever written, captured the first time the vertex
+ * entered an affected region. Session Cancel restores these instead of a full-mesh snapshot.
+ */
+struct SessionOrigSnapshot {
+  Set<int> vert_set;
+  Vector<int> verts;
+  Vector<float3> positions;
+  Set<int> node_set;
+  Vector<int> node_indices;
 };
 
 /**
@@ -134,11 +145,25 @@ struct LatticeToolData {
   /** Cage interpolation (ADR-5: #KEY_LINEAR by default). */
   KeyInterpolationType interpolation = KEY_LINEAR;
 
-  /** Affected verts / rest / mask for the current drag. */
+  /** Affected PBVH nodes / rest / mask for the current deform phase. */
   AffectedRegion current;
 
-  /** Snapshot of all mesh positions on session start, for Cancel (Esc). */
-  Array<float3> entry_positions;
+  /** First-seen positions of verts this tool has written, for session Cancel. */
+  SessionOrigSnapshot session_orig;
+
+  /** True once this session has written a non-zero deformation to the mesh. */
+  bool session_has_mesh_changes = false;
+
+  /** Vertex count at last region build; mismatch means topology changed. */
+  int mesh_verts_num = -1;
+
+  /**
+   * Cached overlay topology, rebuilt when resolution or shell mode changes.
+   */
+  Vector<int> overlay_point_indices;
+  Vector<int2> overlay_edges;
+  int3 overlay_edges_res = int3(0);
+  bool overlay_edges_shell = false;
 
   /**
    * BKE lattice deform context. Rebuilt when the cage transform or resolution changes;
@@ -152,6 +177,12 @@ struct LatticeToolData {
   /** Index of the BPoint currently being dragged (screen-space pick result). */
   int pending_drag_index = -1;
 
+  /** True after this drag has opened a position undo step for a real mesh change. */
+  bool drag_undo_started = false;
+
+  /** #session_has_mesh_changes at the start of the current drag, used when cancelling it. */
+  bool drag_started_with_session_changes = false;
+
   /**
    * Cage-space position of #pending_drag_index when the drag started, so cancelling a drag can
    * put the control point back. Without it the cage would keep the cancelled displacement and
@@ -159,9 +190,18 @@ struct LatticeToolData {
    */
   float3 drag_start_point = float3(0.0f);
 
+  /**
+   * Cage loc/quat/scale at the start of a Placement G/R/S. Written by
+   * #placement_transform_undo_store, consumed on confirm, cleared on Esc.
+   */
+  float3 placement_xform_orig_loc = float3(0.0f);
+  float placement_xform_orig_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+  float3 placement_xform_orig_scale = float3(1.0f);
+  bool placement_xform_orig_valid = false;
+
   /* NOTE: whether a modal slide is running is *not* tracked here. It has to be visible to
    * #BKE_sculpt_update_object_before_eval, which cannot see this type (ADR-13), so
-   * #SculptSession::lattice_slide_active is the single source of truth and this struct would only
+   * #SculptSession::pbvh_hold is the single source of truth and this struct would only
    * duplicate it. */
 };
 
@@ -169,7 +209,7 @@ struct LatticeToolData {
  * Lazy-initializes the tool session on first interaction (ADR-12):
  *  - computes unmasked bbox (variant A)
  *  - creates temp OB_LATTICE fitted to it
- *  - snapshots entry_positions for Cancel
+ *  - snapshots first-touched vertex positions for Cancel
  * Returns false (and reports) if there is nothing to deform.
  */
 bool sculpt_lattice_ensure_session(bContext *C);
@@ -189,7 +229,7 @@ void sculpt_lattice_session_free(Object *ob_mesh);
 bool sculpt_lattice_tool_active_poll(bContext *C);
 
 /**
- * Editor registration: installs the #BKE_sculpt_lattice_state_free_cb hook so the tool state is
+ * Editor registration: installs the sculpt-session free hook so the tool state is
  * released when a sculpt session is freed. Called from #operatortypes_sculpt.
  */
 void sculpt_lattice_register();
@@ -240,13 +280,17 @@ void sculpt_lattice_build_affected_region(const Depsgraph &depsgraph,
  * incremental, hence `translation = target - current`:
  *   `target = mix(rest, lattice(rest), strength * (1 - mask))`
  *
+ * Strength 0 (and fully masked verts) still produce a target of \a rest_coords, so a live
+ * strength change can roll the mesh back rather than leaving the last deformed position stuck.
+ *
  * \param deform_data: cage context from #sculpt_lattice_deform_data_rebuild.
  * \param rest_coords: original (undeformed) positions of the affected verts.
  * \param mask: per-vert mask snapshot, parallel to \a rest_coords.
  * \param current_coords: positions this tool last wrote; advanced to the new targets.
  * \param r_translations: per-vert deltas to hand to #PositionDeformData::deform.
+ * \return false when every translation is zero — callers should skip mesh writes.
  */
-void sculpt_lattice_compute_translations(LatticeDeformData &deform_data,
+bool sculpt_lattice_compute_translations(LatticeDeformData &deform_data,
                                          Span<float3> rest_coords,
                                          Span<float> mask,
                                          float strength,
@@ -254,16 +298,22 @@ void sculpt_lattice_compute_translations(LatticeDeformData &deform_data,
                                          MutableSpan<float3> r_translations);
 
 /**
- * Applies the lattice deformation live (MOUSEMOVE). Writes through PositionDeformData
- * and tags affected PBVH nodes.
+ * Returns true when applying the current cage would move any affected vertex, without changing
+ * the mesh or the incremental position tracker.
  */
-void sculpt_lattice_deform_apply(const Depsgraph &depsgraph,
+bool sculpt_lattice_deform_would_change(LatticeToolData &state);
+
+/**
+ * Applies the lattice deformation live (MOUSEMOVE). Writes through PositionDeformData
+ * and tags affected PBVH nodes. Returns false when nothing moved, so callers can skip
+ * PBVH tagging, bounds updates and viewport flush.
+ */
+bool sculpt_lattice_deform_apply(const Depsgraph &depsgraph,
                                  Object &ob_mesh,
                                  LatticeToolData &state);
 
 /**
- * Tags the PBVH nodes containing \a ar.verts as having changed positions and refreshes their
- * bounds.
+ * Tags the PBVH nodes in \a ar as having changed positions and refreshes their bounds.
  *
  * Required after every direct write through #PositionDeformData: with PBVH drawing active
  * #flush_update_step only tags #ID_RECALC_SHADING, so nothing else invalidates the draw buffers

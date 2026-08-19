@@ -205,6 +205,11 @@ UndoStack *BKE_undosys_stack_create();
 void BKE_undosys_stack_destroy(UndoStack *ustack);
 void BKE_undosys_stack_clear(UndoStack *ustack);
 void BKE_undosys_stack_clear_active(UndoStack *ustack);
+/**
+ * Remove one published undo step while preserving a valid active-step pointer.
+ * The caller must ensure that the current data state remains valid without the removed step.
+ */
+void BKE_undosys_stack_step_remove(UndoStack *ustack, UndoStep *us);
 /* name optional */
 bool BKE_undosys_stack_has_undo(const UndoStack *ustack, const char *name);
 /**
@@ -235,6 +240,9 @@ UndoStep *BKE_undosys_step_push_init_with_type(UndoStack *ustack,
                                                const char *name,
                                                const UndoType *ut);
 UndoStep *BKE_undosys_step_push_init(UndoStack *ustack, bContext *C, const char *name);
+
+/** Discard the in-progress step created by #BKE_undosys_step_push_init. */
+void BKE_undosys_step_push_abort(UndoStack *ustack);
 
 /**
  * \param C: Can be nullptr from some callers if their encoding function doesn't need it

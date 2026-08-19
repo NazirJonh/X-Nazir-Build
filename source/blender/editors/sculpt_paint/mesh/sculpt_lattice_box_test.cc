@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "sculpt_lattice_intern.hh"
+#include "ED_sculpt_lattice_draw.hh"
 
 #include "testing/testing.h"
 
@@ -66,6 +67,59 @@ TEST(SculptLatticeBox, ThicknessFromPerpendicularRay)
       1e-4f);
   ASSERT_TRUE(thickness.has_value());
   EXPECT_NEAR(*thickness, 3.0f, 1e-5f);
+}
+
+TEST(SculptLatticeOverlay, CubeHasTwelveEdges)
+{
+  Vector<int2> edges;
+  lattice_cage_edges_build(int3(2, 2, 2), edges);
+  EXPECT_EQ(edges.size(), 12);
+
+  Vector<int> points;
+  Vector<int2> shell_edges;
+  lattice_cage_overlay_topology_build(int3(2, 2, 2), true, points, shell_edges);
+  EXPECT_EQ(points.size(), 8);
+  EXPECT_EQ(shell_edges.size(), 12);
+}
+
+TEST(SculptLatticeOverlay, ShellOmitsInteriorAtHigherRes)
+{
+  Vector<int> full_points;
+  Vector<int2> full_edges;
+  lattice_cage_overlay_topology_build(int3(4, 4, 4), false, full_points, full_edges);
+
+  Vector<int> shell_points;
+  Vector<int2> shell_edges;
+  lattice_cage_overlay_topology_build(int3(4, 4, 4), true, shell_points, shell_edges);
+
+  EXPECT_EQ(full_points.size(), 64);
+  EXPECT_EQ(full_edges.size(), 144);
+  EXPECT_LT(shell_points.size(), full_points.size());
+  EXPECT_LT(shell_edges.size(), full_edges.size());
+}
+
+TEST(SculptLatticeUndo, CageXformSwapRoundTrip)
+{
+  float loc_stored[3] = {1.0f, 2.0f, 3.0f};
+  float quat_stored[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+  float scale_stored[3] = {1.0f, 1.0f, 1.0f};
+  float loc_live[3] = {4.0f, 5.0f, 6.0f};
+  float quat_live[4] = {0.0f, 1.0f, 0.0f, 0.0f};
+  float scale_live[3] = {2.0f, 3.0f, 4.0f};
+
+  sculpt_lattice_cage_xform_swap(
+      loc_stored, quat_stored, scale_stored, loc_live, quat_live, scale_live);
+  EXPECT_V3_NEAR(loc_stored, float3(4.0f, 5.0f, 6.0f), 1e-6f);
+  EXPECT_V3_NEAR(loc_live, float3(1.0f, 2.0f, 3.0f), 1e-6f);
+  EXPECT_NEAR(quat_stored[1], 1.0f, 1e-6f);
+  EXPECT_NEAR(quat_live[0], 1.0f, 1e-6f);
+  EXPECT_V3_NEAR(scale_stored, float3(2.0f, 3.0f, 4.0f), 1e-6f);
+  EXPECT_V3_NEAR(scale_live, float3(1.0f, 1.0f, 1.0f), 1e-6f);
+
+  sculpt_lattice_cage_xform_swap(
+      loc_stored, quat_stored, scale_stored, loc_live, quat_live, scale_live);
+  EXPECT_V3_NEAR(loc_stored, float3(1.0f, 2.0f, 3.0f), 1e-6f);
+  EXPECT_V3_NEAR(loc_live, float3(4.0f, 5.0f, 6.0f), 1e-6f);
 }
 
 }  // namespace blender::ed::sculpt_paint::lattice::tests

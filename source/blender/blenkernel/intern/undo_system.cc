@@ -314,6 +314,17 @@ void BKE_undosys_stack_clear_active(UndoStack *ustack)
   }
 }
 
+void BKE_undosys_stack_step_remove(UndoStack *ustack, UndoStep *us)
+{
+  UNDO_NESTED_ASSERT(false);
+  BLI_assert(us != ustack->step_init);
+  if (us == ustack->step_active) {
+    ustack->step_active = us->prev;
+  }
+  undosys_step_free_and_unlink(ustack, us);
+  undosys_stack_validate(ustack, false);
+}
+
 /* Caller is responsible for handling active. */
 static void undosys_stack_clear_all_last(UndoStack *ustack, UndoStep *us)
 {
@@ -522,10 +533,19 @@ UndoStep *BKE_undosys_step_push_init(UndoStack *ustack, bContext *C, const char 
   return BKE_undosys_step_push_init_with_type(ustack, C, name, ut);
 }
 
+void BKE_undosys_step_push_abort(UndoStack *ustack)
+{
+  UNDO_NESTED_ASSERT(false);
+  if (UndoStep *us = ustack->step_init) {
+    undosys_step_free_and_unlink(ustack, us);
+    ustack->step_init = nullptr;
+  }
+}
+
 eUndoPushReturn BKE_undosys_step_push_with_type(UndoStack *ustack,
-                                                bContext *C,
-                                                const char *name,
-                                                const UndoType *ut)
+                                                 bContext *C,
+                                                 const char *name,
+                                                 const UndoType *ut)
 {
   BLI_assert((ut->flags & UNDOTYPE_FLAG_NEED_CONTEXT_FOR_ENCODE) == 0 || C != nullptr);
 

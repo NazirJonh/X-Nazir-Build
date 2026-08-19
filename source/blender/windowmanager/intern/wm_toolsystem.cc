@@ -54,6 +54,8 @@
 #include "WM_toolsystem.hh" /* Own include. */
 #include "WM_types.hh"
 
+#include "ED_sculpt_lattice.hh"
+
 namespace blender {
 
 static void toolsystem_reinit_with_toolref(bContext *C, WorkSpace * /*workspace*/, bToolRef *tref);
@@ -192,22 +194,6 @@ static const bToolRef *toolsystem_active_tool_from_context_or_view3d(const bCont
 static void toolsystem_unlink_ref(bContext *C, WorkSpace * /*workspace*/, bToolRef *tref)
 {
   bToolRef_Runtime *tref_rt = tref->runtime;
-
-  /* The Sculpt Lattice tool keeps a session on the sculpt object that outlives its operators, so
-   * nothing else would drop it when the user simply picks another tool. A stale session is not
-   * merely leaked memory until mode-exit: #ed::sculpt_paint::lattice::placement_active still
-   * reports true, which makes the transform system retarget G/R/S onto the now-invisible cage
-   * instead of the mesh, and the cage overlay keeps drawing. Its own operators all poll on the
-   * tool being active, so the user could not even confirm or cancel it from here.
-   *
-   * `tref->idname` is still the outgoing tool at this point (#WM_toolsystem_ref_set_from_runtime
-   * overwrites it only after this call), so this matches exactly "the lattice tool is going away".
-   * Keep the identifier in sync with #sculpt_lattice_tool_active_poll. */
-  if (STREQ(tref->idname, "builtin.sculpt_lattice") && BKE_sculpt_lattice_state_free_cb) {
-    /* The sculpt session only ever exists on the active object, which is the one that can hold a
-     * lattice session; the hook is idempotent and null-safe for every other case. */
-    BKE_sculpt_lattice_state_free_cb(CTX_data_active_object(C));
-  }
 
   if (tref_rt->gizmo_group[0]) {
     wmGizmoGroupType *gzgt = WM_gizmogrouptype_find(tref_rt->gizmo_group, false);
@@ -627,12 +613,26 @@ void WM_toolsystem_ref_set_from_runtime(bContext *C,
                                         const char *idname)
 {
   Main *bmain = CTX_data_main(C);
+  const bool unlinking_sculpt_lattice = STREQ(tref->idname, "builtin.sculpt_lattice") &&
+                                      !STREQ(idname, "builtin.sculpt_lattice");
 
   if (tref->runtime) {
     toolsystem_unlink_ref(C, workspace, tref);
   }
 
   STRNCPY_UTF8(tref->idname, idname);
+
+  /* The Sculpt Lattice session outlives its operators. Once the replacement tool is visible from
+   * the context, free the temporary cage and remove its placement-only history: it cannot be
+   * recreated while a different tool is active. Do this here rather than in #toolsystem_unlink_ref
+   * so the callback can distinguish a real tool switch from refresh/workspace teardown. */
+  if (unlinking_sculpt_lattice && BKE_sculptsession_free_editor_cb) {
+    Object *ob = CTX_data_active_object(C);
+    BKE_sculptsession_free_editor_cb(ob);
+    if (ob) {
+      ed::sculpt_paint::lattice::undo_purge_cage_steps(*ob);
+    }
+  }
 
   /* This immediate request supersedes any unhandled pending requests. */
   tref->idname_pending[0] = '\0';

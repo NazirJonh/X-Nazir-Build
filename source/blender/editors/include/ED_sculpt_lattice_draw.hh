@@ -45,6 +45,15 @@ struct LatticeCageDrawData {
 void lattice_cage_edges_build(const blender::int3 &res, blender::Vector<blender::int2> &r_edges);
 
 /**
+ * Overlay topology: lattice-def point indices and edges into that compact list.
+ * When \a outer_shell_only is true, interior points and interior edges are omitted.
+ */
+void lattice_cage_overlay_topology_build(const blender::int3 &res,
+                                         bool outer_shell_only,
+                                         blender::Vector<int> &r_point_indices,
+                                         blender::Vector<blender::int2> &r_edges);
+
+/**
  * Cheap check, called every begin_sync: resolves the active sculpt object and reports whether
  * the lattice tool is active with a live tool state to draw.
  */

@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include "BLI_math_vector_types.hh"
+
 namespace blender {
 struct bContext;
 struct Object;
@@ -26,9 +28,8 @@ namespace blender::ed::sculpt_paint::lattice {
  *
  * Both halves are load-bearing. A session outlives the operators that created it, so "a session
  * exists" alone would keep retargeting G/R/S onto an invisible cage for any tool the user switched
- * to afterwards. #toolsystem_unlink_ref drops the session on tool switch, which should make the
- * tool check redundant; it is kept because the cost of a missed cleanup path is a transform that
- * silently moves the wrong thing.
+ * to afterwards. The tool-system unlinks this specific tool on tool switch; the tool check remains
+ * as a safeguard against a missed cleanup path silently moving the wrong thing.
  */
 bool placement_active(bContext *C, const Object &ob);
 
@@ -36,11 +37,37 @@ bool placement_active(bContext *C, const Object &ob);
 Object *cage_object(const Object &ob);
 
 /**
- * Forwarders to the sculpt undo system (mesh/sculpt_undo.hh), which sits outside the include path
- * of editors/transform. Opening a sculpt-typed undo step is mandatory around the cage transform:
- * see section 8 of the design doc.
+ * Snapshots the live cage loc/quat/scale so a later confirmed G/R/S can restore them.
+ * Does not open an undo step: Esc must not leave a dummy item on the stack.
  */
-void undo_push_begin(const Scene &scene, Object &ob, const char *name);
-void undo_push_end(Object &ob);
+void placement_transform_undo_store(Object &ob);
+
+/**
+ * Commits a sculpt-typed undo step that stores the snapshot from
+ * #placement_transform_undo_store, not mesh positions. Call only when the transform is
+ * confirmed. Required so #OPTYPE_UNDO does not fall through to memfile.
+ */
+void placement_transform_undo_commit(const Scene &scene, Object &ob, const char *name);
+
+/** Drops a snapshot taken by #placement_transform_undo_store. No-op if none is stored. */
+void placement_transform_undo_abort(Object &ob);
+
+/**
+ * Swaps \a loc / \a quat / \a scale with the live cage transform on \a ob, then refreshes
+ * the cage runtime matrix. If necessary, recreates the editor-private cage from the stored session
+ * settings while the Lattice Tool is active. No-op when recreation is unavailable.
+ */
+void undo_restore_cage(bContext *C,
+                       Object &ob,
+                       float loc[3],
+                       float quat[4],
+                       float scale[3],
+                       const int3 &resolution,
+                       int interpolation,
+                       float margin,
+                       float mask_eps);
+
+/** Remove placement-only lattice undo steps that cannot be restored after a tool switch. */
+void undo_purge_cage_steps(const Object &ob);
 
 }  // namespace blender::ed::sculpt_paint::lattice

@@ -35,6 +35,7 @@
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
+#include "BLI_math_vector.h"
 #include "BLI_memory_counter.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_task.h"
@@ -76,6 +77,7 @@
 #include "ED_geometry.hh"
 #include "ED_object.hh"
 #include "ED_sculpt.hh"
+#include "ED_sculpt_lattice.hh"
 #include "ED_undo.hh"
 
 #include "bmesh.hh"
@@ -248,6 +250,26 @@ struct StepData {
 
   float3 pivot_pos;
   float4 pivot_rot;
+
+  /**
+   * Placement-phase cage transform. Saved at #push_begin like the sculpt pivot, swapped with the
+   * live loc/quat/scale on decode. An empty sculpt step (no PBVH nodes) still has to exist so
+   * transform's #OPTYPE_UNDO does not fall through to memfile and destroy the no-main cage; this
+   * is the data that step actually restores.
+   */
+  struct {
+    bool valid = false;
+    float3 undo_loc = float3(0.0f);
+    float undo_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float3 undo_scale = float3(1.0f);
+    float3 redo_loc = float3(0.0f);
+    float redo_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float3 redo_scale = float3(1.0f);
+    int3 resolution = int3(3);
+    int interpolation = KEY_LINEAR;
+    float margin = 0.1f;
+    float mask_eps = 1e-4f;
+  } lattice_cage;
 
   /* Geometry modification operations. */
   /* Original geometry is stored before the modification and is restored from when undoing. */
@@ -1068,6 +1090,35 @@ static void refine_subdiv(Depsgraph *depsgraph,
   bke::subdiv::eval_refine_from_mesh(subdiv, id_cast<const Mesh *>(object.data), deformed_verts);
 }
 
+static void restore_lattice_cage(bContext *C, StepData &step_data, Object &object)
+{
+  if (!step_data.lattice_cage.valid) {
+    return;
+  }
+  float loc[3];
+  float quat[4];
+  float scale[3];
+  const bool restore_undo = step_data.needs_undo();
+  float3 &stored_loc = restore_undo ? step_data.lattice_cage.undo_loc :
+                                      step_data.lattice_cage.redo_loc;
+  float *stored_quat = restore_undo ? step_data.lattice_cage.undo_quat :
+                                      step_data.lattice_cage.redo_quat;
+  float3 &stored_scale = restore_undo ? step_data.lattice_cage.undo_scale :
+                                        step_data.lattice_cage.redo_scale;
+  copy_v3_v3(loc, stored_loc);
+  copy_v4_v4(quat, stored_quat);
+  copy_v3_v3(scale, stored_scale);
+  ed::sculpt_paint::lattice::undo_restore_cage(C,
+                                               object,
+                                               loc,
+                                               quat,
+                                               scale,
+                                               step_data.lattice_cage.resolution,
+                                               step_data.lattice_cage.interpolation,
+                                               step_data.lattice_cage.margin,
+                                               step_data.lattice_cage.mask_eps);
+}
+
 static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
 {
   PRF_scope(ProfileCategory::Editor);
@@ -1086,6 +1137,8 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
   /* Restore pivot. */
   ss.pivot_pos = step_data.pivot_pos;
   ss.pivot_rot = step_data.pivot_rot;
+
+  restore_lattice_cage(C, step_data, object);
 
   if (bmesh_restore(C, *depsgraph, step_data, object)) {
     return;
@@ -2029,9 +2082,69 @@ void push_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
   }
 }
 
+void push_lattice_cage(const float undo_loc[3],
+                       const float undo_quat[4],
+                       const float undo_scale[3],
+                       const float redo_loc[3],
+                       const float redo_quat[4],
+                       const float redo_scale[3],
+                       const int3 &resolution,
+                       const int interpolation,
+                       const float margin,
+                       const float mask_eps)
+{
+  StepData *step_data = get_step_data();
+  if (step_data == nullptr) {
+    return;
+  }
+  step_data->lattice_cage.valid = true;
+  step_data->lattice_cage.undo_loc = float3(undo_loc);
+  copy_v4_v4(step_data->lattice_cage.undo_quat, undo_quat);
+  step_data->lattice_cage.undo_scale = float3(undo_scale);
+  step_data->lattice_cage.redo_loc = float3(redo_loc);
+  copy_v4_v4(step_data->lattice_cage.redo_quat, redo_quat);
+  step_data->lattice_cage.redo_scale = float3(redo_scale);
+  step_data->lattice_cage.resolution = resolution;
+  step_data->lattice_cage.interpolation = interpolation;
+  step_data->lattice_cage.margin = margin;
+  step_data->lattice_cage.mask_eps = mask_eps;
+}
+
+void purge_lattice_cage_steps(const Object &object)
+{
+  UndoStack *ustack = ED_undo_stack_get();
+  if (ustack == nullptr) {
+    return;
+  }
+
+  for (UndoStep *step = static_cast<UndoStep *>(ustack->steps.first), *step_next; step;
+       step = step_next)
+  {
+    step_next = step->next;
+    if (step->type != BKE_UNDOSYS_TYPE_SCULPT) {
+      continue;
+    }
+    SculptUndoStep &sculpt_step = *reinterpret_cast<SculptUndoStep *>(step);
+    StepData &step_data = sculpt_step.data;
+    if (step_data.lattice_cage.valid && step_data.nodes.is_empty() &&
+        step_data.object_name == object.id.name)
+    {
+      BKE_undosys_stack_step_remove(ustack, step);
+    }
+  }
+}
+
 void push_begin(const Scene &scene, Object &ob, const wmOperator *op)
 {
   push_begin_ex(scene, ob, op->type->name);
+}
+
+void push_abort()
+{
+  UndoStack *ustack = ED_undo_stack_get();
+  if (ustack->step_init && ustack->step_init->type == BKE_UNDOSYS_TYPE_SCULPT) {
+    BKE_undosys_step_push_abort(ustack);
+  }
 }
 
 void push_enter_sculpt_mode(const Scene & /*scene*/, Object &ob, const wmOperator *op)

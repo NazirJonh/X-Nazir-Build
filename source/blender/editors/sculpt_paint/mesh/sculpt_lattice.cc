@@ -16,7 +16,7 @@
  *   Deform --C--> Placement (bake accumulated deform, reset cage to neutral)
  *   Deform --LMB on BPoint--> DragPoint --LMB release--> Deform  (per-drag undo step)
  *   (any phase) --Enter--> Confirmed (apply-once, session_free)
- *   (any phase, no sub-modal active) --Esc--> Cancelled (restore entry_positions, session_free)
+ *   (any phase, no sub-modal active) --Esc--> Cancelled (restore session_orig, session_free)
  *   Box-define and Slide handle Esc themselves while their own sub-modal is running
  *
  * ADR-12: lazy init — selection of the tool in toolbar does NOT call an operator.
@@ -24,6 +24,8 @@
 
 #include "sculpt_lattice.hh"
 #include "sculpt_lattice_intern.hh"
+
+#include <optional>
 
 #include "MEM_guardedalloc.h"
 
@@ -34,6 +36,7 @@
 #include "BLI_math_base.hh"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
@@ -332,11 +335,6 @@ bool sculpt_lattice_ensure_session(bContext *C)
   state->lattice_ob = lat_ob;
   state->phase = Phase::Placement;
 
-  /* Snapshot entry positions for Cancel (Esc). */
-  const Span<float3> positions = bke::pbvh::vert_positions_eval(*depsgraph, *ob_mesh);
-  state->entry_positions.reinitialize(positions.size());
-  state->entry_positions.as_mutable_span().copy_from(positions);
-
   ss->lattice_tool_state = state;
 
   /* Build the affected region against the current mesh positions. This is one of the two points
@@ -364,10 +362,7 @@ void sculpt_lattice_session_free(Object *ob_mesh)
     return;
   }
 
-  if (state->deform_data) {
-    BKE_lattice_deform_data_destroy(state->deform_data);
-    state->deform_data = nullptr;
-  }
+  sculpt_lattice_evaluator_reset(*state);
 
   if (state->lattice_ob) {
     /* ADR-15: the cage is a standalone no-main Object + Lattice. Free both directly; they are not
@@ -383,7 +378,7 @@ void sculpt_lattice_session_free(Object *ob_mesh)
     state->lattice_ob = nullptr;
   }
 
-  ss->lattice_slide_active = false;
+  ss->pbvh_hold = false;
 
   MEM_delete(state);
   ss->lattice_tool_state = nullptr;
@@ -397,7 +392,7 @@ void sculpt_lattice_register()
    * invocations (ADR-12), so it can still be live at any of those points. Routing the cleanup
    * through this hook makes #sculpt_lattice_session_free reachable from blenkernel, which cannot
    * call into editors directly. */
-  BKE_sculpt_lattice_state_free_cb = sculpt_lattice_session_free;
+  BKE_sculptsession_free_editor_cb = sculpt_lattice_session_free;
 }
 
 bool placement_active(bContext *C, const Object &ob)
@@ -421,14 +416,135 @@ Object *cage_object(const Object &ob)
   return state != nullptr ? state->lattice_ob : nullptr;
 }
 
-void undo_push_begin(const Scene &scene, Object &ob, const char *name)
+void sculpt_lattice_cage_xform_swap(float loc_a[3],
+                                    float quat_a[4],
+                                    float scale_a[3],
+                                    float loc_b[3],
+                                    float quat_b[4],
+                                    float scale_b[3])
 {
-  undo::push_begin_ex(scene, ob, name);
+  const float3 loc = float3(loc_a);
+  copy_v3_v3(loc_a, loc_b);
+  copy_v3_v3(loc_b, loc);
+
+  float quat[4];
+  copy_v4_v4(quat, quat_a);
+  copy_v4_v4(quat_a, quat_b);
+  copy_v4_v4(quat_b, quat);
+
+  const float3 scale = float3(scale_a);
+  copy_v3_v3(scale_a, scale_b);
+  copy_v3_v3(scale_b, scale);
 }
 
-void undo_push_end(Object &ob)
+static LatticeToolData *sculpt_lattice_state_from_object(Object &ob)
 {
+  if (ob.runtime == nullptr || ob.runtime->sculpt_session == nullptr) {
+    return nullptr;
+  }
+  return ob.runtime->sculpt_session->lattice_tool_state;
+}
+
+void placement_transform_undo_store(Object &ob)
+{
+  LatticeToolData *state = sculpt_lattice_state_from_object(ob);
+  if (state == nullptr || state->lattice_ob == nullptr) {
+    return;
+  }
+  Object *lat_ob = state->lattice_ob;
+  state->placement_xform_orig_loc = float3(lat_ob->loc);
+  copy_v4_v4(state->placement_xform_orig_quat, lat_ob->quat);
+  state->placement_xform_orig_scale = float3(lat_ob->scale);
+  state->placement_xform_orig_valid = true;
+}
+
+void placement_transform_undo_abort(Object &ob)
+{
+  LatticeToolData *state = sculpt_lattice_state_from_object(ob);
+  if (state) {
+    state->placement_xform_orig_valid = false;
+  }
+}
+
+void placement_transform_undo_commit(const Scene &scene, Object &ob, const char *name)
+{
+  LatticeToolData *state = sculpt_lattice_state_from_object(ob);
+  if (state == nullptr || !state->placement_xform_orig_valid) {
+    return;
+  }
+  undo::push_begin_ex(scene, ob, name);
+  const float undo_loc[3] = {state->placement_xform_orig_loc.x,
+                              state->placement_xform_orig_loc.y,
+                              state->placement_xform_orig_loc.z};
+  const float undo_scale[3] = {state->placement_xform_orig_scale.x,
+                                state->placement_xform_orig_scale.y,
+                                state->placement_xform_orig_scale.z};
+  const float redo_loc[3] = {state->lattice_ob->loc[0],
+                              state->lattice_ob->loc[1],
+                              state->lattice_ob->loc[2]};
+  const float redo_scale[3] = {state->lattice_ob->scale[0],
+                                state->lattice_ob->scale[1],
+                                state->lattice_ob->scale[2]};
+  undo::push_lattice_cage(undo_loc,
+                          state->placement_xform_orig_quat,
+                          undo_scale,
+                          redo_loc,
+                          state->lattice_ob->quat,
+                          redo_scale,
+                          state->resolution,
+                          state->interpolation,
+                          state->margin,
+                          state->mask_eps);
   undo::push_end(ob);
+  state->placement_xform_orig_valid = false;
+}
+
+void undo_restore_cage(bContext *C,
+                       Object &ob,
+                       float loc[3],
+                       float quat[4],
+                       float scale[3],
+                       const int3 &resolution,
+                       const int interpolation,
+                       const float margin,
+                       const float mask_eps)
+{
+  Object *lat_ob = cage_object(ob);
+  if (lat_ob == nullptr && C != nullptr && sculpt_lattice_tool_active_poll(C)) {
+    SculptSession *ss = ob.runtime->sculpt_session;
+    if (ss == nullptr || ss->lattice_tool_state != nullptr) {
+      return;
+    }
+    LatticeToolData *state = MEM_new<LatticeToolData>(__func__);
+    state->resolution = resolution;
+    state->interpolation = KeyInterpolationType(interpolation);
+    state->margin = margin;
+    state->mask_eps = mask_eps;
+    state->phase = Phase::Placement;
+    state->lattice_ob = sculpt_lattice_create_temp_object(resolution);
+    if (Lattice *lt = id_cast<Lattice *>(state->lattice_ob->data)) {
+      lt->typeu = lt->typev = lt->typew = char(state->interpolation);
+    }
+    ss->lattice_tool_state = state;
+    if (Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C)) {
+      if (sculpt_lattice_pbvh_ensure(*depsgraph, ob)) {
+        sculpt_lattice_build_affected_region(*depsgraph, ob, *state);
+      }
+    }
+    lat_ob = state->lattice_ob;
+  }
+  if (lat_ob == nullptr) {
+    return;
+  }
+  copy_v3_v3(lat_ob->loc, loc);
+  copy_v4_v4(lat_ob->quat, quat);
+  copy_v3_v3(lat_ob->scale, scale);
+  BKE_object_to_mat4(lat_ob, lat_ob->runtime->object_to_world.ptr());
+}
+
+void undo_purge_cage_steps(const Object &ob)
+{
+  undo::purge_lattice_cage_steps(ob);
 }
 
 /** \} */
@@ -474,11 +590,58 @@ static int sculpt_lattice_pick_bpoint(const ARegion &region, const float2 mval, 
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Live resolution change
+/** \name Live tool-settings
  * \{ */
 
-/* Defined further down; forward-declared so the resolution update can flush the preview. */
+/* Defined further down; forward-declared so the settings update can flush the preview. */
 static void sculpt_lattice_preview_flush(bContext *C);
+
+static bool sculpt_lattice_tool_props_get(bContext *C, PointerRNA *r_ptr)
+{
+  bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  if (!tref) {
+    return false;
+  }
+  wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_lattice_tool", false);
+  return ot && WM_toolsystem_ref_properties_get_from_operator(tref, ot, r_ptr);
+}
+
+static LatticeToolData *sculpt_lattice_session_state_for_settings(bContext *C, Object **r_ob_mesh)
+{
+  Object *ob_mesh = CTX_data_active_object(C);
+  if (!ob_mesh || ob_mesh->type != OB_MESH || !(ob_mesh->mode & OB_MODE_SCULPT) ||
+      !ob_mesh->runtime->sculpt_session)
+  {
+    return nullptr;
+  }
+  SculptSession *ss = ob_mesh->runtime->sculpt_session;
+  LatticeToolData *state = ss->lattice_tool_state;
+  /* Changing settings under a running slide would re-map the vertices under the cursor. */
+  if (!state || !state->lattice_ob || ss->pbvh_hold) {
+    return nullptr;
+  }
+  if (r_ob_mesh) {
+    *r_ob_mesh = ob_mesh;
+  }
+  return state;
+}
+
+bool sculpt_lattice_sync_settings_from_rna(bContext *C, LatticeToolData &state)
+{
+  PointerRNA props_ptr;
+  if (!sculpt_lattice_tool_props_get(C, &props_ptr)) {
+    return false;
+  }
+  state.strength = RNA_float_get(&props_ptr, "strength");
+  state.margin = RNA_float_get(&props_ptr, "margin");
+  state.mask_eps = RNA_float_get(&props_ptr, "mask_eps");
+  state.resolution = int3(
+      max_ii(SCULPT_LATTICE_MIN_RESOLUTION, RNA_int_get(&props_ptr, "resolution_u")),
+      max_ii(SCULPT_LATTICE_MIN_RESOLUTION, RNA_int_get(&props_ptr, "resolution_v")),
+      max_ii(SCULPT_LATTICE_MIN_RESOLUTION, RNA_int_get(&props_ptr, "resolution_w")));
+  state.interpolation = KeyInterpolationType(RNA_enum_get(&props_ptr, "interpolation"));
+  return true;
+}
 
 /**
  * Re-applies the cage to the mesh from a tool-settings change, wrapped in its own undo step.
@@ -499,22 +662,20 @@ static void sculpt_lattice_undo_push_affected_nodes(Depsgraph &depsgraph,
 {
   sculpt_lattice_ensure_affected_nodes(depsgraph, ob_mesh, ar);
   IndexMaskMemory memory;
-  const IndexMask node_mask = ar.affected_pbvh_nodes.is_empty() ?
-                                  IndexMask() :
-                                  IndexMask::from_indices(ar.affected_pbvh_nodes.as_span(), memory);
+  const IndexMask node_mask = sculpt_lattice_affected_node_mask(ar, memory);
   undo::push_nodes(depsgraph, ob_mesh, node_mask, undo::Type::Position);
 }
 
-static void sculpt_lattice_reapply_with_undo(bContext *C,
-                                             Depsgraph &depsgraph,
-                                             Object &ob_mesh,
-                                             LatticeToolData &state,
-                                             const char *undo_name)
+static bool sculpt_lattice_reapply_with_undo(bContext *C,
+                                              Depsgraph &depsgraph,
+                                              Object &ob_mesh,
+                                              LatticeToolData &state,
+                                              const char *undo_name)
 {
   const Scene *scene = CTX_data_scene(C);
   bke::pbvh::Tree *pbvh = sculpt_lattice_pbvh_ensure(depsgraph, ob_mesh);
-  if (scene == nullptr || pbvh == nullptr) {
-    return;
+  if (scene == nullptr || pbvh == nullptr || !sculpt_lattice_deform_would_change(state)) {
+    return false;
   }
 
   undo::push_begin_ex(*scene, ob_mesh, undo_name);
@@ -522,9 +683,10 @@ static void sculpt_lattice_reapply_with_undo(bContext *C,
   /* Register the position nodes BEFORE the deformation, like #sculpt_lattice_slide_invoke. */
   sculpt_lattice_undo_push_affected_nodes(depsgraph, ob_mesh, state.current);
 
-  sculpt_lattice_deform_apply(depsgraph, ob_mesh, state);
+  const bool changed = sculpt_lattice_deform_apply(depsgraph, ob_mesh, state);
 
   undo::push_end(ob_mesh);
+  return changed;
 }
 
 /**
@@ -540,26 +702,14 @@ static void sculpt_lattice_reapply_with_undo(bContext *C,
  */
 static void sculpt_lattice_apply_resolution_change(bContext *C)
 {
-  Object *ob_mesh = CTX_data_active_object(C);
-  if (!ob_mesh || ob_mesh->type != OB_MESH || !(ob_mesh->mode & OB_MODE_SCULPT) ||
-      !ob_mesh->runtime->sculpt_session)
-  {
-    return;
-  }
-  SculptSession *ss = ob_mesh->runtime->sculpt_session;
-  LatticeToolData *state = ss->lattice_tool_state;
-  /* Re-gridding under a running slide would pull the cage out from under the drag. */
-  if (!state || !state->lattice_ob || ss->lattice_slide_active) {
+  Object *ob_mesh = nullptr;
+  LatticeToolData *state = sculpt_lattice_session_state_for_settings(C, &ob_mesh);
+  if (!state) {
     return;
   }
 
-  bToolRef *tref = WM_toolsystem_ref_from_context(C);
-  if (!tref) {
-    return;
-  }
-  wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_lattice_tool", false);
   PointerRNA props_ptr;
-  if (!ot || !WM_toolsystem_ref_properties_get_from_operator(tref, ot, &props_ptr)) {
+  if (!sculpt_lattice_tool_props_get(C, &props_ptr)) {
     return;
   }
   const int3 res = int3(max_ii(SCULPT_LATTICE_MIN_RESOLUTION, RNA_int_get(&props_ptr, "resolution_u")),
@@ -587,28 +737,19 @@ static void sculpt_lattice_apply_resolution_change(bContext *C)
   lt->typeu = lt->typev = lt->typew = char(state->interpolation);
 
   /* Rebuild the deform context against the new cage geometry. */
-  if (state->deform_data) {
-    BKE_lattice_deform_data_destroy(state->deform_data);
-    state->deform_data = nullptr;
-  }
-  state->deform_data = sculpt_lattice_deform_data_rebuild(state->lattice_ob, ob_mesh);
+  sculpt_lattice_evaluator_rebuild(*state, *ob_mesh);
 
   /* Re-apply so the mesh follows the re-gridded cage immediately. In the placement phase the cage
    * is neutral and this would be a no-op; skip it explicitly rather than leaning on that. */
-  if (state->phase == Phase::Deform) {
-    sculpt_lattice_reapply_with_undo(C, *depsgraph, *ob_mesh, *state, "Lattice Resolution");
+  const bool changed = state->phase == Phase::Deform &&
+                       sculpt_lattice_reapply_with_undo(
+                           C, *depsgraph, *ob_mesh, *state, "Lattice Resolution");
+  if (changed) {
+    sculpt_lattice_preview_flush(C);
   }
-
-  sculpt_lattice_preview_flush(C);
   /* ADR-15: no-main cage is not in any depsgraph; the #SculptLatticeCage overlay reads the live
    * #Lattice.def each redraw, so a redraw tag alone is enough. */
   ED_region_tag_redraw(CTX_wm_region(C));
-}
-
-/* RNA update for #SCULPT_OT_lattice_tool resolution properties (tool settings). */
-static void sculpt_lattice_resolution_update(bContext *C, PointerRNA * /*ptr*/, PropertyRNA * /*prop*/)
-{
-  sculpt_lattice_apply_resolution_change(C);
 }
 
 /**
@@ -623,26 +764,14 @@ static void sculpt_lattice_resolution_update(bContext *C, PointerRNA * /*ptr*/, 
  */
 static void sculpt_lattice_apply_interpolation_change(bContext *C)
 {
-  Object *ob_mesh = CTX_data_active_object(C);
-  if (!ob_mesh || ob_mesh->type != OB_MESH || !(ob_mesh->mode & OB_MODE_SCULPT) ||
-      !ob_mesh->runtime->sculpt_session)
-  {
-    return;
-  }
-  SculptSession *ss = ob_mesh->runtime->sculpt_session;
-  LatticeToolData *state = ss->lattice_tool_state;
-  /* Changing the interpolation mid-drag would re-map the vertices under the cursor. */
-  if (!state || !state->lattice_ob || ss->lattice_slide_active) {
+  Object *ob_mesh = nullptr;
+  LatticeToolData *state = sculpt_lattice_session_state_for_settings(C, &ob_mesh);
+  if (!state) {
     return;
   }
 
-  bToolRef *tref = WM_toolsystem_ref_from_context(C);
-  if (!tref) {
-    return;
-  }
-  wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_lattice_tool", false);
   PointerRNA props_ptr;
-  if (!ot || !WM_toolsystem_ref_properties_get_from_operator(tref, ot, &props_ptr)) {
+  if (!sculpt_lattice_tool_props_get(C, &props_ptr)) {
     return;
   }
   const KeyInterpolationType interpolation = KeyInterpolationType(
@@ -657,26 +786,158 @@ static void sculpt_lattice_apply_interpolation_change(bContext *C)
 
   /* Re-apply so the mesh follows the new interpolation immediately. In the placement phase the
    * cage is neutral and this would be a no-op; skip it explicitly rather than leaning on that. */
+  bool changed = false;
   if (state->phase == Phase::Deform) {
     Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
     if (!depsgraph) {
       return;
     }
-    sculpt_lattice_reapply_with_undo(C, *depsgraph, *ob_mesh, *state, "Lattice Interpolation");
+    changed = sculpt_lattice_reapply_with_undo(
+        C, *depsgraph, *ob_mesh, *state, "Lattice Interpolation");
   }
 
-  sculpt_lattice_preview_flush(C);
+  if (changed) {
+    sculpt_lattice_preview_flush(C);
+  }
   /* ADR-15: no-main cage is not in any depsgraph; the #SculptLatticeCage overlay reads the live
    * #Lattice.def each redraw, so a redraw tag alone is enough. */
   ED_region_tag_redraw(CTX_wm_region(C));
 }
 
-/* RNA update for #SCULPT_OT_lattice_tool interpolation property (tool settings). */
-static void sculpt_lattice_interpolation_update(bContext *C,
-                                                 PointerRNA * /*ptr*/,
-                                                 PropertyRNA * /*prop*/)
+/* RNA update for all #SCULPT_OT_lattice_tool properties. Each apply_* is a no-op when that
+ * property did not change, so one callback can serve Strength, Margin, Mask Epsilon,
+ * Resolution and Interpolation. */
+static void sculpt_lattice_apply_margin_change(bContext *C)
 {
+  LatticeToolData *state = sculpt_lattice_session_state_for_settings(C, nullptr);
+  if (!state) {
+    return;
+  }
+  PointerRNA props_ptr;
+  if (!sculpt_lattice_tool_props_get(C, &props_ptr)) {
+    return;
+  }
+  /* Margin is consumed by the initial fit and by #SCULPT_OT_lattice_fit, not by live deform. */
+  state->margin = RNA_float_get(&props_ptr, "margin");
+}
+
+static void sculpt_lattice_apply_strength_change(bContext *C)
+{
+  Object *ob_mesh = nullptr;
+  LatticeToolData *state = sculpt_lattice_session_state_for_settings(C, &ob_mesh);
+  if (!state) {
+    return;
+  }
+  PointerRNA props_ptr;
+  if (!sculpt_lattice_tool_props_get(C, &props_ptr)) {
+    return;
+  }
+  const float strength = RNA_float_get(&props_ptr, "strength");
+  if (strength == state->strength) {
+    return;
+  }
+  state->strength = strength;
+
+  if (state->phase != Phase::Deform) {
+    return;
+  }
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  if (!depsgraph) {
+    return;
+  }
+  if (sculpt_lattice_reapply_with_undo(C, *depsgraph, *ob_mesh, *state, "Lattice Strength")) {
+    sculpt_lattice_preview_flush(C);
+  }
+  ED_region_tag_redraw(CTX_wm_region(C));
+}
+
+static void sculpt_lattice_apply_mask_eps_change(bContext *C)
+{
+  Object *ob_mesh = nullptr;
+  LatticeToolData *state = sculpt_lattice_session_state_for_settings(C, &ob_mesh);
+  if (!state) {
+    return;
+  }
+  PointerRNA props_ptr;
+  if (!sculpt_lattice_tool_props_get(C, &props_ptr)) {
+    return;
+  }
+  const float mask_eps = RNA_float_get(&props_ptr, "mask_eps");
+  if (mask_eps == state->mask_eps) {
+    return;
+  }
+  state->mask_eps = mask_eps;
+
+  /* Placement rebuilds the region on the next deform-phase entry. */
+  if (state->phase != Phase::Deform) {
+    return;
+  }
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  if (!depsgraph || sculpt_lattice_pbvh_ensure(*depsgraph, *ob_mesh) == nullptr) {
+    return;
+  }
+  const Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr) {
+    return;
+  }
+
+  undo::push_begin_ex(*scene, *ob_mesh, "Lattice Mask Epsilon");
+  /* Snapshot currently affected nodes at their deformed positions before any write. */
+  sculpt_lattice_undo_push_affected_nodes(*depsgraph, *ob_mesh, state->current);
+
+  AffectedRegion &ar = state->current;
+  if (!ar.is_empty()) {
+    int max_verts = 0;
+    for (const AffectedNode &node : ar.nodes) {
+      max_verts = math::max(max_verts, int(node.verts.size()));
+    }
+    if (state->translations.size() < max_verts) {
+      state->translations.reinitialize(max_verts);
+    }
+    std::optional<PositionDeformData> position_data;
+    for (AffectedNode &node : ar.nodes) {
+      MutableSpan<float3> trans = state->translations.as_mutable_span().take_front(node.verts.size());
+      bool restore_changed = false;
+      for (const int i : node.verts.index_range()) {
+        trans[i] = node.rest_coords[i] - node.current_coords[i];
+        node.current_coords[i] = node.rest_coords[i];
+        if (!math::is_zero(trans[i])) {
+          restore_changed = true;
+        }
+      }
+      if (!restore_changed) {
+        continue;
+      }
+      if (!position_data.has_value()) {
+        position_data.emplace(*depsgraph, *ob_mesh);
+      }
+      position_data->deform(trans, node.verts);
+    }
+    if (position_data.has_value()) {
+      sculpt_lattice_tag_affected_nodes(*depsgraph, *ob_mesh, ar);
+    }
+  }
+
+  /* Recapture rest from the restored mesh so newly included verts start from their true rest. */
+  sculpt_lattice_build_affected_region(*depsgraph, *ob_mesh, *state);
+  /* Newly affected nodes were not in the first snapshot; #push_nodes only fills new ones. */
+  sculpt_lattice_undo_push_affected_nodes(*depsgraph, *ob_mesh, state->current);
+
+  sculpt_lattice_evaluator_ensure(*state, *ob_mesh);
+  sculpt_lattice_deform_apply(*depsgraph, *ob_mesh, *state);
+
+  undo::push_end(*ob_mesh);
+  sculpt_lattice_preview_flush(C);
+  ED_region_tag_redraw(CTX_wm_region(C));
+}
+
+static void sculpt_lattice_settings_update(bContext *C, PointerRNA * /*ptr*/, PropertyRNA * /*prop*/)
+{
+  sculpt_lattice_apply_margin_change(C);
+  sculpt_lattice_apply_resolution_change(C);
   sculpt_lattice_apply_interpolation_change(C);
+  sculpt_lattice_apply_mask_eps_change(C);
+  sculpt_lattice_apply_strength_change(C);
 }
 
 /** \} */
@@ -720,26 +981,32 @@ void SCULPT_OT_lattice_tool(wmOperatorType *ot)
 
   ot->flag = OPTYPE_REGISTER;
 
-  RNA_def_float(ot->srna,
-                "strength",
-                SCULPT_LATTICE_STRENGTH_DEFAULT,
-                0.0f,
-                1.0f,
-                "Strength",
-                "Deformation strength",
-                0.0f,
-                1.0f);
-  RNA_def_float(ot->srna,
-                "margin",
-                SCULPT_LATTICE_MARGIN_DEFAULT,
-                0.0f,
-                10.0f,
-                "Margin",
-                "Extra cage margin around the deform region (in mesh units)",
-                0.0f,
-                2.0f);
+  PropertyRNA *strength_prop = RNA_def_float(ot->srna,
+                                             "strength",
+                                             SCULPT_LATTICE_STRENGTH_DEFAULT,
+                                             0.0f,
+                                             1.0f,
+                                             "Strength",
+                                             "Deformation strength, applied immediately to the current cage",
+                                             0.0f,
+                                             1.0f);
+  RNA_def_property_update_runtime_with_context_and_property(strength_prop,
+                                                           sculpt_lattice_settings_update);
+  PropertyRNA *margin_prop = RNA_def_float(
+      ot->srna,
+      "margin",
+      SCULPT_LATTICE_MARGIN_DEFAULT,
+      0.0f,
+      10.0f,
+      "Margin",
+      "Extra cage margin around the deform region (in mesh units). Applied when the cage is "
+      "first created and by Fit Cage",
+      0.0f,
+      2.0f);
+  RNA_def_property_update_runtime_with_context_and_property(margin_prop,
+                                                           sculpt_lattice_settings_update);
   /* The resolution properties re-grid the live cage interactively (add/remove control points)
-   * via #sculpt_lattice_resolution_update; see #sculpt_lattice_apply_resolution_change. */
+   * via #sculpt_lattice_settings_update; see #sculpt_lattice_apply_resolution_change. */
   const char *resolution_names[] = {"resolution_u", "resolution_v", "resolution_w"};
   const char *resolution_labels[] = {"Resolution U", "Resolution V", "Resolution W"};
   for (const int axis : IndexRange(3)) {
@@ -752,18 +1019,21 @@ void SCULPT_OT_lattice_tool(wmOperatorType *ot)
                                     "Number of cage control points along this axis",
                                     SCULPT_LATTICE_MIN_RESOLUTION,
                                     32);
-    RNA_def_property_update_runtime_with_context_and_property(prop,
-                                                             sculpt_lattice_resolution_update);
+    RNA_def_property_update_runtime_with_context_and_property(prop, sculpt_lattice_settings_update);
   }
-  RNA_def_float(ot->srna,
-                "mask_eps",
-                SCULPT_LATTICE_MASK_EPS_DEFAULT,
-                0.0f,
-                1.0f,
-                "Mask Epsilon",
-                "Treat vertices with (1 - mask) below this as protected",
-                0.0f,
-                0.01f);
+  PropertyRNA *mask_eps_prop = RNA_def_float(
+      ot->srna,
+      "mask_eps",
+      SCULPT_LATTICE_MASK_EPS_DEFAULT,
+      0.0f,
+      1.0f,
+      "Mask Epsilon",
+      "Treat vertices with (1 - mask) below this as protected. Changing this rebuilds the "
+      "affected region",
+      0.0f,
+      0.01f);
+  RNA_def_property_update_runtime_with_context_and_property(mask_eps_prop,
+                                                           sculpt_lattice_settings_update);
 
   /* Values are raw #KeyInterpolationType, written straight into #Lattice.typeu/typev/typew. */
   static const EnumPropertyItem interpolation_items[] = {
@@ -778,7 +1048,7 @@ void SCULPT_OT_lattice_tool(wmOperatorType *ot)
                                                  "Interpolation",
                                                  "Lattice interpolation type");
   RNA_def_property_update_runtime_with_context_and_property(interpolation_prop,
-                                                             sculpt_lattice_interpolation_update);
+                                                           sculpt_lattice_settings_update);
 }
 
 /* --- SCULPT_OT_lattice_pick ----------------------------------------- */
@@ -856,8 +1126,8 @@ static void sculpt_lattice_preview_flush(bContext *C)
 }
 
 static wmOperatorStatus sculpt_lattice_slide_invoke(bContext *C,
-                                                    wmOperator *op,
-                                                    const wmEvent * /*event*/)
+                                                     wmOperator *op,
+                                                     const wmEvent * /*event*/)
 {
   Object *ob_mesh = CTX_data_active_object(C);
   SculptSession *ss = ob_mesh ? ob_mesh->runtime->sculpt_session : nullptr;
@@ -867,8 +1137,7 @@ static wmOperatorStatus sculpt_lattice_slide_invoke(bContext *C,
   }
 
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
-  Scene *scene = CTX_data_scene(C);
-  if (!depsgraph || !scene) {
+  if (!depsgraph) {
     return OPERATOR_CANCELLED;
   }
   bke::pbvh::Tree *pbvh = sculpt_lattice_pbvh_ensure(*depsgraph, *ob_mesh);
@@ -896,25 +1165,16 @@ static wmOperatorStatus sculpt_lattice_slide_invoke(bContext *C,
 
   /* Ensure a deform context exists. Subsequent MOUSEMOVE events update the dragged point in
    * place rather than destroying and recreating the whole cache. */
-  if (!state->deform_data) {
-    state->deform_data = sculpt_lattice_deform_data_rebuild(state->lattice_ob, ob_mesh);
-  }
-
-  /* Per-drag undo step (like Mesh Filter). */
-  undo::push_begin(*scene, *ob_mesh, op);
-
-  /* Register position undo nodes BEFORE any deformation: #PositionDeformData::deform writes
-   * coordinates directly and does not push undo itself, so without this the per-drag undo step
-   * would be empty and Ctrl+Z could not revert the deformation. Mirrors Mesh Filter's
-   * `cache_init` (sculpt_filter_mesh.cc). */
-  sculpt_lattice_undo_push_affected_nodes(*depsgraph, *ob_mesh, state->current);
+  sculpt_lattice_evaluator_ensure(*state, *ob_mesh);
 
   /* Snapshot the control point so the drag can be rolled back (see
    * #sculpt_lattice_slide_drag_cancel). */
   const Lattice *lt = id_cast<const Lattice *>(state->lattice_ob->data);
   state->drag_start_point = float3(lt->def[state->pending_drag_index].vec);
+  state->drag_undo_started = false;
+  state->drag_started_with_session_changes = state->session_has_mesh_changes;
 
-  ss->lattice_slide_active = true;
+  ss->pbvh_hold = true;
 
   WM_event_add_modal_handler(C, op);
   ED_region_tag_redraw(CTX_wm_region(C));
@@ -925,6 +1185,7 @@ static wmOperatorStatus sculpt_lattice_slide_invoke(bContext *C,
 static void sculpt_lattice_slide_update_point(bContext *C,
                                               Object &ob_mesh,
                                               LatticeToolData &state,
+                                              const wmOperator &op,
                                               const wmEvent *event)
 {
   if (!state.lattice_ob || state.pending_drag_index < 0) {
@@ -967,34 +1228,49 @@ static void sculpt_lattice_slide_update_point(bContext *C,
    * would also discard the fast PBVH draw-buffer refresh #flush_update_step just did on the mesh.) */
 
   /* The cage object matrix is unchanged; only this control point moved. */
-  if (!state.deform_data) {
-    state.deform_data = sculpt_lattice_deform_data_rebuild(lat_ob, &ob_mesh);
-  }
-  else {
-    BKE_lattice_deform_data_update_point(state.deform_data, state.pending_drag_index);
-  }
+  sculpt_lattice_evaluator_ensure(state, ob_mesh);
+  sculpt_lattice_evaluator_update_point(state, state.pending_drag_index);
 
   if (!sculpt_lattice_pbvh_ensure(*depsgraph, ob_mesh)) {
     return;
   }
-  sculpt_lattice_deform_apply(*depsgraph, ob_mesh, state);
-  sculpt_lattice_preview_flush(C);
+  if (!state.drag_undo_started && sculpt_lattice_deform_would_change(state)) {
+    const Scene *scene = CTX_data_scene(C);
+    if (scene == nullptr) {
+      return;
+    }
+    /* Snapshot immediately before the first write. A click without a real displacement, or a
+     * Strength-0 drag, never opens an undo step. */
+    undo::push_begin(*scene, ob_mesh, &op);
+    sculpt_lattice_undo_push_affected_nodes(*depsgraph, ob_mesh, state.current);
+    state.drag_undo_started = true;
+  }
+  if (sculpt_lattice_deform_apply(*depsgraph, ob_mesh, state)) {
+    sculpt_lattice_preview_flush(C);
+  }
+  else {
+    /* Cage overlay still has to follow the control point even when the mesh did not move. */
+    ED_region_tag_redraw(region);
+  }
 }
 
 /**
  * Closes the per-drag undo step and clears the in-progress state.
  *
- * #SculptSession::lattice_slide_active suppresses the PBVH free in
+ * #SculptSession::pbvh_hold suppresses the PBVH free in
  * #BKE_sculpt_update_object_before_eval, so leaving it set would keep that suppression alive for
  * the rest of the sculpt session. Every exit from the modal — release, Esc, and the window
  * manager's forced #wmOperatorType::cancel — must come through here.
  */
 static void sculpt_lattice_slide_drag_end(bContext *C, Object &ob_mesh, LatticeToolData &state)
 {
-  undo::push_end(ob_mesh);
+  if (state.drag_undo_started) {
+    undo::push_end(ob_mesh);
+    state.drag_undo_started = false;
+  }
   state.pending_drag_index = -1;
   if (SculptSession *ss = ob_mesh.runtime->sculpt_session) {
-    ss->lattice_slide_active = false;
+    ss->pbvh_hold = false;
   }
   /* ADR-15: nothing to re-evaluate for the no-main cage — the #SculptLatticeCage overlay
    * already follows the live control points each redraw. */
@@ -1003,51 +1279,44 @@ static void sculpt_lattice_slide_drag_end(bContext *C, Object &ob_mesh, LatticeT
 }
 
 /**
- * Rolls the current drag back: returns the affected vertices to their rest positions AND the
- * dragged control point to where it was when the drag started.
+ * Rolls the current drag back: returns the dragged control point to where it was when the drag
+ * started, then reapplies the cage to the mesh.
  *
- * Both halves are required. The cage is the absolute accumulator for the whole session, so a
- * control point left at its cancelled position would be re-applied by the next drag even though
- * the mesh was restored here.
+ * The cage is the absolute accumulator for the whole session. Restoring vertices to
+ * #AffectedRegion::rest_coords would also undo every earlier confirmed drag. Re-evaluating
+ * `target - current_coords` after #update_point keeps those earlier drags and undoes only this one.
  */
 static void sculpt_lattice_slide_drag_cancel(bContext *C, Object &ob_mesh, LatticeToolData &state)
 {
   if (state.lattice_ob && state.pending_drag_index >= 0) {
     Lattice *lt = id_cast<Lattice *>(state.lattice_ob->data);
     copy_v3_v3(lt->def[state.pending_drag_index].vec, state.drag_start_point);
-    if (state.deform_data) {
-      BKE_lattice_deform_data_update_point(state.deform_data, state.pending_drag_index);
-    }
+    sculpt_lattice_evaluator_update_point(state, state.pending_drag_index);
   }
 
   if (Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C)) {
     /* Ahead of the restore, not after it: any geometry re-evaluation since this modal started may
      * have freed the PBVH that #PositionDeformData and #sculpt_lattice_tag_affected_nodes read.
      * This is the same order #sculpt_lattice_slide_update_point uses for the same reason. */
-    AffectedRegion &ar = state.current;
-    if (sculpt_lattice_pbvh_ensure(*depsgraph, ob_mesh) && !ar.verts.is_empty()) {
-      const PositionDeformData position_data(*depsgraph, ob_mesh);
-      if (state.translations.size() != ar.verts.size()) {
-        state.translations.reinitialize(ar.verts.size());
-      }
-      for (const int i : ar.verts.index_range()) {
-        /* Move from the last position this tool wrote back to rest (see
-         * #AffectedRegion::current_coords). */
-        state.translations[i] = ar.rest_coords[i] - ar.current_coords[i];
-        ar.current_coords[i] = ar.rest_coords[i];
-      }
-      position_data.deform(state.translations, ar.verts);
-      sculpt_lattice_tag_affected_nodes(*depsgraph, ob_mesh, ar);
+    if (sculpt_lattice_pbvh_ensure(*depsgraph, ob_mesh)) {
+      sculpt_lattice_deform_apply(*depsgraph, ob_mesh, state);
     }
     flush_update_step(C, UpdateType::Position);
   }
 
+  /* The modal step captured the mesh before the first drag write. The mesh is now back at that
+   * state, so discard only this un-published step instead of adding a no-op history entry. */
+  if (state.drag_undo_started) {
+    undo::push_abort();
+    state.drag_undo_started = false;
+  }
+  state.session_has_mesh_changes = state.drag_started_with_session_changes;
   sculpt_lattice_slide_drag_end(C, ob_mesh, state);
 }
 
 static wmOperatorStatus sculpt_lattice_slide_modal(bContext *C,
-                                                   wmOperator * /*op*/,
-                                                   const wmEvent *event)
+                                                    wmOperator *op,
+                                                    const wmEvent *event)
 {
   Object *ob_mesh = CTX_data_active_object(C);
   SculptSession *ss = ob_mesh ? ob_mesh->runtime->sculpt_session : nullptr;
@@ -1058,7 +1327,7 @@ static wmOperatorStatus sculpt_lattice_slide_modal(bContext *C,
 
   switch (event->type) {
     case MOUSEMOVE: {
-      sculpt_lattice_slide_update_point(C, *ob_mesh, *state, event);
+      sculpt_lattice_slide_update_point(C, *ob_mesh, *state, *op, event);
       return OPERATOR_RUNNING_MODAL;
     }
     case LEFTMOUSE: {
@@ -1081,14 +1350,14 @@ static wmOperatorStatus sculpt_lattice_slide_modal(bContext *C,
 }
 
 /* Forced termination by the window manager (file load, area change, another operator taking over
- * the modal handlers). Without this the drag would keep #SculptSession::lattice_slide_active set
+ * the modal handlers). Without this the drag would keep #SculptSession::pbvh_hold set
  * and leave the per-drag undo step open. */
 static void sculpt_lattice_slide_cancel(bContext *C, wmOperator * /*op*/)
 {
   Object *ob_mesh = CTX_data_active_object(C);
   SculptSession *ss = ob_mesh ? ob_mesh->runtime->sculpt_session : nullptr;
   LatticeToolData *state = ss ? ss->lattice_tool_state : nullptr;
-  if (!state || !ss->lattice_slide_active) {
+  if (!state || !ss->pbvh_hold) {
     return;
   }
   sculpt_lattice_slide_drag_cancel(C, *ob_mesh, *state);
@@ -1151,29 +1420,66 @@ static wmOperatorStatus sculpt_lattice_cancel_exec(bContext *C, wmOperator *op)
   }
   LatticeToolData *state = ob_mesh->runtime->sculpt_session->lattice_tool_state;
 
-  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
-  Scene *scene = CTX_data_scene(C);
+  const bool has_session_changes = state->session_has_mesh_changes;
+  Depsgraph *depsgraph = has_session_changes ? CTX_data_ensure_evaluated_depsgraph(C) : nullptr;
+  Scene *scene = has_session_changes ? CTX_data_scene(C) : nullptr;
   bke::pbvh::Tree *pbvh = (depsgraph && scene) ? sculpt_lattice_pbvh_ensure(*depsgraph, *ob_mesh) :
-                                                 nullptr;
+                                                  nullptr;
 
   /* A missing PBVH means there is nothing left to restore into, but the session must still go —
    * dropping it is the whole point of this operator, and its operators are the only way to reach
    * it. */
-  if (pbvh) {
-    /* Restore every position from the entry snapshot as its own undo step. Each drag already
-     * pushed one, so writing the positions outside the undo system would leave the top of the
-     * stack describing a mid-session state that is no longer on screen, and the next Ctrl+Z would
-     * restore that instead of the pre-session mesh. */
+  bool needs_restore = false;
+  if (pbvh && has_session_changes) {
+    const Span<float3> positions = bke::pbvh::vert_positions_eval(*depsgraph, *ob_mesh);
+    for (const int i : state->session_orig.verts.index_range()) {
+      const int v = state->session_orig.verts[i];
+      if (v >= 0 && v < positions.size() &&
+          !math::is_zero(positions[v] - state->session_orig.positions[i]))
+      {
+        needs_restore = true;
+        break;
+      }
+    }
+  }
+
+  if (needs_restore) {
+    /* Restore only verts this tool has written. Each drag already pushed an undo step, so this
+     * write is its own step: otherwise Ctrl+Z would restore a mid-session pose that is no longer
+     * on screen. */
     undo::push_begin(*scene, *ob_mesh, op);
 
     IndexMaskMemory memory;
-    const IndexMask all = bke::pbvh::all_leaf_nodes(*pbvh, memory);
-    undo::push_nodes(*depsgraph, *ob_mesh, all, undo::Type::Position);
+    IndexMask node_mask;
+    if (state->current.pbvh == pbvh && !state->session_orig.node_indices.is_empty()) {
+      node_mask = IndexMask::from_indices(state->session_orig.node_indices.as_span(), memory);
+    }
+    else if (!state->session_orig.vert_set.is_empty()) {
+      const Span<bke::pbvh::MeshNode> mesh_nodes = pbvh->nodes<bke::pbvh::MeshNode>();
+      Vector<int> nodes;
+      const IndexMask leaves = bke::pbvh::all_leaf_nodes(*pbvh, memory);
+      leaves.foreach_index([&](const int node_i) {
+        for (const int v : mesh_nodes[node_i].verts()) {
+          if (state->session_orig.vert_set.contains(v)) {
+            nodes.append(node_i);
+            break;
+          }
+        }
+      });
+      node_mask = nodes.is_empty() ? IndexMask() :
+                                     IndexMask::from_indices(nodes.as_span(), memory);
+    }
+    undo::push_nodes(*depsgraph, *ob_mesh, node_mask, undo::Type::Position);
 
     MutableSpan<float3> positions = bke::pbvh::vert_positions_eval_for_write(*depsgraph, *ob_mesh);
-    if (!state->entry_positions.is_empty() && positions.size() == state->entry_positions.size()) {
-      positions.copy_from(state->entry_positions);
-      pbvh->tag_positions_changed(all);
+    for (const int i : state->session_orig.verts.index_range()) {
+      const int v = state->session_orig.verts[i];
+      if (v >= 0 && v < positions.size()) {
+        positions[v] = state->session_orig.positions[i];
+      }
+    }
+    if (!node_mask.is_empty()) {
+      pbvh->tag_positions_changed(node_mask);
     }
 
     undo::push_end(*ob_mesh);

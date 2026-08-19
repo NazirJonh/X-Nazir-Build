@@ -110,9 +110,10 @@ void sculpt_lattice_enter_placement(Object & /*ob_mesh*/, LatticeToolData &state
 
   /* Bake: the positions this tool last wrote become the new rest, so resetting the cage below
    * leaves the mesh exactly where it is. */
-  if (!ar.current_coords.is_empty()) {
-    ar.rest_coords.reinitialize(ar.current_coords.size());
-    ar.rest_coords.as_mutable_span().copy_from(ar.current_coords);
+  for (AffectedNode &node : ar.nodes) {
+    if (!node.current_coords.is_empty()) {
+      node.rest_coords.as_mutable_span().copy_from(node.current_coords);
+    }
   }
 
   if (state.lattice_ob != nullptr) {
@@ -124,10 +125,7 @@ void sculpt_lattice_enter_placement(Object & /*ob_mesh*/, LatticeToolData &state
   /* The deform context caches offsets computed from the control points that were just reset.
    * Every current consumer rebuilds it before use, but that invariant is implicit and would break
    * with the first consumer that forgets, so drop it here. */
-  if (state.deform_data != nullptr) {
-    BKE_lattice_deform_data_destroy(state.deform_data);
-    state.deform_data = nullptr;
-  }
+  sculpt_lattice_evaluator_reset(state);
 
   state.phase = Phase::Placement;
 }
@@ -143,18 +141,14 @@ bool sculpt_lattice_enter_deform(bContext *C, Object &ob_mesh, LatticeToolData &
    * nothing of the previous deformation is still encoded in the control points. */
   sculpt_lattice_build_affected_region(*depsgraph, ob_mesh, state);
 
-  if (state.current.verts.is_empty()) {
+  if (state.current.is_empty()) {
     BKE_report(CTX_wm_reports(C),
                RPT_WARNING,
                "No deformable vertices inside the cage; move or resize it first");
     return false;
   }
 
-  if (state.deform_data != nullptr) {
-    BKE_lattice_deform_data_destroy(state.deform_data);
-    state.deform_data = nullptr;
-  }
-  state.deform_data = sculpt_lattice_deform_data_rebuild(state.lattice_ob, &ob_mesh);
+  sculpt_lattice_evaluator_rebuild(state, ob_mesh);
 
   state.phase = Phase::Deform;
   return true;
@@ -623,6 +617,8 @@ static wmOperatorStatus sculpt_lattice_fit_exec(bContext *C, wmOperator * /*op*/
   if (state == nullptr || state->lattice_ob == nullptr) {
     return OPERATOR_CANCELLED;
   }
+  /* Read live Margin / Mask Epsilon from the tool settings; they are not auto-fit on RNA update. */
+  sculpt_lattice_sync_settings_from_rna(C, *state);
   if (state->phase != Phase::Placement) {
     BKE_report(CTX_wm_reports(C), RPT_INFO, "Press C to switch to lattice placement");
     return OPERATOR_CANCELLED;
@@ -653,7 +649,7 @@ void SCULPT_OT_lattice_fit(wmOperatorType *ot)
 {
   ot->name = "Lattice Fit to Unmasked";
   ot->idname = "SCULPT_OT_lattice_fit";
-  ot->description = "Fit the lattice cage to the unmasked part of the mesh";
+  ot->description = "Fit the lattice cage to the unmasked part of the mesh, using the current Margin";
 
   ot->exec = sculpt_lattice_fit_exec;
   ot->poll = sculpt_lattice_tool_active_poll;

@@ -20,6 +20,7 @@
 #include <optional>
 
 #include "BLI_bounds_types.hh"
+#include "BLI_index_mask.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 
@@ -51,8 +52,8 @@ constexpr int SCULPT_LATTICE_MIN_RESOLUTION = 2;
  * Every entry point that eventually touches #PositionDeformData, #bke::pbvh::vert_positions_eval
  * or #sculpt_lattice_tag_affected_nodes must come through here first. The PBVH is a `unique_ptr`
  * that #BKE_sculpt_update_object_before_eval resets on any geometry re-evaluation not covered by
- * an in-flight stroke, filter, expand or lattice slide, and the tool session outlives its
- * individual operators (ADR-12) — so a re-evaluation may well have happened since the last
+ * an in-flight stroke, filter, expand or #SculptSession::pbvh_hold, and the tool session outlives
+ * its individual operators (ADR-12) — so a re-evaluation may well have happened since the last
  * interaction, leaving the readers below to dereference a freed tree.
  *
  * Also filters out the PBVH types the MVP does not support (multires / dynamic topology: phase 3),
@@ -82,14 +83,35 @@ const bke::pbvh::Tree *sculpt_lattice_pbvh_find(const Object &ob_mesh);
 LatticeDeformData *sculpt_lattice_deform_data_rebuild(Object *lat_ob, Object *mesh_ob);
 
 struct AffectedRegion;
+struct LatticeToolData;
+
+/** Drops the cached deform context. Safe on a null or already-empty evaluator. */
+void sculpt_lattice_evaluator_reset(LatticeToolData &state);
+/** Rebuilds the deform context from the live cage matrices, without Object curve-cache lookup. */
+void sculpt_lattice_evaluator_rebuild(LatticeToolData &state, Object &mesh_ob);
+/** Rebuilds only when #LatticeToolData::deform_data is missing. */
+void sculpt_lattice_evaluator_ensure(LatticeToolData &state, Object &mesh_ob);
+/** Refreshes one preprocessed control point after a live drag. */
+void sculpt_lattice_evaluator_update_point(LatticeToolData &state, int index);
 
 /**
- * Rebuilds the cached PBVH node list for \a ar when it is missing or the tree changed.
+ * Copies live tool-settings RNA into \a state without rebuilding the cage or deforming.
+ * Used by Fit Cage so Margin / Mask Epsilon match the UI rather than the session-start snapshot.
+ * Returns false when the tool-ref properties are unavailable.
+ */
+bool sculpt_lattice_sync_settings_from_rna(bContext *C, LatticeToolData &state);
+
+/**
+ * Rebuilds the cached PBVH node grouping for \a ar when it is missing or the tree changed.
  * Cheap when the cache already matches the live PBVH.
  */
 void sculpt_lattice_ensure_affected_nodes(const Depsgraph &depsgraph,
                                           Object &ob_mesh,
                                           AffectedRegion &ar);
+
+/** #IndexMask over \a ar.node_indices. */
+blender::IndexMask sculpt_lattice_affected_node_mask(const AffectedRegion &ar,
+                                                     blender::IndexMaskMemory &memory);
 
 /**
  * Screen-space rectangle of a mouse drag on the workplane, in the plane's local XY.
@@ -136,5 +158,16 @@ std::optional<float> sculpt_lattice_box_thickness_from_lines(const float3 &front
 
 /** Status-bar hints for the idle (non-modal) Placement / Deform phases. */
 void sculpt_lattice_status_idle(bContext *C);
+
+/**
+ * Swaps two loc/quat/scale triples. Undo/redo of a Placement transform is two applications
+ * of this: stored orig against the live cage, then live against stored again.
+ */
+void sculpt_lattice_cage_xform_swap(float loc_a[3],
+                                    float quat_a[4],
+                                    float scale_a[3],
+                                    float loc_b[3],
+                                    float quat_b[4],
+                                    float scale_b[3]);
 
 }  // namespace blender::ed::sculpt_paint::lattice

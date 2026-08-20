@@ -148,6 +148,7 @@ set(SRC
   mesh/paint_image_uv_geom.hh
   mesh/paint_image_uv_symmetry.hh
   mesh/paint_mask.hh
+  mesh/paint_vertex_channel_mask.hh
   mesh/sculpt_automask.hh
   mesh/sculpt_boundary.hh
   mesh/sculpt_cloth.hh

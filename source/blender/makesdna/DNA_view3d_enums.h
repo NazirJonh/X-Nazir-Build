@@ -53,4 +53,20 @@ enum eV3DShadingBackgroundType : char {
   V3D_SHADING_BACKGROUND_VIEWPORT = 2,
 };
 
+/** #View3DOverlay.vertex_paint_channel_flag */
+enum eV3DOverlay_VertexPaintChannel {
+  V3D_OVERLAY_VPAINT_SHOW_R = (1 << 0),
+  V3D_OVERLAY_VPAINT_SHOW_G = (1 << 1),
+  V3D_OVERLAY_VPAINT_SHOW_B = (1 << 2),
+  V3D_OVERLAY_VPAINT_SHOW_A = (1 << 3),
+  /** Display single channel in grayscale mode instead of channel color */
+  V3D_OVERLAY_VPAINT_GRAYSCALE = (1 << 4),
+  /** Mask for all RGB channels (R, G, B) */
+  V3D_OVERLAY_VPAINT_SHOW_RGB_MASK = (V3D_OVERLAY_VPAINT_SHOW_R | V3D_OVERLAY_VPAINT_SHOW_G |
+                                      V3D_OVERLAY_VPAINT_SHOW_B),
+  /** Mask for all channels (R, G, B, A) */
+  V3D_OVERLAY_VPAINT_SHOW_ALL_MASK = (V3D_OVERLAY_VPAINT_SHOW_R | V3D_OVERLAY_VPAINT_SHOW_G |
+                                      V3D_OVERLAY_VPAINT_SHOW_B | V3D_OVERLAY_VPAINT_SHOW_A),
+};
+
 }  // namespace blender

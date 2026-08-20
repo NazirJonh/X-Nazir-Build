@@ -508,6 +508,11 @@ struct Brush {
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve = nullptr;
   struct MeshAutomaskingSettings *mesh_automasking_settings = nullptr;
 
+  /** Channels that brush writes to in vertex paint mode (#eBrushVertexPaintChannel). */
+  int vertex_paint_channel_flag = (BRUSH_VPAINT_CHANNEL_R | BRUSH_VPAINT_CHANNEL_G |
+                                   BRUSH_VPAINT_CHANNEL_B);
+  char _pad4[4] = {};
+
   /** #eImagePaint_SelectionExpand — Fill pick mode. Default Pixels = current flood/view fill. */
   char fill_expand = IMAGE_PAINT_SELECT_EXPAND_PIXELS;
   /* Keep #Brush 8-byte aligned after the trailing pointer + char. */

@@ -656,6 +656,9 @@ struct View3DOverlay {
   /** Weight paint mode settings. */
   eView3DOverlay_WPaintFlag wpaint_flag = {};
 
+  /** Vertex paint channel display flags (#eV3DOverlay_VertexPaintChannel). */
+  int vertex_paint_channel_flag = V3D_OVERLAY_VPAINT_SHOW_RGB_MASK;
+
   /** Alpha for texture, weight, vertex paint overlay. */
   float texture_paint_mode_opacity = 1.0f;
   float vertex_paint_mode_opacity = 1.0f;
@@ -817,6 +820,8 @@ struct View3D {
   /** Display settings. */
   View3DShading shading;
   View3DOverlay overlay;
+
+  char _pad5[4] = {};
 
   /** Path to the viewer node that is currently previewed. This is retrieved from the workspace. */
   ViewerPath viewer_path;

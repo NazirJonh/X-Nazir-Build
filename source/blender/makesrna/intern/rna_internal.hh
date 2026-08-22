@@ -242,6 +242,18 @@ IDPropertyGroup *rna_struct_system_properties_get_func(PointerRNA ptr, bool do_c
 
 void rna_def_attributes_common(StructRNA *srna, AttributeOwnerType type);
 
+/* Collection callbacks over an embedded #blender::bke::CurvesGeometry. Defined in
+ * `rna_curves.cc` and shared with #PaintCurve, whose geometry is the same type -- see
+ * `curves_geometry_from_owner()` there. */
+void rna_Curves_position_data_begin(CollectionPropertyIterator *iter, PointerRNA *ptr);
+int rna_Curves_position_data_length(PointerRNA *ptr);
+bool rna_Curves_position_data_lookup_int(PointerRNA *ptr, int index, PointerRNA *r_ptr);
+bool rna_Curves_points_lookup_int(PointerRNA *ptr, int index, PointerRNA *r_ptr);
+void rna_Curves_curves_begin(CollectionPropertyIterator *iter, PointerRNA *ptr);
+int rna_Curves_curves_length(PointerRNA *ptr);
+bool rna_Curves_curves_lookup_int(PointerRNA *ptr, int index, PointerRNA *r_ptr);
+void rna_curve_geometry_update_data(Main *bmain, Scene *scene, PointerRNA *ptr);
+
 void rna_Attribute_data_begin(CollectionPropertyIterator *iter, PointerRNA *ptr);
 int rna_Attribute_data_length(PointerRNA *ptr);
 bool rna_Attribute_data_lookup_int(PointerRNA *ptr, int index, PointerRNA *r_ptr);
@@ -416,6 +428,7 @@ void rna_TextureSlot_update(bContext *C, PointerRNA *ptr);
 bool rna_Armature_object_poll(PointerRNA *ptr, PointerRNA value);
 bool rna_Camera_object_poll(PointerRNA *ptr, PointerRNA value);
 bool rna_Curve_object_poll(PointerRNA *ptr, PointerRNA value);
+bool rna_PaintCurve_source_object_poll(PointerRNA *ptr, PointerRNA value);
 bool rna_GPencil_object_poll(PointerRNA *ptr, PointerRNA value);
 bool rna_Light_object_poll(PointerRNA *ptr, PointerRNA value);
 bool rna_Lattice_object_poll(PointerRNA *ptr, PointerRNA value);

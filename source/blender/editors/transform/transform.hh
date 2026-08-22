@@ -122,6 +122,26 @@ enum eTContext {
   CTX_OBMODE_XFORM_SKIP_CHILDREN = (1 << 14),
   /** Enable edge scrolling in 2D views. */
   CTX_VIEW2D_EDGE_PAN = (1 << 15),
+  /** Target a live Curve Patch's active control point (`CurvePatchSession`) instead of a brush's
+   * `PaintCurve` -- see `TransConvertType_CurvePatch` (`transform_convert_curve_patch.cc`). Kept
+   * distinct from #CTX_PAINT_CURVE: the two data sources are unrelated (Curve Patch's control
+   * curve is session-local, never a `PaintCurve` ID), and Curve Patch runs in plain
+   * `OB_MODE_SCULPT`, which #convert_type_get() would otherwise route to
+   * `TransConvertType_Sculpt` before ever reaching the `CTX_PAINT_CURVE` checks. */
+  CTX_CURVE_PATCH = (1 << 16),
+  /**
+   * The paint curve being transformed lives in OBJECT space rather than in region pixels, so the
+   * transform math must work in world space (see #flushTransPaintCurve). Only ever set alongside
+   * #CTX_PAINT_CURVE, and only in a 3D viewport.
+   *
+   * Resolved ONCE in #initTransInfo, deliberately: this used to be a predicate re-evaluated at
+   * every consumer (`paintcurve_transform_use_3d_viewport()`, nine call sites across six files),
+   * which both allowed the answer to change mid-transform -- the underlying
+   * `PaintCurve::use_3d_space` is plain DNA an operator could flip -- and made a missed call site
+   * a silent behavior bug. Exactly that happened: three of the nine were missed and 2D paint
+   * curves rotated around the wrong pivot.
+   */
+  CTX_PAINT_CURVE_3D = (1 << 17),
 };
 ENUM_OPERATORS(eTContext)
 

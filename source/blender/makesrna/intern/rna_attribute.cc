@@ -542,7 +542,7 @@ const EnumPropertyItem *rna_enum_attribute_domain_itemf(const AttributeOwner &ow
     {
       continue;
     }
-    if (owner.type() == AttributeOwnerType::Curves &&
+    if (ELEM(owner.type(), AttributeOwnerType::Curves, AttributeOwnerType::PaintCurve) &&
         !ELEM(domain_item->value, int(AttrDomain::Point), int(AttrDomain::Curve)))
     {
       continue;
@@ -2170,6 +2170,17 @@ static void rna_def_attribute_group_curves(BlenderRNA *brna)
   rna_def_attribute_group_id_common(srna);
 }
 
+static void rna_def_attribute_group_paint_curve(BlenderRNA *brna)
+{
+  StructRNA *srna;
+
+  srna = RNA_def_struct(brna, "AttributeGroupPaintCurve", nullptr);
+  RNA_def_struct_ui_text(srna, "Attribute Group", "Group of geometry attributes");
+  RNA_def_struct_sdna(srna, "ID");
+
+  rna_def_attribute_group_id_common(srna);
+}
+
 static void rna_def_attribute_group_grease_pencil(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -2293,6 +2304,9 @@ void rna_def_attributes_common(StructRNA *srna, const AttributeOwnerType type)
     case AttributeOwnerType::GreasePencilDrawing:
       RNA_def_property_srna(prop, "AttributeGroupGreasePencilDrawing");
       break;
+    case AttributeOwnerType::PaintCurve:
+      RNA_def_property_srna(prop, "AttributeGroupPaintCurve");
+      break;
   }
 
   prop = RNA_def_property(srna, "color_attributes", PROP_COLLECTION, PROP_NONE);
@@ -2323,6 +2337,9 @@ void rna_def_attributes_common(StructRNA *srna, const AttributeOwnerType type)
     case AttributeOwnerType::GreasePencilDrawing:
       RNA_def_property_srna(prop, "AttributeGroupGreasePencilDrawing");
       break;
+    case AttributeOwnerType::PaintCurve:
+      RNA_def_property_srna(prop, "AttributeGroupPaintCurve");
+      break;
   }
 }
 
@@ -2334,6 +2351,7 @@ void RNA_def_attribute(BlenderRNA *brna)
   rna_def_attribute_group_curves(brna);
   rna_def_attribute_group_grease_pencil(brna);
   rna_def_attribute_group_grease_pencil_drawing(brna);
+  rna_def_attribute_group_paint_curve(brna);
 }
 }  // namespace blender
 

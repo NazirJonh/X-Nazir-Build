@@ -7,11 +7,19 @@
  */
 
 #include "BKE_colorband.hh"
+#include "BKE_context.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "ED_view3d.hh"
 
 #include "BKE_paint.hh"
+#include "BKE_wm_runtime.hh"
+
+#include "DNA_screen_types.h"
+#include "DNA_windowmanager_types.h"
+#include "DNA_workspace_types.h"
+
+#include "WM_types.hh"
 
 #include "draw_debug.hh"
 #include "overlay_instance.hh"
@@ -44,6 +52,31 @@ void Instance::init()
   state.is_depth_only_drawing = ctx->is_depth();
   state.skip_particles = ctx->mode == DRWContext::DEPTH_ACTIVE_OBJECT;
   state.is_material_select = ctx->is_material_select();
+  /* Cursor position, its modifiers and the active tool are all pulled from the window here rather
+   * than carried on #DRWContext. They describe who is looking at the viewport, not what is being
+   * drawn, so a shared draw context is the wrong place for them: every non-interactive consumer
+   * (render, XR, off-screen) would inherit fields it must then remember to ignore. Only this
+   * engine wants them, so only this engine pays for them -- and `cursor_mval_valid` keeps the
+   * "interactive draw only" guarantee the consumers below rely on. */
+  state.cursor_mval = int2(0, 0);
+  state.cursor_mval_valid = false;
+  state.cursor_ctrl_pressed = false;
+  state.active_tool_idname = nullptr;
+  if (const bContext *C = ctx->evil_C) {
+    if (const wmWindow *win = CTX_wm_window(C)) {
+      if (win->runtime != nullptr && win->runtime->eventstate != nullptr) {
+        const wmEvent &event_state = *win->runtime->eventstate;
+        state.cursor_mval = int2(event_state.xy[0], event_state.xy[1]);
+        state.cursor_mval_valid = ELEM(ctx->mode, DRWContext::VIEWPORT, DRWContext::VIEWPORT_XR);
+        state.cursor_ctrl_pressed = (event_state.modifier & KM_CTRL) != 0;
+      }
+    }
+    if (const ScrArea *area = CTX_wm_area(C)) {
+      if (area->runtime.tool != nullptr) {
+        state.active_tool_idname = area->runtime.tool->idname;
+      }
+    }
+  }
   state.draw_background = ctx->options.draw_background;
   state.show_text = false;
 
@@ -465,6 +498,7 @@ void Instance::begin_sync()
 
   background.begin_sync(resources, state);
   cursor.begin_sync(resources, state);
+  paint_curve_cursor.begin_sync(resources, state);
   image_prepass.begin_sync(resources, state);
   motion_paths.begin_sync(resources, state);
   origins.begin_sync(resources, state);
@@ -851,6 +885,7 @@ void Instance::draw_v2d(Manager &manager, View &view)
     draw_text(resources.overlay_output_color_only_fb);
 
     cursor.draw_output(resources.overlay_output_color_only_fb, manager, view);
+    paint_curve_cursor.draw_output(resources.overlay_output_color_only_fb, manager, view);
   }
 }
 
@@ -1010,6 +1045,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
     background.draw_output(resources.overlay_output_color_only_fb, manager, view);
     anti_aliasing.draw_output(resources.overlay_output_color_only_fb, manager, view);
     cursor.draw_output(resources.overlay_output_color_only_fb, manager, view);
+    paint_curve_cursor.draw_output(resources.overlay_output_color_only_fb, manager, view);
 
     draw_text(resources.overlay_output_color_only_fb);
 

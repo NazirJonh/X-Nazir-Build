@@ -112,4 +112,66 @@ TEST_F(BrushTest, deep_copy_grease_pencil_brush)
   EXPECT_TRUE(bmain->nodetrees.is_empty());
 }
 
+/**
+ * Production change that fails this test: decrementing `texture_active_index` for every removal,
+ * including a slot after the active one (the bug in `BKE_brush_curve_patch_texture_slot_remove`).
+ */
+TEST_F(BrushTest, curve_patch_texture_slot_remove_keeps_active_when_later_slot_removed)
+{
+  Brush *brush = BKE_brush_add(bmain, "UnitTestBrush", OB_MODE_SCULPT);
+  id_us_min(&brush->id);
+
+  BKE_brush_curve_patch_texture_slot_add(*brush);
+  BKE_brush_curve_patch_texture_slot_add(*brush);
+  BKE_brush_curve_patch_texture_slot_add(*brush);
+  BKE_brush_curve_patch_texture_slot_add(*brush);
+  BrushCurvePatchTextureSlot *later = BKE_brush_curve_patch_texture_slot_add(*brush);
+
+  brush->curve_patch.texture_active_index = 2;
+  ASSERT_TRUE(BKE_brush_curve_patch_texture_slot_remove(*brush, *later));
+  EXPECT_EQ(brush->curve_patch.texture_active_index, 2);
+  EXPECT_EQ(brush->curve_patch.texture_slots.count(), 4);
+}
+
+TEST_F(BrushTest, curve_patch_texture_slot_remove_decrements_active_when_earlier_slot_removed)
+{
+  Brush *brush = BKE_brush_add(bmain, "UnitTestBrush", OB_MODE_SCULPT);
+  id_us_min(&brush->id);
+
+  BrushCurvePatchTextureSlot *earlier = BKE_brush_curve_patch_texture_slot_add(*brush);
+  BKE_brush_curve_patch_texture_slot_add(*brush);
+  BKE_brush_curve_patch_texture_slot_add(*brush);
+
+  brush->curve_patch.texture_active_index = 2;
+  ASSERT_TRUE(BKE_brush_curve_patch_texture_slot_remove(*brush, *earlier));
+  EXPECT_EQ(brush->curve_patch.texture_active_index, 1);
+  EXPECT_EQ(brush->curve_patch.texture_slots.count(), 2);
+}
+
+TEST_F(BrushTest, curve_patch_texture_slot_remove_clamps_active_when_last_slot_was_active)
+{
+  Brush *brush = BKE_brush_add(bmain, "UnitTestBrush", OB_MODE_SCULPT);
+  id_us_min(&brush->id);
+
+  BKE_brush_curve_patch_texture_slot_add(*brush);
+  BKE_brush_curve_patch_texture_slot_add(*brush);
+  BrushCurvePatchTextureSlot *last = BKE_brush_curve_patch_texture_slot_add(*brush);
+
+  ASSERT_EQ(brush->curve_patch.texture_active_index, 2);
+  ASSERT_TRUE(BKE_brush_curve_patch_texture_slot_remove(*brush, *last));
+  EXPECT_EQ(brush->curve_patch.texture_active_index, 1);
+  EXPECT_EQ(brush->curve_patch.texture_slots.count(), 2);
+}
+
+TEST_F(BrushTest, curve_patch_texture_slot_remove_resets_active_when_list_empties)
+{
+  Brush *brush = BKE_brush_add(bmain, "UnitTestBrush", OB_MODE_SCULPT);
+  id_us_min(&brush->id);
+
+  BrushCurvePatchTextureSlot *only = BKE_brush_curve_patch_texture_slot_add(*brush);
+  ASSERT_TRUE(BKE_brush_curve_patch_texture_slot_remove(*brush, *only));
+  EXPECT_EQ(brush->curve_patch.texture_active_index, 0);
+  EXPECT_EQ(brush->curve_patch.texture_slots.count(), 0);
+}
+
 }  // namespace blender

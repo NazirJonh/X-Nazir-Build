@@ -4827,6 +4827,71 @@ void WM_event_remove_modal_handler_all(const wmOperator *op, const bool postpone
   }
 }
 
+wmEventHandler_Op *WM_event_add_modal_handler_all_windows(bContext *C,
+                                                          wmOperator *op,
+                                                          const int space_type,
+                                                          const int region_type)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (!wm) {
+    return nullptr;
+  }
+  wmWindow *invoke_win = CTX_wm_window(C);
+  ScrArea *invoke_area = CTX_wm_area(C);
+  ARegion *invoke_region = CTX_wm_region(C);
+  wmEventHandler_Op *invoke_handler = nullptr;
+  for (wmWindow &win : wm->windows) {
+    if (WM_operator_is_modal(&win, op)) {
+      continue;
+    }
+    ScrArea *area = nullptr;
+    ARegion *region = nullptr;
+    if (&win == invoke_win) {
+      area = invoke_area;
+      region = invoke_region;
+    }
+    else {
+      bScreen *screen = WM_window_get_active_screen(&win);
+      if (screen) {
+        for (ScrArea &area_iter : screen->areabase) {
+          if (area_iter.spacetype != space_type) {
+            continue;
+          }
+          for (ARegion &region_iter : area_iter.regionbase) {
+            if (region_iter.regiontype == region_type) {
+              area = &area_iter;
+              region = &region_iter;
+              break;
+            }
+          }
+          if (region) {
+            break;
+          }
+        }
+      }
+    }
+    wmEventHandler_Op *handler = WM_event_add_modal_handler_ex(&win, area, region, op);
+    if (&win == invoke_win) {
+      invoke_handler = handler;
+    }
+  }
+  return invoke_handler;
+}
+
+void WM_event_remove_modal_handler_other_windows(const bContext *C, const wmOperator *op)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  wmWindow *current_win = CTX_wm_window(C);
+  if (!wm || !current_win) {
+    return;
+  }
+  for (wmWindow &win : wm->windows) {
+    if (&win != current_win) {
+      WM_event_remove_modal_handler(&win.runtime->modalhandlers, op, false);
+    }
+  }
+}
+
 void WM_event_modal_handler_area_replace(wmWindow *win, const ScrArea *old_area, ScrArea *new_area)
 {
   for (wmEventHandler &handler_base : win->runtime->modalhandlers) {
@@ -5309,6 +5374,23 @@ wmOperator *WM_operator_find_modal_by_type(wmWindow *win, const wmOperatorType *
     }
   }
   return nullptr;
+}
+
+bool WM_operator_is_modal(const wmWindow *win, const wmOperator *op)
+{
+  for (const wmEventHandler &handler_base : win->runtime->modalhandlers) {
+    if (handler_base.type != WM_HANDLER_TYPE_OP) {
+      continue;
+    }
+    const wmEventHandler_Op *handler = reinterpret_cast<const wmEventHandler_Op *>(&handler_base);
+    if (!handler->op) {
+      continue;
+    }
+    if ((handler->op == op) || (op->opm && handler->op == op->opm)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 #if 0

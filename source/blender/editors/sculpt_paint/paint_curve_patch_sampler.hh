@@ -76,6 +76,16 @@ struct CurvePatchStrokeContext {
 float3 curve_patch_canonicalize(const CurvePatchStrokeContext &ctx, const float3 &co);
 
 /**
+ * Inverse of #curve_patch_canonicalize for a DIRECTION: maps a vector expressed in the patch's
+ * canonical frame back into the space the current symmetry pass actually paints in.
+ *
+ * Needed because everything the patch geometry reports (#CurvePatchSample::patch_axis_u and
+ * friends) lives in the canonical frame, while the surface data a consumer compares it against --
+ * triangle normals, tangents -- does not.
+ */
+float3 curve_patch_decanonicalize_dir(const CurvePatchStrokeContext &ctx, const float3 &dir);
+
+/**
  * Radius of the tube around the control polyline that the relief can possibly reach.
  *
  * The `2.5x` factor is generous margin for the bounding-sphere approximation the culls make and
@@ -134,13 +144,45 @@ struct CurvePatchSample {
    * the brush has no texture (`brush.mtex.tex == nullptr`), matching the initializer the sampler
    * already used for its local `tex_rgba`/`sample_rgba` buffers before the null-texture guard.
    *
-   * `ColorEffect` and `ImageColorEffect` use only the ALPHA, to modulate their mix -- both paint
-   * the brush's primary color, so the RGB is carried but not yet read, reserved for real
-   * RGBA-texture support. `ReliefEffect` ignores the field entirely, so its existing aggregate
-   * initializers (`{orig, height, weight}`) keep working via the default here. The alpha is the
-   * texture's own alpha (an image texture with transparency reports < 1), not a mix weight by
-   * itself. */
+   * Every color-writing effect reads both the RGB (an assigned texture IS the paint color, see
+   * #curve_patch_paint_color) and the alpha, which attenuates the mix -- but only where
+   * #tex_valid says the sample is real. `ReliefEffect` ignores the field entirely, so its
+   * existing aggregate initializers (`{orig, height, weight}`) keep working via the default here.
+   * The alpha is the texture's own alpha (an image texture with transparency reports < 1), not a
+   * mix weight by itself. */
   float4 tex_color{1.0f, 1.0f, 1.0f, 1.0f};
+  /** Whether #tex_color came from an actual texture evaluation at THIS element, as opposed to
+   * standing at its identity default.
+   *
+   * A binding-wide "does the brush have a texture anywhere" answer cannot substitute for this.
+   * The ribbon in SINGLE mode samples `brush.mtex` while the Stamps list holds the assigned
+   * textures (and vice versa), and a SINGLE-mode stamp with no texture wins its merge carrying
+   * the identity `{1, 1, 1, 1}`. Treating those as "the texture is white" paints an opaque WHITE
+   * ribbon over the user's color -- which is worse than ignoring the texture. */
+  bool tex_valid = false;
+  /** Where this element sits in the PATCH's own parametrization: `u` across the ribbon, `v`
+   * along it (swapped when #CurvePatchParams::swap_axis is set), or the winning stamp's local
+   * coordinates in STAMPS mode. Before the texture Size / Offset transform, so a consumer
+   * applies its own.
+   *
+   * This is what lets a texture be oriented ALONG THE CURVE instead of through the brush's
+   * view/area mapping: the ribbon's own zone textures have always been sampled here, and a
+   * PBR channel source has to reach the same coordinates or it would sit still while the curve
+   * turns. Valid only when #patch_uv_valid is set -- a caller that samples outside the ribbon
+   * or stamp branches has no such frame to offer. */
+  float2 patch_uv{0.0f, 0.0f};
+  bool patch_uv_valid = false;
+  /** World-space directions in which #patch_uv.x and #patch_uv.y increase, reported in the SAME
+   * space as the source geometry (the sampler undoes its own symmetry canonicalization first).
+   * Valid together with #patch_uv_valid.
+   *
+   * A consumer that only reads a color from #patch_uv can ignore these, but a NORMAL map cannot:
+   * its RGB encodes a direction relative to the frame the map was authored in, so writing it into
+   * a surface's own tangent-space map requires knowing where that frame points. Without them a
+   * normal decal would keep facing one fixed way while the curve -- and the color texture with
+   * it -- turns underneath. */
+  float3 patch_axis_u{1.0f, 0.0f, 0.0f};
+  float3 patch_axis_v{0.0f, 1.0f, 0.0f};
 };
 
 class CurvePatchSampler {

@@ -37,6 +37,7 @@
 #include "BLI_execution_mode.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
+#include "BLI_utildefines.h"
 #include "BLI_map.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_task.h"
@@ -890,12 +891,41 @@ std::optional<CurvePatchEffectType> curve_patch_effect_type_for_brush(
        * not fall through to `ColorEffect` merely because the mesh also has a color attribute. */
       return CurvePatchEffectType::Image;
     }
+    /* Same rule for the case where the image canvas resolved NO target -- a material whose
+     * enabled channels have no image assigned yet, or an Image canvas with no image picked.
+     * Falling through to `ColorEffect` there would silently paint the mesh's color attribute
+     * while the user is looking at texture maps and wondering why they never change. Refuse,
+     * so the caller can say what is missing. */
+    if (ELEM(paint_mode_settings.canvas_source,
+             PAINT_CANVAS_SOURCE_MATERIAL,
+             PAINT_CANVAS_SOURCE_IMAGE))
+    {
+      return std::nullopt;
+    }
     return CurvePatchEffectType::Color;
   }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
     return CurvePatchEffectType::Mask;
   }
   return CurvePatchEffectType::Relief;
+}
+
+const char *curve_patch_refusal_message(const CurvePatchRefusal refusal)
+{
+  switch (refusal) {
+    case CurvePatchRefusal::None:
+      return nullptr;
+    case CurvePatchRefusal::BrushType:
+      return "Curve Patch is not supported by this brush type";
+    case CurvePatchRefusal::Geometry:
+      return "Curve Patch requires a plain mesh (not Multires or Dynamic Topology)";
+    case CurvePatchRefusal::NoImageCanvas:
+      return "Curve Patch found no paintable canvas: check the Paint Mode canvas and that the "
+             "material has an image for at least one enabled channel";
+    case CurvePatchRefusal::NoAttribute:
+      return "Curve Patch found no attribute to paint: check the Paint Mode canvas";
+  }
+  return nullptr;
 }
 
 std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(const CurvePatchEffectType type,
@@ -906,7 +936,7 @@ std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(const CurvePatchEffe
     case CurvePatchEffectType::Relief:
       return std::make_unique<ReliefEffect>();
     case CurvePatchEffectType::Color:
-      return curve_patch_effect_color_create(ob);
+      return curve_patch_effect_color_create(ob, paint_mode_settings);
     case CurvePatchEffectType::Image:
       return curve_patch_effect_image_create(ob, paint_mode_settings);
     case CurvePatchEffectType::Mask:

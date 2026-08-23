@@ -245,10 +245,15 @@ class PaintCurveCursor : Overlay {
       }
     }
 
+    /* Which of the three branches below produced `handles_`: the Curve Patch ones get a wire color
+     * of their own (see the override after the chain). */
+    bool drawing_curve_patch = image_patch_drawn;
+
     if (image_patch_drawn) {
       /* Nothing further: the session curve is the only paint curve that matters right now. */
     }
     else if (is_curve_patch_active && state.is_space_v3d()) {
+      drawing_curve_patch = true;
       /* View3D only: these control curves are in the sculpt object's own space, and projecting
        * them needs the region's #RegionView3D. The Image Editor resolves the same active object
        * and would otherwise reach this branch whenever a 3D patch is live in another area, with
@@ -295,6 +300,22 @@ class PaintCurveCursor : Overlay {
        * enough). */
       ed::sculpt_paint::ED_paint_curve_screen_handles_build(
           vc, *brush, sculpt, mval_region, compute_hover, show_insert_preview, handles_);
+    }
+
+    /* A Curve Patch is edited ON TOP of arbitrary image content -- a texture channel is very often
+     * near-black -- where the builder's `TH_WIRE` (a dark grey) all but disappears. White reads on
+     * anything the canvas can show, and the black half-alpha outline the builder already puts
+     * behind every segment keeps it legible on white content too.
+     *
+     * Overridden here rather than in the builder because the builder also serves the ordinary
+     * brush paint-curve overlay, which is drawn over the viewport, follows the theme, and was not
+     * asked to change. Only the wire is touched: control points, handles and radius handles stay
+     * on their theme colors, and the hover highlight is a separate pass drawn on top of this one.
+     */
+    if (drawing_curve_patch) {
+      for (ed::sculpt_paint::PaintCurveSegmentDrawData &seg : handles_.segments) {
+        seg.wire_color = float4(1.0f, 1.0f, 1.0f, seg.wire_color.w);
+      }
     }
 
     if (is_curves_edit && state.is_space_v3d()) {

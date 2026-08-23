@@ -1544,9 +1544,22 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
      * normalizes the coordinates by `start_pixel_radius` later (`BKE_brush_sample_tex_3d()`),
      * hence the `* start_pixel_radius` here. A dab without a valid frame (e.g. the very first
      * dab of the stroke) falls back to a stable axis-aligned frame. */
+    /* No canvas-rotation term belongs here: the trajectory this tangent comes from is recorded
+     * through `view2d_region_to_view()`, which already undoes the display rotation, so the frame
+     * is in canvas space like the rest of this function's output. Roll is path-locked rather than
+     * view-locked (unlike VIEW/TILED below), so the painted texture follows the stroke drawn on
+     * the canvas whatever angle the canvas is displayed at.
+     *
+     * The tangent IS a unit vector in image UV space, though, while the basis below steps in
+     * canvas pixels -- on a non-square canvas that is a different direction. Convert first. */
     float2 tangent(1.0f, 0.0f);
     if (roll_dab != nullptr && roll_dab->frame_valid) {
-      tangent = roll_dab->tangent;
+      const float2 tangent_px = float2(roll_dab->tangent.x * float(tile->canvas->x),
+                                       roll_dab->tangent.y * float(tile->canvas->y));
+      const float tangent_len = math::length(tangent_px);
+      if (tangent_len > 1e-6f) {
+        tangent = tangent_px / tangent_len;
+      }
     }
     const float2 perp = float2(-tangent.y, tangent.x);
     const float scale = 2.0f * s->paint->runtime->start_pixel_radius / float(diameter);

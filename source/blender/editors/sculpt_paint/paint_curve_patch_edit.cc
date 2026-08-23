@@ -102,6 +102,7 @@
 
 namespace blender::ed::sculpt_paint {
 
+
 /* #curve_patch_live_inputs_capture plus the one live input only a mesh target has. The shared
  * capture deliberately leaves `symm` at its sentinel -- see its doc-string. */
 static CurvePatchLiveInputs curve_patch_live_inputs_capture_sculpt(const Paint &paint,
@@ -280,7 +281,8 @@ void curve_patch_tag_viewports_redraw_after_edit(bContext &C,
     return;
   }
   const UpdateType update_type = patch.effect->update_type();
-  if (update_type != UpdateType::Position && bits::any_bit_set(patch.apply.all_touched_nodes)) {
+  const bool touched_any = bits::any_bit_set(patch.apply.all_touched_nodes);
+  if (update_type != UpdateType::Position && touched_any) {
     flush_update_done(&C, ob, update_type);
   }
 }
@@ -952,6 +954,7 @@ static bool curve_patch_edit_session_superseded(const bContext *C,
 static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   CurvePatchEditOpData &data = *static_cast<CurvePatchEditOpData *>(op->customdata);
+
 
   /* The live patch's backing data can vanish out from under this modal operator without an
    * explicit Enter/Esc: unhandled keys (see the `default:` case below) deliberately pass through

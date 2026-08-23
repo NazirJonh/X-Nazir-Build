@@ -493,6 +493,7 @@ static void curve_patch_edit_teardown(bContext *C, wmOperator *op)
   ED_paint_curve_overlay_tag_redraw_all(C);
 }
 
+
 static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   ImageCurvePatchSession *session = image_curve_patch_session_active_get();
@@ -512,8 +513,21 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
    * context is target-specific. Here the patch is kept -- the user built it, and the editing
    * context going away is not a request to throw it out. */
   const SpaceImage *sima = CTX_wm_space_image(C);
-  const bool context_valid = sima != nullptr && sima->mode == SI_MODE_PAINT &&
-                             sima->image == session->image && CTX_wm_region(C) != nullptr;
+  /* Which image the editor DISPLAYS stops identifying what the patch writes once Mode=`Material`
+   * is in play: the patch then writes every enabled Principled map, and the displayed one is just
+   * whichever channel the user is looking at. Switching that view -- or having it switched for
+   * them -- must not end the session.
+   *
+   * `session->image` stays pinned to the image the session started on regardless, because it is
+   * what `resolve_reference_tile()` builds the patch's pixel-space geometry against; re-pinning it
+   * mid-session would silently rescale a patch the user has already shaped. */
+  const Scene *scene = CTX_data_scene(C);
+  const bool material_canvas = scene != nullptr &&
+                               scene->toolsettings->paint_mode.canvas_source ==
+                                   PAINT_CANVAS_SOURCE_MATERIAL;
+  const bool canvas_valid = sima != nullptr && (material_canvas || sima->image == session->image);
+  const bool context_valid = sima != nullptr && sima->mode == SI_MODE_PAINT && canvas_valid &&
+                             CTX_wm_region(C) != nullptr;
   if (!context_valid) {
     image_curve_patch_session_commit(C, session);
     curve_patch_edit_teardown(C, op);
@@ -533,7 +547,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   if (event->type == TIMER && modal->sync_timer != nullptr &&
       event->customdata == modal->sync_timer)
   {
-    if (modal->host.sync_live_brush(*C) && !modal->host.is_alive(*C)) {
+    const bool synced = modal->host.sync_live_brush(*C);
+    if (synced && !modal->host.is_alive(*C)) {
       /* The re-stamp ended the session under us -- the same guard the core applies to its own
        * poll. */
       curve_patch_edit_teardown(C, op);

@@ -96,6 +96,22 @@ class CurvePatchEffect {
   virtual void restore(Object &ob, const CurvePatchSession &patch) = 0;
 
   /**
+   * Immediately after #restore, before anything is rebuilt or written: adopt whatever the
+   * session's OUTPUT configuration has become since the last restamp.
+   *
+   * A live session outlives panel edits -- that is the whole point of the live-sync poll -- and
+   * some of those edits change WHERE the patch writes, not just what it writes. Toggling a PBR
+   * channel is the case that forced this to exist: it adds or removes a destination image, and an
+   * effect that froze its destinations at session start would either keep painting a channel the
+   * user just switched off or silently paint nothing at all.
+   *
+   * Ordering is the contract: #restore has already put the pristine content back through the OLD
+   * destinations, so re-targeting here cannot strand painted pixels on a canvas that is about to
+   * stop being addressed. Nothing may be written from this call.
+   */
+  virtual void sync_targets(Object & /*ob*/) {}
+
+  /**
    * Once per restamp, after the ribbon is built and before the first symmetry pass: refresh
    * whatever input the sampler and the write step will read. Relief recomputes vertex normals
    * here; an effect that neither reads nor invalidates them does nothing.
@@ -158,6 +174,22 @@ class CurvePatchEffect {
 std::optional<CurvePatchEffectType> curve_patch_effect_type_for_brush(
     const Brush &brush, const Paint &paint, Object &ob, PaintModeSettings &paint_mode_settings);
 
+/** Why #curve_patch_effect_create refused, for the caller to report. */
+enum class CurvePatchRefusal : int8_t {
+  None = 0,
+  /** The brush type has no Curve Patch meaning (#bke::brush::supports_curve_patch). */
+  BrushType,
+  /** Multires or Dynamic Topology: no stable per-element index to snapshot. */
+  Geometry,
+  /** Paint Mode canvas is an image/material map, but no target resolved. */
+  NoImageCanvas,
+  /** Color Attribute or Poly Paint canvas with no attribute to write. */
+  NoAttribute,
+};
+
+/** Human-readable reason for \a refusal, or null when there is none. */
+const char *curve_patch_refusal_message(CurvePatchRefusal refusal);
+
 /** Build one effect of the named type. Null when the object cannot actually carry it -- no usable
  * color attribute, or an unresolvable canvas -- which the type alone cannot rule out. */
 std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(
@@ -169,8 +201,16 @@ std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(
     const Brush &brush, const Paint &paint, Object &ob, PaintModeSettings &paint_mode_settings);
 
 /** Builds the vertex-color effect. Called only by #curve_patch_effect_create; returns null when
- * the mesh has no usable active color attribute. */
-std::unique_ptr<CurvePatchEffect> curve_patch_effect_color_create(const Object &ob);
+ * the mesh has no usable color attribute to write.
+ *
+ * Two canvases land here. #PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE paints the mesh's ACTIVE color
+ * attribute with the brush color. #PAINT_CANVAS_SOURCE_MATERIAL_PAINT (Poly Paint) paints the
+ * NAMED attribute the material paint settings assign to Base Color, with that channel's own
+ * color and blend mode, and undoes through a #undo::Type::Material step. The effect class is
+ * the same either way -- only the target differs -- so no separate #CurvePatchEffectType is
+ * needed. */
+std::unique_ptr<CurvePatchEffect> curve_patch_effect_color_create(
+    const Object &ob, PaintModeSettings &paint_mode_settings);
 
 /** Builds the image-canvas effect. Called only by #curve_patch_effect_create; returns null when
  * the brush's Paint Mode canvas cannot be resolved (`SCULPT_use_image_paint_brush()` already gates

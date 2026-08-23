@@ -33,6 +33,9 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "ED_view3d.hh"
+
+#include "../paint_intern.hh"
 #include "paint_material_source.hh"
 #include "sculpt_intern.hh"
 
@@ -737,7 +740,7 @@ void ChannelSourceSampler::decode_linear_batch(MutableSpan<float3> colors,
 
 static float3 color_channel_fallback(const eMaterialPaintChannel channel,
                                      const BrushMaterialPaint &brush_paint,
-                                     const SculptSession &ss,
+                                     const Paint &paint,
                                      const Brush &brush)
 {
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
@@ -752,7 +755,7 @@ static float3 color_channel_fallback(const eMaterialPaintChannel channel,
     return float3(brush_paint.channels[channel].value);
   }
   if (is_base_color) {
-    return BKE_paint_material_base_color_get(brush_paint, *ss.cache->paint, brush, false);
+    return BKE_paint_material_base_color_get(brush_paint, paint, brush, false);
   }
   return float3(brush_paint.channels[channel].value);
 }
@@ -794,13 +797,124 @@ static float3 finish_color_sample(const bool is_normal,
   return decal_normal;
 }
 
+/**
+ * Sample \a source at explicit 2D coordinates in the caller's own parametrization.
+ *
+ * The channel's own Size / Offset are applied here, so the mapping controls behave the same as
+ * on the position-based path; only the coordinate SOURCE differs. The direct image path is tried
+ * first for the same reason it is everywhere else, and #paint_get_tex_pixel covers procedural
+ * textures and any image the direct path declines.
+ */
+static bool sample_channel_source_at_uv(const ChannelSourceSet &sources,
+                                        const ChannelSourceSet::ChannelSource &source,
+                                        const float2 &uv,
+                                        const int thread,
+                                        float *r_value,
+                                        float4 &r_rgba)
+{
+  const MTex *mtex = source.mtex;
+  if (mtex == nullptr) {
+    return false;
+  }
+  const float tex_x = uv.x * mtex->size[0] + mtex->ofs[0];
+  const float tex_y = uv.y * mtex->size[1] + mtex->ofs[1];
+  float dummy_value = 0.0f;
+  float *value_ptr = r_value != nullptr ? r_value : &dummy_value;
+  if (sources.sample_image_direct(source, tex_x, tex_y, value_ptr, r_rgba)) {
+    return true;
+  }
+  paint_get_tex_pixel(mtex, tex_x, tex_y, sources.pool(), thread, value_ptr, r_rgba);
+  return true;
+}
+
+bool ChannelUvSampler::has_usable_source(const eMaterialPaintChannel channel) const
+{
+  return sources_.source(channel).usable;
+}
+
+float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
+                                     const float2 &uv,
+                                     const int thread) const
+{
+  const float2 range = BKE_paint_material_channel_range(settings_, channel);
+  const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
+
+  const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
+  if (!source.usable) {
+    return fallback;
+  }
+  float value = fallback;
+  float4 rgba;
+  if (!sample_channel_source_at_uv(sources_, source, uv, thread, &value, rgba)) {
+    return fallback;
+  }
+  return math::clamp(value, range.x, range.y);
+}
+
+float3 ChannelUvSampler::color_at_uv(const eMaterialPaintChannel channel,
+                                     const float2 &uv,
+                                     const int thread,
+                                     const bool decode_linear) const
+{
+  const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+  const float3 fallback = color_channel_fallback(channel, brush_paint_, paint_, brush_);
+
+  const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
+  if (!source.usable) {
+    return fallback;
+  }
+  float4 rgba;
+  if (!sample_channel_source_at_uv(sources_, source, uv, thread, nullptr, rgba)) {
+    return fallback;
+  }
+  return finish_color_sample(is_normal,
+                             fallback,
+                             source.do_linear_conversion,
+                             source.colorspace,
+                             rgba,
+                             decode_linear,
+                             source.flip_green_channel);
+}
+
+const Paint &ChannelSourceSampler::paint() const
+{
+  return *ss_.cache->paint;
+}
+
+/** The UV view of this sampler; every `*_at_uv` method is exactly this object's counterpart. */
+static ChannelUvSampler uv_view(const ChannelSourceSet &sources,
+                                const BrushMaterialPaint &brush_paint,
+                                const PaintModeSettings &settings,
+                                const Paint &paint,
+                                const Brush &brush)
+{
+  return ChannelUvSampler(sources, brush_paint, settings, paint, brush);
+}
+
+float ChannelSourceSampler::scalar_at_uv(const eMaterialPaintChannel channel,
+                                         const float2 &uv,
+                                         const int thread) const
+{
+  return uv_view(sources_, brush_paint_, settings_, this->paint(), brush_)
+      .scalar_at_uv(channel, uv, thread);
+}
+
+float3 ChannelSourceSampler::color_at_uv(const eMaterialPaintChannel channel,
+                                         const float2 &uv,
+                                         const int thread,
+                                         const bool decode_linear) const
+{
+  return uv_view(sources_, brush_paint_, settings_, this->paint(), brush_)
+      .color_at_uv(channel, uv, thread, decode_linear);
+}
+
 float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                                    const float3 &position,
                                    const int thread,
                                    const bool decode_linear) const
 {
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  const float3 fallback = color_channel_fallback(channel, brush_paint_, ss_, brush_);
+  const float3 fallback = color_channel_fallback(channel, brush_paint_, this->paint(), brush_);
 
   const ChannelSource &source = sources_.source(channel);
   if (!source.usable) {
@@ -833,7 +947,7 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                                    const bool decode_linear) const
 {
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  const float3 fallback = color_channel_fallback(channel, brush_paint_, ss_, brush_);
+  const float3 fallback = color_channel_fallback(channel, brush_paint_, this->paint(), brush_);
 
   const ChannelSource &source = sources_.source(channel);
   if (!source.usable) {
@@ -870,7 +984,7 @@ void ChannelSourceSampler::gather_colors(const eMaterialPaintChannel channel,
   BLI_assert(r_colors.size() == contexts.size());
 
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  const float3 fallback = color_channel_fallback(channel, brush_paint_, ss_, brush_);
+  const float3 fallback = color_channel_fallback(channel, brush_paint_, this->paint(), brush_);
   const ChannelSource &source = sources_.source(channel);
   if (!source.usable) {
     for (const int i : contexts.index_range()) {
@@ -953,6 +1067,81 @@ void ChannelSourceSampler::gather_scalars(const eMaterialPaintChannel channel,
   }
 }
 
+void build_normal_write_basis(const float3 &tri_tangent,
+                              const float tri_bitangent_sign,
+                              const Span<float3> tri_positions,
+                              const float3 &view_right,
+                              const ARegion *region,
+                              const float4x4 &projection_mat,
+                              float3 &r_t_screen,
+                              float3 &r_b_screen,
+                              float3 &r_n_m,
+                              float3 &r_t_m,
+                              float3 &r_b_m)
+{
+  BLI_assert(tri_positions.size() == 3);
+  const float3 edge1 = tri_positions[1] - tri_positions[0];
+  const float3 edge2 = tri_positions[2] - tri_positions[0];
+  r_n_m = math::normalize(math::cross(edge1, edge2));
+
+  /* Screen right/up carried onto the surface, obtained from how the primitive's own screen
+   * projection relates to its object-space edges. */
+  bool screen_basis_ready = false;
+  if (region != nullptr) {
+    const float2 screen0 = ED_view3d_project_float_v2_m4(region, tri_positions[0], projection_mat);
+    const float2 screen1 = ED_view3d_project_float_v2_m4(region, tri_positions[1], projection_mat);
+    const float2 screen2 = ED_view3d_project_float_v2_m4(region, tri_positions[2], projection_mat);
+    const float2 sx = screen1 - screen0;
+    const float2 sy = screen2 - screen0;
+    const float det = sx.x * sy.y - sx.y * sy.x;
+    if (math::abs(det) > 1e-8f) {
+      const float3 dp_dx = (edge1 * sy.y - edge2 * sx.y) / det;
+      r_t_screen = dp_dx - r_n_m * math::dot(dp_dx, r_n_m);
+      r_b_screen = math::cross(r_n_m, r_t_screen);
+      const float t_screen_len = math::length(r_t_screen);
+      const float b_screen_len = math::length(r_b_screen);
+      if (t_screen_len > 1e-6f) {
+        r_t_screen /= t_screen_len;
+      }
+      if (b_screen_len > 1e-6f) {
+        r_b_screen /= b_screen_len;
+      }
+      screen_basis_ready = true;
+    }
+  }
+  if (!screen_basis_ready) {
+    /* Edge-on, or no view to project into: the view's own right vector flattened onto the
+     * surface is the closest thing to "screen right" still available. A caller with no view at
+     * all leaves `view_right` zero, so the flattening can come back empty -- any in-plane axis
+     * then keeps the basis finite rather than filling the map with NaNs. */
+    const float3 flat_right = view_right - r_n_m * math::dot(view_right, r_n_m);
+    const float flat_right_len = math::length(flat_right);
+    if (flat_right_len > 1e-6f) {
+      r_t_screen = flat_right / flat_right_len;
+    }
+    else {
+      float fallback[3];
+      ortho_v3_v3(fallback, r_n_m);
+      r_t_screen = math::normalize(float3(fallback));
+    }
+    r_b_screen = math::cross(r_n_m, r_t_screen);
+  }
+
+  r_t_m = tri_tangent - r_n_m * math::dot(tri_tangent, r_n_m);
+  const float t_len = math::length(r_t_m);
+  if (t_len > 1e-6f) {
+    r_t_m /= t_len;
+  }
+  else {
+    /* A tangent parallel to the normal carries no direction; any in-plane axis keeps the basis
+     * finite, and a UV-less primitive has no authored orientation to preserve anyway. */
+    float fallback[3];
+    ortho_v3_v3(fallback, r_n_m);
+    r_t_m = math::normalize(float3(fallback));
+  }
+  r_b_m = math::cross(r_n_m, r_t_m) * tri_bitangent_sign;
+}
+
 static float3 remap_decal_normal_to_packed_tangent(const float3 &n_d,
                                                    const float3 &t_screen,
                                                    const float3 &b_screen,
@@ -967,6 +1156,49 @@ static float3 remap_decal_normal_to_packed_tangent(const float3 &n_d,
   float packed[3];
   BKE_pbr_normal_pack(n_t, false, packed);
   return float3(packed[0], packed[1], packed[2]);
+}
+
+float3 ChannelSourceSampler::tangent_normal_packed(const eMaterialPaintChannel channel,
+                                                   const TexelSampleContext &ctx,
+                                                   const int thread,
+                                                   const float3 &t_decal,
+                                                   const float3 &b_decal,
+                                                   const float3 &n_m,
+                                                   const float3 &t_m,
+                                                   const float3 &b_m) const
+{
+  BLI_assert(channel == PAINT_MATERIAL_CHANNEL_NORMAL);
+  /* #color already returns the UNPACKED decal normal for this channel -- DirectX green flip and
+   * the no-source fallback included -- so only the basis change is left to do here. */
+  return remap_decal_normal_to_packed_tangent(
+      this->color(channel, ctx, thread), t_decal, b_decal, n_m, t_m, b_m);
+}
+
+float3 ChannelUvSampler::tangent_normal_packed_at_uv(const eMaterialPaintChannel channel,
+                                                     const float2 &uv,
+                                                     const int thread,
+                                                     const float3 &t_decal,
+                                                     const float3 &b_decal,
+                                                     const float3 &n_m,
+                                                     const float3 &t_m,
+                                                     const float3 &b_m) const
+{
+  BLI_assert(channel == PAINT_MATERIAL_CHANNEL_NORMAL);
+  return remap_decal_normal_to_packed_tangent(
+      this->color_at_uv(channel, uv, thread), t_decal, b_decal, n_m, t_m, b_m);
+}
+
+float3 ChannelSourceSampler::tangent_normal_packed_at_uv(const eMaterialPaintChannel channel,
+                                                         const float2 &uv,
+                                                         const int thread,
+                                                         const float3 &t_decal,
+                                                         const float3 &b_decal,
+                                                         const float3 &n_m,
+                                                         const float3 &t_m,
+                                                         const float3 &b_m) const
+{
+  return uv_view(sources_, brush_paint_, settings_, this->paint(), brush_)
+      .tangent_normal_packed_at_uv(channel, uv, thread, t_decal, b_decal, n_m, t_m, b_m);
 }
 
 void ChannelSourceSampler::gather_tangent_normals_packed(const eMaterialPaintChannel channel,
@@ -984,7 +1216,7 @@ void ChannelSourceSampler::gather_tangent_normals_packed(const eMaterialPaintCha
   BLI_assert(contexts.size() == factors.size());
   BLI_assert(r_packed.size() == contexts.size());
 
-  const float3 fallback = color_channel_fallback(channel, brush_paint_, ss_, brush_);
+  const float3 fallback = color_channel_fallback(channel, brush_paint_, this->paint(), brush_);
   const ChannelSource &source = sources_.source(channel);
   if (!source.usable) {
     for (const int i : contexts.index_range()) {

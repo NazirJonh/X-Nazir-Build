@@ -79,6 +79,22 @@ struct CurvePatchLiveInputs {
   int falloff_preset = -1;
   int falloff_curve_ts = -1;
 
+  /** PBR Paint / Poly Paint: everything a re-stamp reads out of #BrushMaterialPaint -- every
+   * channel's paint value, blend mode and enable flag, the Base Color, both Alpha switches and
+   * the shared source mapping.
+   *
+   * A digest rather than ten spelled-out channels: #BrushMaterialPaint carries
+   * `PAINT_MATERIAL_CHANNEL_NUM` of them, and listing the fields one by one is exactly the
+   * shape of bug this struct's doc-string warns about -- one forgotten member shows up as
+   * "the Roughness slider moves and the texture does not". */
+  uint64_t material_paint_digest = 0;
+  /** The channels' SOURCE texture identities alone. Split out of the digest above because a
+   * source swap changes which images are sampled, which is what drives the pool rebuild -- a
+   * plain value-slider drag must not free and reallocate the pool on every tick. */
+  uint64_t material_source_digest = 0;
+  /** #Paint.visible_material_channels: hiding a channel removes its paint target. */
+  int visible_material_channels = -1;
+
   friend bool operator==(const CurvePatchLiveInputs &a, const CurvePatchLiveInputs &b) = default;
 
   /** True when the set of sampled images or their mapping changed. A cap-length or slot-weight
@@ -89,7 +105,8 @@ struct CurvePatchLiveInputs {
     return tex != prev.tex || tex_edit_count != prev.tex_edit_count || tex_size != prev.tex_size ||
            tex_ofs != prev.tex_ofs || texture_pointer_digest != prev.texture_pointer_digest ||
            cap_tex_start != prev.cap_tex_start || cap_tex_middle != prev.cap_tex_middle ||
-           cap_tex_end != prev.cap_tex_end;
+           cap_tex_end != prev.cap_tex_end ||
+           material_source_digest != prev.material_source_digest;
   }
 };
 

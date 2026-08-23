@@ -1508,10 +1508,23 @@ static wmOperatorStatus image_open_exec(bContext *C, wmOperator *op)
     RNA_property_update(C, &iod->pprop.ptr, iod->pprop.prop);
   }
 
+  /* An Open launched from a BRUSH property was a request to fill that property, nothing more: no
+   * brush property describes what this editor displays. Without this, the Open button of any
+   * brush-owned `template_ID` drawn in an Image Editor sidebar -- PBR Paint's per-channel source
+   * image, the Curve Patch ribbon/stamp texture slots -- silently re-pointed the editor at the
+   * file it had just assigned to the brush.
+   *
+   * Deliberately narrower than "any property": #image_new_exec skips the editor for every
+   * property it fills, but widening this to match would also stop the editor following
+   * `PaintModeSettings.canvas_image`, which is a different interaction and not what this fixes.
+   * The editor's OWN field is unaffected either way -- assigning `SpaceImage.image` runs
+   * #ED_space_image_set through #rna_SpaceImageEditor_image_set. */
+  const bool filled_brush_property = iod->pprop.prop != nullptr && owner_id != nullptr &&
+                                     GS(owner_id->name) == ID_BR;
   if (iod->iuser) {
     iuser = iod->iuser;
   }
-  else if (area && area->spacetype == SPACE_IMAGE) {
+  else if (area && area->spacetype == SPACE_IMAGE && !filled_brush_property) {
     SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
     ED_space_image_set(bmain, sima, ima, false);
     iuser = &sima->iuser;

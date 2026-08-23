@@ -44,6 +44,7 @@
 #include "MEM_guardedalloc.h"
 #include "WM_api.hh"
 
+
 #include "UI_view2d.hh"
 
 #include "paint_image_curve_patch.hh"
@@ -63,6 +64,7 @@ namespace ed::sculpt_paint {
  * anchor-stroke integration (Stage 6) both look this up; both treat "active" as a precondition
  * for their own work. */
 static ImageCurvePatchSession *g_active_session = nullptr;
+
 
 bool image_curve_patch_session_active()
 {
@@ -282,7 +284,8 @@ bool image_curve_patch_session_sync_live_brush(bContext *C, ImageCurvePatchSessi
     return false;
   }
 
-  if (live.needs_texture_pool_rebuild(session->doc.last_synced)) {
+  const bool pool_rebuild = live.needs_texture_pool_rebuild(session->doc.last_synced);
+  if (pool_rebuild) {
     session->tex_pool_invalidate();
   }
   /* Fields the writer reads straight off the session rather than off the brush. Keeping them in

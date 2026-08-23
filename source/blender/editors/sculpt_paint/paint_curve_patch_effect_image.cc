@@ -28,6 +28,7 @@
 #include <cstdio> /* `printf`/`fflush` for `CURVE_PATCH_PROFILING`. */
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "paint_curve_patch_effect.hh"
 
@@ -49,6 +50,8 @@
 #include "BKE_paint_bvh_pixels.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_undo_system.hh"
+
+#include "DEG_depsgraph.hh"
 
 #include "BLI_array.hh"
 #include "BLI_assert.h"
@@ -74,6 +77,7 @@
 
 #include "ED_paint.hh"
 #include "ED_undo.hh"
+#include "ED_view3d.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -82,6 +86,8 @@
 #include "paint_intern.hh"
 
 #include "mesh/mesh_brush_common.hh"
+#include "mesh/paint_material_blend.hh"
+#include "mesh/paint_material_source.hh"
 #include "mesh/sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint {
@@ -98,6 +104,7 @@ constexpr int tile_size = ED_IMAGE_UNDO_TILE_SIZE;
 /** Name this effect's own `ImageUndoStep` is opened under. Shared by the initial open and the
  * reopen in #ImageColorEffect::ensure_undo_step_live so the two cannot drift apart. */
 constexpr const char *undo_step_name = "Curve Patch Image";
+
 
 /** Identifies one `tile_size` x `tile_size` snapshot tile within one UDIM tile of one image.
  *
@@ -163,6 +170,7 @@ class ImageColorEffect : public CurvePatchEffect {
   void session_undo_begin() override;
   int64_t element_num(Object &ob) const override;
   void restore(Object &ob, const CurvePatchSession &patch) override;
+  void sync_targets(Object &ob) override;
   void begin_restamp(const Depsgraph &depsgraph, Object &ob, CurvePatchSession &patch) override;
   void apply_pass(const Depsgraph &depsgraph,
                   Object &ob,
@@ -452,6 +460,109 @@ static paint::image::ImageData *curve_patch_primary_image_data(const SculptSessi
   return ss->cache->image_paint_targets[0].data.get();
 }
 
+/** Every canvas the current stroke paints, keyed by its #Image so a snapshot tile can be routed
+ * back to the buffer it was captured from. One entry for Mode=`Image`, one per enabled
+ * Principled channel for Mode=`Material`. */
+static Map<const Image *, paint::image::ImageData *> curve_patch_image_data_by_image(
+    const SculptSession *ss)
+{
+  Map<const Image *, paint::image::ImageData *> by_image;
+  if (ss == nullptr || ss->cache == nullptr) {
+    return by_image;
+  }
+  for (paint::image::ImagePaintTarget &target : ss->cache->image_paint_targets) {
+    if (target.data && target.data->image != nullptr) {
+      /* Two channels can name the same image; the first entry wins, which is the one every
+       * snapshot tile of that image was captured through. */
+      by_image.add(target.data->image, target.data.get());
+    }
+  }
+  return by_image;
+}
+
+/**
+ * Whether \a image_data's tile layout is the one the PBVH pixel encoding currently describes.
+ *
+ * The encoding (resolution, UDIM set, seam margin, UV map) is built ONCE per restamp, from the
+ * primary target -- see #ImageColorEffect::begin_restamp. Every pixel row it holds addresses
+ * texels of that layout, so a channel map of a different size cannot be painted through it: the
+ * rows would land on the wrong texels. The ordinary stroke engine rebuilds the encoding per
+ * layout group instead (`do_paint_pixels()` in `mesh/sculpt_paint_image.cc`); a patch cannot
+ * follow it there yet, because its seam fix and dirty marking run once per RESTAMP across every
+ * symmetry pass, and a mid-restamp rebuild would discard the dirty state the earlier passes
+ * recorded.
+ *
+ * So such a channel is SKIPPED rather than painted wrongly. In practice the Principled maps of
+ * one material are authored at the same resolution and every channel passes.
+ */
+static bool curve_patch_layout_matches(const bke::pbvh::Tree &pbvh,
+                                       const paint::image::ImageData &image_data,
+                                       const StringRef uv_map_name)
+{
+  if (pbvh.pixels_ == nullptr || image_data.image == nullptr ||
+      image_data.image_user == nullptr)
+  {
+    return false;
+  }
+  return pbvh.pixels_->layout_key ==
+         BKE_paint_pixels_layout_key_get(*image_data.image, *image_data.image_user, uv_map_name);
+}
+
+/**
+ * The flat color a channel paints RIGHT NOW.
+ *
+ * #ImagePaintTarget::color_override is resolved ONCE, when the stroke cache builds its targets,
+ * and that is all a dab ever needs: a stroke cannot outlive a slider drag. A Curve Patch session
+ * can. It stays open across panel edits -- and its live-sync poll re-stamps for exactly those --
+ * so reading the cached override would re-stamp with the value the session STARTED on. The
+ * Roughness slider would move and the texture would not.
+ *
+ * Resolved through the same BKE helpers #init_image_paint_targets uses, so the two cannot drift
+ * on what a channel's paint value means.
+ */
+static float3 curve_patch_channel_flat_color(const paint::image::ImagePaintTarget &target,
+                                             const Brush &brush,
+                                             const Paint &paint,
+                                             const PaintModeSettings &settings,
+                                             const bool invert)
+{
+  const bool live_channel = target.is_material_channel && brush.material_paint != nullptr;
+  if (!live_channel) {
+    return target.color_override ? float3(*target.color_override) :
+                                   BKE_brush_color_get(&paint, &brush);
+  }
+  const BrushMaterialPaint &brush_paint = *brush.material_paint;
+  if (target.is_normal_channel) {
+    /* The same clamp / normalize / pack #BKE_paint_material_image_targets_get and
+     * #init_image_paint_targets perform between them. Inversion is deliberately not handled, for
+     * the same reason it is not there: a direction has no "erase toward the default" meaning the
+     * scalar channels' rule would give it. */
+    const float2 range = BKE_paint_material_channel_range(settings, target.channel);
+    float3 direction;
+    for (const int i : IndexRange(3)) {
+      direction[i] = math::clamp(
+          brush_paint.channels[target.channel].value[i], range.x, range.y);
+    }
+    /* An all-zero direction cannot be normalized; `normalize_v3` leaves it zero and the pack
+     * turns that into neutral grey, so match it rather than emitting NaNs. */
+    const float direction_len = math::length(direction);
+    direction = direction_len > 1e-6f ? direction / direction_len : float3(0.0f);
+    float packed[3];
+    BKE_pbr_normal_pack(direction, false, packed);
+    return float3(packed[0], packed[1], packed[2]);
+  }
+  if (target.is_color_channel) {
+    return BKE_paint_material_channel_color_get(brush_paint, paint, brush, target.channel, invert);
+  }
+  /* Scalar channel: a scalar IS the gray with that value in every component -- the convention
+   * both paint engines share (#material::scalar_as_color). Erasing pulls it to the channel
+   * default instead of the slider, the same rule `do_paint_material_brush()` follows. */
+  const float value = invert ? BKE_paint_material_channel_default_value(target.channel) :
+                               BKE_paint_material_channel_value(
+                                   brush_paint, settings, target.channel);
+  return float3(value);
+}
+
 /** The #Paint the spawning stroke resolved; #StrokeCache::paint is the same pointer its own init
  * used. Both the canvas key stored at session start and every later comparison of it read the
  * brush and channel mask from here, so the two cannot be computed from different inputs. */
@@ -549,12 +660,11 @@ void ImageColorEffect::restore(Object &ob, const CurvePatchSession & /*patch*/)
     return;
   }
   SculptSession *ss = ob.runtime->sculpt_session;
-  ImageData *image_data_ptr = curve_patch_primary_image_data(ss);
-  if (image_data_ptr == nullptr) {
-    return;
-  }
-  ImageData &image_data = *image_data_ptr;
-  if (image_data.image == nullptr || image_data.image_user == nullptr) {
+  /* Keyed by image rather than taken from one canvas: with Mode=`Material` the snapshot holds
+   * tiles of every painted channel, and each has to go back through its own buffer. */
+  const Map<const Image *, ImageData *> image_data_by_image = curve_patch_image_data_by_image(
+      ss);
+  if (image_data_by_image.is_empty()) {
     return;
   }
 
@@ -599,12 +709,16 @@ void ImageColorEffect::restore(Object &ob, const CurvePatchSession & /*patch*/)
   for (const auto item : orig_tiles_.items()) {
     const TileKey &key = item.key;
     const TileSnapshot &snapshot = item.value;
-    if (key.image != image_data.image) {
-      /* Cannot happen while `canvas_matches()` holds, but a stale entry must never be written
-       * through a buffer belonging to a different image. */
+    ImageData *key_data = image_data_by_image.lookup_default(key.image, nullptr);
+    if (key_data == nullptr || key_data->image_user == nullptr) {
+      /* A tile of a canvas this stroke no longer paints. Cannot happen while
+       * `canvas_matches()` holds, but a stale entry must never be written through a buffer
+       * belonging to a different image. */
       restored_all = false;
       continue;
     }
+    /* Shadows nothing: the rest of this loop body addresses the canvas of THIS tile. */
+    ImageData &image_data = *key_data;
 
     /* Re-acquire rather than reading `ImageData::buffers`: that map is populated per-restamp
      * inside `apply_pass()`, and `restore()` runs FIRST in every restamp. Acquisition is reference
@@ -731,6 +845,41 @@ void ImageColorEffect::restore(Object &ob, const CurvePatchSession & /*patch*/)
   }
 }
 
+void ImageColorEffect::sync_targets(Object &ob)
+{
+  SculptSession *ss = ob.runtime->sculpt_session;
+  if (ss == nullptr || ss->cache == nullptr || ss->cache->paint == nullptr) {
+    return;
+  }
+  std::string live_key = curve_patch_canvas_key(*paint_mode_settings_, ob, ss);
+  if (live_key == canvas_key_) {
+    return;
+  }
+  /* The destination set changed. Only a PBR channel toggle can do that without the user touching
+   * the canvas panel, and that is exactly the interaction this follows: the targets were resolved
+   * once by `stroke_cache_init()` (`init_image_paint_targets`), and a session that outlives panel
+   * edits has to re-resolve them or a channel switched on mid-session never gets a canvas while a
+   * channel switched off keeps receiving paint.
+   *
+   * Rebuilding through the very same helper the stroke path uses is what keeps the two from
+   * drifting on which channels are targets at all. `restore()` has already run (see
+   * #CurvePatchEffect::sync_targets), so the images being dropped here are pristine.
+   *
+   * An empty result is adopted like any other: with every channel switched off the patch paints
+   * nothing, and `apply_pass()` / `restore()` already treat an empty target set that way. */
+  StrokeCache &cache = *ss->cache;
+  const Paint &paint = *cache.paint;
+  cache.image_paint_targets = paint::image::init_image_paint_targets(
+      ob, *paint_mode_settings_, BKE_paint_brush_for_read(&paint), paint.visible_material_channels);
+  canvas_key_ = std::move(live_key);
+
+  /* The pixel encoding is built from `targets[0]` and is keyed by that image's layout, so a
+   * rebuild that changed which canvas comes first must be followed by a matching rebuild of the
+   * encoding. `begin_restamp()` does that unconditionally on the same restamp, right after this,
+   * so nothing more is needed here -- recorded because it is the non-obvious half of why
+   * re-targeting between `restore()` and the re-stamp is safe. */
+}
+
 void ImageColorEffect::begin_restamp(const Depsgraph &depsgraph,
                                      Object &ob,
                                      CurvePatchSession & /*patch*/)
@@ -783,8 +932,18 @@ void ImageColorEffect::begin_restamp(const Depsgraph &depsgraph,
 struct AcceptedPixel {
   int local;
   float4 tex_color;
+  /** Whether #tex_color is a real sample -- #CurvePatchSample::tex_valid. */
+  bool tex_valid;
   float value;
   float weight;
+  /** What the channel's own PBR source supplies at this texel: RGB for a color channel, the value
+   * replicated into all three for a scalar one, and the 0..1 PACKED tangent-space direction for
+   * Normal. Equals the channel's slider color/value when the channel has no usable source, so
+   * PHASE 2 can use it unconditionally. */
+  float3 source_color;
+  /** The Alpha channel sampled at this texel, or 1 when Alpha masking is off or does not apply
+   * to this channel (Alpha never masks its own write -- #channel_uses_alpha_mask). */
+  float alpha_factor;
 };
 
 /** One chunk of a `PackedPixelRow` that PHASE 1 accepted at least one pixel in.
@@ -828,10 +987,6 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   if (!this->canvas_matches(ob)) {
     return;
   }
-  ImageData &image_data = *cache.image_paint_targets[0].data;
-  if (image_data.image == nullptr) {
-    return;
-  }
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   if (pbvh.type() != bke::pbvh::Type::Mesh || pbvh.pixels_ == nullptr) {
@@ -844,7 +999,44 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   const MeshAttributeData attribute_data(mesh);
   const Span<float> mask = attribute_data.mask;
 
+  /* Only a brush-mapped Normal source projects into the view; a session whose view context is
+   * gone falls back to #StrokeCache::view_right, which #build_normal_write_basis handles. */
+  const ARegion *view_region = cache.vc != nullptr ? cache.vc->region : nullptr;
+
   curve_patch_effect_ensure_falloff_curve(brush);
+
+  /* PBR Paint gives every channel an optional SOURCE texture of its own -- that is what the
+   * Base Color image in the channel panel is -- and an Alpha channel that masks the others.
+   * The ordinary stroke resolves both through this sampler (`do_paint_pixels()` in
+   * `mesh/sculpt_paint_image.cc`); without it a patch could only ever paint the flat slider
+   * color, which is exactly what made an assigned Base Color texture look ignored.
+   *
+   * Built once per pass rather than per canvas: it is a property of the brush, and its
+   * per-channel sources are all resolved up front. */
+  std::optional<material::ChannelSourceSampler> channel_sources;
+  bool alpha_masking_active = false;
+  if (brush.material_paint != nullptr) {
+    channel_sources.emplace(ss,
+                            brush,
+                            *brush.material_paint,
+                            *paint_mode_settings_,
+                            cache.paint->visible_material_channels);
+    if (channel_sources->is_active()) {
+      /* Area Plane mapping depends on the dab's own location and motion, so the matrices are
+       * rebuilt per pass -- the patch's equivalent of "per dab". */
+      channel_sources->update_area_local_mats(ob);
+      /* Inverting erases toward the channel default, where masking the erase by the Alpha the
+       * stroke is also painting would be circular. Same condition the stroke engine uses. */
+      alpha_masking_active = !cache.toggle_settings.invert &&
+                             BKE_paint_material_channel_masks_stroke(
+                                 *brush.material_paint,
+                                 *paint_mode_settings_,
+                                 cache.paint->visible_material_channels);
+    }
+    else {
+      channel_sources.reset();
+    }
+  }
 
 #if CURVE_PATCH_PROFILING
   /* Counted here, past every guard above, so the pass total matches the timed work. */
@@ -893,6 +1085,42 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * the preview's pixels stay on the old canvas -- neither restorable nor undoable. That is the
    * same exposure the canvas-swap guards accept everywhere else in this effect; the alternative is
    * writing patch data into an image the user has since pointed the canvas away from. */
+
+  /* Everything above is canvas-independent -- the cull and the node mask come from the patch
+   * geometry alone -- so it is computed once and the pixel work below repeats per canvas. One
+   * iteration for Mode=`Image`, one per enabled Principled channel for Mode=`Material`. */
+  const StringRef uv_map_name =
+      BKE_paint_canvas_uvmap_name_get(paint_mode_settings_, &ob).value_or("");
+  for (paint::image::ImagePaintTarget &target : cache.image_paint_targets) {
+  ImageData &image_data = *target.data;
+  if (image_data.image == nullptr) {
+    continue;
+  }
+  if (!curve_patch_layout_matches(pbvh, image_data, uv_map_name)) {
+    continue;
+  }
+  /* Whether the RIBBON's own texture may supply this canvas's paint color. Normal packs a
+   * direction and a scalar channel carries a single value, so neither can take an RGB from it.
+   * The channel's own SOURCE is a separate mechanism and does reach Normal -- see
+   * `target_paints_normal_source`. Resolved per canvas because it is a property of the channel. */
+  const bool target_paints_color = !target.is_normal_channel &&
+                                   (target.is_color_channel || !target.is_material_channel);
+  const eMaterialPaintChannel target_channel = target.channel;
+  const bool target_has_source = target.is_material_channel && channel_sources.has_value() &&
+                                 channel_sources->has_usable_source(target_channel);
+  /* A Normal source is neither a color nor a scalar: sampling it as either would write a flat
+   * grey over the directions the map encodes. It takes its own path, which needs the destination
+   * tangent basis per UV primitive -- the same `tri_tangent` / `bitangent_sign` pair
+   * `do_paint_pixels()` builds (`mesh/sculpt_paint_image.cc`). */
+  const bool target_paints_normal_source = target.is_normal_channel && target_has_source;
+  const bool target_masked_by_alpha = target.is_material_channel &&
+                                      material::channel_uses_alpha_mask(alpha_masking_active,
+                                                                        target_channel);
+
+  /* The channel's flat color, used where no source supplies one. Read from the LIVE brush, not
+   * from the target's cached override -- see #curve_patch_channel_flat_color. */
+  const float3 target_flat_color = curve_patch_channel_flat_color(
+      target, brush, *cache.paint, *paint_mode_settings_, cache.toggle_settings.invert);
   node_mask.foreach_index([&](const int i) {
     paint::image::fetch_image_buffers(image_data, nodes[i], pixel_nodes[i]);
   });
@@ -1098,13 +1326,130 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
             const CurvePatchSampler sampler(
                 item, patch.doc.texture, ctx, brush, source, chunk_mask, tex_pool);
 
+            /* Destination tangent basis for a Normal source, plus the screen basis a texel with
+             * no patch frame falls back to. Constant across a UV primitive, and a chunk never
+             * spans more than one, so it is built once here -- the same per-row hoist
+             * `do_paint_pixels()` makes for the identical reason. */
+            float3 n_m(0.0f, 0.0f, 1.0f);
+            float3 t_screen(1.0f, 0.0f, 0.0f);
+            float3 b_screen(0.0f, 1.0f, 0.0f);
+            float3 t_m(1.0f, 0.0f, 0.0f);
+            float3 b_m(0.0f, 1.0f, 0.0f);
+            if (target_paints_normal_source) {
+              const int64_t tri_position_start = int64_t(pixel_row.uv_primitive_index) * 3;
+              material::build_normal_write_basis(
+                  pixel_node.uv_primitives.tangents[pixel_row.uv_primitive_index],
+                  pixel_node.uv_primitives.bitangent_signs[pixel_row.uv_primitive_index],
+                  pixel_node.uv_primitives.triangle_positions.as_span().slice(tri_position_start,
+                                                                             3),
+                  cache.view_right,
+                  view_region,
+                  cache.projection_mat,
+                  t_screen,
+                  b_screen,
+                  n_m,
+                  t_m,
+                  b_m);
+            }
+
             Vector<AcceptedPixel> accepted;
             for (const int li : IndexRange(range.size())) {
               const std::optional<CurvePatchSample> sample = sampler.sample(li, thread_id);
               if (!sample) {
                 continue;
               }
-              accepted.append({li, sample->tex_color, sample->value, sample->weight});
+              float3 source_color = target_flat_color;
+              float alpha_factor = 1.0f;
+              if (target_has_source || target_masked_by_alpha) {
+                /* WHERE a channel source is sampled decides whether it turns with the curve.
+                 *
+                 * The patch reports its own frame (`u` across the ribbon, `v` along it) whenever
+                 * it has one, and that is the frame the ribbon's own zone textures have always
+                 * used. Sampling a channel source there is what makes Base Color and the Alpha
+                 * map follow the curve instead of standing still in view/area space while the
+                 * curve turns under them.
+                 *
+                 * Without a patch frame -- a sample that reached neither the ribbon nor the
+                 * stamp branch -- fall back to the ordinary brush mapping, which is what the
+                 * stroke engine uses and is still better than nothing. */
+                const bool use_patch_frame = sample->patch_uv_valid;
+                std::optional<material::TexelSampleContext> tex_ctx;
+                if (!use_patch_frame) {
+                  tex_ctx = material::sculpt_texel_sample_context(ss, chunk_positions[li]);
+                }
+                if (target_paints_normal_source) {
+                  /* The decal frame a normal map is authored in. In the patch frame that is the
+                   * ribbon's own axes flattened onto the surface, which is what makes the map
+                   * TURN with the curve instead of staying pinned to the screen while the color
+                   * texture under it rotates; without a patch frame it is the screen basis, the
+                   * same one the stroke engine uses. */
+                  float3 t_decal = t_screen;
+                  float3 b_decal = b_screen;
+                  if (use_patch_frame) {
+                    const float3 flat_u = sample->patch_axis_u -
+                                          n_m * math::dot(sample->patch_axis_u, n_m);
+                    const float3 flat_v = sample->patch_axis_v -
+                                          n_m * math::dot(sample->patch_axis_v, n_m);
+                    const float len_u = math::length(flat_u);
+                    const float len_v = math::length(flat_v);
+                    /* A frame seen edge-on by the surface projects to nothing; the screen basis
+                     * already loaded above then stands in, as it does for a frameless texel. */
+                    if (len_u > 1e-6f && len_v > 1e-6f) {
+                      t_decal = flat_u / len_u;
+                      b_decal = flat_v / len_v;
+                    }
+                  }
+                  source_color = use_patch_frame ?
+                                     channel_sources->tangent_normal_packed_at_uv(target_channel,
+                                                                                 sample->patch_uv,
+                                                                                 thread_id,
+                                                                                 t_decal,
+                                                                                 b_decal,
+                                                                                 n_m,
+                                                                                 t_m,
+                                                                                 b_m) :
+                                     channel_sources->tangent_normal_packed(target_channel,
+                                                                            *tex_ctx,
+                                                                            thread_id,
+                                                                            t_decal,
+                                                                            b_decal,
+                                                                            n_m,
+                                                                            t_m,
+                                                                            b_m);
+                }
+                else if (target_has_source) {
+                  if (target_paints_color) {
+                    source_color = use_patch_frame ?
+                                       channel_sources->color_at_uv(
+                                           target_channel, sample->patch_uv, thread_id) :
+                                       channel_sources->color(target_channel, *tex_ctx, thread_id);
+                  }
+                  else {
+                    source_color = float3(
+                        use_patch_frame ? channel_sources->scalar_at_uv(
+                                              target_channel, sample->patch_uv, thread_id) :
+                                          channel_sources->scalar(
+                                              target_channel, *tex_ctx, thread_id));
+                  }
+                }
+                if (target_masked_by_alpha) {
+                  const float alpha_sample =
+                      use_patch_frame ? channel_sources->scalar_at_uv(
+                                            PAINT_MATERIAL_CHANNEL_ALPHA,
+                                            sample->patch_uv,
+                                            thread_id) :
+                                        channel_sources->scalar(
+                                            PAINT_MATERIAL_CHANNEL_ALPHA, *tex_ctx, thread_id);
+                  alpha_factor = math::clamp(alpha_sample, 0.0f, 1.0f);
+                }
+              }
+              accepted.append({li,
+                               sample->tex_color,
+                               sample->tex_valid,
+                               sample->value,
+                               sample->weight,
+                               source_color,
+                               alpha_factor});
             }
 #if CURVE_PATCH_PROFILING
             local.reached_lut += sampler.dbg_reached_lut();
@@ -1207,12 +1552,30 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   /* Not named `paint`: that would shadow the `paint` namespace this function also calls into
    * (`paint::image::write_image_pixels()` below). */
   const Paint &paint_settings = *cache.paint;
-  const float3 brush_color = BKE_brush_color_get(&paint_settings, &brush);
-  /* The RGB the patch paints is ALWAYS the brush's primary color; a brush texture contributes only
-   * its intensity (already folded into `CurvePatchSample::value` by the sampler) and its alpha,
-   * which attenuates the mix below. `CurvePatchSample::tex_color`'s RGB is deliberately left
-   * unread until the color path grows real RGBA-texture support. */
-  const bool has_texture = brush.mtex.tex != nullptr;
+  /* A material channel carries its own color -- a channel RGB, or grayscale `(v, v, v)` for a
+   * scalar channel -- resolved by #init_image_paint_targets. Only the plain image canvas paints
+   * with the brush color. Mirrors #BrushPainter.use_material_channel_color on the 2D path. */
+  /* Same live resolve as `target_flat_color` above -- a cached override would make a slider
+   * edit re-stamp with the old value. */
+  const float3 brush_color = curve_patch_channel_flat_color(
+      target, brush, paint_settings, *paint_mode_settings_, cache.toggle_settings.invert);
+
+  /* A material channel decides how its value composites -- Normal must go through
+   * #IMB_BLEND_NORMAL_MIX rather than a plain lerp of the encoded RGB, and a scalar channel may
+   * be configured for Add, Multiply and so on. Resolved exactly as `do_paint_pixels()` resolves
+   * it (`mesh/sculpt_paint_image.cc`) so the two engines cannot drift on what a channel means.
+   *
+   * Deliberately NOT `brush.blend` for the plain image canvas: a Curve Patch stamps a shape
+   * rather than accumulating dabs, and Mix is the behavior that contract has always had.
+   * Only the per-channel modes are honored here. */
+  const IMB_BlendMode blend_mode = (target.is_material_channel &&
+                                    brush.material_paint != nullptr) ?
+                                       IMB_BlendMode(BKE_paint_material_channel_blend_mode(
+                                           *brush.material_paint,
+                                           target.channel,
+                                           cache.toggle_settings.invert)) :
+                                       IMB_BLEND_MIX;
+
   /* The Strength slider, applied as a separate factor exactly as the ordinary paint pipeline does
    * -- `brush_strength()` leaves it out of `bstrength` for a Paint brush. See
    * #curve_patch_color_mix_factor. */
@@ -1275,12 +1638,69 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
          * not grouped with Relief for this policy; see #curve_patch_blend_across_passes. */
         const float blended = curve_patch_blend_across_passes(
             patch.apply, accum_key, pixel.weight, pixel.value);
+        /* The Alpha channel scales every other channel's write, exactly as it does for a dab. */
         const float factor = curve_patch_color_mix_factor(
-            blended, pixel.tex_color, has_texture, strength);
-        /* The destination alpha is carried through untouched: `BKE_brush_color_get()` returns a
-         * `float3`, so writing anything else would invent data the brush never specified. */
-        chunk.values[pixel.local] = float4(math::interpolate(float3(orig), brush_color, factor),
-                                           orig.w);
+                                 blended, pixel.tex_color, pixel.tex_valid, strength) *
+                             pixel.alpha_factor;
+
+        /* The destination alpha is carried through untouched in BOTH branches: the color a patch
+         * paints is a `float3` (`BKE_brush_color_get()`, or a channel color), so writing
+         * anything else would invent data neither the brush nor the channel specified. A
+         * channel configured for an alpha-targeting mode therefore affects only its RGB here. */
+        /* Precedence, matching the stroke engine: the CHANNEL's own source wins (that is the
+         * image assigned to Base Color in the channel panel); failing that the ribbon's own
+         * texture supplies the color; failing that the flat channel/brush color. A ribbon
+         * texture still contributes its intensity and alpha through `factor` either way. */
+        const float3 paint_rgb = target_has_source ?
+                                     pixel.source_color :
+                                     (target_paints_color ?
+                                          curve_patch_paint_color(
+                                              brush_color, pixel.tex_color, pixel.tex_valid) :
+                                          brush_color);
+        if (blend_mode == IMB_BLEND_NORMAL_MIX) {
+          /* A packed tangent normal is an ENCODED direction, not a linear color, so it must NOT
+           * be pre-multiplied by coverage the way every other mode's source is: scaling it toward
+           * (0, 0, 0) unpacks to a direction tilted hard toward (-1, -1, -1), which showed up as
+           * the whole ribbon bulging wherever the falloff was partial -- the Alpha mask cropped
+           * the decal correctly and this rode along underneath it. Coverage belongs in `t` alone,
+           * exactly as `prepare_sampled_paint_range()` builds it for the stroke engine.
+           *
+           * #BKE_pbr_normal_blend_mix is called directly rather than through
+           * #composite_coverage, whose #IMB_blend_color_float entry for this mode hard-codes
+           * `is_float = true`. The destination's STORAGE decides whether its normals are signed
+           * (float map) or packed into 0..1 (byte map -- every 8-bit normal map), and getting it
+           * wrong reinterprets every texel already in the map. `do_paint_pixels()` passes the
+           * real flag; so does this. */
+          const float t = std::clamp(factor, 0.0f, 1.0f);
+          const float target_n[3] = {
+              paint_rgb.x * 2.0f - 1.0f, paint_rgb.y * 2.0f - 1.0f, paint_rgb.z * 2.0f - 1.0f};
+          const float3 orig_rgb(orig);
+          float blended_normal[3];
+          BKE_pbr_normal_blend_mix(orig_rgb,
+                                   target_n,
+                                   t,
+                                   chunk.image_buffer->float_data() != nullptr,
+                                   blended_normal);
+          chunk.values[pixel.local] = float4(
+              blended_normal[0], blended_normal[1], blended_normal[2], orig.w);
+        }
+        else if (blend_mode == IMB_BLEND_MIX) {
+          /* `composite_coverage()` would compute the same RGB for Mix, but it is a lerp either
+           * way; keep the direct form so the common canvas pays nothing for the general path. */
+          chunk.values[pixel.local] = float4(math::interpolate(float3(orig), paint_rgb, factor),
+                                             orig.w);
+        }
+        else {
+          /* `orig` is the frozen pre-patch value and `factor` this restamp's total coverage of
+           * the texel, which is exactly the (pre-stroke value, accumulated coverage) pair
+           * #composite_coverage expects -- the patch snapshot plays the role the raster
+           * engine's #MaterialStrokeAccum plays for a stroke. Pre-multiplied, as that contract
+           * requires. */
+          const float4 mix(paint_rgb * factor, factor);
+          float4 composited = material::composite_coverage(orig, mix, blend_mode);
+          composited.w = orig.w;
+          chunk.values[pixel.local] = composited;
+        }
       }
 
       /* Write the chunk back WHOLE. The unaccepted pixels still hold the originals read in PHASE
@@ -1336,10 +1756,12 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   /* `touched` is built per-write rather than from the whole `node_mask` query, for the same reason
    * `ColorEffect` scopes its own tag to the nodes it actually wrote. */
   IndexMaskMemory tag_memory;
+
   curve_patch_record_touched_nodes(patch.apply, IndexMask::from_bits(touched, tag_memory));
 #if CURVE_PATCH_PROFILING
   prof_phase2_ += BLI_time_now_seconds() - prof_phase2_t0; /* DEBUG-cpatch-image */
 #endif
+  }
 }
 
 void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
@@ -1349,12 +1771,7 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
     return;
   }
   SculptSession *ss = ob.runtime->sculpt_session;
-  ImageData *image_data_ptr = curve_patch_primary_image_data(ss);
-  if (image_data_ptr == nullptr) {
-    return;
-  }
-  ImageData &image_data = *image_data_ptr;
-  if (image_data.image == nullptr) {
+  if (ss == nullptr || ss->cache == nullptr || ss->cache->image_paint_targets.is_empty()) {
     return;
   }
   bke::pbvh::pixels::PixelData &pixel_data = bke::pbvh::pixels::data_get(*pbvh);
@@ -1370,15 +1787,56 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
   const double prof_seam_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
 #endif
   /* The dirty-tile scan is a property of the shared pixel nodes, so it is collected once and
-   * replayed per canvas; with one canvas that is a single replay. */
+   * replayed per canvas. */
   const Vector<bke::image::TileNumber> dirty_tiles = paint::image::collect_dirty_tiles(
       pixel_nodes, touched_mask);
-  if (!dirty_tiles.is_empty()) {
-    paint::image::fix_non_manifold_seam_bleeding(*pbvh, image_data.buffers, dirty_tiles);
+  /* Exactly the canvases `apply_pass()` could have written -- the same predicate, so a channel
+   * skipped there is not seam-fixed or marked dirty here either. */
+  const StringRef uv_map_name =
+      BKE_paint_canvas_uvmap_name_get(paint_mode_settings_, &ob).value_or("");
+  for (paint::image::ImagePaintTarget &target : ss->cache->image_paint_targets) {
+    ImageData &image_data = *target.data;
+    if (image_data.image == nullptr ||
+        !curve_patch_layout_matches(*pbvh, image_data, uv_map_name))
+    {
+      continue;
+    }
+    if (!dirty_tiles.is_empty()) {
+      paint::image::fix_non_manifold_seam_bleeding(*pbvh, image_data.buffers, dirty_tiles);
+    }
   }
+  /* #mark_image_dirty CONSUMES the dirty state: it clears #PixelNode::flags.dirty and every
+   * tile's dirty region. The canvases share these nodes, so a later canvas would find nothing
+   * left to mark. Snapshot the node's state and restore it between canvases -- the same thing
+   * `do_paint_pixels()` does for its own grouped destinations
+   * (`mesh/sculpt_paint_image.cc`, MarkDirty). */
   touched_mask.foreach_index([&](const int i) {
-    bke::pbvh::pixels::mark_image_dirty(
-        nodes[i], pixel_nodes[i], *image_data.image, image_data.buffers);
+    bke::pbvh::pixels::PixelNode &pixel_node = pixel_nodes[i];
+    const bool saved_node_dirty = pixel_node.flags.dirty;
+    Vector<std::pair<bool, rcti>> saved_tile_dirty;
+    saved_tile_dirty.reserve(pixel_node.tiles.size());
+    for (const bke::pbvh::pixels::UDIMTilePixels &tile : pixel_node.tiles) {
+      saved_tile_dirty.append({bool(tile.flags.dirty), tile.dirty_region});
+    }
+    bool first = true;
+    for (paint::image::ImagePaintTarget &target : ss->cache->image_paint_targets) {
+      ImageData &image_data = *target.data;
+      if (image_data.image == nullptr ||
+          !curve_patch_layout_matches(*pbvh, image_data, uv_map_name))
+      {
+        continue;
+      }
+      if (!first) {
+        pixel_node.flags.dirty = saved_node_dirty;
+        for (const int tile_i : pixel_node.tiles.index_range()) {
+          pixel_node.tiles[tile_i].flags.dirty = saved_tile_dirty[tile_i].first;
+          pixel_node.tiles[tile_i].dirty_region = saved_tile_dirty[tile_i].second;
+        }
+      }
+      first = false;
+      bke::pbvh::pixels::mark_image_dirty(
+          nodes[i], pixel_node, *image_data.image, image_data.buffers);
+    }
   });
 
   /* Force pending partial updates onto the GPU texture NOW, while the event-thread GL context is
@@ -1390,10 +1848,38 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
    *
    * Also notify Image Editors the way legacy texture paint does on every dab (`NA_PAINTING`), so
    * an open canvas preview redraws without waiting for a full `NA_EDITED` area refresh. */
-  if (image_data.image_user != nullptr) {
-    BKE_image_get_gpu_material_texture(image_data.image, image_data.image_user, true);
+  for (paint::image::ImagePaintTarget &target : ss->cache->image_paint_targets) {
+    ImageData &image_data = *target.data;
+    if (image_data.image == nullptr ||
+        !curve_patch_layout_matches(*pbvh, image_data, uv_map_name))
+    {
+      continue;
+    }
+    if (image_data.image_user != nullptr) {
+      BKE_image_get_gpu_material_texture(image_data.image, image_data.image_user, true);
+    }
+    WM_main_add_notifier(NC_IMAGE | NA_PAINTING, image_data.image);
+    /* Refreshing the texture object is not enough on its own: the shading consumers of these
+     * pixels keep their cached GPU material state until a SHADING-relevant tag lands on the ID,
+     * so the 3D Viewport goes on showing the previous frame -- until an unrelated full refresh
+     * (moving the view) rebuilds it. A re-stamp driven by the live-brush timer has no such
+     * refresh behind it, which is what made a panel edit look like it did nothing.
+     *
+     * The 2D path already learned this (`paint_image_2d.cc`, `redraw_single()`, #150957); the 3D
+     * canvas needs it for the same reason, and the multi-channel case makes it worse: only the
+     * image a viewport happens to display gets refreshed as a side effect of its own redraw, so a
+     * channel nobody has open would stay stale indefinitely. Explicit flags, not `0`. */
+    DEG_id_tag_update(&image_data.image->id, ID_RECALC_SHADING | ID_RECALC_PARAMETERS);
   }
-  WM_main_add_notifier(NC_IMAGE | NA_PAINTING, image_data.image);
+
+  /* Once for the object, not per canvas. The images ARE wired into the Principled BSDF, but the
+   * draw code does not connect an image tag to the object's GPU material, so the object needs its
+   * own shading tag -- the same conclusion, and the same comment, as the 2D path's Material
+   * canvas branch. `ID_RECALC_SHADING` does NOT rebuild the PBVH the way a geometry tag would,
+   * which is what `flush_update_step()` is careful to avoid on its image branch. */
+  if (!ss->cache->image_paint_targets.is_empty()) {
+    DEG_id_tag_update(&ob.id, ID_RECALC_SHADING);
+  }
 #if CURVE_PATCH_PROFILING
   const double prof_seam = BLI_time_now_seconds() - prof_seam_t0;
   /* DEBUG-cpatch-image: one line per restamp, summing every symmetry pass x patch. `pixels` is the

@@ -37,6 +37,7 @@
 #include "BLI_bit_vector.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
+#include "BLI_utildefines.h"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
 #include "BLI_rand.hh"
@@ -52,6 +53,8 @@
 
 #include "paint_curve_intern.hh"
 #include "paint_curve_patch_sampler.hh"
+#include "paint_image_curve_patch.hh"
+#include "paint_intern.hh"
 
 #include "mesh/sculpt_intern.hh"
 #include "mesh/sculpt_undo.hh"
@@ -62,6 +65,7 @@
  * `DEBUG-cpatch-image` sub-phase breakdown. */
 
 namespace blender::ed::sculpt_paint {
+
 
 static bool curve_patch_apply_target_changed(Object &ob, const CurvePatchSession &session)
 {
@@ -90,6 +94,11 @@ void curve_patch_restore_only(Object &ob, const CurvePatchSession &session)
     return;
   }
   session.effect->restore(ob, session);
+  /* Deliberately paired with the restore rather than placed next to the re-stamp: an effect may
+   * only change its destinations once the old ones hold their pristine content again. Both
+   * callers of this function want that -- the re-stamp so it writes where the user is now
+   * looking, and the restore-only paths (Esc, mode exit) so the next one starts consistent. */
+  session.effect->sync_targets(ob);
 }
 
 bke::CurvesGeometry curve_patch_control_curve_from_points(const Span<float3> positions,
@@ -495,6 +504,29 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchSession 
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Cross-Editor Exclusivity
+ * \{ */
+
+const char *curve_patch_active_session_message(const bContext &C)
+{
+  /* The Image Editor's session first: it is a module singleton, so it is live regardless of which
+   * object or mode the context happens to describe. The 3D one hangs off the active object, so a
+   * context pointing elsewhere would report "nothing live" for a patch that very much is. */
+  if (image_curve_patch_session_active()) {
+    return "Finish the Curve Patch in the Image Editor first (Return to apply, Esc to cancel)";
+  }
+  const Object *ob = CTX_data_active_object(&C);
+  if (ob != nullptr && ob->runtime->sculpt_session != nullptr &&
+      ob->runtime->sculpt_session->curve_patch_session != nullptr)
+  {
+    return "Finish the Curve Patch in the 3D Viewport first (Return to apply, Esc to cancel)";
+  }
+  return nullptr;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Session Teardown
  * \{ */
 
@@ -768,9 +800,33 @@ static bool curve_patch_begin_editing(Object &ob,
    * Dynamic Topology refusals do -- #curve_patch_session_publish deliberately frees nothing. */
   const std::optional<CurvePatchEffectType> effect_type = curve_patch_effect_type_for_brush(
       brush, *cache.paint, ob, paint_mode_settings);
-  if (!effect_type ||
-      !curve_patch_session_publish(ob, *session, *effect_type, paint_mode_settings))
-  {
+  CurvePatchRefusal refusal = CurvePatchRefusal::None;
+  if (!effect_type) {
+    const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+    if (pbvh == nullptr || pbvh->type() != bke::pbvh::Type::Mesh) {
+      refusal = CurvePatchRefusal::Geometry;
+    }
+    else if (ELEM(paint_mode_settings.canvas_source,
+                  PAINT_CANVAS_SOURCE_MATERIAL,
+                  PAINT_CANVAS_SOURCE_IMAGE))
+    {
+      /* The brush type is fine (it got past `supports_curve_patch`); what failed is the canvas.
+       */
+      refusal = CurvePatchRefusal::NoImageCanvas;
+    }
+    else {
+      refusal = CurvePatchRefusal::BrushType;
+    }
+  }
+  else if (!curve_patch_session_publish(ob, *session, *effect_type, paint_mode_settings)) {
+    refusal = *effect_type == CurvePatchEffectType::Image ? CurvePatchRefusal::NoImageCanvas :
+                                                            CurvePatchRefusal::NoAttribute;
+  }
+  if (refusal != CurvePatchRefusal::None) {
+    /* Refusing silently is indistinguishable from the feature not being wired up at all: the
+     * stroke just ends and the mesh sits pristine. Name the reason instead -- every branch here
+     * is a configuration the user can act on. */
+    BKE_report(CTX_wm_reports(vc.C), RPT_WARNING, curve_patch_refusal_message(refusal));
     MEM_delete(session);
     MEM_delete(ss.cache);
     ss.cache = nullptr;

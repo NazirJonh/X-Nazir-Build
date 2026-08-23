@@ -1,0 +1,472 @@
+/* SPDX-FileCopyrightText: 2026 Blender Authors
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+/** \file
+ * \ingroup edsculpt
+ */
+
+#include "paint_image_curve_patch_raster.hh"
+
+#include <cfloat>
+
+#include "BLI_listbase.h"
+#include "BLI_math_color.h"
+#include "BLI_math_vector.hh"
+#include "BLI_rect.h"
+#include "BLI_task.h"
+#include "BLI_task.hh"
+
+#include "BKE_brush.hh"
+#include "BKE_context.hh"
+#include "BKE_curve_patch.hh"
+#include "BKE_image.hh"
+#include "BKE_paint.hh"
+#include "BKE_paint_types.hh"
+
+#include "DNA_brush_types.h"
+#include "DNA_image_types.h"
+
+#include "ED_paint.hh"
+
+#include "IMB_colormanagement.hh"
+#include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
+
+#include "WM_api.hh"
+#include "WM_types.hh"
+
+#include "paint_curve_patch_sampler.hh"
+#include "paint_curve_patch_session.hh"
+#include "paint_image_curve_patch.hh"
+
+namespace blender::ed::sculpt_paint {
+
+/* -------------------------------------------------------------------- */
+/** \name Pure helpers
+ * \{ */
+
+float2 image_curve_patch_uv_to_ref_px(const float2 &uv,
+                                      const float2 &ref_tile_uv_origin,
+                                      const int2 &ref_tile_resolution)
+{
+  return (uv - ref_tile_uv_origin) * float2(ref_tile_resolution);
+}
+
+float2 image_curve_patch_ref_px_to_uv(const float2 &ref_px,
+                                      const float2 &ref_tile_uv_origin,
+                                      const int2 &ref_tile_resolution)
+{
+  return ref_px / float2(ref_tile_resolution) + ref_tile_uv_origin;
+}
+
+float4 image_curve_patch_blend_src_float(const float3 &brush_color_linear, const float alpha)
+{
+  /* Float image buffers are premultiplied in Blender's convention. */
+  return float4(brush_color_linear.x * alpha,
+                brush_color_linear.y * alpha,
+                brush_color_linear.z * alpha,
+                alpha);
+}
+
+void image_curve_patch_blend_src_byte(const float3 &brush_color_linear,
+                                      const float alpha,
+                                      const ColorSpace *byte_colorspace,
+                                      uchar r_src[4])
+{
+  float3 color_cs = brush_color_linear;
+  if (byte_colorspace != nullptr) {
+    IMB_colormanagement_scene_linear_to_colorspace_v3(color_cs, byte_colorspace);
+  }
+  const float col_f[4] = {color_cs.x, color_cs.y, color_cs.z, alpha};
+  rgba_float_to_uchar(r_src, col_f);
+}
+
+/* \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Geometry Rebuild
+ * \{ */
+
+namespace {
+
+/* Resolve which UDIM tile the patch is anchored in and that tile's resolution, from the
+ * session's first control point (spec §4.2, §9). */
+struct ReferenceTile {
+  int number = 0;
+  float2 uv_origin = float2(0.0f, 0.0f);
+  int2 resolution = int2(0, 0);
+  bool valid = false;
+};
+
+static ReferenceTile resolve_reference_tile(const Image &image, const float2 &first_point_uv)
+{
+  ReferenceTile out;
+  float local_uv[2];
+  float ofs[2];
+  const float uv_in[2] = {first_point_uv.x, first_point_uv.y};
+  out.number = BKE_image_get_tile_from_pos(const_cast<Image *>(&image), uv_in, local_uv, ofs);
+  out.uv_origin = float2(ofs[0], ofs[1]);
+
+  ImageUser iuser = {};
+  iuser.tile = out.number;
+  iuser.framenr = image.lastframe;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(const_cast<Image *>(&image), &iuser, nullptr);
+  if (ibuf == nullptr) {
+    return out;
+  }
+  out.resolution = int2(ibuf->x, ibuf->y);
+  out.valid = out.resolution.x > 0 && out.resolution.y > 0;
+  BKE_image_release_ibuf(const_cast<Image *>(&image), ibuf, nullptr);
+  return out;
+}
+
+}  // namespace
+
+bke::CurvePatchParams image_curve_patch_params_resolve(ImageCurvePatchSession &session,
+                                                       const Paint &paint,
+                                                       const Brush &brush)
+{
+  /* `apply_brush_swap_axis = true`: 2D has no session-owned S hotkey (yet) that a live brush read
+   * could clobber, unlike 3D. */
+  const int brush_size = BKE_brush_size_get(&paint, &brush);
+  session.frozen_patch_params.radius = session.radius_per_size * float(brush_size);
+  session.frozen_patch_params.plane_normal = float3(0.0f, 0.0f, 1.0f);
+  bke::CurvePatchParams params = curve_patch_params_live_overlay(
+      brush, session.frozen_patch_params, brush_size, /*apply_brush_swap_axis=*/true);
+  params.plane_normal = float3(0.0f, 0.0f, 1.0f);
+  return params;
+}
+
+void image_curve_patch_geometry_rebuild(bContext *C, ImageCurvePatchSession &session)
+{
+  if (session.curve.points_num() == 0 || session.curve.curves_num() == 0) {
+    session.doc.active_item().geometry.clear();
+    return;
+  }
+
+  const Paint *paint = BKE_paint_get_active_from_context(C);
+  const Brush *brush = paint ? BKE_paint_brush_for_read(paint) : nullptr;
+  if (brush == nullptr) {
+    session.doc.active_item().geometry.clear();
+    return;
+  }
+
+  /* 1. Resolve the reference tile from the curve's first control point. */
+  const Span<float3> uv_positions = session.curve.positions();
+  const float2 first_uv(uv_positions[0].x, uv_positions[0].y);
+  const ReferenceTile ref = resolve_reference_tile(*session.image, first_uv);
+  if (!ref.valid) {
+    session.doc.active_item().geometry.clear();
+    return;
+  }
+  session.ref_tile_number = ref.number;
+  session.ref_tile_uv_origin = ref.uv_origin;
+  session.ref_tile_resolution = ref.resolution;
+
+  /* 2. Project the canonical UV curve into reference-tile pixels (spec §6.1). */
+  bke::CurvesGeometry &control_curve = session.doc.active_item().control_curve;
+  control_curve = session.curve;
+  auto project = [&](MutableSpan<float3> coords) {
+    for (float3 &co : coords) {
+      const float2 px = image_curve_patch_uv_to_ref_px(
+          float2(co.x, co.y), session.ref_tile_uv_origin, session.ref_tile_resolution);
+      co = float3(px.x, px.y, 0.0f);
+    }
+  };
+  project(control_curve.positions_for_write());
+  if (control_curve.handle_positions_left().has_value()) {
+    project(control_curve.handle_positions_left_for_write());
+  }
+  if (control_curve.handle_positions_right().has_value()) {
+    project(control_curve.handle_positions_right_for_write());
+  }
+  control_curve.tag_positions_changed();
+
+  /* 3. Live-overlay parameters (spec §6.2). */
+  session.doc.active_item().params = image_curve_patch_params_resolve(session, *paint, *brush);
+
+  /* 4. Texture bindings (spec §8.3, §8.4). */
+  curve_patch_texture_binding_from_brush(
+      *brush, session.doc.active_item().params.radius, session.doc.texture);
+
+  /* 5. Build from the (already-in-pixel-space) control curve. #PlanarSingleWindow is what pins
+   * this to the single-window ribbon instead of windowed frames: a flat canvas has no surface to
+   * wrap onto (spec §6.3; regression-tested by BKE `build_mode_selects_normals_and_strip_path`).
+   * The tessellation itself lives in the core wrapper so that it stays one implementation shared
+   * with the 3D path. */
+  bke::curve_patch_build_from_control_curve(control_curve,
+                                            session.doc.active_item().params,
+                                            session.doc.texture.stamp_texture_weights_cdf,
+                                            bke::CurvePatchBuildMode::PlanarSingleWindow,
+                                            session.doc.active_item().geometry);
+}
+
+/* \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Pixel Writer
+ * \{ */
+
+namespace {
+
+/* Reference-tile-pixel bounding box the patch can possibly touch (spec §7.1). Mirrors
+ * `curve_patch_cull_tube_radius()`'s reach exactly -- if the two ever disagree, pixels the
+ * sampler would have accepted get silently dropped before the sampler is even asked. */
+struct CoverageBounds {
+  float2 min = float2(0.0f);
+  float2 max = float2(0.0f);
+  bool valid = false;
+};
+
+static CoverageBounds compute_coverage_bounds(const bke::CurvePatchGeometry &geometry)
+{
+  CoverageBounds out;
+  if (geometry.spline.is_empty()) {
+    return out;
+  }
+  const float reach = curve_patch_max_radius(geometry) * float(M_SQRT2) +
+                      geometry.ribbon_end_margin;
+
+  float2 lo(FLT_MAX, FLT_MAX);
+  float2 hi(-FLT_MAX, -FLT_MAX);
+  for (const float3 &p : geometry.spline.poly_3d) {
+    lo = math::min(lo, float2(p.x, p.y));
+    hi = math::max(hi, float2(p.x, p.y));
+  }
+  out.min = lo - float2(reach, reach);
+  out.max = hi + float2(reach, reach);
+  out.valid = true;
+  return out;
+}
+
+/* One 64x64 image-undo tile's worth of pixel indices this call should touch, already clamped to
+ * the ImBuf's real bounds and to `coverage` (spec §7.2, §15.2). */
+struct TileRegion {
+  int x0 = 0, y0 = 0, x1 = 0, y1 = 0; /* [x0, x1) x [y0, y1) in ibuf pixel coordinates. */
+};
+
+/* Snapshot every 64x64 undo tile `region` overlaps into the session's OWN tile map, before a
+ * single pixel of `region` is touched. `ED_image_paint_tile_push(..., find_prev=true)` only
+ * captures a tile the FIRST time it sees it -- calling it AFTER blending (as
+ * `ED_imapaint_dirty_region()` alone would) captures the just-painted pixels as if they were the
+ * pristine "before" state, so every later restore-and-restamp restores to the previous patch
+ * instead of the true pre-anchor canvas and the old patch never disappears. */
+static void push_undo_tiles_for_region(const TileRegion &region,
+                                       PaintTileMap &undo_tiles,
+                                       Image &image,
+                                       ImBuf &ibuf,
+                                       ImageUser &iuser)
+{
+  const int tx0 = region.x0 >> ED_IMAGE_UNDO_TILE_BITS;
+  const int ty0 = region.y0 >> ED_IMAGE_UNDO_TILE_BITS;
+  const int tx1 = (region.x1 - 1) >> ED_IMAGE_UNDO_TILE_BITS;
+  const int ty1 = (region.y1 - 1) >> ED_IMAGE_UNDO_TILE_BITS;
+  for (int ty = ty0; ty <= ty1; ty++) {
+    for (int tx = tx0; tx <= tx1; tx++) {
+      ED_image_paint_tile_push(
+          &undo_tiles, &image, &ibuf, &iuser, tx, ty, nullptr, nullptr, false, /*find_prev=*/true);
+    }
+  }
+}
+
+static void blend_tile_region(const TileRegion &region,
+                              ImBuf &ibuf,
+                              const CurvePatchItem &patch,
+                              const CurvePatchTextureBinding &texture,
+                              const CurvePatchStrokeContext &ctx,
+                              const Brush &brush,
+                              const float3 &brush_color_linear,
+                              ImagePool &tex_pool,
+                              const float2 &tile_uv_origin,
+                              const int2 &tile_resolution,
+                              const float2 &ref_tile_uv_origin,
+                              const int2 &ref_tile_resolution)
+{
+  const bool is_float = ibuf.float_data() != nullptr;
+  float *float_data = is_float ? ibuf.float_data_for_write() : nullptr;
+  uchar *byte_data = is_float ? nullptr : ibuf.byte_data_for_write();
+  const ColorSpace *byte_colorspace = is_float ? nullptr : ibuf.byte_buffer.colorspace;
+
+  const int row_count = region.y1 - region.y0;
+  const int width = region.x1 - region.x0;
+  threading::parallel_for(IndexRange(row_count), 1, [&](const IndexRange row_range) {
+    /* The sampler is per-iteration, but the thread id it receives also selects the per-thread
+     * node-tree exec stack in #RE_texture_evaluate and the per-thread RNG. Those live in the
+     * shared #Tex, not in the sampler, so a constant id would let every worker mutate slot 0
+     * at once. */
+    const int thread_id = BLI_task_parallel_thread_id(nullptr);
+    for (const int row_offset : row_range) {
+      const int y_px = region.y0 + row_offset;
+
+      Array<float3> positions(width);
+      Array<float3> normals(width, float3(0.0f, 0.0f, 1.0f));
+      for (const int i : IndexRange(width)) {
+        const int x_px = region.x0 + i;
+        /* This tile's own pixel -> UV -> reference-tile pixel space, since the patch geometry
+         * was built in the REFERENCE tile's pixel space (spec §4.2, §9) -- for any tile other
+         * than the reference one, or one with a different resolution, skipping this two-step
+         * conversion (or round-tripping through the same tile's own origin/resolution twice,
+         * which cancels out) would sample the geometry at the wrong location. */
+        const float2 uv = image_curve_patch_ref_px_to_uv(
+            float2(float(x_px) + 0.5f, float(y_px) + 0.5f), tile_uv_origin, tile_resolution);
+        const float2 ref_px = image_curve_patch_uv_to_ref_px(
+            uv, ref_tile_uv_origin, ref_tile_resolution);
+        positions[i] = float3(ref_px.x, ref_px.y, 0.0f);
+      }
+
+      CurvePatchSourceGeometry source;
+      source.positions = positions;
+      source.normals = normals;
+      source.orig_positions = nullptr;
+      source.indices_are_mesh_verts = false;
+
+      CurvePatchSampler sampler(patch, texture, ctx, brush, source, /*mask=*/{}, tex_pool);
+
+      for (const int i : IndexRange(width)) {
+        const std::optional<CurvePatchSample> sample = sampler.sample(i, thread_id);
+        if (!sample) {
+          continue;
+        }
+        const float alpha = math::clamp(
+            math::abs(sample->value) * sample->tex_color.w, 0.0f, 1.0f);
+        if (alpha <= 0.0f) {
+          continue;
+        }
+
+        const int x_px = region.x0 + i;
+        const size_t coord = size_t(y_px) * ibuf.x + x_px;
+
+        if (is_float) {
+          const float4 src = image_curve_patch_blend_src_float(brush_color_linear, alpha);
+          const float src_arr[4] = {src.x, src.y, src.z, src.w};
+          IMB_blend_color_float(
+              float_data + 4 * coord, float_data + 4 * coord, src_arr, IMB_BlendMode(brush.blend));
+        }
+        else {
+          uchar src[4];
+          image_curve_patch_blend_src_byte(brush_color_linear, alpha, byte_colorspace, src);
+          IMB_blend_color_byte(
+              byte_data + 4 * coord, byte_data + 4 * coord, src, IMB_BlendMode(brush.blend));
+        }
+      }
+    }
+  });
+}
+
+}  // namespace
+
+void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
+{
+  const CurvePatchItem &patch = session.doc.active_item();
+  if (patch.geometry.spline.is_empty()) {
+    return;
+  }
+  const CoverageBounds bounds = compute_coverage_bounds(patch.geometry);
+  if (!bounds.valid) {
+    return;
+  }
+
+  const Paint *paint = BKE_paint_get_active_from_context(C);
+  const Brush *brush = paint ? BKE_paint_brush_for_read(paint) : nullptr;
+  if (brush == nullptr) {
+    return;
+  }
+  const float3 brush_color_linear(
+      session.params.color[0], session.params.color[1], session.params.color[2]);
+
+  CurvePatchStrokeContext ctx;
+  ctx.bstrength = session.params.alpha * ((brush->flag & BRUSH_DIR_IN) != 0 ? -1.0f : 1.0f);
+
+  ImagePool &tex_pool = session.tex_pool_ensure();
+
+  /* Reference-tile UV bounds, expanded to every UDIM tile they overlap (spec §9). */
+  const float2 bounds_uv_min = image_curve_patch_ref_px_to_uv(
+      bounds.min, session.ref_tile_uv_origin, session.ref_tile_resolution);
+  const float2 bounds_uv_max = image_curve_patch_ref_px_to_uv(
+      bounds.max, session.ref_tile_uv_origin, session.ref_tile_resolution);
+
+  for (ImageTile &tile : session.image->tiles) {
+    const int col = (tile.tile_number - 1001) % 10;
+    const int row = (tile.tile_number - 1001) / 10;
+    const float2 tile_uv_origin{float(col), float(row)};
+    /* AABB-vs-AABB overlap against the unit tile square. */
+    if (bounds_uv_max.x < tile_uv_origin.x || bounds_uv_min.x > tile_uv_origin.x + 1.0f ||
+        bounds_uv_max.y < tile_uv_origin.y || bounds_uv_min.y > tile_uv_origin.y + 1.0f)
+    {
+      continue;
+    }
+
+    ImageUser iuser = {};
+    iuser.tile = tile.tile_number;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(session.image, &iuser, nullptr);
+    if (ibuf == nullptr) {
+      continue; /* Tile without a buffer is skipped, not an error (spec §16). */
+    }
+    const int2 tile_resolution(ibuf->x, ibuf->y);
+
+    /* Pixel bounds within THIS tile, computed directly from tile-local UV. */
+    TileRegion region;
+    region.x0 = std::max(0,
+                         int(std::floor((bounds_uv_min.x - tile_uv_origin.x) * float(ibuf->x))));
+    region.y0 = std::max(0,
+                         int(std::floor((bounds_uv_min.y - tile_uv_origin.y) * float(ibuf->y))));
+    region.x1 = std::min(ibuf->x,
+                         int(std::ceil((bounds_uv_max.x - tile_uv_origin.x) * float(ibuf->x))));
+    region.y1 = std::min(ibuf->y,
+                         int(std::ceil((bounds_uv_max.y - tile_uv_origin.y) * float(ibuf->y))));
+
+    if (region.x1 > region.x0 && region.y1 > region.y0) {
+      push_undo_tiles_for_region(region, *session.tiles, *session.image, *ibuf, iuser);
+      blend_tile_region(region,
+                        *ibuf,
+                        patch,
+                        session.doc.texture,
+                        ctx,
+                        *brush,
+                        brush_color_linear,
+                        tex_pool,
+                        tile_uv_origin,
+                        tile_resolution,
+                        session.ref_tile_uv_origin,
+                        session.ref_tile_resolution);
+      /* Deliberately NOT `ED_imapaint_dirty_region()`. Half of what that does is push the
+       * "before" tiles into the IN-FLIGHT image undo step, which it reaches through
+       * `ED_image_paint_tile_map_get()` -- and this session holds no such step by design: it
+       * captures into its own map, two lines above, precisely so that no foreign operator can take
+       * a transaction out from under a live patch (see #ED_image_paint_tile_map_new). With nothing
+       * in flight that lookup returns null and the very first stamp dereferenced it.
+       *
+       * What is actually wanted here is the other half: mark the image dirty and tell the
+       * partial-update system which pixels changed. The `imapaintpartial` rectangle
+       * `ED_imapaint_dirty_region()` also accumulates belongs to `PAINT_OT_image_paint`'s stroke,
+       * which clears and consumes it; a patch never does either, so feeding it only left a stale
+       * dirty rect behind for the next real stroke. */
+      BKE_image_mark_dirty(session.image, ibuf);
+      rcti updated_region;
+      BLI_rcti_init(&updated_region, region.x0, region.x1, region.y0, region.y1);
+      BKE_image_partial_update_mark_region(session.image, &tile, ibuf, &updated_region);
+    }
+
+    BKE_image_release_ibuf(session.image, ibuf, nullptr);
+  }
+
+  WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, session.image);
+}
+
+/* \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Final-Quality Draw
+ * \{ */
+
+void image_curve_patch_raster_draw_final(bContext *C, ImageCurvePatchSession &session)
+{
+  session.frozen_patch_params.final_quality = true;
+  image_curve_patch_geometry_rebuild(C, session);
+  image_curve_patch_raster_draw(C, session);
+}
+
+/* \} */
+
+}  // namespace blender::ed::sculpt_paint

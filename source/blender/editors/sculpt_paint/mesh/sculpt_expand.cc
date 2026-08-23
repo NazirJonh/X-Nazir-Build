@@ -202,7 +202,7 @@ static float falloff_value_vertex_get(const SculptSession &ss,
 
   float4 rgba;
   const float avg = BKE_brush_sample_tex_3d(
-      expand_cache.paint, brush, mtex, position, rgba, 0, ss.tex_pool);
+      expand_cache.paint, brush, mtex, position, rgba, 0, ss.tex_pool());
 
   const float distortion = (avg - 0.5f) * expand_cache.texture_distortion_strength *
                            expand_cache.max_vert_falloff;
@@ -2431,9 +2431,7 @@ static void ensure_sculptsession_data(Object &ob)
   islands::ensure_cache(ob);
   vert_random_access_ensure(ob);
   boundary::ensure_boundary_info(ob);
-  if (!ss.tex_pool) {
-    ss.tex_pool = BKE_image_pool_new();
-  }
+  ss.tex_pool_ensure();
 }
 
 /**

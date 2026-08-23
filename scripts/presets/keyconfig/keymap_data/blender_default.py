@@ -4804,6 +4804,27 @@ def km_pose(params):
 # ------------------------------------------------------------------------------
 # Object Paint Modes
 
+def _template_paintcurve_edit_core_items(mouse_key, *, sculpt_pick=False, delete_key='X'):
+    """Shared paint-curve edit bindings for Stroke: Curve and the Sculpt Curve Edit tool."""
+    items = []
+    if sculpt_pick:
+        items.append(("paintcurve.sculpt_pick", {"type": mouse_key, "value": 'PRESS'}, None))
+    items.extend([
+        ("paintcurve.insert_or_add_point", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True}, None),
+        ("paintcurve.context_menu", {"type": 'RIGHTMOUSE', "value": 'PRESS'}, None),
+        ("paintcurve.slide", {"type": mouse_key, "value": 'PRESS'},
+         {"properties": [("align", False), ("move_segment", True), ("select", True)]}),
+        ("paintcurve.slide", {"type": mouse_key, "value": 'PRESS', "shift": True},
+         {"properties": [("extend", True), ("move_segment", True)]}),
+        ("paintcurve.select", {"type": 'A', "value": 'PRESS'},
+         {"properties": [("toggle", True)]}),
+        ("paintcurve.duplicate_move", {"type": 'D', "value": 'PRESS', "shift": True}, None),
+        ("paintcurve.delete_point", {"type": delete_key, "value": 'PRESS'}, None),
+        ("paintcurve.delete_point", {"type": 'DEL', "value": 'PRESS'}, None),
+    ])
+    return items
+
+
 def km_paint_curve(params):
     items = []
     keymap = (
@@ -4812,26 +4833,22 @@ def km_paint_curve(params):
         {"items": items},
     )
 
+    items.extend(_template_paintcurve_edit_core_items(params.action_mouse))
     items.extend([
-        ("paintcurve.add_point_slide", {"type": params.action_mouse, "value": 'PRESS', "ctrl": True}, None),
-        ("paintcurve.select", {"type": params.select_mouse, "value": 'PRESS'}, None),
-        ("paintcurve.select", {"type": params.select_mouse, "value": 'PRESS', "shift": True},
-         {"properties": [("extend", True)]}),
-        ("paintcurve.slide", {"type": params.action_mouse, "value": 'PRESS'},
-         {"properties": [("align", False)]}),
-        ("paintcurve.slide", {"type": params.action_mouse, "value": 'PRESS', "shift": True},
-         {"properties": [("align", True)]}),
-        ("paintcurve.select", {"type": 'A', "value": 'PRESS'},
-         {"properties": [("toggle", True)]}),
+        ("paintcurve.slide", {"type": params.select_mouse, "value": 'PRESS'},
+         {"properties": [("align", False), ("move_segment", True)]}),
+        ("paintcurve.slide", {"type": params.select_mouse, "value": 'PRESS', "shift": True},
+         {"properties": [("extend", True), ("move_segment", True)]}),
+        ("paintcurve.slide_radius", {"type": params.select_mouse, "value": 'PRESS'}, None),
         ("paintcurve.cursor", {"type": params.action_mouse, "value": 'PRESS', "shift": True, "ctrl": True}, None),
-        ("paintcurve.delete_point", {"type": 'X', "value": 'PRESS'}, None),
-        ("paintcurve.delete_point", {"type": 'DEL', "value": 'PRESS'}, None),
         ("paintcurve.draw", {"type": 'RET', "value": 'PRESS'}, None),
         ("paintcurve.draw", {"type": 'NUMPAD_ENTER', "value": 'PRESS'}, None),
         ("transform.translate", {"type": 'G', "value": 'PRESS'}, None),
         ("transform.translate", {"type": params.select_mouse, "value": 'CLICK_DRAG'}, None),
         ("transform.rotate", {"type": 'R', "value": 'PRESS'}, None),
         ("transform.resize", {"type": 'S', "value": 'PRESS'}, None),
+        ("transform.transform", {"type": 'S', "value": 'PRESS', "alt": True},
+         {"properties": [("mode", 'CURVE_SHRINKFATTEN')]}),
     ])
 
     return keymap
@@ -6888,6 +6905,33 @@ def km_sculpt_mesh_filter_modal_map(_params):
     return keymap
 
 
+def km_curve_patch_edit_modal_map(_params):
+    items = []
+    keymap = (
+        "Curve Patch Edit Modal Map",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW', "modal": True},
+        {"items": items},
+    )
+
+    items.extend([
+        ("CONFIRM", {"type": 'RET', "value": 'PRESS', "any": True}, None),
+        ("CONFIRM", {"type": 'NUMPAD_ENTER', "value": 'PRESS', "any": True}, None),
+        ("CANCEL", {"type": 'ESC', "value": 'PRESS', "any": True}, None),
+        ("UNDO", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
+        ("UNDO", {"type": 'Z', "value": 'PRESS', "oskey": True}, None),
+        ("REDO", {"type": 'Z', "value": 'PRESS', "ctrl": True, "shift": True}, None),
+        ("REDO", {"type": 'Z', "value": 'PRESS', "oskey": True, "shift": True}, None),
+        ("TOGGLE_CYCLIC", {"type": 'C', "value": 'PRESS'}, None),
+        ("SWAP_AXIS", {"type": 'Y', "value": 'PRESS'}, None),
+        ("TRANSLATE", {"type": 'G', "value": 'PRESS'}, None),
+        ("ROTATE", {"type": 'R', "value": 'PRESS'}, None),
+        ("SCALE", {"type": 'S', "value": 'PRESS'}, None),
+        ("RADIUS", {"type": 'S', "value": 'PRESS', "alt": True}, None),
+        ("DELETE", {"type": 'DEL', "value": 'PRESS'}, None),
+    ])
+    return keymap
+
+
 def km_curve_pen_modal_map(_params):
     items = []
     keymap = (
@@ -8665,6 +8709,23 @@ def km_3d_view_tool_sculpt_face_set_edit(params):
     )
 
 
+def km_3d_view_tool_sculpt_curves_edit(params):
+    items = _template_paintcurve_edit_core_items(params.tool_mouse, sculpt_pick=True)
+    items.extend([
+        ("paintcurve.slide_radius", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+        ("transform.translate", {"type": 'G', "value": 'PRESS'}, None),
+        ("transform.rotate", {"type": 'R', "value": 'PRESS'}, None),
+        ("transform.resize", {"type": 'S', "value": 'PRESS'}, None),
+        ("transform.transform", {"type": 'S', "value": 'PRESS', "alt": True},
+         {"properties": [("mode", 'CURVE_SHRINKFATTEN')]}),
+    ])
+    return (
+        "3D View Tool: Sculpt, Curves Edit",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": items},
+    )
+
+
 # ------------------------------------------------------------------------------
 # Tool System (3D View, Weight Paint)
 
@@ -9329,6 +9390,7 @@ def generate_keymaps(params=None):
         km_paint_stroke_modal(params),
         km_sculpt_expand_modal(params),
         km_sculpt_mesh_filter_modal_map(params),
+        km_curve_patch_edit_modal_map(params),
         km_curve_pen_modal_map(params),
         km_pen_tool_modal_map(params),
         km_node_link_modal_map(params),
@@ -9470,6 +9532,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_color_filter(params),
         km_3d_view_tool_sculpt_mask_by_color(params),
         km_3d_view_tool_sculpt_face_set_edit(params),
+        km_3d_view_tool_sculpt_curves_edit(params),
         km_3d_view_tool_paint_weight_sample_weight(params),
         km_3d_view_tool_paint_weight_sample_vertex_group(params),
         km_3d_view_tool_paint_weight_gradient(params),

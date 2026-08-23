@@ -96,6 +96,22 @@ namespace ed::sculpt_paint {
 
 using StrokeDone = void (*)(PaintStroke *stroke, bool is_cancel);
 
+/**
+ * The message to report when a live Curve Patch session must be finished before anything else may
+ * paint, or null when no session is live.
+ *
+ * There are two independent sessions -- 3D Sculpt Mode's (`SculptSession::curve_patch_session`)
+ * and the Image Editor's module singleton -- and only one of them may be live at a time, so that
+ * the user can always tell what an edit is about to change. Every stroke operator asks this at
+ * invoke, BEFORE the stroke starts: refusing after the drag would throw away work the user has
+ * already done. Declared here rather than in `paint_curve_patch_session.hh` because the callers
+ * are four unrelated stroke operators that have no other reason to pull in a Curve Patch header.
+ *
+ * The returned string is a static literal naming WHICH editor holds the session, and how to end
+ * it; it is never owned by the caller.
+ */
+const char *curve_patch_active_session_message(const bContext &C);
+
 /* stroke operator */
 
 struct PaintSample {

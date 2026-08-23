@@ -1210,47 +1210,18 @@ static void apply_paint_channel(ImageData &image_data,
           float3 b_screen(0.0f, 1.0f, 0.0f);
           float3 t_m(1.0f, 0.0f, 0.0f);
           float3 b_m(0.0f, 1.0f, 0.0f);
-          float2 screen[3] = {};
-          float det = 0.0f;
           if (is_normal_channel && sampler != nullptr) {
-            const float3 edge1 = tri_positions[1] - tri_positions[0];
-            const float3 edge2 = tri_positions[2] - tri_positions[0];
-            n_m = math::normalize(math::cross(edge1, edge2));
-            screen[0] = ED_view3d_project_float_v2_m4(region, tri_positions[0], projection_mat);
-            screen[1] = ED_view3d_project_float_v2_m4(region, tri_positions[1], projection_mat);
-            screen[2] = ED_view3d_project_float_v2_m4(region, tri_positions[2], projection_mat);
-            const float2 sx = screen[1] - screen[0];
-            const float2 sy = screen[2] - screen[0];
-            det = sx.x * sy.y - sx.y * sy.x;
-            if (math::abs(det) > 1e-8f) {
-              const float3 dp_dx = (edge1 * sy.y - edge2 * sx.y) / det;
-              t_screen = dp_dx - n_m * math::dot(dp_dx, n_m);
-              b_screen = math::cross(n_m, t_screen);
-              const float t_screen_len = math::length(t_screen);
-              const float b_screen_len = math::length(b_screen);
-              if (t_screen_len > 1e-6f) {
-                t_screen /= t_screen_len;
-              }
-              if (b_screen_len > 1e-6f) {
-                b_screen /= b_screen_len;
-              }
-            }
-            else {
-              t_screen = view_right - n_m * math::dot(view_right, n_m);
-              t_screen = math::normalize(t_screen);
-              b_screen = math::cross(n_m, t_screen);
-            }
-            t_m = tri_tangent - n_m * math::dot(tri_tangent, n_m);
-            const float t_len = math::length(t_m);
-            if (t_len > 1e-6f) {
-              t_m /= t_len;
-            }
-            else {
-              float fallback[3];
-              ortho_v3_v3(fallback, n_m);
-              t_m = math::normalize(float3(fallback));
-            }
-            b_m = math::cross(n_m, t_m) * tri_bitangent_sign;
+            material::build_normal_write_basis(tri_tangent,
+                                               tri_bitangent_sign,
+                                               tri_positions,
+                                               view_right,
+                                               region,
+                                               projection_mat,
+                                               t_screen,
+                                               b_screen,
+                                               n_m,
+                                               t_m,
+                                               b_m);
           }
 
           threading::parallel_for(IndexRange(row_size), 512, [&](const IndexRange range) {

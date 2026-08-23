@@ -733,6 +733,12 @@ CurvePatchCurveEditor::Status CurvePatchCurveEditor::handle_event(bContext &C,
 
     case LEFTMOUSE:
       if (event.val == KM_PRESS) {
+        if ((event.modifier & KM_ALT) != 0) {
+          /* Alt+LMB is reserved for view navigation (#IMAGE_OT_view_rotate_interactive in the 2D
+           * canvas, orbit in the 3D viewport) -- never a curve-patch action -- so it must reach
+           * the keymap underneath untouched, rather than being swallowed as a "miss" below. */
+          return Status::PassThrough;
+        }
         if (!this->drag_start_from_press(C, event, host, adapter)) {
           /* A miss inside the region is swallowed rather than passed through: underneath sits the
            * paint keymap, whose stroke operator would start painting on top of the live patch.

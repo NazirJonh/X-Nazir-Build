@@ -125,11 +125,12 @@ struct PaintCurveOverlayModes {
  * `cursor_valid` is the caller's "this is an interactive draw and the cursor position is real"
  * flag; `ctrl_pressed` gates the insert preview alone. `is_curve_patch_active` reports whether a
  * live Curve Patch session already published an overlay -- such a session keeps its affordances
- * whatever the brush now says.
+ * whatever the brush now says. Space (View3D vs Image Editor) is not part of this gate: a plain
+ * Stroke Method: Curve is screen-space and hovers in the Image Editor exactly as a 3D one hovers
+ * in the viewport.
  */
 PaintCurveOverlayModes ED_paint_curve_overlay_modes_get(const Brush *brush,
                                                         const char *active_tool_idname,
-                                                        bool is_space_v3d,
                                                         bool is_curve_patch_active,
                                                         bool cursor_valid,
                                                         bool ctrl_pressed);

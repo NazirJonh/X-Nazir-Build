@@ -292,15 +292,17 @@ bool ED_paint_curve_overlay_is_relevant(const Brush *brush,
 
 PaintCurveOverlayModes ED_paint_curve_overlay_modes_get(const Brush *brush,
                                                         const char *active_tool_idname,
-                                                        const bool is_space_v3d,
                                                         const bool is_curve_patch_active,
                                                         const bool cursor_valid,
                                                         const bool ctrl_pressed)
 {
   PaintCurveOverlayModes modes;
-  if (!cursor_valid || !is_space_v3d || paintcurve_slide_is_active()) {
+  if (!cursor_valid || paintcurve_slide_is_active()) {
     /* Mid-slide the affordances would fight the drag: the hover would chase the point being
-     * moved, and the insert marker would offer to subdivide a segment that is reshaping. */
+     * moved, and the insert marker would offer to subdivide a segment that is reshaping. A plain
+     * Stroke Method: Curve is screen-space and edited in the Image Editor just as legitimately as
+     * a 3D one is edited in the viewport, so space is not a gate here -- #ED_paint_curve_overlay_
+     * draws_brush_curve already refused to draw an object-space curve outside a View3D region. */
     return modes;
   }
 

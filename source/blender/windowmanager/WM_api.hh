@@ -787,10 +787,16 @@ void WM_event_remove_modal_handler_all(const wmOperator *op, bool postpone) ATTR
  * untouched, so this can be called again later (e.g. every modal tick) to pick up windows opened
  * after the operator started.
  *
- * The invoking window keeps its own frozen area/region (from \a C). Other windows get the first
- * region of type \a region_type found in an area of type \a space_type; if none is found there,
- * that window is registered with a null area/region (same as `WM_event_add_modal_handler_ex()`
- * accepts for any other window).
+ * The context window keeps its own area/region from \a C, but only when they are of the requested
+ * kind -- on a later call `C` describes whatever is current, which may be a temporary window.
+ * Every other window gets the first region of type \a region_type found in an area of type
+ * \a space_type.
+ *
+ * A window with no such region is SKIPPED, never registered with a null area/region. It has
+ * nothing for the operator to intercept, and registering there is not harmless: closing a window
+ * runs #WM_event_remove_handlers over its modal handlers, which cancels and frees the shared
+ * \a op. Temporary windows (File Browser, render, preferences) would otherwise end the modal when
+ * they close.
  */
 wmEventHandler_Op *WM_event_add_modal_handler_all_windows(bContext *C,
                                                           wmOperator *op,

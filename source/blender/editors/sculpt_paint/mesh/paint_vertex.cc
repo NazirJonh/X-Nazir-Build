@@ -45,6 +45,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_report.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -2170,6 +2171,13 @@ void VertexPaintStroke::done(bool /*is_cancel*/, bool /*stroke_started*/)
 
 static wmOperatorStatus vpaint_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  /* One live Curve Patch at a time -- see `sculpt_brush_stroke_invoke()`. Vertex Paint reaches a
+   * mesh a live patch may be previewing on, so it is gated the same way. */
+  if (const char *blocked = curve_patch_active_session_message(*C)) {
+    BKE_report(op->reports, RPT_WARNING, blocked);
+    return OPERATOR_CANCELLED;
+  }
+
   VertexPaintStroke *stroke = MEM_new<VertexPaintStroke>(__func__, C, op, event->type);
   op->customdata = stroke;
 

@@ -6758,6 +6758,14 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
                                                    wmOperator *op,
                                                    const wmEvent *event)
 {
+  /* Only one Curve Patch may be live at a time, in one editor, so the user can always tell what
+   * an edit is about to change -- and nothing else may paint over the canvas it is previewing.
+   * Checked here, before the stroke starts, so a refusal never costs the user a finished drag. */
+  if (const char *blocked = curve_patch_active_session_message(*C)) {
+    BKE_report(op->reports, RPT_WARNING, blocked);
+    return OPERATOR_CANCELLED;
+  }
+
   SculptPaintStroke *stroke;
   int ignore_background_click;
   Object &ob = *CTX_data_active_object(C);

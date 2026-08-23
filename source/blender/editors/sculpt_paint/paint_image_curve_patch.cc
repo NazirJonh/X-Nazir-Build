@@ -33,6 +33,7 @@
 
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 
@@ -43,6 +44,7 @@
 
 #include "MEM_guardedalloc.h"
 #include "WM_api.hh"
+
 
 #include "UI_view2d.hh"
 
@@ -63,6 +65,7 @@ namespace ed::sculpt_paint {
  * anchor-stroke integration (Stage 6) both look this up; both treat "active" as a precondition
  * for their own work. */
 static ImageCurvePatchSession *g_active_session = nullptr;
+
 
 bool image_curve_patch_session_active()
 {
@@ -261,6 +264,10 @@ static CurvePatchLiveInputs image_curve_patch_live_inputs_capture(ImageCurvePatc
 
   CurvePatchLiveInputs in = curve_patch_live_inputs_capture(paint, brush);
   in.blend = brush.blend;
+  /* Toggling Symmetry X/Y mid-session does not touch the Brush at all -- #symmetry_flags lives on
+   * `Paint` -- so without this the watchdog's compare never changed and the checkbox had no effect
+   * until some UNRELATED live input (color, alpha, ...) happened to re-stamp anyway. */
+  in.image_symmetry_flags = int(paint.symmetry_flags & (PAINT_SYMM_X | PAINT_SYMM_Y));
   return in;
 }
 
@@ -282,7 +289,8 @@ bool image_curve_patch_session_sync_live_brush(bContext *C, ImageCurvePatchSessi
     return false;
   }
 
-  if (live.needs_texture_pool_rebuild(session->doc.last_synced)) {
+  const bool pool_rebuild = live.needs_texture_pool_rebuild(session->doc.last_synced);
+  if (pool_rebuild) {
     session->tex_pool_invalidate();
   }
   /* Fields the writer reads straight off the session rather than off the brush. Keeping them in
@@ -355,8 +363,13 @@ bool ED_image_curve_patch_overlay_geometry_get(const ARegion *region,
   r_geometry = src;
   auto project = [&](MutableSpan<float3> coords) {
     for (float3 &co : coords) {
-      co = float3(
-          ui::view2d_view_to_region_x(v2d, co.x), ui::view2d_view_to_region_y(v2d, co.y), 0.0f);
+      float region_x, region_y;
+      /* #view2d_view_to_region_fl, not the un-rotated per-axis #view2d_view_to_region_x/y: those
+       * two skip #View2D::rotation entirely (they exist for callers that genuinely want the
+       * axis-aligned rect, e.g. scrollers), so the overlay's points stayed screen-locked instead
+       * of turning with the canvas once #SpaceImage::rotation was non-zero. */
+      ui::view2d_view_to_region_fl(v2d, co.x, co.y, &region_x, &region_y);
+      co = float3(region_x, region_y, 0.0f);
     }
   };
   project(r_geometry.positions_for_write());

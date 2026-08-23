@@ -4846,7 +4846,14 @@ wmEventHandler_Op *WM_event_add_modal_handler_all_windows(bContext *C,
     }
     ScrArea *area = nullptr;
     ARegion *region = nullptr;
-    if (&win == invoke_win) {
+    /* The context's own area/region are preferred for the context window, but only when they are
+     * of the requested kind. This function is re-run on every modal tick, by which time `C` no
+     * longer describes the invoke: it describes whatever is current, and that can be a temporary
+     * window (the File Browser `image.open` opens) whose area is a #SPACE_FILE. Trusting the
+     * context blindly registered the operator there. */
+    if (&win == invoke_win && invoke_area != nullptr && invoke_region != nullptr &&
+        invoke_area->spacetype == space_type && invoke_region->regiontype == region_type)
+    {
       area = invoke_area;
       region = invoke_region;
     }
@@ -4869,6 +4876,16 @@ wmEventHandler_Op *WM_event_add_modal_handler_all_windows(bContext *C,
           }
         }
       }
+    }
+    if (region == nullptr) {
+      /* No region of the requested kind in this window, so there is nothing here for the operator
+       * to intercept -- and registering anyway is actively harmful. Temporary windows (the File
+       * Browser opened by `image.open`, the render and preferences windows) match nothing, yet
+       * #wm_window_close() runs #WM_event_remove_handlers over the closing window's modal
+       * handlers, which calls `cancel` and then #WM_operator_free on the SHARED operator. Closing
+       * such a window therefore killed a live multi-window modal that had nothing to do with it.
+       */
+      continue;
     }
     wmEventHandler_Op *handler = WM_event_add_modal_handler_ex(&win, area, region, op);
     if (&win == invoke_win) {

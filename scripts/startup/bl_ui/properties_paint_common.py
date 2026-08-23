@@ -587,7 +587,15 @@ class StrokePanel(BrushPanel):
                 # implementation, so every supported brush gives the same result. Say so,
                 # otherwise the allowlist implies a distinction that does not exist.
                 if brush.sculpt_brush_type == 'PAINT':
-                    col.label(text="Paints the active color attribute; direction is ignored")
+                    # Which array the patch writes follows the Paint Mode canvas, so naming the
+                    # active color attribute unconditionally would be wrong for the other two.
+                    canvas_source = context.tool_settings.paint_mode.canvas_source
+                    if canvas_source == 'MATERIAL_PAINT':
+                        col.label(text="Paints the enabled material channels; direction is ignored")
+                    elif canvas_source in {'MATERIAL', 'IMAGE'}:
+                        col.label(text="Paints the canvas image; direction is ignored")
+                    else:
+                        col.label(text="Paints the active color attribute; direction is ignored")
                 else:
                     col.label(text="Brush type affects strength, radius and texture only")
             col.row().prop(cp, "stamp_mode", text="Curve Patch", expand=True)

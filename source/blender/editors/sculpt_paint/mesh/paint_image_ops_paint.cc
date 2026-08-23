@@ -748,6 +748,15 @@ static void curve_patch_session_takeover(bContext *C)
 
 static wmOperatorStatus paint_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  /* See the matching guard in `sculpt_brush_stroke_invoke()`: one live Curve Patch at a time,
+   * refused before the stroke rather than after it. This is the path the exclusivity actually
+   * matters on -- the 2D modal only registers in its own area, so without this a live Image
+   * Editor patch left 3D painting wide open, and vice versa. */
+  if (const char *blocked = curve_patch_active_session_message(*C)) {
+    BKE_report(op->reports, RPT_WARNING, blocked);
+    return OPERATOR_CANCELLED;
+  }
+
   ImagePaintStroke *stroke = MEM_new<ImagePaintStroke>(__func__, C, op, event->type);
   op->customdata = stroke;
 

@@ -28,6 +28,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 
+#include "paint_curve_patch_document.hh"
 #include "paint_curve_patch_sampler.hh"
 #include "paint_curve_patch_session.hh"
 
@@ -163,12 +164,42 @@ inline float curve_patch_blend_across_passes(CurvePatchApplyState &apply,
  * modal editor already re-stamps when the slider changes
  * (`CurvePatchEditOpData::last_synced_alpha`).
  */
+/**
+ * The RGB one sample paints.
+ *
+ * The sampler already returns the ribbon texture's full RGBA in #CurvePatchSample::tex_color,
+ * sampled at the ribbon's own `(u, v)`. Only the alpha used to be read, so a ribbon with a color
+ * texture assigned painted a flat brush color and the texture was invisible in the result.
+ *
+ * When a texture is assigned its color IS the paint color -- the same rule the raster PBR engine
+ * follows ("a source, or the texture itself, is the color; the Color slider does not multiply",
+ * `mesh/paint_image_2d.cc`). With no texture the caller's own color is returned unchanged.
+ *
+ * \param tex_valid: #CurvePatchSample::tex_valid, i.e. whether a texture was actually evaluated
+ * AT THIS ELEMENT. Deliberately per-sample: a brush-wide "has a texture somewhere" test answers
+ * a different question, and answering this one with it paints an opaque white ribbon wherever the
+ * branch that ran had no texture of its own.
+ *
+ * Only callers that write a COLOR may use this. A scalar material channel carries its value in
+ * #CurvePatchSample::value already, and Normal writes a packed direction that a texture's RGB
+ * would corrupt.
+ */
+inline float3 curve_patch_paint_color(const float3 &base_color,
+                                      const float4 &tex_color,
+                                      const bool tex_valid)
+{
+  return tex_valid ? float3(tex_color) : base_color;
+}
+
+/** \param tex_valid: see #curve_patch_paint_color -- an unevaluated texture contributes no alpha
+ * either, or a textureless stamp would fade the ribbon by its identity alpha of 1 (harmless) while
+ * a textureless SINGLE ribbon would do the same for a texture the user never assigned. */
 inline float curve_patch_color_mix_factor(const float blended,
                                           const float4 &tex_color,
-                                          const bool has_texture,
+                                          const bool tex_valid,
                                           const float strength)
 {
-  const float source_alpha = has_texture ? tex_color.w : 1.0f;
+  const float source_alpha = tex_valid ? tex_color.w : 1.0f;
   return std::clamp(blended, 0.0f, 1.0f) * source_alpha * strength;
 }
 

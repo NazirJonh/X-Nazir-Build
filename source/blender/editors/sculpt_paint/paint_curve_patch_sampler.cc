@@ -24,6 +24,7 @@
 #include "BLI_bounds_types.hh"
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
 
 #include "paint_curve_patch_session.hh"
@@ -40,10 +41,35 @@ float3 curve_patch_canonicalize(const CurvePatchStrokeContext &ctx, const float3
   return flipped;
 }
 
+float3 curve_patch_decanonicalize_dir(const CurvePatchStrokeContext &ctx, const float3 &dir)
+{
+  /* Inverse of #curve_patch_canonicalize, in the reverse order: the rotation is undone with the
+   * transpose of its own inverse (a rotation matrix), and the mirror is its own inverse. Applied
+   * to DIRECTIONS only, which is why the translation-free 3x3 part is all that is needed. */
+  const float3 unrotated = ctx.radial_symmetry_pass ?
+                               math::transpose(float3x3(ctx.symm_rot_mat_inv)) * dir :
+                               dir;
+  return symmetry_flip(unrotated, ctx.mirror_symmetry_pass);
+}
+
 float curve_patch_cull_tube_radius(const bke::CurvePatchGeometry &geometry, const float max_radius)
 {
   return 2.5f * max_radius + geometry.ribbon_end_margin;
 }
+
+#if CURVE_PATCH_PROFILING
+void CurvePatchSampler::BranchFunnel::add(const BranchFunnel &other)
+{
+  branch_calls += other.branch_calls;
+  rej_radius += other.rej_radius;
+  rej_normal_dist += other.rej_normal_dist;
+  rej_falloff += other.rej_falloff;
+  rej_endpoint += other.rej_endpoint;
+  rej_s_range += other.rej_s_range;
+  rej_end_falloff += other.rej_end_falloff;
+  rej_late += other.rej_late;
+}
+#endif
 
 CurvePatchSampler::CurvePatchSampler(const CurvePatchItem &item,
                                      const CurvePatchTextureBinding &texture,
@@ -148,6 +174,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
    * not actually reach it. */
   auto branch_relief = [&](const float3 &sample_co,
                            const float2 ribbon_uv) -> std::optional<CurvePatchSample> {
+#if CURVE_PATCH_PROFILING
+    dbg_branch_funnel_.branch_calls++;
+#endif
     const float s = ribbon_uv.y;
     /* Signed offset from the surface, measured against the curve point the ribbon mapped this
      * sample to (NOT the globally-closest point -- consistent with the ribbon's own branch
@@ -174,6 +203,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * globally) to get an actual world-space falloff radius comparable to `lateral`/`s` below. */
     const float falloff_radius_at_s = item.geometry.spline.radius_at(s) * item.params.radius;
     if (falloff_radius_at_s <= 0.0f) {
+#if CURVE_PATCH_PROFILING
+      dbg_branch_funnel_.rej_radius++;
+#endif
       return std::nullopt;
     }
 
@@ -204,6 +236,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * near-edge vertices on the intended face (small `normal_dist` from slight surface curvature)
      * still pass. */
     if (std::abs(normal_dist) > 2.0f * falloff_radius_at_s) {
+#if CURVE_PATCH_PROFILING
+      dbg_branch_funnel_.rej_normal_dist++;
+#endif
       return std::nullopt;
     }
     /* In-plane offset reconstructed from the ribbon's normalized across-strip coordinate; the
@@ -231,6 +266,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
     const float lateral_falloff = BKE_brush_curve_strength(
         &brush, radial_dist, falloff_radius_at_s);
     if (lateral_falloff <= 0.0f) {
+#if CURVE_PATCH_PROFILING
+      dbg_branch_funnel_.rej_falloff++;
+#endif
       return std::nullopt;
     }
 
@@ -262,6 +300,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       if (!endpoint_contains(item.params.start_point_shape, s) ||
           !endpoint_contains(item.params.end_point_shape, total_length - s))
       {
+#if CURVE_PATCH_PROFILING
+        dbg_branch_funnel_.rej_endpoint++;
+#endif
         return std::nullopt;
       }
     }
@@ -278,6 +319,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      */
     if (s < -item.geometry.ribbon_end_margin || s > total_length + item.geometry.ribbon_end_margin)
     {
+#if CURVE_PATCH_PROFILING
+      dbg_branch_funnel_.rej_s_range++;
+#endif
       return std::nullopt;
     }
 
@@ -311,6 +355,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       }
     }
     if (end_falloff <= 0.0f) {
+#if CURVE_PATCH_PROFILING
+      dbg_branch_funnel_.rej_end_falloff++;
+#endif
       return std::nullopt;
     }
 
@@ -338,6 +385,16 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * below pre- initialize their local buffers to before the null-texture guard, so threading it
      * through changes nothing for the no-texture case. */
     float tex_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    /* Raised only where a texture is actually evaluated below; see #CurvePatchSample::tex_valid
+     * for why the caller may not infer this from the brush. */
+    bool tex_valid = false;
+    /* Filled by whichever branch below runs; see #CurvePatchSample::patch_uv. */
+    float2 patch_uv(0.0f, 0.0f);
+    bool patch_uv_valid = false;
+    /* World-space frame of the coordinates above, still canonical here; de-canonicalized once at
+     * the bottom, where the sample is built. See #CurvePatchSample::patch_axis_u. */
+    float3 patch_axis_u(1.0f, 0.0f, 0.0f);
+    float3 patch_axis_v(0.0f, 1.0f, 0.0f);
     if (item.params.stamp_mode == CurvePatchStampMode::Stamps) {
       /* Find the stamps whose square could cover this vertex. The list is sorted by `center_v`,
        * so a lower-bound on `s - max_extent` opens a window that closes as soon as a stamp starts
@@ -406,6 +463,18 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         if (item.params.swap_axis) {
           std::swap(stamp_u, stamp_v);
         }
+        /* Kept before the Size / Offset transform below: consumers that sample a texture of
+         * their own in this frame apply their own mapping. */
+        const float2 stamp_patch_uv(stamp_u, stamp_v);
+        /* The stamp's rigid world frame IS the frame `stamp_u`/`stamp_v` grow in -- in the
+         * curvilinear projection too, where `local_u`/`local_v` rotate the ribbon's `(T, B)` pair
+         * by `-angle`, giving exactly the axes #curve_patch_stamps_build froze. Swapped alongside
+         * the coordinates so the pair keeps describing them. */
+        float3 stamp_axis_u = it->axis_u;
+        float3 stamp_axis_v = it->axis_v;
+        if (item.params.swap_axis) {
+          std::swap(stamp_axis_u, stamp_axis_v);
+        }
         stamp_u = stamp_u * mtex_size.x + mtex_ofs.x;
         stamp_v = stamp_v * mtex_size.y + mtex_ofs.y;
 
@@ -423,6 +492,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         }
         float sample = 1.0f;
         float sample_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        const bool stamp_tex_valid = stamp_mtex.tex != nullptr;
         if (stamp_mtex.tex != nullptr) {
 #if CURVE_PATCH_PROFILING
           dbg_tex_evals_++;
@@ -455,10 +525,20 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
            * sampled last. Mirrors how `tex_value`/`stamp_strength` are kept in sync with the
            * winning candidate above. */
           copy_v4_v4(tex_rgba, sample_rgba);
+          tex_valid = stamp_tex_valid;
+          /* Same reason as the RGBA above: the frame the patch reports must be the one the
+           * winning stamp defines, not whichever was sampled last. */
+          patch_uv = stamp_patch_uv;
+          patch_uv_valid = true;
+          patch_axis_u = stamp_axis_u;
+          patch_axis_v = stamp_axis_v;
         }
       }
       if (!hit) {
         /* Between stamps the surface is simply untouched. */
+#if CURVE_PATCH_PROFILING
+        dbg_branch_funnel_.rej_late++;
+#endif
         return std::nullopt;
       }
     }
@@ -486,6 +566,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
           item.geometry.spline.cyclic);
       if (!zone_sample.valid) {
         /* Two oversized caps squeezed the middle to nothing; leave that stretch untouched. */
+#if CURVE_PATCH_PROFILING
+        dbg_branch_funnel_.rej_late++;
+#endif
         return std::nullopt;
       }
 
@@ -495,6 +578,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       if (texture.caps_enabled && zone_mtex.tex == nullptr) {
         /* An unassigned zone leaves its stretch of the ribbon alone, which is what makes a
          * caps-only ribbon (no Middle texture) possible. */
+#if CURVE_PATCH_PROFILING
+        dbg_branch_funnel_.rej_late++;
+#endif
         return std::nullopt;
       }
 
@@ -502,6 +588,25 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       float tex_v = zone_sample.v;
       if (item.params.swap_axis) {
         std::swap(tex_u, tex_v);
+      }
+      /* The ribbon frame, before Size / Offset -- this is the "along the curve" orientation a
+       * PBR channel source has to be sampled in too. */
+      patch_uv = float2(tex_u, tex_v);
+      patch_uv_valid = true;
+      /* Same frame the LUT was rasterized in: `B = cross(T, plane_normal)` is the ribbon's `+u`
+       * side (#curve_patch_ribbon_build), and `s` -- hence `v` -- grows along `T`. Reported as a
+       * pair rather than a single angle so a swapped or mirrored patch stays describable. */
+      const float3 ribbon_along = item.geometry.spline.tangent_at(s);
+      float3 ribbon_across = math::cross(ribbon_along, item.geometry.spline.plane_normal);
+      const float ribbon_across_len = math::length(ribbon_across);
+      /* A tangent parallel to the plane normal leaves no lateral direction to report; the
+       * default axes stand in, and the consumer's own degeneracy handling takes over. */
+      if (ribbon_across_len > 1e-6f) {
+        patch_axis_u = ribbon_across / ribbon_across_len;
+        patch_axis_v = ribbon_along;
+        if (item.params.swap_axis) {
+          std::swap(patch_axis_u, patch_axis_v);
+        }
       }
       tex_u = tex_u * mtex_size.x + mtex_ofs.x;
       tex_v = tex_v * mtex_size.y + mtex_ofs.y;
@@ -517,6 +622,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         dbg_tex_evals_++;
 #endif
         paint_get_tex_pixel(&zone_mtex, tex_u, tex_v, &tex_pool_, thread_id, &tex_value, tex_rgba);
+        tex_valid = true;
       }
     }
 
@@ -531,7 +637,15 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
     return CurvePatchSample{orig,
                             height,
                             lateral_falloff * end_falloff,
-                            float4(tex_rgba[0], tex_rgba[1], tex_rgba[2], tex_rgba[3])};
+                            float4(tex_rgba[0], tex_rgba[1], tex_rgba[2], tex_rgba[3]),
+                            tex_valid,
+                            patch_uv,
+                            patch_uv_valid,
+                            /* Back into the space the caller's own surface data lives in -- every
+                             * axis above was derived from geometry frozen in the canonical
+                             * frame. */
+                            curve_patch_decanonicalize_dir(ctx, patch_axis_u),
+                            curve_patch_decanonicalize_dir(ctx, patch_axis_v)};
   };
 
   /* Relief at one sample position: the stretches covering it merged by keeping the strongest

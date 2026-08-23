@@ -101,15 +101,21 @@ static bool image_projected_geometry_get(bContext *C, bke::CurvesGeometry &r_geo
   return paintcurve_geometry_is_valid(r_geom);
 }
 
-/** Region-local pixel position as canonical UV. */
+/** Region-local pixel position as canonical UV.
+ *
+ * Goes through #ED_image_mouse_pos rather than a plain #ui::view2d_region_to_view: the View2D's
+ * own `cur`/`tot` stay axis-aligned even when the canvas is rotated (the rotation is an extra
+ * screen-space transform layered on top for drawing), so a raw region-to-view conversion ignores
+ * it and every point lands off the cursor once #SpaceImage::rotation is non-zero. */
 static float2 mval_uv_get(bContext *C, const int mval[2])
 {
+  const SpaceImage *sima = CTX_wm_space_image(C);
   const ARegion *region = CTX_wm_region(C);
-  if (region == nullptr) {
+  if (sima == nullptr || region == nullptr) {
     return float2(0.0f);
   }
   float2 uv(0.0f);
-  ui::view2d_region_to_view(&region->v2d, float(mval[0]), float(mval[1]), &uv.x, &uv.y);
+  ED_image_mouse_pos(const_cast<SpaceImage *>(sima), region, mval, uv);
   return uv;
 }
 
@@ -377,12 +383,17 @@ class ImageScreenAdapter : public CurvePatchScreenAdapter {
 
   bool project_to_screen(bContext &C, const float3 &co, float2 &r_mval) const override
   {
+    const SpaceImage *sima = CTX_wm_space_image(&C);
     const ARegion *region = CTX_wm_region(&C);
-    if (region == nullptr) {
+    if (sima == nullptr || region == nullptr) {
       return false;
     }
+    /* #ED_image_point_pos__reverse rather than a plain #ui::view2d_view_to_region_fl: it applies
+     * the canvas rotation (view->screen) that the axis-aligned View2D `cur`/`tot` does not know
+     * about, matching the inverse used by #mval_uv_get above. */
+    const float uv[2] = {co.x, co.y};
     float2 mval(0.0f);
-    ui::view2d_view_to_region_fl(&region->v2d, co.x, co.y, &mval.x, &mval.y);
+    ED_image_point_pos__reverse(const_cast<SpaceImage *>(sima), region, uv, mval);
     r_mval = mval;
     return true;
   }
@@ -493,6 +504,7 @@ static void curve_patch_edit_teardown(bContext *C, wmOperator *op)
   ED_paint_curve_overlay_tag_redraw_all(C);
 }
 
+
 static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   ImageCurvePatchSession *session = image_curve_patch_session_active_get();
@@ -512,8 +524,21 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
    * context is target-specific. Here the patch is kept -- the user built it, and the editing
    * context going away is not a request to throw it out. */
   const SpaceImage *sima = CTX_wm_space_image(C);
-  const bool context_valid = sima != nullptr && sima->mode == SI_MODE_PAINT &&
-                             sima->image == session->image && CTX_wm_region(C) != nullptr;
+  /* Which image the editor DISPLAYS stops identifying what the patch writes once Mode=`Material`
+   * is in play: the patch then writes every enabled Principled map, and the displayed one is just
+   * whichever channel the user is looking at. Switching that view -- or having it switched for
+   * them -- must not end the session.
+   *
+   * `session->image` stays pinned to the image the session started on regardless, because it is
+   * what `resolve_reference_tile()` builds the patch's pixel-space geometry against; re-pinning it
+   * mid-session would silently rescale a patch the user has already shaped. */
+  const Scene *scene = CTX_data_scene(C);
+  const bool material_canvas = scene != nullptr &&
+                               scene->toolsettings->paint_mode.canvas_source ==
+                                   PAINT_CANVAS_SOURCE_MATERIAL;
+  const bool canvas_valid = sima != nullptr && (material_canvas || sima->image == session->image);
+  const bool context_valid = sima != nullptr && sima->mode == SI_MODE_PAINT && canvas_valid &&
+                             CTX_wm_region(C) != nullptr;
   if (!context_valid) {
     image_curve_patch_session_commit(C, session);
     curve_patch_edit_teardown(C, op);
@@ -533,7 +558,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   if (event->type == TIMER && modal->sync_timer != nullptr &&
       event->customdata == modal->sync_timer)
   {
-    if (modal->host.sync_live_brush(*C) && !modal->host.is_alive(*C)) {
+    const bool synced = modal->host.sync_live_brush(*C);
+    if (synced && !modal->host.is_alive(*C)) {
       /* The re-stamp ended the session under us -- the same guard the core applies to its own
        * poll. */
       curve_patch_edit_teardown(C, op);

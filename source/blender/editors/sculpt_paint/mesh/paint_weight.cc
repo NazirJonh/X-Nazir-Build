@@ -1942,6 +1942,12 @@ static wmOperatorStatus wpaint_invoke(bContext *C, wmOperator *op, const wmEvent
     view3d_operator_needs_gpu(C);
   }
 
+  /* One live Curve Patch at a time -- see `sculpt_brush_stroke_invoke()`. */
+  if (const char *blocked = curve_patch_active_session_message(*C)) {
+    BKE_report(op->reports, RPT_WARNING, blocked);
+    return OPERATOR_CANCELLED;
+  }
+
   WeightPaintStroke *stroke = MEM_new<WeightPaintStroke>(__func__, C, op, event->type);
   op->customdata = stroke;
   vwpaint::init_stroke(*op, *stroke->bmain_, *stroke->paint, *stroke->depsgraph, *stroke->object);

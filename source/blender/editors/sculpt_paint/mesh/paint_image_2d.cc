@@ -1819,12 +1819,12 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   /* Re-initialize the curve mask. Mask is always recreated due to the change of position.
    * Extra material painters share the primary's rasterized mask when the dab diameter matches. */
+  const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(s->image);
 #if PBR_PAINT_2D_STROKE_PROFILE
   {
     const StrokePhaseTimer curve_timer(&g_stroke_curve_mask_seconds, &g_stroke_curve_mask_calls);
 #endif
     const CurveMaskCache *shared_mask = paint_2d_matching_curve_mask(shared_state, tile, diameter);
-    const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(s->image);
     const bool shared_mask_has_selection = shared_state != nullptr &&
                                            BKE_image_paint_selection_mask_has_any(shared_state->image);
     if (shared_mask != nullptr && !has_selection_mask && !shared_mask_has_selection) {

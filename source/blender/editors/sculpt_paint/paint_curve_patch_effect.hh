@@ -161,6 +161,22 @@ class CurvePatchEffect {
    * `curve_patch_restore_and_restamp()`, which reported it before the snapshot moved off the
    * cache; no non-debug caller may rely on it. */
   virtual int64_t snapshot_size() const = 0;
+
+  /** Elements THIS restamp wrote, for the same `CURVE_PATCH_PROFILING` line's `displaced` column.
+   *
+   * `nullopt` means "count me the standard way", i.e. from the shared cross-pass accumulator,
+   * which holds one entry per written element for every effect that blends through
+   * #curve_patch_blend_across_passes. Only an effect that accumulates elsewhere returns a value.
+   *
+   * Deliberately takes no `CurvePatchApplyState`: that type lives in `paint_curve_patch_session.hh`,
+   * which includes THIS header, so naming it here would close a cycle. The caller already holds
+   * the state and applies the fallback itself.
+   *
+   * Debug-only, exactly as #snapshot_size is; no non-debug caller may rely on it. */
+  virtual std::optional<int64_t> displaced_size() const
+  {
+    return std::nullopt;
+  }
 };
 
 /**

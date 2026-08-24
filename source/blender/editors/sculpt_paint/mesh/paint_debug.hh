@@ -27,7 +27,7 @@
  * Set to 1 to enable all PBR debug logging, 0 to compile it all out.
  * \{ */
 
-#define PBR_PAINT_DEBUG_LOG 0
+#define PBR_PAINT_DEBUG_LOG 1
 
 /** \} */
 
@@ -78,7 +78,7 @@
  *
  * Set to 1 for a profiling session, then back to 0.
  */
-#define PBR_PAINT_2D_STROKE_PROFILE 0
+#define PBR_PAINT_2D_STROKE_PROFILE 1
 
 /** paint_material_source.cc – ChannelSourceSampler construction and image-pool probe timing. */
 #if PBR_PAINT_DEBUG_LOG

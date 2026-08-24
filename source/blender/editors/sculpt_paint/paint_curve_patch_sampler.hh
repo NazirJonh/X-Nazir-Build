@@ -203,6 +203,26 @@ class CurvePatchSampler {
   std::optional<CurvePatchSample> sample(int idx, int thread_id) const;
 
 #if CURVE_PATCH_PROFILING
+  /** DEBUG-cpatch: why `branch_relief()` threw a branch away. The rejections plus the accepted
+   * remainder sum to `branch_calls`, which is what says WHICH test is worth making cheaper or
+   * hoisting ahead of the spline evaluations. */
+  struct BranchFunnel {
+    int64_t branch_calls = 0;
+    int64_t rej_radius = 0;
+    int64_t rej_normal_dist = 0;
+    int64_t rej_falloff = 0;
+    int64_t rej_endpoint = 0;
+    int64_t rej_s_range = 0;
+    int64_t rej_end_falloff = 0;
+    /** Stamp-layout and texture-zone rejections past the geometric funnel above. */
+    int64_t rej_late = 0;
+
+    void add(const BranchFunnel &other);
+  };
+  const BranchFunnel &dbg_branch_funnel() const
+  {
+    return dbg_branch_funnel_;
+  }
   int64_t dbg_reached_lut() const
   {
     return dbg_reached_lut_;
@@ -235,6 +255,7 @@ class CurvePatchSampler {
 #if CURVE_PATCH_PROFILING
   /* DEBUG-cpatch-image funnel counters. `mutable` because `sample()` is `const`; no atomics needed
    * because a sampler is constructed per chunk and a chunk is processed by a single thread. */
+  mutable BranchFunnel dbg_branch_funnel_;
   mutable int64_t dbg_reached_lut_ = 0;
   mutable int64_t dbg_reached_relief_ = 0;
   mutable int64_t dbg_tex_evals_ = 0;

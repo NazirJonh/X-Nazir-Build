@@ -310,13 +310,23 @@ class ImageColorEffect : public CurvePatchEffect {
    * whether that is worth doing. */
   double prof_p2_write_ = 0.0;
   /* PHASE 1 split, summed across threads (CPU-time; sums exceed `prof_phase1_`). */
-  double prof_p1_sample_ = 0.0;     /* Interpolation + patch sampling. */
+  /* The INTERNAL CONTROL of every PHASE 1 measurement: the barycentric position/normal/mask
+   * interpolation runs once per candidate pixel in the same loop as the patch sampling, and no
+   * ribbon/LUT optimization touches it. Its per-candidate cost must hold steady across runs; when
+   * it does not, the two runs drew different enough curves that `patch`/`cand` cannot be compared
+   * either. */
+  double prof_p1_interp_ = 0.0;
+  double prof_p1_sample_ = 0.0;     /* The `sampler.sample()` loop alone. */
   double prof_p1_read_ = 0.0;       /* `read_image_pixels()` on accepted chunks. */
   int64_t prof_candidates_ = 0;     /* Pixels sampled (vs the accepted `pixels` count). */
   int64_t prof_culled_ = 0;         /* Pixels in chunks skipped by the broad-phase cull. */
   int64_t prof_reached_lut_ = 0;    /* Passed cheap culls, reached the ribbon/frames LUT. */
   int64_t prof_reached_relief_ = 0; /* LUT returned >=1 branch. */
   int64_t prof_tex_evals_ = 0;      /* paint_get_tex_pixel calls. */
+  int64_t prof_shaded_ = 0;         /* Accepted pixels that sampled a material channel source. */
+  /* Which test in `branch_relief()` threw the work away. A counter rather than a timer on purpose
+   * -- a clock call costs more than the step it would time. */
+  CurvePatchSampler::BranchFunnel prof_branch_funnel_;
   int prof_pass_count_ = 0;
 #endif
 };
@@ -985,6 +995,7 @@ void ImageColorEffect::begin_restamp(const Depsgraph &depsgraph,
   prof_phase1_ = 0.0;
   prof_phase2_ = 0.0;
   prof_p2_write_ = 0.0;
+  prof_p1_interp_ = 0.0;
   prof_p1_sample_ = 0.0;
   prof_p1_read_ = 0.0;
   prof_candidates_ = 0;
@@ -992,6 +1003,8 @@ void ImageColorEffect::begin_restamp(const Depsgraph &depsgraph,
   prof_reached_lut_ = 0;
   prof_reached_relief_ = 0;
   prof_tex_evals_ = 0;
+  prof_shaded_ = 0;
+  prof_branch_funnel_ = {};
   prof_pass_count_ = 0;
 #endif
   SculptSession *ss = ob.runtime->sculpt_session;
@@ -1220,6 +1233,20 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   const bool target_masked_by_alpha = target.is_material_channel &&
                                       material::channel_uses_alpha_mask(alpha_masking_active,
                                                                         target_channel);
+  /* Decode a Base Color source once per CHUNK rather than once per pixel.
+   *
+   * The per-pixel decode goes through `IMB_colormanagement_colorspace_to_scene_linear_v3`, which
+   * re-acquires the colorspace's CPU processor on every call -- and that acquisition takes a mutex
+   * shared by every colorspace (`cpu_processor_cache.hh`), so with one worker per core the painted
+   * pixels spend most of their time queueing for a lock that then just hands back an
+   * already-built pointer. It measured at ~9 of the ~13 seconds of CPU this phase was spending.
+   * The buffer entry point takes that lock once for a whole span instead, which is why
+   * `do_paint_pixels()` and the 2D paint path already sample raw and call #decode_linear_batch
+   * afterwards; this is the same move for the Curve Patch path, and it is why the sampling below
+   * asks for `decode_linear = !batch_decode_color`. */
+  const bool batch_decode_color = target_has_source && target_paints_color &&
+                                  !target_paints_normal_source &&
+                                  channel_sources->needs_linear_conversion(target_channel);
 
   /* The channel's flat color, used where no source supplies one. Read from the LIVE brush, not
    * from the target's cached override -- see #curve_patch_channel_flat_color. */
@@ -1280,13 +1307,16 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   struct LocalData {
     Vector<ChunkWrite> chunks;
 #if CURVE_PATCH_PROFILING
-    /* DEBUG-cpatch-image: per-thread CPU-time split of PHASE 1. `sample` is the barycentric
-     * position/normal/mask interpolation plus the patch sampling (`sampler.sample()` per
-     * candidate); `read` is `read_image_pixels()`, run only for accepted chunks. `candidates` is
+    /* DEBUG-cpatch-image: per-thread CPU-time split of PHASE 1. `interp` is the barycentric
+     * position/normal/mask interpolation, `sample` the `sampler.sample()` loop it feeds -- split
+     * because `interp` is the one per-candidate cost no ribbon optimization touches, which makes
+     * it the control that says whether two runs are comparable at all. `read` is
+     * `read_image_pixels()`, run only for accepted chunks. `candidates` is
      * how many pixels were sampled at all -- compared against the reported `pixels` (accepted) it
      * shows how much of PHASE 1 is spent on pixels the patch then rejects. Summed across threads
      * after the parallel region, so the sums exceed the wall-clock `phase1`; their RATIO is the
      * signal. */
+    double interp_time = 0.0;
     double sample_time = 0.0;
     double read_time = 0.0;
     int64_t candidates = 0;
@@ -1297,6 +1327,11 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
     int64_t reached_lut = 0;
     int64_t reached_relief = 0;
     int64_t tex_evals = 0;
+    /* Accepted pixels that reached the channel-source sampling. That work runs per ACCEPTED pixel
+     * inside the same timed span as the per-CANDIDATE patch sampling, so `patch` only means the
+     * same thing across two runs at the same `shaded`/`cand` ratio. */
+    int64_t shaded = 0;
+    CurvePatchSampler::BranchFunnel branch_funnel;
 #endif
   };
   threading::EnumerableThreadSpecific<LocalData> all_tls;
@@ -1494,6 +1529,12 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
              *
              * The 512-pixel chunking itself is untouched: `read_image_pixels()` requires it, and
              * PHASE 2 still writes back whole chunks. */
+#if CURVE_PATCH_PROFILING
+            /* Chunk granularity on purpose: one clock pair per 512 pixels is noise-free, while a
+             * pair around each pixel's sampling would cost more than the sampling itself. */
+            const double prof_patch_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
+            local.interp_time += prof_patch_t0 - prof_sample_t0;
+#endif
             constexpr int64_t cull_span_size = 32;
             Vector<AcceptedPixel> accepted;
             int64_t span_end = 0;
@@ -1530,6 +1571,11 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
               }
               float3 source_color = target_flat_color;
               float alpha_factor = 1.0f;
+#if CURVE_PATCH_PROFILING
+              if (target_has_source || target_masked_by_alpha) {
+                local.shaded++;
+              }
+#endif
               if (target_has_source || target_masked_by_alpha) {
                 /* WHERE a channel source is sampled decides whether it turns with the curve.
                  *
@@ -1590,9 +1636,13 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                 else if (target_has_source) {
                   if (target_paints_color) {
                     source_color = use_patch_frame ?
-                                       channel_sources->color_at_uv(
-                                           target_channel, sample->patch_uv, thread_id) :
-                                       channel_sources->color(target_channel, *tex_ctx, thread_id);
+                                       channel_sources->color_at_uv(target_channel,
+                                                                    sample->patch_uv,
+                                                                    thread_id,
+                                                                    !batch_decode_color) :
+                                       channel_sources->color(
+                                           target_channel, *tex_ctx, thread_id,
+                                           !batch_decode_color);
                   }
                   else {
                     source_color = float3(
@@ -1621,23 +1671,39 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                source_color,
                                alpha_factor});
             }
+            if (batch_decode_color && !accepted.is_empty()) {
+              /* Gathered into a contiguous span because the decode entry point takes one. Every
+               * accepted pixel of this chunk sampled the color source -- the branch that fills
+               * `source_color` from it is selected by chunk-constant flags -- so the whole array
+               * decodes, with no per-pixel bookkeeping of which entries are raw. */
+              Vector<float3> raw_colors(accepted.size());
+              for (const int ai : accepted.index_range()) {
+                raw_colors[ai] = accepted[ai].source_color;
+              }
+              material::ChannelSourceSampler::decode_linear_batch(
+                  raw_colors, channel_sources->colorspace(target_channel));
+              for (const int ai : accepted.index_range()) {
+                accepted[ai].source_color = raw_colors[ai];
+              }
+            }
 #if CURVE_PATCH_PROFILING
             local.reached_lut += sampler.dbg_reached_lut();
             local.reached_relief += sampler.dbg_reached_relief();
             local.tex_evals += sampler.dbg_tex_evals();
+            local.branch_funnel.add(sampler.dbg_branch_funnel());
 #endif
             if (accepted.is_empty()) {
           /* Bail out BEFORE the read. The float overload of `read_image_pixels()` converts
            * the image buffer in place, so a chunk that is read must also be written back. */
 #if CURVE_PATCH_PROFILING
               local.sample_time += BLI_time_now_seconds() -
-                                   prof_sample_t0; /* DEBUG-cpatch-image */
+                                   prof_patch_t0; /* DEBUG-cpatch-image */
 #endif
               return;
             }
 #if CURVE_PATCH_PROFILING
-            local.sample_time += BLI_time_now_seconds() - prof_sample_t0; /* DEBUG-cpatch-image */
-            const double prof_read_t0 = BLI_time_now_seconds();           /* DEBUG-cpatch-image */
+            local.sample_time += BLI_time_now_seconds() - prof_patch_t0; /* DEBUG-cpatch-image */
+            const double prof_read_t0 = BLI_time_now_seconds();          /* DEBUG-cpatch-image */
 #endif
 
             Vector<float4> byte_storage;
@@ -1697,6 +1763,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   prof_phase1_ += BLI_time_now_seconds() - prof_phase1_t0; /* DEBUG-cpatch-image */
   /* Sum the per-thread PHASE 1 split now that the parallel region has joined. */
   for (const LocalData &local : all_tls) {
+    prof_p1_interp_ += local.interp_time;
     prof_p1_sample_ += local.sample_time;
     prof_p1_read_ += local.read_time;
     prof_candidates_ += local.candidates;
@@ -1704,6 +1771,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
     prof_reached_lut_ += local.reached_lut;
     prof_reached_relief_ += local.reached_relief;
     prof_tex_evals_ += local.tex_evals;
+    prof_shaded_ += local.shaded;
+    prof_branch_funnel_.add(local.branch_funnel);
   }
   const double prof_phase2_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
 #endif
@@ -2110,7 +2179,8 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
    * sampling pixels it then rejects (a culling-tightness signal). */
   printf(
       "[DEBUG-cpatch-image] passes=%d | build_px=%.2f cull=%.2f fetch=%.2f undo=%.2f phase1=%.2f "
-      "(sample=%.2f read=%.2f cpu) phase2=%.2f (write=%.2f) seam=%.2f (ms) | culled=%lld "
+      "(interp=%.2f sample=%.2f read=%.2f cpu) phase2=%.2f (write=%.2f) seam=%.2f (ms) | "
+      "culled=%lld "
       "cand=%lld lut=%lld "
       "relief=%lld texev=%lld pixels=%lld tiles=%lld\n",
       prof_pass_count_,
@@ -2119,6 +2189,7 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
       prof_fetch_ * to_ms,
       prof_undo_push_ * to_ms,
       prof_phase1_ * to_ms,
+      prof_p1_interp_ * to_ms,
       prof_p1_sample_ * to_ms,
       prof_p1_read_ * to_ms,
       prof_phase2_ * to_ms,
@@ -2131,6 +2202,39 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
       (long long)prof_tex_evals_,
       (long long)painted_slots_,
       (long long)orig_tiles_.size());
+
+  /* DEBUG-cpatch-funnel: where PHASE 1's work goes to die, all normalized per CANDIDATE pixel so
+   * two restamps of two DIFFERENT curves stay comparable -- absolute counts are not, since the
+   * user draws a new curve every run. `interp_ns` is the control: it must hold steady, or the two
+   * runs are not comparable at all and `patch_ns` means nothing. `shaded` is the second half of
+   * that caveat: the channel sampling folded into `patch_ns` runs per ACCEPTED pixel, so two runs
+   * only compare at a matching `shaded` ratio.
+   *
+   * The `rej_*` columns split the branches the LUT returned by the test that discarded them, which
+   * is what names the check worth making cheaper or hoisting ahead of the spline evaluations. */
+  const double per_cand = prof_candidates_ > 0 ? 1.0 / double(prof_candidates_) : 0.0;
+  const double to_ns = 1.0e9;
+  const CurvePatchSampler::BranchFunnel &bf = prof_branch_funnel_;
+  const double per_branch = bf.branch_calls > 0 ? 1.0 / double(bf.branch_calls) : 0.0;
+  printf(
+      "[DEBUG-cpatch-funnel] per-cand: interp_ns=%.1f patch_ns=%.1f shaded=%.3f || per-branch: "
+      "calls=%lld "
+      "radius=%.3f nd=%.3f falloff=%.3f endpt=%.3f srange=%.3f endfade=%.3f late=%.3f "
+      "accepted=%.3f\n",
+      prof_p1_interp_ * to_ns * per_cand,
+      prof_p1_sample_ * to_ns * per_cand,
+      double(prof_shaded_) * per_cand,
+      (long long)bf.branch_calls,
+      double(bf.rej_radius) * per_branch,
+      double(bf.rej_normal_dist) * per_branch,
+      double(bf.rej_falloff) * per_branch,
+      double(bf.rej_endpoint) * per_branch,
+      double(bf.rej_s_range) * per_branch,
+      double(bf.rej_end_falloff) * per_branch,
+      double(bf.rej_late) * per_branch,
+      double(bf.branch_calls - bf.rej_radius - bf.rej_normal_dist - bf.rej_falloff -
+             bf.rej_endpoint - bf.rej_s_range - bf.rej_end_falloff - bf.rej_late) *
+          per_branch);
   fflush(stdout);
 #endif
 }

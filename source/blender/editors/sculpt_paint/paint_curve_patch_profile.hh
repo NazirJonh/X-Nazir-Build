@@ -17,4 +17,4 @@
  * Must stay 0 outside a measurement pass: the reports write to stdout and flush on every
  * interactive re-stamp. Grep `DEBUG-cpatch` for every touch point.
  */
-#define CURVE_PATCH_PROFILING 1
+#define CURVE_PATCH_PROFILING 0

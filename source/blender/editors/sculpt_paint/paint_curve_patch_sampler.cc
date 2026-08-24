@@ -57,6 +57,20 @@ float curve_patch_cull_tube_radius(const bke::CurvePatchGeometry &geometry, cons
   return 2.5f * max_radius + geometry.ribbon_end_margin;
 }
 
+#if CURVE_PATCH_PROFILING
+void CurvePatchSampler::BranchFunnel::add(const BranchFunnel &other)
+{
+  branch_calls += other.branch_calls;
+  rej_radius += other.rej_radius;
+  rej_normal_dist += other.rej_normal_dist;
+  rej_falloff += other.rej_falloff;
+  rej_endpoint += other.rej_endpoint;
+  rej_s_range += other.rej_s_range;
+  rej_end_falloff += other.rej_end_falloff;
+  rej_late += other.rej_late;
+}
+#endif
+
 CurvePatchSampler::CurvePatchSampler(const CurvePatchItem &item,
                                      const CurvePatchTextureBinding &texture,
                                      const CurvePatchStrokeContext &ctx,
@@ -160,6 +174,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
    * not actually reach it. */
   auto branch_relief = [&](const float3 &sample_co,
                            const float2 ribbon_uv) -> std::optional<CurvePatchSample> {
+#if CURVE_PATCH_PROFILING
+    dbg_branch_funnel_.branch_calls++;
+#endif
     const float s = ribbon_uv.y;
     /* Signed offset from the surface, measured against the curve point the ribbon mapped this
      * sample to (NOT the globally-closest point -- consistent with the ribbon's own branch
@@ -186,6 +203,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * globally) to get an actual world-space falloff radius comparable to `lateral`/`s` below. */
     const float falloff_radius_at_s = item.geometry.spline.radius_at(s) * item.params.radius;
     if (falloff_radius_at_s <= 0.0f) {
+#if CURVE_PATCH_PROFILING
+      dbg_branch_funnel_.rej_radius++;
+#endif
       return std::nullopt;
     }
 
@@ -216,6 +236,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * near-edge vertices on the intended face (small `normal_dist` from slight surface curvature)
      * still pass. */
     if (std::abs(normal_dist) > 2.0f * falloff_radius_at_s) {
+#if CURVE_PATCH_PROFILING
+      dbg_branch_funnel_.rej_normal_dist++;
+#endif
       return std::nullopt;
     }
     /* In-plane offset reconstructed from the ribbon's normalized across-strip coordinate; the
@@ -243,6 +266,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
     const float lateral_falloff = BKE_brush_curve_strength(
         &brush, radial_dist, falloff_radius_at_s);
     if (lateral_falloff <= 0.0f) {
+#if CURVE_PATCH_PROFILING
+      dbg_branch_funnel_.rej_falloff++;
+#endif
       return std::nullopt;
     }
 
@@ -274,6 +300,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       if (!endpoint_contains(item.params.start_point_shape, s) ||
           !endpoint_contains(item.params.end_point_shape, total_length - s))
       {
+#if CURVE_PATCH_PROFILING
+        dbg_branch_funnel_.rej_endpoint++;
+#endif
         return std::nullopt;
       }
     }
@@ -290,6 +319,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      */
     if (s < -item.geometry.ribbon_end_margin || s > total_length + item.geometry.ribbon_end_margin)
     {
+#if CURVE_PATCH_PROFILING
+      dbg_branch_funnel_.rej_s_range++;
+#endif
       return std::nullopt;
     }
 
@@ -323,6 +355,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       }
     }
     if (end_falloff <= 0.0f) {
+#if CURVE_PATCH_PROFILING
+      dbg_branch_funnel_.rej_end_falloff++;
+#endif
       return std::nullopt;
     }
 
@@ -501,6 +536,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       }
       if (!hit) {
         /* Between stamps the surface is simply untouched. */
+#if CURVE_PATCH_PROFILING
+        dbg_branch_funnel_.rej_late++;
+#endif
         return std::nullopt;
       }
     }
@@ -528,6 +566,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
           item.geometry.spline.cyclic);
       if (!zone_sample.valid) {
         /* Two oversized caps squeezed the middle to nothing; leave that stretch untouched. */
+#if CURVE_PATCH_PROFILING
+        dbg_branch_funnel_.rej_late++;
+#endif
         return std::nullopt;
       }
 
@@ -537,6 +578,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       if (texture.caps_enabled && zone_mtex.tex == nullptr) {
         /* An unassigned zone leaves its stretch of the ribbon alone, which is what makes a
          * caps-only ribbon (no Middle texture) possible. */
+#if CURVE_PATCH_PROFILING
+        dbg_branch_funnel_.rej_late++;
+#endif
         return std::nullopt;
       }
 

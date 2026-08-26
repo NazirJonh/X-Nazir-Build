@@ -3456,6 +3456,50 @@ static void rna_def_tool_settings(BlenderRNA *brna)
   RNA_def_property_pointer_sdna(prop, nullptr, "paint_mode");
   RNA_def_property_ui_text(prop, "Paint Mode", "");
 
+  static const EnumPropertyItem texture_grid_display_items[] = {
+      {TOOL_SETTINGS_TEXTURE_GRID_DISPLAY_ASSET_GRID,
+       "ASSET_GRID",
+       0,
+       "Asset Grid",
+       "Show textures as a compact asset grid"},
+      {TOOL_SETTINGS_TEXTURE_GRID_DISPLAY_LEGACY_LIST,
+       "LEGACY_LIST",
+       0,
+       "Legacy List",
+       "Show textures as the legacy ID preview list"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "texture_grid_display_view3d", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "texture_grid_display_view3d");
+  RNA_def_property_enum_items(prop, texture_grid_display_items);
+  RNA_def_property_flag(prop, PROP_DEG_SYNC_ONLY);
+  RNA_def_property_ui_text(
+      prop, "Texture Grid Display (3D Viewport)", "How to display the brush texture slot");
+
+  prop = RNA_def_property(srna, "texture_grid_display_image_editor", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "texture_grid_display_image_editor");
+  RNA_def_property_enum_items(prop, texture_grid_display_items);
+  RNA_def_property_flag(prop, PROP_DEG_SYNC_ONLY);
+  RNA_def_property_ui_text(
+      prop, "Texture Grid Display (Image Editor)", "How to display the brush texture slot");
+
+  prop = RNA_def_property(srna, "mask_texture_grid_display_view3d", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mask_texture_grid_display_view3d");
+  RNA_def_property_enum_items(prop, texture_grid_display_items);
+  RNA_def_property_flag(prop, PROP_DEG_SYNC_ONLY);
+  RNA_def_property_ui_text(prop,
+                           "Mask Texture Grid Display (3D Viewport)",
+                           "How to display the brush mask texture slot");
+
+  prop = RNA_def_property(srna, "mask_texture_grid_display_image_editor", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mask_texture_grid_display_image_editor");
+  RNA_def_property_enum_items(prop, texture_grid_display_items);
+  RNA_def_property_flag(prop, PROP_DEG_SYNC_ONLY);
+  RNA_def_property_ui_text(prop,
+                           "Mask Texture Grid Display (Image Editor)",
+                           "How to display the brush mask texture slot");
+
   prop = RNA_def_property(srna, "uv_sculpt", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "uvsculpt");
   RNA_def_property_ui_text(prop, "UV Sculpt", "");

@@ -33,6 +33,7 @@ set(SRC
   filelist/filelist_readjob_asset_library_on_disk.cc
   filelist/filelist_readjob_asset_library_remote.cc
   filelist/filelist_readjob_common.cc
+  filelist/filelist_readjob_image_library.cc
   filelist/filelist_readjob_directories.cc
   filelist/filelist_readjob_library.cc
 
@@ -66,6 +67,7 @@ else() # Generic UNIX
 endif()
 
 set(LIB
+  bf_editor_asset
   PRIVATE bf::asset_system
   PRIVATE bf::blenfont
   PRIVATE bf::blenkernel

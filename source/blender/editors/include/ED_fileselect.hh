@@ -17,6 +17,7 @@
 namespace blender {
 
 struct ARegion;
+struct AssetLibraryReference;
 struct FileAssetSelectParams;
 struct FileDirEntry;
 struct FileSelectParams;
@@ -96,6 +97,8 @@ struct FileLayout {
   int dirty;
   int text_line_height;
   int text_lines_count;
+  /** True if this layout is for Asset Browser or Asset Shelf, false for File Browser. */
+  bool is_asset_browser;
   /**
    * The columns for each item (name, modification date/time, size).
    * Not to be confused with the `flow_columns` above.
@@ -163,6 +166,22 @@ asset_system::AssetLibrary *ED_fileselect_active_asset_library_get(const SpaceFi
 ID *ED_fileselect_active_asset_get(const SpaceFile *sfile);
 
 void ED_fileselect_activate_asset_catalog(const SpaceFile *sfile, bUUID catalog_id);
+
+/**
+ * Set #params's active catalog to #catalog_id and write it through to this library's
+ * per-library catalog memory (UserDef, domain "asset_browser") so it's restored next time this
+ * library is selected. Use this instead of writing params->catalog_id directly.
+ */
+void ED_fileselect_asset_catalog_set(FileAssetSelectParams *params, bUUID catalog_id);
+/** As above, but sets "All catalogs" (no narrowing) and writes that through too. */
+void ED_fileselect_asset_catalog_set_all(FileAssetSelectParams *params);
+/**
+ * Switch #params to #new_ref, restoring whichever catalog was last remembered for that library
+ * (falling back to All if none was remembered, or if the remembered UUID no longer exists once
+ * the library finishes loading). Use this instead of writing params->asset_library_ref directly.
+ */
+void ED_fileselect_asset_library_reference_set(FileAssetSelectParams *params,
+                                               const AssetLibraryReference &new_ref);
 
 /**
  * Resolve this space's #eFileAssetImportMethod to the #eAssetImportMethod (note the different

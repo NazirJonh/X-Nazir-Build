@@ -34,6 +34,7 @@
 #include "BKE_idprop.hh"
 #include "BKE_keyconfig.h"
 #include "BKE_main.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_preferences.h"
 
 #include "BLO_readfile.hh"
@@ -1781,6 +1782,60 @@ void blo_do_versions_userdef(UserDef *userdef)
   if (!USER_VERSION_ATLEAST(502, 42)) {
     userdef->asset_flag |= USER_ASSETS_USE_ONLINE_ESSENTIALS;
   }
+
+  if (!USER_VERSION_ATLEAST(502, 49)) {
+    /* Free rather than forget: prefs saved with an early (pre-release) version of these DNA
+     * fields may already hold real user-authored map types/tokens, and clear_no_delete() would
+     * both leak them and silently discard custom entries. */
+    BKE_name_matching_userdef_free(userdef);
+    userdef->active_name_match_map_type = 0;
+    userdef->active_name_match_filter_tag = 0;
+  }
+
+  /* Seed core Principled BSDF map types when the list is empty.
+   * Call unconditionally (not version-gated): #BKE_name_matching_userdef_ensure_defaults is
+   * idempotent, and prefs may already be at the current subversion with an empty list
+   * (e.g. saved before seeding landed). */
+  BKE_name_matching_userdef_ensure_defaults(userdef);
+
+  /* Ensure asset shelf preview size presets are within the valid range [24, 256].
+   * Values may be 0 (or otherwise invalid) when loaded from an older Blender
+   * version that did not include these fields. Applied unconditionally since
+   * 0 and out-of-range values are never valid. */
+  if (userdef->asset_shelf_preview_size_small == 0) {
+    userdef->asset_shelf_preview_size_small = 32;
+  }
+  else {
+    CLAMP(userdef->asset_shelf_preview_size_small, 24, 256);
+  }
+  if (userdef->asset_shelf_preview_size_medium == 0) {
+    userdef->asset_shelf_preview_size_medium = 56;
+  }
+  else {
+    CLAMP(userdef->asset_shelf_preview_size_medium, 24, 256);
+  }
+  if (userdef->asset_shelf_preview_size_large == 0) {
+    userdef->asset_shelf_preview_size_large = 96;
+  }
+  else {
+    CLAMP(userdef->asset_shelf_preview_size_large, 24, 256);
+  }
+
+  /* Ensure asset shelf recent items maximum counts are within the valid range [1, 200].
+   * Default is 20 if they are 0 (e.g. when loading preferences saved by an older version). */
+  if (userdef->asset_shelf_recent_brushes_max == 0) {
+    userdef->asset_shelf_recent_brushes_max = 20;
+  }
+  else {
+    CLAMP(userdef->asset_shelf_recent_brushes_max, 1, 200);
+  }
+  if (userdef->asset_shelf_recent_images_max == 0) {
+    userdef->asset_shelf_recent_images_max = 20;
+  }
+  else {
+    CLAMP(userdef->asset_shelf_recent_images_max, 1, 200);
+  }
+
 
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning

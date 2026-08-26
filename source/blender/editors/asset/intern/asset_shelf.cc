@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cfloat>
 
+#include <fmt/format.h>
+
 #include "AS_asset_catalog_path.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
@@ -23,18 +25,21 @@
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
 #include "BKE_screen.hh"
+#include "BKE_wm_runtime.hh"
 
 #include "BLT_translation.hh"
 
 #include "DNA_screen_types.h"
 
 #include "ED_asset_list.hh"
+#include "ED_fileselect.hh"
 #include "ED_screen.hh"
 
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 #include "UI_tree_view.hh"
@@ -344,6 +349,27 @@ static void asset_shelf_region_listen(const wmRegionListenerParams *params)
       break;
     case NC_ASSET:
       ED_region_tag_redraw(region);
+      if (wmn->data == ND_ASSET_LIST_READING) {
+        /* Library finished loading (or is progressing) -- force a full rebuild so catalog
+         * filter state can re-validate a previously-optimistic restored selection. */
+        ED_region_tag_refresh_ui(region);
+        /* #region may be the shelf's header region, not the main shelf region that owns
+         * #RegionAssetShelf -- look up the actual shelf region via the area instead of assuming
+         * #region is it (this is also called from #header_region_listen). */
+        if (ARegion *shelf_region = params->area ?
+                                         BKE_area_find_region_type(params->area,
+                                                                    RGN_TYPE_ASSET_SHELF) :
+                                         nullptr)
+        {
+          if (RegionAssetShelf *shelf_regiondata =
+                  RegionAssetShelf::get_from_asset_shelf_region(*shelf_region))
+          {
+            if (AssetShelf *shelf = shelf_regiondata->active_shelf) {
+              shelf->catalog_validated = 0;
+            }
+          }
+        }
+      }
       break;
   }
 }
@@ -352,6 +378,20 @@ void region_listen(const wmRegionListenerParams *params)
 {
   if (list::listen(params->notifier)) {
     ED_region_tag_redraw_no_rebuild(params->region);
+    /* #list::listen() claims #ND_ASSET_LIST_READING, so #asset_shelf_region_listen is skipped.
+     * Still need #ED_region_tag_refresh_ui here or permanent shelves never revalidate. */
+    if (params->notifier->category == NC_ASSET &&
+        params->notifier->data == ND_ASSET_LIST_READING)
+    {
+      ED_region_tag_refresh_ui(params->region);
+      if (RegionAssetShelf *shelf_regiondata =
+              RegionAssetShelf::get_from_asset_shelf_region(*params->region))
+      {
+        if (AssetShelf *shelf = shelf_regiondata->active_shelf) {
+          shelf->catalog_validated = 0;
+        }
+      }
+    }
   }
   /* If the asset list didn't catch the notifier, let the region itself listen. */
   else {
@@ -573,6 +613,7 @@ void region_layout(const bContext *C, ARegion *region)
   }
 
   settings_ensure_valid_library_ref(active_shelf->settings);
+  shelf_ensure_catalog_revalidated(*active_shelf);
 
   ui::Block *block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
 
@@ -589,7 +630,18 @@ void region_layout(const bContext *C, ARegion *region)
                                         0,
                                         style);
 
-  build_asset_view(layout, active_shelf->settings.asset_library_reference, *active_shelf, *C);
+  if (settings_library_is_missing(active_shelf->settings)) {
+    /* No asset view to build or fetch, but still fall through to the shared
+     * layout/View2D/resize finalization below -- otherwise the region's scroll state and size
+     * stay frozen at whatever they were before the library went missing. */
+    layout.label(fmt::format(fmt::runtime(IFACE_("Library \"{}\" not found")),
+                             active_shelf->settings.asset_library_reference.custom_library_name)
+                     .c_str(),
+                 ICON_ERROR);
+  }
+  else {
+    build_asset_view(layout, active_shelf->settings.asset_library_reference, *active_shelf, *C);
+  }
 
   int layout_height = ui::block_layout_resolve(block).y;
   BLI_assert(layout_height <= 0);
@@ -821,12 +873,20 @@ AssetShelf *active_shelf_from_context(const bContext *C)
 /** \name Catalog toggle buttons
  * \{ */
 
-static ui::Button *add_tab_button(ui::Block &block, StringRefNull name)
+int tab_button_width(const StringRefNull name)
 {
   const uiStyle *style = ui::style_get_dpi();
   const int string_width = ui::fontstyle_string_width(&style->widget, name.c_str());
   const int pad_x = UI_UNIT_X * 0.3f;
-  const int but_width = std::min(string_width + 2 * pad_x, UI_UNIT_X * 8);
+  return string_width + 2 * pad_x;
+}
+
+static ui::Button *add_tab_button(ui::Block &block, StringRefNull name)
+{
+  /* Catalog tabs all share one header row that cannot wrap, so a long catalog name is capped and
+   * ellipsized rather than allowed to push the other tabs out of reach. The popover's library tabs
+   * wrap onto further rows instead, so they show their names in full. */
+  const int but_width = std::min(tab_button_width(name), int(UI_UNIT_X * 8));
 
   ui::Button *but = uiDefBut(
       &block,
@@ -852,11 +912,37 @@ static void add_catalog_tabs(AssetShelf &shelf, ui::Layout &layout)
   ui::Block *block = layout.block();
   AssetShelfSettings &shelf_settings = shelf.settings;
 
+  /* "Recent" / "Favorites" pseudo-catalog tabs. Only shelves that support asset lists have
+   * Recent/Favorites (see #shelf_supports_asset_lists), so keep the header uncluttered for others.
+   * Order matches the popover's catalog tree (Recent, Favorites, then All). */
+  if (shelf.type && shelf_supports_asset_lists(shelf.type->idname)) {
+    ui::Button *recent_but = add_tab_button(*block, IFACE_("Recent"));
+    button_func_set(recent_but, [&shelf, &shelf_settings](bContext &C) {
+      settings_set_recent_catalog_active(shelf_settings);
+      settings_catalog_commit_active(shelf);
+      send_redraw_notifier(C);
+    });
+    button_func_pushed_state_set(recent_but, [&shelf_settings](const ui::Button &) -> bool {
+      return settings_is_recent_catalog_active(shelf_settings);
+    });
+
+    ui::Button *favorites_but = add_tab_button(*block, IFACE_("Favorites"));
+    button_func_set(favorites_but, [&shelf, &shelf_settings](bContext &C) {
+      settings_set_favorites_catalog_active(shelf_settings);
+      settings_catalog_commit_active(shelf);
+      send_redraw_notifier(C);
+    });
+    button_func_pushed_state_set(favorites_but, [&shelf_settings](const ui::Button &) -> bool {
+      return settings_is_favorites_catalog_active(shelf_settings);
+    });
+  }
+
   /* "All" tab. */
   {
     ui::Button *but = add_tab_button(*block, IFACE_("All"));
-    button_func_set(but, [&shelf_settings](bContext &C) {
+    button_func_set(but, [&shelf, &shelf_settings](bContext &C) {
       settings_set_all_catalog_active(shelf_settings);
+      settings_catalog_commit_active(shelf);
       send_redraw_notifier(C);
     });
     button_func_pushed_state_set(but, [&shelf_settings](const ui::Button &) -> bool {
@@ -870,8 +956,9 @@ static void add_catalog_tabs(AssetShelf &shelf, ui::Layout &layout)
   settings_foreach_enabled_catalog_path(shelf, [&](const asset_system::AssetCatalogPath &path) {
     ui::Button *but = add_tab_button(*block, path.name());
 
-    button_func_set(but, [&shelf_settings, path](bContext &C) {
+    button_func_set(but, [&shelf, &shelf_settings, path](bContext &C) {
       settings_set_active_catalog(shelf_settings, path);
+      settings_catalog_commit_active(shelf);
       send_redraw_notifier(C);
     });
     button_func_pushed_state_set(but, [&shelf_settings, path](const ui::Button &) -> bool {
@@ -909,7 +996,14 @@ static void asset_shelf_header_draw(const bContext *C, Header *header)
 
   layout.separator_spacer();
 
-  layout.popover(C, "ASSETSHELF_PT_display", "", ICON_IMGDISPLAY);
+  if (shelf_ptr.data) {
+    PropertyRNA *prop = RNA_struct_find_property(&shelf_ptr, "preview_size_preset");
+    layout.prop_with_popover(
+        &shelf_ptr, prop, -1, 0, ui::ITEM_R_ICON_ONLY, {}, ICON_NONE, "ASSETSHELF_PT_display");
+  }
+  else {
+    layout.popover(C, "ASSETSHELF_PT_display", "", ICON_IMGDISPLAY);
+  }
   ui::Layout &sub = layout.row(false);
   /* Same as file/asset browser header. */
   sub.ui_units_x_set(8);

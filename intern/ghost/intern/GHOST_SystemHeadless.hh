@@ -80,7 +80,9 @@ class GHOST_SystemHeadless : public GHOST_System {
             /* Wrap. */
             GHOST_kCapabilityMultiMonitorPlacement |
             /* Wrap. */
-            GHOST_kCapabilityWindowPath)
+            GHOST_kCapabilityWindowPath |
+            /* Wrap. */
+            GHOST_kCapabilityDesktopSampleContinuous)
 
     );
   }

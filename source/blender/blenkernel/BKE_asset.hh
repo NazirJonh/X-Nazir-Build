@@ -8,9 +8,14 @@
 
 #pragma once
 
+#include <optional>
+#include <string>
+
 #include "BLI_compiler_attrs.h"
+#include "BLI_string_ref.hh"
 
 #include "DNA_asset_types.h"
+#include "DNA_screen_types.h"
 
 namespace blender {
 
@@ -97,5 +102,50 @@ bool BKE_asset_catalog_path_list_has_path(const ListBaseT<AssetCatalogPathLink> 
                                           const char *catalog_path);
 void BKE_asset_catalog_path_list_add_path(ListBaseT<AssetCatalogPathLink> &catalog_path_list,
                                           const char *catalog_path);
+
+/* Collapsed-state list for asset catalog tree views (#AssetCatalogState). Kept separate from the
+ * #AssetCatalogPathLink helpers above so enabled-catalog lists are unaffected. */
+
+void BKE_asset_catalog_state_list_free(ListBaseT<AssetCatalogState> &catalog_state_list);
+void BKE_asset_catalog_state_list_duplicate(ListBaseT<AssetCatalogState> &dest_list,
+                                            const ListBaseT<AssetCatalogState> &src_list);
+void BKE_asset_catalog_state_list_blend_write(
+    BlendWriter *writer, const ListBaseT<AssetCatalogState> &catalog_state_list);
+void BKE_asset_catalog_state_list_blend_read_data(
+    BlendDataReader *reader, ListBaseT<AssetCatalogState> &catalog_state_list);
+
+/** Set (or create) the collapsed state for a catalog path; refreshes its last-used time. */
+void BKE_asset_catalog_state_set_collapsed(ListBaseT<AssetCatalogState> &catalog_state_list,
+                                           const char *catalog_path,
+                                           bool collapsed);
+/** Collapsed state for a catalog path, or nullopt when no entry has been saved yet. */
+std::optional<bool> BKE_asset_catalog_state_get_collapsed(
+    const ListBaseT<AssetCatalogState> &catalog_state_list, const char *catalog_path);
+/** Drop entries whose last-used time is older than `max_age_seconds`. */
+void BKE_asset_catalog_state_cleanup_old(ListBaseT<AssetCatalogState> &catalog_state_list,
+                                         uint32_t max_age_seconds);
+
+/* --------------------------------------------------------------------------
+ * Map-tag namespace helpers (`map:` prefix).
+ * These are type-agnostic: they work with any AssetMetaData, not just images.
+ * -------------------------------------------------------------------------- */
+
+/**
+ * Returns true when \a tag_name starts with `"map:"` (case-insensitive).
+ * An empty string returns false.
+ */
+bool BKE_asset_metadata_tag_is_map_tag(StringRef tag_name);
+
+/** Remove all tags whose name starts with `"map:"` (case-insensitive). */
+void BKE_asset_metadata_map_tags_clear(AssetMetaData *asset_data);
+
+/**
+ * Ensure a tag `"map:" + map_type_identifier` exists on \a asset_data.
+ * Caller is responsible for calling #BKE_asset_metadata_map_tags_clear first if
+ * the old map type must be replaced.
+ * \return The tag, or nullptr when \a map_type_identifier is empty.
+ */
+AssetTag *BKE_asset_metadata_map_tag_ensure(AssetMetaData *asset_data,
+                                            StringRef map_type_identifier);
 
 }  // namespace blender

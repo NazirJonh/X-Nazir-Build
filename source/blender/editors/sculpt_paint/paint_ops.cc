@@ -1108,6 +1108,9 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 
+  /* texture assignment */
+  WM_operatortype_append(BRUSH_OT_texture_slot_assign_image);
+
   /* weight */
   WM_operatortype_append(PAINT_OT_weight_paint_toggle);
   WM_operatortype_append(PAINT_OT_weight_paint);

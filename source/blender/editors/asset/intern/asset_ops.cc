@@ -11,16 +11,19 @@
 
 #include <fmt/format.h>
 
+#include "AS_asset_catalog.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 #include "AS_remote_library.hh"
 
+#include "BKE_asset.hh"
 #include "BKE_asset_edit.hh"
 #include "BKE_blendfile.hh"
 #include "BKE_bpath.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_icons.hh"
+#include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_preferences.h"
@@ -29,13 +32,24 @@
 #include "BKE_screen.hh"
 
 #include "BLI_fnmatch.h"
+#include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_uuid.h"
+
+#include "DNA_image_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_userdef_types.h"
 
 #include "ED_asset.hh"
+#include "ED_asset_image_library.hh"
+#include "ED_asset_image_utils.hh"
+#include "ED_asset_library.hh"
+#include "ED_asset_list.hh"
 #include "ED_screen.hh"
+#include "asset_shelf.hh"
 /* XXX needs access to the file list, should all be done via the asset system in future. */
 #include "ED_asset_menu_utils.hh"
 #include "ED_fileselect.hh"
@@ -56,11 +70,18 @@
 #include "WM_api.hh"
 
 #include "DNA_space_types.h"
+#include "DNA_uuid_types.h"
 
 #include "GPU_immediate.hh"
 
 #include "UI_interface_c.hh"
+#include "UI_interface_layout.hh"
 #include "UI_resources.hh"
+
+#include "ED_asset_catalog.hh"
+#include "ED_asset_name_matching.hh"
+
+#include "BKE_name_matching.hh"
 
 namespace blender::ed::asset {
 /* -------------------------------------------------------------------- */
@@ -103,11 +124,11 @@ static IDVecStats asset_operation_get_id_vec_stats_from_ids(const Span<PointerRN
 static const char *asset_operation_unsupported_type_msg(const bool is_single)
 {
   const char *msg_single = N_(
-      "Data-block does not support asset operations - must be a "
-      "Brush, Collection, Node Group, Object, Pose Action, Scene, or World");
+      "Data-block does not support asset operations - must be "
+      "a " ED_ASSET_TYPE_IDS_NON_EXPERIMENTAL_UI_STRING);
   const char *msg_multiple = N_(
-      "No data-block selected that supports asset operations - select at least one "
-      "Brush, Collection, Node Group, Object, Pose Action, Scene, or World");
+      "No data-block selected that supports asset operations - select at least "
+      "one " ED_ASSET_TYPE_IDS_NON_EXPERIMENTAL_UI_STRING);
   return is_single ? msg_single : msg_multiple;
 }
 
@@ -209,6 +230,543 @@ static bool asset_mark_poll(bContext *C, const Span<PointerRNA> ids)
 
   return true;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Import images as assets operator
+ * \{ */
+
+/**
+ * Normalize a filepath to a canonical key for de-duplication.
+ * On Windows, converts to lower-case for case-insensitive comparison;
+ * always normalizes slashes.
+ */
+static std::string asset_image_import_path_dedupe_key(const StringRef filepath)
+{
+  char norm[FILE_MAX];
+  BLI_strncpy(norm, std::string(filepath).c_str(), sizeof(norm));
+  BLI_path_slash_native(norm);
+#ifdef _WIN32
+  BLI_str_tolower_ascii(norm, sizeof(norm));
+#endif
+  return norm;
+}
+
+static int asset_image_import_map_type_identifier_to_enum(const UserDef &userdef,
+                                                          const StringRef identifier)
+{
+  if (identifier.is_empty()) {
+    return 0;
+  }
+  int value = 1;
+  for (const bUserNameMatchMapType &map_type : userdef.name_match_map_types) {
+    if (map_type.identifier[0] == '\0') {
+      continue;
+    }
+    if (identifier == map_type.identifier) {
+      return value;
+    }
+    value++;
+  }
+  return 0;
+}
+
+static const char *asset_image_import_map_type_enum_to_identifier(const UserDef &userdef,
+                                                                  const int enum_value)
+{
+  if (enum_value == 0) {
+    return nullptr;
+  }
+  int value = 1;
+  for (const bUserNameMatchMapType &map_type : userdef.name_match_map_types) {
+    if (map_type.identifier[0] == '\0') {
+      continue;
+    }
+    if (value == enum_value) {
+      return map_type.identifier;
+    }
+    value++;
+  }
+  return nullptr;
+}
+
+static const bUserNameMatchMapType *asset_image_import_map_type_find(const UserDef &userdef,
+                                                                      const StringRef identifier)
+{
+  return identifier.is_empty() ? nullptr : BKE_name_matching_map_type_find(&userdef, identifier);
+}
+
+static const EnumPropertyItem *rna_asset_image_import_map_type_itemf(bContext * /*C*/,
+                                                                     PointerRNA * /*ptr*/,
+                                                                     PropertyRNA * /*prop*/,
+                                                                     bool *r_free)
+{
+  EnumPropertyItem *items = nullptr;
+  int totitem = 0;
+
+  static const EnumPropertyItem none_item = {0, "NONE", 0, "None", ""};
+  RNA_enum_item_add(&items, &totitem, &none_item);
+
+  int value = 1;
+  for (const bUserNameMatchMapType &map_type : U.name_match_map_types) {
+    if (map_type.identifier[0] == '\0') {
+      continue;
+    }
+    EnumPropertyItem item = {};
+    item.value = value++;
+    item.identifier = map_type.identifier;
+    item.name = map_type.name[0] != '\0' ? map_type.name : map_type.identifier;
+    RNA_enum_item_add(&items, &totitem, &item);
+  }
+
+  RNA_enum_item_end(&items, &totitem);
+  *r_free = true;
+  return items;
+}
+
+static asset_system::AssetLibrary *asset_image_import_current_file_library_get(Main *bmain)
+{
+  return AS_asset_library_load(bmain, asset_system::current_file_library_reference());
+}
+
+static void asset_image_import_catalog_search(
+    const bContext *C,
+    PointerRNA * /*ptr*/,
+    PropertyRNA * /*prop*/,
+    const char *edit_text,
+    FunctionRef<void(StringPropertySearchVisitParams)> visit_fn)
+{
+  visit_library_catalogs_catalog_for_search(*CTX_data_main(C),
+                                            asset_system::current_file_library_reference(),
+                                            edit_text,
+                                            visit_fn);
+}
+
+static std::string asset_image_import_item_label(const StringRef filepath,
+                                                 const Span<std::string> all_filepaths)
+{
+  const std::string filepath_storage = filepath;
+  const char *basename = BLI_path_basename(filepath_storage.c_str());
+  int basename_count = 0;
+  for (const std::string &other : all_filepaths) {
+    if (STREQ(BLI_path_basename(other.c_str()), basename)) {
+      basename_count++;
+    }
+  }
+  if (basename_count <= 1) {
+    return basename;
+  }
+
+  char dir[FILE_MAXDIR], file[FILE_MAX];
+  BLI_path_split_dir_file(filepath_storage.c_str(), dir, sizeof(dir), file, sizeof(file));
+  const char *parent = BLI_path_basename(dir);
+  if (parent[0] != '\0' && parent[0] != '.' && !STREQ(parent, file)) {
+    return std::string(parent) + "/" + file;
+  }
+  return filepath_storage;
+}
+
+static void asset_image_import_invoke_prefill_catalog(wmOperator *op,
+                                                      asset_system::AssetLibrary *library)
+{
+  if (library == nullptr || RNA_boolean_get(op->ptr, "catalog_locked")) {
+    return;
+  }
+
+  char catalog_path[MAX_NAME];
+  RNA_string_get(op->ptr, "catalog_path", catalog_path);
+  if (catalog_path[0] != '\0') {
+    return;
+  }
+
+  char catalog_id_str[UUID_STRING_SIZE];
+  RNA_string_get(op->ptr, "catalog_id", catalog_id_str);
+  if (catalog_id_str[0] == '\0') {
+    return;
+  }
+
+  bUUID catalog_id;
+  if (!BLI_uuid_parse_string(&catalog_id, catalog_id_str)) {
+    return;
+  }
+
+  if (const asset_system::AssetCatalog *catalog =
+          library->catalog_service().find_catalog(catalog_id))
+  {
+    RNA_string_set(op->ptr, "catalog_path", catalog->path.c_str());
+  }
+}
+
+static wmOperatorStatus asset_image_import_mark_invoke(bContext *C,
+                                                       wmOperator *op,
+                                                       const wmEvent * /*event*/)
+{
+  /* If no images → nothing to do. */
+  if (RNA_collection_length(op->ptr, "images") == 0) {
+    BKE_report(op->reports, RPT_WARNING, "No image files to import");
+    return OPERATOR_CANCELLED;
+  }
+
+  const UserDef &userdef = U;
+  /* Prefill map_type guesses for each item if not already set. */
+  RNA_BEGIN (op->ptr, itemptr, "images") {
+    if (RNA_enum_get(&itemptr, "map_type") == 0) {
+      char filepath[FILE_MAX];
+      RNA_string_get(&itemptr, "filepath", filepath);
+      const std::string guessed = ED_asset_name_matching_guess_map_type_identifier(
+          userdef, BLI_path_basename(filepath));
+      if (!guessed.empty()) {
+        RNA_string_set(&itemptr, "map_type_identifier", guessed.c_str());
+        RNA_enum_set(&itemptr,
+                     "map_type",
+                     asset_image_import_map_type_identifier_to_enum(userdef, guessed));
+      }
+    }
+  }
+  RNA_END;
+
+  asset_image_import_invoke_prefill_catalog(
+      op, asset_image_import_current_file_library_get(CTX_data_main(C)));
+
+  return WM_operator_props_dialog_popup(
+      C, op, 720, IFACE_("Import Images as Assets"), IFACE_("Import"));
+}
+
+static void asset_image_import_mark_draw(bContext * /*C*/, wmOperator *op)
+{
+  ui::Layout *layout = op->layout;
+  PointerRNA *ptr = op->ptr;
+
+  Vector<std::string> filepaths;
+  filepaths.reserve(RNA_collection_length(ptr, "images"));
+  RNA_BEGIN (ptr, itemptr, "images") {
+    char filepath[FILE_MAX];
+    RNA_string_get(&itemptr, "filepath", filepath);
+    filepaths.append(filepath);
+  }
+  RNA_END;
+
+  {
+    ui::Layout &header_split = layout->split(0.58f, true);
+    header_split.use_property_split_set(false);
+    ui::Layout &name_header = header_split.column(true);
+    name_header.label(IFACE_("Name"), ICON_NONE);
+    ui::Layout &type_header = header_split.column(true);
+    type_header.label(IFACE_("Type"), ICON_NONE);
+  }
+
+  int filepath_index = 0;
+  RNA_BEGIN (ptr, itemptr, "images") {
+    const std::string &display_name = asset_image_import_item_label(filepaths[filepath_index],
+                                                                    filepaths);
+    filepath_index++;
+
+    ui::Layout &row_split = layout->split(0.58f, true);
+    row_split.use_property_split_set(false);
+    ui::Layout &name_col = row_split.column(true);
+    name_col.label(display_name, ICON_IMAGE);
+    ui::Layout &type_col = row_split.column(true);
+    type_col.prop(&itemptr, "map_type", UI_ITEM_NONE, "", ICON_NONE);
+  }
+  RNA_END;
+
+  layout->separator();
+
+  /* Catalog section — only shown when not catalog-locked. */
+  const bool catalog_locked = RNA_boolean_get(ptr, "catalog_locked");
+  if (!catalog_locked) {
+    layout->use_property_split_set(true);
+    layout->prop(ptr, "create_catalog", UI_ITEM_NONE, IFACE_("Create New Catalog"), ICON_NONE);
+    if (RNA_boolean_get(ptr, "create_catalog")) {
+      layout->prop(ptr, "new_catalog_name", UI_ITEM_NONE, IFACE_("Name"), ICON_NONE);
+    }
+    else {
+      layout->prop(ptr, "catalog_path", UI_ITEM_NONE, IFACE_("Catalog"), ICON_NONE);
+    }
+  }
+}
+
+static wmOperatorStatus asset_image_import_mark_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  const UserDef &userdef = U;
+
+  /* 1. Bail out if nothing to import. */
+  if (RNA_collection_length(op->ptr, "images") == 0) {
+    BKE_report(op->reports, RPT_WARNING, "No images to import");
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool catalog_locked = RNA_boolean_get(op->ptr, "catalog_locked");
+
+  /* 2. If catalog_locked we must already have a parseable UUID. */
+  bUUID catalog_id = BLI_uuid_nil();
+  bool has_catalog = false;
+  if (catalog_locked) {
+    char catalog_id_str[UUID_STRING_SIZE];
+    RNA_string_get(op->ptr, "catalog_id", catalog_id_str);
+    if (catalog_id_str[0] == '\0' || !BLI_uuid_parse_string(&catalog_id, catalog_id_str)) {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "No valid catalog target — drop onto a catalog in the catalog tree");
+      return OPERATOR_CANCELLED;
+    }
+    has_catalog = true;
+  }
+
+  /* 3. Resolve library — import always targets Current File. */
+  asset_system::AssetLibrary *library = asset_image_import_current_file_library_get(bmain);
+  if (library == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Could not resolve Current File asset library");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* 4. Handle catalog creation when not locked. */
+  std::string catalog_simple_name;
+  if (!catalog_locked && RNA_boolean_get(op->ptr, "create_catalog")) {
+    char raw_name[MAX_NAME];
+    RNA_string_get(op->ptr, "new_catalog_name", raw_name);
+    std::string sanitized;
+    const CatalogNameValidateResult validate = ED_asset_catalog_root_name_sanitize(raw_name,
+                                                                                   sanitized);
+    if (validate != CatalogNameValidateResult::Ok) {
+      const char *reason = (validate == CatalogNameValidateResult::Empty)     ? "empty" :
+                           (validate == CatalogNameValidateResult::TooLong)   ? "too long" :
+                                                                                "invalid characters";
+      BKE_reportf(op->reports, RPT_ERROR, "Catalog name is %s", reason);
+      return OPERATOR_CANCELLED;
+    }
+    if (ED_asset_catalog_root_path_exists(*library, sanitized)) {
+      BKE_reportf(op->reports,
+                  RPT_ERROR,
+                  "A catalog named \"%s\" already exists",
+                  sanitized.c_str());
+      return OPERATOR_CANCELLED;
+    }
+    asset_system::AssetCatalog *new_catalog = catalog_add(library, sanitized.c_str(), "");
+    if (new_catalog == nullptr || new_catalog->path.c_str() != sanitized) {
+      BKE_reportf(
+          op->reports, RPT_ERROR, "Failed to create catalog \"%s\"", sanitized.c_str());
+      return OPERATOR_CANCELLED;
+    }
+    catalog_id = new_catalog->catalog_id;
+    catalog_simple_name = new_catalog->simple_name;
+    has_catalog = true;
+  }
+  else if (!catalog_locked) {
+    char catalog_path_c[MAX_NAME];
+    RNA_string_get(op->ptr, "catalog_path", catalog_path_c);
+    if (catalog_path_c[0] != '\0') {
+      const asset_system::AssetCatalogPath catalog_path =
+          asset_system::AssetCatalogPath::from_user_input(catalog_path_c);
+      if (const asset_system::AssetCatalog *cat =
+              library->catalog_service().find_catalog_by_path(catalog_path))
+      {
+        catalog_id = cat->catalog_id;
+        catalog_simple_name = cat->simple_name;
+        has_catalog = true;
+      }
+      else {
+        BKE_reportf(op->reports, RPT_ERROR, "Catalog \"%s\" not found", catalog_path_c);
+        return OPERATOR_CANCELLED;
+      }
+    }
+    else {
+      /* Fallback for call sites that only set catalog_id (e.g. catalog tree is not used here). */
+      char catalog_id_str[UUID_STRING_SIZE];
+      RNA_string_get(op->ptr, "catalog_id", catalog_id_str);
+      if (catalog_id_str[0] != '\0' && BLI_uuid_parse_string(&catalog_id, catalog_id_str)) {
+        has_catalog = true;
+        if (const asset_system::AssetCatalog *cat =
+                library->catalog_service().find_catalog(catalog_id))
+        {
+          catalog_simple_name = cat->simple_name;
+        }
+      }
+    }
+  }
+  else if (has_catalog) {
+    /* catalog_locked with valid UUID — look up simple name. */
+    if (const asset_system::AssetCatalog *cat =
+            library->catalog_service().find_catalog(catalog_id))
+    {
+      catalog_simple_name = cat->simple_name;
+    }
+  }
+
+  /* 6. De-duplicate filepaths (case-insensitive on Windows). */
+  Set<std::string> seen_keys;
+  struct ImportItem {
+    std::string filepath;
+    std::string map_type_identifier;
+  };
+  Vector<ImportItem> items;
+  RNA_BEGIN (op->ptr, itemptr, "images") {
+    char filepath[FILE_MAX];
+    RNA_string_get(&itemptr, "filepath", filepath);
+    const std::string key = asset_image_import_path_dedupe_key(filepath);
+    if (!seen_keys.add(key)) {
+      BKE_reportf(op->reports, RPT_WARNING, "Duplicate path skipped: %s", filepath);
+      continue;
+    }
+    char map_type_identifier[64];
+    RNA_string_get(&itemptr, "map_type_identifier", map_type_identifier);
+    /* The visible enum is authoritative after the user edits the dialog. The string remains the
+     * stable identifier for callers that populate the collection without the enum UI. */
+    if (const char *identifier = asset_image_import_map_type_enum_to_identifier(
+            userdef, RNA_enum_get(&itemptr, "map_type")))
+    {
+      STRNCPY(map_type_identifier, identifier);
+    }
+    else {
+      map_type_identifier[0] = '\0';
+    }
+    items.append({filepath, map_type_identifier});
+  }
+  RNA_END;
+
+  /* 7. Per-file import. */
+  int success_count = 0;
+  for (const ImportItem &item : items) {
+    const bUserNameMatchMapType *map_type_ptr = asset_image_import_map_type_find(
+        userdef, item.map_type_identifier);
+    if (!item.map_type_identifier.empty() && map_type_ptr == nullptr) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Map type '%s' not found in Preferences, ignored for %s",
+                  item.map_type_identifier.c_str(),
+                  BLI_path_basename(item.filepath.c_str()));
+    }
+
+    bool image_exists = false;
+    Image *image = BKE_image_load_exists(bmain, item.filepath.c_str(), &image_exists);
+    if (image == nullptr) {
+      BKE_reportf(op->reports, RPT_WARNING, "Could not load image \"%s\"", item.filepath.c_str());
+      continue;
+    }
+    id_us_min(&image->id);
+
+    if (image_exists) {
+      BKE_image_clear_autosave(image);
+      ED_preview_kill_jobs_for_id(CTX_wm_manager(C), &image->id);
+      BKE_image_signal(bmain, image, nullptr, IMA_SIGNAL_RELOAD);
+      WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, image);
+    }
+
+    bool this_success = false;
+    if (image->id.asset_data == nullptr) {
+      if (mark_id(&image->id)) {
+        generate_preview(C, &image->id);
+        this_success = true;
+      }
+    }
+    else {
+      /* Already an asset — still update catalog / tags and refresh preview after reload. */
+      this_success = true;
+      if (image_exists) {
+        generate_preview(C, &image->id);
+      }
+    }
+
+    if (!this_success) {
+      continue;
+    }
+
+    if (has_catalog && image->id.asset_data != nullptr) {
+      BKE_asset_metadata_catalog_id_set(
+          image->id.asset_data, catalog_id, catalog_simple_name.c_str());
+    }
+
+    if (image->id.asset_data != nullptr) {
+      BKE_asset_metadata_map_tags_clear(image->id.asset_data);
+      if (map_type_ptr != nullptr) {
+        BKE_asset_metadata_map_tag_ensure(image->id.asset_data, map_type_ptr->identifier);
+      }
+    }
+
+    success_count++;
+  }
+
+  /* 8. Refresh library notifiers. */
+  refresh_asset_library(C, asset_system::current_file_library_reference());
+  if (SpaceFile *sfile = CTX_wm_space_file(C)) {
+    if (const FileAssetSelectParams *params = ED_fileselect_get_asset_params(sfile)) {
+      if (params->asset_library_ref.type != ASSET_LIBRARY_LOCAL) {
+        refresh_asset_library(C, params->asset_library_ref);
+      }
+    }
+  }
+  WM_main_add_notifier(NC_ID | NA_EDITED, nullptr);
+  WM_main_add_notifier(NC_ASSET | ND_ASSET_LIST | NA_ADDED, nullptr);
+
+  /* 9. Report results. */
+  if (success_count == 0) {
+    BKE_report(op->reports, RPT_WARNING, "No images were successfully imported as assets");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* 10. Done. */
+  if (success_count == 1) {
+    BKE_report(op->reports, RPT_INFO, "1 image is now an asset");
+  }
+  else {
+    BKE_reportf(op->reports, RPT_INFO, "%d images are now assets", success_count);
+  }
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_image_import_mark(wmOperatorType *ot)
+{
+  ot->name = "Import Images as Assets";
+  ot->description =
+      "Load dropped image files and mark them as assets, assigning per-file map types and "
+      "optionally a shared catalog";
+  ot->idname = "ASSET_OT_image_import_mark";
+
+  ot->invoke = asset_image_import_mark_invoke;
+  ot->exec = asset_image_import_mark_exec;
+  ot->ui = asset_image_import_mark_draw;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+
+  PropertyRNA *prop;
+
+  /* Per-file list (replaces old directory + files). */
+  prop = RNA_def_collection_runtime(
+      ot->srna, "images", RNA_OperatorAssetImageImportElement, "Images", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna, "catalog_locked", false, "Catalog Locked", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna, "create_catalog", false, "Create New Catalog", "");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_string(
+      ot->srna, "new_catalog_name", nullptr, MAX_NAME, "Catalog Name", "Name for the new catalog");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_string(
+      ot->srna, "catalog_path", nullptr, MAX_NAME, "Catalog", "Catalog path in the current file");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  RNA_def_property_string_search_func_runtime(
+      prop, asset_image_import_catalog_search, PROP_STRING_SEARCH_SUGGESTION);
+
+  /* Kept for backward compat / catalog tree call site. */
+  prop = RNA_def_string(ot->srna,
+                        "catalog_id",
+                        nullptr,
+                        UUID_STRING_SIZE,
+                        "Catalog UUID",
+                        "UUID of the catalog to assign the new assets to");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  PropertyRNA *map_type_prop = RNA_struct_type_find_property(RNA_OperatorAssetImageImportElement,
+                                                             "map_type");
+  RNA_def_enum_funcs(map_type_prop, rna_asset_image_import_map_type_itemf);
+}
+
+/** \} */
+
 
 static void ASSET_OT_mark(wmOperatorType *ot)
 {
@@ -450,9 +1008,25 @@ static bool asset_library_refresh_poll(bContext *C)
 static void do_asset_library_refresh(bContext *C)
 {
   const AssetLibraryReference *library = CTX_wm_asset_library_ref(C);
+  if (!library) {
+    return;
+  }
+
+  /* For custom on-disk libraries, update the image index before clearing the list so
+   * that the next read job picks up any files added, moved or deleted since the last
+   * scan.  The index write is atomic and fast for unchanged libraries. */
+  if (library->type == ASSET_LIBRARY_CUSTOM) {
+    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_from_ref(&U, library);
+    if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
+      image_library_scan_and_index(user_lib->dirpath);
+      image_library_invalidate_cached_previews(user_lib->dirpath);
+    }
+  }
+
   /* Handles both global asset list storage and asset browsers. */
   list::clear(library, C);
   WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
+  list::tag_refresh_visible_asset_browsers(*library, C);
 }
 
 struct AssetLibraryAndRef {
@@ -522,7 +1096,6 @@ static wmOperatorStatus asset_library_reload_listing_exec(bContext *C, wmOperato
    * thing on top of regular refreshing (otherwise it would be weird to use the refresh button for
    * this). */
   do_asset_library_refresh(C);
-
   return OPERATOR_FINISHED;
 }
 
@@ -1040,8 +1613,7 @@ static const bUserAssetLibrary *selected_asset_library(wmOperator *op)
 {
   const int enum_value = RNA_enum_get(op->ptr, "asset_library_reference");
   const AssetLibraryReference lib_ref = library_reference_from_enum_value(enum_value);
-  const bUserAssetLibrary *lib = BKE_preferences_asset_library_find_index(
-      &U, lib_ref.custom_library_index);
+  const bUserAssetLibrary *lib = BKE_preferences_asset_library_find_from_ref(&U, &lib_ref);
   return lib;
 }
 
@@ -1790,6 +2362,42 @@ static void ASSET_OT_assets_download(wmOperatorType *ot)
 }
 
 /* -------------------------------------------------------------------- */
+/** \name Set Asset Shelf Popup Size as Default
+ * \{ */
+
+static wmOperatorStatus asset_shelf_popup_set_default_size_exec(bContext *C, wmOperator * /*op*/)
+{
+  PointerRNA shelf_ptr = CTX_data_pointer_get_type(C, "asset_shelf", RNA_AssetShelf);
+  AssetShelf *shelf = static_cast<AssetShelf *>(shelf_ptr.data);
+  if (!shelf || shelf->idname[0] == '\0') {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Copy this file's current popup size (and the other stored view options) into the Preferences,
+   * so new files and files without their own per-`.blend` override open at this size. */
+  BKE_preferences_asset_shelf_popup_view_store(&U,
+                                               shelf->idname,
+                                               shelf->settings.preview_size,
+                                               short(shelf->settings.display_flag),
+                                               shelf->settings.popup_width_units,
+                                               shelf->settings.popup_height_units,
+                                               shelf->settings.recent_max_count);
+  U.runtime.is_dirty = true;
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_shelf_popup_set_default_size(wmOperatorType *ot)
+{
+  ot->name = "Set Popup Size as Default";
+  ot->description = "Use the current popup size as the default for new files";
+  ot->idname = "ASSET_OT_shelf_popup_set_default_size";
+
+  ot->exec = asset_shelf_popup_set_default_size_exec;
+
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+/** \} */
 
 static wmOperatorStatus asset_download_exec(bContext *C, wmOperator *op)
 {
@@ -1834,9 +2442,73 @@ static void ASSET_OT_asset_download(wmOperatorType *ot)
 }
 
 /* -------------------------------------------------------------------- */
+/** \name Asset Browser Name Match Filter
+ * \{ */
+
+static bool browser_name_match_operator_poll(bContext *C)
+{
+  const SpaceFile *sfile = CTX_wm_space_file(C);
+  if (sfile == nullptr) {
+    return false;
+  }
+  return ED_fileselect_get_asset_params(sfile) != nullptr;
+}
+
+static wmOperatorStatus browser_name_match_map_type_toggle_exec(bContext *C, wmOperator *op)
+{
+  SpaceFile *sfile = CTX_wm_space_file(C);
+  FileAssetSelectParams *params = sfile ? ED_fileselect_get_asset_params(sfile) : nullptr;
+  if (params == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  char identifier[64];
+  RNA_string_get(op->ptr, "identifier", identifier);
+  ED_asset_browser_name_match_map_type_toggle(*params, identifier);
+  ED_asset_browser_name_match_notify(C);
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_browser_name_match_map_type_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Name Match Map Type";
+  ot->idname = "ASSET_OT_browser_name_match_map_type_toggle";
+  ot->description = "Toggle a map type in the Asset Browser name matching filter";
+  ot->exec = browser_name_match_map_type_toggle_exec;
+  ot->poll = browser_name_match_operator_poll;
+
+  RNA_def_string(ot->srna, "identifier", nullptr, 64, "Identifier", "");
+}
+
+static wmOperatorStatus browser_name_match_clear_exec(bContext *C, wmOperator * /*op*/)
+{
+  SpaceFile *sfile = CTX_wm_space_file(C);
+  FileAssetSelectParams *params = sfile ? ED_fileselect_get_asset_params(sfile) : nullptr;
+  if (params == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  ED_asset_browser_name_match_clear_selection(*params);
+  ED_asset_browser_name_match_notify(C);
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_browser_name_match_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Name Match Filter";
+  ot->idname = "ASSET_OT_browser_name_match_clear";
+  ot->description = "Clear active name matching map types in the Asset Browser";
+  ot->exec = browser_name_match_clear_exec;
+  ot->poll = browser_name_match_operator_poll;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 
 void operatortypes_asset()
 {
+  WM_operatortype_append(ASSET_OT_shelf_popup_set_default_size);
   WM_operatortype_append(ASSET_OT_mark);
   WM_operatortype_append(ASSET_OT_mark_single);
   WM_operatortype_append(ASSET_OT_clear);
@@ -1857,6 +2529,49 @@ void operatortypes_asset()
 
   WM_operatortype_append(ASSET_OT_assets_download);
   WM_operatortype_append(ASSET_OT_asset_download);
+
+  WM_operatortype_append(ASSET_OT_image_import_mark);
+
+  WM_operatortype_append(ASSET_OT_browser_name_match_map_type_toggle);
+  WM_operatortype_append(ASSET_OT_browser_name_match_clear);
+  ED_asset_browser_name_match_panel_register();
+
+  WM_operatortype_append(shelf::ASSETSHELF_OT_asset_favorite_toggle);
+  WM_operatortype_append(shelf::ASSETSHELF_OT_asset_favorite_reorder);
+  WM_operatortype_append(shelf::ASSETSHELF_OT_asset_favorite_reorder_to);
+  WM_operatortype_append(shelf::ASSETSHELF_OT_asset_recent_clear);
+  WM_operatortype_append(shelf::ASSETSHELF_OT_asset_favorites_clear);
 }
+
+namespace list {
+
+void library_refresh(bContext *C, const AssetLibraryReference *library_reference)
+{
+  if (!C) {
+    return;
+  }
+
+  /* Callers with an explicit library (e.g. after drag-drop) run the same logic as the operator
+   * without relying on context poll or #CTX_wm_asset_library_ref. */
+  if (library_reference) {
+    list::clear(library_reference, C);
+    WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
+    list::tag_refresh_visible_asset_browsers(*library_reference, C);
+    return;
+  }
+
+  wmOperatorType *ot = WM_operatortype_find("ASSET_OT_library_refresh", false);
+  if (ot && WM_operator_poll(C, ot)) {
+    const wmOperatorStatus status = WM_operator_name_call(
+        C, "ASSET_OT_library_refresh", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+    if (ELEM(status, OPERATOR_FINISHED, OPERATOR_RUNNING_MODAL)) {
+      return;
+    }
+  }
+
+  do_asset_library_refresh(C);
+}
+
+}  // namespace list
 
 }  // namespace blender::ed::asset

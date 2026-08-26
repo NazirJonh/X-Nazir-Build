@@ -44,8 +44,11 @@ set(SRC
   intern/armature_selection.cc
   intern/armature_update.cc
   intern/asset.cc
+  intern/asset_browser_settings.cc
+  intern/asset_catalog_memory.cc
   intern/asset_edit.cc
   intern/asset_weak_reference.cc
+  intern/asset_shelf_catalog_state.cc
   intern/attribute.cc
   intern/attribute_access.cc
   intern/attribute_legacy_convert.cc
@@ -231,6 +234,7 @@ set(SRC
   intern/multires_subdiv.cc
   intern/multires_unsubdivide.cc
   intern/multires_versioning.cc
+  intern/name_matching.cc
   intern/nla.cc
   intern/node.cc
   intern/node_enum_definition.cc
@@ -336,6 +340,7 @@ set(SRC
   BKE_appdir.hh
   BKE_armature.hh
   BKE_asset.hh
+  BKE_asset_catalog_memory.hh
   BKE_asset_edit.hh
   BKE_attribute.h
   BKE_attribute.hh
@@ -480,6 +485,7 @@ set(SRC
   BKE_modifier.hh
   BKE_movieclip.hh
   BKE_multires.hh
+  BKE_name_matching.hh
   BKE_nla.hh
   BKE_node.hh
   BKE_node_enum.hh
@@ -764,7 +770,10 @@ if(WITH_GTESTS)
     intern/anim_data_test.cc
     intern/armature_deform_test.cc
     intern/armature_test.cc
+    intern/asset_catalog_memory_test.cc
     intern/asset_metadata_test.cc
+    intern/asset_map_tag_test.cc
+    intern/name_matching_filter_test.cc
     intern/attribute_storage_test.cc
     intern/bake_items_serialize_test.cc
     intern/bpath_test.cc
@@ -799,6 +808,7 @@ if(WITH_GTESTS)
     intern/paint_material_channel_test.cc
     intern/paint_test.cc
     intern/path_templates_test.cc
+    intern/preferences_test.cc
     intern/scene_test.cc
     intern/subdiv_ccg_test.cc
     intern/tracking_test.cc

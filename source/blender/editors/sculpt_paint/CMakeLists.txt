@@ -51,6 +51,7 @@ set(SRC
   paint_curve_sync.cc
   paint_curve_undo.cc
   paint_ops.cc
+  paint_texture_ops.cc
   paint_sample_color.cc
   paint_stroke.cc
   paint_stroke_roll.cc

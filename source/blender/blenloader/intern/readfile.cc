@@ -94,6 +94,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
 #include "BKE_packedFile.hh"
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_preferences.h"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -4007,7 +4008,16 @@ static BHead *read_userdef(BlendFileData *bfd, FileData *fd, BHead *bhead)
   BLO_read_struct_list(reader, bPathCompare, &user->autoexec_paths);
   BLO_read_struct_list(reader, bUserScriptDirectory, &user->script_directories);
   BLO_read_struct_list(reader, bUserAssetLibrary, &user->asset_libraries);
+
+  /* Clear runtime parent pointers (contain stale addresses from the saved file),
+   * then restore them from the serialized parent_name strings. */
+  for (bUserAssetLibrary &lib : user->asset_libraries) {
+    lib.parent = nullptr;
+  }
+  BKE_preferences_asset_library_restore_hierarchy(user);
+
   BLO_read_struct_list(reader, bUserExtensionRepo, &user->extension_repos);
+  BLO_read_struct_list(reader, bUserAssetBrowserSettings, &user->asset_browser_settings);
   BLO_read_struct_list(reader, bUserAssetShelfSettings, &user->asset_shelves_settings);
 
   for (wmKeyMap &keymap : user->user_keymaps) {
@@ -4063,6 +4073,17 @@ static BHead *read_userdef(BlendFileData *bfd, FileData *fd, BHead *bhead)
   for (bUserAssetShelfSettings &shelf_settings : user->asset_shelves_settings) {
     BKE_asset_catalog_path_list_blend_read_data(reader, shelf_settings.enabled_catalog_paths);
   }
+
+  for (bUserAssetBrowserSettings &browser_settings : user->asset_browser_settings) {
+    BKE_preferences_asset_browser_settings_blend_read_data(reader, &browser_settings);
+  }
+  BKE_asset_catalog_memory_list_blend_read_data(reader, user->catalog_memory);
+
+  BLO_read_struct_list(reader, bUserNameMatchMapType, &user->name_match_map_types);
+  for (bUserNameMatchMapType &map_type : user->name_match_map_types) {
+    BLO_read_struct_list(reader, bUserNameMatchToken, &map_type.tokens);
+  }
+  BLO_read_struct_list(reader, bUserNameMatchFilterTag, &user->name_match_filter_tags);
 
   /* XXX */
   user->uifonts.first = user->uifonts.last = nullptr;

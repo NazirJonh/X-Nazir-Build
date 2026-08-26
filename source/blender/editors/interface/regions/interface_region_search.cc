@@ -382,6 +382,10 @@ static ARegion *wm_searchbox_tooltip_init(
       }
 
       ARegion *searchbox_region = region_searchbox_region_get(region);
+      if (searchbox_region == nullptr) {
+        /* The search-box may not be open yet (e.g. before the field entered text editing). */
+        return nullptr;
+      }
       uiSearchboxData *data = static_cast<uiSearchboxData *>(searchbox_region->regiondata);
 
       BLI_assert(data->items.pointers[data->active] == search_but->item_active);
@@ -699,7 +703,8 @@ static void searchbox_region_draw_fn(const bContext *C, ARegion *region)
                           data->items.names[a],
                           data->items.icons[a],
                           but_flag,
-                          UI_STYLE_TEXT_LEFT);
+                          UI_STYLE_TEXT_LEFT,
+                          /* preview_size_px: */ 0);
       }
 
       /* indicate more */

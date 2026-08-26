@@ -12,6 +12,7 @@ class ASSETSHELF_PT_display(Panel):
     # Doesn't actually matter. Panel is instanced through popover only.
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
 
     def draw(self, context):
         layout = self.layout
@@ -21,8 +22,15 @@ class ASSETSHELF_PT_display(Panel):
 
         shelf = context.asset_shelf
 
-        layout.prop(shelf, "preview_size", text="Size")
-        layout.prop(shelf, "show_names", text="Names")
+        col = layout.column()
+
+        col.prop(shelf, "preview_size_preset", expand=True)
+        col.prop(shelf, "preview_size")
+
+        col.prop(shelf, "show_names", text="Names")
+
+        if shelf.bl_idname.startswith(("VIEW3D_AST_brush", "IMAGE_AST_brush")) or shelf.bl_idname == "VIEW3D_AST_image_texture":
+            col.prop(shelf, "show_favorite_icons", text="Favorite Icons")
 
     @classmethod
     def poll(cls, context):

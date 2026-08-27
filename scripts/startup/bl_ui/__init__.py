@@ -152,15 +152,33 @@ def register():
         key: StringProperty()
         expanded: BoolProperty(default=False)
 
+    # Dedicated PBR paint channel source-picker settings, for the same reason the ID Browser has
+    # its own below: picking a library or catalog there must not move another browser's filters.
+    # One settings object per material paint channel, so each channel keeps its own library,
+    # catalogs, preview size and grid height; the members are named after
+    # `rna_enum_material_paint_channel_items` in lower case.
+    class MaterialPaintSourceGridSettings(PropertyGroup):
+        base_color: PointerProperty(type=GridViewSettings)
+        metallic: PointerProperty(type=GridViewSettings)
+        roughness: PointerProperty(type=GridViewSettings)
+        specular: PointerProperty(type=GridViewSettings)
+        normal: PointerProperty(type=GridViewSettings)
+        custom: PointerProperty(type=GridViewSettings)
+        height: PointerProperty(type=GridViewSettings)
+        alpha: PointerProperty(type=GridViewSettings)
+        ao: PointerProperty(type=GridViewSettings)
+        emission: PointerProperty(type=GridViewSettings)
+
     globals().update({
         "GridViewCatalogPath": GridViewCatalogPath,
         "GridViewLibraryCatalogs": GridViewLibraryCatalogs,
         "GridViewExpandedKey": GridViewExpandedKey,
         "GridViewCatalogItemState": GridViewCatalogItemState,
+        "MaterialPaintSourceGridSettings": MaterialPaintSourceGridSettings,
     })
 
     for cls in (GridViewCatalogPath, GridViewLibraryCatalogs, GridViewExpandedKey,
-                GridViewCatalogItemState):
+                GridViewCatalogItemState, MaterialPaintSourceGridSettings):
         register_class(cls)
 
     # space_userprefs.py
@@ -226,6 +244,9 @@ def register():
     # with the default template-grid settings object.
     WindowManager.id_browser_grid_view_settings = PointerProperty(type=GridViewSettings)
 
+    WindowManager.material_paint_source_grid_view_settings = PointerProperty(
+        type=MaterialPaintSourceGridSettings)
+
     bpy.app.handlers.translation_update_post.append(translation_update)
 
     # done...
@@ -238,14 +259,15 @@ def unregister():
         WindowManager,
     )
 
+    del WindowManager.material_paint_source_grid_view_settings
     del WindowManager.id_browser_grid_view_settings
     del WindowManager.grid_view_settings
     del GridViewSettings.expanded_catalog_items
     del GridViewSettings.expanded_library_sections
     del GridViewSettings.enabled_catalogs_by_library
 
-    for cls in reversed((GridViewCatalogItemState, GridViewExpandedKey,
-                         GridViewLibraryCatalogs, GridViewCatalogPath)):
+    for cls in reversed((MaterialPaintSourceGridSettings, GridViewCatalogItemState,
+                         GridViewExpandedKey, GridViewLibraryCatalogs, GridViewCatalogPath)):
         if cls.is_registered:
             unregister_class(cls)
 

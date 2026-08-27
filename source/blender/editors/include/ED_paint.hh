@@ -379,6 +379,15 @@ bool ED_paintcurve_export_to_scene_object(bContext *C,
  */
 void ED_paint_curve_overlay_redraw_register();
 
+/**
+ * Free the brush overlay textures cached in the `paint_cursor.cc` file-static snapshots.
+ *
+ * They are normally only released when leaving a paint or sculpt mode. Blender's exit path never
+ * leaves those modes, so on quit the textures outlive the GPU backend and the Vulkan allocator
+ * asserts on the unfreed image. Must be called while the GPU context is still alive.
+ */
+void ED_paint_cursor_free_textures();
+
 /* `paint_curve_snap.cc` (implemented in #bf_editor_transform) */
 
 struct PaintCurveSnapContext;

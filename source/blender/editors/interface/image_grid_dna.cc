@@ -73,6 +73,7 @@ void image_grid_slot_dna_duplicate(ImageGridSlotDNA &dst, const ImageGridSlotDNA
   dst.library_type_legacy = src.library_type_legacy;
   dst.library_custom_index_legacy = src.library_custom_index_legacy;
   dst.filter_name_match_enabled = src.filter_name_match_enabled;
+  dst.hide_grid = src.hide_grid;
   dst.enabled_catalog_paths_legacy = BKE_asset_catalog_path_list_duplicate(
       src.enabled_catalog_paths_legacy);
 

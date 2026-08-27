@@ -82,6 +82,24 @@ inline int preview_size_get(PointerRNA &settings)
   return RNA_int_get(&settings, "preview_size");
 }
 
+/** Whether tiles show the item name under the preview; see #GridViewSettings.show_names. */
+inline bool show_names_get(PointerRNA &settings)
+{
+  return RNA_boolean_get(&settings, "show_names");
+}
+
+/** Whether the filter row under the resize grip is disclosed; see #GridViewSettings.show_filter. */
+inline bool show_filter_get(PointerRNA &settings)
+{
+  return RNA_boolean_get(&settings, "show_filter");
+}
+
+/** Free-text name filter; empty means "show all". See #GridViewSettings.filter_search. */
+inline std::string filter_search_get(PointerRNA &settings)
+{
+  return RNA_string_get(&settings, "filter_search");
+}
+
 /**
  * Serialize a set of catalog paths into one string. A catalog path may contain any character,
  * including commas and surrounding spaces, so commas and backslashes are backslash-escaped
@@ -327,10 +345,11 @@ inline void catalog_item_set_expanded(PointerRNA &settings,
  */
 enum class CatalogMode { All, CatalogPath, Recent, Favorites };
 
-inline CatalogMode catalog_mode_get(PointerRNA &settings)
+inline CatalogMode catalog_mode_get(PointerRNA &settings,
+                                    const char *domain = id_browser_catalog_memory_domain)
 {
   const AssetLibraryReference library_ref = library_ref_get(settings);
-  switch (BKE_asset_catalog_memory_get_mode(&U, library_ref, id_browser_catalog_memory_domain)) {
+  switch (BKE_asset_catalog_memory_get_mode(&U, library_ref, domain)) {
     case ASSET_CATALOG_MEMORY_RECENT:
       return CatalogMode::Recent;
     case ASSET_CATALOG_MEMORY_FAVORITES:
@@ -347,16 +366,37 @@ inline CatalogMode catalog_mode_get(PointerRNA &settings)
 /** Enter Recent or Favorites membership mode. Writes only the mode field for #ASSET_LIBRARY_ALL
  * (never clears #catalog_id_set). Leaving membership is #BKE_asset_catalog_memory_set_all or a
  * catalog toggle that calls #BKE_asset_catalog_memory_set_set. */
-inline void catalog_mode_set_membership(PointerRNA & /*settings*/, const CatalogMode mode)
+inline void catalog_mode_set_membership(PointerRNA & /*settings*/,
+                                        const CatalogMode mode,
+                                        const char *domain = id_browser_catalog_memory_domain)
 {
   BLI_assert(ELEM(mode, CatalogMode::Recent, CatalogMode::Favorites));
   const AssetLibraryReference all_ref = asset_system::all_library_reference();
   BKE_asset_catalog_memory_set_mode(
       &U,
       all_ref,
-      id_browser_catalog_memory_domain,
+      domain,
       (mode == CatalogMode::Recent) ? ASSET_CATALOG_MEMORY_RECENT :
                                       ASSET_CATALOG_MEMORY_FAVORITES);
+}
+
+/**
+ * Leave Recent/Favorites membership for #ASSET_LIBRARY_ALL, restoring that library's remembered
+ * catalog filter instead of force-clearing it: a saved catalog set comes back as
+ * #ASSET_CATALOG_MEMORY_SET, and only a library that was never narrowed ends up on
+ * #ASSET_CATALOG_MEMORY_ALL. Mirrors how the image grid leaves membership
+ * (#image_grid_filter_set_show_all), so a host cannot lose the user's catalog selection just by
+ * passing through Recent.
+ */
+inline void catalog_mode_exit_membership(const char *domain = id_browser_catalog_memory_domain)
+{
+  const AssetLibraryReference all_ref = asset_system::all_library_reference();
+  const Vector<bUUID> saved = BKE_asset_catalog_memory_get_set(&U, all_ref, domain);
+  if (saved.is_empty()) {
+    BKE_asset_catalog_memory_set_all(&U, all_ref, domain);
+    return;
+  }
+  BKE_asset_catalog_memory_set_set(&U, all_ref, domain, saved.as_span());
 }
 
 /**
@@ -475,7 +515,9 @@ namespace blender::ui {
  * side effects, which libraries appear in All mode, and where library-section expand state lives.
  */
 struct CatalogCheckboxSetConfig {
-  const char *catalog_memory_domain = grid_settings::id_browser_catalog_memory_domain;
+  /* Owned rather than a #const char *: a host can name its domain from a string built per draw
+   * (the PBR Paint picker's per-channel domain), and the tree outlives that draw call. */
+  std::string catalog_memory_domain = grid_settings::id_browser_catalog_memory_domain;
   PointerRNA settings{};
   bool all_libraries_mode = false;
   const asset_system::AssetLibrary *single_library = nullptr;

@@ -43,12 +43,6 @@ namespace ed::image {
 
 /* Runtime data owned by SpaceImage, allocated on space create, freed on space free. */
 struct SpaceImage_Runtime {
-  /**
-   * Per-space session state for the brush texture image grid template. Created lazily and freed
-   * with the space. Opaque here to keep the runtime independent of Image Grid internals.
-   */
-  void *image_grid_state = nullptr;
-
   /* Floating selection operation state (move / transform) for Image Paint mode.
    * All members are null when no selection operation is in progress for this editor instance. */
   PaintSelectSession paint_select;

@@ -10,6 +10,7 @@
 
 #include "BKE_report.hh"
 
+#include "DNA_uuid_types.h"
 #include "DNA_windowmanager_types.h"
 
 #include "BLI_set.hh"
@@ -65,6 +66,15 @@ struct WindowManagerRuntime {
    * so the popover works from any editor. Only one such popover is open at a time.
    */
   char id_browser_search[64] = {};
+
+  /**
+   * Paint-layer UUID the ID-browser popover's "Slot" filter (with its "All" restriction released)
+   * narrows to, overriding the layer derived from the currently assigned image. Session-only and
+   * shared like #id_browser_search. Written from Python as
+   * #WindowManager.id_browser_filter_layer_id by paint add-ons (e.g. Ucupaint) when the user
+   * selects a layer; nil means "follow the assigned image".
+   */
+  bUUID id_browser_filter_layer_id = {};
 
   /**
    * Indicates the main loop (#WM_main()) to stop processing the event queue and move to the next

@@ -93,6 +93,7 @@
 #include "ED_keyframes_edit.hh"
 #include "ED_keyframing.hh"
 #include "ED_node.hh"
+#include "ED_paint.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
@@ -198,6 +199,19 @@ static void sound_jack_sync_callback(Main *bmain, int mode, double time)
   }
 }
 
+/**
+ * #PreviewImageRenderStopCb: an icon-render job owns the #PreviewImage it renders into (see
+ * #ED_preview_icon_job), so the preview alone identifies the job to stop. #WM_jobs_kill_type joins
+ * the worker before returning, which is what makes it safe for the caller to free the ID next.
+ */
+static void wm_previewimg_render_stop(const PreviewImage *prv)
+{
+  wmWindowManager *wm = G_MAIN ? static_cast<wmWindowManager *>(G_MAIN->wm.first) : nullptr;
+  if (wm != nullptr) {
+    WM_jobs_kill_type(wm, prv, WM_JOB_TYPE_RENDER_PREVIEW);
+  }
+}
+
 void WM_init(bContext *C, int argc, const char **argv)
 {
 
@@ -222,6 +236,7 @@ void WM_init(bContext *C, int argc, const char **argv)
   ED_undosys_type_init();
 
   BKE_library_callback_free_notifier_reference_set(WM_main_remove_notifier_reference);
+  BKE_previewimg_render_stop_callback_set(wm_previewimg_render_stop);
   BKE_region_callback_free_gizmomap_set(wm_gizmomap_remove);
   BKE_region_callback_refresh_tag_gizmomap_set(WM_gizmomap_tag_refresh);
   BKE_library_callback_remap_editor_id_reference_set(WM_main_remap_editor_id_reference);
@@ -621,7 +636,15 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
 
   if (gpu_is_init) {
     BKE_image_free_unused_gpu_textures();
+    /* Exiting never leaves paint or sculpt mode, so the brush overlay textures cached there are
+     * still alive. They must go before the GPU backend does, or the Vulkan allocator asserts on
+     * the unfreed image. */
+    ED_paint_cursor_free_textures();
   }
+
+  /* The window manager is freed together with #G_MAIN below, so previews freed from there must not
+   * look for jobs to stop any more. */
+  BKE_previewimg_render_stop_callback_set(nullptr);
 
   /* Frees the entire library (#G_MAIN) and space-types. */
   BKE_blender_free();

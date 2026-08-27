@@ -11,6 +11,7 @@
 #include "DNA_image_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "AS_asset_catalog.hh"
 #include "AS_asset_library.hh"
@@ -18,6 +19,7 @@
 
 #include "BLI_listbase.h"
 #include "BLI_set.hh"
+#include "BLI_string.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 #include "BLI_vector_set.hh"
@@ -25,6 +27,7 @@
 #include "BKE_asset.hh"
 #include "BKE_asset_catalog_memory.hh"
 #include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
 #include "BKE_name_matching.hh"
@@ -469,6 +472,18 @@ int image_grid_foreach_filtered_item(
   int out_index = 0;
   const NameMatchResolvedFilter name_match_resolved = BKE_name_match_filter_resolve(
       state.filter.name_match, U);
+  /* Lower-cased once, not per item. Case-insensitive "contains", the same match the new grid's
+   * search does (#asset_passes_search) and the one a #uiList search reads as. */
+  std::string search_lower = state.filter.search;
+  BLI_str_tolower_ascii(search_lower.data(), search_lower.size());
+  auto passes_search = [&](const StringRef name) -> bool {
+    if (search_lower.empty()) {
+      return true;
+    }
+    std::string name_lower = name;
+    BLI_str_tolower_ascii(name_lower.data(), name_lower.size());
+    return StringRef(name_lower).find(StringRef(search_lower)) != StringRef::not_found;
+  };
   auto gate = [&](const ImageGridFilteredItem &item, int /*inner*/) -> bool {
     StringRef name;
     Vector<StringRef> tags;
@@ -483,6 +498,9 @@ int image_grid_foreach_filtered_item(
     }
     else {
       return fn(item, out_index++);
+    }
+    if (!passes_search(name)) {
+      return true;
     }
     if (!BKE_name_match_resolved_asset_passes(name_match_resolved, name, tags)) {
       return true;
@@ -540,15 +558,28 @@ struct ImageGridStatesPerOwner {
 };
 
 /**
- * Return the per-owner grid state stored in the owner's runtime cache slot, creating it on first
- * access. Keeping it on the owning space (instead of a global map keyed by raw pointer) ties its
- * lifetime to the owner and avoids aliasing when a freed space's address is reused.
+ * Return the grid state cached behind the owner's runtime slot, creating it on first access.
+ *
+ * That slot is shared by every host (see #ImageGridOwner::runtime_state_slot), so it outlives any
+ * one editor and must instead be dropped when the file it was read from is gone. The window
+ * manager is replaced on file read, so its session UID identifies the file the cache belongs to.
  */
 static ImageGridStatesPerOwner &image_grid_states_ensure(const ImageGridOwner owner)
 {
   void *&slot = owner.runtime_state_slot();
+
+  const wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
+  const uint32_t wm_session_uid = wm ? wm->id.session_uid : 0;
+  static uint32_t cached_wm_session_uid = 0;
+
+  if (slot && cached_wm_session_uid != wm_session_uid) {
+    /* State of a file that is no longer open; the new file's DNA has to be read in again. */
+    MEM_delete(static_cast<ImageGridStatesPerOwner *>(slot));
+    slot = nullptr;
+  }
   if (!slot) {
     slot = MEM_new<ImageGridStatesPerOwner>(__func__);
+    cached_wm_session_uid = wm_session_uid;
   }
   return *static_cast<ImageGridStatesPerOwner *>(slot);
 }
@@ -557,6 +588,7 @@ struct ImageGridOwnerDNAFields {
   AssetLibraryReference &library_ref;
   short &catalog_mode;
   char &filter_name_match_enabled;
+  char &hide_grid;
   ListBaseT<AssetNameMatchIdLink> &filter_name_match_map_types;
 };
 
@@ -567,6 +599,7 @@ static ImageGridOwnerDNAFields image_grid_owner_dna_fields(const ImageGridOwner 
   return {slot.library_ref,
           slot.catalog_mode,
           slot.filter_name_match_enabled,
+          slot.hide_grid,
           slot.filter_name_match_map_types};
 }
 
@@ -588,6 +621,7 @@ static void image_grid_init_state_from_owner_dna(ImageGridUIState &state,
   image_grid_catalog_load_active(state, state.filter.lib_ref);
 
   state.filter.name_match.enabled = (dna.filter_name_match_enabled != 0);
+  state.show_grid = (dna.hide_grid == 0);
   state.filter.name_match.active_map_type_ids.clear();
   if (BLI_listbase_head_is_plausible(&dna.filter_name_match_map_types)) {
     for (const AssetNameMatchIdLink &link : dna.filter_name_match_map_types) {
@@ -674,17 +708,17 @@ void image_grid_reset_scroll(const ImageGridOwner owner, const ImageGridSlot gri
 
 void image_grid_state_remove(const ImageGridOwner owner)
 {
-  /* Drop this owner's four grid sessions from the shared registry before the state is freed; safe
-   * because the space is being torn down, so no live view still references them. */
+  /* Drop this owner's four grid sessions from the shared registry; safe because the space is being
+   * torn down, so no live view still references them. Sessions hold per-layout state (scroll, grip
+   * height), which is the only part of the grid that is still per editor.
+   *
+   * The filter state itself is deliberately kept: it is shared by every host (see
+   * #ImageGridOwner::runtime_state_slot), so closing one editor must not reset the others. It is
+   * dropped when the file it belongs to is closed, see #image_grid_states_ensure. */
   for (const ImageGridSlot grid_slot : IMAGE_GRID_SLOTS) {
     for (const bool is_popover : {false, true}) {
       ui::grid_view_session_remove(image_grid_session_id(owner, grid_slot, is_popover));
     }
-  }
-  void *&slot = owner.runtime_state_slot();
-  if (slot) {
-    MEM_delete(static_cast<ImageGridStatesPerOwner *>(slot));
-    slot = nullptr;
   }
 }
 

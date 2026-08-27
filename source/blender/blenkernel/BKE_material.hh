@@ -12,10 +12,13 @@
 #include <optional>
 #include <utility>
 
+#include "BLI_vector.hh"
+
 namespace blender {
 
 struct Depsgraph;
 struct ID;
+struct Image;
 struct Main;
 struct Material;
 struct Object;
@@ -163,6 +166,20 @@ void BKE_texpaint_slot_refresh_cache(Scene *scene, Material *ma, const Object *o
 void BKE_texpaint_slots_refresh_object(Scene *scene, Object *ob);
 std::pair<bNodeTree *, bNode *> BKE_texpaint_slot_material_find_node(Material *ma,
                                                                      short texpaint_slot);
+
+/**
+ * Images backing \a ma's texture paint slots, in node order, each listed once (one image can back
+ * several slots).
+ *
+ * This order defines what "the next canvas" means, so every UI that steps through a material's
+ * paint canvases shares it: #PAINT_OT_material_canvas_cycle walks the list, and
+ * #SpaceImageEditor.material_paint_canvas lists it, and the two can therefore never disagree
+ * about what follows what.
+ *
+ * Reads #Material::texpaintslot as it stands; call #BKE_texpaint_slot_refresh_cache first when
+ * the cache may not reflect the current node tree. Returns an empty list when there is no cache.
+ */
+Vector<Image *> BKE_texpaint_slot_canvas_images(const Material *ma);
 
 /**
  * Detect the paint slot type of an Image Texture node by tracing its output links.

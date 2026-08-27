@@ -5430,6 +5430,10 @@ struct SculptPaintStroke final : public PaintStroke {
   /* Needed to tag other viewports */
   wmWindowManager *wm_;
 
+  /* Which undo system #stroke_undo_begin opened the stroke's transaction on, so that
+   * #stroke_undo_end can close the same one. See #stroke_undo_begin. */
+  bool undo_uses_image_canvas_ = false;
+
   SculptPaintStroke(bContext *C, wmOperator *op, const int event_type)
       : PaintStroke(C, op, event_type)
   {
@@ -6132,7 +6136,17 @@ bool sculpt_brush_uses_image_canvas(const Brush &brush,
   return SCULPT_use_image_paint_brush(settings, ob, &brush, paint.visible_material_channels);
 }
 
-static void stroke_undo_begin(const Scene &scene,
+/**
+ * Open the undo transaction for a stroke and report which undo system it was opened on.
+ *
+ * The result must be handed back to #stroke_undo_end. The condition below is not stable for the
+ * duration of a stroke -- it depends on the brush's enabled material channels, the paint settings'
+ * visible channels and the canvas' resolved image targets, all of which can change -- while the
+ * image and sculpt undo systems share `UndoStack.step_init`. Re-deriving it at the end would let
+ * #ED_image_undo_push_end finalize a transaction the sculpt system opened, which reinterprets a
+ * #SculptUndoStep as an #ImageUndoStep.
+ */
+static bool stroke_undo_begin(const Scene &scene,
                               const Brush *brush,
                               PaintModeSettings &paint_mode_settings,
                               const Paint &paint,
@@ -6143,18 +6157,16 @@ static void stroke_undo_begin(const Scene &scene,
    * Color attributes are part of the sculpting undo system. */
   if (brush && sculpt_brush_uses_image_canvas(*brush, paint_mode_settings, paint, object)) {
     ED_image_undo_push_begin(op->type->name, PaintMode::Sculpt);
+    return true;
   }
-  else {
-    undo::push_begin_ex(scene, object, sculpt_brush_type_name(*brush));
-  }
+  undo::push_begin_ex(scene, object, sculpt_brush_type_name(*brush));
+  return false;
 }
 
-static void stroke_undo_end(PaintModeSettings &paint_mode_settings,
-                            const Paint &paint,
-                            Object &object,
-                            Brush *brush)
+/** Close the transaction on the same undo system #stroke_undo_begin opened it on. */
+static void stroke_undo_end(Object &object, const bool used_image_canvas)
 {
-  if (brush && sculpt_brush_uses_image_canvas(*brush, paint_mode_settings, paint, object)) {
+  if (used_image_canvas) {
     ED_image_undo_push_end();
   }
   else {
@@ -6378,7 +6390,7 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 
     cursor_geometry_info_update(*this->depsgraph, *paint, sculpt_, this->vc, base_, mval, false);
 
-    stroke_undo_begin(
+    this->undo_uses_image_canvas_ = stroke_undo_begin(
         *this->scene, this->brush, *this->paint_mode_settings_, this->sculpt_->paint, *this->object, op);
 
     return true;
@@ -6681,7 +6693,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
       /* The start refused (see its own guards) and already freed `ss.cache`. Close the
        * transaction the ordinary way so whatever the stroke did stays undoable, and return -- the
        * teardown below would double-free the cache this path has already released. */
-      stroke_undo_end(*paint_mode_settings_, sd.paint, *this->object, brush);
+      stroke_undo_end(*this->object, this->undo_uses_image_canvas_);
       return;
     }
   }
@@ -6713,7 +6725,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
         curve_patch_handoff_to_editor(this->vc.C, ss);
         return;
       }
-      stroke_undo_end(*paint_mode_settings_, sd.paint, *this->object, brush);
+      stroke_undo_end(*this->object, this->undo_uses_image_canvas_);
       return;
     }
   }
@@ -6722,7 +6734,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   ss.cache = nullptr;
 
   if (!is_cancel && stroke_started) {
-    stroke_undo_end(*paint_mode_settings_, sd.paint, *this->object, brush);
+    stroke_undo_end(*this->object, this->undo_uses_image_canvas_);
   }
 
   if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {

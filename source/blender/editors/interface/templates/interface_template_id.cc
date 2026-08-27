@@ -10,7 +10,6 @@
 #include "BKE_collection.hh"
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
-#include "BKE_image.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_override.hh"
@@ -30,15 +29,12 @@
 #include "DNA_collection_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
-#include "DNA_node_types.h"
 #include "DNA_scene_types.h"
-#include "DNA_space_types.h"
 #include "DNA_workspace_types.h"
 
 #include "ED_id_management.hh"
 #include "ED_node.hh"
 #include "ED_object.hh"
-#include "ED_screen.hh"
 #include "ED_undo.hh"
 
 #include "RNA_access.hh"
@@ -62,6 +58,17 @@ enum {
   UI_ID_DELETE = 1 << 4,
   UI_ID_PIN = 1 << 6,
   UI_ID_PREVIEWS = 1 << 7,
+  UI_ID_OPEN_ICON_ONLY = 1 << 8,
+  UI_ID_NO_FAKE_USER = 1 << 9,
+  UI_ID_IMAGE_BROWSER_DROP_TARGET = 1 << 10,
+  /* Explicit opt-out, so templates that simply never passed #UI_ID_RENAME keep an editable name
+   * field. */
+  UI_ID_NO_RENAME = 1 << 11,
+  /* Explicit opt-out for the users-count button (#ID_REAL_USERS > 1). */
+  UI_ID_NO_USERS = 1 << 12,
+  /* Skip the name field. For hosts that draw their own name button in its place, e.g. the
+   * paint-slot browse row, whose name button opens the browser rather than renaming. */
+  UI_ID_NO_NAME = 1 << 13,
   UI_ID_FULL = UI_ID_RENAME | UI_ID_BROWSE | UI_ID_ADD_NEW | UI_ID_OPEN | UI_ID_DELETE,
 };
 
@@ -145,12 +152,11 @@ static bool id_search_allows_id(const bContext &C,
    * also excludes render-result/compositor images, so it is only consulted when a paint-slot
    * filter is active (the unfiltered "All" mode keeps showing every image as usual). */
   if (template_ui->idcode == ID_IM && template_ui->filter != TEMPLATE_ID_FILTER_ALL) {
-    if (!image_id_passes_paint_filter(bmain,
-                                      *id_cast<Image *>(id),
-                                      template_ui->filter,
-                                      template_ui->filter_context.material,
-                                      template_ui->filter_context.slot_type))
-    {
+    ImagePaintFilterParams paint_params;
+    paint_params.filter_mode = template_ui->filter;
+    paint_params.material = template_ui->filter_context.material;
+    paint_params.slot_type = template_ui->filter_context.slot_type;
+    if (!image_id_passes_paint_filter(bmain, *id_cast<Image *>(id), paint_params)) {
       return false;
     }
   }
@@ -1153,7 +1159,7 @@ static void template_ID(const bContext *C,
   }
 
   /* text button with name */
-  if (id) {
+  if (id && !(flag & UI_ID_NO_NAME)) {
     char name[UI_MAX_NAME_STR];
     const bool user_alert = (id->us <= 0);
 
@@ -1192,6 +1198,17 @@ static void template_ID(const bContext *C,
       ED_undo_push(&C, CTX_N_(BLT_I18NCONTEXT_OPERATOR_DEFAULT, "Rename Data-Block"));
       WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
     });
+    if (flag & UI_ID_IMAGE_BROWSER_DROP_TARGET) {
+      /* Mark only the assigned-image name field. The browser, Open, and Unlink buttons retain
+       * their ordinary behavior and must not become image drop targets. */
+      button_context_int_set(block, but, "id_browser_drop_target", 1);
+      /* The name alone does not tell the user what is assigned, so the field shows the same large
+       * preview as the thumbnail next to it (see #id_browser_add_popover_button). */
+      id_preview_tooltip_set(but, id);
+    }
+    if (flag & UI_ID_NO_RENAME) {
+      button_flag_enable(but, BUT_DISABLED);
+    }
 
     if (user_alert) {
       button_flag_enable(but, BUT_REDALERT);
@@ -1289,7 +1306,7 @@ static void template_ID(const bContext *C,
       }
     }
 
-    if ((ID_REAL_USERS(id) > 1) && (hide_buttons == false)) {
+    if ((ID_REAL_USERS(id) > 1) && (hide_buttons == false) && (flag & UI_ID_NO_USERS) == 0) {
       char numstr[32];
       short numstr_len;
 
@@ -1341,7 +1358,8 @@ static void template_ID(const bContext *C,
                       UI_UNIT_Y,
                       std::nullopt);
       }
-      else if (!ELEM(GS(id->name), ID_GR, ID_SCE, ID_SCR, ID_OB, ID_WS) && (hide_buttons == false))
+      else if (!ELEM(GS(id->name), ID_GR, ID_SCE, ID_SCR, ID_OB, ID_WS) &&
+               (hide_buttons == false) && (flag & UI_ID_NO_FAKE_USER) == 0)
       {
         uiDefIconButR(block,
                       ButtonType::IconToggle,
@@ -1388,11 +1406,13 @@ static void template_ID(const bContext *C,
     }
   }
   else if (flag & UI_ID_OPEN) {
-    const char *button_text = (id) ? "" : IFACE_("Open");
+    const bool open_icon_only = (flag & UI_ID_OPEN_ICON_ONLY) != 0;
+    const char *button_text = (id || open_icon_only) ? "" : IFACE_("Open");
     const uiFontStyle *fstyle = UI_FSTYLE_WIDGET;
 
-    int w = id ? UI_UNIT_X : (flag & UI_ID_ADD_NEW) ? UI_UNIT_X * 3 : UI_UNIT_X * 6;
-    if (!id) {
+    int w = (id || open_icon_only) ? UI_UNIT_X :
+                                    (flag & UI_ID_ADD_NEW) ? UI_UNIT_X * 3 : UI_UNIT_X * 6;
+    if (!id && !open_icon_only) {
       w = std::max(fontstyle_string_width(fstyle, button_text) + int(UI_UNIT_X * 1.5f), w);
     }
 
@@ -1402,7 +1422,7 @@ static void template_ID(const bContext *C,
                               openop,
                               wm::OpCallContext::InvokeDefault,
                               ICON_FILEBROWSER,
-                              (id) ? "" : IFACE_("Open"),
+                              button_text,
                               0,
                               0,
                               w,
@@ -1413,7 +1433,7 @@ static void template_ID(const bContext *C,
       but = uiDefIconTextBut(block,
                              ButtonType::But,
                              ICON_FILEBROWSER,
-                             (id) ? "" : IFACE_("Open"),
+                             button_text,
                              0,
                              0,
                              w,
@@ -1807,7 +1827,8 @@ void template_id_image_row_append_standard(const bContext *C,
                                            PropertyRNA *prop,
                                            const char *newop,
                                            const char *openop,
-                                           const char *unlinkop)
+                                           const char *unlinkop,
+                                           const ImageIDRowParams &params)
 {
   TemplateID template_ui = {};
   template_ui.ptr = *ptr;
@@ -1823,9 +1844,38 @@ void template_id_image_row_append_standard(const bContext *C,
     return;
   }
 
-  int flag = UI_ID_RENAME | UI_ID_DELETE;
-  if (newop) {
-    flag |= UI_ID_ADD_NEW;
+  int flag = params.use_unlink ? UI_ID_DELETE : 0;
+  if (!params.use_users) {
+    flag |= UI_ID_NO_USERS;
+  }
+  if (!params.use_fake_user) {
+    flag |= UI_ID_NO_FAKE_USER;
+  }
+  switch (params.mode) {
+    case ImageBrowserMode::Standard:
+      flag |= UI_ID_RENAME;
+      if (newop) {
+        flag |= UI_ID_ADD_NEW;
+      }
+      break;
+    case ImageBrowserMode::PaintSlotEmpty:
+      /* The drop button already offers browsing and dropping, so New would only add a third way to
+       * fill the slot; Open stays as an icon beside it. */
+      flag |= UI_ID_NO_FAKE_USER | UI_ID_NO_RENAME | UI_ID_OPEN_ICON_ONLY;
+      break;
+    case ImageBrowserMode::PaintSlotAssigned:
+      flag |= UI_ID_NO_FAKE_USER | UI_ID_NO_RENAME | UI_ID_IMAGE_BROWSER_DROP_TARGET;
+      break;
+  }
+  /* Applied after the variant so an explicit opt-out always wins: the paint-slot variants already
+   * lock the name, and #ImageBrowserMode::Standard hosts that own their data-block's name (the
+   * PBR paint canvas rows) ask for the same here. */
+  if (!params.use_rename) {
+    flag |= UI_ID_NO_RENAME;
+    flag &= ~UI_ID_RENAME;
+  }
+  if (!params.use_name) {
+    flag |= UI_ID_NO_NAME;
   }
   if (openop) {
     flag |= UI_ID_OPEN;

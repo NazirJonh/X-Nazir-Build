@@ -143,6 +143,11 @@ void paint_cursor_delete_textures()
   BKE_paint_invalidate_overlay_all();
 }
 
+void ED_paint_cursor_free_textures()
+{
+  paint_cursor_delete_textures();
+}
+
 namespace ed::sculpt_paint {
 
 static bool paint_overlay_alpha_mask_mtex(const Paint *paint,

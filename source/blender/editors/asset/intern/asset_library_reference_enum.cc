@@ -266,11 +266,14 @@ const EnumPropertyItem *library_reference_to_rna_enum_itemf(
     BLI_assert(rna_enum_asset_library_type_items[1].value == ASSET_LIBRARY_LOCAL);
     RNA_enum_item_add(&item, &totitem, &rna_enum_asset_library_type_items[1]);
   }
-  if (include_readonly) {
+  /* The Essentials ship brushes and node groups, never image assets, so a caller listing image
+   * libraries only (the brush Texture panel's grid and the paint-source grids that share its list)
+   * would offer a library that can only ever come up empty. */
+  if (include_readonly && !only_image_libraries) {
     BLI_assert(rna_enum_asset_library_type_items[2].value == ASSET_LIBRARY_ESSENTIALS);
     RNA_enum_item_add(&item, &totitem, &rna_enum_asset_library_type_items[2]);
   }
-  if (include_separate_online_essentials) {
+  if (include_separate_online_essentials && !only_image_libraries) {
     BLI_assert(rna_enum_asset_library_type_items[3].value == ASSET_LIBRARY_ONLINE_ESSENTIALS);
     RNA_enum_item_add(&item, &totitem, &rna_enum_asset_library_type_items[3]);
   }

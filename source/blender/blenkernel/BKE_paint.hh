@@ -1137,17 +1137,31 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
                                                ImageUser **r_iuser,
                                                PaintModeSettings *mode_settings = nullptr);
 
+/** Result of #BKE_paint_material_images_ensure_writable. */
+struct PaintMaterialImagesEnsureResult {
+  /** Number of Image maps newly created this call. */
+  int created = 0;
+  /**
+   * True only when the ensured channels already carried more than one distinct non-nil
+   * #Image::paint_layer_id AND at least one new Image was created this call, i.e. the new maps
+   * were put in a freshly minted layer. Only #PAINT_OT_material_paint_images_ensure acts on this
+   * (a one-shot warning); stroke-init callers ignore it.
+   */
+  bool conflicting_layer_ids = false;
+};
+
 /**
  * Create missing Principled maps for every channel this brush currently writes to. Channels with
  * a #PaintModeSettings.channel_image_bindings override never create anything - the add-on manages
- * that Image's lifetime itself.
- * \return number of newly created images.
+ * that Image's lifetime itself. Maps created in one call are tagged with a single
+ * #Image::paint_layer_id (see the spec).
  */
-int BKE_paint_material_images_ensure_writable(Main &bmain,
-                                               Object &ob,
-                                               const BrushMaterialPaint &brush_paint,
-                                               PaintModeSettings &mode_settings,
-                                               int visible_material_channels);
+PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
+    Main &bmain,
+    Object &ob,
+    const BrushMaterialPaint &brush_paint,
+    PaintModeSettings &mode_settings,
+    int visible_material_channels);
 
 /**
  * When channels are newly shown in a #Paint's visible material channels, also enable

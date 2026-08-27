@@ -16,6 +16,7 @@ from bl_ui.properties_paint_common import (
     brush_basic_grease_pencil_weight_settings,
     brush_basic_grease_pencil_vertex_settings,
     BrushAssetShelf,
+    brush_color_eyedropper_draw,
     draw_material_paint_channels,
 )
 from bl_ui.properties_grease_pencil_common import (
@@ -9275,7 +9276,9 @@ class VIEW3D_PT_sculpt_context_menu(Panel):
             )
             UnifiedPaintPanel.prop_unified_color(split, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color_picker(split, context, brush, "color", value_slider=True)
-            layout.prop(brush, "blend", text="")
+            blend_row = layout.row(align=True)
+            blend_row.prop(brush, "blend", text="")
+            brush_color_eyedropper_draw(blend_row, context)
 
         ups = paint.unified_paint_settings
         size = "size"

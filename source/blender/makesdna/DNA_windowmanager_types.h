@@ -10,9 +10,10 @@
 
 #include "DNA_windowmanager_enums.h" /* Own enums. */
 
+#include "DNA_image_grid_types.h" /* for #ImageGridSlotDNA */
 #include "DNA_listBase.h"
-#include "DNA_screen_types.h" /* for #ScrAreaMap */
-#include "DNA_xr_types.h"     /* for #XrSessionSettings */
+#include "DNA_screen_types.h"     /* for #ScrAreaMap */
+#include "DNA_xr_types.h"         /* for #XrSessionSettings */
 
 #include "DNA_ID.h"
 
@@ -170,6 +171,21 @@ struct wmWindowManager {
    */
   char id_browser_source = 0;
   char _pad2[1] = {};
+
+  /**
+   * Brush-texture image grid state (#ImageGridOwner), one instance per `.blend` rather than one
+   * per editor: the grid shows the active brush's texture slot, which is global, so the 3D
+   * viewport sidebar, the Image Editor sidebar, the Properties Texture tab and the browse popover
+   * all browse the same library, catalog filter and thumbnail size. Only per-layout state (scroll
+   * position and grip height, which depend on the region's width) stays per editor -- see
+   * #image_grid_session_id.
+   *
+   * Kept here for the same reason as #id_browser_view_mode: the grid is not bound to one space.
+   */
+  short image_grid_preview_size = 0;
+  char _pad_image_grid[6] = {};
+  ImageGridSlotDNA image_grid;
+  ImageGridSlotDNA image_grid_mask;
 
   // #ifdef WITH_XR_OPENXR
   wmXrData xr;

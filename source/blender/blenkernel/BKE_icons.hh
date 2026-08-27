@@ -140,6 +140,19 @@ std::optional<IconBufferRef> BKE_icon_get_buffer(int icon_id, eIconSizes size);
 Icon *BKE_icon_get(int icon_id);
 
 /**
+ * Retrieve icon for id, or null when there is none.
+ *
+ * Unlike #BKE_icon_get this reports a miss silently. For callers to which a missing icon is a
+ * normal outcome rather than an error: a dynamic icon id can be cached past the deletion of the
+ * icon it names (#PreviewImage::runtime::icon_id is not cleared when its icon is deleted, and a
+ * button keeps the id it was built with until the region is rebuilt).
+ */
+Icon *BKE_icon_get_optional(int icon_id);
+
+/** True when \a icon_id still resolves to an icon. Silent, see #BKE_icon_get_optional. */
+bool BKE_icon_exists(int icon_id);
+
+/**
  * Set icon for id if not already defined.
  * Used for inserting the internal icons.
  */

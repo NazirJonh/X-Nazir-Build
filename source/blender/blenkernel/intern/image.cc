@@ -31,6 +31,7 @@
 #include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_string_utils.hh"
+#include "BLI_uuid.h"
 
 #include "CLG_log.h"
 
@@ -3322,6 +3323,13 @@ static void image_paint_slot_info_collect(Main &bmain,
     if (material.nodetree != nullptr) {
       image_paint_slot_info_collect_tree(*material.nodetree, material, *ima, records);
     }
+  }
+}
+
+void BKE_image_paint_layer_id_ensure(Image *ima)
+{
+  if (BLI_uuid_is_nil(ima->paint_layer_id)) {
+    ima->paint_layer_id = BLI_uuid_generate_random();
   }
 }
 

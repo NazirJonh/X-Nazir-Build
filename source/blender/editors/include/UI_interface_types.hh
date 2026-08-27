@@ -33,10 +33,14 @@ using MenuHandleFunc = void (*)(bContext *C, void *arg, int event);
 /**
  * Used for cycling menu values without opening the menu (Ctrl-Wheel).
  * \param direction: forward or backwards [1 / -1].
- * \param arg1: `Button.poin` (as with #MenuCreateFunc).
- * \return true when the button was changed.
+ * \param but: the button being cycled. Gives access to its context store and RNA source, which a
+ * plain `Button.poin` argument cannot provide (needed by selectors whose item list depends on the
+ * layout context, see #grid_library_selector_menu_step).
+ * \return the button's new value. Applied to the RNA property for enum buttons, so a stepper on
+ * such a button must return the new enum value; steppers on non-RNA menu buttons apply the change
+ * themselves and the return value is unused.
  */
-using MenuStepFunc = bool (*)(bContext *C, int direction, void *arg1);
+using MenuStepFunc = int (*)(bContext *C, int direction, Button *but);
 
 using CopyArgFunc = void *(*)(const void *arg);
 using FreeArgFunc = void (*)(void *arg);

@@ -45,6 +45,7 @@
 #include "BKE_blender_version.h"
 #include "BKE_blendfile.hh"
 #include "BKE_bpath.hh"
+#include "BKE_brush.hh"
 #include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
@@ -922,6 +923,8 @@ static void wm_data_consistency_ensure(wmWindowManager *curwm,
  *
  * \param bfd: Blend file data, freed by this function on exit.
  */
+static CLG_LogRef LOG_SETUP = {"blend.setup"};
+
 static void setup_app_data(bContext *C,
                            BlendFileData *bfd,
                            const BlendFileReadParams *params,
@@ -1251,6 +1254,18 @@ static void setup_app_data(bContext *C,
   if (mode != LOAD_UNDO) {
     /* TODO(@sergey): Can this be also move above? */
     RE_FreeAllPersistentData();
+  }
+
+  if (mode == LOAD_UNDO) {
+    /* Brushes are 'no undo' IDs, carried over untouched, while the textures their PBR Paint
+     * channels point at are regular data-blocks this step may have removed. Clear what is left
+     * dangling before anything walks those pointers, starting with the reference-count pass right
+     * below. See #BKE_brush_material_paint_stale_textures_clear. */
+    if (const int cleared = BKE_brush_material_paint_stale_textures_clear(*bmain)) {
+      CLOG_WARN(&LOG_SETUP,
+                "Cleared %d PBR Paint channel texture(s) left pointing at data removed by undo",
+                cleared);
+    }
   }
 
   /* Both undo and regular file loading can perform some fairly complex ID manipulation, simpler

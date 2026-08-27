@@ -532,11 +532,16 @@ static EnumPropertyItem rna_enum_gpencil_brush_modes_items[] = {
 #  include "BKE_paint_types.hh"
 #  include "BKE_preview_image.hh"
 #  include "BKE_report.hh"
+#  include "BKE_image.hh"
 #  include "BKE_texture.h"
 
 #  include "BLI_math_vector_types.hh"
 
 #  include <optional>
+
+#  include "DEG_depsgraph.hh"
+
+#  include "IMB_colormanagement.hh"
 
 #  include "WM_api.hh"
 
@@ -1904,6 +1909,32 @@ static void rna_BrushMaterialPaintChannel_source_mtex_reset_mapping(MTex &mtex)
   mtex.tex = tex;
 }
 
+/**
+ * Every material paint channel except Base Color and Emission samples its source image as raw
+ * data, so an sRGB-tagged file would be silently gamma-decoded into wrong roughness / metallic /
+ * normal values. Force the assigned image to the Non-Color space to prevent that.
+ */
+static void rna_BrushMaterialPaintChannel_source_image_apply_non_color_default(
+    Main *bmain, const std::optional<eMaterialPaintChannel> channel_id, Image *image)
+{
+  if (!channel_id ||
+      ELEM(*channel_id, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_EMISSION))
+  {
+    return;
+  }
+  const char *data_name = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA);
+  if (data_name == nullptr || data_name[0] == '\0' ||
+      STREQ(image->colorspace_settings.name, data_name))
+  {
+    return;
+  }
+  STRNCPY(image->colorspace_settings.name, data_name);
+  DEG_id_tag_update(&image->id, 0);
+  DEG_id_tag_update(&image->id, ID_RECALC_SOURCE);
+  BKE_image_signal(bmain, image, nullptr, IMA_SIGNAL_COLORMANAGE);
+  WM_main_add_notifier(NC_IMAGE | ND_DISPLAY, &image->id);
+}
+
 static void rna_BrushMaterialPaintChannel_source_image_set(PointerRNA *ptr,
                                                            PointerRNA value,
                                                            ReportList * /*reports*/)
@@ -1932,6 +1963,9 @@ static void rna_BrushMaterialPaintChannel_source_image_set(PointerRNA *ptr,
     return;
   }
 
+  const std::optional<eMaterialPaintChannel> channel_id = rna_BrushMaterialPaintChannel_channel_get(
+      ptr);
+
   /* Each channel owns its own Tex so the same image can carry different mapping per channel. */
   if (mtex.tex != nullptr && mtex.tex->type == TEX_IMAGE) {
     if (mtex.tex->ima != image) {
@@ -1941,6 +1975,7 @@ static void rna_BrushMaterialPaintChannel_source_image_set(PointerRNA *ptr,
     }
     /* The slot already carries a valid image mapping; swapping the image alone must not touch
      * the user's mapping settings (including an intentional zero scale). */
+    rna_BrushMaterialPaintChannel_source_image_apply_non_color_default(G_MAIN, channel_id, image);
     BKE_brush_tag_unsaved_changes(brush);
     return;
   }
@@ -1958,6 +1993,7 @@ static void rna_BrushMaterialPaintChannel_source_image_set(PointerRNA *ptr,
   }
   mtex.tex = tex;
   rna_BrushMaterialPaintChannel_source_mtex_reset_mapping(mtex);
+  rna_BrushMaterialPaintChannel_source_image_apply_non_color_default(bmain, channel_id, image);
   /* BKE_texture_add returns the texture with one user already; the MTex slot is that user. */
   BKE_brush_tag_unsaved_changes(brush);
 }
@@ -3485,6 +3521,20 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem prop_source_select_mode_items[] = {
+      {BRUSH_MATERIAL_PAINT_SOURCE_SELECT_IMAGE_BROWSER,
+       "IMAGE_BROWSER",
+       0,
+       "Image Browser",
+       "Pick the source image from the Image Browser popover"},
+      {BRUSH_MATERIAL_PAINT_SOURCE_SELECT_GRID,
+       "GRID",
+       0,
+       "Grid",
+       "Pick the source image from a preview grid shown inside the channel's panel"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "BrushMaterialPaintChannel", nullptr);
   RNA_def_struct_sdna(srna, "BrushMaterialPaintChannel");
   RNA_def_struct_path_func(srna, "rna_BrushMaterialPaintChannel_path");
@@ -3616,6 +3666,31 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       "Tangent-space convention of the Normal channel's source image. Only used by the Normal "
       "channel's entry in BrushMaterialPaint.channels");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "source_select_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "source_select_mode");
+  RNA_def_property_enum_items(prop, prop_source_select_mode_items);
+  RNA_def_property_ui_text(
+      prop, "Source Picker", "How this channel's source image is picked in the user interface");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  /* Same field as `source_select_mode`, exposed as a checkbox: the enum only ever holds two
+   * values, so the UI draws it as a single toggle (like "Sync with Brush") instead of a menu. */
+  prop = RNA_def_property(srna, "use_grid_source_picker", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "source_select_mode", BRUSH_MATERIAL_PAINT_SOURCE_SELECT_GRID);
+  RNA_def_property_ui_text(
+      prop,
+      "Source Picker: Grid",
+      "Pick this channel's source image from a preview grid instead of the Image Browser");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "show_source_grid", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "show_source_grid", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Show Source Grid",
+      "Expand the inline preview grid used to pick this channel's source image");
 
   srna = RNA_def_struct(brna, "BrushMaterialPaint", nullptr);
   RNA_def_struct_sdna(srna, "BrushMaterialPaint");

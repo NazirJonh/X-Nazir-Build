@@ -488,6 +488,18 @@ std::optional<IconBufferRef> BKE_icon_get_buffer(const int icon_id, const eIconS
   return std::nullopt;
 }
 
+Icon *BKE_icon_get_optional(const int icon_id)
+{
+  BLI_assert(BLI_thread_is_main());
+
+  return icon_ghash_lookup(icon_id);
+}
+
+bool BKE_icon_exists(const int icon_id)
+{
+  return BKE_icon_get_optional(icon_id) != nullptr;
+}
+
 Icon *BKE_icon_get(const int icon_id)
 {
   BLI_assert(BLI_thread_is_main());

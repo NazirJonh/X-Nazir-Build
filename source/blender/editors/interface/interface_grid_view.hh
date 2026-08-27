@@ -32,6 +32,7 @@
 namespace blender {
 struct ARegion;
 struct bContext;
+struct PointerRNA;
 
 namespace ui {
 
@@ -55,6 +56,22 @@ struct GridViewHostParams {
   int max_rows = GRID_VIEW_DEFAULT_MAX_ROWS;
   int max_items = GRID_VIEW_DEFAULT_MAX_ITEMS;
   bool show_grip = true;
+  /**
+   * #GridViewSettings backing the disclosure triangle and search field drawn beside the grip,
+   * like #uiList's filter row. Null leaves the grip row bare: a host without these settings has
+   * nowhere to persist the state, and a host that draws its own filter (the Python grid's
+   * #UIGrid.draw_filter) would end up with two. Requires #show_grip.
+   */
+  PointerRNA *filter_settings = nullptr;
+  /**
+   * Same filter row for a host whose state is plain memory rather than RNA (the image grid keeps
+   * its state in DNA plus a runtime struct). Both pointers must be set, and they are ignored when
+   * #filter_settings is given. \a filter_search_buf must stay alive for the block's lifetime and
+   * hold #filter_search_maxncpy bytes, since a text button writes into it in place.
+   */
+  bool *filter_show = nullptr;
+  char *filter_search_buf = nullptr;
+  int filter_search_maxncpy = 0;
 };
 
 /** \} */
@@ -166,6 +183,11 @@ struct GridSessionState {
    * sub-row clip offset are derived on demand (`scroll_px / tile_h`, `scroll_px % tile_h`).
    * The #ButtonType::Scroll overlay widget binds directly to this pixel value (pixel-scale). */
   int scroll_px = 0;
+  /** Deferred active-item focus for fixed-viewport views. Kept in the session, rather than the
+   * per-redraw view instance, so an asynchronously populated asset grid can fulfill it once its
+   * items arrive. */
+  bool scroll_active_into_view_pending = false;
+  bool scroll_active_to_center_pending = false;
   int cached_item_count = 0;
   /* Geometry snapshot, written once per build: stable across rebuilds, so drags and hit-tests
    * never depend on the tiles built this frame. Zero tile_h/cols means the grid was not built
@@ -181,6 +203,14 @@ struct GridSessionState {
   int refcount = 0;
   /* LRU stamp, refreshed by #grid_session_state_ensure. */
   uint64_t last_used_seq = 0;
+  /* Identifier of the item the host called active on the last build, empty when it had none.
+   * Recorded so #UI_OT_grid_view_step can step from where the grid actually is without the caller
+   * having to hand it the current item -- a keymap entry has fixed properties and cannot. */
+  std::string active_identifier;
+  /* What the grid last scrolled to on its own, as "<filter state>|<item identifier>". A host that
+   * knows its active item asks for it to be revealed once per change of this key, so the user's
+   * own scrolling afterwards is never fought (see #template_grid_view_asset). */
+  std::string active_focus_key;
 };
 
 /**

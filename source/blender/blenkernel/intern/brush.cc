@@ -945,6 +945,37 @@ void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
   MEM_delete(material_paint);
 }
 
+int BKE_brush_material_paint_stale_textures_clear(Main &bmain)
+{
+  int cleared = 0;
+  for (Brush &brush : bmain.brushes) {
+    if (brush.material_paint == nullptr) {
+      continue;
+    }
+    for (BrushMaterialPaintChannel &channel : brush.material_paint->channels) {
+      const Tex *tex = channel.source_mtex.tex;
+      if (tex == nullptr) {
+        continue;
+      }
+      bool found = false;
+      for (const Tex &tex_iter : bmain.textures) {
+        if (&tex_iter == tex) {
+          found = true;
+          break;
+        }
+      }
+      if (found) {
+        continue;
+      }
+      /* Deliberately no #id_us_min: the texture is gone, so there is no user count left to drop
+       * and the pointer must not be dereferenced. */
+      channel.source_mtex.tex = nullptr;
+      cleared++;
+    }
+  }
+  return cleared;
+}
+
 void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMaterialPaint &src)
 {
   if (&dst == &src) {
@@ -2070,16 +2101,14 @@ static bool brush_gen_texture(const Brush *br,
       const bool has_rgb = RE_texture_evaluate(
           mtex, co, 0, pool, false, false, &intensity, rgba);
       float *px = &rect[(iy * side + ix) * 4];
-      if (has_rgb) {
-        if (is_color_preview) {
-          if (convert_to_linear && colorspace != nullptr && !colorspace_is_data) {
-            IMB_colormanagement_colorspace_to_scene_linear_v3(rgba, colorspace);
-            linearrgb_to_srgb_v3_v3(rgba, rgba);
-          }
-          else if (!convert_to_linear) {
-            /* Float buffers are already scene linear. */
-            linearrgb_to_srgb_v3_v3(rgba, rgba);
-          }
+      if (has_rgb && is_color_preview) {
+        if (convert_to_linear && colorspace != nullptr && !colorspace_is_data) {
+          IMB_colormanagement_colorspace_to_scene_linear_v3(rgba, colorspace);
+          linearrgb_to_srgb_v3_v3(rgba, rgba);
+        }
+        else if (!convert_to_linear) {
+          /* Float buffers are already scene linear. */
+          linearrgb_to_srgb_v3_v3(rgba, rgba);
         }
         px[0] = rgba[0];
         px[1] = rgba[1];
@@ -2087,10 +2116,14 @@ static bool brush_gen_texture(const Brush *br,
         px[3] = 1.0f;
       }
       else {
-        px[0] = intensity;
-        px[1] = intensity;
-        px[2] = intensity;
-        px[3] = 1.0f;
+        /* Classic intensity preview. #radial_control_paint_tex tints this with the brush fill
+         * color, which is black for brushes without a color property (any deform brush), so the
+         * pattern has to live in alpha -- what the "111r" swizzle used to do. In RGB it would be
+         * multiplied away and the preview would show the bare falloff disc. */
+        px[0] = 1.0f;
+        px[1] = 1.0f;
+        px[2] = 1.0f;
+        px[3] = intensity;
       }
       if (alpha_mtex != nullptr) {
         float mask_intensity;
@@ -2139,10 +2172,12 @@ ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br,
           px[3] *= strength;
         }
         else {
-          px[0] = strength;
-          px[1] = strength;
-          px[2] = strength;
-          px[3] = 1.0f;
+          /* Falloff-only preview, tinted by the brush fill color: same alpha-carries-the-shape
+           * rule as the texture case above. */
+          px[0] = 1.0f;
+          px[1] = 1.0f;
+          px[2] = 1.0f;
+          px[3] = strength;
         }
       }
     }

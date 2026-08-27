@@ -62,8 +62,16 @@ void DROP_IMAGE_update_texture_preview_smart(bContext *C, Main *bmain, Tex *tex,
  * dispatch #blender::ui::region_but_find_drop_target_at().
  */
 std::unique_ptr<ui::DropTargetInterface> brush_texture_slot_drop_target_get(bContext *C,
-                                                                            const ARegion *region,
-                                                                            const wmEvent *event);
+                                                                           const ARegion *region,
+                                                                           const wmEvent *event);
+
+/**
+ * Return a drop target for a specialized Image #template_ID_browser control under the cursor, or
+ * null if it is not one. Used by the generic button drop dispatch.
+ */
+std::unique_ptr<ui::DropTargetInterface> image_id_browser_drop_target_get(bContext *C,
+                                                                         const ARegion *region,
+                                                                         const wmEvent *event);
 
 /**
  * Register the brush texture-slot image/texture drop box in the "User Interface" drop-box map.

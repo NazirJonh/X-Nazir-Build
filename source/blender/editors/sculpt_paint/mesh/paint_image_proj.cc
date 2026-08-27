@@ -45,6 +45,7 @@
 #include "DNA_brush_types.h"
 #include "DNA_customdata_types.h"
 #include "DNA_defs.h"
+#include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_node_types.h"
@@ -6726,7 +6727,7 @@ static Image *proj_paint_image_create(wmOperator *op, Main *bmain, bool is_data)
 {
   Image *ima;
   float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-  char imagename[MAX_ID_NAME - 2] = "Material Diffuse Color";
+  char imagename[MAX_ID_NAME - 2] = "Base Color TexLayer";
   int width = 1024;
   int height = 1024;
   bool use_float = false;
@@ -6760,6 +6761,10 @@ static Image *proj_paint_image_create(wmOperator *op, Main *bmain, bool is_data)
                                 false,
                                 is_data,
                                 use_tiled);
+
+  if (ima != nullptr) {
+    ima->flag |= IMA_PAINT_CANVAS;
+  }
 
   return ima;
 }
@@ -7034,15 +7039,12 @@ static wmOperatorStatus texture_paint_add_texture_paint_slot_exec(bContext *C, w
   return OPERATOR_CANCELLED;
 }
 
-static void get_default_texture_layer_name_for_object(Object *ob,
-                                                      int texture_type,
-                                                      char *dst,
-                                                      int dst_maxncpy)
+static void get_default_texture_layer_name(int texture_type, char *dst, int dst_maxncpy)
 {
-  Material *ma = BKE_object_material_get(ob, ob->actcol);
-  const char *base_name = ma ? &ma->id.name[2] : &ob->id.name[2];
-  BLI_snprintf_utf8(
-      dst, dst_maxncpy, "%s %s", base_name, DATA_(layer_type_items[texture_type].name));
+  /* Channel-scoped name ("Base Color TexLayer"), matching
+   * #BKE_paint_principled_channel_image_ensure so a map added here reads as a reusable layer
+   * instead of being bound to the material or object it was first created on. */
+  BLI_snprintf_utf8(dst, dst_maxncpy, "%s TexLayer", DATA_(layer_type_items[texture_type].name));
 }
 
 static wmOperatorStatus texture_paint_add_texture_paint_slot_invoke(bContext *C,
@@ -7056,8 +7058,7 @@ static wmOperatorStatus texture_paint_add_texture_paint_slot_invoke(bContext *C,
 
   /* Set default name. */
   char imagename[MAX_ID_NAME - 2];
-  get_default_texture_layer_name_for_object(
-      ob, type, reinterpret_cast<char *>(&imagename), sizeof(imagename));
+  get_default_texture_layer_name(type, reinterpret_cast<char *>(&imagename), sizeof(imagename));
   RNA_string_set(op->ptr, "name", imagename);
 
   /* Set default color. Copy the color from nodes, so it matches the existing material.

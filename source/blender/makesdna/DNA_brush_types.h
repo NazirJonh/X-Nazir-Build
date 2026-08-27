@@ -177,6 +177,16 @@ enum eBrushMaterialPaintNormalSpace : int8_t {
   BRUSH_MATERIAL_PAINT_NORMAL_SPACE_DIRECTX = 1,
 };
 
+/**
+ * How a channel's source image is picked in the UI: through the Image Browser popover, or
+ * through a grid embedded in the channel's own subpanel. Purely a UI preference; it has no
+ * effect on painting.
+ */
+enum eBrushMaterialPaintSourceSelectMode : int8_t {
+  BRUSH_MATERIAL_PAINT_SOURCE_SELECT_IMAGE_BROWSER = 0,
+  BRUSH_MATERIAL_PAINT_SOURCE_SELECT_GRID = 1,
+};
+
 struct BrushMaterialPaintChannel {
   DNA_DEFINE_CXX_METHODS(BrushMaterialPaintChannel)
 
@@ -191,6 +201,12 @@ struct BrushMaterialPaintChannel {
   char use = 0;
   /** #eBrushMaterialPaintNormalSpace. Only read for the Normal channel. */
   char normal_space = 0;
+  /** #eBrushMaterialPaintSourceSelectMode. UI-only; zero keeps the Image Browser popover. */
+  char source_select_mode = 0;
+  /** UI-only: collapses the inline preview grid shown when #source_select_mode is Grid. */
+  char show_source_grid = 1;
+  /* #source_mtex is 8-byte aligned; pad up to its offset rather than to the next word. */
+  char _pad[6] = {};
 
   /**
    * Source texture sampled instead of `value` / base color. Inactive when `tex` is null.

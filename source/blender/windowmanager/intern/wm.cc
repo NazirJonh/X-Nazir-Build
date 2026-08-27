@@ -59,6 +59,7 @@
 
 #include "BKE_asset_shelf.hh"
 #include "BKE_undo_system.hh"
+#include "ED_image_grid.hh"
 #include "ED_screen.hh"
 
 #ifdef WITH_PYTHON
@@ -129,6 +130,10 @@ static void window_manager_blend_write(BlendWriter *writer, ID *id, const void *
   BKE_id_blend_write(writer, &wm->id);
   write_wm_xr_data(writer, &wm->xr);
 
+  /* Shared brush-texture grid state, see #ImageGridOwner. */
+  ed::image_grid::image_grid_slot_dna_blend_write(writer, wm->image_grid);
+  ed::image_grid::image_grid_slot_dna_blend_write(writer, wm->image_grid_mask);
+
   for (wmWindow &win : wm->windows) {
     /* Update deprecated screen member (for so loading in 2.7x uses the correct screen). */
     win.screen = BKE_workspace_active_screen_get(win.workspace_hook);
@@ -162,6 +167,10 @@ static void window_manager_blend_read_data(BlendDataReader *reader, ID *id)
   id_us_ensure_real(&wm->id);
   BLO_read_struct_list(reader, wmWindow, &wm->windows);
   BLO_read_struct_list(reader, AssetShelfPopupSize, &wm->asset_shelf_popup_sizes);
+
+  /* Shared brush-texture grid state, see #ImageGridOwner. */
+  ed::image_grid::image_grid_slot_dna_blend_read(reader, wm->image_grid);
+  ed::image_grid::image_grid_slot_dna_blend_read(reader, wm->image_grid_mask);
 
   for (wmWindow &win : wm->windows) {
     BLO_read_struct(reader, wmWindow, &win.parent);
@@ -602,6 +611,10 @@ void wm_close_and_free(bContext *C, wmWindowManager *wm)
 
   /* Per-`.blend` asset shelf popup sizes are plain (no nested allocations). */
   BLI_freelistN(&wm->asset_shelf_popup_sizes);
+
+  /* Shared brush-texture grid state, see #ImageGridOwner. */
+  ed::image_grid::image_grid_slot_dna_free(wm->image_grid);
+  ed::image_grid::image_grid_slot_dna_free(wm->image_grid_mask);
 
   if (C && CTX_wm_manager(C) == wm) {
     CTX_wm_manager_set(C, nullptr);

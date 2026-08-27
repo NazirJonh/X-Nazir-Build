@@ -491,6 +491,13 @@ enum {
   BUT_NO_TEXT_PADDING = 1 << 6,
   /** Do not add the usual padding around preview image drawing, use the size of the button. */
   BUT_NO_PREVIEW_PADDING = 1 << 7,
+  /**
+   * Draw a popover button without its dropdown arrow (see #popover_widget_type). The arrow is
+   * sized from the button height and reserves text space accordingly, so a button that is
+   * deliberately taller than one unit (e.g. a drop area) would get a disproportionate arrow and
+   * an off-center label.
+   */
+  BUT_NO_MENU_TRIA = 1 << 8,
 
   /* Button align flag, for drawing groups together.
    * Used in 'Block.flag', take care! */
@@ -2113,6 +2120,12 @@ void button_func_drawextra_set(Block *block,
                                std::function<void(const bContext *C, rcti *rect)> func);
 
 void button_func_menu_step_set(Button *but, MenuStepFunc func);
+/**
+ * The menu button's own argument (#Button::poin), i.e. what was passed as `arg` to #uiDefMenuBut /
+ * #Layout::menu_fn. For a #MenuStepFunc outside `editors/interface/`, where #Button is an
+ * incomplete type; a #MenuCreateFunc receives the same value as its `arg1`.
+ */
+void *button_menu_arg_get(const Button *but);
 
 /**
  * When a button displays a menu, hovering another button that can display one will switch to that
@@ -2640,13 +2653,39 @@ void template_id_browse_with_context(Layout *layout,
                                      struct Material *material,
                                      char slot_type,
                                      const char *filter_type = nullptr);
+
+struct IDBrowserParams {
+  /** Registered #IDFilterType narrowing the listed data-blocks from Python (may be null/empty). */
+  const char *filter_type = nullptr;
+  /**
+   * Row label. For an empty Image property a non-empty label also opts into the paint-slot UI,
+   * where it becomes the drop button's text.
+   */
+  const char *text = nullptr;
+  /** Built-in image filtering preset for the browser popover (may be null/empty). */
+  const char *image_filter = nullptr;
+  /** Reduce the template to a single browser button, for places with no room for the full row. */
+  bool compact = false;
+  /**
+   * Optional controls of the appended #template_ID row, see #ImageIDRowParams. Kept here rather
+   * than as trailing boolean parameters so hosts can opt out of one without spelling out the
+   * others, and so a new control does not shift an existing argument list.
+   */
+  bool use_rename = true;
+  bool use_unlink = true;
+  bool use_users = true;
+};
 /**
  * Browse/assign an ID-block via a popover panel with a grid/list view toggle and a search field.
  * \a ptr / \a propname identify the pointer property to set; its ID type determines the listed
  * data-blocks. For Image properties the popover also shows the paint-slot/material filters (driven
  * by the editor's own #SpaceImage / #SpaceNode `image_filter_*` properties); \a material seeds the
  * material filter context (may be null). \a filter_type optionally names a registered #IDFilterType
- * to further filter the listed data-blocks from Python (may be null/empty).
+ * to further filter the listed data-blocks from Python (may be null/empty). For an empty Image
+ * property, \a text opts into the specialized paint-slot UI. It displays a labelled Image Browser
+ * popover/drop button beside icon-only Open while empty, and hides rename, Fake User, and New
+ * while assigned. #IDBrowserParams::compact reduces the whole template to a single browser button
+ * showing the assigned data-block's preview and name, for places with no room for the full row.
  */
 void template_id_browser(Layout *layout,
                          const bContext *C,
@@ -2656,7 +2695,24 @@ void template_id_browser(Layout *layout,
                          const char *newop,
                          const char *openop,
                          const char *unlinkop,
-                         const char *filter_type = nullptr);
+                         const IDBrowserParams &params = {});
+
+/**
+ * The ID Browser popover button on its own, without the name field and the New/Open/Unlink buttons
+ * #template_id_browser puts beside it.
+ *
+ * For hosts that compose their own row around the browser instead of taking the standard one: the
+ * Image Editor's PBR paint canvas row replaces the name field with a channel selector, but still
+ * wants the browser button in front of it. \a material and \a filter_type / \a image_filter mean
+ * what they do in #template_id_browser, and are what the popover filters itself by.
+ */
+void template_id_browser_button(Layout *layout,
+                                const bContext *C,
+                                PointerRNA *ptr,
+                                const char *propname,
+                                struct Material *material,
+                                const char *filter_type = nullptr,
+                                const char *image_filter = nullptr);
 
 /** Pointer to #wmWindowManager::id_browser_grid_view_settings (the ID browser's grid settings). */
 PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm);
@@ -2696,19 +2752,87 @@ void template_id_preview(Layout *layout,
 void template_asset_image_grid(
     Layout *layout, bContext *C, PointerRNA *ptr, const char *propname, bool is_popover = false);
 
-/** Reusable grid view header widgets operating on #GridViewSettings. */
+/* Reusable grid view header widgets operating on #GridViewSettings. */
+
+/**
+ * How a library selector differs from the default one. Grouped into a struct rather than trailing
+ * parameters so a host can set only what it cares about, and so a new option does not shift an
+ * argument list its callers pass positionally.
+ */
+struct GridLibrarySelectorParams {
+  /** #GridViewSettings property holding the library reference. */
+  StringRefNull prop_name = "asset_library_reference";
+  /** Draw into the caller's row instead of opening one. */
+  bool embed_in_parent_row = false;
+  /** Show the refresh button beside the selector. */
+  bool show_refresh = true;
+  /** List only libraries set up through "Add Image Library", instead of every asset library. */
+  bool only_image_libraries = false;
+  /**
+   * Preferences catalog-memory domain holding this grid's Recent/Favorites mode ("image_grid"
+   * shares them with the brush Texture panel). When set, the menu also offers those two entries.
+   * Null means the ID Browser's own storage.
+   */
+  const char *catalog_memory_domain = nullptr;
+};
+
 void template_grid_library_selector(Layout *layout,
                                     bContext *C,
                                     PointerRNA *ptr,
-                                    StringRefNull prop_name = "asset_library_reference",
-                                    bool embed_in_parent_row = false,
-                                    bool show_refresh = true);
+                                    const GridLibrarySelectorParams &params = {});
+/**
+ * Catalog checkbox popover. Writes the enabled-catalog set into the preferences catalog memory
+ * under \a catalog_filter_domain, which is what #GridViewAssetParams::catalog_filter_domain reads
+ * back — pass the same value to both, or the grid filters by a set nothing writes.
+ */
 void template_grid_catalog_selector(Layout *layout,
                                     bContext *C,
                                     PointerRNA *settings_ptr,
-                                    bool embed_in_parent_row = false);
+                                    bool embed_in_parent_row = false,
+                                    const char *catalog_filter_domain = nullptr);
 void template_grid_preview_size(Layout *layout, bContext *C, PointerRNA *settings_ptr);
 void template_grid_name_match_filter(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+
+/**
+ * How an asset grid differs from the default one. Grouped into a struct for the same reason as
+ * #GridLibrarySelectorParams.
+ */
+struct GridViewAssetParams {
+  /**
+   * Let items be dragged. When false the items carry no drag controller, so a press is left to
+   * the grid's drag-scroll arbitration instead of starting asset drag-and-drop. Hosts that only
+   * assign on click want this; the default keeps the drag for existing callers.
+   */
+  bool use_drag = true;
+  /**
+   * Set on the activate operator's "context_id" property, if it has one. Tells the operator what
+   * the click applies to, without relying on the layout context.
+   */
+  const char *activate_context_id = nullptr;
+  /** Draw the tiles inside a themed box, like the brush texture image grid. */
+  bool use_box = false;
+  /**
+   * Data-block the host considers assigned. Its tile is highlighted, and the grid scrolls to it
+   * once when the library holding it is opened.
+   */
+  PointerRNA *active_id_ptr = nullptr;
+  /**
+   * Asset shelf whose Recent/Favorites lists this grid shows while the settings are in one of
+   * those modes (e.g. "VIEW3D_AST_image_texture").
+   */
+  const char *membership_shelf_idname = nullptr;
+  /** As #GridLibrarySelectorParams::catalog_memory_domain; pass the same value to both. */
+  const char *catalog_memory_domain = nullptr;
+  /**
+   * Preferences catalog-memory domain holding the enabled-catalog set this grid filters by. Kept
+   * separate from #catalog_memory_domain because one entry stores both the catalog set and the
+   * Recent/Favorites mode: a host that wants its own catalog filter but a shared Recent/Favorites
+   * history (the PBR Paint source picker, one filter per channel) must split the two. Pass the
+   * same value to #template_grid_catalog_selector, which writes what this reads. Null falls back
+   * to #catalog_memory_domain, then to the ID Browser's own storage.
+   */
+  const char *catalog_filter_domain = nullptr;
+};
 
 /**
  * Reusable asset-library grid. Activating an item runs \a activate_operator with standard asset
@@ -2719,7 +2843,19 @@ void template_grid_view_asset(Layout *layout,
                               const char *grid_id,
                               PointerRNA *settings_ptr,
                               const char *activate_operator,
-                              const char *drag_operator);
+                              const char *drag_operator,
+                              const GridViewAssetParams &params = {});
+
+/** How a custom grid differs from the default one, see #GridLibrarySelectorParams. */
+struct GridViewCustomParams {
+  /** Draw the tiles inside a themed box, like the brush texture image grid. */
+  bool use_box = false;
+  /**
+   * Identifier (as returned by #UIGrid.get_item) of the item the host considers assigned; its
+   * tile is highlighted.
+   */
+  const char *active_identifier = nullptr;
+};
 
 /**
  * Reusable grid driven by a registered Python #UIGrid type.
@@ -2731,7 +2867,8 @@ void template_grid_view_custom(Layout *layout,
                                const char *gridtype_name,
                                PointerRNA *dataptr,
                                const char *propname,
-                               PointerRNA *settings_ptr);
+                               PointerRNA *settings_ptr,
+                               const GridViewCustomParams &params = {});
 
 void template_matrix(Layout *layout, PointerRNA *ptr, StringRefNull propname);
 /**

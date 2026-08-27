@@ -5528,9 +5528,10 @@ static int widget_roundbox_set(Button *but, rcti *rect)
 
 static WidgetType *popover_widget_type(Button *but, rcti *rect)
 {
-  /* We could use a flag for this, but for now just check size,
+  /* Besides the explicit #BUT_NO_MENU_TRIA opt-out, just check size:
    * add up/down arrows if there is room. */
-  if ((but->str.empty() && but->icon && (BLI_rcti_size_x(rect) < BLI_rcti_size_y(rect) + 2)) ||
+  if ((but->drawflag & BUT_NO_MENU_TRIA) ||
+      (but->str.empty() && but->icon && (BLI_rcti_size_x(rect) < BLI_rcti_size_y(rect) + 2)) ||
       /* disable for brushes also */
       (but->flag & BUT_ICON_PREVIEW))
   {

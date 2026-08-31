@@ -271,6 +271,7 @@ from .discovery_scan import (
     _extension_manifest_match_keys,
     _auto_detect_extension_icon_path,
     auto_detect_extension_icon_path_normalized,
+    query_popular_addon_icon_normalized,
     _discover_active_categories,
 )
 
@@ -356,6 +357,7 @@ from .operators import (
 # -- Tag management UI -------------------------------------------------------
 from .tag_ui import (
     VIEW3D_OT_category_tabs_settings,
+    UI_MT_category_tab_context,
     USERPREF_UL_category_tags,
     TagsPanel,
     USERPREF_OT_tag_mode_toggle,

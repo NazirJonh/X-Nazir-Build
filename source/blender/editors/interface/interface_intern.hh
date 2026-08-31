@@ -1270,6 +1270,13 @@ extern double category_tab_popup_close_time;
 extern char category_tab_last_closed_category[];
 
 /**
+ * Category tab that was last right-clicked to open the tab context menu.
+ * The edit dialog is invoked from that menu, where the cursor no longer hovers the tab, so the
+ * category can no longer be resolved from the mouse position.
+ */
+extern char category_tab_context_menu_category[64];
+
+/**
  * Hex/UTF-8 conversion utilities.
  */
 bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8_max);
@@ -1282,6 +1289,14 @@ bool is_single_glyph_str(const char *str);
  * Category tab shared utility helpers.
  */
 bool category_tab_first_utf8_char_copy(const char *input, char *output, size_t output_max);
+/**
+ * Abbreviate a category name the way the tabs display it when no glyph or icon is assigned.
+ * Mirrors the abbreviation used by the upstream compact tabs: a single complex character stays
+ * alone, otherwise two characters are used (`RGb` -> "RG", `Grease Pencil` -> "GP",
+ * `Tool` -> "To").
+ * Output needs room for two UTF-8 characters, so at least 9 bytes.
+ */
+bool category_tab_fallback_label_copy(const char *input, char *output, size_t output_max);
 bool category_tab_glyph_is_fallback_letter(const char *glyph, const char *category);
 float category_tabs_zoom_value_get(const ScrArea *area,
                                    eUserPref_CategoryTabsDisplayMode display_mode);
@@ -1293,7 +1308,6 @@ int category_tab_icon_id_resolve_from_key_path(const char *icon_key, const char 
 void category_tab_split_tags(const char *tags,
                              Vector<std::string> &r_tags,
                              const char *delimiters = ",;");
-std::string category_tab_escape_for_python_literal(const char *input);
 bool category_tab_parse_json_string_array_minimal(const char *json,
                                                   Vector<std::string> &r_items);
 

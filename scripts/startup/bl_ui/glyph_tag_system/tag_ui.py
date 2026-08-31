@@ -23,7 +23,7 @@ use lazy imports inside their bodies to avoid a circular-import cycle.
 """
 
 import bpy
-from bpy.types import Operator, Panel, UIList
+from bpy.types import Menu, Operator, Panel, UIList
 
 from bl_ui.glyph_tag_system.defaults import (
     _CATEGORY_TAG_ALL_MODE_FLAGS,
@@ -177,6 +177,51 @@ class VIEW3D_OT_category_tabs_settings(Operator):
         _wm_sync_to_wm.register_category_glyph_mappings()
         wm = context.window_manager
         return wm.invoke_popup(self, width=240) # in interface_panel void panel_category_tabs_settings_popover_open(bContext *C, ARegion *region) use const int popup_width = 240 * UI_SCALE_FAC;
+
+
+# -----------------------------------------------------------------------------
+# Category tab context menu (right click on a tab)
+# -----------------------------------------------------------------------------
+
+
+class UI_MT_category_tab_context(Menu):
+    """Context menu shown when right-clicking a panel category tab."""
+    bl_idname = "UI_MT_category_tab_context"
+    bl_label = "Category Tab"
+
+    def draw(self, context):
+        layout = self.layout
+        view = context.preferences.view
+        display_mode_owner = VIEW3D_OT_category_tabs_settings._display_mode_owner(context)
+
+        layout.label(text="Display Mode")
+        col = layout.column(align=True)
+        col.prop_enum(display_mode_owner, "category_tabs_display_mode", 'GLYPHS_ONLY', text="Icon")
+        col.prop_enum(display_mode_owner, "category_tabs_display_mode", 'GLYPHS_TEXT', text="Mixed")
+        col.prop_enum(display_mode_owner, "category_tabs_display_mode", 'TEXT_ONLY', text="Text")
+
+        layout.separator()
+        # Menu blocks execute operators directly; both entries open their own popup, so they
+        # must go through invoke() instead.
+        layout.operator_context = 'INVOKE_DEFAULT'
+        layout.operator(
+            "view3d.category_tabs_settings",
+            text="Display Mode Settings",
+            icon='PREFERENCES',
+        )
+
+        layout.separator()
+        # Editing may be locked in Preferences, keep the entry visible but inactive so the
+        # reason stays discoverable.
+        sub = layout.column()
+        sub.enabled = not view.category_tabs_lock_edit
+        sub.operator(
+            "screen.category_tab_edit_dialog",
+            text="Edit Category Tab",
+            icon='GREASEPENCIL',
+        )
+        if view.category_tabs_lock_edit:
+            layout.label(text="Category editing is locked", icon='LOCKED')
 
 
 # -----------------------------------------------------------------------------

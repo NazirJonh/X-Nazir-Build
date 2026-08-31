@@ -13280,62 +13280,43 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
     }
   }
 
-  /* Handle right-click on category tabs for edit dialog. */
+  /* Handle right-click on category tabs, opens the tab context menu. */
   if (event->type == RIGHTMOUSE && event->val == KM_PRESS) {
     if (panel_category_tabs_is_visible(region)) {
       /* Check if mouse is over a category tab. */
       for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
         if (BLI_rcti_isect_pt(&pc_dyn.rect, event->mval[0], event->mval[1])) {
-          /* Check if editing is locked. */
-          if (!U.category_tabs_lock_edit) {
-            /* Prevent opening a new dialog if one is already open for the same category,
-             * or if a dialog for the same category was just closed (within 0.5 seconds).
-             * This prevents data corruption when right-clicking multiple times on the same tab. */
-            bool should_prevent = false;
+          /* Prevent reopening the menu while the edit dialog is already open for this category,
+           * or right after it was closed. This prevents data corruption when right-clicking
+           * multiple times on the same tab. */
+          bool should_prevent = false;
 
-            /* Check if dialog is currently open */
-            if (category_tab_current_dialog_op) {
-              char existing_category[64];
-              RNA_string_get(category_tab_current_dialog_op->ptr, "category", existing_category);
-              if (STREQ(existing_category, pc_dyn.idname)) {
-                should_prevent = true;
-              }
+          /* Check if dialog is currently open */
+          if (category_tab_current_dialog_op) {
+            char existing_category[64];
+            RNA_string_get(category_tab_current_dialog_op->ptr, "category", existing_category);
+            if (STREQ(existing_category, pc_dyn.idname)) {
+              should_prevent = true;
             }
+          }
 
-            /* Check if dialog was just closed for the same category */
-            if (!should_prevent && category_tab_last_closed_category[0] != '\0') {
-              double time_since_close = BLI_time_now_seconds() - category_tab_popup_close_time;
-              if (time_since_close < 0.1 && STREQ(category_tab_last_closed_category, pc_dyn.idname)) {
-                should_prevent = true;
-              }
+          /* Check if dialog was just closed for the same category */
+          if (!should_prevent && category_tab_last_closed_category[0] != '\0') {
+            double time_since_close = BLI_time_now_seconds() - category_tab_popup_close_time;
+            if (time_since_close < 0.1 && STREQ(category_tab_last_closed_category, pc_dyn.idname))
+            {
+              should_prevent = true;
             }
+          }
 
-            if (should_prevent) {
-              /* Same category dialog is already open or just closed - ignore this click. */
-              return WM_UI_HANDLER_BREAK;
-            }
-
-            /* Invoke edit dialog. */
-            wmOperatorType *ot = WM_operatortype_find("SCREEN_OT_category_tab_edit_dialog", false);
-            if (ot) {
-              WM_operator_name_call_ptr(
-                  C, ot, wm::OpCallContext::InvokeDefault, nullptr, event);
-            }
+          if (should_prevent) {
             return WM_UI_HANDLER_BREAK;
           }
-          else {
-            /* Editing is locked - show report message to user. */
-            ReportList *reports = CTX_wm_reports(C);
-            if (reports) {
-              BKE_report(reports,
-                         RPT_INFO,
-                         "Category editing is locked. Disable \"Lock Category Editing\" in "
-                         "Preferences to edit.");
-              WM_report_banner_show(CTX_wm_manager(C), CTX_wm_window(C));
-            }
-            return WM_UI_HANDLER_BREAK;
-          }
-          break;
+
+          /* Remember the tab, the menu items act on it once the cursor left the tab. */
+          STRNCPY(category_tab_context_menu_category, pc_dyn.idname);
+          popup_menu_invoke(C, "UI_MT_category_tab_context", CTX_wm_reports(C));
+          return WM_UI_HANDLER_BREAK;
         }
       }
     }

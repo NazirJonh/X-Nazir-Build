@@ -507,6 +507,39 @@ def auto_detect_extension_icon_path_normalized(category: str):
     return icon_path.replace("\\", "/"), provider
 
 
+def query_popular_addon_icon_normalized(addon_id: str):
+    """Look up an icon for ``addon_id`` in the optional Popular Addons Database extension.
+
+    The extension (``bl_ext.user_default.popular_addons_database``) is not part of Blender and is
+    usually absent, so a missing module is a normal result, not an error. Returns
+    ``(icon_path, provider)`` with backslashes normalized to '/', or ``None`` when the extension
+    is unavailable or has no icon for this add-on. Used by the C++ bridge, which forwards the
+    result to ``json.dumps`` as-is.
+    """
+    try:
+        from bl_ext.user_default.popular_addons_database import api as pad_api
+    except Exception:
+        return None
+
+    try:
+        if not pad_api.check_popular_addons_database_available():
+            return None
+        result = pad_api.query_popular_addon_icon(addon_id)
+    except Exception as ex:
+        category_debug_print(
+            "[POPULAR ADDONS] query failed for {!r}: {}".format(addon_id, ex))
+        return None
+
+    if not result:
+        return None
+
+    icon_path = result.get("icon_path", "")
+    if not icon_path:
+        return None
+    provider = result.get("icon_provider", "") or "popular_addons_database"
+    return icon_path.replace("\\", "/"), provider
+
+
 def _discover_active_categories():
     """Discover all active categories from registered panels including addon panels."""
     discovered_categories = set()

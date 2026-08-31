@@ -30,12 +30,10 @@
  * raw value (an int, or a JSON string that the caller parses with its local helpers) -
  * get_reserved_category_priority, get_category_order, search_glyphs_summary (a bridge-facing
  * trimmed view of `glyph_library.registry.search_glyphs`),
- * auto_detect_extension_icon_path_normalized (backslash-normalized `_auto_detect_extension_icon_path`).
+ * auto_detect_extension_icon_path_normalized (backslash-normalized `_auto_detect_extension_icon_path`),
+ * query_popular_addon_icon_normalized (optional Popular-Addons-Database extension lookup).
  *
  * NOT routed here (by design):
- *   - The temporary Popular-Addons-Database lookup in interface_tab_categories_edit.cc: it parses
- *     marker-formatted stdout (not the clean API surface) and is slated for removal once extensions
- *     bundle their own icons.
  *   - `sync_wm_to_glyph_cache` invoked from `makesrna/rna_wm.cc`, to avoid a makesrna -> editors
  *     dependency.
  */
@@ -137,5 +135,10 @@ std::string category_py_search_glyphs_json(bContext *C,
 /* Auto-detected extension icon as a JSON array string ["icon_path", "icon_provider"] (with
  * backslashes normalized to '/'). Returns an empty string on failure. */
 std::string category_py_auto_detect_extension_icon_json(bContext *C, const char *category);
+
+/* Look up an icon for `addon_id` in the optional Popular Addons Database extension. Returns a
+ * JSON `[icon_path, icon_provider]` pair, or an empty string when the extension is unavailable
+ * or has no icon for this add-on (a missing extension is a normal result, not an error). */
+std::string category_py_query_popular_addon_icon_json(bContext *C, const char *addon_id);
 
 }  // namespace blender::ui

@@ -1670,16 +1670,15 @@ static void ui_panel_category_draw_content(
   }
 
   /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
-  char fallback_glyph_buf[8];
+  char fallback_glyph_buf[16];
   if (glyph == nullptr && is_fallback_letter) {
     /* For glyph-id categories use human-readable name (panel label/display name),
      * otherwise use category id. */
     const char *first_letter_source = category_first_letter_source_name_get(
         region, wm, category_id, category_id_draw, space_type);
-    const int first_char_size = BLI_str_utf8_size_safe(first_letter_source);
-    if (first_char_size > 0) {
-      memcpy(fallback_glyph_buf, first_letter_source, first_char_size);
-      fallback_glyph_buf[first_char_size] = '\0';
+    const bool has_fallback_label = category_tab_fallback_label_copy(
+        first_letter_source, fallback_glyph_buf, sizeof(fallback_glyph_buf));
+    if (has_fallback_label) {
       glyph = fallback_glyph_buf;
     }
     else {
@@ -2960,16 +2959,15 @@ void panel_category_tabs_draw_all(const bContext *C, ARegion *region, const char
     }
 
     /* Handle nullptr glyph (explicitly cleared) - use fallback letter from category */
-    char fallback_glyph_buf[8];
+    char fallback_glyph_buf[16];
     if (glyph == nullptr && is_fallback_letter) {
       /* For glyph-id categories use human-readable name (panel label/display name),
        * otherwise use category id. */
       const char *first_letter_source = category_first_letter_source_name_get(
           region, wm, category_id, category_id_draw, space_type);
-      const int first_char_size = BLI_str_utf8_size_safe(first_letter_source);
-      if (first_char_size > 0) {
-        memcpy(fallback_glyph_buf, first_letter_source, first_char_size);
-        fallback_glyph_buf[first_char_size] = '\0';
+      const bool has_fallback_label = category_tab_fallback_label_copy(
+          first_letter_source, fallback_glyph_buf, sizeof(fallback_glyph_buf));
+      if (has_fallback_label) {
         glyph = fallback_glyph_buf;
       }
       else {

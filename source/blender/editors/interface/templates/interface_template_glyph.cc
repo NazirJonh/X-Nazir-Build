@@ -1023,7 +1023,8 @@ static void ui_template_glyph_selector_impl(Layout *layout,
           }
         }
 
-        category_tab_first_utf8_char_copy(first_letter_source, glyph_unicode, sizeof(glyph_unicode));
+        /* Match what the tabs draw for a fallback label (up to two characters). */
+        category_tab_fallback_label_copy(first_letter_source, glyph_unicode, sizeof(glyph_unicode));
       }
       else if (glyph_value[0] != '\0') {
         /* Convert hex code to UTF-8 if needed */

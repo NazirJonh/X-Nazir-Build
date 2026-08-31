@@ -642,13 +642,13 @@ static const char *panel_category_glyph_lookup_apply_fallback(const wmWindowMana
     *r_is_fallback_letter = !category_name_is_glyph(category);
   }
 
-  static char first_char_buf[8];
+  static char first_char_buf[16];
   const char *first_letter_source = panel_category_display_name_lookup(wm, category, space_type);
   if (!first_letter_source || first_letter_source[0] == '\0') {
     first_letter_source = category;
   }
 
-  if (category_tab_first_utf8_char_copy(first_letter_source, first_char_buf, sizeof(first_char_buf))) {
+  if (category_tab_fallback_label_copy(first_letter_source, first_char_buf, sizeof(first_char_buf))) {
     return first_char_buf;
   }
   return first_letter_source;

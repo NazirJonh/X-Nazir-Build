@@ -208,6 +208,61 @@ bool category_tab_first_utf8_char_copy(const char *input, char *output, const si
   return true;
 }
 
+bool category_tab_fallback_label_copy(const char *input, char *output, const size_t output_max)
+{
+  if (!category_tab_first_utf8_char_copy(input, output, output_max)) {
+    return false;
+  }
+
+  const size_t input_len = BLI_strnlen(input, 64);
+  const int char_offset1 = BLI_str_utf8_offset_from_index(input, input_len, 1);
+  if (char_offset1 > 2) {
+    /* Only a single complex character, symbol, or emoji. */
+    return true;
+  }
+
+  const int char_offset2 = BLI_str_utf8_offset_from_index(input, input_len, 2);
+  const char *space = strchr(input, ' ');
+
+  int copy_size = 0;
+  char second_char[8] = "";
+  if (char_offset2 == 2 && isupper(uchar(input[1]))) {
+    /* First two characters are Latin with second uppercase. */
+    copy_size = char_offset2;
+  }
+  else if (space && input_len > size_t(space - input) + 1) {
+    /* First characters from each of the first two words. */
+    if (!category_tab_first_utf8_char_copy(space + 1, second_char, sizeof(second_char))) {
+      return true;
+    }
+  }
+  else if (char_offset2 > char_offset1) {
+    /* First two characters of a single word. */
+    copy_size = char_offset2;
+  }
+  else {
+    /* A single character name. */
+    return true;
+  }
+
+  if (copy_size > 0) {
+    if (size_t(copy_size) >= output_max) {
+      return true;
+    }
+    memcpy(output, input, copy_size);
+    output[copy_size] = '\0';
+    return true;
+  }
+
+  const size_t first_len = strlen(output);
+  const size_t second_len = strlen(second_char);
+  if (first_len + second_len >= output_max) {
+    return true;
+  }
+  memcpy(output + first_len, second_char, second_len + 1);
+  return true;
+}
+
 bool category_tab_glyph_is_fallback_letter(const char *glyph, const char *category)
 {
   if (!glyph || glyph[0] == '\0' || !category || category[0] == '\0') {
@@ -383,40 +438,6 @@ void category_tab_split_tags(const char *tags,
 
     token_start = p + 1;
   }
-}
-
-std::string category_tab_escape_for_python_literal(const char *input)
-{
-  std::string escaped;
-  if (!input) {
-    return escaped;
-  }
-
-  for (const char *p = input; *p != '\0'; p++) {
-    const char c = *p;
-    switch (c) {
-      case '\\':
-        escaped += "\\\\";
-        break;
-      case '\'':
-        escaped += "\\'";
-        break;
-      case '\n':
-        escaped += "\\n";
-        break;
-      case '\r':
-        escaped += "\\r";
-        break;
-      case '\t':
-        escaped += "\\t";
-        break;
-      default:
-        escaped += c;
-        break;
-    }
-  }
-
-  return escaped;
 }
 
 bool category_tab_parse_json_string_array_minimal(const char *json, Vector<std::string> &r_items)

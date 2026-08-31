@@ -115,6 +115,9 @@ Block *category_tab_popup_block = nullptr;
 double category_tab_popup_close_time = 0.0;
 char category_tab_last_closed_category[64] = "";
 
+/* Category of the tab that opened the context menu, see declaration for details. */
+char category_tab_context_menu_category[64] = "";
+
 /* Local tag filter mode for the edit popup (0 = all tags, 1+ = current mode).
  * This is separate from wm->category_tag_filter_mode to prevent cross-UI interference.
  * When the popup opens, it initializes from the global setting, but changes only affect the popup. */
@@ -147,8 +150,12 @@ static void category_glyph_item_init(
 {
   STRNCPY(item.category, category);
   item.space_type = space_type;
-  item.first_letter[0] = category[0] ? category[0] : '?';
-  item.first_letter[1] = '\0';
+  /* Same abbreviation the tabs draw, and UTF-8 safe (a raw `category[0]` would cut a multi-byte
+   * character in half). */
+  if (!category_tab_fallback_label_copy(category, item.first_letter, sizeof(item.first_letter))) {
+    item.first_letter[0] = '?';
+    item.first_letter[1] = '\0';
+  }
   item.glyph[0] = '\0';
   item.display_name[0] = '\0';
   zero_v3(item.color);
@@ -708,127 +715,50 @@ bool category_tab_try_auto_detect_extension_icon(bContext *C,
  * Returns true if icon found and paths set.
  * Can be removed when extensions bundle their own icons.
  */
-static bool category_tab_query_popular_addons_database(
-    bContext *C,
-    const char *addon_id,
-    char r_icon_path[1024],
-    char r_icon_provider[128])
+static bool category_tab_query_popular_addons_database(bContext *C,
+                                                       const char *addon_id,
+                                                       char r_icon_path[1024],
+                                                       char r_icon_provider[128])
 {
 #ifdef WITH_PYTHON
-    if (!C || !addon_id || !addon_id[0]) {
-        return false;
-    }
-    
-    // Clear output buffers
-    r_icon_path[0] = '\0';
-    r_icon_provider[0] = '\0';
-    
-    // Check if Popular Addons Database is available
-    const char *check_script =
-        "try:\n"
-        "    from bl_ext.user_default.popular_addons_database import api as _pad_api\n"
-        "    available = _pad_api.check_popular_addons_database_available()\n"
-        "    print(f'POPULAR_ADDONS_AVAILABLE:{available}')\n"
-        "except Exception:\n"
-        "    print('POPULAR_ADDONS_AVAILABLE:False')";
-    
-    // Execute availability check via BPY
-    const char *imports[] = {"bpy", nullptr};
-    char *result = nullptr;
-    char *err_msg = nullptr;
-    BPy_RunErrInfo err_info = {false, nullptr, "", &err_msg};
-    const bool check_success = BPY_run_string_as_string(C, imports, check_script, &err_info, &result);
-    
-    if (!check_success || !result) {
-        if (err_msg) {
-            MEM_delete(err_msg);
-        }
-        return false;
-    }
-    
-    // Parse availability result
-    bool available = (strstr(result, "POPULAR_ADDONS_AVAILABLE:True") != nullptr);
-    MEM_delete(result);
-    if (err_msg) {
-        MEM_delete(err_msg);
-    }
-    
-    if (!available) {
-        return false;
-    }
-    
-    // Query for addon icon. Escape the addon id before interpolating it into the Python
-    // literal (it is an arbitrary category name; unescaped ' \ or newline would raise
-    // SyntaxError or allow injection), matching the centralized bridge's convention.
-    const std::string escaped_addon_id = category_tab_escape_for_python_literal(addon_id);
-    char query_script[2048];
-    SNPRINTF(query_script,
-        "try:\n"
-        "    from bl_ext.user_default.popular_addons_database import api as _pad_api\n"
-        "    result = _pad_api.query_popular_addon_icon('%s')\n"
-        "    if result:\n"
-        "        icon_path = result.get('icon_path', '')\n"
-        "        icon_provider = result.get('icon_provider', 'popular_addons_database')\n"
-        "        print(f'ADDON_ICON_FOUND:{icon_path}:{icon_provider}')\n"
-        "    else:\n"
-        "        print('ADDON_ICON_NOT_FOUND')\n"
-        "except Exception as e:\n"
-        "    print(f'ADDON_ICON_ERROR:{e}')",
-        escaped_addon_id.c_str());
-    
-    char *query_result = nullptr;
-    char *query_err_msg = nullptr;
-    BPy_RunErrInfo query_err_info = {false, nullptr, "", &query_err_msg};
-    const bool query_success = BPY_run_string_as_string(C, imports, query_script, &query_err_info, &query_result);
-    
-    if (!query_success || !query_result) {
-        if (query_err_msg) {
-            MEM_delete(query_err_msg);
-        }
-        return false;
-    }
-    
-    // Parse query result
-    bool icon_found = false;
-    if (const char *found_line = strstr(query_result, "ADDON_ICON_FOUND:")) {
-        const char *data_start = found_line + strlen("ADDON_ICON_FOUND:");
-        
-        // Find first colon (separator between path and provider)
-        const char *colon_pos = strchr(data_start, ':');
-        if (colon_pos) {
-            // Extract icon path
-            size_t path_len = colon_pos - data_start;
-            if (path_len > 0 && path_len < 1023) {
-                BLI_strncpy_ensure_pad(r_icon_path, data_start, path_len + 1, '\0');
-                
-                // Extract provider
-                const char *provider_start = colon_pos + 1;
-                const char *newline_pos = strchr(provider_start, '\n');
-                size_t provider_len = newline_pos ? (newline_pos - provider_start) : strlen(provider_start);
-                
-                if (provider_len < 127) {
-                    BLI_strncpy_ensure_pad(r_icon_provider, provider_start, provider_len + 1, '\0');
-                    
-                    icon_found = true;
-                    
-                    if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-                        printf("[POPULAR_ADDONS] Found icon for '%s': path='%s', provider='%s'\n",
-                               addon_id, r_icon_path, r_icon_provider);
-                    }
-                }
-            }
-        }
-    }
-    
-    MEM_delete(query_result);
-    if (query_err_msg) {
-        MEM_delete(query_err_msg);
-    }
-    return icon_found;
-    
-#else
-    UNUSED_VARS(C, addon_id, r_icon_path, r_icon_provider);
+  if (!C || !addon_id || !addon_id[0]) {
     return false;
+  }
+
+  r_icon_path[0] = '\0';
+  r_icon_provider[0] = '\0';
+
+  /* The database lives in an optional extension, so an empty result is the common case. */
+  const std::string json = category_py_query_popular_addon_icon_json(C, addon_id);
+  if (json.empty()) {
+    return false;
+  }
+
+  blender::Vector<std::string> parts;
+  if (!category_tab_parse_json_string_array_minimal(json.c_str(), parts) || parts.size() < 2) {
+    return false;
+  }
+
+  /* The serialization layer already fully decoded these strings. */
+  const std::string &icon_path = parts[0];
+  const std::string &icon_provider = parts[1];
+  if (icon_path.empty()) {
+    return false;
+  }
+
+  BLI_strncpy(r_icon_path, icon_path.c_str(), 1024);
+  BLI_strncpy(r_icon_provider, icon_provider.c_str(), 128);
+
+  if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
+    printf("[POPULAR_ADDONS] Found icon for '%s': path='%s', provider='%s'\n",
+           addon_id,
+           r_icon_path,
+           r_icon_provider);
+  }
+  return true;
+#else
+  UNUSED_VARS(C, addon_id, r_icon_path, r_icon_provider);
+  return false;
 #endif
 }
 
@@ -1951,9 +1881,9 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   PointerRNA reset_ptr = row_left.op("SCREEN_OT_category_tab_reset", IFACE_("Reset"), ICON_LOOP_BACK);
   RNA_string_set(&reset_ptr, "category", category);
 
-  /* Spacer and right-aligned buttons */
+  /* Right-aligned buttons. #Layout::separator_spacer() is not supported inside popups. */
   Layout &row_right = split.row(true);
-  row_right.separator_spacer();
+  row_right.alignment_set(LayoutAlign::Right);
   /* Save button (active/default, no icon) */
   row_right.active_default_set(true);
   row_right.op("SCREEN_OT_category_tab_edit_dialog_save", IFACE_("Save"), ICON_NONE);
@@ -2036,9 +1966,15 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
                                                   wmOperator *op,
                                                   const wmEvent *event)
 {
+  /* When invoked from the tab context menu the cursor hovers the menu instead of the tab, so the
+   * category stored while opening the menu takes precedence over the mouse position. */
+  char pending_category[64] = "";
+  STRNCPY(pending_category, category_tab_context_menu_category);
+  category_tab_context_menu_category[0] = '\0';
+
   /* Check if dialog was just closed for the same category to prevent immediate reopen
    * caused by the same click that closed the popup. */
-  if (category_tab_last_closed_category[0] != '\0') {
+  if (pending_category[0] == '\0' && category_tab_last_closed_category[0] != '\0') {
     double time_since_close = BLI_time_now_seconds() - category_tab_popup_close_time;
     if (time_since_close < 0.1) {
       /* Get category from mouse position to check if it matches */
@@ -2067,8 +2003,11 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
       const int mx = event->mval[0];
       const int my = event->mval[1];
 
-      const char *clicked_category = nullptr;
+      const char *clicked_category = (pending_category[0] != '\0') ? pending_category : nullptr;
       for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+        if (clicked_category) {
+          break;
+        }
         if (BLI_rcti_isect_pt(&pc_dyn.rect, mx, my)) {
           clicked_category = pc_dyn.idname;
           break;
@@ -2082,14 +2021,26 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
     }
   }
 
+  /* Get space_type for per-space tag storage */
+  ScrArea *area = CTX_wm_area(C);
+
   /* Get category from mouse position */
   ARegion *region = CTX_wm_region(C);
+  if (pending_category[0] != '\0' && (!region || !panel_category_tabs_is_visible(region))) {
+    /* Invoked from the tab context menu: the context region is the menu, so look up the region
+     * that actually holds the tabs in this area. */
+    if (area) {
+      for (ARegion &area_region : area->regionbase) {
+        if (panel_category_tabs_is_visible(&area_region)) {
+          region = &area_region;
+          break;
+        }
+      }
+    }
+  }
   if (!region || !panel_category_tabs_is_visible(region)) {
     return OPERATOR_CANCELLED;
   }
-
-  /* Get space_type for per-space tag storage */
-  ScrArea *area = CTX_wm_area(C);
   const int space_type = area ? area->spacetype : -1;
 
   /* Find which tab the mouse is over */
@@ -2097,10 +2048,21 @@ wmOperatorStatus category_tab_edit_dialog_invoke(bContext *C,
   const int my = event->mval[1];
 
   const char *category = nullptr;
-  for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    if (BLI_rcti_isect_pt(&pc_dyn.rect, mx, my)) {
-      category = pc_dyn.idname;
-      break;
+  if (pending_category[0] != '\0') {
+    /* Only accept it while the tab still exists in this region. */
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (STREQ(pc_dyn.idname, pending_category)) {
+        category = pc_dyn.idname;
+        break;
+      }
+    }
+  }
+  else {
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (BLI_rcti_isect_pt(&pc_dyn.rect, mx, my)) {
+        category = pc_dyn.idname;
+        break;
+      }
     }
   }
 

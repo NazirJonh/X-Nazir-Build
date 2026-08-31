@@ -51,6 +51,7 @@ from bl_ui.glyph_tag_system.api import (
     USERPREF_OT_category_tag_filter_set_mode,
     USERPREF_OT_category_tag_remove_from_category,
     VIEW3D_OT_category_tabs_settings,
+    UI_MT_category_tab_context,
     USERPREF_OT_tag_mode_toggle,
     USERPREF_OT_tag_mode_select_all,
     USERPREF_OT_tag_mode_select_none,
@@ -3619,6 +3620,7 @@ classes = (
 
     # Operators.
     VIEW3D_OT_category_tabs_settings,
+    UI_MT_category_tab_context,
     USERPREF_OT_tag_mode_toggle,
     USERPREF_OT_tag_mode_select_all,
     USERPREF_OT_tag_mode_select_none,

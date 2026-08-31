@@ -458,7 +458,7 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   RNA_string_get(op->ptr, "display_name", preview_name);
   const char *first_letter_source = (preview_name[0] != '\0') ? preview_name : category;
   char fallback_letter[8] = "";
-  if (!category_tab_first_utf8_char_copy(first_letter_source, fallback_letter, sizeof(fallback_letter))) {
+  if (!category_tab_fallback_label_copy(first_letter_source, fallback_letter, sizeof(fallback_letter))) {
     fallback_letter[0] = '\0';
   }
   STRNCPY(category_tab_preview_first_letter, fallback_letter);
@@ -511,7 +511,8 @@ void category_tab_edit_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   RNA_string_get(op->ptr, "display_name", display_name);
   if (display_name[0] != '\0') {
     STRNCPY(item->display_name, display_name);
-    category_tab_first_utf8_char_copy(display_name, item->first_letter, sizeof(item->first_letter));
+    /* Keep this in sync with the preview above, which uses the same abbreviation. */
+    category_tab_fallback_label_copy(display_name, item->first_letter, sizeof(item->first_letter));
   }
 
   /* Update color for live preview */

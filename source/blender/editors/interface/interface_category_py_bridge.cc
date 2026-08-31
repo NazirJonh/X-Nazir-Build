@@ -410,6 +410,31 @@ std::string category_py_auto_detect_extension_icon_json(bContext *C, const char 
 #endif
 }
 
+std::string category_py_query_popular_addon_icon_json(bContext *C, const char *addon_id)
+{
+#ifdef WITH_PYTHON
+  const BPy_CallArg args[] = {
+      {.type = BPy_CallArg::Type::STRING, .as_string = addon_id},
+  };
+  char *result_str = nullptr;
+  const bool success = BPY_run_module_func_as_json(
+      C, api_module, "query_popular_addon_icon_normalized", AS_SPAN(args), nullptr, &result_str);
+  if (!success || !result_str) {
+    return "";
+  }
+  std::string out(result_str);
+  MEM_delete(result_str);
+  /* The extension is optional, a missing database returns None. */
+  if (out == "null") {
+    return "";
+  }
+  return out;
+#else
+  UNUSED_VARS(C, addon_id);
+  return "";
+#endif
+}
+
 #ifdef WITH_PYTHON
 #  undef AS_SPAN
 #endif

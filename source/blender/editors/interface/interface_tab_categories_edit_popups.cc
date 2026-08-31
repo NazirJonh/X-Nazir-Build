@@ -445,8 +445,12 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
         }
 
         /* Get target property - from picker operator or use default "glyph" */
+        /* The owning operator is not always the picker (the edit dialog uses this popup too),
+         * so only read the property when it actually exists. */
         char target_prop[256] = "glyph";  /* Default to "glyph" property */
-        if (popup_data->op) {
+        if (popup_data->op &&
+            RNA_struct_find_property(popup_data->op->ptr, "target_property") != nullptr)
+        {
           RNA_string_get(popup_data->op->ptr, "target_property", target_prop);
         }
 
@@ -611,8 +615,9 @@ static Block *glyph_grid_popup_block_create(bContext *C, ARegion *region, void *
   GridViewBuilder builder(*block);
   builder.build_grid_view(*C, *grid, scroll_col);
   
-  /* Add a large spacer to ensure minimum height */
-  scroll_col.separator_spacer();
+  /* Add a large spacer to ensure minimum height. #Layout::separator_spacer() only works in
+   * horizontal, non-popup layouts, so use a plain separator here. */
+  scroll_col.separator(2.0f);
   
   return block;
 }
@@ -973,7 +978,9 @@ static bool icon_grid_writeback_icon_key(bContext &C,
   /* First, try to resolve via target_property (RNA path) - same approach as glyph picker.
    * This allows writing directly to any RNA property without needing a target operator. */
   char target_property[256] = "";
-  if (popup_data->op && popup_data->op->ptr) {
+  if (popup_data->op && popup_data->op->ptr &&
+      RNA_struct_find_property(popup_data->op->ptr, "target_property") != nullptr)
+  {
     RNA_string_get(popup_data->op->ptr, "target_property", target_property);
   }
 

@@ -445,6 +445,13 @@ struct CurvePatchStamp {
   float angle = 0.0f;
   /** Per-stamp relief strength multiplier in `(0, 1]`. */
   float strength = 1.0f;
+  /** Random stacking order in `[0, 1)`: where overlapping stamps composite, the larger `depth`
+   * goes ON TOP. Drawn from its own hash channel rather than derived from the layout, so it is
+   * independent of the arc-length order the list is sorted by -- stacking that followed the curve
+   * would read as a directional shingle, which is the opposite of what Jitter's scatter is for.
+   * Ghost copies made by #curve_patch_stamps_add_cyclic_wrap inherit it by whole-struct copy, so
+   * a seam stamp keeps one consistent depth on both sides of the join. */
+  float depth = 0.0f;
   /** Index into the cache's `stamp_texture_variants`, or -1 when this stamp samples the brush's
    * own texture (SINGLE mode, an empty list, or a list whose weights all sum to zero). Ghost
    * copies made by #curve_patch_stamps_add_cyclic_wrap inherit it by whole-struct copy, so a seam
@@ -933,8 +940,11 @@ struct CurvePatchGeometry {
   Vector<CurvePatchStamp> stamps;
 
   /** World-space radius the ribbon was actually built from. Equals `CurvePatchParams::radius`
-   * in Ribbon mode; WIDENED by the layout's jitter in Stamps mode, so anything reconstructing a
-   * world-space lateral offset from the ribbon's normalized `u` must scale by THIS value. */
+   * in Ribbon mode; in Stamps mode WIDENED to a jittered stamp's full lateral reach
+   * (#curve_patch_stamp_reach plus the jitter amount, the same bound as #ribbon_end_margin), so
+   * anything reconstructing a world-space lateral offset from the ribbon's normalized `u` must
+   * scale by THIS value. It is the strip's extent, NOT the brush's reach -- see
+   * `CurvePatchParams::radius` for the latter. */
   float ribbon_radius = 0.0f;
 
   /** Conservative arc-length half-window covering one stamp's footprint, resolved once per build

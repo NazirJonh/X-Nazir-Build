@@ -1431,6 +1431,9 @@ void SCULPT_OT_brush_stroke(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_edit(wmOperatorType *ot);
 /* #curve_patch_edit_modal_keymap(), the modal keymap for #SCULPT_OT_curve_patch_edit, is declared
  * in `paint_curve_patch_edit_intern.hh` alongside the rest of that split, not here. */
+/** Defined in `paint_curve_patch_edit.cc`. The Apply/Cancel dialog a live session hands its patch
+ * to when a tool, brush or workspace change interrupts it -- never invoked by the user directly. */
+void SCULPT_OT_curve_patch_edit_confirm(wmOperatorType *ot);
 
 void SCULPT_OT_curve_patch_handle_type_set(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_delete_point(wmOperatorType *ot);

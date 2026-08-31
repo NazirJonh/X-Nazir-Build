@@ -30,6 +30,7 @@ enum {
   STAMP_HASH_JITTER_V = 3,
   STAMP_HASH_JITTER_U = 4,
   STAMP_HASH_TEX = 5,
+  STAMP_HASH_DEPTH = 6,
 };
 
 static float stamp_random(const int index, const uint32_t seed, const int channel)
@@ -109,6 +110,9 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
     stamp.strength = std::max(strength_factor, 0.05f);
     stamp.tex_index = curve_patch_stamp_pick_texture(texture_weights_cdf,
                                                      stamp_random(i, seed, STAMP_HASH_TEX));
+    /* Its own channel, so the stacking order stays independent of every other per-stamp draw --
+     * see #CurvePatchStamp::depth for why it must not follow the layout order. */
+    stamp.depth = stamp_random(i, seed, STAMP_HASH_DEPTH);
 
     /* `center_v` is jittered and routinely lands outside `[0, total_length]` -- the first stamp
      * goes negative about half the time, the last overshoots. `evaluate()`/`tangent_at()` CLAMP,

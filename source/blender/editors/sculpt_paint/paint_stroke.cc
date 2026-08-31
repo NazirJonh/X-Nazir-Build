@@ -437,8 +437,18 @@ static bool paint_stroke_use_jitter(const PaintMode mode, const Brush &brush, co
                                                          brush.jitter != 0;
 
   /* jitter-ed brush gives weird and unpredictable result for this
-   * kinds of stroke, so manually disable jitter usage (sergey) */
-  use_jitter &= (ELEM(brush.stroke_method, BRUSH_STROKE_DRAG_DOT, BRUSH_STROKE_ANCHORED)) == 0;
+   * kinds of stroke, so manually disable jitter usage (sergey)
+   *
+   * `BRUSH_STROKE_CURVE_PATCH` belongs here for a stronger reason than the other two: its stroke
+   * paints nothing at all (`ImageStrokeMethodHook::suppresses_dabs`). It RECORDS the gesture that
+   * becomes the patch's control curve, and Curve Patch reads this very same `jitter` setting as
+   * the per-stamp scatter it lays out along that curve. Left in, raising Jitter for the stamps
+   * also scattered the anchor's recorded positions, and the curve built from them came out as a
+   * wandering cloud of control points instead of the two-point line the gesture drew. */
+  use_jitter &= (ELEM(brush.stroke_method,
+                      BRUSH_STROKE_DRAG_DOT,
+                      BRUSH_STROKE_ANCHORED,
+                      BRUSH_STROKE_CURVE_PATCH)) == 0;
   use_jitter &= !ELEM(mode, PaintMode::Texture2D, PaintMode::Texture3D) ||
                 !(invert && brush.image_brush_type == IMAGE_PAINT_BRUSH_TYPE_CLONE);
 

@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <optional>
 
@@ -210,14 +211,13 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
     }
 
     /* The ribbon's `u` is normalized across the half-width the LUT was BUILT with, which in Stamps
-     * mode is widened by the jitter amount (`CurvePatchGeometry::ribbon_radius`). So turning `u`
-     * back into a world-space lateral offset must use that widened scale, while the falloff radius
-     * above must stay UNWIDENED -- the widening only exists to give jittered stamps room inside
-     * the strip and must not enlarge the brush's actual reach. Using one value for both would
-     * simultaneously under-report `lateral` (widening the visible relief band as Jitter rises) and
-     * compress the stamp-space `du` below, squashing stamps toward the curve and clipping the very
-     * edge stamps the widening was meant to admit. The two are equal in Ribbon mode, where jitter
-     * never applies. */
+     * mode is widened to a jittered stamp's full reach (`CurvePatchGeometry::ribbon_radius`). So
+     * turning `u` back into a world-space lateral offset must use that widened scale. The two
+     * values must not be conflated: `falloff_radius_at_s` is the BRUSH's reach and stays
+     * unwidened, since Ribbon mode fades over it and both modes measure the off-plane cutoff and
+     * the endpoint shapes against it. Scaling `u` by it instead would under-report `lateral` and
+     * compress the stamp-space `du` below, squashing stamps toward the curve. The two are equal in
+     * Ribbon mode, where jitter never applies. */
     const float lateral_scale_at_s = item.geometry.spline.radius_at(s) *
                                      item.geometry.ribbon_radius;
 
@@ -263,13 +263,37 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
     }
     const float radial_dist = std::sqrt(lateral * lateral + normal_dist * normal_dist +
                                         cap_overshoot * cap_overshoot);
-    const float lateral_falloff = BKE_brush_curve_strength(
-        &brush, radial_dist, falloff_radius_at_s);
-    if (lateral_falloff <= 0.0f) {
+
+    /* Stamps mode owns no centerline falloff. Each stamp already fades over its OWN half-extent
+     * (`stamp_falloff` below), and measuring a second falloff from the curve on top of that is
+     * what made Jitter useless: a stamp thrown sideways was both cut off at `falloff_radius_at_s`
+     * and dimmed in proportion to how far it had been thrown, so the scatter the setting exists to
+     * produce could never leave the band the un-jittered layout already covers. Ribbon mode, which
+     * has no stamps and nothing else to shape its edge, keeps the falloff exactly as it was.
+     *
+     * What remains in Stamps mode is a plain admissibility bound, so vertices out where a jittered
+     * stamp can reach still get to run the per-stamp test that decides their fate. It is the
+     * strip's own half-width -- `lateral_scale_at_s`, i.e. the widened `ribbon_radius`, which is
+     * built to cover exactly `jitter_amount` plus a stamp's corner reach. Vertices past it have no
+     * ribbon `u` to place them in a stamp's frame anyway. */
+    const bool is_stamps = item.params.stamp_mode == CurvePatchStampMode::Stamps;
+    float lateral_falloff = 1.0f;
+    if (is_stamps) {
+      if (radial_dist > lateral_scale_at_s) {
 #if CURVE_PATCH_PROFILING
-      dbg_branch_funnel_.rej_falloff++;
+        dbg_branch_funnel_.rej_falloff++;
 #endif
-      return std::nullopt;
+        return std::nullopt;
+      }
+    }
+    else {
+      lateral_falloff = BKE_brush_curve_strength(&brush, radial_dist, falloff_radius_at_s);
+      if (lateral_falloff <= 0.0f) {
+#if CURVE_PATCH_PROFILING
+        dbg_branch_funnel_.rej_falloff++;
+#endif
+        return std::nullopt;
+      }
     }
 
     /* Shape the two endpoints independently. Square stops at the control point. Round and Triangle
@@ -279,20 +303,28 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * of the reach checks below once `lateral_falloff` reaches zero, not the source of its edge
      * shape. Square and Triangle have no such falloff-side handling and still clip flat here. */
     if (!item.geometry.spline.cyclic) {
+      /* Jitter throws stamps ALONG the curve as well as across it, and an end stamp overhangs the
+       * control point by its own corner reach on top of that. The endpoint shapes are cut at the
+       * control point, so in Stamps mode every one of those stamps lost its outer half to a
+       * straight edge -- the same defect as the lateral clipping, in the other axis. Shift the
+       * shape outward by exactly the overhang the strip is already built to cover
+       * (`ribbon_end_margin`, which is `stamp_reach + jitter_amount`), so the shape still shapes
+       * the end, just around the stamps that are actually there. Ribbon mode has no overhang and
+       * is untouched. */
+      const float end_overhang = is_stamps ? item.geometry.ribbon_end_margin : 0.0f;
       const auto endpoint_contains = [&](const CurvePatchPointShape shape,
                                          const float distance_from_endpoint) {
+        const float d = distance_from_endpoint + end_overhang;
         switch (shape) {
           case CurvePatchPointShape::Square:
-            return distance_from_endpoint >= 0.0f;
+            return d >= 0.0f;
           case CurvePatchPointShape::Round:
-            return distance_from_endpoint >= 0.0f ||
-                   (distance_from_endpoint >= -falloff_radius_at_s &&
-                    distance_from_endpoint * distance_from_endpoint + lateral * lateral <=
-                        falloff_radius_at_s * falloff_radius_at_s);
+            return d >= 0.0f || (d >= -falloff_radius_at_s &&
+                                 d * d + lateral * lateral <=
+                                     falloff_radius_at_s * falloff_radius_at_s);
           case CurvePatchPointShape::Triangle:
-            return distance_from_endpoint >= 0.0f ||
-                   (distance_from_endpoint >= -falloff_radius_at_s &&
-                    std::abs(lateral) <= falloff_radius_at_s + distance_from_endpoint);
+            return d >= 0.0f ||
+                   (d >= -falloff_radius_at_s && std::abs(lateral) <= falloff_radius_at_s + d);
         }
         BLI_assert_unreachable();
         return false;
@@ -339,16 +371,24 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         /* A non-square cap extends the actual relief boundary beyond its control point. Fade to
          * that outer boundary, rather than to the control point, or Smooth would erase every cap
          * outside the curve. Square endpoints deliberately keep the historical zero extension. */
-        const float start_extension = ELEM(item.params.start_point_shape,
-                                           CurvePatchPointShape::Round,
-                                           CurvePatchPointShape::Triangle) ?
-                                          start_endpoint_radius_ :
-                                          0.0f;
-        const float end_extension = ELEM(item.params.end_point_shape,
-                                         CurvePatchPointShape::Round,
-                                         CurvePatchPointShape::Triangle) ?
-                                        end_endpoint_radius_ :
-                                        0.0f;
+        /* In Stamps mode the relief boundary sits `ribbon_end_margin` past the cap as well, for
+         * the stamps jitter threw out there. Fading to the control point instead would dim exactly
+         * those stamps to nothing and undo the endpoint relaxation above. Taken as the larger of
+         * the two rather than their sum: both describe the same outer boundary, from a cap and
+         * from a stamp overhang, and only the farther one bounds it. */
+        const float end_overhang = is_stamps ? item.geometry.ribbon_end_margin : 0.0f;
+        const float start_extension = math::max(ELEM(item.params.start_point_shape,
+                                                     CurvePatchPointShape::Round,
+                                                     CurvePatchPointShape::Triangle) ?
+                                                    start_endpoint_radius_ :
+                                                    0.0f,
+                                                end_overhang);
+        const float end_extension = math::max(ELEM(item.params.end_point_shape,
+                                                   CurvePatchPointShape::Round,
+                                                   CurvePatchPointShape::Triangle) ?
+                                                  end_endpoint_radius_ :
+                                                  0.0f,
+                                              end_overhang);
         const float t = std::clamp(
             std::min(s + start_extension, total_length + end_extension - s) / zone, 0.0f, 1.0f);
         end_falloff = t * t * (3.0f - 2.0f * t);
@@ -395,7 +435,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * the bottom, where the sample is built. See #CurvePatchSample::patch_axis_u. */
     float3 patch_axis_u(1.0f, 0.0f, 0.0f);
     float3 patch_axis_v(0.0f, 1.0f, 0.0f);
-    if (item.params.stamp_mode == CurvePatchStampMode::Stamps) {
+    if (is_stamps) {
       /* Find the stamps whose square could cover this vertex. The list is sorted by `center_v`,
        * so a lower-bound on `s - max_extent` opens a window that closes as soon as a stamp starts
        * past `s`; with the default spacing that window holds one to three stamps.
@@ -417,8 +457,36 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
           item.geometry.stamps.end(),
           s - max_extent,
           [](const CurvePatchStamp &stamp, const float value) { return stamp.center_v < value; });
-      bool hit = false;
-      float best_abs = 0.0f;
+      /* Overlapping stamps are COMPOSITED, not arbitrated. Picking a single winner (the largest
+       * `|candidate|`) left a visible seam wherever the winner changed, which Jitter turns from a
+       * rarity into the normal case: scattered stamps overlap almost everywhere. Each stamp is
+       * instead laid over the ones below it, exactly as a stack of brush dabs would be.
+       *
+       * Contributions are collected here and composited after the window, because "below" is
+       * decided by #CurvePatchStamp::depth, which is random and therefore unrelated to the
+       * `center_v` order this window walks in. The buffer is kept sorted by depth as it fills, so
+       * the composite is a single back-to-front pass over it.
+       *
+       * The uv/axes frame and `tex_valid` cannot be composited -- one frame has to be reported --
+       * so they come from the DOMINANT contributor (largest coverage), tracked alongside. That is
+       * the least discontinuous single choice: coverage varies smoothly, so the reported frame
+       * changes hands away from either stamp's strong interior. */
+      struct StampContribution {
+        float depth;
+        /** Coverage of this stamp at this vertex: how much of what is under it it hides. */
+        float alpha;
+        /** Signed amplitude the stamp paints where it is fully opaque. */
+        float amplitude;
+        float4 color;
+      };
+      /* Sized for the densest window the layout can produce at a usable spacing (the 1% Spacing
+       * floor against a sqrt(2)-radius window admits far more in theory, but such a patch is
+       * already unusable). Overflow drops the least-covering contribution rather than the newest,
+       * so what is lost is what would have been hidden anyway. */
+      constexpr int contributions_max = 32;
+      std::array<StampContribution, contributions_max> contributions;
+      int contribution_num = 0;
+      float dominant_alpha = 0.0f;
       for (auto it = lower; it != item.geometry.stamps.end() && it->center_v <= s + max_extent;
            ++it)
       {
@@ -511,36 +579,106 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         if (stamp_falloff <= 0.0f) {
           continue;
         }
-        const float candidate = sample * stamp_falloff * it->strength;
-        /* Overlapping stamps merge by the strongest absolute displacement -- the same rule
-         * `relief_at()` uses where the curve runs alongside itself. Summing would pile up into
-         * spikes wherever the spacing puts stamps on top of each other. */
-        if (!hit || std::abs(candidate) > best_abs) {
-          hit = true;
-          best_abs = std::abs(candidate);
-          tex_value = sample;
-          stamp_strength = stamp_falloff * it->strength;
-          /* Carry the winner's RGBA alongside its intensity, so a color patch is attenuated by the
-           * alpha of the stamp that actually won the merge rather than by whichever happened to be
-           * sampled last. Mirrors how `tex_value`/`stamp_strength` are kept in sync with the
-           * winning candidate above. */
-          copy_v4_v4(tex_rgba, sample_rgba);
+        /* How much of what lies under this stamp it hides. Three factors, and each is needed:
+         * - the falloff, so stamps meet along a smooth seam instead of a square edge;
+         * - the texture's ALPHA, so a brush alpha with real transparency lets the stamps below
+         *   show through where it is transparent;
+         * - the texture's INTENSITY, so a black region of a grayscale mask -- the ordinary way a
+         *   Blender brush texture says "nothing here" -- does not punch a hole through the stamps
+         *   underneath while contributing nothing itself.
+         * Clamped because a color texture's intensity is a luminance and an HDR one can exceed 1.
+         */
+        const float tex_alpha = stamp_tex_valid ? sample_rgba[3] : 1.0f;
+        const float alpha = std::clamp(stamp_falloff * tex_alpha * sample, 0.0f, 1.0f);
+        if (alpha <= 0.0f) {
+          /* Fully transparent here: it neither paints nor hides, so it is not a contribution at
+           * all. A stamp whose texture is black throughout no longer claims the vertex. */
+          continue;
+        }
+
+        if (alpha > dominant_alpha) {
+          dominant_alpha = alpha;
           tex_valid = stamp_tex_valid;
-          /* Same reason as the RGBA above: the frame the patch reports must be the one the
-           * winning stamp defines, not whichever was sampled last. */
           patch_uv = stamp_patch_uv;
           patch_uv_valid = true;
           patch_axis_u = stamp_axis_u;
           patch_axis_v = stamp_axis_v;
         }
+
+        /* The amplitude is the stamp's own strength: the texture's shape has already been folded
+         * into `alpha`, so `alpha * amplitude` reproduces the single-stamp result the winner-take-
+         * all merge used to hand on (`sample * stamp_falloff * strength`) exactly. */
+        const StampContribution contribution{it->depth,
+                                             alpha,
+                                             it->strength,
+                                             float4(sample_rgba[0],
+                                                    sample_rgba[1],
+                                                    sample_rgba[2],
+                                                    tex_alpha)};
+        if (contribution_num == contributions_max) {
+          /* Evict the least-covering entry, and only for something that covers more. */
+          int weakest = 0;
+          for (const int i : IndexRange(1, contributions_max - 1)) {
+            if (contributions[i].alpha < contributions[weakest].alpha) {
+              weakest = i;
+            }
+          }
+          if (contributions[weakest].alpha >= alpha) {
+            continue;
+          }
+          std::move(contributions.begin() + weakest + 1,
+                    contributions.begin() + contribution_num,
+                    contributions.begin() + weakest);
+          contribution_num--;
+        }
+        /* Insert keeping the buffer sorted by depth ascending, so the composite below is one
+         * back-to-front pass. The window holds a handful of stamps, so a linear insert beats
+         * sorting afterwards. */
+        int insert_at = contribution_num;
+        while (insert_at > 0 && contributions[insert_at - 1].depth > contribution.depth) {
+          contributions[insert_at] = contributions[insert_at - 1];
+          insert_at--;
+        }
+        contributions[insert_at] = contribution;
+        contribution_num++;
       }
-      if (!hit) {
+
+      /* Back-to-front `over`, accumulated PREMULTIPLIED so the result never has to be composited
+       * against a background the patch does not have -- the surface under the patch is not the
+       * sampler's to read. `coverage` is the alpha that accumulation implies, and un-premultiplying
+       * by it at the end recovers the paint color and the texture alpha in the form the effects
+       * already expect. With one contribution this reduces to that contribution unchanged, in
+       * every channel. */
+      float height_premul = 0.0f;
+      float3 color_premul(0.0f);
+      float tex_alpha_premul = 0.0f;
+      float coverage = 0.0f;
+      for (const int i : IndexRange(contribution_num)) {
+        const StampContribution &c = contributions[i];
+        const float transmit = 1.0f - c.alpha;
+        height_premul = c.amplitude * c.alpha + height_premul * transmit;
+        color_premul = float3(c.color.x, c.color.y, c.color.z) * c.alpha + color_premul * transmit;
+        tex_alpha_premul = c.color.w * c.alpha + tex_alpha_premul * transmit;
+        coverage = c.alpha + coverage * transmit;
+      }
+
+      if (coverage <= 0.0f) {
         /* Between stamps the surface is simply untouched. */
 #if CURVE_PATCH_PROFILING
         dbg_branch_funnel_.rej_late++;
 #endif
         return std::nullopt;
       }
+
+      /* The whole composited product goes into `tex_value`; there is no longer a single stamp
+       * whose intensity and amplitude could be reported apart from each other. */
+      tex_value = height_premul;
+      stamp_strength = 1.0f;
+      const float3 color = color_premul / coverage;
+      tex_rgba[0] = color.x;
+      tex_rgba[1] = color.y;
+      tex_rgba[2] = color.z;
+      tex_rgba[3] = tex_alpha_premul / coverage;
     }
     else {
       /* Zone + along-length coordinate in one call. The local radius controls the projection's

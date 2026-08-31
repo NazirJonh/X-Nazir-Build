@@ -36,6 +36,7 @@
 #include "ED_datafiles.h"
 #include "ED_object.hh"
 #include "ED_screen.hh"
+#include "ED_sculpt.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -191,6 +192,14 @@ bool ED_workspace_change(WorkSpace *workspace_new, bContext *C, wmWindowManager 
   if (workspace_old == workspace_new) {
     /* Could also return true, everything that needs to be done was done (nothing :P),
      * but nothing changed */
+    return false;
+  }
+
+  /* A live Curve Patch must be resolved by the user BEFORE the screen changes: the automatic mode
+   * change below ends the patch, and its restore only works against the intact context the session
+   * was built with. See #ed::sculpt_paint::curve_patch_defer_workspace_change, which re-issues
+   * this change once the user has answered. */
+  if (ed::sculpt_paint::curve_patch_defer_workspace_change(C, workspace_new)) {
     return false;
   }
 

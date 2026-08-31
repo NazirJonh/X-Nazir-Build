@@ -106,8 +106,16 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
    * edge, so the strip has to cover the widest possible excursion. Only jitter needs this: the
    * size randomization shrinks stamps and never grows them. The widened value flows into
    * `ribbon_source_hash()` as the `brush_radius` argument, so the cached LUT invalidates correctly
-   * with no extra hashing. */
-  r_geometry.ribbon_radius += params.jitter_amount;
+   * with no extra hashing.
+   *
+   * The SAME bound the end margin below uses, and for the same reason: a stamp jittered out to
+   * `jitter_amount` still spans its own corner reach beyond that center. Widening by
+   * `jitter_amount` alone left the outermost `radius * (sqrt(2) - 1)` of every edge stamp without
+   * UV, which the sampler then clipped along the strip's straight edge -- the exact defect
+   * #curve_patch_stamp_reach's doc-string warns about, in the one direction that had been left out
+   * of it. This is a lateral half-width, not an increment: `ribbon_radius` was set to
+   * `params.radius` by the caller. */
+  r_geometry.ribbon_radius = curve_patch_stamp_reach(params.radius) + params.jitter_amount;
 
   /* The layout puts the first stamp's center exactly at `s == 0` and the last one at the last
    * whole step before `total_length`, so an end stamp reaches past the curve's end by its own

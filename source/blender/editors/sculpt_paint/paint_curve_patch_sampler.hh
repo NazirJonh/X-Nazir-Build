@@ -156,14 +156,16 @@ struct CurvePatchSample {
    *
    * A binding-wide "does the brush have a texture anywhere" answer cannot substitute for this.
    * The ribbon in SINGLE mode samples `brush.mtex` while the Stamps list holds the assigned
-   * textures (and vice versa), and a SINGLE-mode stamp with no texture wins its merge carrying
-   * the identity `{1, 1, 1, 1}`. Treating those as "the texture is white" paints an opaque WHITE
-   * ribbon over the user's color -- which is worse than ignoring the texture. */
+   * textures (and vice versa), and a SINGLE-mode stamp with no texture contributes the identity
+   * `{1, 1, 1, 1}`. Treating those as "the texture is white" paints an opaque WHITE ribbon over
+   * the user's color -- which is worse than ignoring the texture. In STAMPS mode this reports the
+   * most-covering contributor, alongside #patch_uv. */
   bool tex_valid = false;
   /** Where this element sits in the PATCH's own parametrization: `u` across the ribbon, `v`
-   * along it (swapped when #CurvePatchParams::swap_axis is set), or the winning stamp's local
-   * coordinates in STAMPS mode. Before the texture Size / Offset transform, so a consumer
-   * applies its own.
+   * along it (swapped when #CurvePatchParams::swap_axis is set), or, in STAMPS mode, the local
+   * coordinates of the stamp covering this element most -- overlapping stamps are composited, so
+   * there is no single winner, and the most-covering one is the least discontinuous frame to
+   * report. Before the texture Size / Offset transform, so a consumer applies its own.
    *
    * This is what lets a texture be oriented ALONG THE CURVE instead of through the brush's
    * view/area mapping: the ribbon's own zone textures have always been sampled here, and a

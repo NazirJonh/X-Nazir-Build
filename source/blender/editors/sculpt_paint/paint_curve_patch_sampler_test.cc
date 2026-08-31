@@ -128,8 +128,8 @@ TEST(paint_curve_patch_sampler, cull_tube_covers_everything_the_sampler_can_acce
    * polyline. So the tube has to cover the widest falloff radius PLUS the end extension.
    *
    * `params.radius` is never greater than `ribbon_radius` -- Stamps mode only ever widens the
-   * ribbon, by the jitter amount -- so scaling the largest scalar by `ribbon_radius` is already an
-   * upper bound on the sampler's own reach. */
+   * ribbon, to a jittered stamp's full lateral reach -- so scaling the largest scalar by
+   * `ribbon_radius` is already an upper bound on the sampler's own reach. */
   const std::array<float, 3> radii = {0.25f, 1.0f, 0.5f};
   for (const float ribbon_radius : {0.5f, 1.0f, 4.0f}) {
     for (const float end_margin : {0.0f, 0.3f, 2.0f}) {

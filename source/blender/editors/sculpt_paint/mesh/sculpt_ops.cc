@@ -588,14 +588,33 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
   }
 
   if (is_mode_set) {
-    /* Commit a live Curve Patch instead of losing it, while the session, an evaluated depsgraph
-     * and this operator's `bContext` are all still intact -- `object_sculpt_mode_exit()` has none
-     * of those to offer, and its own `curve_patch_discard_on_session_end()` can only discard. Both
-     * Tab and the header's mode dropdown reach sculpt-mode exit through this operator
-     * (`object_mode_op_string()`, `object_modes.cc`), so every deliberate way out of the mode
-     * commits. The step this pushes is left parked for this operator's own `OPTYPE_UNDO`, which is
-     * the contract `curve_patch_finish_commit()` expects. */
-    curve_patch_commit_on_session_end(*C, ob);
+    /* A live Curve Patch must not be written into the mesh -- or, for the image target, into the
+     * texture -- just because the mode is going away. Ask first, and only then leave.
+     *
+     * The question cannot be asked from further down: the commit has to happen while the session,
+     * an evaluated depsgraph and a `bContext` are all still intact, and `object_sculpt_mode_exit()`
+     * below destroys the session through `curve_patch_discard_on_session_end()` the moment it
+     * runs. A Blender dialog answers asynchronously, long after this `exec` has returned, so the
+     * mode change is deferred instead: #SCULPT_OT_curve_patch_edit_confirm resolves the patch and
+     * then re-runs this operator (`resume_mode_toggle`), by which point there is no session left
+     * and this branch falls through to the ordinary exit. Returning here leaves the mode untouched
+     * -- a workspace switch has already changed the screen by now, only its automatic mode change
+     * waits for the answer.
+     *
+     * This is the single interception point for every way out of the mode: Tab, the header's mode
+     * dropdown and a workspace switch's automatic mode change all reach sculpt-mode exit through
+     * this operator (`object_mode_op_string()`, `object_modes.cc`). */
+    if (ob.runtime->sculpt_session && ob.runtime->sculpt_session->curve_patch_session) {
+      PointerRNA props = WM_operator_properties_create("SCULPT_OT_curve_patch_edit_confirm");
+      RNA_boolean_set(&props, "resume_mode_toggle", true);
+      WM_operator_name_call(C,
+                            "SCULPT_OT_curve_patch_edit_confirm",
+                            wm::OpCallContext::InvokeDefault,
+                            &props,
+                            nullptr);
+      WM_operator_properties_free(&props);
+      return OPERATOR_CANCELLED;
+    }
     object_sculpt_mode_exit(bmain, *depsgraph, scene, ob);
   }
   else {
@@ -1568,6 +1587,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
   WM_operatortype_append(SCULPT_OT_curve_patch_apply);
   WM_operatortype_append(SCULPT_OT_curve_patch_edit);
+  WM_operatortype_append(SCULPT_OT_curve_patch_edit_confirm);
   WM_operatortype_append(SCULPT_OT_curve_patch_handle_type_set);
   WM_operatortype_append(SCULPT_OT_curve_patch_delete_point);
   WM_operatortype_append(SCULPT_OT_curve_patch_toggle_cyclic);

@@ -12,6 +12,8 @@
 
 #ifdef WIN32
 #  include "BLI_winstuff.h"
+
+#  include "BKE_blendfile.hh"
 #elif defined(__APPLE__)
 /* Pass. */
 #else
@@ -46,10 +48,10 @@ bool WM_platform_associate_set(bool do_register, bool all_users, char **r_error_
     }
     else {
       if (do_register) {
-        result = BLI_windows_register_blend_extension(false);
+        result = BLI_windows_register_blend_extension(false, XBLEND_FILE_EXTENSION);
       }
       else {
-        result = BLI_windows_unregister_blend_extension(false);
+        result = BLI_windows_unregister_blend_extension(false, XBLEND_FILE_EXTENSION);
       }
     }
   }

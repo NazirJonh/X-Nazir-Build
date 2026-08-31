@@ -112,6 +112,7 @@ const bTheme U_theme_default = {
     .wcol_tab = {
       .outline = RGBA(0x1d1d1dff),
       .outline_sel = RGBA(0x1d1d1dff),
+      .icon_selection = RGBA(0x181818ff),
       .inner = RGBA(0x1d1d1dff),
       .inner_sel = RGBA(0x303030ff),
       .item = RGBA(0x1d1d1dff),
@@ -952,6 +953,32 @@ const bTheme U_theme_default = {
     },
     {
       .color = RGBA(0x808080ff),
+    },
+  },
+  .glyph_color = {
+    {
+      .color = RGBA(0xbc3b3bff),
+    },
+    {
+      .color = RGBA(0xCB8521ff),
+    },
+    {
+      .color = RGBA(0xD8C500ff),
+    },
+    {
+      .color = RGBA(0x029c05ff),
+    },
+    {
+      .color = RGBA(0x1980ceff),
+    },
+    {
+      .color = RGBA(0x8d59daff),
+    },
+    {
+      .color = RGBA(0xc643b8ff),
+    },
+    {
+      .color = RGBA(0x7a442aff),
     },
   },
 };

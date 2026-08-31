@@ -387,6 +387,7 @@ operator_pattern_exclude_for_io = (
     "preferences.addon_*",
     "preferences.associate_blend",
     "preferences.copy_prev",
+    "preferences.copy_settings",
     "preferences.keyconfig_export",
     "preferences.studiolight_install",
     "preferences.theme_install",

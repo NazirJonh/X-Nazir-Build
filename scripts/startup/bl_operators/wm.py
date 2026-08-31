@@ -3356,22 +3356,35 @@ class WM_MT_splash_quick_setup(Menu):
 
         layout.operator_context = 'EXEC_DEFAULT'
 
-        old_version = bpy.types.PREFERENCES_OT_copy_prev.previous_version()
-        can_import = bpy.types.PREFERENCES_OT_copy_prev.poll(context) and old_version
+        operator_cls = bpy.types.PREFERENCES_OT_copy_settings
+        can_import = operator_cls.poll(context) and bool(
+            operator_cls.find_versions('XBLEND') or
+            operator_cls.find_versions('STOCK') or
+            operator_cls.stock_current_path()
+        )
 
         if can_import:
-            layout.label(text="Import Preferences From Previous Version")
+            layout.label(text="Import Preferences")
             split = layout.split(factor=0.20)  # Left margin.
             split.label()
 
             split = split.split(factor=0.73)  # Content width.
             col = split.column()
+            # The dialogs must be shown, the menu sets EXEC_DEFAULT for everything else.
+            col.operator_context = 'INVOKE_DEFAULT'
             col.operator(
-                "preferences.copy_prev",
-                text=iface_("Import Blender {:d}.{:d} Preferences", "Operator").format(*old_version),
+                "preferences.copy_settings",
+                text="Copy Previous Settings",
+                icon='NONE',
+            )
+            props = col.operator(
+                "preferences.copy_settings",
+                text=iface_("Copy from Official Blender {:d}.{:d}", "Operator").format(*bpy.app.version[:2]),
                 icon='NONE',
                 translate=False,
             )
+            props.lock_source = True
+            props.branch = 'STOCK'
             layout.separator()
             layout.separator(type='LINE')
 
@@ -3436,6 +3449,18 @@ class WM_MT_splash(Menu):
         layout.operator_context = 'EXEC_DEFAULT'
         layout.emboss = 'PULLDOWN_MENU'
 
+        # Feedback button centered above everything
+        split_fb = layout.split(factor=0.23)
+        split_fb.column()  # left spacer
+        row_feedback = split_fb.column()
+        row_feedback.scale_x = 2.0
+        row_feedback.operator("wm.url_open", text=">>>Support and Send FEEDBACK<<<", icon='FUND').url = "https://xnazirbuildfeedback.carrd.co/"
+
+        col_sep = layout.column()
+        col_sep.separator()
+        col_sep.separator(type='LINE')
+        col_sep.separator()
+
         split = layout.split()
 
         # Templates
@@ -3482,7 +3507,7 @@ class WM_MT_splash(Menu):
 
         col2 = split.column()
 
-        col2.operator("wm.url_open_preset", text="What's New", icon='URL').type = 'RELEASE_NOTES'
+        col2.operator("wm.url_open", text="X-Nazir Sculpt YouTube Channel", icon='URL').url = "https://www.youtube.com/@XNazirBuild"
         col2.operator("wm.url_open_preset", text="Donate to Blender", icon='FUND').type = 'FUND'
 
         layout.separator()
@@ -3530,7 +3555,7 @@ class WM_MT_splash_about(Menu):
         col = split.column(align=True)
         col.emboss = 'PULLDOWN_MENU'
         col.operator("wm.url_open_preset", text="Donate", icon='FUND').type = 'FUND'
-        col.operator("wm.url_open_preset", text="What's New", icon='URL').type = 'RELEASE_NOTES'
+        col.operator("wm.url_open", text="What's New", icon='URL').url = "https://xnazirbuildfeedback.carrd.co/"
         col.separator(factor=2.0)
         col.operator("wm.url_open_preset", text="Credits", icon='URL').type = 'CREDITS'
         col.operator("wm.url_open", text="License", icon='URL').url = "https://www.blender.org/about/license/"

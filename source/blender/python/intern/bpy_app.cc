@@ -41,6 +41,7 @@
 
 #include "BKE_appdir.hh"
 #include "BKE_blender_version.h"
+#include "BKE_callbacks.hh"
 #include "BKE_global.hh"
 #include "BKE_main.hh"
 
@@ -61,6 +62,11 @@
 #include "../generic/py_capi_rna.hh"
 #include "../generic/py_capi_utils.hh"
 #include "../generic/python_compat.hh" /* IWYU pragma: keep. */
+
+/* Global debug flag for extension operations, set to 0 to disable debug output. */
+#ifndef EXTENSION_DEBUG_ENABLED
+#  define EXTENSION_DEBUG_ENABLED 0
+#endif
 
 namespace blender {
 
@@ -811,6 +817,35 @@ static PyObject *bpy_app_memory_usage_undo(PyObject * /*self*/, PyObject * /*arg
   return PyLong_FromSize_t(total_memory);
 }
 
+PyDoc_STRVAR(
+    /* Wrap. */
+    bpy_app_extension_repos_update_post_trigger_doc,
+    ".. staticmethod:: extension_repos_update_post_trigger()\n"
+    "\n"
+    "   Trigger the extension repositories update post callback.\n"
+    "\n"
+    "   This is used internally to notify the UI system when extensions are installed.\n"
+    "   :return: None\n"
+    "   :rtype: None\n");
+
+static PyObject *bpy_app_extension_repos_update_post_trigger(PyObject * /*self*/,
+                                                             PyObject * /*args*/)
+{
+#if EXTENSION_DEBUG_ENABLED
+  printf("[PYTHON API] extension_repos_update_post_trigger() called\n");
+  fflush(stdout);
+#endif
+  Main *bmain = G_MAIN;
+  if (bmain) {
+    BKE_callback_exec_null(bmain, BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST);
+#if EXTENSION_DEBUG_ENABLED
+    printf("[PYTHON API] BKE_callback_exec_null completed for EXTENSION_REPOS_UPDATE_POST\n");
+    fflush(stdout);
+#endif
+  }
+  Py_RETURN_NONE;
+}
+
 static PyMethodDef bpy_app_methods[] = {
     {"is_job_running",
      reinterpret_cast<PyCFunction>(bpy_app_is_job_running),
@@ -824,6 +859,10 @@ static PyMethodDef bpy_app_methods[] = {
      static_cast<PyCFunction>(bpy_app_memory_usage_undo),
      METH_NOARGS | METH_STATIC,
      bpy_app_memory_usage_undo_doc},
+    {"extension_repos_update_post_trigger",
+     static_cast<PyCFunction>(bpy_app_extension_repos_update_post_trigger),
+     METH_NOARGS | METH_STATIC,
+     bpy_app_extension_repos_update_post_trigger_doc},
     {nullptr, nullptr, 0, nullptr},
 };
 

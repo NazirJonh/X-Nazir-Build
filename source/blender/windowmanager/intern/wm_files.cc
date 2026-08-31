@@ -47,6 +47,7 @@
 #include "BLI_time.h"
 #include "BLI_timer.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 #include BLI_SYSTEM_PID_H
 
 #include "BLO_core_blend_header.hh"
@@ -708,6 +709,11 @@ static void wm_file_read_post(bContext *C,
   const bool reset_app_template = params->reset_app_template;
 
   bool addons_loaded = false;
+
+  /* The category glyph mappings, overrides and tags are runtime-only lists that may contain
+   * garbage pointers from the loaded file's memory space. They are cleared (for all three lists)
+   * by versioning, see #do_versions_clear_category_runtime_lists_in_wm, so there is no need to
+   * clear them again here. */
 
   if (use_data) {
     if (!G.background) {
@@ -2090,7 +2096,7 @@ static bool wm_file_write_check_with_report_on_failure(Main *bmain,
     return false;
   }
 
-  if (bmain->is_asset_edit_file && StringRef(filepath).endswith(BLENDER_ASSET_FILE_SUFFIX)) {
+  if (bmain->is_asset_edit_file && BKE_blendfile_is_asset_file_path(filepath)) {
     BKE_report(reports, RPT_ERROR, "Cannot overwrite files that are managed by the asset system");
     return false;
   }
@@ -2106,6 +2112,54 @@ static bool wm_file_write_check_with_report_on_failure(Main *bmain,
 }
 
 /**
+ * Backup of the runtime-only category lists of a single #wmWindowManager.
+ *
+ * These lists (`category_glyph_mappings`, `category_glyph_overrides` and `category_tags`) are
+ * runtime data that should not be written to .blend files. The proper fix is to skip these lists
+ * while writing the window manager in `writefile.cc` (DNA write-skip); until that is in place we
+ * temporarily detach the lists from every #wmWindowManager around #BLO_write_file and restore them
+ * afterwards. The backup also stores the owning window manager so restore does not rely on the
+ * iteration order of `bmain->wm` matching between clear and restore.
+ */
+struct CategoryGlyphMappingsBackup {
+  wmWindowManager *wm;
+  ListBase mappings;
+  ListBase overrides;
+  ListBase tags;
+};
+
+static void wm_category_glyph_mappings_backup_and_clear(
+    Main *bmain, blender::Vector<CategoryGlyphMappingsBackup> &backups)
+{
+  /* Detach the runtime category lists from all window managers so they are not written. */
+  for (wmWindowManager &wm : bmain->wm) {
+    CategoryGlyphMappingsBackup backup;
+    backup.wm = &wm;
+    /* Store the original list pointers. */
+    backup.mappings = wm.category_glyph_mappings;
+    backup.overrides = wm.category_glyph_overrides;
+    backup.tags = wm.category_tags;
+    backups.append(backup);
+
+    /* Clear the ListBase pointers to prevent writing data to file. */
+    BLI_listbase_clear(&wm.category_glyph_mappings);
+    BLI_listbase_clear(&wm.category_glyph_overrides);
+    BLI_listbase_clear(&wm.category_tags);
+  }
+}
+
+static void wm_category_glyph_mappings_restore(
+    const blender::Vector<CategoryGlyphMappingsBackup> &backups)
+{
+  /* Restore the runtime category lists onto their original window managers. */
+  for (const CategoryGlyphMappingsBackup &backup : backups) {
+    backup.wm->category_glyph_mappings = backup.mappings;
+    backup.wm->category_glyph_overrides = backup.overrides;
+    backup.wm->category_tags = backup.tags;
+  }
+}
+
+/**
  * \see #wm_homefile_write_exec wraps #BLO_write_file in a similar way.
  */
 static bool wm_file_write(bContext *C,
@@ -2118,6 +2172,9 @@ static bool wm_file_write(bContext *C,
   Main *bmain = CTX_data_main(C);
   BlendThumbnail *thumb = nullptr, *main_thumb = nullptr;
   ImBuf *ibuf_thumb = nullptr;
+
+  /* Backup for category glyph mappings - will be cleared during save and restored after. */
+  blender::Vector<CategoryGlyphMappingsBackup> glyph_mappings_backup;
 
   /* NOTE: used to replace the file extension (to ensure `.blend`),
    * no need to now because the operator ensures,
@@ -2226,6 +2283,12 @@ static bool wm_file_write(bContext *C,
   /* XXX(ton): temp solution to solve bug, real fix coming. */
   bmain->recovered = false;
 
+  /* Backup and clear category glyph mappings before save - these are runtime-only data
+   * loaded from JSON, not saved to .blend files. This prevents crashes when
+   * loading files that contain garbage pointers in these ListBase structures.
+   * The data is restored after save to keep the UI working. */
+  wm_category_glyph_mappings_backup_and_clear(bmain, glyph_mappings_backup);
+
   BlendFileWriteParams blend_write_params{};
   blend_write_params.remap_mode = remap_mode;
   blend_write_params.use_save_versions = true;
@@ -2233,6 +2296,9 @@ static bool wm_file_write(bContext *C,
   blend_write_params.thumb = thumb;
 
   const bool success = BLO_write_file(bmain, filepath, fileflags, &blend_write_params, reports);
+
+  /* Restore category glyph mappings after save to keep UI working. */
+  wm_category_glyph_mappings_restore(glyph_mappings_backup);
 
   if (success) {
     const bool do_history_file_update = (G.background == false) &&
@@ -3905,7 +3971,7 @@ static void wm_filepath_default(const Main *bmain, char *filepath)
   if (bmain->filepath[0] == '\0') {
     char filename_untitled[FILE_MAXFILE];
     /* While a filename need not be UTF8, at this point the constructed name should be UTF8. */
-    SNPRINTF_UTF8(filename_untitled, "%s.blend", DATA_("Untitled"));
+    SNPRINTF_UTF8(filename_untitled, "%s%s", DATA_("Untitled"), XBLEND_FILE_EXTENSION);
     BLI_path_filename_ensure(filepath, FILE_MAX, filename_untitled);
   }
 }
@@ -3945,12 +4011,15 @@ static void save_set_filepath(bContext *C, wmOperator *op)
     }
 
     /* For convenience when using "Save As" on asset system files:
-     * Replace `.asset.blend` extension with just `.blend`.
+     * Replace the `.asset.blend` / `.asset.xblend` suffix with a plain file extension.
      * Asset system files must not be overridden (except by the asset system),
      * there are further checks to prevent this entirely. */
-    if (bmain->is_asset_edit_file && StringRef(filepath).endswith(BLENDER_ASSET_FILE_SUFFIX)) {
-      filepath[strlen(filepath) - strlen(BLENDER_ASSET_FILE_SUFFIX)] = '\0';
-      BLI_path_extension_ensure(filepath, FILE_MAX, ".blend");
+    if (bmain->is_asset_edit_file) {
+      const StringRef asset_suffix = BKE_blendfile_asset_file_suffix_get(filepath);
+      if (!asset_suffix.is_empty()) {
+        filepath[strlen(filepath) - size_t(asset_suffix.size())] = '\0';
+        BLI_path_extension_ensure(filepath, FILE_MAX, XBLEND_FILE_EXTENSION);
+      }
     }
 
     wm_filepath_default(bmain, filepath);
@@ -4139,7 +4208,7 @@ static bool wm_save_mainfile_check(bContext * /*C*/, wmOperator *op)
     /* NOTE(@ideasman42): some users would prefer #BLI_path_extension_replace(),
      * we have had some nitpicking bug reports about this.
      * Always adding the extension as users may use '.' as part of the file-name. */
-    BLI_path_extension_ensure(filepath, FILE_MAX, ".blend");
+    BLI_path_extension_ensure(filepath, FILE_MAX, XBLEND_FILE_EXTENSION);
     RNA_string_set(op->ptr, "filepath", filepath);
     return true;
   }
@@ -4853,7 +4922,7 @@ static ui::Block *block_create_save_file_overwrite_dialog(bContext *C, ARegion *
   }
   else {
     /* While a filename need not be UTF8, at this point the constructed name should be UTF8. */
-    SNPRINTF_UTF8(filename, "%s.blend", DATA_("Untitled"));
+    SNPRINTF_UTF8(filename, "%s%s", DATA_("Untitled"), XBLEND_FILE_EXTENSION);
     /* Since this dialog should only be shown when re-saving an existing file, current filepath
      * should never be empty. */
     BLI_assert_unreachable();
@@ -5074,7 +5143,7 @@ static ui::Block *block_create__close_file_dialog(bContext *C, ARegion *region, 
   }
   else {
     /* While a filename need not be UTF8, at this point the constructed name should be UTF8. */
-    SNPRINTF_UTF8(filename, "%s.blend", DATA_("Untitled"));
+    SNPRINTF_UTF8(filename, "%s%s", DATA_("Untitled"), XBLEND_FILE_EXTENSION);
   }
   layout.label(filename, ICON_NONE);
 

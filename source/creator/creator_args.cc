@@ -2106,13 +2106,16 @@ static bool arg_handle_extension_registration(const bool do_register, const bool
 #  ifdef WIN32
   /* This process has been launched with the permissions needed
    * to register or unregister, so just do it now and then exit. */
+  bool success;
   if (do_register) {
-    BLI_windows_register_blend_extension(all_users);
+    success = BLI_windows_register_blend_extension(all_users, XBLEND_FILE_EXTENSION);
   }
   else {
-    BLI_windows_unregister_blend_extension(all_users);
+    success = BLI_windows_unregister_blend_extension(all_users, XBLEND_FILE_EXTENSION);
   }
-  TerminateProcess(GetCurrentProcess(), 0);
+  /* #BLI_windows_execute_self reads this exit code to decide whether the elevated
+   * registration succeeded, so it must not be hard-coded to zero. */
+  TerminateProcess(GetCurrentProcess(), success ? 0 : 1);
   return true;
 #  else
   char *error_msg = nullptr;

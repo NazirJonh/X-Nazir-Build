@@ -77,6 +77,15 @@ void ScreenSpaceDrawingMode::add_depth_shgroups(blender::Image *image, ImageUser
 void ScreenSpaceDrawingMode::update_textures(blender::Image *image, ImageUser *image_user) const
 {
   State &state = instance_.state;
+
+  /* The partial update checker reports changes to the image's own pixels, which say nothing about
+   * a display override composited from several images. Its dirty flags were set from the override
+   * revision in #image_sync instead, so all that is left here is to honour them. */
+  if (state.has_display_override) {
+    do_full_update_for_dirty_textures(image_user);
+    return;
+  }
+
   PartialUpdateChecker<ImageTileData> checker(image, image_user, state.partial_update.user);
   PartialUpdateChecker<ImageTileData>::CollectResult changes = checker.collect_changes();
 
@@ -88,8 +97,10 @@ void ScreenSpaceDrawingMode::update_textures(blender::Image *image, ImageUser *i
     case ePartialUpdateCollectResult::NoChangesDetected:
       break;
     case ePartialUpdateCollectResult::PartialChangesDetected:
-      /* Partial update when wrap repeat is enabled is not supported. */
-      if (state.flags.do_tile_drawing) {
+      /* Partial update when wrap repeat is enabled is not supported, and neither is a rotated
+       * canvas: the changed region is mapped to the texture as an axis-aligned rectangle, which
+       * a rotation makes meaningless. */
+      if (state.flags.do_tile_drawing || instance_.space().get_canvas_rotation() != 0.0f) {
         state.float_buffers.clear();
         state.mark_all_texture_slots_dirty();
       }
@@ -267,6 +278,21 @@ void ScreenSpaceDrawingMode::do_full_update_gpu_texture(TextureInfo &info,
   void *lock;
 
   blender::Image *image = instance_.state.image;
+
+  /* A display override replaces the pixels of every tile: it is a single buffer covering the
+   * image, and a stack it could have been composited from cannot be tiled in the first place. */
+  if (ImBuf *override_buffer = instance_.space().acquire_display_override_buffer(instance_.main(),
+                                                                                 nullptr))
+  {
+    const ImageTileWrapper image_tile(static_cast<ImageTile *>(image->tiles.first));
+    do_full_update_texture_slot(info, texture_buffer, *override_buffer, image_tile);
+    instance_.space().release_display_override_buffer(override_buffer);
+    IMB_gpu_clamp_half_float(&texture_buffer);
+    GPU_texture_update(info.texture, GPU_DATA_FLOAT, texture_buffer.float_data());
+    IMB_free_all_data(&texture_buffer);
+    return;
+  }
+
   for (ImageTile &image_tile_ptr : image->tiles) {
     const ImageTileWrapper image_tile(&image_tile_ptr);
     tile_user.tile = image_tile.get_tile_number();
@@ -287,26 +313,30 @@ void ScreenSpaceDrawingMode::do_full_update_texture_slot(const TextureInfo &text
                                                          ImBuf &tile_buffer,
                                                          const ImageTileWrapper &image_tile) const
 {
-  const int texture_width = texture_buffer.x;
-  const int texture_height = texture_buffer.y;
   ImBuf *float_tile_buffer = instance_.state.float_buffers.cached_float_buffer(&tile_buffer);
 
-  /* IMB_transform works in a non-consistent space. This should be documented or fixed!.
-   * Construct a variant of the info_uv_to_texture that adds the texel space
-   * transformation. */
-  float3x3 uv_to_texel;
-  rctf texture_area;
-  rctf tile_area;
-
-  BLI_rctf_init(&texture_area, 0.0, texture_width, 0.0, texture_height);
-  BLI_rctf_init(
-      &tile_area,
-      tile_buffer.x * (texture_info.clipping_uv_bounds.xmin - image_tile.get_tile_x_offset()),
-      tile_buffer.x * (texture_info.clipping_uv_bounds.xmax - image_tile.get_tile_x_offset()),
-      tile_buffer.y * (texture_info.clipping_uv_bounds.ymin - image_tile.get_tile_y_offset()),
-      tile_buffer.y * (texture_info.clipping_uv_bounds.ymax - image_tile.get_tile_y_offset()));
-  BLI_rctf_transform_calc_m3_pivot_min(&tile_area, &texture_area, uv_to_texel.ptr());
-  uv_to_texel = math::invert(uv_to_texel);
+  /* Destination texel to source pixel, which is what #IMB_transform maps with.
+   *
+   * Built from #State.ss_to_texture rather than by fitting the two rectangles to each other: the
+   * region-to-image mapping is not a plain rectangle fit once the canvas is rotated, and a
+   * rect-to-rect fit silently drops that rotation -- which is what used to leave a rotated canvas
+   * drawn straight in this drawing mode.
+   *
+   * A texture covers its #TextureInfo.clipping_bounds of the region at one texel per pixel, so a
+   * destination texel becomes a region pixel by that offset and a normalized screen coordinate by
+   * the region size. Taking the offset from the texture info rather than assuming the whole region
+   * is what keeps this correct for a method that splits the region into several textures. */
+  const float2 region_size = float2(instance_.region->winx, instance_.region->winy);
+  const float3x3 texel_to_screen_uv =
+      math::from_scale<float3x3, 2>(1.0f / region_size) *
+      math::from_location<float3x3>(float2(texture_info.clipping_bounds.xmin,
+                                           texture_info.clipping_bounds.ymin));
+  const float3x3 image_uv_to_tile_texel =
+      math::from_scale<float3x3, 2>(float2(tile_buffer.x, tile_buffer.y)) *
+      math::from_location<float3x3>(
+          float2(-image_tile.get_tile_x_offset(), -image_tile.get_tile_y_offset()));
+  const float3x3 uv_to_texel = image_uv_to_tile_texel * instance_.state.ss_to_texture *
+                               texel_to_screen_uv;
 
   rctf crop_rect;
   const rctf *crop_rect_ptr = nullptr;
@@ -362,6 +392,30 @@ void ScreenSpaceDrawingMode::image_sync(blender::Image *image, ImageUser *iuser)
 
   /* Step: Check for changes in the image user compared to the last time. */
   state.update_image_usage(iuser);
+
+  /* Step: A display override brings its own notion of "changed": its pixels are composited from
+   * several images, so the image's own partial-update log does not describe them.
+   *
+   * This is the one place per frame that resolves the override, and the rest of the frame reads
+   * #State.has_display_override. The distinction matters: the space being *set* to show a
+   * composite is not the same as one having been produced -- a material that is not a layer stack
+   * falls back to the image, and the paths below must then treat it as an ordinary image again. */
+  uint64_t override_revision = 0;
+  ImBuf *override_buffer = instance_.space().has_display_override() ?
+                               instance_.space().acquire_display_override_buffer(
+                                   instance_.main(), &override_revision) :
+                               nullptr;
+  state.has_display_override = override_buffer != nullptr;
+  if (override_buffer != nullptr) {
+    instance_.space().release_display_override_buffer(override_buffer);
+  }
+  if (override_revision != state.display_override_revision) {
+    /* Either the composite changed, or it went away and the textures still hold its pixels. Both
+     * need the same full re-upload; a zero revision is what "no override" reads as. */
+    state.display_override_revision = override_revision;
+    state.mark_all_texture_slots_dirty();
+    state.float_buffers.clear();
+  }
 
   /* Step: Update the GPU textures based on the changes in the image. */
   method.ensure_gpu_textures_allocation();

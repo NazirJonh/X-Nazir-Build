@@ -97,6 +97,36 @@ ImBuf *ED_space_image_acquire_buffer(SpaceImage *sima,
                                      int tile,
                                      const bool ensure_host_buffer);
 /**
+ * Whether \a sima is set to show a composited pass rather than its image's own pixels.
+ *
+ * Cheap by contract -- a flag and a pointer, never a node graph walk or an image lock -- so that a
+ * caller reached several times per redraw can ask it instead of acquiring a buffer it may not use.
+ * It answers what the space is *set* to, not whether a composite can be produced: a material that
+ * turns out not to be a layer stack still falls back to the image, and only
+ * #ED_space_image_acquire_composite_buffer can tell.
+ */
+bool ED_space_image_has_composite(const SpaceImage *sima);
+/**
+ * The composited layer stack to display instead of the space's own image, or null.
+ *
+ * Non-null only while the space is in composite mode and its material's channel really is a layer
+ * stack; every other case falls back to the image, so a caller that has no interest in the
+ * composite can ignore this entirely and keep using #ED_space_image_acquire_buffer.
+ *
+ * The buffer comes with a reference of its own, so it is released like any other:
+ * #BKE_image_release_ibuf with a null lock, which is what #ED_space_image_release_buffer does.
+ *
+ * \param bmain: searched for the material whose layer stack the space's image belongs to. Explicit
+ *               rather than #G_MAIN because the per-frame caller -- the image engine -- has the
+ *               real one and must not be resolved against a preview or a temporary #Main.
+ * \param r_revision: bumped whenever the composited pixels change, for a caller that keeps a copy
+ *                    of them -- the image editor uploads them to a GPU texture -- and needs to
+ *                    know when its copy went stale.
+ */
+ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
+                                               SpaceImage *sima,
+                                               uint64_t *r_revision = nullptr);
+/**
  * Get the #SpaceImage flag that is valid for the given ibuf.
  */
 int ED_space_image_get_display_channel_mask(ImBuf *ibuf);

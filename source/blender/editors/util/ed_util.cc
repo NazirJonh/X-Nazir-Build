@@ -28,6 +28,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_packedFile.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
 #include "BKE_undo_system.hh"
@@ -247,6 +248,17 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
    * cached bakes. Dropping them per undo step would force a full EEVEE re-render on every Ctrl+Z. */
   if (do_undo_system) {
     material_bake::material_source_bake_invalidate(nullptr);
+    /* Same reasoning for the composite cache, which owns #ImBuf buffers of its own and is keyed
+     * on session UIDs the same way. */
+    BKE_paint_material_composite_cache_free_all();
+  }
+  else {
+    /* Memfile undo, where the entries stay reachable but their pixels may not be current any
+     * more: the step just put a whole #Main back, images included, and none of the per-image tags
+     * could have reported that. The composite cache parts company with the bake cache here --
+     * recomputing a composite is milliseconds, so marking it costs nothing like the full EEVEE
+     * re-render that dropping a bake per Ctrl+Z would. */
+    BKE_paint_material_composite_cache_invalidate(nullptr);
   }
 
   /* Frees all edit-mode undo-steps. */

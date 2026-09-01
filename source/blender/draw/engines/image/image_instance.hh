@@ -72,8 +72,30 @@ class Instance : public DrawEngine {
   /* Constructs either a screen space or an image space drawing mode depending on if the image can
    * fit in a GPU texture. So we just need to retrieve the image buffer and check if its size is
    * safe for GPU use. */
+  AbstractSpaceAccessor &space()
+  {
+    return *space_;
+  }
+
+  Main *main()
+  {
+    return main_;
+  }
+
   std::unique_ptr<AbstractDrawingMode> get_drawing_mode()
   {
+    /* Pixels that do not come from the image itself can only be shown by the screen-space mode:
+     * the image-space one hands the image's own GPU texture to the shader and would draw the
+     * layer under the composite instead of the composite.
+     *
+     * Asked rather than acquired: producing the override means compositing a layer stack, and a
+     * space that is merely *set* to show one already settles the choice of drawing mode. Screen
+     * space draws an ordinary image correctly too, so the conservative answer costs nothing but
+     * the image-space fast path. */
+    if (space_->has_display_override()) {
+      return std::make_unique<ScreenSpaceDrawingMode>(*this);
+    }
+
     if (this->state.image->source != IMA_SRC_TILED) {
       void *lock;
       ImBuf *buffer = BKE_image_acquire_ibuf_gpu(

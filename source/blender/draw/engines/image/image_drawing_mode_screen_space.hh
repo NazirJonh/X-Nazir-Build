@@ -59,9 +59,17 @@ class OneTexture : public BaseTextureMethod {
 
   void update_bounds(const ARegion *region) override
   {
-    float3x3 mat = instance_data->ss_to_texture;
+    /* All four corners, not just two: #State.ss_to_texture carries the canvas rotation, and a
+     * rotated region is not bounded by the images of its opposite corners. Without rotation the
+     * other two corners fall inside the same box, so this is the same rectangle as before. */
+    const float3x3 mat = instance_data->ss_to_texture;
     float2 region_uv_min = math::transform_point(mat, float2(0.0f, 0.0f));
-    float2 region_uv_max = math::transform_point(mat, float2(1.0f, 1.0f));
+    float2 region_uv_max = region_uv_min;
+    for (const float2 corner : {float2(1.0f, 0.0f), float2(0.0f, 1.0f), float2(1.0f, 1.0f)}) {
+      const float2 uv = math::transform_point(mat, corner);
+      region_uv_min = math::min(region_uv_min, uv);
+      region_uv_max = math::max(region_uv_max, uv);
+    }
 
     TextureInfo &texture_info = instance_data->texture_infos[0];
     texture_info.tile_id = int2(0);
@@ -76,6 +84,13 @@ class OneTexture : public BaseTextureMethod {
     if (memcmp(&new_clipping_uv_bounds, &texture_info.clipping_uv_bounds, sizeof(rctf))) {
       texture_info.clipping_uv_bounds = new_clipping_uv_bounds;
       texture_info.need_full_update = true;
+    }
+
+    /* Tri-fan order, matching #BatchUpdater: min/min, max/min, max/max, min/max of the region. */
+    const float2 screen_corners[4] = {
+        float2(0.0f, 0.0f), float2(1.0f, 0.0f), float2(1.0f, 1.0f), float2(0.0f, 1.0f)};
+    for (const int i : IndexRange(4)) {
+      texture_info.clipping_uv_corners[i] = math::transform_point(mat, screen_corners[i]);
     }
 
     rcti new_clipping_bounds;
@@ -258,6 +273,10 @@ template<size_t Divisions> class ScreenTileTextures : public BaseTextureMethod {
       int2 bottom_left = tile_origin + texture_size * info.tile_id;
       int2 top_right = bottom_left + texture_size;
       BLI_rcti_init(&info.clipping_bounds, bottom_left.x, top_right.x, bottom_left.y, top_right.y);
+      /* This method fits axis-aligned uv rectangles to axis-aligned screen tiles, so its corners
+       * are its bounds. Written here rather than left to the batch, which reads only the corners
+       * and must not have to know which method produced them. */
+      info.uv_corners_set_from_bounds();
     }
   }
 };

@@ -37,6 +37,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
 
 #include "RE_engine.h"
@@ -236,6 +237,12 @@ static void material_changed(Main *bmain, Material *ma)
   /* icons */
   BKE_icon_changed(BKE_icon_id_ensure(&ma->id));
   ED_previews_tag_dirty_by_id(*bmain, ma->id);
+
+  /* The composite is derived from this material's node tree, so an edit to it can change the
+   * stack in ways the stack hash is not asked about -- a layer relinked through a group, a mix
+   * node replaced by another. Marking is cheap: a composite is milliseconds, and the previous
+   * pixels stay on screen until the next one is asked for. */
+  BKE_paint_material_composite_cache_invalidate(ma);
 }
 
 static void lamp_changed(Main *bmain, Light *la)
@@ -296,6 +303,10 @@ static void image_changed(Main *bmain, Image *ima)
   /* A PBR Paint source-material bake reads image pixels through the shader graph, and nothing in
    * the node tree changes when those pixels do, so its cache cannot notice this on its own. */
   ed::material_bake::material_source_bake_tag_image_changed(*ima);
+  /* The composite of a layer stack containing this image is stale for the same reason: its layers
+   * are the pixels themselves, and nothing in the stack's own description changed. Reported from
+   * the same place so that neither cache grows its own idea of when an image went out of date. */
+  BKE_paint_material_composite_cache_tag_image_changed(*ima);
 
   /* Ensure downstream editors are made aware of changes to the Image data. */
   WM_main_add_notifier(NC_IMAGE | NA_EDITED, ima);

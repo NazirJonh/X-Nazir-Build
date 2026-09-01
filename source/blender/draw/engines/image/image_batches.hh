@@ -64,12 +64,13 @@ class BatchUpdater {
     GPU_vertbuf_data_alloc(*vbo, 4);
     int pos[4][2];
     fill_tri_fan_from_rect<int, rcti>(pos, info.clipping_bounds);
-    float uv[4][2];
-    fill_tri_fan_from_rect<float, rctf>(uv, info.clipping_uv_bounds);
 
     for (int i = 0; i < 4; i++) {
+      /* Per-corner rather than the corners of #TextureInfo.clipping_uv_bounds: the two agree
+       * unless the canvas is rotated, and then only these describe where the image actually is. */
+      const float uv[2] = {info.clipping_uv_corners[i].x, info.clipping_uv_corners[i].y};
       GPU_vertbuf_attr_set(vbo, pos_id, i, pos[i]);
-      GPU_vertbuf_attr_set(vbo, uv_id, i, uv[i]);
+      GPU_vertbuf_attr_set(vbo, uv_id, i, uv);
     }
 
     return vbo;

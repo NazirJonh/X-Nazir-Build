@@ -55,6 +55,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
 
@@ -172,6 +173,13 @@ void imapaint_image_update(
            (BLI_time_now_seconds() - perf_start) * 1000.0);
 #endif
     return;
+  }
+
+  /* A composite that reads this image now shows the pixels from before the dab. Only the dirty
+   * region is reported, so refreshing it costs the area of the dab rather than of the canvas --
+   * which is what keeps the composite usable as a paint target at all. */
+  if (image != nullptr) {
+    BKE_paint_material_composite_cache_tag_image_region(*image, imapaintpartial.dirty_region);
   }
 
   /* When buffer is partial updated the planes should be set to a larger value than 8. This will

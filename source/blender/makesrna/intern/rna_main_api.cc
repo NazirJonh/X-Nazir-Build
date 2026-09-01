@@ -49,6 +49,7 @@
 #  include "BKE_node.hh"
 #  include "BKE_object.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_paint_material_composite.hh"
 #  include "BKE_particle.h"
 #  include "BKE_pointcloud.hh"
 #  include "BKE_scene.hh"
@@ -321,6 +322,13 @@ static const EnumPropertyItem *rna_Main_nodetree_type_itemf(bContext * /*C*/,
 {
   return rna_node_tree_type_itemf(nullptr, nullptr, r_free);
 }
+static bNodeTree *rna_Main_nodetree_pbr_normal_combine(Main *bmain)
+{
+  bNodeTree *group = BKE_paint_material_normal_combine_group_ensure(*bmain);
+  BKE_main_ensure_invariants(*bmain);
+  return group;
+}
+
 static bNodeTree *rna_Main_nodetree_new(Main *bmain, const char *name, int type)
 {
   char safe_name[MAX_ID_NAME - 2];
@@ -1151,6 +1159,18 @@ void RNA_def_main_node_groups(BlenderRNA *brna, PropertyRNA *cprop)
   func = RNA_def_function(srna, "tag", "rna_Main_node_groups_tag");
   parm = RNA_def_boolean(func, "value", false, "Value", "");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(
+      srna, "pbr_normal_combine_ensure", "rna_Main_nodetree_pbr_normal_combine");
+  RNA_def_function_ui_description(
+      func,
+      "Return the PBR Paint normal combine node group, adding it if the file has none. Use it "
+      "where a normal layer is meant to lay its relief over the layer below rather than replace "
+      "it; PBR Paint composites this group the same way the shader evaluates it, so the Image "
+      "Editor composite and the render agree");
+  parm = RNA_def_pointer(
+      func, "tree", "ShaderNodeTree", "", "The normal combine node group of this file");
+  RNA_def_function_return(func, parm);
 }
 void RNA_def_main_meshes(BlenderRNA *brna, PropertyRNA *cprop)
 {

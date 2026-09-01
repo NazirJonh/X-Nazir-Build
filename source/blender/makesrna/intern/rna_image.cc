@@ -1318,6 +1318,39 @@ static void rna_def_image(BlenderRNA *brna)
                            "UUID shared by every image that authors the same PBR paint layer; "
                            "empty when the image is not part of a managed layer");
 
+  /* The public half of the layer contract: an add-on says what each of its maps is, and the
+   * engine can then composite and list channels it could never find in the shader graph. Values
+   * match #eMaterialPaintChannel, with two roles that are not channels. */
+  static const EnumPropertyItem paint_layer_channel_items[] = {
+      {PAINT_LAYER_MAP_NONE, "NONE", 0, "None", "The image does not say which channel it authors"},
+      {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+      {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+      {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+      {PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
+      {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", ""},
+      {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
+      {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "Ambient Occlusion", ""},
+      {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+      {PAINT_LAYER_MAP_MASK,
+       "MASK",
+       0,
+       "Mask",
+       "The layer's own mask rather than a material channel"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "paint_layer_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "paint_layer_channel");
+  RNA_def_property_enum_items(prop, paint_layer_channel_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Layer Channel",
+      "Which PBR channel this image authors within its paint layer. The companion of "
+      "Paint Layer ID, and the only way the engine can find the maps of channels that have no "
+      "Principled BSDF input to follow - Ambient Occlusion and the layer mask. Meaningful only "
+      "while Paint Layer ID is set");
+
   /* generated image (image_generated_change_cb) */
   prop = RNA_def_property(srna, "generated_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "gen_type");

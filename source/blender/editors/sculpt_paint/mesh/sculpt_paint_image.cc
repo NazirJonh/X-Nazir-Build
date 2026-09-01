@@ -49,6 +49,7 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
 #include "BKE_paint_material_channel_perf_debug.hh"
+#include "BKE_paint_material_composite.hh"
 
 #include "mesh_brush_common.hh"
 #include "paint_material_blend.hh"
@@ -1763,6 +1764,12 @@ static void mark_gpu_texture_regions_dirty(ImageData &image_data,
                                         region.ymin,
                                         BLI_rcti_size_x(&region),
                                         BLI_rcti_size_y(&region));
+    /* A composite of a stack containing this map is now showing the pixels from before the dab.
+     * Its layers are the pixels themselves, so nothing in the stack's own description changed and
+     * the partial-update log above says nothing about it -- the same reason the 2D paint path
+     * reports the region here too. Without this a stroke made in the 3D Viewport leaves an Image
+     * Editor showing a composited pass stale until something else happens to rebuild it. */
+    BKE_paint_material_composite_cache_tag_image_region(*image_data.image, region);
   }
 }
 

@@ -32,6 +32,20 @@ struct State {
   blender::Image *image = nullptr;
   /** Usage data of the previous time, to identify changes that require a full update. */
   ImageUsage last_usage;
+  /**
+   * Revision of the display override buffer the textures were last uploaded from. Zero when the
+   * space has no override, which is every space but an Image Editor showing a composite.
+   */
+  uint64_t display_override_revision = 0;
+  /**
+   * Whether an override buffer was really produced this frame, as opposed to the space merely
+   * being set to want one.
+   *
+   * Resolved once, in #ScreenSpaceDrawingMode::image_sync, and read by the paths that would
+   * otherwise each pay for the composite again. False also covers a space that asked for a
+   * composite its material cannot supply, which then has to be drawn as an ordinary image.
+   */
+  bool has_display_override = false;
 
   PartialImageUpdater partial_update = {};
 

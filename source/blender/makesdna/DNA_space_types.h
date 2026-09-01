@@ -710,7 +710,16 @@ struct SpaceImage {
   eSpaceImage_Gizmo_Flag gizmo_flag = {};
 
   eSpaceImage_GridShapeSource grid_shape_source = SI_GRID_SHAPE_DYNAMIC;
-  char _pad1[10] = {};
+  char _pad1[6] = {};
+
+  /**
+   * Which composited pass to show while #SI_PAINT_COMPOSITE_MODE is set, as
+   * #eMaterialPaintChannel or #PAINT_LAYER_MAP_MASK.
+   *
+   * Separate from #image on purpose: a composite is a channel of the material, not a data-block,
+   * and #image keeps pointing at the layer map the strokes go to while a pass is shown over it.
+   */
+  int material_paint_pass = 0;
 
   eSpaceImage_Flag flag = {};
 

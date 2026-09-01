@@ -258,6 +258,7 @@ set(SRC
   intern/packedFile.cc
   intern/paint.cc
   intern/paint_canvas.cc
+  intern/paint_material_composite.cc
   intern/paint_material_resolve.cc
   intern/paint_material_sync.cc
   intern/paint_runtime.cc
@@ -512,6 +513,7 @@ set(SRC
   BKE_paint_bvh.hh
   BKE_paint_bvh_pixels.hh
   BKE_paint_types.hh
+  BKE_paint_material_composite.hh
   BKE_paint_material_resolve.hh
   BKE_particle.h
   BKE_path_templates.hh
@@ -809,6 +811,7 @@ if(WITH_GTESTS)
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
     intern/paint_material_channel_test.cc
+    intern/paint_material_composite_test.cc
     intern/paint_material_resolve_test.cc
     intern/paint_test.cc
     intern/path_templates_test.cc

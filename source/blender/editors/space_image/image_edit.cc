@@ -25,8 +25,12 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
 
+#include "DNA_material_types.h"
+
+#include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "ED_image.hh" /* own include */
@@ -209,12 +213,143 @@ void ED_space_image_set_mask(bContext *C, SpaceImage *sima, Mask *mask)
   }
 }
 
+/**
+ * Whether any channel of \a ma resolves to a layer stack that \a image is a layer of.
+ *
+ * \param layers: scratch space, so that a caller testing many materials allocates once.
+ */
+static bool space_image_composite_material_contains(
+    Main &bmain,
+    Material &ma,
+    const Image &image,
+    Vector<PaintMaterialCompositeImageLayer> &layers)
+{
+  /* Any channel identifies the material, not just the composited one: the canvas the user came
+   * from is as likely to be a Roughness layer as a Base Color one, and switching to the composite
+   * should not depend on which channel they were painting. */
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!BKE_paint_material_composite_stack_from_material(bmain, ma, info.channel, layers)) {
+      continue;
+    }
+    for (const PaintMaterialCompositeImageLayer &layer : layers) {
+      if (layer.color_image == &image) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The material the last successful lookup resolved to, by #ID.session_uid.
+ *
+ * A redraw asks for the composite at least once per frame, and the search below is a graph walk
+ * per channel per material: without this, a file with many materials pays for all of them every
+ * frame to answer a question whose answer almost never changes.
+ *
+ * Purely a hint. It is trusted only after the remembered material is confirmed to still contain
+ * the image -- the very same check the full scan makes, just for one candidate instead of all of
+ * them -- so a stale or wrong memo costs one extra walk and then falls back to the scan. Session
+ * UIDs rather than pointers, since a freed material hands its address to the next one.
+ *
+ * Main thread only, like the composite cache it feeds.
+ */
+static uint32_t g_composite_material_memo_image_uid = 0;
+static uint32_t g_composite_material_memo_material_uid = 0;
+
+/**
+ * The material whose layer stack \a image belongs to, or null.
+ *
+ * The composite is displayed in place of a canvas image, and the canvas image is what says which
+ * material to composite: the user was painting on one of its layers a moment ago. Derived rather
+ * than stored so that nothing has to be kept in sync, and so that no #Material pointer has to live
+ * in #SpaceImage across undo and file load.
+ *
+ * Walks #Main because it has nothing better to start from; the memo above is what keeps the
+ * steady state from paying for that walk on every redraw.
+ */
+static Material *space_image_composite_material_find(Main &bmain, const Image &image)
+{
+  Vector<PaintMaterialCompositeImageLayer> layers;
+
+  if (g_composite_material_memo_image_uid == image.id.session_uid) {
+    Material *remembered = id_cast<Material *>(BKE_libblock_find_session_uid(
+        &bmain, ID_MA, g_composite_material_memo_material_uid));
+    if (remembered != nullptr &&
+        space_image_composite_material_contains(bmain, *remembered, image, layers))
+    {
+      return remembered;
+    }
+  }
+
+  for (Material &ma : bmain.materials) {
+    if (!space_image_composite_material_contains(bmain, ma, image, layers)) {
+      continue;
+    }
+    g_composite_material_memo_image_uid = image.id.session_uid;
+    g_composite_material_memo_material_uid = ma.id.session_uid;
+    return &ma;
+  }
+  return nullptr;
+}
+
+bool ED_space_image_has_composite(const SpaceImage *sima)
+{
+  /* Without an image there is no material to find, and no #Image for a release to go through
+   * either, which would leak the reference #ED_space_image_acquire_composite_buffer takes. */
+  return sima != nullptr && (sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 && sima->image != nullptr;
+}
+
+ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain, SpaceImage *sima, uint64_t *r_revision)
+{
+  if (r_revision != nullptr) {
+    *r_revision = 0;
+  }
+  if (!ED_space_image_has_composite(sima) || bmain == nullptr) {
+    return nullptr;
+  }
+  Material *ma = space_image_composite_material_find(*bmain, *sima->image);
+  if (ma == nullptr) {
+    return nullptr;
+  }
+
+  const int pass = sima->material_paint_pass;
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  if (!BKE_paint_material_composite_stack_from_material(*bmain, *ma, pass, layers)) {
+    return nullptr;
+  }
+  const uint64_t stack_hash = BKE_paint_material_composite_stack_hash(layers);
+  ImBuf *ibuf = BKE_paint_material_composite_cache_ensure(
+      *ma, eMaterialPaintChannel(pass), layers, stack_hash, r_revision);
+  if (ibuf == nullptr) {
+    return nullptr;
+  }
+  /* Handed out with a reference of its own so that #ED_space_image_release_buffer can release it
+   * exactly like any other buffer. That is what keeps the two paths symmetrical: a caller never
+   * has to know which one it got, and a composite that fails here leaves the ordinary path -- and
+   * its lock -- untouched. */
+  IMB_refImBuf(ibuf);
+  return ibuf;
+}
+
 ImBuf *ED_space_image_acquire_buffer(SpaceImage *sima,
                                      void **r_lock,
                                      int tile,
                                      const bool ensure_host_buffer)
 {
   ImBuf *ibuf;
+
+  if (ED_space_image_has_composite(sima)) {
+    /* #G_MAIN because this entry point has no #Main of its own and is reached from too many
+     * places to be given one. The per-frame caller -- the image engine -- does not come through
+     * here; it calls #ED_space_image_acquire_composite_buffer with its own #Main. */
+    if (ImBuf *composite = ED_space_image_acquire_composite_buffer(G_MAIN, sima)) {
+      *r_lock = nullptr;
+      return composite;
+    }
+    /* A material that is not a layer stack -- or none at all -- shows its plain canvas image
+     * rather than an empty editor. */
+  }
 
   if (sima && sima->image) {
     const Image *image = sima->image;

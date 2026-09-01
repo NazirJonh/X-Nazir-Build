@@ -68,6 +68,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_pointcloud.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_scene.hh"
@@ -153,6 +154,10 @@ static void material_copy_data(Main *bmain,
 static void material_free_data(ID *id)
 {
   Material *material = id_cast<Material *>(id);
+
+  /* The composite cache is keyed on #ID.session_uid, so an entry left behind here would never be
+   * looked up again and would hold its buffer until the size budget happened to evict it. */
+  BKE_paint_material_composite_cache_free_material(*material);
 
   /* Invalidate image paint slot info for all images used in this material. */
   if (material->nodetree != nullptr) {

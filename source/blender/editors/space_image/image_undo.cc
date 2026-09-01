@@ -32,6 +32,7 @@
 #include "BLI_map.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
+#include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_threads.h"
 #include "BLI_utildefines.h"
@@ -52,6 +53,7 @@
 #include "BKE_image_paint_selection.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_undo_system.hh"
@@ -343,6 +345,17 @@ static void ptile_restore_runtime_map(PaintTileMap *paint_tile_map)
 
     BKE_image_partial_update_mark_full_update(image);
 
+    /* A composite reading this image is showing the pixels the restore just took back. Reported as
+     * the tile rectangle, since that is exactly what changed and the composite shares the image's
+     * coordinate space; a stroke and its undo then cost the same to refresh. */
+    rcti tile_region;
+    BLI_rcti_init(&tile_region,
+                  tile_pos.x,
+                  tile_pos.x + tile_copy_size.x,
+                  tile_pos.y,
+                  tile_pos.y + tile_copy_size.y);
+    BKE_paint_material_composite_cache_tag_image_region(*image, tile_region);
+
     if (ibuf->float_data()) {
       ibuf->userflags |= IB_RECT_INVALID; /* force recreate of char rect */
     }
@@ -614,6 +627,10 @@ static void uhandle_restore_list(ListBaseT<UndoImageHandle> *undo_handles, bool 
       BKE_image_mark_dirty(image, ibuf);
       /* TODO(@jbakker): only mark areas that are actually updated to improve performance. */
       BKE_image_partial_update_mark_full_update(image);
+      /* A composite reading this image now shows the pixels the restore took back, and nothing in
+       * the stack's own description changed for it to notice on its own. Whole-image here, since
+       * this path restores every tile of the buffer rather than a known rectangle. */
+      BKE_paint_material_composite_cache_tag_image_changed(*image);
 
       if (ibuf->float_data()) {
         ibuf->userflags |= IB_RECT_INVALID; /* Force recreate of char `rect` */

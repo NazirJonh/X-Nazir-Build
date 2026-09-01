@@ -32,6 +32,19 @@ struct TextureInfo : NonCopyable {
   rcti clipping_bounds;
   /** \brief uv area of the texture in screen space. */
   rctf clipping_uv_bounds;
+  /**
+   * \brief uv of each corner of #clipping_bounds, in the tri-fan order of the batch.
+   *
+   * The corners of #clipping_uv_bounds whenever the canvas is not rotated, and what the batch
+   * has to use instead of them when it is: the region-to-image mapping stays affine under
+   * rotation, so interpolating these four across the quad is exact, but the axis-aligned
+   * rectangle they span is not the region any more.
+   *
+   * Every texture method has to keep these in step with #clipping_uv_bounds, since the batch
+   * reads only these. One that cannot express a rotation says so with
+   * #uv_corners_set_from_bounds.
+   */
+  float2 clipping_uv_corners[4] = {};
 
   /* Which tile of the screen is used with this texture. Used to safely calculate the correct
    * offset of the textures. */
@@ -73,6 +86,20 @@ struct TextureInfo : NonCopyable {
   int2 offset() const
   {
     return int2(clipping_bounds.xmin, clipping_bounds.ymin);
+  }
+
+  /**
+   * \brief Derive #clipping_uv_corners from #clipping_uv_bounds.
+   *
+   * For a texture method whose mapping really is a rectangle fit, which is every method that
+   * cannot express a rotated canvas. A method that can must write the four corners itself.
+   */
+  void uv_corners_set_from_bounds()
+  {
+    clipping_uv_corners[0] = float2(clipping_uv_bounds.xmin, clipping_uv_bounds.ymin);
+    clipping_uv_corners[1] = float2(clipping_uv_bounds.xmax, clipping_uv_bounds.ymin);
+    clipping_uv_corners[2] = float2(clipping_uv_bounds.xmax, clipping_uv_bounds.ymax);
+    clipping_uv_corners[3] = float2(clipping_uv_bounds.xmin, clipping_uv_bounds.ymax);
   }
 
   void ensure_gpu_texture(int2 texture_size)

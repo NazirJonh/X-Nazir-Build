@@ -1780,6 +1780,15 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     version_material_paint_source_defaults(*bmain);
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 67)) {
+    /* #Image.paint_layer_channel is new, and a file written before it zero-fills the field --
+     * which reads as Base Color rather than as "unset". Every image predates the tag, including
+     * the layer maps this branch's earlier builds already wrote a #paint_layer_id onto. */
+    for (Image &image : bmain->images) {
+      image.paint_layer_channel = -1;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

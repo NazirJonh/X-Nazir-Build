@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cfloat>
+#include <memory>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -84,6 +85,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include "ED_fileselect.hh"
+#include "ED_material_bake.hh"
 #include "ED_gpencil_legacy.hh"
 #include "ED_grease_pencil.hh"
 #include "ED_numinput.hh"
@@ -2696,7 +2698,25 @@ static void radial_control_set_tex(RadialControl *rc)
     case ID_BR:
     {
       bool is_color = false;
-      if ((ibuf = BKE_brush_gen_radial_control_imbuf(static_cast<Brush *>(rc->image_id_ptr.data),
+      Brush *radial_brush = static_cast<Brush *>(rc->image_id_ptr.data);
+      /* In Source Mode: Material no channel has a #Tex, so the pixels come from the bake. The
+       * bake lives in the editors, so it is resolved here and handed to blenkernel. Held by
+       * `radial_bake` until the buffer below has been built from it. */
+      ed::material_bake::MaterialSourcePreview material_preview;
+      std::shared_ptr<const ed::material_bake::MaterialSourceBake> radial_bake;
+      if (radial_brush != nullptr && radial_brush->material_paint != nullptr &&
+          radial_brush->material_paint->source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL)
+      {
+        /* Radial control only has the Brush, so there is no #Paint to take a visibility set or
+         * mode settings from -- the same compromise #brush_radial_preview_mtex makes. */
+        const PaintModeSettings mode_settings{};
+        ed::material_bake::material_source_preview_get(*radial_brush->material_paint,
+                                                       mode_settings,
+                                                       PAINT_MATERIAL_CHANNELS_VISIBLE_ALL,
+                                                       material_preview,
+                                                       radial_bake);
+      }
+      if ((ibuf = BKE_brush_gen_radial_control_imbuf(radial_brush,
                                                      rc->use_secondary_tex,
                                                      !ELEM(rc->subtype,
                                                            PROP_NONE,
@@ -2704,7 +2724,13 @@ static void radial_control_set_tex(RadialControl *rc)
                                                            PROP_PIXEL_DIAMETER,
                                                            PROP_DISTANCE,
                                                            PROP_DISTANCE_DIAMETER),
-                                                     &is_color)))
+                                                     &is_color,
+                                                     material_preview.usable ?
+                                                         material_preview.ibuf :
+                                                         nullptr,
+                                                     material_preview.usable ?
+                                                         &material_preview.mtex :
+                                                         nullptr)))
       {
         /* UNORM_8_8_8_8 is not a float texture: passing #ImBuf float pixels into
          * #GPU_texture_create_2d uploads them as raw bytes (IEEE 0.x floats start with 0 on

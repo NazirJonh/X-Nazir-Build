@@ -34,6 +34,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 
+#include "BKE_asset_edit.hh"
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
@@ -616,6 +617,88 @@ static wmOperatorStatus material_paint_brush_ensure_exec(bContext *C, wmOperator
   return OPERATOR_FINISHED;
 }
 
+/**
+ * Make the active brush local when it is a linked asset, returning the brush to configure.
+ *
+ * A linked ID may not reference a local one (#BKE_id_can_use_id, which #RNA_property_pointer_poll
+ * enforces for the UI), so a linked brush cannot be given a local source #Material -- local
+ * materials are not even offered in the selector. The restriction is not cosmetic: brushes live
+ * outside memfile undo, whose pointer remap skips linked IDs, so such a reference would dangle
+ * after an undo step and could not be written to the .blend. Same reasoning, and same remedy, as
+ * #brush_ensure_local_for_texture in `image_grid_ops.cc`.
+ *
+ * \return the new local copy, or \a brush unchanged when it is already local.
+ */
+static Brush *material_paint_brush_ensure_local(bContext *C,
+                                                Paint *paint,
+                                                Brush &brush,
+                                                ReportList *reports)
+{
+  if (!ID_IS_LINKED(&brush)) {
+    return &brush;
+  }
+
+  Main &bmain = *CTX_data_main(C);
+  Brush *local_brush = id_cast<Brush *>(bke::asset_edit_id_ensure_local(bmain, brush.id));
+  if (local_brush == nullptr || local_brush == &brush) {
+    return &brush;
+  }
+
+  /* Plain #BKE_paint_brush_set rather than the `_synced` variant: this is the same brush made
+   * local, not a user-facing brush switch, so running the PBR preset snapshot/apply round trip
+   * would only risk clobbering the very state being carried over. Matches the texture path. */
+  if (paint != nullptr) {
+    BKE_paint_brush_set(paint, local_brush);
+    /* The tool brush bindings, not #Paint.brush, are what re-activates a brush on entering the
+     * mode again. Without this the linked asset comes back on the next mode change and takes the
+     * source mode with it, which #BKE_paint_brush_set alone does not prevent. */
+    WM_toolsystem_brush_bindings_update_from_active(C, paint);
+  }
+  /* Reported rather than done silently: the active brush is being swapped for a copy, which the
+   * user would otherwise only notice later by the missing library icon. */
+  BKE_reportf(reports,
+              RPT_INFO,
+              "Brush \"%s\" made local: a linked brush cannot reference a source material",
+              local_brush->id.name + 2);
+  return local_brush;
+}
+
+static wmOperatorStatus material_paint_source_mode_set_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  const int mode = RNA_enum_get(op->ptr, "mode");
+  if (mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+    /* Before the mode is stored, so the panel that draws next already has a brush whose selector
+     * can list local materials. */
+    brush = material_paint_brush_ensure_local(C, paint, *brush, op->reports);
+  }
+
+  BKE_brush_material_paint_ensure(brush);
+  brush->material_paint->source_mode = char(mode);
+
+  Scene *scene = CTX_data_scene(C);
+  /* The scene-side preset is what #paint_brush_update_from_asset_reference applies when the brush
+   * is re-activated -- on re-entering the mode, or after an undo step restores the scene. Leaving
+   * it stale is what silently put the brush back on Maps. */
+  if (scene != nullptr) {
+    BKE_paint_material_brush_preset_snapshot(*scene, *brush);
+  }
+
+  /* Same reasoning as #material_paint_brush_ensure_exec: the paired editor must not be left on a
+   * different source mode. No-op when sync is off or the canvas is not Material. */
+  BKE_paint_material_brush_sync(scene, paint);
+
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
 static wmOperatorStatus material_channel_value_invert_exec(bContext *C, wmOperator *op)
 {
   Paint *paint = BKE_paint_get_active_from_context(C);
@@ -987,6 +1070,37 @@ void PAINT_OT_material_canvas_cycle(wmOperatorType *ot)
 }
 
 /** \} */
+
+void PAINT_OT_material_paint_source_mode_set(wmOperatorType *ot)
+{
+  /* Mirrors #prop_source_mode_items in `rna_brush.cc`; the panel draws its own labels, so these
+   * exist only to carry the value. */
+  static const EnumPropertyItem mode_items[] = {
+      {BRUSH_MATERIAL_PAINT_SOURCE_MAPS, "MAPS", 0, "Maps", ""},
+      {BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL, "MATERIAL", 0, "Material", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  ot->name = "Set Material Paint Source Mode";
+  ot->idname = "PAINT_OT_material_paint_source_mode_set";
+  ot->description =
+      "Choose where the brush takes its channel textures from, making the brush local first when "
+      "a source material requires it";
+  ot->exec = material_paint_source_mode_set_exec;
+  ot->poll = ED_operator_object_active_editable;
+  /* No #OPTYPE_UNDO, matching #IMAGE_GRID_OT_assign_texture, the other operator that makes a brush
+   * local. Brushes are outside memfile undo (their persistence goes through
+   * #BKE_brush_tag_unsaved_changes), so pushing an undo step that both creates a brush ID and
+   * swaps the active one is what leaves the reference dangling on the next undo. */
+  ot->flag = OPTYPE_REGISTER;
+
+  ot->prop = RNA_def_enum(ot->srna,
+                          "mode",
+                          mode_items,
+                          BRUSH_MATERIAL_PAINT_SOURCE_MAPS,
+                          "Mode",
+                          "Where the brush takes its channel textures from");
+}
 
 void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
 {
@@ -1412,6 +1526,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_from_view);
   WM_operatortype_append(PAINT_OT_brush_colors_flip);
   WM_operatortype_append(PAINT_OT_material_paint_brush_ensure);
+  WM_operatortype_append(PAINT_OT_material_paint_source_mode_set);
   WM_operatortype_append(PAINT_OT_material_paint_images_ensure);
   WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);

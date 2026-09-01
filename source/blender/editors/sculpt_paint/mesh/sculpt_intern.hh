@@ -378,6 +378,10 @@ struct TexelSampleContext {
    * #MTEX_MAP_MODE_AREA (i.e. #MTEX_MAP_MODE_VIEW, #MTEX_MAP_MODE_TILED,
    * #MTEX_MAP_MODE_RANDOM). */
   float2 view_point_2d;
+  /**
+   * The texel's own UV coordinate, when the caller rasterizes in UV space and an explicit Baked
+   * Target UV source is active. Negative otherwise, including for all brush-mapped sources. */
+  float2 uv = float2(-1.0f, -1.0f);
 };
 
 }  // namespace material

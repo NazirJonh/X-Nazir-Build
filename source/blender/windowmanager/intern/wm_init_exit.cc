@@ -94,6 +94,7 @@
 #include "ED_keyframing.hh"
 #include "ED_node.hh"
 #include "ED_paint.hh"
+#include "ED_material_bake.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
@@ -633,6 +634,8 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
   RE_FreeAllRender();
   RE_engines_exit();
 
+  /* Owns ImBufs of its own, so it has to be dropped before the leak check at exit. */
+  ed::material_bake::material_source_bake_invalidate(nullptr);
   ED_preview_free_dbase(); /* Frees a Main dbase, before #BKE_blender_free! */
   ed::asset::list::storage_exit();
   /* Write out any brush recent/favorite lists change that was only kept in memory this session. */

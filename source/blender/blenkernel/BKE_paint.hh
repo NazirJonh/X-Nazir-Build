@@ -941,6 +941,13 @@ void BKE_paint_material_channel_effective_mtex(const BrushMaterialPaint &brush_p
                                                MTex &r_mtex);
 
 /**
+ * The order in which channels are considered for the brush cursor overlay: Base Color first, then
+ * Alpha, then the remaining channels, with Normal always last. Shared so the Source Mode: Material
+ * preview, which decides usability differently, still picks the same channel a user would expect.
+ */
+Span<eMaterialPaintChannel> BKE_paint_material_channel_preview_order();
+
+/**
  * Fills \a r_mtex with the effective #MTex (see #BKE_paint_material_channel_effective_mtex) to
  * preview in the brush cursor overlay for \a brush_paint, chosen by the priority a user painting
  * a pattern expects: Base Color if enabled and sourced, else Alpha, else the first remaining

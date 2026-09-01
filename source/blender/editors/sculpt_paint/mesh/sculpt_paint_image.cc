@@ -947,6 +947,8 @@ static Array<RowFactorCache> compute_paint_row_factors(
     const MaterialPaintFilter &material_filter,
     const ed::sculpt_paint::material::ChannelSourceSampler *active_sampler,
     const bool alpha_masking_active,
+    const ImageData &layout_image_data,
+    const bool needs_baked_target_uv,
     PixelNode &pixel_node)
 {
   PRF_scope(ProfileCategory::Editor);
@@ -993,6 +995,13 @@ static Array<RowFactorCache> compute_paint_row_factors(
         [&](const int row_i) {
           const PackedPixelRow pixel_row = tile_data.pixel_rows[row_i];
           const int row_size = pixel_row.num_pixels;
+          const ImBuf *layout_buffer = needs_baked_target_uv ?
+                                          layout_image_data.buffers.lookup_default(
+                                              tile_data.tile_number, nullptr) :
+                                          nullptr;
+          const float2 layout_size = layout_buffer != nullptr ?
+                                          float2(float(layout_buffer->x), float(layout_buffer->y)) :
+                                          float2(0.0f);
           Array<float> &row_factors = tile_cache.row_factors[row_i];
           row_factors.reinitialize(row_size);
           if (alpha_masking_active && active_sampler != nullptr) {
@@ -1023,6 +1032,13 @@ static Array<RowFactorCache> compute_paint_row_factors(
                   tile_cache.row_contexts[row_i].as_mutable_span().slice(range);
               for (const int i : range.index_range()) {
                 contexts[i] = material::sculpt_texel_sample_context(ss, tls.pixel_positions[i]);
+                if (layout_size.x > 0.0f && layout_size.y > 0.0f) {
+                  const int texel_x = int(pixel_row.start_image_coordinate.x) +
+                                      int(range.start()) + i;
+                  const int texel_y = int(pixel_row.start_image_coordinate.y);
+                  contexts[i].uv = float2((float(texel_x) + 0.5f) / layout_size.x,
+                                          (float(texel_y) + 0.5f) / layout_size.y);
+                }
               }
 
             }
@@ -2100,6 +2116,10 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                                                 material_filter,
                                                                 active_sampler,
                                                                 alpha_masking_active,
+                                                                image_data,
+                                                                active_sampler != nullptr &&
+                                                                    active_sampler
+                                                                        ->uses_baked_target_uv(),
                                                                 pixel_nodes[i]);
           },
           exec_mode::grain_size(1));

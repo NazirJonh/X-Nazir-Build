@@ -38,6 +38,7 @@
 #include "ED_asset.hh"
 #include "ED_gpencil_legacy.hh"
 #include "ED_image.hh"
+#include "ED_material_bake.hh"
 #include "ED_mesh.hh"
 #include "ED_object.hh"
 #include "ED_paint.hh"
@@ -236,6 +237,17 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
   /* Free the process-global Category-Tabs tag bar runtime cache deterministically (on quit and
    * before a file load), so it never leaks and never holds a dangling window-manager pointer. */
   blender::ui::tag_bar_runtime_free_all();
+
+  /* The bake cache is keyed on session UIDs, which are never reused, so every entry for a material
+   * of the file being replaced is unreachable from here on. It owns #ImBuf buffers, so dropping it
+   * has to be deliberate.
+   *
+   * Only when the whole file is going away, which is what \a do_undo_system distinguishes: memfile
+   * undo also reaches here, and it restores session UIDs, so its materials keep matching their
+   * cached bakes. Dropping them per undo step would force a full EEVEE re-render on every Ctrl+Z. */
+  if (do_undo_system) {
+    material_bake::material_source_bake_invalidate(nullptr);
+  }
 
   /* Frees all edit-mode undo-steps. */
   if (do_undo_system && G_MAIN->wm.first) {

@@ -21,6 +21,8 @@
 #include "BLI_listbase.h"
 #include "BLI_math_base.hh"
 #include "BLI_math_color.h"
+#include "BLI_math_vector.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_rand.h"
 
 #include "BLT_translation.hh"
@@ -48,6 +50,7 @@
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
+#include "IMB_interp.hh"
 
 #include "PRF_profile.hh"
 
@@ -268,6 +271,9 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
           data,
           BKE_texture_mtex_foreach_id(data, &brush->material_paint->channels[i].source_mtex));
     }
+    /* The source material is an ID reference like any channel texture: without this the user count
+     * is never updated and remapping, library overrides and unused-data purging all miss it. */
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->material_paint->source_material, IDWALK_CB_USER);
   }
 }
 
@@ -908,11 +914,10 @@ static void material_paint_mtex_tex_user_adjust(MTex &mtex, const int delta)
   }
 }
 
-/** Runs \a material_paint_mtex_tex_user_adjust over every #MTex embedded in \a material_paint:
- *  each channel's #BrushMaterialPaintChannel.source_mtex and
- *  #BrushMaterialPaint.shared_source_mapping. */
-static void material_paint_all_mtex_user_adjust(BrushMaterialPaint &material_paint,
-                                                const int delta)
+/** Adjusts the user count of every ID embedded in \a material_paint: each channel's
+ *  #BrushMaterialPaintChannel.source_mtex, #BrushMaterialPaint.shared_source_mapping and
+ *  #BrushMaterialPaint.source_material. */
+static void material_paint_all_id_user_adjust(BrushMaterialPaint &material_paint, const int delta)
 {
   for (BrushMaterialPaintChannel &channel : material_paint.channels) {
     material_paint_mtex_tex_user_adjust(channel.source_mtex, delta);
@@ -922,13 +927,22 @@ static void material_paint_all_mtex_user_adjust(BrushMaterialPaint &material_pai
    * every future caller — the adjust helper is already a no-op when tex is null, so this
    * costs nothing when the invariant does hold. */
   material_paint_mtex_tex_user_adjust(material_paint.shared_source_mapping, delta);
+
+  if (material_paint.source_material != nullptr) {
+    if (delta == 1) {
+      id_us_plus(&material_paint.source_material->id);
+    }
+    else {
+      id_us_min(&material_paint.source_material->id);
+    }
+  }
 }
 
 BrushMaterialPaint *BKE_brush_material_paint_copy(const BrushMaterialPaint &src, const int flag)
 {
   BrushMaterialPaint *dst = MEM_new<BrushMaterialPaint>(__func__, dna::shallow_copy(src));
   if ((flag & LIB_ID_CREATE_NO_USER_REFCOUNT) == 0) {
-    material_paint_all_mtex_user_adjust(*dst, 1);
+    material_paint_all_id_user_adjust(*dst, 1);
   }
   return dst;
 }
@@ -940,7 +954,7 @@ void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
     return;
   }
   if (do_user_refcount) {
-    material_paint_all_mtex_user_adjust(*material_paint, -1);
+    material_paint_all_id_user_adjust(*material_paint, -1);
   }
   MEM_delete(material_paint);
 }
@@ -981,9 +995,9 @@ void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMate
   if (&dst == &src) {
     return;
   }
-  material_paint_all_mtex_user_adjust(dst, -1);
+  material_paint_all_id_user_adjust(dst, -1);
   dst = dna::shallow_copy(src);
-  material_paint_all_mtex_user_adjust(dst, 1);
+  material_paint_all_id_user_adjust(dst, 1);
 }
 
 /**
@@ -2054,16 +2068,25 @@ static bool brush_gen_texture(const Brush *br,
                               const int side,
                               const bool use_secondary,
                               float *rect,
-                              bool *r_is_color)
+                              bool *r_is_color,
+                              const ImBuf *material_source_ibuf,
+                              const MTex *material_source_mtex)
 {
   MTex material_preview = {};
   MTex alpha_mask_storage = {};
-  const MTex *mtex = brush_radial_preview_mtex(br, use_secondary, material_preview);
-  if (mtex->tex == nullptr) {
+  /* In Source Mode: Material no channel has a #Tex, so the caller resolves the pixels from the
+   * bake and hands them over; the #MTex then carries placement only. */
+  const bool use_material_source = material_source_ibuf != nullptr &&
+                                   material_source_mtex != nullptr;
+  const MTex *mtex = use_material_source ?
+                         material_source_mtex :
+                         brush_radial_preview_mtex(br, use_secondary, material_preview);
+  if (!use_material_source && mtex->tex == nullptr) {
     return false;
   }
   const MTex *alpha_mtex = brush_radial_alpha_mask_mtex(br, use_secondary, alpha_mask_storage);
-  const bool is_color_preview = mtex != &br->mtex && mtex != &br->mask_mtex;
+  const bool is_color_preview = use_material_source ||
+                                (mtex != &br->mtex && mtex != &br->mask_mtex);
   if (r_is_color != nullptr) {
     *r_is_color = is_color_preview;
   }
@@ -2098,8 +2121,24 @@ static bool brush_gen_texture(const Brush *br,
       const float co[3] = {x, y, 0.0f};
       float intensity;
       float rgba[4];
-      const bool has_rgb = RE_texture_evaluate(
-          mtex, co, 0, pool, false, false, &intensity, rgba);
+      bool has_rgb;
+      if (use_material_source) {
+        /* Same placement as the cursor overlay and the stroke: #MTex size/ofs, the [-1, 1] to
+         * [0, 1] remap, then a wrapped bilinear fetch. A baked buffer has no #Tex and therefore
+         * no extension mode of its own, so it always repeats. */
+        const float vx = mtex->size[0] * (x + mtex->ofs[0]);
+        const float vy = mtex->size[1] * (y + mtex->ofs[1]);
+        const float4 sampled = imbuf::interpolate_bilinear_wrap_fl(
+            material_source_ibuf,
+            (vx + 1.0f) * 0.5f * float(material_source_ibuf->x),
+            (vy + 1.0f) * 0.5f * float(material_source_ibuf->y));
+        copy_v4_v4(rgba, sampled);
+        intensity = IMB_colormanagement_get_luminance(sampled);
+        has_rgb = true;
+      }
+      else {
+        has_rgb = RE_texture_evaluate(mtex, co, 0, pool, false, false, &intensity, rgba);
+      }
       float *px = &rect[(iy * side + ix) * 4];
       if (has_rgb && is_color_preview) {
         if (convert_to_linear && colorspace != nullptr && !colorspace_is_data) {
@@ -2143,7 +2182,9 @@ static bool brush_gen_texture(const Brush *br,
 ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br,
                                           bool secondary,
                                           bool display_gradient,
-                                          bool *r_is_color)
+                                          bool *r_is_color,
+                                          const ImBuf *material_source_ibuf,
+                                          const MTex *material_source_mtex)
 {
   int side = 512;
   int half = side / 2;
@@ -2153,8 +2194,13 @@ ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br,
   ImBuf *im = IMB_allocImBuf(side, side, ImBufFlags::FloatData);
 
   bool is_color = false;
-  const bool have_texture = brush_gen_texture(
-      br, side, secondary, im->float_data_for_write(), &is_color);
+  const bool have_texture = brush_gen_texture(br,
+                                              side,
+                                              secondary,
+                                              im->float_data_for_write(),
+                                              &is_color,
+                                              material_source_ibuf,
+                                              material_source_mtex);
   if (r_is_color != nullptr) {
     *r_is_color = have_texture && is_color;
   }

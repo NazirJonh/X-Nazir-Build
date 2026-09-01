@@ -48,8 +48,23 @@
 
 namespace blender {
 
+/**
+ * Drop-box polls run for the region found under the cursor, while the context region is the one
+ * the event is currently handled in. These can differ (temporary popup regions, events dispatched
+ * to every region of an area), so the context has to be validated explicitly here: polls below
+ * query the view matrices through the context, which only exist in the main region.
+ */
+static bool view3d_drop_context_is_main_region(const bContext *C)
+{
+  return CTX_wm_region_view3d(C) != nullptr;
+}
+
 static bool view3d_drop_in_main_region_poll(bContext *C, const wmEvent *event)
 {
+  if (!view3d_drop_context_is_main_region(C)) {
+    return false;
+  }
+
   ScrArea *area = CTX_wm_area(C);
   return ED_region_overlap_isect_any_xy(area, event->xy) == false;
 }
@@ -240,6 +255,9 @@ static std::string view3d_object_data_drop_tooltip(bContext * /*C*/,
 
 static bool view3d_ima_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
 {
+  if (!view3d_drop_context_is_main_region(C)) {
+    return false;
+  }
   if (ED_region_overlap_isect_any_xy(CTX_wm_area(C), event->xy)) {
     return false;
   }

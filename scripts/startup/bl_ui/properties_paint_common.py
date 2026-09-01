@@ -1605,6 +1605,19 @@ def _material_paint_channel_has_source(channel):
     return channel.source_image is not None or channel.source_texture_slot.texture is not None
 
 
+def _material_paint_channel_source_active(channel, *, source_enabled):
+    """True when something other than the channel's own fixed value drives it while painting.
+
+    In Material mode the per-channel slots are ignored, so what matters is whether the source
+    material resolves the channel at all. 'BAKED' counts only once a bake has landed, which the
+    panel cannot know, so it is treated as driven: reporting the value slider as live would be
+    wrong for the far more common case where the bake is ready.
+    """
+    if source_enabled:
+        return _material_paint_channel_has_source(channel)
+    return channel.material_source_resolution in {'CONSTANT', 'IMAGE', 'BAKED'}
+
+
 def _draw_material_paint_subpanel_header(
     header,
     context,
@@ -1745,7 +1758,30 @@ def _draw_material_paint_source_grid(layout, context, channel):
         )
 
 
-def _draw_material_paint_source_texture(panel, context, channel):
+def _draw_material_paint_material_status(panel, channel):
+    """Report what the brush's source material supplies to this channel.
+
+    Drawn in place of the per-channel image slot in Material mode: the channel has no slot of its
+    own there, and without this the panel would silently show nothing for a channel the material
+    cannot paint.
+    """
+    resolution = channel.material_source_resolution
+    row = panel.row()
+    if resolution == 'IMAGE':
+        row.label(text="Image from material", icon='IMAGE_DATA')
+        return
+    if resolution == 'CONSTANT':
+        row.label(text="Constant value from material", icon='CHECKMARK')
+        return
+    if resolution == 'BAKED':
+        row.label(text="Baked from material", icon='CHECKMARK')
+        return
+    reason = channel.material_source_reason
+    label = channel.bl_rna.properties["material_source_reason"].enum_items[reason].name
+    row.label(text=label, icon='ERROR')
+
+
+def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True):
     """Draw the per-channel source image.
 
     The source replaces the channel's fixed value while painting, so the value row is drawn
@@ -1756,6 +1792,10 @@ def _draw_material_paint_source_texture(panel, context, channel):
     popup menu's "Source Picker: Grid" checkbox): the Image Browser popover, or a preview grid
     embedded right below the name row.
     """
+    if not enabled:
+        _draw_material_paint_material_status(panel, channel)
+        return
+
     slot = channel.source_texture_slot
     use_grid = channel.source_select_mode == 'GRID'
 
@@ -1855,10 +1895,10 @@ def _draw_material_paint_shared_mapping(layout, material_paint):
         col.prop(slot, "angle", text="Angle")
 
 
-def _draw_material_paint_value_ramp(layout, context, channel, channel_id):
+def _draw_material_paint_value_ramp(layout, context, channel, channel_id, *, source_enabled=True):
     # One subpanel per scalar ramp channel; open by default.
     # Header: socket + value color swatch + numeric value. Body: gradient + Invert.
-    has_source = _material_paint_channel_has_source(channel)
+    has_source = _material_paint_channel_source_active(channel, source_enabled=source_enabled)
     header, panel = layout.panel(
         "material_paint_value_%s" % channel_id.lower(),
         default_closed=False,
@@ -1872,7 +1912,7 @@ def _draw_material_paint_value_ramp(layout, context, channel, channel_id):
     # The source row (and the grid below it) is not part of the value row's aligned column: it is
     # a separate control, and sharing the column would glue them together, unlike every other
     # channel panel.
-    _draw_material_paint_source_texture(panel, context, channel)
+    _draw_material_paint_source_texture(panel, context, channel, enabled=source_enabled)
     if not has_source:
         panel.separator()
         row = panel.row(align=True)
@@ -1883,8 +1923,8 @@ def _draw_material_paint_value_ramp(layout, context, channel, channel_id):
     panel.separator()
 
 
-def _draw_material_paint_alpha_panel(layout, context, channel, channel_id):
-    has_source = _material_paint_channel_has_source(channel)
+def _draw_material_paint_alpha_panel(layout, context, channel, channel_id, *, source_enabled=True):
+    has_source = _material_paint_channel_source_active(channel, source_enabled=source_enabled)
     header, panel = layout.panel(
         "material_paint_value_%s" % channel_id.lower(),
         default_closed=False,
@@ -1897,7 +1937,7 @@ def _draw_material_paint_alpha_panel(layout, context, channel, channel_id):
     panel.separator()
     # "Use For: Alpha Map / Brush Mask" now lives in the socket-button popup menu,
     # #PAINT_MT_material_paint_channel_socket.
-    _draw_material_paint_source_texture(panel, context, channel)
+    _draw_material_paint_source_texture(panel, context, channel, enabled=source_enabled)
     if not has_source:
         panel.separator()
         row = panel.row(align=True)
@@ -1908,8 +1948,9 @@ def _draw_material_paint_alpha_panel(layout, context, channel, channel_id):
     panel.separator()
 
 
-def _draw_material_paint_base_color_panel(layout, context, channel, material_paint):
-    has_source = _material_paint_channel_has_source(channel)
+def _draw_material_paint_base_color_panel(
+        layout, context, channel, material_paint, *, source_enabled=True):
+    has_source = _material_paint_channel_source_active(channel, source_enabled=source_enabled)
     header, panel = layout.panel(
         "material_paint_value_base_color",
         default_closed=False,
@@ -1934,11 +1975,11 @@ def _draw_material_paint_base_color_panel(layout, context, channel, material_pai
     row = panel.row(align=True)
     row.prop(channel, "blend", text="Blend")
     panel.separator()
-    _draw_material_paint_source_texture(panel, context, channel)
+    _draw_material_paint_source_texture(panel, context, channel, enabled=source_enabled)
 
 
-def _draw_material_paint_normal_panel(layout, context, channel):
-    has_source = _material_paint_channel_has_source(channel)
+def _draw_material_paint_normal_panel(layout, context, channel, *, source_enabled=True):
+    has_source = _material_paint_channel_source_active(channel, source_enabled=source_enabled)
     header, panel = layout.panel(
         "material_paint_value_normal",
         default_closed=False,
@@ -1956,11 +1997,11 @@ def _draw_material_paint_normal_panel(layout, context, channel):
     if not panel:
         return
     panel.separator()
-    _draw_material_paint_source_texture(panel, context, channel)
+    _draw_material_paint_source_texture(panel, context, channel, enabled=source_enabled)
 
 
-def _draw_material_paint_emission_panel(layout, context, channel):
-    has_source = _material_paint_channel_has_source(channel)
+def _draw_material_paint_emission_panel(layout, context, channel, *, source_enabled=True):
+    has_source = _material_paint_channel_source_active(channel, source_enabled=source_enabled)
     header, panel = layout.panel(
         "material_paint_value_emission",
         default_closed=False,
@@ -1977,7 +2018,7 @@ def _draw_material_paint_emission_panel(layout, context, channel):
     if not panel:
         return
     panel.separator()
-    _draw_material_paint_source_texture(panel, context, channel)
+    _draw_material_paint_source_texture(panel, context, channel, enabled=source_enabled)
 
 
 def material_paint_visible_channels_owner(context):
@@ -2146,6 +2187,33 @@ def draw_material_paint_channels(
 
     channels = {channel.channel: channel for channel in material_paint.channels}
 
+    # Drawn as operator buttons rather than a plain enum: switching to Material has to make a
+    # linked brush local first, because a linked data-block may not reference a local material and
+    # the selector would not even list one. See #PAINT_OT_material_paint_source_mode_set.
+    row = layout.row(align=True)
+    for mode_id, mode_label in (('MAPS', "Maps"), ('MATERIAL', "Material")):
+        row.operator(
+            "paint.material_paint_source_mode_set",
+            text=mode_label,
+            depress=material_paint.source_mode == mode_id,
+        ).mode = mode_id
+
+    source_maps_enabled = material_paint.source_mode == 'MAPS'
+    if not source_maps_enabled:
+        col = layout.column()
+        # Normally unreachable: the operator above makes the brush local on the way in. It can
+        # still be hit by a file saved in Material mode with a linked brush, so report the reason
+        # instead of silently showing an empty selector.
+        brush_is_linked = brush.library is not None
+        if brush_is_linked:
+            col.label(text="Linked brush cannot use a source material", icon='ERROR')
+        sub = col.column()
+        sub.enabled = not brush_is_linked
+        sub.template_ID(material_paint, "source_material")
+        sub.prop(material_paint, "source_layout")
+        sub.prop(material_paint, "source_bake_size")
+    layout.separator()
+
     # Use one aligned grid_flow so channel toggles wrap when the panel is too narrow.
     # Labels may be clipped in very tight cells; the short labels below keep controls readable.
     # `show_custom` is only passed True for the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color)
@@ -2177,18 +2245,30 @@ def draw_material_paint_channels(
     # Shared source-texture mapping is drawn before the channel toggles so it reads as a setup step
     # rather than being buried under whichever channel panels happen to be open.
     has_source_mapping = any(
-        channels[channel_id].use and _material_paint_channel_has_source(channels[channel_id])
+        channels[channel_id].use and _material_paint_channel_source_active(
+            channels[channel_id], source_enabled=source_maps_enabled,
+        )
         for channel_id in toggle_ids if channel_id != 'CUSTOM'
     )
-    header, panel = layout.panel(
-        "material_paint_transform",
-        default_closed=True,
+    # Material mode still needs mapping for direct Images and brush-mapped Baked channels. An
+    # explicit Baked Target UV source does not use it, but it stays useful when channels resolve
+    # differently or the layout is switched back to Brush Mapping. A material that only yields
+    # constants has nothing to place, so the panel is hidden entirely.
+    show_source_mapping = source_maps_enabled or any(
+        channels[channel_id].use and
+        channels[channel_id].material_source_resolution in {'IMAGE', 'BAKED'}
+        for channel_id in toggle_ids if channel_id != 'CUSTOM'
     )
-    header.label(text="Image Transform Settings")
-    if panel:
-        panel.active = has_source_mapping
-        _draw_material_paint_shared_mapping(panel, material_paint)
-    layout.separator()
+    if show_source_mapping:
+        header, panel = layout.panel(
+            "material_paint_transform",
+            default_closed=True,
+        )
+        header.label(text="Image Transform Settings")
+        if panel:
+            panel.active = has_source_mapping
+            _draw_material_paint_shared_mapping(panel, material_paint)
+        layout.separator()
 
     # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.
     _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
@@ -2226,18 +2306,24 @@ def draw_material_paint_channels(
     channel = channels['BASE_COLOR']
     if channel.use and 'BASE_COLOR' in visible:
         _channel_panel_sep()
-        _draw_material_paint_base_color_panel(channel_col, context, channel, material_paint)
+        _draw_material_paint_base_color_panel(
+            channel_col, context, channel, material_paint, source_enabled=source_maps_enabled,
+        )
 
     for channel_id in ('METALLIC', 'ROUGHNESS', 'AO'):
         channel = channels[channel_id]
         if channel.use and channel_id in visible:
             _channel_panel_sep()
-            _draw_material_paint_value_ramp(channel_col, context, channel, channel_id)
+            _draw_material_paint_value_ramp(
+                channel_col, context, channel, channel_id, source_enabled=source_maps_enabled,
+            )
 
     channel = channels['ALPHA']
     if channel.use and 'ALPHA' in visible:
         _channel_panel_sep()
-        _draw_material_paint_alpha_panel(channel_col, context, channel, 'ALPHA')
+        _draw_material_paint_alpha_panel(
+            channel_col, context, channel, 'ALPHA', source_enabled=source_maps_enabled,
+        )
 
     # Normal, Emission and Height are texture-map-only channels: a vertex canvas has no per-vertex
     # storage for them (see `_MATERIAL_PAINT_VERTEX_CHANNELS`), so skip them for Material Paint.
@@ -2249,17 +2335,23 @@ def draw_material_paint_channels(
         channel = channels['NORMAL']
         if channel.use and 'NORMAL' in visible:
             _channel_panel_sep()
-            _draw_material_paint_normal_panel(channel_col, context, channel)
+            _draw_material_paint_normal_panel(
+                channel_col, context, channel, source_enabled=source_maps_enabled,
+            )
 
         channel = channels['EMISSION']
         if channel.use and 'EMISSION' in visible:
             _channel_panel_sep()
-            _draw_material_paint_emission_panel(channel_col, context, channel)
+            _draw_material_paint_emission_panel(
+                channel_col, context, channel, source_enabled=source_maps_enabled,
+            )
 
     channel = channels['SPECULAR']
     if channel.use and 'SPECULAR' in visible:
         _channel_panel_sep()
-        _draw_material_paint_value_ramp(channel_col, context, channel, 'SPECULAR')
+        _draw_material_paint_value_ramp(
+            channel_col, context, channel, 'SPECULAR', source_enabled=source_maps_enabled,
+        )
 
     if show_custom:
         channel = channels['CUSTOM']

@@ -3642,10 +3642,7 @@ void BKE_paint_material_channel_effective_mtex(const BrushMaterialPaint &brush_p
   r_mtex.rot = shared.rot;
 }
 
-bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
-                                         const PaintModeSettings &mode_settings,
-                                         const int visible_material_channels,
-                                         MTex &r_mtex)
+Span<eMaterialPaintChannel> BKE_paint_material_channel_preview_order()
 {
   static const eMaterialPaintChannel priority[] = {
       PAINT_MATERIAL_CHANNEL_BASE_COLOR,
@@ -3659,7 +3656,15 @@ bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
       PAINT_MATERIAL_CHANNEL_EMISSION,
       PAINT_MATERIAL_CHANNEL_NORMAL,
   };
-  for (const eMaterialPaintChannel channel : priority) {
+  return Span<eMaterialPaintChannel>(priority, ARRAY_SIZE(priority));
+}
+
+bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
+                                         const PaintModeSettings &mode_settings,
+                                         const int visible_material_channels,
+                                         MTex &r_mtex)
+{
+  for (const eMaterialPaintChannel channel : BKE_paint_material_channel_preview_order()) {
     if (!BKE_paint_material_channel_is_enabled(
             brush_paint, mode_settings, visible_material_channels, channel))
     {

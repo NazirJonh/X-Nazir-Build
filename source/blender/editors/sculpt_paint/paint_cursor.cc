@@ -15,10 +15,12 @@
 #include "BLI_listbase.h"
 #include "BLI_math_axis_angle.hh"
 #include "BLI_math_color.h"
+#include "BLI_math_vector.h"
 #include "BLI_math_rotation.h"
 #include "BLI_offset_indices.hh"
 #include "BLI_rect.h"
 #include "BLI_task.h"
+#include "BLI_time.h"
 #include "BLI_utildefines.h"
 
 #include "DNA_brush_enums.h"
@@ -58,8 +60,10 @@
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf_types.hh"
+#include "IMB_interp.hh"
 
 #include "ED_image.hh"
+#include "ED_material_bake.hh"
 #include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
@@ -76,6 +80,12 @@
 
 #include "paint_curve_intern.hh"
 #include "paint_intern.hh"
+
+/* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
+#include "mesh/paint_debug.hh"
+#if PBR_PAINT_CURSOR_DEBUG
+#  include <cstdio>
+#endif
 
 namespace blender {
 
@@ -111,6 +121,10 @@ struct TexSnapshot {
   int old_curve_preset;
   /** Alpha stroke-mask source (#use_alpha_stroke_mask). Null when the overlay is not masked. */
   const Tex *old_alpha_tex;
+  /** Source Mode: Material identity. #old_tex is null in that mode, so without these a re-bake,
+   * or a switch to another channel of the same material, would keep serving the cached overlay. */
+  const ImBuf *old_material_ibuf;
+  float4 old_material_constant;
 };
 
 struct CursorSnapshot {
@@ -150,6 +164,31 @@ void ED_paint_cursor_free_textures()
 
 namespace ed::sculpt_paint {
 
+/* Diagnostic tracing of the Source Mode: Material overlay gates. Off unless
+ * #PBR_PAINT_CURSOR_DEBUG is enabled in `mesh/paint_debug.hh`. */
+#if PBR_PAINT_CURSOR_DEBUG
+/** Prints only when \a state differs from the previous call at this \a slot. */
+static bool pbr_cursor_state_changed(const int slot, const uint64_t state)
+{
+  static uint64_t previous[8] = {};
+  BLI_assert(slot < 8);
+  if (previous[slot] == state) {
+    return false;
+  }
+  previous[slot] = state;
+  return true;
+}
+#  define PBR_CURSOR_LOG(slot, state, ...) \
+    do { \
+      if (pbr_cursor_state_changed(slot, uint64_t(state))) { \
+        printf("[PBR-CURSOR] " __VA_ARGS__); \
+        fflush(stdout); \
+      } \
+    } while (0)
+#else
+#  define PBR_CURSOR_LOG(slot, state, ...) ((void)0)
+#endif
+
 static bool paint_overlay_alpha_mask_mtex(const Paint *paint,
                                           const Brush *br,
                                           const ViewContext *vc,
@@ -188,8 +227,12 @@ static int same_tex_snap(TexSnapshot *snap,
                          float zoom,
                          float radius,
                          int curve_preset,
-                         const Tex *alpha_tex)
+                         const Tex *alpha_tex,
+                         const ed::material_bake::MaterialSourcePreview *material_source)
 {
+  const ImBuf *material_ibuf = material_source != nullptr ? material_source->ibuf : nullptr;
+  const float4 material_constant = material_source != nullptr ? material_source->constant :
+                                                                float4(0.0f);
   return (/* make brush smaller shouldn't cause a resample */
           //(mtex->brush_map_mode != MTEX_MAP_MODE_VIEW ||
           //(BKE_brush_size_get(vc->scene, brush) <= snap->BKE_brush_size_get)) &&
@@ -200,7 +243,9 @@ static int same_tex_snap(TexSnapshot *snap,
           (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL || snap->old_zoom == zoom) &&
           snap->old_col == col && snap->old_tex == mtex->tex &&
           snap->old_map_mode == mtex->brush_map_mode && snap->old_rot == mtex->rot &&
-          (!col || snap->old_curve_preset == curve_preset) && snap->old_alpha_tex == alpha_tex);
+          (!col || snap->old_curve_preset == curve_preset) && snap->old_alpha_tex == alpha_tex &&
+          snap->old_material_ibuf == material_ibuf &&
+          snap->old_material_constant == material_constant);
 }
 
 static void make_tex_snap(TexSnapshot *snap,
@@ -209,7 +254,8 @@ static void make_tex_snap(TexSnapshot *snap,
                           float radius,
                           const MTex *mtex,
                           int curve_preset,
-                          const Tex *alpha_tex)
+                          const Tex *alpha_tex,
+                          const ed::material_bake::MaterialSourcePreview *material_source)
 {
   snap->old_zoom = zoom;
   snap->old_radius = radius;
@@ -220,6 +266,9 @@ static void make_tex_snap(TexSnapshot *snap,
   snap->old_rot = mtex->rot;
   snap->old_curve_preset = curve_preset;
   snap->old_alpha_tex = alpha_tex;
+  snap->old_material_ibuf = material_source != nullptr ? material_source->ibuf : nullptr;
+  snap->old_material_constant = material_source != nullptr ? material_source->constant :
+                                                             float4(0.0f);
 }
 
 struct LoadTexData {
@@ -235,7 +284,36 @@ struct LoadTexData {
   float rotation;
   float radius;
   const MTex *alpha_mtex;
+  /** Source Mode: Material pixels. Null in Source Mode: Maps, where #mtex carries a #Tex. */
+  const ed::material_bake::MaterialSourcePreview *material_source;
 };
+
+/**
+ * Sample \a source at brush-local (\a x, \a y), the same coordinates #paint_get_tex_pixel is given
+ * for a #Tex source.
+ *
+ * Placement matches #ChannelSourceSet::sample_image_direct so the overlay lands where the stroke
+ * will: #MTex size/ofs, then the [-1, 1] to [0, 1] remap, then a wrapped bilinear fetch. A baked
+ * buffer has no #Tex and therefore no extension mode of its own, so it always repeats.
+ */
+static void paint_sample_material_source(const ed::material_bake::MaterialSourcePreview &source,
+                                         const MTex &mtex,
+                                         const float x,
+                                         const float y,
+                                         float &r_value,
+                                         float r_rgba[4])
+{
+  float4 rgba = source.constant;
+  if (source.ibuf != nullptr) {
+    const float vx = mtex.size[0] * (x + mtex.ofs[0]);
+    const float vy = mtex.size[1] * (y + mtex.ofs[1]);
+    const float px = (vx + 1.0f) * 0.5f * float(source.ibuf->x);
+    const float py = (vy + 1.0f) * 0.5f * float(source.ibuf->y);
+    rgba = imbuf::interpolate_bilinear_wrap_fl(source.ibuf, px, py);
+  }
+  copy_v4_v4(r_rgba, rgba);
+  r_value = IMB_colormanagement_get_luminance(rgba);
+}
 
 static void load_tex_task_cb_ex(void *__restrict userdata,
                                 const int j,
@@ -292,7 +370,10 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
     if (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL) || len <= 1.0f) {
       /* It is probably worth optimizing for those cases where the texture is not rotated by
        * skipping the calls to atan2, sqrtf, sin, and cos. */
-      if (mtex->tex && (rotation > 0.001f || rotation < -0.001f)) {
+      /* A Material source has no #Tex but is still placed by the #MTex, rotation included. */
+      if ((mtex->tex || data->material_source != nullptr) &&
+          (rotation > 0.001f || rotation < -0.001f))
+      {
         const float angle = atan2f(y, x) + rotation;
 
         x = len * cosf(angle);
@@ -301,7 +382,12 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
 
       float avg;
       float rgba[4];
-      paint_get_tex_pixel(mtex, x, y, pool, thread_id, &avg, rgba);
+      if (data->material_source != nullptr) {
+        paint_sample_material_source(*data->material_source, *mtex, x, y, avg, rgba);
+      }
+      else {
+        paint_get_tex_pixel(mtex, x, y, pool, thread_id, &avg, rgba);
+      }
 
       if (col) {
         const bool is_data = colorspace != nullptr &&
@@ -373,7 +459,8 @@ static int load_tex(Paint *paint,
                     float zoom,
                     bool col,
                     bool primary,
-                    const MTex *mtex_override = nullptr)
+                    const MTex *mtex_override = nullptr,
+                    const ed::material_bake::MaterialSourcePreview *material_source = nullptr)
 {
   bool init;
   TexSnapshot *target;
@@ -404,7 +491,8 @@ static int load_tex(Paint *paint,
                            zoom,
                            radius,
                            curve_preset,
-                           alpha_mtex != nullptr ? alpha_mtex->tex : nullptr) ||
+                           alpha_mtex != nullptr ? alpha_mtex->tex : nullptr,
+                           material_source) ||
             (col && (overlay_flags & PAINT_OVERLAY_INVALID_CURVE));
 
   init = (target->overlay_texture != nullptr);
@@ -419,7 +507,8 @@ static int load_tex(Paint *paint,
                   radius,
                   mtex,
                   curve_preset,
-                  alpha_mtex != nullptr ? alpha_mtex->tex : nullptr);
+                  alpha_mtex != nullptr ? alpha_mtex->tex : nullptr,
+                  material_source);
 
     if (col) {
       BKE_curvemapping_init(br->curve_distance_falloff);
@@ -482,6 +571,7 @@ static int load_tex(Paint *paint,
     data.rotation = rotation;
     data.radius = radius;
     data.alpha_mtex = alpha_mtex;
+    data.material_source = material_source;
 
     TaskParallelSettings settings;
     BLI_parallel_range_settings_defaults(&settings);
@@ -654,7 +744,8 @@ static bool paint_draw_tex_overlay(Paint *paint,
                                    const PaintMode mode,
                                    bool col,
                                    bool primary,
-                                   const MTex *mtex_override = nullptr)
+                                   const MTex *mtex_override = nullptr,
+                                   const ed::material_bake::MaterialSourcePreview *material_source = nullptr)
 {
   rctf quad;
   /* Check for overlay mode. */
@@ -675,15 +766,35 @@ static bool paint_draw_tex_overlay(Paint *paint,
     }
   }
 
-  if (!(mtex->tex) ||
-      !((mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL) ||
-        (valid && ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_TILED))))
-  {
+  /* A Material source stands in for the #Tex: in Source Mode: Material the channel has none, and
+   * its pixels come from the bake instead. */
+  const bool has_pixels = mtex->tex != nullptr ||
+                          (material_source != nullptr && material_source->usable);
+  const bool map_mode_drawable = (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL) ||
+                                 (valid &&
+                                  ELEM(mtex->brush_map_mode,
+                                       MTEX_MAP_MODE_VIEW,
+                                       MTEX_MAP_MODE_TILED));
+  if (mtex_override != nullptr) {
+    PBR_CURSOR_LOG(3,
+                   uint64_t(has_pixels) | uint64_t(map_mode_drawable) << 1 |
+                       uint64_t(valid) << 2 |
+                       uint64_t(uint16_t(mtex->brush_map_mode)) << 8 | uint64_t(mode) << 24,
+                   "draw: mode=%d map_mode=%d valid=%d has_pixels=%d drawable=%d "
+                   "material_source=%p\n",
+                   int(mode),
+                   int(mtex->brush_map_mode),
+                   int(valid),
+                   int(has_pixels),
+                   int(map_mode_drawable),
+                   (const void *)material_source);
+  }
+  if (!has_pixels || !map_mode_drawable) {
     return false;
   }
 
   bke::PaintRuntime *paint_runtime = paint->runtime;
-  if (load_tex(paint, brush, vc, zoom, col, primary, mtex_override)) {
+  if (load_tex(paint, brush, vc, zoom, col, primary, mtex_override, material_source)) {
     GPU_color_mask(true, true, true, true);
     GPU_depth_test(GPU_DEPTH_NONE);
 
@@ -896,7 +1007,8 @@ static bool paint_draw_alpha_overlay(Paint *paint,
                                      int y,
                                      float zoom,
                                      PaintMode mode,
-                                     const MTex *material_preview_mtex = nullptr)
+                                     const MTex *material_preview_mtex = nullptr,
+                                     const ed::material_bake::MaterialSourcePreview *material_source = nullptr)
 {
   /* Color means that primary brush texture is colored and secondary is used for alpha/mask
    * control. A material paint channel preview is always colored: it previews the actual pattern
@@ -920,7 +1032,7 @@ static bool paint_draw_alpha_overlay(Paint *paint,
   if (col) {
     if (!(flags & PAINT_OVERLAY_OVERRIDE_PRIMARY)) {
       alpha_overlay_active = paint_draw_tex_overlay(
-          paint, brush, vc, x, y, zoom, mode, true, true, material_preview_mtex);
+          paint, brush, vc, x, y, zoom, mode, true, true, material_preview_mtex, material_source);
     }
     /* Material Paint has no secondary/mask channel equivalent to preview. */
     if (!(flags & PAINT_OVERLAY_OVERRIDE_SECONDARY) && !material_preview_mtex) {
@@ -1018,6 +1130,15 @@ static bool paint_cursor_context_init(bContext *C,
       ((pcontext.mode == PaintMode::Sculpt &&
         pcontext.brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) ||
        pcontext.mode == PaintMode::Texture2D);
+  PBR_CURSOR_LOG(4,
+                 uint64_t(try_material_preview) | uint64_t(pcontext.mode) << 8 |
+                     uint64_t(pcontext.brush->sculpt_brush_type) << 16 |
+                     uint64_t(pcontext.brush->material_paint != nullptr) << 32,
+                 "gate: mode=%d material_paint=%p sculpt_brush_type=%d try_preview=%d\n",
+                 int(pcontext.mode),
+                 (const void *)pcontext.brush->material_paint,
+                 int(pcontext.brush->sculpt_brush_type),
+                 int(try_material_preview));
   if (try_material_preview) {
     const PaintModeSettings &paint_mode_settings = CTX_data_tool_settings(C)->paint_mode;
     /* Image Editor Paint always uses the 2D cursor; do not require the Sculpt canvas enum, so a
@@ -1027,19 +1148,45 @@ static bool paint_cursor_context_init(bContext *C,
                            ELEM(paint_mode_settings.canvas_source,
                                 PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
                                 PAINT_CANVAS_SOURCE_MATERIAL);
+    PBR_CURSOR_LOG(5,
+                   uint64_t(canvas_ok) | uint64_t(paint_mode_settings.canvas_source) << 8 |
+                       uint64_t(pcontext.mode) << 16 |
+                       uint64_t(pcontext.paint->visible_material_channels) << 24,
+                   "canvas: mode=%d canvas_source=%d canvas_ok=%d visible_channels=0x%x\n",
+                   int(pcontext.mode),
+                   int(paint_mode_settings.canvas_source),
+                   int(canvas_ok),
+                   uint32_t(pcontext.paint->visible_material_channels));
     if (canvas_ok) {
-      const bool has_preview = BKE_paint_material_preview_mtex_get(
-          *pcontext.brush->material_paint,
-          paint_mode_settings,
-          pcontext.paint != nullptr ? pcontext.paint->visible_material_channels :
-                                      PAINT_MATERIAL_CHANNELS_VISIBLE_ALL,
-          pcontext.material_preview_mtex_storage);
-      /* Image Editor has no Area Plane overlay: 2D sampling remaps AREA/3D to View, and the
-       * overlay drawer only accepts View/Tiled/Stencil. Match that so the source shows on the
-       * brush circle (including F / change size). In Sculpt, idle View is still skipped — it
-       * only doubles the circle — unless the size is being dragged (#draw_anchored). */
-      if (pcontext.mode == PaintMode::Texture2D &&
-          ELEM(pcontext.material_preview_mtex_storage.brush_map_mode,
+      const int visible_channels = pcontext.paint != nullptr ?
+                                       pcontext.paint->visible_material_channels :
+                                       PAINT_MATERIAL_CHANNELS_VISIBLE_ALL;
+      /* Source Mode: Material has no #Tex to sample, so its pixels come from the bake instead.
+       * Everything downstream -- placement, map mode, the hide rules below -- stays shared. */
+      bool has_preview = false;
+      if (pcontext.brush->material_paint->source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+        has_preview = ed::material_bake::material_source_preview_get(
+            *pcontext.brush->material_paint,
+            paint_mode_settings,
+            visible_channels,
+            pcontext.material_preview_source,
+            pcontext.material_preview_bake);
+        pcontext.material_preview_mtex_storage = dna::shallow_copy(
+            pcontext.material_preview_source.mtex);
+      }
+      else {
+        has_preview = BKE_paint_material_preview_mtex_get(*pcontext.brush->material_paint,
+                                                          paint_mode_settings,
+                                                          visible_channels,
+                                                          pcontext.material_preview_mtex_storage);
+      }
+      /* The overlay drawer only accepts View/Tiled/Stencil, and neither editor has an Area Plane
+       * overlay: the overlay is a flat screen-space quad either way. 2D sampling already remaps
+       * AREA/3D to View for the same reason, so do it here for both, otherwise an Area-mapped
+       * channel -- what Material sources use by default -- never previews at all. In Sculpt, idle
+       * View is still skipped (it only doubles the circle) unless the size is being dragged
+       * (#draw_anchored). */
+      if (ELEM(pcontext.material_preview_mtex_storage.brush_map_mode,
                MTEX_MAP_MODE_AREA,
                MTEX_MAP_MODE_3D))
       {
@@ -1054,6 +1201,23 @@ static bool paint_cursor_context_init(bContext *C,
           pcontext.mode != PaintMode::Texture2D &&
           pcontext.material_preview_mtex_storage.brush_map_mode == MTEX_MAP_MODE_VIEW &&
           !pcontext.paint->runtime->draw_anchored;
+      PBR_CURSOR_LOG(2,
+                     uint64_t(has_preview) | uint64_t(hide_idle_view_in_sculpt) << 1 |
+                         uint64_t(hide_for_active_tiled_stroke) << 2 |
+                         uint64_t(uint16_t(
+                             pcontext.material_preview_mtex_storage.brush_map_mode))
+                             << 8 |
+                         uint64_t(pcontext.mode) << 24 |
+                         uint64_t(pcontext.material_preview_source.usable) << 32,
+                     "init: mode=%d source_mode=%d has_preview=%d map_mode=%d "
+                     "hide_idle_view=%d hide_tiled=%d source_usable=%d\n",
+                     int(pcontext.mode),
+                     int(pcontext.brush->material_paint->source_mode),
+                     int(has_preview),
+                     int(pcontext.material_preview_mtex_storage.brush_map_mode),
+                     int(hide_idle_view_in_sculpt),
+                     int(hide_for_active_tiled_stroke),
+                     int(pcontext.material_preview_source.usable));
       if (has_preview && !hide_idle_view_in_sculpt && !hide_for_active_tiled_stroke) {
         pcontext.material_preview_mtex = &pcontext.material_preview_mtex_storage;
       }
@@ -1274,7 +1438,10 @@ static void paint_cursor_check_and_draw_alpha_overlays(PaintCursorContext &pcont
                                                           pcontext.mval.y,
                                                           pcontext.zoomx,
                                                           pcontext.mode,
-                                                          pcontext.material_preview_mtex);
+                                                          pcontext.material_preview_mtex,
+                                                          pcontext.material_preview_source.usable ?
+                                                              &pcontext.material_preview_source :
+                                                              nullptr);
 }
 
 static void paint_cursor_update_anchored_location(PaintCursorContext &pcontext)
@@ -1315,6 +1482,55 @@ static void paint_cursor_restore_drawing_state()
   GPU_line_smooth(false);
 }
 
+/**
+ * Keep the bake of the brush's source material current.
+ *
+ * Driven from the cursor rather than from a notifier because the bake key is derived from the
+ * material's node trees: comparing it is what makes an edit anywhere in that graph -- including
+ * inside a nested node group, which propagates no notifier of its own -- pick itself up. The
+ * properties that select which bake is wanted do kick one off directly, from RNA; this is the
+ * backstop for everything that changes the material's content instead.
+ *
+ * Rate limited because that comparison is not free: building the key walks every node of every
+ * group the material reaches and ensures their topology caches. A cursor redraws on every mouse
+ * move, and a bake takes seconds, so noticing an edit a fraction of a second late costs nothing
+ * while doing the walk hundreds of times a second on a heavy graph is a visible drag on the one
+ * path that has to stay responsive.
+ */
+static void paint_cursor_ensure_material_source_bake(const bContext &C,
+                                                     const PaintCursorContext &pcontext)
+{
+  if (pcontext.brush == nullptr || pcontext.brush->material_paint == nullptr) {
+    return;
+  }
+  BrushMaterialPaint &brush_paint = *pcontext.brush->material_paint;
+  if (brush_paint.source_mode != BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL ||
+      brush_paint.source_material == nullptr)
+  {
+    return;
+  }
+  /* Never mid-stroke. A bake is a full EEVEE render competing with the stroke for the GPU, and
+   * when the source material samples the very image being painted -- which #image_changed marks
+   * stale on every dab -- starting one per stroke would mean baking continuously while the user
+   * paints. The stroke keeps the bake it was handed at its start regardless, so there is nothing
+   * to gain from rebaking before it ends. */
+  if (pcontext.paint != nullptr && pcontext.paint->runtime->stroke_active) {
+    return;
+  }
+
+  /* Main thread only, so a plain static is enough. */
+  constexpr double check_interval_seconds = 0.25;
+  static double last_check_seconds = 0.0;
+  const double now_seconds = BLI_time_now_seconds();
+  if (now_seconds - last_check_seconds < check_interval_seconds) {
+    return;
+  }
+  last_check_seconds = now_seconds;
+
+  ed::material_bake::material_source_bake_ensure(
+      C, *brush_paint.source_material, brush_paint.source_bake_size);
+}
+
 static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, void * /*unused*/)
 {
   PRF_scope(ProfileCategory::Default);
@@ -1322,6 +1538,10 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
   if (!paint_cursor_context_init(C, xy, tilt, pcontext)) {
     return;
   }
+
+  /* Before the enabled check below: a brush whose cursor the user turned off still paints, so it
+   * still needs its source material baked. */
+  paint_cursor_ensure_material_source_bake(*C, pcontext);
 
   if (!paint_cursor_is_brush_cursor_enabled(pcontext)) {
     /* For Grease Pencil draw mode, we want to we only render a small mouse cursor (dot) if the

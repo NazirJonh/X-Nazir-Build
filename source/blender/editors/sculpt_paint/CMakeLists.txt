@@ -277,6 +277,7 @@ set(LIB
   PRIVATE bf::dependencies::zstd
   PRIVATE bf::dependencies::optional::potrace
   bf_editor_curves
+  bf_editor_render
 )
 
 if(WITH_GTESTS)

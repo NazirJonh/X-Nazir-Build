@@ -1809,12 +1809,16 @@ void buttons_tag_bar_region_draw(const bContext *C, ARegion *region)
   data->total_width = xco;
 
   /* Scroll button (if needed) */
-  if (data->total_width > region->winx) {
+  if (data->total_width > region->winx && state.scroll_offset != nullptr) {
     [[maybe_unused]] Layout &row = layout.row(false);
-    uiDefBut(block, ButtonType::Scroll, "",
-             0, 0, UI_UNIT_X, UI_UNIT_Y,
-             state.scroll_offset, 0.0f, float(data->max_scroll),
-             "");
+    /* #uiDefButV rather than #uiDefBut so the pointer type is deduced from the target. Passing a
+     * bare #ButtonType leaves #ButPointerType::None, and the button then holds a live `int *` it
+     * has not declared the type of: #but_update_ex skips the soft-range update for it, and every
+     * read in #button_value_get falls through its type dispatch. */
+    uiDefButV<int>(block, ButtonType::Scroll, "",
+                   0, 0, UI_UNIT_X, UI_UNIT_Y,
+                   state.scroll_offset, 0.0f, float(data->max_scroll),
+                   "");
   }
 
   block_end(C, block);

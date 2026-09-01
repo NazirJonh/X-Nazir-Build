@@ -78,12 +78,47 @@ namespace blender {
 
 // static CLG_LogRef LOG = {"blend.doversion"};
 
+/**
+ * Drop the TAG_BAR region from Properties editors.
+ *
+ * Earlier versions of this file gave the editor one. It has nothing to filter -- it shows the
+ * active object's data rather than browsing taggable content -- and `space_buttons.cc` no longer
+ * registers a region type for it, so a leftover region would sit in the file forever with nothing
+ * to initialize or draw it.
+ */
+static void do_versions_remove_properties_tag_bar_region(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      /* Also the inactive space data: an area the user has switched away from keeps its regions,
+       * and they come back with it. */
+      for (SpaceLink &sl : area.spacedata) {
+        if (sl.spacetype != SPACE_PROPERTIES) {
+          continue;
+        }
+        ListBaseT<ARegion> *regionbase = (&sl == area.spacedata.first) ? &area.regionbase :
+                                                                        &sl.regionbase;
+        ARegion *region_next = nullptr;
+        for (ARegion *region = static_cast<ARegion *>(regionbase->first); region;
+             region = region_next)
+        {
+          region_next = static_cast<ARegion *>(region->next);
+          if (region->regiontype == RGN_TYPE_TAG_BAR) {
+            MEM_delete(region->runtime);
+            BLI_freelinkN(regionbase, region);
+          }
+        }
+      }
+    }
+  }
+}
+
 /* Ensure editors that support category filtering have the TAG_BAR region. */
 static void do_versions_ensure_spaces_have_tag_bar_region(Main *bmain)
 {
   for (bScreen &screen : bmain->screens) {
     for (ScrArea &area : screen.areabase) {
-      if (ELEM(area.spacetype, SPACE_VIEW3D, SPACE_PROPERTIES, SPACE_NODE, SPACE_IMAGE)) {
+      if (ELEM(area.spacetype, SPACE_VIEW3D, SPACE_NODE, SPACE_IMAGE)) {
         ARegion *region = do_versions_ensure_region(
             &area.regionbase, RGN_TYPE_TAG_BAR, __func__, RGN_TYPE_TOOLS);
 
@@ -166,7 +201,7 @@ static void do_versions_init_tag_filter_state_in_spaces(Main *bmain)
         }
       }
 
-      if (ELEM(area.spacetype, SPACE_VIEW3D, SPACE_PROPERTIES, SPACE_NODE, SPACE_IMAGE)) {
+      if (ELEM(area.spacetype, SPACE_VIEW3D, SPACE_NODE, SPACE_IMAGE)) {
         ARegion *region = do_versions_ensure_region(
             &area.regionbase, RGN_TYPE_TAG_BAR, __func__, RGN_TYPE_TOOLS);
         region->regiontype = RGN_TYPE_TAG_BAR;
@@ -987,6 +1022,34 @@ static void version_material_paint_channel_source_mtex_defaults(Main &bmain)
   }
 }
 
+/* Trailing DNA growth zero-fills, which would leave a zero-sized bake buffer. Maps mode and the
+ * brush layout are correct at zero, so only the size needs restoring. */
+static void version_material_paint_source_defaults_one(BrushMaterialPaint *material_paint)
+{
+  if (material_paint != nullptr && material_paint->source_bake_size == 0) {
+    material_paint->source_bake_size = 1024;
+  }
+}
+
+static void version_material_paint_source_defaults(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    version_material_paint_source_defaults_one(brush.material_paint);
+  }
+  /* The per-brush presets in the tool settings hold their own #BrushMaterialPaint, which grows
+   * with the same DNA and therefore needs the same defaults. */
+  for (Scene &scene : bmain.scenes) {
+    if (scene.toolsettings == nullptr) {
+      continue;
+    }
+    for (PaintMaterialBrushPreset &preset :
+         scene.toolsettings->paint_mode.material_paint_brush_presets)
+    {
+      version_material_paint_source_defaults_one(preset.material_paint);
+    }
+  }
+}
+
 static void version_solid_color_width_height_defaults(Main &bmain)
 {
   for (Scene &scene : bmain.scenes) {
@@ -1112,6 +1175,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
    * blend-file contents (older experimental files may contain stale raw pointers here).
    * Clear unconditionally for all 5.2 loads before any Python-side sync touches them. */
   do_versions_clear_category_runtime_lists_in_wm(bmain);
+
+  /* Before the ensure below, which no longer covers Properties: drop the region that earlier
+   * versions of this file added there. */
+  do_versions_remove_properties_tag_bar_region(bmain);
 
   /* Add TAG_BAR region to editors that support category filtering. */
   do_versions_ensure_spaces_have_tag_bar_region(bmain);
@@ -1707,6 +1774,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
       attributes.remove("paintcurve_selection");
     }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 66)) {
+    version_material_paint_source_defaults(*bmain);
   }
 
   /**

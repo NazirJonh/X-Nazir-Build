@@ -38,6 +38,18 @@ struct State {
    */
   uint64_t display_override_revision = 0;
   /**
+   * The part of the override that changed with #display_override_revision, in image coordinates,
+   * or empty when the whole texture has to be rebuilt from it.
+   *
+   * Empty is the conservative answer and covers three different situations: nothing changed, the
+   * override could not say what changed, and the mapping to the texture is one an axis-aligned
+   * rectangle cannot express -- a rotated canvas or tile drawing. Only a non-empty rectangle is
+   * ever a licence to refresh less than everything.
+   *
+   * Consumed by #ScreenSpaceDrawingMode::update_textures in the same frame it is set.
+   */
+  rcti display_override_changed_region = {0, 0, 0, 0};
+  /**
    * Whether an override buffer was really produced this frame, as opposed to the space merely
    * being set to want one.
    *

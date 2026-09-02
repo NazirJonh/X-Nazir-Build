@@ -12,6 +12,10 @@
 
 #include <cstdint>
 
+#include "BLI_math_vector_types.hh"
+
+#include "DNA_vec_types.h"
+
 struct Image;
 struct wmTimer;
 
@@ -41,6 +45,27 @@ struct PaintSelectSession {
 
 namespace ed::image {
 
+/* What a Combined preview may be narrowed to while the main region is drawing it.
+ *
+ * Both fields are the viewport's alone. Everything else that acquires the preview -- the
+ * eyedropper, the scopes, image saving -- reads pixels this state says nothing about, so it must
+ * see the cleared value and get the whole preview at full resolution. See
+ * #SpaceImage_Runtime::combined_preview_draw for how that is enforced. */
+struct CombinedPreviewDrawState {
+  /* The part of the canvas about to be drawn, in canvas pixels. Empty when nothing is drawing. */
+  rcti clip = {0, 0, 0, 0};
+  /* Region pixels the canvas is drawn into, so the preview is not shaded finer than it can be
+   * shown. Zero when nothing is drawing. */
+  int2 display_size = int2(0);
+
+  /* Whether a draw is in flight. Keyed on the display size rather than the clip, because a canvas
+   * scrolled off screen legitimately arms a degenerate clip. */
+  bool is_armed() const
+  {
+    return this->display_size.x > 0 && this->display_size.y > 0;
+  }
+};
+
 /* Runtime data owned by SpaceImage, allocated on space create, freed on space free. */
 struct SpaceImage_Runtime {
   /* Floating selection operation state (move / transform) for Image Paint mode.
@@ -61,6 +86,28 @@ struct SpaceImage_Runtime {
   const Image *selection_outline_image = nullptr;
   /* Value of #BKE_image_paint_selection_mask_revision_get when the batch was built. */
   uint64_t selection_outline_revision = 0;
+
+  /* What the main region is drawing this instant, or nothing at all when no draw is in flight.
+   *
+   * Armed by #image_main_region_draw for the duration of #DRW_draw_view and cleared again the
+   * moment that returns, because #ED_space_image_acquire_composite_buffer is reached both from
+   * the image engine -- which only ever looks at the pixels named here -- and from the eyedropper,
+   * the scopes and image saving, which look at all of them. Narrowing the Combined preview for the
+   * second group would hand them stale pixels, so the arming window is what tells the two apart
+   * and it must not outlive the draw. #ScopedCombinedPreviewDraw is what guarantees that. */
+  CombinedPreviewDrawState combined_preview_draw;
+
+  /* The canvas the Combined preview last resolved to, and the #Image it was resolved for.
+   *
+   * #ED_space_image_get_size is reached several times per redraw and its composite branch would
+   * otherwise walk the node tree of a material on each one, so the answer is remembered here as
+   * the preview is produced. A UID of zero means nothing is remembered, which is also how a
+   * material that stops resolving clears it.
+   *
+   * At most one frame stale, which is what the cache it stands in for already was: the size query
+   * happens before the preview is produced within a frame either way. */
+  int2 combined_preview_canvas = int2(0);
+  uint32_t combined_preview_canvas_image_uid = 0;
 };
 
 } /* namespace ed::image */

@@ -24,6 +24,7 @@
 #  include <cstdint>
 
 #  include "atomic_ops.h"
+#  include "BLI_math_base.h"
 #  include "BLI_string.h"
 #  include "BLI_time.h"
 #  include "BLI_utildefines.h"
@@ -359,6 +360,29 @@ struct CombinedFrameStats {
   int64_t pixels_processed = 0;
   int width = 0;
   int height = 0;
+  /**
+   * How the preview was asked for this frame: how many times, the largest clip any of those calls
+   * declared, and how many declared none at all.
+   *
+   * The unclipped count is the load-bearing one. A frame that shades the whole canvas has two very
+   * different explanations -- the view really does show all of it, or something acquired the
+   * buffer without declaring a clip and shaded the remainder -- and only this tells them apart.
+   */
+  int eval_calls = 0;
+  int clip_width = 0;
+  int clip_height = 0;
+  int unclipped_calls = 0;
+  /**
+   * Why the cache shaded: how many calls found the whole entry invalid rather than a region of it,
+   * and the largest dirty rectangle any of them was given.
+   *
+   * A frame whose `pixels` equals the clip area has two explanations -- the entry was invalidated
+   * wholesale, or the dirty region really did cover the view -- and only these tell them apart.
+   */
+  int rebuild_full_calls = 0;
+  int rebuild_region_calls = 0;
+  int dirty_width = 0;
+  int dirty_height = 0;
 };
 
 inline CombinedFrameStats &combined_stats()
@@ -400,12 +424,41 @@ inline void combined_set_eval(const double elapsed_seconds,
                               const int height)
 {
   CombinedFrameStats &stats = combined_stats();
+  stats.eval_calls++;
   stats.stage_us[int(CombinedStage::Evaluator)] += seconds_to_us(elapsed_seconds);
   stats.pixels_processed += pixels_processed;
   if (width > 0 && height > 0) {
     stats.width = width;
     stats.height = height;
   }
+}
+
+/** The clip the gather was handed, so a frame that shaded everything says whether it was asked to. */
+inline void combined_set_clip(const int clip_width, const int clip_height)
+{
+  CombinedFrameStats &stats = combined_stats();
+  if (clip_width <= 0 || clip_height <= 0) {
+    stats.unclipped_calls++;
+    return;
+  }
+  /* The largest, not the last: a frame's cost is bounded by the widest area anyone asked for, and
+   * reporting whichever call happened to come last would hide that. */
+  stats.clip_width = max_ii(stats.clip_width, clip_width);
+  stats.clip_height = max_ii(stats.clip_height, clip_height);
+}
+
+/** Why a cache call shaded, reported from the cache itself. */
+inline void combined_set_rebuild(const bool full, const int dirty_width, const int dirty_height)
+{
+  CombinedFrameStats &stats = combined_stats();
+  if (full) {
+    stats.rebuild_full_calls++;
+  }
+  else {
+    stats.rebuild_region_calls++;
+  }
+  stats.dirty_width = max_ii(stats.dirty_width, dirty_width);
+  stats.dirty_height = max_ii(stats.dirty_height, dirty_height);
 }
 
 inline void combined_frame_end_log()
@@ -422,11 +475,20 @@ inline void combined_frame_end_log()
     return;
   }
   CLOG_INFO(&LOG,
-            "combined frame=%llu canvas=%dx%d pixels=%lld",
+            "combined frame=%llu canvas=%dx%d pixels=%lld evals=%d unclipped=%d clip=%dx%d "
+            "full=%d region=%d dirty=%dx%d",
             unsigned long long(stats.frame_index),
             stats.width,
             stats.height,
-            (long long)stats.pixels_processed);
+            (long long)stats.pixels_processed,
+            stats.eval_calls,
+            stats.unclipped_calls,
+            stats.clip_width,
+            stats.clip_height,
+            stats.rebuild_full_calls,
+            stats.rebuild_region_calls,
+            stats.dirty_width,
+            stats.dirty_height);
   print_section_ms("gather (a)", stats.stage_us[int(CombinedStage::Gather)]);
   print_section_ms("composite refresh (b)", stats.stage_us[int(CombinedStage::CompositeRefresh)]);
   print_section_ms("evaluator (c)", stats.stage_us[int(CombinedStage::Evaluator)]);
@@ -479,6 +541,11 @@ class CombinedFrameTimer {
         _paint_channel_perf_combined_frame
 #  define PAINT_CHANNEL_PERF_COMBINED_SET_EVAL(seconds, pixels, width, height) \
     blender::bke::paint_material_channel_perf::combined_set_eval(seconds, pixels, width, height)
+#  define PAINT_CHANNEL_PERF_COMBINED_SET_CLIP(clip_width, clip_height) \
+    blender::bke::paint_material_channel_perf::combined_set_clip(clip_width, clip_height)
+#  define PAINT_CHANNEL_PERF_COMBINED_SET_REBUILD(full, dirty_width, dirty_height) \
+    blender::bke::paint_material_channel_perf::combined_set_rebuild( \
+        full, dirty_width, dirty_height)
 
 #else
 
@@ -522,6 +589,17 @@ inline void add_rows_skipped(uint64_t /*count*/) {}
       (void)(pixels); \
       (void)(width); \
       (void)(height); \
+    } while (0)
+#  define PAINT_CHANNEL_PERF_COMBINED_SET_CLIP(clip_width, clip_height) \
+    do { \
+      (void)(clip_width); \
+      (void)(clip_height); \
+    } while (0)
+#  define PAINT_CHANNEL_PERF_COMBINED_SET_REBUILD(full, dirty_width, dirty_height) \
+    do { \
+      (void)(full); \
+      (void)(dirty_width); \
+      (void)(dirty_height); \
     } while (0)
 
 #endif

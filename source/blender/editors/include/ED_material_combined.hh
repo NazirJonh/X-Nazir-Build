@@ -29,6 +29,28 @@ struct bContext;
 namespace blender::ed::material_combined {
 
 /**
+ * What the viewport knows about the preview it is about to draw, and nobody else may claim.
+ *
+ * Default-constructed means "the whole preview at full resolution", which is what every caller
+ * that reads pixels rather than displaying them -- the eyedropper, the scopes, a save -- must
+ * pass. The defaults are the safe answer precisely so that a caller who does not know about this
+ * struct cannot narrow anything by accident.
+ */
+struct CombinedPreviewRequest {
+  /**
+   * The part of the preview the caller is about to read, in **canvas** coordinates. Empty means
+   * all of it. See #CombinedCacheRequest.clip for what a caller gives up by narrowing it.
+   */
+  rcti clip = {0, 0, 0, 0};
+  /**
+   * The most the caller can display, in pixels. The preview is shaded at the largest power-of-two
+   * fraction of the canvas that still covers this, so a canvas fitted into a small editor is not
+   * shaded at canvas resolution only to be thrown away by the downscale. Zero means no cap.
+   */
+  int2 max_output = int2(0);
+};
+
+/**
  * Gather every channel of \a ma, shade it, and return the cached preview.
  *
  * Synchronous and non-blocking: a region refresh is sub-millisecond and a full rebuild is tens of
@@ -37,12 +59,20 @@ namespace blender::ed::material_combined {
  *
  * The returned buffer is owned by the BKE cache; do not free it.
  *
+ * \param r_changed_region: the part of the preview this call re-shaded, in the **returned
+ *                          buffer's** texel coordinates, or empty when nothing moved. Not canvas
+ *                          coordinates: the buffer covers the whole canvas whatever resolution it
+ *                          was shaded at, so a consumer turns this into UV by dividing by the
+ *                          dimensions of the buffer it is reading, and canvas texels would be
+ *                          wrong by exactly that factor.
  * \return null when nothing resolves, which is the caller's cue to fall back to the plain image.
  */
 ImBuf *combined_preview_ensure(Main &bmain,
                                const Material &ma,
                                const CombinedPreviewLighting &lighting,
+                               const CombinedPreviewRequest &request = {},
                                uint64_t *r_revision = nullptr,
+                               rcti *r_changed_region = nullptr,
                                CombinedEvalStats *r_stats = nullptr);
 
 /**

@@ -10,6 +10,7 @@
 
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
+#include "BKE_image_partial_update.hh"
 #include "BKE_main.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
@@ -30,8 +31,8 @@
 #include "BLI_string.h"
 #include "BLI_task.hh"
 #include "BLI_time.h"
-#include "BLI_uuid.h"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
 
 #include "BLT_translation.hh"
 
@@ -45,8 +46,13 @@
 #include "IMB_imbuf_types.hh"
 
 #include <cstring>
+#include <memory>
 
 namespace blender {
+
+/* The image change log the composite cache subscribes to. Brought in wholesale because the switch
+ * over #ePartialUpdateCollectResult reads badly with the full qualification on every label. */
+using namespace bke::image::partial_update;
 
 /* -------------------------------------------------------------------- */
 /** \name Stack Derivation
@@ -213,11 +219,12 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
   mix->location[1] = 180;
 
   auto link = [&](bNode &from, const char *from_socket, bNode &to, const char *to_socket) {
-    bke::node_add_link(*group,
-                       from,
-                       *bke::node_find_socket(from, SOCK_OUT, UString::from_ptr_noinline(from_socket)),
-                       to,
-                       *bke::node_find_socket(to, SOCK_IN, UString::from_ptr_noinline(to_socket)));
+    bke::node_add_link(
+        *group,
+        from,
+        *bke::node_find_socket(from, SOCK_OUT, UString::from_ptr_noinline(from_socket)),
+        to,
+        *bke::node_find_socket(to, SOCK_IN, UString::from_ptr_noinline(to_socket)));
   };
 
   link(*group_input, "Socket_0", *decode_a, "Vector");
@@ -244,7 +251,8 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
 
 /** \} */
 
-/** The inputs of \a node when it is a colour Mix node, in either the legacy or the current form. */
+/** The inputs of \a node when it is a colour Mix node, in either the legacy or the current form.
+ */
 struct CompositeMixNode {
   const bNodeSocket *factor = nullptr;
   /** What is below in the stack. */
@@ -480,8 +488,7 @@ static bool composite_stack_from_graph(const Material &ma,
      * Color input, in the same encoded space a stroke paints -- so that is where the chain is
      * read from, exactly as the resolver reads a single normal map from there. */
     const bNodeSocket *normal_source = BKE_paint_material_source_socket(*socket);
-    if (normal_source == nullptr ||
-        normal_source->owner_node().type_legacy != SH_NODE_NORMAL_MAP)
+    if (normal_source == nullptr || normal_source->owner_node().type_legacy != SH_NODE_NORMAL_MAP)
     {
       return false;
     }
@@ -532,13 +539,11 @@ static bool composite_stack_from_layer_maps(
 {
   r_layers.clear();
   for (const PaintMaterialCompositeImageLayer &reference : reference_layers) {
-    if (reference.color_image == nullptr ||
-        BLI_uuid_is_nil(reference.color_image->paint_layer_id))
+    if (reference.color_image == nullptr || BLI_uuid_is_nil(reference.color_image->paint_layer_id))
     {
       continue;
     }
-    Image *map = composite_layer_map_find(
-        bmain, reference.color_image->paint_layer_id, channel);
+    Image *map = composite_layer_map_find(bmain, reference.color_image->paint_layer_id, channel);
     if (map == nullptr) {
       continue;
     }
@@ -623,9 +628,9 @@ Span<int> BKE_paint_material_composite_passes()
 Span<int> BKE_paint_material_display_passes()
 {
   /* Combined leads, as it does in the Compositor. Kept out of #BKE_paint_material_composite_passes
-   * because every consumer of that list treats its values as roles -- indexing a per-channel array,
-   * looking the value up in the channel descriptor table, resolving a layer map -- and none of
-   * those is meaningful for a display mode. A second list means no existing loop has to learn
+   * because every consumer of that list treats its values as roles -- indexing a per-channel
+   * array, looking the value up in the channel descriptor table, resolving a layer map -- and none
+   * of those is meaningful for a display mode. A second list means no existing loop has to learn
    * about it. */
   static const int passes[] = {
       PAINT_LAYER_PASS_COMBINED,
@@ -722,11 +727,8 @@ static bool composite_mask_ibuf_is_valid(const ImBuf *ibuf, const int width, con
   return ibuf->byte_buffer.data != nullptr || ibuf->float_buffer.data != nullptr;
 }
 
-static float mask_factor_at(const ImBuf *mask_ibuf,
-                            const bool from_alpha,
-                            const int x,
-                            const int y,
-                            const float influence)
+static float mask_factor_at(
+    const ImBuf *mask_ibuf, const bool from_alpha, const int x, const int y, const float influence)
 {
   if (mask_ibuf == nullptr || influence <= 0.0f) {
     return 1.0f;
@@ -1110,10 +1112,9 @@ uint64_t BKE_paint_material_composite_stack_hash(
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
     /* Session UIDs rather than pointers: a freed image's address can come back as a different
      * one, and the hash is the only thing standing between that and a stale composite. */
-    hash = get_default_hash(
-        hash,
-        layer.color_image != nullptr ? layer.color_image->id.session_uid : 0,
-        layer.mask_image != nullptr ? layer.mask_image->id.session_uid : 0);
+    hash = get_default_hash(hash,
+                            layer.color_image != nullptr ? layer.color_image->id.session_uid : 0,
+                            layer.mask_image != nullptr ? layer.mask_image->id.session_uid : 0);
     hash = get_default_hash(hash,
                             int(layer.blend),
                             layer.enabled,
@@ -1153,8 +1154,32 @@ struct CompositeCacheKey {
   }
 };
 
+/**
+ * Owning handles for the two resources a cache entry holds.
+ *
+ * By value rather than as raw pointers freed by hand, because the entry is destroyed from four
+ * places -- eviction, a failed evaluation, a per-material drop and the teardown -- and every one
+ * of them used to have to remember both. A path added later that forgets is a leak that nothing
+ * reports.
+ */
+struct ImBufDeleter {
+  void operator()(ImBuf *ibuf) const
+  {
+    IMB_freeImBuf(ibuf);
+  }
+};
+using ImBufPtr = std::unique_ptr<ImBuf, ImBufDeleter>;
+
+struct PartialUpdateUserDeleter {
+  void operator()(PartialUpdateUser *user) const
+  {
+    BKE_image_partial_update_free(user);
+  }
+};
+using PartialUpdateUserPtr = std::unique_ptr<PartialUpdateUser, PartialUpdateUserDeleter>;
+
 struct CompositeCacheEntry {
-  ImBuf *ibuf = nullptr;
+  ImBufPtr ibuf;
   int width = 0;
   int height = 0;
   uint64_t stack_hash = 0;
@@ -1164,6 +1189,21 @@ struct CompositeCacheEntry {
   rcti dirty_region = {0, 0, 0, 0};
   /** Images the composite read, so an edit to one can be reported without knowing the stack. */
   Vector<uint32_t> image_session_uids;
+  /**
+   * One partial-update subscription per source image, keyed by #ID.session_uid.
+   *
+   * The image records what changed in it, per tile, whoever caused the change; polling that is
+   * what makes this cache independent of anyone remembering to tag it. More to the point, it is
+   * what stops a blanket tag from discarding a precise one: painting tags the image ID on every
+   * dab, and the depsgraph flush that follows used to reach #image_changed and mark the whole
+   * composite dirty -- re-flattening the entire stack for a dab that had already been reported
+   * exactly.
+   *
+   * Never holds an #Image pointer. The images arrive with every `cache_ensure` call, so a poll
+   * always has a fresh one, and a cache outliving an ID it pointed at would be a crash rather than
+   * a stale pixel.
+   */
+  Map<uint32_t, PartialUpdateUserPtr> partial_update_users;
   /**
    * Taken from a counter shared by the whole cache, so a consumer holding a copy of the pixels can
    * tell it is old.
@@ -1215,12 +1255,17 @@ static int64_t composite_entry_size_in_bytes(const CompositeCacheEntry &entry)
   return int64_t(entry.width) * entry.height * 4;
 }
 
-static void composite_entry_free(CompositeCacheEntry &entry)
+/**
+ * Drop the buffer and the subscriptions of \a entry while keeping the entry itself.
+ *
+ * Only for a resize, which needs a new buffer of a new size and -- because the subscriptions go
+ * with it -- a fresh set of them, whose first poll asks for the full rebuild a resize needs
+ * anyway. Removing an entry from the cache needs no call: the handles free themselves.
+ */
+static void composite_entry_reset(CompositeCacheEntry &entry)
 {
-  if (entry.ibuf != nullptr) {
-    IMB_freeImBuf(entry.ibuf);
-    entry.ibuf = nullptr;
-  }
+  entry.ibuf.reset();
+  entry.partial_update_users.clear();
 }
 
 /** Evict least recently used entries until the cache fits the budget, never the one just made. */
@@ -1246,9 +1291,7 @@ static void composite_cache_enforce_budget(const CompositeCacheKey &keep)
       break;
     }
     const CompositeCacheKey key = *oldest_key;
-    CompositeCacheEntry &entry = g_cache.entries.lookup(key);
-    total -= composite_entry_size_in_bytes(entry);
-    composite_entry_free(entry);
+    total -= composite_entry_size_in_bytes(g_cache.entries.lookup(key));
     g_cache.entries.remove(key);
   }
 }
@@ -1264,6 +1307,18 @@ static void composite_entry_image_dependencies_set(
     if (layer.mask_image != nullptr) {
       entry.image_session_uids.append_non_duplicates(layer.mask_image->id.session_uid);
     }
+  }
+
+  /* A layer removed from the stack stops being watched, or the entry keeps an allocation and a
+   * poll per frame for an image it no longer reads. */
+  Vector<uint32_t> stale;
+  for (const uint32_t uid : entry.partial_update_users.keys()) {
+    if (!entry.image_session_uids.contains(uid)) {
+      stale.append(uid);
+    }
+  }
+  for (const uint32_t uid : stale) {
+    entry.partial_update_users.remove(uid);
   }
 }
 
@@ -1299,8 +1354,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
   const bool size_changed = entry.ibuf == nullptr || entry.width != width ||
                             entry.height != height;
   if (size_changed) {
-    composite_entry_free(entry);
-    entry.ibuf = IMB_allocImBuf(uint(width), uint(height), ImBufFlags::ByteData);
+    composite_entry_reset(entry);
+    entry.ibuf.reset(IMB_allocImBuf(uint(width), uint(height), ImBufFlags::ByteData));
     if (entry.ibuf == nullptr) {
       g_cache.entries.remove(key);
       return nullptr;
@@ -1308,6 +1363,58 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     entry.ibuf->channels = 4;
     entry.width = width;
     entry.height = height;
+  }
+
+  /* What the source images say changed since the last call.
+   *
+   * Polled rather than reported: a caller that edits pixels no longer has to remember to tell this
+   * cache, and -- the reason this exists -- a blanket ID tag from an unrelated subsystem can no
+   * longer overwrite a precise report with "everything". Placed after the reallocation above so a
+   * resize, which drops the subscriptions with the buffer, is followed by fresh ones whose first
+   * poll asks for the full rebuild a resize needs anyway. */
+  for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
+    for (Image *image : {layer.color_image, layer.mask_image}) {
+      if (image == nullptr) {
+        continue;
+      }
+      PartialUpdateUser *user =
+          entry.partial_update_users
+              .lookup_or_add_cb(
+                  image->id.session_uid,
+                  [&]() { return PartialUpdateUserPtr(BKE_image_partial_update_create(image)); })
+              .get();
+
+      switch (BKE_image_partial_update_collect_changes(image, user)) {
+        case ePartialUpdateCollectResult::FullUpdateNeeded:
+          /* A brand new subscription lands here too, which is right: nothing of this image has
+           * been flattened yet. */
+          entry.dirty_full = true;
+          break;
+        case ePartialUpdateCollectResult::NoChangesDetected:
+          break;
+        case ePartialUpdateCollectResult::PartialChangesDetected: {
+          PartialUpdateRegion change;
+          while (BKE_image_partial_update_get_next_change(user, &change) ==
+                 ePartialUpdateIterResult::ChangeAvailable)
+          {
+            /* A layer stack cannot be tiled, so a change reported for any tile but the first would
+             * land at the wrong place in a single-tile buffer. Give up precision rather than put
+             * pixels somewhere they do not belong. */
+            if (change.tile_number != 1001) {
+              entry.dirty_full = true;
+              break;
+            }
+            if (BLI_rcti_is_empty(&entry.dirty_region)) {
+              entry.dirty_region = change.region;
+            }
+            else {
+              BLI_rcti_union(&entry.dirty_region, &change.region);
+            }
+          }
+          break;
+        }
+      }
+    }
   }
 
   const bool rebuild_all = size_changed || entry.stack_hash != stack_hash || entry.dirty_full;
@@ -1318,13 +1425,13 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
      * must not be handed on as sRGB, or the composite is display-transformed on its way to the
      * screen while the layer it is made of is not. */
     BLI_assert(byte_colorspace != nullptr);
-    IMB_colormanagement_assign_byte_colorspace(entry.ibuf, byte_colorspace);
+    IMB_colormanagement_assign_byte_colorspace(entry.ibuf.get(), byte_colorspace);
   }
 
   if (rebuild_all || rebuild_region) {
     const rcti *region = rebuild_region ? &entry.dirty_region : nullptr;
-    if (!BKE_paint_material_composite_eval_images(image_layers, entry.ibuf, region, r_stats)) {
-      composite_entry_free(entry);
+    if (!BKE_paint_material_composite_eval_images(image_layers, entry.ibuf.get(), region, r_stats))
+    {
       g_cache.entries.remove(key);
       return nullptr;
     }
@@ -1350,7 +1457,7 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     *r_revision = entry.revision;
   }
   composite_cache_enforce_budget(key);
-  return entry.ibuf;
+  return entry.ibuf.get();
 }
 
 void BKE_paint_material_composite_cache_invalidate(const Material *ma)
@@ -1369,32 +1476,6 @@ void BKE_paint_material_composite_cache_invalidate(const Material *ma)
   }
 }
 
-void BKE_paint_material_composite_cache_tag_image_region(const Image &image, const rcti &region)
-{
-  const uint32_t session_uid = image.id.session_uid;
-  for (CompositeCacheEntry &entry : g_cache.entries.values()) {
-    if (!entry.image_session_uids.contains(session_uid)) {
-      continue;
-    }
-    if (BLI_rcti_is_empty(&entry.dirty_region)) {
-      entry.dirty_region = region;
-    }
-    else {
-      BLI_rcti_union(&entry.dirty_region, &region);
-    }
-  }
-}
-
-void BKE_paint_material_composite_cache_tag_image_changed(const Image &image)
-{
-  const uint32_t session_uid = image.id.session_uid;
-  for (CompositeCacheEntry &entry : g_cache.entries.values()) {
-    if (entry.image_session_uids.contains(session_uid)) {
-      entry.dirty_full = true;
-    }
-  }
-}
-
 void BKE_paint_material_composite_cache_free_material(const Material &ma)
 {
   if (g_cache.entries.is_empty()) {
@@ -1406,7 +1487,6 @@ void BKE_paint_material_composite_cache_free_material(const Material &ma)
   Vector<CompositeCacheKey> dead_keys;
   for (auto item : g_cache.entries.items()) {
     if (item.key.material_session_uid == session_uid) {
-      composite_entry_free(item.value);
       dead_keys.append(item.key);
     }
   }
@@ -1418,9 +1498,7 @@ void BKE_paint_material_composite_cache_free_material(const Material &ma)
 
 void BKE_paint_material_composite_cache_free_all()
 {
-  for (CompositeCacheEntry &entry : g_cache.entries.values()) {
-    composite_entry_free(entry);
-  }
+  /* Clearing is the whole teardown: every entry owns its buffer and its subscriptions outright. */
   g_cache.entries.clear();
 }
 

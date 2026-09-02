@@ -255,10 +255,9 @@ void BKE_paint_material_layer_maps_get(const Main &bmain,
  * Hash of everything about \a image_layers that changes the composited pixels except the pixels
  * themselves -- which images, in which order, with which blend, opacity and mask.
  *
- * Image *contents* are deliberately not in here; there is no content version to hash. An edit to
- * a layer's pixels is reported instead, through
- * #BKE_paint_material_composite_cache_tag_image_changed or, for a paint stroke that knows exactly
- * what it touched, #BKE_paint_material_composite_cache_tag_region.
+ * Image *contents* are deliberately not in here; there is no content version to hash. An edit to a
+ * layer's pixels is found instead by #BKE_paint_material_composite_cache_ensure, which polls each
+ * source image's partial-update log.
  */
 uint64_t BKE_paint_material_composite_stack_hash(
     Span<PaintMaterialCompositeImageLayer> image_layers);
@@ -268,6 +267,13 @@ uint64_t BKE_paint_material_composite_stack_hash(
  *
  * Synchronous: unlike a bake this is a few milliseconds, and a whole-buffer rebuild only happens
  * when the stack itself changed. A stroke's own edits are refreshed as rectangles.
+ *
+ * Pixel changes are detected, not reported: the cache subscribes to each source image's
+ * partial-update log and polls it here. A caller that edits a layer's pixels therefore has nothing
+ * to tell this cache, and -- the reason it works that way -- a caller that tags the image ID for
+ * unrelated reasons can no longer turn a known rectangle into "the whole canvas".
+ * #BKE_paint_material_composite_cache_invalidate remains for the other kind of change: the stack's
+ * own description.
  *
  * The returned buffer is owned by the cache and stays valid until the next call for a different
  * material or a #BKE_paint_material_composite_cache_free_all. Do not free it.
@@ -311,30 +317,6 @@ void BKE_paint_material_composite_cache_invalidate(const Material *ma);
  * price of keeping it in one place instead -- see the note on #CompositeCache.
  */
 void BKE_paint_material_composite_cache_free_material(const Material &ma);
-
-/**
- * Mark only \a region of every composite that reads \a image out of date.
- *
- * A stroke knows the rectangle it touched but not which materials composite it, and the cache
- * already tracks that dependency, so the region is reported against the image instead. A layer and
- * the composite share a coordinate space -- a stack whose layers disagree on size is rejected --
- * so the image rectangle is the composite rectangle.
- *
- * Regions accumulate into one bounding rectangle until the next
- * #BKE_paint_material_composite_cache_ensure. A caller that cannot say what it touched must use
- * #BKE_paint_material_composite_cache_invalidate instead; tagging too small a region leaves stale
- * pixels on screen with nothing to correct them later.
- */
-void BKE_paint_material_composite_cache_tag_image_region(const Image &image, const rcti &region);
-
-/**
- * Mark every composite that reads \a image out of date.
- *
- * The counterpart to #material_source_bake_tag_image_changed, and called from the same place, so
- * that "these pixels changed" reaches both caches from one call site instead of each growing its
- * own notion of when an image is stale.
- */
-void BKE_paint_material_composite_cache_tag_image_changed(const Image &image);
 
 /** Drop every cached composite. For teardown and for file load. */
 void BKE_paint_material_composite_cache_free_all();

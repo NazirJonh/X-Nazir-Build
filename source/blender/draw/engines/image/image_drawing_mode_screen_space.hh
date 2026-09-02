@@ -307,7 +307,9 @@ class ScreenSpaceDrawingMode : public AbstractDrawingMode {
    * GPUTextures that are marked dirty are rebuild. GPUTextures that aren't marked dirty are
    * updated with changed region of the image.
    */
-  void update_textures(blender::Image *image, blender::ImageUser *image_user) const;
+  void update_textures(blender::Image *image,
+                       blender::ImageUser *image_user,
+                       ImBuf *override_buffer) const;
 
   /**
    * Update the float buffer in the region given by the partial update checker.
@@ -315,8 +317,31 @@ class ScreenSpaceDrawingMode : public AbstractDrawingMode {
   void do_partial_update_float_buffer(
       ImBuf *float_buffer, PartialUpdateChecker<ImageTileData>::CollectResult &iterator) const;
   void do_partial_update(PartialUpdateChecker<ImageTileData>::CollectResult &iterator) const;
-  void do_full_update_for_dirty_textures(const blender::ImageUser *image_user) const;
-  void do_full_update_gpu_texture(TextureInfo &info, const blender::ImageUser *image_user) const;
+  /**
+   * Re-upload the part of \a info's texture that shows \a changed_region of \a source.
+   *
+   * \param source: float pixels covering one UV unit starting at \a tile_offset. An ordinary tile
+   *                and a display override both fit that description, which is why they share this.
+   * \param changed_region: in \a source's own texel space.
+   *
+   * The mapping to the texture is an axis-aligned rectangle, so this is only correct while the
+   * canvas is unrotated and tile drawing is off. Both callers check that before reaching here.
+   */
+  void do_partial_update_texture_slot(const TextureInfo &info,
+                                      const ImBuf &source,
+                                      blender::float2 tile_offset,
+                                      const rcti &changed_region) const;
+  /**
+   * \param override_buffer: the display override resolved once for this frame, or null when the
+   * space has none. Threaded down rather than re-acquired here: acquiring runs the whole gather --
+   * a graph walk and a composite refresh per channel -- and doing that once per dirty texture slot
+   * on top of once per sync was several times the work the pixels needed.
+   */
+  void do_full_update_for_dirty_textures(const blender::ImageUser *image_user,
+                                         ImBuf *override_buffer) const;
+  void do_full_update_gpu_texture(TextureInfo &info,
+                                  const blender::ImageUser *image_user,
+                                  ImBuf *override_buffer) const;
   /**
    * texture_buffer is the image buffer belonging to the texture_info.
    * tile_buffer is the image buffer of the tile.

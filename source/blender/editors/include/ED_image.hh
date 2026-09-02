@@ -123,16 +123,23 @@ bool ED_space_image_has_composite(const SpaceImage *sima);
  * \param r_revision: bumped whenever the composited pixels change, for a caller that keeps a copy
  *                    of them -- the image editor uploads them to a GPU texture -- and needs to
  *                    know when its copy went stale.
+ * \param r_changed_region: which pixels changed, in the **returned buffer's** own texel
+ *                          coordinates, so that caller can refresh that much of its copy rather
+ *                          than all of it. Empty when nothing moved, which is exactly when
+ *                          \a r_revision did not move either. Only the Combined pass reports it; a
+ *                          channel pass leaves it empty and its consumer must fall back to a full
+ *                          refresh.
  */
 ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
                                                SpaceImage *sima,
-                                               uint64_t *r_revision = nullptr);
+                                               uint64_t *r_revision = nullptr,
+                                               rcti *r_changed_region = nullptr);
 /**
  * The material whose layer stack or texture set \a image belongs to, or null.
  *
  * Exposed because the Image Editor's draw callback needs the same answer the buffer acquisition
- * does -- to start a bake for the Combined preview -- and re-deriving it there would duplicate both
- * the search over #Main and the memo that keeps it off the redraw path.
+ * does -- to start a bake for the Combined preview -- and re-deriving it there would duplicate
+ * both the search over #Main and the memo that keeps it off the redraw path.
  */
 Material *ED_space_image_composite_material_get(Main *bmain, const Image *image);
 /**

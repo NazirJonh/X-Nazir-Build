@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <memory>
 
 #include "BKE_image.hh"
@@ -22,6 +23,7 @@
 
 #include "BLI_hash.hh"
 #include "BLI_index_range.hh"
+#include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
@@ -47,7 +49,7 @@
  * #PBR_MATERIAL_BAKE_DEBUG has one: `editors/sculpt_paint/mesh/paint_debug.hh` belongs to another
  * module and this file cannot reach it.
  */
-#define PBR_COMBINED_GATHER_DEBUG 1
+#define PBR_COMBINED_GATHER_DEBUG 0
 #if PBR_COMBINED_GATHER_DEBUG
 #  include <cstdio>
 #  define PBR_COMBINED_LOG(...) \
@@ -313,12 +315,17 @@ static bool combined_ibuf_is_srgb(const ImBuf &ibuf)
 ImBuf *combined_preview_ensure(Main &bmain,
                                const Material &ma,
                                const CombinedPreviewLighting &lighting,
+                               const CombinedPreviewRequest &request,
                                uint64_t *r_revision,
+                               rcti *r_changed_region,
                                CombinedEvalStats *r_stats)
 {
   PAINT_CHANNEL_PERF_COMBINED_SCOPE(Gather);
   if (r_revision != nullptr) {
     *r_revision = 0;
+  }
+  if (r_changed_region != nullptr) {
+    BLI_rcti_init(r_changed_region, 0, 0, 0, 0);
   }
   GatherScope scope;
 
@@ -406,16 +413,71 @@ ImBuf *combined_preview_ensure(Main &bmain,
     return nullptr;
   }
 
+  /* The output resolution: the largest power-of-two fraction of the canvas that still covers what
+   * the caller can display.
+   *
+   * Quantised to octaves rather than fitted exactly, because a changed output size is a full
+   * rebuild -- an exact fit would rebuild the whole preview on every pixel of zoom, which costs
+   * more than the shading it saves. Powers of two also keep the box filter's footprint whole. */
+  int output_width = width;
+  int output_height = height;
+
+  /* The octave already in use, when it is still a power-of-two fraction of this canvas.
+   *
+   * Every caller starts from it, not only the one that can say how much it will display. The
+   * resolution belongs to whoever is *drawing* the preview; a caller that only reads pixels -- the
+   * scopes, the eyedropper, a save -- passes no cap, and deriving one from the canvas there would
+   * reset the viewport's octave on every panel redraw. That is a full rebuild per frame, for a
+   * reader that is served correctly either way: the buffer covers the whole canvas at any octave.
+   */
+  int previous_width = 0;
+  int previous_height = 0;
+  const bool previous_is_usable = BKE_paint_material_combined_cache_output_size_get(
+                                      ma, previous_width, previous_height) &&
+                                  previous_width > 0 && previous_height > 0 &&
+                                  width % previous_width == 0 && height % previous_height == 0 &&
+                                  is_power_of_2_i(width / previous_width) &&
+                                  is_power_of_2_i(height / previous_height);
+  if (previous_is_usable) {
+    output_width = previous_width;
+    output_height = previous_height;
+  }
+
+  if (request.max_output.x > 0 && request.max_output.y > 0) {
+    /* An octave that no longer covers what has to be shown is not a starting point: climb back to
+     * the canvas and let the halving below settle on the right one. */
+    if (previous_is_usable &&
+        (previous_width < request.max_output.x || previous_height < request.max_output.y))
+    {
+      output_width = width;
+      output_height = height;
+    }
+    /* Halve only while the result would still cover the display with room to spare. That margin is
+     * the hysteresis: the octave drops at 1.4x the display and only climbs back when it no longer
+     * covers at all, so it takes a real change of zoom rather than a pixel of jitter to move it.
+     */
+    constexpr float octave_margin = 1.4f;
+    while (output_width % 2 == 0 && output_height % 2 == 0 &&
+           float(output_width / 2) >= float(request.max_output.x) * octave_margin &&
+           float(output_height / 2) >= float(request.max_output.y) * octave_margin)
+    {
+      output_width /= 2;
+      output_height /= 2;
+    }
+  }
+
   CombinedInputs inputs;
   inputs.width = width;
   inputs.height = height;
+  inputs.output_width = output_width == width ? 0 : output_width;
+  inputs.output_height = output_height == height ? 0 : output_height;
   inputs.emission_strength = combined_emission_strength(ma);
   for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     inputs.channels[i].constant = BKE_paint_material_combined_default_value(
         eMaterialPaintChannel(i));
   }
 
-  Vector<uint32_t> dependency_image_uids;
+  Vector<Image *> dependency_images;
   rcti changed_region;
   BLI_rcti_init(&changed_region, 0, 0, 0, 0);
 
@@ -470,7 +532,7 @@ ImBuf *combined_preview_ensure(Main &bmain,
           input.is_srgb = combined_channel_is_color(channel) && combined_ibuf_is_srgb(*ibuf);
           source = CombinedChannelSource::DirectImage;
           source_detail = image.id.session_uid;
-          dependency_image_uids.append_non_duplicates(image.id.session_uid);
+          dependency_images.append_non_duplicates(&image);
         }
       }
     }
@@ -531,19 +593,44 @@ ImBuf *combined_preview_ensure(Main &bmain,
                      input.constant.w);
   }
 
+  /* Both rectangles arrive in canvas texels and the cache works in output pixels. Rounded
+   * outwards, because a dab that lost its edge to rounding would leave a stale fringe. */
+  CombinedCacheRequest cache_request;
+  cache_request.inputs_hash = inputs_hash;
+  cache_request.dependency_images = dependency_images;
+  cache_request.changed_region = changed_region;
+  cache_request.clip = request.clip;
+  if (inputs.output_width > 0) {
+    const float scale_x = float(output_width) / float(width);
+    const float scale_y = float(output_height) / float(height);
+    const auto scale_rect = [&](rcti &rect) {
+      if (BLI_rcti_is_empty(&rect)) {
+        return;
+      }
+      BLI_rcti_init(&rect,
+                    int(floorf(float(rect.xmin) * scale_x)),
+                    int(ceilf(float(rect.xmax) * scale_x)),
+                    int(floorf(float(rect.ymin) * scale_y)),
+                    int(ceilf(float(rect.ymax) * scale_y)));
+    };
+    scale_rect(cache_request.changed_region);
+    scale_rect(cache_request.clip);
+  }
+
   /* Collected unconditionally, because the perf harness reports the evaluator separately from
    * everything else and the caller usually has no interest in the numbers. */
+  /* Reported in the returned buffer's own texels, which is what the cache already works in. Not
+   * scaled back up to the canvas: the buffer covers the whole canvas whatever its resolution, so a
+   * consumer turning the rectangle into UV divides by the dimensions of the buffer it is reading
+   * -- and handing it canvas texels would be wrong by exactly the octave. */
   CombinedEvalStats stats;
-  ImBuf *result = BKE_paint_material_combined_cache_ensure(ma,
-                                                           inputs,
-                                                           lighting,
-                                                           inputs_hash,
-                                                           changed_region,
-                                                           dependency_image_uids,
-                                                           r_revision,
-                                                           &stats);
+  ImBuf *result = BKE_paint_material_combined_cache_ensure(
+      ma, inputs, lighting, cache_request, r_revision, r_changed_region, &stats);
+  /* The output resolution, not the canvas: it is what the numbers have to be read against. */
   PAINT_CHANNEL_PERF_COMBINED_SET_EVAL(
-      stats.elapsed_seconds, stats.pixels_processed, width, height);
+      stats.elapsed_seconds, stats.pixels_processed, output_width, output_height);
+  PAINT_CHANNEL_PERF_COMBINED_SET_CLIP(BLI_rcti_size_x(&cache_request.clip),
+                                       BLI_rcti_size_y(&cache_request.clip));
   if (r_stats != nullptr) {
     *r_stats = stats;
   }

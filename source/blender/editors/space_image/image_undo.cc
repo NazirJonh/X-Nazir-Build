@@ -53,8 +53,6 @@
 #include "BKE_image_paint_selection.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
-#include "BKE_paint_material_combined.hh"
-#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_undo_system.hh"
@@ -346,20 +344,8 @@ static void ptile_restore_runtime_map(PaintTileMap *paint_tile_map)
 
     BKE_image_partial_update_mark_full_update(image);
 
-    /* A composite reading this image is showing the pixels the restore just took back. Reported as
-     * the tile rectangle, since that is exactly what changed and the composite shares the image's
-     * coordinate space; a stroke and its undo then cost the same to refresh. */
-    rcti tile_region;
-    BLI_rcti_init(&tile_region,
-                  tile_pos.x,
-                  tile_pos.x + tile_copy_size.x,
-                  tile_pos.y,
-                  tile_pos.y + tile_copy_size.y);
-    BKE_paint_material_composite_cache_tag_image_region(*image, tile_region);
-    /* A channel sourced from a plain Image Texture has no composite to report through, so the
-     * Combined preview has to hear about the rectangle directly or it would only ever learn of the
-     * edit as a full invalidation. */
-    BKE_paint_material_combined_cache_tag_image_region(*image, tile_region);
+    /* Neither material cache is told: both subscribe to the image's partial-update log, which the
+     * full-update mark above already wrote to. */
 
     if (ibuf->float_data()) {
       ibuf->userflags |= IB_RECT_INVALID; /* force recreate of char rect */
@@ -631,13 +617,8 @@ static void uhandle_restore_list(ListBaseT<UndoImageHandle> *undo_handles, bool 
     if (changed) {
       BKE_image_mark_dirty(image, ibuf);
       /* TODO(@jbakker): only mark areas that are actually updated to improve performance. */
+      /* Both material caches subscribe to this log, so the mark is all the telling they need. */
       BKE_image_partial_update_mark_full_update(image);
-      /* A composite reading this image now shows the pixels the restore took back, and nothing in
-       * the stack's own description changed for it to notice on its own. Whole-image here, since
-       * this path restores every tile of the buffer rather than a known rectangle. */
-      BKE_paint_material_composite_cache_tag_image_changed(*image);
-      /* And the Combined preview, which may read this image without a composite in between. */
-      BKE_paint_material_combined_cache_tag_image_changed(*image);
 
       if (ibuf->float_data()) {
         ibuf->userflags |= IB_RECT_INVALID; /* Force recreate of char `rect` */
@@ -1493,9 +1474,10 @@ void ED_image_undo_push_end()
    * whoever opened it, so the cost is a lost undo push rather than a type-confused one. */
   if (UNLIKELY(ustack->step_init->type != BKE_UNDOSYS_TYPE_IMAGE)) {
     BLI_assert_unreachable();
-    CLOG_ERROR(&LOG,
-               "image undo push end while a '%s' undo step is open, the image undo push is dropped",
-               ustack->step_init->type ? ustack->step_init->type->name : "<null>");
+    CLOG_ERROR(
+        &LOG,
+        "image undo push end while a '%s' undo step is open, the image undo push is dropped",
+        ustack->step_init->type ? ustack->step_init->type->name : "<null>");
     return;
   }
 

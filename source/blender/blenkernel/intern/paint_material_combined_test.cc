@@ -372,4 +372,78 @@ TEST(paint_material_combined, lighting_hash_tracks_every_field_that_shades)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Output Resolution
+ * \{ */
+
+/* A reduced output shades its own texel count, not the input's. */
+TEST(paint_material_combined, output_resolution_shades_the_output)
+{
+  CombinedInputs inputs = test_default_inputs(64);
+  inputs.output_width = 16;
+  inputs.output_height = 16;
+  ImBuf *dst = test_float_ibuf(16);
+
+  CombinedEvalStats stats;
+  EXPECT_TRUE(BKE_paint_material_combined_eval(inputs, test_single_light(), dst, nullptr, &stats));
+  EXPECT_EQ(stats.pixels_processed, 16 * 16);
+  IMB_freeImBuf(dst);
+}
+
+/* A destination that disagrees with the declared output size is still a caller bug. */
+TEST(paint_material_combined, output_resolution_mismatch_is_rejected)
+{
+  CombinedInputs inputs = test_default_inputs(64);
+  inputs.output_width = 16;
+  inputs.output_height = 16;
+  ImBuf *dst = test_float_ibuf(64);
+  EXPECT_FALSE(
+      BKE_paint_material_combined_eval(inputs, test_single_light(), dst, nullptr, nullptr));
+  IMB_freeImBuf(dst);
+}
+
+/* Reducing resolution must not move the image: a constant input shades to the same colour at any
+ * output size, which is the cheapest check that the sampling is centred rather than skewed. */
+TEST(paint_material_combined, output_resolution_preserves_a_constant)
+{
+  const CombinedPreviewLighting lighting = test_single_light();
+
+  CombinedInputs full = test_default_inputs(64);
+  ImBuf *dst_full = test_float_ibuf(64);
+  ASSERT_TRUE(BKE_paint_material_combined_eval(full, lighting, dst_full, nullptr, nullptr));
+
+  CombinedInputs reduced = test_default_inputs(64);
+  reduced.output_width = 16;
+  reduced.output_height = 16;
+  ImBuf *dst_reduced = test_float_ibuf(16);
+  ASSERT_TRUE(BKE_paint_material_combined_eval(reduced, lighting, dst_reduced, nullptr, nullptr));
+
+  const float *a = dst_full->float_data();
+  const float *b = dst_reduced->float_data();
+  for (const int i : IndexRange(4)) {
+    EXPECT_NEAR(a[i], b[i], 1e-5f);
+  }
+  IMB_freeImBuf(dst_full);
+  IMB_freeImBuf(dst_reduced);
+}
+
+/* A region is in output coordinates, so it bounds output pixels rather than canvas texels. */
+TEST(paint_material_combined, output_resolution_region_is_in_output_coordinates)
+{
+  CombinedInputs inputs = test_default_inputs(64);
+  inputs.output_width = 16;
+  inputs.output_height = 16;
+  ImBuf *dst = test_float_ibuf(16);
+
+  rcti region;
+  BLI_rcti_init(&region, 0, 4, 0, 4);
+  CombinedEvalStats stats;
+  EXPECT_TRUE(
+      BKE_paint_material_combined_eval(inputs, test_single_light(), dst, &region, &stats));
+  EXPECT_EQ(stats.pixels_processed, 4 * 4);
+  IMB_freeImBuf(dst);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

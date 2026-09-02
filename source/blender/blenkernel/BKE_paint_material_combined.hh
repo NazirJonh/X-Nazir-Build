@@ -19,7 +19,7 @@
  *
  * - The evaluator is pure. It reads #CombinedInputs and #CombinedPreviewLighting and writes float
  *   RGBA. No #Main, no #Object, no GPU, no ID lookups. Everything a GPU implementation would need
- *   is in its arguments, which is what makes a later GPU path a substitution rather than a rewrite.
+ *   is in its arguments, which is what makes a later GPU path a substitution, not a rewrite.
  * - The cache beside it owns one buffer per material and decides how much of it to recompute.
  *
  * The *gathering* -- turning a #Material into #CombinedInputs -- deliberately lives in the editors
@@ -33,13 +33,14 @@
 #include "BLI_span.hh"
 
 #include "DNA_scene_types.h"
+/* Complete rather than forward-declared: #CombinedCacheRequest holds #rcti by value. */
+#include "DNA_vec_types.h"
 
 namespace blender {
 
 struct ImBuf;
 struct Image;
 struct Material;
-struct rcti;
 
 /** One channel's contribution, either as pixels or as a single value. */
 struct CombinedChannelInput {
@@ -81,6 +82,26 @@ struct CombinedInputs {
    * has already scaled its emission, or a test pinning the emission term, leaves it alone.
    */
   float emission_strength = 1.0f;
+  /**
+   * Resolution of the shaded result, when it differs from the inputs.
+   *
+   * Zero means "the same as #width and #height", which is what every caller but the viewport
+   * wants. The output always covers the whole canvas: the image engine maps a display override
+   * over the full image UV range using the buffer's own dimensions
+   * (#ScreenSpaceDrawingMode::do_full_update_texture_slot scales by `tile_buffer.x`), so the
+   * preview may be coarser than the canvas but never a window onto it.
+   */
+  int output_width = 0;
+  int output_height = 0;
+
+  int out_width() const
+  {
+    return this->output_width > 0 ? this->output_width : this->width;
+  }
+  int out_height() const
+  {
+    return this->output_height > 0 ? this->output_height : this->height;
+  }
 };
 
 /** One analytic directional light of the studio rig. */
@@ -175,6 +196,54 @@ bool BKE_paint_material_combined_eval(const CombinedInputs &inputs,
  * \{ */
 
 /**
+ * What a cache lookup needs to know beyond the pixels themselves.
+ *
+ * A struct rather than four more arguments: every field is optional in its own way, and as
+ * positional parameters they read at the call site as `1234, region, {}, clip` -- four values with
+ * nothing to say which is which, and a fifth would be worse. Every rectangle here is in **output**
+ * coordinates (see #CombinedInputs.output_width), which are the canvas's only while the output is
+ * not reduced.
+ */
+struct CombinedCacheRequest {
+  /**
+   * Identifies the *structure* of the inputs -- which source each channel came from, the
+   * constants, the dimensions, the identity of any bake. Deliberately not the pixels: a change
+   * here means a full rebuild, and a composite whose pixels moved must not land here or every dab
+   * would rebuild the canvas.
+   */
+  uint64_t inputs_hash = 0;
+  /**
+   * Pixels known to have changed since the last call. Empty means nothing did. Only consulted
+   * when #inputs_hash and the lighting are unchanged.
+   *
+   * A caller that reports a dab in canvas texels while asking for a reduced output must scale it;
+   * #combined_preview_ensure is where that happens, and it scales #clip the same way.
+   */
+  rcti changed_region = {0, 0, 0, 0};
+  /**
+   * Every #Image the inputs read directly, so the cache can subscribe to its partial-update log
+   * and find out what changed in it without being told.
+   *
+   * Layer-stack images need not appear: their edits arrive as a #changed_region from the composite
+   * that owns them, which is already precise. These are the ones nothing else would report.
+   *
+   * The pointers are used during the call only; the cache keeps subscriptions keyed by
+   * #ID.session_uid and never an #Image pointer, so an image freed between calls is a missing
+   * dependency rather than a dangling one.
+   */
+  Span<Image *> dependency_images;
+  /**
+   * The part of the buffer the caller is about to read. Empty means all of it.
+   *
+   * Pixels outside it may be left stale from an earlier lighting or an earlier set of inputs, so a
+   * caller that reads more than it declares here will read stale pixels -- which is why every
+   * caller but the viewport leaves it empty. This is what keeps a light drag proportional to the
+   * editor, not to the canvas.
+   */
+  rcti clip = {0, 0, 0, 0};
+};
+
+/**
  * The Combined preview of \a ma, recomputing whatever part of it is out of date.
  *
  * A cache, not a resolver: \a inputs is already gathered. That split is what lets this live in BKE
@@ -184,27 +253,20 @@ bool BKE_paint_material_combined_eval(const CombinedInputs &inputs,
  * The returned buffer is owned by the cache and stays valid until the next call that changes it or
  * a #BKE_paint_material_combined_cache_free_all. Do not free it.
  *
- * \param inputs_hash: identifies the *structure* of the inputs -- which source each channel came
- *                     from, the constants, the dimensions, the identity of any bake. Deliberately
- *                     not the pixels: a change here means a full rebuild, and a composite whose
- *                     pixels moved must not land here or every dab would rebuild the canvas.
- * \param changed_region: pixels known to have changed since the last call, in output coordinates.
- *                        Empty means nothing did. Only consulted when \a inputs_hash and the
- *                        lighting are unchanged.
- * \param dependency_image_uids: #ID.session_uid of every #Image the inputs read directly, so
- *                               #BKE_paint_material_combined_cache_tag_image_region can find this
- *                               entry. Layer-stack images need not appear: their edits arrive as a
- *                               \a changed_region from the composite that owns them.
  * \param r_revision: bumped whenever the pixels are recomputed, for the display-override contract.
+ * \param r_changed_region: the rectangle actually re-shaded by this call, in output coordinates,
+ *                          or empty when nothing was. Exists so a consumer that keeps a copy of
+ *                          these pixels -- the image engine's GPU texture -- can refresh that much
+ *                          of it rather than all of it. Always consistent with \a r_revision: the
+ *                          region is empty exactly when the revision did not move.
  * \return null when the inputs supply nothing, which is the caller's cue to fall back.
  */
 ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
                                                 const CombinedInputs &inputs,
                                                 const CombinedPreviewLighting &lighting,
-                                                uint64_t inputs_hash,
-                                                const rcti &changed_region,
-                                                Span<uint32_t> dependency_image_uids,
+                                                const CombinedCacheRequest &request,
                                                 uint64_t *r_revision = nullptr,
+                                                rcti *r_changed_region = nullptr,
                                                 CombinedEvalStats *r_stats = nullptr);
 
 /**
@@ -212,20 +274,13 @@ ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
  *
  * Marks rather than drops, like the composite cache: a caller asking for the buffer in between
  * must get the previous pixels rather than nothing.
+ *
+ * For a change to the material's *description* only. An edit to the pixels of an image a channel
+ * reads is found by #BKE_paint_material_combined_cache_ensure, which polls each dependency image's
+ * partial-update log; reporting one here instead would turn a painted dab into a full re-shade of
+ * the canvas.
  */
 void BKE_paint_material_combined_cache_invalidate(const Material *ma);
-
-/**
- * Mark only \a region of every preview that reads \a image out of date.
- *
- * The direct-image counterpart of the composite's `r_changed_region`: a channel sourced from a
- * plain Image Texture has no composite behind it, so nothing else would report the rectangle a
- * stroke touched.
- */
-void BKE_paint_material_combined_cache_tag_image_region(const Image &image, const rcti &region);
-
-/** Mark every preview that reads \a image out of date, in full. */
-void BKE_paint_material_combined_cache_tag_image_changed(const Image &image);
 
 /** Drop the cached preview of \a ma, freeing its buffer. Called when the material is freed. */
 void BKE_paint_material_combined_cache_free_material(const Material &ma);
@@ -235,6 +290,37 @@ void BKE_paint_material_combined_cache_free_all();
 
 /** Whether a preview of \a ma is currently cached. Exists for tests. */
 bool BKE_paint_material_combined_cache_contains(const Material &ma);
+
+/**
+ * The dimensions of the *canvas* a cached preview of \a ma stands for, without producing one.
+ *
+ * Exists because a size query is on the redraw path several times a frame --
+ * #ED_space_image_get_size reaches it from #image_main_region_set_view2d and from the preview's
+ * own clip calculation -- and answering it by acquiring the buffer shades the whole canvas to read
+ * two integers.
+ *
+ * The canvas, not the buffer: the preview may be shaded at a power-of-two fraction of it (see
+ * #CombinedInputs.output_width), and a caller building the editor's view from that fraction would
+ * draw the canvas at the wrong size.
+ *
+ * \return false when nothing is cached, leaving \a r_width and \a r_height untouched.
+ */
+bool BKE_paint_material_combined_cache_size_get(const Material &ma, int &r_width, int &r_height);
+
+/**
+ * The resolution a cached preview of \a ma is currently shaded at -- a power-of-two fraction of
+ * the canvas #BKE_paint_material_combined_cache_size_get reports.
+ *
+ * Exists for the gather's octave choice. Deriving that octave from the zoom alone makes the
+ * step-down and the step-up share one threshold, so a zoom resting on it alternates between two
+ * octaves and rebuilds the whole preview every frame; starting from the octave already in use is
+ * what turns that threshold into a band.
+ *
+ * \return false when nothing is cached, leaving \a r_width and \a r_height untouched.
+ */
+bool BKE_paint_material_combined_cache_output_size_get(const Material &ma,
+                                                       int &r_width,
+                                                       int &r_height);
 
 /** \} */
 

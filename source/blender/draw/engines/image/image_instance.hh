@@ -244,8 +244,14 @@ class Instance : public DrawEngine {
     void *lock;
     ImBuf *image_buffer = space_->acquire_image_buffer(state.image, &lock);
 
-    const float2 image_size = float2(image_buffer ? image_buffer->x : 1024.0f,
-                                     image_buffer ? image_buffer->y : 1024.0f);
+    /* The canvas, which a display override does not resize: the override supplies pixels only, and
+     * the Combined preview supplies them at a power-of-two fraction of the canvas. Measuring the
+     * canvas from the buffer would shrink the drawn image as the zoom crossed an octave. */
+    const int2 canvas_size = space_->get_canvas_size();
+    const float2 image_size = canvas_size.x > 0 && canvas_size.y > 0 ?
+                                  float2(canvas_size) :
+                                  float2(image_buffer ? image_buffer->x : 1024.0f,
+                                         image_buffer ? image_buffer->y : 1024.0f);
     float2 offset = float2(0.0f);
     if (image_buffer && space_->use_display_window() &&
         flag_is_set(image_buffer->flags, ImBufFlags::HasDisplayWindow))

@@ -307,13 +307,15 @@ static void image_changed(Main *bmain, Image *ima)
   /* A PBR Paint source-material bake reads image pixels through the shader graph, and nothing in
    * the node tree changes when those pixels do, so its cache cannot notice this on its own. */
   ed::material_bake::material_source_bake_tag_image_changed(*ima);
-  /* The composite of a layer stack containing this image is stale for the same reason: its layers
-   * are the pixels themselves, and nothing in the stack's own description changed. Reported from
-   * the same place so that neither cache grows its own idea of when an image went out of date. */
-  BKE_paint_material_composite_cache_tag_image_changed(*ima);
-  /* A directly linked Image Texture is an input of the Combined preview with no composite in
-   * between, so nothing else would report this edit to it. */
-  BKE_paint_material_combined_cache_tag_image_changed(*ima);
+
+  /* Neither the composite nor the Combined preview is told here, deliberately. Both subscribe to
+   * the image's own partial-update log, which describes *what* changed; this notifier only knows
+   * *that* something did.
+   *
+   * Telling them turned a painted dab into a full re-shade: a stroke tags the image ID on every
+   * dab, so this flush arrives right after the dab's own rectangle has already been recorded, and
+   * the blanket answer wins over the precise one. Measured on a 2048 canvas, that was ~25 ms a
+   * frame against ~4 ms for the dab alone. */
 
   /* Ensure downstream editors are made aware of changes to the Image data. */
   WM_main_add_notifier(NC_IMAGE | NA_EDITED, ima);

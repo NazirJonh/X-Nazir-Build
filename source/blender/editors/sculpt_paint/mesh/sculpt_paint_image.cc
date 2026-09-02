@@ -9,6 +9,9 @@
 #include "DNA_image_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
+/* For #eMaterialPaintChannel, which used to arrive through `BKE_paint_material_composite.hh` --
+ * dropped along with the composite tagging API this file no longer calls. */
+#include "DNA_scene_types.h"
 
 #include <atomic>
 #include <cstdio>
@@ -49,8 +52,6 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
 #include "BKE_paint_material_channel_perf_debug.hh"
-#include "BKE_paint_material_combined.hh"
-#include "BKE_paint_material_composite.hh"
 
 #include "mesh_brush_common.hh"
 #include "paint_material_blend.hh"
@@ -1765,15 +1766,8 @@ static void mark_gpu_texture_regions_dirty(ImageData &image_data,
                                         region.ymin,
                                         BLI_rcti_size_x(&region),
                                         BLI_rcti_size_y(&region));
-    /* A composite of a stack containing this map is now showing the pixels from before the dab.
-     * Its layers are the pixels themselves, so nothing in the stack's own description changed and
-     * the partial-update log above says nothing about it -- the same reason the 2D paint path
-     * reports the region here too. Without this a stroke made in the 3D Viewport leaves an Image
-     * Editor showing a composited pass stale until something else happens to rebuild it. */
-    BKE_paint_material_composite_cache_tag_image_region(*image_data.image, region);
-    /* And the Combined preview, whose direct-image channels have no composite to report for them.
-     */
-    BKE_paint_material_combined_cache_tag_image_region(*image_data.image, region);
+    /* Neither material cache is told: #BKE_image_update_gputexture_delayed above records this very
+     * rectangle in the image's partial-update log, and that is what both of them subscribe to. */
   }
 }
 

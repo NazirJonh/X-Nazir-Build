@@ -93,14 +93,37 @@ class AbstractSpaceAccessor {
    *               that the engine resolves against the #Main it was initialized with.
    * \param r_revision: changes whenever the returned pixels do, so the drawing mode can tell
    *                    whether the texture it uploaded last frame is still current.
+   * \param r_changed_region: which pixels changed since the previous revision, in the returned
+   *                          buffer's own texel coordinates, so the drawing mode can refresh that
+   *                          much of its texture rather than all of it. Empty means "no idea" as
+   *                          well as "nothing moved" -- the two are told apart by \a r_revision --
+   *                          so a caller that sees a new revision with an empty region must do a
+   *                          full refresh.
    */
-  virtual ImBuf *acquire_display_override_buffer(Main * /*bmain*/, uint64_t * /*r_revision*/)
+  virtual ImBuf *acquire_display_override_buffer(Main * /*bmain*/,
+                                                 uint64_t * /*r_revision*/,
+                                                 rcti * /*r_changed_region*/ = nullptr)
   {
     return nullptr;
   }
 
   /** Release a buffer from #acquire_display_override_buffer. */
   virtual void release_display_override_buffer(ImBuf * /*image_buffer*/) {}
+
+  /**
+   * The canvas extent the image occupies, in image pixels, or zero when the space cannot say.
+   *
+   * Asked of the space rather than measured from the displayed buffer, because a display override
+   * is only pixels: it may be produced at a fraction of the canvas -- the Image Editor's Combined
+   * preview is shaded at a power-of-two fraction chosen from the zoom -- and sizing the canvas
+   * from it would shrink the drawn image as the zoom crossed an octave.
+   *
+   * Zero means "measure it from the buffer", which is right for every space that has no override.
+   */
+  virtual int2 get_canvas_size() const
+  {
+    return int2(0);
+  }
 
   /**
    * Update the r_shader_parameters with space specific settings.

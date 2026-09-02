@@ -1241,6 +1241,15 @@ enum eMaterialPaintChannel : int8_t {
 #define PAINT_LAYER_MAP_MASK PAINT_MATERIAL_CHANNEL_NUM
 
 /**
+ * Every shading channel combined into one lit image.
+ *
+ * Not an #eMaterialPaintChannel and not a map role: it must never index a per-channel array, reach
+ * #BKE_paint_material_channel_info, or resolve a layer map. It appears only in
+ * #SpaceImage.material_paint_pass and in #BKE_paint_material_display_passes.
+ */
+#define PAINT_LAYER_PASS_COMBINED (PAINT_MATERIAL_CHANNEL_NUM + 1)
+
+/**
  * Default value of #Paint.visible_material_channels: the channels a PBR material is
  * almost always painted through. Also used as the RNA property default, so that both agree.
  */

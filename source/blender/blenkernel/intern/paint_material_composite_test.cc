@@ -972,4 +972,90 @@ TEST_F(PaintMaterialCompositeStackTest, ao_without_any_map_is_not_a_stack)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Display Passes
+ *
+ * The role list and the display list are maintained by hand and are deliberately different; these
+ * pin the difference rather than leaving it to be discovered when a selector shows the wrong thing.
+ * \{ */
+
+TEST(paint_material_composite, pass_list_covers_every_shading_channel)
+{
+  const Span<int> passes = BKE_paint_material_composite_passes();
+  /* Specular and Emission are shading inputs of the Combined preview and must be inspectable on
+   * their own, like every other channel a user can paint. */
+  EXPECT_TRUE(passes.contains(PAINT_MATERIAL_CHANNEL_SPECULAR));
+  EXPECT_TRUE(passes.contains(PAINT_MATERIAL_CHANNEL_EMISSION));
+  /* Height has no part in phase 1 shading; listing it would offer a pass the preview ignores. */
+  EXPECT_FALSE(passes.contains(PAINT_MATERIAL_CHANNEL_HEIGHT));
+  /* Combined is a display mode, not a role: every consumer of this list indexes an array by the
+   * value or looks it up in the channel descriptor table. */
+  EXPECT_FALSE(passes.contains(PAINT_LAYER_PASS_COMBINED));
+}
+
+TEST(paint_material_composite, display_passes_lead_with_combined)
+{
+  const Span<int> display = BKE_paint_material_display_passes();
+  const Span<int> roles = BKE_paint_material_composite_passes();
+  ASSERT_FALSE(display.is_empty());
+  EXPECT_EQ(display.first(), PAINT_LAYER_PASS_COMBINED);
+  EXPECT_EQ(display.size(), roles.size() + 1);
+  for (const int role : roles) {
+    EXPECT_TRUE(display.contains(role));
+  }
+}
+
+TEST_F(PaintMaterialCompositeStackTest, combined_is_not_a_layer_stack)
+{
+  Material *ma = add_material_with_principled("Mat");
+  bNode *tex = add_image_texture(*ma, "Base");
+  link_to_base_color(*ma, *tex);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  EXPECT_FALSE(BKE_paint_material_composite_stack_from_material(
+      *bmain, *ma, PAINT_LAYER_PASS_COMBINED, layers));
+  EXPECT_TRUE(layers.is_empty());
+}
+
+TEST_F(PaintMaterialCompositeStackTest, changed_region_reports_what_was_recomputed)
+{
+  Material *ma = add_material_with_principled("Mat");
+  bNode *tex = add_image_texture(*ma, "Base");
+  link_to_base_color(*ma, *tex);
+  Image *base = id_cast<Image *>(tex->id);
+  fill_image(*base, 10);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_from_material(
+      *bmain, *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  const uint64_t hash = BKE_paint_material_composite_stack_hash(layers);
+
+  rcti changed;
+
+  /* First call builds everything, so the whole buffer changed. */
+  ImBuf *ibuf = BKE_paint_material_composite_cache_ensure(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, hash, nullptr, nullptr, &changed);
+  ASSERT_NE(ibuf, nullptr);
+  EXPECT_EQ(BLI_rcti_size_x(&changed), ibuf->x);
+  EXPECT_EQ(BLI_rcti_size_y(&changed), ibuf->y);
+
+  /* Nothing changed since: nothing is recomputed and the rectangle is empty. */
+  BKE_paint_material_composite_cache_ensure(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, hash, nullptr, nullptr, &changed);
+  EXPECT_TRUE(BLI_rcti_is_empty(&changed));
+
+  /* A tagged rectangle is the rectangle recomputed. */
+  rcti dab;
+  BLI_rcti_init(&dab, 1, 3, 2, 4);
+  BKE_paint_material_composite_cache_tag_image_region(*base, dab);
+  BKE_paint_material_composite_cache_ensure(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, hash, nullptr, nullptr, &changed);
+  EXPECT_EQ(changed.xmin, dab.xmin);
+  EXPECT_EQ(changed.xmax, dab.xmax);
+  EXPECT_EQ(changed.ymin, dab.ymin);
+  EXPECT_EQ(changed.ymax, dab.ymax);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

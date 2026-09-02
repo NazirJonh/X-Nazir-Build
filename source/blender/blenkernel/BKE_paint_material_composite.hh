@@ -223,6 +223,19 @@ bool BKE_paint_material_is_normal_combine_group(const bNode &node);
 Span<int> BKE_paint_material_composite_passes();
 
 /**
+ * The passes the Image Editor offers as *display* modes, in the order they are listed.
+ *
+ * #BKE_paint_material_composite_passes plus #PAINT_LAYER_PASS_COMBINED at the front. A second list
+ * rather than a widened one because every consumer of the role list treats its values as roles --
+ * indexing a per-channel array, looking the value up in the channel descriptor table, resolving a
+ * layer map -- and none of that is meaningful for a display mode. Only code that populates a
+ * selector or cycles the shown pass should use this one.
+ *
+ * The two lists are kept in sync by hand and a test asserts that they agree.
+ */
+Span<int> BKE_paint_material_display_passes();
+
+/**
  * The maps of the paint layer \a layer_id, indexed by role (channel, or #PAINT_LAYER_MAP_MASK).
  *
  * A channel wired into \a ma is answered from its stack: the layer is already identified there, so
@@ -262,6 +275,10 @@ uint64_t BKE_paint_material_composite_stack_hash(
  * \param r_revision: incremented every time the pixels are recomputed, so a consumer that uploads
  *                    them somewhere -- the image editor's GPU texture -- can tell whether its copy
  *                    is still current without comparing buffers. Never zero for a live composite.
+ * \param r_changed_region: the rectangle recomputed by this call, the whole buffer when it was
+ *                          rebuilt entirely, and empty when nothing was. A consumer that derives
+ *                          its own pixels from this composite -- the Combined preview -- needs it
+ *                          to keep its own refresh proportional to the edit.
  * \return null when the stack cannot be composited, which is the caller's cue to fall back.
  */
 ImBuf *BKE_paint_material_composite_cache_ensure(
@@ -270,7 +287,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     Span<PaintMaterialCompositeImageLayer> image_layers,
     uint64_t stack_hash,
     uint64_t *r_revision = nullptr,
-    PaintMaterialCompositeEvalStats *r_stats = nullptr);
+    PaintMaterialCompositeEvalStats *r_stats = nullptr,
+    rcti *r_changed_region = nullptr);
 
 /**
  * Mark the whole composite of \a ma out of date, or of every material when \a ma is null.

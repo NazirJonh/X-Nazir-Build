@@ -11,6 +11,7 @@
 #include "DNA_gpencil_legacy_types.h"
 #include "DNA_image_types.h"
 #include "DNA_mask_types.h"
+#include "DNA_material_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_view3d_types.h"
@@ -31,6 +32,7 @@
 #include "BKE_lib_query.hh"
 #include "BKE_lib_remap.hh"
 #include "BKE_main.hh"
+#include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
 
@@ -46,6 +48,7 @@
 #include "ED_image.hh"
 #include "ED_image_grid.hh"
 #include "ED_mask.hh"
+#include "ED_material_combined.hh"
 #include "ED_node.hh"
 #include "ED_paint.hh"
 #include "ED_render.hh"
@@ -320,6 +323,7 @@ static void image_operatortypes()
   WM_operatortype_append(IMAGE_OT_view_rotate_ccw);
   WM_operatortype_append(IMAGE_OT_view_rotate_reset);
   WM_operatortype_append(IMAGE_OT_view_rotate_interactive);
+  WM_operatortype_append(IMAGE_OT_combined_light_rotate);
 #ifdef WITH_INPUT_NDOF
   WM_operatortype_append(IMAGE_OT_view_ndof);
 #endif
@@ -840,6 +844,10 @@ static void image_main_region_init(wmWindowManager *wm, ARegion *region)
 
 static void image_main_region_draw(const bContext *C, ARegion *region)
 {
+  /* The Combined preview's end-to-end budget is defined on the whole callback, since a frame that
+   * shades nothing is exactly what the "no-op frame" target measures. */
+  PAINT_CHANNEL_PERF_COMBINED_FRAME();
+
   /* draw entirely, view changes should be handled here */
   SpaceImage *sima = CTX_wm_space_image(C);
   Object *obedit = CTX_data_edit_object(C);
@@ -873,6 +881,17 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
   /* check for mask (delay draw) */
   if (!ED_space_image_show_uvedit(sima, obedit) && sima->mode == SI_MODE_MASK) {
     mask = ED_space_image_get_mask(sima);
+  }
+
+  /* The nearest point to the draw that has a real #bContext.
+   * #ED_space_image_acquire_composite_buffer has only a #Main and is also reached from the image
+   * engine, so a job must never be started there. */
+  if (sima != nullptr && (sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 &&
+      sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED && sima->image != nullptr)
+  {
+    if (Material *ma = ED_space_image_composite_material_get(CTX_data_main(C), sima->image)) {
+      ed::material_combined::combined_preview_bake_ensure(*C, *ma);
+    }
   }
 
   if (show_viewer) {
@@ -1054,9 +1073,19 @@ static void image_main_region_listener(const wmRegionListenerParams *params)
       }
       break;
     case NC_MATERIAL:
+      /* The Combined preview is shaded from the material, and a source-material bake reports its
+       * completion with nothing but a generic #NC_MATERIAL on a timer
+       * (`render_material_bake.cc`, #WM_jobs_timer). Without this, a bake that lands while the
+       * preview is open is not shown until something else happens to redraw the region. Narrow to
+       * the Combined pass on purpose: every other pass is byte-composited from images and hears
+       * about its own edits through #NC_IMAGE. */
+      if ((sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 &&
+          sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED)
+      {
+        ED_region_tag_redraw(region);
+        break;
+      }
       if (wmn->data == ND_SHADING_LINKS) {
-        SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-
         if (sima->iuser.scene &&
             (sima->iuser.scene->toolsettings->uv_flag & UV_FLAG_SHOW_SAME_IMAGE))
         {

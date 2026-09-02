@@ -55,6 +55,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
@@ -180,6 +181,9 @@ void imapaint_image_update(
    * which is what keeps the composite usable as a paint target at all. */
   if (image != nullptr) {
     BKE_paint_material_composite_cache_tag_image_region(*image, imapaintpartial.dirty_region);
+    /* And the Combined preview, whose direct-image channels have no composite to report for them.
+     */
+    BKE_paint_material_combined_cache_tag_image_region(*image, imapaintpartial.dirty_region);
   }
 
   /* When buffer is partial updated the planes should be set to a larger value than 8. This will

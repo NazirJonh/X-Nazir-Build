@@ -10,6 +10,7 @@
 
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
+#include "BKE_paint_material_channel_perf_debug.hh"
 
 namespace blender::image_engine {
 
@@ -418,8 +419,13 @@ void ScreenSpaceDrawingMode::image_sync(blender::Image *image, ImageUser *iuser)
   }
 
   /* Step: Update the GPU textures based on the changes in the image. */
-  method.ensure_gpu_textures_allocation();
-  update_textures(image, iuser);
+  {
+    /* Stage (d) of the Combined preview budget: a float RGBA canvas is four times the bytes of an
+     * ordinary one, so the upload is worth measuring apart from the shading that produced it. */
+    PAINT_CHANNEL_PERF_COMBINED_SCOPE(TextureUpload);
+    method.ensure_gpu_textures_allocation();
+    update_textures(image, iuser);
+  }
 
   /* Step: Add the GPU textures to the shgroup. */
   state.update_batches();

@@ -37,6 +37,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
 
@@ -243,6 +244,9 @@ static void material_changed(Main *bmain, Material *ma)
    * node replaced by another. Marking is cheap: a composite is milliseconds, and the previous
    * pixels stay on screen until the next one is asked for. */
   BKE_paint_material_composite_cache_invalidate(ma);
+  /* The Combined preview reads every channel of this material, so a node-tree edit can change it
+   * in ways no input hash is asked about. */
+  BKE_paint_material_combined_cache_invalidate(ma);
 }
 
 static void lamp_changed(Main *bmain, Light *la)
@@ -307,6 +311,9 @@ static void image_changed(Main *bmain, Image *ima)
    * are the pixels themselves, and nothing in the stack's own description changed. Reported from
    * the same place so that neither cache grows its own idea of when an image went out of date. */
   BKE_paint_material_composite_cache_tag_image_changed(*ima);
+  /* A directly linked Image Texture is an input of the Combined preview with no composite in
+   * between, so nothing else would report this edit to it. */
+  BKE_paint_material_combined_cache_tag_image_changed(*ima);
 
   /* Ensure downstream editors are made aware of changes to the Image data. */
   WM_main_add_notifier(NC_IMAGE | NA_EDITED, ima);

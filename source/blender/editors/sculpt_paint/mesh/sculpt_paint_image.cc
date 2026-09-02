@@ -49,6 +49,7 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
 #include "BKE_paint_material_channel_perf_debug.hh"
+#include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "mesh_brush_common.hh"
@@ -1770,6 +1771,9 @@ static void mark_gpu_texture_regions_dirty(ImageData &image_data,
      * reports the region here too. Without this a stroke made in the 3D Viewport leaves an Image
      * Editor showing a composited pass stale until something else happens to rebuild it. */
     BKE_paint_material_composite_cache_tag_image_region(*image_data.image, region);
+    /* And the Combined preview, whose direct-image channels have no composite to report for them.
+     */
+    BKE_paint_material_combined_cache_tag_image_region(*image_data.image, region);
   }
 }
 

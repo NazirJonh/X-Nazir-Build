@@ -25,6 +25,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
 
@@ -34,6 +35,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include "ED_image.hh" /* own include */
+#include "ED_material_combined.hh"
 #include "ED_mesh.hh"
 #include "ED_screen.hh"
 #include "ED_uvedit.hh"
@@ -293,6 +295,14 @@ static Material *space_image_composite_material_find(Main &bmain, const Image &i
   return nullptr;
 }
 
+Material *ED_space_image_composite_material_get(Main *bmain, const Image *image)
+{
+  if (bmain == nullptr || image == nullptr) {
+    return nullptr;
+  }
+  return space_image_composite_material_find(*bmain, *image);
+}
+
 bool ED_space_image_has_composite(const SpaceImage *sima)
 {
   /* Without an image there is no material to find, and no #Image for a release to go through
@@ -314,6 +324,23 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain, SpaceImage *sima, ui
   }
 
   const int pass = sima->material_paint_pass;
+
+  if (pass == PAINT_LAYER_PASS_COMBINED) {
+    CombinedPreviewLighting lighting = BKE_paint_material_combined_lighting_default();
+    BKE_paint_material_combined_lighting_rotate_z(lighting, sima->material_paint_light_rot_z);
+    ImBuf *combined = ed::material_combined::combined_preview_ensure(
+        *bmain, *ma, lighting, r_revision);
+    if (combined == nullptr) {
+      /* Nothing resolved: the plain canvas image is shown, exactly as a channel pass that is not a
+       * layer stack already behaves. */
+      return nullptr;
+    }
+    /* Referenced so #ED_space_image_release_buffer releases it like any other buffer, which is
+     * what keeps the two paths symmetrical. */
+    IMB_refImBuf(combined);
+    return combined;
+  }
+
   Vector<PaintMaterialCompositeImageLayer> layers;
   if (!BKE_paint_material_composite_stack_from_material(*bmain, *ma, pass, layers)) {
     return nullptr;

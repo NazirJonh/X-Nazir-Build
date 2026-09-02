@@ -53,6 +53,7 @@
 #include "BKE_image_paint_selection.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -355,6 +356,10 @@ static void ptile_restore_runtime_map(PaintTileMap *paint_tile_map)
                   tile_pos.y,
                   tile_pos.y + tile_copy_size.y);
     BKE_paint_material_composite_cache_tag_image_region(*image, tile_region);
+    /* A channel sourced from a plain Image Texture has no composite to report through, so the
+     * Combined preview has to hear about the rectangle directly or it would only ever learn of the
+     * edit as a full invalidation. */
+    BKE_paint_material_combined_cache_tag_image_region(*image, tile_region);
 
     if (ibuf->float_data()) {
       ibuf->userflags |= IB_RECT_INVALID; /* force recreate of char rect */
@@ -631,6 +636,8 @@ static void uhandle_restore_list(ListBaseT<UndoImageHandle> *undo_handles, bool 
        * the stack's own description changed for it to notice on its own. Whole-image here, since
        * this path restores every tile of the buffer rather than a known rectangle. */
       BKE_paint_material_composite_cache_tag_image_changed(*image);
+      /* And the Combined preview, which may read this image without a composite in between. */
+      BKE_paint_material_combined_cache_tag_image_changed(*image);
 
       if (ibuf->float_data()) {
         ibuf->userflags |= IB_RECT_INVALID; /* Force recreate of char `rect` */

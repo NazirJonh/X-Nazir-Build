@@ -20,6 +20,7 @@ struct ImBuf;
 struct Image;
 struct ImageUser;
 struct Main;
+struct Material;
 struct Object;
 struct ReportList;
 struct Scene;
@@ -126,6 +127,14 @@ bool ED_space_image_has_composite(const SpaceImage *sima);
 ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
                                                SpaceImage *sima,
                                                uint64_t *r_revision = nullptr);
+/**
+ * The material whose layer stack or texture set \a image belongs to, or null.
+ *
+ * Exposed because the Image Editor's draw callback needs the same answer the buffer acquisition
+ * does -- to start a bake for the Combined preview -- and re-deriving it there would duplicate both
+ * the search over #Main and the memo that keeps it off the redraw path.
+ */
+Material *ED_space_image_composite_material_get(Main *bmain, const Image *image);
 /**
  * Get the #SpaceImage flag that is valid for the given ibuf.
  */

@@ -564,6 +564,14 @@ bool BKE_paint_material_composite_stack_from_material(
     const int channel,
     Vector<PaintMaterialCompositeImageLayer> &r_layers)
 {
+  /* A display mode, not a role: there is no channel to walk and no layer map to fall back to.
+   * Answered here so that a caller which reaches this by mistake degrades to the plain image
+   * rather than resolving Base Color's layers under a wrong name. */
+  if (channel == PAINT_LAYER_PASS_COMBINED) {
+    r_layers.clear();
+    return false;
+  }
+
   if (composite_stack_from_graph(ma, channel, r_layers)) {
     return true;
   }
@@ -591,16 +599,44 @@ bool BKE_paint_material_composite_stack_from_material(
 
 Span<int> BKE_paint_material_composite_passes()
 {
-  /* Base Color first, then the scalars a PBR material is normally authored with, then the two
-   * roles that are not Principled inputs at all. Ambient Occlusion is baked by the user rather
-   * than wired, and a mask belongs to the layer, not to the shader. */
+  /* Base Color first, then the scalars and colours a PBR material is normally authored with, in
+   * Principled's own order, then the two roles that are not Principled inputs at all. Ambient
+   * Occlusion is baked by the user rather than wired, and a mask belongs to the layer, not to the
+   * shader.
+   *
+   * Height is deliberately absent: it has a descriptor and an identifier, but no part in the
+   * Combined preview's shading, and listing it would offer a pass the preview visibly ignores. */
   static const int passes[] = {
       PAINT_MATERIAL_CHANNEL_BASE_COLOR,
       PAINT_MATERIAL_CHANNEL_METALLIC,
       PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_SPECULAR,
       PAINT_MATERIAL_CHANNEL_NORMAL,
       PAINT_MATERIAL_CHANNEL_AO,
       PAINT_MATERIAL_CHANNEL_ALPHA,
+      PAINT_MATERIAL_CHANNEL_EMISSION,
+      PAINT_LAYER_MAP_MASK,
+  };
+  return Span<int>(passes, ARRAY_SIZE(passes));
+}
+
+Span<int> BKE_paint_material_display_passes()
+{
+  /* Combined leads, as it does in the Compositor. Kept out of #BKE_paint_material_composite_passes
+   * because every consumer of that list treats its values as roles -- indexing a per-channel array,
+   * looking the value up in the channel descriptor table, resolving a layer map -- and none of
+   * those is meaningful for a display mode. A second list means no existing loop has to learn
+   * about it. */
+  static const int passes[] = {
+      PAINT_LAYER_PASS_COMBINED,
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      PAINT_MATERIAL_CHANNEL_METALLIC,
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_SPECULAR,
+      PAINT_MATERIAL_CHANNEL_NORMAL,
+      PAINT_MATERIAL_CHANNEL_AO,
+      PAINT_MATERIAL_CHANNEL_ALPHA,
+      PAINT_MATERIAL_CHANNEL_EMISSION,
       PAINT_LAYER_MAP_MASK,
   };
   return Span<int>(passes, ARRAY_SIZE(passes));
@@ -1237,8 +1273,15 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     Span<PaintMaterialCompositeImageLayer> image_layers,
     const uint64_t stack_hash,
     uint64_t *r_revision,
-    PaintMaterialCompositeEvalStats *r_stats)
+    PaintMaterialCompositeEvalStats *r_stats,
+    rcti *r_changed_region)
 {
+  if (r_changed_region != nullptr) {
+    /* Initialized before any early return, so that "nothing was recomputed" is never confused with
+     * "the caller forgot to look". */
+    BLI_rcti_init(r_changed_region, 0, 0, 0, 0);
+  }
+
   int width = 0;
   int height = 0;
   const char *byte_colorspace = nullptr;
@@ -1284,6 +1327,17 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
       composite_entry_free(entry);
       g_cache.entries.remove(key);
       return nullptr;
+    }
+    if (r_changed_region != nullptr) {
+      /* The caller derives its own pixels from these and needs to refresh no more than what really
+       * moved; a full rebuild is reported as the whole buffer rather than as "everything", so one
+       * rectangle type covers both cases. Read before #dirty_region is reset below. */
+      if (rebuild_all) {
+        BLI_rcti_init(r_changed_region, 0, entry.ibuf->x, 0, entry.ibuf->y);
+      }
+      else {
+        *r_changed_region = entry.dirty_region;
+      }
     }
     entry.stack_hash = stack_hash;
     entry.dirty_full = false;

@@ -1103,7 +1103,9 @@ static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
    * next map of the same layer. Crossing from one to the other is a deliberate choice, so it
    * stays a choice made in the selector. */
   if ((sima->flag & SI_PAINT_COMPOSITE_MODE) != 0) {
-    const Span<int> passes = BKE_paint_material_composite_passes();
+    /* The display list, so the cycle reaches Combined. The second loop below deliberately stays on
+     * the role list: it indexes `layer_maps[role]`, which has no Combined slot. */
+    const Span<int> passes = BKE_paint_material_display_passes();
     const int current = int(passes.first_index_try(sima->material_paint_pass));
     const int count = int(passes.size());
     const int next = (current < 0) ? (reverse ? count - 1 : 0) :

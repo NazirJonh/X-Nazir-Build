@@ -2495,9 +2495,15 @@ static int space_image_canvas_missing_value(const int channel)
 /** The UI name of a pass or layer-map role. */
 static const char *space_image_canvas_role_name(const int role)
 {
+  /* Combined first: it is not a channel, and the cast below would hand the descriptor table an
+   * out-of-range value. */
+  if (role == PAINT_LAYER_PASS_COMBINED) {
+    return "Combined";
+  }
   if (role == PAINT_LAYER_MAP_MASK) {
     return "Mask";
   }
+  /* Everything else really is a channel; the descriptor table asserts on anything that is not. */
   return BKE_paint_material_channel_info(eMaterialPaintChannel(role)).ui_name;
 }
 
@@ -2557,6 +2563,10 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
     const char *layer_identifier;
   };
   static const CanvasRoleIdentifiers role_identifiers[] = {
+      /* A display mode, not a role: it appears in section 1 only, and section 2 never reaches it
+       * because that loop walks the role list. The layer identifier is a placeholder that is
+       * never emitted; it is not null so that no reader has to guard against one. */
+      {PAINT_LAYER_PASS_COMBINED, "COMPOSITE_COMBINED", "LAYER_COMBINED_UNUSED"},
       {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "COMPOSITE_BASE_COLOR", "LAYER_BASE_COLOR"},
       {PAINT_MATERIAL_CHANNEL_METALLIC, "COMPOSITE_METALLIC", "LAYER_METALLIC"},
       {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "COMPOSITE_ROUGHNESS", "LAYER_ROUGHNESS"},
@@ -2578,6 +2588,9 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
   };
 
   const Main *bmain = CTX_data_main(C);
+  /* Two lists on purpose. Section 1 lists what can be *displayed*, Combined included; section 2
+   * lists *roles* and indexes `layer_maps` by them, where Combined would read out of bounds. */
+  const Span<int> display_passes = BKE_paint_material_display_passes();
   const Span<int> passes = BKE_paint_material_composite_passes();
 
   /* Section 1: the material as a whole. Every pass is listed whether or not the maps behind it
@@ -2588,9 +2601,21 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
   composite_heading.name = "Composite";
   RNA_enum_item_add(&item, &totitem, &composite_heading);
 
-  for (const int pass : passes) {
+  for (const int pass : display_passes) {
     const CanvasRoleIdentifiers *identifiers = identifiers_for_role(pass);
     if (identifiers == nullptr) {
+      continue;
+    }
+    if (pass == PAINT_LAYER_PASS_COMBINED) {
+      /* Always available: it shades whatever the material supplies, including nothing, so there is
+       * no stack to probe and no "not yet" state to report. */
+      EnumPropertyItem combined_item{};
+      combined_item.value = space_image_canvas_pass_value(pass);
+      combined_item.identifier = identifiers->pass_identifier;
+      combined_item.name = space_image_canvas_role_name(pass);
+      combined_item.description = "All paint passes shaded together on a flat surface";
+      combined_item.icon = ICON_SHADING_RENDERED;
+      RNA_enum_item_add(&item, &totitem, &combined_item);
       continue;
     }
     const bool resolvable = bmain != nullptr &&
@@ -2694,6 +2719,13 @@ static void rna_SpaceImageEditor_material_paint_canvas_set(PointerRNA *ptr, int 
   /* Holds the framing while stepping the equal-sized channel maps of one material, exactly as the
    * C / Shift-C hotkey does. */
   ED_space_image_set_ex(bmain, sima, image, true);
+}
+
+static bool rna_SpaceImageEditor_is_material_paint_combined_get(PointerRNA *ptr)
+{
+  const SpaceImage *sima = static_cast<const SpaceImage *>(ptr->data);
+  return (sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 &&
+         sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED;
 }
 
 static int rna_SpaceImageEditor_display_channels_get(PointerRNA *ptr)
@@ -7250,6 +7282,23 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Material Paint Canvas",
                            "Paint slot of the active material shown in this editor, by channel");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "is_material_paint_combined", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SpaceImageEditor_is_material_paint_combined_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Show Combined Preview",
+                           "The Combined preview is the pass currently shown in this editor");
+
+  prop = RNA_def_property(srna, "material_paint_light_rotation", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "material_paint_light_rot_z");
+  RNA_def_property_range(prop, -M_PI, M_PI);
+  RNA_def_property_ui_text(prop,
+                           "Light Rotation",
+                           "Rotation of the Combined preview's studio light around the canvas "
+                           "normal");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
   prop = RNA_def_property(srna, "image_user", PROP_POINTER, PROP_NONE);

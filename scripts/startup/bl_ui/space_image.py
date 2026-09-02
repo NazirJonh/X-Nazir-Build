@@ -1008,6 +1008,10 @@ class IMAGE_HT_header(Header):
                 row = layout.row(align=True)
                 row.template_ID_browser_button(sima, "image", material=mat)
                 row.prop(sima, "material_paint_canvas", text="")
+                if sima.is_material_paint_combined:
+                    # Beside the selector that turned it on: the light is the one control the
+                    # Combined pass adds, and looking for it in a sidebar tab is a search.
+                    row.prop(sima, "material_paint_light_rotation", text="")
             else:
                 layout.template_ID_browser(
                     sima,
@@ -1345,6 +1349,28 @@ class IMAGE_PT_view_display(Panel):
 
         if show_uvedit:
             col.prop(uvedit, "show_pixel_coords", text="Pixel Coordinates")
+
+
+class IMAGE_PT_combined_preview(Panel):
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'UI'
+    bl_label = "Combined Preview"
+    bl_category = "View"
+
+    @classmethod
+    def poll(cls, context):
+        sima = context.space_data
+        # Deliberately not the canvas enum: that one is built by an itemf needing an active object
+        # and material, so a context without them resolves to no identifier and the panel would
+        # silently never appear. This reads the space's own state.
+        return sima is not None and sima.is_material_paint_combined
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+
+        sima = context.space_data
+        layout.prop(sima, "material_paint_light_rotation", text="Light Rotation")
 
 
 class IMAGE_UL_render_slots(UIList):
@@ -2371,6 +2397,7 @@ classes = (
     IMAGE_UL_udim_tiles,
     IMAGE_PT_udim_tiles,
     IMAGE_PT_view_display,
+    IMAGE_PT_combined_preview,
     IMAGE_PT_paint_select,
     IMAGE_PT_paint_select_transform,
     IMAGE_PT_paint_select_move_props,

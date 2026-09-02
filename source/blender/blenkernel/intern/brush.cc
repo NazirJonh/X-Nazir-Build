@@ -24,6 +24,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rand.h"
+#include "BLI_set.hh"
 
 #include "BLT_translation.hh"
 
@@ -959,33 +960,62 @@ void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
   MEM_delete(material_paint);
 }
 
-int BKE_brush_material_paint_stale_textures_clear(Main &bmain)
+int BKE_brush_material_paint_stale_ids_clear(Main &bmain)
 {
+  bool any_material_paint = false;
+  for (const Brush &brush : bmain.brushes) {
+    if (brush.material_paint != nullptr) {
+      any_material_paint = true;
+      break;
+    }
+  }
+  if (!any_material_paint) {
+    return 0;
+  }
+
+  /* Address sets, built once rather than re-scanning #Main for every pointer: a brush carries one
+   * texture pointer per channel, so the linear alternative is quadratic in practice. Stored as
+   * `void *` and one set per ID type, so a stale pointer is only ever compared, never
+   * dereferenced, and cannot be mistaken for an ID of another type. */
+  Set<const void *> textures;
+  for (const Tex &tex : bmain.textures) {
+    textures.add(&tex);
+  }
+  Set<const void *> materials;
+  for (const Material &material : bmain.materials) {
+    materials.add(&material);
+  }
+
   int cleared = 0;
+  /* Deliberately no #id_us_min in either helper: the ID is gone, so there is no user count left to
+   * drop and writing to it would touch freed memory. */
+  auto clear_stale_tex = [&](Tex *&tex) {
+    if (tex != nullptr && !textures.contains(tex)) {
+      tex = nullptr;
+      cleared++;
+    }
+  };
+  auto clear_stale_material = [&](Material *&material) {
+    if (material != nullptr && !materials.contains(material)) {
+      material = nullptr;
+      cleared++;
+    }
+  };
+
   for (Brush &brush : bmain.brushes) {
     if (brush.material_paint == nullptr) {
       continue;
     }
     for (BrushMaterialPaintChannel &channel : brush.material_paint->channels) {
-      const Tex *tex = channel.source_mtex.tex;
-      if (tex == nullptr) {
-        continue;
-      }
-      bool found = false;
-      for (const Tex &tex_iter : bmain.textures) {
-        if (&tex_iter == tex) {
-          found = true;
-          break;
-        }
-      }
-      if (found) {
-        continue;
-      }
-      /* Deliberately no #id_us_min: the texture is gone, so there is no user count left to drop
-       * and the pointer must not be dereferenced. */
-      channel.source_mtex.tex = nullptr;
-      cleared++;
+      clear_stale_tex(channel.source_mtex.tex);
     }
+    /* `shared_source_mapping.tex` is documented as always null (see `DNA_brush_types.h`), but the
+     * backstop exists precisely for corrupted/stale states, so relying on the invariant here
+     * would be wrong, and the cost of the check is zero. */
+    clear_stale_tex(brush.material_paint->shared_source_mapping.tex);
+    /* Same class of risk as #Tex: a regular data-block an undo step can remove while the brush
+     * carries the raw pointer across the boundary. */
+    clear_stale_material(brush.material_paint->source_material);
   }
   return cleared;
 }

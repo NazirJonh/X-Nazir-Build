@@ -435,6 +435,109 @@ class MATERIAL_PT_animation(MaterialButtonsPanel, Panel, PropertiesAnimationMixi
             self.draw_action_and_slot_selector(context, col, node_tree)
 
 
+class BrushMaterialButtonsPanel:
+    """Base for the Brush Material tab, which edits the active PBR Paint brush's source material.
+
+    The material is reached through the brush rather than through an object material slot, so the
+    context path is Brush -> Material and there is no object, no slot and no pinning here (the
+    Properties editor's pinned root is deliberately ignored for this tab).
+
+    The panels below deliberately do not subclass the equivalent "material" tab panels: those are
+    registered classes, and registering a subclass of one breaks the original's callbacks. Shared
+    drawing goes through the module level helpers instead, the same way the rest of this file
+    shares code between panels.
+    """
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "brush_material"
+
+    @classmethod
+    def poll(cls, context):
+        # Deliberately no COMPAT_ENGINES test, unlike MaterialButtonsPanel: the source material is
+        # baked through the EEVEE-based node preview path whatever the scene's render engine is,
+        # so filtering these panels by engine would hide settings that still take effect.
+        mat = context.material
+        return mat is not None and not mat.grease_pencil
+
+
+class BRUSH_MATERIAL_PT_context_material(BrushMaterialButtonsPanel, Panel):
+    bl_idname = "BRUSH_MATERIAL_PT_context_material"
+    bl_label = ""
+    bl_options = {'HIDE_HEADER'}
+
+    def draw(self, context):
+        layout = self.layout
+        # Both the tab's context path and context.brush resolve through the active paint, so a
+        # brush with material_paint is expected here. Guarded anyway: a UI script raising is far
+        # worse than a degraded row, and the two lookups are not literally the same code path.
+        brush = getattr(context, "brush", None)
+
+        row = layout.row()
+        if brush is not None and brush.material_paint is not None:
+            row.template_ID(brush.material_paint, "source_material")
+        else:
+            row.label(text=context.material.name, icon='MATERIAL')
+
+
+class BRUSH_MATERIAL_PT_surface(BrushMaterialButtonsPanel, Panel):
+    bl_idname = "BRUSH_MATERIAL_PT_surface"
+    bl_label = "Surface"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        panel_node_draw(layout, context.material.node_tree, 'OUTPUT_MATERIAL', "Surface")
+
+
+class BRUSH_MATERIAL_PT_settings(BrushMaterialButtonsPanel, Panel):
+    bl_idname = "BRUSH_MATERIAL_PT_settings"
+    bl_label = "Settings"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        layout.prop(context.material, "pass_index")
+
+
+class BRUSH_MATERIAL_PT_settings_surface(BrushMaterialButtonsPanel, Panel):
+    bl_idname = "BRUSH_MATERIAL_PT_settings_surface"
+    bl_label = "Surface"
+    bl_parent_id = "BRUSH_MATERIAL_PT_settings"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        draw_material_surface_settings(layout, context.material)
+
+
+class BRUSH_MATERIAL_PT_viewport(BrushMaterialButtonsPanel, Panel):
+    bl_idname = "BRUSH_MATERIAL_PT_viewport"
+    bl_label = "Viewport Display"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_order = 10
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+
+        mat = context.material
+
+        col = layout.column()
+        col.prop(mat, "diffuse_color", text="Color")
+        col.prop(mat, "metallic")
+        col.prop(mat, "roughness")
+
+
+class BRUSH_MATERIAL_PT_custom_props(BrushMaterialButtonsPanel, PropertyPanel, Panel):
+    bl_idname = "BRUSH_MATERIAL_PT_custom_props"
+    _context_path = "material"
+    _property_type = bpy.types.Material
+
+
 classes = (
     MATERIAL_MT_context_menu,
     MATERIAL_UL_matslots,
@@ -452,6 +555,12 @@ classes = (
     EEVEE_MATERIAL_PT_viewport_settings,
     MATERIAL_PT_animation,
     MATERIAL_PT_custom_props,
+    BRUSH_MATERIAL_PT_context_material,
+    BRUSH_MATERIAL_PT_surface,
+    BRUSH_MATERIAL_PT_settings,
+    BRUSH_MATERIAL_PT_settings_surface,
+    BRUSH_MATERIAL_PT_viewport,
+    BRUSH_MATERIAL_PT_custom_props,
 )
 
 

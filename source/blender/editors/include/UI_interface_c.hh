@@ -2880,7 +2880,7 @@ struct IDBrowserParams {
   /** Reduce the template to a single browser button, for places with no room for the full row. */
   bool compact = false;
   /**
-   * Optional controls of the appended #template_ID row, see #ImageIDRowParams. Kept here rather
+   * Optional controls of the appended #template_ID row, see #IDBrowserRowParams. Kept here rather
    * than as trailing boolean parameters so hosts can opt out of one without spelling out the
    * others, and so a new control does not shift an existing argument list.
    */

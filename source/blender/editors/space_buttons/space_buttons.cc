@@ -190,16 +190,17 @@ void ED_buttons_visible_tabs_menu(bContext *C, ui::Layout *layout, void * /*arg*
 
   /* These can be reordered freely. */
   constexpr std::array<StringRefNull, BCONTEXT_TOT> filter_items = {
-      "show_properties_tool",        "show_properties_render",
-      "show_properties_output",      "show_properties_view_layer",
-      "show_properties_scene",       "show_properties_world",
-      "show_properties_collection",  "show_properties_object",
-      "show_properties_modifiers",   "show_properties_effects",
-      "show_properties_particles",   "show_properties_physics",
-      "show_properties_constraints", "show_properties_data",
-      "show_properties_bone",        "show_properties_bone_constraints",
-      "show_properties_material",    "show_properties_texture",
-      "show_properties_strip",       "show_properties_strip_modifier",
+      "show_properties_tool",          "show_properties_brush_material",
+      "show_properties_render",        "show_properties_output",
+      "show_properties_view_layer",    "show_properties_scene",
+      "show_properties_world",         "show_properties_collection",
+      "show_properties_object",        "show_properties_modifiers",
+      "show_properties_effects",       "show_properties_particles",
+      "show_properties_physics",       "show_properties_constraints",
+      "show_properties_data",          "show_properties_bone",
+      "show_properties_bone_constraints", "show_properties_material",
+      "show_properties_texture",       "show_properties_strip",
+      "show_properties_strip_modifier",
   };
 
   for (StringRefNull item : filter_items) {
@@ -232,6 +233,9 @@ Vector<eSpaceButtons_Context> ED_buttons_tabs_list(const SpaceProperties *sbuts,
   };
 
   add_tab(BCONTEXT_TOOL);
+  /* Grouped with the tool rather than with the object's material: this tab edits the active
+   * brush's source material, which belongs to the tool, not to the object being painted on. */
+  add_tab(BCONTEXT_BRUSH_MATERIAL);
 
   add_spacer();
 
@@ -291,6 +295,8 @@ static const char *buttons_main_region_context_string(const short mainb)
       return "data";
     case BCONTEXT_MATERIAL:
       return "material";
+    case BCONTEXT_BRUSH_MATERIAL:
+      return "brush_material";
     case BCONTEXT_TEXTURE:
       return "texture";
     case BCONTEXT_PARTICLE:

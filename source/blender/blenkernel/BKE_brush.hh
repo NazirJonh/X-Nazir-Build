@@ -126,20 +126,18 @@ void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
 void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMaterialPaint &src);
 
 /**
- * Clear every #BrushMaterialPaintChannel.source_mtex texture of every brush in \a bmain that is no
- * longer a data-block of \a bmain, and report how many were cleared.
+ * Clear dangling PBR Paint ID pointers that survived an undo step.
  *
- * #Brush is an #IDTYPE_FLAGS_NO_MEMFILE_UNDO type: an undo step moves the existing brushes into
- * the newly read Main untouched, keeping their raw ID pointers, while a channel's #Tex is a
- * regular data-block that the same undo step can remove -- a channel texture is created on demand
- * by assigning an image to the slot, so undoing past that point deletes it. Read-time remapping
+ * Brushes are `no undo` IDs, so they cross undo boundaries intact. The IDs they reference
+ * (channel textures, the shared source mapping texture, and the source material) are regular
+ * data-blocks that an undo step may remove. Read-time remapping
  * (#read_undo_remap_noundo_data) normally clears such pointers; this is the backstop that keeps a
- * missed one from being dereferenced later, and it never touches user counts (the texture is gone,
+ * missed one from being dereferenced later, and it never touches user counts (the ID is gone,
  * decrementing it would write into freed memory).
  *
  * Compares addresses only, so a stale pointer is never dereferenced.
  */
-int BKE_brush_material_paint_stale_textures_clear(Main &bmain);
+int BKE_brush_material_paint_stale_ids_clear(Main &bmain);
 
 /**
  * Copy the brush's paint color into the Base Color channel, when the brush has material paint

@@ -643,6 +643,11 @@ const EnumPropertyItem buttons_context_items[] = {
      ICON_SEQ_STRIP_MODIFIER,
      "Strip Modifiers",
      "Strip Modifier Properties"},
+    {BCONTEXT_BRUSH_MATERIAL,
+     "BRUSH_MATERIAL",
+     ICON_MATERIAL,
+     "Brush Material",
+     "Active Brush Source Material Properties"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -6983,6 +6988,7 @@ static void rna_def_space_properties_filter(StructRNA *srna)
       "show_properties_effects",
       "show_properties_strip",
       "show_properties_strip_modifier",
+      "show_properties_brush_material",
   };
 
   for (const int i : IndexRange(BCONTEXT_TOT)) {
@@ -9589,6 +9595,11 @@ static void rna_def_space_node(BlenderRNA *brna)
        "Line Style",
        "Edit shader nodes from Line Style"},
 #  endif
+      {SNODE_SHADER_BRUSH,
+       "BRUSH",
+       ICON_BRUSH_DATA,
+       "Brush",
+       "Edit shader nodes from the active paint brush's source material"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

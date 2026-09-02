@@ -7,10 +7,14 @@
 #include "BKE_gtest_base.hh"
 #include "BKE_idtype.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_lib_remap.hh"
 #include "BKE_main.hh"
+#include "BKE_main_namemap.hh"
 
+#include "BLI_ghash.h"
 #include "BLI_listbase.h"
 
+#include "DNA_ID.h"
 #include "DNA_brush_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
@@ -173,5 +177,197 @@ TEST_F(BrushTest, curve_patch_texture_slot_remove_resets_active_when_list_emptie
   EXPECT_EQ(brush->curve_patch.texture_active_index, 0);
   EXPECT_EQ(brush->curve_patch.texture_slots.count(), 0);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Stale PBR Paint ID Backstop
+ *
+ * #BKE_brush_material_paint_stale_ids_clear compares addresses only, so these tests point the
+ * brush at IDs living in a second #Main rather than at freed memory: absent from the #Main being
+ * cleaned is exactly the state an undo step leaves behind, and nothing is ever dereferenced.
+ * \{ */
+
+class BrushStaleIDsTest : public BrushTest {
+ public:
+  Main *other_bmain = nullptr;
+
+  void SetUp() override
+  {
+    BrushTest::SetUp();
+    other_bmain = BKE_main_new();
+  }
+
+  void TearDown() override
+  {
+    BKE_main_free(other_bmain);
+    BrushTest::TearDown();
+  }
+
+  /** A brush with an allocated #BrushMaterialPaint and no extra user from #BKE_brush_add. */
+  Brush *brush_with_material_paint_add()
+  {
+    Brush *brush = BKE_brush_add(bmain, "UnitTestBrush", OB_MODE_SCULPT);
+    id_us_min(&brush->id);
+    BKE_brush_material_paint_ensure(brush);
+    return brush;
+  }
+};
+
+TEST_F(BrushStaleIDsTest, source_material_missing_from_main_is_cleared)
+{
+  Brush *brush = brush_with_material_paint_add();
+  /* Deliberately no #id_us_plus: this stands in for a pointer an undo step left behind, whose
+   * user count no longer exists. */
+  brush->material_paint->source_material = static_cast<Material *>(
+      BKE_id_new(other_bmain, ID_MA, "UnitTestMaterial"));
+
+  EXPECT_EQ(BKE_brush_material_paint_stale_ids_clear(*bmain), 1);
+  EXPECT_EQ(brush->material_paint->source_material, nullptr);
+}
+
+TEST_F(BrushStaleIDsTest, source_material_present_in_main_is_kept)
+{
+  Brush *brush = brush_with_material_paint_add();
+  Material *ma = static_cast<Material *>(BKE_id_new(bmain, ID_MA, "UnitTestMaterial"));
+  brush->material_paint->source_material = ma;
+  id_us_plus(&ma->id);
+
+  EXPECT_EQ(BKE_brush_material_paint_stale_ids_clear(*bmain), 0);
+  EXPECT_EQ(brush->material_paint->source_material, ma);
+}
+
+TEST_F(BrushStaleIDsTest, channel_texture_missing_from_main_is_cleared)
+{
+  Brush *brush = brush_with_material_paint_add();
+  brush->material_paint->channels[0].source_mtex.tex = static_cast<Tex *>(
+      BKE_id_new(other_bmain, ID_TE, "UnitTestTexture"));
+
+  EXPECT_EQ(BKE_brush_material_paint_stale_ids_clear(*bmain), 1);
+  EXPECT_EQ(brush->material_paint->channels[0].source_mtex.tex, nullptr);
+}
+
+TEST_F(BrushStaleIDsTest, shared_mapping_texture_missing_from_main_is_cleared)
+{
+  Brush *brush = brush_with_material_paint_add();
+  brush->material_paint->shared_source_mapping.tex = static_cast<Tex *>(
+      BKE_id_new(other_bmain, ID_TE, "UnitTestTexture"));
+
+  EXPECT_EQ(BKE_brush_material_paint_stale_ids_clear(*bmain), 1);
+  EXPECT_EQ(brush->material_paint->shared_source_mapping.tex, nullptr);
+}
+
+TEST_F(BrushStaleIDsTest, every_stale_reference_is_counted)
+{
+  Brush *brush = brush_with_material_paint_add();
+  brush->material_paint->source_material = static_cast<Material *>(
+      BKE_id_new(other_bmain, ID_MA, "UnitTestMaterial"));
+  brush->material_paint->channels[0].source_mtex.tex = static_cast<Tex *>(
+      BKE_id_new(other_bmain, ID_TE, "UnitTestTextureA"));
+  brush->material_paint->shared_source_mapping.tex = static_cast<Tex *>(
+      BKE_id_new(other_bmain, ID_TE, "UnitTestTextureB"));
+
+  EXPECT_EQ(BKE_brush_material_paint_stale_ids_clear(*bmain), 3);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Source Material Localization
+ *
+ * #BrushMaterialPaint is allocated separately from #Brush (#MEM_new), so nothing reaches
+ * #BrushMaterialPaint.source_material except the generic ID traversal in `brush_foreach_id()`.
+ * These tests pin that down: if the traversal ever stops covering the field, a brush made local
+ * keeps pointing at the linked material, which is both an illegal linked -> local reference and a
+ * pointer that undo can leave dangling.
+ * \{ */
+
+class BrushSourceMaterialLocalTest : public BrushTest {
+ public:
+  /** Move \a id into \a lib, keeping the name map consistent. */
+  void id_move_to_library(ID &id, Library *lib)
+  {
+    BKE_main_namemap_remove_id(*bmain, id);
+    id.lib = lib;
+    id.tag |= ID_TAG_EXTERN;
+    BKE_main_namemap_get_unique_name(*bmain, id, id.name + 2);
+  }
+};
+
+TEST_F(BrushSourceMaterialLocalTest, source_material_is_remapped)
+{
+  Brush *brush = BKE_brush_add(bmain, "UnitTestBrush", OB_MODE_SCULPT);
+  id_us_min(&brush->id);
+  BKE_brush_material_paint_ensure(brush);
+
+  Material *ma_old = BKE_id_new<Material>(bmain, "UnitTestMaterialOld");
+  Material *ma_new = BKE_id_new<Material>(bmain, "UnitTestMaterialNew");
+  brush->material_paint->source_material = ma_old;
+  id_us_plus(&ma_old->id);
+
+  BKE_libblock_remap(bmain, ma_old, ma_new, ID_REMAP_SKIP_USER_CLEAR);
+
+  /* The whole point: the remap has to reach a field inside the separately allocated
+   * #BrushMaterialPaint, which it can only do through `brush_foreach_id()`. */
+  EXPECT_EQ(brush->material_paint->source_material, ma_new);
+}
+
+TEST_F(BrushSourceMaterialLocalTest, source_material_is_cleared_on_remap_to_null)
+{
+  Brush *brush = BKE_brush_add(bmain, "UnitTestBrush", OB_MODE_SCULPT);
+  id_us_min(&brush->id);
+  BKE_brush_material_paint_ensure(brush);
+
+  Material *ma = BKE_id_new<Material>(bmain, "UnitTestMaterial");
+  brush->material_paint->source_material = ma;
+  id_us_plus(&ma->id);
+
+  BKE_libblock_remap(bmain, ma, nullptr, ID_REMAP_SKIP_USER_CLEAR);
+
+  EXPECT_EQ(brush->material_paint->source_material, nullptr);
+}
+
+TEST_F(BrushSourceMaterialLocalTest, make_local_localizes_brush_and_its_source_material)
+{
+  /* S3 of the spec: a linked brush whose source material is linked as well. Making the library
+   * local has to localize both, and leave the brush pointing at the local copy of the material. */
+  Library *lib = BKE_id_new<Library>(bmain, "UnitTestLibrary");
+
+  Brush *brush = BKE_brush_add(bmain, "UnitTestBrush", OB_MODE_SCULPT);
+  id_us_min(&brush->id);
+  BKE_brush_material_paint_ensure(brush);
+
+  Material *ma = BKE_id_new<Material>(bmain, "UnitTestMaterial");
+  brush->material_paint->source_material = ma;
+  id_us_plus(&ma->id);
+
+  id_move_to_library(brush->id, lib);
+  id_move_to_library(ma->id, lib);
+  ASSERT_TRUE(ID_IS_LINKED(&brush->id));
+  ASSERT_TRUE(ID_IS_LINKED(&ma->id));
+
+  GHash *old_to_new_ids = BLI_ghash_ptr_new(__func__);
+  BKE_library_make_local(bmain, lib, old_to_new_ids, false, false, false);
+
+  /* #BKE_library_make_local may localize in place (the ID keeps its address and simply loses its
+   * library) or through a copy recorded in the hash; accept either. */
+  Brush *local_brush = static_cast<Brush *>(BLI_ghash_lookup(old_to_new_ids, brush));
+  if (local_brush == nullptr) {
+    local_brush = brush;
+  }
+  Material *local_ma = static_cast<Material *>(BLI_ghash_lookup(old_to_new_ids, ma));
+  if (local_ma == nullptr) {
+    local_ma = ma;
+  }
+  BLI_ghash_free(old_to_new_ids, nullptr, nullptr);
+
+  ASSERT_NE(local_brush, nullptr);
+  ASSERT_NE(local_brush->material_paint, nullptr);
+  EXPECT_FALSE(ID_IS_LINKED(&local_brush->id));
+  EXPECT_FALSE(ID_IS_LINKED(&local_ma->id));
+  /* A local brush must never be left referencing the linked material. */
+  EXPECT_EQ(local_brush->material_paint->source_material, local_ma);
+  EXPECT_FALSE(ID_IS_LINKED(&local_brush->material_paint->source_material->id));
+}
+
+/** \} */
 
 }  // namespace blender

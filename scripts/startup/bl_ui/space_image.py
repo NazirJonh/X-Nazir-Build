@@ -11,6 +11,7 @@ from bpy.types import (
 )
 from bl_ui.properties_paint_common import (
     UnifiedPaintPanel,
+    is_paint_layer_map,
     draw_brush_texture_image_grid,
     draw_brush_texture_properties,
     brush_basic_texpaint_settings,
@@ -996,15 +997,28 @@ class IMAGE_HT_header(Header):
         IMAGE_HT_header.draw_xform_template(layout, context)
 
         if sima.mode == 'PAINT':
-            ob = context.image_paint_object
+            # `image_paint_object` is only set in Texture Paint mode; fall back to the active
+            # object so the Current Material image filter also works while sculpt-mode material
+            # painting drives the canvas shown here.
+            ob = context.image_paint_object or context.active_object
             mat = ob.active_material if ob else None
-            layout.template_ID_browser(
-                sima,
-                "image",
-                new="image.new",
-                open="image.open",
-                material=mat,
-            )
+            if is_paint_layer_map(sima.image):
+                # A PBR paint layer map: the engine owns its name and lifetime, so New, Open and
+                # rename do not apply. Only the name field is replaced -- by the channel selector,
+                # the one choice that still means something here, and being an enum it brings
+                # Ctrl-Wheel cycling with it, matching the C / Shift-C hotkey. The browser button
+                # stays: switching to an unmanaged image is still how you leave this state.
+                row = layout.row(align=True)
+                row.template_ID_browser_button(sima, "image", material=mat)
+                row.prop(sima, "material_paint_canvas", text="")
+            else:
+                layout.template_ID_browser(
+                    sima,
+                    "image",
+                    new="image.new",
+                    open="image.open",
+                    material=mat,
+                )
         else:
             layout.template_ID(sima, "image", new="image.new", open="image.open")
 

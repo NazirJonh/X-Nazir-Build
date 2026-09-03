@@ -242,9 +242,8 @@ static void image_free(SpaceLink *sl)
 
   BKE_scopes_free(&simage->scopes);
 
-  for (ImageGridSlotDNA *slot : {&simage->image_grid, &simage->image_grid_mask}) {
-    ed::image_grid::image_grid_slot_dna_free(*slot);
-  }
+  /* Per-layout grid sessions (scroll, grip height) of this editor; the filter state itself is
+   * shared by every host and stays, see #image_grid_state_remove. */
   ed::image_grid::image_grid_state_remove(ed::image_grid::ImageGridOwner::from(*simage));
 
   /* The wmTimer (if any) is removed in #image_exit while the wmWindowManager is still
@@ -287,8 +286,6 @@ static SpaceLink *image_duplicate(SpaceLink *sl)
 
   BKE_scopes_new(&simagen->scopes);
 
-  ed::image_grid::image_grid_slot_dna_duplicate(simagen->image_grid, simago->image_grid);
-  ed::image_grid::image_grid_slot_dna_duplicate(simagen->image_grid_mask, simago->image_grid_mask);
 
   /* Floating selection sessions are not copied -- each editor instance owns its own session. */
   simagen->runtime = MEM_new<ed::image::SpaceImage_Runtime>(__func__);
@@ -1435,7 +1432,7 @@ static int image_space_icon_get(const ScrArea *area)
   return item.icon;
 }
 
-static void image_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
+static void image_space_blend_read_data(BlendDataReader * /*reader*/, SpaceLink *sl)
 {
   SpaceImage *sima = reinterpret_cast<SpaceImage *>(sl);
 
@@ -1457,17 +1454,11 @@ static void image_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
     BKE_gpencil_blend_read_data(fd, sima->gpd);
   }
 #endif
-
-  ed::image_grid::image_grid_slot_dna_blend_read(reader, sima->image_grid);
-  ed::image_grid::image_grid_slot_dna_blend_read(reader, sima->image_grid_mask);
 }
 
 static void image_space_blend_write(BlendWriter *writer, SpaceLink *sl)
 {
-  SpaceImage *sima = reinterpret_cast<SpaceImage *>(sl);
   writer->write_struct_cast<SpaceImage>(sl);
-  ed::image_grid::image_grid_slot_dna_blend_write(writer, sima->image_grid);
-  ed::image_grid::image_grid_slot_dna_blend_write(writer, sima->image_grid_mask);
 }
 
 /**************************** spacetype *****************************/

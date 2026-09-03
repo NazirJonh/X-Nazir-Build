@@ -189,6 +189,11 @@ std::unique_ptr<DropTargetInterface> region_but_find_drop_target_at(bContext *C,
   {
     return target;
   }
+  if (std::unique_ptr<DropTargetInterface> target = image_id_browser_drop_target_get(
+          C, region, event))
+  {
+    return target;
+  }
   return nullptr;
 }
 

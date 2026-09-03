@@ -1462,6 +1462,18 @@ void ED_image_undo_push_end()
                "image undo push end without a matching push begin (stroke undo step was lost)");
     return;
   }
+  /* The image and sculpt undo systems share `step_init`, so a caller that opened its transaction
+   * on the other one would have this function adopt that step: #BKE_undosys_step_push_with_type
+   * takes `step_init` as-is and only overwrites its type, after which the encode reinterprets, for
+   * example, a #SculptUndoStep as an #ImageUndoStep. Bail out instead -- the step stays owned by
+   * whoever opened it, so the cost is a lost undo push rather than a type-confused one. */
+  if (UNLIKELY(ustack->step_init->type != BKE_UNDOSYS_TYPE_IMAGE)) {
+    BLI_assert_unreachable();
+    CLOG_ERROR(&LOG,
+               "image undo push end while a '%s' undo step is open, the image undo push is dropped",
+               ustack->step_init->type ? ustack->step_init->type->name : "<null>");
+    return;
+  }
 
   const eUndoPushReturn ret = BKE_undosys_step_push_with_type(
       ustack, nullptr, nullptr, BKE_UNDOSYS_TYPE_IMAGE);

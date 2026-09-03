@@ -428,6 +428,7 @@ void image_grid_state_persist(const ImageGridOwner owner,
   BKE_asset_catalog_path_list_free(legacy_enabled_catalog_paths);
 
   slot.filter_name_match_enabled = state.filter.name_match.enabled ? 1 : 0;
+  slot.hide_grid = state.show_grid ? 0 : 1;
   if (!BLI_listbase_head_is_plausible(&slot.filter_name_match_map_types)) {
     slot.filter_name_match_map_types.clear_no_delete();
   }

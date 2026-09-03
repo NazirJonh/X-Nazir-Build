@@ -16,6 +16,7 @@
 #include "AS_asset_library.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -48,6 +49,7 @@
 #include "RNA_define.hh"
 #include "RNA_prototypes.hh"
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <utility>
@@ -178,7 +180,7 @@ class GridCatalogSelectorTree : public AbstractTreeView {
 
   const char *domain() const
   {
-    return config_.catalog_memory_domain;
+    return config_.catalog_memory_domain.c_str();
   }
 
   void fill_library_sections()
@@ -248,11 +250,15 @@ class GridCatalogSelectorTree : public AbstractTreeView {
   /** Single-library mode constructor (generic grid / ID browser). */
   GridCatalogSelectorTree(const bContext &C,
                           PointerRNA settings,
-                          const asset_system::AssetLibrary &library)
+                          const asset_system::AssetLibrary &library,
+                          const char *catalog_filter_domain)
       : GridCatalogSelectorTree(C, [&]() {
           CatalogCheckboxSetConfig config;
           config.settings = settings;
           config.single_library = &library;
+          if (catalog_filter_domain && catalog_filter_domain[0]) {
+            config.catalog_memory_domain = catalog_filter_domain;
+          }
           return config;
         }())
   {
@@ -261,11 +267,17 @@ class GridCatalogSelectorTree : public AbstractTreeView {
   /** All-Libraries mode constructor: one section per real library. */
   struct AllLibrariesTag {
   };
-  GridCatalogSelectorTree(const bContext &C, PointerRNA settings, AllLibrariesTag /*all_libraries*/)
+  GridCatalogSelectorTree(const bContext &C,
+                          PointerRNA settings,
+                          AllLibrariesTag /*all_libraries*/,
+                          const char *catalog_filter_domain)
       : GridCatalogSelectorTree(C, [&]() {
           CatalogCheckboxSetConfig config;
           config.settings = settings;
           config.all_libraries_mode = true;
+          if (catalog_filter_domain && catalog_filter_domain[0]) {
+            config.catalog_memory_domain = catalog_filter_domain;
+          }
           return config;
         }())
   {
@@ -835,6 +847,17 @@ static void grid_catalog_selector_panel_draw(const bContext *C, Panel *panel)
   Layout &layout = *panel->layout;
   layout.operator_context_set(wm::OpCallContext::InvokeDefault);
 
+  /* Empty means the ID Browser's own storage; a host that keeps its catalog filter apart from its
+   * Recent/Favorites history (the PBR Paint picker, one domain per channel) names it here. Must
+   * match #GridViewAssetParams::catalog_filter_domain, which reads what this panel writes. */
+  std::string filter_domain;
+  if (const std::optional<StringRefNull> domain_str = CTX_data_string_get(
+          C, "grid_catalog_selector_filter_domain"))
+  {
+    filter_domain = *domain_str;
+  }
+  const char *filter_domain_ptr = filter_domain.empty() ? nullptr : filter_domain.c_str();
+
   const AssetLibraryReference lib_ref = grid_settings::library_ref_get(settings_ptr);
   ed::asset::list::storage_fetch(&lib_ref, C);
 
@@ -872,7 +895,7 @@ static void grid_catalog_selector_panel_draw(const bContext *C, Panel *panel)
         *block,
         "grid_catalog_selector_all_libraries",
         std::make_unique<GridCatalogSelectorTree>(
-            *C, settings_ptr, GridCatalogSelectorTree::AllLibrariesTag{}));
+            *C, settings_ptr, GridCatalogSelectorTree::AllLibrariesTag{}, filter_domain_ptr));
     TreeViewBuilder::build_tree_view(*C, *tree_view, layout);
     return;
   }
@@ -886,7 +909,7 @@ static void grid_catalog_selector_panel_draw(const bContext *C, Panel *panel)
   AbstractTreeView *tree_view = block_add_view(
       *block,
       "grid_catalog_selector",
-      std::make_unique<GridCatalogSelectorTree>(*C, settings_ptr, *library));
+      std::make_unique<GridCatalogSelectorTree>(*C, settings_ptr, *library, filter_domain_ptr));
   TreeViewBuilder::build_tree_view(*C, *tree_view, layout);
 }
 
@@ -946,6 +969,10 @@ static void grid_preview_size_panel_draw(const bContext *C, Panel *panel)
   layout.use_property_split_set(true);
   layout.use_property_decorate_set(false);
   layout.prop(&settings_ptr, "preview_size", UI_ITEM_NONE, IFACE_("Size"), ICON_NONE);
+  /* Keeps the toggle away from the slider's drag area, so dragging the size past its end does not
+   * land on it. */
+  layout.separator();
+  layout.prop(&settings_ptr, "show_names", UI_ITEM_NONE, IFACE_("Names"), ICON_NONE);
 }
 
 static void grid_preview_size_panel_register()
@@ -990,6 +1017,10 @@ static wmOperatorStatus name_match_map_type_toggle_exec(bContext *C, wmOperator 
   if (!RNA_boolean_get(&settings, "filter_name_match_enabled")) {
     RNA_boolean_set(&settings, "filter_name_match_enabled", true);
   }
+  /* Reaches the grid behind this nested popover: #RNA_string_set above sends no notifier, so
+   * without this the grid only rebuilds once the Map Types popover closes. Mirrors the catalog
+   * selector (#catalog_checkbox_notify_or_after) and the enabled toggle's RNA update. */
+  WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
   if (ARegion *region = CTX_wm_region(C)) {
     ED_region_tag_redraw(region);
     ED_region_tag_refresh_ui(region);
@@ -1015,6 +1046,8 @@ static wmOperatorStatus name_match_clear_exec(bContext *C, wmOperator * /*op*/)
     return OPERATOR_CANCELLED;
   }
   grid_settings::name_match_settings_clear_selection(settings);
+  /* See #name_match_map_type_toggle_exec: rebuild the grid behind the nested popover now. */
+  WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
   if (ARegion *region = CTX_wm_region(C)) {
     ED_region_tag_redraw(region);
     ED_region_tag_refresh_ui(region);
@@ -1182,13 +1215,116 @@ static bool library_enum_item_is_in_folder(const EnumPropertyItem &item)
  * current library. Modeled on the built-in enum dropdown (#def_but_rna__menu): the parent RNA enum
  * button applies the returned value to the property (with undo) when the menu closes, so this only
  * has to draw the row -- no radio/checkbox as #Layout::prop_enum would produce. */
+namespace {
+
+/** Whether one library-selector entry has a pin, and its current state. */
+struct LibrarySelectorPin {
+  bool exists = false;
+  bool is_pinned = false;
+  /** Set for a custom (Preferences) library; null for a built-in one. */
+  const bUserAssetLibrary *user_library = nullptr;
+  /** Only meaningful when #user_library is null. */
+  eAssetLibraryType builtin_type = ASSET_LIBRARY_ALL;
+};
+
+}  // namespace
+
+/**
+ * "All" gets no pin: it is always the first tab and cannot be unpinned. Folders never reach here
+ * at all -- they are not selectable leaves. For the remaining built-ins, BKE owns which have a pin
+ * (see #asset_builtin_pin_flag_from_type), so the rule is not restated here.
+ */
+static LibrarySelectorPin library_selector_pin_resolve(const EnumPropertyItem &item)
+{
+  LibrarySelectorPin pin;
+  if (item.value >= ASSET_LIBRARY_CUSTOM) {
+    const AssetLibraryReference library_ref = ed::asset::library_reference_from_enum_value(
+        item.value);
+    pin.user_library = BKE_preferences_asset_library_find_from_ref(&U, &library_ref);
+    if (pin.user_library) {
+      pin.exists = true;
+      pin.is_pinned = (pin.user_library->flag & ASSET_LIBRARY_IS_PINNED) != 0;
+    }
+    return pin;
+  }
+
+  pin.builtin_type = eAssetLibraryType(item.value);
+  if (BKE_preferences_asset_builtin_pin_supported(pin.builtin_type)) {
+    pin.exists = true;
+    pin.is_pinned = BKE_preferences_asset_builtin_pin_get(&U, pin.builtin_type);
+  }
+  return pin;
+}
+
+/**
+ * Pin toggle at the right edge of one entry's row. Fires the operator rather than writing the flag
+ * directly: the operator owns marking the Preferences dirty and notifying open popovers, and this
+ * keeps that in one place.
+ */
+static void library_selector_add_pin_toggle(Block *block, const EnumPropertyItem &item)
+{
+  const LibrarySelectorPin pin = library_selector_pin_resolve(item);
+  if (!pin.exists) {
+    return;
+  }
+
+  Button *pin_but = uiDefIconButO(
+      block,
+      ButtonType::But,
+      "PREFERENCES_OT_asset_library_pin_set",
+      wm::OpCallContext::ExecDefault,
+      pin.is_pinned ? ICON_PINNED : ICON_UNPINNED,
+      0,
+      0,
+      short(UI_UNIT_X),
+      short(UI_UNIT_Y),
+      pin.is_pinned ? TIP_("Unpin this library from the asset shelf popover") :
+                      TIP_("Pin this library as a tab at the top of the asset shelf popover"));
+  PointerRNA *pin_opptr = button_operator_ptr_ensure(pin_but);
+  if (pin.user_library) {
+    RNA_enum_set(pin_opptr, "library_type", ASSET_LIBRARY_CUSTOM);
+    RNA_string_set(pin_opptr, "library_name", pin.user_library->name);
+  }
+  else {
+    RNA_enum_set(pin_opptr, "library_type", int(pin.builtin_type));
+  }
+  /* The state to apply is decided here, where the icon showing it is also decided, so the two can
+   * never disagree. */
+  RNA_boolean_set(pin_opptr, "pinned", !pin.is_pinned);
+  button_flag_disable(pin_but, BUT_UNDO);
+}
+
+/**
+ * Restore the tooltip the built-in enum dropdown (#def_but_rna__menu) shows: for asset libraries
+ * this is the library path/URL, a useful hint. The enum items are freed after the draw
+ * (#RNA_property_enum_items_gettexted with `free`), so a copy is stored rather than a reference to
+ * the item string.
+ */
+static void library_selector_set_item_tooltip(Button *but, const char *description)
+{
+  if (description == nullptr || description[0] == '\0') {
+    return;
+  }
+  button_func_tooltip_set(
+      but,
+      [](bContext * /*C*/, void *argN, const StringRef /*tip*/) -> std::string {
+        return static_cast<const char *>(argN);
+      },
+      BLI_strdup(description),
+      MEM_delete_void);
+}
+
 static void library_selector_menu_item(Block *block,
                                        Layout &column,
                                        PopupBlockHandle *handle,
                                        const EnumPropertyItem &item,
                                        const int current_value,
                                        const bool has_item_with_icon,
-                                       const bool show_pin)
+                                       const bool show_pin,
+                                       const std::function<void(bContext &, int)> &apply_library =
+                                           nullptr,
+                                       const std::function<void(bContext &)> &exit_membership =
+                                           nullptr)
 {
   int icon = item.icon;
   if (icon == ICON_NONE && has_item_with_icon) {
@@ -1237,81 +1373,24 @@ static void library_selector_menu_item(Block *block,
 
   button_enum_prop_value_set(but, item.value);
 
-  /* Restore the tooltip the built-in enum dropdown (#def_but_rna__menu) shows: for asset libraries
-   * this is the library path/URL, a useful hint. The enum items are freed after this draw
-   * (#RNA_property_enum_items_gettexted with `free`), so store a copy rather than referencing the
-   * item string directly. */
-  if (item.description && item.description[0]) {
-    char *description_copy = BLI_strdup(item.description);
-    button_func_tooltip_set(
-        but,
-        [](bContext * /*C*/, void *argN, const StringRef /*tip*/) -> std::string {
-          return static_cast<const char *>(argN);
-        },
-        description_copy,
-        MEM_delete_void);
+  /* A host with no RNA property behind the menu button applies the pick itself; an RNA-backed one
+   * leaves this unset and lets the popup-close re-apply do it. */
+  if (apply_library) {
+    button_func_set(but, [apply_library, value = item.value](bContext &C) {
+      apply_library(C, value);
+    });
+  }
+  else if (exit_membership) {
+    button_func_set(but, [exit_membership](bContext &C) { exit_membership(C); });
   }
 
-  /* Pin toggle. Only drawn for hosts that show the pinned libraries (the asset shelf popover's tab
-   * row); everywhere else this selector is reused the toggle would change state with nothing on
-   * screen to show for it.
-   *
-   * "All" gets no toggle: it is always the first tab and cannot be unpinned. Folders never reach
-   * here at all -- they are not selectable leaves.
-   *
-   * This fires the operator rather than writing the flag or the bit directly: the operator owns
-   * marking the Preferences dirty and notifying open popovers, and this keeps that in one place. */
+  library_selector_set_item_tooltip(but, item.description);
+
+  /* Only for hosts that show the pinned libraries (the asset shelf popover's tab row); everywhere
+   * else this selector is reused the toggle would change state with nothing on screen to show for
+   * it. */
   if (show_pin) {
-    const bUserAssetLibrary *user_library = nullptr;
-    eAssetLibraryType builtin_type = ASSET_LIBRARY_ALL;
-    bool has_pin = false;
-    bool is_pinned = false;
-
-    if (item.value >= ASSET_LIBRARY_CUSTOM) {
-      const AssetLibraryReference library_ref = ed::asset::library_reference_from_enum_value(
-          item.value);
-      user_library = BKE_preferences_asset_library_find_from_ref(&U, &library_ref);
-      if (user_library) {
-        has_pin = true;
-        is_pinned = (user_library->flag & ASSET_LIBRARY_IS_PINNED) != 0;
-      }
-    }
-    else {
-      /* BKE owns which built-ins have a pin at all (see #asset_builtin_pin_flag_from_type); asking
-       * it means the rule is not restated here. */
-      builtin_type = eAssetLibraryType(item.value);
-      if (BKE_preferences_asset_builtin_pin_supported(builtin_type)) {
-        has_pin = true;
-        is_pinned = BKE_preferences_asset_builtin_pin_get(&U, builtin_type);
-      }
-    }
-
-    if (has_pin) {
-      Button *pin_but = uiDefIconButO(
-          block,
-          ButtonType::But,
-          "PREFERENCES_OT_asset_library_pin_set",
-          wm::OpCallContext::ExecDefault,
-          is_pinned ? ICON_PINNED : ICON_UNPINNED,
-          0,
-          0,
-          short(UI_UNIT_X),
-          short(UI_UNIT_Y),
-          is_pinned ? TIP_("Unpin this library from the asset shelf popover") :
-                      TIP_("Pin this library as a tab at the top of the asset shelf popover"));
-      PointerRNA *pin_opptr = button_operator_ptr_ensure(pin_but);
-      if (user_library) {
-        RNA_enum_set(pin_opptr, "library_type", ASSET_LIBRARY_CUSTOM);
-        RNA_string_set(pin_opptr, "library_name", user_library->name);
-      }
-      else {
-        RNA_enum_set(pin_opptr, "library_type", int(builtin_type));
-      }
-      /* The state to apply is decided here, where the icon showing it is also decided, so the two
-       * can never disagree. */
-      RNA_boolean_set(pin_opptr, "pinned", !is_pinned);
-      button_flag_disable(pin_but, BUT_UNDO);
-    }
+    library_selector_add_pin_toggle(block, item);
   }
 
   if (item.value == current_value) {
@@ -1353,6 +1432,32 @@ static void library_selector_menu_button(Layout &row,
 /** \name Library selector menu (vertical, backed by #GridViewSettings)
  * \{ */
 
+/* Membership mode of a #template_grid_library_selector host, read straight from catalog memory
+ * rather than through #grid_settings::catalog_mode_get: that helper resolves the library from a
+ * #GridViewSettings property name the calling button does not necessarily have (the ID Browser's is
+ * `id_browser_asset_library_reference`). Membership is always stored under #ASSET_LIBRARY_ALL, which
+ * is also the library the enum reads while it is active. An empty \a domain means the ID Browser's
+ * own storage. */
+static grid_settings::CatalogMode grid_library_selector_current_mode(const int current_value,
+                                                                    const StringRef domain)
+{
+  if (current_value != ASSET_LIBRARY_ALL) {
+    return grid_settings::CatalogMode::All;
+  }
+  const StringRef domain_ref = domain.is_empty() ?
+                                   StringRef(grid_settings::id_browser_catalog_memory_domain) :
+                                   domain;
+  const AssetLibraryReference all_ref = asset_system::all_library_reference();
+  switch (BKE_asset_catalog_memory_get_mode(&U, all_ref, domain_ref)) {
+    case ASSET_CATALOG_MEMORY_RECENT:
+      return grid_settings::CatalogMode::Recent;
+    case ASSET_CATALOG_MEMORY_FAVORITES:
+      return grid_settings::CatalogMode::Favorites;
+    default:
+      return grid_settings::CatalogMode::All;
+  }
+}
+
 /* Draw the asset-library choices as a plain vertical menu instead of the RNA enum dropdown. The
  * enum dropdown lays folder headings out as side-by-side columns (#def_but_rna__menu); a menu reads
  * top to bottom. Folder headings become labels, and each library is a row. Called with the calling
@@ -1361,9 +1466,6 @@ static void library_selector_menu_button(Layout &row,
 static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *but_p)
 {
   Button *but = static_cast<Button *>(but_p);
-  Block *block = layout->block();
-  PopupBlockHandle *handle = block->handle;
-
   PointerRNA ptr = but->rnapoin;
   PropertyRNA *prop = but->rnaprop;
 
@@ -1379,11 +1481,19 @@ static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *b
   /* Set only by the ID Browser header (`interface_template_id_browser.cc`) -- no other
    * #template_grid_library_selector caller draws Recent/Favorites, so this stays off by default. */
   bool show_recent_favorites = false;
+  /* Empty means the ID Browser's own storage; a host that owns a catalog-memory domain (e.g. the
+   * image grid, shared with the brush Texture panel) names it here. */
+  std::string domain;
   if (but->context) {
     if (const std::optional<int64_t> flag = CTX_data_int_get(
             C, "grid_library_selector_show_recent_favorites"))
     {
       show_recent_favorites = *flag != 0;
+    }
+    if (const std::optional<StringRefNull> domain_str = CTX_data_string_get(
+            C, "grid_library_selector_catalog_domain"))
+    {
+      domain = *domain_str;
     }
     CTX_store_set(C, previous_store);
   }
@@ -1391,76 +1501,160 @@ static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *b
     return;
   }
 
-  block_flag_enable(block, BLOCK_MOVEMOUSE_QUIT);
-  block_layout_set_current(block, layout);
+  /* Property UI name as the menu heading (e.g. "Asset Library"), matching the built-in enum
+   * dropdown (#def_but_rna__menu) when it shows a title above the choices. */
+  const char *title = RNA_property_ui_name(prop, RNA_pointer_is_null(&ptr) ? nullptr : &ptr);
 
-  const int current_value = RNA_property_enum_get(&ptr, prop);
+  LibrarySelectorMenuParams params;
+  params.items = items;
+  params.title = title ? StringRef(title) : StringRef();
+  params.current_library_value = RNA_property_enum_get(&ptr, prop);
+  params.current_mode = grid_library_selector_current_mode(params.current_library_value, domain);
+  params.show_membership = show_recent_favorites;
+  /* No #apply_library: this menu was opened from a real RNA enum button, which applies the picked
+   * value itself when the popup closes. */
+  params.apply_membership = [ptr, domain](bContext &C, const grid_settings::CatalogMode mode) {
+    PointerRNA settings = ptr;
+    if (!domain.empty()) {
+      /* Host with its own catalog-memory domain (e.g. the image grid's, shared with the brush
+       * Texture panel): write the membership mode there instead of the ID Browser's. */
+      grid_settings::catalog_mode_set_membership(settings, mode, domain.c_str());
+    }
+    else {
+      wmWindowManager *wm = CTX_wm_manager(&C);
+      if (wm == nullptr) {
+        return;
+      }
+      id_browser_set_membership(*wm, mode);
+    }
+  };
+  /* Picking "All Libraries" while in membership leaves the enum value unchanged, so the popup-close
+   * re-apply is a no-op and nothing else would end membership. Use the same exit the Ctrl-Wheel
+   * stepper uses, which restores this library's remembered catalog filter. */
+  params.exit_membership = [domain](bContext &C) {
+    grid_settings::catalog_mode_exit_membership(
+        domain.empty() ? grid_settings::id_browser_catalog_memory_domain : domain.c_str());
+    /* The enum property does not change here, so its own update never fires; the grid reads the
+     * catalog-memory mode this just rewrote. */
+    WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
+    if (ARegion *region = CTX_wm_region(&C)) {
+      ED_region_tag_redraw(region);
+      ED_region_tag_refresh_ui(region);
+    }
+  };
+
+  library_selector_menu_draw_items(*C, *layout, params);
+
+  if (free) {
+    MEM_delete(items);
+  }
+}
+
+/* The context is unused: every entry applies its change from its own button callback, which
+ * receives the context live (see #LibrarySelectorMenuParams::apply_membership). Kept in the
+ * signature so callers do not have to change if an entry ever needs it at build time. */
+/**
+ * Recent / Favorites rows, drawn above the libraries. Not real libraries; they switch the host's
+ * membership mode through #LibrarySelectorMenuParams::apply_membership rather than an operator.
+ *
+ * They must still write #ASSET_LIBRARY_ALL into `handle->retvalue` like a normal library item
+ * (#library_selector_menu_item) does: when this popup was opened from a real RNA enum property
+ * button (the ID Browser's `id_browser_asset_library_reference`), closing it re-applies
+ * `handle->retvalue` to that property (#rna_WindowManager_id_browser_asset_library_set ->
+ * #id_browser_set_asset_library) regardless of which item was clicked. Leaving retvalue at its
+ * pre-seeded `current_value` would make that re-apply see a library change (old != #ALL). Matching
+ * #ASSET_LIBRARY_ALL here (which membership uses as its library) makes that re-apply compare equal
+ * and early-return instead.
+ */
+static void library_selector_add_membership_items(Block *block,
+                                                  Layout &col,
+                                                  PopupBlockHandle *handle,
+                                                  const LibrarySelectorMenuParams &params,
+                                                  const bool in_membership)
+{
+  auto add_membership_item = [&](const StringRefNull label,
+                                 const int icon,
+                                 const grid_settings::CatalogMode mode) {
+    Layout &item_row = col.row(true);
+    block_layout_set_current(block, &item_row);
+    Button *item_but = uiDefIconTextBut(block,
+                                        ButtonType::ButMenu,
+                                        icon,
+                                        label,
+                                        0,
+                                        0,
+                                        short(UI_UNIT_X * 5),
+                                        short(UI_UNIT_Y),
+                                        &handle->retvalue,
+                                        std::nullopt);
+    button_enum_prop_value_set(item_but, ASSET_LIBRARY_ALL);
+    if (in_membership && params.current_mode == mode) {
+      button_flag_enable(item_but, UI_SELECT_DRAW);
+    }
+    button_func_set(item_but, [apply_membership = params.apply_membership, mode](bContext &C) {
+      apply_membership(C, mode);
+      /* Explicit, not relied-upon-implicit: an RNA host's own property update fires from the
+       * popup-close re-apply above, but that only covers the enum property itself -- it does not
+       * know this click also rewrote the membership mode, which is what the grid actually reads. */
+      WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
+      if (ARegion *region = CTX_wm_region(&C)) {
+        ED_region_tag_redraw(region);
+        ED_region_tag_refresh_ui(region);
+      }
+    });
+  };
+
+  add_membership_item(IFACE_("Recent"), ICON_RECOVER_LAST, grid_settings::CatalogMode::Recent);
+  add_membership_item(IFACE_("Favorites"), ICON_SOLO_ON, grid_settings::CatalogMode::Favorites);
+  col.separator();
+}
+
+void library_selector_menu_draw_items(bContext & /*C*/,
+                                      Layout &layout,
+                                      const LibrarySelectorMenuParams &params)
+{
+  const EnumPropertyItem *items = params.items;
+  if (!items) {
+    return;
+  }
+  Block *block = layout.block();
+  PopupBlockHandle *handle = block->handle;
+
+  block_flag_enable(block, BLOCK_MOVEMOUSE_QUIT);
+  block_layout_set_current(block, &layout);
+
+  const int current_value = params.current_library_value;
+  const bool in_membership = ELEM(params.current_mode,
+                                  grid_settings::CatalogMode::Recent,
+                                  grid_settings::CatalogMode::Favorites);
   library_selector_seed_retvalue(handle, items, current_value);
   const bool has_item_with_icon = library_enum_has_item_with_icon(items);
 
-  Layout &col = layout->column(false);
-  /* Property UI name as the menu heading (e.g. "Asset Library"), matching the built-in enum
-   * dropdown (#def_but_rna__menu) when it shows a title above the choices. */
-  const char *title = RNA_property_ui_name(
-      prop, RNA_pointer_is_null(&ptr) ? nullptr : &ptr);
-  if (title && title[0]) {
-    library_selector_menu_heading(block, col, title);
+  Layout &col = layout.column(false);
+  if (!params.title.is_empty()) {
+    library_selector_menu_heading(block, col, params.title);
     col.separator();
   }
 
-  /* Recent / Favorites first, same order as the Image Grid's own library menu
-   * (#image_grid_library_selector_menu_draw). Not real libraries; they switch the ID Browser's
-   * catalog-memory mode via #id_browser_set_membership (#BKE_asset_catalog_memory_set_mode under
-   * #ASSET_LIBRARY_ALL, domain #"id_browser"), called directly from a #button_func_set callback
-   * rather than through an operator.
-   *
-   * These must still write #ASSET_LIBRARY_ALL into `&handle->retvalue` like a normal library item
-   * (#library_selector_menu_item) does: this popup was opened from a real RNA enum property button
-   * (`id_browser_asset_library_reference`), and closing *any* popup spawned that way re-applies
-   * `handle->retvalue` to that property (#rna_WindowManager_id_browser_asset_library_set ->
-   * #id_browser_set_asset_library) regardless of which item was clicked. Leaving retvalue at its
-   * pre-seeded `current_value` would make that re-apply see a library change (old != #ALL). Matching
-   * #ASSET_LIBRARY_ALL here (already set by #id_browser_set_membership) makes that re-apply
-   * compare equal and early-return instead. */
-  if (show_recent_favorites) {
-    auto add_membership_item = [&](const StringRefNull label,
-                                   const int icon,
-                                   const grid_settings::CatalogMode mode) {
-      Layout &item_row = col.row(true);
-      block_layout_set_current(block, &item_row);
-      Button *item_but = uiDefIconTextBut(block,
-                                          ButtonType::ButMenu,
-                                          icon,
-                                          label,
-                                          0,
-                                          0,
-                                          short(UI_UNIT_X * 5),
-                                          short(UI_UNIT_Y),
-                                          &handle->retvalue,
-                                          std::nullopt);
-      button_enum_prop_value_set(item_but, ASSET_LIBRARY_ALL);
-      button_func_set(item_but, [mode](bContext &C) {
-        wmWindowManager *wm = CTX_wm_manager(&C);
-        if (wm == nullptr) {
-          return;
-        }
-        id_browser_set_membership(*wm, mode);
-        /* Explicit, not relied-upon-implicit: #id_browser_asset_library_reference's own
-         * #RNA_def_property_update fires from the popup-close re-apply above, but that only
-         * covers the enum property itself -- it does not know this click also rewrote the
-         * catalog-memory mode, which is what the grid actually reads. */
-        WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
-        if (ARegion *region = CTX_wm_region(&C)) {
-          ED_region_tag_redraw(region);
-          ED_region_tag_refresh_ui(region);
-        }
-      });
-    };
-
-    add_membership_item(IFACE_("Recent"), ICON_RECOVER_LAST, grid_settings::CatalogMode::Recent);
-    add_membership_item(IFACE_("Favorites"), ICON_SOLO_ON, grid_settings::CatalogMode::Favorites);
-    col.separator();
+  if (params.show_membership && params.apply_membership) {
+    library_selector_add_membership_items(block, col, handle, params, in_membership);
   }
+
+  /* Same for both passes below: while a membership mode is active no library is drawn as current
+   * (-1), and clicking "All" is what leaves that mode. */
+  const auto add_library_item = [&](const EnumPropertyItem &item) {
+    library_selector_menu_item(block,
+                               col,
+                               handle,
+                               item,
+                               in_membership ? -1 : current_value,
+                               has_item_with_icon,
+                               /*show_pin=*/false,
+                               params.apply_library,
+                               (in_membership && item.value == ASSET_LIBRARY_ALL) ?
+                                   params.exit_membership :
+                                   nullptr);
+  };
 
   bool root_items_drawn = false;
   bool folder_section_started = false;
@@ -1479,8 +1673,7 @@ static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *b
     if (library_enum_item_is_in_folder(*item)) {
       continue;
     }
-    library_selector_menu_item(
-        block, col, handle, *item, current_value, has_item_with_icon, /*show_pin=*/false);
+    add_library_item(*item);
     root_items_drawn = true;
   }
 
@@ -1504,13 +1697,158 @@ static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *b
     if (!library_enum_item_is_in_folder(*item)) {
       continue;
     }
-    library_selector_menu_item(
-        block, col, handle, *item, current_value, has_item_with_icon, /*show_pin=*/false);
+    add_library_item(*item);
+  }
+}
+
+std::optional<LibraryStepResult> library_selector_step(const Span<int> library_values,
+                                                       const bool include_membership,
+                                                       const grid_settings::CatalogMode current_mode,
+                                                       const int current_library_value,
+                                                       const int direction)
+{
+  const int membership_num = include_membership ? 2 : 0;
+  const int total_num = membership_num + int(library_values.size());
+  if (total_num == 0) {
+    return std::nullopt;
   }
 
+  /* Position in the virtual list. An unknown current library (e.g. one filtered out of this
+   * selector's item source) falls back to the first entry, so the first step lands on a valid one
+   * either way. */
+  int current_index = membership_num;
+  if (include_membership && current_mode == grid_settings::CatalogMode::Recent) {
+    current_index = 0;
+  }
+  else if (include_membership && current_mode == grid_settings::CatalogMode::Favorites) {
+    current_index = 1;
+  }
+  else {
+    for (const int i : library_values.index_range()) {
+      if (library_values[i] == current_library_value) {
+        current_index = membership_num + i;
+        break;
+      }
+    }
+  }
+
+  const int next_index = mod_i(current_index + direction, total_num);
+
+  LibraryStepResult result{};
+  if (next_index < membership_num) {
+    result.is_membership = true;
+    result.mode = (next_index == 0) ? grid_settings::CatalogMode::Recent :
+                                      grid_settings::CatalogMode::Favorites;
+    return result;
+  }
+  result.is_membership = false;
+  result.library_enum_value = library_values[next_index - membership_num];
+  return result;
+}
+
+/* Ctrl-Wheel cycling for the selector button (#button_supports_cycling / #button_menu_step). The
+ * built-in enum stepping (#RNA_property_enum_step) can't be used here: the item source
+ * (#rna_asset_library_ui_reference_itemf) narrows the list from the button's context store (e.g.
+ * `grid_library_selector_only_image_libraries`), and that store is not present while handling
+ * events -- stepping would walk libraries this selector never draws. Build the items the same way
+ * #grid_library_selector_menu_draw does instead, and step the same virtual list the menu lays out.
+ *
+ * Returns the new library enum value; the caller (#button_menu_step) applies it to the button's RNA
+ * property, which is exactly what clicking a library in the menu does. */
+static int grid_library_selector_menu_step(bContext *C, const int direction, Button *but)
+{
+  PointerRNA ptr = but->rnapoin;
+  PropertyRNA *prop = but->rnaprop;
+  const int current_value = RNA_property_enum_get(&ptr, prop);
+
+  /* Present the button's store while the itemf runs, and read the host's own settings from it --
+   * both as in #grid_library_selector_menu_draw. */
+  const bContextStore *previous_store = CTX_store_get(C);
+  bool show_recent_favorites = false;
+  std::string domain;
+  if (but->context) {
+    CTX_store_set(C, but->context);
+    if (const std::optional<int64_t> flag = CTX_data_int_get(
+            C, "grid_library_selector_show_recent_favorites"))
+    {
+      show_recent_favorites = *flag != 0;
+    }
+    if (const std::optional<StringRefNull> domain_str = CTX_data_string_get(
+            C, "grid_library_selector_catalog_domain"))
+    {
+      domain = *domain_str;
+    }
+  }
+  const EnumPropertyItem *items = nullptr;
+  bool free = false;
+  RNA_property_enum_items_gettexted(C, &ptr, prop, &items, nullptr, &free);
+  if (but->context) {
+    CTX_store_set(C, previous_store);
+  }
+  if (!items) {
+    return current_value;
+  }
+
+  /* Real library entries only, in menu order (folder headings and separators have no identifier). */
+  Vector<int> library_values;
+  for (const EnumPropertyItem *item = items; item->identifier; item++) {
+    if (item->identifier[0]) {
+      library_values.append(item->value);
+    }
+  }
   if (free) {
     MEM_delete(items);
   }
+
+  const char *domain_c = domain.empty() ? grid_settings::id_browser_catalog_memory_domain :
+                                          domain.c_str();
+  const grid_settings::CatalogMode current_mode = grid_library_selector_current_mode(current_value,
+                                                                                    domain);
+
+  const std::optional<LibraryStepResult> result = library_selector_step(
+      library_values, show_recent_favorites, current_mode, current_value, direction);
+  if (!result) {
+    return current_value;
+  }
+
+  if (!result->is_membership) {
+    /* Stepping onto a real library ends membership by itself, because the mode is stored per
+     * library reference and the new one has its own. #ASSET_LIBRARY_ALL is the exception: it is the
+     * very reference membership is stored under, so it takes the same explicit exit the menu's own
+     * "All Libraries" entry performs (#library_selector_menu_draw_items) -- without it the entry
+     * would be unreachable by cycling, since the enum value does not change either and the RNA apply
+     * that follows is a no-op. */
+    if (current_mode != grid_settings::CatalogMode::All &&
+        result->library_enum_value == ASSET_LIBRARY_ALL)
+    {
+      grid_settings::catalog_mode_exit_membership(domain_c);
+      WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
+      if (ARegion *region = CTX_wm_region(C)) {
+        ED_region_tag_redraw(region);
+        ED_region_tag_refresh_ui(region);
+      }
+    }
+    return result->library_enum_value;
+  }
+
+  /* Membership entry: same effect as clicking Recent/Favorites in the menu, including returning
+   * #ASSET_LIBRARY_ALL so the RNA apply that follows sees no library change (see the menu item's
+   * comment on `handle->retvalue`). */
+  if (!domain.empty()) {
+    grid_settings::catalog_mode_set_membership(ptr, result->mode, domain.c_str());
+  }
+  else if (wmWindowManager *wm = CTX_wm_manager(C)) {
+    id_browser_set_membership(*wm, result->mode);
+  }
+  else {
+    return current_value;
+  }
+  WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+    ED_region_tag_refresh_ui(region);
+  }
+  return ASSET_LIBRARY_ALL;
 }
 
 /** \} */
@@ -1528,6 +1866,92 @@ static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *b
  *
  * \param show_pins: see #template_asset_library_column_selector. A #MenuCreateFunc takes no extra
  * arguments, hence the two thin wrappers below rather than a parameter on the drawer itself. */
+/**
+ * The enum's items, resolved with \a but's own context store in place.
+ *
+ * The itemf may read the calling button's context store (e.g. the ID browser's library itemf
+ * narrows the list to image libraries via `id_browser_ptr`/`id_browser_prop`). This menu runs from
+ * #block_func_POPUP, which copies that store onto the menu layout but not onto \a C, and only
+ * applies it to \a C later in #block_layout_resolve -- after the itemf has already run. So the
+ * button's store is presented to the itemf directly, matching #button_context_poll_operator_ex.
+ */
+static const EnumPropertyItem *library_selector_enum_items_get(bContext *C,
+                                                               Button &but,
+                                                               bool *r_free)
+{
+  PointerRNA ptr = but.rnapoin;
+  const bContextStore *previous_store = CTX_store_get(C);
+  if (but.context) {
+    CTX_store_set(C, but.context);
+  }
+  const EnumPropertyItem *items = nullptr;
+  RNA_property_enum_items_gettexted(C, &ptr, but.rnaprop, &items, nullptr, r_free);
+  if (but.context) {
+    CTX_store_set(C, previous_store);
+  }
+  return items;
+}
+
+/**
+ * Column widths and paddings for the multi-column menu. A popup menu
+ * (#BLOCK_BOUNDS_POPUP_MENU) is re-sized to its widest text per column in #block_bounds_calc_text,
+ * ignoring any ui_units_x / fixed_size set on a column, so these #Block fields are the only levers.
+ *
+ * The padding is what each column needs beyond its widest text: #block_bounds_calc_text measures
+ * the text alone, so it has to carry everything the widget puts around it, or the longest name in
+ * each column gets ellipsized. The figures come from the draw code, not from the layout's
+ * estimator (whose `text_pad_none` is about a different question and is short of what is needed):
+ *
+ * - 0.125 each side: the menu item's own box padding. #widget_menu_itembut shrinks the rect in
+ *   place and the text is then drawn into that same, smaller rect.
+ * - #UI_TEXT_MARGIN_X: the left text margin, applied via #button_text_padding.
+ * - 0.25: the margin #text_clip_middle keeps free before it starts ellipsizing
+ *   (#UI_TEXT_CLIP_MARGIN). #ButtonType::ButMenu is not one of the types exempt from it.
+ * - The icon column, when the items show icons (#widget_draw_text_icon: 0.2 for a menu item plus
+ *   the icon and its padding).
+ *
+ * Cross-check on the derivation: with an icon these sum to 2.0, so with the gap they land exactly
+ * on the 2.5-unit blanket #block_bounds_calc_popup hands the pass -- that blanket is the icon
+ * case's requirement, which an ordinary single-column enum menu pays once. This menu draws a column
+ * per folder and would pay it in every one, so it says what its own items need instead.
+ *
+ * WARNING: this is a silent coupling to the draw code, in both directions. Nothing here breaks at
+ * compile time if #widget_menu_itembut or #UI_TEXT_CLIP_MARGIN changes its padding -- the figures
+ * simply drift out of agreement with what is drawn, and the longest name in a column starts
+ * clipping (or gains slack) again. Re-check this against the draw code after any upstream merge
+ * that touches `interface_widgets.cc`. The one cheap test: open the selector with a folder whose
+ * longest library name nearly fills its column and confirm it is not ellipsized.
+ */
+static void library_selector_set_column_metrics(Block &block,
+                                                const Button *calling_but,
+                                                const bool has_item_with_icon)
+{
+  /* Pin the first (folder-less) column to the width of the dropdown that opened this menu, capped
+   * so an unusually wide dropdown does not stretch it across the whole menu; ten units comfortably
+   * fits a typical library name while staying compact. */
+  const float but_width = calling_but ? BLI_rctf_size_x(&calling_but->rect) : 0.0f;
+  if (but_width > 0.0f) {
+    block.menu_first_col_minwidth = std::min(int(but_width), 10 * UI_UNIT_X);
+  }
+
+  const float box_padding_units = 2.0f * 0.125f;
+  const float clip_margin_units = 0.25f;
+  const float icon_units = has_item_with_icon ? 1.1f : 0.0f;
+  const float col_gap_units = 0.5f;
+  block.menu_col_padding = int(
+      (box_padding_units + UI_TEXT_MARGIN_X + clip_margin_units + icon_units + col_gap_units) *
+      UI_UNIT_X);
+
+  /* Where a row's pin stops: exactly the inset #widget_draw gives a menu's separator line
+   * (`BLI_rcti_pad(rect, -7 * UI_SCALE_FAC, 0)`), so the pin lines up with the end of the rule
+   * that underlines the column's heading instead of sitting on the column boundary. Written the
+   * same way the draw writes it: #UI_UNIT_X is not a whole 20 * #UI_SCALE_FAC
+   * (#WM_window_dpi_set_userdef rounds it), so a fraction of a unit would not land on the same
+   * pixel. Smaller than `col_gap_units` above, so the row's text keeps its slack and stays
+   * unclipped. */
+  block.menu_col_row_inset = int(7.0f * UI_SCALE_FAC);
+}
+
 static void asset_library_column_menu_draw_impl(bContext *C,
                                                 Layout *layout,
                                                 void *but_p,
@@ -1540,21 +1964,8 @@ static void asset_library_column_menu_draw_impl(bContext *C,
   PointerRNA ptr = but->rnapoin;
   PropertyRNA *prop = but->rnaprop;
 
-  /* The enum's itemf may read the calling button's context store (e.g. the ID browser's library
-   * itemf narrows the list to image libraries via `id_browser_ptr`/`id_browser_prop`). This menu
-   * runs from #block_func_POPUP, which copies that store onto the menu layout but not onto \a C, and
-   * only applies it to \a C later in #block_layout_resolve -- after the itemf below has already run.
-   * Present the button's store to the itemf directly, matching #button_context_poll_operator_ex. */
-  const bContextStore *previous_store = CTX_store_get(C);
-  if (but->context) {
-    CTX_store_set(C, but->context);
-  }
-  const EnumPropertyItem *items = nullptr;
   bool free = false;
-  RNA_property_enum_items_gettexted(C, &ptr, prop, &items, nullptr, &free);
-  if (but->context) {
-    CTX_store_set(C, previous_store);
-  }
+  const EnumPropertyItem *items = library_selector_enum_items_get(C, *but, &free);
   if (!items) {
     return;
   }
@@ -1562,70 +1973,12 @@ static void asset_library_column_menu_draw_impl(bContext *C,
   block_flag_enable(block, BLOCK_MOVEMOUSE_QUIT);
   block_layout_set_current(block, layout);
 
-  /* Width of the button that opened this menu (the dropdown), read live from the popup handle. */
-  const Button *calling_but = handle ? handle->popup_create_vars.but : nullptr;
-  const float but_width = calling_but ? BLI_rctf_size_x(&calling_but->rect) : 0.0f;
-
-  /* Pin the first (folder-less) column to the dropdown's width. A popup menu (#BLOCK_BOUNDS_POPUP_MENU)
-   * is re-sized to its widest text per column in #block_bounds_calc_text, ignoring any ui_units_x /
-   * fixed_size set on a column. The only lever that pass honors is #Block.menu_first_col_minwidth,
-   * so hand the button width to it, capped so a very wide dropdown doesn't oversize the column. */
-  if (but_width > 0.0f) {
-    /* Upper bound so an unusually wide dropdown button doesn't stretch the first column across the
-     * whole menu; ten units comfortably fits a typical library name while staying compact. */
-    const int max_first_col_width = 10 * UI_UNIT_X;
-    int pinned_width = int(but_width);
-    if (pinned_width > max_first_col_width) {
-      pinned_width = max_first_col_width;
-    }
-    block->menu_first_col_minwidth = pinned_width;
-  }
-
   const int current_value = RNA_property_enum_get(&ptr, prop);
   library_selector_seed_retvalue(handle, items, current_value);
   const bool has_item_with_icon = library_enum_has_item_with_icon(items);
 
-  /* What each column needs beyond its widest text. #block_bounds_calc_text measures the text alone,
-   * so this padding has to carry everything the widget puts around it, or the longest name in each
-   * column gets ellipsized. The figures come from the draw code, not from the layout's estimator
-   * (whose `text_pad_none` is about a different question and is short of what is needed here):
-   *
-   * - 0.125 each side: the menu item's own box padding. #widget_menu_itembut shrinks the rect in
-   *   place and the text is then drawn into that same, smaller rect.
-   * - #UI_TEXT_MARGIN_X: the left text margin, applied via #button_text_padding.
-   * - 0.25: the margin #text_clip_middle keeps free before it starts ellipsizing
-   *   (#UI_TEXT_CLIP_MARGIN). #ButtonType::ButMenu is not one of the types exempt from it.
-   * - The icon column, when the items show icons (#widget_draw_text_icon: 0.2 for a menu item plus
-   *   the icon and its padding).
-   *
-   * Cross-check on the derivation: with an icon these sum to 2.0, so with the gap below they land
-   * exactly on the 2.5-unit blanket #block_bounds_calc_popup hands the pass -- that blanket is the
-   * icon case's requirement, which an ordinary single-column enum menu pays once. This menu draws a
-   * column per folder and would pay it in every one, so it says what its own items need instead.
-   *
-   * WARNING: this is a silent coupling to the draw code, in both directions. Nothing here breaks at
-   * compile time if #widget_menu_itembut or #UI_TEXT_CLIP_MARGIN changes its padding -- the figures
-   * simply drift out of agreement with what is drawn, and the longest name in a column starts
-   * clipping (or gains slack) again. Re-check this block against the draw code after any upstream
-   * merge that touches `interface_widgets.cc`. The one cheap test: open the selector with a folder
-   * whose longest library name nearly fills its column and confirm it is not ellipsized. */
-  {
-    const float box_padding_units = 2.0f * 0.125f;
-    const float clip_margin_units = 0.25f;
-    const float icon_units = has_item_with_icon ? 1.1f : 0.0f;
-    const float col_gap_units = 0.5f;
-    block->menu_col_padding = int((box_padding_units + UI_TEXT_MARGIN_X + clip_margin_units +
-                                   icon_units + col_gap_units) *
-                                  UI_UNIT_X);
-    /* Where a row's pin stops: exactly the inset #widget_draw gives a menu's separator line
-     * (`BLI_rcti_pad(rect, -7 * UI_SCALE_FAC, 0)`), so the pin lines up with the end of the rule
-     * that underlines the column's heading instead of sitting on the column boundary. Written the
-     * same way the draw writes it: #UI_UNIT_X is not a whole 20 * #UI_SCALE_FAC
-     * (#WM_window_dpi_set_userdef rounds it), so a fraction of a unit would not land on the same
-     * pixel. Smaller than `col_gap_units` above, so the row's text keeps its slack and stays
-     * unclipped. */
-    block->menu_col_row_inset = int(7.0f * UI_SCALE_FAC);
-  }
+  library_selector_set_column_metrics(
+      *block, handle ? handle->popup_create_vars.but : nullptr, has_item_with_icon);
 
   Layout &columns = layout->row(false);
 
@@ -1722,10 +2075,14 @@ void template_asset_library_column_selector(Layout &row,
 void template_grid_library_selector(Layout *layout,
                                     bContext *C,
                                     PointerRNA *ptr,
-                                    const StringRefNull prop_name,
-                                    const bool embed_in_parent_row,
-                                    const bool show_refresh)
+                                    const GridLibrarySelectorParams &params)
 {
+  const StringRefNull prop_name = params.prop_name;
+  const bool embed_in_parent_row = params.embed_in_parent_row;
+  const bool show_refresh = params.show_refresh;
+  const bool only_image_libraries = params.only_image_libraries;
+  const char *catalog_memory_domain = params.catalog_memory_domain;
+
   if (!layout || !C || !ptr || !ptr->data) {
     return;
   }
@@ -1734,8 +2091,44 @@ void template_grid_library_selector(Layout *layout,
   }
 
   Layout &row = embed_in_parent_row ? *layout : layout->row(true);
+  if (only_image_libraries) {
+    /* Read back by #rna_asset_library_ui_reference_itemf while the menu builds its items, so the
+     * list matches the texture asset shelf's ("Add Image Library" libraries only). */
+    row.context_int_set("grid_library_selector_only_image_libraries", 1);
+  }
+  const bool show_recent_favorites = catalog_memory_domain && catalog_memory_domain[0];
+  if (show_recent_favorites) {
+    row.context_int_set("grid_library_selector_show_recent_favorites", 1);
+    row.context_string_set("grid_library_selector_catalog_domain", catalog_memory_domain);
+  }
+  const int64_t buttons_num_before = row.block()->buttons_ptrs.size();
   library_selector_menu_button(
       row, ptr, prop_name, ICON_ASSET_MANAGER, grid_library_selector_menu_draw);
+  /* Ctrl-Wheel cycling: replace the built-in enum stepping, which ignores the context store set
+   * above and would step through libraries this selector does not list. */
+  if (row.block()->buttons_ptrs.size() != buttons_num_before) {
+    Button *but = row.block()->buttons_ptrs.last().get();
+    if (but->type == ButtonType::Menu) {
+      button_func_menu_step_set(but, grid_library_selector_menu_step);
+    }
+  }
+
+  if (show_recent_favorites) {
+    /* While in membership the enum still reads "All Libraries"; label the button by what is
+     * actually browsed, the way the ID Browser header does. */
+    const grid_settings::CatalogMode mode = grid_settings::catalog_mode_get(*ptr,
+                                                                           catalog_memory_domain);
+    if (ELEM(mode, grid_settings::CatalogMode::Recent, grid_settings::CatalogMode::Favorites)) {
+      const bool is_recent = mode == grid_settings::CatalogMode::Recent;
+      Button *but = row.block()->buttons_ptrs.last().get();
+      but->str = is_recent ? IFACE_("Recent") : IFACE_("Favorites");
+      but->drawstr = but->str;
+      but->icon = is_recent ? ICON_RECOVER_LAST : ICON_SOLO_ON;
+      /* Without this the label is regenerated from the enum's current value on the next refresh
+       * pass; see the same guard in the ID Browser header. */
+      button_drawflag_enable(but, BUT_MENU_KEEP_LABEL);
+    }
+  }
 
   if (show_refresh) {
     const int enum_value = RNA_enum_get(ptr, prop_name.c_str());
@@ -1750,7 +2143,8 @@ void template_grid_library_selector(Layout *layout,
 void template_grid_catalog_selector(Layout *layout,
                                     bContext *C,
                                     PointerRNA *settings_ptr,
-                                    const bool embed_in_parent_row)
+                                    const bool embed_in_parent_row,
+                                    const char *catalog_filter_domain)
 {
   if (!layout || !C || !settings_ptr || !settings_ptr->data) {
     return;
@@ -1764,6 +2158,9 @@ void template_grid_catalog_selector(Layout *layout,
     row.ui_units_x_set(1.6f);
   }
   row.context_ptr_set("grid_view_settings", settings_ptr);
+  if (catalog_filter_domain && catalog_filter_domain[0]) {
+    row.context_string_set("grid_catalog_selector_filter_domain", catalog_filter_domain);
+  }
   row.popover(C, "GRIDVIEW_PT_catalog_selector", "", ICON_COLLAPSEMENU);
 
   if (!embed_in_parent_row) {

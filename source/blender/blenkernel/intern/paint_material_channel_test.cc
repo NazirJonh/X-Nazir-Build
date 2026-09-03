@@ -12,6 +12,7 @@
 #include "BKE_brush.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_idtype.hh"
+#include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
@@ -32,6 +33,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
+#include "BLI_uuid.h"
 
 #include "BLO_readfile.hh"
 #include "BLO_writefile.hh"
@@ -649,9 +651,10 @@ TEST_F(PaintMaterialChannelTest, channel_image_binding_skips_auto_creation)
   BrushMaterialPaint brush_paint{};
   brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
 
-  const int created = BKE_paint_material_images_ensure_writable(
+  const PaintMaterialImagesEnsureResult ensure_result = BKE_paint_material_images_ensure_writable(
       *bmain, *ob, brush_paint, mode_settings, visible_channels);
-  EXPECT_EQ(created, 0);
+  EXPECT_EQ(ensure_result.created, 0);
+  EXPECT_FALSE(ensure_result.conflicting_layer_ids);
 
   /* Overriding a channel must not wire anything into the shader graph - the Principled BSDF's
    * Metallic socket stays exactly as unconnected as it started; any display wiring is the
@@ -681,6 +684,167 @@ TEST_F(PaintMaterialChannelTest, channel_image_binding_skips_auto_creation)
       *ob, mode_settings, &brush_paint, visible_channels);
   ASSERT_EQ(targets.size(), 1);
   EXPECT_EQ(targets[0].image, layer_image);
+}
+
+TEST_F(PaintMaterialChannelTest, image_paint_layer_id_defaults_to_nil)
+{
+  Image *image = add_image("LayerIdDefault");
+  EXPECT_TRUE(BLI_uuid_is_nil(image->paint_layer_id));
+}
+
+TEST_F(PaintMaterialChannelTest, image_paint_layer_id_ensure_is_idempotent)
+{
+  Image *image = add_image("LayerIdEnsure");
+
+  BKE_image_paint_layer_id_ensure(image);
+  const bUUID first = image->paint_layer_id;
+  EXPECT_FALSE(BLI_uuid_is_nil(first));
+
+  BKE_image_paint_layer_id_ensure(image);
+  EXPECT_TRUE(BLI_uuid_equal(first, image->paint_layer_id));
+}
+
+TEST_F(PaintMaterialChannelTest, images_ensure_stamps_one_layer_id_on_fresh_material)
+{
+  Object *ob = add_mesh_object("StampFreshOb");
+  add_material_with_principled(*ob, "StampFreshMat");
+
+  PaintModeSettings mode_settings{};
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  const int visible_channels = paint_material_channel_test_default_visibility();
+
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].use = 1;
+
+  const PaintMaterialImagesEnsureResult res = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+
+  EXPECT_GT(res.created, 0);
+  EXPECT_FALSE(res.conflicting_layer_ids);
+
+  Image *base = nullptr;
+  Image *rough = nullptr;
+  ImageUser *iuser = nullptr;
+  ASSERT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &base, &iuser));
+  ASSERT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_ROUGHNESS, &rough, &iuser));
+  EXPECT_FALSE(BLI_uuid_is_nil(base->paint_layer_id));
+  EXPECT_TRUE(BLI_uuid_equal(base->paint_layer_id, rough->paint_layer_id));
+}
+
+TEST_F(PaintMaterialChannelTest, images_ensure_joins_single_existing_layer_id)
+{
+  Object *ob = add_mesh_object("StampJoinOb");
+  Material *ma = add_material_with_principled(*ob, "StampJoinMat");
+
+  Image *base = add_image("StampJoinBase");
+  base->paint_layer_id = BLI_uuid_generate_random();
+  const bUUID existing = base->paint_layer_id;
+  link_image_to_socket(*ma, *base, "Base Color");
+
+  PaintModeSettings mode_settings{};
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  const int visible_channels = paint_material_channel_test_default_visibility();
+
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].use = 1;
+
+  const PaintMaterialImagesEnsureResult res = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+
+  EXPECT_GT(res.created, 0);
+  EXPECT_FALSE(res.conflicting_layer_ids);
+  EXPECT_TRUE(BLI_uuid_equal(base->paint_layer_id, existing)); /* untouched */
+
+  Image *rough = nullptr;
+  ImageUser *iuser = nullptr;
+  ASSERT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_ROUGHNESS, &rough, &iuser));
+  EXPECT_TRUE(BLI_uuid_equal(rough->paint_layer_id, existing));
+}
+
+TEST_F(PaintMaterialChannelTest, images_ensure_flags_conflicting_layer_ids)
+{
+  Object *ob = add_mesh_object("StampConflictOb");
+  Material *ma = add_material_with_principled(*ob, "StampConflictMat");
+
+  Image *base = add_image("StampConflictBase");
+  base->paint_layer_id = BLI_uuid_generate_random();
+  const bUUID id_a = base->paint_layer_id;
+  link_image_to_socket(*ma, *base, "Base Color");
+
+  Image *metallic = add_image("StampConflictMetallic");
+  metallic->paint_layer_id = BLI_uuid_generate_random();
+  const bUUID id_b = metallic->paint_layer_id;
+  link_image_to_socket(*ma, *metallic, "Metallic");
+
+  PaintModeSettings mode_settings{};
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  const int visible_channels = paint_material_channel_test_default_visibility();
+
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].use = 1;
+
+  const PaintMaterialImagesEnsureResult res = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+
+  EXPECT_GT(res.created, 0);
+  EXPECT_TRUE(res.conflicting_layer_ids);
+  EXPECT_TRUE(BLI_uuid_equal(base->paint_layer_id, id_a));     /* untouched */
+  EXPECT_TRUE(BLI_uuid_equal(metallic->paint_layer_id, id_b)); /* untouched */
+
+  Image *rough = nullptr;
+  ImageUser *iuser = nullptr;
+  ASSERT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_ROUGHNESS, &rough, &iuser));
+  EXPECT_FALSE(BLI_uuid_is_nil(rough->paint_layer_id));
+  /* Smoke check of the generator, not a uniqueness proof (spec 5.2). */
+  EXPECT_FALSE(BLI_uuid_equal(rough->paint_layer_id, id_a));
+  EXPECT_FALSE(BLI_uuid_equal(rough->paint_layer_id, id_b));
+}
+
+TEST_F(PaintMaterialChannelTest, images_ensure_noop_run_changes_nothing)
+{
+  Object *ob = add_mesh_object("StampNoopOb");
+  add_material_with_principled(*ob, "StampNoopMat");
+
+  PaintModeSettings mode_settings{};
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  const int visible_channels = paint_material_channel_test_default_visibility();
+
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
+
+  /* First run creates the maps. */
+  BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+
+  Image *base = nullptr;
+  Image *metallic = nullptr;
+  ImageUser *iuser = nullptr;
+  ASSERT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &base, &iuser));
+  ASSERT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_METALLIC, &metallic, &iuser));
+  const bUUID base_id = base->paint_layer_id;
+  const bUUID metallic_id = metallic->paint_layer_id;
+  const int images_before = BLI_listbase_count(&bmain->images);
+
+  /* Second run creates nothing. */
+  const PaintMaterialImagesEnsureResult res = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+
+  EXPECT_EQ(res.created, 0);
+  EXPECT_FALSE(res.conflicting_layer_ids);
+  EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before);
+  EXPECT_TRUE(BLI_uuid_equal(base->paint_layer_id, base_id));
+  EXPECT_TRUE(BLI_uuid_equal(metallic->paint_layer_id, metallic_id));
 }
 
 TEST_F(PaintMaterialChannelTest, hidden_channel_is_not_enabled_for_painting)

@@ -5,6 +5,7 @@
 import bpy
 from bpy.types import (
     Menu,
+    UIGrid,
     UIList,
 )
 from bpy.app.translations import (
@@ -12,6 +13,49 @@ from bpy.app.translations import (
     pgettext_iface as iface_,
     pgettext_n as n_,
 )
+
+
+def is_paint_layer_map(image):
+    """True when `image` is a map of a PBR paint layer created by "Create PBR Paint Maps".
+
+    Membership is the `paint_layer_id` UUID alone, not `Image.is_paint_canvas`: the two are
+    related but distinct. `is_paint_canvas` marks any auto-created write target (a classic texture
+    paint slot included), while a layer UUID marks an image an add-on or the engine has grouped
+    into one PBR layer -- an add-on-authored layer map need not carry the canvas flag.
+
+    A layer map is owned by the engine: its name follows the "<Channel> TexLayer" contract the
+    layer's maps are found by, so renaming it, duplicating it through New or replacing it through
+    Open all break that grouping. Hosts drawing a canvas row use this to close the row's editing
+    controls; the Image Editor offers the channel selector
+    (`SpaceImageEditor.material_paint_canvas`) in its place.
+    """
+    return image is not None and bool(image.paint_layer_id)
+
+
+def draw_paint_canvas_row(layout, data, propname, *, material=None, new=None, open_op=None):
+    """Draw a canvas image browse row, closed when the assigned image is a PBR paint layer map.
+
+    Shared by every host that shows a paint canvas outside the Image Editor (the 3D viewport's
+    Texture Slots panel and the Clone source), so they cannot drift apart on which controls a
+    layer map keeps. See `is_paint_layer_map`.
+    """
+    if is_paint_layer_map(getattr(data, propname)):
+        layout.template_ID_browser(
+            data, propname,
+            material=material,
+            use_rename=False,
+            use_unlink=False,
+            use_users=False,
+        )
+        return
+    # Omitted rather than passed as None: the RNA function takes operator names as strings, and an
+    # empty one would still draw a button that runs nothing.
+    kwargs = {}
+    if new is not None:
+        kwargs["new"] = new
+    if open_op is not None:
+        kwargs["open"] = open_op
+    layout.template_ID_browser(data, propname, material=material, **kwargs)
 
 
 class BrushAssetShelf:
@@ -509,10 +553,9 @@ class ClonePanel(BrushPanel):
             clone_text = mesh.uv_layer_clone.name if mesh.uv_layer_clone else ""
             col.label(text="Source Clone Image")
             mat = ob.active_material if ob else None
-            col.template_ID_browser(
-                settings, "clone_image",
-                new="image.new", open="image.open",
-                material=mat,
+            draw_paint_canvas_row(
+                col, settings, "clone_image",
+                material=mat, new="image.new", open_op="image.open",
             )
             col.label(text="Source Clone UV Map")
             col.menu("VIEW3D_MT_tools_projectpaint_clone", text=clone_text, translate=False)
@@ -954,13 +997,112 @@ class DisplayPanel(BrushPanel):
                 )
 
 
+# Recent / Favorites of the PBR source picker are the brush Texture panel's: same asset shelf,
+# same Preferences catalog-memory domain (#image_grid_catalog_memory_domain /
+# #IMAGE_TEXTURE_SHELF_IDNAME), so picking a texture in either panel shows up in both.
+_MATERIAL_PAINT_GRID_CATALOG_DOMAIN = "image_grid"
+_MATERIAL_PAINT_GRID_MEMBERSHIP_SHELF = "VIEW3D_AST_image_texture"
+
+# The catalog filter, unlike Recent / Favorites above, is the channel's own: narrowing the Base
+# Color picker to a catalog of albedo maps must not narrow the Normal picker too. One catalog
+# memory entry holds both the catalog set and the Recent/Favorites mode, so the two live in
+# separate domains. The entry is keyed by (library, domain), so each channel also keeps a
+# separate filter per asset library on top of this.
+_MATERIAL_PAINT_GRID_CATALOG_FILTER_DOMAIN_PREFIX = "pbr_paint_source:"
+
+
+def _material_paint_grid_catalog_filter_domain(channel):
+    return "{:s}{:s}".format(_MATERIAL_PAINT_GRID_CATALOG_FILTER_DOMAIN_PREFIX, channel.channel)
+
+
+def _material_paint_source_images():
+    """Images offerable as a channel source, in the same set the Image Browser's PAINT_SOURCE
+    filter shows: auto-created paint canvases are write targets, never sources, and the render
+    result / compositing buffers are not data-blocks a paint source can point at (both rejected
+    by #image_id_passes_paint_filter)."""
+    return [
+        image for image in bpy.data.images
+        if not image.is_paint_canvas and image.type not in {'RENDER_RESULT', 'COMPOSITING'}
+    ]
+
+
+class PAINT_GT_mp_source(UIGrid):
+    """Inline preview grid picking a material paint channel's source image.
+
+    Listed only for the "Current File" library: local images are not assets, so the asset grid
+    cannot show them. A tile hands its identifier (the image name) to the activate operator, which
+    reads the channel off the layout context.
+
+    The name is abbreviated because it is spliced into the grid's session id together with the
+    region pointer and the grid_id, which together must fit `uiViewStateLink.idname` (64 bytes).
+    """
+    bl_idname = "PAINT_GT_mp_source"
+    bl_activate_operator = "paint.material_channel_source_image_set"
+
+    # Rebuilt once per redraw by get_item_count, which the grid always calls before get_item.
+    _images = []
+
+    def get_item_count(self, _context, _data, _propname):
+        PAINT_GT_mp_source._images = _material_paint_source_images()
+        return len(PAINT_GT_mp_source._images)
+
+    def get_item(self, _context, data, _propname, index):
+        images = PAINT_GT_mp_source._images
+        if index >= len(images) or data is None:
+            # An empty identifier still occupies the index, keeping the scrollbar in sync.
+            return "", "", 0, 0
+        image = images[index]
+        preview = image.preview_ensure()
+        icon = preview.icon_id if preview is not None else 0
+        # The channel travels in front of the image name; a tile has no other way to tell the
+        # operator which channel it belongs to. Channel identifiers never contain a slash.
+        return "{:s}/{:s}".format(data.channel, image.name), image.name, icon, 0
+
+
 class PAINT_MT_material_paint_channel_socket(Menu):
     bl_label = "Material Paint Channel"
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
-        layout.label(text="Material Paint Channel", icon='INFO')
-        layout.label(text="Painted values feed the material's Principled BSDF inputs.")
+
+        # The channel that owns the clicked socket is passed through the layout context by
+        # #_material_paint_channel_socket_icon_draw; without it only the generic info is shown.
+        channel = getattr(context, "material_paint_channel", None)
+        material_paint = channel.id_data.material_paint if channel is not None else None
+        if channel is None or material_paint is None:
+            layout.label(text="Material Paint Channel", icon='INFO')
+            layout.label(text="Painted values feed the material's Principled BSDF inputs.")
+            return
+
+        channel_id = channel.channel
+        drawn_any = False
+
+        if channel_id == 'BASE_COLOR':
+            layout.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
+            drawn_any = True
+        elif channel_id == 'ALPHA':
+            layout.label(text="Use For:")
+            col = layout.column(align=True)
+            col.prop(material_paint, "use_alpha_map", text="Alpha Map")
+            col.prop(material_paint, "use_alpha_stroke_mask", text="Brush Mask")
+            drawn_any = True
+
+        if channel.source_image is not None:
+            if drawn_any:
+                layout.separator()
+            # A popup menu has no label column, so enums are drawn as sub-menus
+            # ("Label" > choices) rather than split label/value rows that would drift apart.
+            # Tangent Space (Normal channel only) now lives beside the source picker buttons in
+            # the panel, #_draw_material_paint_source_texture, once a source image is assigned.
+            layout.prop_menu_enum(
+                channel.source_image.colorspace_settings, "name", text="Color Space",
+            )
+            drawn_any = True
+
+        # Kept last so it stays in the same spot regardless of which options above it are shown.
+        if drawn_any:
+            layout.separator()
+        layout.prop(channel, "use_grid_source_picker", text="Source Picker: Grid")
 
 
 class PAINT_MT_material_paint_brush_sync(Menu):
@@ -1396,7 +1538,7 @@ def _material_paint_channel_socket_color(channel_id):
     return _MATERIAL_PAINT_SOCKET_COLOR_FLOAT
 
 
-def _material_paint_channel_socket_icon_draw(layout, channel_id):
+def _material_paint_channel_socket_icon_draw(layout, channel_id, channel):
     """Colored socket button matching the Principled BSDF socket for this channel.
 
     Routed through ``menu=`` (instead of the plain, background-less socket) so the button is
@@ -1404,8 +1546,13 @@ def _material_paint_channel_socket_icon_draw(layout, channel_id):
     normal button background/border merged with the adjacent value field. A background-less
     socket here would leave light-colored swatches (e.g. white Base Color) with no visible
     border against the panel background.
+
+    The channel is handed to the popup menu through the layout context so it can offer the
+    channel's source-image color space and its per-channel paint options.
     """
-    layout.template_node_socket(
+    socket = layout.row(align=True)
+    socket.context_pointer_set("material_paint_channel", channel)
+    socket.template_node_socket(
         color=_material_paint_channel_socket_color(channel_id),
         menu="PAINT_MT_material_paint_channel_socket",
     )
@@ -1433,6 +1580,43 @@ def _material_paint_channel_color_eyedropper_draw(layout, context, data, prop):
     eye.prop_data_path = path
 
 
+def brush_color_eyedropper_draw(layout, context):
+    """Draw a scene color picker for the active paint brush color.
+
+    Writes into the same color the brush context menu edits (unified or per-brush), so in PBR
+    paint the sampled value propagates to the material's Base Color like the manual field does.
+    """
+    settings = UnifiedPaintPanel.paint_settings(context)
+    if settings is None:
+        return
+    ups = settings.unified_paint_settings
+    sub = "unified_paint_settings" if ups.use_unified_color else "brush"
+    eye = layout.operator("ui.eyedropper_color", text="", icon='EYEDROPPER')
+    eye.prop_data_path = "{:s}.{:s}.color".format(settings.path_from_id(), sub)
+
+
+def _material_paint_channel_source_draw(layout, channel):
+    """Draw the assigned source as a small preview plus its name.
+
+    A channel with a source no longer paints its fixed value, so the header shows what replaced
+    it instead of a color field or slider that cannot be used. Returns True when a source was
+    drawn.
+    """
+    if channel.source_image is not None:
+        # Compact browser button: preview and name in a field, opens the Image Browser on click
+        # and shows the full preview on hover.
+        layout.template_ID_browser(
+            channel, "source_image", compact=True, image_filter='PAINT_SOURCE'
+        )
+        return True
+    texture = channel.source_texture_slot.texture
+    if texture is not None:
+        # A procedural texture has no image to browse for; `icon()` returns its preview.
+        layout.label(text=texture.name, icon_value=layout.icon(texture))
+        return True
+    return False
+
+
 def _material_paint_channel_has_source(channel):
     """True when a source image or any assigned texture (including procedural) drives the channel."""
     return channel.source_image is not None or channel.source_texture_slot.texture is not None
@@ -1449,7 +1633,11 @@ def _draw_material_paint_subpanel_header(
     value_active=True,
     **prop_kwargs,
 ):
-    """Panel header: label | socket button | optional value/color field (Principled-style split)."""
+    """Panel header: label | socket button | optional value/color field (Principled-style split).
+
+    Once a source image or texture drives the channel, the value/color field is replaced by that
+    source's preview and name: the field itself is unusable in that state.
+    """
     header.use_property_split = True
     header.use_property_decorate = False
     row = header.row(align=True)
@@ -1460,7 +1648,9 @@ def _draw_material_paint_subpanel_header(
     if prop is not None and color_picker_after_socket:
         # Color channels: socket + color strip merged; eyedropper fused to color strip.
         controls = split.row(align=True)
-        _material_paint_channel_socket_icon_draw(controls, channel_id)
+        _material_paint_channel_socket_icon_draw(controls, channel_id, channel)
+        if _material_paint_channel_source_draw(controls, channel):
+            return
         value_controls = controls.row(align=True)
         value_controls.active = value_active
         if "text" not in prop_kwargs:
@@ -1469,7 +1659,9 @@ def _draw_material_paint_subpanel_header(
         _material_paint_channel_color_eyedropper_draw(value_controls, context, data, prop)
     else:
         value_row = split.row(align=True)
-        _material_paint_channel_socket_icon_draw(value_row, channel_id)
+        _material_paint_channel_socket_icon_draw(value_row, channel_id, channel)
+        if _material_paint_channel_source_draw(value_row, channel):
+            return
         if prop is not None:
             controls = value_row.row(align=True)
             controls.active = value_active
@@ -1483,39 +1675,183 @@ def _draw_material_paint_subpanel_header(
             controls.prop(data, prop, **prop_kwargs)
 
 
-def _draw_material_paint_source_texture(panel, channel):
+def _draw_material_paint_source_grid(layout, context, channel):
+    """Inline source picker, laid out like the brush texture Asset Grid.
+
+    The header carries the same widgets that grid reads from `GridViewSettings` (library, catalogs,
+    name match, preview size). Which grid is drawn below follows the chosen library: "Current File"
+    lists every local paint-source image, any asset library lists its image assets. Local images are
+    not assets, so `template_grid_view_asset` cannot show them and vice versa.
+
+    Both grids activate the same operator, which reads the channel off the layout context: neither
+    hands the channel along with the item.
+    """
+    # One settings object per channel (see #MaterialPaintSourceGridSettings in bl_ui/__init__.py),
+    # so a library or preview size picked in one channel does not move the others.
+    grid_settings = getattr(
+        context.window_manager.material_paint_source_grid_view_settings,
+        channel.channel.lower(),
+    )
+
+    col = layout.column(align=True)
+    # The channel must stay in context for the whole picker, tiles included; the activate operator
+    # has no other way to know which channel it is assigning to. The id is published beside the
+    # pointer because an operator invoked from a grid tile is not guaranteed to still see the
+    # pointer, and the id lets the operator rebuild the channel from the active brush.
+    col.context_pointer_set("material_paint_channel", channel)
+    col.context_string_set("material_paint_channel_id", channel.channel)
+
+    header = col.row(align=True)
+    # Same library list the brush Texture panel offers: picking a paint source is the job the
+    # texture asset shelf does, so libraries that cannot hold image assets are not listed.
+    header.template_grid_library_selector(
+        grid_settings,
+        only_image_libraries=True,
+        # Recent / Favorites shared with the brush Texture panel's grid.
+        catalog_memory_domain=_MATERIAL_PAINT_GRID_CATALOG_DOMAIN,
+        # The catalog selector popover next to it already carries a refresh button.
+        show_refresh=False,
+    )
+    catalog_filter_domain = _material_paint_grid_catalog_filter_domain(channel)
+    header.template_grid_catalog_selector(
+        grid_settings,
+        catalog_filter_domain=catalog_filter_domain,
+    )
+    header.template_grid_name_match_filter(grid_settings)
+    header.template_grid_preview_size(grid_settings)
+
+    # Kept to the bare channel id: grid type and region already namespace the session id, whose
+    # total length is capped by `uiViewStateLink.idname` (64 bytes).
+    grid_id = channel.channel
+    if grid_settings.asset_library_reference == 'LOCAL':
+        image = channel.source_image
+        col.template_grid_view_custom(
+            grid_id,
+            "PAINT_GT_mp_source",
+            data=channel,
+            settings=grid_settings,
+            use_box=True,
+            # Same identifier #PAINT_GT_mp_source.get_item builds, so the assigned image's tile is
+            # highlighted however it was assigned (click, browser or a drop on the field above).
+            active_identifier=(
+                "{:s}/{:s}".format(channel.channel, image.name) if image is not None else ""
+            ),
+        )
+    else:
+        col.template_grid_view_asset(
+            grid_id,
+            grid_settings,
+            activate_operator="paint.material_channel_source_image_set",
+            # Dragging a tile out of this picker has no meaning yet, and the asset drag it would
+            # start claims the press that touch scrolling needs.
+            use_drag=False,
+            # Handed to the operator as a property, so it does not depend on the layout context
+            # surviving all the way into an operator invoked from a tile.
+            activate_context_id=channel.channel,
+            # Themed box around the tiles, matching the brush Texture panel's grid.
+            use_box=True,
+            # Highlights the assigned image's tile, and scrolls to it the first time its library
+            # is opened.
+            active_id=channel.source_image,
+            # Recent / Favorites come from the same shelf and the same stored mode the brush
+            # Texture panel's grid uses, so both panels show one shared history.
+            membership_shelf_idname=_MATERIAL_PAINT_GRID_MEMBERSHIP_SHELF,
+            catalog_memory_domain=_MATERIAL_PAINT_GRID_CATALOG_DOMAIN,
+            # Own catalog filter per channel, while Recent / Favorites stay shared above.
+            catalog_filter_domain=catalog_filter_domain,
+        )
+
+
+def _draw_material_paint_source_texture(panel, context, channel):
     """Draw the per-channel source image.
 
     The source replaces the channel's fixed value while painting, so the value row is drawn
     inactive whenever a source is set. Mapping (Mapping mode / Size / Angle) is shared by every
     channel instead of being configured per channel; see #_draw_material_paint_shared_mapping.
+
+    Two pickers are offered, per the channel's `source_select_mode` (toggled from the socket-button
+    popup menu's "Source Picker: Grid" checkbox): the Image Browser popover, or a preview grid
+    embedded right below the name row.
     """
     slot = channel.source_texture_slot
-
-    row = panel.row(align=True)
-    row.template_ID(channel, "source_image", new="image.new", open="image.open")
+    use_grid = channel.source_select_mode == 'GRID'
 
     texture = slot.texture
-    if texture is not None and channel.source_image is None:
-        if texture.type == 'IMAGE':
+    broken_image_slot = (
+        texture is not None and channel.source_image is None and texture.type == 'IMAGE'
+    )
+
+    # Aligned, so the sub-rows sit flush against each other with no spacing. Clear Source and the
+    # grid toggle each opt out of the alignment *group* in their own sub-row below: `item_align`
+    # passes the group down only into sub-rows that are themselves aligned, so an unaligned one
+    # keeps its rounded corners while still gaining the parent's zero spacing.
+    row = panel.row(align=True)
+    # The same drop row in both modes: preview and name of the assigned image, click opens the
+    # Image Browser, dropping an image assigns it. Beside the grid, New is dropped (the grid
+    # cannot show an image that does not exist yet) and so is the built-in unlink button, since
+    # Clear Source below covers that and also recovers a slot left in a broken state.
+    browser_kwargs = {} if use_grid else {"new": "image.new"}
+    row.template_ID_browser(
+        channel,
+        "source_image",
+        open="image.open",
+        text="Drop image: {:s}".format(channel.name),
+        image_filter='PAINT_SOURCE',
+        use_unlink=not use_grid,
+        # The user count is not actionable here; the row is a paint source picker, not a
+        # data-block manager.
+        use_users=False,
+        **browser_kwargs,
+    )
+
+    if broken_image_slot or (use_grid and texture is not None):
+        # `template_ID_browser` scales its own row to two units for the paint-slot rows, so match
+        # that height here or this button would sit half as tall beside it, with a visible seam.
+        # Unaligned so the button keeps its rounded corners, see the row comment above.
+        clear = row.row(align=False)
+        clear.scale_y = 2.0
+        if broken_image_slot:
             # IMAGE texture without an image cannot be sampled. `source_image` already reads as
             # unset in this state, so `template_ID`'s own unlink button never appears; offer an
             # explicit way to drop the broken slot instead.
-            row.label(text="", icon='ERROR')
-            row.operator(
-                "paint.material_channel_source_clear", text="", icon='X',
-            ).channel = channel.channel
-            return
-        # Procedural textures are usable as-is.
+            clear.label(text="", icon='ERROR')
+        # Only meaningful once something is assigned; clicking a tile never clears.
+        clear.operator(
+            "paint.material_channel_source_clear", text="", icon='X',
+        ).channel = channel.channel
 
-    elif channel.source_image is None:
+    if use_grid:
+        # Same disclosure-triangle pattern as "Show Size Curve" in the Brush Settings panel: an
+        # icon-only, unembossed toggle that collapses the grid without losing the assigned image.
+        # Wrapped in its own row and matched to `template_ID_browser`'s two-unit row height (see
+        # the comment above), or the icon would sit top-aligned against the taller browse button.
+        # Drawn last (after Clear Source) so it always sits at the row's right edge.
+        toggle = row.row(align=False)
+        toggle.scale_y = 2.0
+        toggle.prop(
+            channel,
+            "show_source_grid",
+            text="",
+            icon='DOWNARROW_HLT' if channel.show_source_grid else 'RIGHTARROW',
+            emboss=False,
+        )
+
+    if channel.channel == 'NORMAL' and channel.source_image is not None:
+        # Only meaningful once a Normal source image is assigned; shown here, right after the
+        # picker buttons, instead of the socket popup menu, since it applies to what was just set.
+        panel.prop(channel, "normal_source_color_space", text="Tangent Space")
+
+    if use_grid:
+        if channel.show_source_grid:
+            _draw_material_paint_source_grid(panel, context, channel)
         return
 
-    # The Normal channel's source may be authored to either the OpenGL or DirectX tangent-space
-    # convention (green channel up vs. down); let the user pick, matching the Normal Map node in
-    # the Shader Editor. Color space is otherwise handled automatically and not user-facing here.
-    if channel.channel == 'NORMAL' and channel.source_image is not None:
-        panel.row(align=True).prop(channel, "normal_source_color_space", text="Color Space")
+    if broken_image_slot:
+        return
+    # Procedural textures are usable as-is.
+
+    # The source image's color space is exposed in the socket-button popup menu,
+    # #PAINT_MT_material_paint_channel_socket.
 
 
 def _draw_material_paint_shared_mapping(layout, material_paint):
@@ -1550,10 +1886,13 @@ def _draw_material_paint_value_ramp(layout, context, channel, channel_id):
     if not panel:
         return
     panel.separator()
-    col = panel.column(align=True)
-    _draw_material_paint_source_texture(col, channel)
+    # The source row (and the grid below it) is not part of the value row's aligned column: it is
+    # a separate control, and sharing the column would glue them together, unlike every other
+    # channel panel.
+    _draw_material_paint_source_texture(panel, context, channel)
     if not has_source:
-        row = col.row(align=True)
+        panel.separator()
+        row = panel.row(align=True)
         row.template_material_paint_value_slider(channel, "value", index=0)
         row.operator(
             "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
@@ -1561,7 +1900,7 @@ def _draw_material_paint_value_ramp(layout, context, channel, channel_id):
     panel.separator()
 
 
-def _draw_material_paint_alpha_panel(layout, context, channel, channel_id, material_paint):
+def _draw_material_paint_alpha_panel(layout, context, channel, channel_id):
     has_source = _material_paint_channel_has_source(channel)
     header, panel = layout.panel(
         "material_paint_value_%s" % channel_id.lower(),
@@ -1573,13 +1912,12 @@ def _draw_material_paint_alpha_panel(layout, context, channel, channel_id, mater
     if not panel:
         return
     panel.separator()
-    col = panel.column(heading="Use For:", align=True)
-    col.prop(material_paint, "use_alpha_map", text="Alpha Map")
-    col.prop(material_paint, "use_alpha_stroke_mask", text="Brush Mask")
-    col = panel.column(align=True)
-    _draw_material_paint_source_texture(col, channel)
+    # "Use For: Alpha Map / Brush Mask" now lives in the socket-button popup menu,
+    # #PAINT_MT_material_paint_channel_socket.
+    _draw_material_paint_source_texture(panel, context, channel)
     if not has_source:
-        row = col.row(align=True)
+        panel.separator()
+        row = panel.row(align=True)
         row.template_material_paint_value_slider(channel, "value", index=0)
         row.operator(
             "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
@@ -1607,13 +1945,13 @@ def _draw_material_paint_base_color_panel(layout, context, channel, material_pai
         return
     panel.use_property_split = False
     panel.separator()
-    row = panel.row(align=True)
-    row.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
+    # "Sync with Brush" now lives in the socket-button popup menu,
+    # #PAINT_MT_material_paint_channel_socket.
     # Base Color is the only blendable channel.
     row = panel.row(align=True)
     row.prop(channel, "blend", text="Blend")
     panel.separator()
-    _draw_material_paint_source_texture(panel, channel)
+    _draw_material_paint_source_texture(panel, context, channel)
 
 
 def _draw_material_paint_normal_panel(layout, context, channel):
@@ -1635,7 +1973,7 @@ def _draw_material_paint_normal_panel(layout, context, channel):
     if not panel:
         return
     panel.separator()
-    _draw_material_paint_source_texture(panel, channel)
+    _draw_material_paint_source_texture(panel, context, channel)
 
 
 def _draw_material_paint_emission_panel(layout, context, channel):
@@ -1656,7 +1994,7 @@ def _draw_material_paint_emission_panel(layout, context, channel):
     if not panel:
         return
     panel.separator()
-    _draw_material_paint_source_texture(panel, channel)
+    _draw_material_paint_source_texture(panel, context, channel)
 
 
 def material_paint_visible_channels_owner(context):
@@ -1916,9 +2254,7 @@ def draw_material_paint_channels(
     channel = channels['ALPHA']
     if channel.use and 'ALPHA' in visible:
         _channel_panel_sep()
-        _draw_material_paint_alpha_panel(
-            channel_col, context, channel, 'ALPHA', material_paint,
-        )
+        _draw_material_paint_alpha_panel(channel_col, context, channel, 'ALPHA')
 
     # Normal, Emission and Height are texture-map-only channels: a vertex canvas has no per-vertex
     # storage for them (see `_MATERIAL_PAINT_VERTEX_CHANNELS`), so skip them for Material Paint.
@@ -1948,7 +2284,7 @@ def draw_material_paint_channels(
             _channel_panel_sep()
             row = channel_col.row(align=True)
             row.use_property_split = False
-            _material_paint_channel_socket_icon_draw(row, 'CUSTOM')
+            _material_paint_channel_socket_icon_draw(row, 'CUSTOM', channel)
             controls = row.row(align=True)
             controls.prop(channel, "value_color", text="")
             controls.prop(channel, "value", index=0, text=channel.name, slider=True)
@@ -2941,6 +3277,7 @@ class PAINT_PT_material_paint_channel_visibility(bpy.types.Panel):
 
 
 classes = (
+    PAINT_GT_mp_source,
     PAINT_MT_material_paint_channel_socket,
     PAINT_MT_material_paint_brush_sync,
     PAINT_PT_material_paint_channel_visibility,

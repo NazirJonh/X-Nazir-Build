@@ -7416,6 +7416,47 @@ static int do_but_COLOR(bContext *C, Button *but, HandleButtonData *data, const 
     if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
       if (color_but->is_pallete_color) {
         if ((event->modifier & KM_CTRL) == 0) {
+          /* When a color picker (popup or inline #template_color_picker) shares this block, a
+           * swatch must be applied to the property that picker edits. Routing the swatch straight
+           * to the brush/unified color only happens to match when the picker edits that same
+           * color; for an unrelated color like the PBR Paint base color it would leave the edited
+           * property untouched (and its brush-color sync would then copy a stale value). */
+          ColorPicker *cpicker = static_cast<ColorPicker *>(but->block->color_pickers.list.first);
+          Button *picker_but = nullptr;
+          if (cpicker != nullptr) {
+            for (Button &bt : but->block->buttons()) {
+              if (bt.custom_data == cpicker && bt.rnaprop != nullptr &&
+                  ELEM(bt.type, ButtonType::HsvCircle, ButtonType::HsvCube))
+              {
+                picker_but = &bt;
+                break;
+              }
+            }
+          }
+          if (picker_but != nullptr) {
+            float rgb[3];
+            RNA_property_float_get_array_at_most(&but->rnapoin, but->rnaprop, rgb, 3);
+            if (but->rnaprop && RNA_property_subtype(but->rnaprop) == PROP_COLOR_GAMMA) {
+              IMB_colormanagement_srgb_to_scene_linear_v3(rgb, rgb);
+            }
+            if (button_is_color_gamma(picker_but)) {
+              IMB_colormanagement_scene_linear_to_srgb_v3(rgb, rgb);
+            }
+            RNA_property_float_set_array_at_most(&picker_but->rnapoin, picker_but->rnaprop, rgb, 3);
+            /* Fire the edited property's own update callback (e.g. the brush/unified color ->
+             * PBR Paint base color sync), which the picker widgets normally trigger through
+             * #apply_but but a direct write here would skip. */
+            RNA_property_update(C, &picker_but->rnapoin, picker_but->rnaprop);
+            /* Popup color pickers refresh their remaining widgets and the popup return value
+             * through this callback; inline #template_color_picker widgets have none and rely on
+             * the redraw from #RNA_property_update above. */
+            if (picker_but->func != nullptr) {
+              picker_but->func(C, picker_but->func_arg1, picker_but->func_arg2);
+            }
+            button_activate_state(C, but, BUTTON_STATE_EXIT);
+            return WM_UI_HANDLER_BREAK;
+          }
+
           float color[3];
           Paint *paint = BKE_paint_get_active_from_context(C);
           if (paint != nullptr) {
@@ -7459,6 +7500,12 @@ static int do_but_COLOR(bContext *C, Button *but, HandleButtonData *data, const 
                 PointerRNA brush_ptr = RNA_id_pointer_create(&brush->id);
                 brush_color_prop = RNA_struct_find_property(&brush_ptr, "color");
                 RNA_property_update(C, &brush_ptr, brush_color_prop);
+
+                /* #rna_Brush_color_update syncs the PBR Paint base color from the raw
+                 * `brush->color`, which is stale when the edit went to the unified color.
+                 * Sync again from the effective (unified-aware) color so the swatch reaches
+                 * the base color channel. */
+                BKE_brush_material_paint_base_color_sync_to_channel(paint, brush);
               }
             }
           }
@@ -11267,7 +11314,8 @@ static int handle_view_item_event(bContext *C,
 
         if (view_but) {
           if (view_item_supports_drag(*view_but->view_item) ||
-              view_but->view_item->is_select_on_click())
+              view_but->view_item->is_select_on_click() ||
+              grid_view_item_defers_activation_to_click(*view_but->view_item))
           {
             if (event->val != KM_CLICK) {
               break;
@@ -13900,7 +13948,14 @@ Button *button_active_drop_name_button(const bContext *C)
 
 bool button_active_drop_name(const bContext *C)
 {
-  return button_active_drop_name_button(C) != nullptr;
+  const Button *but = button_active_drop_name_button(C);
+  /* A disabled text field (e.g. the read-only name of an assigned image in a paint-slot ID
+   * browser) cannot take a dropped name. Reporting it as a name-drop target here would let the
+   * "Drop Name" drop-box shadow the image drop-box that should handle the drag instead. */
+  if (but && (but->flag & BUT_DISABLED)) {
+    return false;
+  }
+  return but != nullptr;
 }
 
 bool button_active_drop_color(bContext *C)

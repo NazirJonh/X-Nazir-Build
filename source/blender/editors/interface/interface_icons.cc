@@ -1156,7 +1156,7 @@ static DrawInfo *icon_ensure_drawinfo(Icon *icon)
 
 bool icon_get_theme_color(int icon_id, uchar color[4])
 {
-  Icon *icon = BKE_icon_get(icon_id);
+  Icon *icon = BKE_icon_get_optional(icon_id);
   if (icon == nullptr) {
     return false;
   }
@@ -1261,7 +1261,7 @@ static void studiolight_icon_job_end(void *customdata)
 
 void icon_ensure_deferred(const bContext *C, const int icon_id, const bool big)
 {
-  Icon *icon = BKE_icon_get(icon_id);
+  Icon *icon = BKE_icon_get_optional(icon_id);
 
   if (icon == nullptr) {
     return;
@@ -1328,7 +1328,7 @@ void icon_ensure_deferred(const bContext *C, const int icon_id, const bool big)
 
 bool icon_is_preview_deferred_loading(const int icon_id, const bool big)
 {
-  const Icon *icon = BKE_icon_get(icon_id);
+  const Icon *icon = BKE_icon_get_optional(icon_id);
   if (icon == nullptr) {
     return false;
   }
@@ -1400,7 +1400,7 @@ static void icon_set_image(const bContext *C,
 
 PreviewImage *icon_to_preview(int icon_id)
 {
-  Icon *icon = BKE_icon_get(icon_id);
+  Icon *icon = BKE_icon_get_optional(icon_id);
 
   if (icon == nullptr) {
     return nullptr;
@@ -1719,7 +1719,7 @@ static void icon_draw_size(float x,
   bTheme *btheme = theme::theme_get();
   const float fdraw_size = float(draw_size);
 
-  Icon *icon = BKE_icon_get(icon_id);
+  Icon *icon = BKE_icon_get_optional(icon_id);
 
   if (icon == nullptr) {
     if (G.debug & G_DEBUG) {

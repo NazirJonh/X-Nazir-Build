@@ -4630,9 +4630,11 @@ void blo_do_versions_280(FileData *fd, Library * /*lib*/, Main *bmain)
     }
 
     for (Image &image : bmain->images) {
-      image.flag &= ~(IMA_HIGH_BITDEPTH | IMA_FLAG_UNUSED_1 | IMA_FLAG_UNUSED_4 |
-                      IMA_FLAG_UNUSED_6 | IMA_FLAG_UNUSED_8 | IMA_FLAG_UNUSED_15 |
-                      IMA_FLAG_UNUSED_16);
+      /* `IMA_PAINT_CANVAS` (bit 1) was `IMA_FLAG_UNUSED_1` when these files were written; a
+       * pre-2.80 file cannot hold a real paint canvas, so clear the bit to sanitize any garbage
+       * value rather than mis-reading it as a canvas marker. */
+      image.flag &= ~(IMA_HIGH_BITDEPTH | IMA_PAINT_CANVAS | IMA_FLAG_UNUSED_4 | IMA_FLAG_UNUSED_6 |
+                      IMA_FLAG_UNUSED_8 | IMA_FLAG_UNUSED_15 | IMA_FLAG_UNUSED_16);
     }
 
     for (Object &ob : bmain->objects) {

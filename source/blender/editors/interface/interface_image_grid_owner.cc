@@ -7,8 +7,11 @@
 
 #include "DNA_space_types.h"
 #include "DNA_view3d_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_global.hh"
+#include "BKE_main.hh"
 #include "BLI_utildefines.h"
 
 #include "ED_image_grid.hh"
@@ -16,7 +19,6 @@
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
-#include "../space_image/image_runtime.hh"
 
 namespace blender::ed::image_grid {
 
@@ -30,45 +32,46 @@ ImageGridOwner ImageGridOwner::from(SpaceImage &sima)
   return ImageGridOwner(Kind::SpaceImage, &sima);
 }
 
+ImageGridOwner ImageGridOwner::from(SpaceProperties &sbuts)
+{
+  return ImageGridOwner(Kind::SpaceProperties, &sbuts);
+}
+
+/**
+ * The single window manager of the open file, which owns the shared grid state.
+ *
+ * Read through #G_MAIN rather than a #bContext: the accessors below are called from layout,
+ * operator and blend-write code that does not all carry a context, and there is exactly one
+ * #wmWindowManager per `.blend`.
+ */
+static wmWindowManager &image_grid_wm()
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
+  BLI_assert(wm != nullptr);
+  return *wm;
+}
+
 ImageGridSlotDNA &ImageGridOwner::slot_dna(const ImageGridSlot grid_slot) const
 {
-  const bool is_mask = (grid_slot == ImageGridSlot::Mask);
-  switch (kind_) {
-    case Kind::View3D: {
-      View3D &v3d = *static_cast<View3D *>(space_);
-      return is_mask ? v3d.image_grid_mask : v3d.image_grid;
-    }
-    case Kind::SpaceImage: {
-      SpaceImage &sima = *static_cast<SpaceImage *>(space_);
-      return is_mask ? sima.image_grid_mask : sima.image_grid;
-    }
-  }
-  BLI_assert_unreachable();
-  return static_cast<View3D *>(space_)->image_grid;
+  /* Shared across every host: the grid browses for the active brush's texture slot, which is
+   * global, so the library, catalog filter and name-match filter are too. See
+   * #wmWindowManager::image_grid. */
+  wmWindowManager &wm = image_grid_wm();
+  return (grid_slot == ImageGridSlot::Mask) ? wm.image_grid_mask : wm.image_grid;
 }
 
 short &ImageGridOwner::preview_size_dna() const
 {
-  switch (kind_) {
-    case Kind::View3D:
-      return static_cast<View3D *>(space_)->image_grid_preview_size;
-    case Kind::SpaceImage:
-      return static_cast<SpaceImage *>(space_)->image_grid_preview_size;
-  }
-  BLI_assert_unreachable();
-  return static_cast<View3D *>(space_)->image_grid_preview_size;
+  return image_grid_wm().image_grid_preview_size;
 }
 
 void *&ImageGridOwner::runtime_state_slot() const
 {
-  switch (kind_) {
-    case Kind::View3D:
-      return static_cast<View3D *>(space_)->runtime.image_grid_state;
-    case Kind::SpaceImage:
-      return static_cast<SpaceImage *>(space_)->runtime->image_grid_state;
-  }
-  BLI_assert_unreachable();
-  return static_cast<View3D *>(space_)->runtime.image_grid_state;
+  /* One runtime cache for the shared DNA above. File-static rather than on
+   * #bke::WindowManagerRuntime so the grid keeps its storage in one module; cleared by
+   * #image_grid_state_remove() when the last host goes away. */
+  static void *shared_state = nullptr;
+  return shared_state;
 }
 
 const void *ImageGridOwner::identity() const
@@ -83,6 +86,8 @@ PointerRNA ImageGridOwner::owner_rna() const
       return RNA_pointer_create_discrete(nullptr, RNA_SpaceView3D, space_);
     case Kind::SpaceImage:
       return RNA_pointer_create_discrete(nullptr, RNA_SpaceImageEditor, space_);
+    case Kind::SpaceProperties:
+      return RNA_pointer_create_discrete(nullptr, RNA_SpaceProperties, space_);
   }
   BLI_assert_unreachable();
   return PointerRNA{};
@@ -98,6 +103,11 @@ SpaceImage *ImageGridOwner::as_space_image() const
   return (kind_ == Kind::SpaceImage) ? static_cast<SpaceImage *>(space_) : nullptr;
 }
 
+SpaceProperties *ImageGridOwner::as_space_properties() const
+{
+  return (kind_ == Kind::SpaceProperties) ? static_cast<SpaceProperties *>(space_) : nullptr;
+}
+
 std::optional<ImageGridOwner> image_grid_owner_from_space(SpaceLink *space)
 {
   if (!space) {
@@ -108,6 +118,9 @@ std::optional<ImageGridOwner> image_grid_owner_from_space(SpaceLink *space)
   }
   if (space->spacetype == SPACE_IMAGE) {
     return ImageGridOwner::from(*reinterpret_cast<SpaceImage *>(space));
+  }
+  if (space->spacetype == SPACE_PROPERTIES) {
+    return ImageGridOwner::from(*reinterpret_cast<SpaceProperties *>(space));
   }
   return std::nullopt;
 }
@@ -122,6 +135,9 @@ std::optional<ImageGridOwner> image_grid_owner_from_rna(const PointerRNA &ptr)
   }
   if (RNA_struct_is_a(ptr.type, RNA_SpaceImageEditor)) {
     return ImageGridOwner::from(*static_cast<SpaceImage *>(ptr.data));
+  }
+  if (RNA_struct_is_a(ptr.type, RNA_SpaceProperties)) {
+    return ImageGridOwner::from(*static_cast<SpaceProperties *>(ptr.data));
   }
   return std::nullopt;
 }
@@ -140,6 +156,9 @@ std::optional<ImageGridOwner> image_grid_owner_from_context(const bContext &C)
   }
   if (SpaceImage *sima = CTX_wm_space_image(&C)) {
     return ImageGridOwner::from(*sima);
+  }
+  if (SpaceProperties *sbuts = CTX_wm_space_properties(&C)) {
+    return ImageGridOwner::from(*sbuts);
   }
   return std::nullopt;
 }

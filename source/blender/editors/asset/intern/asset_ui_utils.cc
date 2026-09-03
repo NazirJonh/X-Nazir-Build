@@ -15,6 +15,7 @@
 #include "AS_asset_representation.hh"
 
 #include "BKE_context.hh"
+#include "BKE_icons.hh"
 #include "BKE_idprop.hh"
 #include "BKE_preferences.h"
 #include "BKE_preview_image.hh"
@@ -477,7 +478,13 @@ void asset_tooltip(const bContext *C,
 BIFIconID asset_preview_icon_id(const asset_system::AssetRepresentation &asset)
 {
   if (const PreviewImage *preview = asset.get_preview()) {
-    if (!BKE_previewimg_is_invalid(preview, ICON_SIZE_ICON)) {
+    /* #PreviewImage::runtime::icon_id is not cleared when the icon behind it is deleted (an asset
+     * list refetch frees the previews it replaces), so a cached id can outlive its icon. Handing
+     * that to a button makes every redraw log "no icon for icon ID"; fall back to the type icon
+     * instead. */
+    if (!BKE_previewimg_is_invalid(preview, ICON_SIZE_ICON) &&
+        BKE_icon_exists(preview->runtime->icon_id))
+    {
       return preview->runtime->icon_id;
     }
   }

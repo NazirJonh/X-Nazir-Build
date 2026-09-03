@@ -16,62 +16,12 @@
 
 namespace blender::ed::image_grid::tests {
 
-TEST(image_grid_owner, from_view3d_slot_dna_selects_texture_or_mask)
-{
-  View3D v3d;
-  ImageGridOwner owner = ImageGridOwner::from(v3d);
-
-  EXPECT_EQ(&owner.slot_dna(ImageGridSlot::Texture), &v3d.image_grid);
-  EXPECT_EQ(&owner.slot_dna(ImageGridSlot::Mask), &v3d.image_grid_mask);
-}
-
-TEST(image_grid_owner, from_view3d_preview_size_dna_points_at_view3d_field)
-{
-  View3D v3d;
-  ImageGridOwner owner = ImageGridOwner::from(v3d);
-
-  EXPECT_EQ(&owner.preview_size_dna(), &v3d.image_grid_preview_size);
-}
-
-TEST(image_grid_owner, from_view3d_runtime_state_slot_points_at_runtime_field)
-{
-  View3D v3d;
-  ImageGridOwner owner = ImageGridOwner::from(v3d);
-
-  EXPECT_EQ(&owner.runtime_state_slot(), &v3d.runtime.image_grid_state);
-}
-
 TEST(image_grid_owner, from_view3d_identity_is_the_view3d_address)
 {
   View3D v3d;
   ImageGridOwner owner = ImageGridOwner::from(v3d);
 
   EXPECT_EQ(owner.identity(), static_cast<const void *>(&v3d));
-}
-
-TEST(image_grid_owner, from_space_image_slot_dna_selects_texture_or_mask)
-{
-  SpaceImage sima;
-  ImageGridOwner owner = ImageGridOwner::from(sima);
-
-  EXPECT_EQ(&owner.slot_dna(ImageGridSlot::Texture), &sima.image_grid);
-  EXPECT_EQ(&owner.slot_dna(ImageGridSlot::Mask), &sima.image_grid_mask);
-}
-
-TEST(image_grid_owner, from_space_image_preview_size_dna_points_at_space_image_field)
-{
-  SpaceImage sima;
-  ImageGridOwner owner = ImageGridOwner::from(sima);
-
-  EXPECT_EQ(&owner.preview_size_dna(), &sima.image_grid_preview_size);
-}
-
-TEST(image_grid_owner, from_space_image_runtime_state_slot_points_at_runtime_field)
-{
-  SpaceImage sima;
-  ImageGridOwner owner = ImageGridOwner::from(sima);
-
-  EXPECT_EQ(&owner.runtime_state_slot(), &sima.runtime.image_grid_state);
 }
 
 TEST(image_grid_owner, from_space_image_identity_is_the_space_image_address)
@@ -113,10 +63,12 @@ TEST(image_grid_owner, slot_from_int_clamps_unknown_values_to_texture)
   EXPECT_EQ(image_grid_slot_from_mask_flag(true), ImageGridSlot::Mask);
 }
 
-TEST(image_grid_owner, from_space_selects_view3d_and_space_image)
+TEST(image_grid_owner, from_space_selects_view3d_image_and_properties)
 {
   View3D v3d;
   SpaceImage sima;
+  SpaceProperties sbuts;
+  sbuts.spacetype = SPACE_PROPERTIES;
   SpaceLink other;
 
   const std::optional<ImageGridOwner> view3d_owner = image_grid_owner_from_space(
@@ -131,8 +83,16 @@ TEST(image_grid_owner, from_space_selects_view3d_and_space_image)
   EXPECT_EQ(view3d_owner->as_view3d(), &v3d);
   EXPECT_EQ(image_owner->as_space_image(), &sima);
 
+  const std::optional<ImageGridOwner> buttons_owner = image_grid_owner_from_space(
+      reinterpret_cast<SpaceLink *>(&sbuts));
+  ASSERT_TRUE(buttons_owner.has_value());
+  EXPECT_EQ(buttons_owner->identity(), static_cast<const void *>(&sbuts));
+  EXPECT_EQ(buttons_owner->as_space_properties(), &sbuts);
+  EXPECT_EQ(buttons_owner->as_view3d(), nullptr);
+
   EXPECT_FALSE(image_grid_owner_from_space(nullptr).has_value());
-  other.spacetype = SPACE_PROPERTIES;
+  /* A space the grid keeps no state on stays unsupported. */
+  other.spacetype = SPACE_NODE;
   EXPECT_FALSE(image_grid_owner_from_space(&other).has_value());
 }
 

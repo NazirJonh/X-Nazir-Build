@@ -6,10 +6,12 @@
  * \ingroup RNA
  */
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "DNA_scene_types.h"
 #include "DNA_space_enums.h"
+#include "DNA_uuid_types.h"
 #include "DNA_windowmanager_types.h"
 
 #include "BLI_path_utils.hh"
@@ -42,6 +44,7 @@
 #  include "BLI_math_vector.h"
 #  include "BLI_string.h"
 #  include "BLI_string_utf8.h"
+#  include "BLI_uuid.h"
 
 #  include "BKE_keyconfig.h"
 #  include "BKE_main.hh"
@@ -1607,6 +1610,77 @@ static bool rna_WindowManager_is_event_handling_break_get(PointerRNA *ptr)
   return wm->runtime->break_events_handling;
 }
 
+/* Thumbnail size of the brush-texture image grid. Shared by every host of the grid, so it lives on
+ * the window manager; anything below #IMAGE_GRID_PREVIEW_SIZE_MIN (never set) reads as the asset
+ * shelf default, see #ImageGridOwner. */
+static int rna_WindowManager_image_grid_preview_size_get(PointerRNA *ptr)
+{
+  const wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
+  const int stored = wm->image_grid_preview_size;
+  if (stored >= IMAGE_GRID_PREVIEW_SIZE_MIN) {
+    return stored;
+  }
+  return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
+}
+
+static void rna_WindowManager_image_grid_preview_size_set(PointerRNA *ptr, const int value)
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
+  wm->image_grid_preview_size = short(
+      std::clamp(value, IMAGE_GRID_PREVIEW_SIZE_MIN, IMAGE_GRID_PREVIEW_SIZE_MAX));
+}
+
+/* Session-only paint-layer UUID the ID-browser popover's "Slot" filter narrows to. String view of
+ * #bke::WindowManagerRuntime::id_browser_filter_layer_id; mirrors #Image.paint_layer_id: nil reads
+ * as "", the setter is hardened and never raises (anything non-canonical clears the value). */
+static void rna_WindowManager_id_browser_filter_layer_id_get(PointerRNA *ptr, char *value)
+{
+  const wmWindowManager *wm = static_cast<const wmWindowManager *>(ptr->data);
+  const bUUID &id = wm->runtime->id_browser_filter_layer_id;
+  if (BLI_uuid_is_nil(id)) {
+    value[0] = '\0';
+    return;
+  }
+  BLI_uuid_format(value, id);
+}
+
+static int rna_WindowManager_id_browser_filter_layer_id_length(PointerRNA *ptr)
+{
+  const wmWindowManager *wm = static_cast<const wmWindowManager *>(ptr->data);
+  return BLI_uuid_is_nil(wm->runtime->id_browser_filter_layer_id) ? 0 : UUID_STRING_SIZE - 1;
+}
+
+static void rna_WindowManager_id_browser_filter_layer_id_set(PointerRNA *ptr, const char *value)
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
+  bUUID &dst = wm->runtime->id_browser_filter_layer_id;
+
+  char trimmed[UUID_STRING_SIZE + 16];
+  BLI_strncpy(trimmed, value, sizeof(trimmed));
+  BLI_str_rstrip(trimmed);
+  const char *start = trimmed;
+  while (ELEM(*start, ' ', '\t', '\n', '\r')) {
+    start++;
+  }
+
+  if (start[0] == '\0') {
+    dst = BLI_uuid_nil();
+    return;
+  }
+
+  /* Commit only on a clean round-trip (see #rna_Image_paint_layer_id_set for the rationale). */
+  bUUID parsed;
+  char canonical[UUID_STRING_SIZE];
+  if (BLI_uuid_parse_string(&parsed, start)) {
+    BLI_uuid_format(canonical, parsed);
+    if (BLI_strcasecmp(canonical, start) == 0) {
+      dst = parsed;
+      return;
+    }
+  }
+  dst = BLI_uuid_nil();
+}
+
 static PointerRNA rna_WindowManager_xr_session_state_get(PointerRNA *ptr)
 {
   wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
@@ -3136,6 +3210,22 @@ static void rna_def_windowmanager(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "ID Browser View", "How data-blocks are listed in the image browser popover");
 
+  /* Shared by every host of the brush-texture image grid (#ImageGridOwner), which is why it lives
+   * on the window manager rather than on a space. */
+  prop = RNA_def_property(srna, "image_grid_preview_size", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid_preview_size");
+  RNA_def_property_int_funcs(prop,
+                             "rna_WindowManager_image_grid_preview_size_get",
+                             "rna_WindowManager_image_grid_preview_size_set",
+                             nullptr);
+  /* The hard range goes below the soft one so very small tiles can still be typed in, while
+   * dragging stays in the comfortable range (same split the asset shelf's preview size uses). */
+  RNA_def_property_range(prop, IMAGE_GRID_PREVIEW_SIZE_MIN, IMAGE_GRID_PREVIEW_SIZE_MAX);
+  RNA_def_property_ui_range(
+      prop, IMAGE_GRID_PREVIEW_SIZE_SOFT_MIN, IMAGE_GRID_PREVIEW_SIZE_MAX, 1, -1);
+  RNA_def_property_ui_text(prop, "Preview Size", "Thumbnail size for the brush texture asset grid");
+  RNA_def_property_update(prop, NC_ASSET | ND_ASSET_LIST, nullptr);
+
   static const EnumPropertyItem id_browser_source_items[] = {
       {ID_BROWSER_SOURCE_BLEND_DATA,
        "BLEND_DATA",
@@ -3156,6 +3246,24 @@ static void rna_def_windowmanager(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "ID Browser Source", "Where the ID browser takes its items from");
   RNA_def_property_update(
       prop, NC_ASSET | ND_ASSET_LIST, "rna_WindowManager_id_browser_source_update");
+
+  /* Session-only paint-layer UUID the ID-browser popover's "Slot" filter narrows to, overriding
+   * the layer derived from the currently assigned image. Meant for paint add-ons (Ucupaint): set
+   * it to the selected layer's UUID so that layer's per-channel textures are what the
+   * "Show images used by a specific paint slot type" grid offers; clear it ("") to fall back to
+   * the assigned image. Not persisted (see #bke::WindowManagerRuntime::id_browser_filter_layer_id). */
+  prop = RNA_def_property(srna, "id_browser_filter_layer_id", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_maxlength(prop, UUID_STRING_SIZE);
+  RNA_def_property_string_funcs(prop,
+                               "rna_WindowManager_id_browser_filter_layer_id_get",
+                               "rna_WindowManager_id_browser_filter_layer_id_length",
+                               "rna_WindowManager_id_browser_filter_layer_id_set");
+  RNA_def_property_ui_text(prop,
+                          "ID Browser Filter Layer ID",
+                          "Paint layer UUID the image browser's paint-slot filter narrows to; set "
+                          "by paint add-ons when a layer is selected, empty to follow the assigned "
+                          "image");
+  RNA_def_property_update(prop, NC_ASSET | ND_ASSET_LIST, nullptr);
 
   /* Asset library browsed by the ID-browser popover's asset source. Backed by
    * #wmWindowManager::id_browser_grid_view_settings through a dynamic enum (get/set/itemf); the set

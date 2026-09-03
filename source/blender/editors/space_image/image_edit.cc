@@ -77,6 +77,28 @@ void ED_space_image_set(Main *bmain, SpaceImage *sima, Image *ima, bool automati
   WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
 }
 
+void ED_space_image_set_ex(Main *bmain, SpaceImage *sima, Image *ima, const bool keep_view)
+{
+  const float zoom = sima->zoom;
+  const float xof = sima->xof;
+  const float yof = sima->yof;
+
+  ED_space_image_set(bmain, sima, ima, false);
+
+  if (!keep_view) {
+    return;
+  }
+
+  sima->zoom = zoom;
+  sima->xof = xof;
+  sima->yof = yof;
+  if (ima != nullptr && ima->runtime != nullptr) {
+    ima->runtime->view_zoom = zoom;
+    ima->runtime->view_offset[0] = xof;
+    ima->runtime->view_offset[1] = yof;
+  }
+}
+
 void ED_space_image_sync(Main *bmain, Image *image, bool ignore_render_viewer)
 {
   wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first);

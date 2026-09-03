@@ -19,6 +19,7 @@
 
 #include "WM_api.hh"
 
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "interface_intern.hh"
 #include "interface_templates_intern.hh"
@@ -54,6 +55,22 @@ int template_search_textbut_width(PointerRNA *ptr, PropertyRNA *name_prop)
 int template_search_textbut_height()
 {
   return TEMPLATE_SEARCH_TEXTBUT_HEIGHT;
+}
+
+void id_preview_tooltip_set(Button *but, ID *id)
+{
+  if (but == nullptr || id == nullptr) {
+    return;
+  }
+  /* The ID outlives the tooltip (the button is rebuilt whenever the property changes), so the raw
+   * pointer needs no ownership handling. */
+  button_func_tooltip_custom_set(
+      but,
+      [](bContext & /*C*/, TooltipData &tip, Button * /*but*/, void *arg) {
+        tooltip_from_id(tip, static_cast<ID *>(arg));
+      },
+      id,
+      nullptr);
 }
 
 void template_add_button_search_menu(const bContext *C,

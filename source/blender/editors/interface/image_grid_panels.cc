@@ -10,6 +10,8 @@
  * this file only supplies image-grid callbacks and panel registration.
  */
 
+#include "DNA_windowmanager_types.h"
+
 #include "BLI_listbase.h"
 #include "BLI_string_utf8.h"
 
@@ -62,16 +64,19 @@ static void image_grid_display_panel_draw(const bContext *C, Panel *panel)
     return;
   }
 
-  PointerRNA owner_ptr = owner->owner_rna();
-  if (owner_ptr.data == nullptr || owner_ptr.type == nullptr) {
+  /* The thumbnail size is shared by every host of the grid, so it lives on the window manager
+   * rather than on the owner's space. See #ImageGridOwner. */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr) {
     return;
   }
+  PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
 
   ui::Layout &layout = *panel->layout;
   layout.use_property_split_set(true);
   layout.use_property_decorate_set(false);
 
-  layout.prop(&owner_ptr, "image_grid_preview_size", UI_ITEM_NONE, IFACE_("Size"), ICON_NONE);
+  layout.prop(&wm_ptr, "image_grid_preview_size", UI_ITEM_NONE, IFACE_("Size"), ICON_NONE);
 }
 
 void image_grid_display_panel_register(ARegionType *region_type)
@@ -215,6 +220,31 @@ static wmOperatorStatus image_grid_name_match_enabled_toggle_exec(bContext *C, w
   ed::image_grid::image_grid_state_persist(*owner, state, grid_slot);
   ed::image_grid::image_grid_notify_change(*C, grid_slot);
   return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus image_grid_show_grid_toggle_exec(bContext *C, wmOperator * /*op*/)
+{
+  const std::optional<ed::image_grid::ImageGridOwner> owner =
+      ed::image_grid::image_grid_owner_from_context(*C);
+  if (!owner) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const ImageGridSlot grid_slot = ed::image_grid::image_grid_slot_from_context(*C);
+  ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, grid_slot);
+  state.show_grid = !state.show_grid;
+  ed::image_grid::image_grid_state_persist(*owner, state, grid_slot);
+  ed::image_grid::image_grid_notify_change(*C, grid_slot);
+  return OPERATOR_FINISHED;
+}
+
+void IMAGE_GRID_OT_show_grid_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Image Grid";
+  ot->idname = "IMAGE_GRID_OT_show_grid_toggle";
+  ot->description = "Collapse or expand the image grid and its library and catalog filters";
+  ot->exec = image_grid_show_grid_toggle_exec;
+  ot->flag = OPTYPE_INTERNAL;
 }
 
 void IMAGE_GRID_OT_name_match_enabled_toggle(wmOperatorType *ot)

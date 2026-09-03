@@ -33,6 +33,7 @@
 #include "BLT_translation.hh"
 
 #include "ED_buttons.hh"
+#include "ED_image_grid.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_view3d.hh" /* To draw toolbar UI. */
@@ -124,6 +125,10 @@ static void buttons_free(SpaceLink *sl)
     ct->users.clear_no_delete();
     MEM_delete(ct);
   }
+
+  /* Per-layout grid sessions (scroll, grip height) of this editor; the shared filter state stays,
+   * see #image_grid_state_remove. */
+  ed::image_grid::image_grid_state_remove(ed::image_grid::ImageGridOwner::from(*sbuts));
 
   MEM_SAFE_DELETE(sbuts->runtime->tab_search_results);
   MEM_delete(sbuts->runtime);
@@ -1111,6 +1116,11 @@ void ED_spacetype_buttons()
   art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_FRAMES;
   art->lock = REGION_DRAW_LOCK_ALL;
   buttons_context_register(art);
+  /* Popovers the brush-texture image grid opens from its own header row; the grid itself is drawn
+   * by the texture panels in this region. */
+  image_grid_catalog_selector_panel_register(art);
+  image_grid_display_panel_register(art);
+  image_grid_name_match_filter_panel_register(art);
   BLI_addhead(&st->regiontypes, art);
 
   /* Register the panel types from modifiers. The actual panels are built per modifier rather

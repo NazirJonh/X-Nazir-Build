@@ -45,6 +45,7 @@
 #include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
@@ -4429,7 +4430,10 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
 
   char image_name[MAX_ID_NAME - 2];
-  SNPRINTF(image_name, "%s %s", ma->id.name + 2, socket_name);
+  /* Channel-scoped name ("Base Color TexLayer"), so the map reads as a reusable layer rather than
+   * being tied to the material it was first created on. Uses the untranslated channel UI name
+   * ("Specular" rather than the "Specular IOR Level" socket). */
+  SNPRINTF(image_name, "%s TexLayer", info.ui_name);
   /* Flat tangent packed for Normal maps; black otherwise. */
   float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
@@ -4454,6 +4458,7 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
   if (image == nullptr) {
     return false;
   }
+  image->flag |= IMA_PAINT_CANVAS;
 
   bNode *tex_node = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
   bNodeSocket *tex_out = bke::node_find_socket(*tex_node, SOCK_OUT, UString("Color"));
@@ -4499,15 +4504,22 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
   return true;
 }
 
-int BKE_paint_material_images_ensure_writable(Main &bmain,
-                                               Object &ob,
-                                               const BrushMaterialPaint &brush_paint,
-                                               PaintModeSettings &mode_settings,
-                                               const int visible_material_channels)
+PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
+    Main &bmain,
+    Object &ob,
+    const BrushMaterialPaint &brush_paint,
+    PaintModeSettings &mode_settings,
+    const int visible_material_channels)
 {
   BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
 
-  int created = 0;
+  PaintMaterialImagesEnsureResult result;
+
+  /* Distinct non-nil layer ids already on the channels we are ensuring, and the maps this call
+   * newly creates. Only maps in `new_images` get tagged; pre-existing images are never touched. */
+  Vector<bUUID> existing_ids;
+  Vector<Image *> new_images;
+
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (!info.supports_image_paint) {
       continue;
@@ -4522,6 +4534,19 @@ int BKE_paint_material_images_ensure_writable(Main &bmain,
     const bool already_had = BKE_paint_principled_channel_image_get(
         ob, info.channel, &existing, &existing_iuser, &mode_settings);
 
+    if (already_had && existing != nullptr && !BLI_uuid_is_nil(existing->paint_layer_id)) {
+      bool seen = false;
+      for (const bUUID &id : existing_ids) {
+        if (BLI_uuid_equal(id, existing->paint_layer_id)) {
+          seen = true;
+          break;
+        }
+      }
+      if (!seen) {
+        existing_ids.append(existing->paint_layer_id);
+      }
+    }
+
     Image *image = nullptr;
     ImageUser *iuser = nullptr;
     if (!BKE_paint_principled_channel_image_ensure(bmain,
@@ -4535,10 +4560,36 @@ int BKE_paint_material_images_ensure_writable(Main &bmain,
       continue;
     }
     if (!already_had) {
-      created++;
+      result.created++;
+      if (image != nullptr) {
+        new_images.append(image);
+      }
     }
   }
-  return created;
+
+  /* No-op rule (spec 5.6): created nothing -> write nothing, mint no UUID. */
+  if (new_images.is_empty()) {
+    return result;
+  }
+
+  /* Pick the layer id for the maps created this call. */
+  bUUID layer_id;
+  if (existing_ids.is_empty()) {
+    layer_id = BLI_uuid_generate_random();
+  }
+  else if (existing_ids.size() == 1) {
+    layer_id = existing_ids[0];
+  }
+  else {
+    layer_id = BLI_uuid_generate_random();
+    result.conflicting_layer_ids = true;
+  }
+
+  for (Image *image : new_images) {
+    image->paint_layer_id = layer_id;
+  }
+
+  return result;
 }
 
 void BKE_paint_material_enable_added_visible_channels(Paint &paint, const int added_channel_bits)

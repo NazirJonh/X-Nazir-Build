@@ -135,6 +135,14 @@ static TexSnapshot primary_snap = {nullptr};
 static TexSnapshot secondary_snap = {nullptr};
 static CursorSnapshot cursor_snap = {nullptr};
 
+/* Exit-path alias for #ed::sculpt_paint::paint_cursor_delete_textures(): this fork already frees
+ * the cursor overlay snapshots on mode exit via #ED_paint_cursor_delete_textures(); PBR's grid
+ * refactor added a second, identically-bodied entry point that #WM_exit_ex() calls on quit. */
+void ED_paint_cursor_free_textures()
+{
+  ed::sculpt_paint::paint_cursor_delete_textures();
+}
+
 namespace ed::sculpt_paint {
 
 /* Forward declaration: defined below, after the shared overlay helpers it relies on. */

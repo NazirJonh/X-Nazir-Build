@@ -2075,6 +2075,21 @@ std::pair<bNodeTree *, bNode *> BKE_texpaint_slot_material_find_node(Material *m
   return std::pair<bNodeTree *, bNode *>(find_data.r_nodetree, find_data.r_node);
 }
 
+Vector<Image *> BKE_texpaint_slot_canvas_images(const Material *ma)
+{
+  Vector<Image *> images;
+  if (ma == nullptr || ma->texpaintslot == nullptr) {
+    return images;
+  }
+  for (const int i : IndexRange(ma->tot_slots)) {
+    Image *image = ma->texpaintslot[i].ima;
+    if (image != nullptr && !images.contains(image)) {
+      images.append(image);
+    }
+  }
+  return images;
+}
+
 void ramp_blend(int type, float r_col[4], const float fac, const float col[4])
 {
   float tmp, facm = 1.0f - fac;

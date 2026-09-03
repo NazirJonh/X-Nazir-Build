@@ -62,6 +62,7 @@ ImBuf *icon_alert_imbuf_get(AlertIcon icon, float size);
 void icons_init();
 
 bool icon_get_theme_color(int icon_id, unsigned char color[4]);
+bool icon_is_monochrome(int icon_id);
 
 /**
  * Render a #PreviewImage for the data block.

@@ -178,7 +178,7 @@ static bool register_blender_prog_id(const char *prog_id,
   return true;
 }
 
-bool BLI_windows_register_blend_extension(const bool all_users)
+bool BLI_windows_register_blend_extension(const bool all_users, const char *extension)
 {
   if (BLI_windows_is_store_install()) {
     fprintf(stderr, "Registration not possible from Microsoft Store installation.");
@@ -187,7 +187,6 @@ bool BLI_windows_register_blend_extension(const bool all_users)
 
   HKEY root = 0;
   char blender_path[MAX_PATH];
-  char *blender_app;
   HKEY hkey = 0;
   LONG lresult;
   DWORD dwd = 0;
@@ -196,17 +195,18 @@ bool BLI_windows_register_blend_extension(const bool all_users)
 
   GetModuleFileName(0, blender_path, sizeof(blender_path));
 
-  /* Prevent overflow when we add -launcher to the executable name. */
-  if (strlen(blender_path) > (sizeof(blender_path) - 10)) {
+  /* The launcher is named after the executable, so derive its path instead of assuming a fixed
+   * name: this build renames both, and a mismatch silently disables registration. */
+  const char *path_extension = BLI_path_extension(blender_path);
+  if (path_extension == nullptr) {
     return false;
   }
-
-  /* Replace the actual app name with the wrapper. */
-  blender_app = strstr(blender_path, "blender.exe");
-  if (!blender_app) {
+  const size_t stem_size = size_t(path_extension - blender_path);
+  const char *launcher_suffix = "-launcher.exe";
+  if (stem_size + strlen(launcher_suffix) + 1 > sizeof(blender_path)) {
     return false;
   }
-  strcpy(blender_app, "blender-launcher.exe");
+  BLI_strncpy(blender_path + stem_size, launcher_suffix, sizeof(blender_path) - stem_size);
 
   if (!open_registry_hive(all_users, &root)) {
     return false;
@@ -218,7 +218,7 @@ bool BLI_windows_register_blend_extension(const bool all_users)
   }
 
   lresult = RegCreateKeyEx(
-      root, ".blend", 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr, &hkey, &dwd);
+      root, extension, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr, &hkey, &dwd);
   if (lresult == ERROR_SUCCESS) {
     /* Set this instance the default. */
     lresult = RegSetValueEx(hkey, nullptr, 0, REG_SZ, (BYTE *)prog_id, strlen(prog_id) + 1);
@@ -230,8 +230,11 @@ bool BLI_windows_register_blend_extension(const bool all_users)
     }
     RegCloseKey(hkey);
 
+    char subkey[MAX_PATH];
+    SNPRINTF(subkey, "%s\\OpenWithProgids", extension);
+
     lresult = RegCreateKeyEx(root,
-                             ".blend\\OpenWithProgids",
+                             subkey,
                              0,
                              nullptr,
                              REG_OPTION_NON_VOLATILE,
@@ -275,14 +278,15 @@ bool BLI_windows_register_blend_extension(const bool all_users)
   RegCloseKey(root);
   char message[256];
   SNPRINTF(message,
-           "Blend file extension registered for %s.",
+           "File extension %s registered for %s.",
+           extension,
            all_users ? "all users" : "the current user");
   printf("%s\n", message);
 
   return true;
 }
 
-bool BLI_windows_unregister_blend_extension(const bool all_users)
+bool BLI_windows_unregister_blend_extension(const bool all_users, const char *extension)
 {
   if (BLI_windows_is_store_install()) {
     fprintf(stderr, "Unregistration not possible from Microsoft Store installation.");
@@ -290,8 +294,7 @@ bool BLI_windows_unregister_blend_extension(const bool all_users)
   }
 
   HKEY root = 0;
-  HKEY hkey = 0;
-  LONG lresult;
+  HKEY hkey_extension = 0;
 
   if (!open_registry_hive(all_users, &root)) {
     return false;
@@ -301,13 +304,16 @@ bool BLI_windows_unregister_blend_extension(const bool all_users)
 
   RegDeleteTree(root, BLENDER_WIN_APPID);
 
-  lresult = RegOpenKeyEx(root, ".blend", 0, KEY_ALL_ACCESS, &hkey);
-  if (lresult == ERROR_SUCCESS) {
+  const bool has_extension_key = RegOpenKeyEx(
+                                     root, extension, 0, KEY_ALL_ACCESS, &hkey_extension) ==
+                                 ERROR_SUCCESS;
+  if (has_extension_key) {
     char buffer[256] = {0};
     DWORD size = sizeof(buffer);
-    lresult = RegGetValueA(hkey, nullptr, nullptr, RRF_RT_REG_SZ, nullptr, &buffer, &size);
+    const LONG lresult = RegGetValueA(
+        hkey_extension, nullptr, nullptr, RRF_RT_REG_SZ, nullptr, &buffer, &size);
     if (lresult == ERROR_SUCCESS && STREQ(buffer, BLENDER_WIN_APPID)) {
-      RegSetValueEx(hkey, nullptr, 0, REG_SZ, 0, 0);
+      RegSetValueEx(hkey_extension, nullptr, 0, REG_SZ, 0, 0);
     }
   }
 
@@ -324,15 +330,24 @@ bool BLI_windows_unregister_blend_extension(const bool all_users)
   }
 #  endif
 
-  lresult = RegOpenKeyEx(hkey, "OpenWithProgids", 0, KEY_ALL_ACCESS, &hkey);
-  if (lresult == ERROR_SUCCESS) {
-    RegDeleteValue(hkey, BLENDER_WIN_APPID);
+  /* The sub-key is opened into its own handle: the extension key is still needed as its parent
+   * and must outlive it. */
+  if (has_extension_key) {
+    HKEY hkey_prog_ids = 0;
+    if (RegOpenKeyEx(hkey_extension, "OpenWithProgids", 0, KEY_ALL_ACCESS, &hkey_prog_ids) ==
+        ERROR_SUCCESS)
+    {
+      RegDeleteValue(hkey_prog_ids, BLENDER_WIN_APPID);
+      RegCloseKey(hkey_prog_ids);
+    }
+    RegCloseKey(hkey_extension);
   }
 
   RegCloseKey(root);
   char message[256];
   SNPRINTF(message,
-           "Blend file extension unregistered for %s.",
+           "File extension %s unregistered for %s.",
+           extension,
            all_users ? "all users" : "the current user");
   printf("%s\n", message);
 

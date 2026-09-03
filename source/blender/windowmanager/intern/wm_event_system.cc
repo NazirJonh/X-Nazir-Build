@@ -4472,8 +4472,10 @@ void wm_event_do_handlers(bContext *C)
         for (ARegion *popup = static_cast<ARegion *>(screen->regionbase.last); popup;
              popup = popup->prev)
         {
+          /* Null area: these popups hang off the screen, not off an area, and a temporary region
+           * never has a panel-category gutter -- the only thing the area is consulted for. */
           if (popup->regiontype != RGN_TYPE_TEMPORARY || !popup->runtime->visible ||
-              !ED_region_contains_xy(popup, event->xy))
+              !ED_region_contains_xy(nullptr, popup, event->xy))
           {
             continue;
           }
@@ -7055,6 +7057,7 @@ void WM_window_cursor_keymap_status_refresh(bContext *C, wmWindow *win)
            RGN_TYPE_HEADER,
            RGN_TYPE_TOOL_HEADER,
            RGN_TYPE_FOOTER,
+           RGN_TYPE_TAG_BAR,
            RGN_TYPE_ASSET_SHELF_HEADER,
            RGN_TYPE_TEMPORARY,
            RGN_TYPE_HUD))

@@ -7,12 +7,17 @@
  */
 
 #include <cstring>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <fmt/format.h>
 
 #include "AS_remote_library.hh"
 
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
+#include "DNA_theme_types.h"
 
 #include "BLI_listbase.h"
 #ifdef WIN32
@@ -23,6 +28,9 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 
+#include "BKE_blender.hh"
+#include "BKE_blendfile.hh"
+#include "BKE_addon.h"
 #include "BKE_callbacks.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
@@ -1439,7 +1447,7 @@ static void PREFERENCES_OT_associate_blend(wmOperatorType *ot)
 {
   /* identifiers */
   ot->name = "Register File Association";
-  ot->description = "Use this installation for .blend files and to display thumbnails";
+  ot->description = "Use this installation for .xblend files and to display thumbnails";
   ot->idname = "PREFERENCES_OT_associate_blend";
 
   /* API callbacks. */
@@ -1487,7 +1495,7 @@ static void PREFERENCES_OT_unassociate_blend(wmOperatorType *ot)
 {
   /* identifiers */
   ot->name = "Remove File Association";
-  ot->description = "Remove this installation's associations with .blend files";
+  ot->description = "Remove this installation's associations with .xblend files";
   ot->idname = "PREFERENCES_OT_unassociate_blend";
 
   /* API callbacks. */
@@ -1592,21 +1600,71 @@ static void drop_extension_path_copy(bContext * /*C*/, wmDrag *drag, wmDropBox *
 
 /** \} */
 
+static std::string preferences_extension_dragged_name(wmDrag *drag)
+{
+  if (!drag) {
+    return "";
+  }
+
+  if (drag->type == WM_DRAG_PATH) {
+    const char *path = WM_drag_get_single_path(drag);
+    if (!path || path[0] == '\0') {
+      return "";
+    }
+    const char *basename = BLI_path_basename(path);
+    return (basename && basename[0]) ? std::string(basename) : "";
+  }
+
+  if (drag->type == WM_DRAG_STRING) {
+    const std::string &url = WM_drag_get_string(drag);
+    if (url.empty()) {
+      return "";
+    }
+    std::string url_strip = url;
+    const size_t param_pos = url_strip.find_first_of("?#");
+    if (param_pos != std::string::npos) {
+      url_strip = url_strip.substr(0, param_pos);
+    }
+    const char *basename = BLI_path_basename(url_strip.c_str());
+    return (basename && basename[0]) ? std::string(basename) : "";
+  }
+
+  return "";
+}
+
+static std::string preferences_extension_drop_tooltip(bContext * /*C*/,
+                                                       wmDrag *drag,
+                                                       const int /*xy*/[2],
+                                                       wmDropBox * /*drop*/)
+{
+  const std::string extension_name = preferences_extension_dragged_name(drag);
+  if (!extension_name.empty()) {
+    return fmt::format(fmt::runtime("Install '{}'"), extension_name);
+  }
+  return fmt::format(fmt::runtime("Install Extension"));
+}
+
 static void ED_dropbox_drop_extension()
 {
   ListBaseT<wmDropBox> *lb = WM_dropboxmap_find("Window", SPACE_EMPTY, RGN_TYPE_WINDOW);
+
+  /* Add category-tab extension dropbox FIRST so it takes precedence.
+   * This allows intercepting extension drops in regions without category tabs
+   * to set pending context for "New Add-on!" virtual tag. */
+  ED_dropbox_category_extension();
+
   WM_dropbox_add(lb,
                  "PREFERENCES_OT_extension_url_drop",
                  drop_extension_url_poll,
                  drop_extension_url_copy,
                  nullptr,
-                 nullptr);
+                 preferences_extension_drop_tooltip);
   WM_dropbox_add(lb,
                  "PREFERENCES_OT_extension_url_drop",
                  drop_extension_path_poll,
                  drop_extension_path_copy,
                  nullptr,
-                 nullptr);
+                 preferences_extension_drop_tooltip);
 }
 
 /* -------------------------------------------------------------------- */
@@ -1657,6 +1715,8 @@ void PREFERENCES_OT_clear_filter(wmOperatorType *ot)
 
 void ED_operatortypes_userpref()
 {
+  ED_operatortypes_userpref_sync();
+
   WM_operatortype_append(PREFERENCES_OT_reset_default_theme);
 
   WM_operatortype_append(PREFERENCES_OT_autoexec_path_add);
@@ -1676,6 +1736,7 @@ void ED_operatortypes_userpref()
 
   WM_operatortype_append(PREFERENCES_OT_associate_blend);
   WM_operatortype_append(PREFERENCES_OT_unassociate_blend);
+
 
   WM_operatortype_append(PREFERENCES_OT_start_filter);
   WM_operatortype_append(PREFERENCES_OT_clear_filter);

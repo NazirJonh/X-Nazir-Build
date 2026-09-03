@@ -2171,6 +2171,7 @@ static const FaceDetails static_face_details[] = {
     {"NotoSansTamil-VariableFont_wdth,wght.woff2", TT_UCR_TAMIL, 0, 0, 0},
     {"NotoSansTelugu-VariableFont_wdth,wght.woff2", TT_UCR_TELUGU, 0, 0, 0},
     {"NotoSansThai-VariableFont_wdth,wght.woff2", TT_UCR_THAI, 0, 0, 0},
+    {"MaterialSymbolsRounded[FILL,GRAD,opsz,wght].woff2", 0, TT_UCR_PRIVATE_USE, 0, 0},
 };
 
 /**

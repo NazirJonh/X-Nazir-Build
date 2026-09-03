@@ -9,6 +9,13 @@
  * which exposes low-level API for custom previews/icons.
  * It is replaced in final API by an higher-level python wrapper, that handles previews by addon,
  * and automatically release them on deletion.
+ *
+ * THREAD-SAFETY NOTE:
+ * The load() function can now be called from background threads. Previously it
+ * required main thread due to BLI_thread_is_main() check. This restriction was
+ * removed because the underlying C++ implementation (BKE_previewimg_cached_*)
+ * now uses mutex protection for thread-safe access to the cached previews map.
+ * See preview_image.cc for details on GPU resource deletion safety.
  */
 
 #include <Python.h>
@@ -25,6 +32,7 @@
 #include "IMB_thumbs.hh"
 
 #include "BKE_preview_image.hh"
+#include "BLI_threads.h"
 
 namespace blender {
 
@@ -118,6 +126,11 @@ static PyObject *bpy_utils_previews_load(PyObject * /*self*/, PyObject *args)
     return nullptr;
   }
 
+  /* Thread-safe: The underlying BKE_previewimg_cached_thumbnail_read() uses
+   * mutex protection for thread-safe access to the cached previews map.
+   * This allows Python addons to load previews from background threads
+   * (e.g., Ucupaint's download_stream thread). GPU texture deletion is also
+   * safe as all backends have fallback mechanisms. */
   PreviewImage *prv = BKE_previewimg_cached_thumbnail_read(
       name, filepath_data.value, path_type.value_found, force_reload);
 

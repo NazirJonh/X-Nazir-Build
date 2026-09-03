@@ -91,6 +91,7 @@ _modules = [
     "space_view3d",
     "space_view3d_sidebar",
     "space_view3d_toolbar",
+    "glyph_library",
 
     # XXX, keep last so panels show after all other tool options.
     "properties_workspace",
@@ -125,6 +126,7 @@ def register():
     space_filebrowser.register_props()
     properties_data_mesh.register_props()
     properties_paint_common.register()
+    space_userpref.register()
 
     from bpy.props import (
         BoolProperty,
@@ -272,6 +274,7 @@ def unregister():
         if cls.is_registered:
             unregister_class(cls)
 
+    space_userpref.unregister()
     properties_paint_common.unregister()
     properties_data_mesh.unregister_props()
 

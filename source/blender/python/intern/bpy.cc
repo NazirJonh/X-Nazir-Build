@@ -315,7 +315,7 @@ static PyObject *bpy_system_resource(PyObject * /*self*/, PyObject *args, PyObje
 PyDoc_STRVAR(
     /* Wrap. */
     bpy_resource_path_doc,
-    ".. function:: resource_path(type, *, major=None, minor=None)\n"
+    ".. function:: resource_path(type, *, major=None, minor=None, stock=False)\n"
     "\n"
     "   Return the base path for storing system files.\n"
     "\n"
@@ -325,6 +325,9 @@ PyDoc_STRVAR(
     "   :type major: int | None\n"
     "   :param minor: Minor version. None (the default) uses ``bpy.app.version[1]``.\n"
     "   :type minor: int | None\n"
+    "   :param stock: For ``USER``, return the directory of a stock Blender install instead of\n"
+    "      this build's own. Ignored for other resource types.\n"
+    "   :type stock: bool\n"
     "   :return: the resource path (not necessarily existing).\n"
     "   :rtype: str\n"
     "\n"
@@ -334,7 +337,11 @@ PyDoc_STRVAR(
     "but resolves to the directory for architecture-dependent libraries "
     "(typically under ``/usr/lib/...`` rather than ``/usr/share/...``). "
     "It is an empty string on builds without a separate library directory, "
-    "such as portable builds and the Python module.\n");
+    "such as portable builds and the Python module.\n"
+    "\n"
+    "      ``stock=True`` returns an empty string when this install has no per-version user "
+    "directory at all, which is the case for portable installs and when "
+    "``BLENDER_USER_RESOURCES`` is set.\n");
 static PyObject *bpy_resource_path(PyObject * /*self*/, PyObject *args, PyObject *kw)
 {
   const PyC_StringEnumItems type_items[] = {
@@ -348,13 +355,15 @@ static PyObject *bpy_resource_path(PyObject * /*self*/, PyObject *args, PyObject
 
   std::optional<int> major;
   std::optional<int> minor;
+  bool stock = false;
 
-  static const char *_keywords[] = {"type", "major", "minor", nullptr};
+  static const char *_keywords[] = {"type", "major", "minor", "stock", nullptr};
   static _PyArg_Parser _parser = {
       "O&" /* `type` */
       "|$" /* Optional keyword only arguments. */
       "O&" /* `major` */
       "O&" /* `minor` */
+      "O&" /* `stock` */
       ":resource_path",
       _keywords,
       nullptr,
@@ -367,7 +376,9 @@ static PyObject *bpy_resource_path(PyObject * /*self*/, PyObject *args, PyObject
                                         PyC_ParseOptionalInt,
                                         &major,
                                         PyC_ParseOptionalInt,
-                                        &minor))
+                                        &minor,
+                                        PyC_ParseBool,
+                                        &stock))
   {
     return nullptr;
   }
@@ -377,7 +388,7 @@ static PyObject *bpy_resource_path(PyObject * /*self*/, PyObject *args, PyObject
                       minor.value_or(BLENDER_VERSION % 100);
 
   const std::optional<std::string> path = BKE_appdir_resource_path_id_with_version(
-      type.value_found, false, version);
+      type.value_found, false, version, stock);
 
   return PyC_UnicodeFromStdStr(path.value_or(""));
 }

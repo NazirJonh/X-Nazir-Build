@@ -29,5 +29,24 @@ uint popup_menu_hash(StringRef str);
 ARegion *region_temp_add(bScreen *screen);
 void region_temp_remove(bContext *C, bScreen *screen, ARegion *region);
 
+/* interface_region_tooltip.cc */
+
+/**
+ * Update text in an existing simple tooltip region without recreation.
+ * Returns true if the tooltip was successfully updated.
+ * Only works for tooltips with a single TIP_STYLE_NORMAL field.
+ */
+bool tooltip_region_update_text(ARegion *region, const char *text);
+
+/**
+ * Update text and colored suffix in an existing tooltip region without recreation.
+ * Returns true if the tooltip was successfully updated.
+ * Only works for tooltips with a single TIP_STYLE_NORMAL field.
+ * If suffix is nullptr, the existing suffix is cleared.
+ */
+bool tooltip_region_update_text_and_suffix(ARegion *region,
+                                           const char *text,
+                                           const char *suffix);
+
 }  // namespace ui
 }  // namespace blender

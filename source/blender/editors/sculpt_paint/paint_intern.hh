@@ -65,6 +65,7 @@ class PaintModeData;
 struct PaintStroke;
 struct PaintSample;
 struct StrokeCache;
+
 }  // namespace ed::sculpt_paint
 
 namespace ocio {
@@ -498,6 +499,27 @@ void paint_2d_bucket_fill(const bContext *C,
                           const float mouse_init[2],
                           const float mouse_final[2],
                           void *ps);
+/**
+ * 3D Texture Paint Face/Island fill.
+ *
+ * Ray-casts the original mesh / Edit BMesh of \a ob (not the evaluated mesh) so the hit
+ * face index matches 2D Image Editor fill and selection expand. Rasterizes in UV space
+ * onto `imapaint.canvas` or the hit face's material image.
+ *
+ * \return true if any tile was written.
+ */
+bool paint_image_proj_geometry_fill(
+    const bContext *C, const float color[3], Brush *br, Object *ob, const float mouse[2]);
+/**
+ * Single-shot texture fill from 3D viewport screen coords.
+ * Solid color only (v1). Geometry expand or pixel flood depending on \a brush.fill_expand.
+ */
+bool paint_image_viewport_fill_at_mouse(const bContext *C,
+                                        const Paint *paint,
+                                        Brush *brush,
+                                        Object *ob,
+                                        bool stroke_inverted,
+                                        const float mouse[2]);
 void paint_2d_gradient_fill(
     const bContext *C, Brush *br, const float mouse_init[2], const float mouse_final[2], void *ps);
 void *paint_proj_new_stroke(bContext *C,
@@ -544,6 +566,60 @@ void PAINT_OT_add_texture_paint_slot(wmOperatorType *ot);
 void PAINT_OT_image_paint(wmOperatorType *ot);
 void PAINT_OT_add_simple_uvs(wmOperatorType *ot);
 void PAINT_OT_brush_group_override_toggle(wmOperatorType *ot);
+
+/* paint_image_select_mask.cc, paint_image_select_move.cc, paint_image_select_transform.cc */
+void PAINT_OT_image_select_all(wmOperatorType *ot);
+void PAINT_OT_image_select_none(wmOperatorType *ot);
+void PAINT_OT_image_select_box(wmOperatorType *ot);
+void PAINT_OT_image_select_lasso(wmOperatorType *ot);
+void PAINT_OT_image_select_circle(wmOperatorType *ot);
+void PAINT_OT_image_select_polyline(wmOperatorType *ot);
+void PAINT_OT_image_select_invert(wmOperatorType *ot);
+void PAINT_OT_image_select_move(wmOperatorType *ot);
+void PAINT_OT_image_select_move_confirm(wmOperatorType *ot);
+void PAINT_OT_image_select_move_cancel(wmOperatorType *ot);
+void PAINT_OT_image_select_move_undo_step(wmOperatorType *ot);
+void PAINT_OT_image_select_copy(wmOperatorType *ot);
+void PAINT_OT_image_select_paste(wmOperatorType *ot);
+void PAINT_OT_image_select_transform(wmOperatorType *ot);
+void PAINT_OT_image_select_transform_confirm(wmOperatorType *ot);
+void PAINT_OT_image_select_transform_cancel(wmOperatorType *ot);
+void PAINT_OT_image_select_transform_drag(wmOperatorType *ot);
+void PAINT_OT_image_select_gradient(wmOperatorType *ot);
+void PAINT_OT_image_select_gradient_apply(wmOperatorType *ot);
+void PAINT_OT_image_select_gradient_cancel(wmOperatorType *ot);
+void PAINT_OT_image_select_warp(wmOperatorType *ot);
+void PAINT_OT_image_select_warp_confirm(wmOperatorType *ot);
+void PAINT_OT_image_select_warp_cancel(wmOperatorType *ot);
+void PAINT_OT_image_select_warp_undo_step(wmOperatorType *ot);
+/** True while a selection transform gizmo is active in the current Image Editor. */
+bool image_select_transform_is_floating(bContext *C);
+/** True while a move-selection fragment is floating in the current Image Editor. */
+bool image_select_move_is_floating(bContext *C);
+/** Floating move in the given Image Editor space (not another window/space). */
+bool image_select_move_is_floating_in_space(const SpaceImage *sima);
+bool image_select_gradient_is_floating(bContext *C);
+bool image_select_gradient_is_floating_in_space(const SpaceImage *sima);
+/** True while a warp-selection fragment is floating in the current Image Editor. */
+bool image_select_warp_is_floating(bContext *C);
+bool image_select_warp_is_floating_in_space(const SpaceImage *sima);
+/** True when any floating paint-select session owns the current Image Editor. */
+bool image_select_session_is_floating(bContext *C);
+/**
+ * True when the brush must not start a stroke in the current Image Editor: either this editor
+ * itself owns a live floating paint-select session, or its Image's canvas is currently borrowed
+ * by a floating session in a *different* Image Editor (see
+ * #bke::ImageRuntime::paint_selection_borrowed_by). Unlike #image_select_session_is_floating,
+ * this is not meant to gate keymap activation -- an editor merely sharing a borrowed Image has no
+ * session of its own to confirm/cancel.
+ */
+bool image_select_canvas_paint_blocked(bContext *C);
+void image_paint_clipboard_ensure_atexit_handler();
+/**
+ * Modal keymap shared by the floating-selection operators (move / transform / warp).
+ * Defined in mesh/paint_image_select_floating.cc; registered from #ED_keymap_paint.
+ */
+wmKeyMap *image_select_floating_modal_keymap(wmKeyConfig *keyconf);
 
 /* paint_image_2d_curve_mask.cc */
 

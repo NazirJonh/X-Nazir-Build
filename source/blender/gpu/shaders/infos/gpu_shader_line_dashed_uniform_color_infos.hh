@@ -23,7 +23,11 @@ NO_PERSPECTIVE(float2, stipple_start) /* In screen space */
 FLAT(float2, stipple_pos)
 GPU_SHADER_INTERFACE_END() /* In screen space */
 
-GPU_SHADER_CREATE_INFO(gpu_shader_3D_line_dashed_uniform_color)
+/**
+ * Resources shared by every dashed-line variant. Carries no fragment source, so each leaf info
+ * below supplies its own; a leaf may not override an inherited source.
+ */
+GPU_SHADER_CREATE_INFO(gpu_shader_line_dashed_uniform_color_base)
 VERTEX_IN(0, float3, pos)
 VERTEX_OUT(flat_color_iface)
 PUSH_CONSTANT(float4x4, ModelViewProjectionMatrix)
@@ -37,7 +41,25 @@ PUSH_CONSTANT(float4, color2)
 VERTEX_OUT(gpu_shader_line_dashed_interface)
 FRAGMENT_OUT(0, float4, fragColor)
 VERTEX_SOURCE("gpu_shader_3D_line_dashed_uniform_color_vert.glsl")
+GPU_SHADER_CREATE_END()
+
+GPU_SHADER_CREATE_INFO(gpu_shader_3D_line_dashed_uniform_color)
 FRAGMENT_SOURCE("gpu_shader_2D_line_dashed_frag.glsl")
+ADDITIONAL_INFO(gpu_shader_line_dashed_uniform_color_base)
+DO_STATIC_COMPILATION()
+GPU_SHADER_CREATE_END()
+
+/**
+ * Same dash pattern, but with a caller-driven phase for a "marching ants" effect. Kept as a
+ * separate variant so that the callers of the static shader above are not obliged to set a
+ * push constant they have no use for (an unset push constant is not guaranteed to read as zero).
+ */
+GPU_SHADER_CREATE_INFO(gpu_shader_3D_line_dashed_uniform_color_animated)
+/* Phase shift of the dash pattern, expressed in whole dash periods. Only its fractional part
+ * matters, so it can be advanced monotonically over time. */
+PUSH_CONSTANT(float, dash_phase)
+FRAGMENT_SOURCE("gpu_shader_2D_line_dashed_animated_frag.glsl")
+ADDITIONAL_INFO(gpu_shader_line_dashed_uniform_color_base)
 DO_STATIC_COMPILATION()
 GPU_SHADER_CREATE_END()
 

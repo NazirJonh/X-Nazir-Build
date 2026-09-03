@@ -81,6 +81,17 @@ set(SRC
   mesh/paint_hide.cc
   mesh/paint_image.cc
   mesh/paint_image_2d.cc
+  mesh/paint_image_uv_geom.cc
+  mesh/paint_image_uv_symmetry.cc
+  mesh/paint_image_select_mask.cc
+  mesh/paint_image_select_gesture.cc
+  mesh/paint_image_select_fragment.cc
+  mesh/paint_image_select_floating.cc
+  mesh/paint_image_select_move.cc
+  mesh/paint_image_select_transform.cc
+  mesh/paint_image_select_gradient.cc
+  mesh/paint_image_select_warp.cc
+  mesh/paint_image_select_gizmo.cc
   mesh/paint_image_2d_curve_mask.cc
   mesh/paint_area_plane_2d.cc
   mesh/paint_image_ops_paint.cc
@@ -141,6 +152,8 @@ set(SRC
   mesh/paint_material_attribute.hh
   mesh/paint_material_blend.hh
   mesh/paint_material_source.hh
+  mesh/paint_image_uv_geom.hh
+  mesh/paint_image_uv_symmetry.hh
   mesh/paint_mask.hh
   mesh/sculpt_automask.hh
   mesh/sculpt_boundary.hh
@@ -200,7 +213,9 @@ set(SRC
 
 set(LIB
   PRIVATE bf::asset_system
+  PRIVATE bf_editor_uvedit
   PRIVATE bf::blenkernel
+  PRIVATE bf::blenfont
   PRIVATE bf::animrig
   PRIVATE bf::blenlib
   PRIVATE bf::blenloader
@@ -227,6 +242,9 @@ if(WITH_GTESTS)
   set(TEST_SRC
     mesh/mesh_brush_common_tests.cc
     mesh/paint_test.cc
+    mesh/paint_image_select_warp_tests.cc
+    mesh/paint_image_uv_geom_tests.cc
+    mesh/paint_image_uv_symmetry_tests.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_color_test.cc
     mesh/sculpt_detail_test.cc

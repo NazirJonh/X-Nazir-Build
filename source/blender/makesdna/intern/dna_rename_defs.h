@@ -121,6 +121,7 @@ DNA_STRUCT_RENAME_MEMBER(GreasePencilLineartModifierData, thickness, thickness_l
 DNA_STRUCT_RENAME_MEMBER(HookModifierData, totindex, indexar_num)
 DNA_STRUCT_RENAME_MEMBER(Image, name, filepath)
 DNA_STRUCT_RENAME_MEMBER(ImageFormatData, planes, color_mode)
+DNA_STRUCT_RENAME_MEMBER(ImagePaintSettings, use_selection_uv_island, selection_expand)
 DNA_STRUCT_RENAME_MEMBER(LaplacianDeformModifierData, total_verts, verts_num)
 DNA_STRUCT_RENAME_MEMBER(Library, name, filepath)
 DNA_STRUCT_RENAME_MEMBER(Light, clipend, clipend_deprecated)

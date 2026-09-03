@@ -23,6 +23,7 @@
 #include "DNA_ID.h"
 #include "DNA_brush_enums.h"
 #include "DNA_color_types.h" /* color management */
+#include "DNA_colorband_types.h"
 #include "DNA_curve_enums.h"
 #include "DNA_customdata_types.h" /* Scene's runtime custom-data masks. */
 #include "DNA_freestyle_types.h"
@@ -1375,6 +1376,44 @@ enum eImagePaint_MissingData : short {
 };
 ENUM_OPERATORS(eImagePaint_MissingData)
 
+/** #ImagePaintSettings::gradient_type */
+enum eImagePaint_GradientType : int8_t {
+  IMAGE_PAINT_GRADIENT_LINEAR = 0,
+  IMAGE_PAINT_GRADIENT_RADIAL = 1,
+  IMAGE_PAINT_GRADIENT_CONICAL = 2,
+  IMAGE_PAINT_GRADIENT_DIAMOND = 3,
+  IMAGE_PAINT_GRADIENT_SQUARE = 4,
+};
+
+/** #ImagePaintSettings::gradient_repeat */
+enum eImagePaint_GradientRepeat : int8_t {
+  IMAGE_PAINT_GRADIENT_REPEAT_NONE = 0,
+  IMAGE_PAINT_GRADIENT_REPEAT_REPEAT = 1,
+  IMAGE_PAINT_GRADIENT_REPEAT_REFLECT = 2,
+};
+
+/** #ImagePaintSettings::warp_interpolation */
+enum eImagePaint_WarpInterpolation : int8_t {
+  IMAGE_PAINT_WARP_INTERP_LINEAR = 0,
+  IMAGE_PAINT_WARP_INTERP_SMOOTH = 1,
+};
+
+/** Image Paint face/island expansion mode.
+ *
+ * Used by #ImagePaintSettings::selection_expand (Select Box/Lasso/Circle)
+ * and #Brush::fill_expand (Fill brush pick).
+ *
+ * Stored in the same byte that used to be the boolean `use_selection_uv_island`.
+ * `0` and `1` keep their old meanings so existing files need no versioning.
+ * #IMAGE_PAINT_SELECT_EXPAND_MESH is Fill-brush only (`Brush::fill_expand`).
+ */
+enum eImagePaint_SelectionExpand : int8_t {
+  IMAGE_PAINT_SELECT_EXPAND_PIXELS = 0,
+  IMAGE_PAINT_SELECT_EXPAND_ISLAND = 1,
+  IMAGE_PAINT_SELECT_EXPAND_FACE = 2,
+  IMAGE_PAINT_SELECT_EXPAND_MESH = 3,
+};
+
 /** Texture/Image Editor. */
 struct ImagePaintSettings {
   Paint paint;
@@ -1407,6 +1446,35 @@ struct ImagePaintSettings {
   /** Transparency for drawing of clone image in Image editor. */
   float clone_alpha = 0.5f;
   char _pad2[4] = {};
+
+  /* Formerly `use_selection_mask`. Whether selection masking is active is derived from the image
+   * runtime data (see #BKE_image_paint_selection_mask_has_any), so it is not stored in the file.
+   */
+  char _pad3[1] = {};
+  /** #eImagePaint_SelectionExpand */
+  char selection_expand = IMAGE_PAINT_SELECT_EXPAND_PIXELS;
+  /** #eImagePaint_GradientType */
+  char gradient_type = IMAGE_PAINT_GRADIENT_LINEAR;
+  /** #eImagePaint_GradientRepeat */
+  char gradient_repeat = IMAGE_PAINT_GRADIENT_REPEAT_NONE;
+  /** IMB_BlendMode for the selection gradient tool. */
+  short gradient_blend_mode = 0;
+  /** Number of control points along each side of the Warp selection grid. */
+  short warp_grid_size = 4;
+  float gradient_opacity = 1.0f;
+  /** #eImagePaint_WarpInterpolation */
+  char warp_interpolation = IMAGE_PAINT_WARP_INTERP_LINEAR;
+  /** Paint the selection gradient across every UDIM tile instead of only the active one. */
+  char gradient_multi_udim = 0;
+  /* Pad so the embedded #ColorBand starts on an 8-byte boundary and the struct size (which holds
+   * pointers) stays a multiple of 8. */
+  char _pad_gradient2[2] = {};
+  /**
+   * Color ramp (stops + interpolation) for the selection gradient tool. Embedded by value like
+   * #ColorMapping::coba, so it needs a runtime #BKE_colorband_init: see #scene_init_data,
+   * #blo_update_defaults_scene and #blo_do_versions_520.
+   */
+  struct ColorBand gradient_colorband;
 };
 
 /** \} */

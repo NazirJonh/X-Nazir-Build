@@ -13,6 +13,7 @@
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
+#include <limits>
 #include <optional>
 #ifndef WIN32
 #  include <unistd.h>
@@ -79,6 +80,7 @@
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
 #include "BKE_image_format.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
@@ -213,8 +215,13 @@ static void image_free_data(ID *id)
 
   image->tiles.free_no_destruct();
 
+  BKE_image_paint_selection_mask_free(image);
   image_runtime_free_data(image);
-  MEM_delete(image->runtime);
+  /* Nulled, unlike a plain #MEM_delete: `runtime` is dereferenced unconditionally all over
+   * blenkernel (#BKE_image_acquire_ibuf and friends), so a stale access after free must fault on a
+   * null pointer instead of reading freed memory. Matches #MEM_SAFE_DELETE on `stereo3d_format`
+   * above. */
+  MEM_SAFE_DELETE(image->runtime);
 }
 
 static void image_foreach_cache(ID *id,
@@ -725,6 +732,11 @@ void BKE_image_free_buffers_ex(Image *ima, bool do_lock)
     ima->rr = nullptr;
   }
 
+  BKE_image_free_gputextures(ima);
+
+  /* Paint selection masks (and their GPU textures) are built against the image buffers being
+   * freed here; keeping them would leak the textures and leave stale-sized masks behind. */
+  BKE_image_paint_selection_mask_free(ima);
   if (do_lock) {
     ima->runtime->cache_mutex.unlock();
   }
@@ -3276,6 +3288,9 @@ static void image_free_tile(Image *ima, ImageTile *tile)
   }
   BKE_image_partial_update_mark_full_update(ima);
 
+  /* Selection masks are keyed by tile number and must not outlive the tile. */
+  BKE_image_paint_selection_mask_tile_free(ima, tile->tile_number);
+
   if (BKE_image_is_multiview(ima)) {
     const int totviews = ima->views.count();
     for (int i = 0; i < totviews; i++) {
@@ -3698,6 +3713,8 @@ void BKE_image_reassign_tile(Image *ima, ImageTile *tile, int new_tile_number)
 
   const int old_tile_number = tile->tile_number;
   tile->tile_number = new_tile_number;
+
+  BKE_image_paint_selection_mask_tile_reassign(ima, old_tile_number, new_tile_number);
 
   if (BKE_image_is_multiview(ima)) {
     const int totviews = ima->views.count();

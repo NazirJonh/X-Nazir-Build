@@ -1134,9 +1134,9 @@ def brush_settings(layout, context, brush, popover=False):
         capabilities = brush.image_paint_capabilities
 
         if brush.image_brush_type == 'FILL':
-            # For some reason fill threshold only appears to be implemented in 2D paint.
             if brush.color_type == 'COLOR':
-                if mode == 'PAINT_2D':
+                draw_image_paint_fill_expand(layout, brush)
+                if brush.fill_expand == 'PIXELS' and mode == 'PAINT_2D':
                     layout.prop(brush, "fill_threshold", text="Fill Threshold", slider=True)
             elif brush.color_type == 'GRADIENT':
                 layout.row().prop(brush, "gradient_fill_mode", expand=True)
@@ -2213,6 +2213,18 @@ def draw_auto_masking_panel(layout, brush):
         col.prop(automasking, "start_normal_falloff", text="Falloff")
 
 
+def draw_image_paint_fill_expand(layout, brush):
+    """Horizontal Pixels / Face / Island / Mesh buttons for Image/Texture Paint Fill."""
+    is_sculpt_texture_fill = getattr(brush, 'sculpt_brush_type', None) == 'TEXTURE_FILL'
+    is_image_fill = brush.image_brush_type == 'FILL'
+    if (not is_image_fill and not is_sculpt_texture_fill) or brush.color_type != 'COLOR':
+        return False
+    row = layout.row(align=True)
+    row.use_property_split = False
+    row.prop(brush, "fill_expand", text="", expand=True, icon_only=True)
+    return True
+
+
 def draw_color_settings(context, layout, brush, color_type=False):
     """Draw color wheel and gradient settings."""
     ups = UnifiedPaintPanel.paint_settings(context).unified_paint_settings
@@ -2220,7 +2232,8 @@ def draw_color_settings(context, layout, brush, color_type=False):
     if color_type:
         row = layout.row()
         row.use_property_split = False
-        row.prop(brush, "color_type", expand=True)
+        if getattr(brush, 'sculpt_brush_type', None) != 'TEXTURE_FILL':
+            row.prop(brush, "color_type", expand=True)
 
     # Color wheel
     if brush.color_type == 'COLOR':
@@ -2392,6 +2405,8 @@ def brush_mask_texture_settings(layout, brush):
 def brush_basic_texpaint_settings(layout, context, brush, *, compact=False):
     """Draw Tool Settings header for Vertex Paint and 2D and 3D Texture Paint modes."""
     capabilities = brush.image_paint_capabilities
+
+    draw_image_paint_fill_expand(layout, brush)
 
     if capabilities.has_color:
         material_paint = brush.material_paint

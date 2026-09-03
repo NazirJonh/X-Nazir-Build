@@ -541,6 +541,11 @@ struct Brush {
   char _pad_fssc[4] = {};
   /** RGB texture for per-face Face Set color assignment (#eBrushTextureDataMode). */
   struct MTex face_set_color_mtex;
+  /** #eImagePaint_SelectionExpand — Fill pick mode. Default Pixels = current flood/view fill. */
+  char fill_expand = IMAGE_PAINT_SELECT_EXPAND_PIXELS;
+  /* Keep #Brush 8-byte aligned: #face_set_color_mtex above ends on an 8-byte
+   * boundary, so this char plus its padding must add up to 8. */
+  char _pad_fill[7] = {};
 };
 
 struct PaletteColor {

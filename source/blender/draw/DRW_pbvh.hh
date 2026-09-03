@@ -26,6 +26,7 @@ class IndexBuf;
 class VertBuf;
 }  // namespace gpu
 struct Object;
+struct PaintModeSettings;
 namespace bke {
 enum class AttrDomain : int8_t;
 namespace pbvh {
@@ -65,9 +66,18 @@ class DrawCache : public bke::pbvh::DrawCache {
   /**
    * Recalculate and copy data as necessary to prepare batches for drawing triangles for a
    * specific combination of attributes.
+   *
+   * \param paint_mode: Poly Paint tool settings the material paint channel/attribute mapping is
+   * resolved against while building vertex formats, so a channel redirected to an add-on-managed
+   * layer attribute still gets that channel's fixed shader input. The format builders only see
+   * attribute names and cannot reach the scene themselves, and the caller already resolved the
+   * same redirect to pick the names in \a request. Deliberately not part of #ViewportRequest,
+   * which is kept as a batch cache key: only the names belong in the key, and a stored pointer
+   * would outlive the frame it was read for. Null disables the material paint aliases.
    */
   virtual Span<gpu::Batch *> ensure_tris_batches(const Object &object,
                                                  const ViewportRequest &request,
+                                                 const PaintModeSettings *paint_mode,
                                                  const IndexMask &nodes_to_update) = 0;
   /**
    * Recalculate and copy data as necessary to prepare batches for drawing wireframe geometry for a

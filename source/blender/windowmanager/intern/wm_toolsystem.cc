@@ -44,6 +44,8 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_sync.hh"
+#include "BKE_paint_types.hh"
 #include "BKE_workspace.hh"
 
 #include "RNA_access.hh"
@@ -324,7 +326,7 @@ bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *bru
 
   /* Do after switching tool, since switching tool will attempt to restore the last used brush of
    * that tool (in #toolsystem_brush_activate_from_toolref_for_object_paint()). */
-  if (!BKE_paint_brush_set(paint, brush)) {
+  if (!BKE_paint_brush_set_synced(*CTX_data_scene(C), *paint, brush)) {
     return false;
   }
 
@@ -334,6 +336,15 @@ bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *bru
   }
   else {
     toolsystem_brush_type_binding_update(paint, paint_mode, active_tool->runtime->brush_type);
+  }
+
+  /* With Material canvas brush sync on, the paired paint mode adopts the same brush. This is the
+   * single user-facing path for changing the active brush (asset shelf, toolbar, operators), so
+   * whichever editor the change came from becomes the source. */
+  if (Paint *synced_paint = BKE_paint_material_sync_on_brush_activated(
+          CTX_data_scene(C), paint, paint_mode))
+  {
+    toolsystem_main_brush_binding_update_from_active(synced_paint);
   }
 
   return true;
@@ -407,16 +418,28 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
     BKE_paint_ensure_from_paintmode(scene, paint_mode);
     Paint *paint = BKE_paint_get_active_from_paintmode(scene, paint_mode);
 
-    /* Attempt to re-activate a brush remembered for this brush type, as stored in a brush
-     * binding. */
-    if (std::optional<AssetWeakReference> brush_asset_reference =
-            WM_toolsystem_last_brush_asset_from_brush_type(scene, tref_rt->brush_type, paint_mode))
-    {
-      BKE_paint_brush_set(bmain, paint, *brush_asset_reference);
-      if (tref_rt->brush_type == -1) {
-        /* Update the bindings so the main brush reference matches the currently active brush. */
-        toolsystem_main_brush_binding_update_from_active(paint);
+    const bool skip_image_restore_for_sync = BKE_paint_material_sync_suppresses_brush_restore(
+        scene, paint);
+    const bool skip_texture3d_material = BKE_paint_material_sync_texture3d_conflicts(scene,
+                                                                                     paint_mode);
+
+    if (!skip_texture3d_material && !skip_image_restore_for_sync) {
+      /* Attempt to re-activate a brush remembered for this brush type, as stored in a brush
+       * binding. */
+      if (std::optional<AssetWeakReference> brush_asset_reference =
+              WM_toolsystem_last_brush_asset_from_brush_type(
+                  scene, tref_rt->brush_type, paint_mode))
+      {
+        BKE_paint_brush_set_synced(*bmain, *scene, *paint, *brush_asset_reference);
+        if (tref_rt->brush_type == -1) {
+          /* Update the bindings so the main brush reference matches the currently active brush. */
+          toolsystem_main_brush_binding_update_from_active(paint);
+        }
       }
+    }
+
+    if (Paint *synced_paint = BKE_paint_material_sync_on_tool_restore(scene, paint_mode)) {
+      toolsystem_main_brush_binding_update_from_active(synced_paint);
     }
   }
 }

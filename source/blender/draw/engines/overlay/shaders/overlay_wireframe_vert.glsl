@@ -33,7 +33,7 @@ bool is_edge_sharpness_visible(float wire_data)
  * its cells are large on screen. Main knob for "how conservative" the
  * adaptive wireframe is overall.
  */
-const float LEVEL_REVEAL_OFFSET = 2.0f;
+#  define LEVEL_REVEAL_OFFSET 2.0f
 
 /**
  * Extra per-level visibility threshold beyond the linear `level + 0.5` schedule.

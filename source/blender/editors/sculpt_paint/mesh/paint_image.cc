@@ -19,6 +19,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_rand.hh"
 #include "BLI_string.h"
+#include "BLI_time.h"
 #include "BLI_utildefines.h"
 
 #include "IMB_imbuf.hh"
@@ -46,6 +47,9 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
+
+/* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
+#include "paint_debug.hh"
 
 #include "NOD_texture.h"
 
@@ -148,7 +152,15 @@ void ED_imapaint_dirty_region(
 void imapaint_image_update(
     SpaceImage *sima, Image *image, ImBuf *ibuf, ImageUser *iuser, short texpaint)
 {
+#if PBR_PAINT_IMAGE_UPDATE_PROFILE
+  const double perf_start = BLI_time_now_seconds();
+#endif
   if (BLI_rcti_is_empty(&imapaintpartial.dirty_region)) {
+#if PBR_PAINT_IMAGE_UPDATE_PROFILE
+    printf("[PBR-PERF] image_update image=%s skipped_empty elapsed=%.3f ms\n",
+           image ? image->id.name + 2 : "<null>",
+           (BLI_time_now_seconds() - perf_start) * 1000.0);
+#endif
     return;
   }
 
@@ -169,6 +181,22 @@ void imapaint_image_update(
     /* Testing with partial update in uv editor too. */
     BKE_image_update_gputexture(
         image, iuser, imapaintpartial.dirty_region.xmin, imapaintpartial.dirty_region.ymin, w, h);
+#if PBR_PAINT_IMAGE_UPDATE_PROFILE
+    printf("[PBR-PERF] image_update image=%s gpu_update=%dx%d elapsed=%.3f ms\n",
+           image ? image->id.name + 2 : "<null>",
+           w,
+           h,
+           (BLI_time_now_seconds() - perf_start) * 1000.0);
+#endif
+  }
+  else {
+#if PBR_PAINT_IMAGE_UPDATE_PROFILE
+    printf("[PBR-PERF] image_update image=%s no_gpu_path texpaint=%d locked=%d elapsed=%.3f ms\n",
+           image ? image->id.name + 2 : "<null>",
+           int(texpaint),
+           sima ? int(sima->lock) : 0,
+           (BLI_time_now_seconds() - perf_start) * 1000.0);
+#endif
   }
 }
 
@@ -703,28 +731,34 @@ void ED_object_texture_paint_mode_enter_ex(Main &bmain,
 
   ED_paint_proj_mesh_data_check(scene, ob, nullptr, nullptr, nullptr, nullptr);
 
-  /* entering paint mode also sets image to editors */
-  if (imapaint.mode == IMAGEPAINT_MODE_MATERIAL) {
-    /* set the current material active paint slot on image editor */
-    Material *ma = BKE_object_material_get(&ob, ob.actcol);
+  /* Entering Texture Paint used to push the active paint slot into every unpinned Image Editor.
+   * With the Material canvas that overwrites Image Editor: Paint after the user already chose a
+   * map (or left it empty for PBR auto-select). Classic IMAGE canvas still syncs. */
+  const bool skip_image_editor_sync =
+      scene.toolsettings->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL;
+  if (!skip_image_editor_sync) {
+    if (imapaint.mode == IMAGEPAINT_MODE_MATERIAL) {
+      /* set the current material active paint slot on image editor */
+      Material *ma = BKE_object_material_get(&ob, ob.actcol);
 
-    if (ma && ma->texpaintslot) {
-      ima = ma->texpaintslot[ma->paint_active_slot].ima;
+      if (ma && ma->texpaintslot) {
+        ima = ma->texpaintslot[ma->paint_active_slot].ima;
+      }
     }
-  }
-  else if (imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
-    ima = imapaint.canvas;
-  }
+    else if (imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
+      ima = imapaint.canvas;
+    }
 
-  if (ima) {
-    ED_space_image_sync(&bmain, ima, false);
+    if (ima) {
+      ED_space_image_sync(&bmain, ima, false);
+    }
   }
 
   ob.mode |= OB_MODE_TEXTURE_PAINT;
 
   BKE_paint_init(&bmain, &scene, PaintMode::Texture3D);
 
-  BKE_paint_brushes_validate(&bmain, &imapaint.paint);
+  BKE_paint_brushes_validate(&bmain, &scene, &imapaint.paint);
 
   if (U.glreslimit != 0) {
     BKE_image_free_all_gputextures(&bmain);
@@ -864,6 +898,11 @@ static wmOperatorStatus brush_colors_flip_exec(bContext *C, wmOperator * /*op*/)
   else {
     return OPERATOR_CANCELLED;
   }
+
+  /* The swap above writes DNA directly (not through the RNA "color" property), so the usual
+   * #rna_Brush_color_update / #rna_UnifiedPaintSettings_color_update path that keeps Base Color
+   * in sync with the brush color never runs; do it explicitly here. */
+  BKE_brush_material_paint_base_color_sync_to_channel(paint, br);
 
   WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, br);
 

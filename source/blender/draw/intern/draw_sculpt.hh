@@ -39,6 +39,7 @@ enum SculptBatchFeature {
   SCULPT_BATCH_UV = 1 << 4,
   SCULPT_BATCH_LAYER_MASK = 1 << 5,
   SCULPT_BATCH_LAYER_PREVIEW = 1 << 6,
+  SCULPT_BATCH_MATERIAL_PROPS = 1 << 7,
 };
 ENUM_OPERATORS(SculptBatchFeature);
 

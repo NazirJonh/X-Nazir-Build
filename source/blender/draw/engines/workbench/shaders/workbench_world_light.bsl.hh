@@ -49,6 +49,7 @@ float3 get_world_lighting([[resource_table]] const workbench::World &world,
                           float3 base_color,
                           float roughness,
                           float metallic,
+                          float specular,
                           float3 N,
                           float3 I)
 {
@@ -57,8 +58,12 @@ float3 get_world_lighting([[resource_table]] const workbench::World &world,
   float3 specular_color, diffuse_color;
 
   if (world_data.use_specular) {
+    /* Poly Paint: `specular` in [0..1] maps to dielectric F0 the same way Principled BSDF's
+     * "IOR Level" does (0.08 * specular). The unpainted #WORKBENCH_DEFAULT_SPECULAR gives exactly
+     * the fixed 0.05f reflectance Workbench used before per-vertex specular existed, so this is
+     * not a behavior change for anything that does not paint the channel. */
     diffuse_color = mix(base_color, float3(0.0f), metallic);
-    specular_color = mix(float3(0.05f), base_color, metallic);
+    specular_color = mix(float3(0.08f * specular), base_color, metallic);
   }
   else {
     diffuse_color = base_color;

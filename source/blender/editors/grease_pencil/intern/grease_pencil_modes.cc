@@ -59,6 +59,7 @@ static wmOperatorStatus paintmode_toggle_exec(bContext *C, wmOperator *op)
 
   wmMsgBus *mbus = CTX_wm_message_bus(C);
   Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
   ToolSettings *ts = CTX_data_tool_settings(C);
 
   eObjectMode mode;
@@ -67,7 +68,6 @@ static wmOperatorStatus paintmode_toggle_exec(bContext *C, wmOperator *op)
 
   const bool is_mode_set = (ob->mode & OB_MODE_PAINT_GREASE_PENCIL) != 0;
   if (!is_mode_set) {
-    Scene *scene = CTX_data_scene(C);
     BKE_paint_init(bmain, scene, PaintMode::GPencil);
     Paint *paint = BKE_paint_get_active_from_paintmode(scene, PaintMode::GPencil);
     ED_paint_cursor_start(paint, brush_cursor_poll);
@@ -87,9 +87,9 @@ static wmOperatorStatus paintmode_toggle_exec(bContext *C, wmOperator *op)
     /* Be sure we have brushes and Paint settings.
      * Need Draw and Vertex (used for Tint). */
     BKE_paint_ensure(ts, reinterpret_cast<Paint **>(&ts->gp_paint));
-    BKE_paint_brushes_ensure(bmain, &ts->gp_paint->paint);
+    BKE_paint_brushes_ensure(bmain, scene, &ts->gp_paint->paint);
     BKE_paint_ensure(ts, reinterpret_cast<Paint **>(&ts->gp_vertexpaint));
-    BKE_paint_brushes_ensure(bmain, &ts->gp_vertexpaint->paint);
+    BKE_paint_brushes_ensure(bmain, scene, &ts->gp_vertexpaint->paint);
 
     /* Ensure Palette by default. */
     BKE_gpencil_palette_ensure(bmain, CTX_data_scene(C));
@@ -99,7 +99,7 @@ static wmOperatorStatus paintmode_toggle_exec(bContext *C, wmOperator *op)
     if (brush && !brush->gpencil_settings) {
       BKE_brush_init_gpencil_settings(brush);
     }
-    BKE_paint_brushes_validate(bmain, &ts->gp_paint->paint);
+    BKE_paint_brushes_validate(bmain, scene, &ts->gp_paint->paint);
   }
 
   GreasePencil *grease_pencil = id_cast<GreasePencil *>(ob->data);
@@ -166,6 +166,7 @@ static bool sculpt_poll_view3d(bContext *C)
 static wmOperatorStatus sculptmode_toggle_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
   ToolSettings *ts = CTX_data_tool_settings(C);
 
   const bool back = RNA_boolean_get(op->ptr, "back");
@@ -179,7 +180,6 @@ static wmOperatorStatus sculptmode_toggle_exec(bContext *C, wmOperator *op)
     mode = OB_MODE_OBJECT;
   }
   else {
-    Scene *scene = CTX_data_scene(C);
     BKE_paint_init(bmain, scene, PaintMode::SculptGPencil);
     Paint *paint = BKE_paint_get_active_from_paintmode(scene, PaintMode::SculptGPencil);
     ED_paint_cursor_start(paint, sculpt_poll_view3d);
@@ -194,8 +194,8 @@ static wmOperatorStatus sculptmode_toggle_exec(bContext *C, wmOperator *op)
 
   if (mode == OB_MODE_SCULPT_GREASE_PENCIL) {
     BKE_paint_ensure(ts, reinterpret_cast<Paint **>(&ts->gp_sculptpaint));
-    BKE_paint_brushes_ensure(bmain, &ts->gp_sculptpaint->paint);
-    BKE_paint_brushes_validate(bmain, &ts->gp_sculptpaint->paint);
+    BKE_paint_brushes_ensure(bmain, scene, &ts->gp_sculptpaint->paint);
+    BKE_paint_brushes_validate(bmain, scene, &ts->gp_sculptpaint->paint);
   }
 
   GreasePencil *grease_pencil = id_cast<GreasePencil *>(ob->data);
@@ -288,7 +288,7 @@ static wmOperatorStatus weightmode_toggle_exec(bContext *C, wmOperator *op)
     ED_paint_cursor_start(weight_paint, grease_pencil_poll_weight_cursor);
 
     BKE_paint_init(bmain, scene, PaintMode::WeightGPencil);
-    BKE_paint_brushes_validate(bmain, weight_paint);
+    BKE_paint_brushes_validate(bmain, scene, weight_paint);
   }
 
   GreasePencil *grease_pencil = id_cast<GreasePencil *>(ob->data);
@@ -378,9 +378,9 @@ static wmOperatorStatus vertexmode_toggle_exec(bContext *C, wmOperator *op)
     Paint *gp_paint = BKE_paint_get_active_from_paintmode(scene, PaintMode::GPencil);
     Paint *vertex_paint = BKE_paint_get_active_from_paintmode(scene, PaintMode::VertexGPencil);
 
-    BKE_paint_brushes_ensure(bmain, gp_paint);
-    BKE_paint_brushes_ensure(bmain, vertex_paint);
-    BKE_paint_brushes_validate(bmain, vertex_paint);
+    BKE_paint_brushes_ensure(bmain, scene, gp_paint);
+    BKE_paint_brushes_ensure(bmain, scene, vertex_paint);
+    BKE_paint_brushes_validate(bmain, scene, vertex_paint);
 
     ED_paint_cursor_start(vertex_paint, grease_pencil_poll_vertex_cursor);
 

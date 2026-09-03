@@ -6892,6 +6892,8 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
         break;
       }
       case PAINT_CANVAS_SOURCE_MATERIAL:
+      case PAINT_CANVAS_SOURCE_MATERIAL_PAINT:
+        /* Project-paint / add-slot path does not create Material Paint slots. */
         BLI_assert_unreachable();
         return false;
     }
@@ -7078,6 +7080,8 @@ static void texture_paint_add_texture_paint_slot_ui(bContext *C, wmOperator *op)
       layout.prop(op->ptr, "color", UI_ITEM_NONE, std::nullopt, ICON_NONE);
       break;
     case PAINT_CANVAS_SOURCE_MATERIAL:
+    case PAINT_CANVAS_SOURCE_MATERIAL_PAINT:
+      /* Not offered by this operator's type enum; keep switch exhaustive. */
       BLI_assert_unreachable();
       break;
   }

@@ -9,6 +9,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_ordered_edge.hh"
 #include "BLI_rect.h"
+#include "BLI_task.hh"
 
 #include "pbvh_uv_islands.hh"
 

@@ -30,6 +30,8 @@
 #include <mutex>
 #include <shared_mutex>
 #include <utility>
+#include <type_traits>
+#include <variant>
 #include <zstd.h>
 
 #include "CLG_log.h"
@@ -58,6 +60,7 @@
 
 #include "BLT_translation.hh"
 
+#include "BKE_attribute.h"
 #include "BKE_attribute.hh"
 #include "BKE_attribute_legacy_convert.hh"
 #include "BKE_ccg.hh"
@@ -162,12 +165,31 @@ namespace ed::sculpt_paint::undo {
 
 #define NO_ACTIVE_LAYER bke::AttrDomain::Auto
 
+/** Poly Paint: which shape a #StepData::MaterialAttributeInfo/#Node material attribute slot
+ * holds. Determines which alternative of #MaterialAttributeData is active. */
+enum class MaterialAttributeKind : int8_t { Scalar, Color };
+
+/** Poly Paint: per-node color snapshot for one Color-shaped material attribute. #loop_colors is
+ * only populated for attributes stored on the Corner domain (parallels #Node::loop_col/#col). */
+struct MaterialColorData {
+  Array<float4, 0> vert_colors;
+  Array<float4, 0> loop_colors;
+};
+
+/** Poly Paint: type-erased per-node snapshot of one material paint attribute - a scalar array for
+ * #MaterialAttributeKind::Scalar, or a #MaterialColorData for ::Color. */
+using MaterialAttributeData = std::variant<Array<float, 0>, MaterialColorData>;
+
 struct Node {
   Array<float3, 0> position;
   Array<float3, 0> orig_position;
   Array<float3, 0> normal;
   Array<float4, 0> col;
   Array<float, 0> mask;
+  /** Poly Paint: per-attribute snapshot for #NodeDataFlag::Material steps, aligned positionally with
+   * #StepData::material_attributes. Each slot's active #MaterialAttributeData alternative matches
+   * that entry's #MaterialAttributeInfo::kind. */
+  Vector<MaterialAttributeData> material_attributes;
 
   Array<float4, 0> loop_col;
 
@@ -264,6 +286,21 @@ struct StepData {
 
   /** Name of the object's active shape key when the undo step was created. */
   std::string active_shape_key_name;
+
+  /**
+   * Poly Paint: identity of one attribute snapshotted for a #NodeDataFlag::Material step - its name,
+   * shape (#MaterialAttributeKind), and whether the stroke itself created it (undoing the step
+   * then removes it instead of leaving a zero-valued attribute behind). Name-keyed rather than a
+   * single active-attribute assumption - required for redirected/multiple channel attributes to
+   * undo correctly. Fixed by the first push of a step; #Node::material_attributes is indexed
+   * positionally against this list.
+   */
+  struct MaterialAttributeInfo {
+    std::string name;
+    MaterialAttributeKind kind;
+    bool created = false;
+  };
+  Vector<MaterialAttributeInfo> material_attributes;
 
   /* TODO: Combine the three structs into a variant, since they specify data that is only valid
    * within a single mode. */
@@ -717,7 +754,7 @@ size_t step_memory_size_get(UndoStep *step)
  * Must not fall back to the last applied sculpt step: doing so would write stroke undo data into
  * an already committed step, or finalize/destroy the wrong step in #push_end_all_ex.
  *
- * This replaces the bundle's `get_active_step` / object-less `get_step_data()` pair outright: on
+ * This replaces the bundle's `get_active_step` / object-less `get_step_data(object)` pair outright: on
  * this fork a step owns one #StepData per participating object (#SculptUndoStep.objects_data), so
  * there is no single step-wide #StepData for an object-less accessor to return. Every layer-undo
  * caller must go through #get_step_data(const Object &) below.
@@ -1184,6 +1221,195 @@ static void restore_color(Object &object,
   }
 
   color_attribute.finish();
+}
+
+/**
+ * Restores every attribute in \a step_data.material_attributes to its pre-stroke snapshot,
+ * regardless of #MaterialAttributeKind - scalar and color channels share the same
+ * lookup/domain-check/per-node-swap scaffolding, differing only in how a single slot's data is
+ * swapped back (element-wise compare-and-swap for scalars; #color::swap_gathered_colors, which
+ * unconditionally marks the whole node modified, for colors - matching each shape's prior,
+ * separate implementation).
+ *
+ * \note #restore_material_attributes_from_step below intentionally re-implements the same
+ * lookup/domain-check/per-node-loop scaffolding for the in-stroke (non-undo) redraw path, using
+ * copy instead of swap. The Corner-domain color handling differs between the two on purpose
+ * (loop_colors via #color::swap_gathered_colors here, a per-vertex splat via
+ * #color::color_vert_set there); keep that distinction in mind before "de-duplicating" either
+ * one.
+ */
+static void restore_material_channel_attribute(Object &object,
+                                               StepData &step_data,
+                                               const MutableSpan<bool> modified_verts)
+{
+  PRF_scope(ProfileCategory::Editor);
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+
+  for (const int attr_i : step_data.material_attributes.index_range()) {
+    const StepData::MaterialAttributeInfo &info = step_data.material_attributes[attr_i];
+
+    if (info.kind == MaterialAttributeKind::Scalar) {
+      /* Deliberately does not create the attribute: if the user removed it after the stroke, undo
+       * should not resurrect it as a side effect of restoring values. */
+      bke::SpanAttributeWriter<float> scalar_attribute =
+          attributes.lookup_for_write_span<float>(info.name);
+      if (!scalar_attribute) {
+        continue;
+      }
+      if (scalar_attribute.domain != bke::AttrDomain::Point) {
+        scalar_attribute.finish();
+        continue;
+      }
+
+      for (std::unique_ptr<Node> &unode : step_data.nodes) {
+        BLI_assert(unode->material_attributes.size() == step_data.material_attributes.size());
+        MutableSpan<float> stored = std::get<Array<float, 0>>(unode->material_attributes[attr_i]);
+        const Span<int> index = unode->vert_indices.as_span().take_front(unode->unique_verts_num);
+        for (const int i : index.index_range()) {
+          const int vert = index[i];
+          if (scalar_attribute.span[vert] != stored[i]) {
+            std::swap(scalar_attribute.span[vert], stored[i]);
+            modified_verts[vert] = true;
+          }
+        }
+      }
+
+      scalar_attribute.finish();
+      continue;
+    }
+
+    /* Color. Deliberately does not create the attribute, matching the scalar branch above. */
+    bke::GSpanAttributeWriter color_attribute = attributes.lookup_for_write_span(info.name);
+    if (!color_attribute) {
+      continue;
+    }
+    if (!bke::mesh::is_color_attribute(
+            {color_attribute.domain, bke::cpp_type_to_attribute_type(color_attribute.span.type())}))
+    {
+      color_attribute.finish();
+      continue;
+    }
+
+    for (std::unique_ptr<Node> &unode : step_data.nodes) {
+      BLI_assert(unode->material_attributes.size() == step_data.material_attributes.size());
+      MaterialColorData &stored = std::get<MaterialColorData>(unode->material_attributes[attr_i]);
+      if (color_attribute.domain == bke::AttrDomain::Point) {
+        const Span<int> index = unode->vert_indices.as_span().take_front(unode->unique_verts_num);
+        color::swap_gathered_colors(index, color_attribute.span, stored.vert_colors);
+      }
+      else if (color_attribute.domain == bke::AttrDomain::Corner && !stored.loop_colors.is_empty())
+      {
+        color::swap_gathered_colors(
+            unode->corner_indices, color_attribute.span, stored.loop_colors);
+      }
+      else {
+        /* The attribute changed domain since the snapshot was taken, so nothing was written back
+         * and the node must not be reported as modified. */
+        continue;
+      }
+      modified_verts.fill_indices(unode->vert_indices.as_span(), true);
+    }
+
+    color_attribute.finish();
+  }
+}
+
+/**
+ * In-stroke (non-undo) counterpart to #restore_material_channel_attribute above: copies each
+ * attribute back from its frozen pre-stroke snapshot instead of swapping, and always splats the
+ * per-vertex value to Corner-domain attributes via #color::color_vert_set rather than using the
+ * gathered #MaterialColorData::loop_colors. See that function's docstring before merging the two.
+ */
+bool restore_material_attributes_from_step(Object &object)
+{
+  PRF_scope(ProfileCategory::Editor);
+  const StepData *step_data = get_step_data(object);
+  if (!step_data || !bool(step_data->node_flags & NodeDataFlag::Material)) {
+    return false;
+  }
+
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  BLI_assert(pbvh.type() == bke::pbvh::Type::Mesh);
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+
+  Array<bool> modified_verts(mesh.verts_num, false);
+
+  for (const int attr_i : step_data->material_attributes.index_range()) {
+    const StepData::MaterialAttributeInfo &info = step_data->material_attributes[attr_i];
+
+    if (info.kind == MaterialAttributeKind::Scalar) {
+      bke::SpanAttributeWriter<float> scalar_attribute =
+          attributes.lookup_for_write_span<float>(info.name);
+      if (!scalar_attribute) {
+        continue;
+      }
+      if (scalar_attribute.domain != bke::AttrDomain::Point) {
+        scalar_attribute.finish();
+        continue;
+      }
+      for (const std::unique_ptr<Node> &unode : step_data->nodes) {
+        const Span<float> stored = std::get<Array<float, 0>>(unode->material_attributes[attr_i]);
+        const Span<int> index = unode->vert_indices.as_span().take_front(unode->unique_verts_num);
+        for (const int i : index.index_range()) {
+          const int vert = index[i];
+          if (scalar_attribute.span[vert] != stored[i]) {
+            scalar_attribute.span[vert] = stored[i];
+            modified_verts[vert] = true;
+          }
+        }
+      }
+      scalar_attribute.finish();
+      continue;
+    }
+
+    bke::GSpanAttributeWriter color_attribute = attributes.lookup_for_write_span(info.name);
+    if (!color_attribute) {
+      continue;
+    }
+    if (!bke::mesh::is_color_attribute(
+            {color_attribute.domain, bke::cpp_type_to_attribute_type(color_attribute.span.type())}))
+    {
+      color_attribute.finish();
+      continue;
+    }
+    for (const std::unique_ptr<Node> &unode : step_data->nodes) {
+      const MaterialColorData &stored = std::get<MaterialColorData>(
+          unode->material_attributes[attr_i]);
+      const Span<int> index = unode->vert_indices.as_span().take_front(unode->unique_verts_num);
+      /* Writes through the per-vertex snapshot for both domains, the same way
+       * #restore_color_from_undo_step does: a Corner-domain attribute gets the vertex value
+       * splatted to its corners rather than the gathered loop colors, which is what the paint
+       * loop reads back anyway. */
+      for (const int i : index.index_range()) {
+        color::color_vert_set(faces,
+                              corner_verts,
+                              vert_to_face_map,
+                              color_attribute.domain,
+                              index[i],
+                              stored.vert_colors[i],
+                              color_attribute.span);
+      }
+      modified_verts.as_mutable_span().fill_indices(unode->vert_indices.as_span(), true);
+    }
+    color_attribute.finish();
+  }
+
+  const MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  IndexMaskMemory memory;
+  const IndexMask changed_nodes = IndexMask::from_predicate(
+      nodes.index_range(),
+      memory,
+      [&](const int i) { return indices_contain_true(modified_verts, nodes[i].all_verts()); },
+      exec_mode::grain_size(1));
+  for (const StepData::MaterialAttributeInfo &info : step_data->material_attributes) {
+    pbvh.tag_attribute_changed(changed_nodes, info.name);
+  }
+  return true;
 }
 
 static void restore_mask_mesh(Object &object, Node &unode, const MutableSpan<bool> modified_verts)
@@ -2562,6 +2788,28 @@ static void restore_block_color(Object &object,
   pbvh.tag_attribute_changed(changed_nodes, mesh.active_color_attribute);
 }
 
+/* Poly Paint: mirrors #restore_block_color -- the channel attributes live on the same point
+ * domain, so the changed-node set is derived the same way. */
+static void restore_block_material(Object &object,
+                                   bke::pbvh::Tree &pbvh,
+                                   StepData &step_data,
+                                   IndexMaskMemory &memory)
+{
+  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  Array<bool> modified_verts(mesh.verts_num, false);
+  restore_material_channel_attribute(object, step_data, modified_verts);
+  const IndexMask changed_nodes = IndexMask::from_predicate(
+      node_mask,
+      memory,
+      [&](const int i) { return indices_contain_true(modified_verts, nodes[i].all_verts()); },
+      exec_mode::grain_size(1));
+  for (const StepData::MaterialAttributeInfo &info : step_data.material_attributes) {
+    pbvh.tag_attribute_changed(changed_nodes, info.name);
+  }
+}
+
 static void restore_block_mask(Object &object,
                                SculptSession &ss,
                                bke::pbvh::Tree &pbvh,
@@ -3297,6 +3545,10 @@ static void restore_list_object(bContext *C,
     restore_block_color(object, pbvh, step_data, memory);
   }
 
+  if (bool(step_data.node_flags & NodeDataFlag::Material)) {
+    restore_block_material(object, pbvh, step_data, memory);
+  }
+
   if (bool(step_data.node_flags & NodeDataFlag::Mask)) {
     restore_block_mask(object, ss, pbvh, step_data, depsgraph, memory);
   }
@@ -3503,6 +3755,145 @@ static void store_mask_grids(const SubdivCCG &subdiv_ccg, Node &unode)
   }
 }
 
+/**
+ * Records the material attributes covered by this undo step.
+ *
+ * The list is fixed by the first push of the step and every later push must match: each undo
+ * node's #Node::material_attributes is indexed positionally against it, and #ensure_node does not
+ * refill a node that was already stored, so a changing list would silently misalign the restore.
+ */
+static void material_step_data_ensure(StepData &step_data,
+                                      const NodeDataFlag flags,
+                                      const MaterialUndoAttributes &attributes)
+{
+  if (!bool(flags & NodeDataFlag::Material)) {
+    return;
+  }
+
+  if (step_data.nodes.is_empty() && step_data.material_attributes.is_empty()) {
+    for (const StringRef name : attributes.scalar_names) {
+      step_data.material_attributes.append({std::string(name),
+                                            MaterialAttributeKind::Scalar,
+                                            attributes.created_names.contains(name)});
+    }
+    /* Colors track \a created for the same reason scalars do: a stroke that had to create its
+     * target attribute should not leave a zero-valued one behind when it is undone. */
+    for (const StringRef name : attributes.color_names) {
+      step_data.material_attributes.append({std::string(name),
+                                            MaterialAttributeKind::Color,
+                                            attributes.created_names.contains(name)});
+    }
+    return;
+  }
+
+#ifndef NDEBUG
+  auto assert_names_match =
+      [&](const Span<StringRef> names, const MaterialAttributeKind kind, int &i) {
+        for (const StringRef name : names) {
+          BLI_assert(i < step_data.material_attributes.size());
+          BLI_assert(step_data.material_attributes[i].name == name);
+          BLI_assert(step_data.material_attributes[i].kind == kind);
+          i++;
+        }
+      };
+  int i = 0;
+  assert_names_match(attributes.scalar_names, MaterialAttributeKind::Scalar, i);
+  assert_names_match(attributes.color_names, MaterialAttributeKind::Color, i);
+  BLI_assert(i == step_data.material_attributes.size());
+#else
+  UNUSED_VARS(attributes);
+#endif
+}
+
+/**
+ * Populates #Node::corner_indices from \a node's faces, once. Shared by #store_color and
+ * #store_material_channel_attributes so a node's corner list is only ever built one way.
+ */
+static void node_corner_indices_ensure(const Mesh &mesh,
+                                       const bke::pbvh::MeshNode &node,
+                                       Node &unode)
+{
+  if (!unode.corner_indices.is_empty()) {
+    return;
+  }
+  const OffsetIndices<int> faces = mesh.faces();
+  for (const int face : node.faces()) {
+    for (const int corner : faces[face]) {
+      unode.corner_indices.append(corner);
+    }
+  }
+}
+
+/**
+ * Snapshots every attribute in \a attributes into \a unode.material_attributes, aligned
+ * positionally with it. Scalar and color-shaped channels share the lookup/verts scaffolding here;
+ * only the per-attribute gather differs; #node_corner_indices_ensure is only called when a
+ * Corner-domain color attribute actually needs it.
+ */
+static void store_material_channel_attributes(
+    const Mesh &mesh,
+    const bke::pbvh::MeshNode &node,
+    const Span<StepData::MaterialAttributeInfo> attributes,
+    Node &unode)
+{
+  PRF_scope(ProfileCategory::Editor);
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+  const bke::AttributeAccessor mesh_attributes = mesh.attributes();
+  const Span<int> verts = unode.vert_indices.as_span().take_front(unode.unique_verts_num);
+
+  unode.material_attributes.resize(attributes.size());
+
+  for (const int attr_i : attributes.index_range()) {
+    const StepData::MaterialAttributeInfo &info = attributes[attr_i];
+
+    if (info.kind == MaterialAttributeKind::Scalar) {
+      Array<float, 0> scalar;
+      scalar.reinitialize(verts.size());
+      const VArraySpan stored = *mesh_attributes.lookup<float>(info.name, bke::AttrDomain::Point);
+      if (stored.is_empty()) {
+        /* Missing or wrong type: leave zeroed. #paint_scalar_channel already refuses to paint
+         * through a mismatched attribute, so this state is only reachable if the attribute was
+         * removed between stroke init and this snapshot. */
+        scalar.fill(0.0f);
+      }
+      else {
+        gather_data_mesh(stored, verts, scalar.as_mutable_span());
+      }
+      unode.material_attributes[attr_i] = std::move(scalar);
+      continue;
+    }
+
+    MaterialColorData color_data;
+    color_data.vert_colors.reinitialize(verts.size());
+    const bke::GAttributeReader color_attribute = mesh_attributes.lookup(info.name);
+    if (!color_attribute) {
+      /* Missing or wrong type: leave zeroed, matching the scalar branch above. */
+      color_data.vert_colors.fill(float4(0.0f));
+    }
+    else {
+      const GVArraySpan colors(*color_attribute);
+      color::gather_colors_vert(faces,
+                                corner_verts,
+                                vert_to_face_map,
+                                colors,
+                                color_attribute.domain,
+                                verts,
+                                color_data.vert_colors);
+
+      if (color_attribute.domain == bke::AttrDomain::Corner) {
+        /* Only build the (potentially expensive) per-node corner list when a Corner-domain
+         * attribute actually needs it, not just because some color attribute is present. */
+        node_corner_indices_ensure(mesh, node, unode);
+        color_data.loop_colors.reinitialize(unode.corner_indices.size());
+        color::gather_colors(colors, unode.corner_indices, color_data.loop_colors);
+      }
+    }
+    unode.material_attributes[attr_i] = std::move(color_data);
+  }
+}
+
 static void store_color(const Mesh &mesh, const bke::pbvh::MeshNode &node, Node &unode)
 {
   PRF_scope(ProfileCategory::Editor);
@@ -3524,11 +3915,7 @@ static void store_color(const Mesh &mesh, const bke::pbvh::MeshNode &node, Node 
       faces, corner_verts, vert_to_face_map, colors, color_attribute.domain, verts, unode.col);
 
   if (color_attribute.domain == bke::AttrDomain::Corner) {
-    for (const int face : node.faces()) {
-      for (const int corner : faces[face]) {
-        unode.corner_indices.append(corner);
-      }
-    }
+    node_corner_indices_ensure(mesh, node, unode);
     unode.loop_col.reinitialize(unode.corner_indices.size());
     color::gather_colors(colors, unode.corner_indices, unode.loop_col);
   }
@@ -3594,6 +3981,7 @@ static void fill_node_data_mesh(const Depsgraph &depsgraph,
                                 const Object &object,
                                 const bke::pbvh::MeshNode &node,
                                 const NodeDataFlag flags,
+                                const StepData &step_data,
                                 Node &unode)
 {
   const SculptSession &ss = *object.runtime->sculpt_session;
@@ -3639,6 +4027,13 @@ static void fill_node_data_mesh(const Depsgraph &depsgraph,
   if (bool(flags & NodeDataFlag::HideFace)) {
     unode.face_hidden.resize(unode.face_indices.size());
     store_face_visibility(mesh, unode);
+  }
+
+  if (bool(flags & NodeDataFlag::Material)) {
+    /* Read the attribute list off the step passed in by the caller: this runs inside
+     * #push_nodes's #threading::parallel_for, and #get_step_data touches unlocked global
+     * undo-stack state that is not safe to read concurrently. */
+    store_material_channel_attributes(mesh, node, step_data.material_attributes, unode);
   }
 }
 
@@ -3689,6 +4084,7 @@ static void fill_node_data_grids(const Object &object,
    * per grid node. Callers must not request it: silently dropping the flag would mark the step as
    * containing color data that #restore_block_color would then fail to find. */
   BLI_assert(!bool(flags & NodeDataFlag::Color));
+  BLI_assert(!bool(flags & NodeDataFlag::Material));
 }
 
 /**
@@ -3823,7 +4219,8 @@ void push_node_special(const Depsgraph & /*depsgraph*/, Object &object, const Ty
 void push_node(const Depsgraph &depsgraph,
                const Object &object,
                const bke::pbvh::Node *node,
-               const NodeDataFlag flags)
+               const NodeDataFlag flags,
+               const MaterialUndoAttributes &material_attributes)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
@@ -3849,6 +4246,9 @@ void push_node(const Depsgraph &depsgraph,
   {
     std::scoped_lock lock(*step_data->nodes_mutex);
     ensure_step_topology_data(const_cast<Object &>(object), *step_data);
+    /* Same reason as the topology counts above: idempotent, written once per step but
+     * reached from every node of a concurrent push. */
+    material_step_data_ensure(*step_data, flags, material_attributes);
   }
 
   if (bool(flags & NodeDataFlag::FaceSet)) {
@@ -3867,8 +4267,12 @@ void push_node(const Depsgraph &depsgraph,
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
-      fill_node_data_mesh(
-          depsgraph, object, static_cast<const bke::pbvh::MeshNode &>(*node), flags, *unode);
+      fill_node_data_mesh(depsgraph,
+                          object,
+                          static_cast<const bke::pbvh::MeshNode &>(*node),
+                          flags,
+                          *step_data,
+                          *unode);
       break;
     case bke::pbvh::Type::Grids:
       fill_node_data_grids(
@@ -3883,7 +4287,8 @@ void push_node(const Depsgraph &depsgraph,
 void push_nodes(const Depsgraph &depsgraph,
                 Object &object,
                 const IndexMask &node_mask,
-                const NodeDataFlag flags)
+                const NodeDataFlag flags,
+                const MaterialUndoAttributes &material_attributes)
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *object.runtime->sculpt_session;
@@ -3907,6 +4312,7 @@ void push_nodes(const Depsgraph &depsgraph,
     ensure_face_sets_attribute(*id_cast<Mesh *>(object.data));
     ensure_face_set_colors_snapshot(*step_data, *id_cast<const Mesh *>(object.data));
   }
+  material_step_data_ensure(*step_data, flags, material_attributes);
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
@@ -3921,7 +4327,7 @@ void push_nodes(const Depsgraph &depsgraph,
       });
       threading::parallel_for(nodes_to_fill.index_range(), 1, [&](const IndexRange range) {
         for (const auto &[node, unode] : nodes_to_fill.as_span().slice(range)) {
-          fill_node_data_mesh(depsgraph, object, *node, flags, *unode);
+          fill_node_data_mesh(depsgraph, object, *node, flags, *step_data, *unode);
         }
       });
       break;
@@ -4163,6 +4569,20 @@ static size_t node_size_in_bytes(const Node &node)
   size += node.grid_hidden.all_bits().size() / 8;
   size += node.face_sets.as_span().size_in_bytes();
   size += node.face_indices.as_span().size_in_bytes();
+  for (const MaterialAttributeData &data : node.material_attributes) {
+    std::visit(
+        [&](const auto &value) {
+          using T = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<T, Array<float, 0>>) {
+            size += value.as_span().size_in_bytes();
+          }
+          else {
+            size += value.vert_colors.as_span().size_in_bytes();
+            size += value.loop_colors.as_span().size_in_bytes();
+          }
+        },
+        data);
+  }
   return size;
 }
 
@@ -4959,6 +5379,80 @@ std::optional<Span<float4>> orig_color_data_lookup_mesh(const Object &object,
     return std::nullopt;
   }
   return unode->col.as_span();
+}
+
+/**
+ * Shared by #orig_material_scalar_attribute_index and #orig_material_color_attribute_index: both
+ * search the same unified #undo::StepData::material_attributes list, filtered to \a kind so a
+ * scalar lookup can never return a color slot's index (and vice versa).
+ */
+static int orig_material_attribute_index(const Object &object,
+                                         const StringRef attribute_name,
+                                         const undo::MaterialAttributeKind kind)
+{
+  const undo::StepData *step_data = undo::get_step_data(object);
+  if (!step_data || !bool(step_data->node_flags & undo::NodeDataFlag::Material)) {
+    return -1;
+  }
+  for (const int attr_i : step_data->material_attributes.index_range()) {
+    const undo::StepData::MaterialAttributeInfo &info = step_data->material_attributes[attr_i];
+    if (info.kind == kind && info.name == attribute_name) {
+      return attr_i;
+    }
+  }
+  return -1;
+}
+
+int orig_material_scalar_attribute_index(const Object &object, const StringRef attribute_name)
+{
+  return orig_material_attribute_index(
+      object, attribute_name, undo::MaterialAttributeKind::Scalar);
+}
+
+int orig_material_color_attribute_index(const Object &object, const StringRef attribute_name)
+{
+  return orig_material_attribute_index(
+      object, attribute_name, undo::MaterialAttributeKind::Color);
+}
+
+std::optional<Span<float>> orig_material_scalar_data_lookup_mesh(const Object &object,
+                                                                 const bke::pbvh::MeshNode &node,
+                                                                 const int attribute_index)
+{
+  BLI_assert(attribute_index >= 0);
+  const undo::Node *unode = undo::get_node(object, &node, undo::NodeDataFlag::Material);
+  if (!unode) {
+    return std::nullopt;
+  }
+  /* #std::get_if rather than #std::get: a shape mismatch here means the caller resolved its index
+   * against a different attribute list, which must not escalate into an exception thrown from the
+   * middle of a brush dab. */
+  const Array<float, 0> *stored = std::get_if<Array<float, 0>>(
+      &unode->material_attributes[attribute_index]);
+  if (!stored) {
+    BLI_assert_unreachable();
+    return std::nullopt;
+  }
+  return stored->as_span();
+}
+
+std::optional<Span<float4>> orig_material_color_data_lookup_mesh(const Object &object,
+                                                                 const bke::pbvh::MeshNode &node,
+                                                                 const int attribute_index)
+{
+  BLI_assert(attribute_index >= 0);
+  const undo::Node *unode = undo::get_node(object, &node, undo::NodeDataFlag::Material);
+  if (!unode) {
+    return std::nullopt;
+  }
+  /* See #orig_material_scalar_data_lookup_mesh for why this is #std::get_if. */
+  const undo::MaterialColorData *stored = std::get_if<undo::MaterialColorData>(
+      &unode->material_attributes[attribute_index]);
+  if (!stored) {
+    BLI_assert_unreachable();
+    return std::nullopt;
+  }
+  return stored->vert_colors.as_span();
 }
 
 std::optional<Span<int>> orig_face_set_data_lookup_mesh(const Object &object,

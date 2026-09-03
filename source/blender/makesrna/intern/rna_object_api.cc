@@ -14,9 +14,14 @@
 #include "BLI_math_geom.h"
 
 #include "RNA_define.hh"
+/* For #rna_enum_material_paint_channel_items. Never include `RNA_enum_items.hh` directly: it is an
+ * X-macro list that expects #DEF_ENUM to be defined by its includer. */
+#include "RNA_enum_types.hh"
 
 #include "DNA_constraint_types.h"
 #include "DNA_modifier_types.h"
+/* For #eMaterialPaintChannel. */
+#include "DNA_scene_types.h"
 
 #include "ED_outliner.hh"
 
@@ -66,6 +71,7 @@ static const EnumPropertyItem space_items[] = {
 #  include "BKE_modifier.hh"
 #  include "BKE_object.hh"
 #  include "BKE_object_types.hh"
+#  include "BKE_paint.hh"
 #  include "BKE_report.hh"
 #  include "BKE_vfont.hh"
 
@@ -826,6 +832,14 @@ static bool rna_Object_update_from_editmode(Object *ob, Main *bmain)
   return result;
 }
 
+static bool rna_Object_principled_paint_channel_has_image(Object *ob, int channel)
+{
+  Image *image = nullptr;
+  ImageUser *iuser = nullptr;
+  return BKE_paint_principled_channel_image_get(
+      *ob, eMaterialPaintChannel(channel), &image, &iuser);
+}
+
 }  // namespace blender
 
 #else /* RNA_RUNTIME */
@@ -1368,6 +1382,26 @@ void RNA_api_object(StructRNA *srna)
   RNA_def_function_ui_description(func,
                                   "Release memory used by caches associated with this object. "
                                   "Intended to be used by render engines only.");
+
+  /* The shared channel enum is used as-is rather than a trimmed copy, so that adding a channel
+   * stays a one-line change in the descriptor table. Channels with no Principled socket (Custom)
+   * are accepted and simply resolve to False. */
+  func = RNA_def_function(
+      srna, "principled_paint_channel_has_image", "rna_Object_principled_paint_channel_has_image");
+  RNA_def_function_ui_description(
+      func,
+      "Return whether the active material has an Image Texture directly linked to the given "
+      "Principled BSDF input (Base Color, Metallic, Roughness, Specular IOR Level, or Normal). "
+      "Channels that have no Principled input, such as Custom, always return False");
+  parm = RNA_def_enum(func,
+                      "channel",
+                      rna_enum_material_paint_channel_items,
+                      PAINT_MATERIAL_CHANNEL_METALLIC,
+                      "Channel",
+                      "Principled BSDF channel to resolve");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "True when a paintable image was found");
+  RNA_def_function_return(func, parm);
 }
 
 }  // namespace blender

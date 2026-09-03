@@ -39,6 +39,7 @@
 
 #include "DRW_render.hh"
 
+#include "draw_cache.hh"
 #include "draw_cache_extract.hh"
 #include "draw_cache_inline.hh"
 #include "draw_subdivision.hh"
@@ -654,6 +655,32 @@ static void request_active_and_default_color_attributes(const Object &object,
   request_color_attribute(me_final.default_color_attribute);
 }
 
+/* Poly Paint: request the point float attributes that the Workbench prepass reads to override
+ * per-vertex material properties (see #workbench_prepass.bsl.hh). Only the attributes that exist
+ * are requested, so unpainted meshes create no extra VBOs. */
+static void request_material_property_attributes(const Object &object,
+                                                 const Mesh &mesh,
+                                                 const PaintModeSettings *paint_mode,
+                                                 VectorSet<std::string> &attributes)
+{
+  const Mesh &me_final = editmesh_final_or_this(object, mesh);
+
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    /* The attribute a stroke would actually write; see the matching loop in `draw_sculpt.cc`. */
+    const StringRef attr_name = paint_mode ? BKE_paint_material_channel_attribute_name(
+                                                 *paint_mode, info.channel) :
+                                             StringRef(info.attribute_name);
+    if (attr_name.is_empty() ||
+        DRW_material_paint_vertex_input_alias(attr_name, paint_mode) == nullptr)
+    {
+      continue;
+    }
+    if (attribute_exists(me_final, attr_name)) {
+      drw_attributes_add_request(&attributes, attr_name);
+    }
+  }
+}
+
 gpu::Batch *DRW_mesh_batch_cache_get_all_verts(Mesh &mesh)
 {
   MeshBatchCache &cache = *mesh_batch_cache_get(mesh);
@@ -781,6 +808,40 @@ gpu::Batch *DRW_mesh_batch_cache_get_surface_vertpaint(Object &object, Mesh &mes
 
   mesh_batch_cache_request_surface_batches(mesh, cache);
   return cache.batch.surface;
+}
+
+gpu::Batch *DRW_mesh_batch_cache_get_surface_material_props(Object &object,
+                                                            Mesh &mesh,
+                                                            const PaintModeSettings *paint_mode)
+{
+  MeshBatchCache &cache = *mesh_batch_cache_get(mesh);
+
+  VectorSet<std::string> attrs_needed{};
+  request_material_property_attributes(object, mesh, paint_mode, attrs_needed);
+
+  drw_attributes_merge(&cache.attr_needed, &attrs_needed);
+
+  mesh_batch_cache_request_surface_batches(mesh, cache);
+  return cache.batch.surface;
+}
+
+Span<gpu::Batch *> DRW_mesh_batch_cache_get_surface_shaded_material_props(
+    Object &object,
+    Mesh &mesh,
+    const Span<const GPUMaterial *> materials,
+    const PaintModeSettings *paint_mode)
+{
+  MeshBatchCache &cache = *mesh_batch_cache_get(mesh);
+  mesh_cd_calc_used_gpu_layers(object, mesh, materials, &cache.attr_needed, &cache.cd_needed);
+
+  VectorSet<std::string> attrs_needed{};
+  request_material_property_attributes(object, mesh, paint_mode, attrs_needed);
+  drw_attributes_merge(&cache.attr_needed, &attrs_needed);
+
+  BLI_assert(materials.size() == cache.mat_len);
+
+  mesh_batch_cache_request_surface_batches(mesh, cache);
+  return cache.surface_per_mat;
 }
 
 gpu::Batch *DRW_mesh_batch_cache_get_surface_sculpt(Object &object, Mesh &mesh)

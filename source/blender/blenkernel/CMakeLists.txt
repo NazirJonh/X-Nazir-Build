@@ -247,6 +247,7 @@ set(SRC
   intern/paint.cc
   intern/paint_brush_group_override.cc
   intern/paint_canvas.cc
+  intern/paint_material_sync.cc
   intern/paint_runtime.cc
   intern/particle.cc
   intern/particle_child.cc
@@ -786,6 +787,7 @@ if(WITH_GTESTS)
     intern/multires_group_test.cc
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
+    intern/paint_material_channel_test.cc
     intern/path_templates_test.cc
     intern/scene_test.cc
     intern/sculpt_layers_mask_test.cc

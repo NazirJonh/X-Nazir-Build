@@ -286,6 +286,7 @@ void BKE_paint_brush_group_overrides_apply(Paint *paint, const Brush *src, Brush
 }
 
 bool BKE_paint_brush_group_reset_from_asset(Main *bmain,
+                                           Scene *scene,
                                             Paint *paint,
                                             const BrushOverrideGroup group,
                                             ReportList *reports)
@@ -322,7 +323,7 @@ bool BKE_paint_brush_group_reset_from_asset(Main *bmain,
     /* #asset_edit_id_revert deletes the brush even when it fails, mirroring the fallback of
      * #BRUSH_OT_asset_revert. */
     BKE_id_free(nullptr, backup);
-    BKE_paint_brush_set_default(bmain, paint);
+    BKE_paint_brush_set_default(bmain, scene, paint);
     return false;
   }
 

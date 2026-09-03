@@ -327,7 +327,7 @@ static void curves_sculptmode_enter(bContext *C)
 
   Paint *paint = BKE_paint_get_active_from_paintmode(scene, PaintMode::SculptCurves);
 
-  BKE_paint_brushes_ensure(CTX_data_main(C), paint);
+  BKE_paint_brushes_ensure(CTX_data_main(C), scene, paint);
 
   ED_paint_cursor_start(&curves_sculpt->paint, curves_sculpt_poll_view3d);
   paint_init_pivot(ob, scene, paint);

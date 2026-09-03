@@ -42,6 +42,7 @@
 
 #include "BLI_dial_2d.h"
 #include "BLI_listbase.h"
+#include "BLI_math_color.h"
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
@@ -77,6 +78,7 @@
 #include "GPU_immediate_util.hh"
 #include "GPU_matrix.hh"
 #include "GPU_state.hh"
+#include "GPU_texture.hh"
 
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
@@ -2563,6 +2565,7 @@ struct RadialControl {
   bool snap = false;
   Dial *dial = nullptr;
   gpu::Texture *texture = nullptr;
+  bool texture_is_color = false;
   ListBaseT<wmPaintCursor> orig_paintcursors = {};
   bool use_secondary_tex = false;
   void *cursor = nullptr;
@@ -2662,6 +2665,8 @@ static void radial_control_set_tex(RadialControl *rc)
 
   switch (RNA_type_to_ID_code(rc->image_id_ptr.type)) {
     case ID_BR:
+    {
+      bool is_color = false;
       if ((ibuf = BKE_brush_gen_radial_control_imbuf(static_cast<Brush *>(rc->image_id_ptr.data),
                                                      rc->use_secondary_tex,
                                                      !ELEM(rc->subtype,
@@ -2669,23 +2674,41 @@ static void radial_control_set_tex(RadialControl *rc)
                                                            PROP_PIXEL,
                                                            PROP_PIXEL_DIAMETER,
                                                            PROP_DISTANCE,
-                                                           PROP_DISTANCE_DIAMETER))))
+                                                           PROP_DISTANCE_DIAMETER),
+                                                     &is_color)))
       {
-
+        /* UNORM_8_8_8_8 is not a float texture: passing #ImBuf float pixels into
+         * #GPU_texture_create_2d uploads them as raw bytes (IEEE 0.x floats start with 0 on
+         * little-endian) and the preview is solid black. Match the paint cursor overlay: convert
+         * to uchar and #GPU_texture_update with #GPU_DATA_UBYTE. */
+        const int pixel_num = ibuf->x * ibuf->y;
+        uchar *bytes = MEM_new_array_uninitialized<uchar>(size_t(pixel_num) * 4, __func__);
+        const float *fp = ibuf->float_data();
+        for (int i = 0; i < pixel_num; i++) {
+          const float *src = &fp[i * 4];
+          uchar *dst = &bytes[i * 4];
+          dst[0] = unit_float_to_uchar_clamp(src[0]);
+          dst[1] = unit_float_to_uchar_clamp(src[1]);
+          dst[2] = unit_float_to_uchar_clamp(src[2]);
+          dst[3] = unit_float_to_uchar_clamp(src[3]);
+        }
         rc->texture = GPU_texture_create_2d("radial_control",
                                             ibuf->x,
                                             ibuf->y,
                                             1,
-                                            gpu::TextureFormat::UNORM_8,
+                                            gpu::TextureFormat::UNORM_8_8_8_8,
                                             GPU_TEXTURE_USAGE_SHADER_READ,
-                                            ibuf->float_data());
+                                            nullptr);
+        GPU_texture_update(rc->texture, GPU_DATA_UBYTE, bytes);
+        MEM_delete(bytes);
+        rc->texture_is_color = is_color;
 
         GPU_texture_filter_mode(rc->texture, true);
-        GPU_texture_swizzle_set(rc->texture, "111r");
 
         IMB_freeImBuf(ibuf);
       }
       break;
+    }
     default:
       break;
   }
@@ -2729,7 +2752,19 @@ static void radial_control_paint_tex(RadialControl *rc, float radius, float alph
 
     immBindBuiltinProgram(GPU_SHADER_3D_IMAGE_COLOR);
 
-    immUniformColor3fvAlpha(col, alpha);
+    /* Color source previews (Material Paint Base Color) already store the pattern in RGB;
+     * tinting with the brush color would hide it. Classic intensity textures keep the fill. */
+    if (rc->texture_is_color) {
+      const float white[3] = {1.0f, 1.0f, 1.0f};
+      /* Source color is already in the texture; extra uniform alpha mixed the backdrop in and
+       * made the preview paler than the image. Falloff is in the texture alpha. Keep subtype
+       * alpha for strength (factor) so that control still visualizes the value. */
+      const float tint_alpha = (rc->subtype == PROP_FACTOR) ? alpha : 1.0f;
+      immUniformColor3fvAlpha(white, tint_alpha);
+    }
+    else {
+      immUniformColor3fvAlpha(col, alpha);
+    }
     immBindTexture("image", rc->texture);
 
     /* Draw textured quad. */

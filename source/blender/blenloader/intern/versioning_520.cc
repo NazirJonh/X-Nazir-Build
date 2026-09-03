@@ -23,6 +23,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 #include "DNA_view3d_types.h"
+#include "DNA_texture_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
 
@@ -579,6 +580,238 @@ static bool face_set_brush_color_is_uninitialized(const float color[3])
   return false;
 }
 
+/**
+ * Initializes the Custom-channel range for files that predate material paint channels.
+ * Per-channel enable/value/blend live on #Brush.material_paint and need no versioning: the brush
+ * settings are allocated on demand by #BKE_brush_material_paint_ensure, already at their defaults.
+ */
+static void version_material_paint_channel_defaults(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    PaintModeSettings &paint_mode = ts->paint_mode;
+    /* A zero-length range is the zero-initialized state of an older file, never a valid setting.
+     * Only the maximum needs restoring; the minimum default is already 0. */
+    if (paint_mode.channel_custom_range[0] == 0.0f && paint_mode.channel_custom_range[1] == 0.0f) {
+      paint_mode.channel_custom_range[1] = 1.0f;
+    }
+  }
+}
+
+/**
+ * Material paint used to blend every channel with the single brush-wide #Brush.blend, while
+ * #BrushMaterialPaintChannel.blend was stored but never read. Base Color now blends with its own
+ * stored mode, so carry the brush's mode over to it; otherwise such brushes would silently fall
+ * back to Mix, which is the zero value the field was left at.
+ *
+ * The scalar channels are deliberately left alone: they no longer blend with anything but Mix (see
+ * #BKE_paint_material_channel_blend_mode), so there is nothing to preserve for them.
+ */
+static void version_material_paint_base_color_blend_from_brush(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    if (brush.material_paint == nullptr) {
+      continue;
+    }
+    brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].blend = brush.blend;
+  }
+}
+
+static void version_material_paint_channel_height_defaults(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    if (brush.material_paint == nullptr) {
+      continue;
+    }
+    BrushMaterialPaintChannel &height =
+        brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT];
+    /* Trailing DNA growth should zero-fill; set explicit defaults for clarity. */
+    height.use = 0;
+    height.value[0] = 0.0f;
+    height.value[1] = 0.0f;
+    height.value[2] = 0.0f;
+    height.blend = 0;
+  }
+}
+
+static void version_material_paint_channel_alpha_ao_emission_defaults(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    if (brush.material_paint == nullptr) {
+      continue;
+    }
+    BrushMaterialPaintChannel &alpha =
+        brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA];
+    /* Trailing DNA growth should zero-fill; set explicit defaults for clarity. */
+    alpha.use = 0;
+    alpha.value[0] = 1.0f;
+    alpha.value[1] = 0.0f;
+    alpha.value[2] = 0.0f;
+    alpha.blend = 0;
+    brush.material_paint->use_alpha_map = 1;
+    brush.material_paint->use_alpha_stroke_mask = 1;
+
+    BrushMaterialPaintChannel &ao = brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_AO];
+    ao.use = 0;
+    ao.value[0] = 1.0f;
+    ao.value[1] = 0.0f;
+    ao.value[2] = 0.0f;
+    ao.blend = 0;
+
+    BrushMaterialPaintChannel &emission =
+        brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_EMISSION];
+    emission.use = 0;
+    emission.value[0] = 0.0f;
+    emission.value[1] = 0.0f;
+    emission.value[2] = 0.0f;
+    emission.blend = 0;
+  }
+}
+
+/**
+ * The legacy #PaintModeSettings::visible_material_channels_deprecated was added with a zero
+ * in-class default, which
+ * is indistinguishable from "user hid every channel" at read time. Gated purely on file version
+ * (never on the field's value) so a user's deliberate all-hidden choice made after upgrading is
+ * never clobbered by a later load of the same file.
+ */
+static void version_material_paint_channel_visibility_defaults(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    ts->paint_mode.visible_material_channels_deprecated = PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT;
+  }
+}
+
+static void version_material_paint_channel_shader_visibility_defaults(Main &bmain)
+{
+  /* The default matches the shading behavior before this bitmask existed, where display was
+   * driven purely by whether the channel's attribute was present. */
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    ts->paint_mode.material_shader_visible_channels =
+        PAINT_MATERIAL_CHANNELS_SHADER_VISIBLE_DEFAULT;
+  }
+}
+
+/**
+ * `PaintModeSettings::material_paint_flag` reuses bytes that were padding in older files, so it
+ * reads back as zero - indistinguishable from "the user turned brush sync off". Gated purely on
+ * file version (never on the field's value) so a deliberate opt-out made after upgrading survives
+ * later loads of the same file.
+ */
+static void version_material_paint_brush_sync_defaults(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    ts->paint_mode.material_paint_flag |= PAINT_MATERIAL_BRUSH_SYNC;
+  }
+}
+
+/**
+ * Both visibility bitmasks only gained a non-zero DNA default partway through this feature's
+ * development; scenes created by an in-between dev build were written with zero, which the UI
+ * reads as "every channel hidden". Unlike the two functions above this one cannot overwrite
+ * unconditionally, because #version_material_paint_channel_visibility_defaults /
+ * #version_material_paint_channel_shader_visibility_defaults (called just before this, in the
+ * same merged versioning gate) may since have turned a zero into a deliberate all-hidden choice
+ * for this same file - so only an all-zero mask is restored to the default, any other value is
+ * left alone.
+ */
+static void version_material_paint_channel_visibility_fix_zeros(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    if (ts->paint_mode.visible_material_channels_deprecated == 0) {
+      ts->paint_mode.visible_material_channels_deprecated = PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT;
+    }
+    if (ts->paint_mode.material_shader_visible_channels == 0) {
+      ts->paint_mode.material_shader_visible_channels =
+          PAINT_MATERIAL_CHANNELS_SHADER_VISIBLE_DEFAULT;
+    }
+  }
+}
+
+/**
+ * Move the scene-wide channel visibility mask onto the two #Paint modes that paint PBR channels,
+ * which own it independently from now on. Both start from the old shared value, so an upgraded
+ * file paints exactly what it painted before; they only drift apart once the user edits one.
+ *
+ * The value is copied as-is, including an all-hidden one: that is a deliberate user choice, and
+ * #version_material_paint_channel_visibility_fix_zeros already repaired the files where a zero
+ * meant "never initialized". The other #Paint types in #ToolSettings are intentionally left at
+ * their read-time value: they have no PBR channels and no RNA for this field.
+ */
+static void version_material_paint_channel_visibility_per_paint(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    const int visible_channels = ts->paint_mode.visible_material_channels_deprecated;
+    if (ts->sculpt != nullptr) {
+      ts->sculpt->paint.visible_material_channels = visible_channels;
+    }
+    ts->imapaint.paint.visible_material_channels = visible_channels;
+  }
+}
+
+/**
+ * `PaintModeSettings::new_channel_image_size` was added with a C++ default member initializer
+ * (4096), but that initializer only applies to freshly constructed structs; files saved before
+ * this field existed have it zero-filled on read, which is not one of the enum's valid sizes and
+ * shows as a blank dropdown.
+ */
+static void version_material_paint_channel_image_size_defaults(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    if (ts->paint_mode.new_channel_image_size == 0) {
+      ts->paint_mode.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_4K;
+    }
+  }
+}
+
+static void version_material_paint_channel_source_mtex_defaults(Main &bmain)
+{
+  /* Files saved by earlier revisions of this branch have a zeroed `source_mtex`: size 0 and an
+   * invalid brush map mode, which would make sampling silently return nothing. Preserve any
+   * already-linked Tex; only mapping defaults need repair. */
+  for (Brush &brush : bmain.brushes) {
+    if (brush.material_paint == nullptr) {
+      continue;
+    }
+    for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+      MTex &mtex = brush.material_paint->channels[i].source_mtex;
+      if (!is_zero_v3(mtex.size) && mtex.brush_map_mode <= MTEX_MAP_MODE_STENCIL) {
+        continue;
+      }
+      Tex *tex = mtex.tex;
+      mtex = blender::dna::shallow_copy(MTex());
+      mtex.tex = tex;
+    }
+  }
+}
+
 static void version_solid_color_width_height_defaults(Main &bmain)
 {
   for (Scene &scene : bmain.scenes) {
@@ -1056,6 +1289,25 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         copy_v3_v3(brush.face_set_secondary_color, face_set_color_default);
       }
     }
+  }
+
+  /* Poly Paint (material attribute painting) landed as a single squashed commit in this fork, so
+   * none of the intermediate dev-build subversions this feature was originally staged across need
+   * to be individually distinguishable any more - only "before this feature existed" vs. "at or
+   * after its final shape" matters. All of its versioning steps therefore run under one gate, in
+   * their original relative order. */
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 58)) {
+    version_material_paint_channel_defaults(*bmain);
+    version_material_paint_base_color_blend_from_brush(*bmain);
+    version_material_paint_channel_height_defaults(*bmain);
+    version_material_paint_channel_source_mtex_defaults(*bmain);
+    version_material_paint_channel_image_size_defaults(*bmain);
+    version_material_paint_channel_alpha_ao_emission_defaults(*bmain);
+    version_material_paint_channel_visibility_defaults(*bmain);
+    version_material_paint_channel_shader_visibility_defaults(*bmain);
+    version_material_paint_brush_sync_defaults(*bmain);
+    version_material_paint_channel_visibility_fix_zeros(*bmain);
+    version_material_paint_channel_visibility_per_paint(*bmain);
   }
 
   /**

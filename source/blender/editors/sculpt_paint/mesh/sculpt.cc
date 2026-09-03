@@ -48,6 +48,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
 
+#include "BKE_attribute.h"
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_bvhutils.hh"
@@ -61,6 +62,7 @@
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
@@ -70,6 +72,8 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_sculpt_layers.hh"
@@ -96,12 +100,14 @@
 #include "WM_types.hh"
 
 #include "ED_mesh.hh"
+#include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
 #include "ED_view3d.hh"
 
 #include "../paint_intern.hh"
+#include "paint_material_source.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_boundary.hh"
 #include "sculpt_cloth.hh"
@@ -113,6 +119,7 @@
 #include "sculpt_intern.hh"
 #include "sculpt_islands.hh"
 #include "sculpt_multi_object.hh"
+#include "sculpt_paint_material.hh"
 #include "sculpt_pose.hh"
 #include "sculpt_undo.hh"
 
@@ -125,6 +132,8 @@
 #include "mesh_brush_common.hh"
 
 namespace blender {
+
+namespace paint_material_channel_perf = bke::paint_material_channel_perf;
 
 static CLG_LogRef LOG = {"sculpt"};
 
@@ -965,6 +974,28 @@ static bool brush_uses_topology_rake(const SculptSession &ss, const Brush &brush
          (ss.bm != nullptr);
 }
 
+/** Whether any material paint channel source on \a brush uses #MTEX_MAP_MODE_AREA, which (like
+ * the brush's own #MTex below) needs #StrokeCache.sculpt_normal to build its local matrix. */
+static bool material_paint_uses_area_mapping(const Brush &brush)
+{
+  if (brush.material_paint == nullptr) {
+    return false;
+  }
+  const BrushMaterialPaint &brush_paint = *brush.material_paint;
+  /* Mapping mode is shared by every channel's source texture (#BrushMaterialPaint.
+   * shared_source_mapping); per-channel #source_mtex only carries the texture identity now. */
+  if (brush_paint.shared_source_mapping.brush_map_mode != MTEX_MAP_MODE_AREA) {
+    return false;
+  }
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const BrushMaterialPaintChannel &channel = brush_paint.channels[info.channel];
+    if (BKE_paint_material_channel_has_source(channel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Test whether the #StrokeCache.sculpt_normal needs update in #do_brush_action
  */
@@ -988,6 +1019,7 @@ static int sculpt_brush_needs_normal(const SculptSession &ss, const Brush &brush
            brush.project_ray_direction_type == BRUSH_PROJECT_RAY_DIRECTION_PLANE_NORMAL) ||
           (mask_tex->tex && mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA) ||
           brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE ||
+          material_paint_uses_area_mapping(brush) ||
           brush_uses_topology_rake(ss, brush) ||
           BKE_brush_has_cube_tip(&brush, PaintMode::Sculpt));
 }
@@ -1348,7 +1380,11 @@ static void restore_from_undo_step(const Depsgraph &depsgraph, const Sculpt &sd,
     case SCULPT_BRUSH_TYPE_BLUR:
     case SCULPT_BRUSH_TYPE_PAINT:
     case SCULPT_BRUSH_TYPE_SMEAR:
-      restore_color_from_undo_step(object);
+      /* Poly Paint pushes #Type::Material (scalar and/or color channels) where a plain color
+       * stroke pushes #Type::Color, so restore whichever the in-progress step actually holds. */
+      if (!restore_material_attributes_from_step(object)) {
+        restore_color_from_undo_step(object);
+      }
       break;
     case SCULPT_BRUSH_TYPE_DRAW_FACE_SETS:
       if (ss.cache->toggle_settings.alt_smooth) {
@@ -3392,6 +3428,112 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
                                      r_rgba);
 }
 
+namespace material {
+
+TexelSampleContext sculpt_texel_sample_context(const SculptSession &ss, const float brush_point[3])
+{
+  const StrokeCache &cache = *ss.cache;
+
+  TexelSampleContext ctx;
+  sub_v3_v3v3(ctx.point, brush_point, cache.plane_offset);
+
+  /* If the active area is being applied for symmetry, flip it across the symmetry axis and
+   * rotate it back to the original position in order to project it. This insures that the brush
+   * texture will be oriented correctly. */
+  float3 point = ctx.point;
+  if (cache.radial_symmetry_pass) {
+    mul_m4_v3(cache.symm_rot_mat_inv.ptr(), point);
+  }
+  ctx.symm_point = symmetry_flip(point, cache.mirror_symmetry_pass);
+
+  ctx.view_point_2d = ED_view3d_project_float_v2_m4(
+      cache.vc->region, ctx.symm_point, cache.projection_mat);
+  return ctx;
+}
+
+}  // namespace material
+
+void sculpt_apply_texture(const SculptSession &ss,
+                          const Brush &brush,
+                          const MTex &mtex,
+                          const material::TexelSampleContext &ctx,
+                          const int thread_id,
+                          float *r_value,
+                          float4 &r_rgba,
+                          ImagePool *pool,
+                          const float4x4 *area_local_mat)
+{
+  const StrokeCache &cache = *ss.cache;
+
+  if (!mtex.tex) {
+    *r_value = 1.0f;
+    copy_v4_fl(r_rgba, 1.0f);
+    return;
+  }
+
+  if (mtex.brush_map_mode == MTEX_MAP_MODE_3D) {
+    /* Get strength by feeding the vertex location directly into a texture. */
+    *r_value = BKE_brush_sample_tex_3d(
+        cache.paint, &brush, &mtex, ctx.point, r_rgba, thread_id, pool);
+  }
+  else if (mtex.brush_map_mode == MTEX_MAP_MODE_AREA) {
+    /* Similar to fixed mode, but projects from brush angle
+     * rather than view direction. */
+    const float4x4 &local_mat = area_local_mat ? *area_local_mat : cache.brush_local_mat;
+    float3 symm_point = ctx.symm_point;
+    mul_m4_v3(local_mat.ptr(), symm_point);
+
+    float x = symm_point[0];
+    float y = symm_point[1];
+
+    x *= mtex.size[0];
+    y *= mtex.size[1];
+
+    x += mtex.ofs[0];
+    y += mtex.ofs[1];
+
+    paint_get_tex_pixel(&mtex, x, y, pool, thread_id, r_value, r_rgba);
+
+    add_v3_fl(r_rgba, brush.texture_sample_bias);  // v3 -> Ignore alpha
+    *r_value -= brush.texture_sample_bias;
+  }
+  else {
+    /* Still no symmetry supported for other paint modes.
+     * Sculpt does it DIY. */
+    const float point_3d[3] = {ctx.view_point_2d[0], ctx.view_point_2d[1], 0.0f};
+    *r_value = BKE_brush_sample_tex_3d(
+        cache.paint, &brush, &mtex, point_3d, r_rgba, thread_id, pool);
+  }
+}
+
+void sculpt_apply_texture(const SculptSession &ss,
+                          const Brush &brush,
+                          const MTex &mtex,
+                          const float brush_point[3],
+                          const int thread_id,
+                          float *r_value,
+                          float4 &r_rgba,
+                          ImagePool *pool,
+                          const float4x4 *area_local_mat)
+{
+  /* Avoid paying for #sculpt_texel_sample_context (a view-projection matrix multiply) on the
+   * common no-texture path, e.g. the mask-texture wrapper below when the brush has none set. */
+  if (!mtex.tex) {
+    *r_value = 1.0f;
+    copy_v4_fl(r_rgba, 1.0f);
+    return;
+  }
+  sculpt_apply_texture(ss,
+                       brush,
+                       mtex,
+                       material::sculpt_texel_sample_context(ss, brush_point),
+                       thread_id,
+                       r_value,
+                       r_rgba,
+                       pool,
+                       area_local_mat);
+}
+
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const float brush_point[3],
@@ -3661,7 +3803,13 @@ static float3 calc_sculpt_normal(const Depsgraph &depsgraph,
   const SculptSession &ss = *ob.runtime->sculpt_session;
   switch (brush.sculpt_plane) {
     case SCULPT_DISP_DIR_AREA:
-      return calc_area_normal(depsgraph, brush, ob, node_mask).value_or(float3(0));
+      /* WORKAROUND: `calc_area_normal` returns nullopt when this dab's vertices don't accumulate
+       * a usable normal (e.g. the view-facing filter in #calc_area_normal_and_center_node_mesh
+       * rejects all of them). Falling back to a zero vector here used to leave
+       * #StrokeCache.sculpt_normal zeroed, which made #calc_brush_local_mat's Area Plane frame
+       * (used by material paint channel sources) collapse to a singular matrix. #view_normal is
+       * always a valid unit vector and is the same fallback #SCULPT_DISP_DIR_VIEW uses below. */
+      return calc_area_normal(depsgraph, brush, ob, node_mask).value_or(ss.cache->view_normal);
     case SCULPT_DISP_DIR_VIEW:
       return ss.cache->view_normal;
     case SCULPT_DISP_DIR_X:
@@ -3871,6 +4019,22 @@ static void calc_brush_local_mat(const float rotation,
   /* Return inverse (for converting from model-space coords to local area coords). */
   invert_m4_m4(local_mat, tmat);
 }
+
+namespace material {
+
+float4x4 calc_area_local_mat(const Object &ob, const float rotation)
+{
+  float4x4 local_mat;
+  float4x4 local_mat_inv_unused;
+  /* Multi-object sculpt made the frame's plane normal explicit rather than reading
+   * #StrokeCache.sculpt_normal inside: the same convention as the brush's own matrix. */
+  const StrokeCache &cache = *ob.runtime->sculpt_session->cache;
+  calc_brush_local_mat(
+      rotation, ob, cache.sculpt_normal, local_mat.ptr(), local_mat_inv_unused.ptr());
+  return local_mat;
+}
+
+}  // namespace material
 
 float3 tilt_apply_to_normal(const Object &object,
                             const float4x4 &view_inverse,
@@ -4094,6 +4258,15 @@ static void update_brush_local_mat(const Depsgraph &depsgraph,
                            cache->brush_local_mat_inv.ptr());
     }
   }
+  /* Material paint channel sources have their own rotation, which #cache->brush_local_mat above
+   * (built from the brush's own #MTex) does not account for. Unlike that matrix, this one is
+   * recomputed on every symmetry pass: #calc_area_local_mat depends on #cache->location_symm and
+   * #cache->sculpt_normal, which are themselves mirrored per pass, so gating this to pass 0 like
+   * the legacy matrix above would leave every mirrored half sampling through the unmirrored
+   * (pass-0) placement. */
+  if (cache->material_source_sampler) {
+    cache->material_source_sampler->update_area_local_mats(ob);
+  }
 }
 
 /** \} */
@@ -4104,25 +4277,52 @@ static void update_brush_local_mat(const Depsgraph &depsgraph,
 
 static bool sculpt_needs_pbvh_pixels(const Brush &brush, const Object &ob)
 {
-  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-      USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint))
-  {
-    return ob.runtime->sculpt_session->cache->image_data.get();
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
+    return !ob.runtime->sculpt_session->cache->image_paint_targets.is_empty();
   }
 
   return false;
 }
 
-static void sculpt_pbvh_update_pixels(const Depsgraph &depsgraph, Object &ob)
+static bool sculpt_pbvh_update_pixels(const Depsgraph &depsgraph,
+                                      Object &ob,
+                                      PaintModeSettings &paint_mode_settings)
 {
   BLI_assert(ob.type == OB_MESH);
 
   StrokeCache &cache = *ob.runtime->sculpt_session->cache;
-  if (!cache.image_data) {
-    return;
+  if (cache.image_paint_targets.is_empty()) {
+    return false;
   }
 
-  bke::pbvh::build_pixels(depsgraph, ob, *cache.image_data->image, *cache.image_data->image_user);
+  /* Ensure PBVH pixels for texpaint node gather. Reuse an existing encoding when
+   * the first target's tile layout already matches (Material maps of equal size). */
+  paint::image::ImageData &image_data = *cache.image_paint_targets[0].data;
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  const StringRef uv_map_name =
+      BKE_paint_canvas_uvmap_name_get(&paint_mode_settings, &ob).value_or("");
+  const std::string layout_key = BKE_paint_pixels_layout_key_get(
+      *image_data.image, *image_data.image_user, uv_map_name);
+  const bool need_rebuild = pbvh.pixels_ == nullptr || pbvh.pixels_->flags.dirty ||
+                            pbvh.pixels_->layout_key != layout_key;
+
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  PAINT_CHANNEL_PERF_SCOPE(SculptPbvhUpdatePixels);
+  if (!need_rebuild) {
+    paint_material_channel_perf::set_pbvh_update_rebuilt(false);
+    return true;
+  }
+  const bool rebuilt = bke::pbvh::build_pixels(
+      depsgraph, ob, *image_data.image, *image_data.image_user, uv_map_name);
+  paint_material_channel_perf::set_pbvh_update_rebuilt(rebuilt);
+  return rebuilt;
+#else
+  if (!need_rebuild) {
+    return true;
+  }
+  return bke::pbvh::build_pixels(
+      depsgraph, ob, *image_data.image, *image_data.image_user, uv_map_name);
+#endif
 }
 
 /** \} */
@@ -4603,12 +4803,20 @@ static bool texture_data_is_deferred(const Brush &brush)
 static void push_undo_nodes(const Depsgraph &depsgraph,
                             Object &ob,
                             const Brush &brush,
-                            const IndexMask &node_mask)
+                            const IndexMask &node_mask,
+                            const PaintModeSettings &paint_mode_settings,
+                            const int visible_material_channels)
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *ob.runtime->sculpt_session;
 
   undo::NodeDataFlag flags{};
+  /* Backing storage for #material_attributes: the spans it hands to #push_nodes must
+   * outlive that call. */
+  Vector<StringRef, PAINT_MATERIAL_CHANNEL_NUM> scalar_names;
+  Vector<StringRef, PAINT_MATERIAL_CHANNEL_NUM> color_names;
+  Vector<StringRef, PAINT_MATERIAL_CHANNEL_NUM> created_names;
+  undo::MaterialUndoAttributes material_attributes;
 
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
     if (ss.cache->toggle_settings.alt_smooth) {
@@ -4629,7 +4837,34 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
       flags |= undo::NodeDataFlag::Mask;
     }
     else if (brush_type_is_paint(brush.sculpt_brush_type)) {
-      flags |= undo::NodeDataFlag::Color;
+      /* Poly Paint: only the PAINT brush routes to material attributes or an image canvas;
+       * Smear/Blur are no-ops on those (see #do_brush_action) and need no undo push. */
+      if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+          paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT &&
+          bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh &&
+          brush.material_paint != nullptr)
+      {
+        /* Exactly the attributes #do_paint_material_brush will write, derived from the same
+         * helpers so the two can never disagree about what the stroke touches. */
+        scalar_names = material::enabled_scalar_attribute_names(
+            *brush.material_paint, paint_mode_settings, visible_material_channels);
+        color_names = material::enabled_color_attribute_names(
+            *brush.material_paint, paint_mode_settings, visible_material_channels);
+        if (!scalar_names.is_empty() || !color_names.is_empty()) {
+          for (const std::string &name : ss.cache->material_created_attribute_names) {
+            created_names.append(name);
+          }
+          /* #NodeDataFlag::Material covers scalar and color channel writes alike now that color
+           * undo is name-keyed (see #undo::StepData::material_attributes). */
+          flags |= undo::NodeDataFlag::Material;
+          material_attributes = {
+              scalar_names.as_span(), color_names.as_span(), created_names.as_span()};
+        }
+      }
+      else if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE) {
+        flags |= undo::NodeDataFlag::Color;
+      }
+      /* Else: image canvas -- undo is opened by #stroke_undo_begin, nothing to push here. */
     }
     else {
       flags |= undo::NodeDataFlag::Position;
@@ -4643,7 +4878,7 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
   }
 
   if (flags != undo::NodeDataFlag{}) {
-    undo::push_nodes(depsgraph, ob, node_mask, flags);
+    undo::push_nodes(depsgraph, ob, node_mask, flags, material_attributes);
   }
 }
 
@@ -4734,6 +4969,22 @@ static void do_brush_action(const Depsgraph &depsgraph,
   IndexMaskMemory memory;
   IndexMask texnode_mask;
 
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  const bool perf_trace = brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+                          SCULPT_use_image_paint_brush(paint_mode_settings,
+                                                       ob,
+                                                       &brush,
+                                                       sd.paint.visible_material_channels);
+  double perf_dab_start = 0.0;
+  if (perf_trace) {
+    const int symmetry_passes = ss.cache ? (ss.cache->radial_symmetry_pass + 1) *
+                                               (ss.cache->mirror_symmetry_pass + 1) :
+                                           1;
+    paint_material_channel_perf::dab_begin(symmetry_passes);
+    perf_dab_start = paint_material_channel_perf::now_seconds();
+  }
+#endif
+
   const bool use_original = brush_type_needs_original(brush.sculpt_brush_type) ? true :
                                                                                  !ss.cache->accum;
   const bool use_pixels = sculpt_needs_pbvh_pixels(brush, ob);
@@ -4747,11 +4998,30 @@ static void do_brush_action(const Depsgraph &depsgraph,
   }
 
   if (sculpt_needs_pbvh_pixels(brush, ob)) {
-    sculpt_pbvh_update_pixels(depsgraph, ob);
+    if (!sculpt_pbvh_update_pixels(depsgraph, ob, paint_mode_settings)) {
+      return;
+    }
 
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+    {
+      PAINT_CHANNEL_PERF_SCOPE(PbvGatherTexpaint);
+      texnode_mask = pbvh_gather_texpaint(ob, brush, use_original, 1.0f, memory);
+      paint_material_channel_perf::set_gather_node_count(texnode_mask.size());
+    }
+#else
     texnode_mask = pbvh_gather_texpaint(ob, brush, use_original, 1.0f, memory);
+#endif
 
     if (texnode_mask.is_empty()) {
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+      if (perf_trace) {
+        paint_material_channel_perf::add_section_us(
+            paint_material_channel_perf::Section::DoBrushActionTotal,
+            paint_material_channel_perf::seconds_to_us(paint_material_channel_perf::now_seconds() -
+                                                       perf_dab_start));
+        paint_material_channel_perf::dab_end_log();
+      }
+#endif
       return;
     }
   }
@@ -4796,6 +5066,15 @@ static void do_brush_action(const Depsgraph &depsgraph,
       }
       update_brush_local_mat(depsgraph, sd, ob, node_mask);
     }
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+    if (perf_trace) {
+      paint_material_channel_perf::add_section_us(
+          paint_material_channel_perf::Section::DoBrushActionTotal,
+          paint_material_channel_perf::seconds_to_us(paint_material_channel_perf::now_seconds() -
+                                                     perf_dab_start));
+      paint_material_channel_perf::dab_end_log();
+    }
+#endif
     return;
   }
 
@@ -4807,7 +5086,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
   }
 
   if (!use_pixels) {
-    push_undo_nodes(depsgraph, ob, brush, node_mask);
+    push_undo_nodes(
+        depsgraph, ob, brush, node_mask, paint_mode_settings, sd.paint.visible_material_channels);
   }
 
   /* There are issues with the underlying normals cache / mesh data that can cause the data to
@@ -5019,10 +5299,29 @@ static void do_brush_action(const Depsgraph &depsgraph,
       brushes::do_displacement_smear_brush(depsgraph, sd, ob, node_mask);
       break;
     case SCULPT_BRUSH_TYPE_PAINT:
-      color::do_paint_brush(depsgraph, paint_mode_settings, sd, ob, node_mask, texnode_mask);
+      if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT) {
+        material::do_paint_material_brush(depsgraph, sd, ob, node_mask, paint_mode_settings);
+      }
+      else if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL ||
+               paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_IMAGE)
+      {
+        /* Image / Material maps: empty target list is a real no-op (no color-attr fallback). */
+        if (SCULPT_use_image_paint_brush(
+                paint_mode_settings, ob, &brush, sd.paint.visible_material_channels))
+        {
+          color::do_paint_brush(depsgraph, paint_mode_settings, sd, ob, node_mask, texnode_mask);
+        }
+      }
+      else {
+        color::do_paint_brush(depsgraph, paint_mode_settings, sd, ob, node_mask, texnode_mask);
+      }
       break;
     case SCULPT_BRUSH_TYPE_SMEAR:
-      color::do_smear_brush(depsgraph, sd, ob, node_mask);
+      /* Smear only operates on the active Color Attribute; no-op on Material canvases to
+       * match the PAINT brush (no implicit fallback to vertex colors). */
+      if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE) {
+        color::do_smear_brush(depsgraph, sd, ob, node_mask);
+      }
       break;
     case SCULPT_BRUSH_TYPE_PLANE:
       BLI_assert(cursor_sample_result.plane_normal && cursor_sample_result.plane_center);
@@ -5034,7 +5333,11 @@ static void do_brush_action(const Depsgraph &depsgraph,
                               *cursor_sample_result.plane_center);
       break;
     case SCULPT_BRUSH_TYPE_BLUR:
-      color::do_blur_brush(depsgraph, sd, ob, node_mask);
+      /* Blur only operates on the active Color Attribute; no-op on Material canvases to
+       * match the PAINT brush (no implicit fallback to vertex colors). */
+      if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE) {
+        color::do_blur_brush(depsgraph, sd, ob, node_mask);
+      }
       break;
     case SCULPT_BRUSH_TYPE_SCENE_PROJECT:
       brushes::do_scene_project_brush(depsgraph, sd, ob, node_mask);
@@ -5096,6 +5399,16 @@ static void do_brush_action(const Depsgraph &depsgraph,
   paint_runtime.average_stroke_counter++;
   /* Update last stroke position. */
   paint_runtime.last_stroke_valid = true;
+
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  if (perf_trace) {
+    paint_material_channel_perf::add_section_us(
+        paint_material_channel_perf::Section::DoBrushActionTotal,
+        paint_material_channel_perf::seconds_to_us(paint_material_channel_perf::now_seconds() -
+                                                   perf_dab_start));
+    paint_material_channel_perf::dab_end_log();
+  }
+#endif
 }
 
 void cache_calc_brushdata_symm(StrokeCache &cache,
@@ -5247,10 +5560,10 @@ using BrushActionFunc = void (*)(const Depsgraph &depsgraph,
 
 static void apply_deferred_texture_data(const Depsgraph &depsgraph,
                                         const Scene & /*scene*/,
-                                        Sculpt & /*sd*/,
+                                        Sculpt &sd,
                                         Object &ob,
                                         const Brush &brush,
-                                        PaintModeSettings & /*paint_mode_settings*/)
+                                        PaintModeSettings &paint_mode_settings)
 {
   if (!texture_data_is_deferred(brush) ||
       (!face_set::brush_texture_data_writes_face_sets(brush) &&
@@ -5268,7 +5581,8 @@ static void apply_deferred_texture_data(const Depsgraph &depsgraph,
     return;
   }
 
-  push_undo_nodes(depsgraph, ob, brush, node_mask);
+  push_undo_nodes(
+      depsgraph, ob, brush, node_mask, paint_mode_settings, sd.paint.visible_material_channels);
   if (face_set::brush_texture_data_mode_is_alpha(brush)) {
     face_set::apply_from_texture(depsgraph, ob, brush, node_mask);
   }
@@ -7347,14 +7661,137 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
 
   brush_init_tex(sd, ss);
 
-  const bool needs_colors = brush_type_is_paint(brush->sculpt_brush_type) &&
-                            !SCULPT_use_image_paint_brush(tool_settings->paint_mode, ob);
+  PaintModeSettings &paint_mode_init = tool_settings->paint_mode;
+  const bool needs_color_attributes = brush_type_is_paint(brush->sculpt_brush_type) &&
+                                      paint_mode_init.canvas_source ==
+                                          PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE;
 
-  if (needs_colors) {
+  if (needs_color_attributes) {
     /* Multi-object sculpt paints into one shared color channel: every mesh in the mode gets the
      * active object's channel (same name/domain/type) set active before the stroke starts. */
     ViewContext vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
     color::ensure_shared_color_attributes(ob, sculpt_mode_objects(vc));
+  }
+
+  /* Poly Paint: create enabled material attributes up-front (mirroring the color layer above)
+   * instead of lazily during the stroke. This lets the draw engine's object sync pick them up and
+   * switch the Workbench shader to per-vertex material display before the first dab is drawn.
+   * Painting itself only tags the attribute data dirty; the push-constants that enable reading
+   * them are refreshed during a full object sync, which the geometry tag below forces. */
+  if (brush_type_is_paint(brush->sculpt_brush_type) &&
+      paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT &&
+      material::paint_supported_on_object(*CTX_data_scene(C), ob))
+  {
+    Mesh &mesh = *id_cast<Mesh *>(ob.data);
+    bool any_created = false;
+    /* Per-channel settings are allocated by the PBR Paint opt-in button, not by the first
+     * stroke. A fresh brush without that setup paints nothing on this canvas. */
+    if (brush->material_paint != nullptr) {
+      const BrushMaterialPaint &brush_paint = *brush->material_paint;
+      for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+        if (!BKE_paint_material_channel_writes_to_target(
+                brush_paint,
+                paint_mode_init,
+                sd.paint.visible_material_channels,
+                info.channel))
+        {
+          continue;
+        }
+        bool created = false;
+        const std::string attr_name = BKE_paint_material_channel_attribute_name(paint_mode_init,
+                                                                                info.channel);
+        const MaterialPaintAttributeStatus status =
+            info.is_color ?
+                BKE_paint_mesh_material_color_attribute_ensure_named(mesh, attr_name, &created) :
+                BKE_paint_mesh_material_attribute_ensure(mesh, attr_name, &created);
+
+        if (status != MaterialPaintAttributeStatus::Ok) {
+          /* Without this the channel would just silently not paint. */
+          BKE_reportf(op->reports,
+                      RPT_WARNING,
+                      "%s channel: %s",
+                      IFACE_(info.ui_name),
+                      TIP_(BKE_paint_material_attribute_status_message(status)));
+          continue;
+        }
+
+        if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
+            paint_mode_init.channel_layer_bindings[PAINT_MATERIAL_CHANNEL_BASE_COLOR]
+                    .attribute_name[0] == '\0')
+        {
+          /* Always, not just when newly created: Workbench renders the mesh's active color
+           * attribute, so leaving a pre-existing "Color" inactive would make the stroke write
+           * into an attribute the user cannot see. A redirected layer is exempt - it is an
+           * add-on's storage, not "the" color of the mesh (see
+           * #BKE_paint_mesh_material_color_attribute_ensure_named's contract). */
+          BKE_id_attributes_active_color_set(&mesh.id, attr_name);
+          if (created) {
+            /* Only a brand new attribute takes over as the render default; retargeting the
+             * default of an existing mesh would change how it renders outside paint mode. */
+            BKE_id_attributes_default_color_set(&mesh.id, attr_name);
+          }
+        }
+
+        any_created |= created;
+        if (created) {
+          /* Undo should remove the attribute again rather than leave a zeroed one behind; see
+           * #undo::StepData::MaterialAttributeInfo::created. Color-shaped channels are tracked
+           * here too - the undo step recreates them through the color path on redo. */
+          ss.cache->material_created_attribute_names.append(attr_name);
+        }
+      }
+
+      /* Built here, alongside the per-stroke attribute creation, so the image pool lives exactly
+       * as long as the stroke does. */
+      ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
+          ss, *brush, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
+    }
+    if (any_created) {
+      DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+    }
+  }
+
+  /* Material canvas: create missing Image Texture maps for enabled channels so a stroke can
+   * write. Invalidate the resolve cache so this stroke does not write into a stale Image after
+   * undo or a Shader Editor edit. */
+  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+      paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL && ob.type == OB_MESH)
+  {
+    BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
+    if (brush->material_paint != nullptr) {
+      const BrushMaterialPaint &brush_paint = *brush->material_paint;
+      BKE_paint_material_images_ensure_writable(
+          *CTX_data_main(C), ob, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
+      for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+        if (info.socket_name == nullptr) {
+          continue;
+        }
+        if (!BKE_paint_material_channel_writes_to_target(
+                brush_paint,
+                paint_mode_init,
+                sd.paint.visible_material_channels,
+                info.channel))
+        {
+          continue;
+        }
+        Image *image;
+        ImageUser *iuser;
+        if (!BKE_paint_principled_channel_image_get(
+                ob, info.channel, &image, &iuser, &paint_mode_init))
+        {
+          BKE_reportf(op->reports,
+                      RPT_WARNING,
+                      TIP_("%s channel has no paintable image texture on the active material"),
+                      IFACE_(info.ui_name));
+        }
+      }
+
+      /* Same stroke-scoped sampler as Material Paint: raster image targets also sample per-channel
+       * sources through StrokeCache::material_source_sampler. */
+      ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
+          ss, *brush, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
+    }
+    ED_space_image_paint_auto_select_material_canvas(CTX_data_main(C), &ob);
   }
 
   /* CTX_data_ensure_evaluated_depsgraph should be used at the end to include the updates of
@@ -7422,6 +7859,13 @@ static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
        * See #129069. */
       ss.cache->layer_displacement_factor = {};
       ss.cache->paint_brush.mix_colors = {};
+      /* Poly Paint: same reasoning as #paint_brush.mix_colors above - the accumulated coverage
+       * must restart from empty when the anchor point moves, not keep compositing onto coverage
+       * built up at the previous anchor position. */
+      ss.cache->material_mix_base_color = {};
+      for (Array<float2> &mix_scalars : ss.cache->material_mix_scalars) {
+        mix_scalars = {};
+      }
     }
   }
 }
@@ -7951,6 +8395,7 @@ static void stroke_undo_begin(const Scene &scene,
                               const Brush *brush,
                               PaintModeSettings &paint_mode_settings,
                               const Span<Object *> objects,
+                              const Paint &paint,
                               wmOperator *op)
 {
   bool sculpt_undo_started = false;
@@ -7960,7 +8405,8 @@ static void stroke_undo_begin(const Scene &scene,
     /* Setup the correct undo system. Image painting and sculpting are mutual exclusive.
      * Color attributes are part of the sculpting undo system. */
     if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-        SCULPT_use_image_paint_brush(paint_mode_settings, ob))
+        SCULPT_use_image_paint_brush(
+            paint_mode_settings, ob, brush, paint.visible_material_channels))
     {
       ED_image_undo_push_begin(op->type->name, PaintMode::Sculpt);
     }
@@ -7978,13 +8424,15 @@ static void stroke_undo_begin(const Scene &scene,
 
 static void stroke_undo_end(PaintModeSettings &paint_mode_settings,
                             const Span<Object *> objects,
+                            const Paint &paint,
                             Brush *brush)
 {
   bool any_sculpt_undo = false;
   for (Object *object_ptr : objects) {
     Object &ob = *object_ptr;
     if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-        SCULPT_use_image_paint_brush(paint_mode_settings, ob))
+        SCULPT_use_image_paint_brush(
+            paint_mode_settings, ob, brush, paint.visible_material_channels))
     {
       ED_image_undo_push_end();
     }
@@ -8258,10 +8706,17 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     /* Cache projection matrix. */
     cache->projection_mat = ED_view3d_ob_project_mat_get(cache->vc->rv3d, &ob);
 
+    const float3 x_axis(1.0f, 0.0f, 0.0f);
+    const float3 y_axis(0.0f, 1.0f, 0.0f);
     const float3 z_axis(0.0f, 0.0f, 1.0f);
     ob.runtime->world_to_object = math::invert(ob.object_to_world());
-    cache->view_normal = math::normalize(math::transform_direction(
-        ob.world_to_object() * float4x4(cache->vc->rv3d->viewinv), z_axis));
+    const float4x4 view_to_object = ob.world_to_object() *
+                                    float4x4(cache->vc->rv3d->viewinv);
+    cache->view_normal = math::normalize(math::transform_direction(view_to_object, z_axis));
+    /* Camera right/up, in the same object space as #view_normal: together they are the basis a
+     * View-mapped brush texture (e.g. a Normal-map decal) is authored in. */
+    cache->view_right = math::normalize(math::transform_direction(view_to_object, x_axis));
+    cache->view_up = math::normalize(math::transform_direction(view_to_object, y_axis));
 
     /* Secondary objects: if cursor_normal is zero (cursor was never over this object),
      * fall back to view_normal so that plane-based brushes (Clay, Flatten, Fill, Scrape)
@@ -8315,12 +8770,18 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     /* Original coordinates require the sculpt undo system, which isn't used
      * for image brushes. It's also not necessary, just disable it. */
     if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-        SCULPT_use_image_paint_brush(*paint_mode_settings_, ob))
+        SCULPT_use_image_paint_brush(
+            *paint_mode_settings_, ob, brush, this->sculpt_->paint.visible_material_channels))
     {
       cache->accum = true;
 
-      cache->image_data = paint::image::ImageData::init_active_image(
-          ob, this->scene->toolsettings->paint_mode);
+      /* #StrokeCache::image_data was replaced by a list of targets: Material canvases paint
+       * several Principled maps in one stroke, not a single active image. */
+      cache->image_paint_targets = paint::image::init_image_paint_targets(
+          ob,
+          this->scene->toolsettings->paint_mode,
+          brush,
+          this->sculpt_->paint.visible_material_channels);
     }
 
     if (BKE_brush_color_jitter_get_settings(this->paint, brush)) {
@@ -8367,9 +8828,9 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     Brush *brush = this->brush;
 
     /* NOTE: This should be removed when paint mode is available. Paint mode can force based on the
-     * canvas it is painting on. (ref. use_sculpt_texture_paint). */
+     * canvas it is painting on. Only Color Attribute painting should switch solid shading. */
     if (brush && brush_type_is_paint(brush->sculpt_brush_type) &&
-        !SCULPT_use_image_paint_brush(*paint_mode_settings_, ob))
+        paint_mode_settings_->canvas_source == PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE)
     {
       View3D *v3d = this->vc.v3d;
       if (v3d->shading.type == OB_SOLID) {
@@ -8508,8 +8969,12 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 
     }
 
-    stroke_undo_begin(
-        *this->scene, this->brush, *this->paint_mode_settings_, this->multi_.mode_objects, op);
+    stroke_undo_begin(*this->scene,
+                      this->brush,
+                      *this->paint_mode_settings_,
+                      this->multi_.mode_objects,
+                      this->sculpt_->paint,
+                      op);
 
     /* Start recording this stroke into each recording object's target layer (primary active, or
      * the sync_uid-matched layer temporarily made active on members). Undo data is recorded at
@@ -9009,7 +9474,9 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       flush_update_step(this->vc, ob, UpdateType::Mask);
     }
     else if (brush_type_is_paint(brush.sculpt_brush_type)) {
-      if (SCULPT_use_image_paint_brush(*this->paint_mode_settings_, ob)) {
+      if (SCULPT_use_image_paint_brush(
+              *this->paint_mode_settings_, ob, &brush, sd.paint.visible_material_channels))
+      {
         flush_update_step(this->vc, ob, UpdateType::Image);
       }
       else {
@@ -9225,7 +9692,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     undo::discard_init_step();
   }
   else if (!is_cancel && stroke_started) {
-    stroke_undo_end(*paint_mode_settings_, this->multi_.mode_objects, brush);
+    stroke_undo_end(*paint_mode_settings_, this->multi_.mode_objects, sd.paint, brush);
   }
   else if (is_cancel && stroke_started) {
     undo::discard_init_step();
@@ -9257,7 +9724,10 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
       update_type = UpdateType::Mask;
     }
     else if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
-      update_type = SCULPT_use_image_paint_brush(*this->paint_mode_settings_, ob_iter) ?
+      update_type = SCULPT_use_image_paint_brush(*this->paint_mode_settings_,
+                                                ob_iter,
+                                                brush,
+                                                sd.paint.visible_material_channels) ?
                         UpdateType::Image :
                         UpdateType::Color;
     }

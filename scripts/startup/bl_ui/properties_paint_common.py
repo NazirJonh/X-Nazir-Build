@@ -807,6 +807,41 @@ class DisplayPanel(BrushPanel):
                 )
 
 
+class PAINT_MT_material_paint_channel_socket(Menu):
+    bl_label = "Material Paint Channel"
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.label(text="Material Paint Channel", icon='INFO')
+        layout.label(text="Painted values feed the material's Principled BSDF inputs.")
+
+
+class PAINT_MT_material_paint_brush_sync(Menu):
+    bl_label = "Sync Brush"
+
+    def draw(self, context):
+        layout = self.layout
+        paint_mode_settings = context.tool_settings.paint_mode
+
+        # Continuous mirroring is a mode; the two entries below are one-shot copies that work
+        # whether or not it is on, so they must not change this toggle.
+        layout.prop(paint_mode_settings, "use_brush_sync", text="Automatic Sync")
+        layout.separator()
+
+        op = layout.operator(
+            "paint.material_paint_brush_sync",
+            text="Use Image Editor Settings in Sculpt Mode",
+            icon='VIEW3D',
+        )
+        op.direction = 'IMAGE_TO_SCULPT'
+        op = layout.operator(
+            "paint.material_paint_brush_sync",
+            text="Use Sculpt Mode Settings in Image Editor",
+            icon='IMAGE',
+        )
+        op.direction = 'SCULPT_TO_IMAGE'
+
+
 class VIEW3D_MT_tools_projectpaint_clone(Menu):
     bl_label = "Clone Layer"
 
@@ -932,8 +967,13 @@ def brush_settings(layout, context, brush, popover=False):
             layout.separator()
 
         if capabilities.has_color:
+            material_paint = brush.material_paint
+            synced_with_material_paint = (
+                material_paint is None or material_paint.use_sync_base_color_with_brush
+            )
             ups = UnifiedPaintPanel.paint_settings(context).unified_paint_settings
             row = layout.row(align=True)
+            row.active = synced_with_material_paint
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
             row.separator()
@@ -1148,6 +1188,636 @@ def brush_settings(layout, context, brush, popover=False):
             layout.prop(brush.curves_sculpt_settings, "minimum_length")
 
 
+# PAINT_OT_material_channel_value_invert is implemented in C
+# (source/blender/editors/sculpt_paint/paint_ops.cc) so it can read the channel's value range
+# from BKE_paint_material_channel_range, the single source of truth also used by the RNA "value"
+# range callback and by the Custom channel's user-defined range.
+
+# Display order for Material Paint toggles and channel panels (independent of DNA enum indices).
+# Height has no write backend yet (no Principled socket, no vertex storage) and is omitted until
+# one exists; leaving it here would offer a toggle that silently no-ops.
+_MATERIAL_PAINT_CHANNEL_UI_ORDER = (
+    'BASE_COLOR',
+    'METALLIC',
+    'ROUGHNESS',
+    'NORMAL',
+    'ALPHA',
+    'AO',
+    'EMISSION',
+    'SPECULAR',
+)
+# Channels the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas can store: one float (or
+# color) per vertex has no meaningful representation for a texture-map-only channel. Must match
+# #MaterialPaintChannelInfo.supports_vertex_paint in source/blender/blenkernel/intern/paint.cc.
+# CUSTOM is vertex-only and is handled separately via the `show_custom` argument below, not here.
+_MATERIAL_PAINT_VERTEX_CHANNELS = {
+    'BASE_COLOR',
+    'METALLIC',
+    'ROUGHNESS',
+    'SPECULAR',
+    'AO',
+    'ALPHA',
+}
+# Max width per channel toggle (Blender UI units). grid_flow uses this to fit as many buttons
+# as possible on each row and wrap the rest; without a fixed cell width every toggle expands to
+# the full panel width and stacks vertically.
+_MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X = 2
+_MATERIAL_PAINT_SOCKET_COLOR_FLOAT = (0.63, 0.63, 0.63, 1.0)
+_MATERIAL_PAINT_SOCKET_COLOR_VECTOR = (0.39, 0.39, 0.78, 1.0)
+_MATERIAL_PAINT_SOCKET_COLOR_RGBA = (0.78, 0.78, 0.16, 1.0)
+
+
+def _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels):
+    """Draw channel enable toggles in wrapped rows of fixed-max-width buttons."""
+    # align=False keeps each toggle as its own button; align=True would merge neighbors into one bar.
+    flow = layout.grid_flow(row_major=True, columns=0, even_columns=False, even_rows=False, align=False)
+    flow.use_property_split = False
+    flow.use_property_decorate = False
+    for channel_id in toggle_ids:
+        col = flow.column(align=False)
+        col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X
+        col.prop(channels[channel_id], "use", text=toggle_labels[channel_id], toggle=True)
+
+
+def _material_paint_channel_socket_color(channel_id):
+    """Socket color matching Principled BSDF socket colors."""
+    if channel_id in ('BASE_COLOR', 'EMISSION'):
+        return _MATERIAL_PAINT_SOCKET_COLOR_RGBA
+    if channel_id == 'NORMAL':
+        return _MATERIAL_PAINT_SOCKET_COLOR_VECTOR
+    # Metallic / Roughness / Specular / Height / Alpha / AO / Custom — float sockets.
+    return _MATERIAL_PAINT_SOCKET_COLOR_FLOAT
+
+
+def _material_paint_channel_socket_icon_draw(layout, channel_id):
+    """Colored socket button matching the Principled BSDF socket for this channel.
+
+    Routed through ``menu=`` (instead of the plain, background-less socket) so the button is
+    drawn as a real node-link socket: a menu button carrying #BUT_NODE_LINK, which gets the
+    normal button background/border merged with the adjacent value field. A background-less
+    socket here would leave light-colored swatches (e.g. white Base Color) with no visible
+    border against the panel background.
+    """
+    layout.template_node_socket(
+        color=_material_paint_channel_socket_color(channel_id),
+        menu="PAINT_MT_material_paint_channel_socket",
+    )
+
+
+def _material_paint_channel_color_eyedropper_path(context, data, prop):
+    """RNA path string for ``ui.eyedropper_color.prop_data_path``, resolved from context.
+
+    Built from the *actual* property location (``data.path_from_id(prop)``, relative to the
+    owning Brush ID) rather than a hardcoded channel-index table, so it stays correct if
+    material paint channels are ever added, removed, or reordered.
+    """
+    settings = UnifiedPaintPanel.paint_settings(context)
+    brush = getattr(settings, "brush", None) if settings else None
+    if brush is None or brush.material_paint is None:
+        return None
+    return "{:s}.brush.{:s}".format(settings.path_from_id(), data.path_from_id(prop))
+
+
+def _material_paint_channel_color_eyedropper_draw(layout, context, data, prop):
+    path = _material_paint_channel_color_eyedropper_path(context, data, prop)
+    if path is None:
+        return
+    eye = layout.operator("ui.eyedropper_color", text="", icon='EYEDROPPER')
+    eye.prop_data_path = path
+
+
+def _material_paint_channel_has_source(channel):
+    """True when a source image or any assigned texture (including procedural) drives the channel."""
+    return channel.source_image is not None or channel.source_texture_slot.texture is not None
+
+
+def _draw_material_paint_subpanel_header(
+    header,
+    context,
+    channel_id,
+    channel,
+    prop=None,
+    prop_data=None,
+    color_picker_after_socket=False,
+    value_active=True,
+    **prop_kwargs,
+):
+    """Panel header: label | socket button | optional value/color field (Principled-style split)."""
+    header.use_property_split = True
+    header.use_property_decorate = False
+    row = header.row(align=True)
+    # Match UI_ITEM_PROP_SEP_DIVIDE (0.4) used by property split labels in the Properties editor.
+    split = row.split(factor=0.4, align=True)
+    split.label(text=channel.name)
+    data = prop_data if prop_data is not None else channel
+    if prop is not None and color_picker_after_socket:
+        # Color channels: socket + color strip merged; eyedropper fused to color strip.
+        controls = split.row(align=True)
+        _material_paint_channel_socket_icon_draw(controls, channel_id)
+        value_controls = controls.row(align=True)
+        value_controls.active = value_active
+        if "text" not in prop_kwargs:
+            prop_kwargs["text"] = ""
+        value_controls.prop(data, prop, **prop_kwargs)
+        _material_paint_channel_color_eyedropper_draw(value_controls, context, data, prop)
+    else:
+        value_row = split.row(align=True)
+        _material_paint_channel_socket_icon_draw(value_row, channel_id)
+        if prop is not None:
+            controls = value_row.row(align=True)
+            controls.active = value_active
+            if prop == "value":
+                # Scalar channels: gradient-matched grayscale swatch beside a value slider.
+                controls.prop(data, "value_color", text="")
+            if "text" not in prop_kwargs:
+                prop_kwargs["text"] = ""
+            if prop == "value":
+                prop_kwargs["slider"] = True
+            controls.prop(data, prop, **prop_kwargs)
+
+
+def _draw_material_paint_source_texture(panel, channel):
+    """Draw the per-channel source image.
+
+    The source replaces the channel's fixed value while painting, so the value row is drawn
+    inactive whenever a source is set. Mapping (Mapping mode / Size / Angle) is shared by every
+    channel instead of being configured per channel; see #_draw_material_paint_shared_mapping.
+    """
+    slot = channel.source_texture_slot
+
+    row = panel.row(align=True)
+    row.template_ID(channel, "source_image", new="image.new", open="image.open")
+
+    texture = slot.texture
+    if texture is not None and channel.source_image is None:
+        if texture.type == 'IMAGE':
+            # IMAGE texture without an image cannot be sampled. `source_image` already reads as
+            # unset in this state, so `template_ID`'s own unlink button never appears; offer an
+            # explicit way to drop the broken slot instead.
+            row.label(text="", icon='ERROR')
+            row.operator(
+                "paint.material_channel_source_clear", text="", icon='X',
+            ).channel = channel.channel
+            return
+        # Procedural textures are usable as-is.
+
+    elif channel.source_image is None:
+        return
+
+    # The Normal channel's source may be authored to either the OpenGL or DirectX tangent-space
+    # convention (green channel up vs. down); let the user pick, matching the Normal Map node in
+    # the Shader Editor. Color space is otherwise handled automatically and not user-facing here.
+    if channel.channel == 'NORMAL' and channel.source_image is not None:
+        panel.row(align=True).prop(channel, "normal_source_color_space", text="Color Space")
+
+
+def _draw_material_paint_shared_mapping(layout, material_paint):
+    """Mapping shared by every channel's source texture: Mapping mode, Size (X/Y only), Angle.
+
+    Drawn once, in the Image Transform Settings panel above the channel toggles, instead of once per
+    channel.
+    Multi-channel patterns (a Base Color texture with a matching Normal/Roughness texture meant
+    to tile together) need identical mapping to stay aligned, so there is deliberately no
+    per-channel override and no Offset control.
+    """
+    slot = material_paint.shared_texture_slot
+    col = layout.column(align=True)
+    col.prop(slot, "map_mode", text="Mapping")
+    col.prop(material_paint, "shared_mapping_size_x", text="Size X", slider=True)
+    col.prop(material_paint, "shared_mapping_size_y", text="Size Y", slider=True)
+    if slot.has_texture_angle:
+        col.prop(slot, "angle", text="Angle")
+
+
+def _draw_material_paint_value_ramp(layout, context, channel, channel_id):
+    # One subpanel per scalar ramp channel; open by default.
+    # Header: socket + value color swatch + numeric value. Body: gradient + Invert.
+    has_source = _material_paint_channel_has_source(channel)
+    header, panel = layout.panel(
+        "material_paint_value_%s" % channel_id.lower(),
+        default_closed=False,
+    )
+    _draw_material_paint_subpanel_header(
+        header, context, channel_id, channel, "value", index=0, value_active=not has_source,
+    )
+    if not panel:
+        return
+    panel.separator()
+    col = panel.column(align=True)
+    _draw_material_paint_source_texture(col, channel)
+    if not has_source:
+        row = col.row(align=True)
+        row.template_material_paint_value_slider(channel, "value", index=0)
+        row.operator(
+            "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
+        ).channel = channel_id
+    panel.separator()
+
+
+def _draw_material_paint_alpha_panel(layout, context, channel, channel_id, material_paint):
+    has_source = _material_paint_channel_has_source(channel)
+    header, panel = layout.panel(
+        "material_paint_value_%s" % channel_id.lower(),
+        default_closed=False,
+    )
+    _draw_material_paint_subpanel_header(
+        header, context, channel_id, channel, "value", index=0, value_active=not has_source,
+    )
+    if not panel:
+        return
+    panel.separator()
+    col = panel.column(heading="Use For:", align=True)
+    col.prop(material_paint, "use_alpha_map", text="Alpha Map")
+    col.prop(material_paint, "use_alpha_stroke_mask", text="Brush Mask")
+    col = panel.column(align=True)
+    _draw_material_paint_source_texture(col, channel)
+    if not has_source:
+        row = col.row(align=True)
+        row.template_material_paint_value_slider(channel, "value", index=0)
+        row.operator(
+            "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
+        ).channel = channel_id
+    panel.separator()
+
+
+def _draw_material_paint_base_color_panel(layout, context, channel, material_paint):
+    has_source = _material_paint_channel_has_source(channel)
+    header, panel = layout.panel(
+        "material_paint_value_base_color",
+        default_closed=False,
+    )
+    _draw_material_paint_subpanel_header(
+        header,
+        context,
+        'BASE_COLOR',
+        channel,
+        "base_color",
+        prop_data=material_paint,
+        color_picker_after_socket=True,
+        value_active=not has_source,
+    )
+    if not panel:
+        return
+    panel.use_property_split = False
+    panel.separator()
+    row = panel.row(align=True)
+    row.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
+    # Base Color is the only blendable channel.
+    row = panel.row(align=True)
+    row.prop(channel, "blend", text="Blend")
+    panel.separator()
+    _draw_material_paint_source_texture(panel, channel)
+
+
+def _draw_material_paint_normal_panel(layout, context, channel):
+    has_source = _material_paint_channel_has_source(channel)
+    header, panel = layout.panel(
+        "material_paint_value_normal",
+        default_closed=False,
+    )
+    # normal_color maps tangent XYZ [-1, 1] to RGB [0, 1]; default flat +Z is #8080FF.
+    _draw_material_paint_subpanel_header(
+        header,
+        context,
+        'NORMAL',
+        channel,
+        "normal_color",
+        color_picker_after_socket=True,
+        value_active=not has_source,
+    )
+    if not panel:
+        return
+    panel.separator()
+    _draw_material_paint_source_texture(panel, channel)
+
+
+def _draw_material_paint_emission_panel(layout, context, channel):
+    has_source = _material_paint_channel_has_source(channel)
+    header, panel = layout.panel(
+        "material_paint_value_emission",
+        default_closed=False,
+    )
+    _draw_material_paint_subpanel_header(
+        header,
+        context,
+        'EMISSION',
+        channel,
+        "emission_color",
+        color_picker_after_socket=True,
+        value_active=not has_source,
+    )
+    if not panel:
+        return
+    panel.separator()
+    _draw_material_paint_source_texture(panel, channel)
+
+
+def material_paint_visible_channels_owner(context):
+    """The ``Paint`` whose ``visible_material_channels`` the current editor edits.
+
+    Sculpt Mode and the Image Editor / Texture Paint keep independent channel sets, so the owner
+    has to follow the mode the panel is drawn in. Returns None when the active mode has no paint
+    settings (Particle Edit) or when the mode's paint data was never created.
+    """
+    settings = UnifiedPaintPanel.paint_settings(context)
+    if settings is None or not hasattr(settings, "visible_material_channels"):
+        return None
+    return settings
+
+
+def draw_material_paint_visibility_popover(_context, layout, paint, paint_mode_settings):
+    """Popover body: checkboxes for which channels appear in the PBR Paint list.
+
+    The "PBR Paint list" checkbox is independent of hiding: turning a channel on here also
+    enables its paint `use` flag so the channel row appears ready to assign a source texture.
+    Hiding a channel does not clear `use`, its value, or source texture, but it removes the
+    channel from the UI and skips it during painting until shown again.
+    """
+    if paint is None:
+        layout.label(text="No paint settings for this mode", icon='INFO')
+        return
+
+    is_vertex_paint = paint_mode_settings.canvas_source == 'MATERIAL_PAINT'
+    channel_ids = _MATERIAL_PAINT_CHANNEL_UI_ORDER
+    if is_vertex_paint:
+        channel_ids = [
+            identifier for identifier in channel_ids
+            if identifier in _MATERIAL_PAINT_VERTEX_CHANNELS
+        ]
+
+    col = layout.column()
+    for identifier in channel_ids:
+        row = col.row(align=True)
+        row.prop_enum(paint, "visible_material_channels", identifier)
+
+
+def draw_material_paint_visibility_chevron(_context, layout, _paint_mode_settings, *, panel=None):
+    """Chevron icon button opening the channel-visibility popover, for PBR Paint headers.
+
+    The popover panel resolves its own ``Paint`` owner from context
+    (#material_paint_visible_channels_owner): ``layout.popover`` cannot pass arguments through, so
+    an editor needing a different owner than the active mode's must supply its own \a panel.
+    """
+    if panel is None:
+        panel = "PAINT_PT_material_paint_channel_visibility"
+    layout.popover(
+        panel=panel,
+        text="",
+        icon='DOWNARROW_HLT',
+    )
+
+
+def draw_material_paint_sync_toggle(layout, paint_mode_settings):
+    """Menu for sharing one brush between Sculpt Mode and the Image Editor.
+
+    Only meaningful for the Material canvas - the other canvas sources are painted by a single
+    editor - so it is drawn next to the canvas source in the PBR Paint headers and hidden
+    elsewhere.
+
+    ``UILayout.menu`` has no ``depress`` argument, so whether automatic sync is on is carried by
+    the icon rather than by a pressed state.
+    """
+    if paint_mode_settings.canvas_source != 'MATERIAL':
+        return
+    layout.menu(
+        "PAINT_MT_material_paint_brush_sync",
+        text="",
+        icon='UV_SYNC_SELECT' if paint_mode_settings.use_brush_sync else 'UNLINKED',
+    )
+
+
+def material_paint_missing_map_channels(ob, brush, paint, paint_mode_settings):
+    """Channel identifiers that are writable but have no Principled Image Texture yet.
+
+    Height, AO and Custom have no Principled socket, so they cannot be created as maps and are
+    omitted. Returns an empty set when there is no usable brush (distinct from every writable
+    channel already having a map).
+    """
+    writable = material_paint_writable_channels(brush, paint, paint_mode_settings)
+    if writable is None:
+        return set()
+    has_image_fn = getattr(ob, "principled_paint_channel_has_image", None) if ob else None
+    map_ids = {
+        'BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL', 'ALPHA', 'EMISSION',
+    }
+    missing = set()
+    for channel_id in writable:
+        if channel_id not in map_ids:
+            continue
+        if has_image_fn is None or not has_image_fn(channel_id):
+            missing.add(channel_id)
+    return missing
+
+
+def material_paint_writable_channels(brush, paint, paint_mode_settings):
+    """Channel identifiers \a brush actually writes to for the Material (image) canvas.
+
+    Mirrors #BKE_paint_material_channel_writes_to_target combined with the
+    `MaterialPaintChannelInfo.socket_name` gate that excludes Custom for the image canvas (see
+    `paint.cc`'s `BKE_paint_material_image_targets_get`): enabled, listed in
+    `visible_material_channels`, and - for Alpha only - `use_alpha_map`. Custom and Height have
+    no Principled socket for this canvas: Custom is omitted from
+    `_MATERIAL_PAINT_CHANNEL_UI_ORDER`; Height is omitted until a displacement backend exists.
+    If the C++ conditions above change, update this function to match.
+
+    Returns ``None`` when there is no usable brush/channel configuration (distinct from an empty
+    set, which means a brush exists but currently writes no channels).
+    """
+    if brush is None or brush.material_paint is None or paint is None:
+        return None
+    material_paint = brush.material_paint
+    channels = {channel.channel: channel for channel in material_paint.channels}
+    visible = set(paint.visible_material_channels)
+    writable = set()
+    for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
+        channel = channels.get(channel_id)
+        if channel is None or not channel.use or channel_id not in visible:
+            continue
+        if channel_id == 'ALPHA' and not material_paint.use_alpha_map:
+            continue
+        writable.add(channel_id)
+    return writable
+
+
+def draw_material_paint_channels(
+        context, layout, brush, paint, paint_mode, *, show_custom):
+    """Draw Material / Material Paint channel enable + value rows.
+
+    Used by View3D Canvas and Image Editor Paint Canvas panels. Only Base Color has a blend
+    mode; the scalar channels always use Mix. The brush-level Blend setting is not what drives
+    these strokes.
+
+    :arg context: Current ``Context``, used to resolve the active brush's RNA path for the
+        color eyedropper.
+    :arg layout: Layout to draw into.
+    :arg brush: Active paint ``Brush``, or ``None``.
+    :arg paint: Active ``Paint`` RNA data-block (per-editor visible channel set).
+    :arg paint_mode: ``PaintModeSettings`` RNA data-block (Custom name/range only).
+    :arg show_custom: When True, draw the Custom channel (Material Paint mode).
+    """
+    if brush is None:
+        layout.label(text="No active brush", icon='INFO')
+        return
+
+    material_paint = brush.material_paint
+    if material_paint is None:
+        # Resolution only matters for images not created yet; once channels exist, this control
+        # does nothing (there is no live-resize), so it is offered alongside the button that
+        # creates them instead of as a permanent row above. The Material Paint (vertex color)
+        # canvas has no images at all - every channel is a per-vertex attribute - so the control
+        # is meaningless there.
+        row = layout.row(align=True)
+        row.operator(
+            "paint.material_paint_brush_ensure",
+            text="PBR Paint",
+            icon='ADD',
+        )
+        if paint_mode is not None and not show_custom:
+            row.prop(paint_mode, "new_channel_image_size", text="")
+        return
+
+    channels = {channel.channel: channel for channel in material_paint.channels}
+
+    # Use one aligned grid_flow so channel toggles wrap when the panel is too narrow.
+    # Labels may be clipped in very tight cells; the short labels below keep controls readable.
+    # `show_custom` is only passed True for the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color)
+    # canvas, so it also selects the vertex-storable channel subset here.
+    channel_ids = _MATERIAL_PAINT_CHANNEL_UI_ORDER
+    if show_custom:
+        channel_ids = [
+            channel_id for channel_id in channel_ids if channel_id in _MATERIAL_PAINT_VERTEX_CHANNELS
+        ]
+    # Falling back to every channel keeps the list usable if the panel is drawn for a mode without
+    # its own visibility set; the paint helpers still gate what a stroke writes.
+    visible = set(paint.visible_material_channels) if paint is not None else set(channel_ids)
+    toggle_ids = [channel_id for channel_id in channel_ids if channel_id in visible]
+    if show_custom:
+        toggle_ids.append('CUSTOM')
+    toggle_labels = {
+        'BASE_COLOR': "Color",
+        'METALLIC': "Metal",
+        'ROUGHNESS': "Rough",
+        'SPECULAR': "Spec",
+        'NORMAL': "Normal",
+        'HEIGHT': "Height",
+        'ALPHA': "Alpha",
+        'AO': "AO",
+        'EMISSION': "Emit",
+        'CUSTOM': "Custom",
+    }
+
+    # Shared source-texture mapping is drawn before the channel toggles so it reads as a setup step
+    # rather than being buried under whichever channel panels happen to be open.
+    has_source_mapping = any(
+        channels[channel_id].use and _material_paint_channel_has_source(channels[channel_id])
+        for channel_id in toggle_ids if channel_id != 'CUSTOM'
+    )
+    header, panel = layout.panel(
+        "material_paint_transform",
+        default_closed=True,
+    )
+    header.label(text="Image Transform Settings")
+    if panel:
+        panel.active = has_source_mapping
+        _draw_material_paint_shared_mapping(panel, material_paint)
+    layout.separator()
+
+    # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.
+    _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
+
+    # Image maps: resolution only matters while at least one enabled channel still needs a map.
+    if not show_custom and paint_mode is not None:
+        missing_maps = material_paint_missing_map_channels(
+            getattr(context, "active_object", None), brush, paint, paint_mode,
+        )
+        if missing_maps:
+            row = layout.row(align=True)
+            row.operator(
+                "paint.material_paint_images_ensure",
+                text="Create Missing Maps",
+                icon='IMAGE_DATA',
+            )
+            row.prop(paint_mode, "new_channel_image_size", text="")
+
+    if any(channels[channel_id].use for channel_id in toggle_ids):
+        layout.separator()
+
+    # layout.panel() sections need a non-aligned column: align=True sets space_y to 0, so
+    # consecutive panel headers/bodies stack with no gap (unlike bl_parent_id sub-panels).
+    channel_col = layout.column(align=False)
+    channel_panel_sep = False
+
+    def _channel_panel_sep():
+        nonlocal channel_panel_sep
+        if channel_panel_sep:
+            channel_col.separator()
+        channel_panel_sep = True
+
+    # Value rows are only drawn for enabled channels, so a disabled channel does not clutter the
+    # panel with a grayed-out row.
+    channel = channels['BASE_COLOR']
+    if channel.use and 'BASE_COLOR' in visible:
+        _channel_panel_sep()
+        _draw_material_paint_base_color_panel(channel_col, context, channel, material_paint)
+
+    for channel_id in ('METALLIC', 'ROUGHNESS', 'AO'):
+        channel = channels[channel_id]
+        if channel.use and channel_id in visible:
+            _channel_panel_sep()
+            _draw_material_paint_value_ramp(channel_col, context, channel, channel_id)
+
+    channel = channels['ALPHA']
+    if channel.use and 'ALPHA' in visible:
+        _channel_panel_sep()
+        _draw_material_paint_alpha_panel(
+            channel_col, context, channel, 'ALPHA', material_paint,
+        )
+
+    # Normal, Emission and Height are texture-map-only channels: a vertex canvas has no per-vertex
+    # storage for them (see `_MATERIAL_PAINT_VERTEX_CHANNELS`), so skip them for Material Paint.
+    # Their `use`/visibility bits can still be set from a prior Material (image) canvas session,
+    # so this must be an explicit `not show_custom` guard, not just membership in `channel_ids`.
+    if not show_custom:
+        # Normal: tangent vector as a single color (#8080FF = flat +Z); blend is always
+        # NORMAL_MIX.
+        channel = channels['NORMAL']
+        if channel.use and 'NORMAL' in visible:
+            _channel_panel_sep()
+            _draw_material_paint_normal_panel(channel_col, context, channel)
+
+        channel = channels['EMISSION']
+        if channel.use and 'EMISSION' in visible:
+            _channel_panel_sep()
+            _draw_material_paint_emission_panel(channel_col, context, channel)
+
+    channel = channels['SPECULAR']
+    if channel.use and 'SPECULAR' in visible:
+        _channel_panel_sep()
+        _draw_material_paint_value_ramp(channel_col, context, channel, 'SPECULAR')
+
+    if show_custom:
+        channel = channels['CUSTOM']
+        if channel.use:
+            _channel_panel_sep()
+            row = channel_col.row(align=True)
+            row.use_property_split = False
+            _material_paint_channel_socket_icon_draw(row, 'CUSTOM')
+            controls = row.row(align=True)
+            controls.prop(channel, "value_color", text="")
+            controls.prop(channel, "value", index=0, text=channel.name, slider=True)
+
+            # The bindings are a fixed array indexed by channel, so key them by their own
+            # read-only `channel` rather than by a hard-coded index, same as `channels` above.
+            bindings = {binding.channel: binding for binding in paint_mode.channel_layer_bindings}
+            row = channel_col.row(align=True)
+            row.prop(bindings[channel.channel], "attribute_name", text="Name")
+
+            # Unlike the fixed channels, the custom channel targets an arbitrary float attribute,
+            # so the range its painted values are clamped to is user-defined.
+            row = channel_col.row(align=True)
+            row.prop(paint_mode, "channel_custom_range", text="Range")
+
+
 def brush_shared_settings(layout, context, brush, popover=False):
     """ Draw simple brush settings that are shared between different paint modes. """
 
@@ -1228,7 +1898,9 @@ def brush_shared_settings(layout, context, brush, popover=False):
     ups = UnifiedPaintPanel.paint_settings(context).unified_paint_settings
 
     if blend_mode:
-        layout.prop(brush, "blend", text="Blend")
+        row = layout.row()
+        row.active = context.tool_settings.paint_mode.canvas_source not in {'MATERIAL', 'MATERIAL_PAINT'}
+        row.prop(brush, "blend", text="Blend")
         layout.separator()
 
     if weight:
@@ -1552,16 +2224,29 @@ def draw_color_settings(context, layout, brush, color_type=False):
 
     # Color wheel
     if brush.color_type == 'COLOR':
-        UnifiedPaintPanel.prop_unified_color_picker(layout, context, brush, "color", value_slider=True)
+        material_paint = brush.material_paint
+        # PBR Paint's Base Color channel becomes the color source once it stops mirroring the
+        # brush color; keep Color/Secondary Color visible but inert so the brush's own color
+        # cannot be mistaken for what strokes will actually paint.
+        synced_with_material_paint = (
+            material_paint is None or material_paint.use_sync_base_color_with_brush
+        )
+        if not synced_with_material_paint:
+            layout.label(text="Base Color (PBR Paint) is the color source", icon='INFO')
 
-        row = layout.row(align=True)
+        col = layout.column()
+        col.active = synced_with_material_paint
+
+        UnifiedPaintPanel.prop_unified_color_picker(col, context, brush, "color", value_slider=True)
+
+        row = col.row(align=True)
         UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
         UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
         row.separator()
         row.operator("paint.brush_colors_flip", icon='FILE_REFRESH', text="", emboss=False)
         row.prop(ups, "use_unified_color", text="", icon='BRUSHES_ALL')
 
-        draw_color_jitter_panel(layout, context, brush)
+        draw_color_jitter_panel(col, context, brush)
 
     # Gradient
     elif brush.color_type == 'GRADIENT':
@@ -1709,7 +2394,9 @@ def brush_basic_texpaint_settings(layout, context, brush, *, compact=False):
     capabilities = brush.image_paint_capabilities
 
     if capabilities.has_color:
+        material_paint = brush.material_paint
         row = layout.row(align=True)
+        row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
         row.ui_units_x = 4
         UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
         UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
@@ -2018,7 +2705,23 @@ def brush_basic_grease_pencil_vertex_settings(layout, context, brush, *, compact
             layout.prop(gp_settings, "vertex_mode", text="Stroke Mode")
 
 
+class PAINT_PT_material_paint_channel_visibility(bpy.types.Panel):
+    bl_label = "Visible Channels"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    def draw(self, context):
+        draw_material_paint_visibility_popover(
+            context, self.layout, material_paint_visible_channels_owner(context),
+            context.tool_settings.paint_mode,
+        )
+
+
 classes = (
+    PAINT_MT_material_paint_channel_socket,
+    PAINT_MT_material_paint_brush_sync,
+    PAINT_PT_material_paint_channel_visibility,
     VIEW3D_MT_tools_projectpaint_clone,
 )
 

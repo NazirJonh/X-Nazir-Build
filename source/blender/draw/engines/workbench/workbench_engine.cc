@@ -45,6 +45,109 @@ namespace workbench {
 
 using namespace draw;
 
+/**
+ * Which material paint channels a mesh carries per-vertex, as a bitmask over
+ * #eMaterialPaintChannel.
+ *
+ * Only the scalar channels the prepass shader can read are ever set; Base Color goes through the
+ * regular vertex color path and Custom has no shader slot.
+ *
+ * This is a mask rather than one flag per channel because it is pushed to the shader per draw
+ * call, for every mesh in the scene whether it is painted or not: one push constant per draw is
+ * cheap, one per channel per draw is not, and the count would grow with every channel added.
+ */
+using MaterialPropsUsage = int;
+
+/**
+ * Channels #workbench_prepass.bsl.hh has a per-vertex input for. Kept next to the draw code rather
+ * than in the channel descriptor table, since it describes this shader rather than the paint data.
+ *
+ * NOTE: this is the *display* side, and it is deliberately narrow. Painting is not limited to
+ * these channels - the raster (Texture Paint) path writes every enabled channel to its image map.
+ * A channel missing here shows as unchanged shading in the Workbench viewport; its painted data is
+ * still stored and still reaches the render engines through the material.
+ */
+static constexpr int material_props_shader_channels()
+{
+  return (1 << PAINT_MATERIAL_CHANNEL_METALLIC) | (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+         (1 << PAINT_MATERIAL_CHANNEL_SPECULAR);
+}
+
+/* The prepass cannot see the DNA enum, so it spells the same bits out itself; catch them drifting
+ * apart here rather than through a channel that silently reads its neighbour's attribute. */
+static_assert(WB_VERTEX_PROP_METALLIC == (1 << PAINT_MATERIAL_CHANNEL_METALLIC));
+static_assert(WB_VERTEX_PROP_ROUGHNESS == (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+static_assert(WB_VERTEX_PROP_SPECULAR == (1 << PAINT_MATERIAL_CHANNEL_SPECULAR));
+
+/**
+ * Detects the material paint attributes present on \a ob that are also currently shown by
+ * #PaintModeSettings.material_shader_visible_channels.
+ *
+ * Presence alone is not enough: the shader reads these as float point attributes, and an unrelated
+ * attribute that merely shares the name (a face-domain color, say) must not switch shading. The
+ * shader-visible bitmask is deliberately independent of #BrushMaterialPaintChannel.use (whether
+ * strokes currently write to the channel): a channel keeps its painted data and displays it
+ * whether or not it is actively being painted, and can be hidden from display without losing that
+ * data or affecting painting.
+ *
+ * \param visible_channels: #material_props_visible_channels_get for this frame, hoisted out by the
+ * caller so the scene lookup is not repeated for every object.
+ * \param paint_mode: Tool settings the channel/attribute mapping is resolved against, so a channel
+ * redirected to an add-on-managed layer attribute is detected on that attribute. Null falls back
+ * to the built-in names.
+ */
+static MaterialPropsUsage material_props_usage_get(const int visible_channels,
+                                                   const PaintModeSettings *paint_mode,
+                                                   const Object &ob)
+{
+  /* Every mesh in the scene reaches this, so the cheap rejections come first: an all-hidden mask
+   * (or a channel set with no shader input) skips the attribute lookups entirely. */
+  if (visible_channels == 0 || ob.type != OB_MESH) {
+    return 0;
+  }
+
+  MaterialPropsUsage usage = 0;
+  const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(ob);
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if ((visible_channels & (1 << info.channel)) == 0) {
+      continue;
+    }
+    /* Must match what the batch request uploads (see `draw_sculpt.cc` /
+     * `draw_cache_impl_mesh.cc`), or the shader would be told a channel is present while its
+     * vertex buffer is missing. */
+    const StringRef attr_name = paint_mode ? BKE_paint_material_channel_attribute_name(
+                                                 *paint_mode, info.channel) :
+                                             StringRef(info.attribute_name);
+    if (attr_name.is_empty()) {
+      continue;
+    }
+    const std::optional<bke::AttributeMetaData> meta_data = attributes.lookup_meta_data(attr_name);
+    if (meta_data && meta_data->data_type == bke::AttrType::Float &&
+        meta_data->domain == bke::AttrDomain::Point)
+    {
+      usage |= 1 << info.channel;
+    }
+  }
+  return usage;
+}
+
+/** Tool settings the material paint channel/attribute mapping is resolved against, or null. */
+static const PaintModeSettings *material_props_paint_mode_get(const Scene &scene)
+{
+  return scene.toolsettings ? &scene.toolsettings->paint_mode : nullptr;
+}
+
+/** Channels that are both shader-displayable and switched on for display in \a scene. */
+static int material_props_visible_channels_get(const Scene &scene)
+{
+  if (scene.toolsettings == nullptr) {
+    return 0;
+  }
+  return scene.toolsettings->paint_mode.material_shader_visible_channels &
+         material_props_shader_channels();
+}
+
 class Instance : public DrawEngine {
  private:
   View view_ = {"DefaultView"};
@@ -101,6 +204,7 @@ class Instance : public DrawEngine {
                                              DEG_get_update_count(depsgraph));
 
     scene_state_.init(this->draw_ctx, scene_updated, camera_ob);
+
     shadow_ps_.init(scene_state_, resources_);
     resources_.init(scene_state_, this->draw_ctx);
 
@@ -129,6 +233,11 @@ class Instance : public DrawEngine {
   void end_sync() final
   {
     resources_.material_buf.push_update();
+    /* Poly Paint: the deferred composite pass is the one pass whose shader setup depends on
+     * something only known after every object has been synced (#material_ext_needed), so it is
+     * built here instead of in #begin_sync with the others. It must not be built in #draw: that
+     * runs every frame, while sync only runs when the scene changed. */
+    opaque_ps_.sync_deferred(scene_state_, resources_);
   }
 
   Material get_material(ObjectRef ob_ref, eV3DShadingColorType color_type, int slot = 0)
@@ -265,7 +374,8 @@ class Instance : public DrawEngine {
                  gpu::Batch *batch,
                  ResourceHandleRange handle,
                  const MaterialTexture *texture = nullptr,
-                 bool show_missing_texture = false)
+                 bool show_missing_texture = false,
+                 const MaterialPropsUsage material_props = 0)
   {
     resources_.material_buf.append(material);
     int material_index = resources_.material_buf.size() - 1;
@@ -275,7 +385,13 @@ class Instance : public DrawEngine {
     }
 
     this->draw_to_mesh_pass(ob_ref, material.is_transparent(), [&](MeshPass &mesh_pass) {
-      mesh_pass.get_subpass(eGeometryType::MESH, texture).draw(batch, handle, material_index);
+      PassMain::Sub &pass = mesh_pass.get_subpass(eGeometryType::MESH, texture);
+      /* Poly Paint: one command per draw call, not one per channel. Pushed unconditionally
+       * because a sub-pass is shared by many objects and push constants persist across the draws
+       * recorded into it - skipping it for an unpainted object would leave it shading with the
+       * previous object's mask. */
+      pass.push_constant("vertex_material_props", material_props);
+      pass.draw(batch, handle, material_index);
     });
   }
 
@@ -283,12 +399,32 @@ class Instance : public DrawEngine {
   {
     bool has_transparent_material = false;
 
+    /* Poly Paint: detect per-vertex material attributes so painted metallic/roughness/specular
+     * display in Object Mode too, not only while the Sculpt Mode draw path is active. They only
+     * override the solid base color, so they are ignored for texture and vertex-color shading. */
+    const PaintModeSettings *paint_mode = material_props_paint_mode_get(*scene_state_.scene);
+    MaterialPropsUsage material_props = 0;
+    if (object_state.color_type != V3D_SHADING_TEXTURE_COLOR &&
+        object_state.color_type != V3D_SHADING_VERTEX_COLOR)
+    {
+      material_props = material_props_usage_get(
+          material_props_visible_channels_get(*scene_state_.scene), paint_mode, *ob_ref.object);
+    }
+    const bool use_material_props = material_props != 0;
+    /* Poly Paint: read by #OpaquePass::draw to decide whether the full-precision material_ext
+     * G-buffer texture is worth allocating this frame at all. */
+    resources_.material_ext_needed |= use_material_props;
+
     if (object_state.use_per_material_batches) {
       const int material_count = BKE_object_material_used_with_fallback_eval(*ob_ref.object);
 
       Span<gpu::Batch *> batches;
       if (object_state.color_type == V3D_SHADING_TEXTURE_COLOR) {
         batches = DRW_cache_mesh_surface_texpaint_get(ob_ref.object);
+      }
+      else if (use_material_props) {
+        batches = DRW_cache_mesh_surface_shaded_material_props_get(
+            ob_ref.object, this->get_dummy_gpu_materials(material_count), paint_mode);
       }
       else {
         batches = DRW_cache_object_surface_material_get(
@@ -310,8 +446,13 @@ class Instance : public DrawEngine {
             texture = MaterialTexture(ob_ref.object, material_slot);
           }
 
-          this->draw_mesh(
-              ob_ref, mat, batches[i], handle, &texture, object_state.show_missing_texture);
+          this->draw_mesh(ob_ref,
+                          mat,
+                          batches[i],
+                          handle,
+                          &texture,
+                          object_state.show_missing_texture,
+                          material_props);
         }
       }
     }
@@ -328,6 +469,9 @@ class Instance : public DrawEngine {
           batch = DRW_cache_mesh_surface_sculptcolors_get(ob_ref.object);
         }
       }
+      else if (use_material_props) {
+        batch = DRW_cache_mesh_surface_material_props_get(ob_ref.object, paint_mode);
+      }
       else {
         batch = DRW_cache_object_surface_get(ob_ref.object);
       }
@@ -336,7 +480,13 @@ class Instance : public DrawEngine {
         Material mat = this->get_material(ob_ref, object_state.color_type);
         has_transparent_material = has_transparent_material || mat.is_transparent();
 
-        this->draw_mesh(ob_ref, mat, batch, handle, &object_state.image_paint_override);
+        this->draw_mesh(ob_ref,
+                        mat,
+                        batch,
+                        handle,
+                        &object_state.image_paint_override,
+                        false,
+                        material_props);
       }
     }
 
@@ -349,11 +499,24 @@ class Instance : public DrawEngine {
   {
     SculptBatchFeature features = SCULPT_BATCH_DEFAULT;
     if (object_state.color_type == V3D_SHADING_VERTEX_COLOR) {
-      features = SCULPT_BATCH_VERTEX_COLOR;
+      features |= SCULPT_BATCH_VERTEX_COLOR;
     }
     else if (object_state.color_type == V3D_SHADING_TEXTURE_COLOR) {
-      features = SCULPT_BATCH_UV;
+      features |= SCULPT_BATCH_UV;
     }
+
+    /* Only request the extra vertex buffers when the mesh actually carries painted channels;
+     * every sculpt object would pay for them otherwise. */
+    const MaterialPropsUsage material_props = material_props_usage_get(
+        material_props_visible_channels_get(*scene_state_.scene),
+        material_props_paint_mode_get(*scene_state_.scene),
+        *ob_ref.object);
+    if (material_props != 0) {
+      features |= SCULPT_BATCH_MATERIAL_PROPS;
+    }
+    /* Poly Paint: read by #OpaquePass::sync_deferred to decide whether the full-precision
+     * material_ext G-buffer texture is worth allocating at all. */
+    resources_.material_ext_needed |= material_props != 0;
 
     if (object_state.use_per_material_batches) {
       for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, features)) {
@@ -367,8 +530,13 @@ class Instance : public DrawEngine {
           texture = MaterialTexture(ob_ref.object, batch.material_slot);
         }
 
-        this->draw_mesh(
-            ob_ref, mat, batch.batch, handle, &texture, object_state.show_missing_texture);
+        this->draw_mesh(ob_ref,
+                        mat,
+                        batch.batch,
+                        handle,
+                        &texture,
+                        object_state.show_missing_texture,
+                        material_props);
       }
     }
     else {
@@ -378,7 +546,13 @@ class Instance : public DrawEngine {
           mat.base_color = batch.debug_color();
         }
 
-        this->draw_mesh(ob_ref, mat, batch.batch, handle, &object_state.image_paint_override);
+        this->draw_mesh(ob_ref,
+                        mat,
+                        batch.batch,
+                        handle,
+                        &object_state.image_paint_override,
+                        false,
+                        material_props);
       }
     }
   }

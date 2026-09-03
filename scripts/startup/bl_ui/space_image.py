@@ -16,6 +16,11 @@ from bl_ui.properties_paint_common import (
     brush_settings,
     brush_settings_advanced,
     draw_color_settings,
+    draw_material_paint_channels,
+    draw_material_paint_visibility_chevron,
+    draw_material_paint_sync_toggle,
+    material_paint_writable_channels,
+    draw_material_paint_visibility_popover,
     ClonePanel,
     BrushSelectPanel,
     TextureMaskPanel,
@@ -1275,6 +1280,205 @@ class IMAGE_PT_paint_select(Panel, ImagePaintPanel, BrushSelectPanel):
     bl_category = "Tool"
 
 
+class IMAGE_PT_material_paint_channel_visibility(Panel):
+    bl_label = "Visible Channels"
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    def draw(self, context):
+        draw_material_paint_visibility_popover(
+            context, self.layout, context.tool_settings.image_paint, context.tool_settings.paint_mode,
+        )
+
+
+class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
+    bl_context = ".paint_common_2d"
+    bl_category = "Tool"
+    bl_label = ""
+
+    @classmethod
+    def poll(cls, context):
+        sima = context.space_data
+        return sima and sima.mode == 'PAINT'
+
+    def draw_header(self, context):
+        paint = context.tool_settings.paint_mode
+        ob = context.object
+        me = ob.data if ob else None
+
+        label = iface_("Canvas")
+
+        if paint.canvas_source == 'MATERIAL':
+            label = iface_("Material")
+        elif paint.canvas_source == 'MATERIAL_PAINT':
+            label = iface_("PolyPaint")
+        elif paint.canvas_source == 'COLOR_ATTRIBUTE':
+            if me:
+                active_color = me.color_attributes.active_color
+                label = (
+                    active_color.name if active_color else
+                    iface_("Color Attribute")
+                )
+            else:
+                label = iface_("Color Attribute")
+        elif paint.canvas_image:
+            label = paint.canvas_image.name
+
+        self.layout.label(text="PBR Paint")
+        row = self.layout.row(align=True)
+        row.prop(paint, "canvas_source", text="")
+        draw_material_paint_sync_toggle(row, paint)
+        draw_material_paint_visibility_chevron(
+            context, row, paint,
+            panel="IMAGE_PT_material_paint_channel_visibility",
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        settings = context.tool_settings.image_paint
+        mode_settings = context.tool_settings.paint_mode
+        ob = context.active_object
+
+        if self.is_popover:
+            layout.prop(mode_settings, "canvas_source", text="Mode")
+            layout.separator()
+
+        have_image = False
+        canvas_source = mode_settings.canvas_source
+
+        match canvas_source:
+            case 'MATERIAL' | 'MATERIAL_PAINT':
+                if canvas_source == 'MATERIAL' and ob and len(ob.material_slots) > 1:
+                    layout.template_list(
+                        "MATERIAL_UL_matslots", "layers",
+                        ob, "material_slots",
+                        ob, "active_material_index", rows=2,
+                    )
+
+                if canvas_source == 'MATERIAL' and ob:
+                    has_image_fn = getattr(ob, "principled_paint_channel_has_image", None)
+                    if has_image_fn is not None:
+                        have_image = any(
+                            has_image_fn(channel)
+                            for channel in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL', 'ALPHA', 'EMISSION')
+                        )
+
+                draw_material_paint_channels(
+                    context,
+                    layout,
+                    getattr(settings, "brush", None),
+                    settings,
+                    mode_settings,
+                    show_custom=(canvas_source == 'MATERIAL_PAINT'),
+                )
+
+                # See the matching gate in space_view3d_toolbar.py: dead UI while sync is on.
+                if canvas_source == 'MATERIAL' and not mode_settings.use_brush_sync:
+                    self._draw_material_paint_brush_divergence(context, layout, settings, mode_settings)
+
+            case 'IMAGE':
+                if ob:
+                    mesh = ob.data
+                    uv_text = mesh.uv_layers.active.name if mesh.uv_layers.active else ""
+                    layout.template_ID(mode_settings, "canvas_image", new="image.new", open="image.open")
+                    if settings.missing_uvs:
+                        layout.operator("paint.add_simple_uvs", icon='ADD', text="Add UVs")
+                    else:
+                        layout.menu("VIEW3D_MT_tools_projectpaint_uvlayer", text=uv_text, translate=False)
+                else:
+                    layout.template_ID(mode_settings, "canvas_image", new="image.new", open="image.open")
+                have_image = mode_settings.canvas_image is not None
+
+            case 'COLOR_ATTRIBUTE':
+                if ob:
+                    mesh = ob.data
+
+                    row = layout.row()
+                    col = row.column()
+                    col.template_list(
+                        "MESH_UL_color_attributes_selector",
+                        "color_attributes",
+                        mesh,
+                        "color_attributes",
+                        mesh.color_attributes,
+                        "active_color_index",
+                        rows=3,
+                    )
+
+                    col = row.column(align=True)
+                    col.operator("geometry.color_attribute_add", icon='ADD', text="")
+                    col.operator("geometry.color_attribute_remove", icon='REMOVE', text="")
+
+        if settings.missing_uvs and canvas_source != 'MATERIAL_PAINT':
+            layout.separator()
+            split = layout.split()
+            split.label(text="UV Map Needed", icon='INFO')
+            split.operator("paint.add_simple_uvs", icon='ADD', text="Add Simple UVs")
+        elif have_image:
+            layout.separator()
+            layout.operator("image.save_all_modified", text="Save All Images", icon='FILE_TICK')
+
+    @staticmethod
+    def _draw_material_paint_brush_divergence(context, layout, settings, mode_settings):
+        """Read-only note when the Image Paint and Sculpt brushes are configured to write
+        different Material Texture channels.
+
+        Compares brush *configuration* only (#material_paint_writable_channels), not confirmed
+        shared paint destinations - the Sculpt Mode area may have a different active object than
+        this Image Editor. Never resolves or creates images/nodes.
+        """
+        ob = context.active_object
+        if ob is None or ob.type != 'MESH':
+            layout.label(text="No active mesh object", icon='INFO')
+            return
+        if ob.active_material is None:
+            layout.label(text="No active material", icon='INFO')
+            return
+
+        image_paint_channels = material_paint_writable_channels(
+            getattr(settings, "brush", None), settings, mode_settings,
+        )
+        sculpt_settings = context.tool_settings.sculpt
+        sculpt_channels = material_paint_writable_channels(
+            getattr(sculpt_settings, "brush", None) if sculpt_settings else None,
+            sculpt_settings,
+            mode_settings,
+        )
+
+        def _names(channels):
+            return ", ".join(sorted(c.replace('_', ' ').title() for c in channels)) or "None"
+
+        col = layout.column(align=True)
+
+        # Always report the Image Paint brush's own state first, whether or not it has one -
+        # missing brush is not painting-blocking information here, just context.
+        if image_paint_channels is None:
+            col.label(text="No active Image Paint brush", icon='INFO')
+        else:
+            col.label(text="Writes: %s" % _names(image_paint_channels))
+
+        if sculpt_channels is None:
+            # No Sculpt brush either: nothing further to compare against.
+            return
+
+        if image_paint_channels is None:
+            # No Image Paint brush selected, but Sculpt Mode already has a configured brush -
+            # this is the common case right after painting a Material Texture in Sculpt Mode, so
+            # surface what it writes instead of only reporting the Image Paint side as empty.
+            row = col.row(align=True)
+            row.label(text="Sculpt brush writes: %s" % _names(sculpt_channels), icon='INFO')
+            row.menu("PAINT_MT_material_paint_brush_sync", text="Sync Brush", icon='UV_SYNC_SELECT')
+        elif sculpt_channels != image_paint_channels:
+            diff = sorted(c.replace('_', ' ').title() for c in (sculpt_channels ^ image_paint_channels))
+            row = col.row(align=True)
+            row.label(text="Sculpt brush configuration differs: %s" % ", ".join(diff), icon='ERROR')
+            row.menu("PAINT_MT_material_paint_brush_sync", text="Sync Brush", icon='UV_SYNC_SELECT')
+
+
 class IMAGE_PT_paint_settings(Panel, ImagePaintPanel):
     bl_context = ".paint_common_2d"
     bl_category = "Tool"
@@ -1376,6 +1580,13 @@ class IMAGE_PT_tools_brush_texture(BrushButtonsPanel, Panel):
     bl_category = "Tool"
     bl_options = {'DEFAULT_CLOSED'}
 
+    @classmethod
+    def poll(cls, context):
+        if not super().poll(context):
+            return False
+        # PBR Paint and PolyPaint assign textures per-channel instead of via the brush texture slot.
+        return context.tool_settings.paint_mode.canvas_source not in {'MATERIAL', 'MATERIAL_PAINT'}
+
     def draw(self, context):
         layout = self.layout
 
@@ -1395,6 +1606,13 @@ class IMAGE_PT_tools_mask_texture(Panel, BrushButtonsPanel, TextureMaskPanel):
     bl_category = "Tool"
     bl_label = "Texture Mask"
     bl_ui_units_x = 12
+
+    @classmethod
+    def poll(cls, context):
+        if not BrushButtonsPanel.poll(context):
+            return False
+        # PBR Paint and PolyPaint assign textures per-channel instead of via the brush mask slot.
+        return context.tool_settings.paint_mode.canvas_source not in {'MATERIAL', 'MATERIAL_PAINT'}
 
 
 class IMAGE_PT_paint_stroke(BrushButtonsPanel, Panel, StrokePanel):
@@ -1424,7 +1642,7 @@ class IMAGE_PT_paint_curve(BrushButtonsPanel, Panel, FalloffPanel):
 
 class IMAGE_PT_tools_imagepaint_symmetry(BrushButtonsPanel, Panel):
     bl_context = ".imagepaint_2d"
-    bl_label = "Tiling"
+    bl_label = "Symmetry"
     bl_category = "Tool"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1435,6 +1653,14 @@ class IMAGE_PT_tools_imagepaint_symmetry(BrushButtonsPanel, Panel):
         ipaint = tool_settings.image_paint
 
         col = layout.column(align=True)
+        col.label(text="Mirror")
+        row = col.row(align=True)
+        row.prop(ipaint, "use_symmetry_x", text="X", toggle=True)
+        row.prop(ipaint, "use_symmetry_y", text="Y", toggle=True)
+        row.prop(ipaint, "use_symmetry_z", text="Z", toggle=True)
+
+        col = layout.column(align=True)
+        col.label(text="Tiling")
         row = col.row(align=True)
         row.prop(ipaint, "tile_x", text="X", toggle=True)
         row.prop(ipaint, "tile_y", text="Y", toggle=True)
@@ -1906,6 +2132,8 @@ classes = (
     IMAGE_PT_udim_tiles,
     IMAGE_PT_view_display,
     IMAGE_PT_paint_select,
+    IMAGE_PT_material_paint_channel_visibility,
+    IMAGE_PT_paint_canvas,
     IMAGE_PT_paint_settings,
     IMAGE_PT_paint_color,
     IMAGE_PT_paint_swatches,

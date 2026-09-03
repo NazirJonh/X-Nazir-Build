@@ -24,6 +24,7 @@ namespace blender {
 
 enum class PaintMode : int8_t;
 struct Brush;
+struct BrushMaterialPaint;
 struct ImBuf;
 struct ImagePool;
 struct Main;
@@ -79,6 +80,76 @@ void BKE_brush_init_gpencil_settings(Brush *brush);
 void BKE_brush_init_mesh_automasking_settings(Brush *brush);
 
 void BKE_brush_init_curves_sculpt_settings(Brush *brush);
+
+/**
+ * Allocates a #BrushMaterialPaint holding the default per-channel state, owned by the caller.
+ * Used both for #Brush.material_paint and for the scene-level per-brush presets, so that the
+ * defaults are defined in exactly one place.
+ */
+BrushMaterialPaint *BKE_brush_material_paint_create_default();
+
+/**
+ * Lazily allocates #Brush.material_paint if null.
+ * Call before reading/writing per-channel material paint values.
+ */
+void BKE_brush_material_paint_ensure(Brush *brush);
+
+/**
+ * Deep-copies channels/base_color/flags/shared_source_mapping from \a src. The caller owns the
+ * result and must eventually pass it to #BKE_brush_material_paint_free.
+ *
+ * \param flag: #LIB_ID_CREATE_ / #LIB_ID_COPY_ flags, as passed to the surrounding copy
+ * function. Unless #LIB_ID_CREATE_NO_USER_REFCOUNT is set, a counted reference (#id_us_plus) is
+ * taken on every #Tex any channel's #BrushMaterialPaintChannel.source_mtex.tex or
+ * #BrushMaterialPaint.shared_source_mapping.tex points at.
+ */
+BrushMaterialPaint *BKE_brush_material_paint_copy(const BrushMaterialPaint &src, int flag);
+
+/**
+ * Frees \a material_paint. No-op if \a material_paint is null.
+ *
+ * \param do_user_refcount: When true, drop a counted reference (#id_us_min) on every #Tex the
+ * struct holds. Required when the owner is not an ID whose `foreach_id` pass already walked those
+ * pointers — notably #PaintMaterialBrushPreset on remove/purge. Must stay false for
+ * #brush_free_data / #scene_free (foreach_id already ran) and for copies made with
+ * #LIB_ID_CREATE_NO_USER_REFCOUNT, or user counts double-decrement.
+ */
+void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
+                                   bool do_user_refcount = false);
+
+/**
+ * Overwrites \a dst's channels/base_color/flags/shared_source_mapping from \a src,
+ * adjusting #Tex user counts for every reference gained or dropped. \a dst == \a src
+ * (self-assignment) is a defined no-op.
+ */
+void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMaterialPaint &src);
+
+/**
+ * Copy the brush's paint color into the Base Color channel, when the brush has material paint
+ * settings with Sync with Brush enabled.
+ *
+ * \param paint: the active paint, used to resolve the unified color. May be null, in which case
+ * #Brush.color is read directly — the caller then only knows about the brush, not the mode.
+ *
+ * \note Both sync directions share one re-entrancy guard, so a sync triggered from either side
+ * cannot bounce back into the other. Keeping the guard here rather than in RNA is the whole point
+ * of this pair living in blenkernel: RNA reaches the Base Color from several unrelated update
+ * callbacks (brush color, unified color, the channel itself), and per-file guards would not see
+ * each other.
+ */
+void BKE_brush_material_paint_base_color_sync_to_channel(const Paint *paint, Brush *brush);
+
+/**
+ * Copy the Base Color channel into the brush's paint color, when Sync with Brush is enabled.
+ * The inverse of #BKE_brush_material_paint_base_color_sync_to_channel; shares its guard.
+ *
+ * \a scene, when non-null and Material brush sync is on, also writes the color onto the paired
+ * paint mode's #UnifiedPaintSettings. Image Editor Color reads that struct, not the shared
+ * #BrushMaterialPaint, so omitting it left the Image Editor brush color stale.
+ */
+void BKE_brush_material_paint_base_color_sync_to_brush(Paint *paint,
+                                                       Brush *brush,
+                                                       Scene *scene = nullptr);
 
 /**
  * Tag a linked brush as having changed settings so an indicator can be displayed to the user,
@@ -195,8 +266,15 @@ const MTex *BKE_brush_face_set_color_texture_get(const Brush *brush, eObjectMode
 
 /**
  * Radial control.
+ *
+ * \param r_is_color: When non-null, set true if the preview stores RGB (Material Paint source)
+ * rather than a single intensity channel. The F-key overlay uses this to skip the brush-color
+ * tint so a Base Color map is visible.
  */
-ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br, bool secondary, bool display_gradient);
+ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br,
+                                          bool secondary,
+                                          bool display_gradient,
+                                          bool *r_is_color = nullptr);
 
 /* Unified strength size and color. */
 

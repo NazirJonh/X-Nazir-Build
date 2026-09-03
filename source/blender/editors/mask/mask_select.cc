@@ -434,7 +434,6 @@ static wmOperatorStatus box_select_exec(bContext *C, wmOperator *op)
   Mask *mask_eval = DEG_get_evaluated(depsgraph, mask_orig);
 
   rcti rect;
-  rctf rectf;
   bool changed = false;
 
   const eSelectOp sel_op = eSelectOp(RNA_enum_get(op->ptr, "mode"));
@@ -446,9 +445,6 @@ static wmOperatorStatus box_select_exec(bContext *C, wmOperator *op)
 
   /* get rectangle from operator */
   WM_operator_properties_border_to_rcti(op, &rect);
-
-  ED_mask_point_pos(area, region, rect.xmin, rect.ymin, &rectf.xmin, &rectf.ymin);
-  ED_mask_point_pos(area, region, rect.xmax, rect.ymax, &rectf.xmax, &rectf.ymax);
 
   /* do actual selection */
   for (MaskLayer *mask_layer_orig = static_cast<MaskLayer *>(mask_orig->masklayers.first),
@@ -473,7 +469,18 @@ static wmOperatorStatus box_select_exec(bContext *C, wmOperator *op)
 
         /* TODO: handles? */
         /* TODO: uw? */
-        if (BLI_rctf_isect_pt_v(&rectf, point_deform->bezt.vec[1])) {
+
+        /* Project the mask point to screen and test there. A screen-aligned drag is a rotated
+         * quad in mask space, so the test cannot be done with an axis-aligned rect. */
+        float screen_co[2];
+        ED_mask_point_pos__reverse(area,
+                                   region,
+                                   point_deform->bezt.vec[1][0],
+                                   point_deform->bezt.vec[1][1],
+                                   &screen_co[0],
+                                   &screen_co[1]);
+
+        if (BLI_rcti_isect_pt(&rect, int(screen_co[0]), int(screen_co[1]))) {
           BKE_mask_point_select_set(point, select);
           BKE_mask_point_select_set_handle(point, MASK_WHICH_HANDLE_BOTH, select);
           changed = true;

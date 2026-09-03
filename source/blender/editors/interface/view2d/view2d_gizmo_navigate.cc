@@ -46,8 +46,11 @@ namespace {
 enum {
   GZ_INDEX_MOVE = 0,
   GZ_INDEX_ZOOM = 1,
+  /** Canvas rotation, only defined for spaces that support it (currently the Image Editor). */
+  GZ_INDEX_ROTATE = 2,
 
-  GZ_INDEX_TOTAL = 2,
+  /** Upper bound, not the number of gizmos a given space uses (see #NavigateGizmoParams.gz_num). */
+  GZ_INDEX_MAX = 3,
 };
 
 struct NavigateGizmoInfo {
@@ -56,8 +59,19 @@ struct NavigateGizmoInfo {
   uint icon;
 };
 
+/**
+ * The gizmos a space uses. Spaces define a prefix of the #GZ_INDEX_ enumeration, so `gz_num` is
+ * both the array length and the exclusive upper bound of the valid indices.
+ */
+struct NavigateGizmoParams {
+  const NavigateGizmoInfo *info;
+  int gz_num;
+};
+
 struct NavigateWidgetGroup {
-  wmGizmo *gz_array[GZ_INDEX_TOTAL];
+  wmGizmo *gz_array[GZ_INDEX_MAX];
+  /** Number of entries actually filled in #gz_array, the rest are null. */
+  int gz_num;
   /* Store the view state to check for changes. */
   struct {
     rcti rect_visible;
@@ -66,7 +80,7 @@ struct NavigateWidgetGroup {
 
 }  // namespace
 
-static NavigateGizmoInfo g_navigate_params_for_space_image[GZ_INDEX_TOTAL] = {
+static NavigateGizmoInfo g_navigate_params_for_space_image[] = {
     {
         "IMAGE_OT_view_pan",
         "GIZMO_GT_button_2d",
@@ -77,9 +91,14 @@ static NavigateGizmoInfo g_navigate_params_for_space_image[GZ_INDEX_TOTAL] = {
         "GIZMO_GT_button_2d",
         ICON_VIEW_ZOOM,
     },
+    {
+        "IMAGE_OT_view_rotate_interactive",
+        "GIZMO_GT_button_2d",
+        ICON_GESTURE_ROTATE,
+    },
 };
 
-static NavigateGizmoInfo g_navigate_params_for_space_clip[GZ_INDEX_TOTAL] = {
+static NavigateGizmoInfo g_navigate_params_for_space_clip[] = {
     {
         "CLIP_OT_view_pan",
         "GIZMO_GT_button_2d",
@@ -92,7 +111,7 @@ static NavigateGizmoInfo g_navigate_params_for_space_clip[GZ_INDEX_TOTAL] = {
     },
 };
 
-static NavigateGizmoInfo g_navigate_params_for_view2d[GZ_INDEX_TOTAL] = {
+static NavigateGizmoInfo g_navigate_params_for_view2d[] = {
     {
         "VIEW2D_OT_pan",
         "GIZMO_GT_button_2d",
@@ -105,16 +124,21 @@ static NavigateGizmoInfo g_navigate_params_for_view2d[GZ_INDEX_TOTAL] = {
     },
 };
 
-static NavigateGizmoInfo *navigate_params_from_space_type(short space_type)
+static_assert(ARRAY_SIZE(g_navigate_params_for_space_image) <= GZ_INDEX_MAX);
+static_assert(ARRAY_SIZE(g_navigate_params_for_space_clip) <= GZ_INDEX_MAX);
+static_assert(ARRAY_SIZE(g_navigate_params_for_view2d) <= GZ_INDEX_MAX);
+
+static NavigateGizmoParams navigate_params_from_space_type(short space_type)
 {
   switch (space_type) {
     case SPACE_IMAGE:
-      return g_navigate_params_for_space_image;
+      return {g_navigate_params_for_space_image,
+              int(ARRAY_SIZE(g_navigate_params_for_space_image))};
     case SPACE_CLIP:
-      return g_navigate_params_for_space_clip;
+      return {g_navigate_params_for_space_clip, int(ARRAY_SIZE(g_navigate_params_for_space_clip))};
     default:
       /* Used for sequencer. */
-      return g_navigate_params_for_view2d;
+      return {g_navigate_params_for_view2d, int(ARRAY_SIZE(g_navigate_params_for_view2d))};
   }
 }
 
@@ -157,11 +181,12 @@ static void WIDGETGROUP_navigate_setup(const bContext * /*C*/, wmGizmoGroup *gzg
 {
   NavigateWidgetGroup *navgroup = MEM_new_zeroed<NavigateWidgetGroup>(__func__);
 
-  const NavigateGizmoInfo *navigate_params = navigate_params_from_space_type(
+  const NavigateGizmoParams navigate_params = navigate_params_from_space_type(
       gzgroup->type->gzmap_params.spaceid);
+  navgroup->gz_num = navigate_params.gz_num;
 
-  for (int i = 0; i < GZ_INDEX_TOTAL; i++) {
-    const NavigateGizmoInfo *info = &navigate_params[i];
+  for (int i = 0; i < navgroup->gz_num; i++) {
+    const NavigateGizmoInfo *info = &navigate_params.info[i];
     navgroup->gz_array[i] = WM_gizmo_new(info->gizmo, gzgroup, nullptr);
     wmGizmo *gz = navgroup->gz_array[i];
     gz->flag |= WM_GIZMO_MOVE_CURSOR | WM_GIZMO_DRAW_MODAL;
@@ -197,6 +222,13 @@ static void WIDGETGROUP_navigate_setup(const bContext * /*C*/, wmGizmoGroup *gzg
     }
   }
 
+  /* Clicking the button gives no meaningful drag origin, so rotate about the canvas center. */
+  if (navgroup->gz_num > GZ_INDEX_ROTATE) {
+    wmGizmo *gz = navgroup->gz_array[GZ_INDEX_ROTATE];
+    wmGizmoOpElem *gzop = WM_gizmo_operator_get(gz, 0);
+    RNA_boolean_set(&gzop->ptr, "use_center_pivot", true);
+  }
+
   gzgroup->customdata = navgroup;
 }
 
@@ -224,7 +256,7 @@ static void WIDGETGROUP_navigate_draw_prepare(const bContext *C, wmGizmoGroup *g
 
   wmGizmo *gz;
 
-  for (uint i = 0; i < ARRAY_SIZE(navgroup->gz_array); i++) {
+  for (int i = 0; i < navgroup->gz_num; i++) {
     gz = navgroup->gz_array[i];
     WM_gizmo_set_flag(gz, WM_GIZMO_HIDDEN, true);
   }
@@ -240,6 +272,13 @@ static void WIDGETGROUP_navigate_draw_prepare(const bContext *C, wmGizmoGroup *g
   gz->matrix_basis[3][0] = roundf(co[0]);
   gz->matrix_basis[3][1] = roundf(co[1] - (icon_offset_mini * icon_mini_slot++));
   WM_gizmo_set_flag(gz, WM_GIZMO_HIDDEN, false);
+
+  if (navgroup->gz_num > GZ_INDEX_ROTATE) {
+    gz = navgroup->gz_array[GZ_INDEX_ROTATE];
+    gz->matrix_basis[3][0] = roundf(co[0]);
+    gz->matrix_basis[3][1] = roundf(co[1] - (icon_offset_mini * icon_mini_slot++));
+    WM_gizmo_set_flag(gz, WM_GIZMO_HIDDEN, false);
+  }
 }
 
 void VIEW2D_GGT_navigate_impl(wmGizmoGroupType *gzgt, const char *idname)

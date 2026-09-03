@@ -79,11 +79,15 @@ static void draw_render_info(
     const rcti *tiles = RE_engine_get_current_tiles(re, &total_tiles);
 
     if (total_tiles) {
-      /* find window pixel coordinates of origin */
-      int x, y;
-      ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &x, &y);
+      /* Find window pixel coordinates of origin. Navigation frame: the zoom scaling below is
+       * expressed relative to the un-rotated origin; the rotation is applied to the matrix
+       * instead. */
+      float anchor[2];
+      ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+      const int x = int(anchor[0]);
+      const int y = int(anchor[1]);
 
-      GPU_matrix_push();
+      ui::view2d_matrix_push_rotation(&region->v2d);
       GPU_matrix_translate_2f(x, y);
       GPU_matrix_scale_2f(zoomx, zoomy);
 
@@ -101,7 +105,7 @@ static void draw_render_info(
 
       immUnbindProgram();
 
-      GPU_matrix_pop();
+      ui::view2d_matrix_pop_rotation();
     }
   }
 }
@@ -629,12 +633,27 @@ void draw_image_uv_custom_region(const ARegion *region, const rctf &custom_regio
   immUniform4f("color", 1.0f, 0.25f, 0.25f, 1.0f);
   immUniform1f("dash_width", 6.0f);
   immUniform1f("udash_factor", 0.5f);
-  rcti region_rect;
+  /* Project the corners individually rather than using #view2d_view_to_region_rcti: under canvas
+   * rotation the border is a rotated quad on screen, which an axis-aligned rect cannot represent. */
+  const float corners_view[4][2] = {
+      {custom_region.xmin, custom_region.ymin},
+      {custom_region.xmax, custom_region.ymin},
+      {custom_region.xmax, custom_region.ymax},
+      {custom_region.xmin, custom_region.ymax},
+  };
+  float corners_px[4][2];
+  for (int i = 0; i < 4; i++) {
+    ui::view2d_view_to_region_fl(
+        &region->v2d, corners_view[i][0], corners_view[i][1], &corners_px[i][0], &corners_px[i][1]);
+  }
 
-  ui::view2d_view_to_region_rcti(&region->v2d, &custom_region, &region_rect);
-
-  imm_draw_box_wire_2d(
-      shdr_pos, region_rect.xmin, region_rect.ymin, region_rect.xmax, region_rect.ymax);
+  /* NOTE(Metal/AMD): For small primitives, line list more efficient than line-strip. */
+  immBegin(GPU_PRIM_LINES, 8);
+  for (int i = 0; i < 4; i++) {
+    immVertex2fv(shdr_pos, corners_px[i]);
+    immVertex2fv(shdr_pos, corners_px[(i + 1) % 4]);
+  }
+  immEnd();
 
   immUnbindProgram();
 }

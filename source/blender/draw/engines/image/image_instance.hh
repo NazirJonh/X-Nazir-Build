@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <cmath>
+
 #include <DRW_render.hh>
 
 #include "BKE_context.hh"
@@ -236,6 +238,53 @@ class Instance : public DrawEngine {
         space_->get_pan_offset(),
         space_->get_zoom(),
         space_->get_aspect_ratio());
+
+    /* Bake the canvas rotation into the screen-space to sampler-space transform. The non-rotated
+     * transform above is a pure scale + translation (`m_base`), so its scale/translation factors can
+     * be recovered directly. The rotation must happen in screen space about the screen position of
+     * the pivot (square in pixels), exactly like the interactive tools and overlays, so that the
+     * displayed image stays aligned with them regardless of zoom/pan. We therefore rotate the screen
+     * input first and then apply the base map: `m_rot = m_base * R_screen`.
+     *
+     * NOTE: This must stay geometrically equivalent to `view2d_view_rotation_matrix`
+     * (`editors/interface/view2d/view2d.cc`), which applies the same rotation for the overlays and
+     * the POST_VIEW callbacks. The two work in different spaces and so cannot share code, but a
+     * change to one convention requires the matching change here. */
+    const float rotation = space_->get_canvas_rotation();
+    if (rotation != 0.0f) {
+      float3x3 &m = state.ss_to_texture;
+      const float scale_x = m[0][0];
+      const float scale_y = m[1][1];
+      const float translate_x = m[2][0];
+      const float translate_y = m[2][1];
+
+      const float cos_r = cosf(rotation);
+      const float sin_r = sinf(rotation);
+      /* Aspect factors make the screen-space rotation square in pixels regardless of the region
+       * proportions. */
+      const float aspect_x = float(region->winx) / float(region->winy);
+      const float aspect_y = float(region->winy) / float(region->winx);
+
+      /* Screen-space (normalized screen UV) position where the image-space pivot is displayed.
+       * This is the inverse of the base map applied to the pivot, and unlike a plain `scale * pivot`
+       * it correctly tracks zoom and pan. */
+      const float2 pivot = space_->get_canvas_rotation_pivot();
+      const float pivot_sx = (pivot.x - translate_x) / scale_x;
+      const float pivot_sy = (pivot.y - translate_y) / scale_y;
+
+      /* Translation of the aspect-corrected screen-space rotation about the pivot. */
+      const float rot_tx = pivot_sx * (1.0f - cos_r) + (aspect_y * sin_r) * pivot_sy;
+      const float rot_ty = pivot_sy * (1.0f - cos_r) - (aspect_x * sin_r) * pivot_sx;
+
+      /* m_base * R_screen: the base map is diagonal, so its scale multiplies each row of R_screen. */
+      m = float3x3::identity();
+      m[0][0] = scale_x * cos_r;
+      m[1][0] = scale_x * (-(aspect_y * sin_r));
+      m[0][1] = scale_y * (aspect_x * sin_r);
+      m[1][1] = scale_y * cos_r;
+      m[2][0] = scale_x * rot_tx + translate_x;
+      m[2][1] = scale_y * rot_ty + translate_y;
+    }
 
     const Scene *scene = DRW_context_get()->scene;
     state.sh_params.update(space_.get(), scene, state.image, image_buffer);

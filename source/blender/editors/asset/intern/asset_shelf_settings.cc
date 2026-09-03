@@ -90,8 +90,18 @@ AssetShelfSettings &AssetShelfSettings::operator=(const AssetShelfSettings &othe
   if (this->catalog_states != other.catalog_states) {
     BKE_asset_catalog_state_list_free(this->catalog_states);
   }
+  else {
+    /* Shallow copied before: the head aliases `other`'s nodes. Detach it so the duplicate below
+     * does not free list data that is still owned by `other`. */
+    this->catalog_states = {nullptr, nullptr};
+  }
   if (this->library_catalog_states != other.library_catalog_states) {
     BKE_asset_shelf_library_catalog_state_list_free(this->library_catalog_states);
+  }
+  else {
+    /* Shallow copied before: the head aliases `other`'s nodes. Detach it so the duplicate below
+     * does not free list data that is still owned by `other`. */
+    this->library_catalog_states = {nullptr, nullptr};
   }
   if (this->filter_name_match_map_types != other.filter_name_match_map_types) {
     free_name_match_list_safe(this->filter_name_match_map_types);

@@ -799,7 +799,7 @@ static TreeElement *outliner_find_first_desired_element_at_y(const SpaceOutliner
         space_outliner, te, view_co_limit, callback_test);
     if (te_sub != nullptr) {
       /* Skip the element if it was not visible to start with. */
-      if (te->ys + UI_UNIT_Y > view_co_limit) {
+      if (te->ys + outliner_tree_element_height(*space_outliner, *te) > view_co_limit) {
         return te_sub;
       }
       return nullptr;

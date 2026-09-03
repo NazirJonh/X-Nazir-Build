@@ -1804,6 +1804,76 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 69)) {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_OUTLINER) {
+            continue;
+          }
+          SpaceOutliner &space_outliner = reinterpret_cast<SpaceOutliner &>(sl);
+          if (!ELEM(space_outliner.outlinevis,
+                    SO_SCENES,
+                    SO_LIBRARIES,
+                    SO_SEQUENCE,
+                    SO_DATA_API,
+                    SO_ID_ORPHANS,
+                    SO_VIEW_LAYER,
+                    SO_OVERRIDES_LIBRARY,
+                    SO_STACK_LAYERS))
+          {
+            space_outliner.outlinevis = SO_VIEW_LAYER;
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 70)) {
+    /* The Outliner grew a tool header. `ED_area_init` only initializes regions that already
+     * exist, so an old file needs the region added here or the Stack Layers controls have nowhere
+     * to draw. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_OUTLINER) {
+            continue;
+          }
+          ListBaseT<ARegion> *regionbase = (&sl == area.spacedata.first) ? &area.regionbase :
+                                                                          &sl.regionbase;
+          ARegion *region = do_versions_add_region_if_not_found(
+              regionbase, RGN_TYPE_TOOL_HEADER, "tool header", RGN_TYPE_HEADER);
+          if (region == nullptr) {
+            continue;
+          }
+          region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+          /* Shown when the space is set to Stack Layers; not "hidden by user", or it would never
+           * come back on its own. */
+          region->flag |= RGN_FLAG_HIDDEN;
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 72)) {
+    /* The Stack Layers view opens as a layer manager does: tall rows with a thumbnail, and the
+     * visibility toggle down the left edge. Both are #SpaceOutliner defaults now, which a space
+     * written before they existed carries as a zero -- and a zero here reads as "the user turned
+     * everything off", not as "unset". Files from before the mode existed are given the defaults
+     * once, so an Outliner opened in one looks like an Outliner opened in a new file. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_OUTLINER) {
+            continue;
+          }
+          SpaceOutliner &space_outliner = reinterpret_cast<SpaceOutliner &>(sl);
+          space_outliner.stack_layers_flag |= SO_SL_BIG_ROWS | SO_SL_VISIBILITY_LEFT;
+        }
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

@@ -25,6 +25,7 @@
 #include "BKE_outliner_treehash.hh"
 #include "BKE_screen.hh"
 
+#include "ED_outliner_stack_automation.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 
@@ -54,8 +55,8 @@ namespace blender {
 
 namespace ed::outliner {
 
-SpaceOutliner_Runtime::SpaceOutliner_Runtime(const SpaceOutliner_Runtime & /*other*/)
-    : tree_display(nullptr), tree_hash(nullptr)
+SpaceOutliner_Runtime::SpaceOutliner_Runtime(const SpaceOutliner_Runtime &other)
+    : tree_display(nullptr), tree_hash(nullptr), stack_focus(other.stack_focus)
 {
 }
 
@@ -72,12 +73,7 @@ static void outliner_main_region_init(wmWindowManager *wm, ARegion *region)
   region->v2d.scroll |= V2D_SCROLL_HORIZONTAL_HIDE;
   region->v2d.scroll |= V2D_SCROLL_VERTICAL_HIDE;
 
-  region->v2d.align = (V2D_ALIGN_NO_NEG_X | V2D_ALIGN_NO_POS_Y);
-  region->v2d.keepzoom = (V2D_LOCKZOOM_X | V2D_LOCKZOOM_Y | V2D_LIMITZOOM | V2D_KEEPASPECT);
-  region->v2d.keeptot = V2D_KEEPTOT_STRICT;
-  region->v2d.minzoom = region->v2d.maxzoom = 1.0f;
-
-  view2d_region_reinit(&region->v2d, ui::V2D_COMMONVIEW_LIST, region->winx, region->winy);
+  view2d_region_reinit(&region->v2d, ui::V2D_COMMONVIEW_PANELS_UI, region->winx, region->winy);
 
   /* own keymap */
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Outliner", SPACE_OUTLINER, RGN_TYPE_WINDOW);
@@ -143,11 +139,30 @@ static void outliner_main_region_listener(const wmRegionListenerParams *params)
         case ND_LIB_OVERRIDE_CHANGED:
           ED_region_tag_redraw(region);
           break;
+        case ND_UNDO:
+          /* Session UIDs survive undo, addresses do not: everything the stack cached by address
+           * is dropped. The focus stays -- it names its object by UID, and the resolver drops it
+           * itself on the next read if that object is gone. */
+          outliner_stack_sources_undo_reset();
+          if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+            outliner_stack_rows_invalidate(*space_outliner);
+            ED_region_tag_redraw(region);
+          }
+          break;
       }
       break;
     case NC_SCENE:
       switch (wmn->data) {
         case ND_OB_ACTIVE:
+          if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+              (space_outliner->stack_layers_flag & SO_SL_PINNED) == 0)
+          {
+            space_outliner->runtime->stack_focus = {};
+            outliner_stack_rows_invalidate(*space_outliner);
+            ED_region_tag_redraw(region);
+            break;
+          }
+          ATTR_FALLTHROUGH;
         case ND_OB_SELECT:
           if (outliner_requires_rebuild_on_select_or_active_change(space_outliner)) {
             ED_region_tag_redraw(region);
@@ -159,6 +174,14 @@ static void outliner_main_region_listener(const wmRegionListenerParams *params)
         case ND_FRAME:
           /* Rebuilding the outliner tree is expensive and shouldn't be done when scrubbing. */
           ED_region_tag_redraw_no_rebuild(region);
+          break;
+        case ND_TOOLSETTINGS:
+          if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+            ED_region_tag_redraw_no_rebuild(region);
+          }
+          else {
+            ED_region_tag_redraw(region);
+          }
           break;
         case ND_OB_VISIBLE:
         case ND_OB_RENDER:
@@ -244,10 +267,18 @@ static void outliner_main_region_listener(const wmRegionListenerParams *params)
       }
       break;
     case NC_MATERIAL:
-      switch (wmn->data) {
-        case ND_SHADING_LINKS:
-          ED_region_tag_redraw_no_rebuild(region);
-          break;
+      if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+          stack_source_for_space(*space_outliner)->notifier_invalidates(*wmn))
+      {
+        /* A rename, a shading tweak or an edit from another editor can move the rows the
+         * state hash does not see coming; ask the source again and let the hash decide
+         * whether anything really changed. */
+        outliner_stack_rows_invalidate(*space_outliner);
+        ED_region_tag_redraw(region);
+        break;
+      }
+      if (wmn->data == ND_SHADING_LINKS) {
+        ED_region_tag_redraw_no_rebuild(region);
       }
       break;
     case NC_GEOM:
@@ -309,6 +340,15 @@ static void outliner_main_region_listener(const wmRegionListenerParams *params)
       }
       break;
     case NC_NODE:
+      if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+          stack_source_for_space(*space_outliner)->notifier_invalidates(*wmn))
+      {
+        /* The rows are read from a node graph by some sources and not by others; the state hash
+         * decides whether anything actually changed, so this only has to prompt the question. */
+        outliner_stack_rows_invalidate(*space_outliner);
+        ED_region_tag_redraw(region);
+        break;
+      }
       if (ELEM(wmn->action, NA_ADDED, NA_REMOVED) &&
           ELEM(space_outliner->outlinevis, SO_LIBRARIES, SO_DATA_API))
       {
@@ -316,6 +356,15 @@ static void outliner_main_region_listener(const wmRegionListenerParams *params)
       }
       break;
     case NC_IMAGE:
+      if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+          stack_source_for_space(*space_outliner)->notifier_invalidates(*wmn))
+      {
+        /* A data-block coming or going may have changed the rows; a source that reads no image
+         * data at all never answers true here in the first place. */
+        outliner_stack_rows_invalidate(*space_outliner);
+        ED_region_tag_redraw(region);
+        break;
+      }
       if (ELEM(wmn->action, NA_ADDED, NA_REMOVED) &&
           ELEM(space_outliner->outlinevis, SO_LIBRARIES, SO_DATA_API))
       {
@@ -339,6 +388,9 @@ static void outliner_main_region_message_subscribe(const wmRegionMessageSubscrib
 
   if (ELEM(space_outliner->outlinevis, SO_VIEW_LAYER, SO_SCENES, SO_OVERRIDES_LIBRARY)) {
     WM_msg_subscribe_rna_anon_prop(mbus, Window, view_layer, &msg_sub_value_region_tag_redraw);
+  }
+  if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+    stack_source_for_space(*space_outliner)->message_subscribe(*params);
   }
 }
 
@@ -409,6 +461,15 @@ static SpaceLink *outliner_create(const ScrArea * /*area*/, const Scene * /*scen
   region->regiontype = RGN_TYPE_HEADER;
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
 
+  /* Tool header: only the Stack Layers display mode puts anything in it, so it starts hidden and
+   * the display-mode update shows it. */
+  region = BKE_area_region_new();
+
+  BLI_addtail(&space_outliner->regionbase, region);
+  region->regiontype = RGN_TYPE_TOOL_HEADER;
+  region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+  region->flag = RGN_FLAG_HIDDEN;
+
   /* main region */
   region = BKE_area_region_new();
 
@@ -432,7 +493,30 @@ static void outliner_free(SpaceLink *sl)
 }
 
 /* spacetype; init callback */
-static void outliner_init(wmWindowManager * /*wm*/, ScrArea * /*area*/) {}
+void outliner_tool_header_visibility_sync(ScrArea *area, const SpaceOutliner &space_outliner)
+{
+  const bool show = space_outliner.outlinevis == SO_STACK_LAYERS;
+  for (ARegion &region : area->regionbase) {
+    if (region.regiontype != RGN_TYPE_TOOL_HEADER) {
+      continue;
+    }
+    const bool hidden = !show || (region.flag & RGN_FLAG_HIDDEN_BY_USER);
+    if (bool(region.flag & RGN_FLAG_HIDDEN) == hidden) {
+      continue;
+    }
+    SET_FLAG_FROM_TEST(region.flag, hidden, RGN_FLAG_HIDDEN);
+    ED_area_tag_region_size_update(area, &region);
+    ED_region_tag_redraw(&region);
+  }
+}
+
+static void outliner_init(wmWindowManager * /*wm*/, ScrArea *area)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(area->spacedata.first);
+  if (space_outliner != nullptr) {
+    outliner_tool_header_visibility_sync(area, *space_outliner);
+  }
+}
 
 static SpaceLink *outliner_duplicate(SpaceLink *sl)
 {
@@ -451,6 +535,15 @@ static SpaceLink *outliner_duplicate(SpaceLink *sl)
 static void outliner_id_remap(ScrArea *area, SpaceLink *slink, const bke::id::IDRemapper &mappings)
 {
   SpaceOutliner *space_outliner = reinterpret_cast<SpaceOutliner *>(slink);
+
+  /* The stack rows hold ID pointers (their sub-rows) and RNA pointers into node graphs; a remap
+   * moves both, and picking them apart one by one costs more than rebuilding the model, which is
+   * cheap. The focus is not remapped: it names its object by session UID, and the resolver
+   * re-checks it on the next read. */
+  if (space_outliner->runtime != nullptr) {
+    outliner_stack_rows_invalidate(*space_outliner);
+    outliner_stack_sources_undo_reset();
+  }
 
   if (!space_outliner->treestore) {
     return;
@@ -677,7 +770,9 @@ void ED_spacetype_outliner()
   /* regions: main window */
   art = MEM_new_zeroed<ARegionType>("spacetype outliner region");
   art->regionid = RGN_TYPE_WINDOW;
-  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D;
+  /* View2D has default wheel-zoom bindings without modifiers. The Outliner provides its own
+   * View2D bindings so plain wheel input remains scrolling and zoom requires Ctrl. */
+  art->keymapflag = ED_KEYMAP_UI;
 
   art->init = outliner_main_region_init;
   art->draw = outliner_main_region_draw;
@@ -690,6 +785,20 @@ void ED_spacetype_outliner()
   /* regions: header */
   art = MEM_new_zeroed<ARegionType>("spacetype outliner header region");
   art->regionid = RGN_TYPE_HEADER;
+  art->prefsizey = HEADERY;
+  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D | ED_KEYMAP_HEADER;
+
+  art->init = outliner_header_region_init;
+  art->draw = outliner_header_region_draw;
+  art->free = outliner_header_region_free;
+  art->listener = outliner_header_region_listener;
+  BLI_addhead(&st->regiontypes, art);
+
+  /* regions: tool header. Shares the header's callbacks: it is an ordinary header region that
+   * happens to be shown only in one display mode. No `ED_KEYMAP_FRAMES` -- the Outliner has no
+   * notion of the current frame to navigate. */
+  art = MEM_new_zeroed<ARegionType>("spacetype outliner tool header region");
+  art->regionid = RGN_TYPE_TOOL_HEADER;
   art->prefsizey = HEADERY;
   art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D | ED_KEYMAP_HEADER;
 

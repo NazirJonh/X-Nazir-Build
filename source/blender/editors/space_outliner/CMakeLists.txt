@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 set(INC
+  .
+  ../asset
   ../include
   ../../blenfont
   ../../makesrna
@@ -22,6 +24,10 @@ set(SRC
   outliner_ops.cc
   outliner_query.cc
   outliner_select.cc
+  outliner_stack_layers.cc
+  outliner_stack_source.cc
+  outliner_stack_source_paint_material.cc
+  outliner_stack_source_shape_keys.cc
   outliner_sync.cc
   outliner_tools.cc
   outliner_tree.cc
@@ -36,6 +42,7 @@ set(SRC
   tree/tree_display_override_library_properties.cc
   tree/tree_display_scenes.cc
   tree/tree_display_sequencer.cc
+  tree/tree_display_stack_layers.cc
   tree/tree_display_view_layer.cc
   tree/tree_element.cc
   tree/tree_element_action_slot.cc
@@ -77,11 +84,13 @@ set(SRC
   tree/tree_element_scene_objects.cc
   tree/tree_element_seq.cc
   tree/tree_element_shapekey.cc
+  tree/tree_element_stack_layer.cc
   tree/tree_element_view_collection.cc
   tree/tree_element_view_layer.cc
   tree/tree_iterator.cc
 
   outliner_intern.hh
+  outliner_stack_source.hh
   tree/common.hh
   tree/tree_display.hh
   tree/tree_element.hh
@@ -124,6 +133,7 @@ set(SRC
   tree/tree_element_scene_objects.hh
   tree/tree_element_seq.hh
   tree/tree_element_shapekey.hh
+  tree/tree_element_stack_layer.hh
   tree/tree_element_view_collection.hh
   tree/tree_element_view_layer.hh
   tree/tree_iterator.hh
@@ -131,6 +141,7 @@ set(SRC
 
 set(LIB
   PRIVATE bf::animrig
+  PRIVATE bf::asset_system
   PRIVATE bf::blenkernel
   PRIVATE bf::blenlib
   PRIVATE bf::blenloader
@@ -153,3 +164,16 @@ blender_add_lib(bf_editor_space_outliner "${SRC}" "${INC}" "${INC_SYS}" "${LIB}"
 
 # RNA_prototypes.hh dna_type_offsets.h
 add_dependencies(bf_editor_space_outliner bf_rna)
+
+if(WITH_GTESTS)
+  set(TEST_SRC
+    outliner_stack_source_paint_material_test.cc
+  )
+  set(TEST_INC
+  )
+  set(TEST_LIB
+    bf_editor_space_outliner
+  )
+  blender_add_test_suite_lib(
+    editor_space_outliner "${TEST_SRC}" "${INC};${TEST_INC}" "${INC_SYS}" "${LIB};${TEST_LIB}")
+endif()

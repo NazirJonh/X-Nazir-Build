@@ -6,6 +6,8 @@
  * \ingroup spoutliner
  */
 
+#include "MEM_guardedalloc.h"
+
 #include "DNA_armature_types.h"
 #include "DNA_collection_types.h"
 #include "DNA_constraint_types.h"
@@ -21,6 +23,7 @@
 
 #include "BLI_fileops.h"
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
@@ -28,6 +31,7 @@
 #include "BLI_string_utils.hh"
 #include "BLI_utildefines.h"
 
+#include "BLF_api.hh"
 #include "BLT_translation.hh"
 
 #include "BKE_action.hh"
@@ -36,6 +40,7 @@
 #include "BKE_curve.hh"
 #include "BKE_deform.hh"
 #include "BKE_gpencil_legacy.h"
+#include "BKE_global.hh"
 #include "BKE_grease_pencil.hh"
 #include "BKE_idtype.hh"
 #include "BKE_key.hh"
@@ -49,6 +54,7 @@
 #include "BKE_node.hh"
 #include "BKE_object.hh"
 #include "BKE_particle.h"
+#include "BKE_preview_image.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 
@@ -71,7 +77,11 @@
 #include "WM_types.hh"
 
 #include "GPU_immediate.hh"
+#include "GPU_immediate_util.hh"
 #include "GPU_state.hh"
+
+#include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
 
 #include "UI_interface.hh"
 #include "UI_interface_icons.hh"
@@ -81,6 +91,7 @@
 #include "RNA_access.hh"
 
 #include "outliner_intern.hh"
+#include "outliner_stack_source.hh"
 #include "tree/tree_element.hh"
 #include "tree/tree_element_grease_pencil_node.hh"
 #include "tree/tree_element_id.hh"
@@ -92,6 +103,44 @@
 namespace blender {
 
 namespace ed::outliner {
+
+/**
+ * How far outside the preview its frame sits, in pixels before the interface scale.
+ */
+static constexpr float OUTLINER_STACK_PREVIEW_FRAME_MARGIN = 2.0f;
+
+/**
+ * The empty-texture placeholder: the texture icon at preview size with a faint frame, standing
+ * for a slot whose data exists but has nothing to show in its thumbnail yet.
+ */
+static void stack_preview_empty_draw(const rctf &preview_rect, const float alpha_fac)
+{
+  ui::icon_draw_ex(preview_rect.xmin,
+                   preview_rect.ymin,
+                   ICON_TEXTURE_DATA,
+                   UI_INV_SCALE_FAC,
+                   alpha_fac,
+                   0.0f,
+                   nullptr,
+                   false,
+                   nullptr,
+                   false,
+                   OUTLINER_STACK_PREVIEW_SCALE);
+
+  float preview_border[4];
+  ui::theme::get_color_blend_4f(TH_TEXT, TH_BACK, 0.9f, preview_border);
+  preview_border[3] *= alpha_fac;
+  const float margin = OUTLINER_STACK_PREVIEW_FRAME_MARGIN * UI_SCALE_FAC;
+  rctf frame{};
+  BLI_rctf_init(&frame,
+                preview_rect.xmin - margin,
+                preview_rect.xmax + margin,
+                preview_rect.ymin - margin,
+                preview_rect.ymax + margin);
+  draw_roundbox_corner_set(ui::CNR_ALL);
+  ui::draw_roundbox_aa(&frame, false, UI_UNIT_Y / 5.0f, preview_border);
+  GPU_blend(GPU_BLEND_ALPHA); /* Round-box disables. */
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Tree Size Functions
@@ -105,7 +154,7 @@ static void outliner_tree_dimensions_impl(SpaceOutliner *space_outliner,
   for (TreeElement &te : *lb) {
     *width = std::max(*width, int(te.xend));
     if (height != nullptr) {
-      *height += UI_UNIT_Y;
+      *height += outliner_tree_element_height(*space_outliner, te);
     }
 
     TreeStoreElem *tselem = TREESTORE(&te);
@@ -744,7 +793,10 @@ static void scenes__collection_set_flag_recursive_fn(bContext *C, void *poin, vo
   outliner_collection_set_flag_recursive_fn(C, nullptr, collection, propname);
 }
 
-static void namebutton_fn(bContext *C, TreeStoreElem *tselem, const char *oldname)
+static void namebutton_fn(bContext *C,
+                          TreeStoreElem *tselem,
+                          const char *oldname,
+                          const StackItemIdentity &stack_row_identity = {})
 {
   Main *bmain = CTX_data_main(C);
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
@@ -1008,6 +1060,37 @@ static void namebutton_fn(bContext *C, TreeStoreElem *tselem, const char *oldnam
           WM_event_add_notifier(C, NC_ID | NA_RENAME, nullptr);
           DEG_id_tag_update(tselem->id, ID_RECALC_SYNC_TO_EVAL);
           undo_str = CTX_N_(BLT_I18NCONTEXT_OPERATOR_DEFAULT, "Rename Shape Key");
+          break;
+        }
+        case TSE_STACK_LAYER: {
+          /* The field typed into one channel's node label; a layer is the same row in every
+           * channel it appears in, so the edit API is what carries the name to the rest of them.
+           * Restore the old one first, the way the other cases here do, so that a name the source
+           * refuses -- an empty one, most of all -- leaves the row as it was.
+           *
+           * The rows may have been re-read since the field was opened, and an edit that moved
+           * rows renumbers them: the ordinal this field was opened on may name a different row by
+           * now. The field captured its row's identity at open time, and the confirmation
+           * resolves that identity to wherever the row sits now instead of trusting the ordinal.
+           * How much that is worth is the source's to give: a row it hands no
+           * #StackRow::stable_id for has nothing to be found by but its position, and
+           * #outliner_stack_identity_resolve falls back to it -- for such a source the rename
+           * lands wherever the ordinal now points, as it did before identities. */
+          const int ordinal = outliner_stack_identity_resolve(outliner_stack_read_context(*C),
+                                                              *space_outliner,
+                                                              stack_row_identity);
+          char *name_buffer = (ordinal >= 0) ?
+                                  outliner_stack_row_name_buffer(*space_outliner, ordinal) :
+                                  nullptr;
+          if (name_buffer == nullptr) {
+            break;
+          }
+          char newname[MAX_NAME];
+          STRNCPY_UTF8(newname, name_buffer);
+          BLI_strncpy_utf8(name_buffer, oldname, MAX_NAME);
+          if (outliner_stack_row_rename(C, *space_outliner, ordinal, newname)) {
+            undo_str = CTX_N_(BLT_I18NCONTEXT_OPERATOR_DEFAULT, "Rename Layer");
+          }
           break;
         }
         default:
@@ -1858,7 +1941,7 @@ static void outliner_draw_userbuts(ui::Block *block,
                                    const SpaceOutliner *space_outliner)
 {
   tree_iterator::all_open(*space_outliner, [&](const TreeElement *te) {
-    if (!outliner_is_element_in_view(te, &region->v2d)) {
+    if (!outliner_is_element_in_view(*space_outliner, te, &region->v2d)) {
       return;
     }
 
@@ -1958,7 +2041,7 @@ static void outliner_draw_overrides_rna_buts(ui::Block *block,
       outliner_draw_overrides_rna_buts(block, region, space_outliner, &te.subtree, x);
     }
 
-    if (!outliner_is_element_in_view(&te, &region->v2d)) {
+    if (!outliner_is_element_in_view(*space_outliner, &te, &region->v2d)) {
       continue;
     }
     TreeElementOverridesProperty *override_elem = tree_element_cast<TreeElementOverridesProperty>(
@@ -2058,7 +2141,7 @@ static void outliner_draw_overrides_restrictbuts(Main *bmain,
       outliner_draw_overrides_restrictbuts(bmain, block, region, space_outliner, &te.subtree, x);
     }
 
-    if (!outliner_is_element_in_view(&te, &region->v2d)) {
+    if (!outliner_is_element_in_view(*space_outliner, &te, &region->v2d)) {
       continue;
     }
     TreeElementID *te_id = tree_element_cast<TreeElementID>(&te);
@@ -2121,6 +2204,469 @@ static void outliner_draw_separator(ARegion *region, const int x)
   immUnbindProgram();
 }
 
+static void outliner_draw_text(const uiFontStyle *fstyle,
+                               const View2D &v2d,
+                               const float x,
+                               const float y,
+                               const char *text,
+                               const uchar color[4])
+{
+  ui::fontstyle_set(fstyle);
+
+  /* Render zoomed text at a compensating font size and scale it back with the font aspect. This
+   * keeps the on-screen size tied to the View2D zoom while preserving glyph detail. */
+  const float view_aspect = BLI_rctf_size_x(&v2d.cur) /
+                            float(BLI_rcti_size_x(&v2d.mask) + 1);
+  const float aspect = (view_aspect > 0.0f) ? view_aspect : 1.0f;
+  const int font_id = fstyle->uifont_id;
+  BLF_enable(font_id, BLF_ASPECT);
+  BLF_aspect(font_id, aspect, aspect, 1.0f);
+  BLF_size(font_id, fstyle->points * UI_SCALE_FAC / aspect);
+  BLF_position(font_id, x, y, 0.0f);
+  BLF_color4ubv(font_id, color);
+  BLF_draw(font_id, text, BLF_DRAW_STR_DUMMY_MAX);
+  BLF_disable(font_id, BLF_ASPECT);
+}
+
+/**
+ * The value and mode columns of the Stack Layers mode.
+ *
+ * Which properties those are is the source's business, so this only knows that a row may name one
+ * of each and how wide the source wants them. A row that names neither still reserves the space:
+ * columns that shift from row to row are harder to read than columns with a gap in them.
+ */
+/**
+ * How far the visibility toggle is kept from the edges of the column it sits in.
+ *
+ * The toggle is shifted two pixels toward the hierarchy: its left inset keeps it clear of the
+ * region border while its right edge meets the beginning of the tree.
+ */
+static float stack_visibility_column_left_inset()
+{
+  return 8.0f * UI_SCALE_FAC;
+}
+
+/**
+ * Where the one-unit-tall content of a row whose bottom is \a row_bottom sits.
+ *
+ * A Stack Layers row is two units tall with `SO_SL_BIG_ROWS` on, and its content -- name, icon,
+ * toggles, columns -- is centered in that: a name pinned to one edge of a tall row reads as
+ * belonging to the row next to it.
+ */
+static int stack_row_content_offset(const int row_bottom, const int row_height)
+{
+  return row_bottom + (row_height - UI_UNIT_Y) / 2;
+}
+
+/**
+ * The same line, for the passes that draw their buttons from `te->ys`.
+ *
+ * They run after the tree has been laid out, so they have the row's bottom rather than the running
+ * position #outliner_draw_tree_element works with.
+ */
+static int stack_row_content_y(const SpaceOutliner &space_outliner, const TreeElement &te)
+{
+  return stack_row_content_offset(te.ys, outliner_tree_element_height(space_outliner, te));
+}
+
+/** Forward declaration; defined further down, next to the rest of the fading logic. */
+static bool element_should_draw_faded(const TreeViewContext &tvc,
+                                      const SpaceOutliner *space_outliner,
+                                      const TreeElement *te,
+                                      const TreeStoreElem *tselem);
+
+/**
+ * The per-row toggles that sit right after a stack row's name.
+ *
+ * Drawn as a pass of its own rather than from #outliner_draw_tree_element, so that the buttons all
+ * land in the block at once and the tree drawing stays about drawing the tree. The name has
+ * already been laid out by then, and `te->xend` is where it ended.
+ */
+static void outliner_draw_stack_row_icons(ui::Block *block,
+                                          ARegion *region,
+                                          SpaceOutliner *space_outliner,
+                                          const bContext & /*C*/,
+                                          const TreeViewContext &tvc)
+{
+  const StackReadContext ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
+  const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (owner == nullptr) {
+    return;
+  }
+  const StackSource &source = *stack_source_for_space(*space_outliner);
+  const bool can_toggle = source.can_edit(*owner);
+  const bool visibility_left = (space_outliner->stack_layers_flag & SO_SL_VISIBILITY_LEFT) != 0;
+
+  /* The toggle sits in its own column at the right edge, after the value and mode ones --
+   * unless it was moved to the dedicated left column instead, in which case this is only where
+   * the "row not supported" badge sits. No margin towards the mode column:
+   * #outliner_right_columns_width reserves the columns flush against each other, and an extra
+   * offset here would push the toggle into the mode button. */
+  const int icon_columns = visibility_left ? 0 : source.column_layout().icon_columns;
+  const int icons_x = int(region->v2d.cur.xmax) - icon_columns * UI_UNIT_X -
+                      V2D_SCROLL_WIDTH;
+  /* The column immediately before the tree. With the left-side toggle enabled, the whole tree is
+   * shifted right by one unit to reserve this column for its buttons. */
+  const TreeElement *root = static_cast<const TreeElement *>(space_outliner->runtime->tree.first);
+  const int first_column_x = (root != nullptr) ? root->xs - UI_UNIT_X : 0;
+  const float column_left_inset = stack_visibility_column_left_inset();
+
+  tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
+    const TreeStoreElem *tselem = TREESTORE(te);
+    if (tselem->type != TSE_STACK_LAYER ||
+        !outliner_is_element_in_view(*space_outliner, te, &region->v2d))
+    {
+      return;
+    }
+    const StackRow *row = outliner_stack_row_find(*space_outliner, tselem->nr);
+    if (row == nullptr) {
+      return;
+    }
+    const int content_y = stack_row_content_y(*space_outliner, *te);
+    if (!row->supported) {
+      /* A row the source could not represent is listed anyway, so the user can see that something
+       * is there; the badge is where the reason lives. */
+      uiDefIconBut(block,
+                   ui::ButtonType::Label,
+                   ICON_ERROR,
+                   icons_x,
+                   content_y,
+                   UI_UNIT_X,
+                   UI_UNIT_Y,
+                   nullptr,
+                   0.0,
+                   0.0,
+                   row->unsupported_reason == nullptr ? TIP_("This layer is not supported") :
+                                                        TIP_(row->unsupported_reason));
+      return;
+    }
+    /* A bare base has no Mix node to mute, so there is nothing to turn off. */
+    if (!can_toggle || row->is_bare_base) {
+      return;
+    }
+
+    /* Before the name or in the columns, whichever the user asked for. On the left it goes in the
+     * column reserved before the tree, so the toggles of nested rows line up with the ones above
+     * them without overlapping the hierarchy. */
+    ui::Button *but = uiDefIconButO(block,
+                                    ui::ButtonType::ButToggle,
+                                    "OUTLINER_OT_stack_layer_visibility_toggle",
+                                    wm::OpCallContext::ExecDefault,
+                                    row->enabled ? ICON_HIDE_OFF : ICON_HIDE_ON,
+                                     /* Shifted slightly toward the hierarchy within the dedicated
+                                      * column, with its right edge meeting the tree. */
+                                     visibility_left ? first_column_x + int(column_left_inset) :
+                                                       icons_x,
+                                     content_y,
+                                     visibility_left ? UI_UNIT_X - int(column_left_inset) :
+                                                       UI_UNIT_X,
+                                     UI_UNIT_Y,
+                                     row->enabled ? TIP_("Hide this layer") :
+                                                    TIP_("Show this layer"));
+    RNA_int_set(ui::button_operator_ptr_ensure(but), "ordinal", row->ordinal);
+    /* The state the button shows is the row's own, captured here: the block is rebuilt every
+     * draw, and a callback that re-read the rows would re-run the model build on every poll of
+     * every toggle. */
+    button_func_pushed_state_set(
+        but, [enabled = row->enabled](const ui::Button & /*button*/) { return enabled; });
+    /* Faded the same way the row's own name and icon are -- whether that is because this layer's
+     * own toggle is off, or because a group it sits in is: either way the toggle belongs to a row
+     * that already reads as inactive, and should not be the one thing on it that still looks lit.
+     * #BUT_INACTIVE only dims the button, unlike #BUT_DISABLED it stays clickable. */
+    if (element_should_draw_faded(tvc, space_outliner, te, tselem)) {
+      button_flag_enable(but, ui::BUT_INACTIVE);
+    }
+  });
+}
+
+/**
+ * What the preview tooltip callback is keyed by.
+ *
+ * The session UID addresses the data-block whose preview is shown, and the type says which: UIDs
+ * are only unique within a type, so the callback must not guess between an image and a material
+ * when it looks the ID up. Allocated with #MEM_new, freed through the button's free callback.
+ */
+struct StackPreviewTooltipArg {
+  uint32_t session_uid;
+  short id_type;
+};
+
+/**
+ * Attach the preview-image tooltip to one preview button.
+ *
+ * The callback is keyed by identity -- rows are rebuilt, session UIDs are stable.
+ */
+static void stack_preview_tooltip_attach(ui::Button *but,
+                                         const uint32_t session_uid,
+                                         const short id_type)
+{
+  StackPreviewTooltipArg *tooltip_arg = MEM_new<StackPreviewTooltipArg>(
+      __func__, StackPreviewTooltipArg{session_uid, id_type});
+  button_func_tooltip_custom_set(
+      but,
+      [](bContext & /*C*/, ui::TooltipData &tip, ui::Button * /*but*/, void *arg) {
+        const StackPreviewTooltipArg &preview_arg = *static_cast<StackPreviewTooltipArg *>(arg);
+        Main *bmain_tooltip = G_MAIN; /* Context may not have bmain in a tooltip callback. */
+        ID *id = BKE_libblock_find_session_uid(
+            bmain_tooltip, preview_arg.id_type, preview_arg.session_uid);
+        if (id == nullptr) {
+          return;
+        }
+
+        PreviewImage *preview = BKE_previewimg_id_get(id);
+        if (preview == nullptr || !BKE_previewimg_is_finished(preview, ICON_SIZE_PREVIEW)) {
+          return;
+        }
+
+        ImBuf *ibuf = BKE_previewimg_to_imbuf(preview, ICON_SIZE_PREVIEW);
+        if (ibuf == nullptr) {
+          return;
+        }
+
+        /* Tooltip shows only the image, no text or metadata. */
+        ui::TooltipImage image_data;
+        image_data.ibuf = ibuf;
+        image_data.width = short(ibuf->x);
+        image_data.height = short(ibuf->y);
+        image_data.border = true;
+        image_data.background = ui::TooltipImageBackground::Checkerboard_Themed;
+        image_data.premultiplied = true;
+        ui::tooltip_image_field_add(tip, image_data);
+        IMB_freeImBuf(ibuf);
+      },
+      tooltip_arg,
+      [](void *arg) { MEM_delete(static_cast<StackPreviewTooltipArg *>(arg)); });
+}
+
+/**
+ * Attach preview tooltips to Stack Layers row icons.
+ *
+ * A transparent operator button is laid over each row's preview rectangle, and
+ * #button_func_tooltip_custom_set attaches a callback that shows only the preview image (no text).
+ * An image preview is resolved from #stack_preview_icons via the slot's data-block UID, or from
+ * the object row's stack representative in SO_SL_VIEW_OBJECTS. A source can instead provide a
+ * textual label for a non-image preview such as a mask. The button's arg carries the session UID
+ * and the ID type, since StackRow pointers are invalidated on rebuild.
+ */
+static void outliner_draw_stack_preview_tooltips(ui::Block *block,
+                                                 ARegion *region,
+                                                 SpaceOutliner *space_outliner,
+                                                 const TreeViewContext &tvc)
+{
+  const bool stack_big_rows = (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
+  if (!stack_big_rows) {
+    /* In normal (non-Large) mode, previews are single-unit icons; tooltips are less useful there
+     * and the geometry is harder to compute consistently. */
+    return;
+  }
+
+  tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
+    const TreeStoreElem *tselem = TREESTORE(te);
+    if (!outliner_is_element_in_view(*space_outliner, te, &region->v2d)) {
+      return;
+    }
+
+    uint32_t tooltip_uid = 0;
+    ID_Type tooltip_id_type = ID_IM;
+
+    if (tselem->type == TSE_STACK_LAYER) {
+      const StackRow *row = outliner_stack_row_find(*space_outliner, tselem->nr);
+      if (row == nullptr) {
+        return; /* No row data. */
+      }
+      for (const int slot_index : row->preview_slots.index_range()) {
+        const StackRowPreview &slot = row->preview_slots[slot_index];
+        const rctf preview_rect = outliner_stack_row_preview_rect(
+            *row,
+            float(te->xs),
+            float(stack_row_content_y(*space_outliner, *te)),
+            slot_index);
+        /* This is tooltip-only: the standard Outliner selection handler owns clicks and drags
+         * over preview slots, so dragging from a preview still starts a stack-layer drag. */
+        ui::Button *but = uiDefBut(block,
+                                   ui::ButtonType::Label,
+                                   "",
+                                   int(preview_rect.xmin),
+                                   int(preview_rect.ymin),
+                                   int(BLI_rctf_size_x(&preview_rect)),
+                                   int(BLI_rctf_size_y(&preview_rect)),
+                                   nullptr,
+                                   0.0,
+                                   0.0,
+                                   slot.label.empty() ? "" : slot.label.c_str());
+
+        if (slot.id_uid == 0) {
+          continue;
+        }
+        stack_preview_tooltip_attach(but, slot.id_uid, short(slot.id_type));
+      }
+      return;
+    }
+    if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+        space_outliner->stack_layers_view == SO_SL_VIEW_OBJECTS && tselem->type == TSE_SOME_ID &&
+        te->idcode == ID_OB && tselem->id != nullptr)
+    {
+      /* An object row previews whatever the source names as its stack's representative; without
+       * one it keeps the plain object icon, and there is no thumbnail to hover. */
+      Object *object = id_cast<Object *>(tselem->id);
+      const StackReadContext ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
+      ID *preview_id = stack_source_for_space(*space_outliner)->object_preview_id(ctx, *object);
+      if (preview_id == nullptr) {
+        return;
+      }
+      tooltip_uid = preview_id->session_uid;
+      tooltip_id_type = GS(preview_id->name);
+    }
+    else {
+      return;
+    }
+
+    /* Lay a transparent button over the preview rectangle: the exact geometry the draw painted
+     * the thumbnail with. Wherever the button and the thumbnail disagree, part of the thumbnail
+     * sits outside the tooltip. */
+    const rctf preview_rect = outliner_stack_slot_preview_rect(
+        float(te->xs), float(stack_row_content_y(*space_outliner, *te)), 0);
+
+    ui::Button *but = uiDefBut(block,
+                               ui::ButtonType::Label,
+                               "",
+                               int(preview_rect.xmin),
+                               int(preview_rect.ymin),
+                               int(BLI_rctf_size_x(&preview_rect)),
+                               int(BLI_rctf_size_y(&preview_rect)),
+                               nullptr,
+                               0,
+                               0,
+                               "");
+
+    stack_preview_tooltip_attach(but, tooltip_uid, short(tooltip_id_type));
+  });
+}
+
+static void outliner_draw_stack_columns(ui::Block *block,
+                                        ARegion *region,
+                                        SpaceOutliner *space_outliner,
+                                        const TreeViewContext &tvc)
+{
+  const StackColumnLayout layout = stack_source_for_space(*space_outliner)->column_layout();
+  const bool show_value = layout.value_width > 0 &&
+                          (space_outliner->stack_layers_flag & SO_SL_HIDE_OPACITY) == 0;
+  const bool show_mode = layout.mode_width > 0 &&
+                         (space_outliner->stack_layers_flag & SO_SL_HIDE_BLEND) == 0;
+  if (!show_value && !show_mode) {
+    return;
+  }
+
+  const StackReadContext ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
+  const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (owner == nullptr) {
+    return;
+  }
+  const bool editable = stack_source_for_space(*space_outliner)->is_editable(*owner);
+  const char *disabled_hint = N_("This stack cannot be edited");
+
+  /* With Large rows on, the mode and the value stack in one column instead of sitting side by
+   * side: the row is two units tall, room enough for one full-height button above the other. Only
+   * one of the two is ever visible there, so the column -- and the buttons in it -- are only as
+   * wide as the wider of the two, not both added together. */
+  const bool stacked = show_value && show_mode &&
+                       (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
+
+  /* The margin from the right edge is part of that width; see #outliner_right_columns_width.
+   * Column widths come in UI units and may be fractional, so they stay floats until the button
+   * rects round them to pixels. */
+  const float column_x = region->v2d.cur.xmax - outliner_right_columns_width(space_outliner);
+  const float value_width = show_value ? layout.value_width * UI_UNIT_X : 0;
+  const float mode_width = show_mode ? layout.mode_width * UI_UNIT_X : 0;
+  const float stacked_width = max_ff(value_width, mode_width);
+
+  tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
+    const TreeStoreElem *tselem = TREESTORE(te);
+    if (tselem->type != TSE_STACK_LAYER ||
+        !outliner_is_element_in_view(*space_outliner, te, &region->v2d))
+    {
+      return;
+    }
+    const StackRow *row = outliner_stack_row_find(*space_outliner, tselem->nr);
+    if (row == nullptr || !row->supported) {
+      return;
+    }
+
+    /* Full #UI_UNIT_Y tall and centered on the row's single content line normally; stacked, each
+     * shrinks a little instead of filling its half of the tall row edge to edge, so the pair reads
+     * as one compact control rather than two stretched widgets touching in the middle. `te->ys` is
+     * the row's own bottom, written by the tree pass that ran before this one. */
+    const int button_height = stacked ? int(UI_UNIT_Y * 0.5f) : int(UI_UNIT_Y);
+    int mode_y, value_y;
+    if (stacked) {
+      const int row_height = outliner_tree_element_height(*space_outliner, *te);
+      const int gap = int(4.0f * UI_SCALE_FAC);
+      const int margin = (row_height - 2 * button_height - gap) / 2;
+      mode_y = te->ys + row_height - margin - button_height;
+      value_y = te->ys + margin;
+    }
+    else {
+      mode_y = stack_row_content_y(*space_outliner, *te);
+      value_y = mode_y;
+    }
+    /* Side by side, value keeps its usual place on the left of mode; stacked, both sit in the same
+     * single column and each fills the combined width the column was reserved with -- the reserved
+     * width and the button width have to agree, or the column looks wider than the buttons that
+     * sit in it. */
+    const float value_x = column_x;
+    const float mode_x = stacked ? column_x : column_x + value_width;
+    const float this_value_width = stacked ? stacked_width : value_width;
+    const float this_mode_width = stacked ? stacked_width : mode_width;
+
+    if (show_value) {
+      ui::Button *button = nullptr;
+      if (row->value_ptr && row->value_prop != nullptr) {
+        PointerRNA rna_ptr = *row->value_ptr;
+        PropertyRNA *prop = RNA_struct_find_property(&rna_ptr, row->value_prop);
+        if (prop != nullptr) {
+          button = uiDefAutoButR(block,
+                                 &rna_ptr,
+                                 prop,
+                                 -1,
+                                 "",
+                                 ICON_NONE,
+                                 int(value_x),
+                                 value_y,
+                                 int(this_value_width),
+                                 button_height);
+        }
+      }
+      if (button != nullptr && !editable) {
+        button_disable(button, disabled_hint);
+      }
+    }
+
+    if (show_mode) {
+      ui::Button *button = nullptr;
+      if (row->mode_ptr && row->mode_prop != nullptr) {
+        PointerRNA rna_ptr = *row->mode_ptr;
+        PropertyRNA *prop = RNA_struct_find_property(&rna_ptr, row->mode_prop);
+        if (prop != nullptr) {
+          button = uiDefAutoButR(block,
+                                 &rna_ptr,
+                                 prop,
+                                 -1,
+                                 std::nullopt,
+                                 ICON_NONE,
+                                 int(mode_x),
+                                 mode_y,
+                                 int(this_mode_width),
+                                 button_height);
+        }
+      }
+      if (button != nullptr && !editable) {
+        button_disable(button, disabled_hint);
+      }
+    }
+  });
+
+}
+
 static void outliner_draw_rnabuts(ui::Block *block,
                                   ARegion *region,
                                   SpaceOutliner *space_outliner,
@@ -2132,7 +2678,7 @@ static void outliner_draw_rnabuts(ui::Block *block,
   tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
     TreeStoreElem *tselem = TREESTORE(te);
 
-    if (!outliner_is_element_in_view(te, &region->v2d)) {
+    if (!outliner_is_element_in_view(*space_outliner, te, &region->v2d)) {
       return;
     }
 
@@ -2228,17 +2774,36 @@ static void outliner_buttons(const bContext *C,
     len = MAX_ID_NAME - 2;
   }
 
+  SpaceOutliner &space_outliner = *CTX_wm_space_outliner(C);
+  /* What the field edits. Normally the element's own name, which for a renameable element points
+   * at the real name in the data -- so the text survives the rebuilds that happen while the field
+   * is open. A stack row's #TreeElement.name is only a copy, so the source hands out the storage
+   * it derives that name from instead. */
+  char *name_buffer = (char *)te->name;
+  if (tselem->type == TSE_STACK_LAYER) {
+    name_buffer = outliner_stack_row_name_buffer(space_outliner, tselem->nr);
+    if (name_buffer == nullptr) {
+      tselem->flag &= ~TSE_TEXTBUT;
+      return;
+    }
+    /* A layer's name is kept in a node label. */
+    len = MAX_NAME;
+  }
+
   spx = te->xs + 1.8f * UI_UNIT_X;
   dx = region->v2d.cur.xmax - (spx + restrict_column_width + 0.2f * UI_UNIT_X);
+  /* A tall Stack Layers row keeps its content centered rather than at its bottom edge, which is
+   * what `te->ys` is; the field has to sit on the name it replaces. */
+  const int spy = stack_row_content_y(space_outliner, *te);
 
   bt = uiDefBut(block,
                 ui::ButtonType::Text,
                 "",
                 spx,
-                te->ys,
+                spy,
                 dx,
                 UI_UNIT_Y - 1,
-                (void *)te->name,
+                name_buffer,
                 1.0,
                 float(len),
                 "");
@@ -2247,8 +2812,13 @@ static void outliner_buttons(const bContext *C,
    * code (see #apply_but_undo) would not work here, as the new name is not yet applied to the
    * ID. */
   button_flag_disable(bt, ui::BUT_UNDO);
-  text_button_func_rename_set(bt, [tselem](bContext &C, StringRefNull oldname) {
-    namebutton_fn(&C, tselem, oldname.c_str());
+  /* The field captures its row's identity at open time: an edit that moves rows renumbers them,
+   * and the confirmation resolves the identity rather than trusting the ordinal -- as far as the
+   * source's identities reach, which for one that hands out none is no further than the ordinal
+   * itself. See the #TSE_STACK_LAYER case of #namebutton_fn. */
+  const StackItemIdentity row_identity = outliner_stack_identity_of(space_outliner, tselem->nr);
+  text_button_func_rename_set(bt, [tselem, row_identity](bContext &C, StringRefNull oldname) {
+    namebutton_fn(&C, tselem, oldname.c_str(), row_identity);
   });
 
   /* Returns false if button got removed. */
@@ -2786,6 +3356,15 @@ TreeElementIcon tree_element_get_icon(TreeStoreElem *tselem, TreeElement *te)
       case TSE_LINKED_NODE_TREE:
         data.icon = ICON_NODETREE;
         break;
+      case TSE_STACK_LAYER:
+      case TSE_STACK_ITEM:
+        /* The stack source picks these icons, so the element carries its own. No `drag_id`: a row
+         * stands for a position inside its owner, never for the owner itself, and offering the
+         * material as a draggable ID from a layer row would be a lie. */
+        if (te->abstract_element) {
+          data.icon = te->abstract_element->get_icon().value_or(ICON_NONE);
+        }
+        break;
       case TSE_POSE_BASE:
         data.icon = ICON_ARMATURE_DATA;
         break;
@@ -2953,6 +3532,7 @@ TreeElementIcon tree_element_get_icon(TreeStoreElem *tselem, TreeElement *te)
  * \return true if the element has an icon that was drawn, false if it doesn't have an icon.
  */
 static bool tselem_draw_icon(ui::Block *block,
+                             const SpaceOutliner &space_outliner,
                              int xmax,
                              float x,
                              float y,
@@ -2968,11 +3548,18 @@ static bool tselem_draw_icon(ui::Block *block,
   }
 
   const bool is_collection = outliner_is_collection_tree_element(te);
+  const StackRow *stack_row = (tselem->type == TSE_STACK_LAYER) ?
+                                  outliner_stack_row_find(space_outliner, tselem->nr) :
+                                  nullptr;
+  const bool is_colored_stack_folder = stack_row != nullptr && stack_row->can_hold_children &&
+                                       stack_row->color_tag >= 0 &&
+                                       stack_row->color_tag <= 7 &&
+                                       data.icon == ICON_FILE_FOLDER;
   ui::IconTextOverlay text_overlay;
   icon_text_overlay_init_from_count(&text_overlay, num_elements);
 
   /* Collection colors and icons covered by restrict buttons. */
-  if (!is_clickable || x >= xmax || is_collection) {
+  if (!is_clickable || x >= xmax || is_collection || is_colored_stack_folder) {
     /* Placement of icons, copied from `interface_widgets.cc`. */
     float aspect = (0.8f * UI_UNIT_Y) / ICON_DEFAULT_HEIGHT;
     x += 2.0f * aspect;
@@ -2993,6 +3580,18 @@ static bool tselem_draw_icon(ui::Block *block,
                      &text_overlay);
         return true;
       }
+    }
+    if (is_colored_stack_folder) {
+      icon_draw_ex(x,
+                   y,
+                   data.icon,
+                   UI_INV_SCALE_FAC,
+                   alpha,
+                   0.0f,
+                   btheme->collection_color[stack_row->color_tag].color,
+                   btheme->tui.icon_border_intensity > 0.0f,
+                   &text_overlay);
+      return true;
     }
 
     /* Reduce alpha to match icon buttons */
@@ -3065,6 +3664,7 @@ static void outliner_draw_active_indicator(const float minx,
 }
 
 static void outliner_draw_iconrow_doit(ui::Block *block,
+                                       const SpaceOutliner &space_outliner,
                                        TreeElement *te,
                                        int xmax,
                                        int *offsx,
@@ -3094,8 +3694,16 @@ static void outliner_draw_iconrow_doit(ui::Block *block,
   if (tselem->flag & TSE_HIGHLIGHTED_ICON) {
     alpha_fac += 0.5;
   }
-  tselem_draw_icon(
-      block, xmax, float(*offsx), float(ys), tselem, te, alpha_fac, false, num_elements);
+  tselem_draw_icon(block,
+                   space_outliner,
+                   xmax,
+                   float(*offsx),
+                   float(ys),
+                   tselem,
+                   te,
+                   alpha_fac,
+                   false,
+                   num_elements);
   te->xs = *offsx;
   te->ys = ys;
   te->xend = short(*offsx) + UI_UNIT_X;
@@ -3212,7 +3820,8 @@ static void outliner_draw_iconrow(ui::Block *block,
                 TSE_NLA_TRACK) &&
           tselem->type != TSE_SHAPE_KEY_BLOCK)
       {
-        outliner_draw_iconrow_doit(block, &te, xmax, offsx, ys, alpha_fac, active, 1);
+        outliner_draw_iconrow_doit(
+            block, *space_outliner, &te, xmax, offsx, ys, alpha_fac, active, 1);
       }
       else if (tselem->type == TSE_GREASE_PENCIL_NODE &&
                tree_element_cast<TreeElementGreasePencilNode>(&te)->node().is_group())
@@ -3271,6 +3880,7 @@ static void outliner_draw_iconrow(ui::Block *block,
         const int index = index_base + j;
         if (merged->num_elements[index] != 0) {
           outliner_draw_iconrow_doit(block,
+                                     *space_outliner,
                                      merged->tree_element[index],
                                      xmax,
                                      offsx,
@@ -3298,6 +3908,7 @@ static void outliner_set_subtree_coords(TreeElement *te)
 }
 
 static bool element_should_draw_faded(const TreeViewContext &tvc,
+                                      const SpaceOutliner *space_outliner,
                                       const TreeElement *te,
                                       const TreeStoreElem *tselem)
 {
@@ -3319,7 +3930,7 @@ static bool element_should_draw_faded(const TreeViewContext &tvc,
       }
       default: {
         if (te->parent) {
-          return element_should_draw_faded(tvc, te->parent, te->parent->store_elem);
+          return element_should_draw_faded(tvc, space_outliner, te->parent, te->parent->store_elem);
         }
       }
     }
@@ -3337,9 +3948,26 @@ static bool element_should_draw_faded(const TreeViewContext &tvc,
           tree_element_cast<TreeElementGreasePencilNode>(te)->node();
       return !node.is_visible();
     }
+    case TSE_STACK_LAYER: {
+      /* A layer switched off with its own visibility toggle should read the same way the rest of
+       * the Outliner shows something hidden -- faded, not just an icon changed -- so its off state
+       * is obvious at a glance rather than only on hover. */
+      const StackRow *row = (space_outliner != nullptr) ?
+                                outliner_stack_row_find(*space_outliner, tselem->nr) :
+                                nullptr;
+      if (row != nullptr && !row->enabled) {
+        return true;
+      }
+      /* A row's own toggle is not the whole story: switched off, a group takes everything it
+       * holds down with it, the same way a disabled collection fades what is inside it. */
+      if (te->parent) {
+        return element_should_draw_faded(tvc, space_outliner, te->parent, te->parent->store_elem);
+      }
+      break;
+    }
     default: {
       if (te->parent) {
-        return element_should_draw_faded(tvc, te->parent, te->parent->store_elem);
+        return element_should_draw_faded(tvc, space_outliner, te->parent, te->parent->store_elem);
       }
     }
   }
@@ -3348,6 +3976,78 @@ static bool element_should_draw_faded(const TreeViewContext &tvc,
     return true;
   }
 
+  return false;
+}
+
+/**
+ * Whether a Stack Layers layer row should read as selected -- either because its own row is, or
+ * because one of the channel rows it holds is. Switching which channel is open is a detail of
+ * working inside the layer, not a different selection, so the layer's own highlight should not
+ * blink out when the click lands on one of its maps instead of on the layer itself.
+ */
+static bool stack_layer_row_selected(const TreeElement &te)
+{
+  if (TREESTORE(&te)->flag & TSE_SELECTED) {
+    return true;
+  }
+  for (const TreeElement &child : te.subtree) {
+    if (TREESTORE(&child)->type == TSE_STACK_ITEM && (TREESTORE(&child)->flag & TSE_SELECTED)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Same reasoning as #stack_layer_row_selected, for the active flag. */
+static bool stack_layer_row_active(const TreeElement &te)
+{
+  if (TREESTORE(&te)->flag & TSE_ACTIVE) {
+    return true;
+  }
+  for (const TreeElement &child : te.subtree) {
+    if (TREESTORE(&child)->type == TSE_STACK_ITEM && (TREESTORE(&child)->flag & TSE_ACTIVE)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether any row in the Stack Layers tree has the TSE_ACTIVE flag set.
+ *
+ * Stack Layers rows can be lit two ways: by the source (row_is_active) and by the tree
+ * (TSE_ACTIVE). When a folder is created, it gets TSE_ACTIVE, but row_is_active keeps
+ * returning true for the texture layer that was active before -- leading to two rows
+ * lighting up at once. TSE_ACTIVE is the single source of truth for which row is actually
+ * active: if it exists anywhere in the tree, only TSE_ACTIVE rows light up, and
+ * row_is_active is ignored. This check is done once before drawing, rather than on each
+ * row, to avoid repeated tree traversals.
+ */
+static bool stack_tree_has_tse_active(const SpaceOutliner &space_outliner)
+{
+  bool found = false;
+  tree_iterator::all_open(space_outliner, [&](const TreeElement *te) {
+    const TreeStoreElem *tselem = TREESTORE(te);
+    if (ELEM(tselem->type, TSE_STACK_LAYER, TSE_STACK_ITEM) && (tselem->flag & TSE_ACTIVE)) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+/**
+ * Whether a Stack Layers folder directly holds the row that is open right now -- a nested layer
+ * that is itself active, or one holding the active channel. Only one level down: a folder's own
+ * activity comes from what it directly contains, the same way a Collection is only "active"
+ * through the object directly inside it, not through everything nested further down.
+ */
+static bool stack_layer_direct_child_active(const TreeElement &te)
+{
+  for (const TreeElement &child : te.subtree) {
+    if (TREESTORE(&child)->type == TSE_STACK_LAYER && stack_layer_row_active(child)) {
+      return true;
+    }
+  }
   return false;
 }
 
@@ -3361,7 +4061,8 @@ static void outliner_draw_tree_element(ui::Block *block,
                                        int startx,
                                        int *starty,
                                        const float restrict_column_width,
-                                       TreeElement **te_edit)
+                                       TreeElement **te_edit,
+                                       const bool stack_tree_has_active)
 {
   TreeStoreElem *tselem = TREESTORE(te);
   float ufac = UI_UNIT_X / 20.0f;
@@ -3372,8 +4073,20 @@ static void outliner_draw_tree_element(ui::Block *block,
   float icon_bgcolor[4], icon_border[4];
   outliner_icon_background_colors(icon_bgcolor, icon_border);
 
+  /* `starty` is where a one-unit row would start, which is also where a taller row keeps its
+   * content: rows are laid out from the top down, and the extra height of a tall row hangs below
+   * it. The row's own bottom -- what `te->ys` means, and what hit testing measures from -- is that
+   * much further down. Every pass steps by #outliner_tree_element_height, so this is the only
+   * place the two have to be told apart. */
+  const int row_height = outliner_tree_element_height(*space_outliner, *te);
+  const int row_bottom = *starty + UI_UNIT_Y - row_height;
+  /* Restored before stepping to the next row, which measures from where a one-unit row would sit. */
+  const int row_line = *starty;
+  *starty = stack_row_content_offset(row_bottom, row_height);
+
   if (*starty + 2 * UI_UNIT_Y >= region->v2d.cur.ymin && *starty <= region->v2d.cur.ymax) {
-    const float alpha_fac = element_should_draw_faded(tvc, te, tselem) ? 0.5f : 1.0f;
+    const float alpha_fac = element_should_draw_faded(tvc, space_outliner, te, tselem) ? 0.5f :
+                                                                                        1.0f;
     int xmax = region->v2d.cur.xmax;
 
     if ((tselem->flag & TSE_TEXTBUT) && (*te_edit == nullptr)) {
@@ -3433,9 +4146,46 @@ static void outliner_draw_tree_element(ui::Block *block,
     }
     else {
       active = tree_element_type_active_state_get(tvc, te, tselem);
+      /* Stack Layers rows can be lit by the source (row_is_active) or by the tree (TSE_ACTIVE).
+       * If TSE_ACTIVE is set anywhere in the tree, it wins -- the source-level activity is ignored
+       * to prevent two rows lighting up at once (e.g., when a folder is created, it gets
+       * TSE_ACTIVE, but the previously active layer still answers row_is_active = true). Folders
+       * cannot be active at the source level (they have no channel maps), so TSE_ACTIVE is the
+       * only way a folder can be active, and it must take precedence. */
+      if (tselem->type == TSE_STACK_LAYER && !stack_tree_has_active) {
+        const StackReadContext ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
+        if (outliner_stack_row_is_active(ctx, *space_outliner, tselem->nr)) {
+          active = OL_DRAWSEL_ACTIVE;
+        }
+      }
       if (active != OL_DRAWSEL_NONE) {
         ui::theme::get_color_3ubv(TH_TEXT_HI, text_color);
         text_color[3] = 255;
+      }
+
+      /* Stack Layers rows read their own tree selection for this, on top of whatever the paint
+       * target above already decided. The row actually open right now -- a layer with no channel
+       * drilled into, or the channel itself -- takes the colour the active object gets elsewhere in
+       * the Outliner; a layer lit only because a channel it holds is open keeps the plain
+       * highlighted colour, so the eye still goes to what is actually open. A folder that directly
+       * holds that open row gets the same plain colour a Collection gets for directly holding the
+       * active object -- one level only, the same way a Collection's own container does not light up
+       * in turn. */
+      if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+        if (ELEM(tselem->type, TSE_STACK_LAYER, TSE_STACK_ITEM) && (tselem->flag & TSE_ACTIVE)) {
+          ui::theme::get_color_3ubv(TH_ACTIVE_OBJECT, text_color);
+          text_color[3] = 255;
+          active = OL_DRAWSEL_ACTIVE;
+        }
+        else if (tselem->type == TSE_STACK_LAYER && stack_layer_row_active(*te)) {
+          ui::theme::get_color_3ubv(TH_TEXT_HI, text_color);
+          text_color[3] = 255;
+        }
+        else if (tselem->type == TSE_STACK_LAYER && stack_layer_direct_child_active(*te)) {
+          ui::theme::get_color_3ubv(TH_TEXT_HI, text_color);
+          text_color[3] = 255;
+          active = OL_DRAWSEL_ACTIVE;
+        }
       }
     }
 
@@ -3452,7 +4202,7 @@ static void outliner_draw_tree_element(ui::Block *block,
     }
 
     if (tselem->type == TSE_VIEW_COLLECTION_BASE) {
-      /* Scene collection in view layer can't expand/collapse. */
+      /* The Scene Collection can't expand/collapse. */
     }
     else if (te->subtree.first || (te->flag & TE_PRETEND_HAS_CHILDREN)) {
       /* Open/close icon, only when sub-levels, except for scene. */
@@ -3470,9 +4220,112 @@ static void outliner_draw_tree_element(ui::Block *block,
     }
     offsx += UI_UNIT_X;
 
-    /* Data-type icon. */
-    if (!ELEM(tselem->type, TSE_RNA_PROPERTY, TSE_RNA_ARRAY_ELEM, TSE_ID_BASE) &&
+    /* Data-type icon. A stack layer row with a preview available shows that instead, filling
+     * more of its two-unit-tall row than a unit icon would. */
+    const bool stack_big_rows = (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
+    bool draw_empty_texture = false; /* Whether to draw the empty texture icon instead of preview. */
+    /* A group holds no map of its own: its slot is the folder icon's, and the empty texture icon
+     * -- which stands for a texture layer with no data in any channel -- is not for it. */
+    bool stack_row_is_group = false;
+    int preview_slots_drawn = 0;
+    bool icon_drawn = false;
+    bool preview_drawn = false;
+    if (tselem->type == TSE_STACK_LAYER && stack_big_rows) {
+      const StackRow *row = outliner_stack_row_find(*space_outliner, tselem->nr);
+      if (row == nullptr) {
+        /* The row is gone from the model; the placeholder icon below stands in for it. */
+      }
+      else if (row->preview_slots.is_empty()) {
+        /* Nothing to preview: a plain group keeps its folder icon, and any other row without a
+         * slot gets the empty-texture placeholder. */
+        stack_row_is_group = row->can_hold_children;
+        draw_empty_texture = !stack_row_is_group;
+      }
+      else {
+        /* The row's own icon is drawn ahead of the first slot when that slot says so -- a folder
+         * with a mask stays a folder, a layer's preview stands in for its icon. */
+        stack_row_is_group = row->preview_slots[0].keeps_row_icon;
+        const float preview_size = outliner_stack_preview_size();
+        const float margin = OUTLINER_STACK_PREVIEW_FRAME_MARGIN * UI_SCALE_FAC;
+        const bool is_active_stack_row = (tselem->flag & TSE_ACTIVE) != 0;
+        /* Which section the row's content currently shows: the slot that names it draws its
+         * highlight frame. */
+        const StringRef active_section_id =
+            is_active_stack_row ? outliner_stack_row_active_section_get(*space_outliner, *row) :
+                                  StringRef();
+        for (const int slot_index : row->preview_slots.index_range()) {
+          const StackRowPreview &slot = row->preview_slots[slot_index];
+          const rctf preview_rect = outliner_stack_row_preview_rect(
+              *row, float(startx), float(*starty), slot_index);
+          const float alpha = (tselem->flag & TSE_HIGHLIGHTED_ICON) ? alpha_fac + 0.5f : alpha_fac;
+          if (slot.is_blank) {
+            /* The data-block exists, but its thumbnail has nothing to show yet: the source says
+             * so, and the empty-texture placeholder answers for the slot. */
+            stack_preview_empty_draw(preview_rect, alpha);
+          }
+          else {
+            int icon_id = slot.icon;
+            if (icon_id == 0 && slot.id_uid != 0) {
+              icon_id = space_outliner->runtime->stack_preview_icons.lookup_default(slot.id_uid,
+                                                                                    0);
+            }
+            ui::icon_draw_ex(preview_rect.xmin,
+                             preview_rect.ymin,
+                             icon_id != 0 ? icon_id : ICON_TEXTURE_DATA,
+                             UI_INV_SCALE_FAC,
+                             alpha,
+                             0.0f,
+                             nullptr,
+                             false,
+                             nullptr,
+                             false,
+                             OUTLINER_STACK_PREVIEW_SCALE);
+          }
+          /* A slot that opens no section is never the one showing: an empty section id would
+           * otherwise match the empty answer a row without sections gives, and frame every slot
+           * of an active row that has nothing to switch between. */
+          if (is_active_stack_row && !slot.section_id.empty() &&
+              slot.section_id == active_section_id)
+          {
+            float preview_border[4];
+            ui::theme::get_color_4fv(TH_ACTIVE_OBJECT, preview_border);
+            preview_border[3] *= 0.5f * alpha_fac;
+            rctf frame{};
+            BLI_rctf_init(&frame,
+                          preview_rect.xmin - margin,
+                          preview_rect.xmin + preview_size + margin,
+                          preview_rect.ymin - margin,
+                          preview_rect.ymin + preview_size + margin);
+            draw_roundbox_corner_set(ui::CNR_ALL);
+            ui::draw_roundbox_aa(&frame, false, UI_UNIT_Y / 5.0f, preview_border);
+            GPU_blend(GPU_BLEND_ALPHA); /* Round-box disables. */
+          }
+        }
+        preview_slots_drawn = int(row->preview_slots.size());
+        icon_drawn = true;
+        preview_drawn = true;
+      }
+    }
+    if (draw_empty_texture) {
+      /* An empty texture layer uses the texture data icon at preview size, so its name remains
+       * aligned with rows that have a preview. */
+      const rctf preview_rect = outliner_stack_slot_preview_rect(
+          float(startx), float(*starty), 0);
+      stack_preview_empty_draw(
+          preview_rect,
+          (tselem->flag & TSE_HIGHLIGHTED_ICON) ? alpha_fac + 0.5f : alpha_fac);
+
+      icon_drawn = true;
+      preview_drawn = true;
+    }
+    if ((!icon_drawn || stack_row_is_group) &&
+        !ELEM(tselem->type, TSE_RNA_PROPERTY, TSE_RNA_ARRAY_ELEM, TSE_ID_BASE) &&
+        /* Stack layer rows in Large Rows mode draw a preview or an empty texture icon in place of
+         * the placeholder icon -- except a group, whose folder icon stays before its mask
+         * preview. */
+        !(tselem->type == TSE_STACK_LAYER && stack_big_rows && !stack_row_is_group) &&
         tselem_draw_icon(block,
+                         *space_outliner,
                          xmax,
                          float(startx) + offsx,
                          float(*starty),
@@ -3482,6 +4335,20 @@ static void outliner_draw_tree_element(ui::Block *block,
                          true,
                          1))
     {
+      icon_drawn = true;
+    }
+    if (preview_drawn) {
+      /* Multiple previews are wider: account for all slots, gaps, and frames. */
+      const int num_previews = std::max(1, preview_slots_drawn);
+      const float preview_size = outliner_stack_preview_size();
+      const float preview_gap = UI_UNIT_X * 0.25f;
+      const float leading_icon_width = stack_row_is_group ? UI_UNIT_X + 4.0f * ufac : 0.0f;
+      const float total_width = leading_icon_width + num_previews * preview_size +
+                                (num_previews - 1) * preview_gap +
+                                2.0f * OUTLINER_STACK_PREVIEW_FRAME_MARGIN * UI_SCALE_FAC;
+      offsx += int(total_width + 2 * ufac);
+    }
+    else if (icon_drawn) {
       offsx += UI_UNIT_X + 4 * ufac;
     }
     else {
@@ -3514,6 +4381,7 @@ static void outliner_draw_tree_element(ui::Block *block,
         }
       }
     }
+
     GPU_blend(GPU_BLEND_NONE);
 
     /* Name. */
@@ -3523,12 +4391,14 @@ static void outliner_draw_tree_element(ui::Block *block,
         text_color[3] = 255;
       }
       text_color[3] *= alpha_fac;
-      ui::fontstyle_draw_simple(fstyle, startx + offsx, *starty + 5 * ufac, te->name, text_color);
+      outliner_draw_text(
+          fstyle, region->v2d, startx + offsx, *starty + 5 * ufac, te->name, text_color);
     }
 
     offsx += int(UI_UNIT_X + ui::fontstyle_string_width(fstyle, te->name));
 
     /* Closed item, we draw the icons, not when it's a scene, or master-server list though. */
+    int data_icons_end = startx + offsx;
     if (!TSELEM_OPEN(tselem, space_outliner)) {
       if (te->subtree.first) {
         if ((tselem->type == TSE_SOME_ID) && (te->idcode == ID_SCE)) {
@@ -3556,17 +4426,50 @@ static void outliner_draw_tree_element(ui::Block *block,
                                 &merged);
 
           GPU_blend(GPU_BLEND_NONE);
+          data_icons_end = tempx;
         }
       }
     }
+
+    /* Focus Stack follows the row's inline data icons: the ones merged into a collapsed object's
+     * row, or just the name when the children are rows of their own. */
+    if (space_outliner->outlinevis == SO_VIEW_LAYER && tselem->type == TSE_SOME_ID &&
+        te->idcode == ID_OB)
+    {
+      Object *object = id_cast<Object *>(tselem->id);
+      const StackSource &source = *stack_source_for_space(*space_outliner);
+      const StackReadContext ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
+      /* Buttons are not clipped by overdrawing the way plain icons are (#tselem_draw_icon), so
+       * keep this one clear of the restriction columns. The rect is the full cell: the widget
+       * centers the icon inside it (#widget_draw_icon), unlike a plain icon draw which insets the
+       * glyph by hand. */
+      if (object != nullptr && source.object_has_stack(ctx, *object) && data_icons_end < xmax) {
+        ui::Button *but = uiDefIconButO(block,
+                                        ui::ButtonType::But,
+                                        "OUTLINER_OT_stack_layer_focus",
+                                        wm::OpCallContext::ExecDefault,
+                                        ICON_BRUSH_DATA,
+                                        data_icons_end,
+                                        *starty,
+                                        UI_UNIT_X,
+                                        UI_UNIT_Y,
+                                        TIP_("Show this object's layer stack"));
+        PointerRNA *props = ui::button_operator_ptr_ensure(but);
+        RNA_string_set(props, "object", object->id.name + 2);
+        RNA_int_set(props, "sub_index", -1);
+        RNA_boolean_set(props, "enter_edit_mode", true);
+      }
+    }
   }
+  *starty = row_line;
+
   /* Store coord and continue, we need coordinates for elements outside view too. */
   te->xs = startx;
-  te->ys = *starty;
+  te->ys = row_bottom;
   te->xend = startx + offsx;
 
   if (TSELEM_OPEN(tselem, space_outliner)) {
-    *starty -= UI_UNIT_Y;
+    *starty -= row_height;
 
     for (TreeElement &ten : te->subtree) {
       /* Check if element needs to be drawn grayed out, but also gray out
@@ -3582,12 +4485,13 @@ static void outliner_draw_tree_element(ui::Block *block,
                                  startx + UI_UNIT_X,
                                  starty,
                                  restrict_column_width,
-                                 te_edit);
+                                 te_edit,
+                                 stack_tree_has_active);
     }
   }
   else {
     outliner_set_subtree_coords(te);
-    *starty -= UI_UNIT_Y;
+    *starty -= row_height;
   }
 }
 
@@ -3638,7 +4542,7 @@ static void outliner_draw_hierarchy_lines_recursive(uint pos,
     TreeStoreElem *tselem = TREESTORE(&te);
     draw_hierarchy_line = false;
     use_dashed_line = false;
-    *starty -= UI_UNIT_Y;
+    *starty -= outliner_tree_element_height(*space_outliner, te);
     short color_tag = COLLECTION_COLOR_NONE;
 
     /* Only draw hierarchy lines for expanded collections and objects with children. */
@@ -3671,13 +4575,26 @@ static void outliner_draw_hierarchy_lines_recursive(uint pos,
         use_dashed_line = true;
         y = *starty;
       }
+      else if (tselem->type == TSE_STACK_LAYER) {
+        /* A layer group holds rows the way a collection holds objects, so it is read the same
+         * way: the line is what says where the group's contents end, and a tag the user gave
+         * the group colors the line the way a collection's colors its own. */
+        draw_hierarchy_line = true;
+        y = *starty;
+        if (const StackRow *row = outliner_stack_row_find(*space_outliner, tselem->nr)) {
+          if (row->can_hold_children && row->color_tag >= 0) {
+            color_tag = short(row->color_tag);
+          }
+        }
+      }
 
       outliner_draw_hierarchy_lines_recursive(
           pos, space_outliner, &te.subtree, tvc, startx + UI_UNIT_X, col, draw_grayed_out, starty);
     }
 
     if (draw_hierarchy_line) {
-      const short alpha_fac = element_should_draw_faded(tvc, &te, tselem) ? 127 : 255;
+      const short alpha_fac = element_should_draw_faded(tvc, space_outliner, &te, tselem) ? 127 :
+                                                                                            255;
       uchar line_color[4];
       if (color_tag != COLLECTION_COLOR_NONE) {
         copy_v4_v4_uchar(line_color, btheme->collection_color[color_tag].color);
@@ -3768,53 +4685,97 @@ static void outliner_draw_highlights(const ARegion *region,
                                      const float col_active[4],
                                      const float col_highlight[4],
                                      const float col_searchmatch[4],
+                                     const bool drag_active,
                                      int /* start_x */,
                                      int *io_start_y)
 {
+  /* Where a drop on the Stack Layers list is pointing, kept by the stack's own polls. Its rows
+   * read this rather than the tree store's #TSE_DRAG_ANY flags: every drop poll in the Outliner
+   * clears those before deciding whether it wants the drop, so which poll's flags survive to this
+   * draw depends on the order the window manager polls in. Only meaningful while a drag is live;
+   * what it holds between drags is last time's answer. */
+  const SpaceOutliner_Runtime::StackDropIndicator &stack_drop =
+      space_outliner->runtime->stack_drop_indicator;
+  const bool stack_drop_shown = drag_active && space_outliner->outlinevis == SO_STACK_LAYERS &&
+                                stack_drop.ordinal >= 0;
+
   const bool is_searching = (SEARCHING_OUTLINER(space_outliner) ||
                              (space_outliner->outlinevis == SO_DATA_API &&
                               space_outliner->search_string[0] != 0));
 
   tree_iterator::all_open(*space_outliner, [&](const TreeElement *te) {
     const TreeStoreElem *tselem = TREESTORE(te);
-    const int start_y = *io_start_y;
 
     const float ufac = UI_UNIT_X / 20.0f;
     const float radius = UI_UNIT_Y / 8.0f;
     const int padding_x = 3 * UI_SCALE_FAC;
+    const int row_height = outliner_tree_element_height(*space_outliner, *te);
+    /* The extra height of a tall row hangs below where a one-unit row would sit; see
+     * #outliner_draw_tree_element. */
+    const int start_y = *io_start_y + UI_UNIT_Y - row_height;
     rctf rect{};
     BLI_rctf_init(&rect,
                   padding_x,
                   int(region->v2d.cur.xmax) - padding_x,
                   start_y + ufac,
-                  start_y + UI_UNIT_Y - ufac);
+                  start_y + row_height - ufac);
     draw_roundbox_corner_set(ui::CNR_ALL);
 
-    /* Selection status. */
-    if ((tselem->flag & TSE_ACTIVE) && (tselem->flag & TSE_SELECTED)) {
+    /* Only the layer rows fold in their channels' state: the maps a layer holds are ordinary rows
+     * and are selected the way rows are selected everywhere else in the Outliner, but a layer's own
+     * highlight should not disappear just because the click that opened one of its channels moved
+     * the tree's selection onto that channel row instead. */
+    const bool is_stack_layer = space_outliner->outlinevis == SO_STACK_LAYERS &&
+                               tselem->type == TSE_STACK_LAYER;
+    /* Activeness itself never propagates up -- a layer lit only because a channel it holds is open
+     * reads as an ordinary selected row (the darker fill), the same as an Object's row does while a
+     * data-block nested under it is what is actually active, rather than repeating the brighter
+     * active fill on both rows. */
+    const bool row_active = (tselem->flag & TSE_ACTIVE) != 0;
+    const bool row_selected = is_stack_layer ? stack_layer_row_selected(*te) :
+                                               (tselem->flag & TSE_SELECTED) != 0;
+    if (row_active && row_selected) {
       ui::draw_roundbox_4fv(&rect, true, radius, col_active);
 
       float col_active_outline[4];
       ui::theme::get_color_shade_4fv(TH_SELECT_ACTIVE, 40, col_active_outline);
       ui::draw_roundbox_4fv(&rect, false, radius, col_active_outline);
     }
-    else if (tselem->flag & TSE_SELECTED) {
+    else if (row_selected) {
       ui::draw_roundbox_4fv(&rect, true, radius, col_selection);
     }
 
+    /* What the drop under way is pointing at for this row: the stack's own indicator where it
+     * applies, the tree store's drag flags everywhere else. */
+    std::optional<TreeElementInsertType> drop_insert_type;
+    if (stack_drop_shown && tselem->type == TSE_STACK_LAYER &&
+        int(tselem->nr) == stack_drop.ordinal)
+    {
+      drop_insert_type = stack_drop.insert_type;
+    }
+    else if (tselem->flag & TSE_DRAG_BEFORE) {
+      drop_insert_type = TE_INSERT_BEFORE;
+    }
+    else if (tselem->flag & TSE_DRAG_AFTER) {
+      drop_insert_type = TE_INSERT_AFTER;
+    }
+    else if (tselem->flag & TSE_DRAG_INTO) {
+      drop_insert_type = TE_INSERT_INTO;
+    }
+
     /* Highlights. */
-    if (tselem->flag & (TSE_DRAG_ANY | TSE_HIGHLIGHTED | TSE_SEARCHMATCH)) {
-      if (tselem->flag & TSE_DRAG_ANY) {
+    if (drop_insert_type.has_value() || (tselem->flag & (TSE_HIGHLIGHTED | TSE_SEARCHMATCH))) {
+      if (drop_insert_type.has_value()) {
         /* Drag and drop highlight. */
         float col_outline[4];
         ui::theme::get_color_blend_4f(TH_TEXT, TH_BACK, 0.4f, col_outline);
 
-        if (tselem->flag & TSE_DRAG_BEFORE) {
+        if (*drop_insert_type == TE_INSERT_BEFORE) {
           rect.ymax += (1.0f * UI_SCALE_FAC) + (1.0f * U.pixelsize);
           rect.ymin = rect.ymax - (2.0f * U.pixelsize);
           ui::draw_roundbox_4fv(&rect, true, 0.0f, col_outline);
         }
-        else if (tselem->flag & TSE_DRAG_AFTER) {
+        else if (*drop_insert_type == TE_INSERT_AFTER) {
           rect.ymin -= (1.0f * UI_SCALE_FAC) + (1.0f * U.pixelsize);
           rect.ymax = rect.ymin + (2.0f * U.pixelsize);
           ui::draw_roundbox_4fv(&rect, true, 0.0f, col_outline);
@@ -3838,12 +4799,193 @@ static void outliner_draw_highlights(const ARegion *region,
       }
     }
 
-    *io_start_y -= UI_UNIT_Y;
+    *io_start_y -= outliner_tree_element_height(*space_outliner, *te);
   });
+}
+
+/**
+ * Draw alternating Stack Layers backgrounds and the rule between a layer's channel rows, from
+ * the actual row geometry.
+ *
+ * The regular Outliner background uses a fixed one-unit pitch. That cuts a two-unit layer row in
+ * half, so Stack Layers alternates after complete tree elements instead. Channel rows are one unit
+ * high and are therefore handled naturally. In pair mode, direct channel rows are grouped as
+ * [1+2], [3+4], ...; for an odd count the first row is kept on its own: [1], [2+3], [4+5], ... .
+ */
+static void outliner_draw_stack_row_bands_recursive(const ARegion *region,
+                                                    const SpaceOutliner *space_outliner,
+                                                    const ListBaseT<TreeElement> *lb,
+                                                    const bool pair_channels,
+                                                    const uint pos,
+                                                    const float col_alternate[4],
+                                                    const float col_divider[4],
+                                                    const int startx,
+                                                    int *stripe_index,
+                                                    int *io_start_y)
+{
+  for (const TreeElement &te : *lb) {
+    const TreeStoreElem *tselem = TREESTORE(&te);
+    const int row_height = outliner_tree_element_height(*space_outliner, te);
+    const int start_y = *io_start_y + UI_UNIT_Y - row_height;
+
+    /* The band is drawn first so the rule below always shows on top of it, whichever of the two
+     * rows on either side of the rule is the shaded one. */
+    if ((*stripe_index & 1) != 0) {
+      immUniformColor4fv(col_alternate);
+      immRectf(pos,
+               float(region->v2d.cur.xmin),
+               float(start_y),
+               float(region->v2d.cur.xmax),
+               float(start_y + row_height));
+    }
+
+    /* A rule between the maps a layer is made of. They are one-line rows of the same shape --
+     * "Base Color", "Metallic", "Roughness" -- and without a line between them they read as one
+     * block of text. The first one needs none: the layer's row is above it. Starting at the row's
+     * own indent rather than the region edge keeps it off the hierarchy line and expand-arrow
+     * gutter to its left. */
+    if (tselem->type == TSE_STACK_ITEM && te.prev != nullptr) {
+      immUniformColor4fv(col_divider);
+      immRectf(pos,
+               float(startx),
+               float(start_y + row_height) - U.pixelsize,
+               float(region->v2d.cur.xmax),
+               float(start_y + row_height));
+    }
+
+    (*stripe_index)++;
+    *io_start_y -= row_height;
+
+    if (!TSELEM_OPEN(tselem, space_outliner)) {
+      continue;
+    }
+
+    if (tselem->type == TSE_STACK_LAYER && pair_channels) {
+      int channel_count = 0;
+      for (const TreeElement &child : te.subtree) {
+        channel_count += TREESTORE(&child)->type == TSE_STACK_ITEM;
+      }
+
+      if (channel_count > 0) {
+        const int channel_x = startx + UI_UNIT_X;
+        int channel_index = 0;
+        const int channel_stripe_index = *stripe_index;
+        for (const TreeElement &child : te.subtree) {
+          if (TREESTORE(&child)->type != TSE_STACK_ITEM) {
+            continue;
+          }
+
+          const int group = (channel_count & 1) ?
+                                (channel_index == 0 ? 0 : 1 + (channel_index - 1) / 2) :
+                                channel_index / 2;
+          const int channel_row_height = outliner_tree_element_height(*space_outliner, child);
+          const int channel_start_y = *io_start_y + UI_UNIT_Y - channel_row_height;
+          if (((channel_stripe_index + group) & 1) != 0) {
+            immUniformColor4fv(col_alternate);
+            immRectf(pos,
+                     float(region->v2d.cur.xmin),
+                     float(channel_start_y),
+                     float(region->v2d.cur.xmax),
+                     float(channel_start_y + channel_row_height));
+          }
+          if (channel_index != 0) {
+            immUniformColor4fv(col_divider);
+            immRectf(pos,
+                     float(channel_x),
+                     float(channel_start_y + channel_row_height) - U.pixelsize,
+                     float(region->v2d.cur.xmax),
+                     float(channel_start_y + channel_row_height));
+          }
+          channel_index++;
+          *io_start_y -= channel_row_height;
+        }
+        *stripe_index = channel_stripe_index + (channel_count + 1) / 2;
+        continue;
+      }
+    }
+
+    outliner_draw_stack_row_bands_recursive(region,
+                                            space_outliner,
+                                            &te.subtree,
+                                            pair_channels,
+                                            pos,
+                                            col_alternate,
+                                            col_divider,
+                                            startx + UI_UNIT_X,
+                                            stripe_index,
+                                            io_start_y);
+  }
+}
+
+static void outliner_draw_stack_row_bands(const ARegion *region,
+                                          const SpaceOutliner *space_outliner,
+                                          const int startx)
+{
+  if (space_outliner->outlinevis != SO_STACK_LAYERS ||
+      space_outliner->stack_layers_view != SO_SL_VIEW_STACK)
+  {
+    return;
+  }
+
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+
+  /* Themes saved before #TH_STACK_ALTERNATE existed leave it unset (alpha zero); fall back to
+   * the regular Outliner alternate-row color instead of drawing nothing until the user
+   * re-saves the theme. */
+  float col_stack_alternate[4];
+  ui::theme::get_color_4fv(TH_STACK_ALTERNATE, col_stack_alternate);
+  const int alternate_theme_id = (col_stack_alternate[3] > 0.0f) ? TH_STACK_ALTERNATE :
+                                                                  TH_ROW_ALTERNATE;
+  float col_alternate_raw[4];
+  ui::theme::get_color_4fv(alternate_theme_id, col_alternate_raw);
+  float col_alternate[4];
+  ui::theme::get_color_blend_3f(TH_BACK, alternate_theme_id, col_alternate_raw[3], col_alternate);
+  col_alternate[3] = 1.0f;
+
+  float col_divider[4];
+  ui::theme::get_color_blend_4f(TH_TEXT, TH_BACK, 0.8f, col_divider);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  /* Start with the alternate color so the first stack row remains distinct from a same-colored
+   * header and background in themes that use identical values for both. */
+  int stripe_index = 1;
+  int start_y = int(region->v2d.tot.ymax) - UI_UNIT_Y - OL_Y_OFFSET;
+  outliner_draw_stack_row_bands_recursive(region,
+                                          space_outliner,
+                                          &space_outliner->runtime->tree,
+                                          (space_outliner->stack_layers_flag &
+                                           SO_SL_PAIR_CHANNELS) != 0,
+                                          pos,
+                                          col_alternate,
+                                          col_divider,
+                                          startx,
+                                          &stripe_index,
+                                          &start_y);
+
+  /* The walk above only covers the tree's own rows. Below the last one, tile the same alternate
+   * band on the Outliner's usual one-unit pitch so an empty stretch of the list reads the same
+   * way it always has, rather than as a plain, un-striped background. */
+  immUniformColor4fv(col_alternate);
+  while (start_y + UI_UNIT_Y > region->v2d.cur.ymin) {
+    if ((stripe_index & 1) != 0) {
+      immRectf(pos,
+               float(region->v2d.cur.xmin),
+               float(start_y),
+               float(region->v2d.cur.xmax),
+               float(start_y + UI_UNIT_Y));
+    }
+    stripe_index++;
+    start_y -= UI_UNIT_Y;
+  }
+
+  immUnbindProgram();
 }
 
 static void outliner_draw_highlights(ARegion *region,
                                      SpaceOutliner *space_outliner,
+                                     const bool drag_active,
                                      int startx,
                                      int *starty)
 {
@@ -3864,9 +5006,47 @@ static void outliner_draw_highlights(ARegion *region,
                            col_active,
                            col_highlight,
                            col_searchmatch,
+                           drag_active,
                            startx,
                            starty);
   GPU_blend(GPU_BLEND_NONE);
+}
+
+/**
+ * The preview icon of every row slot that has one, resolved against the core's preview cache
+ * while a context is at hand. Cleared and refilled each draw: the icons are the core's, and a
+ * preview it does not have yet starts a job that we neither own nor wait for.
+ */
+static void stack_preview_icons_ensure(const bContext &C, SpaceOutliner &space_outliner)
+{
+  SpaceOutliner_Runtime &runtime = *space_outliner.runtime;
+  runtime.stack_preview_icons.clear();
+  if (space_outliner.outlinevis != SO_STACK_LAYERS) {
+    return;
+  }
+  Main *bmain = CTX_data_main(&C);
+  if (!runtime.stack_rows_valid) {
+    return;
+  }
+  for (const StackRow &row : runtime.stack_rows) {
+    for (const StackRowPreview &slot : row.preview_slots) {
+      if (slot.id_uid == 0 || slot.is_blank ||
+          runtime.stack_preview_icons.contains(slot.id_uid))
+      {
+        /* No data to preview, or a slot the source already answered for with its blank flag --
+         * both draw the placeholder instead of whatever the cache would build. */
+        continue;
+      }
+      ID *id = BKE_libblock_find_session_uid(bmain, ID_Type(slot.id_type), slot.id_uid);
+      if (id == nullptr) {
+        continue;
+      }
+      const int icon_id = ui::icon_id_preview_get(&C, id);
+      if (icon_id > 0) {
+        runtime.stack_preview_icons.add(slot.id_uid, icon_id);
+      }
+    }
+  }
 }
 
 static void outliner_draw_tree(ui::Block *block,
@@ -3876,6 +5056,7 @@ static void outliner_draw_tree(ui::Block *block,
                                const float right_column_width,
                                const bool use_mode_column,
                                const bool use_warning_column,
+                               const bool drag_active,
                                TreeElement **te_edit)
 {
   const uiFontStyle *fstyle = UI_FSTYLE_WIDGET;
@@ -3894,6 +5075,15 @@ static void outliner_draw_tree(ui::Block *block,
     columns_offset += UI_UNIT_X;
   }
 
+  /* Keep a dedicated column for the left-side stack visibility toggles, so the whole hierarchy --
+   * names, expand arrows and guide lines -- begins after them. */
+  if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+      space_outliner->stack_layers_view == SO_SL_VIEW_STACK &&
+      (space_outliner->stack_layers_flag & SO_SL_VISIBILITY_LEFT) != 0)
+  {
+    columns_offset += UI_UNIT_X;
+  }
+
   GPU_blend(GPU_BLEND_ALPHA); /* Only once. */
 
   if (space_outliner->outlinevis == SO_DATA_API) {
@@ -3907,11 +5097,13 @@ static void outliner_draw_tree(ui::Block *block,
   {
     int starty = int(region->v2d.tot.ymax) - UI_UNIT_Y - OL_Y_OFFSET;
     int startx = 0;
-    outliner_draw_highlights(region, space_outliner, startx, &starty);
+    outliner_draw_stack_row_bands(region, space_outliner, columns_offset);
+    outliner_draw_highlights(region, space_outliner, drag_active, startx, &starty);
 
     /* Set scissor so tree elements or lines can't overlap restriction icons. */
     if (right_column_width > 0.0f) {
-      int mask_x = BLI_rcti_size_x(&region->v2d.mask) - int(right_column_width) + 1;
+      const float columns_left = region->v2d.cur.xmax - right_column_width;
+      int mask_x = int(ui::view2d_view_to_region_x(&region->v2d, columns_left));
       CLAMP_MIN(mask_x, 0);
 
       GPU_scissor_get(scissor);
@@ -3929,6 +5121,13 @@ static void outliner_draw_tree(ui::Block *block,
 
   /* Items themselves. */
   {
+    /* Check once whether any Stack Layers row has TSE_ACTIVE set. If it does, TSE_ACTIVE wins
+     * over source-level activity (row_is_active) to prevent two rows lighting up at once. Folders
+     * cannot be active at the source level, so this is the only way a folder can be active. */
+    const bool stack_tree_has_active = (space_outliner->outlinevis == SO_STACK_LAYERS) ?
+                                           stack_tree_has_tse_active(*space_outliner) :
+                                           false;
+
     int starty = int(region->v2d.tot.ymax) - UI_UNIT_Y - OL_Y_OFFSET;
     int startx = columns_offset;
     for (TreeElement &te : space_outliner->runtime->tree) {
@@ -3942,7 +5141,8 @@ static void outliner_draw_tree(ui::Block *block,
                                  startx,
                                  &starty,
                                  right_column_width,
-                                 te_edit);
+                                 te_edit,
+                                 stack_tree_has_active);
     }
 
     if (right_column_width > 0.0f) {
@@ -3952,8 +5152,15 @@ static void outliner_draw_tree(ui::Block *block,
   }
 }
 
-static void outliner_back(ARegion *region)
+static void outliner_back(const SpaceOutliner &space_outliner, ARegion *region)
 {
+  if (space_outliner.outlinevis == SO_STACK_LAYERS &&
+      space_outliner.stack_layers_view == SO_SL_VIEW_STACK)
+  {
+    /* Stack Layers draws alternating bands from the actual tree geometry below. */
+    return;
+  }
+
   int ystart;
 
   ystart = int(region->v2d.tot.ymax);
@@ -4042,6 +5249,20 @@ void draw_outliner(const bContext *C, bool do_rebuild)
   TreeViewContext tvc;
   outliner_viewcontext_init(C, &tvc);
 
+  if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+      space_outliner->stack_layers_view == SO_SL_VIEW_STACK)
+  {
+    const StackReadContext stack_ctx = outliner_stack_read_context(*C);
+    if (ID *owner = outliner_stack_owner_get(stack_ctx, *space_outliner)) {
+      outliner_stack_rows_ensure(stack_ctx, *space_outliner, *owner);
+    }
+  }
+
+  /* The rows' preview icons, resolved while the context is at hand -- the core's preview cache
+   * answers from its own, and starts a render job for a preview it does not have yet. The row
+   * drawing that follows only looks the icon ids up. */
+  stack_preview_icons_ensure(*C, *space_outliner);
+
   /* FIXME(@ideasman42): There is an order of initialization problem here between
    * `v2d->cur` & `v2d->tot` where this function reads from `v2d->cur` for the scroll position
    * but may reset the scroll position *without* drawing into the clamped position.
@@ -4063,9 +5284,10 @@ void draw_outliner(const bContext *C, bool do_rebuild)
     if (space_outliner->flag & SO_SYNC_SELECT) {
       if (!ELEM(space_outliner->outlinevis,
                 SO_LIBRARIES,
-                SO_OVERRIDES_LIBRARY,
-                SO_DATA_API,
-                SO_ID_ORPHANS))
+                 SO_OVERRIDES_LIBRARY,
+                 SO_DATA_API,
+                 SO_ID_ORPHANS,
+                 SO_STACK_LAYERS))
       {
         if (outliner_sync_selection(C, tvc, space_outliner) &&
             (space_outliner->flag & SO_SCROLL_TO_ACTIVE))
@@ -4087,7 +5309,7 @@ void draw_outliner(const bContext *C, bool do_rebuild)
 
   /* Draw outliner stuff (background, hierarchy lines and names). */
   const float right_column_width = outliner_right_columns_width(space_outliner);
-  outliner_back(region);
+  outliner_back(*space_outliner, region);
   block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
   outliner_draw_tree(block,
                      tvc,
@@ -4096,6 +5318,9 @@ void draw_outliner(const bContext *C, bool do_rebuild)
                      right_column_width,
                      use_mode_column,
                      use_warning_column,
+                     /* A drop indicator is only worth anything while something is being dragged;
+                      * between drags it holds last time's answer. */
+                     !CTX_wm_manager(C)->runtime->drags.is_empty(),
                      &te_edit);
 
   /* Compute outliner dimensions after it has been drawn. */
@@ -4132,6 +5357,14 @@ void draw_outliner(const bContext *C, bool do_rebuild)
       outliner_draw_overrides_restrictbuts(
           mainvar, block, region, space_outliner, &space_outliner->runtime->tree, x);
     }
+  }
+  else if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+    /* The row toggles stay embossless, like the restriction icons: they sit inside the row. */
+    outliner_draw_stack_row_icons(block, region, space_outliner, *C, tvc);
+    outliner_draw_stack_preview_tooltips(block, region, space_outliner, tvc);
+    block_emboss_set(block, ui::EmbossType::Emboss);
+    outliner_draw_stack_columns(block, region, space_outliner, tvc);
+    block_emboss_set(block, ui::EmbossType::NoneOrStatus);
   }
   else if (right_column_width > 0.0f) {
     /* draw restriction columns */

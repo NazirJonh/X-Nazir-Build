@@ -487,6 +487,27 @@ def km_outliner(params):
     )
 
     items.extend([
+        # View2D navigation. These bindings live in the Outliner keymap instead of the shared
+        # "View2D" keymap because the generic View2D handler is attached before the region's
+        # own handlers and is consulted first, so its bindings would win over the Outliner
+        # overrides. Panning and zooming follow the Industry Compatible conventions (pan with
+        # Alt+drag, zoom with Alt+RMB or Alt+wheel). Keep plain wheel input as scrolling.
+        ("view2d.scroller_activate", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroller_activate", {"type": 'MIDDLEMOUSE', "value": 'PRESS'}, None),
+        ("view2d.pan", {"type": 'LEFTMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("view2d.pan", {"type": 'MIDDLEMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("view2d.zoom", {"type": 'RIGHTMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("view2d.pan", {"type": 'TRACKPADPAN', "value": 'ANY'}, None),
+        ("view2d.scroll_down", {"type": 'WHEELDOWNMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroll_up", {"type": 'WHEELUPMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroll_right", {"type": 'WHEELDOWNMOUSE', "value": 'PRESS', "shift": True}, None),
+        ("view2d.scroll_left", {"type": 'WHEELUPMOUSE', "value": 'PRESS', "shift": True}, None),
+        ("view2d.ndof", {"type": 'NDOF_MOTION', "value": 'ANY'}, None),
+        ("view2d.zoom_in", {"type": 'WHEELINMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("view2d.zoom_out", {"type": 'WHEELOUTMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("view2d.zoom", {"type": 'TRACKPADPAN', "value": 'ANY', "ctrl": True}, None),
+        ("view2d.zoom", {"type": 'TRACKPADZOOM', "value": 'ANY'}, None),
+        ("view2d.smoothview", {"type": 'TIMER1', "value": 'ANY', "any": True}, None),
         ("outliner.item_rename", {"type": 'LEFTMOUSE', "value": 'DOUBLE_CLICK'}, None),
         ("outliner.item_rename", {"type": 'RET', "value": 'PRESS'},
          {"properties": [("use_active", True)]}),
@@ -571,6 +592,8 @@ def km_outliner(params):
         ("outliner.start_filter", {"type": 'F', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.clear_filter", {"type": 'F', "value": 'PRESS', "alt": True}, None),
         # Copy/paste.
+        ("outliner.stack_layer_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
+        ("outliner.stack_layer_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.id_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.id_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
     ])

@@ -101,6 +101,11 @@ enum eTreeStoreElemType : short {
   TSE_ACTION_SLOT = 50,
   TSE_SHAPE_KEY_BLOCK = 51,
   TSE_SHAPE_KEY_BASE = 52,
+  TSE_STACK_LAYER = 53,
+  TSE_STACK_ITEM = 54,
+  /* Reserved: once named a root element of the Stack Layers view. Values in this enum are written
+   * to files and never reused, so the number stays out of future elements' way. */
+  TSE_STACK_BASE = 55,
 };
 
 /** Check whether given #TreeStoreElem should have a real ID in #TreeStoreElem.id member. */

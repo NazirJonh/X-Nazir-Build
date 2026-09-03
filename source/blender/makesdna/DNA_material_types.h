@@ -23,6 +23,7 @@ namespace blender {
 struct AnimData;
 struct Image;
 struct bNodeTree;
+struct MaterialPaintLayerRuntime;
 
 /* MaterialGPencilStyle->flag */
 enum eMaterialGPencilStyle_Flag : short {
@@ -472,6 +473,14 @@ struct Material {
    * Must be refreshed via #BKE_paint_material_channel_cache_invalidate before using after edits.
    */
   MaterialPaintChannelCache paint_channel_cache[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
+
+  /**
+   * Runtime-only paint layer state: the revision every successful paint layer edit bumps, so a
+   * reader can tell a stack it has already read from one that moved on without walking the node
+   * graph. Defined and owned by BKE (#MaterialPaintLayerRuntime), never part of the file: the
+   * file reader nulls it, a copy starts fresh, and the first edit allocates it.
+   */
+  struct MaterialPaintLayerRuntime *paint_layer_runtime = nullptr;
 
   /** Runtime cache for GLSL materials. */
   ListBaseT<LinkData> gpumaterial = {nullptr, nullptr};

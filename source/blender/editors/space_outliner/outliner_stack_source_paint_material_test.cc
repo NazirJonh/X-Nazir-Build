@@ -1,0 +1,227 @@
+/* SPDX-FileCopyrightText: 2026 Blender Authors
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+#include "testing/testing.h"
+
+#include "BLI_assert.h"
+
+#include "BKE_gtest_base.hh"
+#include "BKE_image.hh"
+#include "BKE_lib_id.hh"
+#include "BKE_main.hh"
+#include "BKE_material.hh"
+#include "BKE_node.hh"
+#include "BKE_paint_material_layer_edit.hh"
+
+#include "DNA_image_types.h"
+#include "DNA_material_types.h"
+#include "DNA_node_types.h"
+#include "DNA_space_types.h"
+
+#include "outliner_stack_source.hh"
+
+namespace blender::ed::outliner::tests {
+
+class OutlinerStackPaintMaterialSourceTest : public bke::BlenderGTestBase {
+ public:
+  Main *bmain = nullptr;
+
+  void SetUp() override
+  {
+    bmain = BKE_main_new();
+  }
+
+  void TearDown() override
+  {
+    BKE_main_free(bmain);
+  }
+
+  Image &add_image(const char *name)
+  {
+    const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    return *BKE_image_add_generated(
+        bmain, 8, 8, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  }
+
+  Material &add_material_with_texture(Image &image)
+  {
+    Material *material = BKE_material_add(bmain, "Material");
+    bNodeTree &tree = *material->nodetree;
+    bNode &principled = *bke::node_add_static_node(nullptr, tree, SH_NODE_BSDF_PRINCIPLED);
+    bNode &output = *bke::node_add_static_node(nullptr, tree, SH_NODE_OUTPUT_MATERIAL);
+    bNode &texture = *bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+    texture.id = &image.id;
+    bke::node_add_link(tree,
+                       principled,
+                       *bke::node_find_socket(principled, SOCK_OUT, "BSDF"_ustr),
+                       output,
+                       *bke::node_find_socket(output, SOCK_IN, "Surface"_ustr));
+    bke::node_add_link(tree,
+                       texture,
+                       *bke::node_find_socket(texture, SOCK_OUT, "Color"_ustr),
+                       principled,
+                       *bke::node_find_socket(principled, SOCK_IN, "Base Color"_ustr));
+    return *material;
+  }
+
+  static bNode *find_texture_node(Material &material, const Image &image)
+  {
+    for (bNode &node : material.nodetree->nodes) {
+      if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id == &image.id) {
+        return &node;
+      }
+    }
+    return nullptr;
+  }
+
+  static bNode *find_principled(Material &material)
+  {
+    for (bNode &node : material.nodetree->nodes) {
+      if (node.type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+        return &node;
+      }
+    }
+    return nullptr;
+  }
+
+  static bNodeLink *find_link_into(bNodeTree &tree, bNodeSocket &to_socket)
+  {
+    for (bNodeLink &link : tree.links) {
+      if (link.tosock == &to_socket) {
+        return &link;
+      }
+    }
+    return nullptr;
+  }
+
+  const StackSource &paint_source()
+  {
+    const StackSource *source = stack_source_get(SO_STACK_SRC_PAINT_MATERIAL);
+    BLI_assert(source != nullptr);
+    return *source;
+  }
+};
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, rewire_changes_state_hash_with_unchanged_counts)
+{
+  Image &image_a = add_image("FeedA");
+  Image &image_b = add_image("FeedB");
+  Material &material = add_material_with_texture(image_a);
+  bNodeTree &tree = *material.nodetree;
+  bNode &texture_b = *bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+  texture_b.id = &image_b.id;
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  const uint64_t hash_before = paint_source().state_hash(ctx, material.id);
+
+  /* Move the Base Color feed over to the other texture: the node count and the link count stay
+   * put, the link's two ends do not. A counts-only hash would call this the same stack, and the
+   * rows built from the links would go stale. */
+  bNode *texture_a = find_texture_node(material, image_a);
+  bNode *principled = find_principled(material);
+  ASSERT_NE(texture_a, nullptr);
+  ASSERT_NE(principled, nullptr);
+  bNodeSocket *base_color = bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  bNodeLink *feed = find_link_into(tree, *base_color);
+  ASSERT_NE(feed, nullptr);
+  bke::node_remove_link(&tree, *feed);
+  bke::node_add_link(tree,
+                     texture_b,
+                     *bke::node_find_socket(texture_b, SOCK_OUT, "Color"_ustr),
+                     *principled,
+                     *base_color);
+
+  const uint64_t hash_after = paint_source().state_hash(ctx, material.id);
+  EXPECT_NE(hash_before, hash_after);
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, relinking_the_same_ends_hashes_the_same)
+{
+  Image &image = add_image("Feed");
+  Material &material = add_material_with_texture(image);
+  bNodeTree &tree = *material.nodetree;
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  const uint64_t hash_before = paint_source().state_hash(ctx, material.id);
+
+  /* Take the map's feed off and put it back on the same two ends: the stack did not change, and
+   * the hash may not say it did -- that would re-read the rows on every build. */
+  bNode *principled = find_principled(material);
+  ASSERT_NE(principled, nullptr);
+  bNodeSocket *base_color = bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  bNodeLink *feed = find_link_into(tree, *base_color);
+  ASSERT_NE(feed, nullptr);
+  bNode &from_node = *feed->fromnode;
+  bNodeSocket &from_socket = *feed->fromsock;
+  bke::node_remove_link(&tree, *feed);
+  bke::node_add_link(tree, from_node, from_socket, *principled, *base_color);
+
+  const uint64_t hash_after = paint_source().state_hash(ctx, material.id);
+  EXPECT_EQ(hash_before, hash_after);
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, adding_a_node_changes_state_hash)
+{
+  Image &image = add_image("Feed");
+  Material &material = add_material_with_texture(image);
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  const uint64_t hash_before = paint_source().state_hash(ctx, material.id);
+  bke::node_add_static_node(nullptr, *material.nodetree, SH_NODE_TEX_IMAGE);
+  const uint64_t hash_after = paint_source().state_hash(ctx, material.id);
+
+  EXPECT_NE(hash_before, hash_after);
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, stack_past_the_addressable_range_shows_a_stub)
+{
+  Material &material = add_material_with_texture(add_image("Base"));
+
+  /* Fill the stack just past the addressable range: the bare base at ordinal 0, then added
+   * layers up to one ordinal past #STACK_ROW_ORDINAL_MAX. The images stay tiny so the test does
+   * not pay for real maps. */
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  for (int i = 0; i < STACK_ROW_ORDINAL_MAX + 1; i++) {
+    ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params));
+  }
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  const StackFocus focus;
+  Vector<StackRow> rows;
+  ASSERT_TRUE(paint_source().rows_build(ctx, focus, material.id, rows));
+  ASSERT_FALSE(rows.is_empty());
+
+  /* Every addressable row is listed as before; the one row above them is the stub. */
+  for (const int index : rows.index_range().drop_back(1)) {
+    EXPECT_TRUE(rows[index].supported);
+    EXPECT_LE(rows[index].ordinal, STACK_ROW_ORDINAL_MAX);
+  }
+  const StackRow &stub = rows.last();
+  EXPECT_EQ(stub.ordinal, STACK_ROW_ORDINAL_MAX + 1);
+  EXPECT_FALSE(stub.supported);
+  EXPECT_STREQ(stub.unsupported_reason, "Stack is too large to display");
+  EXPECT_TRUE(stub.preview_slots.is_empty());
+  EXPECT_TRUE(stub.content_sections.is_empty());
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, copy_starts_with_a_fresh_paint_revision)
+{
+  Material &material = add_material_with_texture(add_image("Base"));
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params));
+  EXPECT_GT(BKE_material_paint_layer_revision_get(material), 0);
+
+  Material *copy = static_cast<Material *>(BKE_id_copy(bmain, &material.id));
+  ASSERT_NE(copy, nullptr);
+  /* The revision says "the stack I read is still the stack it was"; a copy has not been read by
+   * anyone yet, whatever the original has done since. */
+  EXPECT_EQ(BKE_material_paint_layer_revision_get(*copy), 0);
+  BKE_id_free(bmain, copy);
+}
+
+}  // namespace blender::ed::outliner::tests

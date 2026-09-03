@@ -25,13 +25,13 @@ namespace blender {
  * `rna_image.cc` carries a leading None for reading a link back, which a flag enum must not have.
  */
 static const EnumPropertyItem rna_enum_bake_paint_channel_items[] = {
-    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
-    {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
-    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
-    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
-    {PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
-    {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
-    {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -39,6 +39,7 @@ static const EnumPropertyItem rna_enum_bake_paint_channel_items[] = {
 
 #ifdef RNA_RUNTIME
 
+#  include "BLI_math_bits.h"
 #  include "BLI_string.h"
 #  include "BLI_vector.hh"
 
@@ -66,8 +67,8 @@ static void rna_Material_bake_paint_channels(Material *material,
        item->identifier != nullptr;
        item++)
   {
-    if (channels_flag & (1 << item->value)) {
-      targets.append({eMaterialPaintChannel(item->value)});
+    if (channels_flag & item->value) {
+      targets.append({eMaterialPaintChannel(bitscan_forward_uint(item->value))});
     }
   }
   if (targets.is_empty()) {

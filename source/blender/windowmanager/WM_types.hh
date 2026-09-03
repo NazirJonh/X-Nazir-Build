@@ -101,6 +101,7 @@
 #include "BLI_vector.hh"
 
 #include "DNA_listBase.h"
+#include "DNA_space_enums.h"
 #include "DNA_uuid_types.h"
 #include "DNA_vec_types.h"
 #include "DNA_xr_types.h"
@@ -1286,6 +1287,8 @@ enum eWM_DragDataType : int8_t {
   WM_DRAG_NODE_TREE_INTERFACE,
   WM_DRAG_BONE_COLLECTION,
   WM_DRAG_SHAPE_KEY,
+  /** Reorder a row of the Outliner's Stack Layers mode. */
+  WM_DRAG_STACK_LAYER,
   /** Reorder an item within an asset-backed grid (Shift+drag) — the asset shelf's Favorites list
    *  today, any future template_grid_view_asset consumer that opts in tomorrow. */
   WM_DRAG_GRID_ITEM_REORDER_ASSET,
@@ -1343,6 +1346,75 @@ struct wmDragGridItemPy {
 
 struct wmDragAssetCatalog {
   bUUID drag_catalog_id;
+};
+
+namespace ed::outliner {
+
+/**
+ * What a row remains, once its ordinal has moved on.
+ *
+ * An ordinal is a position, and any edit above it in the stack changes it. Everything that has to
+ * survive an edit -- a drag, restoring a selection, a preview cache key -- is addressed by this
+ * instead.
+ *
+ * The one place for this type is here, not in an editor header: a drag outlives the editor that
+ * started it, and this header is what every module that meets the payload -- blenkernel and
+ * render included -- already includes. It is a lightweight POD struct on purpose, suitable for
+ * drag data and other cross-module contexts.
+ */
+struct StackItemIdentity {
+  /** #ID.session_uid of the stack's owner. 0 means unset. */
+  uint32_t owner_uid = 0;
+  /**
+   * Which source issued it: a row of one stack does not address a row of another. Default is
+   * #SO_STACK_SRC_NONE, so a half-filled identity can never be mistaken for a row of whichever
+   * source happens to sort first.
+   */
+  eSpaceOutliner_StackSource source_type = SO_STACK_SRC_NONE;
+  /** #StackRow::stable_id. Nil when the source gives no identity for this row. */
+  bUUID row_id = {};
+  /**
+   * Position at the time this was issued -- a hint for the resolver, and the fallback used in
+   * place of a nil #row_id.
+   */
+  int16_t ordinal_hint = -1;
+
+  bool is_valid() const
+  {
+    return owner_uid != 0;
+  }
+};
+
+}  // namespace ed::outliner
+
+/**
+ * Drag data for a Stack Layers row (texture layer, group, channel).
+ *
+ * Runtime-only and dynamically allocated with #MEM_new. The source row and owner are encoded as
+ * #StackItemIdentity values (session UID + source type + row ID + ordinal hint) rather than
+ * pointers, since they may be freed or renumbered before the drop happens. See
+ * #WM_drag_data_free, which frees this payload through its own branch, since the
+ * #blender::Vector below allocates and has to be destructed.
+ * The drop target is resolved each frame from the cursor position -- see `outliner_dragdrop.cc`
+ * for that half of the dance.
+ *
+ * Unlike most drag payloads, this carries *multiple* source identities, for multi-selection drag:
+ * all selected rows move together, preserving their relative order. An empty vector means the
+ * drag is invalid (mid-construction or after a failed resolution).
+ *
+ * What the drop would look like on screen -- the indicator's row and zone -- is the Outliner's
+ * own business, kept in the space's runtime rather than here.
+ */
+struct wmDragStackLayer {
+  /** Identities of all dragged rows (from selection). Empty = invalid drag. */
+  blender::Vector<ed::outliner::StackItemIdentity> drag_rows;
+
+  /** `target_owner_uid == 0` until a drop zone under the cursor has resolved to one. */
+  uint32_t target_owner_uid;
+  short target_source_type; /* #eSpaceOutliner_StackSource. */
+  bUUID target_row_id;
+  short target_ordinal_hint;
+  short target_place; /* #StackMovePlace, see #ed::outliner in this header. */
 };
 
 /** Drag data for asset library items from Preferences. */

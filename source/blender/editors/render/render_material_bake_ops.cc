@@ -20,6 +20,7 @@
 
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
+#include "BLI_math_bits.h"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
@@ -48,19 +49,19 @@ using ed::material_bake::MaterialBakeToImagesParams;
 using ed::material_bake::MaterialBakeToImagesResult;
 
 /**
- * Bit index `i` of the flag enum is #eMaterialPaintChannel value `i`.
+ * Each value is the bit for its #eMaterialPaintChannel index.
  *
  * Height, ambient occlusion and Custom are absent on purpose: the resolver has no Principled input
  * to bake them from, so offering them would only produce empty maps.
  */
 static const EnumPropertyItem bake_paint_channel_items[] = {
-    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
-    {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
-    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
-    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
-    {PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
-    {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
-    {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -86,8 +87,8 @@ static wmOperatorStatus material_bake_from_material_exec(bContext *C, wmOperator
        item->identifier != nullptr;
        item++)
   {
-    if (channels_flag & (1 << item->value)) {
-      targets.append({eMaterialPaintChannel(item->value)});
+    if (channels_flag & item->value) {
+      targets.append({eMaterialPaintChannel(bitscan_forward_uint(item->value))});
     }
   }
   if (targets.is_empty()) {

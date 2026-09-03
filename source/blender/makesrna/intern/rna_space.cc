@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cstdlib>
 #include <cstring>
 
@@ -27,6 +28,8 @@ static constexpr bool RNA_SPACE_DEBUG_ENABLED = false;
 #include "ED_asset.hh"
 #include "ED_buttons.hh"
 #include "ED_image.hh"
+#include "ED_outliner.hh"
+#include "ED_outliner_stack_automation.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_spreadsheet.hh"
@@ -863,6 +866,124 @@ static ScrArea *rna_area_from_space(const PointerRNA *ptr)
   bScreen *screen = reinterpret_cast<bScreen *>(ptr->owner_id);
   SpaceLink *link = static_cast<SpaceLink *>(ptr->data);
   return BKE_screen_find_area_from_space(screen, link);
+}
+
+static void rna_SpaceOutliner_display_mode_update(bContext * /*C*/, PointerRNA *ptr)
+{
+  ScrArea *area = rna_area_from_space(ptr);
+  if (area != nullptr) {
+    /* The tool header only carries the Stack Layers controls, so it follows the display mode.
+     * `RGN_FLAG_HIDDEN_BY_USER` is left alone: a user who collapsed it keeps it collapsed. */
+    SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+    ed::outliner::outliner_tool_header_visibility_sync(area, *space_outliner);
+    ED_area_tag_redraw(area);
+  }
+  ED_area_tag_refresh(area);
+}
+
+static void rna_SpaceOutliner_stack_focus_name_get(PointerRNA *ptr, char *value)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  const char *name = ed::outliner::outliner_stack_focus_name_get(*space_outliner);
+  const int length = int(strlen(name));
+  memcpy(value, name, length + 1);
+}
+
+static int rna_SpaceOutliner_stack_focus_name_length(PointerRNA *ptr)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  return int(strlen(ed::outliner::outliner_stack_focus_name_get(*space_outliner)));
+}
+
+static int rna_SpaceOutliner_stack_focus_sub_index_get(PointerRNA *ptr)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  return ed::outliner::outliner_stack_focus_sub_index_get(*space_outliner);
+}
+
+static void rna_SpaceOutliner_stack_focus_sub_index_set(PointerRNA *ptr, int value)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  ed::outliner::outliner_stack_focus_sub_index_set(*space_outliner, value);
+}
+
+static void rna_SpaceOutliner_stack_focus_sub_index_update(bContext *C,
+                                                           PointerRNA *ptr,
+                                                           PropertyRNA * /*prop*/)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  ed::outliner::outliner_stack_focus_sub_index_apply(*C, *space_outliner);
+}
+
+static const EnumPropertyItem *rna_SpaceOutliner_stack_focus_sub_index_itemf(
+    bContext *C, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  return ed::outliner::outliner_stack_focus_sub_index_itemf(C, *space_outliner, r_free);
+}
+
+static bool rna_SpaceOutliner_stack_layer_row_is_selected(SpaceOutliner *space_outliner,
+                                                          int ordinal)
+{
+  return ed::outliner::outliner_stack_row_is_selected(*space_outliner, ordinal);
+}
+
+static bool rna_SpaceOutliner_stack_layer_row_is_open(SpaceOutliner *space_outliner, int ordinal)
+{
+  return ed::outliner::outliner_stack_row_is_open(*space_outliner, ordinal);
+}
+
+static void rna_SpaceOutliner_stack_layer_row_select(SpaceOutliner *space_outliner,
+                                                     bContext *C,
+                                                     int ordinal,
+                                                     bool select,
+                                                     bool extend)
+{
+  ed::outliner::outliner_stack_row_select(*C, *space_outliner, ordinal, select, extend);
+}
+
+static void rna_SpaceOutliner_stack_layer_row_closed_set(SpaceOutliner *space_outliner,
+                                                         int ordinal,
+                                                         bool closed)
+{
+  ed::outliner::outliner_stack_row_closed_set(*space_outliner, ordinal, closed);
+}
+
+static int rna_SpaceOutliner_stack_layer_row_preview_uid(SpaceOutliner *space_outliner,
+                                                         int ordinal)
+{
+  return int(ed::outliner::outliner_stack_row_preview_uid(*space_outliner, ordinal));
+}
+
+static bool rna_SpaceOutliner_stack_layer_debug_drop(SpaceOutliner *space_outliner,
+                                                      bContext *C,
+                                                      PointerRNA *source_space_ptr,
+                                                      int source_ordinal,
+                                                      int target_ordinal)
+{
+  SpaceOutliner *source_space = static_cast<SpaceOutliner *>(source_space_ptr->data);
+  return ed::outliner::outliner_stack_layer_debug_drop(
+      *C, *source_space, source_ordinal, *space_outliner, target_ordinal);
+}
+
+static bool rna_SpaceOutliner_stack_layer_debug_drop_id(SpaceOutliner *space_outliner,
+                                                        bContext *C,
+                                                        PointerRNA *dropped_ptr,
+                                                        int target_ordinal)
+{
+  ID *dropped = dropped_ptr ? static_cast<ID *>(dropped_ptr->data) : nullptr;
+  if (dropped == nullptr) {
+    return false;
+  }
+  return ed::outliner::outliner_stack_layer_debug_drop_id(
+      *C, *space_outliner, *dropped, target_ordinal);
+}
+
+static int rna_SpaceOutliner_stack_layer_item_debug_drag_id(SpaceOutliner *space_outliner,
+                                                            int ordinal,
+                                                            int role)
+{
+  return int(ed::outliner::outliner_stack_item_debug_drag_id(*space_outliner, ordinal, role));
 }
 
 static void area_region_from_regiondata(bScreen *screen,
@@ -5113,6 +5234,7 @@ static void rna_def_space_outliner(BlenderRNA *brna)
 {
   StructRNA *srna;
   PropertyRNA *prop;
+  FunctionRNA *func;
 
   static const EnumPropertyItem display_mode_items[] = {
       {SO_SCENES,
@@ -5150,6 +5272,35 @@ static void rna_def_space_outliner(BlenderRNA *brna)
        ICON_ORPHAN_DATA,
        "Unused Data",
        "Display data that is unused and/or will be lost when the file is reloaded"},
+      {SO_STACK_LAYERS,
+       "STACK_LAYERS",
+       ICON_IMAGE_RGB,
+       "Stack Layers",
+       "Display an ordered layer stack of the focused data"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem stack_layers_view_items[] = {
+      {SO_SL_VIEW_OBJECTS,
+       "OBJECTS",
+       ICON_OBJECT_DATA,
+       "Objects",
+       "Browse the objects that have a stack"},
+      {SO_SL_VIEW_STACK, "STACK", ICON_IMAGE_RGB, "Stack", "Display the focused stack"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem stack_source_items[] = {
+      {SO_STACK_SRC_PAINT_MATERIAL,
+       "PAINT_MATERIAL",
+       ICON_BRUSH_DATA,
+       "Paint Layers",
+       "Paint layers of the active material"},
+      {SO_STACK_SRC_SHAPE_KEYS,
+       "SHAPE_KEYS",
+       ICON_SHAPEKEY_DATA,
+       "Shape Keys",
+       "Shape keys of the active object"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -5185,6 +5336,251 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "outlinevis");
   RNA_def_property_enum_items(prop, display_mode_items);
   RNA_def_property_ui_text(prop, "Display Mode", "Type of information to display");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_SPACE_OUTLINER, "rna_SpaceOutliner_display_mode_update");
+
+  prop = RNA_def_property(srna, "stack_layers_view", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stack_layers_view");
+  RNA_def_property_enum_items(prop, stack_layers_view_items);
+  RNA_def_property_ui_text(
+      prop, "Stack Layers View", "Whether to browse objects or to show one object's stack");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "stack_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stack_source");
+  RNA_def_property_enum_items(prop, stack_source_items);
+  RNA_def_property_ui_text(prop, "Stack Source", "Which kind of layer stack to display");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_pin", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_PINNED);
+  RNA_def_property_ui_text(
+      prop, "Pin Stack", "Keep the focused stack when the active object changes");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "stack_focus_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_SpaceOutliner_stack_focus_name_get",
+                                "rna_SpaceOutliner_stack_focus_name_length",
+                                nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Stack Focus Name",
+                           "Name of the data-block the displayed stack belongs to, as the source "
+                           "last resolved it; empty before the first stack is shown");
+  RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_ID);
+
+  prop = RNA_def_property(srna, "stack_focus_sub_index", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_dummy_NULL_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_SpaceOutliner_stack_focus_sub_index_get",
+                              "rna_SpaceOutliner_stack_focus_sub_index_set",
+                              "rna_SpaceOutliner_stack_focus_sub_index_itemf");
+  RNA_def_property_ui_text(prop,
+                           "Stack Material",
+                           "Material slot whose layer stack is shown and used for painting");
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_SPACE_OUTLINER, "rna_SpaceOutliner_stack_focus_sub_index_update");
+  RNA_def_property_flag(prop, PROP_CONTEXT_PROPERTY_UPDATE);
+
+  func = RNA_def_function(
+      srna, "debug_stack_layer_row_is_selected", "rna_SpaceOutliner_stack_layer_row_is_selected");
+  RNA_def_function_ui_description(
+      func,
+      "Whether the stack row at the given ordinal is selected in the tree. For the automated "
+      "test suite: the display mode has no other reason to read tree selection by ordinal");
+  RNA_def_int(
+      func, "ordinal", 0, 0, SHRT_MAX, "Ordinal", "Position of the row in the stack", 0, SHRT_MAX);
+  RNA_def_function_return(func, RNA_def_boolean(func, "is_selected", false, "", ""));
+
+  func = RNA_def_function(
+      srna, "debug_stack_layer_row_is_open", "rna_SpaceOutliner_stack_layer_row_is_open");
+  RNA_def_function_ui_description(
+      func,
+      "Whether the stack row at the given ordinal is open (not collapsed) in the tree. For the "
+      "automated test suite; see debug_stack_layer_row_is_selected");
+  RNA_def_int(
+      func, "ordinal", 0, 0, SHRT_MAX, "Ordinal", "Position of the row in the stack", 0, SHRT_MAX);
+  RNA_def_function_return(func, RNA_def_boolean(func, "is_open", false, "", ""));
+
+  func = RNA_def_function(
+      srna, "debug_stack_layer_row_select", "rna_SpaceOutliner_stack_layer_row_select");
+  RNA_def_function_ui_description(
+      func,
+      "Select or deselect the stack row at the given ordinal, the way clicking it would. For the "
+      "automated test suite; see debug_stack_layer_row_is_selected");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_int(
+      func, "ordinal", 0, 0, SHRT_MAX, "Ordinal", "Position of the row in the stack", 0, SHRT_MAX);
+  RNA_def_boolean(func, "select", true, "Select", "Select the row, rather than deselect it");
+  RNA_def_boolean(func,
+                  "extend",
+                  false,
+                  "Extend",
+                  "Add the row to the selection, the way ctrl-clicking it would");
+
+  func = RNA_def_function(
+      srna, "debug_stack_layer_row_closed_set", "rna_SpaceOutliner_stack_layer_row_closed_set");
+  RNA_def_function_ui_description(
+      func,
+      "Collapse or open the stack row at the given ordinal, the way its disclosure toggle would. "
+      "For the automated test suite; see debug_stack_layer_row_is_selected");
+  RNA_def_int(
+      func, "ordinal", 0, 0, SHRT_MAX, "Ordinal", "Position of the row in the stack", 0, SHRT_MAX);
+  RNA_def_boolean(func, "closed", true, "Closed", "Collapse the row, rather than open it");
+
+  func = RNA_def_function(
+      srna, "debug_stack_layer_row_preview_uid", "rna_SpaceOutliner_stack_layer_row_preview_uid");
+  RNA_def_function_ui_description(
+      func,
+      "The session UID of the data-block whose preview the stack row at the given ordinal shows, "
+      "or 0 when it has none. For the automated test suite; see "
+      "debug_stack_layer_row_is_selected");
+  RNA_def_int(
+      func, "ordinal", 0, 0, SHRT_MAX, "Ordinal", "Position of the row in the stack", 0, SHRT_MAX);
+  /* Session UIDs are unsigned and RNA integers are not, so the full range is declared and a UID
+   * past #INT_MAX reads back negative -- exactly as #ID.session_uid does, which is what these
+   * values are compared against. */
+  RNA_def_function_return(func,
+                          RNA_def_int(func,
+                                      "preview_uid",
+                                      0,
+                                      INT_MIN,
+                                      INT_MAX,
+                                      "Preview UID",
+                                      "Session UID of the preview",
+                                      INT_MIN,
+                                      INT_MAX));
+
+  func = RNA_def_function(
+      srna, "debug_stack_layer_drop_between", "rna_SpaceOutliner_stack_layer_debug_drop");
+  RNA_def_function_ui_description(
+      func,
+      "Move a row from source_space's stack into this one's, exactly as dropping it there would. "
+      "Automation surface for the Stack Layers test suite, not a stable scripting API: it may "
+      "change or go away with those tests. False when the two do not show the same stack -- a "
+      "different owner or a different source -- or either row is gone");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  PropertyRNA *parm = RNA_def_pointer(
+      func, "source_space", "SpaceOutliner", "Source", "The Outliner the row is dragged from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_int(func,
+              "source_ordinal",
+              0,
+              0,
+              SHRT_MAX,
+              "Source Ordinal",
+              "Row to move, in the source Outliner's stack",
+              0,
+              SHRT_MAX);
+  RNA_def_int(func,
+              "target_ordinal",
+              0,
+              0,
+              SHRT_MAX,
+              "Target Ordinal",
+              "Row to move it next to, in this stack",
+              0,
+              SHRT_MAX);
+  RNA_def_function_return(func, RNA_def_boolean(func, "success", false, "", ""));
+
+  func = RNA_def_function(
+      srna, "debug_stack_layer_drop_id", "rna_SpaceOutliner_stack_layer_debug_drop_id");
+  RNA_def_function_ui_description(
+      func,
+      "Drop a data-block on this stack -- on the row at target_ordinal, or on the stack itself "
+      "for -1 -- exactly as dragging it there would. Automation surface for the Stack Layers test "
+      "suite, not a stable scripting API: it may change or go away with those tests. False when "
+      "this Outliner shows no stack, its source has no drop handler, or the handler refuses the "
+      "payload");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_pointer(func, "dropped", "ID", "Dropped", "The data-block dropped on the stack");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_int(func,
+              "target_ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Target Ordinal",
+              "Row to drop on, or -1 for the stack itself",
+              -1,
+              SHRT_MAX);
+  RNA_def_function_return(func, RNA_def_boolean(func, "success", false, "", ""));
+
+  func = RNA_def_function(
+      srna, "debug_stack_layer_item_drag_id", "rna_SpaceOutliner_stack_layer_item_debug_drag_id");
+  RNA_def_function_ui_description(
+      func,
+      "The session UID of the data-block the drag started on the stack sub-row at the given "
+      "ordinal and role would carry, or 0 when there is no such row or it has nothing to drag. "
+      "Automation surface for the Stack Layers test suite, not a stable scripting API; see "
+      "debug_stack_layer_drop_id");
+  RNA_def_int(func,
+              "ordinal",
+              0,
+              0,
+              SHRT_MAX,
+              "Ordinal",
+              "Position of the row in the stack",
+              0,
+              SHRT_MAX);
+  RNA_def_int(
+      func, "role", 0, 0, SHRT_MAX, "Role", "Which sub-row of the row to drag", 0, SHRT_MAX);
+  RNA_def_function_return(
+      func,
+      /* Signed for the same reason as `preview_uid` above. */
+      RNA_def_int(func,
+                  "drag_id_uid",
+                  0,
+                  INT_MIN,
+                  INT_MAX,
+                  "Drag ID UID",
+                  "Session UID of the data-block the drag carries",
+                  INT_MIN,
+                  INT_MAX));
+
+  prop = RNA_def_property(srna, "show_stack_layer_opacity", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_OPACITY);
+  RNA_def_property_ui_text(
+      prop, "Show Value", "Show the column that modulates each layer, such as its opacity");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "show_stack_layer_blend", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_BLEND);
+  RNA_def_property_ui_text(
+      prop, "Show Mode", "Show the column that says how each layer combines with the one below");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "show_stack_items", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_ITEMS);
+  RNA_def_property_ui_text(
+      prop, "Show Contents", "Show the data-blocks each layer is made of, below it");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_big_rows", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_BIG_ROWS);
+  RNA_def_property_ui_text(prop, "Large Rows", "Use larger Stack Layers rows");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_pair_channels", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_PAIR_CHANNELS);
+  RNA_def_property_ui_text(prop,
+                           "Pair Channel Rows",
+                           "Use one color for each pair of channel rows");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_visibility_left", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_VISIBILITY_LEFT);
+  RNA_def_property_ui_text(prop,
+                           "Visibility Left Side",
+                           "Put the visibility toggle before the layer's name instead of in the "
+                           "columns on the right");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_sort_by_name", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_SORT_BY_NAME);
+  RNA_def_property_ui_text(prop, "Sort by Name", "Sort Stack Layers alphabetically");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 
   prop = RNA_def_property(srna, "lib_override_view_mode", PROP_ENUM, PROP_NONE);

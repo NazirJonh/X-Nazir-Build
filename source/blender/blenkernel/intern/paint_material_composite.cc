@@ -19,6 +19,8 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_material_resolve.hh"
 
+#include "paint_material_composite_internal.hh"
+
 #include "BLI_hash.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
@@ -92,8 +94,59 @@ static bool composite_blend_from_ramp_blend(const int ramp_blend, CompositeBlend
 /** Name of the ID property that marks the group, and the value that identifies this one. */
 static const char *NORMAL_COMBINE_PROP = "pbr_paint_node_group";
 static const char *NORMAL_COMBINE_VALUE = "NORMAL_COMBINE";
+/** A folder of layers, composited on transparency; see `08 §2.2`. */
+static const char *LAYER_GROUP_VALUE = "LAYER_GROUP";
 /* NOTE: DO NOT translate, it is what an existing group is found by. */
 static const char *NORMAL_COMBINE_TREE_NAME = "PBR Normal Combine";
+
+bool BKE_paint_material_is_layer_group(const bNode &node)
+{
+  if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
+    return false;
+  }
+  const IDProperty *properties = IDP_GetProperties(const_cast<ID *>(node.id));
+  if (properties == nullptr) {
+    return false;
+  }
+  /* The same marker property the Normal Combine group uses, with a different value: one place to
+   * look to know whether a group node is one of ours, and which. */
+  const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
+      properties, NORMAL_COMBINE_PROP, IDP_STRING);
+  return marker != nullptr && STREQ(IDP_string_get(marker), LAYER_GROUP_VALUE);
+}
+
+static const char *LAYER_GROUP_MATERIAL_PROP = "pbr_paint_layer_material";
+
+Material *BKE_paint_material_layer_group_material_get(const ID &group_tree_id)
+{
+  const IDProperty *properties = IDP_GetProperties(const_cast<ID *>(&group_tree_id));
+  if (properties == nullptr) {
+    return nullptr;
+  }
+  const IDProperty *reference = IDP_GetPropertyTypeFromGroup(
+      properties, LAYER_GROUP_MATERIAL_PROP, IDP_ID);
+  ID *id = (reference == nullptr) ? nullptr : IDP_ID_get(const_cast<IDProperty *>(reference));
+  return (id != nullptr && GS(id->name) == ID_MA) ? id_cast<Material *>(id) : nullptr;
+}
+
+void BKE_paint_material_layer_group_material_set(ID &group_tree_id, Material *material)
+{
+  IDProperty *properties = IDP_EnsureProperties(&group_tree_id);
+  IDProperty *reference = IDP_GetPropertyTypeFromGroup(
+      properties, LAYER_GROUP_MATERIAL_PROP, IDP_ID);
+  if (reference == nullptr) {
+    if (material == nullptr) {
+      /* Nothing stood here, and nothing is being put here. */
+      return;
+    }
+    reference = bke::idprop::create(LAYER_GROUP_MATERIAL_PROP, static_cast<ID *>(nullptr))
+                    .release();
+    IDP_AddToGroup(properties, reference);
+  }
+  /* #IDP_AssignID moves the user count along with the pointer, whichever way it goes -- a null
+   * included, which is how the reference is taken away again. */
+  IDP_AssignID(reference, (material != nullptr) ? &material->id : nullptr, 0);
+}
 
 bool BKE_paint_material_is_normal_combine_group(const bNode &node)
 {
@@ -251,18 +304,45 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
 
 /** \} */
 
-/** The inputs of \a node when it is a colour Mix node, in either the legacy or the current form.
+/**
+ * Whether \a r_mix.factor is linked through a Math node in Multiply mode that combines a
+ * per-pixel coverage source with a plain constant, and if so, fills in #factor_opacity and
+ * #factor_coverage.
+ *
+ * Coverage and opacity coexist this way: the layer's own image still drives per-pixel coverage
+ * through the Multiply's linked input, and the other, unlinked input is a constant the user can
+ * still edit -- unlike a bare link straight into the Mix's Factor, which leaves nothing to edit.
  */
-struct CompositeMixNode {
-  const bNodeSocket *factor = nullptr;
-  /** What is below in the stack. */
-  const bNodeSocket *bottom = nullptr;
-  /** The layer itself. */
-  const bNodeSocket *top = nullptr;
-  CompositeBlend blend = CompositeBlend::Mix;
-};
+static void composite_mix_factor_opacity_detect(CompositeMixNode &r_mix)
+{
+  if (r_mix.factor == nullptr) {
+    return;
+  }
+  const bNode *source = composite_source_node_shallow(*r_mix.factor);
+  if (source == nullptr || source->type_legacy != SH_NODE_MATH ||
+      NodeMathOperation(source->custom1) != NODE_MATH_MULTIPLY)
+  {
+    return;
+  }
+  const bNodeSocket *value_a = static_cast<const bNodeSocket *>(
+      BLI_findlink(&source->inputs, 0));
+  const bNodeSocket *value_b = static_cast<const bNodeSocket *>(
+      BLI_findlink(&source->inputs, 1));
+  if (value_a == nullptr || value_b == nullptr) {
+    return;
+  }
+  const bool a_linked = !value_a->directly_linked_links().is_empty();
+  const bool b_linked = !value_b->directly_linked_links().is_empty();
+  /* Exactly one side has to be the coverage source and the other a plain constant; both linked,
+   * or neither, is not this shape, and the legacy all-or-nothing reading takes over instead. */
+  if (a_linked == b_linked) {
+    return;
+  }
+  r_mix.factor_coverage = a_linked ? value_a : value_b;
+  r_mix.factor_opacity = a_linked ? value_b : value_a;
+}
 
-static bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
+bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
 {
   if (BKE_paint_material_is_normal_combine_group(node)) {
     /* Sockets by name: the group is the engine's own, and its interface names are the contract
@@ -271,15 +351,15 @@ static bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
     r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "A"_ustr);
     r_mix.top = bke::node_find_socket(node, SOCK_IN, "B"_ustr);
     r_mix.blend = CompositeBlend::NormalCombine;
+    composite_mix_factor_opacity_detect(r_mix);
     return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
   }
   if (node.type_legacy == SH_NODE_MIX_RGB_LEGACY) {
-    if (!composite_blend_from_ramp_blend(node.custom1, r_mix.blend)) {
-      return false;
-    }
+    r_mix.blend_supported = composite_blend_from_ramp_blend(node.custom1, r_mix.blend);
     r_mix.factor = bke::node_find_socket(node, SOCK_IN, "Fac"_ustr);
     r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "Color1"_ustr);
     r_mix.top = bke::node_find_socket(node, SOCK_IN, "Color2"_ustr);
+    composite_mix_factor_opacity_detect(r_mix);
     return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
   }
   if (node.type_legacy == SH_NODE_MIX) {
@@ -292,12 +372,11 @@ static bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
     if (storage->factor_mode != NODE_MIX_MODE_UNIFORM) {
       return false;
     }
-    if (!composite_blend_from_ramp_blend(storage->blend_type, r_mix.blend)) {
-      return false;
-    }
+    r_mix.blend_supported = composite_blend_from_ramp_blend(storage->blend_type, r_mix.blend);
     r_mix.factor = bke::node_find_socket(node, SOCK_IN, "Factor_Float"_ustr);
     r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "A_Color"_ustr);
     r_mix.top = bke::node_find_socket(node, SOCK_IN, "B_Color"_ustr);
+    composite_mix_factor_opacity_detect(r_mix);
     return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
   }
   return false;
@@ -309,10 +388,10 @@ static bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
  * The same rule as the resolver's image case: only a #ShaderNodeTexImage counts, and a tiled
  * (UDIM) image has no single buffer to composite.
  */
-static bool composite_image_from_socket(const bNodeSocket &socket,
-                                        Image *&r_image,
-                                        const ImageUser *&r_iuser,
-                                        bool *r_from_alpha = nullptr)
+bool composite_image_from_socket(const bNodeSocket &socket,
+                                 Image *&r_image,
+                                 const ImageUser *&r_iuser,
+                                 bool *r_from_alpha)
 {
   const bNodeSocket *source = BKE_paint_material_source_socket(socket);
   if (source == nullptr) {
@@ -348,7 +427,7 @@ static bool composite_image_from_socket(const bNodeSocket &socket,
  * node inside it. This answers "what node produced it", which is what a group used as an operation
  * -- the normal combine -- has to be recognized by.
  */
-static const bNode *composite_source_node_shallow(const bNodeSocket &socket)
+const bNode *composite_source_node_shallow(const bNodeSocket &socket)
 {
   const bNodeSocket *current = &socket;
   /* A malformed tree can in principle cycle; bound the walk rather than trust the data. */
@@ -392,6 +471,45 @@ static const bNode *composite_source_node_shallow(const bNodeSocket &socket)
  */
 static bool composite_stack_collect(const bNodeSocket &socket,
                                     Vector<PaintMaterialCompositeImageLayer> &r_layers,
+                                    int depth);
+
+/**
+ * Append the sub-stack of \a group, reached through \a socket, to \a r_layers.
+ *
+ * The group's own output socket says which channel to follow: the instance's outputs and the Group
+ * Output's inputs come from the same interface and therefore share identifiers, so this needs no
+ * channel names.
+ */
+static bool composite_stack_collect_group(const bNodeSocket &socket,
+                                          const bNode &group,
+                                          Vector<PaintMaterialCompositeImageLayer> &r_layers,
+                                          const int depth)
+{
+  const bNodeTree *group_tree = reinterpret_cast<const bNodeTree *>(group.id);
+  if (group_tree == nullptr || socket.directly_linked_links().is_empty()) {
+    return false;
+  }
+  const bNodeSocket *from = socket.directly_linked_links()[0]->fromsock;
+  if (from == nullptr) {
+    return false;
+  }
+
+  group_tree->ensure_topology_cache();
+  for (const bNode &node : group_tree->nodes) {
+    if (node.type_legacy != NODE_GROUP_OUTPUT) {
+      continue;
+    }
+    if (const bNodeSocket *result = bke::node_find_socket(
+            node, SOCK_IN, from->identifier_ustr()))
+    {
+      return composite_stack_collect(*result, r_layers, depth + 1);
+    }
+  }
+  return false;
+}
+
+static bool composite_stack_collect(const bNodeSocket &socket,
+                                    Vector<PaintMaterialCompositeImageLayer> &r_layers,
                                     const int depth)
 {
   /* A malformed tree can cycle, and a very deep chain is not worth compositing anyway. */
@@ -403,6 +521,13 @@ static bool composite_stack_collect(const bNodeSocket &socket,
    * #BKE_paint_material_source_socket descends into a group and reports the node inside that
    * happens to feed the output, which says nothing about what the group as a whole does. */
   const bNode *shallow_source = composite_source_node_shallow(socket);
+  if (shallow_source != nullptr && BKE_paint_material_is_layer_group(*shallow_source)) {
+    /* A layer group is a sub-stack composited on transparency and laid over the rest as one
+     * layer. Flattening it into this list is only the same picture when the node above it does
+     * nothing more than stack the two -- see below, where that is checked; here the group is
+     * simply walked into, which is that already-checked case. */
+    return composite_stack_collect_group(socket, *shallow_source, r_layers, depth);
+  }
   const bool is_combine_group = shallow_source != nullptr &&
                                 BKE_paint_material_is_normal_combine_group(*shallow_source);
 
@@ -419,6 +544,7 @@ static bool composite_stack_collect(const bNodeSocket &socket,
         return false;
       }
       /* The bottom layer has nothing under it: its own blend and opacity would have no meaning. */
+      layer.is_bare_base = true;
       r_layers.append(layer);
       return true;
     }
@@ -429,17 +555,61 @@ static bool composite_stack_collect(const bNodeSocket &socket,
   if (!composite_mix_node_read(*shallow_source, mix)) {
     return false;
   }
-  if (!composite_stack_collect(*mix.bottom, r_layers, depth + 1)) {
+  if (!mix.blend_supported) {
+    /* Screen, Difference, Hue and the rest have no byte blend function here. Reporting them as
+     * not-a-stack sends the channel to the bake, which evaluates them properly, rather than
+     * showing the user a composite that quietly differs from the render. */
+    return false;
+  }
+  /* Nothing under this Mix node means it is the bottom of a uniform chain: what it blends over is
+   * the transparency its own socket holds, so the list simply starts here. */
+  if (composite_source_node_shallow(*mix.bottom) != nullptr &&
+      !composite_stack_collect(*mix.bottom, r_layers, depth + 1))
+  {
     return false;
   }
 
   PaintMaterialCompositeImageLayer layer;
   layer.blend = mix.blend;
+
+  const bNode *top_source = composite_source_node_shallow(*mix.top);
+  if (top_source != nullptr && BKE_paint_material_is_layer_group(*top_source)) {
+    /* An isolated group flattens into this list only when the node above it does nothing but
+     * stack the two: any other blend, or a factor below one, composites the group as a whole and
+     * is not the same as compositing its layers one after another. Reporting those as not-a-stack
+     * sends the channel to the bake, which evaluates the graph properly, rather than showing a
+     * composite that quietly differs from the render. */
+    if (mix.blend != CompositeBlend::Mix) {
+      return false;
+    }
+    if (BKE_paint_material_source_socket(*mix.factor) != nullptr) {
+      return false;
+    }
+    const float factor =
+        static_cast<const bNodeSocketValueFloat *>(mix.factor->default_value)->value;
+    if (factor < 1.0f) {
+      return false;
+    }
+    return composite_stack_collect_group(*mix.top, *top_source, r_layers, depth);
+  }
+
   if (!composite_image_from_socket(*mix.top, layer.color_image, layer.color_iuser)) {
     return false;
   }
-  if (BKE_paint_material_source_socket(*mix.factor) != nullptr) {
-    /* A linked factor is a mask, and only an image one can be sampled per pixel. */
+  if (mix.factor_opacity != nullptr) {
+    /* Coverage and the layer's own opacity coexist: the mask comes from the Multiply's other
+     * input, not from #mix.factor itself. */
+    if (!composite_image_from_socket(
+            *mix.factor_coverage, layer.mask_image, layer.mask_iuser, &layer.mask_from_alpha))
+    {
+      return false;
+    }
+    layer.opacity =
+        static_cast<const bNodeSocketValueFloat *>(mix.factor_opacity->default_value)->value;
+  }
+  else if (BKE_paint_material_source_socket(*mix.factor) != nullptr) {
+    /* A linked factor with nothing to separate an opacity from is a mask alone, and only an image
+     * one can be sampled per pixel. */
     if (!composite_image_from_socket(
             *mix.factor, layer.mask_image, layer.mask_iuser, &layer.mask_from_alpha))
     {
@@ -920,17 +1090,27 @@ bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
     const uchar *layer_pixels = layer.color_ibuf->byte_data();
 
     if (!composite_initialized) {
-      /* The bottom layer is copied rather than blended: there is nothing under it, and blending
-       * it over undefined pixels would let them show through wherever it is transparent. */
+      /* A bare bottom is copied rather than blended: it has no Mix node, so it has no blend mode
+       * or factor, and blending it over undefined pixels would let them show through wherever it
+       * is transparent. A uniform chain's lowest layer has all of those, and blends over the
+       * transparency the graph gives it -- so the buffer starts cleared and it is blended like
+       * any other layer. */
       threading::parallel_for(rows, 64, [&](const IndexRange range) {
         for (const int64_t y : range) {
           const int64_t offset = y * row_stride + int64_t(area.xmin) * 4;
-          memcpy(composite_pixels + offset, layer_pixels + offset, size_t(area_width * 4));
+          if (layer.is_bare_base) {
+            memcpy(composite_pixels + offset, layer_pixels + offset, size_t(area_width * 4));
+          }
+          else {
+            memset(composite_pixels + offset, 0, size_t(area_width * 4));
+          }
         }
       });
       composite_initialized = true;
-      layers_evaluated++;
-      continue;
+      if (layer.is_bare_base) {
+        layers_evaluated++;
+        continue;
+      }
     }
 
     threading::parallel_for(rows, 64, [&](const IndexRange range) {
@@ -1037,6 +1217,7 @@ static bool composite_stack_build(Span<PaintMaterialCompositeImageLayer> image_l
     layer.opacity = image_layer.opacity;
     layer.mask_influence = image_layer.mask_influence;
     layer.mask_from_alpha = image_layer.mask_from_alpha;
+    layer.is_bare_base = image_layer.is_bare_base;
     r_stack.layers.append(layer);
   }
   return !r_stack.layers.is_empty();
@@ -1121,6 +1302,8 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.mask_from_alpha,
                             layer.opacity,
                             layer.mask_influence);
+    /* Split rather than appended: #get_default_hash mixes a fixed number of values at once. */
+    hash = get_default_hash(hash, layer.is_bare_base);
   }
   return hash;
 }

@@ -832,6 +832,13 @@ static void rna_ui_template_ID_session_uid(
   template_ID_session_uid(*layout, C, ptr, propname, idcode);
 }
 
+static void rna_ui_template_stack_focus_sub_index(Layout *layout,
+                                                  PointerRNA *ptr,
+                                                  const char *propname)
+{
+  ui::template_stack_focus_sub_index(layout, ptr, propname);
+}
+
 static void rna_uiTemplateID_with_filter_context(Layout *layout,
                                                  bContext *C,
                                                  PointerRNA *ptr,
@@ -2246,6 +2253,10 @@ void RNA_api_ui_layout(StructRNA *srna)
   func = RNA_def_function(srna, "template_header", "template_header");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   RNA_def_function_ui_description(func, "Inserts common Space header UI (editor type selector)");
+
+  func = RNA_def_function(
+      srna, "template_stack_focus_sub_index", "rna_ui_template_stack_focus_sub_index");
+  api_ui_item_rna_common(func);
 
   func = RNA_def_function(srna, "template_ID", "rna_uiTemplateID");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);

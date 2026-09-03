@@ -217,9 +217,18 @@ struct SpaceOutliner {
   eSpaceOutliner_Mode outlinevis = SO_SCENES;
   eSpaceOutliner_LibOverrideViewMode lib_override_view_mode = SO_LIB_OVERRIDE_VIEW_PROPERTIES;
   eSpaceOutliner_StoreFlag storeflag = {};
-  eSpaceOutliner_Search_Flags search_flags = {};
-  char _pad[6] = {};
+  eSpaceOutliner_StackLayersView stack_layers_view = SO_SL_VIEW_OBJECTS;
+  /**
+   * A stack reads as a layer manager, so it opens like one: tall rows with a thumbnail, and the
+   * visibility toggle down the left edge where every layer manager puts it. Both stay
+   * user-configurable; this is only what a space that has never been touched starts with.
+   */
+  eSpaceOutliner_StackLayersFlag stack_layers_flag = SO_SL_BIG_ROWS | SO_SL_VISIBILITY_LEFT;
+  /** Which kind of stack #SO_STACK_LAYERS lists. */
+  eSpaceOutliner_StackSource stack_source = SO_STACK_SRC_PAINT_MATERIAL;
 
+  /* Keep the two single-byte members paired: DNA requires 2-byte members to stay aligned. */
+  eSpaceOutliner_Search_Flags search_flags = {};
   /** Selection syncing flag (#WM_OUTLINER_SYNC_SELECT_FROM_OBJECT and similar flags). */
   char sync_select_dirty = 0;
 

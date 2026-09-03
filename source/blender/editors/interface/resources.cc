@@ -974,6 +974,10 @@ const uchar *get_color_ptr(bTheme *btheme, int spacetype, int colorid)
           cp = ts->row_alternate;
           break;
 
+        case TH_STACK_ALTERNATE:
+          cp = ts->stack_layer_alternate;
+          break;
+
         case TH_SKIN_ROOT:
           cp = ts->skin_root;
           break;

@@ -2828,6 +2828,9 @@ std::optional<StringRefNull> button_asset_shelf_type_idname_get(const Button *bu
 
 /* templates */
 void template_header(Layout *layout, bContext *C);
+void template_stack_focus_sub_index(Layout *layout,
+                                    PointerRNA *ptr,
+                                    StringRefNull propname);
 void template_id(Layout *layout,
                  const bContext *C,
                  PointerRNA *ptr,

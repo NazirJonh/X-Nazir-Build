@@ -712,6 +712,14 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     &toolsett_old->paint_mode.canvas_image,
                                                     IDWALK_CB_NOP);
   for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+    /* The paint bindings are deliberately preserved across an undo restore (they do not follow
+     * the graph back): a live paint target must not jump when an undo rolls the graph back. The
+     * binding names where the brush writes, not what the graph says, so restoring it would take
+     * the canvas out from under a stroke the user is in the middle of; taking a target away is a
+     * deliberate act instead (#OUTLINER_OT_stack_layer_clear_target). The Outliner suite covers
+     * both halves of the contract -- the binding surviving the undo that wrote it
+     * (#test_activate_undo_preserves_paint_target), and the clear operator as the explicit way
+     * out (#test_clear_target_after_undo). */
     BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(
         data,
         &toolsett->paint_mode.channel_image_bindings[i].image,

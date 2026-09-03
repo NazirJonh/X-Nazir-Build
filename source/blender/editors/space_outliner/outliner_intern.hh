@@ -9,12 +9,21 @@
 #pragma once
 
 #include <memory>
+#include <optional>
+#include <string>
+
+#include "BLI_map.hh"
+#include "BLI_set.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_listBase.h"
+#include "DNA_vec_types.h"
 
 #include "BLI_function_ref.hh"
 
 #include "RNA_types.hh"
+
+#include "outliner_stack_source.hh"
 
 /* Needed for `tree_element_cast()`. */
 #include "tree/tree_element.hh"
@@ -27,10 +36,13 @@ struct ARegion;
 struct Collection;
 struct EditBone;
 struct ID;
+struct Image;
 struct LayerCollection;
 struct Main;
+struct Material;
 struct Object;
 struct Scene;
+struct ScrArea;
 struct TreeStoreElem;
 struct ViewLayer;
 struct bContext;
@@ -56,6 +68,39 @@ namespace treehash = bke::outliner::treehash;
 
 struct TreeElement;
 
+/**
+ * The part of a stack row's appearance the user controls: whether the row is collapsed, selected
+ * and/or active.
+ *
+ * Keyed by identity (#StackRow::stable_id) rather than by the row's ordinal, because an ordinal is
+ * a position and every structural edit recomputes positions -- a collapsed group has to come back
+ * collapsed at whatever ordinal it lands on, not hand its state to whichever row moves into its
+ * old one.
+ */
+struct StackRowUiState {
+  bool closed = false;
+  bool selected = false;
+  bool active = false;
+  /**
+   * Identifier of the currently active content section for this row.
+   *
+   * Empty means the default section (typically "CHANNELS" for paint layers). When a row has
+   * multiple content sections, this determines which one's sub-rows are shown when the row is
+   * expanded. Paint layers switch between "CHANNELS" and "MASK" by clicking their respective
+   * preview slots.
+   *
+   * This is UI state, not file data: it persists across tree rebuilds via #StackRow::stable_id,
+   * but never enters DNA or survives session restart.
+   */
+  std::string active_content_section;
+};
+
+enum TreeElementInsertType {
+  TE_INSERT_BEFORE,
+  TE_INSERT_AFTER,
+  TE_INSERT_INTO,
+};
+
 struct SpaceOutliner_Runtime {
   /** Object to create and manage the tree for a specific display type (View Layers, Scenes,
    * Blender File, etc.). */
@@ -66,16 +111,103 @@ struct SpaceOutliner_Runtime {
 
   ListBaseT<ed::outliner::TreeElement> tree = {nullptr, nullptr};
 
+  /* Stack Layers display mode. Transient: none of it is written to a .blend. */
+
+  /** What the stack is pointed at. Interpreted by the space's #ed::outliner::StackSource. */
+  ed::outliner::StackFocus stack_focus;
+  /** Rows as the source last described them, addressed by #TreeElement through their ordinal. */
+  Vector<ed::outliner::StackRow> stack_rows;
+  /**
+   * Ordinal to index into #stack_rows, rebuilt whenever the rows are: rows are looked up by
+   * ordinal many times per redraw, and walking the whole vector for each of those is the kind of
+   * cost that only shows up once the stack is large.
+   */
+  Map<int, int> stack_row_index;
+  /**
+   * The data-block #stack_rows was built from, and the source state it was built at.
+   *
+   * By session UID rather than by address: a UID names the same data for as long as the session
+   * lasts, where a freed data-block's address can come back as a different one and make a stale
+   * cache read as current. 0 is "nothing built yet".
+   */
+  uint32_t stack_owner_uid = 0;
+  uint64_t stack_state_hash = 0;
+  bool stack_rows_valid = false;
+  /**
+   * The rows were re-read since the tree was last built -- an edit's doing -- so the tree store
+   * still speaks the previous build's ordinals, and reading it against these rows would attach
+   * its state to the wrong ones. #outliner_stack_row_ui_state_sync refuses while this is set;
+   * the build that lists these rows clears it.
+   */
+  bool stack_rows_rebuilt_since_build = false;
+  /**
+   * Name of the data-block the displayed stack belongs to, as the source last resolved it. Kept
+   * for headers and scripts, which ask for it through RNA and have no context of their own to
+   * resolve the focus with.
+   */
+  std::string stack_focus_name;
+  /**
+   * What the user did with each row, by #StackRow::stable_id: survives any renumbering.
+   *
+   * Clicks and collapses live in the tree store between builds. Read into this map whenever the
+   * rows are about to be re-read (#outliner_stack_rows_invalidate) and whenever the tree is
+   * rebuilt (#outliner_stack_row_ui_state_sync), it is what carries their state across the
+   * rebuild that renumbers them. Rows without a #StackRow::stable_id are left to the tree store,
+   * which is what they have always had.
+   */
+  Map<UUID, StackRowUiState> stack_row_ui_state;
+  /**
+   * The row identities the last tree build actually listed, for #stack_row_ui_state's cleanup: an
+   * entry seen at neither this nor the previous build belongs to a row that is gone.
+   */
+  Set<UUID> stack_row_ui_state_seen;
+  /**
+   * Icon ids for the rows' preview slots, keyed by the data-block UID a #StackRowPreview names.
+   * Filled once per draw from the pass that owns a context -- the core's preview cache and its
+   * jobs are not ours to keep -- and consumed by the row drawing that follows.
+   */
+  Map<uint32_t, int> stack_preview_icons;
+  /**
+   * Where the reorder drop indicator currently points: the row aimed at and the zone it was aimed
+   * at. Written by the stack drop's poll and read by its tooltip before the drop commits; the
+   * element itself is this space's tree, which the drag -- a window-manager object that knows
+   * nothing of trees -- must not hold on to.
+   */
+  /**
+   * Which row the drop under way is pointing at, and how -- what the drag draws as a line or an
+   * outline.
+   *
+   * The Stack Layers rows draw this instead of reading the tree store's #TSE_DRAG_ANY flags: every
+   * drop poll in the Outliner clears those flags before deciding, so which of them survives to the
+   * next draw depends on the order the window manager happens to poll in. This is written by the
+   * stack's own polls only, and read only while a drag is live.
+   *
+   * By ordinal rather than by #TreeElement, so a tree rebuilt mid-drag leaves nothing dangling;
+   * -1 is "no row".
+   */
+  struct StackDropIndicator {
+    int ordinal = -1;
+    TreeElementInsertType insert_type = TE_INSERT_BEFORE;
+  } stack_drop_indicator;
+  /**
+   * Where a dropped data-block would land, as the drop's own poll last resolved it.
+   *
+   * The poll is the only pass that is asked "where is the cursor" while the drag is live, and the
+   * drop that follows must land exactly where the indicator promised. Resolving the cursor a
+   * second time from the operator is the same question asked in a different place, and answering
+   * it twice is what lets the two answers differ; the drop reads this instead. An invalid anchor
+   * means the drop named no row, which each source reads its own way -- for paint layers, the top
+   * of the stack.
+   */
+  struct StackDropAim {
+    ed::outliner::StackItemIdentity anchor;
+    ed::outliner::StackMovePlace place = ed::outliner::StackMovePlace::Above;
+  } stack_drop_aim;
+
   SpaceOutliner_Runtime() = default;
-  /** Used for copying runtime data to a duplicated space. */
+  /** Used for copying runtime data to a duplicated space. Copies its focus, not cached tree data. */
   SpaceOutliner_Runtime(const SpaceOutliner_Runtime &);
   ~SpaceOutliner_Runtime() = default;
-};
-
-enum TreeElementInsertType {
-  TE_INSERT_BEFORE,
-  TE_INSERT_AFTER,
-  TE_INSERT_INTO,
 };
 
 enum TreeTraversalAction {
@@ -486,6 +618,10 @@ void OUTLINER_OT_parent_clear(wmOperatorType *ot);
 void OUTLINER_OT_scene_drop(wmOperatorType *ot);
 void OUTLINER_OT_material_drop(wmOperatorType *ot);
 void OUTLINER_OT_datastack_drop(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_drop(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_image_drop(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_material_drop(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_channel_image_assign(wmOperatorType *ot);
 void OUTLINER_OT_collection_drop(wmOperatorType *ot);
 
 /* ...................................................... */
@@ -520,6 +656,225 @@ void OUTLINER_OT_keyingset_remove_selected(wmOperatorType *ot);
 
 void OUTLINER_OT_drivers_add_selected(wmOperatorType *ot);
 void OUTLINER_OT_drivers_delete_selected(wmOperatorType *ot);
+
+/* `outliner_stack_layers.cc` */
+
+/** The subset of the context a #ed::outliner::StackSource is allowed to read. */
+ed::outliner::StackReadContext outliner_stack_read_context(const bContext &C);
+/** Drop the cached rows so the next rebuild asks the source again. */
+void outliner_stack_rows_invalidate(SpaceOutliner &space_outliner);
+/**
+ * Read the tree store's per-row state back into #SpaceOutliner_Runtime::stack_row_ui_state, keyed
+ * by identity, so the tree build that follows can re-attach it however the ordinals moved.
+ *
+ * The tree the tree store was filled by is gone by the time a build starts; its rows are not, and
+ * the caller passes the owner they belong to, which is what keys the tree store entries. A build
+ * whose rows were already re-read under it (an edit that just ran) must not call this: the tree
+ * store still speaks the old ordinals, and the map is already up to date.
+ */
+void outliner_stack_row_ui_state_sync(SpaceOutliner &space_outliner, const ID &owner);
+/**
+ * Drop the #stack_row_ui_state entries seen at neither of the last two builds -- a row removed
+ * from the stack has nobody left to remember.
+ *
+ * \param seen: the identities the build that is just finishing listed.
+ */
+void outliner_stack_row_ui_state_prune(SpaceOutliner_Runtime &runtime, Set<UUID> &&seen);
+
+/**
+ * Get the active content section identifier for the given row.
+ *
+ * Returns the active section ID from UI state, or empty for the default section (typically
+ * "CHANNELS"). Falls back to the first available section if the stored section no longer exists
+ * in the row's current data.
+ *
+ * The answer names a string the row's own model owns, which outlives the tree build this is read
+ * in, so it is a view and not a copy.
+ */
+StringRef outliner_stack_row_active_section_get(const SpaceOutliner &space_outliner,
+                                                const ed::outliner::StackRow &row);
+
+/**
+ * Set the active content section for the given row.
+ *
+ * \param section_id: Identifier of the section to activate (e.g., "CHANNELS" or "MASK").
+ *                   Must match a section in the row's #StackRow::content_sections.
+ * \return true if the section was set, false if the section does not exist in the row.
+ */
+bool outliner_stack_row_active_section_set(SpaceOutliner &space_outliner,
+                                           const ed::outliner::StackRow &row,
+                                           StringRefNull section_id);
+
+/** Rebuild #SpaceOutliner_Runtime.stack_rows when the source says its state moved on. */
+void outliner_stack_rows_ensure(const ed::outliner::StackReadContext &ctx,
+                                SpaceOutliner &space_outliner,
+                                ID &owner);
+/** The row with this ordinal, or null. */
+const ed::outliner::StackRow *outliner_stack_row_find(const SpaceOutliner &space_outliner,
+                                                      int ordinal);
+
+/**
+ * How much larger than an icon a Stack Layers preview draws: the draw paints a thumbnail this many
+ * icon heights tall, and everything that aims at one -- tooltips, the hit-test -- scales by the
+ * same factor.
+ */
+constexpr float OUTLINER_STACK_PREVIEW_SCALE = 1.5f;
+
+/** The pixel size of one preview slot, at the current interface scale. */
+float outliner_stack_preview_size();
+
+/**
+ * The exact rectangle the draw paints the row's preview slot \a slot_index into, in window
+ * coordinates.
+ *
+ * Geometry shared by the draw that paints it, the tooltips that cover it and the hit-test that
+ * reads the cursor against it: all three have to agree to the pixel, so the formula lives in
+ * exactly one place. When the row's first slot keeps the row's own icon, every slot's rectangle
+ * sits one icon further right, past that icon.
+ *
+ * \param row_x: where the row's own content starts, and \a content_y its one-unit content line.
+ * Both are passed rather than read off \a te, because #TreeElement.xs and #TreeElement.ys are
+ * written by the draw pass at the *end* of the element it is drawing: inside that pass they still
+ * hold the previous layout's numbers, and nothing at all the first time a rebuilt tree is drawn.
+ * The draw hands over its running position; the passes that run after it read the layout.
+ */
+rctf outliner_stack_row_preview_rect(const ed::outliner::StackRow &row,
+                                     float row_x,
+                                     float content_y,
+                                     int slot_index);
+
+/** The rectangle a preview-shaped placeholder -- an object row's or an empty slot's -- draws into:
+ * the first slot's geometry, without a leading icon. */
+rctf outliner_stack_slot_preview_rect(float row_x, float content_y, int slot_index);
+
+/** An Image Editor already open in this screen, or null. */
+ScrArea *outliner_image_area_find(const bContext &C);
+
+/**
+ * The identity of the row \a identity names, or -1 when it can no longer be found: the owner or
+ * source changed, or the row itself is gone.
+ *
+ * Resolution matches #StackItemIdentity::row_id first when it is not nil, falling back to
+ * #StackItemIdentity::ordinal_hint otherwise -- see #StackItemIdentity.
+ */
+int outliner_stack_identity_resolve(const ed::outliner::StackReadContext &ctx,
+                                    SpaceOutliner &space_outliner,
+                                    const ed::outliner::StackItemIdentity &identity);
+/** The identity of the row currently at \a ordinal, for later use with #outliner_stack_identity_resolve. */
+ed::outliner::StackItemIdentity outliner_stack_identity_of(const SpaceOutliner &space_outliner,
+                                                            int ordinal);
+/** Ordinals of the stack rows the user has selected, in ascending order. Empty when none are. */
+void stack_selected_ordinals_get(SpaceOutliner &space_outliner, blender::Vector<int> &r_ordinals);
+/** The stack's owning data-block for the current focus, or null. */
+ID *outliner_stack_owner_get(const ed::outliner::StackReadContext &ctx,
+                             SpaceOutliner &space_outliner);
+/**
+ * The object the space's focus names, resolved for this read: the active object for an empty
+ * focus, the pinned one found by session UID otherwise. A focus left naming a deleted object
+ * drops itself and the rows cached under it, and the space falls back to the active object.
+ */
+Object *outliner_stack_focus_object_resolve(const ed::outliner::StackReadContext &ctx,
+                                            SpaceOutliner &space_outliner);
+bool outliner_stack_focus_set(bContext *C,
+                              SpaceOutliner &space_outliner,
+                              Object &object,
+                              int sub_index,
+                              bool enter_edit_mode);
+bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, int ordinal);
+bool outliner_stack_sub_row_activate(bContext *C, SpaceOutliner &space_outliner, int nr);
+/**
+ * Height of one row in pixels.
+ *
+ * #UI_UNIT_Y everywhere except a Stack Layers row with `SO_SL_BIG_ROWS` on, which is why every
+ * place that steps from one row to the next has to ask rather than assume. Anything that compares
+ * a mouse position against a row, walks to the next row, or measures the tree goes through here.
+ */
+int outliner_tree_element_height(const SpaceOutliner &space_outliner, const TreeElement &te);
+
+/** Ordinal of the row the source reports as active, or -1 when there is none. */
+int outliner_stack_active_ordinal_get(const ed::outliner::StackReadContext &ctx,
+                                      SpaceOutliner &space_outliner);
+bool outliner_stack_row_is_active(const ed::outliner::StackReadContext &ctx,
+                                  SpaceOutliner &space_outliner,
+                                  int ordinal);
+bool outliner_stack_row_reorder(bContext *C,
+                                SpaceOutliner &space_outliner,
+                                int from_ordinal,
+                                int to_ordinal);
+/**
+ * Move a row next to another one, above it or below it; see #StackSource::row_move.
+ *
+ * What a drop means, as opposed to the position #outliner_stack_row_reorder takes.
+ *
+ * \param r_ordinal: when given, receives the ordinal the moved row has afterwards.
+ */
+bool outliner_stack_row_move(bContext *C,
+                             SpaceOutliner &space_outliner,
+                             int from_ordinal,
+                             int anchor_ordinal,
+                             ed::outliner::StackMovePlace place,
+                             int *r_ordinal = nullptr);
+bool outliner_stack_row_remove(bContext *C, SpaceOutliner &space_outliner, int ordinal);
+/**
+ * Give a row a new name, reporting to the user's status bar when the source refuses.
+ *
+ * Shared by the rename operator and by the Outliner's own in-row text button, so that typing a
+ * name over a row and asking for one through the menu go through the same edit.
+ */
+/**
+ * The storage a rename field types into for a row, or null when the row cannot be renamed.
+ *
+ * See #ed::outliner::StackRow::name_buffer: it holds at least #MAX_NAME bytes and outlives the
+ * rows, which is what a text button being edited across redraws needs.
+ */
+char *outliner_stack_row_name_buffer(const SpaceOutliner &space_outliner, int ordinal);
+bool outliner_stack_row_rename(bContext *C,
+                               SpaceOutliner &space_outliner,
+                               int ordinal,
+                               StringRefNull name);
+/**
+ * Create a row and, when the source reports where it landed, activate it.
+ *
+ * \return the new ordinal, or -1 when nothing was created.
+ */
+int outliner_stack_row_add(bContext *C,
+                           SpaceOutliner &space_outliner,
+                           int kind,
+                           int ordinal);
+bool outliner_stack_row_color_tag_set(bContext *C,
+                                      SpaceOutliner &space_outliner,
+                                      int ordinal,
+                                      int color_tag);
+bool outliner_stack_row_set_enabled(bContext *C,
+                                    SpaceOutliner &space_outliner,
+                                    int ordinal,
+                                    bool enable);
+/** Whether the space's source lets its rows change places right now. */
+bool outliner_stack_can_reorder(const bContext &C, SpaceOutliner &space_outliner);
+/** Forget whatever the sources remember by address; see #StackSource::undo_reset. */
+void outliner_stack_sources_undo_reset();
+
+void OUTLINER_OT_stack_layer_focus(wmOperatorType *ot);
+void OUTLINER_OT_stack_layers_back(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_pin_toggle(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
+void OUTLINER_OT_stack_preview_section_activate(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_clear_target(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_copy(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_paste(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_group(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_group_add(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_ungroup(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_color_tag_set(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_merge_down(wmOperatorType *ot);
+void OUTLINER_OT_stack_focus_sub_index(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot);
 
 void OUTLINER_OT_orphans_purge(wmOperatorType *ot);
 void OUTLINER_OT_orphans_manage(wmOperatorType *ot);
@@ -672,7 +1027,9 @@ bool outliner_is_element_visible(const TreeElement *te);
  * Check if the element is displayed within the view bounds. Doesn't check if all parents are
  * open/uncollapsed.
  */
-bool outliner_is_element_in_view(const TreeElement *te, const View2D *v2d);
+bool outliner_is_element_in_view(const SpaceOutliner &space_outliner,
+                                const TreeElement *te,
+                                const View2D *v2d);
 /**
  * Scroll view vertically while keeping within total bounds.
  */

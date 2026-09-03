@@ -47,6 +47,7 @@ enum class OpCallContext : int8_t;
  *   uiBlockCurLayout. */
 
 namespace ui {
+class AbstractGridView;
 enum class ItemType : int8_t;
 enum class ItemInternalFlag : uint8_t;
 enum class EmbossType : uint8_t;
@@ -103,8 +104,14 @@ enum class NodeAssetMenuOperatorType : int8_t {
  * Panel popup draw direction.
  */
 enum class PopupAttachDirection : int8_t {
+  /** Below the button, horizontally centered on it. */
   Vertical = 0,
+  /** Beside the button (to the left of it). */
   Horizontal = 1,
+  /** Below (or above) the button, left edges aligned. */
+  VerticalAlignLeft = 2,
+  /** Below (or above) the button, right edges aligned. */
+  VerticalAlignRight = 3,
 };
 
 enum class EnumTabExpand {
@@ -143,6 +150,17 @@ struct Layout : public Item, NonCopyable, NonMovable {
   float units_[2] = {0.0f, 0.0f};
   /** Is copied to uiButs created in this layout. */
   float search_weight_ = 0.0f;
+  /**
+   * When > 0, this layout is a fixed-height scroll-clip window: its reported height is clamped to
+   * this many pixels regardless of content. See #view_scroll_clip_set.
+   */
+  int view_scroll_clip_height_ = 0;
+  /** Vertical pixel offset applied to descendant buttons of a scroll-clip window. */
+  int view_scroll_clip_offset_ = 0;
+  /** Set alongside the two fields above by #view_scroll_clip_set; the grid #Layout::resolve()
+   * writes the resolved clip rect into (instead of a block-global field), so two fixed-viewport
+   * grids in the same block get independent clip windows. */
+  AbstractGridView *view_scroll_clip_owner_ = nullptr;
 
  public:
   Layout(ItemType type, LayoutRoot *root);
@@ -235,6 +253,19 @@ struct Layout : public Item, NonCopyable, NonMovable {
   /** Sets a fixed height size for this layout. */
   void ui_units_y_set(float height);
 
+  /**
+   * Make this layout a fixed-height "scroll window": after layout resolve its reported height is
+   * clamped to \a height_px regardless of content, every descendant button is shifted vertically
+   * by \a offset_px and flagged #BUT_GRID_SCROLL_CLIP (tagged with \a owner), and \a owner is told
+   * its own clip rect. This lets an embedded grid view scroll its rows by sub-row pixel amounts
+   * while occupying a fixed slot in the surrounding layout (brush texture image grid).
+   *
+   * \param height_px: Visible window height in pixels.
+   * \param offset_px: Positive shifts content up (scrolls down through the content).
+   * \param owner: The grid view this clip window belongs to; never null.
+   */
+  void view_scroll_clip_set(int height_px, int offset_px, AbstractGridView *owner);
+
   [[nodiscard]] bool use_property_split() const;
   /**
    * Sets when to split property's label into a separate button when adding new property buttons.
@@ -249,6 +280,13 @@ struct Layout : public Item, NonCopyable, NonMovable {
   void use_property_decorate_set(bool is_sep);
 
   [[nodiscard]] int width() const;
+
+  /**
+   * Padding #Layout::box() adds around its content on each side, in pixels. Callers that measure
+   * an exact pixel width before wrapping content in #box() (e.g. for fixed-size grid columns)
+   * need this to shrink that width so the box's total footprint (content + padding) still fits.
+   */
+  [[nodiscard]] int box_padding_px() const;
 
   /** Sub-layout items. */
 
@@ -844,6 +882,13 @@ inline float Layout::ui_units_y() const
 inline void Layout::ui_units_y_set(float height)
 {
   units_[1] = height;
+}
+
+inline void Layout::view_scroll_clip_set(int height_px, int offset_px, AbstractGridView *owner)
+{
+  view_scroll_clip_height_ = height_px;
+  view_scroll_clip_offset_ = offset_px;
+  view_scroll_clip_owner_ = owner;
 }
 
 inline int Layout::width() const

@@ -60,6 +60,13 @@ struct WindowManagerRuntime {
   char save_modified_images_when_file_is_saved = true;
 
   /**
+   * Transient name-search text of the ID-browser popover (#UI_PT_id_browser; see
+   * #UILayout.template_ID_browser). Session-only (deliberately not persisted to file) and shared,
+   * so the popover works from any editor. Only one such popover is open at a time.
+   */
+  char id_browser_search[64] = {};
+
+  /**
    * Indicates the main loop (#WM_main()) to stop processing the event queue and move to the next
    * step. The Remaining events will then be processed during the next iteration of the loop.
    *
@@ -92,6 +99,11 @@ struct WindowManagerRuntime {
 
   /** Extra overlay cursors to draw, like circles. */
   ListBaseT<wmPaintCursor> paintcursors = {nullptr, nullptr};
+  /**
+   * Number of active requests to hide the #paintcursors, see #WM_paint_cursor_suppress_push.
+   * Counted so multiple operators can request this at the same time.
+   */
+  int paintcursors_suppress_count = 0;
 
   /**
    * Known key configurations.

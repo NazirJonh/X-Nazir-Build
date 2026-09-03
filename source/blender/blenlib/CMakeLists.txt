@@ -114,6 +114,7 @@ set(SRC
   intern/memory_counter.cc
   intern/mesh_boolean.cc
   intern/mesh_intersect.cc
+  intern/name_matching.cc
   intern/noise.cc
   intern/noise_c.cc
   intern/offset_indices.cc
@@ -340,6 +341,7 @@ set(SRC
   BLI_mmap.h
   BLI_multi_value_map.hh
   BLI_mutex.hh
+  BLI_name_matching.hh
   BLI_noise.h
   BLI_noise.hh
   BLI_offset_indices.hh
@@ -576,6 +578,7 @@ if(WITH_GTESTS)
     tests/BLI_mesh_boolean_test.cc
     tests/BLI_mesh_intersect_test.cc
     tests/BLI_multi_value_map_test.cc
+    tests/BLI_name_matching_test.cc
     tests/BLI_offset_indices_test.cc
     tests/BLI_path_utils_test.cc
     tests/BLI_polyfill_2d_test.cc

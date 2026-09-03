@@ -49,6 +49,17 @@ ID *asset_edit_id_from_weak_reference(Main &global_main,
 /** Get asset weak reference from ID. */
 std::optional<AssetWeakReference> asset_edit_weak_reference_from_id(const ID &id);
 
+/**
+ * Map a local asset weak reference (#ASSET_LIBRARY_LOCAL) to the weak reference of the source
+ * asset it was made local from, using the datablock's stored library weak reference. Returns
+ * nullopt when the reference is not local, the datablock is missing, or it has no source asset.
+ *
+ * Used so a datablock localized from an asset (e.g. a brush localized to receive a texture) is
+ * still recognized as that source asset, for active-asset highlighting in the asset shelf.
+ */
+std::optional<AssetWeakReference> asset_edit_local_to_source_weak_reference(
+    Main &global_main, const AssetWeakReference &local_weak_ref);
+
 /** Asset editing operations. */
 
 bool asset_edit_id_is_editable(const ID &id);

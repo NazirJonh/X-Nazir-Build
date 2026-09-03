@@ -273,8 +273,8 @@ void remote_asset_library_request(FileListReadJob *job_params,
 
 static bUserAssetLibrary *lookup_remote_library(const FileListReadJob *job_params)
 {
-  bUserAssetLibrary *library = BKE_preferences_asset_library_find_index(
-      &U, job_params->filelist->asset_library_ref->custom_library_index);
+  bUserAssetLibrary *library = BKE_preferences_asset_library_find_from_ref(
+      &U, job_params->filelist->asset_library_ref);
   if (!library || !(library->flag & ASSET_LIBRARY_USE_REMOTE_URL)) {
     return nullptr;
   }

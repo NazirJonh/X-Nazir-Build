@@ -191,6 +191,7 @@ _km_hierarchy = [
 
     ('File Browser', 'FILE_BROWSER', 'WINDOW', [
         ('File Browser Main', 'FILE_BROWSER', 'WINDOW', []),
+        ('Asset Browser Main', 'FILE_BROWSER', 'WINDOW', []),
         ('File Browser Buttons', 'FILE_BROWSER', 'WINDOW', []),
     ]),
 

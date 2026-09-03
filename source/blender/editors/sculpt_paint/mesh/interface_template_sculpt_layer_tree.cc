@@ -143,7 +143,7 @@ class SculptLayerDropTarget : public ui::TreeViewItemDropTarget {
     BLI_assert(drop_node_ != nullptr);
   }
 
-  bool can_drop(const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
   {
     if (drag.type != WM_DRAG_SCULPT_LAYER) {
       return false;

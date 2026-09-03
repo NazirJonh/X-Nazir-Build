@@ -519,7 +519,7 @@ enum eFileAssetImportFlags : short {
 ENUM_OPERATORS(eFileAssetImportFlags)
 
 enum eFileSel_AssetParams_Flag : int {
-  // FILE_ASSETS_FLAG_DEPRECATED_1 = (1 << 0), /* Not cleared! */
+  FILE_ASSET_FILTER_NAME_MATCH_ENABLED = (1 << 0),
 };
 ENUM_OPERATORS(eFileSel_AssetParams_Flag)
 
@@ -762,6 +762,20 @@ enum eSpaceImage_Mode : char {
   SI_MODE_PAINT = 1,
   SI_MODE_MASK = 2,
   SI_MODE_UV = 3,
+};
+
+/** #wmWindowManager.id_browser_view_mode. */
+enum eImageBrowserViewMode : char {
+  IMAGE_BROWSER_VIEW_GRID = 0,
+  IMAGE_BROWSER_VIEW_LIST = 1,
+};
+
+/** #wmWindowManager.id_browser_source. */
+enum eIDBrowserSource : char {
+  /** Data-blocks of the current file (`which_libbase()`), with the paint-slot filters. */
+  ID_BROWSER_SOURCE_BLEND_DATA = 0,
+  /** Assets from an asset library, filtered by catalog. */
+  ID_BROWSER_SOURCE_ASSET_LIBRARY = 1,
 };
 
 /** #SpaceImage.flag */

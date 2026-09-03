@@ -824,7 +824,9 @@ GHOST_TCapabilityFlag GHOST_SystemSDL::getCapabilities() const
           /* No support yet for dynamic cursor generation. */
           GHOST_kCapabilityCursorGenerator |
           /* No support for window path meta-data. */
-          GHOST_kCapabilityWindowPath));
+          GHOST_kCapabilityWindowPath |
+          /* Implied by the lack of #GHOST_kCapabilityDesktopSample. */
+          GHOST_kCapabilityDesktopSampleContinuous));
 }
 
 char *GHOST_SystemSDL::getClipboard(bool selection) const

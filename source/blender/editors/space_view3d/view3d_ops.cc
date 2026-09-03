@@ -31,6 +31,7 @@
 #include "ED_outliner.hh"
 #include "ED_screen.hh"
 #include "ED_transform.hh"
+#include "ED_view3d.hh"
 
 #include "view3d_intern.hh"
 #include "view3d_navigate.hh"

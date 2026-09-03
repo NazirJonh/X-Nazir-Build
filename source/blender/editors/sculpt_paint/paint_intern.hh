@@ -913,6 +913,9 @@ void PAINT_OT_image_paint(wmOperatorType *ot);
 void PAINT_OT_add_simple_uvs(wmOperatorType *ot);
 void PAINT_OT_brush_group_override_toggle(wmOperatorType *ot);
 
+/* paint_texture_ops.cc */
+void BRUSH_OT_texture_slot_assign_image(wmOperatorType *ot);
+
 /* paint_image_select_mask.cc, paint_image_select_move.cc, paint_image_select_transform.cc */
 void PAINT_OT_image_select_all(wmOperatorType *ot);
 void PAINT_OT_image_select_none(wmOperatorType *ot);

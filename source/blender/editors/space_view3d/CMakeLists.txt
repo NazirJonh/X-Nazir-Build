@@ -84,6 +84,8 @@ set(LIB
   PRIVATE bf::depsgraph
   PRIVATE bf::dna
   PRIVATE bf::draw
+  bf_editor_asset
+  bf_editor_space_image
   bf_editor_curves
   bf_editor_lattice
   bf_editor_mesh

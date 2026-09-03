@@ -39,8 +39,23 @@ class FILEBROWSER_HT_header(Header):
         )
 
         sub = layout.row()
-        sub.ui_units_x = 8
+        # Usability: shrink only as needed so Name Match + Filter + Gear fit; start from 6.
+        sub.ui_units_x = 6
         sub.prop(params, "filter_search", text="", icon='VIEWZOOM')
+
+        name_match = layout.row(align=True)
+        name_match.prop(
+            params,
+            "filter_name_match_enabled",
+            text="",
+            icon='FILTER_FILLED' if params.filter_name_match_enabled else 'FILTER',
+            toggle=True,
+            icon_only=True,
+        )
+        name_match.popover(
+            panel="ASSETBROWSER_PT_name_match",
+            text="",
+        )
 
         layout.popover(
             panel="ASSETBROWSER_PT_filter",
@@ -67,14 +82,46 @@ class FILEBROWSER_HT_header(Header):
 
         if SpaceAssetInfo.is_asset_browser(space_data):
             ASSETBROWSER_MT_editor_menus.draw_collapsible(context, layout)
-            layout.separator()
-            self.draw_asset_browser_buttons(context)
+            if is_tool_header_region_visible(context):
+                # The buttons row moved to the tool header region (area too narrow, see
+                # file_tool_header_region_poll() in space_file.cc); drawing it here too
+                # would duplicate every button.
+                layout.separator_spacer()
+            else:
+                layout.separator()
+                self.draw_asset_browser_buttons(context)
         else:
             FILEBROWSER_MT_editor_menus.draw_collapsible(context, layout)
             layout.separator_spacer()
 
         if not context.screen.show_statusbar:
             layout.template_running_jobs()
+
+
+class ASSETBROWSER_HT_tool_header(Header):
+    """Second header line for the Asset Browser.
+
+    The region it draws into only exists while the area is too narrow for the buttons row to
+    share the main header line with the View/Select/Library/Catalog/Asset menus -- that is
+    decided entirely in C++ by file_tool_header_region_poll() (space_file.cc). The buttons are
+    drawn either here or in the main header, never in both (see FILEBROWSER_HT_header.draw).
+    """
+    bl_space_type = 'FILE_BROWSER'
+    bl_region_type = 'TOOL_HEADER'
+
+    def draw_asset_browser_buttons(self, context):
+        # Same content as on the main header line by default. Kept as a separate method (rather
+        # than calling FILEBROWSER_HT_header's) so add-ons can replace the narrow-area layout
+        # without touching the wide-area one.
+        FILEBROWSER_HT_header.draw_asset_browser_buttons(self, context)
+
+    def draw(self, context):
+        from bpy_extras.asset_utils import SpaceAssetInfo
+
+        if not SpaceAssetInfo.is_asset_browser(context.space_data):
+            return
+
+        self.draw_asset_browser_buttons(context)
 
 
 class FileBrowserPanel:
@@ -392,6 +439,23 @@ class FILEBROWSER_PT_advanced_filter(Panel):
                     row = col.row()
                     row.label(icon=filter_id.bl_rna.properties[identifier].icon)
                     row.prop(filter_id, identifier, toggle=False)
+
+
+def is_tool_header_region_visible(context):
+    """True once the Asset Browser's tool header region is actually laid out.
+
+    Its existence is poll-driven in C++ (file_tool_header_region_poll(), space_file.cc); a
+    region whose poll failed, or that the user hid, ends up with no height.
+    """
+    area = context.area
+    if area is None:
+        return False
+
+    for region in area.regions:
+        if region.type == 'TOOL_HEADER' and region.height > 1:
+            return True
+
+    return False
 
 
 def is_option_region_visible(context, space):
@@ -963,6 +1027,7 @@ classes = (
     FILEBROWSER_MT_select,
     FILEBROWSER_MT_context_menu,
     FILEBROWSER_MT_view_pie,
+    ASSETBROWSER_HT_tool_header,
     ASSETBROWSER_PT_display,
     ASSETBROWSER_PT_filter,
     ASSETBROWSER_MT_editor_menus,

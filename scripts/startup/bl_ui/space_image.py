@@ -1599,8 +1599,13 @@ class IMAGE_PT_tools_brush_texture(BrushButtonsPanel, Panel):
     def poll(cls, context):
         if not super().poll(context):
             return False
-        # PBR Paint and PolyPaint assign textures per-channel instead of via the brush texture slot.
-        return context.tool_settings.paint_mode.canvas_source not in {'MATERIAL', 'MATERIAL_PAINT'}
+        brush = context.tool_settings.image_paint.brush
+        # The 2D PBR path requires both the Material canvas and per-channel brush data.
+        # A retained Material canvas without such a brush still uses the regular brush texture.
+        return not (
+            context.tool_settings.paint_mode.canvas_source == 'MATERIAL' and
+            brush.material_paint is not None
+        )
 
     def draw(self, context):
         layout = self.layout
@@ -1626,8 +1631,11 @@ class IMAGE_PT_tools_mask_texture(Panel, BrushButtonsPanel, TextureMaskPanel):
     def poll(cls, context):
         if not BrushButtonsPanel.poll(context):
             return False
-        # PBR Paint and PolyPaint assign textures per-channel instead of via the brush mask slot.
-        return context.tool_settings.paint_mode.canvas_source not in {'MATERIAL', 'MATERIAL_PAINT'}
+        brush = context.tool_settings.image_paint.brush
+        return not (
+            context.tool_settings.paint_mode.canvas_source == 'MATERIAL' and
+            brush.material_paint is not None
+        )
 
 
 class IMAGE_PT_paint_stroke(BrushButtonsPanel, Panel, StrokePanel):

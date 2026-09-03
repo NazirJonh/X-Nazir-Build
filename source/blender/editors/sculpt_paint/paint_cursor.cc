@@ -88,6 +88,7 @@ struct TexSnapshot {
   int winy;
   int old_size;
   float old_zoom;
+  float old_radius;
   bool old_col;
   /* The clip shape is baked into the snapshot's pixels, so it has to invalidate it when changed.
    */
@@ -188,6 +189,7 @@ static int same_tex_snap(TexSnapshot *snap,
                          bool col,
                          float zoom,
                          Brush *brush,
+                         float radius,
                          int curve_preset,
                          const Tex *alpha_tex)
 {
@@ -196,7 +198,8 @@ static int same_tex_snap(TexSnapshot *snap,
   }
 
   return ((mtex->brush_map_mode != MTEX_MAP_MODE_TILED ||
-           (vc->region->winx == snap->winx && vc->region->winy == snap->winy)) &&
+           (vc->region->winx == snap->winx && vc->region->winy == snap->winy &&
+            radius == snap->old_radius)) &&
           (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL || snap->old_zoom == zoom) &&
           snap->old_texture_clip_shape == brush->texture_clip_shape &&
           snap->old_col == col && snap->old_tex == mtex->tex &&
@@ -208,11 +211,13 @@ static void make_tex_snap(TexSnapshot *snap,
                           const ViewContext *vc,
                           float zoom,
                           Brush *brush,
+                          float radius,
                           const MTex *mtex,
                           int curve_preset,
                           const Tex *alpha_tex)
 {
   snap->old_zoom = zoom;
+  snap->old_radius = radius;
   snap->winx = vc->region->winx;
   snap->winy = vc->region->winy;
   snap->old_texture_clip_shape = brush->texture_clip_shape;
@@ -406,6 +411,7 @@ static int load_tex(Paint *paint,
   TexSnapshot *target;
 
   const MTex *mtex = mtex_override ? mtex_override : (primary) ? &br->mtex : &br->mask_mtex;
+  const float radius = BKE_brush_radius_get(paint, br) * zoom;
   ePaintOverlayControlFlags overlay_flags = BKE_paint_get_overlay_flags();
   uchar *buffer = nullptr;
 
@@ -429,6 +435,7 @@ static int load_tex(Paint *paint,
                            col,
                            zoom,
                            br,
+                           radius,
                            curve_preset,
                            alpha_mtex != nullptr ? alpha_mtex->tex : nullptr) ||
             (col && (overlay_flags & PAINT_OVERLAY_INVALID_CURVE));
@@ -443,12 +450,12 @@ static int load_tex(Paint *paint,
                             mtex->brush_map_mode == MTEX_MAP_MODE_AREA) ?
                                0.0f :
                                -mtex->rot;
-    const float radius = BKE_brush_radius_get(paint, br) * zoom;
 
     make_tex_snap(target,
                   vc,
                   zoom,
                   br,
+                  radius,
                   mtex,
                   curve_preset,
                   alpha_mtex != nullptr ? alpha_mtex->tex : nullptr);

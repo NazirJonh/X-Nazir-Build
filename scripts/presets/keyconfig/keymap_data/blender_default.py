@@ -1390,6 +1390,27 @@ def km_outliner(params):
     )
 
     items.extend([
+        # View2D navigation. These bindings live in the Outliner keymap instead of the shared
+        # "View2D" keymap because the generic View2D handler is attached before the region's
+        # own handlers and is consulted first, so its bindings would win over the Outliner
+        # overrides. Keep plain wheel input as scrolling; zoom bindings below require Ctrl.
+        ("view2d.scroller_activate", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroller_activate", {"type": 'MIDDLEMOUSE', "value": 'PRESS'}, None),
+        ("view2d.pan", {"type": 'MIDDLEMOUSE', "value": 'PRESS'}, None),
+        ("view2d.pan", {"type": 'MIDDLEMOUSE', "value": 'PRESS', "shift": True}, None),
+        ("view2d.pan", {"type": 'TRACKPADPAN', "value": 'ANY'}, None),
+        ("view2d.scroll_down", {"type": 'WHEELDOWNMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroll_up", {"type": 'WHEELUPMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroll_right", {"type": 'WHEELDOWNMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroll_left", {"type": 'WHEELUPMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroll_down", {"type": 'WHEELDOWNMOUSE', "value": 'PRESS', "shift": True}, None),
+        ("view2d.scroll_up", {"type": 'WHEELUPMOUSE', "value": 'PRESS', "shift": True}, None),
+        ("view2d.ndof", {"type": 'NDOF_MOTION', "value": 'ANY'}, None),
+        ("view2d.zoom", {"type": 'MIDDLEMOUSE', "value": 'PRESS', "ctrl": True}, None),
+        ("view2d.zoom", {"type": 'TRACKPADPAN', "value": 'ANY', "ctrl": True}, None),
+        ("view2d.zoom", {"type": 'TRACKPADZOOM', "value": 'ANY'}, None),
+        ("view2d.smoothview", {"type": 'TIMER1', "value": 'ANY', "any": True}, None),
+        ("view2d.zoom_border", {"type": 'B', "value": 'PRESS', "shift": True}, None),
         ("outliner.highlight_update", {"type": 'MOUSEMOVE', "value": 'ANY', "any": True}, None),
         ("outliner.item_rename", {"type": 'LEFTMOUSE', "value": 'DOUBLE_CLICK'}, None),
         ("outliner.item_rename", {"type": 'F2', "value": 'PRESS'},
@@ -1472,7 +1493,19 @@ def km_outliner(params):
         ("outliner.unhide_all", {"type": 'H', "value": 'PRESS', "alt": True}, None),
         ("outliner.start_filter", {"type": 'F', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.clear_filter", {"type": 'F', "value": 'PRESS', "alt": True}, None),
+        # Stack Layers. These poll false in every other display mode, so they fall through to the
+        # data-block bindings above rather than shadowing them.
+        ("outliner.stack_layer_rename", {"type": 'F2', "value": 'PRESS'}, None),
+        ("outliner.stack_layer_duplicate", {"type": 'D', "value": 'PRESS', "shift": True}, None),
+        ("outliner.stack_layer_remove", {"type": 'X', "value": 'PRESS'}, None),
+        ("outliner.stack_layer_remove", {"type": 'DEL', "value": 'PRESS'}, None),
+        ("outliner.stack_layer_move", {"type": 'UP_ARROW', "value": 'PRESS', "ctrl": True},
+         {"properties": [("direction", 'UP')]}),
+        ("outliner.stack_layer_move", {"type": 'DOWN_ARROW', "value": 'PRESS', "ctrl": True},
+         {"properties": [("direction", 'DOWN')]}),
         # Copy/paste.
+        ("outliner.stack_layer_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
+        ("outliner.stack_layer_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.id_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.id_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
         *_template_object_hide_collection_from_number_keys(),

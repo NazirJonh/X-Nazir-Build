@@ -3,11 +3,16 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
-from bpy.types import Menu, Panel, UIList
+from bpy.types import Menu, Operator, Panel, UIList
 from bpy.app.translations import contexts as i18n_contexts
 from rna_prop_ui import PropertyPanel
 from bpy_extras.node_utils import find_node_input
 
+from bl_operators.material_paint_layers import (
+    mesh_map_objects_for_material,
+    mesh_map_source_member_count,
+    mesh_map_summary_status,
+)
 from bl_ui.space_properties import PropertiesAnimationMixin
 
 
@@ -132,6 +137,7 @@ class EEVEE_MATERIAL_PT_context_material(MaterialButtonsPanel, Panel):
 
         if ob:
             row.template_ID(ob, "active_material", new="material.new")
+            row.operator("material.new_layered", text="", icon='ADD')
 
             if slot:
                 row.prop(slot, "link", icon_only=True)
@@ -538,6 +544,486 @@ class BRUSH_MATERIAL_PT_custom_props(BrushMaterialButtonsPanel, PropertyPanel, P
     _property_type = bpy.types.Material
 
 
+class LayerMaterialButtonsPanel:
+    """Base for the Layer Material tab, which edits the material the active Material paint layer
+    was baked from.
+
+    The material is reached through the scene's paint channel bindings, so there is no slot to pick
+    from and no pinning. Editing it re-bakes the layer's maps on its own.
+    Like #BrushMaterialButtonsPanel, these panels share drawing through module level helpers rather
+    than by subclassing registered panels.
+    """
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "layer_material"
+
+    @staticmethod
+    def _owner_material(context):
+        """The material that owns the stack, or None.
+
+        In this tab `context.material` can be the active Material layer's *source* material, not the
+        owner: `buttons_context_path_layer_material` points the context at `layer.material` for a
+        Material row. Panels that need the stack or its active row must go through the object's
+        active material slot instead.
+        """
+        ob = context.object
+        mat = ob.active_material if ob is not None else None
+        return mat if (mat is not None and mat.is_layered) else None
+
+    @staticmethod
+    def _active_layer(context):
+        """The active row of the owning material, or `(None, None)` when there is none."""
+        owner = LayerMaterialButtonsPanel._owner_material(context)
+        if owner is None:
+            return None, None
+        return owner, owner.paint_layers.active
+
+    @classmethod
+    def poll(cls, context):
+        # No COMPAT_ENGINES test, for the same reason as the Brush Material tab: the bake goes
+        # through EEVEE whatever the scene's render engine is.
+        mat = context.material
+        return mat is not None and not mat.grease_pencil
+
+
+class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
+    """The Layer Material tab for a *layered* material: the active layer read from the description,
+    its channels and values, and the generated tree's state. The binding-driven panel below is for
+    the old graph path and hides itself for a layered material."""
+
+    bl_idname = "LAYER_MATERIAL_PT_layers"
+    bl_label = "Paint Layers"
+
+    @classmethod
+    def poll(cls, context):
+        return cls._owner_material(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        owner = self._owner_material(context)
+        if owner is None:
+            return
+
+        col = layout.column(align=True)
+        col.prop(owner, "paint_layers_locked", text="Locked")
+        row = col.row()
+        row.enabled = owner.paint_layers_tree_is_stale
+        row.operator("material.paint_layers_regenerate", text="Regenerate", icon='FILE_REFRESH')
+        if owner.paint_layers_tree_is_stale:
+            layout.label(text="Tree out of step with the layers", icon='ERROR')
+
+        row = layout.row(align=True)
+        row.operator_menu_enum("material.paint_layer_add", "source", text="Add", icon='ADD')
+        row.operator("material.paint_layer_remove", text="", icon='REMOVE')
+        row.operator("material.paint_layer_duplicate", text="", icon='DUPLICATE')
+
+        row = layout.row()
+        row.operator_menu_enum("material.paint_layer_add_material", "source",
+                               text="New Material Layer", icon='MATERIAL')
+        row.operator_menu_enum("material.paint_layer_use_row_result", "source",
+                               text="Use Row Result", icon='RENDER_STILL')
+        layout.operator("material.paint_layer_add_custom", text="New Custom Layer",
+                        icon='NODETREE')
+
+        _, layer = self._active_layer(context)
+        if layer is None:
+            layout.separator()
+            layout.label(text="No active layer", icon='INFO')
+            return
+
+        layout.separator()
+        layout.prop(layer, "name", text="Layer")
+        layout.prop(layer, "blend_type", text="Blend")
+        layout.prop(layer, "opacity", text="Opacity")
+        if layer.source == 'CONSTANT':
+            layout.prop(layer, "fill_color")
+
+        box = layout.box()
+        box.label(text="Mask", icon='MOD_MASK')
+        for item in layer.mask_stack:
+            row = box.row(align=True)
+            row.operator(
+                "material.paint_layer_mask_toggle",
+                text="",
+                icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT',
+            ).item_marker = item.marker
+            select = row.operator(
+                "material.paint_layer_correction_select",
+                text=item.name if item.name else "Mask",
+                icon='RADIOBUT_ON' if item.marker == layer.marker else 'RADIOBUT_OFF',
+                emboss=False,
+            )
+            select.marker = item.marker
+            row.operator("material.paint_layer_correction_remove", text="", icon='X').item_marker = \
+                item.marker
+            # A mask item's own channel choice only means something for a source that carries more
+            # than one scalar (Material, Node Group, Stack); Image/Constant/Mesh Map already read
+            # as a single value and never show this.
+            if item.source in {'MATERIAL', 'NODE_GROUP', 'STACK'}:
+                sub = box.row()
+                sub.use_property_split = True
+                sub.prop(item, "mask_channel")
+        box.operator("material.paint_layer_mask_add", text="Add Mask", icon='ADD')
+
+        box = layout.box()
+        box.label(text="Effects", icon='MODIFIER')
+        for item in layer.effects:
+            row = box.row(align=True)
+            row.operator(
+                "material.paint_layer_mask_toggle",
+                text="",
+                icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT',
+            ).item_marker = item.marker
+            select = row.operator(
+                "material.paint_layer_correction_select",
+                text=item.name if item.name else "Correction",
+                icon='RADIOBUT_ON' if item.marker == layer.marker else 'RADIOBUT_OFF',
+                emboss=False,
+            )
+            select.marker = item.marker
+            row.operator("material.paint_layer_correction_remove", text="", icon='X').item_marker = \
+                item.marker
+
+        box = layout.box()
+        box.label(text="Channels", icon='IMAGE_RGB')
+        for ch in layer.channels:
+            row = box.row(align=True)
+            row.label(text=ch.channel)
+            if ch.image is not None:
+                row.label(text=ch.image.name, icon='IMAGE_DATA')
+            else:
+                row.label(text="No map", icon='INFO')
+            op = row.operator("material.paint_layer_channel_remove", text="", icon='X')
+            op.channel = ch.channel
+        row = box.row(align=True)
+        row.operator_menu_enum("material.paint_layer_channel_add", "channel",
+                               text="Add Channel", icon='ADD')
+        row.operator_menu_enum("material.paint_layer_correction_add", "role",
+                               text="Add Correction", icon='ADD')
+        if layer.source == 'NODE_GROUP':
+            layout.operator_menu_enum("material.paint_layer_custom_channel_add", "channel",
+                                      text="Add Custom Channel", icon='ADD')
+
+        if len(layer.issues):
+            box = layout.box()
+            box.label(text="Issues", icon='ERROR')
+            for issue in layer.issues:
+                box.label(text=issue.text)
+
+
+class LAYER_MATERIAL_PT_source_material(LayerMaterialButtonsPanel, Panel):
+    """The source material of the active Material layer: the material it bakes its channels from.
+
+    ``layer.material`` is a plain RNA pointer to a Material, not a material slot, so the picker
+    changes what the layer bakes without touching the object's slots.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_source_material"
+    bl_label = "Source Material"
+
+    @classmethod
+    def poll(cls, context):
+        _, layer = cls._active_layer(context)
+        return layer is not None and layer.source == 'MATERIAL'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        _, layer = self._active_layer(context)
+        if layer is None:
+            return
+
+        row = layout.row()
+        row.prop(layer, "material", text="")
+        if layer.material is not None and layer.material.library is not None:
+            layout.label(text="Linked, not editable", icon='LIBRARY_DATA_DIRECT')
+
+        col = layout.column(align=True)
+        col.prop(layer, "bake_mode", text="Bake")
+        col.prop(layer, "bake_size", text="Resolution")
+        row = col.row()
+        row.enabled = layer.material is not None
+        row.operator("material.paint_layer_rebake", text="Rebake", icon='FILE_REFRESH')
+        # One RNA answer for the row's state; the Outliner stack shows the same property.
+        status = layer.live_status
+        if status == 'REFUSED':
+            reason = layer.live_status_refusal_reason
+            layout.label(text="Refused: " + (reason if reason else "unknown"), icon='ERROR')
+        elif status == 'BAKING':
+            layout.label(text="Baking...", icon='FILE_REFRESH')
+        elif status == 'BAKED':
+            layout.label(text="Baked", icon='IMAGE_DATA')
+        else:
+            layout.label(text="Live", icon='HIDE_OFF')
+
+
+class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
+    """The source material's Surface inputs, edited in place.
+
+    Drawing the material's own node tree here is what makes the source editable without leaving the
+    tab; the same ``OUTPUT_MATERIAL`` node the shader editor shows is drawn as a property panel.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_source_surface"
+    bl_parent_id = "LAYER_MATERIAL_PT_source_material"
+    bl_label = "Surface"
+
+    @classmethod
+    def poll(cls, context):
+        _, layer = cls._active_layer(context)
+        return (
+            layer is not None and
+            layer.source == 'MATERIAL' and
+            layer.material is not None and
+            layer.material.node_tree is not None
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        _, layer = self._active_layer(context)
+        if layer is None or layer.material is None:
+            return
+        if layer.material.library is not None:
+            layout.label(text="Linked, not editable", icon='LIBRARY_DATA_DIRECT')
+            return
+        panel_node_draw(layout, layer.material.node_tree, 'OUTPUT_MATERIAL', "Surface")
+
+
+class LAYER_MATERIAL_PT_custom_layer(LayerMaterialButtonsPanel, Panel):
+    """The node group of the active Custom layer and its stored input values."""
+
+    bl_idname = "LAYER_MATERIAL_PT_custom_layer"
+    bl_label = "Custom Group"
+
+    @classmethod
+    def poll(cls, context):
+        _, layer = cls._active_layer(context)
+        return layer is not None and layer.source == 'NODE_GROUP'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        _, layer = self._active_layer(context)
+        if layer is None:
+            return
+
+        layout.prop(layer, "custom_group", text="Group")
+        props = layer.properties
+        if props is None:
+            return
+        # The group's role-less inputs are stored as IDProperty members; draw each as its own row.
+        keys = getattr(props, "keys", None)
+        if keys is None:
+            return
+        col = layout.column(align=True)
+        for key in keys():
+            if key == "rna_type":
+                continue
+            col.prop(props, '["%s"]' % key, text=key)
+
+
+class LAYER_MATERIAL_PT_custom_props(LayerMaterialButtonsPanel, PropertyPanel, Panel):
+    bl_idname = "LAYER_MATERIAL_PT_custom_props"
+    _context_path = "material"
+    _property_type = bpy.types.Material
+
+
+class MATERIAL_PT_paint_layers(MaterialButtonsPanel, Panel):
+    """Layer-stack controls of a layered material: who owns the generated tree, and whether it is
+    in step with the description."""
+
+    bl_label = "Layered Material"
+    bl_context = "material"
+    COMPAT_ENGINES = {'BLENDER_EEVEE', 'CYCLES'}
+
+    @classmethod
+    def poll(cls, context):
+        mat = context.material
+        return mat is not None and mat.is_layered and not mat.grease_pencil
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        mat = context.material
+
+        col = layout.column(heading="Tree")
+        col.prop(mat, "paint_layers_locked", text="Locked")
+        row = layout.row()
+        row.enabled = mat.paint_layers_tree_is_stale
+        row.operator("material.paint_layers_regenerate", text="Regenerate", icon='FILE_REFRESH')
+        if mat.paint_layers_tree_is_stale:
+            layout.label(
+                text="The node tree is out of step with the layers; Regenerate to rebuild it",
+                icon='ERROR',
+            )
+
+
+_MESH_MAP_TYPES = (
+    ('AO', "Ambient Occlusion"),
+    ('CURVATURE', "Curvature"),
+    ('NORMAL_WORLD', "Normal (World)"),
+    ('NORMAL_OBJECT', "Normal (Object)"),
+    ('ID_OBJECT', "Object ID"),
+    ('ID_MATERIAL', "Material ID"),
+    ('EDGE', "Edge"),
+)
+
+_MESH_MAP_STATUS = {
+    'NONE': ("Not baked", 'DOT'),
+    'VALID': ("Valid", 'CHECKMARK'),
+    'STALE': ("Stale", 'FILE_REFRESH'),
+    'BAKING': ("Baking", 'FILE_REFRESH'),
+    'ERROR': ("Error", 'ERROR'),
+}
+
+
+def _mesh_map_state(context, mat, map_type):
+    for state in context.object.mesh_map_states:
+        if state.material == mat and state.type == map_type:
+            return state
+    return None
+
+
+class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
+    """Mesh map atlases of the stack's owner material and the active object's bake state.
+
+    Drawn in the Layer Material tab, so the material is the owner (the active slot), never the
+    source material `context.material` may point at; the bake operator bakes the active slot too.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_mesh_maps"
+    bl_label = "Mesh Maps"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return (
+            cls._owner_material(context) is not None and
+            ob.type == 'MESH' and ob.data is not None
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        mat = self._owner_material(context)
+        ob = context.object
+
+        layout.prop_search(mat, "paint_layers_uv_map", ob.data, "uv_layers")
+        uv_name = mat.paint_layers_uv_map
+        if not uv_name:
+            layout.operator("material.mesh_map_use_active_uv", text="Use Active UV")
+        elif ob.data.uv_layers.get(uv_name) is None:
+            layout.label(
+                text="The object has no UV layer '{}'".format(uv_name),
+                icon='ERROR',
+            )
+
+        actions = layout.row(align=True)
+        # The bakes are background wmJobs; a plain button would run the synchronous exec path and
+        # block the UI. Clear is cheap and runs inline.
+        actions.operator_context = 'INVOKE_DEFAULT'
+        bake_all = actions.operator(
+            "object.mesh_map_bake_all", text="Bake All Maps", icon='RENDER_STILL')
+        bake_all.types = set()
+        bake_all.object_scope = 'ACTIVE'
+        bake_all.material_index = 0
+        bake_all_objects = actions.operator(
+            "object.mesh_map_bake_all", text="Bake All Objects")
+        bake_all_objects.types = set()
+        bake_all_objects.object_scope = 'ALL'
+        bake_all_objects.material_index = 0
+        actions.operator_context = 'EXEC_DEFAULT'
+        actions.operator("object.mesh_map_clear", text="Clear").types = set()
+
+        header, settings_layout = layout.panel("mesh_map_settings", default_closed=True)
+        header.label(text="Settings")
+        if settings_layout:
+            settings = mat.mesh_map_settings
+            settings_layout.use_property_split = True
+            col = settings_layout.column(align=True)
+            col.prop(settings, "resolution")
+            col.prop(settings, "samples")
+            col.prop(settings, "use_denoise")
+            col.prop(settings, "margin")
+            col.prop(settings, "ao_distance")
+            col.prop(settings, "edge_radius")
+
+        source = next((item for item in ob.mesh_map_sources if item.material == mat), None)
+        hp_header, hp = layout.panel("mesh_map_highpoly", default_closed=True)
+        hp_header.label(text="High-poly Source")
+        if hp:
+            if source is None:
+                hp.operator("object.mesh_map_source_add", text="Use High-poly Source", icon='ADD')
+            else:
+                hp.prop_search(source, "high_poly", context.scene, "objects", text="Object")
+                hp.prop_search(
+                    source, "high_poly_collection", context.blend_data, "collections",
+                    text="Collection")
+                hp.label(
+                    text="AO is computed per high-poly object; pieces do not occlude each other")
+                hp.prop(source, "cage", text="Cage")
+                hp.prop(source, "cage_extrusion")
+                hp.prop(source, "max_ray_distance")
+                if mesh_map_source_member_count(source) == 0:
+                    hp.label(text="The source resolves to no mesh objects", icon='ERROR')
+                elif source.cage is not None and not source.cage_matches(
+                        depsgraph=context.view_layer.depsgraph):
+                    hp.label(
+                        text="The cage must have the same face count as the low-poly object",
+                        icon='ERROR')
+                hp.operator("object.mesh_map_source_remove", text="Remove", icon='X')
+
+        active_layer = mat.paint_layers.active
+        baking = False
+        for map_type, type_label in _MESH_MAP_TYPES:
+            row = layout.row(align=True)
+            row.label(text=type_label)
+            state = _mesh_map_state(context, mat, map_type)
+            if state is None:
+                status_label, status_icon = _MESH_MAP_STATUS['NONE']
+            else:
+                status_label, status_icon = _MESH_MAP_STATUS[state.status]
+                baking = baking or state.status == 'BAKING'
+            row.label(text=status_label, icon=status_icon)
+            slot = mat.mesh_map_slots.find(type=map_type)
+            image = slot.image if slot is not None else None
+            row.label(text=image.name if image is not None else "—")
+
+            row.operator_context = 'INVOKE_DEFAULT'
+            bake = row.operator("object.mesh_map_bake", text="Bake", icon='RENDER_STILL')
+            bake.type = map_type
+            bake.material_index = 0
+            row.operator_context = 'EXEC_DEFAULT'
+
+            add_row = row.row(align=True)
+            add_row.operator("material.mesh_map_add_layer", text="Add Layer", icon='ADD').type = map_type
+            mask_row = row.row(align=True)
+            mask_row.enabled = active_layer is not None
+            mask_row.operator("material.mesh_map_add_mask", text="Add Mask", icon='ADD').type = map_type
+
+        if baking:
+            layout.label(text="Baking...", icon='FILE_REFRESH')
+
+        objects = mesh_map_objects_for_material(context.scene, mat)
+        if len(objects) > 1:
+            box = layout.box()
+            box.label(text="Objects using this material", icon='OUTLINER_OB_MESH')
+            for other in objects:
+                status, count = mesh_map_summary_status(other, mat)
+                status_label, status_icon = _MESH_MAP_STATUS[status]
+                line = box.row(align=True)
+                line.label(
+                    text="{}: {} ({} map(s))".format(other.name, status_label, count),
+                    icon=status_icon,
+                )
+                if uv_name and other.data.uv_layers.get(uv_name) is None:
+                    line.label(text="no UV '{}'".format(uv_name), icon='ERROR')
+
+        layout.operator("object.mesh_map_refresh", text="Refresh Status", icon='FILE_REFRESH')
+
+
 classes = (
     MATERIAL_MT_context_menu,
     MATERIAL_UL_matslots,
@@ -555,12 +1041,19 @@ classes = (
     EEVEE_MATERIAL_PT_viewport_settings,
     MATERIAL_PT_animation,
     MATERIAL_PT_custom_props,
+    MATERIAL_PT_paint_layers,
+    LAYER_MATERIAL_PT_mesh_maps,
     BRUSH_MATERIAL_PT_context_material,
     BRUSH_MATERIAL_PT_surface,
     BRUSH_MATERIAL_PT_settings,
     BRUSH_MATERIAL_PT_settings_surface,
     BRUSH_MATERIAL_PT_viewport,
     BRUSH_MATERIAL_PT_custom_props,
+    LAYER_MATERIAL_PT_layers,
+    LAYER_MATERIAL_PT_source_material,
+    LAYER_MATERIAL_PT_source_surface,
+    LAYER_MATERIAL_PT_custom_layer,
+    LAYER_MATERIAL_PT_custom_props,
 )
 
 

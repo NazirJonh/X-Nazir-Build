@@ -16,6 +16,8 @@
 #include "DNA_brush_types.h"
 #include "DNA_camera_types.h"
 #include "DNA_curve_types.h"
+#include "DNA_genfile.h"
+#include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_node_tree_interface_types.h"
@@ -1169,8 +1171,94 @@ static void do_versions_structure_tag_category_memory(Main *bmain)
   }
 }
 
-void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
+static void do_versions_paint_layer_channel_settings(MaterialPaintLayer &layer,
+                                                     const bool migrate_records)
 {
+  for (MaterialPaintLayerChannelSettings &settings : layer.channel_settings) {
+    settings.blend = -1;
+    settings.opacity = 1.0f;
+  }
+  if (migrate_records) {
+    for (int i = 0; i < layer.channels_num; i++) {
+      const MaterialPaintLayerChannel &record = layer.channels[i];
+      if (record.channel < 0 || record.channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+        continue;
+      }
+      layer.channel_settings[record.channel].blend = record.blend;
+      layer.channel_settings[record.channel].opacity = record.opacity;
+    }
+  }
+  for (MaterialPaintLayer &child :
+       layer.children)
+  {
+    do_versions_paint_layer_channel_settings(child, migrate_records);
+  }
+  for (MaterialPaintLayer &effect :
+       layer.effects)
+  {
+    do_versions_paint_layer_channel_settings(effect, migrate_records);
+  }
+  for (MaterialPaintLayer &mask_item :
+       layer.mask_stack)
+  {
+    do_versions_paint_layer_channel_settings(mask_item, migrate_records);
+  }
+}
+
+/**
+ * Mark the base mask of every layer written before #MA_PAINT_LAYER_MASK_BASE existed.
+ *
+ * The base mask was always created first (#BKE_paint_layers_mask_add inserts at the head), so the
+ * first item of the stack is it. Newer files carry the flag explicitly.
+ */
+static void do_versions_paint_layer_mask_base(MaterialPaintLayer &layer)
+{
+  if (!layer.mask_stack.is_empty()) {
+    bool has_base = false;
+    for (MaterialPaintLayer &item : layer.mask_stack) {
+      if (item.flag & MA_PAINT_LAYER_MASK_BASE) {
+        has_base = true;
+        break;
+      }
+    }
+    if (!has_base) {
+      /* The first item of the stack is the base (#ListBaseT::first is untyped). */
+      for (MaterialPaintLayer &item : layer.mask_stack) {
+        item.flag |= MA_PAINT_LAYER_MASK_BASE;
+        break;
+      }
+    }
+  }
+  for (MaterialPaintLayer &child : layer.children) {
+    do_versions_paint_layer_mask_base(child);
+  }
+  for (MaterialPaintLayer &effect : layer.effects) {
+    do_versions_paint_layer_mask_base(effect);
+  }
+  for (MaterialPaintLayer &mask_item : layer.mask_stack) {
+    do_versions_paint_layer_mask_base(mask_item);
+  }
+}
+
+void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
+{
+  /* Per (row, channel) blend/opacity moved out of the sparse channel record into the row's fixed
+   * #MaterialPaintLayer::channel_settings array. An older file has no array in its SDNA, so the
+   * in-memory one is zeroed: default every entry to inherit. When the record still carried its own
+   * override (a file written between the two layouts), carry its values across. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "MaterialPaintLayer", "MaterialPaintLayerChannelSettings", "channel_settings"))
+  {
+    const bool migrate_records = DNA_struct_member_exists_with_alias(
+        fd->filesdna, "MaterialPaintLayerChannel", "int8_t", "blend");
+    for (Material &ma : bmain->materials) {
+      for (MaterialPaintLayer &layer :
+           ma.paint_layers)
+      {
+        do_versions_paint_layer_channel_settings(layer, migrate_records);
+      }
+    }
+  }
   /* Category runtime lists in WM are rebuilt by Python on startup and must never be trusted from
    * blend-file contents (older experimental files may contain stale raw pointers here).
    * Clear unconditionally for all 5.2 loads before any Python-side sync touches them. */
@@ -1800,6 +1888,95 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
             sbuts.visible_tabs |= (1 << BCONTEXT_BRUSH_MATERIAL);
           }
         }
+      }
+    }
+  }
+
+  /* One step for the whole Stack Layers feature: an Outliner display mode with a tool header,
+   * big rows, and the Layer Material properties tab. Intermediate branch builds versioned these
+   * separately; only files from main (below this subversion) or new files matter now. */
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 73)) {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_OUTLINER) {
+            continue;
+          }
+          SpaceOutliner &space_outliner = reinterpret_cast<SpaceOutliner &>(sl);
+          if (!ELEM(space_outliner.outlinevis,
+                    SO_SCENES,
+                    SO_LIBRARIES,
+                    SO_SEQUENCE,
+                    SO_DATA_API,
+                    SO_ID_ORPHANS,
+                    SO_VIEW_LAYER,
+                    SO_OVERRIDES_LIBRARY,
+                    SO_STACK_LAYERS))
+          {
+            space_outliner.outlinevis = SO_VIEW_LAYER;
+          }
+        }
+      }
+    }
+    /* The Outliner grew a tool header. `ED_area_init` only initializes regions that already
+     * exist, so an old file needs the region added here or the Stack Layers controls have nowhere
+     * to draw. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_OUTLINER) {
+            continue;
+          }
+          ListBaseT<ARegion> *regionbase = (&sl == area.spacedata.first) ? &area.regionbase :
+                                                                          &sl.regionbase;
+          ARegion *region = do_versions_add_region_if_not_found(
+              regionbase, RGN_TYPE_TOOL_HEADER, "tool header", RGN_TYPE_HEADER);
+          if (region == nullptr) {
+            continue;
+          }
+          region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+          /* Shown when the space is set to Stack Layers; not "hidden by user", or it would never
+           * come back on its own. */
+          region->flag |= RGN_FLAG_HIDDEN;
+        }
+      }
+    }
+    /* The Stack Layers view opens as a layer manager does: tall rows with a thumbnail, and the
+     * visibility toggle down the left edge. Both are #SpaceOutliner defaults now, which a space
+     * written before they existed carries as a zero -- and a zero here reads as "the user turned
+     * everything off", not as "unset". Files from before the mode existed are given the defaults
+     * once, so an Outliner opened in one looks like an Outliner opened in a new file. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_OUTLINER) {
+            continue;
+          }
+          SpaceOutliner &space_outliner = reinterpret_cast<SpaceOutliner &>(sl);
+          space_outliner.stack_layers_flag |= SO_SL_BIG_ROWS | SO_SL_VISIBILITY_LEFT;
+        }
+      }
+    }
+    /* BCONTEXT_LAYER_MATERIAL is new; like the Brush Material tab, its visibility bit starts set
+     * so the tab can show up in older files once a Material paint layer is active. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_PROPERTIES) {
+            SpaceProperties &sbuts = reinterpret_cast<SpaceProperties &>(sl);
+            sbuts.visible_tabs |= (1 << BCONTEXT_LAYER_MATERIAL);
+          }
+        }
+      }
+    }
+  }
+
+  /* The base-mask flag is new: mark the first item of every mask stack written before it, so the
+   * UI has an explicit handle on the base rather than assuming the first item. */
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 76)) {
+    for (Material &ma : bmain->materials) {
+      for (MaterialPaintLayer &layer : ma.paint_layers) {
+        do_versions_paint_layer_mask_base(layer);
       }
     }
   }

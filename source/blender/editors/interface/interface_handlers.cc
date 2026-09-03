@@ -1751,6 +1751,11 @@ static bool drag_toggle_but_is_supported(const Button *but)
  * then just true or false for toggle buttons with more than 2 states. */
 static int drag_toggle_but_pushed_state(Button *but)
 {
+  /* A callback-backed button knows its own truth: the callback is what the UI renders, while the
+   * icon heuristic below would derive garbage from its icon. */
+  if (but->pushed_state_func) {
+    return button_is_pushed(but);
+  }
   if (but->rnapoin.data == nullptr && but->poin == nullptr && but->icon) {
     /* Assume icon identifies a unique state, for buttons that
      * work through functions callbacks and don't have an boolean

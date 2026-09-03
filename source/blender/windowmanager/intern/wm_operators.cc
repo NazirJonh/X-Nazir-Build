@@ -1490,6 +1490,9 @@ struct wmOpPopUp {
   ui::AlertIcon icon;
   wmPopupSize size;
   wmPopupPosition position;
+  /** Window-space rectangle #WM_POPUP_POSITION_ANCHOR opens the dialog beside. Lives here rather
+   * than in the popup handle so refreshes re-place the rebuilt block against the same rectangle. */
+  std::optional<rcti> anchor_rect;
   bool cancel_default;
   bool mouse_move_quit;
   bool include_properties;
@@ -1690,7 +1693,17 @@ static ui::Block *wm_block_dialog_create(bContext *C, ARegion *region, void *use
 
   const int padding = (small ? 7 : 14) * UI_SCALE_FAC;
 
-  if (data->position == WM_POPUP_POSITION_MOUSE) {
+  if (data->position == WM_POPUP_POSITION_ANCHOR) {
+    /* The anchor is mandatory for this mode; a caller that lost it should have kept the mouse. */
+    BLI_assert(data->anchor_rect.has_value());
+    if (data->anchor_rect.has_value()) {
+      block_bounds_set_anchor(block, padding, *data->anchor_rect);
+    }
+    else {
+      block_bounds_set_popup(block, padding, nullptr);
+    }
+  }
+  else if (data->position == WM_POPUP_POSITION_MOUSE) {
     const float button_center_x = windows_layout ? -0.4f : -0.90f;
     const float button_center_y = small ? 2.0f : 3.1f;
     const int bounds_offset[2] = {int(button_center_x * layout.width()),
@@ -1890,7 +1903,8 @@ wmOperatorStatus WM_operator_props_dialog_popup(bContext *C,
                                                 std::optional<std::string> confirm_text,
                                                 const bool cancel_default,
                                                 std::optional<std::string> message,
-                                                const bool show_icon)
+                                                const bool show_icon,
+                                                std::optional<rcti> anchor_rect)
 {
   wmOpPopUp *data = MEM_new<wmOpPopUp>(__func__);
   data->op = op;
@@ -1902,7 +1916,12 @@ wmOperatorStatus WM_operator_props_dialog_popup(bContext *C,
   data->message = message ? std::move(*message) : std::string();
   data->icon = show_icon ? ui::AlertIcon::Info : ui::AlertIcon::None;
   data->size = show_icon ? WM_POPUP_SIZE_LARGE : WM_POPUP_SIZE_SMALL;
-  data->position = (message) ? WM_POPUP_POSITION_CENTER : WM_POPUP_POSITION_MOUSE;
+  /* An anchor overrides everything: the caller asked to open beside a rectangle it knows about,
+   * whatever the message would otherwise have done to the placement. */
+  data->position = anchor_rect.has_value() ? WM_POPUP_POSITION_ANCHOR :
+                                             ((message) ? WM_POPUP_POSITION_CENTER :
+                                                          WM_POPUP_POSITION_MOUSE);
+  data->anchor_rect = std::move(anchor_rect);
   data->cancel_default = cancel_default;
   data->mouse_move_quit = false;
   data->include_properties = true;

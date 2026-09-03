@@ -55,6 +55,7 @@
 #include "BKE_editmesh.hh"
 #include "BKE_grease_pencil.hh"
 #include "BKE_icons.hh"
+#include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
@@ -68,6 +69,10 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_mesh_maps.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_pointcloud.hh"
@@ -83,6 +88,8 @@
 
 #include "NOD_shader.h"
 
+#include "paint_layers_runtime.hh"
+
 #include "BLO_read_write.hh"
 
 namespace blender {
@@ -97,6 +104,216 @@ static void material_init_data(ID *id)
   material->nodetree = bke::node_tree_add_tree_embedded(
       nullptr, &material->id, "Shader Nodetree", "ShaderNodeTree");
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Paint layer description
+ *
+ * The DNA description of the paint layer stack (`Material::paint_layers`) is plain sub-data of the
+ * material: it is never shared between materials, and its ID references (`Image`, the custom
+ * group) are owned elsewhere. The helpers below are the single place that knows how to free, copy,
+ * walk and serialize it.
+ * \{ */
+
+/**
+ * Call \a fn for each of a layer's three sub-lists, in the fixed order the file writer, the readers
+ * and the ID walk rely on: #MaterialPaintLayer::children, then #effects, then #mask_stack. This is
+ * the one place the traversal order lives, so the serialization order cannot drift between passes.
+ */
+template<typename Fn>
+static void material_paint_layer_foreach_sublist(MaterialPaintLayer &layer, Fn &&fn)
+{
+  fn(layer.children);
+  fn(layer.effects);
+  fn(layer.mask_stack);
+}
+template<typename Fn>
+static void material_paint_layer_foreach_sublist(const MaterialPaintLayer &layer, Fn &&fn)
+{
+  fn(layer.children);
+  fn(layer.effects);
+  fn(layer.mask_stack);
+}
+
+void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
+{
+  material_paint_layer_foreach_sublist(*layer, [](ListBaseT<MaterialPaintLayer> &list) {
+    /* Free every element of the sub-list. The mutable iterator caches the next pointer, so freeing
+     * the current element is safe; the list itself is discarded with \a layer. */
+    for (MaterialPaintLayer &item : list.items_mutable()) {
+      BKE_material_paint_layer_free(&item);
+    }
+  });
+
+  MEM_SAFE_DELETE(layer->channels);
+  layer->channels_num = 0;
+  MEM_SAFE_DELETE(layer->bake);
+
+  if (layer->properties != nullptr) {
+    IDP_FreeProperty(layer->properties);
+    layer->properties = nullptr;
+  }
+
+  MEM_delete(layer);
+}
+
+static void material_paint_layers_free(Material &material)
+{
+  BKE_paint_layers_bake_runtime_free(material);
+  BKE_paint_layers_sampler_state_free(material);
+  BKE_paint_layers_generate_runtime_free(material);
+  for (MaterialPaintLayer &layer : material.paint_layers.items_mutable()) {
+    BKE_material_paint_layer_free(&layer);
+  }
+  material.paint_layers = {nullptr, nullptr};
+  BKE_mesh_maps_material_slots_free(material);
+}
+
+static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &src, const int flag)
+{
+  MaterialPaintLayer *dst = static_cast<MaterialPaintLayer *>(MEM_dupalloc(&src));
+  dst->next = nullptr;
+  dst->prev = nullptr;
+  dst->children = {nullptr, nullptr};
+  dst->effects = {nullptr, nullptr};
+  dst->mask_stack = {nullptr, nullptr};
+  dst->channels = nullptr;
+  dst->channels_num = 0;
+  dst->bake = nullptr;
+  dst->properties = nullptr;
+
+  int sublist_index = 0;
+  material_paint_layer_foreach_sublist(
+      src, [&](const ListBaseT<MaterialPaintLayer> &src_list) {
+        ListBaseT<MaterialPaintLayer> *dst_list = nullptr;
+        switch (sublist_index++) {
+          case 0:
+            dst_list = &dst->children;
+            break;
+          case 1:
+            dst_list = &dst->effects;
+            break;
+          case 2:
+            dst_list = &dst->mask_stack;
+            break;
+          default:
+            return;
+        }
+        for (const MaterialPaintLayer &item : src_list) {
+          BLI_addtail(dst_list, material_paint_layer_copy(item, flag));
+        }
+      });
+
+  if (src.channels != nullptr && src.channels_num > 0) {
+    dst->channels = static_cast<MaterialPaintLayerChannel *>(MEM_dupalloc(src.channels));
+    dst->channels_num = src.channels_num;
+  }
+  if (src.bake != nullptr) {
+    dst->bake = static_cast<MaterialPaintLayerBake *>(MEM_dupalloc(src.bake));
+  }
+  if (src.properties != nullptr) {
+    dst->properties = IDP_CopyProperty_ex(src.properties, flag);
+  }
+
+  return dst;
+}
+
+static void material_paint_layer_foreach_id(MaterialPaintLayer *layer, LibraryForeachIDData *data)
+{
+  for (int i = 0; i < layer->channels_num; i++) {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, layer->channels[i].image, IDWALK_CB_USER);
+  }
+  if (layer->bake != nullptr) {
+    for (int i = 0; i < 10; i++) {
+      BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, layer->bake->images[i], IDWALK_CB_USER);
+    }
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, layer->bake->coverage, IDWALK_CB_USER);
+  }
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, layer->custom_group, IDWALK_CB_USER);
+  /* The source material of a baked Material layer is a reference the layer keeps alive. */
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, layer->material, IDWALK_CB_USER);
+
+  BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(
+      data, IDP_foreach_property(layer->properties, IDP_TYPE_FILTER_ID, [&](IDProperty *prop) {
+        BKE_lib_query_idpropertiesForeachIDLink_callback(prop, data);
+      }));
+
+  material_paint_layer_foreach_sublist(*layer, [&](ListBaseT<MaterialPaintLayer> &list) {
+    for (MaterialPaintLayer &item : list) {
+      BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&item, data));
+    }
+  });
+}
+
+static void material_paint_layer_blend_write(BlendWriter *writer, const MaterialPaintLayer &layer)
+{
+  material_paint_layer_foreach_sublist(layer, [&](const ListBaseT<MaterialPaintLayer> &list) {
+    writer->write_struct_list(&list);
+    for (const MaterialPaintLayer &item : list) {
+      material_paint_layer_blend_write(writer, item);
+    }
+  });
+
+  if (layer.channels != nullptr && layer.channels_num > 0) {
+    writer->write_struct_array(layer.channels_num, layer.channels);
+  }
+  if (layer.bake != nullptr) {
+    writer->write_struct(layer.bake);
+  }
+  if (layer.properties != nullptr) {
+    IDP_BlendWrite(writer, layer.properties);
+  }
+}
+
+static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPaintLayer &layer)
+{
+  material_paint_layer_foreach_sublist(layer, [&](ListBaseT<MaterialPaintLayer> &list) {
+    BLO_read_struct_list(reader, MaterialPaintLayer, &list);
+    for (MaterialPaintLayer &item : list) {
+      material_paint_layer_blend_read(reader, item);
+    }
+  });
+
+  if (layer.channels != nullptr) {
+    BLO_read_array_and_validate_size(reader, &layer.channels, &layer.channels_num);
+  }
+  else {
+    /* A corrupt/older file can carry a count without the matching array; a non-zero count with a
+     * null pointer would make later readers dereference null. Do not trust the file's count. */
+    layer.channels_num = 0;
+  }
+  BLO_read_struct(reader, MaterialPaintLayerBake, &layer.bake);
+  BLO_read_struct(reader, IDProperty, &layer.properties);
+  IDP_BlendDataRead(reader, &layer.properties);
+}
+
+static void material_paint_layers_blend_write(BlendWriter *writer, const Material &material)
+{
+  writer->write_struct_list(&material.paint_layers);
+  for (const MaterialPaintLayer &layer : material.paint_layers) {
+    material_paint_layer_blend_write(writer, layer);
+  }
+  writer->write_struct_list(
+      reinterpret_cast<const ListBaseT<MaterialMeshMapSlot> *>(&material.mesh_map_slots));
+}
+
+static void material_paint_layers_blend_read(BlendDataReader *reader, Material &material)
+{
+  /* The texture-paint slot cache and the bake queue are runtime only; never trust the saved stale
+   * flags. The first bake check after a load re-bakes everything through the hash anyway.
+   * #MA_PAINT_LAYERS_BAKE_SCHEDULED belongs to the editor's `wmJob`/debounce-timer state, which
+   * a file never carries across a save: a file saved while a bake was armed or in flight must not
+   * load back in permanently "stale" with nothing left running to ever clear the mark. */
+  material.paint_layers_flag &= ~(MA_PAINT_LAYERS_SLOTS_STALE | MA_PAINT_LAYERS_BAKE_STALE |
+                                   MA_PAINT_LAYERS_MATERIAL_BAKE_DUE |
+                                   MA_PAINT_LAYERS_BAKE_SCHEDULED);
+  BLO_read_struct_list(reader, MaterialPaintLayer, &material.paint_layers);
+  for (MaterialPaintLayer &layer : material.paint_layers) {
+    material_paint_layer_blend_read(reader, layer);
+  }
+  BLO_read_struct_list(reader, MaterialMeshMapSlot, &material.mesh_map_slots);
+}
+
+/** \} */
 
 static void material_copy_data(Main *bmain,
                                std::optional<Library *> owner_library,
@@ -146,6 +363,21 @@ static void material_copy_data(Main *bmain,
         MEM_dupalloc(material_src->gp_style));
   }
 
+  /* The description is owned sub-data: never share the source's list or its elements. */
+  material_dst->paint_layers = {nullptr, nullptr};
+  for (const MaterialPaintLayer &layer : material_src->paint_layers) {
+    BLI_addtail(&material_dst->paint_layers, material_paint_layer_copy(layer, flag_subdata));
+  }
+  /* Runtime state is derived and per-owner; a copy never shares it with the source. */
+  material_dst->paint_layers_runtime = nullptr;
+  /* The generated tree is owned 1:1 as well: the copy gets its own deep copy (or shares the
+   * pointer under COW), see the generator. */
+  BKE_paint_layers_generate_copy_data(bmain, *material_dst, *material_src, flag);
+
+  /* The mesh map atlases are owned sub-data too: never share the source's list. The Image
+   * references themselves are remapped/counted by the generic copy machinery through foreach_id. */
+  BKE_mesh_maps_material_slots_copy(*material_dst, *material_src);
+
   material_dst->gpumaterial.clear_no_delete();
   BKE_paint_material_channel_cache_invalidate(material_dst);
 
@@ -186,6 +418,10 @@ static void material_free_data(ID *id)
 
   MEM_SAFE_DELETE(material->gp_style);
 
+  /* The whole DNA description is owned sub-data; the IDs it references are owned elsewhere and
+   * must not be freed here. */
+  material_paint_layers_free(*material);
+
   BKE_previewimg_id_free(&material->id);
 
   BKE_icon_id_delete(id_cast<ID *>(material));
@@ -198,12 +434,28 @@ static void material_foreach_id(ID *id, LibraryForeachIDData *data)
   /* Node-trees **are owned by IDs**, treat them as mere sub-data and not real ID! */
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(
       data, BKE_library_foreach_ID_embedded(data, (ID **)&material->nodetree));
-  if (material->texpaintslot != nullptr) {
-    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->texpaintslot->ima, IDWALK_CB_NOP);
+  for (int i = 0; i < material->tot_slots && material->texpaintslot != nullptr; i++) {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->texpaintslot[i].ima, IDWALK_CB_NOP);
   }
   if (material->gp_style != nullptr) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->gp_style->sima, IDWALK_CB_USER);
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->gp_style->ima, IDWALK_CB_USER);
+  }
+
+  /* The generated stack tree is owned by the material (one user) and shared by the instance node
+   * in #nodetree; walking it keeps it alive across purge and remaps it on file read. */
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->paint_layers_tree, IDWALK_CB_USER);
+
+  for (MaterialPaintLayer &layer : material->paint_layers) {
+    BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&layer, data));
+  }
+
+  /* The mesh map atlases are ID references owned by the material; walking them keeps them alive
+   * across purge and remaps them on file read. */
+  for (MaterialMeshMapSlot &slot :
+       *reinterpret_cast<ListBaseT<MaterialMeshMapSlot> *>(&material->mesh_map_slots))
+  {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, slot.image, IDWALK_CB_USER);
   }
 }
 
@@ -253,6 +505,10 @@ static void material_blend_write(BlendWriter *writer, ID *id, const void *id_add
   if (ma->gp_style) {
     writer->write_struct(ma->gp_style);
   }
+
+  /* Paint layer description. #Material::paint_layers_tree is a regular node group in #Main and is
+   * written by the file as its own ID; only the description is material sub-data. */
+  material_paint_layers_blend_write(writer, *ma);
 }
 
 static void material_blend_read_data(BlendDataReader *reader, ID *id)
@@ -260,6 +516,10 @@ static void material_blend_read_data(BlendDataReader *reader, ID *id)
   Material *ma = id_cast<Material *>(id);
 
   ma->texpaintslot = nullptr;
+  /* Runtime-only derived state; never read back from the file. */
+  ma->paint_layers_runtime = nullptr;
+  /* #ma->paint_layers_tree is a regular node group in #Main, linked by the file's lib-link pass
+   * through #material_foreach_id; the material owns it, so it is kept, not nulled. */
 
   BLO_read_struct(reader, PreviewImage, &ma->preview);
   BKE_previewimg_blend_read(reader, ma->preview);
@@ -268,6 +528,30 @@ static void material_blend_read_data(BlendDataReader *reader, ID *id)
   BKE_paint_material_channel_cache_invalidate(ma);
 
   BLO_read_struct(reader, MaterialGPencilStyle, &ma->gp_style);
+
+  /* paint layer description */
+  material_paint_layers_blend_read(reader, *ma);
+}
+
+/**
+ * Carry the Paint Layers runtime across a memfile undo. A changed material is read back as a new
+ * ID whose runtime is empty, while the global maps it replaced survived undo through an unchanged
+ * `session_uid`; moving the pointer keeps the removed-rows set available, so Ctrl+Z does not cost an
+ * extra root rebuild and EEVEE compile. The old ID is left empty so its free path cannot double
+ * free the runtime.
+ */
+static void material_undo_preserve(BlendLibReader * /*reader*/, ID *id_new, ID *id_old)
+{
+  if (id_new == id_old) {
+    return;
+  }
+  Material *material_new = id_cast<Material *>(id_new);
+  Material *material_old = id_cast<Material *>(id_old);
+  bke::paint_layers_runtime_transfer(*material_new, *material_old);
+  /* The bake subscription and the sampler runtime are global maps keyed by `session_uid`; they must
+   * be re-owned too, or the old ID's free path would drop the re-read ID's entries. */
+  BKE_paint_layers_bake_runtime_owner_transfer(*material_new, *material_old);
+  BKE_paint_layers_sampler_state_owner_transfer(*material_new, *material_old);
 }
 
 IDTypeInfo IDType_ID_MA = {
@@ -296,7 +580,7 @@ IDTypeInfo IDType_ID_MA = {
     .blend_read_data = material_blend_read_data,
     .blend_read_after_liblink = nullptr,
 
-    .blend_read_undo_preserve = nullptr,
+    .blend_read_undo_preserve = material_undo_preserve,
 
     .lib_override_apply_post = nullptr,
 };
@@ -1959,6 +2243,161 @@ static ePaintSlotFilter material_paint_slot_filter(const Object *ob)
   return slot_filter;
 }
 
+/**
+ * Fill \a ma's paint slots from its layer description: one slot per channel map of the active
+ * layer, or the single mask slot in MASK mode. Reads the description only and never touches the
+ * node tree. The active slot follows #PaintModeSettings::active_layer_channel, which is exactly
+ * the channel the single-target Texture Paint (projection) canvas paints.
+ */
+int BKE_paint_layers_texpaint_slot_channel(const PaintModeSettings *settings,
+                                           const int slot_index)
+{
+  if (settings == nullptr || slot_index < 0) {
+    return -1;
+  }
+  if (settings->layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    /* One mask slot; -1 is the "mask, not a channel" sentinel. */
+    return slot_index == 0 ? -1 : -2;
+  }
+  int index = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint) {
+      continue;
+    }
+    if (index == slot_index) {
+      return int(info.channel);
+    }
+    index++;
+  }
+  return -1;
+}
+
+int BKE_paint_layers_texpaint_slot_channel_content(const int slot_index)
+{
+  if (slot_index < 0) {
+    return -1;
+  }
+  int index = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint) {
+      continue;
+    }
+    if (index == slot_index) {
+      return int(info.channel);
+    }
+    index++;
+  }
+  return -1;
+}
+
+int BKE_paint_layers_texpaint_slot_index(const PaintModeSettings *settings, const int channel)
+{
+  if (settings == nullptr) {
+    return -1;
+  }
+  if (settings->layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    return channel == -1 ? 0 : -1;
+  }
+  int index = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint) {
+      continue;
+    }
+    if (int(info.channel) == channel) {
+      return index;
+    }
+    index++;
+  }
+  return -1;
+}
+
+void BKE_paint_layers_texpaint_slots_refresh(Material *ma, const PaintModeSettings *paint_mode)
+{
+  if (ma == nullptr || paint_mode == nullptr || !paint_layers_is_layered(*ma)) {
+    return;
+  }
+  MEM_SAFE_DELETE(ma->texpaintslot);
+  ma->tot_slots = 0;
+  ma->paint_active_slot = 0;
+  ma->paint_clone_slot = 0;
+
+  MaterialPaintLayer *layer = BLI_uuid_is_nil(ma->active_layer_marker) ?
+                                  nullptr :
+                                  BKE_paint_layers_find(*ma, ma->active_layer_marker);
+
+  auto record_image = [&](const int channel) -> Image * {
+    if (layer == nullptr) {
+      return nullptr;
+    }
+    for (int i = 0; i < layer->channels_num; i++) {
+      if (layer->channels[i].channel == channel &&
+          layer->channels[i].state != MA_PAINT_LAYER_CHANNEL_ABSENT)
+      {
+        return layer->channels[i].image;
+      }
+    }
+    return nullptr;
+  };
+
+  if (paint_mode->layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    PaintLayersTarget target;
+    Image *mask_image = nullptr;
+    if (BKE_paint_layers_target_get(
+            *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target))
+    {
+      mask_image = BKE_paint_layers_target_image(target);
+    }
+    ma->texpaintslot = MEM_new_array<TexPaintSlot>(1, "texpaint_slots");
+    TexPaintSlot &slot = ma->texpaintslot[0];
+    slot.ima = mask_image;
+    slot.valid = mask_image != nullptr;
+    slot.image_user = nullptr;
+    slot.uvname = nullptr;
+    slot.interp = 0;
+    slot.slot_type = 0;
+    ma->tot_slots = 1;
+    ma->paint_active_slot = 0;
+    ma->paint_clone_slot = 0;
+    ma->paint_layers_flag &= ~MA_PAINT_LAYERS_SLOTS_STALE;
+    return;
+  }
+
+  /* CONTENT: a fixed slot per image-paint channel, in table order, whether or not it has a map.
+   * The index is then a pure function of the channel, so selecting an empty channel in the
+   * Texture Slots list names it and the first stroke creates exactly that map. */
+  int count = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.supports_image_paint) {
+      count++;
+    }
+  }
+  if (count == 0) {
+    ma->paint_layers_flag &= ~MA_PAINT_LAYERS_SLOTS_STALE;
+    return;
+  }
+  ma->texpaintslot = MEM_new_array<TexPaintSlot>(count, "texpaint_slots");
+  int index = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint) {
+      continue;
+    }
+    TexPaintSlot &slot = ma->texpaintslot[index];
+    slot.ima = record_image(int(info.channel));
+    slot.valid = slot.ima != nullptr;
+    slot.image_user = nullptr;
+    slot.uvname = nullptr;
+    slot.interp = 0;
+    slot.slot_type = 0;
+    index++;
+  }
+  ma->tot_slots = count;
+  const int active = BKE_paint_layers_texpaint_slot_index(paint_mode,
+                                                          paint_mode->active_layer_channel);
+  ma->paint_active_slot = (active >= 0) ? active : 0;
+  ma->paint_clone_slot = 0;
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_SLOTS_STALE;
+}
+
 void BKE_texpaint_slot_refresh_cache(Scene *scene, Material *ma, const Object *ob)
 {
   if (!ma) {
@@ -1980,6 +2419,10 @@ void BKE_texpaint_slot_refresh_cache(Scene *scene, Material *ma, const Object *o
   if (scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
     ma->paint_active_slot = 0;
     ma->paint_clone_slot = 0;
+  }
+  else if (paint_layers_is_layered(*ma)) {
+    /* A layered material's slots come from the description, never from the node tree. */
+    BKE_paint_layers_texpaint_slots_refresh(ma, &scene->toolsettings->paint_mode);
   }
   else if (!(ma->nodetree)) {
     ma->paint_active_slot = 0;
@@ -2354,6 +2797,12 @@ void ramp_blend(int type, float r_col[4], const float fac, const float col[4])
 void BKE_material_eval(Depsgraph *depsgraph, Material *material)
 {
   DEG_debug_print_eval(depsgraph, __func__, material->id.name, material);
+  /* Topology and values are separate: copy the description's animatable values into the group
+   * instance's sockets in this evaluated tree, so a value change is a uniform update and never a
+   * rebuild of the generated topology. */
+  if (paint_layers_is_layered(*material)) {
+    BKE_paint_layers_values_sync(*material);
+  }
   GPU_material_free(&material->gpumaterial);
 }
 

@@ -68,6 +68,7 @@
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
 #include "BKE_material.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
@@ -4382,8 +4383,23 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     }
 
     Brush *brush = BKE_paint_brush(&settings->imapaint.paint);
-    if (brush == nullptr || brush->material_paint == nullptr) {
+    if (brush == nullptr) {
       return nullptr;
+    }
+    if (brush->material_paint == nullptr) {
+      /* An ordinary brush the user has never opted into PBR Paint still has to work for mask
+       * painting -- BrushMaterialPaint.channels[] is never read for a mask target (see the design
+       * spec's invariant M6), so allocating it here costs nothing but the flag. */
+      /* Mask mode is the explicit field now, for the old and the layered path alike; the binding
+       * is only the old path's picture. */
+      if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL &&
+          paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK)
+      {
+        BKE_brush_material_paint_ensure(brush);
+      }
+      else {
+        return nullptr;
+      }
     }
     const BrushMaterialPaint &brush_paint = *brush->material_paint;
 
@@ -4397,8 +4413,16 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(ob, ob->actcol));
 
     Main *bmain = CTX_data_main(C);
-    BKE_paint_material_images_ensure_writable(
-        *bmain, *ob, brush_paint, paint_mode, settings->imapaint.paint.visible_material_channels);
+    /* A layered material's maps are created in the operator's invoke, inside the first-stroke undo
+     * group, so ID creation lives in one place; this call would be a no-op anyway. */
+    Material *layer_material = BKE_object_material_get(ob, ob->actcol);
+    if (layer_material == nullptr || !paint_layers_is_layered(*layer_material)) {
+      BKE_paint_material_images_ensure_writable(*bmain,
+                                                *ob,
+                                                brush_paint,
+                                                paint_mode,
+                                                settings->imapaint.paint.visible_material_channels);
+    }
     ED_space_image_paint_auto_select_material_canvas(bmain, ob);
 
     for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
@@ -4425,6 +4449,8 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       }
     }
 
+    /* A mask is painted toward white at full value: the brush strength already scales every dab's
+     * coverage, so passing it as the value too would square it and cap the mask below white. */
     const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(
         *ob, paint_mode, &brush_paint, settings->imapaint.paint.visible_material_channels);
     if (targets.is_empty()) {
@@ -4432,6 +4458,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     }
 
     const Paint *paint = BKE_paint_get_active_from_context(C);
+
     const bool invert = mode == BrushStrokeMode::Invert;
 
     std::shared_ptr<ed::sculpt_paint::material::ChannelSourceSet> channel_sources;
@@ -4447,8 +4474,12 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
                                     brush_paint,
                                     paint_mode,
                                     settings->imapaint.paint.visible_material_channels);
-    const float alpha_fallback = BKE_paint_material_channel_value(
-        brush_paint, paint_mode, PAINT_MATERIAL_CHANNEL_ALPHA);
+    /* Mask mode is the explicit field, so a layered mask stroke does not fall back to the brush's
+     * Alpha channel value. */
+    const float alpha_fallback = paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK ?
+                                     1.0f :
+                                     BKE_paint_material_channel_value(
+                                         brush_paint, paint_mode, PAINT_MATERIAL_CHANNEL_ALPHA);
 
     std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh> area_plane_mesh;
     {

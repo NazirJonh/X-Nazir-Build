@@ -499,6 +499,12 @@ void WM_drag_data_free(eWM_DragDataType dragtype, void *poin)
       MEM_delete(static_cast<wmDragGridItemPy *>(poin));
       break;
     }
+    case WM_DRAG_STACK_LAYER: {
+      /* The payload owns a #blender::Vector, which allocates: #MEM_delete_void would free the
+       * struct without running its destructor and leak the buffer. */
+      MEM_delete(static_cast<wmDragStackLayer *>(poin));
+      break;
+    }
     default:
       MEM_delete_void(poin);
       break;

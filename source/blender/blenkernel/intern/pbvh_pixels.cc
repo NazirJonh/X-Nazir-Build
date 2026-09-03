@@ -13,10 +13,12 @@
 #include "DNA_image_types.h"
 #include "DNA_object_types.h"
 
+#include "BLI_array.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
+#include "BLI_task.hh"
 
 #include "BKE_image_wrappers.hh"
 #include "BKE_paint.hh"
@@ -113,7 +115,59 @@ static float3 calc_uv_primitive_tangent(const uv_islands::MeshData &mesh_data,
  */
 constexpr bool USE_WATERTIGHT_CHECK = false;
 
-static void extract_barycentric_pixels(UDIMTilePixels &tile_data,
+static void extract_barycentric_row(Vector<PackedPixelRow> &r_pixel_rows,
+                                    const TriRasterizer &rasterizer,
+                                    const uv_islands::UVIslandsMask &uv_mask,
+                                    const int uv_island_index,
+                                    const int uv_primitive_index,
+                                    const float2 uvs[3],
+                                    const float2 tile_offset,
+                                    const float inv_w,
+                                    const float inv_h,
+                                    const int minx,
+                                    const int maxx,
+                                    const int y)
+{
+  bool start_detected = false;
+  PackedPixelRow pixel_row;
+  pixel_row.uv_primitive_index = uv_primitive_index;
+  pixel_row.num_pixels = 0;
+  int x;
+
+  const float fy = float(y) + 0.5f;
+
+  /* Each row starts from its own exact edge values rather than accumulating `dy_step`, so a row's
+   * result does not depend on how #extract_barycentric_pixels splits rows into bands. */
+  float3 edge_vals = rasterizer.edge_values(minx, y);
+  for (x = minx; x < maxx; x++) {
+    const float fx = float(x) + 0.5f;
+    const float2 uv(fx * inv_w, fy * inv_h);
+
+    /* The mask UV is always in range, since loop pixels are inside the clamped bounding box. */
+    const bool is_masked = uv_mask.is_masked(uv_island_index, uv + tile_offset);
+    const bool is_inside = rasterizer.inside(edge_vals);
+
+    if (!start_detected && is_inside && is_masked) {
+      start_detected = true;
+      pixel_row.start_image_coordinate = ushort2(x, y);
+      float3 barycentric_weights;
+      barycentric_weights_v2(uvs[0], uvs[1], uvs[2], uv, barycentric_weights);
+      pixel_row.start_barycentric_coord = float2(barycentric_weights.x, barycentric_weights.y);
+    }
+    else if (start_detected && (!is_inside || !is_masked)) {
+      break;
+    }
+    edge_vals += rasterizer.dx_step;
+  }
+
+  if (!start_detected) {
+    return;
+  }
+  pixel_row.num_pixels = x - pixel_row.start_image_coordinate.x;
+  r_pixel_rows.append(pixel_row);
+}
+
+static void extract_barycentric_pixels(Vector<PackedPixelRow> &r_pixel_rows,
                                        const ImBuf *image_buffer,
                                        const uv_islands::UVIslandsMask &uv_mask,
                                        const int uv_island_index,
@@ -132,44 +186,43 @@ static void extract_barycentric_pixels(UDIMTilePixels &tile_data,
   const TriRasterizer rasterizer(
       uvs[0] * image_dimensions, uvs[1] * image_dimensions, uvs[2] * image_dimensions);
 
-  float3 row_edge_vals = rasterizer.edge_values(minx, miny);
-  for (int y = miny; y < maxy; y++) {
-    bool start_detected = false;
-    PackedPixelRow pixel_row;
-    pixel_row.uv_primitive_index = uv_primitive_index;
-    pixel_row.num_pixels = 0;
-    int x;
-
-    const float fy = float(y) + 0.5f;
-
-    float3 edge_vals = row_edge_vals;
-    for (x = minx; x < maxx; x++) {
-      const float fx = float(x) + 0.5f;
-      const float2 uv(fx * inv_w, fy * inv_h);
-
-      /* The mask UV is always in range, since loop pixels are inside the clamped bounding box. */
-      const bool is_masked = uv_mask.is_masked(uv_island_index, uv + tile_offset);
-      const bool is_inside = rasterizer.inside(edge_vals);
-
-      if (!start_detected && is_inside && is_masked) {
-        start_detected = true;
-        pixel_row.start_image_coordinate = ushort2(x, y);
-        float3 barycentric_weights;
-        barycentric_weights_v2(uvs[0], uvs[1], uvs[2], uv, barycentric_weights);
-        pixel_row.start_barycentric_coord = float2(barycentric_weights.x, barycentric_weights.y);
-      }
-      else if (start_detected && (!is_inside || !is_masked)) {
-        break;
-      }
-      edge_vals += rasterizer.dx_step;
+  const auto extract_rows = [&](const IndexRange rows, Vector<PackedPixelRow> &r_rows) {
+    for (const int y : rows) {
+      extract_barycentric_row(r_rows,
+                              rasterizer,
+                              uv_mask,
+                              uv_island_index,
+                              uv_primitive_index,
+                              uvs,
+                              tile_offset,
+                              inv_w,
+                              inv_h,
+                              minx,
+                              maxx,
+                              y);
     }
+  };
 
-    row_edge_vals += rasterizer.dy_step;
-    if (!start_detected) {
-      continue;
+  const IndexRange rows(miny, math::max(maxy - miny, 0));
+  /* A low poly mesh has triangles covering most of the map, which would otherwise be rasterized
+   * by a single thread; small triangles keep the direct path. Bands are concatenated in order, so
+   * the rows come out as a serial pass would produce them. */
+  constexpr int band_rows = 64;
+  if (rows.size() <= band_rows) {
+    extract_rows(rows, r_pixel_rows);
+    return;
+  }
+  const int bands_num = int((rows.size() + band_rows - 1) / band_rows);
+  Array<Vector<PackedPixelRow>> band_pixel_rows(bands_num);
+  threading::parallel_for(IndexRange(bands_num), 1, [&](const IndexRange bands) {
+    for (const int band : bands) {
+      const int start = int(rows.start()) + band * band_rows;
+      const int end = math::min(start + band_rows, int(rows.one_after_last()));
+      extract_rows(IndexRange::from_begin_end(start, end), band_pixel_rows[band]);
     }
-    pixel_row.num_pixels = x - pixel_row.start_image_coordinate.x;
-    tile_data.pixel_rows.append(pixel_row);
+  });
+  for (const Vector<PackedPixelRow> &band : band_pixel_rows) {
+    r_pixel_rows.extend(band);
   }
 }
 
@@ -213,7 +266,8 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
                              const uv_islands::UVIslandsMask &uv_masks,
                              const UVPrimitiveLookup &uv_prim_lookup,
                              Image &image,
-                             ImageUser &image_user,
+                             /* A copy: nodes are encoded in parallel and each sets its tile. */
+                             ImageUser image_user,
                              MeshNode &node,
                              PixelNode &pixel_node)
 {
@@ -245,10 +299,19 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
     tile_data.tile_number = image_tile.get_tile_number();
     float2 tile_offset = float2(image_tile.get_tile_offset());
 
+    /* Rasterizing is the expensive part and each primitive's rows are independent, so primitives
+     * are rasterized in parallel into their own rows and concatenated in primitive order below,
+     * which keeps the encoding identical to a serial pass. A node can hold the whole mesh. */
+    struct RasterJob {
+      int uv_prim_index;
+      int uv_island_index;
+      float2 uvs[3];
+      int minx, miny, maxx, maxy;
+    };
+    Vector<RasterJob> raster_jobs;
     for (const int face : node.faces()) {
       for (const int tri : bke::mesh::face_triangles_range(mesh_data.faces, face)) {
         for (const UVPrimitiveLookup::Entry &entry : uv_prim_lookup.lookup[tri]) {
-          uv_islands::UVBorder uv_border = entry.uv_primitive->extract_border();
           float2 uvs[3] = {
               entry.uv_primitive->get_uv_vertex(mesh_data, 0)->uv - tile_offset,
               entry.uv_primitive->get_uv_vertex(mesh_data, 1)->uv - tile_offset,
@@ -281,20 +344,41 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
           pixel_node.uv_primitives.triangle_uvs.append(uvs[2]);
           pixel_node.uv_primitives.bitangent_signs.append(bitangent_sign);
 
-          /* Extract the pixels. */
-          extract_barycentric_pixels(tile_data,
-                                     image_buffer,
-                                     uv_masks,
-                                     entry.uv_island_index,
-                                     uv_prim_index,
-                                     uvs,
-                                     tile_offset,
-                                     minx,
-                                     miny,
-                                     maxx,
-                                     maxy);
+          raster_jobs.append({uv_prim_index,
+                              int(entry.uv_island_index),
+                              {uvs[0], uvs[1], uvs[2]},
+                              minx,
+                              miny,
+                              maxx,
+                              maxy});
         }
       }
+    }
+
+    Array<Vector<PackedPixelRow>> job_rows(raster_jobs.size());
+    threading::parallel_for(raster_jobs.index_range(), 64, [&](const IndexRange range) {
+      for (const int job_i : range) {
+        const RasterJob &job = raster_jobs[job_i];
+        extract_barycentric_pixels(job_rows[job_i],
+                                   image_buffer,
+                                   uv_masks,
+                                   job.uv_island_index,
+                                   job.uv_prim_index,
+                                   job.uvs,
+                                   tile_offset,
+                                   job.minx,
+                                   job.miny,
+                                   job.maxx,
+                                   job.maxy);
+      }
+    });
+    int64_t rows_num = 0;
+    for (const Vector<PackedPixelRow> &rows : job_rows) {
+      rows_num += rows.size();
+    }
+    tile_data.pixel_rows.reserve(rows_num);
+    for (const Vector<PackedPixelRow> &rows : job_rows) {
+      tile_data.pixel_rows.extend(rows);
     }
     BKE_image_release_ibuf(&image, image_buffer, nullptr);
 
@@ -465,10 +549,17 @@ static bool update_pixels(const Depsgraph &depsgraph,
   {
     PAINT_CHANNEL_PERF_SCOPE(BuildPixelsEncode);
 #endif
-    nodes_to_update.foreach_index([&](const int i) {
-      do_encode_pixels(
-          mesh_data, uv_masks, uv_primitive_lookup, image, image_user, nodes[i], pixel_nodes[i]);
-    });
+    nodes_to_update.foreach_index(
+        [&](const int i) {
+          do_encode_pixels(mesh_data,
+                           uv_masks,
+                           uv_primitive_lookup,
+                           image,
+                           image_user,
+                           nodes[i],
+                           pixel_nodes[i]);
+        },
+        exec_mode::grain_size(1));
 #if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   }
 #endif

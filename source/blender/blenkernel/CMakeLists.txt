@@ -258,8 +258,26 @@ set(SRC
   intern/packedFile.cc
   intern/paint.cc
   intern/paint_canvas.cc
+    intern/paint_layers.cc
+    intern/paint_layers_bake.cc
+    intern/paint_layers_composite.cc
+    intern/paint_layers_generate_common.cc
+    intern/paint_layers_generate_build.cc
+    intern/paint_layers_generate_build_chain.cc
+    intern/paint_layers_generate_build_correction.cc
+    intern/paint_layers_generate_build_intern.hh
+    intern/paint_layers_generate_regen.cc
+    intern/paint_layers_generate_warm.cc
+    intern/paint_layers_generate_source_group.cc
+    intern/paint_layers_generate_sampler.cc
+    intern/paint_layers_generate_values.cc
+    intern/paint_layers_generate_intern.hh
+    intern/paint_layers_target.cc
+  intern/mesh_maps.cc
+  intern/mesh_maps_bake.cc
   intern/paint_material_combined.cc
   intern/paint_material_composite.cc
+  intern/paint_material_normal_combine.cc
   intern/paint_material_resolve.cc
   intern/paint_material_sync.cc
   intern/paint_runtime.cc
@@ -512,10 +530,15 @@ set(SRC
   BKE_packedFile.hh
   BKE_paint.hh
   BKE_paint_bvh.hh
+  BKE_mesh_maps.hh
   BKE_paint_bvh_pixels.hh
+  BKE_paint_layers.hh
+  BKE_paint_layers_composite.hh
+  BKE_paint_layers_generate.hh
   BKE_paint_types.hh
   BKE_paint_material_combined.hh
   BKE_paint_material_composite.hh
+  BKE_paint_material_enums.hh
   BKE_paint_material_resolve.hh
   BKE_particle.h
   BKE_path_templates.hh
@@ -811,9 +834,14 @@ if(WITH_GTESTS)
     intern/lib_remap_test.cc
     intern/main_test.cc
     intern/main_namemap_test.cc
+    intern/mesh_maps_test.cc
+    intern/mesh_maps_bake_test.cc
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
-    intern/paint_material_channel_test.cc
+    intern/paint_layers_description_test.cc
+    intern/paint_layers_generate_test.cc
+    intern/paint_layers_graph_eval_test.cc
+    intern/paint_layers_target_test.cc
     intern/paint_material_combined_cache_test.cc
     intern/paint_material_combined_test.cc
     intern/paint_material_composite_test.cc

@@ -6,7 +6,11 @@
  * \ingroup imbuf
  */
 
+#include "BLI_time.h"
 #include "BLI_utildefines.h"
+
+/* TEMP: diagnostics, imbuf cannot see the blenkernel debug header. */
+#define PL_TIMING_LOG 1
 
 #include "MEM_guardedalloc.h"
 
@@ -60,7 +64,8 @@ static bool imb_is_grayscale_texture_format_compatible(const ImBuf *ibuf)
 static void imb_gpu_get_format(const ImBuf *ibuf,
                                bool high_bitdepth,
                                bool use_grayscale,
-                               gpu::TextureFormat *r_texture_format)
+                               gpu::TextureFormat *r_texture_format,
+                               const bool store_linear_float = false)
 {
   const bool float_rect = (ibuf->float_data() != nullptr);
   const bool is_grayscale = use_grayscale && imb_is_grayscale_texture_format_compatible(ibuf);
@@ -75,8 +80,13 @@ static void imb_gpu_get_format(const ImBuf *ibuf,
                                                  gpu::TextureFormat::SFLOAT_16_16_16_16);
   }
   else {
-    if (IMB_colormanagement_space_is_data(ibuf->byte_buffer.colorspace) ||
-        IMB_colormanagement_space_is_scene_linear(ibuf->byte_buffer.colorspace))
+    if (store_linear_float) {
+      /* Pre-multiplied scene linear, see #imb_gpu_get_data. */
+      *r_texture_format = (is_grayscale) ? gpu::TextureFormat::SFLOAT_16 :
+                                           gpu::TextureFormat::SFLOAT_16_16_16_16;
+    }
+    else if (IMB_colormanagement_space_is_data(ibuf->byte_buffer.colorspace) ||
+             IMB_colormanagement_space_is_scene_linear(ibuf->byte_buffer.colorspace))
     {
       /* Non-color data or scene linear, just store buffer as is. */
       *r_texture_format = (is_grayscale) ? gpu::TextureFormat::UNORM_8 :
@@ -135,7 +145,8 @@ static void *imb_gpu_get_data(ImBuf *ibuf,
                               const bool store_premultiplied,
                               const bool allow_grayscale,
                               bool *r_freedata,
-                              eGPUDataFormat *r_data_format)
+                              eGPUDataFormat *r_data_format,
+                              const bool store_linear_float)
 {
   bool is_float_rect = (ibuf->float_data() != nullptr);
   const bool is_grayscale = allow_grayscale && imb_is_grayscale_texture_format_compatible(ibuf);
@@ -165,11 +176,15 @@ static void *imb_gpu_get_data(ImBuf *ibuf,
      *
      * We must also convert to premultiplied for correct texture interpolation
      * and consistency with float images. */
-    if (IMB_colormanagement_space_is_data(ibuf->byte_buffer.colorspace)) {
+    /* Pre-multiplying a byte buffer happens in its stored encoding, so for sRGB bytes the GPU's
+     * sRGB decode would run on `c * a` and darken every partly covered texel: a texture that must
+     * filter pre-multiplied without edge artifacts goes through the scene linear float branch. */
+    if (!store_linear_float && IMB_colormanagement_space_is_data(ibuf->byte_buffer.colorspace)) {
       /* Non-color data, just store buffer as is. */
     }
-    else if (IMB_colormanagement_space_is_scene_linear_srgb(ibuf->byte_buffer.colorspace) ||
-             IMB_colormanagement_space_is_scene_linear(ibuf->byte_buffer.colorspace))
+    else if (!store_linear_float &&
+             (IMB_colormanagement_space_is_scene_linear_srgb(ibuf->byte_buffer.colorspace) ||
+              IMB_colormanagement_space_is_scene_linear(ibuf->byte_buffer.colorspace)))
     {
       /* scene linear + sRGB or scene linear, store as byte texture that the GPU can decode
        * directly. */
@@ -290,10 +305,11 @@ gpu::Texture *IMB_touch_gpu_texture(const char *name,
                                     int h,
                                     int layers,
                                     bool use_high_bitdepth,
-                                    bool use_grayscale)
+                                    bool use_grayscale,
+                                    const bool store_linear_float)
 {
   gpu::TextureFormat tex_format;
-  imb_gpu_get_format(ibuf, use_high_bitdepth, use_grayscale, &tex_format);
+  imb_gpu_get_format(ibuf, use_high_bitdepth, use_grayscale, &tex_format, store_linear_float);
 
   gpu::Texture *tex;
   if (layers > 0) {
@@ -331,19 +347,36 @@ void IMB_update_gpu_texture_sub(gpu::Texture *tex,
                                 int h,
                                 bool use_high_bitdepth,
                                 bool use_grayscale,
-                                bool use_premult)
+                                bool use_premult,
+                                const bool store_linear_float)
 {
   const bool do_rescale = (ibuf->x != w || ibuf->y != h);
   const int size[2] = {w, h};
 
-  gpu::TextureFormat tex_format;
-  imb_gpu_get_format(ibuf, use_high_bitdepth, use_grayscale, &tex_format);
-
   bool freebuf = false;
 
   eGPUDataFormat data_format;
-  void *data = imb_gpu_get_data(
-      ibuf, do_rescale, size, use_premult, use_grayscale, &freebuf, &data_format);
+#if PL_TIMING_LOG
+  const double pl_t0 = BLI_time_now_seconds();
+#endif
+  void *data = imb_gpu_get_data(ibuf,
+                                do_rescale,
+                                size,
+                                use_premult,
+                                use_grayscale,
+                                &freebuf,
+                                &data_format,
+                                store_linear_float);
+#if PL_TIMING_LOG
+  const double pl_t1 = BLI_time_now_seconds();
+  if ((pl_t1 - pl_t0) * 1000.0 > 5.0) {
+    printf("PL_TIMING: imb_gpu_get_data (sub) %dx%d rescale=%d %.2f ms\n",
+           ibuf->x,
+           ibuf->y,
+           int(do_rescale),
+           (pl_t1 - pl_t0) * 1000.0);
+  }
+#endif
 
   /* Update Texture. */
   GPU_texture_update_sub(tex, data_format, data, x, y, z, w, h, 1);
@@ -353,8 +386,12 @@ void IMB_update_gpu_texture_sub(gpu::Texture *tex,
   }
 }
 
-gpu::Texture *IMB_create_gpu_texture(
-    const char *name, ImBuf *ibuf, bool use_high_bitdepth, bool use_premult, const bool limit_size)
+gpu::Texture *IMB_create_gpu_texture(const char *name,
+                                     ImBuf *ibuf,
+                                     bool use_high_bitdepth,
+                                     bool use_premult,
+                                     const bool limit_size,
+                                     const bool store_linear_float)
 {
   gpu::Texture *tex = nullptr;
   int size[2] = {ibuf->x, ibuf->y};
@@ -424,7 +461,7 @@ gpu::Texture *IMB_create_gpu_texture(
   }
 
   gpu::TextureFormat tex_format;
-  imb_gpu_get_format(ibuf, use_high_bitdepth, true, &tex_format);
+  imb_gpu_get_format(ibuf, use_high_bitdepth, true, &tex_format, store_linear_float);
 
   bool freebuf = false;
 
@@ -441,8 +478,33 @@ gpu::Texture *IMB_create_gpu_texture(
   }
   BLI_assert(tex != nullptr);
   eGPUDataFormat data_format;
-  void *data = imb_gpu_get_data(ibuf, do_rescale, size, use_premult, true, &freebuf, &data_format);
+#if PL_TIMING_LOG
+  const double pl_t0 = BLI_time_now_seconds();
+#endif
+  void *data = imb_gpu_get_data(ibuf,
+                                do_rescale,
+                                size,
+                                use_premult,
+                                true,
+                                &freebuf,
+                                &data_format,
+                                store_linear_float);
+#if PL_TIMING_LOG
+  const double pl_t1 = BLI_time_now_seconds();
+#endif
   GPU_texture_update(tex, data_format, data);
+#if PL_TIMING_LOG
+  {
+    const double pl_t2 = BLI_time_now_seconds();
+    if ((pl_t2 - pl_t0) * 1000.0 > 5.0) {
+      printf("PL_TIMING: IMB_create_gpu_texture %dx%d convert %.2f ms, upload %.2f ms\n",
+             ibuf->x,
+             ibuf->y,
+             (pl_t1 - pl_t0) * 1000.0,
+             (pl_t2 - pl_t1) * 1000.0);
+    }
+  }
+#endif
 
   GPU_texture_swizzle_set(tex, imb_gpu_get_swizzle(ibuf));
   GPU_texture_anisotropic_filter(tex, true);

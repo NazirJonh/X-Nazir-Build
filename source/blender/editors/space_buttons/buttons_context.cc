@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 
 #include "MEM_guardedalloc.h"
 
@@ -37,6 +38,7 @@
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_particle.h"
 #include "BKE_screen.hh"
 
@@ -394,6 +396,42 @@ static bool buttons_context_path_brush_material(const bContext *C, ButsContextPa
   return true;
 }
 
+static bool buttons_context_path_layer_material(const bContext *C, ButsContextPath *path)
+{
+  /* Pinning is ignored like for #BCONTEXT_BRUSH_MATERIAL: the tab follows the active paint
+   * layer. */
+  if (C == nullptr) {
+    return false;
+  }
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  if (view_layer == nullptr) {
+    return false;
+  }
+
+  /* A layered material paints through the description: the active row of the active object's
+   * active material slot. A Material row edits the material it was baked from; any other row shows
+   * its channels on the material that owns the stack. */
+  Object *ob = BKE_view_layer_active_object_get(view_layer);
+  Material *owner = BKE_paint_layers_active_material_get(ob);
+  if (owner == nullptr) {
+    return false;
+  }
+  Material *material = owner;
+  if (MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(*owner)) {
+    if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->material != nullptr) {
+      material = layer->material;
+    }
+  }
+  /* The object comes first: the panels of this tab reach the material that owns the stack through
+   * `context.object.active_material`, and `context.material` stays the row's source material
+   * because the path holds exactly one Material. */
+  path->ptr[path->len] = RNA_id_pointer_create(&ob->id);
+  path->len++;
+  path->ptr[path->len] = RNA_id_pointer_create(&material->id);
+  path->len++;
+  return true;
+}
+
 static bool buttons_context_path_bone(ButsContextPath *path)
 {
   /* if we have an armature, get the active bone */
@@ -639,7 +677,7 @@ static bool buttons_context_path(
   /* If some ID datablock is pinned, set the root pointer.
    * NOTE: BCONTEXT_BRUSH_MATERIAL always tracks the active brush source material (D9),
    * so ignore pinned root ID which would put pinned material in path->ptr[0]. */
-  if (sbuts->pinid && mainb != BCONTEXT_BRUSH_MATERIAL) {
+  if (sbuts->pinid && !ELEM(mainb, BCONTEXT_BRUSH_MATERIAL, BCONTEXT_LAYER_MATERIAL)) {
     ID *id = sbuts->pinid;
 
     path->ptr[0] = RNA_id_pointer_create(id);
@@ -743,6 +781,9 @@ static bool buttons_context_path(
       break;
     case BCONTEXT_BRUSH_MATERIAL:
       found = buttons_context_path_brush_material(C, path);
+      break;
+    case BCONTEXT_LAYER_MATERIAL:
+      found = buttons_context_path_layer_material(C, path);
       break;
     default:
       found = false;

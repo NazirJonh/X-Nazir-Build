@@ -25,6 +25,7 @@ _modules = [
     "grease_pencil",
     "image",
     "image_as_planes",
+    "material_paint_layers",
     "mesh",
     "node",
     "object",
@@ -65,6 +66,7 @@ def register():
     from . import (
         bone_selection_sets,
         copy_global_transform,
+        material_paint_layers,
         userpref_sync,
     )
 
@@ -76,6 +78,7 @@ def register():
 
     bone_selection_sets.register()
     copy_global_transform.register()
+    material_paint_layers.register()
 
 
 def unregister():
@@ -83,8 +86,10 @@ def unregister():
     from . import (
         bone_selection_sets,
         copy_global_transform,
+        material_paint_layers,
     )
 
+    material_paint_layers.unregister()
     bone_selection_sets.unregister()
     copy_global_transform.unregister()
 

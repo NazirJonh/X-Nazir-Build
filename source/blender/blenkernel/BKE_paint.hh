@@ -8,11 +8,16 @@
  * \ingroup bke
  */
 
+#include <optional>
 #include <variant>
+
+/* For #PaintMaterialLayerKind, named by the active-layer answer. */
+#include "BKE_paint_material_enums.hh"
 
 #include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
 #include "BLI_enum_flags.hh"
+#include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_offset_indices.hh"
@@ -68,6 +73,7 @@ struct ImagePool;
 struct ImageUser;
 struct KeyBlock;
 struct Main;
+enum class PaintMaterialLayerKind : int8_t;
 struct Material;
 struct Mesh;
 struct MDeformVert;
@@ -801,6 +807,12 @@ struct MaterialPaintChannelInfo {
    * this flag and not test #socket_name, precisely so that the two can diverge.
    */
   bool supports_image_paint;
+  /**
+   * True when a Material layer can carry this channel: the bake has a Principled input to bake
+   * it from. Height, ambient occlusion and Custom have none, so offering them would only produce
+   * empty maps.
+   */
+  bool bakeable;
 };
 
 /**
@@ -808,6 +820,12 @@ struct MaterialPaintChannelInfo {
  * Base Color comes first so painting and undo process the color channel before the scalars.
  */
 Span<MaterialPaintChannelInfo> BKE_paint_material_channels();
+
+/**
+ * The channels a Material layer carries, in #eMaterialPaintChannel order: the #bakeable subset
+ * of #BKE_paint_material_channels.
+ */
+Span<eMaterialPaintChannel> BKE_paint_material_bakeable_channels();
 
 /** The single descriptor for \a channel. */
 const MaterialPaintChannelInfo &BKE_paint_material_channel_info(eMaterialPaintChannel channel);
@@ -1100,10 +1118,6 @@ void BKE_paint_material_channel_cache_invalidate(Material *ma);
  * Channels without a socket (Custom) always return false. Only a direct link is followed;
  * anything routed through an intermediate node (Math, Mix, etc.) is left alone, since there is no
  * single image such a chain could be said to paint into.
- * \param mode_settings: When given and \a channel has a non-null
- * #PaintModeSettings.channel_image_bindings entry, that Image is returned directly and the
- * Principled BSDF socket is never consulted. Null (the default) preserves the socket-only
- * resolution every existing caller relied on before this override existed.
  * \return true when \a r_image and \a r_iuser were set.
  */
 bool BKE_paint_principled_channel_image_get(Object &ob,
@@ -1111,6 +1125,53 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
                                             Image **r_image,
                                             ImageUser **r_iuser,
                                             PaintModeSettings *mode_settings = nullptr);
+
+/**
+ * Enter mask-editing mode: the active row's mask becomes the paint target instead of the
+ * material's channels. The first call (no mask currently being edited) snapshots \a paint's active
+ * brush into \a mode_settings.mask_saved_brush and switches to \a mode_settings.mask_active_brush
+ * (creating a default one, with #Brush.material_paint allocated, the very first time this is ever
+ * called). A call while a mask is already being edited only switches the mode; the brush was
+ * already switched and stays switched. \a mask_image is unused: the mask itself is resolved from
+ * the description by the target resolver.
+ *
+ * Exposed separately from #ED_paint_material_mask_edit_begin so it can be unit tested without a
+ * #bContext.
+ */
+void BKE_paint_material_mask_edit_begin_ex(Main &bmain,
+                                           Scene &scene,
+                                           Paint &paint,
+                                           PaintModeSettings &mode_settings,
+                                           Image &mask_image);
+
+/**
+ * Leave mask-editing mode: restores the brush that was active before the first
+ * #BKE_paint_material_mask_edit_begin_ex call (falling back to #BKE_paint_brush_set_default when
+ * that brush no longer exists), and remembers whatever brush is active right now as the mask
+ * brush for next time. A no-op when no mask is currently being edited.
+ */
+void BKE_paint_material_mask_edit_end_ex(Main &bmain,
+                                         Scene &scene,
+                                         Paint &paint,
+                                         PaintModeSettings &mode_settings);
+
+/**
+ * Set a layered material's paint target mode, switching the mask brush in or out.
+ *
+ * `PaintModeSettings.layer_target_mode` is the authoritative state -- never derived from
+ * `mask_saved_brush`, which is only bookkeeping. Entering #PAINT_LAYER_TARGET_MASK snapshots the
+ * active brush and switches to `mask_active_brush` (creating one the first time); leaving restores
+ * the snapshot, falls back to the default brush when there was none. Idempotent: a call with the
+ * mode already in effect does nothing.
+ *
+ * #BKE_paint_material_mask_edit_begin_ex and `..._end_ex` call this, so an operator and an RNA
+ * write switch the brush in exactly one place.
+ */
+void BKE_paint_material_layer_target_mode_set(Main &bmain,
+                                              Scene &scene,
+                                              Paint &paint,
+                                              PaintModeSettings &mode_settings,
+                                              ePaintLayerTargetMode mode);
 
 /**
  * Image the Image Editor should show for the Material canvas when nothing is selected.
@@ -1149,6 +1210,11 @@ struct PaintMaterialImagesEnsureResult {
   /** Number of Image maps newly created this call. */
   int created = 0;
   /**
+   * Channels the brush writes to that the active Stack Layers row does not have (Absent) or has
+   * switched off (Disabled). No map is created for them: the row's channels are the user's choice.
+   */
+  int skipped_stack_channels = 0;
+  /**
    * True only when the ensured channels already carried more than one distinct non-nil
    * #Image::paint_layer_id AND at least one new Image was created this call, i.e. the new maps
    * were put in a freshly minted layer. Only #PAINT_OT_material_paint_images_ensure acts on this
@@ -1158,10 +1224,8 @@ struct PaintMaterialImagesEnsureResult {
 };
 
 /**
- * Create missing Principled maps for every channel this brush currently writes to. Channels with
- * a #PaintModeSettings.channel_image_bindings override never create anything - the add-on manages
- * that Image's lifetime itself. Maps created in one call are tagged with a single
- * #Image::paint_layer_id (see the spec).
+ * Create missing Principled maps for every channel this brush currently writes to. Maps created in
+ * one call are tagged with a single #Image::paint_layer_id (see the spec).
  */
 PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
     Main &bmain,
@@ -1189,20 +1253,39 @@ struct PaintMaterialImageTarget {
   float color[3] = {0.0f, 0.0f, 0.0f};
   bool is_color_channel = false;
   bool is_normal_channel = false;
+  /** True when this target is a Stack Layers row's mask being edited (see
+   * #PaintModeSettings::layer_target_mode), not a Principled material channel. #channel is
+   * meaningless when this is true -- readers must check this first. */
+  bool is_mask_target = false;
+  /**
+   * True when the row being painted is a correction (content or mask), whose map starts
+   * transparent and is layered over its owner with the map's own alpha as coverage -- unlike an
+   * ordinary row, whose factor does not read its own map's alpha. Painting one needs the single
+   * pre-multiplied "over" (#mix_paint_over_transparent_scene) regardless of the map's own storage
+   * (#Image::alpha_mode), which stays whatever the channel's colour needs -- straight for a
+   * colour correction, so its stroke goes through the ordinary sRGB path with no un-premultiply
+   * divide, avoiding the precision loss dividing a correction's own low, byte-quantised alpha
+   * would cost the colour of a soft brush edge.
+   */
+  bool is_correction_target = false;
 };
 
 /**
- * Collects enabled channels that successfully resolve to a target Image on \a ob - either a
- * Principled Image Texture, or an add-on's #PaintModeSettings.channel_image_bindings override.
- * Missing maps are skipped. Channels without a socket (Custom) are never included.
+ * Collects enabled channels that successfully resolve to a target Image on \a ob - a Principled
+ * Image Texture or a Stack Layers row's map. Missing maps are skipped. Channels without a socket
+ * (Custom) are never included.
  * Order follows #BKE_paint_material_channels.
  * When \a brush_paint is null, returns an empty list (no channels enabled).
+ * When #PaintModeSettings::layer_target_mode is #PAINT_LAYER_TARGET_MASK, returns a single mask
+ * target instead of reading channels at all; \a brush_paint may be null in that case and
+ * \a mask_stroke_value is the flat value written.
  */
 Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     Object &ob,
     PaintModeSettings &mode_settings,
     const BrushMaterialPaint *brush_paint,
-    int visible_material_channels);
+    int visible_material_channels,
+    float mask_stroke_value = 1.0f);
 
 /**
  * Whether a face with \a face_material_index should receive image writes while painting

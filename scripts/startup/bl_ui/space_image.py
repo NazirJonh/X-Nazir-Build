@@ -1012,6 +1012,13 @@ class IMAGE_HT_header(Header):
                     # Beside the selector that turned it on: the light is the one control the
                     # Combined pass adds, and looking for it in a sidebar tab is a search.
                     row.prop(sima, "material_paint_light_rotation", text="")
+                # Only while an actual composite/Combined pass is shown (not a plain layer map):
+                # `paint_layers_bake_pending` also catches a bake job the window manager already
+                # has running, which `paint_layers_is_stale` alone cannot see yet. What is shown
+                # here (a stale cache) is never blocked on this -- only a script reading a result
+                # through RNA is -- so this is purely an "it is about to change" notice.
+                if sima.show_material_paint_composite and mat is not None and mat.paint_layers_bake_pending:
+                    row.label(text="Updating...", icon='SORTTIME')
             else:
                 layout.template_ID_browser(
                     sima,
@@ -1371,6 +1378,13 @@ class IMAGE_PT_combined_preview(Panel):
 
         sima = context.space_data
         layout.prop(sima, "material_paint_light_rotation", text="Light Rotation")
+
+        # Same material lookup the header uses beside the canvas selector; the panel's own poll()
+        # only checked `sima.is_material_paint_combined`, so `mat` still needs resolving here.
+        ob = context.image_paint_object or context.active_object
+        mat = ob.active_material if ob else None
+        if mat is not None and mat.paint_layers_bake_pending:
+            layout.label(text="Updating...", icon='SORTTIME')
 
 
 class IMAGE_UL_render_slots(UIList):

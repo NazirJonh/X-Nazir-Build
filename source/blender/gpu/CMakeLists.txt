@@ -645,6 +645,7 @@ set(GLSL_SRC
   shaders/material/gpu_shader_material_camera.glsl
   shaders/material/gpu_shader_material_clamp.glsl
   shaders/material/gpu_shader_material_combine_color.glsl
+  shaders/material/gpu_shader_material_compose_color_alpha.glsl
   shaders/material/gpu_shader_material_combine_xyz.glsl
   shaders/material/gpu_shader_material_diffuse.glsl
   shaders/material/gpu_shader_material_displacement.glsl

@@ -191,6 +191,7 @@ void ED_buttons_visible_tabs_menu(bContext *C, ui::Layout *layout, void * /*arg*
   /* These can be reordered freely. */
   constexpr std::array<StringRefNull, BCONTEXT_TOT> filter_items = {
       "show_properties_tool",          "show_properties_brush_material",
+      "show_properties_layer_material",
       "show_properties_render",        "show_properties_output",
       "show_properties_view_layer",    "show_properties_scene",
       "show_properties_world",         "show_properties_collection",
@@ -236,6 +237,9 @@ Vector<eSpaceButtons_Context> ED_buttons_tabs_list(const SpaceProperties *sbuts,
   /* Grouped with the tool rather than with the object's material: this tab edits the active
    * brush's source material, which belongs to the tool, not to the object being painted on. */
   add_tab(BCONTEXT_BRUSH_MATERIAL);
+  /* Beside it for the same reason: the source of the active paint layer is edited while painting,
+   * whichever object that is on. */
+  add_tab(BCONTEXT_LAYER_MATERIAL);
 
   add_spacer();
 
@@ -297,6 +301,8 @@ static const char *buttons_main_region_context_string(const short mainb)
       return "material";
     case BCONTEXT_BRUSH_MATERIAL:
       return "brush_material";
+    case BCONTEXT_LAYER_MATERIAL:
+      return "layer_material";
     case BCONTEXT_TEXTURE:
       return "texture";
     case BCONTEXT_PARTICLE:

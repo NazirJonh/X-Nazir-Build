@@ -302,139 +302,127 @@ static void update_color_picker_buts_rgba(Block *block,
   }
 }
 
-static void colorpicker_rgba_update_cb(bContext * /*C*/, void *picker_bt1, void *prop_bt1)
+/* The update return value only matters to popups a button opened: their owner re-applies the
+ * button on #RETURN_UPDATE. A dialog's own popup handler closes on any return value, so an
+ * embedded picker (created without an opening button) must not set one. */
+static void colorpicker_popup_update_retval_set(Block *block)
+{
+  PopupBlockHandle *popup = block->handle;
+  if (popup && popup->popup_create_vars.but) {
+    popup->menuretval = RETURN_UPDATE;
+  }
+}
+
+static void colorpicker_rna_update_fire(bContext *C, ColorPicker *cpicker)
+{
+  if (cpicker->fire_rna_update && cpicker->prop) {
+    RNA_property_update(C, &cpicker->ptr, cpicker->prop);
+  }
+}
+
+static void colorpicker_rgba_update_cb(bContext * /*C*/, void *picker_bt1, void * /*prop_bt1*/)
 {
   Button *picker_but = static_cast<Button *>(picker_bt1);
   Block *block = picker_but->block;
-  PopupBlockHandle *popup = block->handle;
   ColorPicker *cpicker = static_cast<ColorPicker *>(picker_but->custom_data);
 
-  Button *prop_but = static_cast<Button *>(prop_bt1);
-  PointerRNA ptr = prop_but->rnapoin;
-  PropertyRNA *prop = prop_but->rnaprop;
-
-  if (prop) {
+  if (cpicker->prop) {
     float rgba_scene_linear[4];
 
     zero_v4(rgba_scene_linear);
     RNA_property_float_get_array_at_most(
-        &ptr, prop, rgba_scene_linear, ARRAY_SIZE(rgba_scene_linear));
+        &cpicker->ptr, cpicker->prop, rgba_scene_linear, ARRAY_SIZE(rgba_scene_linear));
     update_color_picker_buts_rgba(block, cpicker, false, rgba_scene_linear);
   }
+  /* The edited widget is RNA-bound: its own apply already ran the property's RNA update, so the
+   * embedded picker must not fire it a second time here. */
 
-  if (popup) {
-    popup->menuretval = RETURN_UPDATE;
-  }
+  colorpicker_popup_update_retval_set(block);
 }
 
-static void colorpicker_hsv_perceptual_slider_update_cb(bContext * /*C*/, void *bt1, void *bt2)
+static void colorpicker_hsv_perceptual_slider_update_cb(bContext *C, void *bt1, void * /*bt2*/)
 {
   Button *but = static_cast<Button *>(bt1);
-  PopupBlockHandle *popup = but->block->handle;
+  Block *block = but->block;
   ColorPicker *cpicker = static_cast<ColorPicker *>(but->custom_data);
-
-  /* Get RNA ptr/prop from the original color datablock button (bt2) since the HSV buttons (bt1)
-   * do not directly point to it. */
-  Button *prop_but = static_cast<Button *>(bt2);
-  PointerRNA ptr = prop_but->rnapoin;
-  PropertyRNA *prop = prop_but->rnaprop;
   float rgba_scene_linear[4];
 
-  if (prop) {
+  if (cpicker->prop) {
     zero_v4(rgba_scene_linear);
     /* Get the current RGBA color for its (optional) Alpha component,
      * then update RGB components from the current HSV values. */
     RNA_property_float_get_array_at_most(
-        &ptr, prop, rgba_scene_linear, ARRAY_SIZE(rgba_scene_linear));
+        &cpicker->ptr, cpicker->prop, rgba_scene_linear, ARRAY_SIZE(rgba_scene_linear));
     color_picker_hsv_to_rgb(cpicker->hsv_perceptual_slider, cpicker->rgb_perceptual_slider);
     copy_v3_v3(rgba_scene_linear, cpicker->rgb_perceptual_slider);
     perceptual_to_scene_linear_space(but->block->is_color_gamma_picker, rgba_scene_linear);
-    update_color_picker_buts_rgba(but->block, cpicker, true, rgba_scene_linear);
+    update_color_picker_buts_rgba(block, cpicker, true, rgba_scene_linear);
   }
 
-  if (popup) {
-    popup->menuretval = RETURN_UPDATE;
-  }
+  /* The edited slider writes its picker state, not the property: the color reached the RNA above
+   * through #update_color_picker_buts_rgba, which does not run updates itself. */
+  colorpicker_rna_update_fire(C, cpicker);
+  colorpicker_popup_update_retval_set(block);
 }
 
-static void colorpicker_hsv_linear_slider_update_cb(bContext * /*C*/, void *bt1, void *bt2)
+static void colorpicker_hsv_linear_slider_update_cb(bContext *C, void *bt1, void * /*bt2*/)
 {
   Button *but = static_cast<Button *>(bt1);
-  PopupBlockHandle *popup = but->block->handle;
+  Block *block = but->block;
   ColorPicker *cpicker = static_cast<ColorPicker *>(but->custom_data);
-
-  /* Get RNA ptr/prop from the original color datablock button (bt2) since the HSV buttons (bt1)
-   * do not directly point to it. */
-  Button *prop_but = static_cast<Button *>(bt2);
-  PointerRNA ptr = prop_but->rnapoin;
-  PropertyRNA *prop = prop_but->rnaprop;
   float rgba_scene_linear[4];
 
-  if (prop) {
+  if (cpicker->prop) {
     zero_v4(rgba_scene_linear);
     /* Get the current RGBA color for its (optional) Alpha component,
      * then update RGB components from the current HSV values. */
     RNA_property_float_get_array_at_most(
-        &ptr, prop, rgba_scene_linear, ARRAY_SIZE(rgba_scene_linear));
+        &cpicker->ptr, cpicker->prop, rgba_scene_linear, ARRAY_SIZE(rgba_scene_linear));
     color_picker_hsv_to_rgb(cpicker->hsv_linear_slider, rgba_scene_linear);
-    update_color_picker_buts_rgba(but->block, cpicker, true, rgba_scene_linear);
+    update_color_picker_buts_rgba(block, cpicker, true, rgba_scene_linear);
   }
 
-  if (popup) {
-    popup->menuretval = RETURN_UPDATE;
-  }
+  colorpicker_rna_update_fire(C, cpicker);
+  colorpicker_popup_update_retval_set(block);
 }
 
-static void colorpicker_rgb_perceptual_slider_update_cb(bContext * /*C*/, void *bt1, void *bt2)
+static void colorpicker_rgb_perceptual_slider_update_cb(bContext *C, void *bt1, void * /*bt2*/)
 {
   Button *but = static_cast<Button *>(bt1);
-  PopupBlockHandle *popup = but->block->handle;
+  Block *block = but->block;
   ColorPicker *cpicker = static_cast<ColorPicker *>(but->custom_data);
-
-  /* Get RNA ptr/prop from the original color datablock button (bt2) since the HSV buttons (bt1)
-   * do not directly point to it. */
-  Button *prop_but = static_cast<Button *>(bt2);
-  PointerRNA ptr = prop_but->rnapoin;
-  PropertyRNA *prop = prop_but->rnaprop;
   float rgba_scene_linear[4];
 
-  if (prop) {
+  if (cpicker->prop) {
     zero_v4(rgba_scene_linear);
     /* Get the current RGBA color for its (optional) Alpha component,
      * then update RGB components from the current HSV values. */
     RNA_property_float_get_array_at_most(
-        &ptr, prop, rgba_scene_linear, ARRAY_SIZE(rgba_scene_linear));
+        &cpicker->ptr, cpicker->prop, rgba_scene_linear, ARRAY_SIZE(rgba_scene_linear));
     copy_v3_v3(rgba_scene_linear, cpicker->rgb_perceptual_slider);
     perceptual_to_scene_linear_space(but->block->is_color_gamma_picker, rgba_scene_linear);
     color_picker_rgb_to_hsv(cpicker->rgb_perceptual_slider, cpicker->hsv_perceptual_slider);
-    update_color_picker_buts_rgba(but->block, cpicker, true, rgba_scene_linear);
+    update_color_picker_buts_rgba(block, cpicker, true, rgba_scene_linear);
   }
 
-  if (popup) {
-    popup->menuretval = RETURN_UPDATE;
-  }
+  colorpicker_rna_update_fire(C, cpicker);
+  colorpicker_popup_update_retval_set(block);
 }
 
-static void colorpicker_hex_rna_cb(bContext * /*C*/, void *bt1, void *bt2)
+static void colorpicker_hex_rna_cb(bContext *C, void *bt1, void * /*bt2*/)
 {
   Button *but = static_cast<Button *>(bt1);
-  PopupBlockHandle *popup = but->block->handle;
+  Block *block = but->block;
   ColorPicker *cpicker = static_cast<ColorPicker *>(but->custom_data);
   char hexcol[128];
   button_string_get(but, hexcol, ARRAY_SIZE(hexcol));
 
   /* In case the current color contains an Alpha component but the Hex string does not, get the
-   * current color to preserve the Alpha component.
-   * Like #colorpicker_hsv_perceptual_slider_update_cb, the original color datablock button
-   * (bt2) is used since Hex Text Field button (bt1) doesn't directly point to it. */
-  Button *prop_but = static_cast<Button *>(bt2);
-  PointerRNA ptr = prop_but->rnapoin;
-  PropertyRNA *prop = prop_but->rnaprop;
-
+   * current color to preserve the Alpha component. */
   float rgba[4];
-  if (prop) {
+  if (cpicker->prop) {
     zero_v4(rgba);
-    RNA_property_float_get_array_at_most(&ptr, prop, rgba, ARRAY_SIZE(rgba));
+    RNA_property_float_get_array_at_most(&cpicker->ptr, cpicker->prop, rgba, ARRAY_SIZE(rgba));
   }
   /* Override the current color with the parsed Hex string, preserving the original Alpha if the
    * hex string doesn't contain it. */
@@ -447,11 +435,10 @@ static void colorpicker_hex_rna_cb(bContext * /*C*/, void *bt1, void *bt2)
     color_picker_rgb_round(rgba);
   }
 
-  update_color_picker_buts_rgba(but->block, cpicker, false, rgba);
+  update_color_picker_buts_rgba(block, cpicker, false, rgba);
 
-  if (popup) {
-    popup->menuretval = RETURN_UPDATE;
-  }
+  colorpicker_rna_update_fire(C, cpicker);
+  colorpicker_popup_update_retval_set(block);
 }
 
 static void popup_close_cb(bContext * /*C*/, void *bt1, void * /*arg*/)
@@ -503,21 +490,17 @@ static void colorpicker_hide_reveal(Block *block)
   }
 }
 
-static void colorpicker_update_type_space_cb(bContext * /*C*/, void *picker_bt1, void *prop_bt1)
+static void colorpicker_update_type_space_cb(bContext * /*C*/, void *picker_bt1, void * /*prop_bt1*/)
 {
   Button *picker_but = static_cast<Button *>(picker_bt1);
   Block *block = picker_but->block;
   ColorPicker *cpicker = static_cast<ColorPicker *>(picker_but->custom_data);
 
-  Button *prop_but = static_cast<Button *>(prop_bt1);
-  PointerRNA ptr = prop_but->rnapoin;
-  PropertyRNA *prop = prop_but->rnaprop;
-
   float rgba_scene_linear[4];
 
   zero_v4(rgba_scene_linear);
   RNA_property_float_get_array_at_most(
-      &ptr, prop, rgba_scene_linear, ARRAY_SIZE(rgba_scene_linear));
+      &cpicker->ptr, cpicker->prop, rgba_scene_linear, ARRAY_SIZE(rgba_scene_linear));
   update_color_picker_buts_rgba(block, cpicker, false, rgba_scene_linear);
 
   colorpicker_hide_reveal(picker_but->block);
@@ -528,6 +511,46 @@ static void colorpicker_update_type_space_cb(bContext * /*C*/, void *picker_bt1,
 #define PICKER_SPACE (8.0f * UI_SCALE_FAC)
 #define PICKER_W (PICKER_TOTAL_W - PICKER_BAR - PICKER_SPACE)
 #define PICKER_H PICKER_W
+
+/* Shared tooltip builders for the space/mode toggle row and the hex field. */
+static void colorpicker_space_tooltip_func(bContext & /*C*/,
+                                           TooltipData &tip,
+                                           Button *but,
+                                           void *space)
+{
+  tooltip_text_field_add(tip, but->tip, {}, TIP_STYLE_HEADER, TIP_LC_NORMAL, false);
+  tooltip_text_field_add(tip,
+                         TIP_("Color Space: ") + std::string(static_cast<const char *>(space)),
+                         {},
+                         TIP_STYLE_NORMAL,
+                         TIP_LC_ACTIVE,
+                         false);
+}
+
+static void colorpicker_hex_tooltip_func(bContext & /*C*/,
+                                         TooltipData &tip,
+                                         Button * /*but*/,
+                                         void *has_alpha_ptr)
+{
+  const bool *has_alpha = static_cast<bool *>(has_alpha_ptr);
+  if (*has_alpha) {
+    tooltip_text_field_add(tip,
+                           TIP_("Hex triplet for color with alpha (#RRGGBBAA)."),
+                           {},
+                           TIP_STYLE_HEADER,
+                           TIP_LC_NORMAL,
+                           false);
+  }
+  else {
+    tooltip_text_field_add(tip,
+                           TIP_("Hex triplet for color (#RRGGBB)."),
+                           {},
+                           TIP_STYLE_HEADER,
+                           TIP_LC_NORMAL,
+                           false);
+  }
+  tooltip_text_field_add(tip, TIP_("Gamma corrected"), {}, TIP_STYLE_NORMAL, TIP_LC_NORMAL, false);
+}
 
 /** Get localized tooltips for the current color picker type.
  *
@@ -727,22 +750,33 @@ static PointerRNA paint_palette_settings_ptr_get(Scene &scene, const PaintMode m
   return PointerRNA_NULL;
 }
 
-/* Build a stable identifier for the color picker that opened from `but`, combining the edited
- * data-block name and the property's RNA path. Used to key per-popup state (palette assignment and
- * the sub-panel's expanded/collapsed state). Returns an empty string when the button has no RNA
- * property to derive a stable key from. */
-static std::string colorpicker_popup_key_get(const Button *but)
+/* Build a stable identifier for the picker that edits \a ptr / \a prop, combining the edited
+ * data-block name and the property's RNA path. Used to key per-picker state (palette assignment
+ * and the sub-panel's expanded/collapsed state). Returns an empty string when the property has no
+ * ID owner to derive a stable key from. */
+static std::string colorpicker_prop_key_get(const PointerRNA *ptr, PropertyRNA *prop)
 {
   std::string key;
-  if (but && but->rnapoin.owner_id && but->rnaprop) {
-    if (const std::optional<std::string> path = RNA_path_from_ID_to_property(&but->rnapoin,
-                                                                             but->rnaprop))
-    {
-      key += but->rnapoin.owner_id->name;
+  if (ptr && ptr->owner_id && prop) {
+    if (const std::optional<std::string> path = RNA_path_from_ID_to_property(ptr, prop)) {
+      key += ptr->owner_id->name;
       key += *path;
     }
   }
   return key;
+}
+
+/* Whether the property the picker edits carries an Alpha component. */
+static bool colorpicker_prop_has_alpha(PointerRNA *ptr, PropertyRNA *prop)
+{
+  if (prop == nullptr) {
+    return false;
+  }
+  const PropertySubType prop_subtype = RNA_property_subtype(prop);
+  if (ELEM(prop_subtype, PROP_COLOR, PROP_COLOR_GAMMA)) {
+    return RNA_property_array_length(ptr, prop) == 4;
+  }
+  return false;
 }
 
 /* Find (or lazily create) the per-color-picker palette association for `key`. A freshly created
@@ -764,19 +798,113 @@ static ColorPickerPalette *colorpicker_palette_entry_ensure(ToolSettings &ts,
   return cpp;
 }
 
+/* Resolve the palette the picker shows: the per-picker entry keyed on the edited property's data
+ * path when there is one, the tool's active palette otherwise. False when the context is not in a
+ * paint mode, in which case the picker shows no palette section at all. */
+static bool colorpicker_palette_context_get(bContext *C,
+                                            const PointerRNA *ptr,
+                                            PropertyRNA *prop,
+                                            PointerRNA *r_palette_ptr,
+                                            Palette **r_active_palette)
+{
+  *r_palette_ptr = PointerRNA_NULL;
+  *r_active_palette = nullptr;
+  if (C == nullptr) {
+    return false;
+  }
+  Scene *scene = CTX_data_scene(C);
+  const PaintMode mode = scene ? BKE_paintmode_get_active_from_context(C) : PaintMode::Invalid;
+  /* Use the already-allocated paint settings; do not allocate here, as this runs while building
+   * the block (allocating during draw would be a side effect on scene data). */
+  Paint *paint = (mode != PaintMode::Invalid) ?
+                     BKE_paint_get_active_from_paintmode(scene, mode) :
+                     nullptr;
+  if (paint == nullptr) {
+    return false;
+  }
+
+  /* Each color picker keeps its own palette, stored per data-path in the tool settings and
+   * independent of the tool's active palette (#Paint::palette). Fall back to the shared paint
+   * settings when the property has no ID owner to derive a stable key from. */
+  const std::string key = colorpicker_prop_key_get(ptr, prop);
+  ColorPickerPalette *palette_entry = nullptr;
+  if (!key.empty()) {
+    palette_entry = colorpicker_palette_entry_ensure(*scene->toolsettings, key, paint->palette);
+    *r_palette_ptr = RNA_pointer_create_discrete(&scene->id, RNA_ColorPickerPalette, palette_entry);
+  }
+  else {
+    *r_palette_ptr = paint_palette_settings_ptr_get(*scene, mode);
+  }
+  *r_active_palette = palette_entry ? palette_entry->palette : paint->palette;
+  return true;
+}
+
+/* The collapsible Color Palette sub-panel: palette selector, swatch grid, and the refresh tagging
+ * that rebuilds the picker popup when the palette changes. Rooted at \a layout, whatever layout
+ * the caller picked for it. */
+static void colorpicker_palette_panel_build(bContext *C,
+                                            Layout &layout,
+                                            Block *block,
+                                            PointerRNA *palette_ptr,
+                                            Palette *active_palette)
+{
+  /* Collapsible Color Palette sub-panel. */
+  PanelLayout palette_panel = layout.panel(C, "color_palette", false);
+  palette_panel.header->label(IFACE_("Color Palette"), ICON_COLOR);
+
+  if (palette_panel.body) {
+    /* Expose the picker's palette as the "palette" context member, so the swatch operators
+     * (add/delete/move/sort) and the "New" button act on it instead of the tool's active
+     * palette. */
+    if (active_palette) {
+      PointerRNA active_palette_ptr = RNA_id_pointer_create(&active_palette->id);
+      palette_panel.body->context_ptr_set("palette", &active_palette_ptr);
+    }
+
+    /* Palette ID selector (choose/create/browse palettes). */
+    Layout &palette_selector = palette_panel.body->column(true);
+    const int64_t but_count_before = int64_t(block->buttons_ptrs.size());
+    template_id(&palette_selector, C, palette_ptr, "palette", "palette.new", nullptr, nullptr);
+    /* When the active palette changes, rebuild the popup so the swatch grid and popup
+     * height update to match the new palette's contents. The palette ID selector buttons set
+     * their own internal callbacks via #template_id, so use `apply_func` (which runs in
+     * addition to those) rather than overriding them. */
+    for (int64_t i = but_count_before; i < int64_t(block->buttons_ptrs.size()); i++) {
+      block->buttons_ptrs[i]->apply_func = [block](bContext & /*C*/) {
+        colorpicker_popup_tag_refresh(block);
+      };
+    }
+
+    /* Color swatches, only when a palette is assigned. */
+    if (active_palette) {
+      template_palette(palette_panel.body,
+                       palette_ptr,
+                       "palette",
+                       false,  /* show_empty_message */
+                       false); /* show_sort_buttons */
+    }
+  }
+}
+
 /* a HS circle, V slider, rgb/hsv/hex sliders */
-static void block_colorpicker(
-    bContext *C, Block *block, Button *from_but, float rgba_scene_linear[4], bool show_picker)
+static void block_colorpicker(bContext *C,
+                              Block *block,
+                              PointerRNA *ptr,
+                              PropertyRNA *prop,
+                              float rgba_scene_linear[4],
+                              bool show_picker)
 {
   /* ePickerType */
   Button *bt;
   int picker_width;
   float softmin, softmax, hardmin, hardmax, step, precision;
   ColorPicker *cpicker = block_colorpicker_create(block);
-  PointerRNA *ptr = &from_but->rnapoin;
-  PropertyRNA *prop = from_but->rnaprop;
 
   picker_width = PICKER_TOTAL_W;
+
+  cpicker->ptr = *ptr;
+  cpicker->prop = prop;
+  cpicker->has_alpha = colorpicker_prop_has_alpha(ptr, prop);
 
   RNA_property_float_ui_range(ptr, prop, &softmin, &softmax, &step, &precision);
   RNA_property_float_range(ptr, prop, &hardmin, &hardmax);
@@ -784,7 +912,6 @@ static void block_colorpicker(
 
   color_picker_update_from_rgb_linear(
       cpicker, block->is_color_gamma_picker, false, rgba_scene_linear);
-  cpicker->has_alpha = button_color_has_alpha(from_but);
 
   /* when the softmax isn't defined in the RNA,
    * using very large numbers causes sRGB/linear round trip to fail. */
@@ -815,16 +942,6 @@ static void block_colorpicker(
   int yco = -0.5f * UI_UNIT_Y;
 
   if (!block->is_color_gamma_picker) {
-    auto colorspace_tip_func = [](bContext & /*C*/, TooltipData &tip, Button *but, void *space) {
-      tooltip_text_field_add(tip, but->tip, {}, TIP_STYLE_HEADER, TIP_LC_NORMAL, false);
-      tooltip_text_field_add(tip,
-                             TIP_("Color Space: ") + std::string(static_cast<const char *>(space)),
-                             {},
-                             TIP_STYLE_NORMAL,
-                             TIP_LC_ACTIVE,
-                             false);
-    };
-
     block_align_begin(block);
 
     bt = uiDefButV(block,
@@ -840,10 +957,10 @@ static void block_colorpicker(
                    TIP_("Scene linear values in the working color space"));
     button_flag_disable(bt, BUT_UNDO);
     button_drawflag_disable(bt, BUT_TEXT_LEFT);
-    button_func_set(bt, colorpicker_update_type_space_cb, bt, from_but);
+    button_func_set(bt, colorpicker_update_type_space_cb, bt, nullptr);
     button_func_tooltip_custom_set(
         bt,
-        colorspace_tip_func,
+        colorpicker_space_tooltip_func,
         const_cast<char *>(IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR)),
         nullptr);
     bt->custom_data = cpicker;
@@ -861,10 +978,10 @@ static void block_colorpicker(
                    TIP_("Perceptually uniform values, matching the color picker"));
     button_flag_disable(bt, BUT_UNDO);
     button_drawflag_disable(bt, BUT_TEXT_LEFT);
-    button_func_set(bt, colorpicker_update_type_space_cb, bt, from_but);
+    button_func_set(bt, colorpicker_update_type_space_cb, bt, nullptr);
     button_func_tooltip_custom_set(
         bt,
-        colorspace_tip_func,
+        colorpicker_space_tooltip_func,
         const_cast<char *>(IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_COLOR_PICKING)),
         nullptr);
 
@@ -890,7 +1007,7 @@ static void block_colorpicker(
                  TIP_("RGB values"));
   button_flag_disable(bt, BUT_UNDO);
   button_drawflag_disable(bt, BUT_TEXT_LEFT);
-  button_func_set(bt, colorpicker_update_type_space_cb, bt, from_but);
+  button_func_set(bt, colorpicker_update_type_space_cb, bt, nullptr);
   bt->custom_data = cpicker;
 
   bt = uiDefButV(block,
@@ -907,7 +1024,7 @@ static void block_colorpicker(
                                                                TIP_("Hue, Saturation, Value"));
   button_flag_disable(bt, BUT_UNDO);
   button_drawflag_disable(bt, BUT_TEXT_LEFT);
-  button_func_set(bt, colorpicker_update_type_space_cb, bt, from_but);
+  button_func_set(bt, colorpicker_update_type_space_cb, bt, nullptr);
   bt->custom_data = cpicker;
 
   block_align_end(block);
@@ -969,7 +1086,7 @@ static void block_colorpicker(
                         linear ? colorpicker_hsv_linear_slider_update_cb :
                                  colorpicker_hsv_perceptual_slider_update_cb,
                         bt,
-                        from_but);
+                        nullptr);
         bt->custom_data = cpicker;
       };
 
@@ -1021,7 +1138,7 @@ static void block_colorpicker(
           bt->softmin = softmin;
           bt->softmax = softmax;
           button_flag_disable(bt, BUT_UNDO);
-          button_func_set(bt, colorpicker_rgb_perceptual_slider_update_cb, bt, from_but);
+          button_func_set(bt, colorpicker_rgb_perceptual_slider_update_cb, bt, nullptr);
           bt->custom_data = cpicker;
         };
 
@@ -1077,7 +1194,8 @@ static void block_colorpicker(
 
   copy_v4_v4(rgba_hex, rgba_scene_linear);
 
-  if (!button_is_color_gamma(from_but)) {
+  /* Both callers resolved the edited property's gamma-ness into the block flag before this runs. */
+  if (!block->is_color_gamma_picker) {
     IMB_colormanagement_scene_linear_to_srgb_v3(rgba_hex, rgba_hex);
     color_picker_rgb_round(rgba_hex);
   }
@@ -1120,32 +1238,10 @@ static void block_colorpicker(
                 0,
                 cpicker->has_alpha ? 10 : 8,
                 std::nullopt);
-  const auto bt_tooltip_func =
-      [](bContext & /*C*/, TooltipData &tip, Button * /*but*/, void *has_alpha_ptr) {
-        const bool *has_alpha = static_cast<bool *>(has_alpha_ptr);
-        if (*has_alpha) {
-          tooltip_text_field_add(tip,
-                                 TIP_("Hex triplet for color with alpha (#RRGGBBAA)."),
-                                 {},
-                                 TIP_STYLE_HEADER,
-                                 TIP_LC_NORMAL,
-                                 false);
-        }
-        else {
-          tooltip_text_field_add(tip,
-                                 TIP_("Hex triplet for color (#RRGGBB)."),
-                                 {},
-                                 TIP_STYLE_HEADER,
-                                 TIP_LC_NORMAL,
-                                 false);
-        }
-        tooltip_text_field_add(
-            tip, TIP_("Gamma corrected"), {}, TIP_STYLE_NORMAL, TIP_LC_NORMAL, false);
-      };
   button_func_tooltip_custom_set(
-      bt, bt_tooltip_func, static_cast<void *>(&cpicker->has_alpha), nullptr);
+      bt, colorpicker_hex_tooltip_func, static_cast<void *>(&cpicker->has_alpha), nullptr);
   button_flag_disable(bt, BUT_UNDO);
-  button_func_set(bt, colorpicker_hex_rna_cb, bt, from_but);
+  button_func_set(bt, colorpicker_hex_rna_cb, bt, nullptr);
   bt->custom_data = cpicker;
 
   if (show_picker) {
@@ -1168,93 +1264,32 @@ static void block_colorpicker(
   colorpicker_hide_reveal(block);
 
   /* Add a Color Palette section when the picker is opened in a paint mode. */
-  if (C) {
-    Scene *scene = CTX_data_scene(C);
-    const PaintMode mode = scene ? BKE_paintmode_get_active_from_context(C) : PaintMode::Invalid;
-    /* Use the already-allocated paint settings; do not allocate here, as this runs while building
-     * the block (allocating during draw would be a side effect on scene data). */
-    Paint *paint = (mode != PaintMode::Invalid) ?
-                       BKE_paint_get_active_from_paintmode(scene, mode) :
-                       nullptr;
-
-    if (paint != nullptr) {
-      /* Each color picker keeps its own palette, stored per data-path in the tool settings and
-       * independent of the tool's active palette (#Paint::palette). Fall back to the shared paint
-       * settings when the button has no RNA property to derive a stable key from. */
-      const std::string key = colorpicker_popup_key_get(from_but);
-      ColorPickerPalette *palette_entry = nullptr;
-      PointerRNA palette_ptr;
-      if (!key.empty()) {
-        palette_entry = colorpicker_palette_entry_ensure(
-            *scene->toolsettings, key, paint->palette);
-        palette_ptr = RNA_pointer_create_discrete(
-            &scene->id, RNA_ColorPickerPalette, palette_entry);
-      }
-      else {
-        palette_ptr = paint_palette_settings_ptr_get(*scene, mode);
-      }
-      Palette *active_palette = palette_entry ? palette_entry->palette : paint->palette;
-
-      /* The color wheel/square is placed above `y == 0`, so the block's top does not coincide with
-       * the layout coordinate origin. Layout panels (the palette sub-panel added below) assume
-       * `block->rect.ymax` is that origin (block top at `y == 0`), as in standard popovers. Shift
-       * all existing widgets down so the content top aligns with `y == 0`; otherwise the palette
-       * header backdrop and its click region are offset upwards by the picker height. */
-      float content_top = 0.0f;
-      for (const Button &but : block->buttons()) {
-        if (but.rect.ymax > content_top) {
-          content_top = but.rect.ymax;
-        }
-      }
-      if (content_top > 0.0f) {
-        block_translate(block, 0.0f, -content_top);
-        yco -= content_top;
-      }
-
-      /* Move y position to place palette below hex field. */
-      yco -= UI_UNIT_Y;
-
-      const uiStyle *style = style_get_dpi();
-      Layout &palette_layout = block_layout(
-          block, LayoutDirection::Vertical, LayoutType::Panel, 0, yco, picker_width, 0, 0, style);
-
-      /* Collapsible Color Palette sub-panel. */
-      PanelLayout palette_panel = palette_layout.panel(C, "color_palette", false);
-      palette_panel.header->label(IFACE_("Color Palette"), ICON_COLOR);
-
-      if (palette_panel.body) {
-        /* Expose the picker's palette as the "palette" context member, so the swatch operators
-         * (add/delete/move/sort) and the "New" button act on it instead of the tool's active
-         * palette. */
-        if (active_palette) {
-          PointerRNA active_palette_ptr = RNA_id_pointer_create(&active_palette->id);
-          palette_panel.body->context_ptr_set("palette", &active_palette_ptr);
-        }
-
-        /* Palette ID selector (choose/create/browse palettes). */
-        Layout &palette_selector = palette_panel.body->column(true);
-        const int64_t but_count_before = int64_t(block->buttons_ptrs.size());
-        template_id(&palette_selector, C, &palette_ptr, "palette", "palette.new", nullptr, nullptr);
-        /* When the active palette changes, rebuild the popup so the swatch grid and popup
-         * height update to match the new palette's contents. The palette ID selector buttons set
-         * their own internal callbacks via #template_id, so use `apply_func` (which runs in
-         * addition to those) rather than overriding them. */
-        for (int64_t i = but_count_before; i < int64_t(block->buttons_ptrs.size()); i++) {
-          block->buttons_ptrs[i]->apply_func = [block](bContext & /*C*/) {
-            colorpicker_popup_tag_refresh(block);
-          };
-        }
-
-        /* Color swatches, only when a palette is assigned. */
-        if (active_palette) {
-          template_palette(palette_panel.body,
-                           &palette_ptr,
-                           "palette",
-                           false,  /* show_empty_message */
-                           false); /* show_sort_buttons */
-        }
+  PointerRNA palette_ptr;
+  Palette *active_palette = nullptr;
+  if (colorpicker_palette_context_get(C, ptr, prop, &palette_ptr, &active_palette)) {
+    /* The color wheel/square is placed above `y == 0`, so the block's top does not coincide with
+     * the layout coordinate origin. Layout panels (the palette sub-panel added below) assume
+     * `block->rect.ymax` is that origin (block top at `y == 0`), as in standard popovers. Shift
+     * all existing widgets down so the content top aligns with `y == 0`; otherwise the palette
+     * header backdrop and its click region are offset upwards by the picker height. */
+    float content_top = 0.0f;
+    for (const Button &but : block->buttons()) {
+      if (but.rect.ymax > content_top) {
+        content_top = but.rect.ymax;
       }
     }
+    if (content_top > 0.0f) {
+      block_translate(block, 0.0f, -content_top);
+      yco -= content_top;
+    }
+
+    /* Move y position to place palette below hex field. */
+    yco -= UI_UNIT_Y;
+
+    const uiStyle *style = style_get_dpi();
+    Layout &palette_layout = block_layout(
+        block, LayoutDirection::Vertical, LayoutType::Panel, 0, yco, picker_width, 0, 0, style);
+    colorpicker_palette_panel_build(C, palette_layout, block, &palette_ptr, active_palette);
   }
 }
 
@@ -1336,7 +1371,7 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
    * sub-panel's expanded/collapsed state) by keying the dummy popup panel on the edited property's
    * data path. Color pickers on different properties then remember their state independently. Falls
    * back to a shared key when the button has no RNA property. */
-  const std::string key = colorpicker_popup_key_get(but);
+  const std::string key = colorpicker_prop_key_get(&but->rnapoin, but->rnaprop);
   const std::string popup_panel_idname = key.empty() ? std::string("color_picker_popup") :
                                                        "color_picker_popup:" + key;
   popup_dummy_panel_set(handle->region, block, popup_panel_idname);
@@ -1347,7 +1382,7 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
 
   copy_v3_v3(handle->retvec, but->editvec);
 
-  block_colorpicker(C, block, but, handle->retvec, true);
+  block_colorpicker(C, block, &but->rnapoin, but->rnaprop, handle->retvec, true);
 
   block->flag = BLOCK_LOOP | BLOCK_KEEP_OPEN | BLOCK_OUT_1 | BLOCK_MOVEMOUSE_QUIT | BLOCK_POPUP;
   block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
@@ -1361,10 +1396,459 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
 
 ColorPicker *block_colorpicker_create(Block *block)
 {
-  ColorPicker *cpicker = MEM_new_zeroed<ColorPicker>(__func__);
+  /* #ColorPicker holds a #PointerRNA, which is not trivially constructible: initialize through
+   * the constructor rather than zero-filling. The struct stays trivially destructible, which the
+   * block free path relies on. */
+  ColorPicker *cpicker = MEM_new<ColorPicker>(__func__);
   BLI_addhead(&block->color_pickers.list, cpicker);
 
   return cpicker;
+}
+
+/* Toggle callback of the embedded picker's type/space rows. The toggle has already written the
+ * new value into the shared global; the embedded picker shows only the widgets of the active
+ * set, so instead of hiding widgets in place (there is nothing to reveal: the others were never
+ * built) it rebuilds its host dialog, which re-runs the picker layout with the new mode. */
+static void colorpicker_embedded_type_space_cb(bContext * /*C*/, void *bt1, void * /*bt2*/)
+{
+  Button *but = static_cast<Button *>(bt1);
+  colorpicker_popup_tag_refresh(but->block);
+}
+
+/* The full standard color picker built into a layout, for dialogs that host the picker directly
+ * instead of opening it as a popup from a color button. Shares the popup picker's state
+ * (#ColorPicker), update callbacks and palette, but:
+ *  - binds to the given RNA property without an opening button, and fires the property's RNA
+ *    update itself where the popup would rely on re-applying its button;
+ *  - builds only the slider set of the active picker type/space, and toggles rebuild the layout
+ *    (the popup instead builds every set at overlapping coordinates and hides);
+ *  - never touches the popup return value, so the host dialog stays open while editing. */
+void template_color_picker_full(bContext *C,
+                                Layout *layout,
+                                PointerRNA *ptr,
+                                StringRefNull propname,
+                                bool show_eyedropper)
+{
+  PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
+  if (!prop) {
+    RNA_warning("property not found: %s.%s", RNA_struct_identifier(ptr->type), propname.c_str());
+    return;
+  }
+
+  Block *block = layout->block();
+  ColorPicker *cpicker = block_colorpicker_create(block);
+  const int picker_width = PICKER_TOTAL_W;
+
+  /* The picker's own conversions read the block flag, the same way the popup wrapper resolves it
+   * from the button it opened from. */
+  const bool is_gamma = (RNA_property_subtype(prop) == PROP_COLOR_GAMMA);
+  block->is_color_gamma_picker = is_gamma;
+
+  cpicker->ptr = *ptr;
+  cpicker->prop = prop;
+  cpicker->has_alpha = colorpicker_prop_has_alpha(ptr, prop);
+  cpicker->fire_rna_update = true;
+
+  float softmin, softmax, hardmin, hardmax, step, precision;
+  RNA_property_float_ui_range(ptr, prop, &softmin, &softmax, &step, &precision);
+  RNA_property_float_range(ptr, prop, &hardmin, &hardmax);
+  /* when the softmax isn't defined in the RNA,
+   * using very large numbers causes sRGB/linear round trip to fail. */
+  if (softmax == FLT_MAX) {
+    softmax = 1.0f;
+  }
+
+  float rgba_scene_linear[4];
+  zero_v4(rgba_scene_linear);
+  RNA_property_float_get_array_at_most(ptr, prop, rgba_scene_linear, 4);
+  if (!cpicker->has_alpha) {
+    rgba_scene_linear[3] = 1.0f;
+  }
+  color_picker_update_from_rgb_linear(cpicker, is_gamma, false, rgba_scene_linear);
+
+  const char *area_tooltip = nullptr;
+  const char *slider_tooltip = nullptr;
+  colorpicker_tooltips(cpicker, &area_tooltip, &slider_tooltip);
+
+  Button *bt;
+  ButtonHSVCube *hsv_but;
+  Layout &col = layout->column(false);
+
+  switch (U.color_picker_type) {
+    case USER_CP_SQUARE_SV:
+    case USER_CP_SQUARE_HS:
+    case USER_CP_SQUARE_HV: {
+      /* Color square with the hue/saturation/value bar below it. */
+      eButGradientType gradient_type;
+      switch (U.color_picker_type) {
+        case USER_CP_SQUARE_SV:
+          gradient_type = GRAD_SV;
+          break;
+        case USER_CP_SQUARE_HS:
+          gradient_type = GRAD_HS;
+          break;
+        default:
+          gradient_type = GRAD_HV;
+          break;
+      }
+
+      hsv_but = static_cast<ButtonHSVCube *>(uiDefButR_prop(block,
+                                                            ButtonType::HsvCube,
+                                                            "",
+                                                            0,
+                                                            0,
+                                                            PICKER_TOTAL_W,
+                                                            PICKER_H,
+                                                            ptr,
+                                                            prop,
+                                                            -1,
+                                                            0.0,
+                                                            0.0,
+                                                            area_tooltip));
+      hsv_but->gradient_type = gradient_type;
+      button_func_set(hsv_but, colorpicker_rgba_update_cb, hsv_but, nullptr);
+      hsv_but->custom_data = cpicker;
+
+      col.separator();
+
+      hsv_but = static_cast<ButtonHSVCube *>(uiDefButR_prop(block,
+                                                            ButtonType::HsvCube,
+                                                            "",
+                                                            0,
+                                                            0,
+                                                            PICKER_TOTAL_W,
+                                                            PICKER_BAR,
+                                                            ptr,
+                                                            prop,
+                                                            -1,
+                                                            0.0,
+                                                            0.0,
+                                                            slider_tooltip));
+      hsv_but->gradient_type = eButGradientType(gradient_type + 3);
+      button_func_set(hsv_but, colorpicker_rgba_update_cb, hsv_but, nullptr);
+      hsv_but->custom_data = cpicker;
+      break;
+    }
+
+    /* user default */
+    case USER_CP_CIRCLE_HSV:
+    case USER_CP_CIRCLE_HSL:
+    default: {
+      /* Color circle with the value/lightness bar beside it. */
+      Layout &row = col.row(true);
+
+      bt = uiDefButR_prop(block,
+                          ButtonType::HsvCircle,
+                          "",
+                          0,
+                          0,
+                          PICKER_H,
+                          PICKER_W,
+                          ptr,
+                          prop,
+                          -1,
+                          0.0,
+                          0.0,
+                          area_tooltip);
+      button_func_set(bt, colorpicker_rgba_update_cb, bt, nullptr);
+      bt->custom_data = cpicker;
+
+      row.separator();
+
+      hsv_but = static_cast<ButtonHSVCube *>(uiDefButR_prop(block,
+                                                            ButtonType::HsvCube,
+                                                            "",
+                                                            0,
+                                                            0,
+                                                            PICKER_BAR,
+                                                            PICKER_H,
+                                                            ptr,
+                                                            prop,
+                                                            -1,
+                                                            0.0,
+                                                            0.0,
+                                                            slider_tooltip));
+      hsv_but->gradient_type = (U.color_picker_type == USER_CP_CIRCLE_HSL) ? GRAD_L_ALT :
+                                                                             GRAD_V_ALT;
+      button_func_set(hsv_but, colorpicker_rgba_update_cb, hsv_but, nullptr);
+      hsv_but->custom_data = cpicker;
+      break;
+    }
+  }
+
+  /* Picker type and space, as rows of two toggles. */
+  if (!is_gamma) {
+    /* The buttons below are captured by this row through the block's current layout. */
+    col.row(true);
+
+    bt = uiDefButV(block,
+                   ButtonType::Row,
+                   IFACE_("Linear"),
+                   0,
+                   0,
+                   picker_width * 0.5,
+                   UI_UNIT_Y,
+                   &g_color_picker_space,
+                   0.0,
+                   float(PICKER_TYPE_RGB),
+                   TIP_("Scene linear values in the working color space"));
+    button_flag_disable(bt, BUT_UNDO);
+    button_drawflag_disable(bt, BUT_TEXT_LEFT);
+    button_func_set(bt, colorpicker_embedded_type_space_cb, bt, nullptr);
+    button_func_tooltip_custom_set(
+        bt,
+        colorpicker_space_tooltip_func,
+        const_cast<char *>(IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR)),
+        nullptr);
+    bt->custom_data = cpicker;
+
+    bt = uiDefButV(block,
+                   ButtonType::Row,
+                   IFACE_("Perceptual"),
+                   0,
+                   0,
+                   picker_width * 0.5,
+                   UI_UNIT_Y,
+                   &g_color_picker_space,
+                   0.0,
+                   float(PICKER_TYPE_HSV),
+                   TIP_("Perceptually uniform values, matching the color picker"));
+    button_flag_disable(bt, BUT_UNDO);
+    button_drawflag_disable(bt, BUT_TEXT_LEFT);
+    button_func_set(bt, colorpicker_embedded_type_space_cb, bt, nullptr);
+    button_func_tooltip_custom_set(
+        bt,
+        colorpicker_space_tooltip_func,
+        const_cast<char *>(IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_COLOR_PICKING)),
+        nullptr);
+    bt->custom_data = cpicker;
+  }
+
+  col.row(true);
+
+  bt = uiDefButV(block,
+                 ButtonType::Row,
+                 IFACE_("RGB"),
+                 0,
+                 0,
+                 picker_width * 0.5,
+                 UI_UNIT_Y,
+                 &g_color_picker_type,
+                 0.0,
+                 float(PICKER_TYPE_RGB),
+                 TIP_("RGB values"));
+  button_flag_disable(bt, BUT_UNDO);
+  button_drawflag_disable(bt, BUT_TEXT_LEFT);
+  button_func_set(bt, colorpicker_embedded_type_space_cb, bt, nullptr);
+  bt->custom_data = cpicker;
+
+  bt = uiDefButV(block,
+                 ButtonType::Row,
+                 (U.color_picker_type == USER_CP_CIRCLE_HSL) ? IFACE_("HSL") : IFACE_("HSV"),
+                 0,
+                 0,
+                 picker_width * 0.5,
+                 UI_UNIT_Y,
+                 &g_color_picker_type,
+                 0.0,
+                 float(PICKER_TYPE_HSV),
+                 (U.color_picker_type == USER_CP_CIRCLE_HSL) ? TIP_("Hue, Saturation, Lightness") :
+                                                               TIP_("Hue, Saturation, Value"));
+  button_flag_disable(bt, BUT_UNDO);
+  button_drawflag_disable(bt, BUT_TEXT_LEFT);
+  button_func_set(bt, colorpicker_embedded_type_space_cb, bt, nullptr);
+  bt->custom_data = cpicker;
+
+  /* Number sliders for the active type/space combination only; the toggle rows above rebuild the
+   * host dialog when the combination changes. */
+  const ePickerType type = ePickerType(g_color_picker_type);
+  const ePickerSpace space = is_gamma ? (type == PICKER_TYPE_RGB ? PICKER_SPACE_LINEAR :
+                                                                   PICKER_SPACE_PERCEPTUAL) :
+                                        ePickerSpace(g_color_picker_space);
+
+  const auto add_rgb_rna_slider = [&](const char *str, const char *tip, const int index) {
+    bt = uiDefButR_prop(block,
+                        ButtonType::NumSlider,
+                        str,
+                        0,
+                        0,
+                        picker_width,
+                        UI_UNIT_Y,
+                        ptr,
+                        prop,
+                        index,
+                        0.0,
+                        0.0,
+                        tip);
+    button_number_slider_step_size_set(bt, 10);
+    button_number_slider_precision_set(bt, 3);
+    button_func_set(bt, colorpicker_rgba_update_cb, bt, nullptr);
+    bt->custom_data = cpicker;
+  };
+
+  const auto add_hsv_slider = [&](const char *str,
+                                  const char *tip,
+                                  const int index,
+                                  const bool linear) {
+    float *hsv_values = linear ? cpicker->hsv_linear_slider : cpicker->hsv_perceptual_slider;
+    bt = uiDefButV(block,
+                   ButtonType::NumSlider,
+                   str,
+                   0,
+                   0,
+                   picker_width,
+                   UI_UNIT_Y,
+                   hsv_values + index,
+                   0.0,
+                   1.0,
+                   tip);
+    if (index == 2) {
+      bt->hardmax = hardmax; /* Not common but RGB may be over 1.0. */
+    }
+    button_number_slider_step_size_set(bt, 10);
+    button_number_slider_precision_set(bt, 3);
+    button_flag_disable(bt, BUT_UNDO);
+    button_func_set(bt,
+                    linear ? colorpicker_hsv_linear_slider_update_cb :
+                             colorpicker_hsv_perceptual_slider_update_cb,
+                    bt,
+                    nullptr);
+    bt->custom_data = cpicker;
+  };
+
+  /* The slider buttons below are captured by this column through the block's current layout. */
+  col.column(true);
+
+  if (type == PICKER_TYPE_RGB) {
+    if (space == PICKER_SPACE_LINEAR) {
+      /* NOTE: don't disable BUT_UNDO for RGBA values, since these don't add undo steps. */
+      add_rgb_rna_slider(IFACE_("Red:"), TIP_("Red"), 0);
+      add_rgb_rna_slider(IFACE_("Green:"), TIP_("Green"), 1);
+      add_rgb_rna_slider(IFACE_("Blue:"), TIP_("Blue"), 2);
+    }
+    else {
+      const auto add_rgb_perceptual_slider =
+          [&](const char *str, const char *tip, const int index) {
+            bt = uiDefButV(block,
+                           ButtonType::NumSlider,
+                           str,
+                           0,
+                           0,
+                           picker_width,
+                           UI_UNIT_Y,
+                           cpicker->rgb_perceptual_slider + index,
+                           hardmin,
+                           hardmax,
+                           tip);
+            button_number_slider_step_size_set(bt, 10);
+            button_number_slider_precision_set(bt, 3);
+            bt->softmin = softmin;
+            bt->softmax = softmax;
+            button_flag_disable(bt, BUT_UNDO);
+            button_func_set(bt, colorpicker_rgb_perceptual_slider_update_cb, bt, nullptr);
+            bt->custom_data = cpicker;
+          };
+
+      add_rgb_perceptual_slider(IFACE_("Red:"), TIP_("Red"), 0);
+      add_rgb_perceptual_slider(IFACE_("Green:"), TIP_("Green"), 1);
+      add_rgb_perceptual_slider(IFACE_("Blue:"), TIP_("Blue"), 2);
+    }
+  }
+  else {
+    const bool slider_is_linear = (space == PICKER_SPACE_LINEAR);
+    add_hsv_slider(IFACE_("Hue:"), TIP_("Hue"), 0, slider_is_linear);
+    add_hsv_slider(IFACE_("Saturation:"), TIP_("Saturation"), 1, slider_is_linear);
+    if (U.color_picker_type == USER_CP_CIRCLE_HSL) {
+      add_hsv_slider(IFACE_("Lightness:"), TIP_("Lightness"), 2, slider_is_linear);
+    }
+    else {
+      add_hsv_slider(
+          CTX_IFACE_(BLT_I18NCONTEXT_COLOR, "Value:"), CTX_TIP_(BLT_I18NCONTEXT_COLOR, "Value"), 2, slider_is_linear);
+    }
+  }
+
+  if (cpicker->has_alpha) {
+    add_rgb_rna_slider(IFACE_("Alpha:"), TIP_("Alpha"), 3);
+  }
+
+  /* Hex color is in sRGB space. */
+  float rgba_hex[4];
+  uchar rgba_hex_uchar[4];
+
+  copy_v4_v4(rgba_hex, rgba_scene_linear);
+
+  if (!is_gamma) {
+    IMB_colormanagement_scene_linear_to_srgb_v3(rgba_hex, rgba_hex);
+    color_picker_rgb_round(rgba_hex);
+  }
+
+  rgba_float_to_uchar(rgba_hex_uchar, rgba_hex);
+
+  if (cpicker->has_alpha) {
+    SNPRINTF_UTF8(cpicker->hexcol, "#%02X%02X%02X%02X", UNPACK4_EX((uint), rgba_hex_uchar, ));
+  }
+  else {
+    SNPRINTF_UTF8(cpicker->hexcol, "#%02X%02X%02X", UNPACK3_EX((uint), rgba_hex_uchar, ));
+  }
+
+  Layout &hex_row = col.row(true);
+  hex_row.fixed_size_set(true);
+
+  const int label_width = int(picker_width * 0.15f);
+
+  bt = uiDefBut(block,
+                ButtonType::Label,
+                IFACE_("Hex"),
+                0,
+                0,
+                label_width,
+                UI_UNIT_Y,
+                nullptr,
+                0.0,
+                0.0,
+                std::nullopt);
+
+  bt = uiDefBut(block,
+                ButtonType::Text,
+                "",
+                0,
+                0,
+                picker_width - label_width - (show_eyedropper ? int(UI_UNIT_X * 1.25f) : 0),
+                UI_UNIT_Y,
+                cpicker->hexcol,
+                0,
+                cpicker->has_alpha ? 10 : 8,
+                std::nullopt);
+  button_func_tooltip_custom_set(
+      bt, colorpicker_hex_tooltip_func, static_cast<void *>(&cpicker->has_alpha), nullptr);
+  button_flag_disable(bt, BUT_UNDO);
+  button_func_set(bt, colorpicker_hex_rna_cb, bt, nullptr);
+  bt->custom_data = cpicker;
+
+  if (show_eyedropper) {
+    bt = uiDefIconButO(block,
+                       ButtonType::But,
+                       "UI_OT_eyedropper_color",
+                       wm::OpCallContext::InvokeDefault,
+                       ICON_EYEDROPPER,
+                       0,
+                       0,
+                       UI_UNIT_X,
+                       UI_UNIT_Y,
+                       std::nullopt);
+    button_flag_disable(bt, BUT_UNDO);
+    button_drawflag_disable(bt, BUT_ICON_LEFT);
+    button_func_set(bt, popup_close_cb, bt, nullptr);
+    bt->custom_data = cpicker;
+  }
+
+  /* Add a Color Palette section when the picker is opened in a paint mode. */
+  PointerRNA palette_ptr;
+  Palette *active_palette = nullptr;
+  if (colorpicker_palette_context_get(C, ptr, prop, &palette_ptr, &active_palette)) {
+    Layout &palette_col = col.column(true);
+    colorpicker_palette_panel_build(C, palette_col, block, &palette_ptr, active_palette);
+  }
 }
 
 static bool colorpicker_rgb_get_from_region(const ARegion *region, float r_rgb[3])

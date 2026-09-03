@@ -2893,6 +2893,14 @@ static void widget_draw_text_icon(const uiFontStyle *fstyle,
   bool no_left_padding = but->drawflag & BUT_NO_TEXT_PADDING;
   bool no_right_padding = no_left_padding;
 
+  /* A button may ask for text smaller than the style's own size; measure and draw with the scaled
+   * style so clipping, alignment and placement all stay consistent. */
+  uiFontStyle fstyle_scaled = *fstyle;
+  if (but->text_scale != 1.0f) {
+    fstyle_scaled.points *= but->text_scale;
+    fstyle = &fstyle_scaled;
+  }
+
   button_text_password_hide(password_str, but, false);
 
   /* check for button text label */

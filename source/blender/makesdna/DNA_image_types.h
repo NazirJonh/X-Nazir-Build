@@ -75,6 +75,12 @@ enum eImage_Flag : int {
   IMA_FLAG_UNUSED_16 = (1 << 16), /* cleared */
   /** Indicates that the image has autosave information */
   IMA_AUTOSAVE_TEMPPACK = (1 << 17),
+  /**
+   * Upload to the GPU as a scene linear float texture with pre-multiplied alpha, whatever the
+   * alpha mode. A transparent straight map (a paint layer correction) otherwise has its
+   * zero-alpha texels' RGB filtered into partly covered neighbors, a dark rim at every soft edge.
+   */
+  IMA_GPU_LINEAR_PREMUL = (1 << 18),
 };
 ENUM_OPERATORS(eImage_Flag)
 

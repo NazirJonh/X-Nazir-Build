@@ -44,6 +44,7 @@
 #include "BKE_lib_remap.hh"
 #include "BKE_main.hh"
 #include "BKE_mball_tessellate.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_preferences.h"
@@ -111,6 +112,7 @@
 #include "UI_string_search.hh"
 
 #include "GPU_context.hh"
+#include "GPU_capabilities.hh"
 #include "GPU_init_exit.hh"
 #include "GPU_shader.hh"
 
@@ -167,6 +169,15 @@ void WM_init_gpu()
   DRW_gpu_context_create();
 
   GPU_init();
+
+  /* The GPU caps are valid now, so hand the paint-layer generator its sampler budget: EEVEE keeps
+   * some slots for its own textures, the rest bound how many samplers a layered material may use
+   * before the fallback pins live rows onto their baked maps. `max` is carried for the log. */
+  {
+    const int max_textures = GPU_max_textures();
+    const int budget = max_textures > 0 ? max_textures - PAINT_LAYERS_EEVEE_RESERVED_SAMPLERS : 0;
+    BKE_paint_layers_sampler_budget_set(budget > 0 ? budget : 0, max_textures);
+  }
 
   if (G.debug & G_DEBUG_GPU_COMPILE_SHADERS) {
     GPU_shader_compile_static();

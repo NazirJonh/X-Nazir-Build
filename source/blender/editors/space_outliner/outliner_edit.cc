@@ -273,7 +273,9 @@ static wmOperatorStatus outliner_item_openclose_invoke(bContext *C,
   TreeElement *te = outliner_find_item_at_y(
       space_outliner, &space_outliner->runtime->tree, view_mval[1]);
 
-  if (te && outliner_item_is_co_within_close_toggle(te, view_mval[0])) {
+  if (te && TREESTORE(te)->type != TSE_VIEW_COLLECTION_BASE &&
+      outliner_item_is_co_within_close_toggle(te, view_mval[0]))
+  {
     TreeStoreElem *tselem = TREESTORE(te);
 
     const bool open = (tselem->flag & TSE_CLOSED) ||
@@ -323,7 +325,8 @@ void OUTLINER_OT_item_openclose(wmOperatorType *ot)
 /** \name Rename Operator
  * \{ */
 
-static void do_item_rename(ARegion *region,
+static void do_item_rename(bContext *C,
+                           ARegion *region,
                            TreeElement *te,
                            TreeStoreElem *tselem,
                            ReportList *reports)
@@ -355,7 +358,10 @@ static void do_item_rename(ARegion *region,
            TSE_SCENE_OBJECTS_BASE,
            TSE_GENERIC_LABEL,
            TSE_GPENCIL_EFFECT_BASE,
-           TSE_SHAPE_KEY_BASE))
+           TSE_SHAPE_KEY_BASE) ||
+      /* Of the Stack Layers rows only the layers carry a name of their own: a channel row stands
+       * for a map that is named by renaming the image it points at. */
+      tselem->type == TSE_STACK_ITEM)
   {
     BKE_report(reports, RPT_INFO, "Not an editable name");
   }
@@ -376,6 +382,23 @@ static void do_item_rename(ARegion *region,
     }
     else {
       add_textbut = true;
+    }
+  }
+  else if (tselem->type == TSE_STACK_LAYER) {
+    /* The field types straight into the node label the stack reads its name from, so the label has
+     * to already hold what the row is showing: a layer named after its map or its node has no
+     * label yet, and an empty field would read as a name the user just deleted. Setting it here
+     * rather than letting the field open empty is also what makes Escape put the row back the way
+     * it was. */
+    SpaceOutliner &space_outliner = *CTX_wm_space_outliner(C);
+    const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
+    if (row != nullptr && row->can_rename() &&
+        outliner_stack_row_rename(C, space_outliner, tselem->nr, te->name))
+    {
+      add_textbut = true;
+    }
+    else {
+      BKE_report(reports, RPT_INFO, "Not an editable name");
     }
   }
   else if (te->idcode == ID_LI) {
@@ -399,7 +422,7 @@ void item_rename_fn(bContext *C,
                     TreeStoreElem *tselem)
 {
   ARegion *region = CTX_wm_region(C);
-  do_item_rename(region, te, tselem, reports);
+  do_item_rename(C, region, te, tselem, reports);
 }
 
 static TreeElement *outliner_item_rename_find_active(const SpaceOutliner *space_outliner,
@@ -461,7 +484,7 @@ static wmOperatorStatus outliner_item_rename_invoke(bContext *C,
     outliner_scroll_view(space_outliner, region, delta_y);
   }
 
-  do_item_rename(region, te, TREESTORE(te), op->reports);
+  do_item_rename(C, region, te, TREESTORE(te), op->reports);
 
   return OPERATOR_FINISHED;
 }
@@ -1528,6 +1551,8 @@ void outliner_set_coordinates(const ARegion *region, SpaceOutliner *space_outlin
   tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
     /* store coord and continue, we need coordinates for elements outside view too */
     te->xs = 0;
+    /* A taller row occupies the space below its content, so its bottom is that much lower. */
+    starty -= outliner_tree_element_height(*space_outliner, *te) - UI_UNIT_Y;
     te->ys = float(starty);
     starty -= UI_UNIT_Y;
   });

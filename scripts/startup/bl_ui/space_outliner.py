@@ -7,6 +7,7 @@ from bpy.types import Header, Menu, Panel
 
 from bpy.app.translations import (
     contexts as i18n_contexts,
+    pgettext_iface as iface_,
 )
 
 
@@ -17,6 +18,193 @@ def has_selected_ids_in_context(context):
         return True
 
     return False
+
+
+class OUTLINER_HT_tool_header(Header):
+    bl_space_type = 'OUTLINER'
+    bl_region_type = 'TOOL_HEADER'
+
+    @classmethod
+    def poll(cls, context):
+        return context.space_data.display_mode == 'STACK_LAYERS'
+
+    def draw(self, context):
+        layout = self.layout
+        space = context.space_data
+
+        if space.stack_layers_view != 'STACK':
+            props = layout.operator("wm.context_set_enum", text="Outliner", icon='OUTLINER')
+            props.data_path = "space_data.display_mode"
+            props.value = 'VIEW_LAYER'
+
+            # Which source's stacks the object list is drawn from. It belongs on this row, next to
+            # the other Stack Layers controls, pushed to the far right edge.
+            layout.separator_spacer()
+            layout.prop(space, "stack_source", text="")
+            return
+
+        layout.operator("outliner.stack_layers_back", text="", icon='BACK')
+        if space.stack_source == 'PAINT_MATERIAL':
+            # Which channel's blend and opacity the rows below show and edit. Width is capped so
+            # the dropdown does not stretch to the widest possible item and crowd the Add buttons.
+            sub = layout.row()
+            sub.ui_units_x = 6.0
+            sub.prop(context.tool_settings.paint_mode, "stack_layer_channel", text="")
+
+        layout.separator_spacer()
+
+        # The Add controls are built from the source's own kinds, so a source with none grows no
+        # Add and a shape-key stack never shows a paint button (S-5). The generic move/group/remove
+        # verbs below stay whatever the source.
+        kind_ids = {kind.identifier for kind in space.stack_add_kinds}
+        if kind_ids:
+            row = layout.row(align=True)
+            # Paint Layer and Fill Layer are their own buttons for quick access; the Fill button is
+            # a glyph button -- a Material Symbols paint-bucket -- because the fill is the one kind
+            # whose content is a colour, and the picker it opens on click is the add.
+            if 'PAINT' in kind_ids:
+                row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB').type = 'PAINT'
+            if 'FILL' in kind_ids:
+                row.tag_button(
+                    "outliner.stack_layer_add",
+                    tag_name="stack_layer_fill",
+                    glyph="\ue997",  # Material Symbols Rounded "format_color_fill"
+                    center_glyph=True,
+                    tooltip="Add Fill Layer",
+                ).type = 'FILL'
+            if 'MATERIAL' in kind_ids:
+                sub = row.row(align=True)
+                # The ID browser is driven only by these two context entries; see
+                # id_browser_popover_context_set in interface_template_id_browser.cc. Picking a
+                # material assigns it to WindowManager.stack_layer_material_pick, whose update turns
+                # the pick into an undo-able stack_layer_add call.
+                sub.context_pointer_set("id_browser_ptr", context.window_manager)
+                sub.context_string_set("id_browser_prop", "stack_layer_material_pick")
+                sub.popover("UI_PT_id_browser", text="", icon='MATERIAL')
+            if any(i.startswith(('CORRECTION', 'MASK_CORRECTION')) for i in kind_ids):
+                # Corrections hang on the row the Add lands on; the kinds share one menu rather than
+                # a button each, since none takes a source or a colour of its own.
+                row.menu("OUTLINER_MT_stack_layer_add_correction", text="", icon='BRUSH_DATA')
+
+        if space.show_stack_layer_move_buttons:
+            layout.separator()
+            row = layout.row(align=True)
+            row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
+            row.operator("outliner.stack_layer_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
+
+        layout.separator()
+        row = layout.row(align=True)
+        row.menu("OUTLINER_MT_stack_layer_mask_add", text="", icon='MOD_MASK')
+
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator("outliner.stack_layer_group_add", text="", icon='NEWFOLDER')
+
+        layout.separator()
+
+        row = layout.row(align=True)
+        row.operator("outliner.stack_layer_remove", text="", icon='TRASH')
+
+
+class OUTLINER_MT_stack_layer_add_correction(Menu):
+    bl_label = "Add Correction"
+
+    def draw(self, context):
+        layout = self.layout
+        # Built from the source's own kinds rather than hard-coded: Paint and Fill corrections are
+        # separate kinds, so the seam carries no paint vocabulary (S-1) and a source with none of
+        # them simply lists nothing here.
+        for kind in context.space_data.stack_add_kinds:
+            if kind.identifier.startswith(('CORRECTION', 'MASK_CORRECTION')):
+                # `icon` is the numeric icon id, which only `icon_value` accepts.
+                layout.operator(
+                    "outliner.stack_layer_add", text=kind.name, icon_value=kind.icon,
+                ).type = kind.identifier
+
+
+class OUTLINER_MT_stack_layer_mask_add(Menu):
+    bl_label = "Add Mask"
+
+    def draw(self, _context):
+        layout = self.layout
+        # `add` is set on the button, not left to the operator's default: the Remove Mask entry
+        # stores `add = False` as the operator's last-used value, and an unset property would come
+        # back as that -- so "Add Mask" would run a remove the next time it is picked.
+        op = layout.operator(
+            "outliner.stack_layer_mask", text="Add White Mask", icon='MOD_MASK')
+        op.add = True
+        op.initial_color = 'WHITE'
+        op = layout.operator(
+            "outliner.stack_layer_mask", text="Add Black Mask", icon='MOD_MASK')
+        op.add = True
+        op.initial_color = 'BLACK'
+
+
+class OUTLINER_MT_stack_layer_context_menu(Menu):
+    bl_label = "Stack Layer"
+
+    def draw(self, context):
+        layout = self.layout
+
+        layout.operator("outliner.stack_layer_rename", text="Rename...", icon='GREASEPENCIL')
+        if bpy.ops.outliner.stack_layer_ungroup.poll():
+            layout.operator(
+                "outliner.stack_layer_duplicate", text="Duplicate Folder", icon='DUPLICATE')
+        else:
+            layout.operator("outliner.stack_layer_duplicate", text="Duplicate", icon='DUPLICATE')
+        layout.operator("outliner.stack_layer_visibility_toggle", text="Toggle Visibility", icon='HIDE_OFF')
+
+        layout.separator()
+
+        layout.menu("OUTLINER_MT_stack_layer_mask_add", text="Add Mask", icon='MOD_MASK')
+        layout.operator("outliner.stack_layer_mask", text="Remove Mask", icon='X').add = False
+        layout.operator(
+            "outliner.stack_layer_mask_toggle", text="Toggle Mask", icon='MOD_MASK')
+
+        # Only a row that stands for a colour can be re-filled; the operator's poll answers for
+        # that, the same way the ungroup entry leans on its own poll.
+        if bpy.ops.outliner.stack_layer_fill_color_set.poll():
+            layout.operator("outliner.stack_layer_fill_color_set", text="Fill Color...")
+
+        layout.separator()
+
+        layout.operator("outliner.stack_layer_group_add", text="New Group", icon='NEWFOLDER')
+        if bpy.ops.outliner.stack_layer_ungroup.poll():
+            layout.operator("outliner.stack_layer_ungroup", text="Ungroup")
+        if bpy.ops.outliner.stack_layer_color_tag_set.poll():
+            layout.separator()
+
+            row = layout.row(align=True)
+            row.operator_enum("outliner.stack_layer_color_tag_set", "color", icon_only=True)
+
+        # The Add entries come from the source's own kinds: a Material layer is made from a material
+        # the user picks, which is the ID browser's job, not a plain Add, so it gets a popover
+        # rather than an operator row (S-5).
+        kind_ids = {kind.identifier for kind in context.space_data.stack_add_kinds}
+        if kind_ids:
+            layout.separator()
+            if 'PAINT' in kind_ids:
+                layout.operator(
+                    "outliner.stack_layer_add", text="Add Paint Layer", icon='IMAGE_RGB',
+                ).type = 'PAINT'
+            if 'FILL' in kind_ids:
+                layout.operator(
+                    "outliner.stack_layer_add", text="Add Fill Layer", icon='GP_DRAW_FILL',
+                ).type = 'FILL'
+            if any(i.startswith(('CORRECTION', 'MASK_CORRECTION')) for i in kind_ids):
+                # Anchored to the same row the Add Paint and Fill entries above land on.
+                layout.menu("OUTLINER_MT_stack_layer_add_correction")
+            if 'MATERIAL' in kind_ids:
+                col = layout.column()
+                # Same hand-off as the header's material button: the pick is assigned to
+                # WindowManager.stack_layer_material_pick, whose update adds the layer.
+                col.context_pointer_set("id_browser_ptr", context.window_manager)
+                col.context_string_set("id_browser_prop", "stack_layer_material_pick")
+                col.popover("UI_PT_id_browser", text="Add Material Layer", icon='MATERIAL')
+            layout.separator()
+        layout.operator("outliner.stack_layer_copy", text="Copy", icon='COPYDOWN')
+        layout.operator("outliner.stack_layer_paste", text="Paste", icon='PASTEDOWN')
+        layout.operator("outliner.stack_layer_remove", text="Remove Stack Layer", icon='TRASH')
 
 
 class OUTLINER_HT_header(Header):
@@ -44,12 +232,24 @@ class OUTLINER_HT_header(Header):
         filter_text_supported = True
         # No text filtering for library override hierarchies. The tree is lazy built to avoid
         # performance issues in complex files.
-        if display_mode == 'LIBRARY_OVERRIDES' and space.lib_override_view_mode == 'HIERARCHIES':
+        if (display_mode == 'LIBRARY_OVERRIDES' and
+                space.lib_override_view_mode == 'HIERARCHIES') or (
+                display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'STACK'):
             filter_text_supported = False
 
         if filter_text_supported:
             row = layout.row(align=True)
             row.prop(space, "filter_text", icon='VIEWZOOM', text="")
+        elif display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'STACK':
+            row = layout.row(align=True)
+            # Which stack of the object is shown -- a material slot, for paint layers. This RNA
+            # enum supports Blender's standard Ctrl+Wheel cycling while hovered.
+            selector_row = row.row(align=True)
+            selector_row.template_enum_menu(space, "stack_focus_sub_index", wrap=False)
+            row.operator(
+                "outliner.stack_layer_pin_toggle", text="", depress=space.use_stack_layer_pin,
+                icon='PINNED' if space.use_stack_layer_pin else 'UNPINNED',
+            )
 
         layout.separator_spacer()
 
@@ -58,7 +258,12 @@ class OUTLINER_HT_header(Header):
             row.prop(space, "use_sync_select", icon='UV_SYNC_SELECT', text="")
 
         row = layout.row(align=True)
-        if display_mode in {'SCENES', 'VIEW_LAYER', 'LIBRARY_OVERRIDES'}:
+        if display_mode == 'STACK_LAYERS':
+            row.popover(
+                panel="OUTLINER_PT_stack_layers_filter",
+                text="",
+            )
+        elif display_mode in {'SCENES', 'VIEW_LAYER', 'LIBRARY_OVERRIDES'}:
             row.popover(
                 panel="OUTLINER_PT_filter",
                 text="",
@@ -142,6 +347,17 @@ class OUTLINER_MT_context_menu(Menu):
 
         layout = self.layout
 
+        if space.display_mode == 'STACK_LAYERS':
+            # A stack row is not a data-block, so none of the common entries (assets, overrides,
+            # ID management) apply to it.
+            if space.stack_layers_view == 'STACK':
+                layout.menu_contents("OUTLINER_MT_stack_layer_context_menu")
+                layout.separator()
+            layout.menu("OUTLINER_MT_context_menu_view")
+            layout.separator()
+            layout.menu("INFO_MT_area")
+            return
+
         if space.display_mode == 'VIEW_LAYER':
             OUTLINER_MT_collection_new.draw_without_context_menu(context, layout)
             layout.separator()
@@ -156,6 +372,12 @@ class OUTLINER_MT_context_menu_view(Menu):
         layout = self.layout
 
         layout.operator("outliner.show_active")
+
+        layout.separator()
+
+        layout.operator("view2d.zoom_in")
+        layout.operator("view2d.zoom_out")
+        layout.operator("view2d.reset", text="Reset Zoom")
 
         layout.separator()
 
@@ -462,6 +684,36 @@ class OUTLINER_PT_filter(Panel):
             row.prop(space, "use_filter_lib_override_system", text="System Overrides")
 
 
+class OUTLINER_PT_stack_layers_filter(Panel):
+    bl_space_type = 'OUTLINER'
+    bl_region_type = 'HEADER'
+    bl_label = "Stack Layers"
+
+    @classmethod
+    def poll(cls, context):
+        return context.space_data.display_mode == 'STACK_LAYERS'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        space = context.space_data
+
+        col = layout.column(heading="Columns", align=True)
+        col.prop(space, "show_stack_layer_opacity", text="Value")
+        col.prop(space, "show_stack_layer_blend", text="Mode")
+        col.prop(space, "use_stack_layer_visibility_left", text="Visibility Left Side")
+
+        col = layout.column(heading="Rows", align=True)
+        col.prop(space, "show_stack_items", text="Contents")
+        col.prop(space, "use_stack_layer_big_rows", text="Large")
+        col.prop(space, "use_stack_layer_pair_channels", text="Pair Channel Rows")
+        col.prop(space, "use_stack_layer_sort_by_name", text="Sort by Name")
+        col.prop(space, "show_stack_layer_move_buttons", text="Move Buttons")
+
+        layout.prop(space, "use_stack_layer_pin")
+
+
 class OUTLINER_PT_options_search(Panel):
     bl_space_type = 'OUTLINER'
     bl_region_type = 'HEADER'
@@ -578,7 +830,11 @@ class OUTLINER_PT_options_filter(Panel):
 
 
 classes = (
+    OUTLINER_HT_tool_header,
     OUTLINER_HT_header,
+    OUTLINER_MT_stack_layer_context_menu,
+    OUTLINER_MT_stack_layer_add_correction,
+    OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,
     OUTLINER_MT_collection,
@@ -593,6 +849,7 @@ classes = (
     OUTLINER_MT_context_menu_view,
     OUTLINER_MT_view_pie,
     OUTLINER_PT_filter,
+    OUTLINER_PT_stack_layers_filter,
     OUTLINER_PT_options_search,
     OUTLINER_PT_options_filter,
 )

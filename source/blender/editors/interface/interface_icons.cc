@@ -2005,6 +2005,13 @@ int id_icon_get(const bContext *C, ID *id, const bool big)
   return iconid;
 }
 
+int icon_id_preview_get(const bContext *C, ID *id)
+{
+  /* Big, because the only caller is a per-row preview column: the row draws whatever the icon
+   * shows at draw time, and the core's preview job fills it in when it lands. */
+  return id_icon_get(C, id, true);
+}
+
 int icon_from_library(const ID *id)
 {
   if (ID_IS_LINKED(id)) {

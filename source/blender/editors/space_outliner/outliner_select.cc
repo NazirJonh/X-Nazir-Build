@@ -6,6 +6,7 @@
  * \ingroup spoutliner
  */
 
+#include <cstdio>
 #include <cstdlib>
 
 #include "DNA_armature_types.h"
@@ -57,6 +58,8 @@
 #include "WM_types.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_icons.hh"
+#include "UI_resources.hh"
 #include "UI_view2d.hh"
 
 #include "RNA_access.hh"
@@ -67,11 +70,93 @@
 #include "ANIM_bone_collections.hh"
 
 #include "outliner_intern.hh"
+#include "outliner_stack_source.hh"
 #include "tree/tree_element_grease_pencil_node.hh"
 #include "tree/tree_element_seq.hh"
 #include "tree/tree_iterator.hh"
 
 namespace blender::ed::outliner {
+
+static bool outliner_stack_preview_section_from_cursor(const SpaceOutliner &space_outliner,
+                                                        const TreeElement &te,
+                                                        const float view_x,
+                                                        std::string &r_section_id)
+{
+  const TreeStoreElem *tselem = TREESTORE(&te);
+  if (tselem->type != TSE_STACK_LAYER ||
+      (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) == 0)
+  {
+    return false;
+  }
+
+  const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
+  if (row == nullptr || row->preview_slots.is_empty()) {
+    return false;
+  }
+
+  /* The same rectangles the draw painted the slots into, read back against the cursor: a hit
+   * names the slot it landed in, and what that slot opens. The rectangles' vertical span is not
+   * consulted -- the caller has already matched the row by its own Y -- so the layout's te.ys,
+   * which the finished draw has written, is as good a line as any here. */
+  for (const int slot_index : row->preview_slots.index_range()) {
+    const rctf preview_rect = outliner_stack_row_preview_rect(
+        *row, float(te.xs), float(te.ys), slot_index);
+    // TODO(debug): remove
+    printf("[STACK_DBG] preview_section slot=%d rect_x=[%.1f,%.1f] view_x=%.1f section='%s'\n",
+           slot_index,
+           preview_rect.xmin,
+           preview_rect.xmax,
+           view_x,
+           row->preview_slots[slot_index].section_id.c_str());
+    if (view_x < preview_rect.xmin || view_x > preview_rect.xmax) {
+      continue;
+    }
+    /* A slot without a section does not switch the row's content; the click means only what the
+     * generic selection code makes of it. */
+    if (row->preview_slots[slot_index].section_id.empty()) {
+      return false;
+    }
+    r_section_id = row->preview_slots[slot_index].section_id;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the cursor names a fill layer's colour swatch.
+ *
+ * The swatch carries no section of its own -- the section hit-test above deliberately answers
+ * false for it -- so it needs its own question: a hit here opens the fill color picker rather
+ * than switching the row's content.
+ */
+static bool outliner_stack_fill_swatch_from_cursor(const SpaceOutliner &space_outliner,
+                                                   const TreeElement &te,
+                                                   const float view_x)
+{
+  const TreeStoreElem *tselem = TREESTORE(&te);
+  if (tselem->type != TSE_STACK_LAYER ||
+      (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) == 0)
+  {
+    return false;
+  }
+
+  const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
+  if (row == nullptr || row->preview_slots.is_empty()) {
+    return false;
+  }
+
+  for (const int slot_index : row->preview_slots.index_range()) {
+    const rctf preview_rect = outliner_stack_row_preview_rect(
+        *row, float(te.xs), float(te.ys), slot_index);
+    if (view_x < preview_rect.xmin || view_x > preview_rect.xmax) {
+      continue;
+    }
+    if (row->preview_slots[slot_index].is_color_swatch) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Internal Utilities
@@ -1680,6 +1765,13 @@ static bool can_select_recursive(TreeElement *te, Collection *in_collection)
     return true;
   }
 
+  /* A Stack Layers group is the stack's own folder: double-clicking its icon selects everything
+   * inside it, the way a collection's icon does in the View Layer. The collection restriction
+   * below does not apply -- stack rows never name an object. */
+  if (te->store_elem->type == TSE_STACK_LAYER) {
+    return true;
+  }
+
   if (te->store_elem->type == TSE_SOME_ID && te->idcode == ID_OB) {
     /* Only actually select the object if
      * 1. We are not restricted to any collection, or
@@ -1861,10 +1953,21 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
 
   ui::view2d_region_to_view(&region->v2d, mval[0], mval[1], &view_mval[0], &view_mval[1]);
 
+  // TODO(debug): remove
+  printf("[STACK_DBG] item_activate enter mval=(%d,%d) view=(%.1f,%.1f)\n",
+         mval[0],
+         mval[1],
+         view_mval[0],
+         view_mval[1]);
+
   if (outliner_is_co_within_restrict_columns(space_outliner, region, view_mval[0])) {
+    // TODO(debug): remove
+    printf("[STACK_DBG] early: within restrict columns\n");
     return OPERATOR_CANCELLED;
   }
   if (outliner_is_co_within_active_mode_column(C, space_outliner, view_mval)) {
+    // TODO(debug): remove
+    printf("[STACK_DBG] early: within active mode column\n");
     return OPERATOR_CANCELLED;
   }
 
@@ -1875,8 +1978,7 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
       changed |= outliner_flag_set(*space_outliner, TSE_SELECTED, false);
     }
   }
-  /* Don't allow toggle on scene collection */
-  else if ((TREESTORE(te)->type != TSE_VIEW_COLLECTION_BASE) &&
+  else if (TREESTORE(te)->type != TSE_VIEW_COLLECTION_BASE &&
            outliner_item_is_co_within_close_toggle(te, view_mval[0]))
   {
     return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
@@ -1887,6 +1989,12 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
     bool is_over_icon = false;
     TreeElement *activate_te = outliner_find_item_at_x_in_row(
         space_outliner, te, view_mval[0], &merged_elements, &is_over_icon);
+    /* A fill swatch click opens the color picker. Stashed here, acted on after the generic
+     * selection below: the picker's own poll answers for the selected row, so selection has to
+     * land first (a click on an unselected row must still open its picker). */
+    bool open_fill_picker = false;
+    StackItemIdentity fill_picker_identity;
+    int fill_picker_ordinal = -1;
 
     /* If the selected icon was an aggregate of multiple elements, run the search popup */
     if (merged_elements) {
@@ -1895,6 +2003,75 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
     }
 
     TreeStoreElem *activate_tselem = TREESTORE(activate_te);
+
+    // TODO(debug): remove
+    printf("[STACK_DBG] click view=(%.1f,%.1f) te=%p activate_te=%p type=%d nr=%d "
+           "outlinevis=%d view=%d recurse=%d extend=%d range=%d\n",
+           view_mval[0],
+           view_mval[1],
+           static_cast<void *>(te),
+           static_cast<void *>(activate_te),
+           int(activate_tselem->type),
+           int(activate_tselem->nr),
+           int(space_outliner->outlinevis),
+           int(space_outliner->stack_layers_view),
+           int(recurse),
+           int(extend),
+           int(use_range));
+
+    if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+      if (space_outliner->stack_layers_view == SO_SL_VIEW_OBJECTS &&
+          activate_tselem->type == TSE_SOME_ID && activate_te->idcode == ID_OB)
+      {
+        Object *object = id_cast<Object *>(activate_tselem->id);
+        return outliner_stack_focus_set(C, *space_outliner, *object, -1, true) ?
+                   OPERATOR_FINISHED :
+                   OPERATOR_CANCELLED;
+      }
+      if (space_outliner->stack_layers_view == SO_SL_VIEW_STACK &&
+          activate_tselem->type == TSE_STACK_LAYER && !recurse)
+      {
+        /* Two different things happen to a clicked row, and only one of them is about painting:
+         * a row that names maps becomes the paint target, and *every* row -- a group included --
+         * becomes the selected one, which is what the operators act on. Selection is left to the
+         * generic code below rather than repeated here, so a folder can be renamed, grouped or
+         * deleted like any other row even though no brush can write into it. */
+        if (outliner_stack_fill_swatch_from_cursor(
+                *space_outliner, *activate_te, view_mval[0]))
+        {
+          fill_picker_ordinal = activate_tselem->nr;
+          fill_picker_identity = outliner_stack_identity_of(*space_outliner,
+                                                            fill_picker_ordinal);
+          open_fill_picker = fill_picker_identity.is_valid();
+        }
+        std::string preview_section;
+        const bool is_preview_click = outliner_stack_preview_section_from_cursor(
+            *space_outliner, *activate_te, view_mval[0], preview_section);
+        outliner_stack_row_activate(C, *space_outliner, activate_tselem->nr);
+        if (is_preview_click) {
+          const StackRow *row = outliner_stack_row_find(*space_outliner, activate_tselem->nr);
+          if (row != nullptr && !row->content_sections.is_empty()) {
+            if (outliner_stack_row_active_section_set(*space_outliner, *row, preview_section)) {
+              /* Content sub-rows are built from the active section, so a section switch needs a
+               * tree rebuild rather than only redrawing the current tree. */
+              rebuild_tree = true;
+            }
+          }
+          if (outliner_stack_row_preview_activate(
+                  C, *space_outliner, activate_tselem->nr, preview_section))
+          {
+            rebuild_tree = true;
+          }
+        }
+      }
+      if (space_outliner->stack_layers_view == SO_SL_VIEW_STACK &&
+          activate_tselem->type == TSE_STACK_ITEM && recurse)
+      {
+        return outliner_stack_sub_row_activate(C, *space_outliner, activate_tselem->nr) ?
+                   OPERATOR_FINISHED :
+                   OPERATOR_CANCELLED;
+      }
+    }
 
     Collection *parent_collection = nullptr;
     if (recurse) {
@@ -1951,6 +2128,59 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
       if (is_over_icon) {
         outliner_set_properties_tab(C, activate_te, activate_tselem);
       }
+
+      if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+          activate_tselem->type == TSE_STACK_LAYER && activate_tselem->id != nullptr)
+      {
+        /* The clicked row's selection has just landed in the tree store; write it into the
+         * identity-keyed state the rebuild restores from, before a section switch triggers that
+         * rebuild. Without this the rebuild would re-apply the previous selection. */
+        outliner_stack_row_ui_state_capture_now(*space_outliner, *activate_tselem->id);
+        // TODO(debug): remove
+        char dbg_stable[UUID_STRING_SIZE];
+        BLI_uuid_format(dbg_stable,
+                        outliner_stack_identity_of(*space_outliner, int(activate_tselem->nr)).row_id);
+        printf("[STACK_DBG] ui_state write stable=%.8s active=%d selected=%d\n",
+               dbg_stable,
+               int((activate_tselem->flag & TSE_ACTIVE) != 0),
+               int((activate_tselem->flag & TSE_SELECTED) != 0));
+      }
+
+      if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+        const StackReadContext dbg_ctx = {
+            CTX_data_main(C), CTX_data_scene(C), CTX_data_view_layer(C)};
+        const bool dbg_row_active = outliner_stack_row_is_active(
+            dbg_ctx, *space_outliner, int(activate_tselem->nr));
+        // TODO(debug): remove
+        printf(
+            "[STACK_DBG] post-click ordinal=%d row_is_active=%d TSE_ACTIVE=%d TSE_SELECTED=%d "
+            "rebuild=%d\n",
+            int(activate_tselem->nr),
+            int(dbg_row_active),
+            int((activate_tselem->flag & TSE_ACTIVE) != 0),
+            int((activate_tselem->flag & TSE_SELECTED) != 0),
+            int(rebuild_tree));
+      }
+    }
+
+    /* A stashed fill swatch click, run after selection landed: the picker's poll answers for
+     * the now-selected row, and both addresses travel along -- the marker first -- so a row
+     * renumbered mid-dialog still resolves. */
+    if (open_fill_picker) {
+      PointerRNA props = WM_operator_properties_create(
+          "OUTLINER_OT_stack_layer_fill_color_set");
+      RNA_int_set(&props, "ordinal", fill_picker_ordinal);
+      if (!BLI_uuid_is_nil(fill_picker_identity.row_id)) {
+        char marker_str[UUID_STRING_SIZE];
+        BLI_uuid_format(marker_str, fill_picker_identity.row_id);
+        RNA_string_set(&props, "marker", marker_str);
+      }
+      WM_operator_name_call(C,
+                            "OUTLINER_OT_stack_layer_fill_color_set",
+                            wm::OpCallContext::InvokeDefault,
+                            &props,
+                            nullptr);
+      WM_operator_properties_free(&props);
     }
 
     changed = true;
@@ -2032,7 +2262,9 @@ static void outliner_box_select(bContext *C,
                                 const bool select)
 {
   tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
-    if (te->ys <= rectf->ymax && te->ys + UI_UNIT_Y >= rectf->ymin) {
+    if (te->ys <= rectf->ymax &&
+        te->ys + outliner_tree_element_height(*space_outliner, *te) >= rectf->ymin)
+    {
       outliner_item_select(
           C, space_outliner, te, (select ? OL_ITEM_SELECT : OL_ITEM_DESELECT) | OL_ITEM_EXTEND);
     }

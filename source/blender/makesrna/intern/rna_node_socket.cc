@@ -8,6 +8,8 @@
 
 #include "BLT_translation.hh"
 
+#include "BKE_idprop.hh"
+
 #include "DNA_node_types.h"
 
 #include "RNA_define.hh"
@@ -777,6 +779,58 @@ std::optional<std::string> rna_NodeSocketString_filepath_filter(const bContext *
   return std::nullopt;
 }
 
+/**
+ * The `pbr_custom_role` IDProperty of a node group interface socket: the one place a Custom
+ * paint layer's role is written and read through RNA.
+ */
+const char *rna_NodeTreeInterfaceSocket_paint_layer_role(const PointerRNA *ptr)
+{
+  const bNodeTreeInterfaceSocket *socket = static_cast<const bNodeTreeInterfaceSocket *>(
+      ptr->data);
+  if (socket == nullptr || socket->properties == nullptr) {
+    return nullptr;
+  }
+  const IDProperty *prop = IDP_GetPropertyTypeFromGroup(
+      socket->properties, "pbr_custom_role", IDP_STRING);
+  return (prop != nullptr) ? IDP_string_get(prop) : nullptr;
+}
+
+void rna_NodeTreeInterfaceSocket_paint_layer_role_get(PointerRNA *ptr, char *value)
+{
+  const char *role = rna_NodeTreeInterfaceSocket_paint_layer_role(ptr);
+  if (role != nullptr) {
+    strcpy(value, role);
+  }
+  else {
+    value[0] = '\0';
+  }
+}
+
+int rna_NodeTreeInterfaceSocket_paint_layer_role_length(PointerRNA *ptr)
+{
+  const char *role = rna_NodeTreeInterfaceSocket_paint_layer_role(ptr);
+  return (role != nullptr) ? int(strlen(role)) : 0;
+}
+
+void rna_NodeTreeInterfaceSocket_paint_layer_role_set(PointerRNA *ptr, const char *value)
+{
+  bNodeTreeInterfaceSocket *socket = static_cast<bNodeTreeInterfaceSocket *>(ptr->data);
+  if (socket == nullptr) {
+    return;
+  }
+  if (socket->properties == nullptr) {
+    IDPropertyTemplate val = {};
+    socket->properties = IDP_New(IDP_GROUP, &val, "properties");
+  }
+  IDProperty *prop = IDP_GetPropertyTypeFromGroup(
+      socket->properties, "pbr_custom_role", IDP_STRING);
+  if (prop != nullptr) {
+    IDP_AssignString(prop, value);
+    return;
+  }
+  IDP_AddToGroup(socket->properties, IDP_NewString(value, "pbr_custom_role"));
+}
+
 }  // namespace blender
 
 #else
@@ -1087,6 +1141,19 @@ static void rna_def_node_tree_interface_socket_builtin(StructRNA *srna)
 {
   FunctionRNA *func;
   PropertyRNA *parm;
+  PropertyRNA *prop;
+
+  prop = RNA_def_property(srna, "paint_layer_role", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_NodeTreeInterfaceSocket_paint_layer_role_get",
+                                "rna_NodeTreeInterfaceSocket_paint_layer_role_length",
+                                "rna_NodeTreeInterfaceSocket_paint_layer_role_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Layer Role",
+      "Role this socket plays in a Custom paint layer group: BELOW:<CHANNEL>, COLOR:<CHANNEL>, "
+      "COVERAGE, COVERAGE_BELOW or UV");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_NodeTreeInterfaceItem_update");
 
   /* Override for functions, invoking the typeinfo callback directly
    * instead of expecting an existing RNA registered function implementation.

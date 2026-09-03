@@ -1259,6 +1259,7 @@ enum BlockBoundsCalc {
   BLOCK_BOUNDS_POPUP_MENU,
   BLOCK_BOUNDS_POPUP_CENTER,
   BLOCK_BOUNDS_PIE_CENTER,
+  BLOCK_BOUNDS_POPUP_ANCHOR,
 };
 
 /**
@@ -1281,6 +1282,12 @@ void block_bounds_set_menu(Block *block, int addval, const int bounds_offset[2])
  * Used for centered popups, i.e. splash.
  */
 void block_bounds_set_centered(Block *block, int addval);
+/**
+ * Used for popups anchored to a window-space rectangle: placed beside it -- above when it fits,
+ * else below -- so the rectangle the user is working on stays visible. The anchor travels in
+ * #Block::bounds_anchor; the side chosen at the first placement is kept across refreshes.
+ */
+void block_bounds_set_anchor(Block *block, int addval, const rcti &anchor_rect);
 void block_bounds_set_explicit(Block *block, int minx, int miny, int maxx, int maxy);
 
 int blocklist_min_y_get(ListBaseT<ui::Block> *lb);
@@ -2232,6 +2239,8 @@ int search_items_find_index(const SearchItems *items, const char *name);
  */
 void button_hint_drawstr_set(Button *but, const char *string);
 void button_icon_scale_set(Button *but, float scale);
+/** Scale the button's text, 1.0 is the style's own size. */
+void button_text_scale_set(Button *but, float scale);
 void button_icon_indicator_number_set(Button *but, const int indicator_number);
 void button_icon_indicator_set(Button *but, const char *string);
 void button_icon_indicator_color_set(Button *but, const uchar color[4]);
@@ -2828,6 +2837,16 @@ std::optional<StringRefNull> button_asset_shelf_type_idname_get(const Button *bu
 
 /* templates */
 void template_header(Layout *layout, bContext *C);
+/**
+ * A menu button for an enum property with a fixed width that does not follow the current
+ * item's name. With \a wrap false, Ctrl-Wheel stepping stops at the first and last item
+ * instead of cycling around.
+ */
+void template_enum_menu(Layout *layout,
+                        PointerRNA *ptr,
+                        StringRefNull propname,
+                        float width_units,
+                        bool wrap);
 void template_id(Layout *layout,
                  const bContext *C,
                  PointerRNA *ptr,
@@ -2929,6 +2948,14 @@ void template_id_browser_button(Layout *layout,
 
 /** Pointer to #wmWindowManager::id_browser_grid_view_settings (the ID browser's grid settings). */
 PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm);
+/**
+ * Register the ID-browser popover's panel type (#UI_PT_id_browser), unless it already is.
+ *
+ * Idempotent. The popover is reachable from Python through #UILayout.popover, which cannot
+ * register the panel type itself, so a host that opens it from Python calls this -- the Outliner's
+ * Stack Layers header does, at its space-type registration.
+ */
+void id_browser_popover_register();
 /**
  * Return the browsed asset library by value from #wmWindowManager::id_browser_grid_view_settings,
  * resolved against the current Preferences (see #ed::asset::library_reference_ensure_resolved).
@@ -3247,6 +3274,18 @@ void template_color_picker(Layout *layout,
                            bool lock,
                            bool lock_luminosity,
                            bool cubic);
+/**
+ * The full standard color picker -- wheel/square, value slider, RGB/HSV/HSL channel sliders, hex
+ * field, eyedropper and the paint-mode Color Palette -- built into \a layout, bound to the float
+ * color \a propname on \a ptr. Meant for operator dialogs: the property's own RNA update runs for
+ * every edit, so a live preview registered on it ticks without extra wiring. Every change stays
+ * inside the dialog: no nested popup, and the picker never closes its host.
+ */
+void template_color_picker_full(bContext *C,
+                                Layout *layout,
+                                PointerRNA *ptr,
+                                StringRefNull propname,
+                                bool show_eyedropper);
 void template_palette(Layout *layout,
                       PointerRNA *ptr,
                       StringRefNull propname,

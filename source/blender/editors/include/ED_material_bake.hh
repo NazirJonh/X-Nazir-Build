@@ -23,9 +23,12 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
+#include "BLI_function_ref.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BKE_paint_material_resolve.hh"
@@ -105,13 +108,19 @@ std::shared_ptr<const MaterialSourceBake> material_source_bake_get(const Materia
  * paint cursor), which is what makes an edit to the source material pick itself up without the
  * user asking.
  */
-void material_source_bake_ensure(const bContext &C, Material &ma, int resolution);
+void material_source_bake_ensure(const bContext &C,
+                                 Material &ma,
+                                 int resolution,
+                                 const char *reason = "source");
 
 /**
  * As above, for callers that have no #bContext -- an RNA update, in particular. Starts nothing
  * when \a bmain has no window manager yet (file read, background mode).
  */
-void material_source_bake_ensure(Main &bmain, Material &ma, int resolution);
+void material_source_bake_ensure(Main &bmain,
+                                 Material &ma,
+                                 int resolution,
+                                 const char *reason = "source");
 
 /**
  * Drop every cached bake of \a ma, or of every material when \a ma is null.
@@ -199,12 +208,21 @@ bool material_bake_source_is_baking(const Image &image);
 
 /**
  * One channel to bake into its own #Image. v1 carries only the channel; an object, a UV map or a
- * socket override are the documented seam for mesh-space and arbitrary-socket bakes and go here
+ * socket substitution are the documented seam for mesh-space and arbitrary-socket bakes and go here
  * without touching #material_bake_to_images's signature.
  */
 struct BakeTargetSpec {
   eMaterialPaintChannel channel;
+  /**
+   * The map to re-fill, when set; it must already carry a bake link to the source material for
+   * #channel. Takes precedence over #MaterialBakeToImagesParams.reuse_existing, which can only
+   * find *a* map of the material's channel -- the wrong one once two layers were baked from the
+   * same material.
+   */
+  Image *existing = nullptr;
 };
+
+struct MaterialBakeToImagesResult;
 
 struct MaterialBakeToImagesParams {
   /** Source material. Not localized by the caller -- #material_bake_to_images copies it. */
@@ -221,6 +239,15 @@ struct MaterialBakeToImagesParams {
   bool reuse_existing = false;
   /** #Image::paint_layer_id to stamp on every created map. Empty -> a fresh UUID is generated. */
   char layer_id[37] = "";
+  /**
+   * Called on the calling thread once the targets exist, before any render starts; returning
+   * false starts none and leaves #MaterialBakeToImagesResult.ok false.
+   *
+   * This is where a caller hands the targets over to the file (a layer add, say). Doing that after
+   * #material_bake_to_images returns would race the job: its worker updates node trees too, and a
+   * refused hand-over frees targets the job would then write back to.
+   */
+  FunctionRef<bool(const MaterialBakeToImagesResult &result)> before_render;
 };
 
 struct MaterialBakeToImagesResult {
@@ -235,13 +262,101 @@ struct MaterialBakeToImagesResult {
  * Bake \a params.targets of \a params.material into one #Image each, on the unit UV square.
  *
  * Preflight, target creation and the link write happen on the calling thread before this returns.
- * The render and the pixel write-back run in a #wmJob unless \a params.blocking. \a wm / \a win may
+ * The render and the pixel write-back run in a #wmJob unless \a params.blocking. \a wm / \a win
+ * may
  * be null only when \a params.blocking is true.
  */
 MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
                                                    wmWindowManager *wm,
                                                    wmWindow *win,
                                                    const MaterialBakeToImagesParams &params);
+
+/**
+ * Start re-filling every editable map baked from \a ma whose bake no longer matches \a ma's node
+ * trees, each map in place and at the size it was baked at.
+ *
+ * Meant for the editor update of a changed material, so it is cheap when nothing was baked from
+ * \a ma and does not restart a running bake for a node-tree state it already started. Starts
+ * nothing without a window manager (file read, background mode).
+ */
+void material_bake_images_rebake_stale(Main &bmain, Material &ma);
+
+/**
+ * Bring the bake of every Material-kind row of the layered material \a ma current: a row whose
+ * bake hash no longer matches (its source material's graph was edited) is rendered again into its
+ * own baked maps, through the same job the source-material bake uses.
+ *
+ * The hand-over of the fresh maps to the description happens on the main thread in the bake's
+ * `before_render`, so the generator substitutes as soon as the worker has filled them. A no-op for
+ * a material that is not layered, or a row that is already valid; starts nothing without a window
+ * manager.
+ */
+void material_bake_layered_rows_ensure(Main &bmain, Material &ma);
+
+/**
+ * Start re-filling \a images, maps baked from \a ma, whether or not they are stale -- after a
+ * resize, or for a map that was just linked to \a ma.
+ *
+ * Every other map of \a ma still being baked is re-rendered along with them, since the material
+ * has a single bake job that this replaces.
+ *
+ * \param size: the square side to render at; zero keeps the largest size the maps were baked at.
+ */
+void material_bake_images_rebake(Main &bmain, Material &ma, Span<Image *> images, int size);
+
+/**
+ * Bring the bake of every Custom-kind row of the layered material \a ma current.
+ *
+ * A Custom row is a node group the CPU cannot evaluate, so the description stores its result as
+ * baked maps and both the generator and the CPU substitute them. The group's `COLOR:<CHANNEL>`
+ * outputs are rendered through the same EEVEE/AOV core the source material uses, its
+ * `BELOW:<CHANNEL>` inputs are fed from the stack under the row (composited on the calling thread
+ * into an image) and its `COVERAGE` output rides the buffers' alpha. A small bake runs synchronously
+ * on the calling thread; a heavy one is queued in a #wmJob. A no-op for a material that is not
+ * layered, a row without a group, or a row whose bake is already valid.
+ */
+void material_bake_custom_rows_ensure(Main &bmain, Material &ma);
+
+/**
+ * Whether \a ma has a Custom row bake in flight right now.
+ *
+ * A Custom row's #wmJob is owned by a throw-away host material in a private #Main, not by \a ma, so
+ * `WM_jobs_test` keyed on \a ma cannot see it. The editor-static active set is the only witness,
+ * which is what this exposes to the paint-layer bake gate so
+ * #MA_PAINT_LAYERS_BAKE_SCHEDULED stays set while a Custom row is still rendering.
+ *
+ * Pure with respect to window-manager state -- the active set and a session_uid comparison -- so it
+ * needs no #wmWindowManager.
+ */
+bool material_bake_custom_in_flight(const Material &ma);
+
+/**
+ * Create a target #Image for (\a material, \a channel) exactly as the bake does, linked back to the
+ * material. Exposed for tests so the colorspace contract of a baked map can be checked without a
+ * render; production reaches it through #material_bake_to_images.
+ *
+ * With \a placeholder the image only holds a 1x1 buffer (the link still records \a size); the
+ * caller is expected to hand it a full-size render buffer afterwards.
+ */
+Image *bake_target_image_create(Main &bmain,
+                                Material &material,
+                                eMaterialPaintChannel channel,
+                                int size,
+                                const char *layer_id,
+                                uint64_t current_hash,
+                                bool placeholder = false);
+
+/**
+ * Write a rendered scene-linear buffer into \a image exactly as the completion callback does.
+ * Exposed for tests alongside #bake_target_image_create.
+ */
+void bake_target_image_write_back(Image &image, const ImBuf &rendered);
+
+/**
+ * Bring a reused map to the colorspace its channel needs, converting the pixels out of a legacy
+ * display space first. Exposed for tests alongside #bake_target_image_create.
+ */
+void bake_target_image_normalize_colorspace(Image &image, eMaterialPaintChannel channel);
 
 /** \} */
 

@@ -12,17 +12,27 @@
 #include "DNA_action_types.h"
 #include "DNA_layer_types.h"
 #include "DNA_lightprobe_types.h"
+#include "DNA_material_types.h"
 #include "DNA_meta_types.h"
 #include "DNA_object_types.h"
 
+#include "BLI_listbase.h"
 #include "BLI_math_rotation.h"
+#include "BLI_string.h"
 
 #include "BLT_translation.hh"
 
+#include "BKE_mesh_maps.hh"
+#include "BKE_mesh_maps_bake.hh"
 #include "BKE_paint.hh"
+#include "BKE_report.hh"
+
+#include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_query.hh"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
+#include "RNA_prototypes.hh"
 
 #include "rna_internal.hh"
 
@@ -2382,6 +2392,314 @@ static void rna_LightLinking_collection_update(Main *bmain, Scene * /*scene*/, P
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, ptr->owner_id);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Mesh map state RNA helpers
+ * \{ */
+
+static void rna_Object_mesh_map_states_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  rna_iterator_listbase_begin(iter, ptr, &ob->mesh_map_states, nullptr);
+}
+
+static int rna_Object_mesh_map_states_length(PointerRNA *ptr)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  return BLI_listbase_count(&ob->mesh_map_states);
+}
+
+static ObjectMeshMapState *rna_Object_mesh_map_states_ensure(Object *ob,
+                                                             Material *material,
+                                                             int type)
+{
+  if (material == nullptr) {
+    return nullptr;
+  }
+  return BKE_mesh_maps_object_state_ensure(*ob, *material, int8_t(type));
+}
+
+/**
+ * The evaluated counterpart of the object that owns \a state, or null after reporting that the
+ * object is not part of \a depsgraph. The hash is a function of the evaluated geometry, so reading
+ * it from an original object would be wrong.
+ */
+static Object *rna_ObjectMeshMapState_object_eval(ID *self_id,
+                                                  Depsgraph *depsgraph,
+                                                  ReportList *reports)
+{
+  Object *ob = id_cast<Object *>(self_id);
+  if (ob == nullptr || depsgraph == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Object is not in the given depsgraph");
+    return nullptr;
+  }
+  Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
+  /* An object that is not part of the depsgraph is returned unchanged by DEG_get_evaluated. */
+  if (ob_eval == nullptr || ob_eval == ob) {
+    BKE_report(reports, RPT_ERROR, "Object is not in the given depsgraph");
+    return nullptr;
+  }
+  return ob_eval;
+}
+
+static bool rna_ObjectMeshMapState_is_current(ID *self_id,
+                                              ObjectMeshMapState *state,
+                                              ReportList *reports,
+                                              Depsgraph *depsgraph)
+{
+  if (state == nullptr || state->material == nullptr) {
+    return false;
+  }
+  Object *ob_eval = rna_ObjectMeshMapState_object_eval(self_id, depsgraph, reports);
+  if (ob_eval == nullptr) {
+    return false;
+  }
+  return BKE_mesh_maps_object_state_is_current(*state, *ob_eval, *state->material);
+}
+
+static bool rna_ObjectMeshMapState_uv_missing(ID *self_id,
+                                              ObjectMeshMapState *state,
+                                              ReportList *reports,
+                                              Depsgraph *depsgraph)
+{
+  if (state == nullptr || state->material == nullptr) {
+    return false;
+  }
+  Object *ob_eval = rna_ObjectMeshMapState_object_eval(self_id, depsgraph, reports);
+  if (ob_eval == nullptr) {
+    return false;
+  }
+  return BKE_mesh_maps_object_uv_missing(*ob_eval, *state->material);
+}
+
+static int rna_ObjectMeshMapState_refresh(ID *self_id,
+                                          ObjectMeshMapState *state,
+                                          ReportList *reports,
+                                          Depsgraph *depsgraph)
+{  if (state == nullptr || state->material == nullptr) {
+    return state != nullptr ? state->status : OB_MESH_MAP_STATUS_NONE;
+  }
+  Object *ob_eval = rna_ObjectMeshMapState_object_eval(self_id, depsgraph, reports);
+  if (ob_eval == nullptr) {
+    return state->status;
+  }
+  return BKE_mesh_maps_object_state_refresh(*state, *ob_eval, *state->material);
+}
+
+static void rna_ObjectMeshMapState_compute_hash(
+    ID *self_id, ObjectMeshMapState *state, ReportList *reports, Depsgraph *depsgraph, char *value)
+{
+  value[0] = '\0';
+  if (state == nullptr || state->material == nullptr) {
+    return;
+  }
+  Object *ob_eval = rna_ObjectMeshMapState_object_eval(self_id, depsgraph, reports);
+  if (ob_eval == nullptr) {
+    return;
+  }
+  uint32_t hash[2];
+  BKE_mesh_maps_object_hash(*ob_eval, *state->material, state->type, hash);
+  /* Same format as the `hash` property. */
+  BLI_snprintf(value, 17, "%08x%08x", hash[0], hash[1]);
+}
+
+static int rna_Object_mesh_map_states_refresh_all(Object *ob,
+                                                  ReportList *reports,
+                                                  Depsgraph *depsgraph)
+{
+  if (ob == nullptr || depsgraph == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Object is not in the given depsgraph");
+    return 0;
+  }
+  Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
+  if (ob_eval == nullptr || ob_eval == ob) {
+    BKE_report(reports, RPT_ERROR, "Object is not in the given depsgraph");
+    return 0;
+  }
+  return BKE_mesh_maps_object_refresh_all(*ob, *ob_eval);
+}
+
+/** \name High-poly source RNA helpers
+ * \{ */
+
+static void rna_Object_mesh_map_sources_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  rna_iterator_listbase_begin(iter, ptr, &ob->mesh_map_sources, nullptr);
+}
+
+static int rna_Object_mesh_map_sources_length(PointerRNA *ptr)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  return BLI_listbase_count(&ob->mesh_map_sources);
+}
+
+static ObjectMeshMapSource *rna_Object_mesh_map_sources_ensure(Object *ob, Material *material)
+{
+  if (ob == nullptr || material == nullptr) {
+    return nullptr;
+  }
+  return BKE_mesh_maps_source_ensure(*ob, *material);
+}
+
+static bool rna_Object_mesh_map_sources_remove(Object *ob, Material *material)
+{
+  if (ob == nullptr || material == nullptr) {
+    return false;
+  }
+  return BKE_mesh_maps_source_remove(*ob, *material);
+}
+
+static PointerRNA rna_ObjectMeshMapSource_material_get(PointerRNA *ptr)
+{
+  ObjectMeshMapSource *source = static_cast<ObjectMeshMapSource *>(ptr->data);
+  return RNA_pointer_create_with_parent(*ptr, RNA_Material, source->material);
+}
+
+static PointerRNA rna_ObjectMeshMapSource_high_poly_get(PointerRNA *ptr)
+{
+  ObjectMeshMapSource *source = static_cast<ObjectMeshMapSource *>(ptr->data);
+  return RNA_pointer_create_with_parent(*ptr, RNA_Object, source->high_poly);
+}
+
+static bool rna_ObjectMeshMapSource_high_poly_poll(PointerRNA *ptr, PointerRNA value)
+{
+  const Object *owner = id_cast<Object *>(ptr->owner_id);
+  const Object *candidate = reinterpret_cast<Object *>(value.owner_id);
+  if (candidate == nullptr || candidate == owner) {
+    return false;
+  }
+  return candidate->type == OB_MESH;
+}
+
+static void rna_ObjectMeshMapSource_high_poly_set(PointerRNA *ptr,
+                                                  PointerRNA value,
+                                                  ReportList *)
+{
+  ObjectMeshMapSource *source = static_cast<ObjectMeshMapSource *>(ptr->data);
+  Object *candidate = static_cast<Object *>(value.data);
+  if (candidate != nullptr && candidate == id_cast<Object *>(ptr->owner_id)) {
+    return;
+  }
+  source->high_poly = candidate;
+  if (candidate != nullptr) {
+    /* At most one of the object and the collection is set. */
+    source->high_poly_collection = nullptr;
+  }
+}
+
+static PointerRNA rna_ObjectMeshMapSource_collection_get(PointerRNA *ptr)
+{
+  ObjectMeshMapSource *source = static_cast<ObjectMeshMapSource *>(ptr->data);
+  return RNA_pointer_create_with_parent(*ptr, RNA_Collection, source->high_poly_collection);
+}
+
+static void rna_ObjectMeshMapSource_collection_set(PointerRNA *ptr,
+                                                   PointerRNA value,
+                                                   ReportList *)
+{
+  ObjectMeshMapSource *source = static_cast<ObjectMeshMapSource *>(ptr->data);
+  Collection *candidate = static_cast<Collection *>(value.data);
+  source->high_poly_collection = candidate;
+  if (candidate != nullptr) {
+    source->high_poly = nullptr;
+  }
+}
+
+static bool rna_ObjectMeshMapSource_cage_matches(ID *self_id,
+                                                 ObjectMeshMapSource *source,
+                                                 Depsgraph *depsgraph)
+{
+  if (source == nullptr || source->cage == nullptr) {
+    /* Without a custom cage there is nothing to compare against: the auto-cage always fits. */
+    return true;
+  }
+  Object *owner = id_cast<Object *>(self_id);
+  if (owner == nullptr) {
+    return false;
+  }
+  /* Fall back to the original data when the object is not in the given depsgraph, so the UI check
+   * never reports a false mismatch for an unlinked or hidden cage. */
+  Object *owner_eval = depsgraph != nullptr ? DEG_get_evaluated(depsgraph, owner) : nullptr;
+  Object *cage_eval = depsgraph != nullptr ? DEG_get_evaluated(depsgraph, source->cage) : nullptr;
+  const Object *owner_ref = (owner_eval != nullptr && owner_eval != owner) ? owner_eval : owner;
+  const Object *cage_ref = (cage_eval != nullptr && cage_eval != source->cage) ? cage_eval :
+                                                                                 source->cage;
+  const Mesh *owner_mesh = BKE_object_get_evaluated_mesh(owner_ref);
+  if (owner_mesh == nullptr) {
+    owner_mesh = id_cast<const Mesh *>(owner_ref->data);
+  }
+  const Mesh *cage_mesh = BKE_object_get_evaluated_mesh(cage_ref);
+  if (cage_mesh == nullptr) {
+    cage_mesh = id_cast<const Mesh *>(cage_ref->data);
+  }
+  if (owner_mesh == nullptr || cage_mesh == nullptr) {
+    return false;
+  }
+  return BKE_mesh_maps_bake_cage_matches(*owner_mesh, *cage_mesh);
+}
+
+static PointerRNA rna_ObjectMeshMapSource_cage_get(PointerRNA *ptr)
+{
+  ObjectMeshMapSource *source = static_cast<ObjectMeshMapSource *>(ptr->data);
+  return RNA_pointer_create_with_parent(*ptr, RNA_Object, source->cage);
+}
+
+static bool rna_ObjectMeshMapSource_cage_poll(PointerRNA *ptr, PointerRNA value)
+{
+  const Object *owner = id_cast<Object *>(ptr->owner_id);
+  const Object *candidate = reinterpret_cast<Object *>(value.owner_id);
+  if (candidate == nullptr || candidate == owner) {
+    return false;
+  }
+  return candidate->type == OB_MESH;
+}
+
+static void rna_ObjectMeshMapSource_cage_set(PointerRNA *ptr, PointerRNA value, ReportList *)
+{
+  ObjectMeshMapSource *source = static_cast<ObjectMeshMapSource *>(ptr->data);
+  Object *candidate = static_cast<Object *>(value.data);
+  if (candidate != nullptr && candidate == id_cast<Object *>(ptr->owner_id)) {
+    return;
+  }
+  source->cage = candidate;
+}
+
+/** \} */
+
+static PointerRNA rna_ObjectMeshMapState_material_get(PointerRNA *ptr)
+{
+  ObjectMeshMapState *state = static_cast<ObjectMeshMapState *>(ptr->data);
+  return RNA_pointer_create_with_parent(*ptr, RNA_Material, state->material);
+}
+
+static int rna_ObjectMeshMapState_type_get(PointerRNA *ptr)
+{
+  return static_cast<const ObjectMeshMapState *>(ptr->data)->type;
+}
+
+static int rna_ObjectMeshMapState_status_get(PointerRNA *ptr)
+{
+  return static_cast<const ObjectMeshMapState *>(ptr->data)->status;
+}
+
+static void rna_ObjectMeshMapState_hash_get(PointerRNA *ptr, char *value)
+{
+  const ObjectMeshMapState *state = static_cast<const ObjectMeshMapState *>(ptr->data);
+  BLI_snprintf(value, 17, "%08x%08x", state->hash[0], state->hash[1]);
+}
+
+static int rna_ObjectMeshMapState_hash_length(PointerRNA * /*ptr*/)
+{
+  return 16;
+}
+
+static int rna_ObjectMeshMapState_baked_time_get(PointerRNA *ptr)
+{
+  return static_cast<const ObjectMeshMapState *>(ptr->data)->baked_time;
+}
+
+/** \} */
+
 }  // namespace blender
 
 #else
@@ -3024,6 +3342,278 @@ static void rna_def_object_visibility(StructRNA *srna)
   RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_Object_internal_update_draw");
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Mesh map states
+ * \{ */
+
+/* Values must match #eMaterialMeshMapType; kept local because rna_material.cc's table is static. */
+static const EnumPropertyItem rna_enum_object_mesh_map_type_items[] = {
+    {MA_MESH_MAP_AO, "AO", 0, "Ambient Occlusion", "Ambient occlusion map"},
+    {MA_MESH_MAP_CURVATURE, "CURVATURE", 0, "Curvature", "Curvature map"},
+    {MA_MESH_MAP_NORMAL_WORLD, "NORMAL_WORLD", 0, "Normal (World)", "World-space normal map"},
+    {MA_MESH_MAP_NORMAL_OBJECT,
+     "NORMAL_OBJECT",
+     0,
+     "Normal (Object)",
+     "Object-space normal map"},
+    {MA_MESH_MAP_ID_OBJECT, "ID_OBJECT", 0, "Object ID", "Object index map"},
+    {MA_MESH_MAP_ID_MATERIAL, "ID_MATERIAL", 0, "Material ID", "Material index map"},
+    {MA_MESH_MAP_EDGE, "EDGE", 0, "Edge", "Edge/bevel map"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values must match #eObjectMeshMapStatus. */
+static const EnumPropertyItem rna_enum_object_mesh_map_status_items[] = {
+    {OB_MESH_MAP_STATUS_NONE, "NONE", 0, "None", "Nothing has been baked"},
+    {OB_MESH_MAP_STATUS_VALID, "VALID", 0, "Valid", "The bake matches the object"},
+    {OB_MESH_MAP_STATUS_STALE, "STALE", 0, "Stale", "The object changed since the last bake"},
+    {OB_MESH_MAP_STATUS_BAKING, "BAKING", 0, "Baking", "A bake is in flight"},
+    {OB_MESH_MAP_STATUS_ERROR, "ERROR", 0, "Error", "The last bake failed"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* The mesh map state RNA helpers that call BKE live in the runtime half; only the registration
+ * and the enum tables below are here. */
+
+static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
+{
+  StructRNA *coll_srna;
+  PropertyRNA *prop;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  prop = RNA_def_property(srna, "mesh_map_states", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "ObjectMeshMapState");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Object_mesh_map_states_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop, "Mesh Map States", "Per-object bake state of the material mesh maps");
+
+  RNA_def_property_srna(prop, "ObjectMeshMapStates");
+  coll_srna = RNA_def_struct(brna, "ObjectMeshMapStates", nullptr);
+  RNA_def_struct_sdna(coll_srna, "Object");
+  RNA_def_struct_ui_text(coll_srna, "Mesh Map States", "Collection of mesh map bake states");
+
+  func = RNA_def_function(coll_srna, "ensure", "rna_Object_mesh_map_states_ensure");
+  RNA_def_function_ui_description(func, "Get the state for a material and map type, creating it");
+  parm = RNA_def_pointer(
+      func, "material", "Material", "Material", "The material whose atlas this state describes");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_enum(func,
+                      "type",
+                      rna_enum_object_mesh_map_type_items,
+                      MA_MESH_MAP_AO,
+                      "Type",
+                      "The mesh map type");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(
+      func, "state", "ObjectMeshMapState", "", "The mesh map state");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(coll_srna, "refresh_all", "rna_Object_mesh_map_states_refresh_all");
+  RNA_def_function_ui_description(
+      func,
+      "Re-check every mesh map state of this object against its evaluated geometry, returning how "
+      "many changed status");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(
+      func, "result", 0, 0, INT_MAX, "", "Number of states whose status changed", 0, INT_MAX);
+  RNA_def_function_return(func, parm);
+
+  prop = RNA_def_property(srna, "mesh_map_sources", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "ObjectMeshMapSource");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Object_mesh_map_sources_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop, "Mesh Map Sources", "High-poly source of each material's mesh maps");
+
+  RNA_def_property_srna(prop, "ObjectMeshMapSources");
+  coll_srna = RNA_def_struct(brna, "ObjectMeshMapSources", nullptr);
+  RNA_def_struct_sdna(coll_srna, "Object");
+  RNA_def_struct_ui_text(coll_srna, "Mesh Map Sources", "Collection of high-poly sources");
+
+  func = RNA_def_function(coll_srna, "ensure", "rna_Object_mesh_map_sources_ensure");
+  RNA_def_function_ui_description(func, "Get the high-poly source for a material, creating it");
+  parm = RNA_def_pointer(func, "material", "Material", "Material", "The material the source feeds");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "source", "ObjectMeshMapSource", "", "The high-poly source");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(coll_srna, "remove", "rna_Object_mesh_map_sources_remove");
+  RNA_def_function_ui_description(func, "Remove the high-poly source of a material");
+  parm = RNA_def_pointer(func, "material", "Material", "Material", "The material the source feeds");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "Whether a source was removed");
+  RNA_def_function_return(func, parm);
+
+  srna = RNA_def_struct(brna, "ObjectMeshMapSource", nullptr);
+  RNA_def_struct_sdna(srna, "ObjectMeshMapSource");
+  RNA_def_struct_ui_text(srna, "Mesh Map Source", "The high-poly source of one material's maps");
+
+  prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_ObjectMeshMapSource_material_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Material", "The material this source feeds");
+
+  prop = RNA_def_property(srna, "high_poly", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_ObjectMeshMapSource_high_poly_get",
+                                 "rna_ObjectMeshMapSource_high_poly_set",
+                                 nullptr,
+                                 "rna_ObjectMeshMapSource_high_poly_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "High-poly", "The high-poly source object");
+
+  prop = RNA_def_property(srna, "high_poly_collection", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Collection");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_ObjectMeshMapSource_collection_get",
+                                 "rna_ObjectMeshMapSource_collection_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "High-poly Collection", "A collection of high-poly source objects");
+
+  prop = RNA_def_property(srna, "cage", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_ObjectMeshMapSource_cage_get",
+                                 "rna_ObjectMeshMapSource_cage_set",
+                                 nullptr,
+                                 "rna_ObjectMeshMapSource_cage_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Cage", "Optional cage object; empty means an auto-cage");
+
+  prop = RNA_def_property(srna, "cage_extrusion", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_range(prop, 0.0f, 1.0e30f);
+  RNA_def_property_ui_text(
+      prop, "Cage Extrusion", "Auto-cage extrusion along the low-poly normals");
+
+  prop = RNA_def_property(srna, "max_ray_distance", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_range(prop, 0.0f, 1.0e30f);
+  RNA_def_property_ui_text(prop,
+                           "Max Ray Distance",
+                           "Maximum cage-to-high-poly ray distance; zero is unlimited");
+
+  func = RNA_def_function(srna, "cage_matches", "rna_ObjectMeshMapSource_cage_matches");
+  RNA_def_function_ui_description(
+      func, "Whether the cage has the same face and corner counts as the low-poly object");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", true, "", "Whether the cage can be cast through");
+  RNA_def_function_return(func, parm);
+
+  srna = RNA_def_struct(brna, "ObjectMeshMapState", nullptr);
+  RNA_def_struct_sdna(srna, "ObjectMeshMapState");
+  RNA_def_struct_ui_text(srna, "Mesh Map State", "Per-object bake state of one mesh map");
+
+  /* Read-only key: the (material, type) pair identifies the state, and changing the material by
+   * assignment would create duplicates `find` cannot tell apart. States are made through
+   * Object.mesh_map_states.ensure(material, type). */
+  prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_ObjectMeshMapState_material_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Material", "The material whose atlas this state describes");
+
+  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_object_mesh_map_type_items);
+  RNA_def_property_enum_funcs(prop, "rna_ObjectMeshMapState_type_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Type", "The mesh map type");
+
+  prop = RNA_def_property(srna, "status", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_object_mesh_map_status_items);
+  RNA_def_property_enum_funcs(prop, "rna_ObjectMeshMapState_status_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Status", "Bake state of this map");
+
+  prop = RNA_def_property(srna, "hash", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_ObjectMeshMapState_hash_get",
+                                "rna_ObjectMeshMapState_hash_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Hash", "Content hash of the object's contribution (hex)");
+
+  prop = RNA_def_property(srna, "baked_time", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop, "rna_ObjectMeshMapState_baked_time_get", nullptr, nullptr);
+  RNA_def_property_range(prop, 0, 2147483647);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Baked Time", "Unix time of the last successful bake");
+
+  func = RNA_def_function(srna, "is_current", "rna_ObjectMeshMapState_is_current");
+  RNA_def_function_ui_description(
+      func, "Whether the stored content hash matches the object's current evaluated geometry");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "Whether the state matches the object");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "refresh", "rna_ObjectMeshMapState_refresh");
+  RNA_def_function_ui_description(
+      func,
+      "Re-check this state against the object's evaluated geometry and return the resulting status");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_enum(func,
+                      "result",
+                      rna_enum_object_mesh_map_status_items,
+                      OB_MESH_MAP_STATUS_NONE,
+                      "",
+                      "The status after the refresh");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "compute_hash", "rna_ObjectMeshMapState_compute_hash");
+  RNA_def_function_ui_description(
+      func, "Compute the content hash of the object's current contribution, without storing it");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "result", nullptr, 17, "", "The computed content hash (hex)");
+  RNA_def_parameter_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  RNA_def_function_output(func, parm);
+
+  func = RNA_def_function(srna, "uv_missing", "rna_ObjectMeshMapState_uv_missing");
+  RNA_def_function_ui_description(
+      func, "Whether the UV layer the material names is missing from the object's mesh");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "Whether the named UV layer is missing");
+  RNA_def_function_return(func, parm);
+}
+
+/** \} */
+
 static void rna_def_object(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3069,6 +3659,9 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_struct_ui_icon(srna, ICON_OBJECT_DATA);
 
   RNA_define_lib_overridable(true);
+
+  /* mesh maps */
+  rna_def_object_mesh_maps(brna, srna);
 
   prop = RNA_def_property(srna, "data", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "ID");

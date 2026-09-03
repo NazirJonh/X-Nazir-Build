@@ -402,6 +402,7 @@ void rna_Scene_freestyle_update(Main *bmain, Scene *scene, PointerRNA *ptr);
 void rna_ViewLayer_name_set(PointerRNA *ptr, const char *value);
 void rna_ViewLayer_override_update(Main *bmain, Scene *activescene, PointerRNA *ptr);
 void rna_ViewLayer_pass_update(Main *bmain, Scene *activescene, PointerRNA *ptr);
+
 void rna_ViewLayer_active_aov_index_range(
     PointerRNA *ptr, int *min, int *max, int *softmin, int *softmax);
 int rna_ViewLayer_active_aov_index_get(PointerRNA *ptr);
@@ -654,6 +655,19 @@ void rna_iterator_array_end(CollectionPropertyIterator *iter);
 PointerRNA rna_array_lookup_int(
     PointerRNA *ptr, StructRNA *type, void *data, size_t itemsize, int64_t length, int64_t index);
 
+/* The Stack Layers Add-kind collection (rna_space.cc), editor data rather than DNA. The type is
+ * the global #OutlinerStackAddKind from ED_outliner_stack_automation.hh, declared there. */
+void rna_iterator_stack_add_kinds_begin(CollectionPropertyIterator *iter, PointerRNA *ptr);
+void rna_OutlinerStackAddKind_identifier_get(PointerRNA *ptr, char *value);
+int rna_OutlinerStackAddKind_identifier_length(PointerRNA *ptr);
+void rna_OutlinerStackAddKind_name_get(PointerRNA *ptr, char *value);
+int rna_OutlinerStackAddKind_name_length(PointerRNA *ptr);
+void rna_OutlinerStackAddKind_description_get(PointerRNA *ptr, char *value);
+int rna_OutlinerStackAddKind_description_length(PointerRNA *ptr);
+int rna_OutlinerStackAddKind_icon_get(PointerRNA *ptr);
+bool rna_OutlinerStackAddKind_takes_color_get(PointerRNA *ptr);
+int rna_OutlinerStackAddKind_source_id_type_get(PointerRNA *ptr);
+
 /* Duplicated code since we can't link in `blenlib`. */
 
 #ifndef RNA_RUNTIME
@@ -740,5 +754,11 @@ BlenderRNA rna_blender_rna_create();
         float: -FLT_MAX, \
         double: -DBL_MAX)
 #endif
+
+/* `rna_node_socket.cc`: the Custom paint-layer role of a node group interface socket, referenced
+ * by the generated interface-socket RNA wrappers. */
+void rna_NodeTreeInterfaceSocket_paint_layer_role_get(PointerRNA *ptr, char *value);
+int rna_NodeTreeInterfaceSocket_paint_layer_role_length(PointerRNA *ptr);
+void rna_NodeTreeInterfaceSocket_paint_layer_role_set(PointerRNA *ptr, const char *value);
 
 }  // namespace blender

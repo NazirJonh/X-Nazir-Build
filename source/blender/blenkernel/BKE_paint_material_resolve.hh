@@ -82,6 +82,9 @@ struct ChannelSourceImage {
   /** The node's #NodeTexImage::iuser. Copy it before acquiring a buffer: acquisition writes to it
    * and the material is not the stroke's to mutate. */
   const ImageUser *iuser = nullptr;
+  /** The Image Texture node itself: its sampling settings and its Vector input decide whether a
+   * caller may show this map without the node's own graph. Owned by the material. */
+  const bNode *node = nullptr;
 };
 
 /**
@@ -139,5 +142,11 @@ struct MaterialSourceResolve {
  * #ChannelResolution::Unavailable rather than failing, so callers never branch first.
  */
 MaterialSourceResolve BKE_paint_material_source_resolve(const Material *ma);
+
+/**
+ * How many times #BKE_paint_material_source_resolve has run in this process. Test hook only: the
+ * generator promises one resolve per source per regeneration, and only a counter can hold it to that.
+ */
+int64_t BKE_paint_material_source_resolve_call_count();
 
 }  // namespace blender

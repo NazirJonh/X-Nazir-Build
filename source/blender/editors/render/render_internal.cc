@@ -22,6 +22,7 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_material_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
@@ -39,6 +40,8 @@
 #include "BKE_main.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
+#include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
@@ -914,8 +917,14 @@ static void clean_viewport_memory(Main *bmain, Scene *scene)
 /* using context, starts job */
 static wmOperatorStatus screen_render_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
-  /* new render clears all callbacks */
+  /* Rebuild the generated trees of layered materials edited since the last event loop pass, here on
+   * the main thread before the render job starts. The worker thread runs the graph update but must
+   * not regenerate (it would touch Main while the UI uses it), so this one pass covers F12 in the
+   * same handler turn. */
   Main *bmain = CTX_data_main(C);
+  Scene *render_scene = CTX_data_scene(C);
+  BKE_paint_layers_regenerate_tagged(
+      *bmain, render_scene != nullptr ? &render_scene->toolsettings->paint_mode : nullptr);
   ViewLayer *single_layer = nullptr;
   Render *re;
   wmJob *wm_job;

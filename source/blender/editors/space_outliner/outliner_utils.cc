@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_utildefines.h"
 
 #include "DNA_action_types.h"
@@ -27,11 +28,13 @@
 #include "ED_screen.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_icons.hh"
 #include "UI_view2d.hh"
 
 #include "outliner_intern.hh"
 #include "tree/tree_display.hh"
 #include "tree/tree_element_rna.hh"
+#include "tree/tree_iterator.hh"
 
 namespace blender {
 
@@ -71,12 +74,32 @@ void outliner_viewcontext_init(const bContext *C, TreeViewContext *tvc)
 
 /** \} */
 
+int outliner_tree_element_height(const SpaceOutliner &space_outliner, const TreeElement &te)
+{
+  if (space_outliner.outlinevis != SO_STACK_LAYERS ||
+      (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) == 0)
+  {
+    return UI_UNIT_Y;
+  }
+  /* Only the layers themselves grow: their content rows -- a mask correction, a channel sub-row --
+   * read better at the usual height, and a taller row for them would only add empty space. */
+  const TreeStoreElem *tselem = TREESTORE(&te);
+  if (tselem == nullptr || tselem->type != TSE_STACK_LAYER) {
+    return UI_UNIT_Y;
+  }
+  const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
+  if (row != nullptr && row->compact) {
+    return UI_UNIT_Y;
+  }
+  return 2 * UI_UNIT_Y;
+}
+
 TreeElement *outliner_find_item_at_y(const SpaceOutliner *space_outliner,
                                      const ListBaseT<TreeElement> *tree,
                                      float view_co_y)
 {
   for (TreeElement &te_iter : *tree) {
-    if (view_co_y < (te_iter.ys + UI_UNIT_Y)) {
+    if (view_co_y < (te_iter.ys + outliner_tree_element_height(*space_outliner, te_iter))) {
       if (view_co_y >= te_iter.ys) {
         /* co_y is inside this element */
         return &te_iter;
@@ -90,7 +113,9 @@ TreeElement *outliner_find_item_at_y(const SpaceOutliner *space_outliner,
       /* If the coordinate is lower than the next element, we can continue with that one and skip
        * recursion too. */
       const TreeElement *te_next = te_iter.next;
-      if (te_next && (view_co_y < (te_next->ys + UI_UNIT_Y))) {
+      if (te_next &&
+          (view_co_y < (te_next->ys + outliner_tree_element_height(*space_outliner, *te_next))))
+      {
         continue;
       }
 
@@ -332,7 +357,7 @@ bool outliner_tree_traverse(const SpaceOutliner *space_outliner,
 
 float outliner_right_columns_width(const SpaceOutliner *space_outliner)
 {
-  int num_columns = 0;
+  float num_columns = 0;
 
   switch (space_outliner->outlinevis) {
     case SO_DATA_API:
@@ -352,6 +377,47 @@ float outliner_right_columns_width(const SpaceOutliner *space_outliner)
     case SO_ID_ORPHANS:
       num_columns = 3;
       break;
+    case SO_STACK_LAYERS: {
+      if (space_outliner->stack_layers_view != SO_SL_VIEW_STACK) {
+        return 0.0f;
+      }
+      /* How wide the two columns are is the source's call: an opacity slider and a shape key
+       * value want different room than a blend-mode menu. With Large rows on the two stack in one
+       * column instead of sitting side by side, but only one of the two is ever visible at a time
+       * there, so the column only has to be as wide as the wider of the two, not both together. */
+      const StackColumnLayout layout = stack_source_for_space(*space_outliner)->column_layout();
+      const bool show_value = layout.value_width > 0 &&
+                              (space_outliner->stack_layers_flag & SO_SL_HIDE_OPACITY) == 0;
+      const bool show_mode = layout.mode_width > 0 &&
+                             (space_outliner->stack_layers_flag & SO_SL_HIDE_BLEND) == 0;
+      const bool stacked = show_value && show_mode &&
+                           (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
+      /* A compact row shows its value and its mode in one label inside the same column, so it
+       * takes no more room than the columns already reserve. */
+      if (stacked) {
+        num_columns += max_ff(layout.value_width, layout.mode_width);
+      }
+      else {
+        if (show_value) {
+          num_columns += layout.value_width;
+        }
+        if (show_mode) {
+          num_columns += layout.mode_width;
+        }
+      }
+      /* The per-row toggles live to the right of those columns, the way the restriction icons do
+       * in the View Layer, rather than trailing the name -- unless the visibility toggle was
+       * moved to the tree's own first column, in which case nothing is left to reserve room
+       * for. */
+      if ((space_outliner->stack_layers_flag & SO_SL_VISIBILITY_LEFT) == 0) {
+        num_columns += layout.icon_columns;
+      }
+      /* No half-unit of air here, unlike the restriction columns: the stack's value and mode
+       * buttons go flush against the scrollbar strip, which is the only thing reserved past
+       * them. This width is still the one the name's clipping, the scrollable width and the hit
+       * test measure from -- they have to agree with where the buttons ended up. */
+      return num_columns * UI_UNIT_X + V2D_SCROLL_WIDTH;
+    }
     case SO_VIEW_LAYER:
       if (space_outliner->show_restrict_flags & SO_RESTRICT_ENABLE) {
         num_columns++;
@@ -411,9 +477,12 @@ bool outliner_is_element_visible(const TreeElement *te)
   return true;
 }
 
-bool outliner_is_element_in_view(const TreeElement *te, const View2D *v2d)
+bool outliner_is_element_in_view(const SpaceOutliner &space_outliner,
+                                const TreeElement *te,
+                                const View2D *v2d)
 {
-  return ((te->ys + UI_UNIT_Y) >= v2d->cur.ymin) && (te->ys <= v2d->cur.ymax);
+  return ((te->ys + outliner_tree_element_height(space_outliner, *te)) >= v2d->cur.ymin) &&
+         (te->ys <= v2d->cur.ymax);
 }
 
 bool outliner_item_is_co_over_name_icons(const TreeElement *te, float view_co_x)
@@ -474,6 +543,140 @@ void outliner_tag_redraw_avoid_rebuild_on_open_change(const SpaceOutliner *space
   else {
     ED_region_tag_redraw_no_rebuild(region);
   }
+}
+
+/** An Image Editor already open in this screen, or null. */
+ScrArea *outliner_image_area_find(const bContext &C)
+{
+  bScreen *screen = CTX_wm_screen(&const_cast<bContext &>(C));
+  if (screen == nullptr) {
+    return nullptr;
+  }
+  for (ScrArea &area : screen->areabase) {
+    if (area.spacetype == SPACE_IMAGE) {
+      return &area;
+    }
+  }
+  return nullptr;
+}
+
+float outliner_stack_preview_size()
+{
+  return ICON_DEFAULT_HEIGHT * OUTLINER_STACK_PREVIEW_SCALE * UI_SCALE_FAC;
+}
+
+static rctf outliner_stack_preview_rect_impl(const float row_x,
+                                             const float content_y,
+                                             const int slot_index,
+                                             const bool has_leading_icon)
+{
+  const float preview_size = outliner_stack_preview_size();
+  /* Gap between multiple previews. */
+  const float preview_gap = UI_UNIT_X * 0.25f;
+  const float leading_icon_width = has_leading_icon ? UI_UNIT_X + 4.0f * UI_UNIT_X / 20.0f : 0.0f;
+
+  rctf rect;
+  rect.xmin = row_x + UI_UNIT_X + leading_icon_width +
+              (slot_index * (preview_size + preview_gap));
+  rect.xmax = rect.xmin + preview_size;
+  rect.ymin = content_y + (UI_UNIT_Y - preview_size) * 0.5f;
+  rect.ymax = rect.ymin + preview_size;
+  return rect;
+}
+
+rctf outliner_stack_row_preview_rect(const StackRow &row,
+                                     const float row_x,
+                                     const float content_y,
+                                     const int slot_index)
+{
+  /* The row's own icon is drawn ahead of the first slot when that slot says so; the geometry
+   * follows it, so every consumer shifts by the same amount without computing it again. */
+  const bool has_leading_icon = !row.preview_slots.is_empty() &&
+                                row.preview_slots[0].keeps_row_icon;
+  return outliner_stack_preview_rect_impl(row_x, content_y, slot_index, has_leading_icon);
+}
+
+rctf outliner_stack_slot_preview_rect(const float row_x,
+                                      const float content_y,
+                                      const int slot_index)
+{
+  return outliner_stack_preview_rect_impl(row_x, content_y, slot_index, false);
+}
+
+bool outliner_stack_row_fill_swatch_anchor_rect(const SpaceOutliner &space_outliner,
+                                                const ARegion &region,
+                                                const int ordinal,
+                                                rcti &r_window_rect)
+{
+  const StackRow *row = outliner_stack_row_find(space_outliner, ordinal);
+  if (row == nullptr || row->preview_slots.is_empty()) {
+    return false;
+  }
+  /* The swatch is not at a fixed place among the slots: a fill row carries its channel map first,
+   * the color beside it, and further slots may follow. */
+  int swatch_slot_index = -1;
+  for (const int slot_index : row->preview_slots.index_range()) {
+    if (row->preview_slots[slot_index].is_color_swatch) {
+      swatch_slot_index = slot_index;
+      break;
+    }
+  }
+  if (swatch_slot_index == -1) {
+    return false;
+  }
+
+  const TreeElement *te = nullptr;
+  tree_iterator::all_open(space_outliner, [&](const TreeElement *te_iter) {
+    if (te == nullptr) {
+      const TreeStoreElem *tselem = TREESTORE(te_iter);
+      if (tselem->type == TSE_STACK_LAYER && int(tselem->nr) == ordinal) {
+        te = te_iter;
+      }
+    }
+  });
+  if (te == nullptr || !outliner_is_element_visible(te) ||
+      !outliner_is_element_in_view(space_outliner, te, &region.v2d))
+  {
+    return false;
+  }
+  /* Coordinates come from the draw pass; until it has run over the current tree they hold the
+   * previous layout's numbers, or nothing at all (both zero) -- a rect built from those would
+   * anchor the dialog somewhere it does not belong. */
+  if (te->xs == 0.0f && te->ys == 0.0f) {
+    return false;
+  }
+
+  const int row_height = outliner_tree_element_height(space_outliner, *te);
+  /* The one-unit content line a row's content is centered on -- a big row's content does not sit
+   * at its bottom; the same line the draw computes (outliner_draw.cc stack_row_content_offset). */
+  const float content_y = te->ys + (row_height - UI_UNIT_Y) / 2;
+  const rctf swatch_rect = outliner_stack_row_preview_rect(
+      *row, float(te->xs), content_y, swatch_slot_index);
+
+  /* X from the swatch, Y from the whole row: the dialog must hide neither the color being edited
+   * nor the row it belongs to. The view's y runs against the region's, so both row edges are
+   * converted and ordered rather than assumed. */
+  float region_x_swatch_min = 0.0f;
+  float region_x_swatch_max = 0.0f;
+  float region_y_row_a = 0.0f;
+  float region_y_row_b = 0.0f;
+  ui::view2d_view_to_region_fl(
+      &region.v2d, swatch_rect.xmin, te->ys, &region_x_swatch_min, &region_y_row_a);
+  ui::view2d_view_to_region_fl(
+      &region.v2d, swatch_rect.xmax, te->ys + row_height, &region_x_swatch_max, &region_y_row_b);
+
+  rctf window_rect;
+  window_rect.xmin = region.winrct.xmin + region_x_swatch_min;
+  window_rect.xmax = region.winrct.xmin + region_x_swatch_max;
+  window_rect.ymin = region.winrct.ymin + std::min(region_y_row_a, region_y_row_b);
+  window_rect.ymax = region.winrct.ymin + std::max(region_y_row_a, region_y_row_b);
+
+  /* Round outward: not a pixel of the swatch or the row is lost from the anchor. */
+  r_window_rect.xmin = int(floorf(window_rect.xmin));
+  r_window_rect.ymin = int(floorf(window_rect.ymin));
+  r_window_rect.xmax = int(ceilf(window_rect.xmax));
+  r_window_rect.ymax = int(ceilf(window_rect.ymax));
+  return true;
 }
 
 }  // namespace ed::outliner

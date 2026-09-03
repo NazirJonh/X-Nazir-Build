@@ -15,6 +15,7 @@
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 
 #include "IMB_imbuf_types.hh"
 
@@ -75,7 +76,9 @@ bool BKE_paint_canvas_image_get(PaintModeSettings *settings,
       }
 
       *r_image = slot->ima;
-      *r_image_user = slot->image_user;
+      /* A layered material's description slots carry no per-node ImageUser; the scene-level one is
+       * a valid default. */
+      *r_image_user = (slot->image_user != nullptr) ? slot->image_user : &settings->image_user;
       break;
     }
   }
@@ -115,6 +118,21 @@ std::optional<StringRef> BKE_paint_canvas_uvmap_name_get(const PaintModeSettings
       }
 
       const Mesh *mesh = id_cast<Mesh *>(ob->data);
+      /* A layered material names the UV layer its whole stack samples. A missing named layer is a
+       * hard no: never silently substitute another, the stroke is refused with a message. */
+      if (Material *ma = BKE_object_material_get(ob, ob->actcol)) {
+        if (paint_layers_is_layered(*ma)) {
+          bool missing = false;
+          const char *resolved = BKE_paint_layers_uv_map_resolve(*mesh, *ma, &missing);
+          if (missing) {
+            return std::nullopt;
+          }
+          if (resolved != nullptr && resolved[0] != '\0') {
+            return StringRef(resolved);
+          }
+        }
+      }
+
       if (has_uv_map_attribute(*mesh, mesh->active_uv_map_name())) {
         return mesh->active_uv_map_name();
       }
@@ -133,11 +151,15 @@ std::optional<StringRef> BKE_paint_canvas_uvmap_name_get(const PaintModeSettings
   return std::nullopt;
 }
 
-static void append_image_key(std::stringstream &ss, Image &image, ImageUser &image_user)
+static void append_image_key(std::stringstream &ss, Image &image, const ImageUser *image_user)
 {
   ss << ",SEAM_MARGIN:" << image.seam_margin;
-  ImageUser tile_user = image_user;
+  /* A layered material's target carries no #ImageUser -- it is painted directly, not through a
+   * texture slot -- so fall back to a default one for the tile lookup. */
+  const ImageUser default_user = {};
+  const ImageUser &user = (image_user != nullptr) ? *image_user : default_user;
   for (ImageTile &image_tile : image.tiles) {
+    ImageUser tile_user = user;
     tile_user.tile = image_tile.tile_number;
     ImBuf *image_buffer = BKE_image_acquire_ibuf(&image, &tile_user, nullptr);
     if (!image_buffer) {
@@ -155,7 +177,7 @@ std::string BKE_paint_pixels_layout_key_get(Image &image,
 {
   std::stringstream ss;
   ss << "UV_MAP:" << uv_map_name;
-  append_image_key(ss, image, image_user);
+  append_image_key(ss, image, &image_user);
   return ss.str();
 }
 
@@ -174,7 +196,7 @@ std::string BKE_paint_canvas_key_get(PaintModeSettings *settings,
         *ob, *settings, brush_paint, visible_material_channels);
     for (const PaintMaterialImageTarget &target : targets) {
       ss << ",CH" << int(target.channel);
-      append_image_key(ss, *target.image, *target.iuser);
+      append_image_key(ss, *target.image, target.iuser);
     }
     return ss.str();
   }
@@ -182,7 +204,7 @@ std::string BKE_paint_canvas_key_get(PaintModeSettings *settings,
   Image *image;
   ImageUser *image_user;
   if (BKE_paint_canvas_image_get(settings, ob, &image, &image_user)) {
-    append_image_key(ss, *image, *image_user);
+    append_image_key(ss, *image, image_user);
   }
 
   return ss.str();

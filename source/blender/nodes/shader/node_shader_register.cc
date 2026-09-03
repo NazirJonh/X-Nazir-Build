@@ -38,6 +38,7 @@ void register_shader_nodes()
   register_node_type_sh_camera();
   register_node_type_sh_clamp();
   register_node_type_sh_combcolor();
+  register_node_type_sh_compose_color_alpha();
   register_node_type_sh_combxyz();
   register_node_type_sh_curve_float();
   register_node_type_sh_curve_rgb();

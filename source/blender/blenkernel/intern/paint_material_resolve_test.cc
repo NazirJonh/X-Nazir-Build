@@ -14,6 +14,7 @@
 #include "BKE_paint_material_resolve.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_listbase.h"
 
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
@@ -91,9 +92,10 @@ TEST_F(PaintMaterialResolveTest, no_node_tree_reports_no_node_tree)
 
 TEST_F(PaintMaterialResolveTest, emission_shader_on_surface_reports_no_principled)
 {
-  Material *ma = BKE_material_add(bmain, "Emit");
+  /* #BKE_material_add leaves the tree empty, Output included; build the Principled/Output pair
+   * first, then remove the Principled so only Emission drives Surface. */
+  Material *ma = this->add_material_with_principled("Emit");
   bNodeTree &ntree = *ma->nodetree;
-  /* BKE_material_add already seeds a Principled; remove it so only Emission drives Surface. */
   if (bNode *seeded = this->find_node(*ma, SH_NODE_BSDF_PRINCIPLED)) {
     bke::node_remove_node(bmain, ntree, *seeded, false);
   }
@@ -118,7 +120,7 @@ TEST_F(PaintMaterialResolveTest, reroute_between_principled_and_output_is_follow
   bNodeSocket &surface = *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr);
   /* Drop the direct link and route it through a Reroute instead. */
   bke::node_remove_socket_links(ntree, surface);
-  bNode *reroute = bke::node_add_static_node(nullptr, ntree, SH_NODE_REROUTE);
+  bNode *reroute = bke::node_add_static_node(nullptr, ntree, NODE_REROUTE);
   bke::node_add_link(ntree,
                      *principled,
                      *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
@@ -244,7 +246,7 @@ TEST_F(PaintMaterialResolveTest, reroute_on_channel_input_without_source_is_cons
   Material *ma = this->add_material_with_principled("DanglingReroute");
   bNodeTree &ntree = *ma->nodetree;
   bNode *principled = this->find_node(*ma, SH_NODE_BSDF_PRINCIPLED);
-  bNode *reroute = bke::node_add_static_node(nullptr, ntree, SH_NODE_REROUTE);
+  bNode *reroute = bke::node_add_static_node(nullptr, ntree, NODE_REROUTE);
   bke::node_add_link(ntree,
                      *reroute,
                      *static_cast<bNodeSocket *>(reroute->outputs.first),

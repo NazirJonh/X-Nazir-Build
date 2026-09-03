@@ -19,6 +19,7 @@ set(SRC
   render_material_bake_ops.cc
   render_opengl.cc
   render_ops.cc
+  render_paint_layers_bake.cc
   render_preview.cc
   render_shading.cc
   render_texture_cache.cc
@@ -75,3 +76,16 @@ blender_add_lib(bf_editor_render "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 
 # RNA_prototypes.hh
 add_dependencies(bf_editor_render bf_rna)
+
+if(WITH_GTESTS)
+  set(TEST_SRC
+    render_material_bake_test.cc
+  )
+  set(TEST_INC
+  )
+  set(TEST_LIB
+    ${LIB}
+    bf_rna  # RNA_prototypes.hh
+  )
+  blender_add_test_suite_lib(editor_render "${TEST_SRC}" "${INC};${TEST_INC}" "${INC_SYS}" "${TEST_LIB}")
+endif()

@@ -28,6 +28,8 @@
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_material.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_screen.hh"
 
 #include "MEM_guardedalloc.h"
@@ -623,6 +625,11 @@ int icon_from_id(const ID *id)
       return ICON_EMPTY_DATA;
     }
     return icon_from_id(static_cast<const ID *>(ob->data));
+  }
+
+  /* A layered material reads as what it is: its tree is generated from a paint-layer stack. */
+  if (GS(id->name) == ID_MA && paint_layers_is_layered(*id_cast<const Material *>(id))) {
+    return ICON_NODE_MATERIAL;
   }
 
   /* otherwise get it through RNA, creating the pointer

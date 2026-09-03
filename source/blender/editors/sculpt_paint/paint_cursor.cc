@@ -49,6 +49,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_screen.hh"
 
@@ -1528,7 +1529,7 @@ static void paint_cursor_ensure_material_source_bake(const bContext &C,
   last_check_seconds = now_seconds;
 
   ed::material_bake::material_source_bake_ensure(
-      C, *brush_paint.source_material, brush_paint.source_bake_size);
+      C, *brush_paint.source_material, brush_paint.source_bake_size, "cursor");
 }
 
 static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, void * /*unused*/)

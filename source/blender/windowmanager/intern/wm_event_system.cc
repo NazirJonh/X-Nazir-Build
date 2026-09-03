@@ -558,6 +558,9 @@ void wm_event_do_refresh_wm_and_depsgraph(bContext *C)
     }
   }
 
+  /* The K-1 scheduling point lives at the start of #BKE_scene_graph_update_tagged, which
+   * #wm_event_do_depsgraph below reaches, so every path -- event loop, script, background render --
+   * regenerates through the same call. */
   wm_event_do_depsgraph(C, false);
 
   CTX_wm_window_set(C, nullptr);

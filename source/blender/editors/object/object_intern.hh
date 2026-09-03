@@ -347,6 +347,12 @@ void OBJECT_OT_collection_objects_select(wmOperatorType *ot);
 void OBJECT_OT_bake_image(wmOperatorType *ot);
 void OBJECT_OT_bake(wmOperatorType *ot);
 
+/* `mesh_map_bake.cc` */
+
+void OBJECT_OT_mesh_map_bake(wmOperatorType *ot);
+void OBJECT_OT_mesh_map_bake_all(wmOperatorType *ot);
+void OBJECT_OT_mesh_map_clear(wmOperatorType *ot);
+
 /* object_bake_simulation.cc */
 
 namespace bake_simulation {

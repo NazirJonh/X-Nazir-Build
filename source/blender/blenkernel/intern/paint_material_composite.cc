@@ -12,6 +12,7 @@
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -44,6 +45,9 @@
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
+#include "IMB_interp.hh"
+
+#include "BLI_math_interp.hh"
 
 #include <cstring>
 #include <memory>
@@ -54,553 +58,6 @@ namespace blender {
  * over #ePartialUpdateCollectResult reads badly with the full qualification on every label. */
 using namespace bke::image::partial_update;
 
-/* -------------------------------------------------------------------- */
-/** \name Stack Derivation
- *
- * Recognizes the one graph shape this module can reproduce: image layers stacked with Mix nodes.
- * Everything here only reads the tree, so it is as cheap as the resolver and may run on a redraw.
- * \{ */
-
-/** The subset of Mix blend modes that #blend_layer_byte reproduces exactly. */
-static bool composite_blend_from_ramp_blend(const int ramp_blend, CompositeBlend &r_blend)
-{
-  switch (ramp_blend) {
-    case MA_RAMP_BLEND:
-      r_blend = CompositeBlend::Mix;
-      return true;
-    case MA_RAMP_MULT:
-      r_blend = CompositeBlend::Multiply;
-      return true;
-    case MA_RAMP_OVERLAY:
-      r_blend = CompositeBlend::Overlay;
-      return true;
-    case MA_RAMP_ADD:
-      r_blend = CompositeBlend::Add;
-      return true;
-    default:
-      /* Screen, Difference, Hue and the rest have no byte blend function here. Reporting them as
-       * not-a-stack sends the channel to the bake, which evaluates them properly, rather than
-       * showing the user a composite that quietly differs from the render. */
-      return false;
-  }
-}
-
-/* -------------------------------------------------------------------- */
-/** \name Normal Combine Group
- * \{ */
-
-/** Name of the ID property that marks the group, and the value that identifies this one. */
-static const char *NORMAL_COMBINE_PROP = "pbr_paint_node_group";
-static const char *NORMAL_COMBINE_VALUE = "NORMAL_COMBINE";
-/* NOTE: DO NOT translate, it is what an existing group is found by. */
-static const char *NORMAL_COMBINE_TREE_NAME = "PBR Normal Combine";
-
-bool BKE_paint_material_is_normal_combine_group(const bNode &node)
-{
-  if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
-    return false;
-  }
-  const IDProperty *properties = IDP_GetProperties(const_cast<ID *>(node.id));
-  if (properties == nullptr) {
-    return false;
-  }
-  const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
-      properties, NORMAL_COMBINE_PROP, IDP_STRING);
-  return marker != nullptr && STREQ(IDP_string_get(marker), NORMAL_COMBINE_VALUE);
-}
-
-/** The group already in \a bmain, or null. Found by its marker, so a rename does not lose it. */
-static bNodeTree *normal_combine_group_find(Main &bmain)
-{
-  for (bNodeTree &ntree : bmain.nodetrees) {
-    const IDProperty *properties = IDP_GetProperties(&ntree.id);
-    if (properties == nullptr) {
-      continue;
-    }
-    const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
-        properties, NORMAL_COMBINE_PROP, IDP_STRING);
-    if (marker != nullptr && STREQ(IDP_string_get(marker), NORMAL_COMBINE_VALUE)) {
-      return &ntree;
-    }
-  }
-  return nullptr;
-}
-
-/** A Vector Math node set to \a operation. */
-static bNode *normal_combine_vector_math_add(bNodeTree &group,
-                                             const int operation,
-                                             const float2 location)
-{
-  bNode *node = bke::node_add_node(nullptr, group, "ShaderNodeVectorMath"_ustr);
-  node->custom1 = operation;
-  node->location[0] = location.x;
-  node->location[1] = location.y;
-  return node;
-}
-
-/** Sets the second and third Vector inputs of a Multiply Add, which decode or encode a normal. */
-static void normal_combine_range_map_set(bNode &node, const float scale, const float offset)
-{
-  bNodeSocket *scale_socket = bke::node_find_socket(node, SOCK_IN, "Vector_001"_ustr);
-  bNodeSocket *offset_socket = bke::node_find_socket(node, SOCK_IN, "Vector_002"_ustr);
-  copy_v3_fl(static_cast<bNodeSocketValueVector *>(scale_socket->default_value)->value, scale);
-  copy_v3_fl(static_cast<bNodeSocketValueVector *>(offset_socket->default_value)->value, offset);
-}
-
-bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
-{
-  if (bNodeTree *existing = normal_combine_group_find(bmain)) {
-    return existing;
-  }
-
-  bNodeTree *group = bke::node_tree_add_tree(&bmain, NORMAL_COMBINE_TREE_NAME, "ShaderNodeTree");
-  IDProperty *properties = IDP_EnsureProperties(&group->id);
-  IDPropertyTemplate value = {0};
-  value.string.str = NORMAL_COMBINE_VALUE;
-  value.string.len = int(strlen(NORMAL_COMBINE_VALUE)) + 1;
-  value.string.subtype = IDP_STRING_SUB_UTF8;
-  IDP_AddToGroup(properties, IDP_New(IDP_STRING, &value, NORMAL_COMBINE_PROP));
-
-  /* Interface identifiers are handed out in creation order: `Socket_0` .. `Socket_3`. */
-  group->tree_interface.add_socket(
-      DATA_("A"), "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
-  group->tree_interface.add_socket(
-      DATA_("B"), "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
-  bNodeTreeInterfaceSocket *factor = group->tree_interface.add_socket(
-      DATA_("Factor"), "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT, nullptr);
-  auto &factor_data = *static_cast<bNodeSocketValueFloat *>(factor->socket_data);
-  factor_data.subtype = PROP_FACTOR;
-  factor_data.min = 0.0f;
-  factor_data.max = 1.0f;
-  factor_data.value = 1.0f;
-  group->tree_interface.add_socket(
-      DATA_("Result"), "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
-
-  bNode *group_input = bke::node_add_node(nullptr, *group, "NodeGroupInput"_ustr);
-  group_input->location[0] = -800;
-  bNode *group_output = bke::node_add_node(nullptr, *group, "NodeGroupOutput"_ustr);
-  group_output->location[0] = 400;
-
-  /* Decode both maps out of [0, 1] and into vectors. */
-  bNode *decode_a = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_MULTIPLY_ADD, float2(-600.0f, 120.0f));
-  normal_combine_range_map_set(*decode_a, 2.0f, -1.0f);
-  bNode *decode_b = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_MULTIPLY_ADD, float2(-600.0f, -120.0f));
-  normal_combine_range_map_set(*decode_b, 2.0f, -1.0f);
-
-  /* Whiteout: the slopes add, the two Z multiply. */
-  bNode *slopes = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_ADD, float2(-400.0f, 120.0f));
-  bNode *depths = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_MULTIPLY, float2(-400.0f, -120.0f));
-
-  bNode *split_slopes = bke::node_add_node(nullptr, *group, "ShaderNodeSeparateXYZ"_ustr);
-  split_slopes->location[0] = -220;
-  split_slopes->location[1] = 120;
-  bNode *split_depths = bke::node_add_node(nullptr, *group, "ShaderNodeSeparateXYZ"_ustr);
-  split_depths->location[0] = -220;
-  split_depths->location[1] = -120;
-  bNode *rebuilt = bke::node_add_node(nullptr, *group, "ShaderNodeCombineXYZ"_ustr);
-  rebuilt->location[0] = -60;
-
-  bNode *normalize = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_NORMALIZE, float2(100.0f, 0.0f));
-  bNode *encode = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_MULTIPLY_ADD, float2(240.0f, 0.0f));
-  normal_combine_range_map_set(*encode, 0.5f, 0.5f);
-
-  /* The factor interpolates between the layer below and the combined result, so that a masked
-   * layer fades out to what it covers rather than to a flat normal. */
-  bNode *mix = bke::node_add_node(nullptr, *group, "ShaderNodeMix"_ustr);
-  auto &mix_storage = *static_cast<NodeShaderMix *>(mix->storage);
-  mix_storage.data_type = SOCK_RGBA;
-  mix->location[0] = 240;
-  mix->location[1] = 180;
-
-  auto link = [&](bNode &from, const char *from_socket, bNode &to, const char *to_socket) {
-    bke::node_add_link(
-        *group,
-        from,
-        *bke::node_find_socket(from, SOCK_OUT, UString::from_ptr_noinline(from_socket)),
-        to,
-        *bke::node_find_socket(to, SOCK_IN, UString::from_ptr_noinline(to_socket)));
-  };
-
-  link(*group_input, "Socket_0", *decode_a, "Vector");
-  link(*group_input, "Socket_1", *decode_b, "Vector");
-  link(*decode_a, "Vector", *slopes, "Vector");
-  link(*decode_b, "Vector", *slopes, "Vector_001");
-  link(*decode_a, "Vector", *depths, "Vector");
-  link(*decode_b, "Vector", *depths, "Vector_001");
-  link(*slopes, "Vector", *split_slopes, "Vector");
-  link(*depths, "Vector", *split_depths, "Vector");
-  link(*split_slopes, "X", *rebuilt, "X");
-  link(*split_slopes, "Y", *rebuilt, "Y");
-  link(*split_depths, "Z", *rebuilt, "Z");
-  link(*rebuilt, "Vector", *normalize, "Vector");
-  link(*normalize, "Vector", *encode, "Vector");
-  link(*group_input, "Socket_0", *mix, "A_Color");
-  link(*encode, "Vector", *mix, "B_Color");
-  link(*group_input, "Socket_2", *mix, "Factor_Float");
-  link(*mix, "Result_Color", *group_output, "Socket_3");
-
-  BKE_ntree_update_tag_all(group);
-  return group;
-}
-
-/** \} */
-
-/** The inputs of \a node when it is a colour Mix node, in either the legacy or the current form.
- */
-struct CompositeMixNode {
-  const bNodeSocket *factor = nullptr;
-  /** What is below in the stack. */
-  const bNodeSocket *bottom = nullptr;
-  /** The layer itself. */
-  const bNodeSocket *top = nullptr;
-  CompositeBlend blend = CompositeBlend::Mix;
-};
-
-static bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
-{
-  if (BKE_paint_material_is_normal_combine_group(node)) {
-    /* Sockets by name: the group is the engine's own, and its interface names are the contract
-     * an add-on wiring it up sees. */
-    r_mix.factor = bke::node_find_socket(node, SOCK_IN, "Factor"_ustr);
-    r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "A"_ustr);
-    r_mix.top = bke::node_find_socket(node, SOCK_IN, "B"_ustr);
-    r_mix.blend = CompositeBlend::NormalCombine;
-    return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
-  }
-  if (node.type_legacy == SH_NODE_MIX_RGB_LEGACY) {
-    if (!composite_blend_from_ramp_blend(node.custom1, r_mix.blend)) {
-      return false;
-    }
-    r_mix.factor = bke::node_find_socket(node, SOCK_IN, "Fac"_ustr);
-    r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "Color1"_ustr);
-    r_mix.top = bke::node_find_socket(node, SOCK_IN, "Color2"_ustr);
-    return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
-  }
-  if (node.type_legacy == SH_NODE_MIX) {
-    const NodeShaderMix *storage = static_cast<const NodeShaderMix *>(node.storage);
-    if (storage == nullptr || storage->data_type != SOCK_RGBA) {
-      return false;
-    }
-    /* A per-component factor is three independent mixes, which the byte blend functions do not
-     * express. */
-    if (storage->factor_mode != NODE_MIX_MODE_UNIFORM) {
-      return false;
-    }
-    if (!composite_blend_from_ramp_blend(storage->blend_type, r_mix.blend)) {
-      return false;
-    }
-    r_mix.factor = bke::node_find_socket(node, SOCK_IN, "Factor_Float"_ustr);
-    r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "A_Color"_ustr);
-    r_mix.top = bke::node_find_socket(node, SOCK_IN, "B_Color"_ustr);
-    return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
-  }
-  return false;
-}
-
-/**
- * The image driving \a socket, or false when its source is not a plain sampleable image.
- *
- * The same rule as the resolver's image case: only a #ShaderNodeTexImage counts, and a tiled
- * (UDIM) image has no single buffer to composite.
- */
-static bool composite_image_from_socket(const bNodeSocket &socket,
-                                        Image *&r_image,
-                                        const ImageUser *&r_iuser,
-                                        bool *r_from_alpha = nullptr)
-{
-  const bNodeSocket *source = BKE_paint_material_source_socket(socket);
-  if (source == nullptr) {
-    return false;
-  }
-  if (r_from_alpha != nullptr) {
-    /* Which output the link left the node by. A layer stack drives the factor from the layer's
-     * Alpha, and reading its Color there instead would modulate the layer by its own brightness
-     * -- the difference between a stack that covers correctly and one that does not. */
-    *r_from_alpha = source->identifier_ustr() == "Alpha"_ustr;
-  }
-  const bNode &node = source->owner_node();
-  if (node.type_legacy != SH_NODE_TEX_IMAGE || node.id == nullptr || GS(node.id->name) != ID_IM) {
-    return false;
-  }
-  const NodeTexImage *storage = static_cast<const NodeTexImage *>(node.storage);
-  if (storage == nullptr) {
-    return false;
-  }
-  Image *image = id_cast<Image *>(node.id);
-  if (image->source == IMA_SRC_TILED) {
-    return false;
-  }
-  r_image = image;
-  r_iuser = &storage->iuser;
-  return true;
-}
-
-/**
- * The node feeding \a socket, skipping reroutes and muted nodes but never entering a group.
- *
- * #BKE_paint_material_source_socket answers "what value arrives here", which for a group means the
- * node inside it. This answers "what node produced it", which is what a group used as an operation
- * -- the normal combine -- has to be recognized by.
- */
-static const bNode *composite_source_node_shallow(const bNodeSocket &socket)
-{
-  const bNodeSocket *current = &socket;
-  /* A malformed tree can in principle cycle; bound the walk rather than trust the data. */
-  for (int step = 0; step < 64; step++) {
-    if (current->directly_linked_links().is_empty()) {
-      return nullptr;
-    }
-    const bNodeLink *link = current->directly_linked_links()[0];
-    if (!link->is_available() || link->is_muted()) {
-      return nullptr;
-    }
-    const bNode &from_node = *link->fromnode;
-    if (from_node.is_reroute()) {
-      current = static_cast<const bNodeSocket *>(from_node.inputs.first);
-      continue;
-    }
-    if (from_node.is_muted()) {
-      const bNodeLink *internal = nullptr;
-      for (const bNodeLink &candidate : from_node.internal_links()) {
-        if (candidate.tosock == link->fromsock) {
-          internal = &candidate;
-          break;
-        }
-      }
-      if (internal == nullptr) {
-        return nullptr;
-      }
-      current = internal->fromsock;
-      continue;
-    }
-    return &from_node;
-  }
-  return nullptr;
-}
-
-/**
- * Collect the stack feeding \a socket into \a r_layers, bottom first.
- *
- * Recurses down the Mix chain first so that the deepest image -- the bottom of the stack -- is
- * appended before anything that covers it.
- */
-static bool composite_stack_collect(const bNodeSocket &socket,
-                                    Vector<PaintMaterialCompositeImageLayer> &r_layers,
-                                    const int depth)
-{
-  /* A malformed tree can cycle, and a very deep chain is not worth compositing anyway. */
-  if (depth > 64) {
-    return false;
-  }
-
-  /* The normal combine group has to be recognized before the socket walk resolves through it:
-   * #BKE_paint_material_source_socket descends into a group and reports the node inside that
-   * happens to feed the output, which says nothing about what the group as a whole does. */
-  const bNode *shallow_source = composite_source_node_shallow(socket);
-  const bool is_combine_group = shallow_source != nullptr &&
-                                BKE_paint_material_is_normal_combine_group(*shallow_source);
-
-  if (!is_combine_group) {
-    const bNodeSocket *source = BKE_paint_material_source_socket(socket);
-    if (source == nullptr) {
-      /* An unlinked input is a constant. Nothing to composite and nothing to paint on. */
-      return false;
-    }
-    const bNode &node = source->owner_node();
-    if (node.type_legacy == SH_NODE_TEX_IMAGE) {
-      PaintMaterialCompositeImageLayer layer;
-      if (!composite_image_from_socket(socket, layer.color_image, layer.color_iuser)) {
-        return false;
-      }
-      /* The bottom layer has nothing under it: its own blend and opacity would have no meaning. */
-      r_layers.append(layer);
-      return true;
-    }
-    shallow_source = &node;
-  }
-
-  CompositeMixNode mix;
-  if (!composite_mix_node_read(*shallow_source, mix)) {
-    return false;
-  }
-  if (!composite_stack_collect(*mix.bottom, r_layers, depth + 1)) {
-    return false;
-  }
-
-  PaintMaterialCompositeImageLayer layer;
-  layer.blend = mix.blend;
-  if (!composite_image_from_socket(*mix.top, layer.color_image, layer.color_iuser)) {
-    return false;
-  }
-  if (BKE_paint_material_source_socket(*mix.factor) != nullptr) {
-    /* A linked factor is a mask, and only an image one can be sampled per pixel. */
-    if (!composite_image_from_socket(
-            *mix.factor, layer.mask_image, layer.mask_iuser, &layer.mask_from_alpha))
-    {
-      return false;
-    }
-  }
-  else {
-    layer.opacity = static_cast<const bNodeSocketValueFloat *>(mix.factor->default_value)->value;
-  }
-  r_layers.append(layer);
-  return true;
-}
-
-/**
- * The stack \a channel is wired as in \a ma's node tree, or false when it is not wired as one.
- */
-static bool composite_stack_from_graph(const Material &ma,
-                                       const int channel,
-                                       Vector<PaintMaterialCompositeImageLayer> &r_layers)
-{
-  r_layers.clear();
-
-  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
-    /* #PAINT_LAYER_MAP_MASK and "none" are not channels and have no socket to start from. */
-    return false;
-  }
-  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-      eMaterialPaintChannel(channel));
-  if (info.socket_name == nullptr) {
-    return false;
-  }
-  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
-  const bNode *principled = BKE_paint_material_principled_find(ma, reason);
-  if (principled == nullptr) {
-    return false;
-  }
-  const bNodeSocket *socket = bke::node_find_socket(
-      *principled, SOCK_IN, UString::from_ptr_noinline(info.socket_name));
-  if (socket == nullptr) {
-    return false;
-  }
-
-  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-    /* The Principled Normal input carries an already transformed vector, which no stack of maps
-     * can be recovered from. The maps themselves sit one node earlier, on the Normal Map node's
-     * Color input, in the same encoded space a stroke paints -- so that is where the chain is
-     * read from, exactly as the resolver reads a single normal map from there. */
-    const bNodeSocket *normal_source = BKE_paint_material_source_socket(*socket);
-    if (normal_source == nullptr || normal_source->owner_node().type_legacy != SH_NODE_NORMAL_MAP)
-    {
-      return false;
-    }
-    socket = bke::node_find_socket(normal_source->owner_node(), SOCK_IN, "Color"_ustr);
-    if (socket == nullptr) {
-      return false;
-    }
-  }
-
-  if (!composite_stack_collect(*socket, r_layers, 0)) {
-    r_layers.clear();
-    return false;
-  }
-  return !r_layers.is_empty();
-}
-
-/** The image tagged as \a channel of the paint layer \a layer_id, or null. */
-static Image *composite_layer_map_find(const Main &bmain, const bUUID &layer_id, const int channel)
-{
-  for (Image &image : const_cast<Main &>(bmain).images) {
-    if (image.paint_layer_channel != channel) {
-      continue;
-    }
-    if (BLI_uuid_equal(image.paint_layer_id, layer_id)) {
-      return &image;
-    }
-  }
-  return nullptr;
-}
-
-/**
- * Assemble \a channel from the paint layers themselves rather than from the graph.
- *
- * For a channel the shader has no input for -- Ambient Occlusion, a layer mask -- there is no
- * chain to walk, but the layers still exist and are still stacked in a definite order. That order,
- * and how each layer blends, is a property of the layer stack rather than of any one channel, so
- * it is taken from \a reference_layers (the channel that *is* wired) and each layer's own map for
- * \a channel is looked up by its #Image.paint_layer_id.
- *
- * A layer with no map for this channel contributes nothing and is skipped, rather than failing the
- * whole stack: a user who baked AO for one layer only should still see that layer's AO.
- */
-static bool composite_stack_from_layer_maps(
-    const Main &bmain,
-    const int channel,
-    Span<PaintMaterialCompositeImageLayer> reference_layers,
-    Vector<PaintMaterialCompositeImageLayer> &r_layers)
-{
-  r_layers.clear();
-  for (const PaintMaterialCompositeImageLayer &reference : reference_layers) {
-    if (reference.color_image == nullptr || BLI_uuid_is_nil(reference.color_image->paint_layer_id))
-    {
-      continue;
-    }
-    Image *map = composite_layer_map_find(bmain, reference.color_image->paint_layer_id, channel);
-    if (map == nullptr) {
-      continue;
-    }
-    PaintMaterialCompositeImageLayer layer = reference;
-    layer.color_image = map;
-    /* The reference layer's #ImageUser belongs to its own Image Texture node; this map has no node
-     * of its own to take one from, so the default applies. */
-    layer.color_iuser = nullptr;
-    if (reference.mask_image == reference.color_image) {
-      /* The reference masked itself -- a layer stack driving the factor from its own alpha. The
-       * same relationship holds for this channel's map. */
-      layer.mask_image = map;
-      layer.mask_iuser = nullptr;
-    }
-    r_layers.append(layer);
-  }
-  return !r_layers.is_empty();
-}
-
-bool BKE_paint_material_composite_stack_from_material(
-    const Main &bmain,
-    const Material &ma,
-    const int channel,
-    Vector<PaintMaterialCompositeImageLayer> &r_layers)
-{
-  /* A display mode, not a role: there is no channel to walk and no layer map to fall back to.
-   * Answered here so that a caller which reaches this by mistake degrades to the plain image
-   * rather than resolving Base Color's layers under a wrong name. */
-  if (channel == PAINT_LAYER_PASS_COMBINED) {
-    r_layers.clear();
-    return false;
-  }
-
-  if (composite_stack_from_graph(ma, channel, r_layers)) {
-    return true;
-  }
-
-  /* No chain for this channel. The layers are still there, so ask the channel that does have one
-   * for the stack's shape. Base Color first: it is the one a layered material always wires. */
-  Vector<PaintMaterialCompositeImageLayer> reference_layers;
-  bool has_reference = composite_stack_from_graph(
-      ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, reference_layers);
-  if (!has_reference) {
-    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-      if (composite_stack_from_graph(ma, info.channel, reference_layers)) {
-        has_reference = true;
-        break;
-      }
-    }
-  }
-  if (!has_reference) {
-    r_layers.clear();
-    return false;
-  }
-
-  return composite_stack_from_layer_maps(bmain, channel, reference_layers, r_layers);
-}
 
 Span<int> BKE_paint_material_composite_passes()
 {
@@ -647,48 +104,6 @@ Span<int> BKE_paint_material_display_passes()
   return Span<int>(passes, ARRAY_SIZE(passes));
 }
 
-void BKE_paint_material_layer_maps_get(const Main &bmain,
-                                       const Material &ma,
-                                       const bUUID &layer_id,
-                                       MutableSpan<Image *> r_maps)
-{
-  r_maps.fill(nullptr);
-  if (BLI_uuid_is_nil(layer_id)) {
-    return;
-  }
-
-  /* A wired channel already says which image belongs to which layer, so its map is read from the
-   * stack rather than from a tag an add-on may never have written. */
-  Vector<PaintMaterialCompositeImageLayer> layers;
-  for (const int role : BKE_paint_material_composite_passes()) {
-    if (!composite_stack_from_graph(ma, role, layers)) {
-      continue;
-    }
-    for (const PaintMaterialCompositeImageLayer &layer : layers) {
-      if (layer.color_image != nullptr &&
-          BLI_uuid_equal(layer.color_image->paint_layer_id, layer_id))
-      {
-        r_maps[role] = layer.color_image;
-        break;
-      }
-    }
-  }
-
-  /* #Image.paint_layer_channel answers the rest: a baked Ambient Occlusion map and the layer's
-   * mask are part of the layer without being part of the shader graph. */
-  for (Image &image : const_cast<Main &>(bmain).images) {
-    if (!r_maps.index_range().contains(image.paint_layer_channel)) {
-      continue;
-    }
-    if (r_maps[image.paint_layer_channel] == nullptr &&
-        BLI_uuid_equal(image.paint_layer_id, layer_id))
-    {
-      r_maps[image.paint_layer_channel] = &image;
-    }
-  }
-}
-
-/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Evaluation
@@ -727,37 +142,101 @@ static bool composite_mask_ibuf_is_valid(const ImBuf *ibuf, const int width, con
   return ibuf->byte_buffer.data != nullptr || ibuf->float_buffer.data != nullptr;
 }
 
+/**
+ * Read one straight scene-linear RGBA sample of \a ibuf at (x, y).
+ *
+ * A byte buffer is straight; a float one is straight-straightened before its colorspace is decoded,
+ * and the buffer's own colorspace is what is decoded -- the same path the colour tiles take. A
+ * mask or a mask correction is data in practice, so the conversion is a no-op for them; it exists
+ * so a map that is somehow tagged sRGB cannot make the CPU and the shader disagree.
+ */
+static void composite_read_sample_linear(const ImBuf *ibuf,
+                                         const int x,
+                                         const int y,
+                                         float rgba[4])
+{
+  const int channels = ibuf->channels == 0 ? 4 : ibuf->channels;
+  const bool four = channels == 4;
+  if (ibuf->byte_buffer.data != nullptr) {
+    const uchar *pixel = ibuf->byte_data() + (int64_t(y) * ibuf->x + x) * 4;
+    rgba[0] = float(pixel[0]) / 255.0f;
+    rgba[1] = float(pixel[1]) / 255.0f;
+    rgba[2] = float(pixel[2]) / 255.0f;
+    rgba[3] = float(pixel[3]) / 255.0f;
+  }
+  else {
+    const float *pixel = ibuf->float_buffer.data + (int64_t(y) * ibuf->x + x) * channels;
+    rgba[0] = pixel[0];
+    rgba[1] = pixel[1];
+    rgba[2] = pixel[2];
+    rgba[3] = four ? pixel[3] : 1.0f;
+    if (rgba[3] > 0.0f) {
+      const float inv = 1.0f / rgba[3];
+      rgba[0] *= inv;
+      rgba[1] *= inv;
+      rgba[2] *= inv;
+    }
+  }
+  const ColorSpace *colorspace = (ibuf->byte_buffer.data != nullptr) ?
+                                     ibuf->byte_buffer.colorspace :
+                                     ibuf->float_buffer.colorspace;
+  if (colorspace != nullptr && !IMB_colormanagement_space_is_data(colorspace) &&
+      !IMB_colormanagement_space_is_scene_linear(colorspace))
+  {
+    IMB_colormanagement_colorspace_to_scene_linear_v4(rgba, false, colorspace);
+  }
+}
+
 static float mask_factor_at(
     const ImBuf *mask_ibuf, const bool from_alpha, const int x, const int y, const float influence)
 {
   if (mask_ibuf == nullptr || influence <= 0.0f) {
     return 1.0f;
   }
-  const int channels = mask_ibuf->channels == 0 ? 4 : mask_ibuf->channels;
-  const int64_t offset = (int64_t(y) * mask_ibuf->x + x) * channels;
-  float mask_value;
+  float rgba[4];
+  composite_read_sample_linear(mask_ibuf, x, y, rgba);
+  const float mask_value = from_alpha ? rgba[3] : (rgba[0] + rgba[1] + rgba[2]) / 3.0f;
+  return (1.0f - influence) + influence * clamp_f(mask_value, 0.0f, 1.0f);
+}
 
-  if (mask_ibuf->byte_buffer.data != nullptr) {
-    const uchar *pixel = mask_ibuf->byte_data() + offset;
-    if (from_alpha) {
-      mask_value = channels == 4 ? float(pixel[3]) / 255.0f : 1.0f;
-    }
-    else {
-      mask_value = (float(pixel[0]) + float(pixel[1]) + float(pixel[2])) / (3.0f * 255.0f);
-    }
+/**
+ * The color and alpha of a mask-correction pixel, reduced by \a mode:
+ * #Mean (every existing Image/Mesh Map mask, unchanged) is the mean of its stored RGB; #Red (a
+ * MESH_MAP mask item) is the atlas R alone, the same value the generated Separate X reads;
+ * #Luminance (a Material/Node Group mask on a colour channel) matches
+ * #IMB_colormanagement_get_luminance, the generator's own #SH_NODE_RGBTOBW; #Alpha (a Material
+ * mask reading a live source Alpha texture) reads the grey from the pixel's own alpha instead of
+ * its RGB, and forces the returned alpha to 1 -- the source's coverage lives in that texture's
+ * alpha, not a second one, so the item's own factor is flat (opacity alone), never squared.
+ * The map is stored straight, like every paint-layer map, so the reduced value already is the
+ * coverage colour `C`; there is no un-premultiply divide. The graph reads the same straight bytes,
+ * after its texture upload has pre-multiplied and its Divide has undone that, so the two agree
+ * texel for texel.
+ */
+static void correction_mask_coverage_at(const ImBuf *ibuf,
+                                        const int x,
+                                        const int y,
+                                        const MaskGrayMode mode,
+                                        float &r_gray,
+                                        float &r_alpha)
+{
+  float rgba[4];
+  composite_read_sample_linear(ibuf, x, y, rgba);
+  if (mode == MaskGrayMode::Alpha) {
+    r_gray = clamp_f(rgba[3], 0.0f, 1.0f);
+    r_alpha = 1.0f;
+    return;
+  }
+  if (mode == MaskGrayMode::Luminance) {
+    r_gray = clamp_f(IMB_colormanagement_get_luminance(rgba), 0.0f, 1.0f);
+  }
+  else if (mode == MaskGrayMode::Red) {
+    r_gray = clamp_f(rgba[0], 0.0f, 1.0f);
   }
   else {
-    const float *pixel = mask_ibuf->float_buffer.data + offset;
-    if (from_alpha) {
-      mask_value = channels == 4 ? pixel[3] : 1.0f;
-    }
-    else {
-      mask_value = (pixel[0] + pixel[1] + pixel[2]) / 3.0f;
-    }
+    r_gray = clamp_f((rgba[0] + rgba[1] + rgba[2]) / 3.0f, 0.0f, 1.0f);
   }
-
-  mask_value = clamp_f(mask_value, 0.0f, 1.0f);
-  return (1.0f - influence) + influence * mask_value;
+  r_alpha = clamp_f(rgba[3], 0.0f, 1.0f);
 }
 
 /**
@@ -776,83 +255,738 @@ static void blend_normal_combine(const float bottom[4], const float top[4], floa
   copy_v3_v3(r_rgb, combined * 0.5f + 0.5f);
 }
 
-/** One component of #CompositeBlend::Overlay, straight from `node_mix_overlay`. */
-static float blend_overlay_channel(const float bottom, const float top, const float fac)
+/** The scalar `blend_value`'s `ramp_blend` equivalent, for mask corrections. */
+static float blend_value_ramp(const float bottom,
+                              const float top,
+                              const CompositeBlend blend,
+                              const float fac)
 {
-  const float facm = 1.0f - fac;
-  if (bottom < 0.5f) {
-    return bottom * (facm + 2.0f * fac * top);
+  if (blend == CompositeBlend::NormalCombine) {
+    const float bottom_rgba[4] = {bottom, bottom, bottom, 1.0f};
+    const float top_rgba[4] = {top, top, top, 1.0f};
+    float combined[3];
+    blend_normal_combine(bottom_rgba, top_rgba, combined);
+    return (combined[0] + combined[1] + combined[2]) / 3.0f;
   }
-  return 1.0f - (facm + 2.0f * fac * (1.0f - top)) * (1.0f - bottom);
+  float rgba[4] = {bottom, bottom, bottom, 1.0f};
+  const float top_rgba[4] = {top, top, top, 1.0f};
+  ramp_blend(int(blend), rgba, clamp_f(fac, 0.0f, 1.0f), top_rgba);
+  return rgba[0];
 }
 
 /**
- * Blend one pixel of \a src_top into \a dst, exactly as the Mix node would.
+ * Blend one row of a scene-linear pixel: the shader's own `ramp_blend` for every colour mode, and
+ * the whiteout for #CompositeBlend::NormalCombine, which no Mix node expresses.
  *
- * These are the formulas of `gpu_shader_material_mix_color.glsl`, not an alpha-over composite.
- * The distinction is the whole correctness of this module: the node interpolates by the factor
- * alone and never treats the top layer's alpha as coverage, so a stack that wants its layers to
- * cover each other routes that alpha into the factor -- and a compositor that also applied it
- * implicitly would apply it twice.
- *
- * Only Mix carries the top's alpha into the result; the others keep the bottom's, again matching
- * the node.
- *
- * \note Byte, and therefore in the buffers' own encoding rather than in the scene-linear space
- * the shader mixes in. The two agree wherever \a fac is 0 or 1 -- which is the whole of a hard
- * layer edge -- and drift by at most a rounding step at partial coverage.
+ * \a top carries the row's coverage in its alpha; Mix mixes it like the node does, the other modes
+ * keep the destination's. Nothing is clamped beyond the factor: Add is meant to exceed one, and the
+ * encode step is where a byte output is finally clamped. This is the one implementation of the
+ * colour formulas; the shader reaches the same `ramp_blend`.
  */
-static void blend_layer_byte(uchar dst[4],
-                             const uchar src_top[4],
+static void blend_row_linear(float dst[4],
+                             const float top[4],
                              const CompositeBlend blend,
-                             const float opacity,
-                             const float mask_factor)
+                             const float factor)
 {
-  const float fac = clamp_f(opacity * mask_factor, 0.0f, 1.0f);
-  if (fac == 0.0f) {
+  const float fac = clamp_f(factor, 0.0f, 1.0f);
+  if (blend == CompositeBlend::NormalCombine) {
+    float combined[3];
+    blend_normal_combine(dst, top, combined);
+    for (const int i : IndexRange(3)) {
+      dst[i] = dst[i] * (1.0f - fac) + combined[i] * fac;
+    }
     return;
   }
+  ramp_blend(int(blend), dst, fac, top);
+}
 
-  float bottom[4];
-  float top[4];
-  for (const int i : IndexRange(4)) {
-    bottom[i] = float(dst[i]) / 255.0f;
-    top[i] = float(src_top[i]) / 255.0f;
+/**
+ * The factor a layer that carries corrections blends by, at one pixel (spec 18 §5.3), steps A-C.
+ *
+ * The coverage starts at the layer's mask, its own alpha, or full. Each content correction
+ * accumulates its own coverage the way the engine's "over" pair does -- `a = a + f * (1 - a)` --
+ * and mask corrections then blend onto that factor, after #mask_influence, which the base coverage
+ * already carries: the mask image establishes the coverage, the corrections sit on top of it. A
+ * mask image owns the factor on its own, and what the content corrections accumulate goes to the
+ * layer's alpha instead.
+ *
+ * Shared by #composite_correction_pixel_apply and the mask baker: B is meant to be exactly the
+ * factor the composite blends by, so the two must read the same expression.
+ *
+ * \param offset: the pixel's offset into every layer buffer, which all match the stack dimensions.
+ */
+/**
+ * The straight alpha of a colour sample at (x, y), from a byte or float buffer.
+ *
+ * A byte buffer is straight already; a float one is premultiplied, so the stored alpha is what
+ * unpremultiplied the colour during decode and is the coverage either way.
+ */
+static float composite_color_alpha_at(const ImBuf *ibuf, const int x, const int y)
+{
+  if (ibuf == nullptr) {
+    return 0.0f;
+  }
+  const int channels = ibuf->channels == 0 ? 4 : ibuf->channels;
+  if (ibuf->byte_buffer.data != nullptr) {
+    return channels == 4 ? float(ibuf->byte_data()[(int64_t(y) * ibuf->x + x) * 4 + 3]) / 255.0f :
+                           1.0f;
+  }
+  const float *pixel = ibuf->float_buffer.data + (int64_t(y) * ibuf->x + x) * channels;
+  return channels == 4 ? pixel[3] : 1.0f;
+}
+
+static float composite_correction_pixel_mask_factor(const PaintMaterialCompositeLayer &layer,
+                                                    const int x,
+                                                    const int y)
+{
+  /* Two coverages that multiply: the mask (its own image, times a second baked coverage) and the
+   * layer's own content coverage (its map alpha, or full). The content corrections accumulate into
+   * the second one only, so a mask always clips them: a correction cannot bring coverage in where
+   * the mask is zero. With no mask at all, an alpha-driven layer covers by its own alpha -- where
+   * an absent base has none, and the corrections are what bring coverage in. */
+  float mask_coverage = 1.0f;
+  if (layer.mask_ibuf != nullptr) {
+    mask_coverage = mask_factor_at(layer.mask_ibuf,
+                                   layer.mask_from_alpha && !layer.mask_reads_grey,
+                                   x,
+                                   y,
+                                   layer.mask_influence);
+  }
+  if (layer.has_coverage_constant) {
+    /* A live Material source alpha: the same constant the generator builds for the factor base. */
+    mask_coverage *= layer.coverage_constant;
+  }
+  else if (layer.coverage_ibuf != nullptr) {
+    /* A second coverage (a Material layer's source transparency) multiplies the mask. A baked
+     * coverage is read as its grey like the generator's chain; a live source alpha map is read as
+     * its alpha, the output the generator's factor uses. */
+    mask_coverage *= mask_factor_at(
+        layer.coverage_ibuf, layer.coverage_from_alpha, x, y, 1.0f);
+  }
+  float alpha = 1.0f;
+  if (layer.color_alpha_coverage && layer.color_ibuf != nullptr) {
+    alpha = composite_color_alpha_at(layer.color_ibuf, x, y);
+  }
+  else if (layer.mask_ibuf == nullptr && layer.mask_from_alpha) {
+    alpha = composite_color_alpha_at(layer.color_ibuf, x, y);
   }
 
-  float result[4];
-  copy_v4_v4(result, bottom);
-  switch (blend) {
-    case CompositeBlend::Mix:
-      interp_v4_v4v4(result, bottom, top, fac);
-      break;
-    case CompositeBlend::Multiply:
-      for (const int i : IndexRange(3)) {
-        result[i] = bottom[i] * (1.0f - fac) + bottom[i] * top[i] * fac;
+  for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
+    if (!correction.enabled) {
+      continue;
+    }
+    float corr_alpha;
+    if (correction.has_coverage_constant) {
+      /* A Material correction's own live source Alpha (a constant), never its content map's alpha
+       * -- see #PaintMaterialCompositeCorrection.coverage_image's own doc comment. */
+      corr_alpha = correction.coverage_constant;
+    }
+    else if (correction.coverage_ibuf != nullptr) {
+      /* The same source Alpha, live (its own alpha) or baked (its grey), like the row's own
+       * #layer.coverage_ibuf a few lines above. */
+      corr_alpha = mask_factor_at(
+          correction.coverage_ibuf, correction.coverage_from_alpha, x, y, 1.0f);
+    }
+    else if (!correction.material_source && correction.ibuf != nullptr) {
+      /* Every other correction's colour arrives through its own coverage: its map alpha. A
+       * Material correction's #ibuf is its content channel's map (Base Color, say), which is never
+       * read as coverage -- see #PaintMaterialCompositeCorrection.coverage_image's own comment. */
+      corr_alpha = composite_color_alpha_at(correction.ibuf, x, y);
+    }
+    else {
+      /* A Fill correction, or a Material correction with no coverage of its own yet: no alpha
+       * contribution here (a Fill's opacity reaches the colour blend directly, not this factor). */
+      continue;
+    }
+    /* The correction's coverage reaches the factor by the same Multiply the graph uses. */
+    const float fac = clamp_f(correction.opacity * corr_alpha, 0.0f, 1.0f);
+    alpha = alpha + fac * (1.0f - alpha);
+  }
+
+  float mask_factor = mask_coverage * alpha;
+  /* Each mask item lays its straight coverage `C` over the factor by its own blend mode, in list
+   * order with the last entry on top: `F = mix(F_below, blend(F_below, C), A * op)`, exactly the
+   * Mix node the generator builds. Mix is the plain over the chain always used. */
+  for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.mask_corrections) {
+    if (!correction.enabled) {
+      continue;
+    }
+    float gray = 0.0f;
+    float corr_alpha = 0.0f;
+    if (correction.has_constant_color) {
+      /* A Material mask's live constant on a colour channel reduces to luminance, like its live
+       * texture / bake counterpart just below; every other constant mask (Fill) keeps the mean. */
+      gray = (correction.mask_gray_mode == MaskGrayMode::Luminance) ?
+                IMB_colormanagement_get_luminance(correction.constant_color) :
+                (correction.constant_color[0] + correction.constant_color[1] +
+                 correction.constant_color[2]) /
+                    3.0f;
+      corr_alpha = 1.0f;
+    }
+    else if (correction.ibuf != nullptr) {
+      const MaskGrayMode mode = correction.mesh_map_mask_reads_red ? MaskGrayMode::Red :
+                                                                     correction.mask_gray_mode;
+      correction_mask_coverage_at(correction.ibuf, x, y, mode, gray, corr_alpha);
+      /* The map is stored straight, like every paint-layer map, so its grey is the colour `C`
+       * directly: no un-premultiply here. The graph reaches the same `C` by dividing the texture,
+       * which the upload pre-multiplied, by alpha. `mix(F, C, A * op)` is
+       * `F * (1 - A * op) + C * A * op`. */
+    }
+    else {
+      continue;
+    }
+    /* A Material/Node Group mask's own coverage (its source's Alpha, on a channel other than
+     * Alpha itself) overrides whatever #correction_mask_coverage_at answered above -- that
+     * function's `corr_alpha` is only meaningful for a plain Image/Mesh Map map's own alpha. */
+    if (correction.has_coverage_constant) {
+      corr_alpha = correction.coverage_constant;
+    }
+    else if (correction.coverage_ibuf != nullptr) {
+      corr_alpha = mask_factor_at(
+          correction.coverage_ibuf, correction.coverage_from_alpha, x, y, 1.0f);
+    }
+    const float fac = clamp_f(corr_alpha * correction.opacity, 0.0f, 1.0f);
+    const float gray_clamped = clamp_f(gray, 0.0f, 1.0f);
+    mask_factor = blend_value_ramp(mask_factor, gray_clamped, correction.blend, fac);
+  }
+  return mask_factor;
+}
+
+/**
+/** Whether \a ibuf is a byte or float RGBA buffer of the stack's dimensions. */
+static bool composite_ibuf_is_rgba(const ImBuf *ibuf, const int width, const int height)
+{
+  if (ibuf == nullptr || ibuf->x != width || ibuf->y != height) {
+    return false;
+  }
+  if (!ELEM(ibuf->channels, 0, 4)) {
+    return false;
+  }
+  return ibuf->byte_buffer.data != nullptr || ibuf->float_buffer.data != nullptr;
+}
+
+/** The colorspace name of \a ibuf's own buffer, or null when its buffer names none. */
+static const char *composite_buffer_colorspace_name(const ImBuf *ibuf)
+{
+  const ColorSpace *colorspace = (ibuf->byte_buffer.data != nullptr) ?
+                                     ibuf->byte_buffer.colorspace :
+                                     ibuf->float_buffer.colorspace;
+  if (colorspace == nullptr) {
+    return nullptr;
+  }
+  return IMB_colormanagement_colorspace_get_name(colorspace);
+}
+
+/**
+ * Decode one tile of \a ibuf into \a dst as straight scene-linear RGBA: `tw * th * 4` floats.
+ *
+ * A byte buffer is straight already; a float one is premultiplied and is straightened here, before
+ * the colorspace conversion, and the conversion is one buffer call per tile rather than a per-pixel
+ * one -- what keeps a 4K map cheap. A data or scene-linear space is left as it is.
+ */
+static void composite_decode_tile(const ImBuf *ibuf,
+                                  const char *colorspace_name,
+                                  const rcti &tile,
+                                  float *dst)
+{
+  const int tw = BLI_rcti_size_x(&tile);
+  const int th = BLI_rcti_size_y(&tile);
+  const bool is_float = ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data != nullptr;
+  const int channels = ibuf->channels == 0 ? 4 : ibuf->channels;
+  const bool four = channels == 4;
+  for (int ty = 0; ty < th; ty++) {
+    const int y = tile.ymin + ty;
+    for (int tx = 0; tx < tw; tx++) {
+      const int x = tile.xmin + tx;
+      float *out = dst + (int64_t(ty) * tw + tx) * 4;
+      if (!is_float) {
+        const uchar *pixel = ibuf->byte_data() + (int64_t(y) * ibuf->x + x) * 4;
+        out[0] = float(pixel[0]) / 255.0f;
+        out[1] = float(pixel[1]) / 255.0f;
+        out[2] = float(pixel[2]) / 255.0f;
+        out[3] = float(pixel[3]) / 255.0f;
       }
-      break;
-    case CompositeBlend::Overlay:
-      for (const int i : IndexRange(3)) {
-        result[i] = blend_overlay_channel(bottom[i], top[i], fac);
+      else {
+        const float *pixel = ibuf->float_buffer.data + (int64_t(y) * ibuf->x + x) * channels;
+        out[0] = pixel[0];
+        out[1] = pixel[1];
+        out[2] = pixel[2];
+        out[3] = four ? pixel[3] : 1.0f;
       }
-      break;
-    case CompositeBlend::Add:
-      for (const int i : IndexRange(3)) {
-        result[i] = bottom[i] * (1.0f - fac) + (bottom[i] + top[i]) * fac;
+    }
+  }
+  if (is_float) {
+    /* A float buffer is premultiplied: straighten it before anything reads the colour. */
+    for (int64_t i = 0; i < int64_t(tw) * th; i++) {
+      const float alpha = dst[i * 4 + 3];
+      if (alpha > 0.0f) {
+        const float inv = 1.0f / alpha;
+        dst[i * 4 + 0] *= inv;
+        dst[i * 4 + 1] *= inv;
+        dst[i * 4 + 2] *= inv;
       }
-      break;
-    case CompositeBlend::NormalCombine: {
-      float combined[3];
-      blend_normal_combine(bottom, top, combined);
-      for (const int i : IndexRange(3)) {
-        result[i] = bottom[i] * (1.0f - fac) + combined[i] * fac;
+    }
+  }
+  /* The name is resolved by the acquisition path from the buffer it hands over; a stack built by
+   * hand (a test) leaves it null, and the buffer's own colorspace is then the right answer. */
+  const ColorSpace *colorspace = (colorspace_name != nullptr) ?
+                                     IMB_colormanagement_space_get_named(colorspace_name) :
+                                     nullptr;
+  if (colorspace == nullptr) {
+    colorspace = (ibuf->byte_buffer.data != nullptr) ? ibuf->byte_buffer.colorspace :
+                                                       ibuf->float_buffer.colorspace;
+  }
+  if (colorspace != nullptr && !IMB_colormanagement_space_is_data(colorspace) &&
+      !IMB_colormanagement_space_is_scene_linear(colorspace))
+  {
+    IMB_colormanagement_colorspace_to_scene_linear(dst, tw, th, 4, colorspace, false);
+  }
+}
+
+/**
+ * Apply one enabled layer over the scene-linear \a dst tile (spec 18 §5.3).
+ *
+ * The colour is decoded out of the layer's own map -- or taken from its constant, already linear --
+ * and every content correction is decoded and blended onto it the way the graph routes a
+ * correction's map through its own coverage. The factor the row finally blends by is the coverage
+ * chain, computed pixel by pixel; a mask image owns it, and the mask corrections sit on top.
+ */
+/* Forward declaration: a Stack correction's own content is its children's isolated result,
+ * computed the same way a Layer folder's own children are (#composite_folder_accumulate, defined
+ * below, after #composite_layer_render, which it is mutually recursive with through a folder's own
+ * corrections). */
+static void composite_folder_accumulate(const PaintMaterialCompositeLayer &folder,
+                                        const rcti &tile,
+                                        float *r_straight,
+                                        float *r_coverage);
+
+/**
+ * A Stack correction's own content: its children's isolated result over transparency
+ * (#composite_folder_accumulate, exactly like a Layer folder's own children), the subtree's
+ * coverage packed into the straight colour's alpha component. A plain Paint correction's own map
+ * alpha is already read as its coverage by the callers below, so packing it here means neither
+ * loop needs a separate code path for a folder correction -- it reads like any other map.
+ */
+static void composite_correction_stack_tile(
+    const PaintMaterialCompositeCorrectionBuffer &correction,
+    const rcti &tile,
+    Vector<float> &r_pixels)
+{
+  const int64_t count = int64_t(BLI_rcti_size_x(&tile)) * BLI_rcti_size_y(&tile);
+  PaintMaterialCompositeLayer stack_layer;
+  stack_layer.children = correction.children;
+  Vector<float> coverage(count);
+  r_pixels.resize(count * 4);
+  composite_folder_accumulate(stack_layer, tile, r_pixels.data(), coverage.data());
+  for (int64_t i = 0; i < count; i++) {
+    r_pixels[i * 4 + 3] = coverage[i];
+  }
+}
+
+/**
+ * Render one row onto tile-sized buffers: its straight colour in \a r_color and the coverage it
+ * blends by in \a r_factor. The destination is not touched, so a folder can composite the rows it
+ * holds through this same code.
+ *
+ * \param source_override: when non-null, the colour to start from instead of the layer's own map --
+ *                         how a folder's isolated result enters the folder's corrections and mask.
+ * \param coverage_override: when non-null, the coverage to start from instead of the layer's own
+ *                          alpha -- the isolated coverage a folder's contents accumulated, so its
+ *                          content corrections fold into that coverage by the over model.
+ */
+static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
+                                   const rcti &tile,
+                                   const float *source_override,
+                                   const float *coverage_override,
+                                   float *r_color,
+                                   float *r_factor)
+{
+  const int tw = BLI_rcti_size_x(&tile);
+  const int th = BLI_rcti_size_y(&tile);
+  const int64_t count = int64_t(tw) * th;
+  const bool has_corrections = !layer.content_corrections.is_empty() ||
+                               !layer.mask_corrections.is_empty();
+
+  if (source_override != nullptr) {
+    memcpy(r_color, source_override, size_t(count) * 4 * sizeof(float));
+  }
+  else if (layer.color_ibuf != nullptr) {
+    composite_decode_tile(layer.color_ibuf, layer.color_colorspace_name, tile, r_color);
+  }
+  else {
+    for (int64_t i = 0; i < count; i++) {
+      if (layer.has_constant_color) {
+        copy_v4_v4(r_color + i * 4, layer.constant_color);
       }
-      break;
+      else {
+        zero_v4(r_color + i * 4);
+      }
     }
   }
 
-  for (const int i : IndexRange(4)) {
-    dst[i] = uchar(clamp_i(int(result[i] * 255.0f + 0.5f), 0, 255));
+  /* A mask is a map like any other: decoded in one tile call, never a colorspace conversion per
+   * pixel. Non-Color masks -- the ones this engine creates -- make the call a no-op. */
+  Vector<float> mask_storage;
+  const float *mask = nullptr;
+  if (layer.mask_ibuf != nullptr) {
+    mask_storage.resize(count * 4);
+    composite_decode_tile(layer.mask_ibuf, layer.mask_colorspace_name, tile, mask_storage.data());
+    mask = mask_storage.data();
+  }
+
+  /* A second coverage (a Material layer's baked source transparency), decoded the same way and
+   * multiplied into the base as its grey, like the per-pixel path and the generator. */
+  Vector<float> coverage_storage;
+  if (layer.coverage_ibuf != nullptr) {
+    coverage_storage.resize(count * 4);
+    composite_decode_tile(
+        layer.coverage_ibuf, layer.coverage_colorspace_name, tile, coverage_storage.data());
+  }
+  auto extra_coverage = [&](const int64_t i) -> float {
+    if (layer.has_coverage_constant) {
+      /* A live Material source alpha, the constant the generator builds. */
+      return layer.coverage_constant;
+    }
+    if (coverage_storage.is_empty()) {
+      return 1.0f;
+    }
+    const float *c = coverage_storage.data() + i * 4;
+    if (layer.coverage_from_alpha) {
+      return clamp_f(c[3], 0.0f, 1.0f);
+    }
+    return clamp_f((c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
+  };
+
+  /* The mask side of the coverage: its own image, times the second baked coverage. A mask always
+   * clips the layer, corrections included, so it stays apart from the content side below. */
+  auto mask_coverage = [&](const int64_t i) -> float {
+    float value_out = 1.0f;
+    if (mask != nullptr) {
+      const float *m = mask + i * 4;
+      const float value = (layer.mask_from_alpha && !layer.mask_reads_grey) ?
+                              m[3] :
+                              (m[0] + m[1] + m[2]) / 3.0f;
+      value_out = (1.0f - layer.mask_influence) +
+                  layer.mask_influence * clamp_f(value, 0.0f, 1.0f);
+    }
+    return value_out * extra_coverage(i);
+  };
+  /* The content side: a folder's contents decide its coverage, a map's alpha decides a leaf's, and
+   * the content corrections build on it. Read before #r_color's alpha is overwritten below. */
+  auto content_coverage = [&](const int64_t i) -> float {
+    if (coverage_override != nullptr) {
+      return coverage_override[i];
+    }
+    if ((layer.color_alpha_coverage && layer.color_ibuf != nullptr) ||
+        (mask == nullptr && layer.mask_from_alpha))
+    {
+      return clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f);
+    }
+    return 1.0f;
+  };
+  auto base_coverage = [&](const int64_t i) -> float {
+    return mask_coverage(i) * content_coverage(i);
+  };
+
+  Vector<float> alpha_storage;
+  float *alpha = nullptr;
+  if (has_corrections) {
+    alpha_storage.resize(count);
+    alpha = alpha_storage.data();
+    /* The alpha of the row's own content, kept apart from the coverage #r_factor carries. The
+     * generated chain tracks it only where the channel can show a map (a Paint/Fill/Custom leaf,
+     * or a folder whose contents track one; a Material row's transparency is its Alpha input and
+     * never the channel map). Where it is tracked, the content correction is laid over this alpha
+     * -- `a = a + fac * (1 - a)` -- exactly as it is over the coverage, and the result is what the
+     * fourth component reports. The coverage stays untouched. */
+    Vector<float> content_alpha_storage;
+    float *content_alpha = nullptr;
+    if (layer.tracks_content_alpha) {
+      content_alpha_storage.resize(count);
+      content_alpha = content_alpha_storage.data();
+    }
+    for (int64_t i = 0; i < count; i++) {
+      alpha[i] = content_coverage(i);
+      if (content_alpha != nullptr) {
+        /* A folder's `r_color` is its straight sub-stack result, a leaf's is its map or constant,
+         * so its fourth component is the content alpha before any correction. */
+        content_alpha[i] = clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f);
+      }
+    }
+
+    Vector<float> correction_storage;
+    Vector<float> correction_coverage_storage;
+    for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
+      if (!correction.enabled) {
+        continue;
+      }
+      const float *correction_pixels = nullptr;
+      if (correction.is_folder) {
+        /* The subtree's own coverage is packed into alpha, so the unchanged code below reads it
+         * exactly like a Paint correction's own map alpha -- #material_source stays false. */
+        composite_correction_stack_tile(correction, tile, correction_storage);
+        correction_pixels = correction_storage.data();
+      }
+      else if (correction.has_constant_color) {
+        correction_storage.clear();
+      }
+      else if (correction.ibuf != nullptr) {
+        correction_storage.resize(count * 4);
+        composite_decode_tile(
+            correction.ibuf, correction.colorspace_name, tile, correction_storage.data());
+        correction_pixels = correction_storage.data();
+      }
+      else {
+        continue;
+      }
+      /* The correction's own coverage (a Material source's Alpha), decoded apart from its colour
+       * -- mirrors #extra_coverage above and #composite_correction_pixel_mask_factor. Every other
+       * correction kind keeps reading its coverage from its own colour pixel's alpha, unchanged. */
+      const float *correction_coverage_pixels = nullptr;
+      if (!correction.has_coverage_constant && correction.coverage_ibuf != nullptr) {
+        correction_coverage_storage.resize(count * 4);
+        composite_decode_tile(correction.coverage_ibuf,
+                              correction.coverage_colorspace_name,
+                              tile,
+                              correction_coverage_storage.data());
+        correction_coverage_pixels = correction_coverage_storage.data();
+      }
+      for (int64_t i = 0; i < count; i++) {
+        float corr_alpha = 1.0f;
+        const float *corr_rgba = correction.constant_color;
+        if (correction_pixels != nullptr) {
+          corr_rgba = correction_pixels + i * 4;
+          /* A Material correction's own pixel is its content channel's map (Base Color, say): its
+           * alpha is never coverage, so #corr_alpha stays the flat default of 1.0 here and waits
+           * for the coverage fields below (or the correction covers fully, like Baked with no bake
+           * coverage yet). */
+          if (!correction.material_source) {
+            corr_alpha = corr_rgba[3];
+          }
+        }
+        if (correction.has_coverage_constant) {
+          corr_alpha = correction.coverage_constant;
+        }
+        else if (correction_coverage_pixels != nullptr) {
+          const float *cc = correction_coverage_pixels + i * 4;
+          corr_alpha = correction.coverage_from_alpha ?
+                          clamp_f(cc[3], 0.0f, 1.0f) :
+                          clamp_f((cc[0] + cc[1] + cc[2]) / 3.0f, 0.0f, 1.0f);
+        }
+        const float fac = clamp_f(correction.opacity * corr_alpha, 0.0f, 1.0f);
+        blend_row_linear(r_color + i * 4, corr_rgba, correction.blend, fac);
+        alpha[i] = alpha[i] + fac * (1.0f - alpha[i]);
+        if (content_alpha != nullptr) {
+          content_alpha[i] = content_alpha[i] + fac * (1.0f - content_alpha[i]);
+        }
+      }
+    }
+    /* The factor the row blends by: the mask times the coverage the content corrections built, and
+     * the mask corrections blend onto that. Each correction is decoded once for the tile, then read
+     * per pixel. The fourth component reports the content alpha instead, so the row keeps the
+     * transparency of its own contents. */
+    for (int64_t i = 0; i < count; i++) {
+      r_factor[i] = mask_coverage(i) * alpha[i];
+      r_color[i * 4 + 3] = (content_alpha != nullptr) ? content_alpha[i] : r_factor[i];
+    }
+    Vector<float> mask_coverage_storage;
+    for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.mask_corrections) {
+      if (!correction.enabled) {
+        continue;
+      }
+      const float *correction_pixels = nullptr;
+      float constant_gray = 0.0f;
+      if (correction.is_folder) {
+        /* The subtree's coverage is packed into alpha; #correction.mask_gray_mode (Alpha/Red/
+         * Luminance, set when the correction was built) picks the right reduction below, exactly
+         * like a Material/Node Group mask reading its own subtree. */
+        composite_correction_stack_tile(correction, tile, correction_storage);
+        correction_pixels = correction_storage.data();
+      }
+      else if (correction.has_constant_color) {
+        /* Mirrors the per-pixel loop: a Material mask's live constant on a colour channel reduces
+         * to luminance, every other constant mask (Fill) keeps the mean. */
+        constant_gray = (correction.mask_gray_mode == MaskGrayMode::Luminance) ?
+                          IMB_colormanagement_get_luminance(correction.constant_color) :
+                          (correction.constant_color[0] + correction.constant_color[1] +
+                           correction.constant_color[2]) /
+                              3.0f;
+      }
+      else if (correction.ibuf != nullptr) {
+        correction_storage.resize(count * 4);
+        composite_decode_tile(
+            correction.ibuf, correction.colorspace_name, tile, correction_storage.data());
+        correction_pixels = correction_storage.data();
+      }
+      else {
+        continue;
+      }
+      /* A Material/Node Group mask's own coverage, decoded apart from its grey -- mirrors the
+       * per-pixel #composite_correction_pixel_mask_factor and the content loop above. */
+      const float *coverage_pixels = nullptr;
+      if (!correction.has_coverage_constant && correction.coverage_ibuf != nullptr) {
+        mask_coverage_storage.resize(count * 4);
+        composite_decode_tile(correction.coverage_ibuf,
+                              correction.coverage_colorspace_name,
+                              tile,
+                              mask_coverage_storage.data());
+        coverage_pixels = mask_coverage_storage.data();
+      }
+      for (int64_t i = 0; i < count; i++) {
+        /* Straight coverage laid over the factor; the bytes are read as stored, never divided. */
+        float gray = constant_gray;
+        float corr_alpha = 1.0f;
+        if (correction_pixels != nullptr) {
+          const float *c = correction_pixels + i * 4;
+          corr_alpha = c[3];
+          /* Read straight, exactly as in #composite_correction_pixel_mask_factor's loop. A MESH_MAP
+           * mask item reads the atlas R, never the mean of its RGB; a Material/Node Group mask on a
+           * colour channel reads luminance, and one reading a live source Alpha texture reads that
+           * texture's own alpha as its grey and forces its own factor flat below. */
+          if (correction.mesh_map_mask_reads_red || correction.mask_gray_mode == MaskGrayMode::Red)
+          {
+            /* A MESH_MAP atlas' dedicated coverage channel, or a Stack mask on a scalar channel
+             * (its subtree's Separate-X-equivalent reduction): both read R alone. */
+            gray = c[0];
+          }
+          else if (correction.mask_gray_mode == MaskGrayMode::Alpha) {
+            gray = c[3];
+            corr_alpha = 1.0f;
+          }
+          else if (correction.mask_gray_mode == MaskGrayMode::Luminance) {
+            gray = IMB_colormanagement_get_luminance(c);
+          }
+          else {
+            gray = (c[0] + c[1] + c[2]) / 3.0f;
+          }
+        }
+        if (correction.has_coverage_constant) {
+          corr_alpha = correction.coverage_constant;
+        }
+        else if (coverage_pixels != nullptr) {
+          const float *cc = coverage_pixels + i * 4;
+          corr_alpha = correction.coverage_from_alpha ?
+                          clamp_f(cc[3], 0.0f, 1.0f) :
+                          clamp_f((cc[0] + cc[1] + cc[2]) / 3.0f, 0.0f, 1.0f);
+        }
+        const float fac = clamp_f(corr_alpha * correction.opacity, 0.0f, 1.0f);
+        const float gray_clamped = clamp_f(gray, 0.0f, 1.0f);
+        r_factor[i] = blend_value_ramp(r_factor[i], gray_clamped, correction.blend, fac);
+      }
+    }
+    return;
+  }
+
+  for (int64_t i = 0; i < count; i++) {
+    r_factor[i] = base_coverage(i);
+  }
+}
+
+/**
+ * Accumulate a folder's contents in isolation: pre-multiplied colour in \a r_straight and coverage
+ * in \a r_coverage, per the isolated-group model of design §5.
+ */
+static void composite_folder_accumulate(const PaintMaterialCompositeLayer &folder,
+                                        const rcti &tile,
+                                        float *r_straight,
+                                        float *r_coverage)
+{
+  const int tw = BLI_rcti_size_x(&tile);
+  const int th = BLI_rcti_size_y(&tile);
+  const int64_t count = int64_t(tw) * th;
+
+  Vector<float> premul(count * 4, 0.0f);
+  Vector<float> coverage(count, 0.0f);
+  Vector<float> child_color(count * 4);
+  Vector<float> child_factor(count);
+  Vector<float> sub_color(count * 4);
+  Vector<float> sub_coverage(count);
+
+  for (const PaintMaterialCompositeLayer &child : folder.children) {
+    if (!child.enabled) {
+      continue;
+    }
+    if (child.is_folder) {
+      composite_folder_accumulate(child, tile, sub_color.data(), sub_coverage.data());
+      composite_layer_render(child,
+                             tile,
+                             sub_color.data(),
+                             sub_coverage.data(),
+                             child_color.data(),
+                             child_factor.data());
+    }
+    else {
+      composite_layer_render(
+          child, tile, nullptr, nullptr, child_color.data(), child_factor.data());
+    }
+
+    for (int64_t i = 0; i < count; i++) {
+      const float f = clamp_f(child.opacity * child_factor[i], 0.0f, 1.0f);
+      const float a = coverage[i];
+      float straight[4];
+      if (a > 0.0f) {
+        for (const int k : IndexRange(4)) {
+          straight[k] = premul[i * 4 + k] / a;
+        }
+      }
+      else {
+        zero_v4(straight);
+      }
+      /* blend_m(S, c) at full factor, then c_eff = lerp(c, blend, a). */
+      float blended[4] = {straight[0], straight[1], straight[2], straight[3]};
+      blend_row_linear(blended, child_color.data() + i * 4, child.blend, 1.0f);
+      const float *c = child_color.data() + i * 4;
+      float c_eff[4];
+      for (const int k : IndexRange(4)) {
+        c_eff[k] = c[k] + (blended[k] - c[k]) * a;
+      }
+      for (const int k : IndexRange(4)) {
+        premul[i * 4 + k] = premul[i * 4 + k] * (1.0f - f) + c_eff[k] * f;
+      }
+      coverage[i] = a + f * (1.0f - a);
+    }
+  }
+
+  for (int64_t i = 0; i < count; i++) {
+    const float a = coverage[i];
+    if (a > 0.0f) {
+      for (const int k : IndexRange(4)) {
+        r_straight[i * 4 + k] = premul[i * 4 + k] / a;
+      }
+    }
+    else {
+      zero_v4(r_straight + i * 4);
+    }
+    r_coverage[i] = a;
+  }
+}
+
+static void composite_apply_layer_linear(const PaintMaterialCompositeLayer &layer,
+                                         const rcti &tile,
+                                         float *dst)
+{
+  const int tw = BLI_rcti_size_x(&tile);
+  const int th = BLI_rcti_size_y(&tile);
+  const int64_t count = int64_t(tw) * th;
+
+  Vector<float> color(count * 4);
+  Vector<float> factor(count);
+  if (layer.is_folder) {
+    Vector<float> sub_color(count * 4);
+    Vector<float> sub_coverage(count);
+    composite_folder_accumulate(layer, tile, sub_color.data(), sub_coverage.data());
+    /* The accumulated coverage is the base the folder's own corrections build on, so it is passed
+     * in rather than multiplied afterwards (design §5). */
+    composite_layer_render(
+        layer, tile, sub_color.data(), sub_coverage.data(), color.data(), factor.data());
+  }
+  else {
+    composite_layer_render(layer, tile, nullptr, nullptr, color.data(), factor.data());
+  }
+
+  for (int64_t i = 0; i < count; i++) {
+    blend_row_linear(
+        dst + i * 4, color.data() + i * 4, layer.blend, layer.opacity * factor[i]);
   }
 }
 
@@ -866,7 +1000,36 @@ static bool composite_stack_validate(const PaintMaterialCompositeStack &stack)
     if (!layer.enabled) {
       continue;
     }
-    if (!composite_ibuf_is_byte_rgba(layer.color_ibuf, stack.width, stack.height)) {
+    if (layer.is_folder) {
+      /* A folder carries no buffers of its own; its contents are what has to be usable. */
+      bool children_ok = !layer.children.empty();
+      for (const PaintMaterialCompositeLayer &child : layer.children) {
+        PaintMaterialCompositeStack child_stack;
+        child_stack.width = stack.width;
+        child_stack.height = stack.height;
+        child_stack.layers.append(child);
+        if (!composite_stack_validate(child_stack)) {
+          children_ok = false;
+          break;
+        }
+      }
+      if (!children_ok) {
+        return false;
+      }
+      any_enabled = true;
+      continue;
+    }
+    const bool has_corrections = !layer.content_corrections.is_empty() ||
+                                 !layer.mask_corrections.is_empty();
+    if (layer.color_ibuf != nullptr) {
+      if (!composite_ibuf_is_rgba(layer.color_ibuf, stack.width, stack.height)) {
+        return false;
+      }
+    }
+    else if (!has_corrections && !layer.has_constant_color) {
+      /* A layer without a map has nothing to composite unless its content corrections carry it
+       * (spec 18 §5.3) or it is a constant; refusing it here is what sends such a stack to the
+       * bake. */
       return false;
     }
     if (layer.mask_ibuf != nullptr &&
@@ -874,9 +1037,133 @@ static bool composite_stack_validate(const PaintMaterialCompositeStack &stack)
     {
       return false;
     }
+    if (layer.coverage_ibuf != nullptr &&
+        !composite_mask_ibuf_is_valid(layer.coverage_ibuf, stack.width, stack.height))
+    {
+      return false;
+    }
+    for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
+      if (correction.ibuf != nullptr &&
+          !composite_ibuf_is_rgba(correction.ibuf, stack.width, stack.height))
+      {
+        return false;
+      }
+    }
+    for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.mask_corrections) {
+      if (correction.ibuf != nullptr &&
+          !composite_mask_ibuf_is_valid(correction.ibuf, stack.width, stack.height))
+      {
+        return false;
+      }
+    }
     any_enabled = true;
   }
   return any_enabled;
+}
+
+/** The rectangle \a region clips to inside `[0, width] x [0, height]`, or empty. */
+static bool composite_clip_area(const PaintMaterialCompositeStack &stack,
+                                const rcti *region,
+                                rcti &r_area)
+{
+  BLI_rcti_init(&r_area, 0, stack.width, 0, stack.height);
+  if (region != nullptr) {
+    rcti clipped = *region;
+    if (!BLI_rcti_isect(&r_area, &clipped, &r_area)) {
+      BLI_rcti_init(&r_area, 0, 0, 0, 0);
+      return false;
+    }
+  }
+  return true;
+}
+
+/** One 256x256 tile: the scratch a layer is decoded and mixed in, never a full-size copy. */
+static constexpr int COMPOSITE_TILE_SIZE = 256;
+
+bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack &stack,
+                                              float *dst,
+                                              const rcti *region,
+                                              PaintMaterialCompositeEvalStats *r_stats)
+{
+  if (!composite_stack_validate(stack)) {
+    return false;
+  }
+
+  rcti area;
+  if (!composite_clip_area(stack, region, area)) {
+    /* Nothing of the tagged region is inside the buffer; the composite is already correct. */
+    if (r_stats != nullptr) {
+      *r_stats = {};
+    }
+    return true;
+  }
+
+  const double start_time = BLI_time_now_seconds();
+  const int64_t area_width = BLI_rcti_size_x(&area);
+  int layers_evaluated = 0;
+  Vector<float> tile_storage;
+
+  for (int tile_y = area.ymin; tile_y < area.ymax; tile_y += COMPOSITE_TILE_SIZE) {
+    for (int tile_x = area.xmin; tile_x < area.xmax; tile_x += COMPOSITE_TILE_SIZE) {
+      rcti tile;
+      BLI_rcti_init(&tile,
+                    tile_x,
+                    min_ii(tile_x + COMPOSITE_TILE_SIZE, area.xmax),
+                    tile_y,
+                    min_ii(tile_y + COMPOSITE_TILE_SIZE, area.ymax));
+      const int tw = BLI_rcti_size_x(&tile);
+      const int th = BLI_rcti_size_y(&tile);
+      tile_storage.resize(int64_t(tw) * th * 4);
+      float *tile_dst = tile_storage.data();
+
+      bool initialized = false;
+      for (const PaintMaterialCompositeLayer &layer : stack.layers) {
+        if (!layer.enabled) {
+          continue;
+        }
+        const bool has_corrections = !layer.content_corrections.is_empty() ||
+                                     !layer.mask_corrections.is_empty();
+        if (!initialized) {
+          /* A bare bottom is copied rather than blended: it has no Mix node, so it has no blend
+           * mode or factor, and blending it over undefined pixels would let them show through
+           * wherever it is transparent. A uniform chain's lowest layer has all of those, and
+           * blends over the transparency the graph gives it -- so the tile starts from the shared
+           * bottom colour and it is blended like any other layer. */
+          if (layer.is_bare_base && layer.color_ibuf != nullptr) {
+            composite_decode_tile(
+                layer.color_ibuf, layer.color_colorspace_name, tile, tile_dst);
+          }
+          else if (stack.has_bottom_color) {
+            for (int64_t i = 0; i < int64_t(tw) * th; i++) {
+              copy_v4_v4(tile_dst + i * 4, stack.bottom_color);
+            }
+          }
+          else {
+            memset(tile_dst, 0, size_t(int64_t(tw) * th * 4) * sizeof(float));
+          }
+          initialized = true;
+          layers_evaluated++;
+          if (layer.is_bare_base && !has_corrections) {
+            continue;
+          }
+        }
+        composite_apply_layer_linear(layer, tile, tile_dst);
+      }
+
+      /* Copy the tile back into the caller's buffer; only the region is ever touched. */
+      for (int row = 0; row < th; row++) {
+        float *dst_row = dst + ((int64_t(tile.ymin + row) * stack.width + tile.xmin) * 4);
+        memcpy(dst_row, tile_dst + int64_t(row) * tw * 4, size_t(tw) * 4 * sizeof(float));
+      }
+    }
+  }
+
+  if (r_stats != nullptr) {
+    r_stats->elapsed_seconds = BLI_time_now_seconds() - start_time;
+    r_stats->layers_evaluated = layers_evaluated;
+    r_stats->pixels_processed = area_width * BLI_rcti_size_y(&area);
+  }
+  return true;
 }
 
 bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
@@ -891,74 +1178,38 @@ bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
     return false;
   }
 
-  rcti area;
-  BLI_rcti_init(&area, 0, stack.width, 0, stack.height);
-  if (region != nullptr) {
-    rcti clipped = *region;
-    if (!BLI_rcti_isect(&area, &clipped, &area)) {
-      /* Nothing of the tagged region is inside the buffer; the composite is already correct. */
-      if (r_stats != nullptr) {
-        *r_stats = {};
-      }
-      return true;
-    }
-  }
-
-  const double start_time = BLI_time_now_seconds();
-
-  const int64_t row_stride = int64_t(stack.width) * 4;
-  const int64_t area_width = BLI_rcti_size_x(&area);
-  const IndexRange rows(area.ymin, BLI_rcti_size_y(&area));
-  uchar *composite_pixels = composite_ibuf->byte_data_for_write();
-  int layers_evaluated = 0;
-  bool composite_initialized = false;
-
-  for (const PaintMaterialCompositeLayer &layer : stack.layers) {
-    if (!layer.enabled) {
-      continue;
-    }
-    const uchar *layer_pixels = layer.color_ibuf->byte_data();
-
-    if (!composite_initialized) {
-      /* The bottom layer is copied rather than blended: there is nothing under it, and blending
-       * it over undefined pixels would let them show through wherever it is transparent. */
-      threading::parallel_for(rows, 64, [&](const IndexRange range) {
-        for (const int64_t y : range) {
-          const int64_t offset = y * row_stride + int64_t(area.xmin) * 4;
-          memcpy(composite_pixels + offset, layer_pixels + offset, size_t(area_width * 4));
-        }
-      });
-      composite_initialized = true;
-      layers_evaluated++;
-      continue;
-    }
-
-    threading::parallel_for(rows, 64, [&](const IndexRange range) {
-      for (const int64_t y : range) {
-        const int64_t row_offset = y * row_stride;
-        for (const int64_t x : IndexRange(area.xmin, area_width)) {
-          const int64_t offset = row_offset + x * 4;
-          const float mask_factor = mask_factor_at(
-              layer.mask_ibuf, layer.mask_from_alpha, int(x), int(y), layer.mask_influence);
-          blend_layer_byte(composite_pixels + offset,
-                           layer_pixels + offset,
-                           layer.blend,
-                           layer.opacity,
-                           mask_factor);
-        }
-      }
-    });
-    layers_evaluated++;
-  }
-
-  if (!composite_initialized) {
+  Vector<float> linear(int64_t(stack.width) * stack.height * 4);
+  if (!BKE_paint_material_composite_eval_linear(stack, linear.data(), region, r_stats)) {
     return false;
   }
 
-  if (r_stats != nullptr) {
-    r_stats->elapsed_seconds = BLI_time_now_seconds() - start_time;
-    r_stats->layers_evaluated = layers_evaluated;
-    r_stats->pixels_processed = area_width * BLI_rcti_size_y(&area);
+  rcti area;
+  if (!composite_clip_area(stack, region, area)) {
+    return true;
+  }
+
+  /* The color encoding the byte output is written in: the buffer's own colorspace, so the preview
+   * and a saved map are the same pixels. Null (a plain ImBuf) leaves the scene-linear values as
+   * they are, which is what a test comparing one raw pixel wants. */
+  const char *colorspace_name = composite_buffer_colorspace_name(composite_ibuf);
+  const ColorSpace *colorspace = (colorspace_name != nullptr) ?
+                                     IMB_colormanagement_space_get_named(colorspace_name) :
+                                     nullptr;
+  const bool encode = colorspace != nullptr && !IMB_colormanagement_space_is_data(colorspace) &&
+                      !IMB_colormanagement_space_is_scene_linear(colorspace);
+
+  uchar *pixels = composite_ibuf->byte_data_for_write();
+  const int64_t area_width = BLI_rcti_size_x(&area);
+  for (int y = area.ymin; y < area.ymax; y++) {
+    float *row = linear.data() + (int64_t(y) * stack.width + area.xmin) * 4;
+    if (encode) {
+      IMB_colormanagement_scene_linear_to_colorspace(
+          row, int(area_width), 1, 4, colorspace);
+    }
+    uchar *out = pixels + (int64_t(y) * stack.width + area.xmin) * 4;
+    for (int64_t i = 0; i < area_width * 4; i++) {
+      out[i] = uchar(clamp_i(int(row[i] * 255.0f + 0.5f), 0, 255));
+    }
   }
   return true;
 }
@@ -973,6 +1224,9 @@ struct CompositeImageLock {
   Image *image = nullptr;
   ImBuf *ibuf = nullptr;
   void *lock = nullptr;
+  /** A buffer this code allocated (a resampled MESH_MAP atlas), freed on release instead of
+   * unlocked. #image is null for one; the atlas' own buffer is never owned. */
+  bool owned = false;
 };
 
 static ImBuf *composite_image_acquire(Image *image,
@@ -1001,42 +1255,320 @@ static ImBuf *composite_image_acquire(Image *image,
   return entry.ibuf;
 }
 
+/** Hand ownership of \a ibuf to \a r_locks, so it is freed once the evaluation is done. */
+static void composite_image_own(ImBuf *ibuf, Vector<CompositeImageLock> &r_locks)
+{
+  CompositeImageLock entry;
+  entry.image = nullptr;
+  entry.ibuf = ibuf;
+  entry.lock = nullptr;
+  entry.owned = true;
+  r_locks.append(entry);
+}
+
 static void composite_images_release(Span<CompositeImageLock> locks)
 {
   for (const CompositeImageLock &entry : locks) {
-    BKE_image_release_ibuf(entry.image, entry.ibuf, entry.lock);
+    if (entry.owned) {
+      IMB_freeImBuf(entry.ibuf);
+    }
+    else {
+      BKE_image_release_ibuf(entry.image, entry.ibuf, entry.lock);
+    }
   }
 }
 
+/**
+ * Resample \a src (a MESH_MAP atlas) onto a \a ref_width x \a ref_height grid, as a float RGBA
+ * scene-linear ImBuf the caller owns.
+ *
+ * The mapping matches the generator's Image Texture sampling: the reference texel centre `(x + 0.5)
+ * / W_ref` is looked up in the atlas at `u * W_atlas - 0.5`, bilinearly filtered with Extend
+ * clamping -- so a differently sized atlas agrees between the graph and the CPU, including at the
+ * borders. With equal sizes the read is the direct texel. The atlas is Non-Color and its alpha is
+ * ignored (alpha 1). A scalar atlas (#scalar) contributes its R spread across the RGB, the grey the
+ * generator's Separate/Combine pair builds; an RGB atlas passes its stored RGB through. A byte
+ * source is converted to scene linear here; the result's buffer colorspace is scene linear, so the
+ * evaluator's decode is the identity.
+ */
+static ImBuf *composite_resample_mesh_map(const ImBuf *src,
+                                          const int ref_width,
+                                          const int ref_height,
+                                          const bool scalar)
+{
+  if (src == nullptr || ref_width <= 0 || ref_height <= 0) {
+    return nullptr;
+  }
+  ImBuf *dst = IMB_allocImBuf(uint(ref_width), uint(ref_height), ImBufFlags::FloatData);
+  if (dst == nullptr || dst->float_data() == nullptr) {
+    if (dst != nullptr) {
+      IMB_freeImBuf(dst);
+    }
+    return nullptr;
+  }
+  dst->channels = 4;
+  float *out = dst->float_data_for_write();
+  const bool src_is_float = src->byte_buffer.data == nullptr && src->float_buffer.data != nullptr;
+  const int channels = src->channels == 0 ? 4 : src->channels;
+  /* The atlas is Non-Color in the model, so no colorspace transform is expected; a byte source is
+   * still scaled to [0, 1]. A float source is straight already (alpha 1). */
+  for (int y = 0; y < ref_height; y++) {
+    const float v = (float(y) + 0.5f) / float(ref_height);
+    const float sv = v * float(src->y) - 0.5f;
+    for (int x = 0; x < ref_width; x++) {
+      const float u = (float(x) + 0.5f) / float(ref_width);
+      const float su = u * float(src->x) - 0.5f;
+      float *p = out + (int64_t(y) * ref_width + x) * 4;
+      if (!src_is_float) {
+        const uchar4 c = math::interpolate_bilinear_byte(src->byte_data(), src->x, src->y, su, sv);
+        p[0] = float(c.x) / 255.0f;
+        p[1] = float(c.y) / 255.0f;
+        p[2] = float(c.z) / 255.0f;
+      }
+      else {
+        const float *data = src->float_buffer.data;
+        /* Read the four filtered channels without assuming 4 components. */
+        float4 sum(0.0f);
+        /* interpolate_bilinear_fl reads 4 components; a 3-component float atlas is uncommon here
+         * (the model stores RGBA), so only the 4-component and the plain read are handled. */
+        if (channels == 4) {
+          const float4 c = math::interpolate_bilinear_fl(data, src->x, src->y, su, sv);
+          sum = c;
+        }
+        else {
+          /* Non-4-channel float atlases: nearest read of the clamped texel. */
+          const int cx = min_ii(max_ii(int(floorf(su + 0.5f)), 0), src->x - 1);
+          const int cy = min_ii(max_ii(int(floorf(sv + 0.5f)), 0), src->y - 1);
+          const float *px = data + (int64_t(cy) * src->x + cx) * channels;
+          sum = float4(px[0], px[1], px[2], 1.0f);
+        }
+        p[0] = sum.x;
+        p[1] = sum.y;
+        p[2] = sum.z;
+      }
+      p[3] = 1.0f;
+      if (scalar) {
+        /* The scalar atlas' value lives in R; the grey is what the channel's colour and the mask
+         * both read, matching the graph's Separate X -> Combine XYZ spread. */
+        p[1] = p[0];
+        p[2] = p[0];
+      }
+    }
+  }
+  /* The result is scene linear, so the evaluator's decode is the identity. A fresh ImBuf's float
+   * colorspace is null, so it is assigned rather than written through. */
+  IMB_colormanagement_assign_float_colorspace(
+      dst, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+  return dst;
+}
+
+/** Acquire one image-layer's buffers into \a r_layer, recursing into a folder's children. */
+static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_layer,
+                                  Vector<CompositeImageLock> &r_locks,
+                                  PaintMaterialCompositeLayer &r_layer,
+                                  const int ref_width,
+                                  const int ref_height)
+{
+  r_layer.blend = image_layer.blend;
+  r_layer.opacity = image_layer.opacity;
+  r_layer.mask_influence = image_layer.mask_influence;
+  r_layer.mask_from_alpha = image_layer.mask_from_alpha;
+  r_layer.mask_reads_grey = image_layer.mask_reads_grey;
+  r_layer.color_alpha_coverage = image_layer.color_alpha_coverage;
+  r_layer.tracks_content_alpha = image_layer.tracks_content_alpha;
+  r_layer.is_bare_base = image_layer.is_bare_base;
+  r_layer.is_folder = image_layer.is_folder;
+  r_layer.is_mesh_map = image_layer.is_mesh_map;
+  r_layer.is_mesh_map_scalar = image_layer.is_mesh_map_scalar;
+  copy_v4_v4(r_layer.constant_color, image_layer.constant_color);
+  r_layer.has_constant_color = image_layer.has_constant_color;
+  r_layer.coverage_constant = image_layer.coverage_constant;
+  r_layer.has_coverage_constant = image_layer.has_coverage_constant;
+  r_layer.coverage_from_alpha = image_layer.coverage_from_alpha;
+  r_layer.coverage_iuser = image_layer.coverage_iuser;
+
+  if (image_layer.color_image != nullptr) {
+    r_layer.color_ibuf = composite_image_acquire(
+        image_layer.color_image, image_layer.color_iuser, r_locks);
+    if (r_layer.color_ibuf == nullptr) {
+      return false;
+    }
+    if (image_layer.is_mesh_map) {
+      /* A mesh map may be another resolution; resample it onto the reference grid so the stack is
+       * uniform, exactly as the graph's filtered UV sampling reads it. */
+      if (ImBuf *resampled = composite_resample_mesh_map(
+              r_layer.color_ibuf, ref_width, ref_height, image_layer.is_mesh_map_scalar))
+      {
+        composite_image_own(resampled, r_locks);
+        r_layer.color_ibuf = resampled;
+      }
+    }
+    /* The buffer's own colorspace, not the Image setting: the two can disagree, and the evaluator
+     * has to decode what it is actually handed. */
+    r_layer.color_colorspace_name = composite_buffer_colorspace_name(r_layer.color_ibuf);
+  }
+  if (image_layer.mask_image != nullptr) {
+    r_layer.mask_ibuf = composite_image_acquire(
+        image_layer.mask_image, image_layer.mask_iuser, r_locks);
+    if (r_layer.mask_ibuf == nullptr) {
+      return false;
+    }
+    r_layer.mask_colorspace_name = composite_buffer_colorspace_name(r_layer.mask_ibuf);
+  }
+  if (image_layer.coverage_image != nullptr) {
+    r_layer.coverage_ibuf = composite_image_acquire(
+        image_layer.coverage_image, image_layer.coverage_iuser, r_locks);
+    if (r_layer.coverage_ibuf == nullptr) {
+      return false;
+    }
+    r_layer.coverage_colorspace_name = composite_buffer_colorspace_name(r_layer.coverage_ibuf);
+  }
+  for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
+    PaintMaterialCompositeCorrectionBuffer buffer;
+    buffer.ibuf = composite_image_acquire(correction.image, correction.iuser, r_locks);
+    if (buffer.ibuf == nullptr && correction.image != nullptr) {
+      return false;
+    }
+    buffer.is_mesh_map = correction.mesh_map;
+    buffer.is_mesh_map_scalar = correction.mesh_map_scalar;
+    if (buffer.ibuf != nullptr && correction.mesh_map) {
+      if (ImBuf *resampled = composite_resample_mesh_map(
+              buffer.ibuf, ref_width, ref_height, correction.mesh_map_scalar))
+      {
+        /* The atlas' own buffer is still locked; the owned copy is what the evaluator reads. */
+        composite_image_own(resampled, r_locks);
+        buffer.ibuf = resampled;
+      }
+    }
+    if (buffer.ibuf != nullptr) {
+      buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
+    }
+    buffer.blend = correction.blend;
+    copy_v4_v4(buffer.constant_color, correction.constant_color);
+    buffer.has_constant_color = correction.has_constant_color;
+    buffer.opacity = correction.opacity;
+    buffer.enabled = correction.enabled;
+    buffer.has_coverage_constant = correction.has_coverage_constant;
+    buffer.coverage_constant = correction.coverage_constant;
+    buffer.coverage_from_alpha = correction.coverage_from_alpha;
+    buffer.material_source = correction.material_source;
+    if (correction.coverage_image != nullptr) {
+      buffer.coverage_ibuf = composite_image_acquire(
+          correction.coverage_image, correction.coverage_iuser, r_locks);
+      if (buffer.coverage_ibuf == nullptr) {
+        return false;
+      }
+      buffer.coverage_colorspace_name = composite_buffer_colorspace_name(buffer.coverage_ibuf);
+    }
+    if (correction.is_folder) {
+      /* A Stack correction has no map of its own; its children are acquired the same way a Layer
+       * folder's own children are, recursively. */
+      buffer.is_folder = true;
+      for (const PaintMaterialCompositeImageLayer &child : correction.children) {
+        PaintMaterialCompositeLayer child_layer;
+        if (!composite_layer_build(child, r_locks, child_layer, ref_width, ref_height)) {
+          return false;
+        }
+        buffer.children.push_back(child_layer);
+      }
+    }
+    r_layer.content_corrections.append(buffer);
+  }
+  for (const PaintMaterialCompositeCorrection &correction : image_layer.mask_corrections) {
+    PaintMaterialCompositeCorrectionBuffer buffer;
+    buffer.ibuf = composite_image_acquire(correction.image, correction.iuser, r_locks);
+    if (buffer.ibuf == nullptr && correction.image != nullptr) {
+      return false;
+    }
+    buffer.is_mesh_map = correction.mesh_map;
+    buffer.is_mesh_map_scalar = correction.mesh_map_scalar;
+    buffer.mesh_map_mask_reads_red = correction.mesh_map_mask_reads_red;
+    if (buffer.ibuf != nullptr && correction.mesh_map) {
+      if (ImBuf *resampled = composite_resample_mesh_map(
+              buffer.ibuf, ref_width, ref_height, correction.mesh_map_scalar))
+      {
+        composite_image_own(resampled, r_locks);
+        buffer.ibuf = resampled;
+      }
+    }
+    if (buffer.ibuf != nullptr) {
+      buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
+    }
+    buffer.blend = correction.blend;
+    copy_v4_v4(buffer.constant_color, correction.constant_color);
+    buffer.has_constant_color = correction.has_constant_color;
+    buffer.opacity = correction.opacity;
+    buffer.enabled = correction.enabled;
+    buffer.has_coverage_constant = correction.has_coverage_constant;
+    buffer.coverage_constant = correction.coverage_constant;
+    buffer.coverage_from_alpha = correction.coverage_from_alpha;
+    buffer.material_source = correction.material_source;
+    buffer.mask_gray_mode = correction.mask_gray_mode;
+    if (correction.coverage_image != nullptr) {
+      buffer.coverage_ibuf = composite_image_acquire(
+          correction.coverage_image, correction.coverage_iuser, r_locks);
+      if (buffer.coverage_ibuf == nullptr) {
+        return false;
+      }
+      buffer.coverage_colorspace_name = composite_buffer_colorspace_name(buffer.coverage_ibuf);
+    }
+    if (correction.is_folder) {
+      buffer.is_folder = true;
+      for (const PaintMaterialCompositeImageLayer &child : correction.children) {
+        PaintMaterialCompositeLayer child_layer;
+        if (!composite_layer_build(child, r_locks, child_layer, ref_width, ref_height)) {
+          return false;
+        }
+        buffer.children.push_back(child_layer);
+      }
+    }
+    r_layer.mask_corrections.append(buffer);
+  }
+  for (const PaintMaterialCompositeImageLayer &child : image_layer.children) {
+    PaintMaterialCompositeLayer child_layer;
+    if (!composite_layer_build(child, r_locks, child_layer, ref_width, ref_height)) {
+      return false;
+    }
+    r_layer.children.push_back(child_layer);
+  }
+  return true;
+}
+
+/**
+ * Acquire the buffers of \a image_layers into \a r_stack, so the evaluator can read them without
+ * touching an image's own cache mid-evaluation.
+ *
+ * \param only_marker: when given, only the layer carrying that identity is built. The mask baker
+ *                     reads one row's coverage and nothing else, and acquiring the rest of the
+ *                     stack would hold locks on images the factor never reads.
+ */
 static bool composite_stack_build(Span<PaintMaterialCompositeImageLayer> image_layers,
                                   Vector<CompositeImageLock> &r_locks,
-                                  PaintMaterialCompositeStack &r_stack)
+                                  PaintMaterialCompositeStack &r_stack,
+                                  const bUUID *only_marker = nullptr)
 {
   if (!BKE_paint_material_composite_stack_dimensions(image_layers, r_stack.width, r_stack.height))
   {
     return false;
   }
   for (const PaintMaterialCompositeImageLayer &image_layer : image_layers) {
-    if (!image_layer.enabled || image_layer.color_image == nullptr) {
+    if (!image_layer.enabled) {
+      continue;
+    }
+    if (only_marker != nullptr && !BLI_uuid_equal(image_layer.marker, *only_marker)) {
+      continue;
+    }
+    const bool has_corrections = !image_layer.content_corrections.is_empty() ||
+                                 !image_layer.mask_corrections.is_empty();
+    if (!image_layer.is_folder && image_layer.color_image == nullptr && !has_corrections &&
+        !image_layer.has_constant_color)
+    {
       continue;
     }
     PaintMaterialCompositeLayer layer;
-    layer.color_ibuf = composite_image_acquire(
-        image_layer.color_image, image_layer.color_iuser, r_locks);
-    if (layer.color_ibuf == nullptr) {
+    if (!composite_layer_build(image_layer, r_locks, layer, r_stack.width, r_stack.height)) {
       return false;
     }
-    if (image_layer.mask_image != nullptr) {
-      layer.mask_ibuf = composite_image_acquire(
-          image_layer.mask_image, image_layer.mask_iuser, r_locks);
-      if (layer.mask_ibuf == nullptr) {
-        return false;
-      }
-    }
-    layer.blend = image_layer.blend;
-    layer.opacity = image_layer.opacity;
-    layer.mask_influence = image_layer.mask_influence;
-    layer.mask_from_alpha = image_layer.mask_from_alpha;
     r_stack.layers.append(layer);
   }
   return !r_stack.layers.is_empty();
@@ -1045,16 +1577,192 @@ static bool composite_stack_build(Span<PaintMaterialCompositeImageLayer> image_l
 bool BKE_paint_material_composite_eval_images(Span<PaintMaterialCompositeImageLayer> image_layers,
                                               ImBuf *composite_ibuf,
                                               const rcti *region,
-                                              PaintMaterialCompositeEvalStats *r_stats)
+                                              PaintMaterialCompositeEvalStats *r_stats,
+                                              const float bottom_color[4])
 {
   Vector<CompositeImageLock> locks;
   PaintMaterialCompositeStack stack;
   bool ok = composite_stack_build(image_layers, locks, stack);
+  if (ok && bottom_color != nullptr) {
+    copy_v4_v4(stack.bottom_color, bottom_color);
+    stack.has_bottom_color = true;
+  }
   if (ok) {
     ok = BKE_paint_material_composite_eval(stack, composite_ibuf, region, r_stats);
   }
   composite_images_release(locks);
   return ok;
+}
+
+bool BKE_paint_material_composite_eval_images_linear(
+    Span<PaintMaterialCompositeImageLayer> image_layers,
+    float *dst,
+    const rcti *region,
+    PaintMaterialCompositeEvalStats *r_stats,
+    const float bottom_color[4])
+{
+  Vector<CompositeImageLock> locks;
+  PaintMaterialCompositeStack stack;
+  bool ok = composite_stack_build(image_layers, locks, stack);
+  if (ok && bottom_color != nullptr) {
+    copy_v4_v4(stack.bottom_color, bottom_color);
+    stack.has_bottom_color = true;
+  }
+  if (ok) {
+    ok = BKE_paint_material_composite_eval_linear(stack, dst, region, r_stats);
+  }
+  composite_images_release(locks);
+  return ok;
+}
+
+bool BKE_paint_material_composite_eval_row_mask(
+    Span<PaintMaterialCompositeImageLayer> image_layers,
+    const bUUID &row_marker,
+    ImBuf *dst_ibuf,
+    const rcti *region)
+{
+  Vector<CompositeImageLock> locks;
+  PaintMaterialCompositeStack stack;
+  /* Only the row is built: its mask factor depends on nothing the other rows composite, and
+   * building them would acquire buffers the factor never reads. The dimensions still come from the
+   * whole stack, so B is validated against the same rectangle the composite uses. */
+  const bool built = composite_stack_build(image_layers, locks, stack, &row_marker);
+
+  bool ok = false;
+  if (built && stack.layers.size() == 1 &&
+      composite_ibuf_is_byte_rgba(dst_ibuf, stack.width, stack.height) &&
+      composite_stack_validate(stack))
+  {
+    const PaintMaterialCompositeLayer &layer = stack.layers.first();
+    rcti area;
+    BLI_rcti_init(&area, 0, stack.width, 0, stack.height);
+    bool have_area = true;
+    if (region != nullptr) {
+      rcti clipped = *region;
+      if (!BLI_rcti_isect(&area, &clipped, &area)) {
+        /* Nothing of the tagged region is inside the buffer; B is already correct. */
+        have_area = false;
+      }
+    }
+    if (have_area) {
+      const int64_t row_stride = int64_t(stack.width) * 4;
+      const int64_t area_width = BLI_rcti_size_x(&area);
+      const IndexRange rows(area.ymin, BLI_rcti_size_y(&area));
+      uchar *dst_pixels = dst_ibuf->byte_data_for_write();
+      threading::parallel_for(rows, 64, [&](const IndexRange range) {
+        for (const int64_t y : range) {
+          const int64_t row_offset = y * row_stride;
+          for (const int64_t x : IndexRange(area.xmin, area_width)) {
+            const int64_t offset = row_offset + x * 4;
+            const float mask_factor = composite_correction_pixel_mask_factor(
+                layer, int(x), int(y));
+            /* A scalar mask: the same value on all three colour channels, opaque. */
+            const uchar gray = uchar(clamp_i(int(mask_factor * 255.0f + 0.5f), 0, 255));
+            dst_pixels[offset + 0] = gray;
+            dst_pixels[offset + 1] = gray;
+            dst_pixels[offset + 2] = gray;
+            dst_pixels[offset + 3] = 255;
+          }
+        }
+      });
+    }
+    ok = true;
+  }
+
+  composite_images_release(locks);
+  return ok;
+}
+
+bool BKE_paint_material_composite_eval_row_content(
+    Span<PaintMaterialCompositeImageLayer> image_layers,
+    const bUUID &row_marker,
+    float *r_color_rgba,
+    float *r_coverage_gray,
+    const rcti *region)
+{
+  if (r_color_rgba == nullptr || r_coverage_gray == nullptr) {
+    return false;
+  }
+  Vector<CompositeImageLock> locks;
+  PaintMaterialCompositeStack stack;
+  const bool built = composite_stack_build(image_layers, locks, stack, &row_marker);
+  bool ok = false;
+  if (built && stack.layers.size() == 1 && composite_stack_validate(stack)) {
+    const PaintMaterialCompositeLayer &layer = stack.layers.first();
+    rcti area;
+    if (!composite_clip_area(stack, region, area)) {
+      composite_images_release(locks);
+      return false;
+    }
+    const int64_t count = int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
+    Vector<float> color(count * 4);
+    Vector<float> factor(count);
+    if (layer.is_folder) {
+      Vector<float> sub_color(count * 4);
+      Vector<float> sub_coverage(count);
+      composite_folder_accumulate(layer, area, sub_color.data(), sub_coverage.data());
+      composite_layer_render(
+          layer, area, sub_color.data(), sub_coverage.data(), color.data(), factor.data());
+    }
+    else {
+      composite_layer_render(layer, area, nullptr, nullptr, color.data(), factor.data());
+    }
+    for (int64_t i = 0; i < count; i++) {
+      r_color_rgba[i * 4 + 0] = color[i * 4 + 0];
+      r_color_rgba[i * 4 + 1] = color[i * 4 + 1];
+      r_color_rgba[i * 4 + 2] = color[i * 4 + 2];
+      /* The colour map's alpha is the row's content alpha, so the generated chain can read it back
+       * after substitution (F2-C6). A row that tracks none -- Material, Normal, a channel outside
+       * the image-paint set -- keeps it opaque; its transparency is the coverage map alone. */
+      r_color_rgba[i * 4 + 3] = layer.tracks_content_alpha ? color[i * 4 + 3] : 1.0f;
+      r_coverage_gray[i] = clamp_f(layer.opacity * factor[i], 0.0f, 1.0f);
+    }
+    ok = true;
+  }
+  composite_images_release(locks);
+  return ok;
+}
+
+/**
+ * The image whose buffer answers the bottom layer's size and colorspace: the layer's own map, or
+ * -- when the layer is Absent here and its corrections carry it -- the first correction map.
+ */
+/**
+ * The size-providing image of \a layer, restricted to the map class \a mesh_maps: a painted map
+ * (false) or a MESH_MAP atlas (true). The two classes are probed separately so the channel's
+ * reference grid keeps coming from the painted maps and only falls back to the lowest participating
+ * MESH_MAP row's atlas when the channel has no painted map at all.
+ */
+static Image *composite_bottom_layer_size_image(const PaintMaterialCompositeImageLayer &layer,
+                                                const ImageUser *&r_iuser,
+                                                const bool mesh_maps)
+{
+  if (layer.is_folder) {
+    /* A folder has no map of its own: its size comes from its contents. */
+    for (const PaintMaterialCompositeImageLayer &child : layer.children) {
+      if (Image *image = composite_bottom_layer_size_image(child, r_iuser, mesh_maps)) {
+        return image;
+      }
+    }
+    return nullptr;
+  }
+  if (layer.color_image != nullptr && layer.is_mesh_map == mesh_maps) {
+    r_iuser = layer.color_iuser;
+    return layer.color_image;
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+    if (correction.image != nullptr && correction.mesh_map == mesh_maps) {
+      r_iuser = correction.iuser;
+      return correction.image;
+    }
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
+    if (correction.image != nullptr && correction.mesh_map == mesh_maps) {
+      r_iuser = correction.iuser;
+      return correction.image;
+    }
+  }
+  return nullptr;
 }
 
 /**
@@ -1080,21 +1788,31 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
   if (r_byte_colorspace != nullptr) {
     *r_byte_colorspace = nullptr;
   }
-  for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
-    if (!layer.enabled || layer.color_image == nullptr) {
-      continue;
-    }
-    Vector<CompositeImageLock> locks;
-    const ImBuf *ibuf = composite_image_acquire(layer.color_image, layer.color_iuser, locks);
-    if (ibuf != nullptr) {
-      r_width = ibuf->x;
-      r_height = ibuf->y;
-      if (r_byte_colorspace != nullptr) {
-        *r_byte_colorspace = IMB_colormanagement_get_byte_colorspace(ibuf);
+  /* The painted maps set the reference grid; only a channel with no painted map falls back to the
+   * lowest participating MESH_MAP row's atlas, which a MESH_MAP-only stack then fills at its own
+   * resolution. */
+  for (const bool mesh_maps : {false, true}) {
+    for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
+      if (!layer.enabled) {
+        continue;
       }
+      const ImageUser *size_iuser = nullptr;
+      Image *size_image = composite_bottom_layer_size_image(layer, size_iuser, mesh_maps);
+      if (size_image == nullptr) {
+        continue;
+      }
+      Vector<CompositeImageLock> locks;
+      const ImBuf *ibuf = composite_image_acquire(size_image, size_iuser, locks);
+      if (ibuf != nullptr) {
+        r_width = ibuf->x;
+        r_height = ibuf->y;
+        if (r_byte_colorspace != nullptr) {
+          *r_byte_colorspace = IMB_colormanagement_get_byte_colorspace(ibuf);
+        }
+      }
+      composite_images_release(locks);
+      return r_width > 0 && r_height > 0;
     }
-    composite_images_release(locks);
-    return r_width > 0 && r_height > 0;
   }
   return false;
 }
@@ -1105,11 +1823,60 @@ bool BKE_paint_material_composite_stack_dimensions(
   return composite_stack_bottom_layer_info(image_layers, r_width, r_height, nullptr);
 }
 
+bool BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return false;
+  }
+  return BKE_paint_material_channel_info(channel).supports_image_paint;
+}
+
+/** Extend \a hash with everything about one correction that changes the composited pixels. */
+static uint64_t composite_correction_hash(uint64_t hash,
+                                          const PaintMaterialCompositeCorrection &correction)
+{
+  /* The marker hashed field by field: it is the correction's identity, so a map re-tagged to a
+   * different correction must not keep serving the old composite. */
+  const bUUID &marker = correction.marker;
+  uint64_t node_bytes = 0;
+  for (const int i : IndexRange(6)) {
+    node_bytes |= uint64_t(marker.node[i]) << (8 * (5 - i));
+  }
+  hash = get_default_hash(hash,
+                          marker.time_low,
+                          uint64_t(marker.time_mid) << 16 | marker.time_hi_and_version,
+                          uint64_t(marker.clock_seq_hi_and_reserved) << 8 |
+                              marker.clock_seq_low,
+                          node_bytes);
+  /* Session UID rather than a pointer, like the layers' own maps: a freed image's address can
+   * come back as a different one. */
+  hash = get_default_hash(hash,
+                          correction.image != nullptr ? correction.image->id.session_uid : 0,
+                          int(correction.blend),
+                          correction.enabled,
+                          correction.opacity);
+  /* A Material correction's own coverage (its source's Alpha) can change independently of its
+   * colour above -- a source Alpha edit must invalidate this composite too. */
+  return get_default_hash(
+      hash,
+      correction.coverage_image != nullptr ? correction.coverage_image->id.session_uid : 0,
+      correction.has_coverage_constant,
+      correction.coverage_constant,
+      correction.coverage_from_alpha);
+}
+
 uint64_t BKE_paint_material_composite_stack_hash(
     Span<PaintMaterialCompositeImageLayer> image_layers)
 {
   uint64_t hash = get_default_hash(image_layers.size());
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
+    /* Mix the running hash multiplicatively before each layer: #get_default_hash folds its
+     * arguments with XOR, which is order-independent, so two layers swapped would otherwise hash
+     * the same and a reorder would not invalidate the composite. */
+    hash *= 0x100000001b3ULL;
     /* Session UIDs rather than pointers: a freed image's address can come back as a different
      * one, and the hash is the only thing standing between that and a stale composite. */
     hash = get_default_hash(hash,
@@ -1121,6 +1888,33 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.mask_from_alpha,
                             layer.opacity,
                             layer.mask_influence);
+    /* Split rather than appended: #get_default_hash mixes a fixed number of values at once. */
+    hash = get_default_hash(hash,
+                            layer.is_bare_base,
+                            layer.mask_reads_grey,
+                            layer.coverage_image != nullptr ?
+                                layer.coverage_image->id.session_uid :
+                                0,
+                            layer.color_alpha_coverage,
+                            layer.tracks_content_alpha);
+    /* A live constant is not backed by an image, so its value has to be hashed explicitly or the
+     * cached composite would not follow a source slider. */
+    hash = get_default_hash(hash,
+                            layer.has_constant_color,
+                            layer.constant_color[0],
+                            layer.constant_color[1],
+                            layer.constant_color[2],
+                            layer.constant_color[3]);
+    hash = get_default_hash(
+        hash, layer.has_coverage_constant, layer.coverage_constant, layer.coverage_from_alpha);
+    /* A correction changes the composite like any other layer input, and so belongs in the hash
+     * that decides whether the whole stack has to be re-flattened. */
+    for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+      hash = composite_correction_hash(hash, correction);
+    }
+    for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
+      hash = composite_correction_hash(hash, correction);
+    }
   }
   return hash;
 }
@@ -1296,16 +2090,67 @@ static void composite_cache_enforce_budget(const CompositeCacheKey &keep)
   }
 }
 
+/**
+ * The images one layer is read from: its maps, then its corrections'.
+ *
+ * The cache subscribes to each image's partial-update log through this one list, so a correction's
+ * own map reports its edits exactly the way a layer's map does. Deduplicated, since a layer that
+ * masks itself by its own map names the same image twice and one subscription per image is all a
+ * poll can use.
+ */
+static Vector<Image *> composite_layer_images(const PaintMaterialCompositeImageLayer &layer)
+{
+  Vector<Image *> images;
+  if (layer.color_image != nullptr) {
+    images.append_non_duplicates(layer.color_image);
+  }
+  if (layer.mask_image != nullptr) {
+    images.append_non_duplicates(layer.mask_image);
+  }
+  if (layer.coverage_image != nullptr) {
+    images.append_non_duplicates(layer.coverage_image);
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+    if (correction.image != nullptr) {
+      images.append_non_duplicates(correction.image);
+    }
+    if (correction.coverage_image != nullptr) {
+      images.append_non_duplicates(correction.coverage_image);
+    }
+    /* A Stack correction has no map of its own; its images are its children's, exactly like a
+     * Layer folder's own children below -- a paint stroke deep inside the subtree must still poke
+     * this subscription. */
+    for (const PaintMaterialCompositeImageLayer &child : correction.children) {
+      for (Image *image : composite_layer_images(child)) {
+        images.append_non_duplicates(image);
+      }
+    }
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
+    if (correction.image != nullptr) {
+      images.append_non_duplicates(correction.image);
+    }
+    for (const PaintMaterialCompositeImageLayer &child : correction.children) {
+      for (Image *image : composite_layer_images(child)) {
+        images.append_non_duplicates(image);
+      }
+    }
+  }
+  for (const PaintMaterialCompositeImageLayer &child : layer.children) {
+    for (Image *image : composite_layer_images(child)) {
+      images.append_non_duplicates(image);
+    }
+  }
+  return images;
+}
+
 static void composite_entry_image_dependencies_set(
     CompositeCacheEntry &entry, Span<PaintMaterialCompositeImageLayer> image_layers)
 {
   entry.image_session_uids.clear();
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
-    if (layer.color_image != nullptr) {
-      entry.image_session_uids.append_non_duplicates(layer.color_image->id.session_uid);
-    }
-    if (layer.mask_image != nullptr) {
-      entry.image_session_uids.append_non_duplicates(layer.mask_image->id.session_uid);
+    for (Image *image : composite_layer_images(layer)) {
+      entry.image_session_uids.append_non_duplicates(image->id.session_uid);
     }
   }
 
@@ -1373,10 +2218,7 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
    * resize, which drops the subscriptions with the buffer, is followed by fresh ones whose first
    * poll asks for the full rebuild a resize needs anyway. */
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
-    for (Image *image : {layer.color_image, layer.mask_image}) {
-      if (image == nullptr) {
-        continue;
-      }
+    for (Image *image : composite_layer_images(layer)) {
       PartialUpdateUser *user =
           entry.partial_update_users
               .lookup_or_add_cb(
@@ -1414,6 +2256,20 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
           break;
         }
       }
+    }
+  }
+
+  /* The partial-update log reports whole tiles, which can reach past a buffer smaller than one
+   * tile. A layer stack cannot be tiled, so clip the report to the buffer: every consumer of the
+   * echoed region -- and the echoed region itself -- must stay within the pixels that exist. */
+  if (!entry.dirty_full && !BLI_rcti_is_empty(&entry.dirty_region)) {
+    const rcti bounds = {0, entry.width, 0, entry.height};
+    rcti clipped;
+    if (BLI_rcti_isect(&bounds, &entry.dirty_region, &clipped)) {
+      entry.dirty_region = clipped;
+    }
+    else {
+      BLI_rcti_init(&entry.dirty_region, 0, 0, 0, 0);
     }
   }
 

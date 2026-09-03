@@ -169,9 +169,11 @@ class NODE_HT_header(Header):
                 # Show material.new when no active ID/slot exists
                 if not id_from and ob_type in types_that_support_material:
                     row.template_ID(ob, "active_material", new="material.new")
+                    row.operator("material.new_layered", text="", icon='ADD')
                 # Material ID, but not for Lights
                 if id_from and ob_type != 'LIGHT':
                     row.template_ID(id_from, "active_material", new="material.new")
+                    row.operator("material.new_layered", text="", icon='ADD')
 
             if snode.shader_type == 'WORLD':
                 NODE_MT_editor_menus.draw_collapsible(context, layout)
@@ -187,6 +189,15 @@ class NODE_HT_header(Header):
                 row = layout.row()
                 row.enabled = not snode.pin
                 row.template_ID(scene, "world", new="world.new")
+
+            if snode.shader_type == 'PAINT_LAYER':
+                NODE_MT_editor_menus.draw_collapsible(context, layout)
+                layout.separator_spacer()
+                # The material follows the active Material paint layer; there is nothing to pick here.
+                if snode_id:
+                    layout.label(text=snode_id.name, icon='MATERIAL')
+                else:
+                    layout.label(text="No active Material layer", icon='INFO')
 
             if snode.shader_type == 'LINESTYLE':
                 view_layer = context.view_layer
@@ -1495,6 +1506,36 @@ class SCREEN_OT_tag_bar_auto_show(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class NODE_PT_paint_layers(Panel):
+    """Banner for a layered material's Shader Editor: says the tree is generated from the layer
+    stack, not edited by hand."""
+
+    bl_space_type = 'NODE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = "Tool"
+    bl_label = "Layered Material"
+
+    @classmethod
+    def poll(cls, context):
+        mat = context.material
+        return mat is not None and mat.is_layered and not mat.grease_pencil
+
+    def draw(self, context):
+        layout = self.layout
+        mat = context.material
+        row = layout.row()
+        row.label(
+            text="Tree managed by the layer stack",
+            icon='LOCKED' if mat.paint_layers_locked else 'UNLOCKED',
+        )
+        layout.prop(mat, "paint_layers_locked", text="Locked")
+        if mat.paint_layers_tree_is_stale:
+            layout.label(text="Out of step with the layers", icon='ERROR')
+        row = layout.row()
+        row.enabled = mat.paint_layers_tree_is_stale
+        row.operator("material.paint_layers_regenerate", text="Regenerate", icon='FILE_REFRESH')
+
+
 classes = (
     NODE_HT_header,
     NODE_HT_tag_bar,
@@ -1511,6 +1552,7 @@ classes = (
     NODE_MT_view,
     NODE_MT_view_pie,
     NODE_PT_material_slots,
+    NODE_PT_paint_layers,
     NODE_PT_geometry_node_tool_object_types,
     NODE_PT_geometry_node_tool_mode,
     NODE_PT_geometry_node_tool_options,

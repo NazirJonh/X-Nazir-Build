@@ -125,7 +125,7 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel);
 static bool id_browser_popover_poll(const bContext *C, PanelType *panel_type);
 static void build_id_grid(const bContext &C, Layout &layout, float grid_viewport_units);
 
-static void id_browser_popover_register()
+void id_browser_popover_register()
 {
   if (WM_paneltype_find("UI_PT_id_browser", true)) {
     return;
@@ -1482,6 +1482,25 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
    * modified) from a plain re-draw would be a side effect of drawing. */
   if (is_image && panel->layout->block()->oldblock == nullptr) {
     id_browser_sync_assigned_image_location(*C, target_ptr, *target_prop, *wm);
+  }
+  /* The Outliner's Stack Layers header opens this popover to pick a layer to add, and its default
+   * reading of the browser is the asset library at large, not the current file. Point the source
+   * there on the first build of the popover's block only, like the assigned-image sync above: a
+   * re-draw is drawing, not a license to undo what the user picked in the meantime. */
+  const SpaceLink *host_space = CTX_wm_space_data(C);
+  if (host_space != nullptr && host_space->spacetype == SPACE_OUTLINER &&
+      panel->layout->block()->oldblock == nullptr)
+  {
+    if (wm->id_browser_source != ID_BROWSER_SOURCE_ASSET_LIBRARY) {
+      wm->id_browser_source = ID_BROWSER_SOURCE_ASSET_LIBRARY;
+      /* The two sources have different item counts, so the scroll offset the other one kept would
+       * point at nothing -- the same reset the source toggle itself does. */
+      grid_view_session_reset_scroll(id_browser_grid_session_key);
+    }
+    const AssetLibraryReference all_libraries = asset_system::all_library_reference();
+    if (!(id_browser_library_ref_get(*wm) == all_libraries)) {
+      id_browser_library_ref_set(*wm, all_libraries);
+    }
   }
   const bool asset_source = wm->id_browser_source == ID_BROWSER_SOURCE_ASSET_LIBRARY;
   /* The paint filters need both an image target and a space to back their state, and they only

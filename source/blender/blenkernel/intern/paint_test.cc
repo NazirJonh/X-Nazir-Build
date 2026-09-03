@@ -5,6 +5,7 @@
 #include "BKE_gtest_base.hh"
 #include "BKE_main.hh"
 #include "BKE_object.hh"
+#include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 
 #include "DNA_object_types.h"

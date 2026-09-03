@@ -22,10 +22,12 @@ struct Image;
 struct Main;
 struct Material;
 struct Object;
+struct PaintModeSettings;
 struct Scene;
 struct bNode;
 struct bNodeTree;
 struct MaterialGPencilStyle;
+struct MaterialPaintLayer;
 
 namespace bke {
 class MutableAttributeAccessor;
@@ -164,6 +166,30 @@ MaterialGPencilStyle *BKE_gpencil_material_settings(Object *ob, short act);
 
 void BKE_texpaint_slot_refresh_cache(Scene *scene, Material *ma, const Object *ob);
 void BKE_texpaint_slots_refresh_object(Scene *scene, Object *ob);
+
+/**
+ * Rebuild \a ma's texture-paint slots from its layer description and clear its stale flag. A no-op
+ * for a non-layered material. The slots are a cache of the description: no node tree is read or
+ * written, and this runs on the main thread.
+ */
+void BKE_paint_layers_texpaint_slots_refresh(Material *ma, const PaintModeSettings *paint_mode);
+
+/**
+ * The channel a texture-paint slot of a layered material stands for: a fixed table, not a lookup
+ * by map, so an empty (map-less) slot still names its channel. Returns the #eMaterialPaintChannel,
+ * or -1 for the single mask slot, or -2 when \a slot_index is out of range.
+ */
+int BKE_paint_layers_texpaint_slot_channel(const PaintModeSettings *settings, int slot_index);
+
+/** The inverse of #BKE_paint_layers_texpaint_slot_channel; -1 when the channel has no slot. */
+int BKE_paint_layers_texpaint_slot_index(const PaintModeSettings *settings, int channel);
+
+/**
+ * The channel a CONTENT-mode texture-paint slot stands for, without needing the mode settings: the
+ * table is fixed, so a name getter that only has the slot can still say which channel an empty slot
+ * will paint. -1 when \a slot_index is out of range.
+ */
+int BKE_paint_layers_texpaint_slot_channel_content(int slot_index);
 std::pair<bNodeTree *, bNode *> BKE_texpaint_slot_material_find_node(Material *ma,
                                                                      short texpaint_slot);
 
@@ -187,6 +213,22 @@ Vector<Image *> BKE_texpaint_slot_canvas_images(const Material *ma);
  * Returns #NODE_TEX_IMAGE_SLOT_NONE when no known connection is found.
  */
 char BKE_material_node_detect_tex_image_slot_type(const bNode *tex_node, const bNodeTree *ntree);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Paint layer description
+ * \{ */
+
+/**
+ * Free a paint layer description row and everything under it: children, corrections, the channel
+ * array, the mask and the properties. The row must already be unlinked from its list; nothing here
+ * touches the owning #Material.
+ *
+ * The description's lifecycle lives with the material; the edit API in `BKE_paint_layers.hh`
+ * reuses this to remove a row.
+ */
+void BKE_material_paint_layer_free(MaterialPaintLayer *layer);
 
 /** \} */
 

@@ -598,12 +598,15 @@ void IMB_transform(const ImBuf *src,
  * image buffers will be stored in full float textures, otherwise, they will be stored in half
  * float textures. If use_premult is true, the image buffer data will be stored premultiplied. If
  * limit_size is true, the texture will be scaled down to match the maximum size allowed by the
- * U.glreslimit user preferences setting. */
+ * U.glreslimit user preferences setting. If store_linear_float is true, a byte buffer is stored
+ * as a scene linear half float texture, so that use_premult filters correctly for any color
+ * space (see #IMA_GPU_LINEAR_PREMUL). */
 gpu::Texture *IMB_create_gpu_texture(const char *name,
                                      ImBuf *ibuf,
                                      bool use_high_bitdepth,
                                      bool use_premult,
-                                     const bool limit_size);
+                                     const bool limit_size,
+                                     const bool store_linear_float = false);
 
 gpu::TextureFormat IMB_gpu_get_texture_format(const ImBuf *ibuf,
                                               bool high_bitdepth,
@@ -628,7 +631,8 @@ gpu::Texture *IMB_touch_gpu_texture(const char *name,
                                     int h,
                                     int layers,
                                     bool use_high_bitdepth,
-                                    bool use_grayscale);
+                                    bool use_grayscale,
+                                    const bool store_linear_float = false);
 
 /**
  * Will update a #gpu::Texture using the content of the #ImBuf. Only one layer will be
@@ -643,7 +647,8 @@ void IMB_update_gpu_texture_sub(gpu::Texture *tex,
                                 int h,
                                 bool use_high_bitdepth,
                                 bool use_grayscale,
-                                bool use_premult);
+                                bool use_premult,
+                                const bool store_linear_float = false);
 
 void IMB_stereo3d_write_dimensions(
     char mode, bool is_squeezed, size_t width, size_t height, size_t *r_width, size_t *r_height);

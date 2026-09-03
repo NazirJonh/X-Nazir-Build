@@ -14,6 +14,7 @@ set(INC_SYS
 
 set(SRC
   render_internal.cc
+  render_material_bake.cc
   render_opengl.cc
   render_ops.cc
   render_preview.cc

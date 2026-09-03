@@ -306,11 +306,17 @@ const MTex *BKE_brush_face_set_color_texture_get(const Brush *brush, eObjectMode
  * \param r_is_color: When non-null, set true if the preview stores RGB (Material Paint source)
  * rather than a single intensity channel. The F-key overlay uses this to skip the brush-color
  * tint so a Base Color map is visible.
+ * \param material_source_ibuf: Pixels to preview when the brush is in Source Mode: Material, where
+ * no channel has a #Tex for #RE_texture_evaluate to sample. Passed in rather than resolved here
+ * because the bake it comes from lives in the editors, which blenkernel must not reach into.
+ * \param material_source_mtex: Placement for \a material_source_ibuf; required alongside it.
  */
 ImBuf *BKE_brush_gen_radial_control_imbuf(Brush *br,
                                           bool secondary,
                                           bool display_gradient,
-                                          bool *r_is_color = nullptr);
+                                          bool *r_is_color = nullptr,
+                                          const ImBuf *material_source_ibuf = nullptr,
+                                          const MTex *material_source_mtex = nullptr);
 
 /* Unified strength size and color. */
 

@@ -68,6 +68,16 @@ bToolRef_Runtime *WM_toolsystem_runtime_find(WorkSpace *workspace, const bToolKe
 bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *brush);
 
 /**
+ * Point the active tool's brush bindings at \a paint's current brush, without switching tool.
+ *
+ * For code that sets the active brush directly with #BKE_paint_brush_set() rather than through
+ * #WM_toolsystem_activate_brush_and_tool(). The bindings are what re-activates a brush on entering
+ * the mode again, so a brush swapped in without updating them is silently replaced by the old one
+ * on the next mode change.
+ */
+void WM_toolsystem_brush_bindings_update_from_active(bContext *C, Paint *paint);
+
+/**
  * Get an asset reference to the last activated brush asset of a specific brush type.
  */
 std::optional<AssetWeakReference> WM_toolsystem_last_brush_asset_from_brush_type(

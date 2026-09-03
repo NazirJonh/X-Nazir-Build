@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
@@ -36,6 +37,10 @@ namespace blender::bke {
 struct PaintRuntime;
 }
 
+namespace blender::ed::material_bake {
+class MaterialSourceBake;
+}
+
 namespace blender::ed::sculpt_paint::material {
 
 struct TexelSampleContext;
@@ -50,6 +55,37 @@ enum class DirectSampleKind : int8_t {
   Random,
   Stencil,
 };
+
+/** Where one channel's values come from during this stroke. */
+enum class ChannelSourceKind : int8_t {
+  /** No usable source; the channel's own slider value applies. */
+  None = 0,
+  /** Maps mode: an #MTex with its own #Tex / #Image. */
+  Mtex,
+  /**
+   * Material mode, Principled input driven by a plain Image Texture: the node's own #Image,
+   * placed through the brush's shared mapping. Sampled from the pinned #ImBuf only - there is no
+   * #Tex to fall back to, so an unusable placement marks the channel unusable instead.
+   */
+  Image,
+  /** Material mode, linked Principled input: a baked buffer. */
+  Baked,
+  /** Material mode, unlinked Principled input: a single value. */
+  Constant,
+};
+
+/**
+ * True when \a kind places its source through an #MTex, i.e. #ChannelSource::mtex is set.
+ *
+ * Callers must ask this rather than test for #ChannelSourceKind::Mtex: whether a source carries a
+ * placement is a different question from where its pixels came from, and the two answers stopped
+ * coinciding when #ChannelSourceKind::Image was added.
+ */
+inline bool channel_source_kind_has_placement(const ChannelSourceKind kind)
+{
+  return kind == ChannelSourceKind::Mtex || kind == ChannelSourceKind::Image ||
+         kind == ChannelSourceKind::Baked;
+}
 
 /**
  * Everything needed to sample one image source without #RE_texture_evaluate, resolved once per
@@ -103,11 +139,27 @@ struct DirectSampleLayout {
 class ChannelSourceSet {
  public:
   struct ChannelSource {
+    ChannelSourceKind kind = ChannelSourceKind::None;
+    /** Scalar channels read x; color channels read xyz. Valid only for Constant. */
+    float4 constant_value = float4(0.0f);
     /** #BKE_paint_material_channel_effective_mtex for this channel: its own #Tex combined with
      * the mapping shared by every channel. Owned here (not a pointer into the channel's DNA
      * #source_mtex) since it is a value the sampler builds, not the raw per-channel data. */
     MTex effective_mtex{};
+    /** Null unless #kind has brush placement. */
     const MTex *mtex = nullptr;
+    /**
+     * The image this source samples: the #Tex's for #ChannelSourceKind::Mtex, the Image Texture
+     * node's for #ChannelSourceKind::Image. Held only so the stroke can release #ibuf back to the
+     * pool; the material keeps it alive.
+     */
+    blender::Image *image = nullptr;
+    /**
+     * The Image Texture node's own #ImageUser, for #ChannelSourceKind::Image. Points into the
+     * material's node storage: acquisition copies it first, because acquiring writes to the
+     * #ImageUser and the source material is not the stroke's to mutate.
+     */
+    const ImageUser *image_iuser = nullptr;
     /** False when the slot has a texture but it cannot be sampled (no image, or load failure). */
     bool usable = false;
     /**
@@ -137,10 +189,14 @@ class ChannelSourceSet {
      * without #RE_texture_evaluate (no nodes, no UDIM, default crop/filter/color).
      */
     bool image_direct_sample = false;
+    /** Baked channels normally use brush placement; this preserves explicit Target UV placement. */
+    bool baked_target_uv = false;
   };
 
  private:
   std::array<ChannelSource, PAINT_MATERIAL_CHANNEL_NUM> sources_;
+  /** Keeps baked ImBufs alive for the complete stroke. */
+  std::shared_ptr<const ed::material_bake::MaterialSourceBake> bake_;
   ImagePool *pool_ = nullptr;
   bool active_ = false;
 
@@ -168,6 +224,13 @@ class ChannelSourceSet {
                            float tex_y,
                            float *r_value,
                            float4 &r_rgba) const;
+
+  /** Sample a baked UV image without applying brush mapping or color management. */
+  bool sample_baked(const ChannelSource &source,
+                    float u,
+                    float v,
+                    float *r_value,
+                    float4 &r_rgba) const;
 };
 
 /**
@@ -187,8 +250,17 @@ class ChannelSourceSampler {
   const BrushMaterialPaint &brush_paint_;
   ChannelSourceSet sources_;
   /** Per-channel #MTEX_MAP_MODE_AREA local matrix; only valid for channels whose source uses
-   * Area Plane mapping (see #update_area_local_mats). Unlike #sources_, recomputed every dab. */
-  std::array<float4x4, PAINT_MATERIAL_CHANNEL_NUM> area_local_mats_;
+   * Area Plane mapping (see #update_area_local_mats). Unlike #sources_, recomputed every dab.
+   *
+   * Seeded with identity because #area_local_mat_for hands out an entry's address without knowing
+   * whether this dab computed it, and #update_area_local_mats fills only the channels that are
+   * both usable and Area. Reading an entry it skipped is then a defined (if wrong) placement
+   * rather than uninitialized memory. */
+  std::array<float4x4, PAINT_MATERIAL_CHANNEL_NUM> area_local_mats_ = []() {
+    std::array<float4x4, PAINT_MATERIAL_CHANNEL_NUM> mats;
+    mats.fill(float4x4::identity());
+    return mats;
+  }();
 
  public:
   ChannelSourceSampler(const SculptSession &ss,
@@ -217,6 +289,9 @@ class ChannelSourceSampler {
 
   /** True when \a channel has a source that can be sampled this stroke. */
   bool has_usable_source(eMaterialPaintChannel channel) const;
+
+  /** True when a Baked channel needs the target image's UV at each sampled texel. */
+  bool uses_baked_target_uv() const;
 
   /**
    * Target scalar for \a channel at \a position (object space), clamped to the channel range.

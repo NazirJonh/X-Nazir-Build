@@ -187,6 +187,24 @@ enum eBrushMaterialPaintSourceSelectMode : int8_t {
   BRUSH_MATERIAL_PAINT_SOURCE_SELECT_GRID = 1,
 };
 
+/**
+ * Where a PBR Paint brush takes its channel textures from. The two are mutually exclusive: a
+ * brush either reads the per-channel #BrushMaterialPaintChannel.source_mtex slots, or reads one
+ * #Material through its Principled BSDF inputs.
+ */
+enum eBrushMaterialPaintSourceMode : int8_t {
+  BRUSH_MATERIAL_PAINT_SOURCE_MAPS = 0,
+  BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL = 1,
+};
+
+/** How a source material's channels are laid out onto the paint target. */
+enum eBrushMaterialPaintSourceLayout : int8_t {
+  /** Through the shared brush mapping, like the Maps slots. */
+  BRUSH_MATERIAL_PAINT_SOURCE_LAYOUT_BRUSH = 0,
+  /** One to one with the target's UV. */
+  BRUSH_MATERIAL_PAINT_SOURCE_LAYOUT_TARGET_UV = 1,
+};
+
 struct BrushMaterialPaintChannel {
   DNA_DEFINE_CXX_METHODS(BrushMaterialPaintChannel)
 
@@ -237,6 +255,19 @@ struct BrushMaterialPaint {
    * #BrushMaterialPaintChannel.source_mtex.tex, only reading mapping from here at paint time.
    */
   struct MTex shared_source_mapping;
+  /** #eBrushMaterialPaintSourceMode. */
+  char source_mode = 0;
+  /** #eBrushMaterialPaintSourceLayout. */
+  char source_layout = 0;
+  char _pad2[2] = {};
+  /**
+   * Side of the square bake buffer in pixels. Deliberately smaller than
+   * #PaintModeSettings.new_channel_image_size: this is a scratch buffer several channels of which
+   * are held at once, not a paint target.
+   */
+  int source_bake_size = 1024;
+  /** Channel source when #source_mode is #BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL. */
+  struct Material *source_material = nullptr;
 };
 
 /** Max number of propagation steps for automasking settings. */

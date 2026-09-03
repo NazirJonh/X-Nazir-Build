@@ -992,6 +992,17 @@ static bool material_paint_uses_area_mapping(const Brush &brush)
   if (brush_paint.shared_source_mapping.brush_map_mode != MTEX_MAP_MODE_AREA) {
     return false;
   }
+  if (brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+    /* In Material mode the per-channel slots are empty, so the loop below would always answer no.
+     * That answer is not harmless: it keeps #update_sculpt_normal from refreshing
+     * #StrokeCache.sculpt_normal, and #calc_area_local_mat then builds every channel's placement
+     * from a stale normal -- the source lands somewhere unrelated to the dab.
+     *
+     * Answering from the material pointer alone deliberately over-approximates: resolving the node
+     * tree here would run per dab, and a normal computed for a material that turns out to supply
+     * only constants costs far less than a misplaced source. */
+    return brush_paint.source_material != nullptr;
+  }
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     const BrushMaterialPaintChannel &channel = brush_paint.channels[info.channel];
     if (BKE_paint_material_channel_has_source(channel)) {

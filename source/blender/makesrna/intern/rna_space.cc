@@ -30,8 +30,11 @@
 
 #include "DNA_action_types.h"
 #include "DNA_camera_types.h"
+#include "DNA_image_types.h"
 #include "DNA_layer_types.h"
 #include "DNA_mask_types.h"
+#include "DNA_material_types.h"
+#include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_space_types.h"
 #include "DNA_view3d_types.h"
@@ -715,6 +718,7 @@ static const EnumPropertyItem spreadsheet_table_id_type_items[] = {
 #  include "BKE_layer.hh"
 #  include "BKE_lib_id.hh"
 #  include "BKE_main.hh"
+#  include "BKE_material.hh"
 #  include "BKE_nla.hh"
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
@@ -744,6 +748,8 @@ static const EnumPropertyItem spreadsheet_table_id_type_items[] = {
 #  include "GPU_material.hh"
 
 #  include "IMB_imbuf_types.hh"
+
+#  include "RNA_access.hh"
 
 #  include "UI_interface.hh"
 #  include "UI_interface_c.hh"
@@ -1386,38 +1392,6 @@ static void rna_SpaceView3D_use_local_camera_set(PointerRNA *ptr, bool value)
       v3d->camera = scene->camera;
     }
   }
-}
-
-static int rna_SpaceView3D_image_grid_preview_size_get(PointerRNA *ptr)
-{
-  View3D *v3d = static_cast<View3D *>(ptr->data);
-  const int stored = v3d->image_grid_preview_size;
-  if (stored >= 24) {
-    return stored;
-  }
-  return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
-}
-
-static void rna_SpaceView3D_image_grid_preview_size_set(PointerRNA *ptr, const int value)
-{
-  View3D *v3d = static_cast<View3D *>(ptr->data);
-  v3d->image_grid_preview_size = short(std::clamp(value, 24, 256));
-}
-
-static int rna_SpaceImage_image_grid_preview_size_get(PointerRNA *ptr)
-{
-  const SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
-  const int stored = sima->image_grid_preview_size;
-  if (stored >= 24) {
-    return stored;
-  }
-  return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
-}
-
-static void rna_SpaceImage_image_grid_preview_size_set(PointerRNA *ptr, const int value)
-{
-  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
-  sima->image_grid_preview_size = short(std::clamp(value, 24, 256));
 }
 
 static float rna_View3DOverlay_GridScaleUnit_get(PointerRNA *ptr)
@@ -2337,6 +2311,134 @@ static const EnumPropertyItem *rna_SpaceImageEditor_display_channels_itemf(bCont
   *r_free = true;
 
   return item;
+}
+
+/**
+ * Identifier for a paint slot whose channel is #NODE_TEX_IMAGE_SLOT_NONE, by position in the
+ * canvas list. Static strings rather than formatted ones: RNA does not own enum item strings, and
+ * frees only the item array, so anything allocated here would leak on every redraw. Returns null
+ * past the end of the table.
+ */
+static const char *material_paint_canvas_fallback_identifier(const int index)
+{
+  constexpr int identifiers_num = 32;
+  static const char *const identifiers[identifiers_num] = {
+      "SLOT_0",  "SLOT_1",  "SLOT_2",  "SLOT_3",  "SLOT_4",  "SLOT_5",  "SLOT_6",  "SLOT_7",
+      "SLOT_8",  "SLOT_9",  "SLOT_10", "SLOT_11", "SLOT_12", "SLOT_13", "SLOT_14", "SLOT_15",
+      "SLOT_16", "SLOT_17", "SLOT_18", "SLOT_19", "SLOT_20", "SLOT_21", "SLOT_22", "SLOT_23",
+      "SLOT_24", "SLOT_25", "SLOT_26", "SLOT_27", "SLOT_28", "SLOT_29", "SLOT_30", "SLOT_31",
+  };
+  return (index >= 0 && index < identifiers_num) ? identifiers[index] : nullptr;
+}
+
+/**
+ * Paint-slot images of the active material, deduplicated, in node order: the same set and order
+ * #PAINT_OT_material_canvas_cycle steps through, so the `C` / `Shift-C` hotkey and this selector
+ * never disagree about what comes next.
+ *
+ * Items are keyed by #ID.session_uid rather than by slot index because enum get/set callbacks
+ * never receive a #bContext (only this itemf does), and a session uid resolves to its image
+ * through #BKE_libblock_find_session_uid without one.
+ */
+static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
+    bContext *C, PointerRNA * /*ptr*/, PropertyRNA * /*prop*/, bool *r_free)
+{
+  EnumPropertyItem *item = nullptr;
+  int totitem = 0;
+
+  Object *ob = (C != nullptr) ? CTX_data_active_object(C) : nullptr;
+  Material *ma = (ob != nullptr) ? BKE_object_material_get(ob, ob->actcol) : nullptr;
+  if (ma == nullptr) {
+    RNA_enum_item_end(&item, &totitem);
+    *r_free = true;
+    return item;
+  }
+
+  /* Built once when missing: unlike entering texture paint mode, the Image Editor never refreshes
+   * the paint-slot cache itself. Deliberately not refreshed on every redraw --
+   * #BKE_texpaint_slot_refresh_cache reallocates the slot array and walks the node tree, which is
+   * far too much work for a draw callback. A node-tree edit therefore only shows up here once
+   * something else refreshes the cache (entering texture paint, or the cycle operator). */
+  if (ma->texpaintslot == nullptr) {
+    Scene *scene = CTX_data_scene(C);
+    if (scene != nullptr) {
+      BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+    }
+  }
+
+  /* Shared with #PAINT_OT_material_canvas_cycle so the C / Shift-C hotkey and this selector can
+   * never disagree about the set or the order. */
+  const Vector<Image *> images = BKE_texpaint_slot_canvas_images(ma);
+  for (const int i : images.index_range()) {
+    Image *image = images[i];
+
+    /* Labelled by channel, so the header stays short; the data-block name is the tooltip. A slot
+     * with no channel (#NODE_TEX_IMAGE_SLOT_NONE) has nothing better than its image name. */
+    const char *channel_identifier = nullptr;
+    const char *channel_name = nullptr;
+    for (const int slot : IndexRange(ma->tot_slots)) {
+      if (ma->texpaintslot[slot].ima != image ||
+          ma->texpaintslot[slot].slot_type == NODE_TEX_IMAGE_SLOT_NONE)
+      {
+        continue;
+      }
+      RNA_enum_id_from_value(rna_enum_node_tex_image_paint_slot_type_items,
+                             ma->texpaintslot[slot].slot_type,
+                             &channel_identifier);
+      RNA_enum_name_from_value(rna_enum_node_tex_image_paint_slot_type_items,
+                               ma->texpaintslot[slot].slot_type,
+                               &channel_name);
+      break;
+    }
+
+    EnumPropertyItem slot_item{};
+    /* #ID.session_uid, so the get/set callbacks -- which never receive a #bContext -- can resolve
+     * an item back to its image through #BKE_libblock_find_session_uid. It is a `uint32_t`
+     * counter; the cast is safe for any session that has not created two billion data-blocks. */
+    BLI_assert(image->id.session_uid <= uint32_t(INT_MAX));
+    slot_item.value = int(image->id.session_uid);
+    /* Enum identifiers reach Python as-is, so they must be valid, stable and unique tokens. Image
+     * names are none of those (spaces, dots, duplicates across libraries), hence the channel
+     * identifier, with a positional fallback for a slot that has no channel. */
+    slot_item.identifier = (channel_identifier != nullptr) ?
+                               channel_identifier :
+                               material_paint_canvas_fallback_identifier(i);
+    if (slot_item.identifier == nullptr) {
+      /* Past the fallback table: listing the item without a usable identifier would break Python
+       * assignment for every item after it, so drop it. Only reachable on a material with more
+       * unchanneled paint slots than any real one has. */
+      continue;
+    }
+    slot_item.name = (channel_name != nullptr) ? channel_name : image->id.name + 2;
+    slot_item.description = image->id.name + 2;
+    RNA_enum_item_add(&item, &totitem, &slot_item);
+  }
+
+  RNA_enum_item_end(&item, &totitem);
+  *r_free = true;
+
+  return item;
+}
+
+static int rna_SpaceImageEditor_material_paint_canvas_get(PointerRNA *ptr)
+{
+  const SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  /* An image outside the active material's slots matches no item, so the button draws blank; a
+   * Ctrl-Wheel step then lands on the first entry, matching #PAINT_OT_material_canvas_cycle. */
+  return (sima->image != nullptr) ? int(sima->image->id.session_uid) : 0;
+}
+
+static void rna_SpaceImageEditor_material_paint_canvas_set(PointerRNA *ptr, int value)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  Main *bmain = G_MAIN;
+  Image *image = id_cast<Image *>(BKE_libblock_find_session_uid(bmain, ID_IM, uint32_t(value)));
+  if (image == nullptr || image == sima->image) {
+    return;
+  }
+  /* Holds the framing while stepping the equal-sized channel maps of one material, exactly as the
+   * C / Shift-C hotkey does. */
+  ED_space_image_set_ex(bmain, sima, image, true);
 }
 
 static int rna_SpaceImageEditor_display_channels_get(PointerRNA *ptr)
@@ -6437,35 +6539,6 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Show Viewer", "Display non-final geometry from viewer nodes");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
-  prop = RNA_def_property(srna, "image_grid_rows", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "image_grid.rows");
-  RNA_def_property_range(prop, 0, 16);
-  RNA_def_property_ui_text(
-      prop,
-      "Image Grid Rows",
-      "Number of visible rows in the sculpt texture image grid (0 uses default 1)");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
-
-  prop = RNA_def_property(srna, "image_grid_mask_rows", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "image_grid_mask.rows");
-  RNA_def_property_range(prop, 0, 16);
-  RNA_def_property_ui_text(
-      prop,
-      "Mask Grid Rows",
-      "Number of visible rows in the sculpt mask texture image grid (0 uses default 1)");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
-
-  prop = RNA_def_property(srna, "image_grid_preview_size", PROP_INT, PROP_UNSIGNED);
-  RNA_def_property_int_sdna(prop, nullptr, "image_grid_preview_size");
-  RNA_def_property_int_funcs(prop,
-                             "rna_SpaceView3D_image_grid_preview_size_get",
-                             "rna_SpaceView3D_image_grid_preview_size_set",
-                             nullptr);
-  RNA_def_property_range(prop, 24, 256);
-  RNA_def_property_ui_text(
-      prop, "Preview Size", "Size of the image grid preview thumbnails in pixels");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
-
   /* Image browser filter/view-mode (mirrors SpaceImage and SpaceNode). */
   {
     static const EnumPropertyItem image_filter_mode_items[] = {
@@ -6860,6 +6933,20 @@ static void rna_def_space_image(BlenderRNA *brna)
       NC_GEOM | ND_DATA,
       "rna_SpaceImageEditor_image_update"); /* is handled in image editor too */
 
+  /* Not stored in DNA: a view of #SpaceImage.image restricted to the active material's paint
+   * slots. Being an enum gets the dropdown and Ctrl-Wheel cycling from the generic button code
+   * (#RNA_property_enum_step wraps around), and lets add-ons switch the shown channel map. */
+  prop = RNA_def_property(srna, "material_paint_canvas", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_dummy_NULL_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_SpaceImageEditor_material_paint_canvas_get",
+                              "rna_SpaceImageEditor_material_paint_canvas_set",
+                              "rna_SpaceImageEditor_material_paint_canvas_itemf");
+  RNA_def_property_ui_text(prop,
+                           "Material Paint Canvas",
+                           "Paint slot of the active material shown in this editor, by channel");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
   prop = RNA_def_property(srna, "image_user", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_NEVER_NULL);
   RNA_def_property_pointer_sdna(prop, nullptr, "iuser");
@@ -6881,35 +6968,6 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Image Pin", "Display current image regardless of object selection");
   RNA_def_property_ui_icon(prop, ICON_UNPINNED, 1);
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
-
-  prop = RNA_def_property(srna, "image_grid_rows", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "image_grid.rows");
-  RNA_def_property_range(prop, 0, 16);
-  RNA_def_property_ui_text(
-      prop,
-      "Image Grid Rows",
-      "Number of visible rows in the brush texture image grid (0 uses default 1)");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
-
-  prop = RNA_def_property(srna, "image_grid_mask_rows", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "image_grid_mask.rows");
-  RNA_def_property_range(prop, 0, 16);
-  RNA_def_property_ui_text(
-      prop,
-      "Mask Grid Rows",
-      "Number of visible rows in the brush mask texture image grid (0 uses default 1)");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
-
-  prop = RNA_def_property(srna, "image_grid_preview_size", PROP_INT, PROP_UNSIGNED);
-  RNA_def_property_int_sdna(prop, nullptr, "image_grid_preview_size");
-  RNA_def_property_int_funcs(prop,
-                             "rna_SpaceImage_image_grid_preview_size_get",
-                             "rna_SpaceImage_image_grid_preview_size_set",
-                             nullptr);
-  RNA_def_property_range(prop, 24, 256);
-  RNA_def_property_ui_text(
-      prop, "Preview Size", "Thumbnail size for the brush texture asset grid");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
   prop = RNA_def_property(srna, "image_filter_mode", PROP_ENUM, PROP_NONE);

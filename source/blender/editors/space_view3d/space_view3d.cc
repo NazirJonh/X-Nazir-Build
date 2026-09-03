@@ -286,9 +286,8 @@ static void view3d_free(SpaceLink *sl)
 
   BKE_viewer_path_clear(&vd->viewer_path);
 
-  for (ImageGridSlotDNA *slot : {&vd->image_grid, &vd->image_grid_mask}) {
-    ed::image_grid::image_grid_slot_dna_free(*slot);
-  }
+  /* Per-layout grid sessions (scroll, grip height) of this editor; the filter state itself is
+   * shared by every host and stays, see #image_grid_state_remove. */
   ed::image_grid::image_grid_state_remove(ed::image_grid::ImageGridOwner::from(*vd));
 }
 
@@ -328,8 +327,6 @@ static SpaceLink *view3d_duplicate(SpaceLink *sl)
 
   BKE_viewer_path_copy(&v3dn->viewer_path, &v3do->viewer_path);
 
-  ed::image_grid::image_grid_slot_dna_duplicate(v3dn->image_grid, v3do->image_grid);
-  ed::image_grid::image_grid_slot_dna_duplicate(v3dn->image_grid_mask, v3do->image_grid_mask);
 
   /* copy or clear inside new stuff */
 
@@ -1593,8 +1590,6 @@ static void view3d_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
   BKE_screen_view3d_do_versions_250(v3d, &sl->regionbase);
 
   BKE_viewer_path_blend_read_data(reader, &v3d->viewer_path);
-  ed::image_grid::image_grid_slot_dna_blend_read(reader, v3d->image_grid);
-  ed::image_grid::image_grid_slot_dna_blend_read(reader, v3d->image_grid_mask);
 }
 
 static void view3d_space_blend_write(BlendWriter *writer, SpaceLink *sl)
@@ -1609,8 +1604,6 @@ static void view3d_space_blend_write(BlendWriter *writer, SpaceLink *sl)
   BKE_screen_view3d_shading_blend_write(writer, &v3d->shading);
 
   BKE_viewer_path_blend_write(writer, &v3d->viewer_path);
-  ed::image_grid::image_grid_slot_dna_blend_write(writer, v3d->image_grid);
-  ed::image_grid::image_grid_slot_dna_blend_write(writer, v3d->image_grid_mask);
 }
 
 void ED_spacetype_view3d()

@@ -71,6 +71,8 @@
 #include "ED_asset_shelf.hh"
 #include "ED_image_grid.hh"
 
+#include "interface_templates_intern.hh"
+
 namespace blender::ui {
 
 using ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME;
@@ -90,13 +92,47 @@ static bool image_grid_asset_preview_is_drawable(const PreviewImage &preview)
 }
 
 /**
+ * Preview icon of \a id, safe to hand to a button.
+ *
+ * Unlike #id_icon_get this never returns a dynamic icon id that has no icon behind it: an ID whose
+ * preview cannot be rendered falls back to its type icon, and a preview that is still loading keeps
+ * its (registered) deferred icon so the button can draw the spinner.
+ */
+static int image_grid_preview_icon_id_for_id(const bContext &C, ID &id)
+{
+  if (!ED_preview_id_render_is_supported(&id)) {
+    return ui::icon_from_id(&id);
+  }
+
+  const int icon_id = BKE_icon_id_ensure(&id);
+  icon_render_id(&C, nullptr, &id, ICON_SIZE_PREVIEW, !G.background);
+
+  /* Keep the preview icon id so #def_but_icon queues loading; draw shows a spinner via
+   * #icon_is_preview_deferred_loading(). */
+  if (icon_is_preview_deferred_loading(icon_id, true)) {
+    return icon_id;
+  }
+
+  PreviewImage *preview = BKE_previewimg_id_get(&id);
+  if (preview && !BKE_previewimg_is_invalid(preview, ICON_SIZE_PREVIEW) &&
+      image_grid_asset_preview_is_drawable(*preview))
+  {
+    return BKE_icon_preview_ensure(&id, preview);
+  }
+
+  return icon_id ? icon_id : ui::icon_from_id(&id);
+}
+
+/**
  * Return the preview icon attached by #BKE_icon_preview_ensure(), even while deferred loading is
  * in progress. Using the type icon instead would skip #icon_ensure_deferred() / #PreviewLoadJob.
  */
 static int image_grid_asset_preview_icon_id(const asset_system::AssetRepresentation &asset)
 {
   if (const PreviewImage *preview = asset.get_preview()) {
-    if (preview->runtime->icon_id) {
+    /* Checked for existence, not just for being set: the cached id survives the deletion of the
+     * icon it names (see #ed::asset::asset_preview_icon_id). */
+    if (preview->runtime->icon_id && BKE_icon_exists(preview->runtime->icon_id)) {
       return preview->runtime->icon_id;
     }
   }
@@ -320,30 +356,6 @@ class ImageAssetGridItem : public PreviewGridItem {
     return false;
   }
 
-  static int preview_icon_id_for_id(const bContext &C, ID &id)
-  {
-    if (!ED_preview_id_render_is_supported(&id)) {
-      return ui::icon_from_id(&id);
-    }
-
-    const int icon_id = BKE_icon_id_ensure(&id);
-    icon_render_id(&C, nullptr, &id, ICON_SIZE_PREVIEW, !G.background);
-
-    /* Keep the preview icon id so #def_but_icon queues loading; draw shows a spinner via
-     * #icon_is_preview_deferred_loading(). */
-    if (icon_is_preview_deferred_loading(icon_id, true)) {
-      return icon_id;
-    }
-
-    PreviewImage *preview = BKE_previewimg_id_get(&id);
-    if (preview && !BKE_previewimg_is_invalid(preview, ICON_SIZE_PREVIEW) &&
-        image_grid_asset_preview_is_drawable(*preview))
-    {
-      return BKE_icon_preview_ensure(&id, preview);
-    }
-
-    return icon_id ? icon_id : ui::icon_from_id(&id);
-  }
 
   int get_preview_icon_id(const bContext &C) const
   {
@@ -353,13 +365,13 @@ class ImageAssetGridItem : public PreviewGridItem {
       }
 
       if (ID *local_id = asset_->local_id()) {
-        return preview_icon_id_for_id(C, *local_id);
+        return image_grid_preview_icon_id_for_id(C, *local_id);
       }
 
       return image_grid_asset_preview_icon_id(*asset_);
     }
 
-    return preview_icon_id_for_id(C, image_->id);
+    return image_grid_preview_icon_id_for_id(C, image_->id);
   }
 
   void build_grid_tile(const bContext &C, Layout &layout) const override
@@ -997,6 +1009,37 @@ class ImageGridStateAccess : public GridStateAccess {
 /** \name Template UI
  * \{ */
 
+/**
+ * The Texture panel's slot holds a #Tex, and #tooltip_from_id knows no preview image for that ID
+ * type -- only for the #Image itself. So resolve the image an IMAGE texture points at and show
+ * that tooltip, giving this row the same hover preview the PBR paint source picker has, where the
+ * slot holds an Image directly. The image is looked up while the tooltip is built, since the
+ * texture may point at a different one by then.
+ */
+static void image_grid_slot_tooltip_set(Button *but, ID *id)
+{
+  if (but == nullptr || id == nullptr) {
+    return;
+  }
+  if (GS(id->name) != ID_TE) {
+    id_preview_tooltip_set(but, id);
+    return;
+  }
+  /* The ID outlives the tooltip (the button is rebuilt whenever the slot changes), so the raw
+   * pointer needs no ownership handling. */
+  button_func_tooltip_custom_set(
+      but,
+      [](bContext & /*C*/, TooltipData &tip, Button * /*but*/, void *arg) {
+        Tex *texture = static_cast<Tex *>(arg);
+        ID *preview_id = (texture->type == TEX_IMAGE && texture->ima != nullptr) ?
+                             &texture->ima->id :
+                             &texture->id;
+        tooltip_from_id(tip, preview_id);
+      },
+      id,
+      nullptr);
+}
+
 static void add_browse_image_button(Layout &layout,
                                     bContext &C,
                                     ed::image_grid::ImageGridUIState &state,
@@ -1004,16 +1047,81 @@ static void add_browse_image_button(Layout &layout,
 {
   ed::image_grid::image_grid_prepare_browse_shelf(C, state, IMAGE_TEXTURE_SHELF_IDNAME);
 
-  Layout &split = layout.split(0.55f, true);
-  split.context_string_set("asset_shelf_idname", IMAGE_TEXTURE_SHELF_IDNAME);
-  split.context_ptr_set("image_grid_target", &target_ptr);
+  PropertyRNA *prop = RNA_struct_find_property(&target_ptr, "texture");
+  PointerRNA idptr = PointerRNA_NULL;
+  if (prop && RNA_property_type(prop) == PROP_POINTER) {
+    idptr = RNA_property_pointer_get(&target_ptr, prop);
+  }
+  ID *id = static_cast<ID *>(idptr.data);
 
-  Layout &browse_row = split.row(true);
-  browse_row.popover(&C, "ASSETSHELF_PT_popover_panel", IFACE_("Browse Image"), ICON_FILEBROWSER);
+  /* Same row the PBR paint source picker uses (see #template_id_browser): two units tall in both
+   * states, so the assigned texture has room for its thumbnail and the empty slot offers a drop
+   * area that is easier to hit while dragging. The browse target here is the asset shelf popover,
+   * not the ID browser -- the slot holds a Texture, which the shelf is the picker for. */
+  Layout &row = layout.row(true);
+  row.scale_y_set(2.0f);
+  row.context_string_set("asset_shelf_idname", IMAGE_TEXTURE_SHELF_IDNAME);
+  /* Makes every button of the row a texture-slot drop target, see #determine_texture_slot_type. */
+  row.context_ptr_set("image_grid_target", &target_ptr);
 
-  Layout &actions_row = split.row(true);
-  actions_row.op("IMAGE_GRID_OT_new", IFACE_("New"), ICON_ADD);
-  actions_row.op("IMAGE_GRID_OT_open", IFACE_("Open"), ICON_FILEBROWSER);
+  Block *block = row.block();
+  if (id == nullptr) {
+    row.popover(&C, "ASSETSHELF_PT_popover_panel", IFACE_("Drop image"), ICON_IMAGE_DATA);
+    /* The icon is the button's own, left-aligned one, so the centered label cannot run into it.
+     * #BUT_NO_MENU_TRIA drops the dropdown arrow, which is sized from the button height and would
+     * be oversized on this deliberately two-unit-tall button. */
+    button_drawflag_enable(block->last_but(), BUT_ICON_LEFT | BUT_NO_MENU_TRIA);
+  }
+  else {
+    /* Rendering the preview is deferred, so this may still return the plain type icon at first.
+     * #id_icon_get is deliberately not used: for an ID whose preview cannot be rendered it hands
+     * back a dynamic icon id with no icon behind it, which the draw code rejects ("no icon for
+     * icon ID"). */
+    const int preview_icon = image_grid_preview_icon_id_for_id(C, *id);
+    row.popover(&C,
+                "ASSETSHELF_PT_popover_panel",
+                "",
+                preview_icon ? preview_icon : ICON_TEXTURE);
+    Button *but = block->last_but();
+    if (preview_icon) {
+      /* Draw the assigned texture as a thumbnail instead of a small icon. The button is widened
+       * to stay roughly square, the row's own scale gives it its height. */
+      def_but_icon(but, preview_icon, UI_HAS_ICON | BUT_ICON_PREVIEW);
+      but->rect.xmax = but->rect.xmin + UI_UNIT_X * 2;
+    }
+    button_drawflag_enable(but, BUT_NO_MENU_TRIA);
+    /* The thumbnail is too small to judge the texture by, so hovering it shows the large preview. */
+    image_grid_slot_tooltip_set(but, id);
+
+    /* The name is the widest target in the row -- the part a user naturally clicks to change the
+     * assignment -- so it opens the shelf too rather than being a rename field. */
+    row.popover(&C, "ASSETSHELF_PT_popover_panel", id->name + 2, ICON_NONE);
+    but = block->last_but();
+    button_drawflag_enable(but, BUT_TEXT_LEFT | BUT_NO_MENU_TRIA);
+    image_grid_slot_tooltip_set(but, id);
+  }
+
+  /* Icon-only: the drop button beside them already says what the row is for, and spelling out New
+   * and Open would crowd it at this row height. */
+  Layout &actions_row = row.row(true);
+  actions_row.op("IMAGE_GRID_OT_new", "", ICON_ADD);
+  actions_row.op("IMAGE_GRID_OT_open", "", ICON_FILEBROWSER);
+  if (id) {
+    /* Only meaningful once something is assigned; clicking a tile never clears the slot. Unaligned
+     * so it keeps its rounded corners while the parent row's zero spacing still holds it flush
+     * against Open (`item_align` passes the alignment group down only into aligned sub-rows). */
+    Layout &clear_row = row.row(false);
+    clear_row.op("IMAGE_GRID_OT_clear", "", ICON_X);
+  }
+
+  /* Same disclosure-triangle pattern as the PBR paint source picker's "Show Source Grid": an
+   * icon-only, unembossed toggle at the row's right edge. Drawn last so it keeps that position
+   * whether or not Clear is there. */
+  Layout &toggle_row = row.row(false);
+  toggle_row.emboss_set(EmbossType::None);
+  toggle_row.op("IMAGE_GRID_OT_show_grid_toggle",
+                "",
+                state.show_grid ? ICON_DOWNARROW_HLT : ICON_RIGHTARROW);
 }
 
 /** Icon-only popover with menu arrow (same footprint as #ASSETSHELF_PT_display in the shelf
@@ -1036,38 +1144,54 @@ static void image_grid_header_popover(Layout &row,
     return;
   }
   /* #layout_add_but() marks compact icon buttons as fixed width (#UI_UNIT_X); widen for arrow. */
-  Button *but = block->buttons_ptrs.last().get();
+  Button *but = block->last_but();
   but->rect.xmax = but->rect.xmin + short(1.6f * UI_UNIT_X);
 }
 
-/* Draw the asset-library choices as a plain vertical menu. The operator's enum dropdown
- * (#Layout::op_menu_enum) lays folder headings out as side-by-side columns; a menu reads top to
- * bottom. Folder headings become labels; each library is an operator row that sets the library and
- * closes the menu. The slot (texture vs mask) is re-applied to the menu's own context because the
- * operator resolves it from there (#image_grid_slot_from_context). */
-static void image_grid_library_selector_menu_draw(bContext * /*C*/, Layout *layout, void *arg)
+/* This grid keeps its membership mode in #ImageGridUIState, the reusable selector speaks
+ * #grid_settings::CatalogMode; translate between the two in one place. */
+static grid_settings::CatalogMode image_grid_catalog_mode_to_grid_settings(
+    const ed::image_grid::ImageGridCatalogMode mode)
 {
-  const ed::image_grid::ImageGridSlot grid_slot =
-      ed::image_grid::image_grid_slot_from_int(POINTER_AS_INT(arg));
+  switch (mode) {
+    case ed::image_grid::ImageGridCatalogMode::Recent:
+      return grid_settings::CatalogMode::Recent;
+    case ed::image_grid::ImageGridCatalogMode::Favorites:
+      return grid_settings::CatalogMode::Favorites;
+    default:
+      return grid_settings::CatalogMode::All;
+  }
+}
+
+static ed::image_grid::ImageGridCatalogMode image_grid_catalog_mode_from_grid_settings(
+    const grid_settings::CatalogMode mode)
+{
+  BLI_assert(ELEM(mode, grid_settings::CatalogMode::Recent, grid_settings::CatalogMode::Favorites));
+  return (mode == grid_settings::CatalogMode::Recent) ?
+             ed::image_grid::ImageGridCatalogMode::Recent :
+             ed::image_grid::ImageGridCatalogMode::Favorites;
+}
+
+/* Draw the asset-library choices as a plain vertical menu, through the same drawer the reusable
+ * grid selector uses (#library_selector_menu_draw_items): identical heading, Recent/Favorites rows,
+ * folder grouping and active highlight. Only the item source (image libraries) and what a pick does
+ * are this grid's own -- its state lives in #ImageGridUIState, not in an RNA property, so the picks
+ * are applied through callbacks (the same functions #IMAGE_GRID_OT_set_library and
+ * #IMAGE_GRID_OT_set_membership call). The slot (texture vs mask) stays in the menu's own context
+ * for anything else drawn from here that resolves it (#image_grid_slot_from_context). */
+static void image_grid_library_selector_menu_draw(bContext *C, Layout *layout, void *arg)
+{
+  const ed::image_grid::ImageGridSlot grid_slot = ed::image_grid::image_grid_slot_from_int(
+      POINTER_AS_INT(arg));
   layout->context_int_set(ed::image_grid::IMAGE_GRID_CONTEXT_SLOT_KEY, int(grid_slot));
 
-  Layout &col = layout->column(false);
-
-  /* Recent / Favorites first — same order as the asset-shelf catalog tree. Not real libraries;
-   * they switch #ImageGridFilter::catalog_mode via #IMAGE_GRID_OT_set_membership. */
-  {
-    PointerRNA recent_ptr = col.op(
-        "IMAGE_GRID_OT_set_membership", IFACE_("Recent"), ICON_RECOVER_LAST);
-    RNA_enum_set(&recent_ptr,
-                 "mode",
-                 int(ed::image_grid::ImageGridCatalogMode::Recent));
-    PointerRNA favorites_ptr = col.op(
-        "IMAGE_GRID_OT_set_membership", IFACE_("Favorites"), ICON_SOLO_ON);
-    RNA_enum_set(&favorites_ptr,
-                 "mode",
-                 int(ed::image_grid::ImageGridCatalogMode::Favorites));
-    col.separator();
+  const std::optional<ed::image_grid::ImageGridOwner> owner_opt =
+      ed::image_grid::image_grid_owner_from_context(*C);
+  if (!owner_opt) {
+    return;
   }
+  const ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner_opt,
+                                                                                       grid_slot);
 
   /* Same item source as the operator's own enum (#rna_image_grid_library_itemf): image libraries
    * only, grouped by folder. */
@@ -1082,47 +1206,52 @@ static void image_grid_library_selector_menu_draw(bContext * /*C*/, Layout *layo
     return;
   }
 
-  /* Start "separated" so a leading folder heading gets no divider above it. */
-  bool prev_was_separator = true;
-  for (const EnumPropertyItem *item = items; item->identifier; item++) {
-    /* Empty identifier: a folder heading (has a name) or a plain separator (no name). */
-    if (!item->identifier[0]) {
-      if (item->name && item->name[0]) {
-        /* Divider before each folder name, unless one was just drawn (avoids doubling the
-         * built-in separator before the custom section). */
-        if (!prev_was_separator) {
-          col.separator();
-        }
-        col.label(item->name, item->icon);
-        prev_was_separator = false;
-      }
-      else {
-        col.separator();
-        prev_was_separator = true;
-      }
-      continue;
-    }
-    PointerRNA op_ptr = col.op("IMAGE_GRID_OT_set_library", item->name, item->icon);
-    RNA_enum_set(&op_ptr, "asset_library_reference", item->value);
-    prev_was_separator = false;
-  }
+  LibrarySelectorMenuParams params;
+  params.items = items;
+  params.title = IFACE_("Asset Library");
+  params.current_library_value = ed::asset::library_reference_to_enum_value(&state.filter.lib_ref);
+  params.current_mode = image_grid_catalog_mode_to_grid_settings(state.filter.catalog_mode);
+  params.show_membership = true;
+  /* The owner resolved here, while the panel is being drawn, is the fallback: a click is handled
+   * from the popup, where the context may no longer name the owning space. */
+  const ed::image_grid::ImageGridOwner owner_at_draw = *owner_opt;
+  params.apply_library = [grid_slot, owner_at_draw](bContext &C, const int library_enum_value) {
+    const ed::image_grid::ImageGridOwner owner =
+        ed::image_grid::image_grid_owner_from_context(C).value_or(owner_at_draw);
+    const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(
+        library_enum_value);
+    ed::image_grid::image_grid_set_library(C, owner, grid_slot, new_ref);
+  };
+  params.apply_membership = [grid_slot, owner_at_draw](bContext &C,
+                                                       const grid_settings::CatalogMode mode) {
+    const ed::image_grid::ImageGridOwner owner =
+        ed::image_grid::image_grid_owner_from_context(C).value_or(owner_at_draw);
+    ed::image_grid::image_grid_set_membership(
+        C, owner, grid_slot, image_grid_catalog_mode_from_grid_settings(mode));
+  };
+
+  library_selector_menu_draw_items(*C, *layout, params);
 
   MEM_delete(items);
 }
 
 /* Ctrl-Wheel cycling for the library-selector button (#button_supports_cycling /
- * #do_but_BLOCK): steps through the same library list the menu draws, in the same order, and
- * applies the change through #image_grid_set_library (shared with #IMAGE_GRID_OT_set_library so
- * behavior matches picking an entry from the menu). */
-static bool image_grid_library_selector_menu_step(bContext *C, int direction, void *arg)
+ * #do_but_BLOCK): steps through the same entries the menu draws, in the same order (Recent,
+ * Favorites, then the libraries -- see #library_selector_step), and applies the change through
+ * #image_grid_set_library / #image_grid_set_membership (shared with #IMAGE_GRID_OT_set_library and
+ * #IMAGE_GRID_OT_set_membership so behavior matches picking an entry from the menu).
+ *
+ * The button is a plain #Layout::menu_fn button, so the return value is unused (nothing applies it
+ * to an RNA property); the work happens here. */
+static int image_grid_library_selector_menu_step(bContext *C, int direction, Button *but)
 {
-  const ed::image_grid::ImageGridSlot grid_slot =
-      ed::image_grid::image_grid_slot_from_int(POINTER_AS_INT(arg));
+  const ed::image_grid::ImageGridSlot grid_slot = ed::image_grid::image_grid_slot_from_int(
+      POINTER_AS_INT(but->poin));
 
   const std::optional<ed::image_grid::ImageGridOwner> owner_opt =
       ed::image_grid::image_grid_owner_from_context(*C);
   if (!owner_opt) {
-    return false;
+    return 0;
   }
   const ed::image_grid::ImageGridOwner owner = *owner_opt;
   const ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner,
@@ -1136,35 +1265,38 @@ static bool image_grid_library_selector_menu_step(bContext *C, int direction, vo
       /*exclude_image_libraries=*/false,
       /*only_image_libraries=*/true);
   if (!items) {
-    return false;
+    return 0;
   }
 
   /* Real library entries only, same order as the menu (folder headings/separators skipped). */
-  Vector<int> values;
+  Vector<int> library_values;
   for (const EnumPropertyItem *item = items; item->identifier; item++) {
     if (item->identifier[0]) {
-      values.append(item->value);
+      library_values.append(item->value);
     }
   }
   MEM_delete(items);
 
-  if (values.is_empty()) {
-    return false;
+  const std::optional<LibraryStepResult> result = library_selector_step(
+      library_values,
+      /*include_membership=*/true,
+      image_grid_catalog_mode_to_grid_settings(state.filter.catalog_mode),
+      ed::asset::library_reference_to_enum_value(&state.filter.lib_ref),
+      direction);
+  if (!result) {
+    return 0;
   }
 
-  const int current_value = ed::asset::library_reference_to_enum_value(&state.filter.lib_ref);
-  int current_index = 0;
-  for (const int i : values.index_range()) {
-    if (values[i] == current_value) {
-      current_index = i;
-      break;
-    }
+  if (result->is_membership) {
+    ed::image_grid::image_grid_set_membership(
+        *C, owner, grid_slot, image_grid_catalog_mode_from_grid_settings(result->mode));
+    return 0;
   }
-  const int next_index = mod_i(current_index + direction, int(values.size()));
+
   const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(
-      values[next_index]);
-
-  return ed::image_grid::image_grid_set_library(*C, owner, grid_slot, new_ref);
+      result->library_enum_value);
+  ed::image_grid::image_grid_set_library(*C, owner, grid_slot, new_ref);
+  return 0;
 }
 
 static void draw_header_row(Layout &layout,
@@ -1194,7 +1326,7 @@ static void draw_header_row(Layout &layout,
      * still #ButtonType::Pulldown, otherwise #button_type_set_menu_from_pulldown's own precondition
      * assert fails on the already-converted button. */
     if (block->buttons_ptrs.size() != buttons_num_before) {
-      Button *but = block->buttons_ptrs.last().get();
+      Button *but = block->last_but();
       button_func_menu_step_set(but, image_grid_library_selector_menu_step);
       if (but->type == ButtonType::Pulldown) {
         button_type_set_menu_from_pulldown(but);
@@ -1226,6 +1358,111 @@ static void draw_header_row(Layout &layout,
   image_grid_header_popover(row, C, ed::image_grid::IMAGE_GRID_PT_DISPLAY, ICON_IMGDISPLAY, grid_slot);
 }
 
+/**
+ * While the N-Panel sidebar grid's resize-grip is the region's active button, keep the panels
+ * region's scroll offset every layout pass. When the grid shrinks while the region is scrolled,
+ * the shorter content would raise #View2D::tot.ymin and snap the view up, drifting the header.
+ * Level-triggered by the actual active button rather than a decaying frame counter, so it holds
+ * for the whole gesture -- including pauses while previews load -- and releases immediately after
+ * (no phantom space). `area.cc` consumes the flag per layout pass, so it is re-set here each pass.
+ *
+ * \note The popover lives in its own temporary region and is unaffected, so it never calls this.
+ */
+static void image_grid_hold_region_scroll_during_grip_drag(const bContext &C,
+                                                           const GridSessionState &session)
+{
+  ARegion *region = CTX_wm_region(&C);
+  if (region == nullptr || region->runtime == nullptr) {
+    return;
+  }
+  const Button *active_but = region_find_active_but(region);
+  if (active_but && active_but->type == ButtonType::Grip &&
+      active_but->poin == reinterpret_cast<const char *>(&session.grip_pixel_height))
+  {
+    region->runtime->keep_scroll_offset_on_resize = true;
+  }
+}
+
+namespace {
+
+/** Tile and column geometry #build_image_grid derives from the panel width and preview size. */
+struct ImageGridTileLayout {
+  int tile_w = 1;
+  int tile_h = 1;
+  int panel_width = 0;
+  int cols_est = 1;
+  /** Visible row count for this viewport, needed before the view exists. */
+  int effective_rows_hint = 1;
+};
+
+}  // namespace
+
+/**
+ * Resolve the tile size and column count for this panel's width.
+ *
+ * When the content overflows the viewport the core draws the overlay scrollbar over the grid's
+ * right edge. The tiles are fixed-size and pinned to the column count (#set_cols_per_row_hint), so
+ * they always fill the full width -- a #V2D_SCROLL_WIDTH gutter is reserved (one fewer column when
+ * it no longer fits) so the scrollbar sits beside the tiles instead of on top of them. Decided
+ * from the full-width column count: narrowing only adds rows, so the overflow cannot disappear.
+ */
+static ImageGridTileLayout image_grid_tile_layout(
+    const GridSessionState &session,
+    const ed::image_grid::ImageGridOwner owner,
+    const ed::image_grid::ImageGridSlot grid_slot,
+    const int panel_width,
+    const bool is_popover)
+{
+  ImageGridTileLayout tiles;
+  tiles.panel_width = panel_width;
+
+  const int preview_size = ed::image_grid::image_grid_preview_size_get(owner);
+  tiles.tile_w = ui::preview_tile_size_x(preview_size);
+  tiles.tile_h = ui::preview_tile_size_y_no_label(preview_size);
+
+  const int grip_height = session.grip_pixel_height;
+  tiles.effective_rows_hint =
+      (grip_height >= tiles.tile_h) ?
+          clamp_i(int(divide_ceil_u(uint(grip_height), uint(tiles.tile_h))),
+                  1,
+                  IMAGE_GRID_HOST.max_rows) :
+          (is_popover ? 3 : ed::image_grid::image_grid_effective_rows(owner, grid_slot));
+
+  /* Falls back to the session's last column count when the width is not yet known. Sidebar and
+   * popover use separate sessions, so neither reuses the other's. */
+  const int cols_full = (panel_width > 0) ? max_ii(1, panel_width / max_ii(tiles.tile_w, 1)) :
+                                            max_ii(1, session.cols);
+  const int content_rows_full = (session.cached_item_count > 0) ?
+                                    ((session.cached_item_count - 1) / cols_full + 1) :
+                                    0;
+  const bool reserve_scrollbar = content_rows_full > tiles.effective_rows_hint &&
+                                 panel_width > int(V2D_SCROLL_WIDTH);
+  tiles.cols_est = reserve_scrollbar ? max_ii(1,
+                                              (panel_width - int(V2D_SCROLL_WIDTH)) /
+                                                  max_ii(tiles.tile_w, 1)) :
+                                       cols_full;
+  return tiles;
+}
+
+/**
+ * Persist a whole-row approximation of the grip height to DNA, so a reloaded file reconstructs a
+ * similar viewport. Done here rather than in the generic core, which must not know about DNA.
+ * Popover height is session-only and never written.
+ */
+static void image_grid_persist_rows_to_dna(const GridSessionState &session,
+                                           const AbstractGridView &grid_view,
+                                           const ed::image_grid::ImageGridOwner owner,
+                                           const ed::image_grid::ImageGridSlot grid_slot)
+{
+  const int tile_h = max_ii(1, grid_view.get_style().tile_height);
+  const int grip = session.grip_pixel_height;
+  if (grip < tile_h) {
+    return;
+  }
+  owner.slot_dna(grid_slot).rows = short(
+      clamp_i(round_fl_to_int(float(grip) / float(tile_h)), 1, IMAGE_GRID_HOST.max_rows));
+}
+
 static void build_image_grid(Layout &layout,
                              const bContext &C,
                              ed::image_grid::ImageGridUIState &state,
@@ -1246,22 +1483,8 @@ static void build_image_grid(Layout &layout,
   const std::string grid_id = ed::image_grid::image_grid_session_id(*owner, grid_slot, is_popover);
   GridSessionState &session = grid_session_state_ensure(grid_id);
 
-  /* While the N-Panel sidebar grid's resize-grip is the region's active button, keep the panels
-   * region's scroll offset every layout pass. When the grid shrinks while the region is scrolled,
-   * the shorter content would raise #View2D::tot.ymin and snap the view up, drifting the header.
-   * Level-triggered by the actual active button rather than a decaying frame counter, so it holds
-   * for the whole gesture — including pauses while previews load — and releases immediately after
-   * (no phantom space). area.cc consumes the flag per layout pass, so re-set it here each pass. The
-   * popover lives in its own temporary region — unaffected. */
   if (!is_popover) {
-    if (ARegion *region = CTX_wm_region(&C)) {
-      const Button *active_but = region_find_active_but(region);
-      if (region->runtime && active_but && active_but->type == ButtonType::Grip &&
-          active_but->poin == reinterpret_cast<char *>(&session.grip_pixel_height))
-      {
-        region->runtime->keep_scroll_offset_on_resize = true;
-      }
-    }
+    image_grid_hold_region_scroll_during_grip_drag(C, session);
   }
 
   /* Wrap the tile grid, scrollbar and resize grip in a themed box so the grid reads as a
@@ -1271,56 +1494,29 @@ static void build_image_grid(Layout &layout,
    * drawn outline would overflow the panel by that padding. */
   Layout &grid_box = layout.box();
 
-  const int preview_size = ed::image_grid::image_grid_preview_size_get(*owner);
-  const int tile_w = ui::preview_tile_size_x(preview_size);
-  const int panel_width = max_ii(layout.width() - 2 * grid_box.box_padding_px(), 0);
-
-  /* Visible row count for this viewport; needed both to reserve the scrollbar gutter below and for
-   * the focus scroll further down. */
-  const int grip_height = session.grip_pixel_height;
-  const int tile_h_hint = ui::preview_tile_size_y_no_label(preview_size);
-  const int effective_rows_hint =
-      (grip_height >= tile_h_hint) ?
-          clamp_i(int(divide_ceil_u(uint(grip_height), uint(tile_h_hint))),
-                  1,
-                  IMAGE_GRID_HOST.max_rows) :
-          (is_popover ? 3 : ed::image_grid::image_grid_effective_rows(*owner, grid_slot));
-
-  /* Column count for this panel's width; falls back to the session's last count when the width is
-   * not yet known. Sidebar and popover use separate sessions, so neither reuses the other's.
-   *
-   * When the content overflows the viewport the core draws the overlay scrollbar over the grid's
-   * right edge. The tiles are fixed-size and pinned to this column count (#set_cols_per_row_hint),
-   * so they always fill the full width — reserve a #V2D_SCROLL_WIDTH gutter (one fewer column when
-   * it no longer fits) so the scrollbar sits beside the tiles instead of on top of them. Decided
-   * from the full-width column count: narrowing only adds rows, so the overflow can't disappear. */
-  const int cols_full = (panel_width > 0) ? max_ii(1, panel_width / max_ii(tile_w, 1)) :
-                                            max_ii(1, session.cols);
-  const int content_rows_full = (session.cached_item_count > 0) ?
-                                    ((session.cached_item_count - 1) / cols_full + 1) :
-                                    0;
-  const bool reserve_scrollbar = content_rows_full > effective_rows_hint &&
-                                 panel_width > int(V2D_SCROLL_WIDTH);
-  const int cols_est = reserve_scrollbar ?
-                           max_ii(1, (panel_width - int(V2D_SCROLL_WIDTH)) / max_ii(tile_w, 1)) :
-                           cols_full;
+  const ImageGridTileLayout tiles = image_grid_tile_layout(
+      session,
+      *owner,
+      grid_slot,
+      max_ii(layout.width() - 2 * grid_box.box_padding_px(), 0),
+      is_popover);
 
   /* Publish this context's column count immediately so the focus computation below uses this
    * panel's count, not the previous frame's. */
-  session.cols = cols_est;
+  session.cols = tiles.cols_est;
 
   /* Focus: when a pending "scroll active texture into view" request applies to this layout the
    * helper returns the target row (-1 = nothing to do) and we set the session's pixel position. */
   const int focus_row = ed::image_grid::image_grid_apply_focus_scroll(
-      C, state, cols_est, effective_rows_hint);
+      C, state, tiles.cols_est, tiles.effective_rows_hint);
   if (focus_row >= 0) {
-    session.scroll_px = focus_row * max_ii(1, tile_h_hint);
+    session.scroll_px = focus_row * max_ii(1, tiles.tile_h);
   }
 
   auto view_unique = std::make_unique<ImageAssetGridView>(
-      C, state, state.filter.lib_ref, ptr, prop, cols_est, is_popover);
-  view_unique->set_tile_size(tile_w, ui::preview_tile_size_y_no_label(preview_size));
-  view_unique->set_cols_per_row_hint(cols_est);
+      C, state, state.filter.lib_ref, ptr, prop, tiles.cols_est, is_popover);
+  view_unique->set_tile_size(tiles.tile_w, tiles.tile_h);
+  view_unique->set_cols_per_row_hint(tiles.cols_est);
   const char *grid_view_id = grid_slot == ed::image_grid::ImageGridSlot::Mask ? "image_asset_grid_mask" : "image_asset_grid";
   AbstractGridView *grid_view = block_add_view(*block, grid_view_id, std::move(view_unique));
   /* Attach to the shared session so scroll survives the per-refresh rebuild and the unified input
@@ -1335,30 +1531,26 @@ static void build_image_grid(Layout &layout,
     grid_view->set_popup_keep_open();
   }
 
-  /* Persist a whole-row approximation to DNA for reload reconstruction (nearest row). Done here
-   * so the generic core does not need to know about View3D DNA. Removed in Stage 7.
-   * Popover height is session-only — never written to DNA. */
   if (!is_popover) {
-    const GridViewStyle &style = grid_view->get_style();
-    const int tile_h = max_ii(1, style.tile_height);
-    const int grip = session.grip_pixel_height;
-    if (grip >= tile_h) {
-      const short row_count = short(clamp_i(round_fl_to_int(float(grip) / float(tile_h)),
-                                            1,
-                                            IMAGE_GRID_HOST.max_rows));
-      owner->slot_dna(grid_slot).rows = row_count;
-    }
+    image_grid_persist_rows_to_dna(session, *grid_view, *owner, grid_slot);
   }
 
   ImageGridStateAccess state_access(session, *owner, grid_id, grid_slot, is_popover);
+  /* Filter row backed by the runtime state rather than RNA: this host has no #GridViewSettings.
+   * Both pointers live in the owner's runtime slot, so they outlive this block. */
+  GridViewHostParams host_params = IMAGE_GRID_HOST;
+  host_params.filter_show = &state.show_filter;
+  host_params.filter_search_buf = state.filter.search;
+  host_params.filter_search_maxncpy = sizeof(state.filter.search);
+
   build_grid_view(C,
                   grid_box,
                   *grid_view,
                   state_access,
                   session.cached_item_count,
-                  cols_est,
-                  panel_width,
-                  IMAGE_GRID_HOST);
+                  tiles.cols_est,
+                  tiles.panel_width,
+                  host_params);
 }
 
 void template_asset_image_grid(
@@ -1397,8 +1589,13 @@ void template_asset_image_grid(
   block_add_dynamic_listener(block, image_grid_block_listener);
 
   if (ed::image_grid::image_grid_library_is_missing(*owner, grid_slot)) {
-    /* The header row is drawn first on purpose: it carries the library selector, which is how
-     * the user recovers from a missing library. */
+    /* The assigned slot still works with no library, so its row stays; the header row follows it
+     * because it carries the library selector, which is how the user recovers from this state. */
+    add_browse_image_button(*layout, *C, state, *ptr);
+    if (!state.show_grid) {
+      return;
+    }
+    layout->separator();
     draw_header_row(*layout, state, *C, grid_slot);
     layout->label(fmt::format(fmt::runtime(IFACE_("Library \"{}\" not found")),
                               state.filter.lib_ref.custom_library_name)
@@ -1408,9 +1605,17 @@ void template_asset_image_grid(
     return;
   }
 
+  /* First: it shows what is currently assigned, which is the subject of the whole template. The
+   * library and catalog selectors below it only narrow down what the grid offers. */
+  add_browse_image_button(*layout, *C, state, *ptr);
+  if (!state.show_grid) {
+    return;
+  }
+  /* Sets the assigned slot apart from the library and catalog selectors, which browse rather than
+   * assign. */
+  layout->separator();
   draw_header_row(*layout, state, *C, grid_slot);
   build_image_grid(*layout, *C, state, *ptr, prop, grid_slot, is_popover);
-  add_browse_image_button(*layout, *C, state, *ptr);
 }
 
 /** \} */

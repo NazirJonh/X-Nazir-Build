@@ -12,6 +12,7 @@
 #include "DNA_color_types.h" /* for color management */
 #include "DNA_defs.h"
 #include "DNA_scene_enums.h"
+#include "DNA_uuid_types.h"
 
 #include "BLI_enum_flags.hh"
 
@@ -50,7 +51,11 @@ enum eGPUTextureTarget : int {
 /** #Image.flag */
 enum eImage_Flag : int {
   IMA_HIGH_BITDEPTH = (1 << 0),
-  IMA_FLAG_UNUSED_1 = (1 << 1), /* cleared */
+  /** Image was auto-created as a writable paint target (a PBR material-paint canvas or a
+   *  classic texture-paint slot), not chosen by the user as a source texture. Excluded from
+   *  the source-picker Image Browser (`image_filter = 'PAINT_SOURCE'`, see
+   *  #image_id_passes_paint_filter / #IDBrowserFilter). Inherited on ID copy/duplicate/link. */
+  IMA_PAINT_CANVAS = (1 << 1),
 #ifdef DNA_DEPRECATED_ALLOW
   IMA_DO_PREMUL = (1 << 2),
 #endif
@@ -273,6 +278,20 @@ struct Image {
 
   ListBaseT<ImageView> views = {nullptr, nullptr};
   struct Stereo3dFormat *stereo3d_format = nullptr;
+
+  /**
+   * Opaque identifier shared by every #Image that authors the same PBR paint layer. A nil UUID
+   * means the image is not part of a managed layer.
+   *
+   * Contract constraint (not enforced): a non-nil value expresses one layer association; one image
+   * may serve several channels of that layer, but sharing it across two layers is unsupported.
+   * #image.copy() duplicates the value verbatim.
+   *
+   * Written by "Create PBR Paint Maps" (#BKE_paint_material_images_ensure_writable) for the maps it
+   * creates, and readable / writable from Python as `Image.paint_layer_id` - the two-way grouping
+   * contract for external paint add-ons (e.g. Ucupaint). Only equality is defined.
+   */
+  bUUID paint_layer_id = {};
 
   bke::ImageRuntime *runtime = nullptr;
 };

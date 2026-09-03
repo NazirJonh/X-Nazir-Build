@@ -33,6 +33,7 @@
 
 #include "DNA_asset_types.h"
 #include "DNA_ID.h"
+#include "DNA_space_enums.h"
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
 
@@ -498,6 +499,111 @@ void UI_OT_id_browser_set_library(wmOperatorType *ot)
   PropertyRNA *prop = RNA_def_enum(
       ot->srna, "asset_library_reference", rna_enum_dummy_NULL_items, 0, "Asset Library", "");
   RNA_def_enum_funcs(prop, rna_id_browser_library_itemf);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Quick source shortcuts (Recent / Favorites / Current File)
+ *
+ * Header buttons that jump the ID browser straight to a source without opening the library
+ * selector. Each first switches the browser to the Asset Library source (the shortcuts are shown
+ * in every mode), then applies its target. Mirrors #id_browser_set_library_exec for the
+ * notifier/redraw tail; UI state only, no undo push.
+ * \{ */
+
+/** Point the browser at the Asset Library source if it is not there already. */
+static void id_browser_ensure_asset_source(wmWindowManager &wm)
+{
+  if (wm.id_browser_source == ID_BROWSER_SOURCE_ASSET_LIBRARY) {
+    return;
+  }
+  wm.id_browser_source = ID_BROWSER_SOURCE_ASSET_LIBRARY;
+  /* Same side effects as #rna_WindowManager_id_browser_source_update: the two sources have
+   * different item counts, so a scroll offset kept from the other one would point at nothing. */
+  grid_view_session_reset_scroll(id_browser_grid_session_key);
+  WM_file_tag_modified();
+}
+
+static wmOperatorStatus id_browser_quick_source_finish(bContext *C)
+{
+  WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+    ED_region_tag_refresh_ui(region);
+  }
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus id_browser_show_recent_exec(bContext *C, wmOperator * /*op*/)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  id_browser_ensure_asset_source(*wm);
+  id_browser_set_membership(*wm, grid_settings::CatalogMode::Recent);
+  return id_browser_quick_source_finish(C);
+}
+
+static wmOperatorStatus id_browser_show_favorites_exec(bContext *C, wmOperator * /*op*/)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  id_browser_ensure_asset_source(*wm);
+  id_browser_set_membership(*wm, grid_settings::CatalogMode::Favorites);
+  return id_browser_quick_source_finish(C);
+}
+
+static wmOperatorStatus id_browser_show_current_file_exec(bContext *C, wmOperator * /*op*/)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  id_browser_ensure_asset_source(*wm);
+
+  const AssetLibraryReference local_ref = asset_system::current_file_library_reference();
+  id_browser_library_ref_set(*wm, local_ref);
+  /* Leave any Recent/Favorites membership: it lives under #ASSET_LIBRARY_ALL, so clear the mode
+   * for both the new library and #ALL (mirrors the catalog selector's "All" item). */
+  BKE_asset_catalog_memory_set_all(
+      &U, local_ref, grid_settings::id_browser_catalog_memory_domain);
+  BKE_asset_catalog_memory_set_all(
+      &U, asset_system::all_library_reference(), grid_settings::id_browser_catalog_memory_domain);
+  grid_view_session_reset_scroll(id_browser_grid_session_key);
+  WM_file_tag_modified();
+
+  return id_browser_quick_source_finish(C);
+}
+
+void UI_OT_id_browser_show_recent(wmOperatorType *ot)
+{
+  ot->name = "Browse Recent Assets";
+  ot->description = "Show recently used assets in the ID browser";
+  ot->idname = "UI_OT_id_browser_show_recent";
+  ot->exec = id_browser_show_recent_exec;
+  ot->flag = OPTYPE_REGISTER;
+}
+
+void UI_OT_id_browser_show_favorites(wmOperatorType *ot)
+{
+  ot->name = "Browse Favorite Assets";
+  ot->description = "Show favorite assets in the ID browser";
+  ot->idname = "UI_OT_id_browser_show_favorites";
+  ot->exec = id_browser_show_favorites_exec;
+  ot->flag = OPTYPE_REGISTER;
+}
+
+void UI_OT_id_browser_show_current_file(wmOperatorType *ot)
+{
+  ot->name = "Browse Current File Assets";
+  ot->description = "Show assets from the current blend file in the ID browser";
+  ot->idname = "UI_OT_id_browser_show_current_file";
+  ot->exec = id_browser_show_current_file_exec;
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /** \} */

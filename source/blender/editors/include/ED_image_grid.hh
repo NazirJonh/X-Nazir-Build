@@ -29,6 +29,7 @@
 
 struct View3D;
 struct SpaceImage;
+struct SpaceProperties;
 struct SpaceLink;
 struct bContext;
 struct AssetShelf;
@@ -113,12 +114,14 @@ class ImageGridOwner {
   /** Concrete-space downcasts; returns null when the owner wraps a different kind. */
   View3D *as_view3d() const;
   SpaceImage *as_space_image() const;
+  SpaceProperties *as_space_properties() const;
 
   static ImageGridOwner from(View3D &v3d);
   static ImageGridOwner from(SpaceImage &sima);
+  static ImageGridOwner from(SpaceProperties &sbuts);
 
  private:
-  enum class Kind { View3D, SpaceImage };
+  enum class Kind { View3D, SpaceImage, SpaceProperties };
 
   ImageGridOwner(Kind kind, void *space) : kind_(kind), space_(space) {}
 
@@ -186,6 +189,15 @@ struct ImageGridFilter {
   ImageGridCatalogMode catalog_mode = ImageGridCatalogMode::All;
   /** Name Matching include-filter (persisted on #ImageGridSlotDNA). */
   blender::NameMatchFilterState name_match;
+  /**
+   * Free-text name filter from the filter row under the resize grip; empty means "show all".
+   * A fixed buffer, not a #std::string, because the row's #ButtonType::Text writes into it in
+   * place -- same storage shape and size as #uiList::filter_name.
+   *
+   * Session-only: the new grid keeps this in #GridViewSettings (an IDProperty), but this host
+   * persists through DNA, and a search string is transient the way a list's search is.
+   */
+  char search[/*MAX_NAME*/ 64] = "";
 };
 
 /**
@@ -262,6 +274,16 @@ struct ImageGridUIState {
    */
   bool shelf_active_asset_valid = false;
   AssetWeakReference shelf_active_asset{};
+
+  /** Disclosure state of the filter row under the resize grip; session-only like
+   * #ImageGridFilter::search, and matching #GridViewSettings.show_filter in the new grid. */
+  bool show_filter = false;
+
+  /**
+   * Disclosure state of the grid itself (and of the library / catalog header row, which only
+   * exists to narrow the grid down). Persisted through #ImageGridSlotDNA::hide_grid.
+   */
+  bool show_grid = true;
 };
 
 ImageGridUIState &image_grid_state_get(ImageGridOwner owner,
@@ -578,6 +600,17 @@ bool image_grid_set_library(bContext &C,
                             const AssetLibraryReference &new_ref);
 
 /**
+ * Enter Recent or Favorites membership (see #image_grid_filter_set_membership), then refetch,
+ * reset scroll, persist state and notify listeners. Returns false (no-op) when \a mode is already
+ * active. Shared by #IMAGE_GRID_OT_set_membership and Ctrl-Wheel cycling on the header library
+ * selector. \a mode must be #ImageGridCatalogMode::Recent or #ImageGridCatalogMode::Favorites.
+ */
+bool image_grid_set_membership(bContext &C,
+                               ImageGridOwner owner,
+                               ImageGridSlot grid_slot,
+                               ImageGridCatalogMode mode);
+
+/**
  * Register #IMAGE_GRID_OT_* operators and the numpad-period focus-active pre-button handler.
  * Called from #operatortypes_ui.
  */
@@ -593,11 +626,13 @@ void IMAGE_GRID_OT_assign_texture(wmOperatorType *ot);
 void IMAGE_GRID_OT_mark_asset(wmOperatorType *ot);
 void IMAGE_GRID_OT_new(wmOperatorType *ot);
 void IMAGE_GRID_OT_open(wmOperatorType *ot);
+void IMAGE_GRID_OT_clear(wmOperatorType *ot);
 void IMAGE_GRID_OT_assign_catalog(wmOperatorType *ot);
 void IMAGE_GRID_OT_copy_to_library(wmOperatorType *ot);
 void IMAGE_GRID_OT_move_to_library(wmOperatorType *ot);
 void IMAGE_GRID_OT_drop_import(wmOperatorType *ot);
 void VIEW3D_OT_image_shelf_activate_asset(wmOperatorType *ot);
+void IMAGE_GRID_OT_show_grid_toggle(wmOperatorType *ot);
 void IMAGE_GRID_OT_name_match_enabled_toggle(wmOperatorType *ot);
 void IMAGE_GRID_OT_name_match_map_type_toggle(wmOperatorType *ot);
 void IMAGE_GRID_OT_name_match_clear(wmOperatorType *ot);

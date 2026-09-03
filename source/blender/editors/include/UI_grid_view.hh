@@ -21,11 +21,14 @@
 
 #include "DNA_vec_types.h"
 
+#include "RNA_types.hh"
+
 #include "UI_abstract_view.hh"
 #include "UI_resources.hh"
 
 namespace blender {
 
+struct ARegion;
 struct bContext;
 struct View2D;
 
@@ -315,8 +318,9 @@ class AbstractGridView : public AbstractView {
   int fixed_viewport_first_row() const;
   /** Re-clamp #scroll_px() against the current viewport geometry (item count/columns changed). */
   void fixed_viewport_clamp_scroll_value();
-  /** Set #scroll_px() so the active item's row is within the fixed viewport. */
-  void fixed_viewport_scroll_active_into_view(bool scroll_active_to_center);
+  /** Set #scroll_px() so the active item's row is within the fixed viewport. Returns true when an
+   * active item exists in the filtered view. */
+  bool fixed_viewport_scroll_active_into_view(bool scroll_active_to_center);
 
   void draw_drop_linehint() const;
 
@@ -426,6 +430,14 @@ class GridViewBuilder {
  * Called once from #ED_spacetypes_init(); not tied to any space type.
  */
 void grid_view_register_pre_button_handler();
+
+/**
+ * True when \a item belongs to a session-backed grid that currently has something to scroll.
+ * Such a tile must defer activation to the synthesized click, so that a touch/pen drag over it
+ * scrolls the grid instead of activating whatever the gesture happened to start on. Items that
+ * support their own drag already defer for the same reason.
+ */
+bool grid_view_item_defers_activation_to_click(const AbstractViewItem &item);
 
 /**
  * Drop the session-state registry entry for \a grid_id if nothing references it. For
@@ -547,6 +559,135 @@ template<class ViewType> ViewType &GridViewItemDropTarget::get_view() const
                 "Type must derive from and implement the ui::AbstractGridView interface");
   return dynamic_cast<ViewType &>(view_);
 }
+
+/* ---------------------------------------------------------------------- */
+/** \name Grid queries and scroll control
+ *
+ * The C++ side of the grid Python API: every function here is reachable from an add-on as a
+ * method on `GridViewSettings` (registered in `rna_ui.cc`), and #UI_OT_grid_view_step is built on
+ * #grid_query::step.
+ *
+ * A drawn grid only exists for the duration of a redraw, so an add-on cannot ask the view itself
+ * what comes after a given item. These answer from a freshly built #GridDataSource instead, so
+ * they work outside a draw callback -- from an operator, a timer or a handler -- and still agree
+ * with what the user sees, because the source is built from the same settings by the same helper
+ * the drawing path uses (#asset_grid_source_from_settings).
+ *
+ * Only asset-backed grids are covered: a grid driven by a Python `UIGrid` already has its item
+ * list in Python, so stepping through it needs no help here.
+ * \{ */
+
+namespace grid_query {
+
+/**
+ * The parts of a grid's identity that do not live in its #GridViewSettings. A query must be given
+ * the same values the drawing call passes, or it would answer about a different list: the
+ * Recent/Favorites membership mode changes both which items are listed and their order.
+ */
+struct QueryParams {
+  /** See #GridViewAssetParams::membership_shelf_idname. Null or empty for a plain library grid. */
+  const char *membership_shelf_idname = nullptr;
+  /** See #GridViewAssetParams::catalog_memory_domain. */
+  const char *catalog_memory_domain = nullptr;
+  /** See #GridViewAssetParams::catalog_filter_domain. */
+  const char *catalog_filter_domain = nullptr;
+};
+
+/**
+ * Queries report "nothing yet" (`0` / `-1` / an empty string) while the asset library is still
+ * being read. They start that read themselves and the #ND_ASSET_LIST notifier fires when it
+ * completes, so use #is_ready to tell an empty grid from one that has not loaded.
+ */
+
+/** Number of items the grid currently lists, after all of its filters. */
+int item_count(const bContext &C, PointerRNA &settings, const QueryParams &params = {});
+
+/** Whether the library behind the grid has finished reading, so the queries are meaningful. */
+bool is_ready(const bContext &C, PointerRNA &settings, const QueryParams &params = {});
+
+/** Position of \a identifier in the displayed order, or -1 when it is filtered out or unknown. */
+int index_of(const bContext &C,
+             PointerRNA &settings,
+             StringRef identifier,
+             const QueryParams &params = {});
+
+/** Identifier at \a index in the displayed order, empty when out of range. */
+std::string identifier_at(const bContext &C,
+                          PointerRNA &settings,
+                          int index,
+                          const QueryParams &params = {});
+
+/**
+ * Identifier \a offset positions from \a identifier in the displayed order.
+ *
+ * An empty or unknown \a identifier means "nothing current": a forward step then lands on the
+ * first item and a backward step on the last. With \a wrap the range is cyclic; without it a step
+ * past either end returns empty rather than the item the caller already had, so "moved" and
+ * "already at the end" stay distinguishable.
+ */
+std::string step(const bContext &C,
+                 PointerRNA &settings,
+                 StringRef identifier,
+                 int offset,
+                 bool wrap = false,
+                 const QueryParams &params = {});
+
+/**
+ * Scroll control acts on the grid's persistent session state, which only exists once the grid has
+ * been drawn at least once; before that these report false and do nothing (a grid that has never
+ * been drawn already starts at the top).
+ */
+
+/**
+ * Identifier the grid's host called active on its last build, empty when it had none or the grid
+ * has never been drawn. This is what #UI_OT_grid_view_step steps from, so a keymap entry -- whose
+ * properties are fixed -- does not have to be told the current item.
+ */
+std::string active_identifier(StringRef grid_id, const ARegion *region = nullptr);
+
+/**
+ * Run \a activate_operator on the asset named by \a identifier, exactly as clicking its tile
+ * would: the standard asset-reference properties and the optional `context_id` are set the same
+ * way, so an activate operator cannot tell a stepped selection from a clicked one.
+ */
+bool activate_identifier(bContext &C,
+                         PointerRNA &settings,
+                         StringRef identifier,
+                         StringRef activate_operator,
+                         StringRef activate_context_id = "",
+                         const QueryParams &params = {});
+
+/** Columns the grid was last laid out with, or 0 when it has never been drawn. */
+int layout_columns(StringRef grid_id, const ARegion *region = nullptr);
+
+/** Scroll back to the top and forget the per-layout positions. */
+bool reset_scroll(StringRef grid_id, const ARegion *region = nullptr);
+
+/**
+ * Scroll so the item at \a index is visible. With \a center it is placed in the middle of the
+ * viewport; otherwise the view moves the shortest distance that brings the item into view, and
+ * does nothing when it already is.
+ */
+bool scroll_to_index(const bContext &C,
+                     PointerRNA &settings,
+                     StringRef grid_id,
+                     int index,
+                     bool center = false,
+                     const ARegion *region = nullptr,
+                     const QueryParams &params = {});
+
+/** #scroll_to_index for the item named by \a identifier; false when it is not in the grid. */
+bool scroll_to_item(const bContext &C,
+                    PointerRNA &settings,
+                    StringRef grid_id,
+                    StringRef identifier,
+                    bool center = false,
+                    const ARegion *region = nullptr,
+                    const QueryParams &params = {});
+
+}  // namespace grid_query
+
+/** \} */
 
 }  // namespace ui
 }  // namespace blender

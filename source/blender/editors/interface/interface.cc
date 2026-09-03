@@ -6245,6 +6245,11 @@ void button_func_menu_step_set(Button *but, MenuStepFunc func)
   but->menu_step_func = func;
 }
 
+void *button_menu_arg_get(const Button *but)
+{
+  return but->poin;
+}
+
 void button_menu_disable_hover_open(Button *but)
 {
   but->menu_no_hover_open = true;

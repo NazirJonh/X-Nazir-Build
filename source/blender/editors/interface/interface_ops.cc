@@ -62,6 +62,8 @@
 #include "UI_interface_layout.hh"
 #include "UI_tree_view.hh"
 
+#include "UI_grid_view.hh"
+
 #include "interface_intern.hh"
 
 #include "WM_api.hh"
@@ -3248,6 +3250,140 @@ static void UI_OT_view_item_focus(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Grid View Step Operator
+ *
+ * Move a named grid's active item along its displayed order and activate the item landed on, the
+ * way clicking that tile would. Unlike #UI_OT_view_item_navigate this addresses the grid by its
+ * `grid_id` rather than by what the mouse is over, so an add-on can bind it to a key that works
+ * anywhere, and it steps from the grid's own recorded active item rather than from the caller --
+ * a keymap entry's properties are fixed and cannot carry a moving target.
+ *
+ * \{ */
+
+static wmOperatorStatus ui_grid_view_step_exec(bContext *C, wmOperator *op)
+{
+  const std::string grid_id = RNA_string_get(op->ptr, "grid_id");
+  const std::string data_path = RNA_string_get(op->ptr, "data_path");
+  const std::string activate_operator = RNA_string_get(op->ptr, "activate_operator");
+  const std::string activate_context_id = RNA_string_get(op->ptr, "activate_context_id");
+  const std::string membership_shelf = RNA_string_get(op->ptr, "membership_shelf");
+  const std::string catalog_domain = RNA_string_get(op->ptr, "catalog_domain");
+
+  if (grid_id.empty() || data_path.empty()) {
+    BKE_report(op->reports, RPT_ERROR, "grid_id and data_path are required");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Resolved against the context, like `wm.context_*` operators do, so an add-on can name its
+   * settings wherever it keeps them (e.g. "window_manager.my_grid_settings"). */
+  PointerRNA context_ptr = RNA_pointer_create_discrete(nullptr, RNA_Context, C);
+  PointerRNA settings;
+  PropertyRNA *prop;
+  if (!RNA_path_resolve(&context_ptr, data_path.c_str(), &settings, &prop) ||
+      settings.data == nullptr || !RNA_struct_is_a(settings.type, RNA_GridViewSettings))
+  {
+    BKE_report(op->reports, RPT_ERROR, "data_path does not resolve to a GridViewSettings");
+    return OPERATOR_CANCELLED;
+  }
+
+  grid_query::QueryParams params;
+  params.membership_shelf_idname = membership_shelf.c_str();
+  params.catalog_memory_domain = catalog_domain.c_str();
+
+  ARegion *region = CTX_wm_region(C);
+  const std::string current = grid_query::active_identifier(grid_id, region);
+  const int offset = RNA_int_get(op->ptr, "offset");
+  const bool wrap = RNA_boolean_get(op->ptr, "wrap");
+
+  const std::string next = grid_query::step(*C, settings, current, offset, wrap, params);
+  if (next.empty()) {
+    /* Either the library is not read yet, the grid is empty, or the step ran off the end without
+     * wrapping. None of those is an error worth a report; the key simply does nothing. */
+    return OPERATOR_CANCELLED;
+  }
+
+  if (!grid_query::activate_identifier(
+          *C, settings, next, activate_operator, activate_context_id, params))
+  {
+    BKE_report(op->reports, RPT_ERROR, "Could not run the grid's activate operator");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* The host normally reveals its active item on the next build, but only once per change of that
+   * item -- and it has not learned about this one yet. Scroll here so the tile is visible even
+   * when the host does not track an active data-block at all. */
+  grid_query::scroll_to_item(*C, settings, grid_id, next, false, region, params);
+
+  if (region) {
+    ED_region_tag_redraw(region);
+  }
+  return OPERATOR_FINISHED;
+}
+
+static void UI_OT_grid_view_step(wmOperatorType *ot)
+{
+  ot->name = "Step Grid Item";
+  ot->idname = "UI_OT_grid_view_step";
+  ot->description =
+      "Move a grid's active item along the order it displays and activate the item landed on";
+
+  ot->exec = ui_grid_view_step_exec;
+
+  ot->flag = OPTYPE_UNDO;
+
+  RNA_def_string(ot->srna,
+                 "grid_id",
+                 nullptr,
+                 0,
+                 "Grid ID",
+                 "Same grid_id passed to template_grid_view_asset");
+  RNA_def_string(ot->srna,
+                 "data_path",
+                 nullptr,
+                 0,
+                 "Data Path",
+                 "Context path of the grid's GridViewSettings, e.g. "
+                 "\"window_manager.my_grid_settings\"");
+  RNA_def_string(ot->srna,
+                 "activate_operator",
+                 nullptr,
+                 0,
+                 "Activate Operator",
+                 "Same activate operator passed to template_grid_view_asset. It is called with "
+                 "the standard asset-reference properties, exactly as a click on the tile would");
+  RNA_def_string(ot->srna,
+                 "activate_context_id",
+                 nullptr,
+                 0,
+                 "Activate Context ID",
+                 "Same value passed to template_grid_view_asset");
+  RNA_def_int(ot->srna,
+              "offset",
+              1,
+              INT_MIN,
+              INT_MAX,
+              "Offset",
+              "Positions to move, negative to go back",
+              -100,
+              100);
+  RNA_def_boolean(
+      ot->srna, "wrap", false, "Wrap", "Continue from the other end instead of stopping");
+  RNA_def_string(ot->srna,
+                 "membership_shelf",
+                 nullptr,
+                 0,
+                 "Membership Shelf",
+                 "Same value passed to template_grid_view_asset");
+  RNA_def_string(ot->srna,
+                 "catalog_domain",
+                 nullptr,
+                 0,
+                 "Catalog Memory Domain",
+                 "Same value passed to template_grid_view_asset");
+}
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Material Drag/Drop Operator
  *
  * \{ */
@@ -3353,6 +3489,7 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_view_item_delete);
   WM_operatortype_append(UI_OT_view_item_navigate);
   WM_operatortype_append(UI_OT_view_item_focus);
+  WM_operatortype_append(UI_OT_grid_view_step);
 
   WM_operatortype_append(UI_OT_override_add_button);
   WM_operatortype_append(UI_OT_override_remove_button);
@@ -3362,6 +3499,9 @@ void operatortypes_ui()
   override_idtemplate_menu();
 
   WM_operatortype_append(UI_OT_id_browser_set_library);
+  WM_operatortype_append(UI_OT_id_browser_show_recent);
+  WM_operatortype_append(UI_OT_id_browser_show_favorites);
+  WM_operatortype_append(UI_OT_id_browser_show_current_file);
 
   /* external */
   WM_operatortype_append(UI_OT_eyedropper_color);

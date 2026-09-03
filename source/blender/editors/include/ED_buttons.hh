@@ -18,6 +18,7 @@ struct ScrArea;
 struct SpaceProperties;
 struct bContext;
 struct PointerRNA;
+struct PropertyRNA;
 
 namespace ui {
 struct Layout;
@@ -45,5 +46,14 @@ void ED_buttons_set_context(const bContext *C,
                             SpaceProperties *sbuts,
                             PointerRNA *ptr,
                             eSpaceButtons_Context context);
+
+/**
+ * Switch the (unpinned) Properties Editor to its Texture tab, with the texture of \a prop on
+ * \a ptr selected as the active texture user. No-op when no Properties Editor can show it.
+ *
+ * This is what the "Show texture in texture tab" button (#uiTemplateTextureShow) does; exposed so
+ * an operator that assigns a texture can bring it up the same way.
+ */
+void ED_buttons_texture_show(bContext *C, PointerRNA *ptr, PropertyRNA *prop);
 
 }  // namespace blender

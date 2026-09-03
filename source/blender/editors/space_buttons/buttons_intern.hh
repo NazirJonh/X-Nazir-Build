@@ -14,6 +14,9 @@
 
 #include "RNA_types.hh"
 
+/* For #UI_MAX_NAME_STR, used by #SpaceProperties_Runtime below. */
+#include "UI_interface_types.hh"
+
 namespace blender {
 
 struct ARegionType;

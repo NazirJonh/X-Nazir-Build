@@ -1287,6 +1287,12 @@ class UIList(_StructRNA, _GenericUI, metaclass=_RNAMeta):
     __slots__ = ()
 
 
+# Unlike `UIList`, grids are not extended by add-ons through `_GenericUI`:
+# `draw_item` is called straight from RNA, so only the registration metaclass is needed.
+class UIGrid(_StructRNA, metaclass=_RNAMeta):
+    __slots__ = ()
+
+
 class Header(_StructRNA, _GenericUI, metaclass=_RNAMeta):
     __slots__ = ()
 

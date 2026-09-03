@@ -62,8 +62,7 @@ int button_menu_step(Button *but, int direction)
 {
   if (button_menu_step_poll(but)) {
     if (but->menu_step_func) {
-      return but->menu_step_func(
-          static_cast<bContext *>(but->block->evil_C), direction, but->poin);
+      return but->menu_step_func(static_cast<bContext *>(but->block->evil_C), direction, but);
     }
 
     const int curval = RNA_property_enum_get(&but->rnapoin, but->rnaprop);

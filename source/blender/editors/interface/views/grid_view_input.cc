@@ -150,6 +150,13 @@ struct GridFlingState {
 struct GridInputRuntime {
   GridDragState drag;
   GridFlingState fling;
+  /**
+   * A scroll drag just ended, so the click the window manager synthesizes after the release must
+   * not reach the tile under the cursor. Outside popups a view item activates on that synthesized
+   * #KM_CLICK (see #handle_view_item_event), which arrives after the release this handler
+   * consumed -- by then the drag state is already reset, so the intent has to survive one event.
+   */
+  bool swallow_next_click = false;
 };
 
 static GridInputRuntime &grid_input_runtime()
@@ -472,11 +479,23 @@ static int grid_drag_apply_region_v2d(ARegion *region, const int dy)
 
 static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, ARegion *region)
 {
-  GridDragState &drag = grid_input_runtime().drag;
+  GridInputRuntime &runtime = grid_input_runtime();
+  GridDragState &drag = runtime.drag;
+
+  if (event->type == LEFTMOUSE && event->val == KM_CLICK) {
+    /* The click synthesized after a scroll drag must not activate the tile the gesture happened to
+     * start on. Consumed once: a later genuine tap synthesizes its own click. */
+    if (runtime.swallow_next_click) {
+      runtime.swallow_next_click = false;
+      return WM_UI_HANDLER_BREAK;
+    }
+    return WM_UI_HANDLER_CONTINUE;
+  }
 
   if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
     /* Reset on any new press so a missed release never leaves stale state. */
     drag = {};
+    runtime.swallow_next_click = false;
     /* Shift+drag defers to the pressed item's own drag (e.g. Favorites reorder) when it has one;
      * cache that here so the mid-drag arbitration below doesn't need to re-resolve the item, and
      * so grids without such an item keep plain Shift-drag-to-scroll working. */
@@ -541,6 +560,7 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
     const bool released_moving = (BLI_time_now_seconds() - drag.last_time) <
                                  GRID_DRAG_FLING_RELEASE_MAX_IDLE;
     drag = {};
+    runtime.swallow_next_click = was_dragging;
     if (sink == GridDragSink::Session && was_dragging && released_moving) {
       grid_fling_start(C, region, grid_id, velocity);
     }
@@ -686,6 +706,27 @@ static int grid_view_pre_button_handler(bContext *C, const wmEvent *event, ARegi
     return retval;
   }
   return grid_handle_drag_scroll_event(C, event, region);
+}
+
+bool grid_view_item_defers_activation_to_click(const AbstractViewItem &item)
+{
+  const auto *grid_view = dynamic_cast<const AbstractGridView *>(&item.get_view());
+  if (grid_view == nullptr) {
+    return false;
+  }
+  const StringRef grid_id = grid_view->session_grid_id();
+  if (grid_id.is_empty()) {
+    return false;
+  }
+  bool scrollable = false;
+  grid_session_state_foreach([&](const StringRef id, GridSessionState &session) {
+    if (id != grid_id) {
+      return true;
+    }
+    scrollable = grid_session_max_scroll_px(session) > 0;
+    return false;
+  });
+  return scrollable;
 }
 
 void grid_view_register_pre_button_handler()

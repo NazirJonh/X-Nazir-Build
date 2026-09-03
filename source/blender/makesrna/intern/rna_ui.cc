@@ -66,6 +66,12 @@ const EnumPropertyItem rna_enum_uilist_layout_type_items[] = {
 
 }  // namespace blender
 
+/**
+ * Buffer size of the asset identifiers the #GridViewSettings query functions hand back. Asset
+ * identifiers are library-relative paths, so this matches #FILE_MAX rather than #MAX_NAME.
+ */
+#define RNA_GRID_IDENTIFIER_MAX 1024
+
 #ifdef RNA_RUNTIME
 
 #  include "MEM_guardedalloc.h"
@@ -86,6 +92,8 @@ const EnumPropertyItem rna_enum_uilist_layout_type_items[] = {
 
 #  include "ED_asset_library.hh"
 #  include "ED_asset_shelf.hh"
+
+#  include "UI_grid_view.hh"
 
 #  include "WM_api.hh"
 
@@ -2286,6 +2294,115 @@ static StructRNA *rna_IDFilter_refine(PointerRNA *ptr)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Grid View Settings queries
+ *
+ * Thin wrappers over #ui::grid_query; see `UI_grid_view.hh` for what each one answers and when it
+ * reports "not ready".
+ * \{ */
+
+static ui::grid_query::QueryParams rna_grid_query_params(const char *membership_shelf,
+                                                         const char *catalog_domain)
+{
+  ui::grid_query::QueryParams params;
+  params.membership_shelf_idname = membership_shelf;
+  params.catalog_memory_domain = catalog_domain;
+  return params;
+}
+
+static int rna_GridViewSettings_item_count(PointerRNA ptr,
+                                           bContext *C,
+                                           const char *membership_shelf,
+                                           const char *catalog_domain)
+{
+  return ui::grid_query::item_count(
+      *C, ptr, rna_grid_query_params(membership_shelf, catalog_domain));
+}
+
+static bool rna_GridViewSettings_is_ready(PointerRNA ptr,
+                                          bContext *C,
+                                          const char *membership_shelf,
+                                          const char *catalog_domain)
+{
+  return ui::grid_query::is_ready(
+      *C, ptr, rna_grid_query_params(membership_shelf, catalog_domain));
+}
+
+static int rna_GridViewSettings_index_of(PointerRNA ptr,
+                                         bContext *C,
+                                         const char *identifier,
+                                         const char *membership_shelf,
+                                         const char *catalog_domain)
+{
+  return ui::grid_query::index_of(
+      *C, ptr, identifier, rna_grid_query_params(membership_shelf, catalog_domain));
+}
+
+static void rna_GridViewSettings_identifier_at(PointerRNA ptr,
+                                               bContext *C,
+                                               int index,
+                                               const char *membership_shelf,
+                                               const char *catalog_domain,
+                                               char *result)
+{
+  const std::string found = ui::grid_query::identifier_at(
+      *C, ptr, index, rna_grid_query_params(membership_shelf, catalog_domain));
+  BLI_strncpy(result, found.c_str(), RNA_GRID_IDENTIFIER_MAX);
+}
+
+static void rna_GridViewSettings_step_item(PointerRNA ptr,
+                                           bContext *C,
+                                           const char *identifier,
+                                           int offset,
+                                           bool wrap,
+                                           const char *membership_shelf,
+                                           const char *catalog_domain,
+                                           char *result)
+{
+  const std::string found = ui::grid_query::step(
+      *C, ptr, identifier, offset, wrap, rna_grid_query_params(membership_shelf, catalog_domain));
+  BLI_strncpy(result, found.c_str(), RNA_GRID_IDENTIFIER_MAX);
+}
+
+static bool rna_GridViewSettings_scroll_to_item(PointerRNA ptr,
+                                                bContext *C,
+                                                const char *grid_id,
+                                                const char *identifier,
+                                                bool center,
+                                                const char *membership_shelf,
+                                                const char *catalog_domain)
+{
+  return ui::grid_query::scroll_to_item(*C,
+                                        ptr,
+                                        grid_id,
+                                        identifier,
+                                        center,
+                                        CTX_wm_region(C),
+                                        rna_grid_query_params(membership_shelf, catalog_domain));
+}
+
+static bool rna_GridViewSettings_scroll_to_index(
+    PointerRNA ptr, bContext *C, const char *grid_id, int index, bool center)
+{
+  return ui::grid_query::scroll_to_index(*C, ptr, grid_id, index, center, CTX_wm_region(C));
+}
+
+static bool rna_GridViewSettings_reset_scroll(PointerRNA /*ptr*/,
+                                              bContext *C,
+                                              const char *grid_id)
+{
+  return ui::grid_query::reset_scroll(grid_id, CTX_wm_region(C));
+}
+
+static int rna_GridViewSettings_layout_columns(PointerRNA /*ptr*/,
+                                               bContext *C,
+                                               const char *grid_id)
+{
+  return ui::grid_query::layout_columns(grid_id, CTX_wm_region(C));
+}
+
+/** \} */
+
 }  // namespace blender
 
 #else /* RNA_RUNTIME */
@@ -3623,6 +3740,167 @@ static void rna_def_ui_textbox_state(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
 }
 
+/**
+ * The two parameters that describe a grid's identity beyond its settings. Every query takes them,
+ * because a grid in Recent/Favorites mode lists a different set in a different order; a plain
+ * library grid leaves them empty.
+ */
+static void rna_def_grid_view_settings_api_common(FunctionRNA *func)
+{
+  RNA_def_string(func,
+                 "membership_shelf",
+                 nullptr,
+                 0,
+                 "Membership Shelf",
+                 "Same value passed to template_grid_view_asset, or empty for a plain library "
+                 "grid. Required for the answer to match what is drawn, because Recent and "
+                 "Favorites list a different set in a different order");
+  RNA_def_string(func,
+                 "catalog_domain",
+                 nullptr,
+                 0,
+                 "Catalog Memory Domain",
+                 "Same value passed to template_grid_view_asset");
+}
+
+/** The identifier a query hands back, as a fixed-size output buffer. */
+static void rna_def_grid_view_settings_api_result(FunctionRNA *func)
+{
+  PropertyRNA *parm = RNA_def_string(func,
+                                     "result",
+                                     nullptr,
+                                     RNA_GRID_IDENTIFIER_MAX,
+                                     "",
+                                     "Asset identifier, or an empty string when there is none");
+  RNA_def_parameter_flags(parm, PROP_THICK_WRAP, PARM_OUTPUT);
+  RNA_def_function_output(func, parm);
+}
+
+/**
+ * Read-only queries and scroll control for a grid drawn from these settings. Implemented in
+ * `interface_grid_query.cc`; they rebuild the same item list the grid draws, so an add-on stepping
+ * through it moves in exactly the order the user sees.
+ */
+static void rna_def_grid_view_settings_api(StructRNA *srna)
+{
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  func = RNA_def_function(srna, "item_count", "rna_GridViewSettings_item_count");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Number of items the grid currently lists, after its filters. Zero while the asset "
+      "library is still being read; use is_ready to tell the two apart");
+  rna_def_grid_view_settings_api_common(func);
+  parm = RNA_def_int(func, "count", 0, 0, INT_MAX, "", "", 0, INT_MAX);
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "is_ready", "rna_GridViewSettings_is_ready");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(func,
+                                  "Whether the asset library behind the grid has finished "
+                                  "reading, so the other queries are meaningful");
+  rna_def_grid_view_settings_api_common(func);
+  parm = RNA_def_boolean(func, "ready", false, "", "");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "index_of", "rna_GridViewSettings_index_of");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func, "Position of an item in the displayed order, or -1 when it is filtered out");
+  parm = RNA_def_string(func, "identifier", nullptr, 0, "", "Asset identifier to look up");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  rna_def_grid_view_settings_api_common(func);
+  parm = RNA_def_int(func, "index", -1, -1, INT_MAX, "", "", -1, INT_MAX);
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "identifier_at", "rna_GridViewSettings_identifier_at");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func, "Identifier of the item at a position in the displayed order");
+  parm = RNA_def_int(func, "index", 0, 0, INT_MAX, "", "Position in the displayed order", 0,
+                     INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  rna_def_grid_view_settings_api_common(func);
+  rna_def_grid_view_settings_api_result(func);
+
+  func = RNA_def_function(srna, "step_item", "rna_GridViewSettings_step_item");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Identifier of the item a number of positions away from the given one, in the order the "
+      "grid displays. An empty or unknown identifier means nothing is current, so a forward step "
+      "lands on the first item and a backward step on the last. Without wrap, a step past either "
+      "end returns an empty string rather than the item passed in");
+  parm = RNA_def_string(
+      func, "identifier", nullptr, 0, "", "Asset identifier to step from; empty to start");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(
+      func, "offset", 1, INT_MIN, INT_MAX, "", "Positions to move, negative to go back", INT_MIN,
+      INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_boolean(func, "wrap", false, "Wrap", "Continue from the other end instead of stopping");
+  rna_def_grid_view_settings_api_common(func);
+  rna_def_grid_view_settings_api_result(func);
+
+  func = RNA_def_function(srna, "scroll_to_item", "rna_GridViewSettings_scroll_to_item");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Scroll the grid so an item is visible. Does nothing and returns False when the grid has "
+      "not been drawn yet or does not hold the item");
+  parm = RNA_def_string(
+      func, "grid_id", nullptr, 0, "", "Same grid_id passed to template_grid_view_asset");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "identifier", nullptr, 0, "", "Asset identifier to reveal");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_boolean(func,
+                  "center",
+                  false,
+                  "Center",
+                  "Place the item in the middle of the viewport instead of moving the shortest "
+                  "distance that brings it into view");
+  rna_def_grid_view_settings_api_common(func);
+  parm = RNA_def_boolean(func, "scrolled", false, "", "");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "scroll_to_index", "rna_GridViewSettings_scroll_to_index");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(func, "scroll_to_item by position instead of identifier");
+  parm = RNA_def_string(
+      func, "grid_id", nullptr, 0, "", "Same grid_id passed to template_grid_view_asset");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "index", 0, 0, INT_MAX, "", "Position in the displayed order", 0,
+                     INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_boolean(func, "center", false, "Center", "Place the item in the middle of the viewport");
+  parm = RNA_def_boolean(func, "scrolled", false, "", "");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "reset_scroll", "rna_GridViewSettings_reset_scroll");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Scroll the grid back to the top and forget its remembered per-layout positions. False "
+      "when the grid has never been drawn, which already starts at the top");
+  parm = RNA_def_string(
+      func, "grid_id", nullptr, 0, "", "Same grid_id passed to template_grid_view_asset");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "reset", false, "", "");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "layout_columns", "rna_GridViewSettings_layout_columns");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func, "Columns the grid was last laid out with, or 0 when it has never been drawn");
+  parm = RNA_def_string(
+      func, "grid_id", nullptr, 0, "", "Same grid_id passed to template_grid_view_asset");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "columns", 0, 0, INT_MAX, "", "", 0, INT_MAX);
+  RNA_def_function_return(func, parm);
+}
+
 static void rna_def_grid_view_settings(BlenderRNA *brna)
 {
   StructRNA *srna = RNA_def_struct(brna, "GridViewSettings", "PropertyGroup");
@@ -3639,12 +3917,21 @@ static void rna_def_grid_view_settings(BlenderRNA *brna)
   RNA_def_property_enum_funcs(prop, nullptr, nullptr, "rna_asset_library_ui_reference_itemf");
   RNA_def_property_ui_text(prop, "Asset Library", "Asset library shown in the grid");
 
-  /* Preview tile size in pixels (32..256). */
+  /* Preview tile size in pixels. The hard range goes below the soft one so very small tiles can
+   * still be typed in, while dragging stays in the comfortable 24..256 range. */
   prop = RNA_def_property(srna, "preview_size", PROP_INT, PROP_PIXEL);
   RNA_def_property_flag(prop, PROP_IDPROPERTY);
-  RNA_def_property_range(prop, 32, 256);
-  RNA_def_property_int_default(prop, 96);
+  RNA_def_property_range(prop, 8, 256);
+  RNA_def_property_ui_range(prop, 24, 256, 1, -1);
+  RNA_def_property_int_default(prop, 32);
   RNA_def_property_ui_text(prop, "Preview Size", "Preview tile size in pixels");
+
+  /* Item names under the preview tiles. Off by default: the tiles are meant to be read as
+   * previews, and the name is available in the tooltip. */
+  prop = RNA_def_property(srna, "show_names", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_boolean_default(prop, false);
+  RNA_def_property_ui_text(prop, "Names", "Show the item name under each preview tile");
 
   /* Comma-separated catalog paths to show; empty string means show all. */
   prop = RNA_def_property(srna, "enabled_catalogs", PROP_STRING, PROP_NONE);
@@ -3675,6 +3962,21 @@ static void rna_def_grid_view_settings(BlenderRNA *brna)
                            "Name Match Map Types",
                            "Comma-separated map-type identifiers to include "
                            "(empty = no selection)");
+
+  /* Disclosure state of the filter row under the resize grip, like #uiList's UILST_FLT_SHOW. */
+  prop = RNA_def_property(srna, "show_filter", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_boolean_default(prop, false);
+  RNA_def_property_ui_text(
+      prop, "Show Filter", "Show the filtering options under the grid's resize grip");
+
+  prop = RNA_def_property(srna, "filter_search", PROP_STRING, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_update(prop, NC_ASSET | ND_ASSET_LIST, nullptr);
+  RNA_def_property_ui_text(
+      prop, "Search", "Only show items whose name contains this text (empty = show all)");
+
+  rna_def_grid_view_settings_api(srna);
 }
 
 void RNA_def_ui(BlenderRNA *brna)

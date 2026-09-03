@@ -35,6 +35,7 @@
 #include "UI_resources.hh"
 #include "UI_view2d.hh"
 
+#include "interface_grid_view.hh"
 #include "interface_intern.hh"
 #include "views/grid_view_intern.hh"
 
@@ -307,10 +308,19 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
      * valid range, then apply any deferred "scroll active into view" request (e.g. on first open of
      * the popover) before the visible rows are selected below. */
     grid_view.fixed_viewport_clamp_scroll_value();
-    if (grid_view.scroll_active_into_view_on_build_) {
-      grid_view.fixed_viewport_scroll_active_into_view(grid_view.scroll_active_center_on_build_);
+    const bool session_focus_pending = grid_view.session_ &&
+                                       grid_view.session_->scroll_active_into_view_pending;
+    if (grid_view.scroll_active_into_view_on_build_ || session_focus_pending) {
+      const bool center = session_focus_pending ?
+                              grid_view.session_->scroll_active_to_center_pending :
+                              grid_view.scroll_active_center_on_build_;
+      const bool found_active = grid_view.fixed_viewport_scroll_active_into_view(center);
       grid_view.scroll_active_into_view_on_build_ = false;
       grid_view.scroll_active_center_on_build_ = false;
+      if (found_active && grid_view.session_) {
+        grid_view.session_->scroll_active_into_view_pending = false;
+        grid_view.session_->scroll_active_to_center_pending = false;
+      }
     }
 
     /* Pin the grid row and tile column to the pixel-exact viewport height the host asked for (e.g.

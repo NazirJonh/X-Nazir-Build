@@ -2036,6 +2036,27 @@ static int id_refcount_recompute_callback(LibraryIDLinkCallbackData *cb_data)
     return IDWALK_RET_NOP;
   }
 
+  /* #BKE_main_id_refcount_recompute resets `us` on every ID this walk may reach before running it,
+   * so a negative count can only mean the pointer does not lead to an ID of this Main -- a stale
+   * reference that outlived a file read or undo. Counting it would write into memory that is no
+   * longer an ID, so report the owner (the bare `id->us >= 0` assert in #id_us_plus_no_lib names
+   * nothing, and this kind of bug rarely reproduces on demand) and leave it alone. */
+  if ((*id_pointer)->us < 0) {
+    char msg[256];
+    SNPRINTF(msg,
+             "Stale ID reference: owner '%s' (self '%s') points at %p (us=%d), which is not an ID "
+             "of this Main",
+             cb_data->owner_id ? cb_data->owner_id->name : "<none>",
+             cb_data->self_id ? cb_data->self_id->name : "<none>",
+             static_cast<const void *>(*id_pointer),
+             (*id_pointer)->us);
+    CLOG_ERROR(&LOG, "%s", msg);
+    /* Also through the assert, so the owner's name reaches the crash report: #CLOG output only
+     * goes to the console, which is easily lost for a bug that does not reproduce on demand. */
+    BLI_assert_msg(false, msg);
+    return IDWALK_RET_NOP;
+  }
+
   if (cb_flag & IDWALK_CB_USER) {
     /* Do not touch to direct/indirect linked status here... */
     id_us_plus_no_lib(*id_pointer);

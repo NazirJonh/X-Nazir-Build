@@ -160,6 +160,19 @@ enum PreviewImageRenderEndStatus {
   PRV_RENDER_STATUS_CANCELLED,
 };
 
+/**
+ * Callback asking for the job that is currently rendering \a prv to be stopped, and to have
+ * finished stopping by the time it returns.
+ *
+ * Called just before the #PreviewImage of an ID that is being freed would be kept alive for a
+ * still-running render (see #BKE_previewimg_id_free). Deferring the preview's own deletion is not
+ * enough there: an icon render reads the owning ID itself from its worker thread (e.g.
+ * #BKE_image_acquire_ibuf for an Image), and that ID is freed as soon as this returns. The window
+ * manager owns the jobs, so it registers the callback; without one, nothing is stopped.
+ */
+using PreviewImageRenderStopCb = void (*)(const PreviewImage *prv);
+void BKE_previewimg_render_stop_callback_set(PreviewImageRenderStopCb cb);
+
 void BKE_previewimg_render_start(PreviewImage *prv, int size, bool using_job);
 void BKE_previewimg_render_end(PreviewImage *prv, int size, PreviewImageRenderEndStatus status);
 bool BKE_previewimg_render_restart(PreviewImage *prv, int size);

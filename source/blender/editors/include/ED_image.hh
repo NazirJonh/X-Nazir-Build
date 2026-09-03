@@ -50,6 +50,23 @@ float ED_space_image_increment_snap_value(int grid_dimensions,
 
 Image *ED_space_image(const SpaceImage *sima);
 void ED_space_image_set(Main *bmain, SpaceImage *sima, Image *ima, bool automatic);
+/**
+ * #ED_space_image_set, optionally holding the View2D zoom/pan steady.
+ *
+ * \param keep_view: hold the framing. Passing false is exactly #ED_space_image_set; the parameter
+ * exists because callers decide at run time (#PAINT_OT_material_canvas_cycle exposes it as an
+ * operator property).
+ *
+ * #ED_space_image_set ends by restoring the incoming image's remembered view
+ * (#SpaceImage.zoom / xof / yof from #ImageRuntime). That is right for 2D image paint, where each
+ * image keeps its own framing, but jarring when stepping through the equal-sized channel maps of a
+ * single PBR material: freshly created maps carry default runtime view values, so the viewport
+ * appears to jump. The #IMA_SIGNAL_USER_NEW_IMAGE signal fired earlier inside #ED_space_image_set
+ * runs before that restore, so a snapshot/restore around the whole call covers both. When
+ * \a keep_view is set the kept view is also stamped onto \a ima's runtime, so the framing sticks
+ * if the user later returns to this map by another route.
+ */
+void ED_space_image_set_ex(Main *bmain, SpaceImage *sima, Image *ima, bool keep_view);
 void ED_space_image_sync(Main *bmain, Image *image, bool ignore_render_viewer);
 void ED_space_image_auto_set(const bContext *C, SpaceImage *sima);
 /**

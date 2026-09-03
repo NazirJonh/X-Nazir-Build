@@ -76,9 +76,13 @@ void regiondata_blend_write(BlendWriter *writer, const RegionAssetShelf *shelf_r
   writer->write_struct(shelf_regiondata);
   for (const AssetShelf &shelf : shelf_regiondata->shelves) {
     writer->write_struct(&shelf);
-    /* Commit the active catalog into the per-library list on a copy so runtime shelf state is
-     * unchanged and this write path stays logically const for the region data. */
-    AssetShelfSettings settings = shelf.settings;
+    /* Fold the active catalog into the persistent per-library list right before writing. This
+     * must run on the live #AssetShelfSettings, not a stack-local copy: #BlendWriter keys blocks
+     * by pointer, and a copy reuses the same stack address across shelves and across screens, so
+     * blendwrite would drop all but the first ("Same identifier (old address) ... struct=
+     * AssetShelfSettings"). The commit is idempotent and its result is exactly the state we want
+     * persisted, so applying it in place is harmless to runtime. */
+    AssetShelfSettings &settings = const_cast<AssetShelf &>(shelf).settings;
     settings_commit_catalog_states_for_file_save(settings);
     settings_blend_write(writer, settings);
   }

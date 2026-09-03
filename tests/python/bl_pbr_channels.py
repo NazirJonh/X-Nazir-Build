@@ -46,8 +46,9 @@ def _ensure_active_mesh_object():
 
 
 def _find_metallic_image():
+    # Channel maps are named "<Channel> TexLayer" (see BKE_paint_principled_channel_image_ensure).
     for image in bpy.data.images:
-        if image.name.endswith("Metallic"):
+        if image.name.endswith("Metallic TexLayer"):
             return image
     return None
 
@@ -338,6 +339,106 @@ class TestChannelSourceImage(unittest.TestCase):
         self.assertEqual(procedural.type, 'CLOUDS')
 
 
+class TestPaintLayerId(unittest.TestCase):
+    NIL = "00000000-0000-0000-0000-000000000000"
+    SAMPLE = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
+
+    def _new_image(self, name):
+        img = bpy.data.images.new(name, 4, 4)
+        self.addCleanup(bpy.data.images.remove, img)
+        return img
+
+    def test_default_is_empty(self):
+        img = self._new_image("LayerIdDefault")
+        self.assertEqual(img.paint_layer_id, "")
+
+    def test_set_valid_roundtrips(self):
+        img = self._new_image("LayerIdRoundtrip")
+        img.paint_layer_id = self.SAMPLE
+        self.assertEqual(img.paint_layer_id, self.SAMPLE)
+
+    def test_set_uppercase_canonicalises_to_lower(self):
+        img = self._new_image("LayerIdUpper")
+        img.paint_layer_id = self.SAMPLE.upper()
+        self.assertEqual(img.paint_layer_id, self.SAMPLE)
+
+    def test_set_surrounding_whitespace_tolerated(self):
+        img = self._new_image("LayerIdSpaces")
+        img.paint_layer_id = "  " + self.SAMPLE + "  "
+        self.assertEqual(img.paint_layer_id, self.SAMPLE)
+
+    def test_empty_clears(self):
+        img = self._new_image("LayerIdClearEmpty")
+        img.paint_layer_id = self.SAMPLE
+        img.paint_layer_id = ""
+        self.assertEqual(img.paint_layer_id, "")
+
+    def test_nil_string_clears(self):
+        img = self._new_image("LayerIdClearNil")
+        img.paint_layer_id = self.SAMPLE
+        img.paint_layer_id = self.NIL
+        self.assertEqual(img.paint_layer_id, "")
+
+    def test_garbage_clears_and_does_not_raise(self):
+        img = self._new_image("LayerIdGarbage")
+        img.paint_layer_id = self.SAMPLE
+        img.paint_layer_id = "not-a-uuid"
+        self.assertEqual(img.paint_layer_id, "")
+
+    def test_ensure_is_stable_and_valid(self):
+        img = self._new_image("LayerIdEnsure")
+        first = img.paint_layer_id_ensure()
+        self.assertRegex(first, r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        self.assertEqual(img.paint_layer_id_ensure(), first)
+        self.assertEqual(img.paint_layer_id, first)
+
+    def test_copy_shares_id(self):
+        img = self._new_image("LayerIdCopySrc")
+        img.paint_layer_id = self.SAMPLE
+        dup = img.copy()
+        self.addCleanup(bpy.data.images.remove, dup)
+        # Documents the spec 5.7 sharp edge: no auto-fresh-id on copy.
+        self.assertEqual(dup.paint_layer_id, self.SAMPLE)
+
+
+class TestPaintLayerIdCreation(unittest.TestCase):
+    def test_create_pbr_paint_maps_stamps_identical_ids(self):
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        generate_monkey(BackendType.MESH)
+        ob = bpy.context.active_object
+
+        mat = bpy.data.materials.new("LayerIdOpMat")
+        mat.use_nodes = True
+        ob.data.materials.append(mat)
+
+        bpy.context.tool_settings.paint_mode.canvas_source = 'MATERIAL'
+
+        brush = bpy.data.brushes.new("LayerIdOpBrush", mode='SCULPT')
+        brush.sculpt_brush_type = 'PAINT'
+        bpy.context.tool_settings.sculpt.brush = brush
+        self.assertEqual(bpy.ops.paint.material_paint_brush_ensure(), {'FINISHED'})
+
+        channels = {c.channel: c for c in brush.material_paint.channels}
+        channels['BASE_COLOR'].use = True
+        channels['ROUGHNESS'].use = True
+
+        self.assertEqual(bpy.ops.paint.material_paint_images_ensure(), {'FINISHED'})
+
+        ids = {im.paint_layer_id for im in bpy.data.images if im.is_paint_canvas}
+        self.assertEqual(len(ids), 1, ids)
+        self.assertNotIn("", ids)
+
+
+class TestPaintLayerIdOldFile(unittest.TestCase):
+    def test_old_file_paint_layer_id_absent(self):
+        # TODO(PBR_PAINT_LAYER_ID): needs a .blend saved from a build at/before commit
+        # 282b785e21f (before Image.paint_layer_id existed) that contains >=1 Image datablock.
+        # Add it at tests/files/pbr_paint/paint_layer_id_pre_field.blend and enable this test.
+        # The mandatory guarantee is already covered by
+        # TestPaintLayerId.test_default_is_empty (a fresh Image reports "").
+        self.skipTest("pre-field fixture not yet added")
+
+
 class TestChannelSourceLifecycle(unittest.TestCase):
     def setUp(self):
         self.brush = bpy.data.brushes.new("LifecycleTest", mode='SCULPT')
@@ -407,6 +508,9 @@ if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(TestChannelSourceImage))
+    suite.addTests(loader.loadTestsFromTestCase(TestPaintLayerId))
+    suite.addTests(loader.loadTestsFromTestCase(TestPaintLayerIdCreation))
+    suite.addTests(loader.loadTestsFromTestCase(TestPaintLayerIdOldFile))
     suite.addTests(loader.loadTestsFromTestCase(TestChannelSourceLifecycle))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():

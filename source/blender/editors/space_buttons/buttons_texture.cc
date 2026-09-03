@@ -609,7 +609,7 @@ static SpaceProperties *find_space_properties(const bContext *C)
   return nullptr;
 }
 
-static void template_texture_show(bContext *C, void *data_p, void *prop_p)
+static void buttons_texture_show(bContext *C, void *data_p, void *prop_p)
 {
   if (data_p == nullptr || prop_p == nullptr) {
     return;
@@ -645,6 +645,14 @@ static void template_texture_show(bContext *C, void *data_p, void *prop_p)
     /* redraw editor */
     ED_area_tag_redraw(area);
   }
+}
+
+void ED_buttons_texture_show(bContext *C, PointerRNA *ptr, PropertyRNA *prop)
+{
+  if (ptr == nullptr) {
+    return;
+  }
+  buttons_texture_show(C, ptr->data, prop);
 }
 
 void uiTemplateTextureShow(ui::Layout *layout,
@@ -694,7 +702,7 @@ void uiTemplateTextureShow(ui::Layout *layout,
                      0.0,
                      TIP_("Show texture in texture tab"));
   button_func_set(but,
-                  template_texture_show,
+                  buttons_texture_show,
                   user_found ? user->ptr.data : nullptr,
                   user_found ? user->prop : nullptr);
   if (ct == nullptr) {

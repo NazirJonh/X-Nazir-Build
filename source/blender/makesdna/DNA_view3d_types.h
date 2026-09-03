@@ -14,7 +14,6 @@
 
 #include "DNA_asset_types.h"
 #include "DNA_defs.h"
-#include "DNA_image_grid_types.h"
 #include "DNA_listBase.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_enums.h"
@@ -738,12 +737,6 @@ struct View3D_Runtime {
   /** Nkey panel stores stuff here. */
   void *properties_storage = nullptr;
   void (*properties_storage_free)(void *properties_storage) = nullptr;
-  /**
-   * Per-space session state for the brush texture image grid template. Created lazily, freed with
-   * the space, and reset on file read and space duplication. Opaque here to keep DNA free of C++
-   * containers. See #ImageGridSlotDNA in DNA_image_grid_types.h.
-   */
-  void *image_grid_state = nullptr;
   /** Runtime only flags. */
   int flag = 0;
 
@@ -874,15 +867,6 @@ struct View3D {
 
   /** Path to the viewer node that is currently previewed. This is retrieved from the workspace. */
   ViewerPath viewer_path;
-
-  /** Preview thumbnail size in pixels for the image grid (shared by both slots below). 0 = use
-   * default (48). */
-  short image_grid_preview_size = 0;
-  char _pad_image_grid[6] = {};
-  /** Brush-texture image grid state (#ImageGridSlotDNA). */
-  ImageGridSlotDNA image_grid;
-  /** Mask-texture image grid state (independent library/catalog/row state from #image_grid). */
-  ImageGridSlotDNA image_grid_mask;
 
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;

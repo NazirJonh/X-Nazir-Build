@@ -130,7 +130,14 @@ class TEXTURE_PT_context(TextureButtonsPanel, Panel):
                 col.template_ID(space, "pin_id")
             else:
                 propname = context.texture_user_property.identifier
-                col.template_ID(user, propname, new="texture.new")
+                # A brush texture slot gets the same picker the 3D viewport and the Image Editor
+                # give it: assigned texture, drop target and the asset grid. Every other texture
+                # user (particles, line style, nodes) keeps the plain data-block row -- the grid
+                # only knows how to assign into a brush slot.
+                if isinstance(context_tex_datablock(context), Brush) and propname == "texture":
+                    col.template_asset_image_grid(user, propname)
+                else:
+                    col.template_ID(user, propname, new="texture.new")
 
             if tex:
                 col.separator()

@@ -95,6 +95,8 @@ const EnumPropertyItem rna_enum_asset_import_method_items[] = {
 
 #  include "RNA_prototypes.hh"
 
+#  include <optional>
+
 #  include "BKE_asset.hh"
 #  include "BKE_context.hh"
 #  include "BKE_report.hh"
@@ -561,7 +563,7 @@ static bool rna_AssetRepresentation_is_online_get(PointerRNA *ptr)
   return asset->is_online_only();
 }
 
-const EnumPropertyItem *rna_asset_library_ui_reference_itemf(bContext * /*C*/,
+const EnumPropertyItem *rna_asset_library_ui_reference_itemf(bContext *C,
                                                              PointerRNA *ptr,
                                                              PropertyRNA * /*prop*/,
                                                              bool *r_free)
@@ -581,6 +583,20 @@ const EnumPropertyItem *rna_asset_library_ui_reference_itemf(bContext * /*C*/,
     if (shelf->type) {
       exclude_image_libraries = ed::asset::shelf::shelf_idname_is_brush_shelf(shelf->type->idname);
       only_image_libraries = STREQ(shelf->type->idname, ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME);
+    }
+  }
+
+  /* Reusable grid views have no owner type to branch on, so the host states its intent through the
+   * selector's layout context (see #template_grid_library_selector). Picking a paint source is the
+   * same job the texture asset shelf does, so it wants the same image-libraries-only list. */
+  if (C != nullptr) {
+    if (const std::optional<int64_t> flag = CTX_data_int_get(
+            C, "grid_library_selector_only_image_libraries"))
+    {
+      if (*flag != 0) {
+        only_image_libraries = true;
+        exclude_image_libraries = false;
+      }
     }
   }
 

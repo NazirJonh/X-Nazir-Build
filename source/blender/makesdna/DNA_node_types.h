@@ -659,6 +659,18 @@ enum eNodeInterp_Image : short {
   SHD_INTERP_SMART = 3,
 };
 
+/** #NodeTexImage.paint_slot_type */
+enum eNodeTexImagePaintSlotType {
+  NODE_TEX_IMAGE_SLOT_NONE = 0,
+  NODE_TEX_IMAGE_SLOT_BASE_COLOR = 1,
+  NODE_TEX_IMAGE_SLOT_SPECULAR = 2,
+  NODE_TEX_IMAGE_SLOT_ROUGHNESS = 3,
+  NODE_TEX_IMAGE_SLOT_METALLIC = 4,
+  NODE_TEX_IMAGE_SLOT_NORMAL = 5,
+  NODE_TEX_IMAGE_SLOT_BUMP = 6,
+  NODE_TEX_IMAGE_SLOT_DISPLACEMENT = 7,
+};
+
 /* tangent */
 enum eNodeTangent_Type : short {
   SHD_TANGENT_RADIAL = 0,
@@ -2632,7 +2644,9 @@ struct NodeTexImage {
   float projection_blend = 0;
   int interpolation = 0;
   int extension = 0;
-  char _pad[4] = {};
+  /* #eNodeTexImagePaintSlotType */
+  char paint_slot_type = 0;
+  char _pad[3] = {};
 };
 
 struct NodeTexChecker {

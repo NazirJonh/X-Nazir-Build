@@ -91,6 +91,12 @@ struct FileListReadJob {
   std::optional<std::function<void(asset_system::AssetRepresentation &)>> on_asset_added =
       std::nullopt;
 
+  /**
+   * Points to the job's stop flag (#wmJobWorkerStatus::stop). When set, #filelist_readjob_endjob
+   * must not apply partial results (see #filelist_readjob_stop / #WM_jobs_kill_type).
+   */
+  const bool *stop = nullptr;
+
   /** Shallow copy of #filelist for thread-safe access.
    *
    * The job system calls #filelist_readjob_update which moves any read file from #tmp_filelist
@@ -149,6 +155,13 @@ void filelist_readjob_main_assets_add_items(FileListReadJob *job_params,
                                             float * /*progress*/);
 
 void filelist_readjob_load_asset_library_data(FileListReadJob *job_params, bool *do_update);
+
+void filelist_readjob_ensure_image_library_indexed(FileListReadJob *job_params);
+
+void filelist_readjob_image_files_add_items(FileListReadJob *job_params,
+                                            const bool *stop,
+                                            bool *do_update,
+                                            float *progress);
 
 void remote_asset_library_request(FileListReadJob *job_params,
                                   const asset_system::RemoteLibraryDefinitionRef &library);

@@ -27,6 +27,9 @@ void userpref_panels_register(ARegionType &region_type);
 
 void userpref_asset_libraries_panel_draw(const bContext *C, Panel *panel);
 
+void userpref_name_matching_panel_register(ARegionType &region_type);
+void userpref_name_matching_operatortypes();
+
 /* `userpref_asset_libraries_list.cc */
 
 /* -------------------------------------------------------------------- */
@@ -41,6 +44,12 @@ void userpref_asset_libraries_panel_draw(const bContext *C, Panel *panel);
 int userpref_ui_asset_libraries_count();
 std::optional<int> userpref_ui_asset_libraries_index_from_user_library(
     const bUserAssetLibrary &user_library);
+
+/**
+ * The user asset library backing the active item in the Preferences list, or null when the active
+ * item is a built-in entry (All / Essentials) or out of range.
+ */
+bUserAssetLibrary *userpref_ui_active_asset_library();
 
 /** \} */
 

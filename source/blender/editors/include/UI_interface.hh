@@ -158,13 +158,15 @@ class DropTargetInterface {
 
   /**
    * Check if the data dragged with \a drag can be dropped on the element this drop target is for.
+   * \param C: Context, available for implementers that need to poll operator availability (e.g.
+   *           reorder drop targets).
    * \param r_disabled_hint: Return a static string to display to the user, explaining why dropping
    *                         isn't possible on this UI element. Shouldn't be done too aggressively,
    *                         e.g. don't set this if the drag-type can't be dropped here; only if it
    *                         can but there's another reason it can't be dropped. Can assume this is
    *                         a non-null pointer.
    */
-  virtual bool can_drop(const wmDrag &drag, const char **r_disabled_hint) const = 0;
+  virtual bool can_drop(bContext &C, const wmDrag &drag, const char **r_disabled_hint) const = 0;
 
   /**
    * Once the drop target validated that it can receive the dragged data using #can_drop(), this
@@ -186,6 +188,12 @@ class DropTargetInterface {
    */
   virtual std::string drop_tooltip(const DragInfo &drag) const = 0;
   /**
+   * Draw a visual hint (e.g. a line) indicating where the dragged data will land, as a more
+   * visible alternative/complement to the tooltip text. Optional: the default does nothing, so
+   * existing drop targets are unaffected unless they opt in.
+   */
+  virtual void drop_linehint(ARegion & /*region*/, const DragInfo & /*drag*/) const {}
+  /**
    * Execute the logic to apply a drop of the data dragged with \a drag onto/into the UI element
    * this drop target is for.
    */
@@ -202,10 +210,12 @@ bool drop_target_apply_drop(bContext &C,
                             const DropTargetInterface &drop_target,
                             const ListBaseT<wmDrag> &drags);
 /**
- * Call #DropTargetInterface::drop_tooltip() and return the result as newly allocated C string
- * (unless the result is empty, returns null then). Needs freeing with MEM_delete().
+ * Call #DropTargetInterface::drop_linehint() and #DropTargetInterface::drop_tooltip(), returning
+ * the tooltip as newly allocated C string (unless the result is empty, returns null then). Needs
+ * freeing with MEM_delete().
  */
-std::string drop_target_tooltip(const ARegion &region,
+std::string drop_target_tooltip(bContext &C,
+                                ARegion &region,
                                 const DropTargetInterface &drop_target,
                                 const wmDrag &drag,
                                 const wmEvent &event);
@@ -217,6 +227,15 @@ std::string drop_target_tooltip(const ARegion &region,
  */
 std::unique_ptr<DropTargetInterface> region_views_find_drop_target_at(const ARegion *region,
                                                                       const int xy[2]);
+
+/**
+ * Find a drop target for the button under the cursor, if any. Dispatches to per-widget drop-target
+ * providers (currently brush texture slots). Returns null if the button under the cursor does not
+ * support dropping the dragged data.
+ */
+std::unique_ptr<DropTargetInterface> region_but_find_drop_target_at(bContext *C,
+                                                                    const ARegion *region,
+                                                                    const wmEvent *event);
 
 enum eUIListFilterResult {
   /** Never show this item, even when filter results are inverted (#UILST_FLT_EXCLUDE). */

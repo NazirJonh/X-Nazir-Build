@@ -854,6 +854,14 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
       &toolsett_old->gp_sculpt.guide.reference_object,
       IDWALK_CB_NOP);
 
+  /* Per-color-picker palettes are weak references. During undo preservation, the complete
+   * ToolSettings is swapped, so only regular foreach-ID processing needs to traverse them. */
+  if (!do_undo_restore) {
+    for (ColorPickerPalette &cpp : toolsett->color_picker_palettes) {
+      BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, cpp.palette, IDWALK_CB_NOP);
+    }
+  }
+
   /* PBR Paint presets are a variable-length list, so unlike every pointer above there is no
    * reliable way to pair a node up with its counterpart in the other tool-settings. Only the list
    * that survives the swap in #scene_undo_preserve needs processing. */
@@ -1309,6 +1317,10 @@ static void scene_blend_write(BlendWriter *writer, ID *id, const void *id_addres
     writer->write_struct(ts->curves_sculpt);
     BKE_paint_blend_write(writer, &ts->curves_sculpt->paint);
   }
+  for (ColorPickerPalette &cpp : ts->color_picker_palettes) {
+    writer->write_struct(&cpp);
+    writer->write_string(cpp.key);
+  }
   /* write grease-pencil custom ipo curve to file */
   if (ts->gp_interpolate.custom_ipo) {
     BKE_curvemapping_blend_write(writer, ts->gp_interpolate.custom_ipo);
@@ -1497,6 +1509,12 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
         reader, sce, reinterpret_cast<Paint **>(&sce->toolsettings->curves_sculpt));
 
     BKE_paint_blend_read_data(reader, sce, &sce->toolsettings->imapaint.paint);
+
+    BLO_read_struct_list(
+        reader, ColorPickerPalette, &sce->toolsettings->color_picker_palettes);
+    for (ColorPickerPalette &cpp : sce->toolsettings->color_picker_palettes) {
+      BLO_read_string(reader, &cpp.key);
+    }
 
     sce->toolsettings->particle.paintcursor = nullptr;
     sce->toolsettings->particle.scene = nullptr;
@@ -1909,6 +1927,14 @@ ToolSettings *BKE_toolsettings_copy(ToolSettings *toolsettings, const int flag)
 
   ts->sequencer_tool_settings = seq::tool_settings_copy(toolsettings->sequencer_tool_settings);
 
+  BLI_listbase_clear(&ts->color_picker_palettes);
+  for (const ColorPickerPalette &cpp : toolsettings->color_picker_palettes) {
+    ColorPickerPalette *cpp_new = MEM_new<ColorPickerPalette>(__func__);
+    cpp_new->palette = cpp.palette;
+    cpp_new->key = cpp.key ? BLI_strdup(cpp.key) : nullptr;
+    BLI_addtail(&ts->color_picker_palettes, cpp_new);
+  }
+
   ts->paint_mode.material_paint_brush_presets.clear_no_delete();
   for (const PaintMaterialBrushPreset &src_preset :
        toolsettings->paint_mode.material_paint_brush_presets)
@@ -2008,6 +2034,12 @@ void BKE_toolsettings_free(ToolSettings *toolsettings)
   if (toolsettings->sequencer_tool_settings) {
     seq::tool_settings_free(toolsettings->sequencer_tool_settings);
   }
+
+  for (ColorPickerPalette &cpp : toolsettings->color_picker_palettes.items_mutable()) {
+    MEM_delete(cpp.key);
+    MEM_delete(&cpp);
+  }
+  BLI_listbase_clear(&toolsettings->color_picker_palettes);
 
   for (PaintMaterialBrushPreset &preset :
        toolsettings->paint_mode.material_paint_brush_presets.items_mutable())

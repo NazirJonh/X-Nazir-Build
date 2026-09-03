@@ -308,6 +308,19 @@ bool contains_assets_from_remote_url(const AssetLibrary &library, StringRef remo
 asset_system::AssetLibrary *AS_asset_library_load(const Main *bmain,
                                                   const AssetLibraryReference &library_reference);
 
+/**
+ * Return the asset library for \a library_reference if it is already loaded, without loading or
+ * reloading anything.
+ *
+ * Use this instead of #AS_asset_library_load() wherever the library is only inspected, e.g. in RNA
+ * getters or drawing code: that function reloads catalogs on every call (invalidating catalog
+ * pointers), and for the "All" library it walks and rebuilds every other library as well.
+ *
+ * \return Null if the library isn't currently loaded.
+ */
+asset_system::AssetLibrary *AS_asset_library_find_loaded(
+    const Main *bmain, const AssetLibraryReference &library_reference);
+
 std::string AS_asset_library_root_path_from_library_ref(
     const AssetLibraryReference &library_reference);
 

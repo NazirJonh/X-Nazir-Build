@@ -55,7 +55,7 @@ class LayerNodeDropTarget : public TreeViewItemDropTarget {
   {
   }
 
-  bool can_drop(const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
   {
     if (!ELEM(drag.type, WM_DRAG_GREASE_PENCIL_LAYER, WM_DRAG_GREASE_PENCIL_GROUP)) {
       return false;

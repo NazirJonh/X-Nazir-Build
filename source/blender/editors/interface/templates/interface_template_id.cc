@@ -10,6 +10,7 @@
 #include "BKE_collection.hh"
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
+#include "BKE_image.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_override.hh"
@@ -27,12 +28,17 @@
 #include "DEG_depsgraph_query.hh"
 
 #include "DNA_collection_types.h"
+#include "DNA_image_types.h"
+#include "DNA_material_types.h"
+#include "DNA_node_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_space_types.h"
 #include "DNA_workspace_types.h"
 
 #include "ED_id_management.hh"
 #include "ED_node.hh"
 #include "ED_object.hh"
+#include "ED_screen.hh"
 #include "ED_undo.hh"
 
 #include "RNA_access.hh"
@@ -40,6 +46,7 @@
 
 #include "WM_api.hh"
 
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_string_search.hh"
 #include "interface_intern.hh"
@@ -69,6 +76,14 @@ struct TemplateID {
   int prv_cols = 0;
   bool preview = false;
   float scale = 0.0f;
+
+  /* Context for the image-only material/slot-type filters (#TEMPLATE_ID_FILTER_CURRENT_MATERIAL
+   * and #TEMPLATE_ID_FILTER_SLOT_TYPE). Set via #template_id_browse_with_context. */
+  TemplateIDFilterContext filter_context = {};
+
+  /* Optional script-defined filter applied on top of the above. Set via
+   * #template_id_browse_with_context from a registered #IDFilterType name. */
+  const IDFilterType *custom_filter = nullptr;
 };
 
 /* Search browse menu, assign. */
@@ -97,7 +112,12 @@ static void template_ID_set_int_property_session_uid_exec_fn(bContext * /*C*/,
       &template_ui->ptr, template_ui->prop, int(static_cast<ID *>(item)->session_uid));
 }
 
-static bool id_search_allows_id(TemplateID *template_ui, const int flag, ID *id, const char *query)
+static bool id_search_allows_id(const bContext &C,
+                                Main &bmain,
+                                TemplateID *template_ui,
+                                const int flag,
+                                ID *id,
+                                const char *query)
 {
   ID *id_from = template_ui->ptr.owner_id;
 
@@ -119,6 +139,27 @@ static bool id_search_allows_id(TemplateID *template_ui, const int flag, ID *id,
     if ((id->name[2] == '.') && (query[0] != '.')) {
       return false;
     }
+  }
+
+  /* Advanced filtering for images by material usage and/or paint slot type. The shared predicate
+   * also excludes render-result/compositor images, so it is only consulted when a paint-slot
+   * filter is active (the unfiltered "All" mode keeps showing every image as usual). */
+  if (template_ui->idcode == ID_IM && template_ui->filter != TEMPLATE_ID_FILTER_ALL) {
+    if (!image_id_passes_paint_filter(bmain,
+                                      *id_cast<Image *>(id),
+                                      template_ui->filter,
+                                      template_ui->filter_context.material,
+                                      template_ui->filter_context.slot_type))
+    {
+      return false;
+    }
+  }
+
+  /* Script-defined filter (registered #IDFilterType), applied on top of the built-in filters. */
+  if (template_ui->custom_filter != nullptr &&
+      !id_filter_type_poll(*template_ui->custom_filter, C, *id))
+  {
+    return false;
   }
 
   return true;
@@ -163,6 +204,8 @@ static void id_search_cb(const bContext *C,
                          const bool /*is_first*/)
 {
   TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
+  Main &bmain = *CTX_data_main(C);
+
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
 
@@ -170,7 +213,7 @@ static void id_search_cb(const bContext *C,
 
   /* ID listbase */
   for (ID &id : *lb) {
-    if (id_search_allows_id(template_ui, flag, &id, str)) {
+    if (id_search_allows_id(*C, bmain, template_ui, flag, &id, str)) {
       search.add(id.name + 2, &id);
     }
   }
@@ -193,6 +236,7 @@ static void id_search_cb_tagged(const bContext *C,
                                 SearchItems *items)
 {
   TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
+  Main &bmain = *CTX_data_main(C);
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
 
@@ -202,7 +246,7 @@ static void id_search_cb_tagged(const bContext *C,
   /* ID listbase */
   for (ID &id : *lb) {
     if (id.tag & ID_TAG_DOIT) {
-      if (id_search_allows_id(template_ui, flag, &id, str)) {
+      if (id_search_allows_id(*C, bmain, template_ui, flag, &id, str)) {
         search.add(id.name + 2, &id);
       }
       id.tag &= ~ID_TAG_DOIT;
@@ -276,16 +320,18 @@ static Block *id_search_menu(bContext *C, ARegion *region, void *arg_litem)
     }
   }
 
-  return template_common_search_menu(C,
-                                     region,
-                                     id_search_update_fn,
-                                     &template_ui,
-                                     template_ID_set_property_exec_fn,
-                                     active_item_ptr.data,
-                                     template_ID_search_menu_item_tooltip,
-                                     template_ui.prv_rows,
-                                     template_ui.prv_cols,
-                                     template_ui.scale);
+  Block *block = template_common_search_menu(C,
+                                             region,
+                                             id_search_update_fn,
+                                             &template_ui,
+                                             template_ID_set_property_exec_fn,
+                                             active_item_ptr.data,
+                                             template_ID_search_menu_item_tooltip,
+                                             template_ui.prv_rows,
+                                             template_ui.prv_cols,
+                                             template_ui.scale);
+
+  return block;
 }
 
 static Block *id_search_menu_session_uid(bContext *C, ARegion *region, void *arg_litem)
@@ -1440,6 +1486,10 @@ static void template_ID(const bContext *C,
 
 ID *context_active_but_get_tab_ID(bContext *C)
 {
+  /* Deliberately not #context_active_but_get_respect_popup, which the untyped counterpart
+   * (#context_active_but_tab_custom_data_get) does use: this serves operators (see
+   * #workspace_context_get) rather than a menu draw, so it must keep resolving against the region
+   * the tab lives in, which for an operator may differ from the active popup. */
   Button *but = context_active_but_get(C);
 
   if (but && but->type == ButtonType::Tab) {
@@ -1475,25 +1525,26 @@ static void template_ID_tabs(const bContext *C,
     const int name_width = fontstyle_string_width(&style->widget, id->name + 2);
     const int but_width = name_width + UI_UNIT_X;
 
-    ButtonTab *tab = static_cast<ButtonTab *>(uiDefButR_prop(block,
-                                                             ButtonType::Tab,
-                                                             id->name + 2,
-                                                             0,
-                                                             0,
-                                                             but_width,
-                                                             but_height,
-                                                             &template_id.ptr,
-                                                             template_id.prop,
-                                                             0,
-                                                             0.0f,
-                                                             sizeof(id->name) - 2,
-                                                             ""));
+    Button *tab = uiDefButR_prop(block,
+                                 ButtonType::Tab,
+                                 id->name + 2,
+                                 0,
+                                 0,
+                                 but_width,
+                                 but_height,
+                                 &template_id.ptr,
+                                 template_id.prop,
+                                 0,
+                                 0.0f,
+                                 sizeof(id->name) - 2,
+                                 "");
     button_func_set(tab, [id = id, template_ui = template_id](bContext &C) mutable {
       template_ID_set_property_exec_fn(&C, &template_ui, id);
     });
     button_drag_set_id(tab, id);
-    tab->custom_data = static_cast<void *>(id);
-    tab->menu = mt;
+    /* The menu and the data it acts on are set together, so a tab can never end up with one and
+     * not the other (read back by #context_active_but_get_tab_ID). */
+    button_tab_menu_set(tab, mt, static_cast<void *>(id));
 
     button_drawflag_enable(tab, but_align);
   }
@@ -1748,6 +1799,90 @@ void template_id_browse(Layout *layout,
               1.0f,
               false,
               false);
+}
+
+void template_id_image_row_append_standard(const bContext *C,
+                                           Layout &layout,
+                                           PointerRNA *ptr,
+                                           PropertyRNA *prop,
+                                           const char *newop,
+                                           const char *openop,
+                                           const char *unlinkop)
+{
+  TemplateID template_ui = {};
+  template_ui.ptr = *ptr;
+  template_ui.prop = prop;
+  template_ui.scale = 1.0f;
+
+  StructRNA *type = RNA_property_pointer_type(ptr, prop);
+  const short idcode = RNA_type_to_ID_code(type);
+  template_ui.idcode = idcode;
+  template_ui.idlb = which_libbase(CTX_data_main(C), idcode);
+
+  if (!template_ui.idlb) {
+    return;
+  }
+
+  int flag = UI_ID_RENAME | UI_ID_DELETE;
+  if (newop) {
+    flag |= UI_ID_ADD_NEW;
+  }
+  if (openop) {
+    flag |= UI_ID_OPEN;
+  }
+
+  template_ID(
+      C, layout, template_ui, type, flag, newop, openop, unlinkop, std::nullopt, false, false);
+}
+
+void template_id_browse_with_context(Layout *layout,
+                                     bContext *C,
+                                     PointerRNA *ptr,
+                                     const StringRefNull propname,
+                                     const char *newop,
+                                     const char *openop,
+                                     const char *unlinkop,
+                                     int filter,
+                                     const char *text,
+                                     Material *material,
+                                     char slot_type,
+                                     const char *filter_type)
+{
+  PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
+
+  if (!prop || RNA_property_type(prop) != PROP_POINTER) {
+    RNA_warning(
+        "pointer property not found: %s.%s", RNA_struct_identifier(ptr->type), propname.c_str());
+    return;
+  }
+
+  TemplateID template_ui = {};
+  template_ui.ptr = *ptr;
+  template_ui.prop = prop;
+  template_ui.scale = 1.0f;
+  template_ui.filter = short(filter);
+  template_ui.filter_context.material = material;
+  template_ui.filter_context.slot_type = slot_type;
+  if (filter_type && filter_type[0] != '\0') {
+    template_ui.custom_filter = id_filter_type_find(filter_type);
+  }
+
+  StructRNA *type = RNA_property_pointer_type(ptr, prop);
+  const short idcode = RNA_type_to_ID_code(type);
+  template_ui.idcode = idcode;
+  template_ui.idlb = which_libbase(CTX_data_main(C), idcode);
+
+  if (template_ui.idlb) {
+    int flag = UI_ID_BROWSE | UI_ID_RENAME | UI_ID_DELETE;
+    if (newop) {
+      flag |= UI_ID_ADD_NEW;
+    }
+    if (openop) {
+      flag |= UI_ID_OPEN;
+    }
+    Layout &row = layout->row(true);
+    template_ID(C, row, template_ui, type, flag, newop, openop, unlinkop, text, false, false);
+  }
 }
 
 void template_id_preview(Layout *layout,

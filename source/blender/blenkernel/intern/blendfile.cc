@@ -58,6 +58,7 @@
 #include "BKE_main.hh"
 #include "BKE_main_idmap.hh"
 #include "BKE_main_namemap.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_preferences.h"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -1577,7 +1578,14 @@ UserDef *BKE_blendfile_userdef_from_defaults()
 
   BKE_preferences_asset_library_default_add(userdef);
 
+  BKE_name_matching_userdef_ensure_defaults(userdef);
+
   BKE_preferences_extension_repo_add_defaults_all(userdef);
+
+  /* Start with an empty asset browser catalog-state list. */
+  userdef->asset_browser_settings.clear_no_delete();
+  /* Start with an empty per-(library, domain) catalog-memory list. */
+  userdef->catalog_memory.clear_no_delete();
 
   {
     BKE_preferences_asset_shelf_settings_ensure_catalog_path_enabled(

@@ -306,6 +306,16 @@ BLI_INLINE void BLI_listbase_clear(ListBase *lb)
 bool BLI_listbase_validate(ListBase *lb);
 
 /**
+ * Cheap sanity check for a #ListBase head that may hold garbage (e.g. an uninitialized struct, or
+ * data left over from an incompatible on-disk layout), without dereferencing `lb->first`/`last`.
+ * Unlike #BLI_listbase_validate, which walks the list and would itself crash on a garbage head,
+ * this only inspects the two pointer values: null-page range and the `(void *)-1` sentinel are
+ * rejected. Use it as a guard before ever touching a #ListBase whose origin is not trusted.
+ * \return true if the list is empty or the head pointers look like plausible heap addresses.
+ */
+bool BLI_listbase_head_is_plausible(const ListBase *lb);
+
+/**
  * Equality check for ListBase.
  *
  * This only shallowly compares the ListBase itself (so the first/last

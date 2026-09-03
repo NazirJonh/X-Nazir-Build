@@ -11,14 +11,29 @@
 #include "BKE_idtype.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_set.hh"
+#include "BLI_string.h"
 
+#include "DNA_ID.h"
 #include "DNA_asset_types.h"
 
+#include "AS_asset_catalog.hh"
 #include "AS_asset_catalog_tree.hh"
 #include "AS_asset_library.hh"
 
 #include "ED_asset_filter.hh"
 #include "ED_asset_list.hh"
+
+#include "BKE_asset_catalog_memory.hh"
+
+#include "DNA_userdef_types.h"
+
+#include "BLI_uuid.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <string>
 
 namespace blender::ed::asset {
 
@@ -185,6 +200,241 @@ AssetItemTree build_filtered_all_catalog_tree(
           std::move(assets_per_path),
           std::move(unassigned_assets),
           dirty};
+}
+
+Vector<std::string> collect_unique_asset_tag_names(const AssetLibraryReference &library_ref,
+                                                   const bContext & /*C*/)
+{
+  /* Case-insensitive uniqueness with first-seen spelling preserved. */
+  Set<std::string> lower_seen;
+  Vector<std::string> tags;
+
+  list::iterate(library_ref, [&](asset_system::AssetRepresentation &asset) {
+    if (ID *local_id = asset.local_id()) {
+      if (local_id->asset_data == nullptr) {
+        return true;
+      }
+    }
+
+    const AssetMetaData &meta = asset.get_metadata();
+    for (const AssetTag &tag : meta.tags) {
+      if (tag.name[0] == '\0') {
+        continue;
+      }
+      std::string lower = tag.name;
+      for (char &c : lower) {
+        c = char(std::tolower(static_cast<unsigned char>(c)));
+      }
+      if (lower_seen.add(lower)) {
+        tags.append(tag.name);
+      }
+    }
+    return true;
+  });
+
+  std::sort(tags.begin(), tags.end(), [](const std::string &a, const std::string &b) {
+    return BLI_strcasecmp(a.c_str(), b.c_str()) < 0;
+  });
+  return tags;
+}
+
+bool catalog_path_is_in_enabled_set(const StringRef asset_catalog_path,
+                                    const Set<std::string> &enabled_paths,
+                                    const CatalogContainment containment)
+{
+  if (enabled_paths.is_empty()) {
+    return true;
+  }
+  if (containment == CatalogContainment::Exact) {
+    return enabled_paths.contains_as(asset_catalog_path);
+  }
+  const asset_system::AssetCatalogPath path{asset_catalog_path};
+  for (const std::string &enabled : enabled_paths) {
+    if (path.is_contained_in(asset_system::AssetCatalogPath(enabled))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+Vector<asset_system::AssetCatalogFilter> catalog_filters_from_enabled_paths(
+    const asset_system::AssetLibrary &library, const Set<std::string> &enabled_paths)
+{
+  Vector<asset_system::AssetCatalogFilter> filters;
+  filters.reserve(enabled_paths.size());
+  for (const std::string &path : enabled_paths) {
+    asset_system::AssetCatalog *catalog = library.catalog_service().find_catalog_by_path(
+        path.c_str());
+    if (catalog) {
+      filters.append(library.catalog_service().create_catalog_filter(catalog->catalog_id));
+    }
+  }
+  return filters;
+}
+
+Vector<asset_system::AssetCatalogFilter> catalog_filters_from_enabled_ids(
+    const asset_system::AssetLibrary &library, const Span<bUUID> enabled_ids)
+{
+  Vector<asset_system::AssetCatalogFilter> filters;
+  filters.reserve(enabled_ids.size());
+  for (const bUUID &catalog_id : enabled_ids) {
+    if (library.catalog_service().find_catalog(asset_system::CatalogID(catalog_id))) {
+      filters.append(library.catalog_service().create_catalog_filter(
+          asset_system::CatalogID(catalog_id)));
+    }
+  }
+  return filters;
+}
+
+static bool asset_passes_catalog_filters(const asset_system::AssetRepresentation &asset,
+                                         const Span<asset_system::AssetCatalogFilter> filters)
+{
+  for (const asset_system::AssetCatalogFilter &filter : filters) {
+    if (filter.contains(asset.get_metadata().catalog_id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool catalog_id_is_in_enabled_set(const asset_system::AssetLibrary *library,
+                                  const asset_system::CatalogID catalog_id,
+                                  const Span<bUUID> enabled_ids,
+                                  const CatalogContainment containment)
+{
+  if (enabled_ids.is_empty()) {
+    return true;
+  }
+  if (containment == CatalogContainment::Exact) {
+    for (const bUUID &id : enabled_ids) {
+      if (BLI_uuid_equal(id, catalog_id)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (!library) {
+    return false;
+  }
+  const Vector<asset_system::AssetCatalogFilter> filters = catalog_filters_from_enabled_ids(
+      *library, enabled_ids);
+  if (filters.is_empty()) {
+    return false;
+  }
+  for (const asset_system::AssetCatalogFilter &filter : filters) {
+    if (filter.contains(catalog_id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int foreach_filtered_asset(
+    const AssetLibraryReference &lib_ref,
+    const Set<std::string> *enabled_catalog_paths,
+    const CatalogContainment containment,
+    const FunctionRef<bool(const asset_system::AssetRepresentation &asset)> extra_poll,
+    const FunctionRef<bool(asset_system::AssetRepresentation &asset, int filtered_index)> fn)
+{
+  const asset_system::AssetLibrary *library = list::library_get_once_available(lib_ref);
+  if (!library) {
+    return 0;
+  }
+
+  const bool catalog_filtering = enabled_catalog_paths && !enabled_catalog_paths->is_empty();
+  Vector<asset_system::AssetCatalogFilter> child_filters;
+  if (catalog_filtering && containment == CatalogContainment::IncludeChildren) {
+    child_filters = catalog_filters_from_enabled_paths(*library, *enabled_catalog_paths);
+    if (child_filters.is_empty()) {
+      /* Library still loading or SET paths do not resolve: hide rather than flash unfiltered. */
+      return 0;
+    }
+  }
+
+  int filtered_index = 0;
+  bool continue_iter = true;
+  list::iterate(lib_ref, [&](asset_system::AssetRepresentation &asset) {
+    if (!continue_iter) {
+      return false;
+    }
+    if (catalog_filtering) {
+      if (containment == CatalogContainment::IncludeChildren) {
+        if (!asset_passes_catalog_filters(asset, child_filters)) {
+          return true;
+        }
+      }
+      else {
+        const asset_system::AssetCatalog *catalog = library->catalog_service().find_catalog(
+            asset.get_metadata().catalog_id);
+        const StringRef path = catalog ? StringRef(catalog->path.str()) : StringRef();
+        if (!catalog_path_is_in_enabled_set(path, *enabled_catalog_paths, CatalogContainment::Exact))
+        {
+          return true;
+        }
+      }
+    }
+    if (extra_poll && !extra_poll(asset)) {
+      return true;
+    }
+    if (!fn(asset, filtered_index)) {
+      continue_iter = false;
+    }
+    filtered_index++;
+    return continue_iter;
+  });
+  return filtered_index;
+}
+
+bool catalog_memory_id_is_enabled(const AssetLibraryReference &lib_ref,
+                                  const StringRef domain,
+                                  const asset_system::CatalogID catalog_id)
+{
+  if (BKE_asset_catalog_memory_get_mode(&U, lib_ref, domain) != ASSET_CATALOG_MEMORY_SET) {
+    return false;
+  }
+  const Vector<bUUID> enabled = BKE_asset_catalog_memory_get_set(&U, lib_ref, domain);
+  for (const bUUID &id : enabled) {
+    if (BLI_uuid_equal(id, catalog_id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void catalog_memory_id_set_enabled(const AssetLibraryReference &lib_ref,
+                                   const StringRef domain,
+                                   const asset_system::CatalogID catalog_id,
+                                   const bool enabled)
+{
+  Vector<bUUID> ids;
+  if (BKE_asset_catalog_memory_get_mode(&U, lib_ref, domain) == ASSET_CATALOG_MEMORY_SET) {
+    ids = BKE_asset_catalog_memory_get_set(&U, lib_ref, domain);
+  }
+  if (enabled) {
+    bool found = false;
+    for (const bUUID &id : ids) {
+      if (BLI_uuid_equal(id, catalog_id)) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      ids.append(catalog_id);
+    }
+  }
+  else {
+    for (int64_t i = ids.size() - 1; i >= 0; i--) {
+      if (BLI_uuid_equal(ids[i], catalog_id)) {
+        ids.remove_and_reorder(i);
+      }
+    }
+  }
+  if (ids.is_empty()) {
+    BKE_asset_catalog_memory_set_all(&U, lib_ref, domain);
+  }
+  else {
+    BKE_asset_catalog_memory_set_set(&U, lib_ref, domain, ids.as_span());
+  }
 }
 
 }  // namespace blender::ed::asset

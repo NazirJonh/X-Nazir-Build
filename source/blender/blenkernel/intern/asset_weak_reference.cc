@@ -7,10 +7,12 @@
  */
 
 #include <memory>
+#include <optional>
 
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
+#include "BLI_time.h"
 
 #include "AS_asset_library.hh"
 
@@ -19,6 +21,7 @@
 #include "BLO_read_write.hh"
 
 #include "DNA_asset_types.h"
+#include "DNA_screen_types.h"
 
 #include "MEM_guardedalloc.h"
 
@@ -181,6 +184,100 @@ void BKE_asset_catalog_path_list_add_path(ListBaseT<AssetCatalogPathLink> &catal
   AssetCatalogPathLink *new_path = MEM_new<AssetCatalogPathLink>(__func__);
   new_path->path = BLI_strdup(catalog_path);
   BLI_addtail(&catalog_path_list, new_path);
+}
+
+/* #AssetCatalogState ------------------------------------------------ */
+
+void BKE_asset_catalog_state_list_free(ListBaseT<AssetCatalogState> &catalog_state_list)
+{
+  for (AssetCatalogState &state : catalog_state_list.items_mutable()) {
+    MEM_delete(state.path);
+    BLI_freelinkN(&catalog_state_list, &state);
+  }
+  BLI_assert(catalog_state_list.is_empty());
+}
+
+void BKE_asset_catalog_state_list_duplicate(ListBaseT<AssetCatalogState> &dest_list,
+                                            const ListBaseT<AssetCatalogState> &src_list)
+{
+  dest_list.clear_no_delete();
+
+  for (const AssetCatalogState &src_state : src_list) {
+    AssetCatalogState *new_state = MEM_new<AssetCatalogState>(__func__);
+    new_state->path = BLI_strdup(src_state.path);
+    new_state->last_used = src_state.last_used;
+    new_state->is_collapsed = src_state.is_collapsed;
+    BLI_addtail(&dest_list, new_state);
+  }
+}
+
+void BKE_asset_catalog_state_list_blend_write(
+    BlendWriter *writer, const ListBaseT<AssetCatalogState> &catalog_state_list)
+{
+  for (const AssetCatalogState &state : catalog_state_list) {
+    writer->write_struct(&state);
+    writer->write_string(state.path);
+  }
+}
+
+void BKE_asset_catalog_state_list_blend_read_data(BlendDataReader *reader,
+                                                  ListBaseT<AssetCatalogState> &catalog_state_list)
+{
+  BLO_read_struct_list(reader, AssetCatalogState, &catalog_state_list);
+  for (AssetCatalogState &state : catalog_state_list.items_mutable()) {
+    BLO_read_string(reader, &state.path);
+  }
+}
+
+void BKE_asset_catalog_state_set_collapsed(ListBaseT<AssetCatalogState> &catalog_state_list,
+                                           const char *catalog_path,
+                                           const bool collapsed)
+{
+  if (!catalog_path || !catalog_path[0]) {
+    return;
+  }
+
+  for (AssetCatalogState &state : catalog_state_list.items_mutable()) {
+    if (state.path && STREQ(state.path, catalog_path)) {
+      state.is_collapsed = collapsed;
+      state.last_used = uint32_t(BLI_time_now_seconds());
+      return;
+    }
+  }
+
+  AssetCatalogState *new_state = MEM_new<AssetCatalogState>(__func__);
+  new_state->path = BLI_strdup(catalog_path);
+  new_state->is_collapsed = collapsed;
+  new_state->last_used = uint32_t(BLI_time_now_seconds());
+  BLI_addtail(&catalog_state_list, new_state);
+}
+
+std::optional<bool> BKE_asset_catalog_state_get_collapsed(
+    const ListBaseT<AssetCatalogState> &catalog_state_list, const char *catalog_path)
+{
+  if (!catalog_path || !catalog_path[0]) {
+    return std::nullopt;
+  }
+
+  for (const AssetCatalogState &state : catalog_state_list) {
+    if (state.path && STREQ(state.path, catalog_path)) {
+      return bool(state.is_collapsed);
+    }
+  }
+
+  return std::nullopt;
+}
+
+void BKE_asset_catalog_state_cleanup_old(ListBaseT<AssetCatalogState> &catalog_state_list,
+                                         const uint32_t max_age_seconds)
+{
+  const uint32_t now = uint32_t(BLI_time_now_seconds());
+  for (AssetCatalogState &state : catalog_state_list.items_mutable()) {
+    if ((now - state.last_used) > max_age_seconds) {
+      MEM_delete(state.path);
+      BLI_freelinkN(&catalog_state_list, &state);
+    }
+  }
 }
 
 }  // namespace blender

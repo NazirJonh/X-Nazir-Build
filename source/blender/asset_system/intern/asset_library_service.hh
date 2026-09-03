@@ -107,6 +107,19 @@ class AssetLibraryService {
                                   const AssetLibraryReference &library_reference);
 
   /**
+   * Look up an asset library that is already loaded, without loading or reloading anything.
+   *
+   * Mirrors the dispatch of #get_asset_library(), but every branch is a plain lookup: no library
+   * is created, and no catalogs are (re-)read. Meant for read-only callers such as RNA getters,
+   * where the side effects of #get_asset_library() -- reloading catalogs, which invalidates
+   * catalog pointers -- are not acceptable.
+   *
+   * \return The loaded library, or null if it isn't currently loaded.
+   */
+  AssetLibrary *find_loaded_asset_library(const Main *bmain,
+                                          const AssetLibraryReference &library_reference);
+
+  /**
    * Get an asset library of type #ASSET_LIBRARY_CUSTOM from a directory path. Use
    * #get_asset_library_on_disk_custom_preferences() for asset libraries registered in the
    * Preferences.
@@ -206,6 +219,12 @@ class AssetLibraryService {
                                           StringRefNull root_path,
                                           bool load_catalogs = true,
                                           bUserAssetLibrary *preferences_library = nullptr);
+  /**
+   * Non-creating, non-reloading counterpart of #get_asset_library_on_disk(), used by
+   * #find_loaded_asset_library().
+   */
+  AssetLibrary *lookup_loaded_asset_library_on_disk(eAssetLibraryType library_type,
+                                                    StringRefNull root_path);
   /**
    * Ensure the AssetLibraryService instance is destroyed before a new blend file is loaded.
    * This makes memory management simple, and ensures a fresh start for every blend file. */

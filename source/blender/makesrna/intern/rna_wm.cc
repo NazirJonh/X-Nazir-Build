@@ -9,6 +9,7 @@
 #include <cstdlib>
 
 #include "DNA_scene_types.h"
+#include "DNA_space_enums.h"
 #include "DNA_windowmanager_types.h"
 
 #include "BLI_path_utils.hh"
@@ -23,8 +24,11 @@
 
 #include "rna_internal.hh"
 
+#include "UI_grid_view.hh"
+#include "UI_interface.hh"
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
+#include "UI_resources.hh"
 
 #include "WM_api.hh"
 #include "WM_keymap.hh"
@@ -44,6 +48,8 @@
 #  include "BKE_report.hh"
 #  include "BKE_wm_runtime.hh"
 #  include "BKE_workspace.hh"
+
+#  include "ED_asset_library.hh"
 
 #  include "wm_event_system.hh"
 
@@ -1342,6 +1348,40 @@ static void rna_WindowManager_extensions_statusbar_update(Main * /*bmain*/,
   }
 }
 
+static void rna_WindowManager_id_browser_source_update(Main * /*bmain*/,
+                                                        Scene * /*scene*/,
+                                                        PointerRNA * /*ptr*/)
+{
+  /* The two sources have different item counts, so a scroll offset kept from the other one would
+   * point at nothing. The literal must match #id_browser_grid_session_key
+   * (interface_templates_intern.hh), a module-private header not visible from makesrna. */
+  ui::grid_view_session_reset_scroll("id_browser_grid");
+}
+
+static int rna_WindowManager_id_browser_asset_library_get(PointerRNA *ptr)
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
+  PointerRNA settings = ui::id_browser_grid_settings_ptr(*wm);
+  if (settings.data == nullptr) {
+    return ASSET_LIBRARY_LOCAL;
+  }
+  return RNA_enum_get(&settings, "asset_library_reference");
+}
+
+static void rna_WindowManager_id_browser_asset_library_set(PointerRNA *ptr, int value)
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
+  /* Applies the same side effects as #UI_OT_id_browser_set_library (reset catalog filter and grid
+   * scroll, flag the file modified); the notifier is sent via #RNA_def_property_update below. */
+  ui::id_browser_set_asset_library(*wm, value);
+}
+
+static const EnumPropertyItem *rna_WindowManager_id_browser_asset_library_itemf(
+    bContext *C, PointerRNA * /*ptr*/, PropertyRNA * /*prop*/, bool *r_free)
+{
+  return ui::id_browser_library_rna_itemf(C, r_free);
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Key Config Preferences
  * \{ */
@@ -2440,6 +2480,33 @@ static void rna_def_operator_filelist_element(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Name", "Name of a file or directory within a file list");
 }
 
+static void rna_def_operator_asset_image_import_element(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "OperatorAssetImageImportElement", "PropertyGroup");
+  RNA_def_struct_ui_text(
+      srna, "Operator Asset Image Import Element", "Per-file entry for the image import operator");
+
+  prop = RNA_def_property(srna, "filepath", PROP_STRING, PROP_FILEPATH);
+  RNA_def_property_string_maxlength(prop, FILE_MAX);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(prop, "File Path", "Absolute path to an image file");
+
+  static const EnumPropertyItem map_type_items[] = {
+      {0, "NONE", 0, "None", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_enum(srna, "map_type", map_type_items, 0, "Map Type", "Texture map type");
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_enum_default(prop, 0);
+
+  prop = RNA_def_property(srna, "map_type_identifier", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_maxlength(prop, 64);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY | PROP_HIDDEN);
+}
+
 static void rna_def_event_ndof_motion(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3049,6 +3116,61 @@ static void rna_def_windowmanager(BlenderRNA *brna)
       "Event Handling Break",
       "Remaining events in the queue are delayed until the next main loop iteration");
 
+  /* Persistent view mode of the ID-browser popover (#UI_PT_id_browser); see
+   * #UILayout.template_ID_browser. Stored on the window manager so the popover works from any
+   * editor. The transient name-search text is session-only (see
+   * #bke::WindowManagerRuntime::id_browser_search) and intentionally not exposed here. */
+  static const EnumPropertyItem id_browser_view_mode_items[] = {
+      {IMAGE_BROWSER_VIEW_GRID,
+       "GRID",
+       ICON_IMGDISPLAY,
+       "Grid",
+       "Show data-blocks as a grid of previews"},
+      {IMAGE_BROWSER_VIEW_LIST, "LIST", ICON_LONGDISPLAY, "List", "Show data-blocks as a list"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "id_browser_view_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "id_browser_view_mode");
+  RNA_def_property_enum_items(prop, id_browser_view_mode_items);
+  RNA_def_property_ui_text(
+      prop, "ID Browser View", "How data-blocks are listed in the image browser popover");
+
+  static const EnumPropertyItem id_browser_source_items[] = {
+      {ID_BROWSER_SOURCE_BLEND_DATA,
+       "BLEND_DATA",
+       ICON_FILE_BLEND,
+       "Blend Data",
+       "Show data-blocks from the current file"},
+      {ID_BROWSER_SOURCE_ASSET_LIBRARY,
+       "ASSET_LIBRARY",
+       ICON_ASSET_MANAGER,
+       "Asset Library",
+       "Show assets from an asset library"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "id_browser_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "id_browser_source");
+  RNA_def_property_enum_items(prop, id_browser_source_items);
+  RNA_def_property_ui_text(prop, "ID Browser Source", "Where the ID browser takes its items from");
+  RNA_def_property_update(
+      prop, NC_ASSET | ND_ASSET_LIST, "rna_WindowManager_id_browser_source_update");
+
+  /* Asset library browsed by the ID-browser popover's asset source. Backed by
+   * #wmWindowManager::id_browser_grid_view_settings through a dynamic enum (get/set/itemf); the set
+   * applies the same side effects as #UI_OT_id_browser_set_library. Exposed so the shared columnar
+   * library selector (#template_asset_library_column_selector) can drive it like the other pickers. */
+  prop = RNA_def_property(srna, "id_browser_asset_library_reference", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_dummy_DEFAULT_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_WindowManager_id_browser_asset_library_get",
+                              "rna_WindowManager_id_browser_asset_library_set",
+                              "rna_WindowManager_id_browser_asset_library_itemf");
+  RNA_def_property_ui_text(
+      prop, "Asset Library", "Asset library browsed by the ID browser popover");
+  RNA_def_property_update(prop, NC_ASSET | ND_ASSET_LIST, nullptr);
+
   RNA_api_wm(srna);
   RNA_api_asset_library_loading_status(srna);
 }
@@ -3424,6 +3546,7 @@ void RNA_def_wm(BlenderRNA *brna)
   rna_def_operator_options_runtime(brna);
   rna_def_operator_utils(brna);
   rna_def_operator_filelist_element(brna);
+  rna_def_operator_asset_image_import_element(brna);
   rna_def_macro_operator(brna);
   rna_def_operator_type_macro(brna);
   rna_def_event_ndof_motion(brna);

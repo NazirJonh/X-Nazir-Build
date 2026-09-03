@@ -50,6 +50,7 @@
 #include "BKE_context.hh"
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
+#include "BKE_main.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -1456,9 +1457,18 @@ void ED_image_undo_push_begin_selection(const char *name, Image *image)
 void ED_image_undo_push_end()
 {
   UndoStack *ustack = ED_undo_stack_get();
-  BKE_undosys_step_push(ustack, nullptr, nullptr);
-  BKE_undosys_stack_limit_steps_and_memory_defaults(ustack);
-  WM_file_tag_modified();
+  if (ustack->step_init == nullptr) {
+    CLOG_ERROR(&LOG,
+               "image undo push end without a matching push begin (stroke undo step was lost)");
+    return;
+  }
+
+  const eUndoPushReturn ret = BKE_undosys_step_push_with_type(
+      ustack, nullptr, nullptr, BKE_UNDOSYS_TYPE_IMAGE);
+  if (ret & UNDO_PUSH_RET_SUCCESS) {
+    BKE_undosys_stack_limit_steps_and_memory_defaults(ustack);
+    WM_file_tag_modified();
+  }
 }
 
 /**

@@ -129,6 +129,10 @@ static void wm_paintcursor_draw(bContext *C, ScrArea *area, ARegion *region)
     return;
   }
 
+  if (wm->runtime->paintcursors_suppress_count > 0) {
+    return;
+  }
+
   for (wmPaintCursor &pc : wm->runtime->paintcursors.items_mutable()) {
     if ((pc.space_type != SPACE_TYPE_ANY) && (area->spacetype != pc.space_type)) {
       continue;
@@ -1402,6 +1406,17 @@ void WM_window_pixels_read_sample_from_frontbuffer(const wmWindowManager *wm,
                                                    float r_col[3])
 {
   BLI_assert(WM_capabilities_flag() & WM_CAPABILITY_GPU_FRONT_BUFFER_READ);
+
+  /* Reading outside of the front-buffer makes the back-end copy a region that extends past the
+   * image, which is invalid usage and resets the GPU with some drivers. While this shouldn't
+   * happen, return in the case it does, matching #WM_window_pixels_read_sample_from_offscreen. */
+  const int2 win_size = WM_window_native_pixel_size(win);
+  zero_v3(r_col);
+  BLI_assert(uint(pos[0]) < uint(win_size[0]) && uint(pos[1]) < uint(win_size[1]));
+  if (!(uint(pos[0]) < uint(win_size[0]) && uint(pos[1]) < uint(win_size[1]))) {
+    return;
+  }
+
   bool setup_context = wm->runtime->windrawable != win;
 
   if (setup_context) {

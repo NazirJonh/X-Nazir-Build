@@ -17,7 +17,10 @@
 
 #include "DNA_ID_enums.h"
 #include "DNA_layer_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_windowmanager_types.h"
+
+#include "BLO_read_write.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -29,6 +32,7 @@
 #include "BLT_translation.hh"
 
 #include "BKE_context.hh"
+#include "BKE_asset.hh"
 #include "BKE_global.hh"
 #include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
@@ -53,6 +57,7 @@
 #  include "wm_xr.hh"
 #endif
 
+#include "BKE_asset_shelf.hh"
 #include "BKE_undo_system.hh"
 #include "ED_screen.hh"
 
@@ -137,6 +142,12 @@ static void window_manager_blend_write(BlendWriter *writer, ID *id, const void *
     /* Data is written, clear deprecated data again. */
     win.screen = nullptr;
   }
+
+  /* Per-`.blend` asset shelf popup size overrides. The list head is part of the wm struct written
+   * above; the entries need their own #write_struct. */
+  for (AssetShelfPopupSize &popup_size : wm->asset_shelf_popup_sizes) {
+    writer->write_struct(&popup_size);
+  }
 }
 
 static void direct_link_wm_xr_data(BlendDataReader *reader, wmXrData *xr_data)
@@ -150,6 +161,7 @@ static void window_manager_blend_read_data(BlendDataReader *reader, ID *id)
 
   id_us_ensure_real(&wm->id);
   BLO_read_struct_list(reader, wmWindow, &wm->windows);
+  BLO_read_struct_list(reader, AssetShelfPopupSize, &wm->asset_shelf_popup_sizes);
 
   for (wmWindow &win : wm->windows) {
     BLO_read_struct(reader, wmWindow, &win.parent);
@@ -587,6 +599,9 @@ void wm_close_and_free(bContext *C, wmWindowManager *wm)
 #endif
 
   wm_reports_free(wm);
+
+  /* Per-`.blend` asset shelf popup sizes are plain (no nested allocations). */
+  BLI_freelistN(&wm->asset_shelf_popup_sizes);
 
   if (C && CTX_wm_manager(C) == wm) {
     CTX_wm_manager_set(C, nullptr);

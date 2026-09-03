@@ -10,6 +10,7 @@
  * For single linked lists see `BLI_linklist.h`.
  */
 
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
@@ -890,6 +891,25 @@ void BLI_listbase_rotate_last(ListBase *lb, void *vlink)
 
   (static_cast<Link *>(lb->first))->prev = nullptr;
   (static_cast<Link *>(lb->last))->next = nullptr;
+}
+
+bool BLI_listbase_head_is_plausible(const ListBase *lb)
+{
+  if (lb->first == nullptr) {
+    return lb->last == nullptr;
+  }
+  if (lb->last == nullptr) {
+    return false;
+  }
+  constexpr uintptr_t min_addr = 4096;
+  constexpr uintptr_t invalid_addr = uintptr_t(-1);
+  if (uintptr_t(lb->first) < min_addr || uintptr_t(lb->first) == invalid_addr) {
+    return false;
+  }
+  if (uintptr_t(lb->last) < min_addr || uintptr_t(lb->last) == invalid_addr) {
+    return false;
+  }
+  return true;
 }
 
 bool BLI_listbase_validate(ListBase *lb)

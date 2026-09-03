@@ -136,6 +136,10 @@ void file_sfile_to_operator(bContext *C, Main *bmain, wmOperator *op, SpaceFile 
 
 void file_operator_to_sfile(Main *bmain, SpaceFile *sfile, wmOperator *op);
 
+struct PointerRNA;
+struct wmDrag;
+void file_asset_image_import_fill_images_from_drag(PointerRNA *op_ptr, const wmDrag *drag);
+
 /* `space_file.cc` */
 
 extern "C" const char *file_context_dir[]; /* doc access */
@@ -216,6 +220,14 @@ struct SpaceFile_Runtime {
   ReportList is_blendfile_readable_reports;
 
   BannersState banners_state;
+
+  /**
+   * One-time gate for re-running #ED_fileselect_asset_library_reference_set after an async asset
+   * library load finishes. Not DNA — session-only. Reset on #ND_ASSET_LIST_READING; set once the
+   * catalog tree build path has revalidated for #catalog_validated_library_ref.
+   */
+  bool catalog_validated;
+  AssetLibraryReference catalog_validated_library_ref;
 };
 
 /**
@@ -244,6 +256,7 @@ ListBaseT<FileFolderHistory> folder_history_list_duplicate(ListBaseT<FileFolderH
 void file_tool_props_region_panels_register(ARegionType *art);
 void file_execute_region_panels_register(ARegionType *art);
 void file_tools_region_panels_register(ARegionType *art);
+void file_header_panels_register(ARegionType *art);
 
 /* `file_utils.cc` */
 

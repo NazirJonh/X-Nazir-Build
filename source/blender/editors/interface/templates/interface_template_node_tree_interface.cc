@@ -65,7 +65,7 @@ class NodeSocketDropTarget : public TreeViewItemDropTarget {
  public:
   explicit NodeSocketDropTarget(NodeSocketViewItem &item, bNodeTreeInterfaceSocket &socket);
 
-  bool can_drop(const wmDrag &drag, const char **r_disabled_hint) const override;
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char **r_disabled_hint) const override;
   std::string drop_tooltip(const DragInfo &drag_info) const override;
   bool on_drop(bContext * /*C*/, const DragInfo &drag_info) const override;
 };
@@ -77,7 +77,7 @@ class NodePanelDropTarget : public TreeViewItemDropTarget {
  public:
   explicit NodePanelDropTarget(NodePanelViewItem &item, bNodeTreeInterfacePanel &panel);
 
-  bool can_drop(const wmDrag &drag, const char **r_disabled_hint) const override;
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char **r_disabled_hint) const override;
   std::string drop_tooltip(const DragInfo &drag_info) const override;
   bool on_drop(bContext *C, const DragInfo &drag_info) const override;
 };
@@ -478,7 +478,9 @@ NodeSocketDropTarget::NodeSocketDropTarget(NodeSocketViewItem &item,
 {
 }
 
-bool NodeSocketDropTarget::can_drop(const wmDrag &drag, const char ** /*r_disabled_hint*/) const
+bool NodeSocketDropTarget::can_drop(bContext & /*C*/,
+                                    const wmDrag &drag,
+                                    const char ** /*r_disabled_hint*/) const
 {
   if (drag.type != WM_DRAG_NODE_TREE_INTERFACE) {
     return false;
@@ -566,7 +568,9 @@ NodePanelDropTarget::NodePanelDropTarget(NodePanelViewItem &item, bNodeTreeInter
 {
 }
 
-bool NodePanelDropTarget::can_drop(const wmDrag &drag, const char ** /*r_disabled_hint*/) const
+bool NodePanelDropTarget::can_drop(bContext & /*C*/,
+                                   const wmDrag &drag,
+                                   const char ** /*r_disabled_hint*/) const
 {
   if (drag.type != WM_DRAG_NODE_TREE_INTERFACE) {
     return false;

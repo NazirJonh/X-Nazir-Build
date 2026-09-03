@@ -151,6 +151,27 @@ void ED_undo_push(bContext *C, const char *str)
   }
 }
 
+void ED_undo_memfile_push(bContext *C, const char *name)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (!wm || !wm->runtime->undo_stack) {
+    return;
+  }
+  UndoStack *ustack = wm->runtime->undo_stack;
+
+  /* Temporarily clear step_init to avoid interfering with any in-progress stroke init step,
+   * mirroring the pattern used in WITH_GLOBAL_UNDO_ENSURE_UPDATED. */
+  void *step_init_saved = ustack->step_init;
+  ustack->step_init = nullptr;
+  const eUndoPushReturn ret = BKE_undosys_step_push_with_type(
+      ustack, C, name, BKE_UNDOSYS_TYPE_MEMFILE);
+  ustack->step_init = static_cast<UndoStep *>(step_init_saved);
+
+  if (ret & UNDO_PUSH_RET_SUCCESS) {
+    WM_file_tag_modified();
+  }
+}
+
 /**
  * Common pre management of undo/redo (killing all running jobs, calling pre handlers, etc.).
  */

@@ -9,6 +9,8 @@
 #include "BLI_assert.h"
 #include "BLI_listbase.h"
 
+#include "BKE_preferences.h"
+
 #include "DNA_userdef_types.h"
 
 #include "common.hh"
@@ -40,8 +42,7 @@ std::optional<AssetLibraryReference> PreferencesOnDiskAssetLibrary::library_refe
   }
 
   AssetLibraryReference library_ref{};
-  library_ref.type = ASSET_LIBRARY_CUSTOM;
-  library_ref.custom_library_index = index;
+  BKE_preferences_asset_library_reference_set(&U, &library_ref, library_definition);
   return library_ref;
 }
 

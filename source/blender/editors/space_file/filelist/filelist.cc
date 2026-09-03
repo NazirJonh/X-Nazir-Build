@@ -33,6 +33,7 @@
 #include "BLI_string.h"
 #include "BLI_task.h"
 #include "BLI_threads.h"
+#include "BLI_vector.hh"
 
 #include "BKE_asset.hh"
 #include "BKE_blendfile.hh"
@@ -43,6 +44,7 @@
 #include "BKE_preferences.h"
 #include "BKE_preview_image.hh"
 
+#include "DNA_ID.h"
 #include "DNA_asset_types.h"
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
@@ -179,6 +181,29 @@ void filelist_set_asset_catalog_filter_options(
   }
 }
 
+void filelist_set_asset_name_match_filter(FileList *filelist,
+                                          const bool enabled,
+                                          const Span<StringRef> map_type_ids)
+{
+  FileListFilter &filter = filelist->filter_data;
+  Vector<std::string> next_ids;
+  next_ids.reserve(map_type_ids.size());
+  for (const StringRef id : map_type_ids) {
+    if (!id.is_empty()) {
+      next_ids.append(std::string(id));
+    }
+  }
+  const bool changed = (filter.name_match_enabled != enabled) ||
+                       (filter.name_match_map_type_ids != next_ids);
+  if (!changed) {
+    return;
+  }
+  filter.name_match_enabled = enabled;
+  filter.name_match_map_type_ids = std::move(next_ids);
+  filter.name_match_resolved.reset();
+  filelist_tag_needs_filtering(filelist);
+}
+
 /**
  * Checks two libraries for equality.
  * \return True if the libraries match.
@@ -191,10 +216,9 @@ static bool filelist_compare_asset_libraries(const AssetLibraryReference *librar
   }
   if (library_a->type == ASSET_LIBRARY_CUSTOM) {
     /* Don't only check the index, also check that it's valid. */
-    bUserAssetLibrary *library_ptr_a = BKE_preferences_asset_library_find_index(
-        &U, library_a->custom_library_index);
-    return (library_ptr_a != nullptr) &&
-           (library_a->custom_library_index == library_b->custom_library_index);
+    bUserAssetLibrary *library_ptr_a = BKE_preferences_asset_library_find_from_ref(&U, library_a);
+    bUserAssetLibrary *library_ptr_b = BKE_preferences_asset_library_find_from_ref(&U, library_b);
+    return (library_ptr_a != nullptr) && (library_ptr_a == library_ptr_b);
   }
 
   return true;
@@ -738,6 +762,29 @@ void filelist_online_asset_preview_request(const bContext *C, FileDirEntry *entr
   }
 }
 
+void filelist_on_disk_image_asset_preview_request(const bContext *C, FileDirEntry *entry)
+{
+  if (!entry->asset || entry->preview_icon_id) {
+    return;
+  }
+  if (entry->asset->is_online_only() || entry->asset->local_id()) {
+    return;
+  }
+  if (entry->asset->get_id_type() != ID_IM) {
+    return;
+  }
+  if (!filelist_file_preview_load_poll(entry)) {
+    return;
+  }
+
+  entry->asset->ensure_previewable(*C, CTX_wm_reports(C));
+  const PreviewImage *preview = entry->asset->get_preview();
+  if (!preview || !preview->runtime->icon_id) {
+    return;
+  }
+  entry->preview_icon_id = preview->runtime->icon_id;
+}
+
 /**
  * \return True if a new preview request was pushed, false otherwise (e.g. because the preview is
  * already loaded, invalid or not supported).
@@ -923,6 +970,20 @@ void filelist_settype(FileList *filelist, short type)
   filelist->flags |= FL_FORCE_RESET;
 }
 
+static void filelist_filter_data_clear(FileListFilter &filter)
+{
+  file_delete_asset_catalog_filter_settings(&filter.asset_catalog_filter);
+  filter.name_match_map_type_ids.clear();
+  filter.name_match_resolved.reset();
+  filter.name_match_enabled = false;
+  filter.filter = 0;
+  filter.filter_id = 0;
+  filter.filter_glob[0] = '\0';
+  filter.filter_search[0] = '\0';
+  filter.flags = 0;
+  filter.asset_catalog_filter = nullptr;
+}
+
 static void filelist_clear_asset_library(FileList *filelist)
 {
   /* The AssetLibraryService owns the AssetLibrary pointer, so no need for us to free it. */
@@ -956,6 +1017,8 @@ void filelist_clear_ex(FileList *filelist,
   if (do_asset_library) {
     filelist_clear_asset_library(filelist);
   }
+
+  filelist->flags &= ~(FL_IS_READY | FL_IS_PENDING);
 }
 
 static void filelist_clear_main_files(FileList *filelist,
@@ -1031,7 +1094,7 @@ void filelist_free(FileList *filelist)
 
   MEM_SAFE_DELETE(filelist->asset_library_ref);
 
-  memset(&filelist->filter_data, 0, sizeof(filelist->filter_data));
+  filelist_filter_data_clear(filelist->filter_data);
 
   filelist->flags &= ~(FL_NEED_SORTING | FL_NEED_FILTERING);
 

@@ -43,6 +43,7 @@
 #include "BKE_global.hh"
 #include "BKE_icons.hh"
 #include "BKE_preferences.h"
+#include "BKE_preview_image.hh"
 #include "BKE_report.hh"
 
 #include "BLO_readfile.hh"
@@ -58,10 +59,12 @@
 #include "IMB_metadata.hh"
 #include "IMB_thumbs.hh"
 
+#include "DNA_asset_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
 
 #include "RNA_access.hh"
+#include "RNA_enum_types.hh"
 #include "RNA_prototypes.hh"
 
 #include "ED_asset.hh"
@@ -144,6 +147,26 @@ struct FileTooltipData {
   const SpaceFile *sfile;
   const FileDirEntry *file;
 };
+
+/* Below this tile size (px), an asset's list/grid tile is too small to read, so its tooltip adds a
+ * bigger preview image (#file_draw_asset_tooltip_custom_func). Between the "Tiny" (32) and "Small"
+ * (64) presets (#rna_space.cc's display_size_items). */
+static const int ASSET_TOOLTIP_PREVIEW_THUMBNAIL_SIZE_THRESHOLD = 100;
+
+static int file_tooltip_preview_tile_size_get(const FileSelectParams *params)
+{
+  if (params == nullptr) {
+    return ASSET_TOOLTIP_PREVIEW_THUMBNAIL_SIZE_THRESHOLD;
+  }
+  if (params->display == FILE_HORIZONTALDISPLAY) {
+    return params->list_thumbnail_size;
+  }
+  if (params->display == FILE_IMGDISPLAY) {
+    return params->thumbnail_size;
+  }
+  /* Vertical list: fixed small icons, always show a bigger preview in the tooltip. */
+  return 0;
+}
 
 static FileTooltipData *file_tooltip_data_create(const SpaceFile *sfile, const FileDirEntry *file)
 {
@@ -387,13 +410,60 @@ static void file_draw_tooltip_custom_func(bContext & /*C*/,
   }
 }
 
-static void file_draw_asset_tooltip_custom_func(bContext & /*C*/,
+static void file_draw_asset_tooltip_custom_func(bContext &C,
                                                 ui::TooltipData &tip,
                                                 ui::Button * /*but*/,
                                                 void *argN)
 {
-  const auto *asset = static_cast<asset_system::AssetRepresentation *>(argN);
-  ed::asset::asset_tooltip(*asset, tip);
+  const auto *tooltip_data = static_cast<FileTooltipData *>(argN);
+  const FileDirEntry *file = tooltip_data->file;
+  ed::asset::asset_tooltip(&C, *file->asset, tip);
+
+  /* Below the tile size where the list/grid thumbnail itself is too small to read, add a bigger
+   * preview to the tooltip. Prefer #AssetRepresentation::get_preview() (same source as the tile
+   * icon and #interface_template_id_browser.cc) so online/remote assets and list-view modes work;
+   * fall back to #filelist_file_get_preview_image() for plain files still using the filelist
+   * preview job in grid view. */
+  const FileSelectParams *params = ED_fileselect_get_active_params(tooltip_data->sfile);
+  if (file_tooltip_preview_tile_size_get(params) >= ASSET_TOOLTIP_PREVIEW_THUMBNAIL_SIZE_THRESHOLD) {
+    return;
+  }
+
+  asset_system::AssetRepresentation *asset = const_cast<asset_system::AssetRepresentation *>(
+      file->asset);
+  asset->ensure_previewable(C, CTX_wm_reports(&C));
+
+  ImBuf *thumb = nullptr;
+  bool free_imbuf = false;
+  if (PreviewImage *preview = asset->get_preview()) {
+    /* #ensure_previewable() only guarantees *some* size is loaded; request the tooltip size
+     * explicitly (see #get_brush_asset_preview_imbuf, interface_region_tooltip.cc). */
+    BKE_previewimg_ensure(preview, ICON_SIZE_PREVIEW);
+    if (BKE_previewimg_is_finished(preview, ICON_SIZE_PREVIEW)) {
+      thumb = BKE_previewimg_to_imbuf(preview, ICON_SIZE_PREVIEW);
+      free_imbuf = (thumb != nullptr);
+    }
+  }
+  if (thumb == nullptr) {
+    thumb = filelist_file_get_preview_image(file);
+  }
+  if (thumb == nullptr) {
+    return;
+  }
+
+  ui::TooltipImage image_data;
+  image_data.ibuf = thumb;
+  image_data.width = short(thumb->x);
+  image_data.height = short(thumb->y);
+  image_data.border = true;
+  image_data.background = ui::TooltipImageBackground::Checkerboard_Themed;
+  image_data.premultiplied = true;
+  ui::tooltip_text_field_add(tip, {}, {}, ui::TIP_STYLE_SPACER, ui::TIP_LC_NORMAL);
+  ui::tooltip_text_field_add(tip, {}, {}, ui::TIP_STYLE_SPACER, ui::TIP_LC_NORMAL);
+  ui::tooltip_image_field_add(tip, image_data);
+  if (free_imbuf) {
+    IMB_freeImBuf(thumb);
+  }
 }
 
 static void draw_tile_background(const rcti *draw_rect, int colorid, int shade)
@@ -427,7 +497,6 @@ static void file_but_enable_drag(ui::Button *but,
            (file->typeflag & FILE_TYPE_ASSET) != 0)
   {
     const int import_method = ED_fileselect_asset_import_method_get(sfile, file);
-    BLI_assert(import_method > -1);
     if (import_method > -1) {
       AssetImportSettings import_settings{};
       import_settings.method = eAssetImportMethod(import_method);
@@ -438,6 +507,10 @@ static void file_but_enable_drag(ui::Button *but,
                 FILE_ASSET_IMPORT_INSTANCE_COLLECTIONS_ON_APPEND)) != 0;
 
       button_drag_set_asset(but, file->asset, import_settings, icon, file->preview_icon_id);
+    }
+    else if (file->asset->get_id_type() == ID_IM && preview_image) {
+      /* On-disk image assets may have no blend-library import method; drag as image file. */
+      button_drag_set_image(but, path, icon, preview_image, scale);
     }
   }
   else if (preview_image) {
@@ -454,7 +527,10 @@ static void file_but_tooltip_func_set(const SpaceFile *sfile,
                                       ui::Button *but)
 {
   if (file->asset) {
-    button_func_tooltip_custom_set(but, file_draw_asset_tooltip_custom_func, file->asset, nullptr);
+    button_func_tooltip_custom_set(but,
+                                   file_draw_asset_tooltip_custom_func,
+                                   file_tooltip_data_create(sfile, file),
+                                   MEM_delete_void);
   }
   else {
     button_func_tooltip_custom_set(but,
@@ -462,6 +538,32 @@ static void file_but_tooltip_func_set(const SpaceFile *sfile,
                                    file_tooltip_data_create(sfile, file),
                                    MEM_delete_void);
   }
+}
+
+/**
+ * Invisible label over the name column so list views show the same tooltip (incl. preview) when
+ * hovering the text, not only the icon button added earlier in the block.
+ */
+static void file_add_name_tooltip_but(const SpaceFile *sfile,
+                                      ui::Block *block,
+                                      const FileDirEntry *file,
+                                      const rcti *text_rect)
+{
+  if (BLI_rcti_size_x(text_rect) < 1 || BLI_rcti_size_y(text_rect) < 1) {
+    return;
+  }
+  ui::Button *but = uiDefBut(block,
+                             ui::ButtonType::Label,
+                             "",
+                             text_rect->xmin,
+                             text_rect->ymin,
+                             BLI_rcti_size_x(text_rect),
+                             BLI_rcti_size_y(text_rect),
+                             nullptr,
+                             0,
+                             0,
+                             std::nullopt);
+  file_but_tooltip_func_set(sfile, file, but);
 }
 
 static ui::Button *file_add_icon_but(const SpaceFile *sfile,
@@ -545,7 +647,8 @@ static void file_draw_string(int sx,
                              float width,
                              int height,
                              ui::FontStyleAlign align,
-                             const uchar col[4])
+                             const uchar col[4],
+                             const FileLayout *layout)
 {
   uiFontStyle fs;
   rcti rect;
@@ -557,6 +660,13 @@ static void file_draw_string(int sx,
 
   const uiStyle *style = ui::style_get();
   fs = style->widget;
+
+  if (layout && layout->is_asset_browser) {
+    const float scale_factor = ui::preview_tile_text_scale(round_fl_to_int(layout->prv_h));
+    if (scale_factor < 1.0f) {
+      fs.points = std::max(int(fs.points * scale_factor), ui::PREVIEW_TILE_TEXT_MIN_POINTS);
+    }
+  }
 
   STRNCPY(filename, string);
   ui::text_clip_middle_ex(&fs, filename, width, UI_ICON_SIZE, sizeof(filename), '\0');
@@ -580,7 +690,8 @@ static void file_draw_string(int sx,
 static void file_draw_string_mulitline_clipped(const rcti *rect,
                                                const char *string,
                                                ui::FontStyleAlign align,
-                                               const uchar col[4])
+                                               const uchar col[4],
+                                               const FileLayout *layout)
 {
   if (string[0] == '\0' || BLI_rcti_size_x(rect) < 1) {
     return;
@@ -588,6 +699,13 @@ static void file_draw_string_mulitline_clipped(const rcti *rect,
 
   const uiStyle *style = ui::style_get();
   uiFontStyle fs = style->widget;
+
+  if (layout && layout->is_asset_browser) {
+    const float scale_factor = ui::preview_tile_text_scale(round_fl_to_int(layout->prv_h));
+    if (scale_factor < 1.0f) {
+      fs.points = std::max(int(fs.points * scale_factor), ui::PREVIEW_TILE_TEXT_MIN_POINTS);
+    }
+  }
 
   fontstyle_draw_multiline_clipped(&fs, rect, string, col, align);
 }
@@ -1224,7 +1342,8 @@ static void draw_columnheader_columns(const FileSelectParams *params,
                      column->width - 2 * ATTRIBUTE_COLUMN_PADDING,
                      layout->attribute_column_header_h - layout->tile_border_y,
                      ui::UI_STYLE_TEXT_LEFT,
-                     text_col);
+                     text_col,
+                     nullptr);
 
     /* Separator line */
     if (column_type != COLUMN_NAME) {
@@ -1343,7 +1462,8 @@ static void draw_details_columns(const FileSelectParams *params,
                        column->width - 2 * ATTRIBUTE_COLUMN_PADDING,
                        layout->tile_h,
                        ui::FontStyleAlign(column->text_align),
-                       text_col);
+                       text_col,
+                       nullptr);
     }
 
     sx += column->width;
@@ -1514,6 +1634,15 @@ void file_draw_list(const bContext *C, ARegion *region)
           }
         }
       }
+      else if ((file->typeflag & FILE_TYPE_IMAGE) && file->asset && !filelist_loading &&
+               !file->preview_icon_id)
+      {
+        /* Fallback while the filelist image preview job is pending. */
+        filelist_on_disk_image_asset_preview_request(C, file);
+        if (file->preview_icon_id) {
+          ui::icon_ensure_deferred(C, file->preview_icon_id, true);
+        }
+      }
 
       const int file_type_icon = filelist_geticon_file_type(files, i, false);
       std::optional<IconBufferRef> preview_buf = file->preview_icon_id ?
@@ -1629,6 +1758,10 @@ void file_draw_list(const bContext *C, ARegion *region)
     const rcti text_rect = text_draw_rect_get(
         v2d, eFileDisplayType(params->display), layout, i, icon_ofs);
 
+    if (params->display != FILE_IMGDISPLAY && (file_selflag & FILE_SEL_EDITING) == 0) {
+      file_add_name_tooltip_but(sfile, block, file, &text_rect);
+    }
+
     if (file_selflag & FILE_SEL_EDITING) {
       const int but_height =
           (params->display == FILE_IMGDISPLAY) ?
@@ -1677,10 +1810,11 @@ void file_draw_list(const bContext *C, ARegion *region)
                          BLI_rcti_size_x(&text_rect),
                          BLI_rcti_size_y(&text_rect),
                          align,
-                         text_col);
+                         text_col,
+                         layout);
       }
       else {
-        file_draw_string_mulitline_clipped(&text_rect, file->name, align, text_col);
+        file_draw_string_mulitline_clipped(&text_rect, file->name, align, text_col, layout);
       }
     }
 
@@ -1718,11 +1852,81 @@ void file_draw_list(const bContext *C, ARegion *region)
       return IFACE_("No items");
     }();
 
-    ui::fontstyle_draw_simple(&style->widget,
-                              tile_draw_rect.xmin + UI_UNIT_X,
-                              tile_draw_rect.ymax - UI_UNIT_Y,
-                              message,
-                              text_col_mod);
+    const int line_x = tile_draw_rect.xmin + UI_UNIT_X;
+    const int line1_y = tile_draw_rect.ymax - UI_UNIT_Y;
+
+    ui::fontstyle_draw_simple(&style->widget, line_x, line1_y, message, text_col_mod);
+
+    /* For Asset Browser with no search filter, if filtering by ID types or Name Match map types
+     * is active, show the active filter types and their icons on the next line. */
+    if (filelist_is_ready(files) && !is_filtered && layout->is_asset_browser) {
+      struct FilterTypeItem {
+        int icon;
+        std::string name;
+      };
+      Vector<FilterTypeItem> active_filters;
+
+      const uint64_t all_filter_flags = (FILTER_ID_BR | FILTER_ID_MA | FILTER_ID_GR |
+                                         FILTER_ID_OB | FILTER_ID_AC | FILTER_ID_WO |
+                                         FILTER_ID_NT | FILTER_ID_SCE | FILTER_ID_IM);
+      const bool has_id_filter = params->filter_id != 0 &&
+                                 (params->filter_id & all_filter_flags) != all_filter_flags;
+
+      if (has_id_filter) {
+        for (uint idx = 0; rna_enum_id_type_filter_items[idx].identifier; idx++) {
+          const IDFilterEnumPropertyItem *item = &rna_enum_id_type_filter_items[idx];
+          if ((params->filter_id & item->flag) != 0) {
+            active_filters.append({item->icon, IFACE_(item->name)});
+          }
+        }
+      }
+
+      FileAssetSelectParams *asset_params = ED_fileselect_get_asset_params(sfile);
+      if (asset_params && (asset_params->asset_flags & FILE_ASSET_FILTER_NAME_MATCH_ENABLED) &&
+          BLI_listbase_head_is_plausible(&asset_params->filter_name_match_map_types))
+      {
+        for (const AssetNameMatchIdLink *link = static_cast<const AssetNameMatchIdLink *>(
+                 asset_params->filter_name_match_map_types.first);
+             link;
+             link = link->next)
+        {
+          if (STREQ(link->id, "MASK")) {
+            active_filters.append({ICON_MOD_MASK, IFACE_("Mask")});
+          }
+          else if (STREQ(link->id, "ALPHA")) {
+            active_filters.append({ICON_IMAGE_ALPHA, IFACE_("Opacity / Alpha")});
+          }
+        }
+      }
+
+      if (!active_filters.is_empty()) {
+        const int line_height = sfile->layout ? sfile->layout->text_line_height : UI_UNIT_Y;
+        const int line2_y = line1_y - int(line_height * 1.3f);
+        const char *filter_prefix = IFACE_("Filtered by: ");
+        int curr_x = line_x;
+
+        ui::fontstyle_draw_simple(
+            &style->widget, curr_x, line2_y, filter_prefix, text_col_mod);
+        curr_x += ui::fontstyle_string_width(&style->widget, filter_prefix);
+
+        for (int f_idx = 0; f_idx < active_filters.size(); f_idx++) {
+          const FilterTypeItem &filter_item = active_filters[f_idx];
+
+          file_add_overlay_icon_but(block, curr_x, line2_y - UI_UNIT_Y / 4, filter_item.icon);
+          curr_x += ICON_DEFAULT_WIDTH_SCALE + int(0.25f * UI_UNIT_X);
+
+          ui::fontstyle_draw_simple(
+              &style->widget, curr_x, line2_y, filter_item.name.c_str(), text_col_mod);
+          curr_x += ui::fontstyle_string_width(&style->widget, filter_item.name.c_str());
+
+          if (f_idx < active_filters.size() - 1) {
+            const char *sep = ", ";
+            ui::fontstyle_draw_simple(&style->widget, curr_x, line2_y, sep, text_col_mod);
+            curr_x += ui::fontstyle_string_width(&style->widget, sep);
+          }
+        }
+      }
+    }
   }
 
   BLF_batch_draw_end();
@@ -1795,7 +1999,7 @@ static void file_draw_invalid_asset_library_hint(const bContext *C,
 
     sy -= line_height;
     file_draw_string(
-        sx, sy, library_ui_path, width, line_height, ui::UI_STYLE_TEXT_LEFT, text_col);
+        sx, sy, library_ui_path, width, line_height, ui::UI_STYLE_TEXT_LEFT, text_col, nullptr);
   }
 
   /* Separate a bit further. */
@@ -1829,6 +2033,38 @@ static void file_draw_invalid_asset_library_hint(const bContext *C,
     block_end(C, block);
     block_draw(C, block);
   }
+}
+
+static void file_draw_missing_asset_library_hint(const SpaceFile *sfile,
+                                                 ARegion *region,
+                                                 const FileAssetSelectParams *asset_params)
+{
+  uchar text_col[4];
+  ui::theme::get_color_4ubv(TH_TEXT, text_col);
+
+  const View2D *v2d = &region->v2d;
+  const int pad = sfile->layout->tile_border_x;
+  const int width = BLI_rctf_size_x(&v2d->tot) - (2 * pad);
+  const int line_height = sfile->layout->text_line_height;
+  int sx = v2d->tot.xmin + pad;
+  /* For some reason no padding needed. */
+  int sy = v2d->tot.ymax;
+
+  const std::string message = fmt::format(
+      fmt::runtime(RPT_("Asset library \"{}\" was not found in the Preferences")),
+      asset_params->asset_library_ref.custom_library_name);
+  file_draw_string_multiline(
+      sx, sy, message.c_str(), width, line_height, text_col, nullptr, &sy);
+
+  /* Separate a bit further. */
+  sy -= line_height * 2.2f;
+
+  ui::icon_draw(sx, sy - UI_UNIT_Y, ICON_INFO);
+  const char *suggestion = RPT_(
+      "It was renamed or removed in the Preferences, or this file was saved on another system.\n"
+      "Pick a library from the header, or restore this one in the Preferences");
+  file_draw_string_multiline(
+      sx + UI_UNIT_X, sy, suggestion, width - UI_UNIT_X, line_height, text_col, nullptr, &sy);
 }
 
 static void file_draw_asset_library_internet_access_required_hint(const bContext *C,
@@ -2045,7 +2281,7 @@ static void file_draw_invalid_library_hint(const bContext * /*C*/,
     file_draw_string_multiline(sx, sy, message, width, line_height, text_col, nullptr, &sy);
 
     sy -= line_height;
-    file_draw_string(sx, sy, blendfile_path, width, line_height, ui::UI_STYLE_TEXT_LEFT, text_col);
+    file_draw_string(sx, sy, blendfile_path, width, line_height, ui::UI_STYLE_TEXT_LEFT, text_col, nullptr);
   }
 
   /* Separate a bit further. */
@@ -2082,8 +2318,8 @@ static const bUserAssetLibrary *assetlib_as_remote_library(
     return nullptr;
   }
 
-  const bUserAssetLibrary *library = BKE_preferences_asset_library_find_index(
-      &U, asset_library_ref.custom_library_index);
+  const bUserAssetLibrary *library = BKE_preferences_asset_library_find_from_ref(
+      &U, &asset_library_ref);
   if (!library) {
     return nullptr;
   }
@@ -2110,6 +2346,18 @@ bool file_draw_hint_if_invalid(const bContext *C, const SpaceFile *sfile, ARegio
 
   if (is_asset_browser) {
     FileAssetSelectParams *asset_params = ED_fileselect_get_asset_params(sfile);
+
+    if (!asset_params) {
+      return false;
+    }
+
+    if (asset_params->asset_library_ref.type == ASSET_LIBRARY_CUSTOM &&
+        BKE_preferences_asset_library_find_from_ref(&U, &asset_params->asset_library_ref) == nullptr)
+    {
+      setup_view();
+      file_draw_missing_asset_library_hint(sfile, region, asset_params);
+      return true;
+    }
 
     const bUserAssetLibrary *remote_library = assetlib_as_remote_library(
         asset_params->asset_library_ref);

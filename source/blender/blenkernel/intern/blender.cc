@@ -29,6 +29,7 @@
 #include "BKE_addon.h"
 #include "BKE_appdir.hh"
 #include "BKE_asset.hh"
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_blender.hh"           /* own include */
 #include "BKE_blender_user_menu.hh" /* own include */
 #include "BKE_blender_version.h"    /* own include */
@@ -37,6 +38,7 @@
 #include "BKE_global.hh"
 #include "BKE_idprop.hh"
 #include "BKE_main.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_node.hh"
 #include "BKE_screen.hh"
 #include "BKE_studiolight.h"
@@ -390,6 +392,16 @@ void BKE_blender_userdef_data_free(UserDef *userdef, bool clear_fonts)
     MEM_delete(&settings);
   }
   userdef->asset_shelves_settings.clear_no_delete();
+
+  for (bUserAssetBrowserSettings &settings : userdef->asset_browser_settings.items_mutable()) {
+    BKE_asset_catalog_state_list_free(settings.catalog_states);
+    MEM_delete(&settings);
+  }
+  userdef->asset_browser_settings.clear_no_delete();
+
+  BKE_asset_catalog_memory_list_free(userdef->catalog_memory);
+
+  BKE_name_matching_userdef_free(userdef);
 
   userdef->uistyles.free_no_destruct();
   userdef->uifonts.free_no_destruct();

@@ -23,6 +23,7 @@
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_idprop.hh"
+#include "BKE_preferences.h"
 #include "BKE_report.hh"
 
 #ifdef WITH_PYTHON
@@ -133,8 +134,7 @@ std::optional<AssetLibraryReference> PreferencesRemoteAssetLibrary::library_refe
 
   BLI_assert(library_definition->flag & ASSET_LIBRARY_USE_REMOTE_URL);
   AssetLibraryReference library_ref{};
-  library_ref.type = ASSET_LIBRARY_CUSTOM;
-  library_ref.custom_library_index = index;
+  BKE_preferences_asset_library_reference_set(&U, &library_ref, library_definition);
   return library_ref;
 }
 

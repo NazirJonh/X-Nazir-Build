@@ -86,8 +86,12 @@ HRESULT __stdcall GHOST_DropTargetWin32::DragEnter(IDataObject *p_data_object,
   *pdw_effect = DROPEFFECT_NONE;
 
   dragged_object_type_ = getGhostType(p_data_object);
+  /* Provide the dragged data already on enter (not only on drop), so the window manager can create
+   * the drag right away and draw a preview while the cursor hovers over the window. The event takes
+   * ownership of this allocation and frees it in #GHOST_EventDragnDrop's destructor. */
+  void *data = getGhostData(p_data_object);
   system_->pushDragDropEvent(
-      GHOST_kEventDraggingEntered, dragged_object_type_, window_, pt.x, pt.y, nullptr);
+      GHOST_kEventDraggingEntered, dragged_object_type_, window_, pt.x, pt.y, data);
   return S_OK;
 }
 

@@ -11,6 +11,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "BLI_span.hh"
+#include "BLI_string_ref.hh"
+
 #include "DNA_space_types.h"
 struct BlendHandle;
 namespace blender {
@@ -76,6 +79,9 @@ void filelist_set_asset_catalog_filter_options(
     FileList *filelist,
     eFileSel_Params_AssetCatalogVisibility catalog_visibility,
     const bUUID *catalog_id);
+void filelist_set_asset_name_match_filter(FileList *filelist,
+                                          bool enabled,
+                                          Span<StringRef> map_type_ids);
 bool filelist_needs_filtering(FileList *filelist);
 void filelist_tag_needs_filtering(FileList *filelist);
 void filelist_filter(FileList *filelist);
@@ -91,6 +97,8 @@ void filelist_file_get_full_path(const FileList *filelist,
                                  char r_filepath[/*FILE_MAX_LIBEXTRA*/ 1282]);
 bool filelist_file_is_preview_pending(const FileList *filelist, const FileDirEntry *file);
 void filelist_online_asset_preview_request(const bContext *C, FileDirEntry *entry);
+/** Load preview for on-disk image assets (#ID_IM) via the asset preview system. */
+void filelist_on_disk_image_asset_preview_request(const bContext *C, FileDirEntry *entry);
 ImBuf *filelist_file_get_preview_image(const FileDirEntry *file);
 ImBuf *filelist_geticon_special_file_image_ex(const FileDirEntry *file);
 /**

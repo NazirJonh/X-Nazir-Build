@@ -53,6 +53,10 @@ void PixelBitmapDrawer::draw(const float x,
                              const float scale_y,
                              const float color[4])
 {
+  if (img_w <= 0 || img_h <= 0 || rect == nullptr) {
+    return;
+  }
+
   const float draw_width = img_w * scale_x;
   const float draw_height = img_h * scale_y;
 

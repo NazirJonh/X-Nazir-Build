@@ -278,6 +278,9 @@ struct TexPaintSlot {
   int valid = 0;
   /** Copy of node interpolation setting. */
   int interp = 0;
+  /** Cached copy of #NodeTexImage.paint_slot_type. */
+  char slot_type = 0;
+  char _pad[7] = {};
 };
 
 /** Runtime-only resolution cache for #BKE_paint_principled_channel_image_get. Not saved to disk. */

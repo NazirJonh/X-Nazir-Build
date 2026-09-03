@@ -726,6 +726,10 @@ std::optional<std::string> WM_prop_pystring_assign(bContext *C,
                                                    PropertyRNA *prop,
                                                    int index)
 {
+  if (ptr == nullptr || prop == nullptr) {
+    return std::nullopt;
+  }
+
   std::optional<std::string> lhs = C ? wm_prop_pystring_from_context(C, ptr, prop, index) :
                                        std::nullopt;
 
@@ -737,6 +741,13 @@ std::optional<std::string> WM_prop_pystring_assign(bContext *C,
     else {
       return std::nullopt;
     }
+  }
+
+  /* A property may exist while its RNA path cannot be resolved (for example for a property
+   * belonging to a temporary or dynamically generated pointer). Never report an invalid Python
+   * assignment such as `bpy.data.window_managers["WinMan"]. = value`. */
+  if (lhs->empty() || lhs->back() == '.') {
+    return std::nullopt;
   }
 
   std::string rhs = RNA_property_as_string(C, ptr, prop, index, INT_MAX);
@@ -2512,6 +2523,19 @@ bool WM_paint_cursor_end(wmPaintCursor *handle)
     }
   }
   return false;
+}
+
+void WM_paint_cursor_suppress_push()
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
+  wm->runtime->paintcursors_suppress_count++;
+}
+
+void WM_paint_cursor_suppress_pop()
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
+  BLI_assert(wm->runtime->paintcursors_suppress_count > 0);
+  wm->runtime->paintcursors_suppress_count--;
 }
 
 void WM_paint_cursor_remove_by_type(wmWindowManager *wm, void *draw_fn, void (*free)(void *))

@@ -8,6 +8,8 @@
  * Catalog tree-view to enable/disable catalogs in the asset shelf settings.
  */
 
+#include <optional>
+
 #include "AS_asset_catalog.hh"
 #include "AS_asset_catalog_tree.hh"
 
@@ -34,6 +36,7 @@
 #include "UI_tree_view.hh"
 
 #include "WM_api.hh"
+#include "WM_types.hh"
 
 #include "asset_shelf.hh"
 
@@ -92,10 +95,17 @@ class AssetCatalogSelectorTree : public ui::AbstractTreeView {
     return view_item;
   }
 
+  /* Redraw the catalog tree when catalogs (and thus their collapsed state) change. */
+  bool listen(const wmNotifier &notifier) const override
+  {
+    return notifier.category == NC_ASSET && notifier.data == ND_ASSET_CATALOGS;
+  }
+
   void update_shelf_settings_from_enabled_catalogs();
 
   class Item : public ui::BasicTreeViewItem {
     const asset_system::AssetCatalogTreeItem &catalog_item_;
+    AssetShelf &shelf_;
     /* Is the catalog path enabled in this redraw? Set on construction, updated by the UI (which
      * gets a pointer to it). The UI needs it as char. */
     char catalog_path_enabled_ = false;
@@ -104,10 +114,24 @@ class AssetCatalogSelectorTree : public ui::AbstractTreeView {
     Item(const asset_system::AssetCatalogTreeItem &catalog_item, AssetShelf &shelf)
         : ui::BasicTreeViewItem(catalog_item.get_name()),
           catalog_item_(catalog_item),
+          shelf_(shelf),
           catalog_path_enabled_(
               settings_is_catalog_path_enabled(shelf, catalog_item.catalog_path()))
     {
       disable_activatable();
+    }
+
+    std::optional<bool> should_be_collapsed() const override
+    {
+      return settings_get_catalog_path_collapsed(shelf_.settings, catalog_item_.catalog_path());
+    }
+
+    bool set_collapsed(bool collapsed) override
+    {
+      const bool result = BasicTreeViewItem::set_collapsed(collapsed);
+      settings_set_catalog_path_collapsed(
+          shelf_.settings, catalog_item_.catalog_path(), collapsed);
+      return result;
     }
 
     bool is_catalog_path_enabled() const
@@ -190,7 +214,11 @@ void library_selector_draw(const bContext *C, ui::Layout &layout, AssetShelf &sh
       &CTX_wm_screen(C)->id, RNA_AssetShelf, &shelf);
 
   ui::Layout &row = layout.row(true);
-  row.prop(&shelf_ptr, "asset_library_reference", UI_ITEM_NONE, "", ICON_NONE);
+  /* Offer the pin toggles only on the popup shelf: it is the only host that draws the pinned
+   * library tab row (see #pinned_tabs_draw). This same function also serves the sidebar's catalog
+   * selector panel, where a pin would set state with nothing on screen to show for it. */
+  ui::template_asset_library_column_selector(
+      row, C, &shelf_ptr, "asset_library_reference", ICON_NONE, /*show_pins=*/shelf.is_popup != 0);
   if (shelf.settings.asset_library_reference.type != ASSET_LIBRARY_LOCAL) {
     PointerRNA ptr = row.op("ASSET_OT_library_refresh", "", ICON_FILE_REFRESH);
     RNA_boolean_set(&ptr, "use_shift_for_remote_listing", true);

@@ -97,6 +97,19 @@ static void filelist_readjob_all_asset_library(FileListReadJob *job_params,
               true, job_params, stop, do_update, &progress_this);
         }
 
+        /* Directory loading may temporarily change the active library or relative base. Restore
+         * the nested library context before reading its image index. */
+        job_params->load_asset_library = &nested_library;
+        STRNCPY(filelist->filelist.root, root_path.c_str());
+
+        /* Image libraries store assets in #blender_image_index.json, not as .blend datablocks.
+         * Single-library fetches already call this (see #filelist_readjob_asset_library); the All
+         * library must do the same for each nested root or image assets never appear in
+         * "All Libraries" / Recent / Favorites (which iterate All). No-op when the root has no
+         * image index. #load_asset_library is the nested library here, not All, so the early
+         * return inside #filelist_readjob_image_files_add_items for All does not apply. */
+        filelist_readjob_image_files_add_items(job_params, stop, do_update, &progress_this);
+
         libraries_done_count++;
         *progress = float(libraries_done_count) / library_count;
       },

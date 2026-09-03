@@ -107,4 +107,9 @@ void RENDER_OT_view_cancel(wmOperatorType *ot);
 
 void RENDER_OT_opengl(wmOperatorType *ot);
 
+/* `render_material_bake_ops.cc` */
+
+void IMAGE_OT_bake_from_material(wmOperatorType *ot);
+void IMAGE_OT_rebake_stale_material_sources(wmOperatorType *ot);
+
 }  // namespace blender

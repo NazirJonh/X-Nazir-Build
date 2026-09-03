@@ -844,6 +844,31 @@ void BKE_image_update_gputexture_delayed(
 void BKE_image_paint_layer_id_ensure(Image *ima);
 
 /**
+ * A hidden, serialized link from a baked map back to the material it was baked from.
+ *
+ * Stored in the image's system IDProperties (keys `pbr_bake_*`), not DNA: it survives save / load
+ * with no versioning, the material pointer is remapped and nulled by the IDProperty machinery, and
+ * nothing in the file format changes.
+ */
+struct ImageMaterialSource {
+  /** The source material. Null is not a valid stored state; a cleared link stores no keys. */
+  Material *material = nullptr;
+  /** #eMaterialPaintChannel value this map holds. */
+  int channel = -1;
+  /** Node-tree state hash at the last successful bake, compared against the live hash. */
+  uint64_t node_tree_hash = 0;
+  /** Square side the map was baked at. */
+  int bake_size = 0;
+};
+
+/** Read the link. Returns false and leaves \a r_source untouched when the image has no link. */
+bool BKE_image_material_source_get(const Image &image, ImageMaterialSource &r_source);
+/** Write / overwrite the link. \a source.material must be non-null. */
+void BKE_image_material_source_set(Image &image, const ImageMaterialSource &source);
+/** Remove the link. No-op when absent. */
+void BKE_image_material_source_clear(Image &image);
+
+/**
  * Runtime index functions for fast image filtering.
  */
 

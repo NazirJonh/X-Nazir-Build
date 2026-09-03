@@ -497,6 +497,151 @@ class TestChannelSourceLifecycle(unittest.TestCase):
             self.assertIsNotNone(channels['ROUGHNESS'].source_image)
 
 
+class TestMaterialBakeAPI(unittest.TestCase):
+    """Material.bake_paint_channels and the two bake operators.
+
+    Every case bakes blocking at a tiny size: the point is the data-block plumbing -- the link,
+    the layer stamping, the colorspace, staleness -- not render quality.
+    """
+
+    def _new_material(self, name):
+        mat = bpy.data.materials.new(name)
+        mat.use_nodes = True
+        return mat
+
+    def _maps_of_layer(self, layer_id):
+        return {img.material_source_channel: img
+                for img in bpy.data.images
+                if img.paint_layer_id == layer_id}
+
+    def test_constant_only_material_blocking(self):
+        mat = self._new_material("const_mat")
+        bsdf = mat.node_tree.nodes["Principled BSDF"]
+        bsdf.inputs["Metallic"].default_value = 0.75
+        # Metallic unlinked -> ChannelResolution::Constant -> flat fill, no render.
+        layer_id = mat.bake_paint_channels(channels={'METALLIC'}, size=32, blocking=True)
+        self.assertTrue(layer_id)
+        maps = self._maps_of_layer(layer_id)
+        self.assertEqual(len(maps), 1)
+        img = maps['METALLIC']
+        self.assertEqual(img.material_source, mat)
+        self.assertAlmostEqual(img.pixels[0], 0.75, places=2)
+
+    def test_bake_paint_channels_returns_uuid_and_collects(self):
+        mat = self._new_material("fn_mat")
+        layer_id = mat.bake_paint_channels(
+            channels={'BASE_COLOR', 'ROUGHNESS'}, size=32, blocking=True)
+        self.assertRegex(layer_id, r"^[0-9a-f-]{36}$")
+        self.assertSetEqual(set(self._maps_of_layer(layer_id)), {'BASE_COLOR', 'ROUGHNESS'})
+
+    def test_operator_creates_maps_collectible_by_layer_id(self):
+        import uuid
+        mat = self._new_material("op_mat")
+        layer_id = str(uuid.uuid4())
+        res = bpy.ops.image.bake_from_material(
+            material=mat.name, channels={'BASE_COLOR', 'ROUGHNESS'},
+            size=32, layer_id=layer_id, blocking=True)
+        self.assertEqual(res, {'FINISHED'})
+        maps = self._maps_of_layer(layer_id)
+        self.assertIn('BASE_COLOR', maps)
+        self.assertIn('ROUGHNESS', maps)
+
+    def test_material_source_properties(self):
+        mat = self._new_material("props_mat")
+        layer_id = mat.bake_paint_channels(channels={'ROUGHNESS'}, size=32, blocking=True)
+        img = self._maps_of_layer(layer_id)['ROUGHNESS']
+        self.assertEqual(img.material_source, mat)
+        self.assertFalse(img.material_source_is_baking)
+        self.assertFalse(img.material_source_is_stale)
+        bpy.data.materials.remove(mat)
+        # The IDProperty machinery nulls the pointer when the material goes away.
+        self.assertIsNone(img.material_source)
+
+    def test_clear_material_source_detaches(self):
+        mat = self._new_material("clr_mat")
+        layer_id = mat.bake_paint_channels(channels={'ROUGHNESS'}, size=32, blocking=True)
+        img = self._maps_of_layer(layer_id)['ROUGHNESS']
+        img.clear_material_source()
+        self.assertIsNone(img.material_source)
+        self.assertEqual(img.material_source_channel, 'NONE')
+        img.rebake_material_source(blocking=True)  # No-op, must not raise.
+
+    def test_rebake_stale_updates_pixels(self):
+        mat = self._new_material("rebake_mat")
+        bsdf = mat.node_tree.nodes["Principled BSDF"]
+        bsdf.inputs["Metallic"].default_value = 0.2
+        layer_id = mat.bake_paint_channels(channels={'METALLIC'}, size=32, blocking=True)
+        img = self._maps_of_layer(layer_id)['METALLIC']
+        self.assertAlmostEqual(img.pixels[0], 0.2, places=2)
+
+        bsdf.inputs["Metallic"].default_value = 0.9
+        self.assertTrue(img.material_source_is_stale)
+        bpy.ops.image.rebake_stale_material_sources(layer_id=layer_id, blocking=True)
+        self.assertAlmostEqual(img.pixels[0], 0.9, places=2)
+        self.assertFalse(img.material_source_is_stale)
+
+    def test_colorspace_per_channel(self):
+        mat = self._new_material("cs_mat")
+        layer_id = mat.bake_paint_channels(
+            channels={'BASE_COLOR', 'ROUGHNESS'}, size=32, blocking=True)
+        maps = self._maps_of_layer(layer_id)
+        self.assertEqual(maps['BASE_COLOR'].colorspace_settings.name, 'sRGB')
+        self.assertEqual(maps['ROUGHNESS'].colorspace_settings.name, 'Non-Color')
+
+    def test_image_resolution_channel_is_rendered(self):
+        mat = self._new_material("ir_mat")
+        node_tree = mat.node_tree
+        tex = node_tree.nodes.new('ShaderNodeTexImage')
+        src = bpy.data.images.new("src_rough", 4, 4)
+        src.generated_color = (0.6, 0.6, 0.6, 1.0)
+        tex.image = src
+        node_tree.links.new(
+            tex.outputs['Color'], node_tree.nodes['Principled BSDF'].inputs['Roughness'])
+        layer_id = mat.bake_paint_channels(channels={'ROUGHNESS'}, size=32, blocking=True)
+        img = self._maps_of_layer(layer_id)['ROUGHNESS']
+        # A distinct data-block, not the sampled image aliased into the layer.
+        self.assertNotEqual(img, src)
+        self.assertAlmostEqual(img.pixels[0], 0.6, places=1)
+
+    def test_copy_strips_link(self):
+        mat = self._new_material("cp_mat")
+        layer_id = mat.bake_paint_channels(channels={'METALLIC'}, size=32, blocking=True)
+        img = self._maps_of_layer(layer_id)['METALLIC']
+        dup = img.copy()
+        self.assertIsNone(dup.material_source)
+        # The fork stays in the layer; only the live bake target is given up.
+        self.assertEqual(dup.paint_layer_id, img.paint_layer_id)
+
+    def test_blend_roundtrip_and_remap(self):
+        import os
+        import tempfile
+        mat = self._new_material("rt_mat")
+        mat.bake_paint_channels(channels={'METALLIC'}, size=32, blocking=True)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "pbr_bake_rt.blend")
+            bpy.ops.wm.save_as_mainfile(filepath=path)
+            bpy.ops.wm.open_mainfile(filepath=path)
+            img = next(i for i in bpy.data.images if i.material_source is not None)
+            self.assertEqual(img.material_source.name, "rt_mat")
+            img.material_source.name = "renamed_mat"
+            self.assertEqual(img.material_source.name, "renamed_mat")
+
+    def test_is_stale_flips_on_sampled_image_paint(self):
+        mat = self._new_material("si_mat")
+        node_tree = mat.node_tree
+        tex = node_tree.nodes.new('ShaderNodeTexImage')
+        src = bpy.data.images.new("si_src", 4, 4)
+        tex.image = src
+        node_tree.links.new(
+            tex.outputs['Color'], node_tree.nodes['Principled BSDF'].inputs['Base Color'])
+        layer_id = mat.bake_paint_channels(channels={'BASE_COLOR'}, size=32, blocking=True)
+        img = self._maps_of_layer(layer_id)['BASE_COLOR']
+        self.assertFalse(img.material_source_is_stale)
+        src.pixels[0] = 0.5
+        src.update()
+        self.assertTrue(img.material_source_is_stale)
+
+
 if __name__ == "__main__":
     test_brush_material_paint_lazy_init()
     test_metallic_paint_erase_restores_default()
@@ -512,6 +657,7 @@ if __name__ == "__main__":
     suite.addTests(loader.loadTestsFromTestCase(TestPaintLayerIdCreation))
     suite.addTests(loader.loadTestsFromTestCase(TestPaintLayerIdOldFile))
     suite.addTests(loader.loadTestsFromTestCase(TestChannelSourceLifecycle))
+    suite.addTests(loader.loadTestsFromTestCase(TestMaterialBakeAPI))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():
         sys.exit(1)

@@ -74,6 +74,7 @@ static const EnumPropertyItem image_source_items[] = {
 #  include "MOV_read.hh"
 
 #  include "ED_image.hh"
+#  include "ED_material_bake.hh"
 #  include "ED_node.hh"
 
 #  include "DNA_space_types.h"
@@ -862,6 +863,36 @@ static void rna_Image_paint_layer_id_set(PointerRNA *ptr, const char *value)
   ima->paint_layer_id = BLI_uuid_nil();
 }
 
+static PointerRNA rna_Image_material_source_get(PointerRNA *ptr)
+{
+  const Image *image = static_cast<const Image *>(ptr->data);
+  ImageMaterialSource source;
+  Material *material = BKE_image_material_source_get(*image, source) ? source.material : nullptr;
+  return RNA_id_pointer_create(material != nullptr ? &material->id : nullptr);
+}
+
+static int rna_Image_material_source_channel_get(PointerRNA *ptr)
+{
+  const Image *image = static_cast<const Image *>(ptr->data);
+  ImageMaterialSource source;
+  if (!BKE_image_material_source_get(*image, source)) {
+    return PAINT_LAYER_MAP_NONE;
+  }
+  return source.channel;
+}
+
+static bool rna_Image_material_source_is_stale_get(PointerRNA *ptr)
+{
+  return ed::material_bake::material_bake_source_is_stale(
+      *static_cast<const Image *>(ptr->data));
+}
+
+static bool rna_Image_material_source_is_baking_get(PointerRNA *ptr)
+{
+  return ed::material_bake::material_bake_source_is_baking(
+      *static_cast<const Image *>(ptr->data));
+}
+
 }  // namespace blender
 
 #else
@@ -1350,6 +1381,48 @@ static void rna_def_image(BlenderRNA *brna)
       "Paint Layer ID, and the only way the engine can find the maps of channels that have no "
       "Principled BSDF input to follow - Ambient Occlusion and the layer mask. Meaningful only "
       "while Paint Layer ID is set");
+
+  /* The read-back of the hidden bake link. Same values as above minus the roles that can never be
+   * baked, plus None for an image that carries no link at all. */
+  static const EnumPropertyItem material_source_channel_items[] = {
+      {PAINT_LAYER_MAP_NONE, "NONE", 0, "None", "The image was not baked from a material"},
+      {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+      {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+      {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+      {PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
+      {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
+      {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "material_source", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_Image_material_source_get", nullptr, nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Material Source", "Material this image was baked from, or None");
+
+  prop = RNA_def_property(srna, "material_source_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, material_source_channel_items);
+  RNA_def_property_enum_funcs(prop, "rna_Image_material_source_channel_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Material Source Channel", "Which channel this baked map holds");
+
+  prop = RNA_def_property(srna, "material_source_is_stale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Image_material_source_is_stale_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Material Source Stale",
+                           "The source material changed since this map was baked");
+
+  prop = RNA_def_property(srna, "material_source_is_baking", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Image_material_source_is_baking_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Material Source Baking", "A bake job for this map is running");
 
   /* generated image (image_generated_change_cb) */
   prop = RNA_def_property(srna, "generated_type", PROP_ENUM, PROP_NONE);

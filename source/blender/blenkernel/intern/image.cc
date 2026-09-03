@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
@@ -78,6 +79,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_global.hh"
 #include "BKE_icons.hh"
+#include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
 #include "BKE_image_format.hh"
@@ -195,6 +197,12 @@ static void image_copy_data(Main * /*bmain*/,
   else {
     image_dst->preview = nullptr;
   }
+
+  /* A duplicated baked map is a fork, not a second live bake target: the link would otherwise
+   * make two images answer for the same (material, channel) and a batch re-bake would overwrite
+   * both. #Image.paint_layer_id still copies verbatim; forking the layer stays an explicit
+   * reassignment. */
+  BKE_image_material_source_clear(*image_dst);
 }
 
 static void image_free_data(ID *id)
@@ -3332,6 +3340,69 @@ void BKE_image_paint_layer_id_ensure(Image *ima)
     ima->paint_layer_id = BLI_uuid_generate_random();
   }
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Baked Map to Source Material Link
+ * \{ */
+
+static const char *image_material_source_keys[] = {
+    "pbr_bake_material", "pbr_bake_channel", "pbr_bake_size", "pbr_bake_hash"};
+
+bool BKE_image_material_source_get(const Image &image, ImageMaterialSource &r_source)
+{
+  IDProperty *root = IDP_ID_system_properties_get(const_cast<ID *>(&image.id));
+  if (root == nullptr) {
+    return false;
+  }
+  IDProperty *material_prop = IDP_GetPropertyTypeFromGroup(root, "pbr_bake_material", IDP_ID);
+  if (material_prop == nullptr || IDP_ID_get(material_prop) == nullptr) {
+    return false;
+  }
+  r_source.material = reinterpret_cast<Material *>(IDP_ID_get(material_prop));
+  const IDProperty *channel_prop = IDP_GetPropertyTypeFromGroup(root, "pbr_bake_channel", IDP_INT);
+  const IDProperty *size_prop = IDP_GetPropertyTypeFromGroup(root, "pbr_bake_size", IDP_INT);
+  const IDProperty *hash_prop = IDP_GetPropertyTypeFromGroup(root, "pbr_bake_hash", IDP_STRING);
+  r_source.channel = channel_prop != nullptr ? IDP_int_get(channel_prop) : -1;
+  r_source.bake_size = size_prop != nullptr ? IDP_int_get(size_prop) : 0;
+  /* The hash is stored as hex text: an IDProperty has no 64-bit integer type, and a double would
+   * silently drop the low bits. */
+  r_source.node_tree_hash = hash_prop != nullptr ?
+                                std::strtoull(IDP_string_get(hash_prop), nullptr, 16) :
+                                0;
+  return true;
+}
+
+void BKE_image_material_source_set(Image &image, const ImageMaterialSource &source)
+{
+  BLI_assert(source.material != nullptr);
+  IDProperty *root = IDP_ID_system_properties_ensure(&image.id);
+
+  IDP_ReplaceInGroup(root,
+                     bke::idprop::create("pbr_bake_material", &source.material->id).release());
+  IDP_ReplaceInGroup(root, bke::idprop::create("pbr_bake_channel", source.channel).release());
+  IDP_ReplaceInGroup(root, bke::idprop::create("pbr_bake_size", source.bake_size).release());
+
+  char hash_hex[17];
+  const unsigned long long hash_value = source.node_tree_hash;
+  BLI_snprintf(hash_hex, sizeof(hash_hex), "%016llx", hash_value);
+  IDP_ReplaceInGroup(root,
+                     bke::idprop::create("pbr_bake_hash", StringRefNull(hash_hex)).release());
+}
+
+void BKE_image_material_source_clear(Image &image)
+{
+  IDProperty *root = IDP_ID_system_properties_get(&image.id);
+  if (root == nullptr) {
+    return;
+  }
+  for (const char *key : image_material_source_keys) {
+    if (IDProperty *prop = IDP_GetPropertyFromGroup(root, key)) {
+      IDP_FreeFromGroup(root, prop);
+    }
+  }
+}
+
+/** \} */
 
 void BKE_image_paint_slot_info_invalidate(Image *ima)
 {

@@ -89,6 +89,10 @@ void ED_operatortypes_render()
 
   /* `render_opengl.cc` */
   WM_operatortype_append(RENDER_OT_opengl);
+
+  /* `render_material_bake_ops.cc` */
+  WM_operatortype_append(IMAGE_OT_bake_from_material);
+  WM_operatortype_append(IMAGE_OT_rebake_stale_material_sources);
 }
 
 }  // namespace blender

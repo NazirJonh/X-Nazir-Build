@@ -799,6 +799,7 @@ if(WITH_GTESTS)
     intern/grease_pencil_test.cc
     intern/idprop_serialize_test.cc
     intern/idprop_test.cc
+    intern/image_material_source_test.cc
     intern/image_partial_update_test.cc
     intern/image_test.cc
     intern/key_test.cc

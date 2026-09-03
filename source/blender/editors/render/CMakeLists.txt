@@ -16,6 +16,7 @@ set(SRC
   paint_material_combined_gather.cc
   render_internal.cc
   render_material_bake.cc
+  render_material_bake_ops.cc
   render_opengl.cc
   render_ops.cc
   render_preview.cc

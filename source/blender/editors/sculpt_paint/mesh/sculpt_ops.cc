@@ -53,10 +53,13 @@
 
 #include "ED_image.hh"
 #include "ED_object.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
 #include "ED_select_utils.hh"
 
+#include "../paint_curve_patch_apply.hh"
+#include "../paint_curve_patch_session.hh"
 #include "../paint_intern.hh"
 #include "mesh_brush_common.hh"
 #include "paint_mask.hh"
@@ -608,12 +611,24 @@ void object_sculpt_mode_enter(bContext *C, Depsgraph &depsgraph, ReportList *rep
   BKE_view_layer_synced_ensure(bmain, &scene, &view_layer);
   Object &ob = *BKE_view_layer_active_object_get(&view_layer);
   object_sculpt_mode_enter(bmain, depsgraph, scene, ob, false, reports);
+  ED_paintcurve_refresh_on_sculpt_mode_enter(C);
 }
 
 void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Object &ob)
 {
   const eObjectMode mode_flag = OB_MODE_SCULPT;
   Mesh *mesh = BKE_mesh_from_object(&ob);
+
+  /* Last resort for a live Curve Patch: `SCULPT_OT_curve_patch_edit` owns it but is never
+   * consulted when the mode exits, so without this the cache would outlive the session that owns
+   * it. A no-op on the paths that already committed through #curve_patch_commit_on_session_end
+   * (Tab and the mode dropdown, see `sculpt_mode_toggle_exec()`); this only ever fires for the
+   * teardown paths that have no `bContext` to commit through -- `ed_object_mode_generic_exit_ex()`
+   * (`object_modes.cc`), reached by clicking another object in the viewport or Outliner. Placed
+   * BEFORE the flushes below, while the session it restores through is still intact.
+   * Object deletion never reaches this function; #BKE_sculptsession_free invokes the same discard
+   * via `SculptSession::free_curve_patch_session`. */
+  curve_patch_discard_on_session_end(ob);
 
   mesh->runtime->corner_tris_cache.unfreeze();
 
@@ -720,6 +735,41 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
   const bool is_mode_set = (active_ob->mode & mode_flag) != 0;
 
   if (is_mode_set) {
+    /* A live Curve Patch must not be written into the mesh -- or, for the image target,
+     * into the texture -- just because the mode is going away. Ask first, and only then
+     * leave.
+     *
+     * The question cannot be asked from further down: the commit has to happen while the
+     * session, an evaluated depsgraph and a `bContext` are all still intact, and
+     * `object_sculpt_mode_exit()` below destroys the session through
+     * `curve_patch_discard_on_session_end()` the moment it runs. A Blender dialog answers
+     * asynchronously, long after this `exec` has returned, so the mode change is deferred
+     * instead: #SCULPT_OT_curve_patch_edit_confirm resolves the patch and then re-runs this
+     * operator (`resume_mode_toggle`), by which point there is no session left and this
+     * branch falls through to the ordinary exit. Returning here leaves the mode untouched.
+     *
+     * This is the single interception point for every way out of the mode: Tab, the
+     * header's mode dropdown and a workspace switch's automatic mode change all reach
+     * sculpt-mode exit through this operator (`object_mode_op_string()`,
+     * `object_modes.cc`). */
+    for (Base &base : view_layer.object_bases) {
+      const Object *ob = base.object;
+      if ((ob->mode & mode_flag) == 0 || !ob->runtime->sculpt_session ||
+          !ob->runtime->sculpt_session->curve_patch_session)
+      {
+        continue;
+      }
+      PointerRNA props = WM_operator_properties_create("SCULPT_OT_curve_patch_edit_confirm");
+      RNA_boolean_set(&props, "resume_mode_toggle", true);
+      WM_operator_name_call(C,
+                            "SCULPT_OT_curve_patch_edit_confirm",
+                            wm::OpCallContext::InvokeDefault,
+                            &props,
+                            nullptr);
+      WM_operator_properties_free(&props);
+      return OPERATOR_CANCELLED;
+    }
+
     /* Exit sculpt mode for all objects that are currently in it. */
     for (Base &base : view_layer.object_bases) {
       Object *ob = base.object;
@@ -792,6 +842,7 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
         object_sculpt_mode_enter(bmain, *depsgraph, scene, *ob, false, op->reports);
       }
     }
+    ED_paintcurve_refresh_on_sculpt_mode_enter(C);
 
     BKE_paint_brushes_validate(&bmain, &scene, &ts.sculpt->paint);
 
@@ -2167,6 +2218,14 @@ void operatormacros_sculpt()
     RNA_enum_set(otmacro->ptr, "mode", SEL_OP_ADD);
     WM_operatortype_macro_define(ot, "SCULPT_OT_selection_enter_sculpt_mode");
   }
+  WM_operatortype_append(SCULPT_OT_curve_patch_apply);
+  WM_operatortype_append(SCULPT_OT_curve_patch_edit);
+  WM_operatortype_append(SCULPT_OT_curve_patch_edit_confirm);
+  WM_operatortype_append(SCULPT_OT_curve_patch_handle_type_set);
+  WM_operatortype_append(SCULPT_OT_curve_patch_delete_point);
+  WM_operatortype_append(SCULPT_OT_curve_patch_toggle_cyclic);
+  WM_operatortype_append(SCULPT_OT_curve_patch_switch_direction);
+  WM_operatortype_append(SCULPT_OT_curve_patch_stamp_reseed);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

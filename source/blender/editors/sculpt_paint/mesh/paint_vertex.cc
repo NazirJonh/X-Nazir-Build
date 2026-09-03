@@ -45,6 +45,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_report.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -494,13 +495,21 @@ void update_cache_variants(const Depsgraph &depsgraph, VPaint &vp, Object &ob, P
   }
 
   /* Truly temporary data that isn't stored in properties */
-  if (cache->first_time) {
+  if (brush.stroke_method == BRUSH_STROKE_CURVE) {
+    const float pixel_radius = RNA_float_get(ptr, "size");
+    cache->initial_radius = paint_calc_object_space_radius(
+        *cache->vc, cache->location, pixel_radius);
+  }
+  else if (cache->first_time) {
     cache->initial_radius = paint_calc_object_space_radius(
         *cache->vc, cache->location, BKE_brush_radius_get(&vp.paint, &brush));
     BKE_brush_unprojected_size_set(&vp.paint, &brush, cache->initial_radius * 2.0f);
   }
 
-  if (BKE_brush_use_size_pressure(&brush) && paint_supports_dynamic_size(brush, paint_mode)) {
+  if (brush.stroke_method == BRUSH_STROKE_CURVE) {
+    cache->radius = cache->initial_radius;
+  }
+  else if (BKE_brush_use_size_pressure(&brush) && paint_supports_dynamic_size(brush, paint_mode)) {
     cache->radius = cache->initial_radius *
                     BKE_curvemapping_evaluateF(brush.curve_size, 0, cache->pressure);
   }
@@ -2162,6 +2171,13 @@ void VertexPaintStroke::done(bool /*is_cancel*/, bool /*stroke_started*/)
 
 static wmOperatorStatus vpaint_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  /* One live Curve Patch at a time -- see `sculpt_brush_stroke_invoke()`. Vertex Paint reaches a
+   * mesh a live patch may be previewing on, so it is gated the same way. */
+  if (const char *blocked = curve_patch_active_session_message(*C)) {
+    BKE_report(op->reports, RPT_WARNING, blocked);
+    return OPERATOR_CANCELLED;
+  }
+
   VertexPaintStroke *stroke = MEM_new<VertexPaintStroke>(__func__, C, op, event->type);
   op->customdata = stroke;
 

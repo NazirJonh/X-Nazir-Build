@@ -204,9 +204,7 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
   return targets;
 }
 
-static void fetch_image_buffers(ImageData &image_data,
-                                bke::pbvh::Node & /*node*/,
-                                PixelNode &pixel_node)
+void fetch_image_buffers(ImageData &image_data, bke::pbvh::Node & /*node*/, PixelNode &pixel_node)
 {
   PRF_scope(ProfileCategory::Editor);
   for (const UDIMTilePixels &tile : pixel_node.tiles) {
@@ -247,10 +245,10 @@ static void fetch_image_buffers(ImageData &image_data,
   }
 }
 
-static float3 calc_pixel_position(const Span<float3> vert_positions,
-                                  const Span<int3> vert_tris,
-                                  const int tri_index,
-                                  const float2 &barycentric_weight)
+float3 calc_pixel_position(const Span<float3> vert_positions,
+                           const Span<int3> vert_tris,
+                           const int tri_index,
+                           const float2 &barycentric_weight)
 {
   PRF_scope(ProfileCategory::Editor);
   const int3 &verts = vert_tris[tri_index];
@@ -266,13 +264,13 @@ static float3 calc_pixel_position(const Span<float3> vert_positions,
   return result;
 }
 
-static void calc_pixel_row_positions(const Span<float3> vert_positions,
-                                     const Span<int3> vert_tris,
-                                     const Span<int> tri_indices,
-                                     const Span<float2> delta_barycentric_coords,
-                                     const PackedPixelRow &pixel_row,
-                                     const IndexRange range,
-                                     const MutableSpan<float3> positions)
+void calc_pixel_row_positions(const Span<float3> vert_positions,
+                              const Span<int3> vert_tris,
+                              const Span<int> tri_indices,
+                              const Span<float2> delta_barycentric_coords,
+                              const PackedPixelRow &pixel_row,
+                              const IndexRange range,
+                              const MutableSpan<float3> positions)
 {
   PRF_scope(ProfileCategory::Editor);
   BLI_assert(positions.size() == range.size());
@@ -331,11 +329,11 @@ static void calc_brush_colors(MutableSpan<float4> buffer_colors,
   }
 }
 
-static MutableSpan<float4> read_image_pixels(MutableSpan<float4> image_pixels,
-                                             const TileColorspaceProcessor &processors,
-                                             const PackedPixelRow &pixel_row,
-                                             const IndexRange range,
-                                             const int width)
+MutableSpan<float4> read_image_pixels(MutableSpan<float4> image_pixels,
+                                      const TileColorspaceProcessor &processors,
+                                      const PackedPixelRow &pixel_row,
+                                      const IndexRange range,
+                                      const int width)
 {
   PRF_scope(ProfileCategory::Editor);
   const int start_offset = int(pixel_row.start_image_coordinate.y) * width +
@@ -376,12 +374,12 @@ static void pack_float_pixels_to_byte(const Span<float4> src, uchar4 *dst)
   }
 }
 
-static MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
-                                             const TileColorspaceProcessor &processors,
-                                             const PackedPixelRow &pixel_row,
-                                             const IndexRange range,
-                                             const int width,
-                                             Vector<float4> &storage)
+MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
+                                      const TileColorspaceProcessor &processors,
+                                      const PackedPixelRow &pixel_row,
+                                      const IndexRange range,
+                                      const int width,
+                                      Vector<float4> &storage)
 {
   PRF_scope(ProfileCategory::Editor);
   storage.resize(range.size());
@@ -400,12 +398,12 @@ static MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
   return storage;
 }
 
-static void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
-                               MutableSpan<uchar4> image_pixels,
-                               const TileColorspaceProcessor &processors,
-                               const PackedPixelRow &pixel_row,
-                               const IndexRange range,
-                               const int width)
+void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
+                        MutableSpan<uchar4> image_pixels,
+                        const TileColorspaceProcessor &processors,
+                        const PackedPixelRow &pixel_row,
+                        const IndexRange range,
+                        const int width)
 {
   PRF_scope(ProfileCategory::Editor);
   if (!processors.is_noop) {
@@ -419,12 +417,12 @@ static void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
   pack_float_pixels_to_byte(scene_linear_pixels, image_pixels.data() + start_offset);
 }
 
-static void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
-                               MutableSpan<float4> image_pixels,
-                               const TileColorspaceProcessor &processors,
-                               const PackedPixelRow &pixel_row,
-                               const IndexRange range,
-                               const int width)
+void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
+                        MutableSpan<float4> image_pixels,
+                        const TileColorspaceProcessor &processors,
+                        const PackedPixelRow &pixel_row,
+                        const IndexRange range,
+                        const int width)
 {
   PRF_scope(ProfileCategory::Editor);
   if (!processors.is_noop) {
@@ -1212,47 +1210,18 @@ static void apply_paint_channel(ImageData &image_data,
           float3 b_screen(0.0f, 1.0f, 0.0f);
           float3 t_m(1.0f, 0.0f, 0.0f);
           float3 b_m(0.0f, 1.0f, 0.0f);
-          float2 screen[3] = {};
-          float det = 0.0f;
           if (is_normal_channel && sampler != nullptr) {
-            const float3 edge1 = tri_positions[1] - tri_positions[0];
-            const float3 edge2 = tri_positions[2] - tri_positions[0];
-            n_m = math::normalize(math::cross(edge1, edge2));
-            screen[0] = ED_view3d_project_float_v2_m4(region, tri_positions[0], projection_mat);
-            screen[1] = ED_view3d_project_float_v2_m4(region, tri_positions[1], projection_mat);
-            screen[2] = ED_view3d_project_float_v2_m4(region, tri_positions[2], projection_mat);
-            const float2 sx = screen[1] - screen[0];
-            const float2 sy = screen[2] - screen[0];
-            det = sx.x * sy.y - sx.y * sy.x;
-            if (math::abs(det) > 1e-8f) {
-              const float3 dp_dx = (edge1 * sy.y - edge2 * sx.y) / det;
-              t_screen = dp_dx - n_m * math::dot(dp_dx, n_m);
-              b_screen = math::cross(n_m, t_screen);
-              const float t_screen_len = math::length(t_screen);
-              const float b_screen_len = math::length(b_screen);
-              if (t_screen_len > 1e-6f) {
-                t_screen /= t_screen_len;
-              }
-              if (b_screen_len > 1e-6f) {
-                b_screen /= b_screen_len;
-              }
-            }
-            else {
-              t_screen = view_right - n_m * math::dot(view_right, n_m);
-              t_screen = math::normalize(t_screen);
-              b_screen = math::cross(n_m, t_screen);
-            }
-            t_m = tri_tangent - n_m * math::dot(tri_tangent, n_m);
-            const float t_len = math::length(t_m);
-            if (t_len > 1e-6f) {
-              t_m /= t_len;
-            }
-            else {
-              float fallback[3];
-              ortho_v3_v3(fallback, n_m);
-              t_m = math::normalize(float3(fallback));
-            }
-            b_m = math::cross(n_m, t_m) * tri_bitangent_sign;
+            material::build_normal_write_basis(tri_tangent,
+                                               tri_bitangent_sign,
+                                               tri_positions,
+                                               view_right,
+                                               region,
+                                               projection_mat,
+                                               t_screen,
+                                               b_screen,
+                                               n_m,
+                                               t_m,
+                                               b_m);
           }
 
           threading::parallel_for(IndexRange(row_size), 512, [&](const IndexRange range) {
@@ -1701,9 +1670,7 @@ static void push_undo(const PixelNode &node_data,
   }
 }
 
-static void do_push_undo_tile(ImageData &image_data,
-                              bke::pbvh::Node & /*node*/,
-                              PixelNode &pixel_node)
+void do_push_undo_tile(ImageData &image_data, bke::pbvh::Node & /*node*/, PixelNode &pixel_node)
 {
   PRF_scope(ProfileCategory::Editor);
   for (const UDIMTilePixels &tile : pixel_node.tiles) {
@@ -1721,17 +1688,18 @@ static void do_push_undo_tile(ImageData &image_data,
 /** \name Fix non-manifold edge bleeding.
  * \{ */
 
-static Vector<image::TileNumber> collect_dirty_tiles(MutableSpan<PixelNode> nodes,
-                                                     const IndexMask &node_mask)
+Vector<image::TileNumber> collect_dirty_tiles(MutableSpan<PixelNode> nodes,
+                                              const IndexMask &node_mask)
 {
   Vector<image::TileNumber> dirty_tiles;
   node_mask.foreach_index(
       [&](const int i) { bke::pbvh::pixels::collect_dirty_tiles(nodes[i], dirty_tiles); });
   return dirty_tiles;
 }
-static void fix_non_manifold_seam_bleeding(bke::pbvh::Tree &pbvh,
-                                           Map<paint::image::TileNumber, ImBuf *> &buffers,
-                                           Span<TileNumber> tile_numbers_to_fix)
+
+void fix_non_manifold_seam_bleeding(bke::pbvh::Tree &pbvh,
+                                    Map<paint::image::TileNumber, ImBuf *> &buffers,
+                                    Span<TileNumber> tile_numbers_to_fix)
 {
   PRF_scope(ProfileCategory::Editor);
   for (image::TileNumber tile_number : tile_numbers_to_fix) {

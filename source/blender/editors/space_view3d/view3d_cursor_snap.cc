@@ -412,9 +412,21 @@ static void cursor_point_draw(
       break;
     case SCE_SNAP_TO_FACE_MIDPOINT:
       imm_draw_circle_wire_3d(attr_pos, 0.0f, 0.0f, 1.0f, 24);
+
+      /* The center dot must use a shader that sets `gl_PointSize`. The uniform-color shader
+       * bound by the caller does not, which asserts and crashes on the Vulkan backend. */
+      immUnbindProgram();
+      immBindBuiltinProgram(GPU_SHADER_3D_POINT_UNIFORM_SIZE_UNIFORM_COLOR_AA);
+      immUniform1f("size", ui::theme::get_value_f(TH_VERTEX_SIZE));
+      immUniformColor4ubv(color);
       immBegin(GPU_PRIM_POINTS, 1);
       immVertex3f(attr_pos, 0.0f, 0.0f, 0.0f);
       immEnd();
+      immUnbindProgram();
+
+      /* Restore the shader the caller expects to remain bound for subsequent draws. */
+      immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+      immUniformColor4ubv(color);
       break;
     case SCE_SNAP_TO_FACE:
     default:

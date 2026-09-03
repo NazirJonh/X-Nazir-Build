@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 #include "CLG_log.h"
 
@@ -308,6 +309,12 @@ static void ptile_restore_runtime_map(PaintTileMap *paint_tile_map)
   for (PaintTile *ptile : paint_tile_map->map.values()) {
     Image *image = ptile->image;
     ImBuf *ibuf = BKE_image_acquire_ibuf(image, &ptile->iuser, nullptr);
+    if (ibuf == nullptr) {
+      /* The image lost its buffer since the tile was captured (reloaded, resized, or the UDIM
+       * tile went away). There is nothing to restore into, and dereferencing it below would be a
+       * null crash. */
+      continue;
+    }
 
     int2 tile_pos;
     int2 tile_copy_size;
@@ -1452,6 +1459,82 @@ void ED_image_undo_push_end()
   BKE_undosys_step_push(ustack, nullptr, nullptr);
   BKE_undosys_stack_limit_steps_and_memory_defaults(ustack);
   WM_file_tag_modified();
+}
+
+/**
+ * Tell the partial-update system that every image `paint_tile_map` covers changed wholesale.
+ *
+ * #ptile_restore_runtime_map writes pristine pixels straight into the `ImBuf` and notifies
+ * nothing. That was adequate where it was written -- projection painting, which is followed by a
+ * full 3D viewport redraw regardless -- but the Image Editor draws through `PartialUpdateChecker`,
+ * so any region the restore reverted and the caller does not dirty again keeps displaying the
+ * stale content even though the pixels underneath are already correct.
+ *
+ * Deliberately NOT folded into #ptile_restore_runtime_map itself: that one is shared with the
+ * projection-paint path, where the mark would be pure overhead on a hot path. Only the
+ * session-owned map helpers below, whose callers are Image Editor sessions, pay for it.
+ */
+static void ptile_map_mark_images_full_update(PaintTileMap *paint_tile_map)
+{
+  /* A session typically touches a single image, so the last-marked check is enough to keep this
+   * O(tiles) with no allocation; a UDIM set marks each of its images once per contiguous run. */
+  Image *last_marked = nullptr;
+  for (PaintTile *ptile : paint_tile_map->map.values()) {
+    if (ptile->image != nullptr && ptile->image != last_marked) {
+      BKE_image_partial_update_mark_full_update(ptile->image);
+      last_marked = ptile->image;
+    }
+  }
+}
+
+PaintTileMap *ED_image_paint_tile_map_new()
+{
+  return MEM_new<PaintTileMap>(__func__);
+}
+
+void ED_image_paint_tile_map_free(PaintTileMap *paint_tile_map)
+{
+  MEM_delete(paint_tile_map);
+}
+
+void ED_image_paint_tile_map_restore(PaintTileMap *paint_tile_map)
+{
+  ptile_restore_runtime_map(paint_tile_map);
+  ptile_map_mark_images_full_update(paint_tile_map);
+  /* Drop any per-stroke alpha accumulation so the next re-stamp starts from zero coverage, exactly
+   * as the first stamp did. The mask buffer itself is kept: reallocating it per cycle would churn
+   * one allocation per touched tile per mouse move. A writer that pushes its tiles with a null
+   * `r_mask` (the flat-canvas rasterizer does) allocates no mask at all, so this is a no-op there
+   * -- it guards the writers that do. */
+  for (PaintTile *ptile : paint_tile_map->map.values()) {
+    if (ptile->mask != nullptr) {
+      memset(ptile->mask, 0, sizeof(uint16_t) * square_i(ED_IMAGE_UNDO_TILE_SIZE));
+    }
+  }
+  /* Marking the tiles invalid is what keeps a commit honest: the encode below writes only VALID
+   * tiles into the history entry, and a tile is re-validated the next time a writer touches it
+   * (#ED_image_paint_tile_find re-validates rather than re-capturing, so the pristine pixels
+   * captured the first time are preserved). A tile some earlier re-stamp touched and the final one
+   * did not is therefore restored to pristine here and correctly left out of the step. */
+  ptile_invalidate_map(paint_tile_map);
+}
+
+void ED_image_undo_push_from_tile_map(const char *name,
+                                      const PaintMode paint_mode,
+                                      PaintTileMap *paint_tile_map)
+{
+  ImageUndoStep *us = image_undo_push_begin(name, paint_mode);
+  /* The tiles are MOVED into the step's own (empty) map, allocated by
+   * `image_undosys_step_encode_init`. Deliberately not a swap of the two handles: the caller owns
+   * the handle it passed in and frees it, so a step left holding that handle would free it a
+   * second time in `image_undosys_step_free`. Encoding consumes whatever it finds in the step's
+   * map, so this hands over exactly what a transaction open for the whole session would have
+   * accumulated -- without the session ever holding the in-flight slot. The caller's map stays
+   * alive and simply owns nothing any more. */
+  BLI_assert(us->paint_tile_map->map.is_empty());
+  us->paint_tile_map->map = std::move(paint_tile_map->map);
+  paint_tile_map->map.clear();
+  ED_image_undo_push_end();
 }
 
 /** \} */

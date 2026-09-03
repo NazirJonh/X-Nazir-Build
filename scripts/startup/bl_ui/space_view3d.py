@@ -302,7 +302,26 @@ class VIEW3D_HT_tool_header(Header):
 class _draw_tool_settings_context_mode:
     @staticmethod
     def SCULPT(context, layout, tool):
-        if (tool is None) or (not tool.use_brushes):
+        if tool is None:
+            return False
+
+        # Show source scene curve selector when Curve Edit tool is active.
+        if tool.idname == "builtin.curves_edit":
+            sculpt = context.tool_settings.sculpt
+            if sculpt is not None:
+                row = layout.row()
+                row.scale_x = 2.0
+                row.prop(sculpt, "paint_curve_source_object", text="Curve")
+
+                # Add Overlay Curve popover button
+                layout.popover(
+                    panel="VIEW3D_PT_overlay_sculpt_curve_edit",
+                    text="Overlay Curve"
+                )
+            VIEW3D_HT_header.draw_paint_curve_snap_template(layout, context)
+            return False
+
+        if not tool.use_brushes:
             return False
 
         paint = context.tool_settings.sculpt
@@ -391,6 +410,9 @@ class _draw_tool_settings_context_mode:
         # direction
         if capabilities.has_direction:
             layout.row().prop(brush, "direction", expand=True, text="")
+
+        if brush.stroke_method == 'CURVE':
+            VIEW3D_HT_header.draw_paint_curve_snap_template(layout, context)
 
         return True
 
@@ -776,6 +798,54 @@ class VIEW3D_HT_header(Header):
     bl_space_type = 'VIEW_3D'
 
     @staticmethod
+    def paint_curve_uses_view3d_snapping(context):
+        """Paint-curve editing uses #VIEW3D_PT_snapping (vertex / edge / face targets)."""
+        if context.mode != 'SCULPT':
+            return False
+        tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
+        if tool and tool.idname == "builtin.curves_edit":
+            return True
+        paint_settings = UnifiedPaintPanel.paint_settings(context)
+        if paint_settings:
+            brush = paint_settings.brush
+            if brush and getattr(brush, "stroke_method", None) == 'CURVE':
+                return True
+        return False
+
+    @staticmethod
+    def draw_paint_curve_snap_template(layout, context):
+        """Draw snap toggle and snapping popover for paint-curve editing."""
+        VIEW3D_HT_header.draw_snap_template(layout, context)
+
+    @staticmethod
+    def draw_snap_template(layout, context):
+        """Draw header snap toggle and #VIEW3D_PT_snapping popover."""
+        tool_settings = context.tool_settings
+
+        snap_items = bpy.types.ToolSettings.bl_rna.properties["snap_elements"].enum_items
+        snap_elements = tool_settings.snap_elements
+        if len(snap_elements) == 1:
+            text = ""
+            for elem in snap_elements:
+                icon = snap_items[elem].icon
+                break
+        else:
+            text = iface_("Mix", i18n_contexts.editor_view3d)
+            icon = 'NONE'
+        del snap_items, snap_elements
+
+        row = layout.row(align=True)
+        row.prop(tool_settings, "use_snap", text="")
+
+        sub = row.row(align=True)
+        sub.popover(
+            panel="VIEW3D_PT_snapping",
+            icon=icon,
+            text=text,
+            translate=False,
+        )
+
+    @staticmethod
     def draw_xform_template(layout, context):
         obj = context.active_object
         object_mode = 'OBJECT' if obj is None else obj.mode
@@ -810,45 +880,15 @@ class VIEW3D_HT_header(Header):
         show_snap = False
         if obj is None:
             show_snap = True
-        else:
-            if has_pose_mode or (object_mode not in {
-                    'SCULPT', 'SCULPT_CURVES',
-                    'VERTEX_PAINT', 'WEIGHT_PAINT', 'TEXTURE_PAINT',
-                    'PAINT_GREASE_PENCIL', 'SCULPT_GREASE_PENCIL', 'WEIGHT_GREASE_PENCIL', 'VERTEX_GREASE_PENCIL',
-            }):
-                show_snap = True
-            else:
-
-                paint_settings = UnifiedPaintPanel.paint_settings(context)
-
-                if paint_settings:
-                    brush = paint_settings.brush
-                    if brush and hasattr(brush, "stroke_method") and brush.stroke_method == 'CURVE':
-                        show_snap = True
+        elif has_pose_mode or (object_mode not in {
+                'SCULPT', 'SCULPT_CURVES',
+                'VERTEX_PAINT', 'WEIGHT_PAINT', 'TEXTURE_PAINT',
+                'PAINT_GREASE_PENCIL', 'SCULPT_GREASE_PENCIL', 'WEIGHT_GREASE_PENCIL', 'VERTEX_GREASE_PENCIL',
+        }):
+            show_snap = True
 
         if show_snap:
-            snap_items = bpy.types.ToolSettings.bl_rna.properties["snap_elements"].enum_items
-            snap_elements = tool_settings.snap_elements
-            if len(snap_elements) == 1:
-                text = ""
-                for elem in snap_elements:
-                    icon = snap_items[elem].icon
-                    break
-            else:
-                text = iface_("Mix", i18n_contexts.editor_view3d)
-                icon = 'NONE'
-            del snap_items, snap_elements
-
-            row = layout.row(align=True)
-            row.prop(tool_settings, "use_snap", text="")
-
-            sub = row.row(align=True)
-            sub.popover(
-                panel="VIEW3D_PT_snapping",
-                icon=icon,
-                text=text,
-                translate=False,
-            )
+            VIEW3D_HT_header.draw_snap_template(layout, context)
 
         # Proportional editing
         if object_mode in {
@@ -1073,12 +1113,15 @@ class VIEW3D_HT_header(Header):
             # the appropriate color types are selected in Solid mode, I.E. 'TEXTURE'
             row.active = is_paint_tool
 
-            layout.popover(
-                panel="VIEW3D_PT_sculpt_snapping",
-                icon='SNAP_INCREMENT',
-                text="",
-                translate=False,
-            )
+            if VIEW3D_HT_header.paint_curve_uses_view3d_snapping(context):
+                VIEW3D_HT_header.draw_paint_curve_snap_template(layout, context)
+            else:
+                layout.popover(
+                    panel="VIEW3D_PT_sculpt_snapping",
+                    icon='SNAP_INCREMENT',
+                    text="",
+                    translate=False,
+                )
 
             layout.popover(
                 panel="VIEW3D_PT_sculpt_automasking",
@@ -1290,6 +1333,9 @@ class VIEW3D_MT_editor_menus(Menu):
             if mode_string == 'SCULPT':
                 layout.menu("VIEW3D_MT_mask")
                 layout.menu("VIEW3D_MT_face_sets")
+                active_tool = context.workspace.tools.from_space_view3d_mode(mode_string)
+                if active_tool and active_tool.idname == "builtin.curves_edit":
+                    layout.menu("VIEW3D_MT_sculpt_paint_curves")
                 layout.template_node_operator_asset_root_items()
             elif mode_string == 'SCULPT_CURVES':
                 layout.menu("VIEW3D_MT_select_sculpt_curves")
@@ -4165,6 +4211,83 @@ class VIEW3D_MT_face_sets(Menu):
         layout.operator("sculpt.face_set_clear_all_custom_colors", text="Clear All Colors")
 
         layout.template_node_operator_asset_menu_items(catalog_path=self.bl_label)
+
+
+class VIEW3D_MT_sculpt_paint_curve_convert(Menu):
+    bl_label = "Create Curves Object"
+
+    def draw(self, context):
+        layout = self.layout
+
+        # Standalone paint curves only: once a source is linked, the scene object already holds
+        # the real data-block and sync keeps it up to date.
+        sculpt = context.tool_settings.sculpt if context.tool_settings else None
+        has_source = bool(sculpt and sculpt.paint_curve_source_object)
+        layout.enabled = not has_source
+
+        props = layout.operator(
+            "paintcurve.to_curve_object",
+            text="Bezier Curve",
+            icon='OUTLINER_OB_CURVE',
+        )
+        props.curve_type = 'BEZIER'
+        props.use_selection = False
+        props.assign_as_source = True
+
+        props = layout.operator(
+            "paintcurve.to_curve_object",
+            text="Curves",
+            icon='OUTLINER_OB_CURVE',
+        )
+        props.curve_type = 'CURVES'
+        props.use_selection = False
+        props.assign_as_source = True
+
+
+class VIEW3D_MT_sculpt_paint_curves(Menu):
+    bl_label = "Curves"
+
+    def draw(self, context):
+        layout = self.layout
+
+        layout.menu("VIEW3D_MT_sculpt_paint_curve_convert")
+
+        props = layout.operator(
+            "paintcurve.to_curve_object",
+            text="Create Curves Object from Selection Point",
+            icon='OUTLINER_OB_CURVE',
+        )
+        props.curve_type = 'CURVES'
+        props.use_selection = True
+        props.assign_as_source = True
+
+        props = layout.operator(
+            "paintcurve.separate_to_curve_object",
+            text="Separate Curves Object from Selection",
+            icon='OUTLINER_OB_CURVE',
+        )
+        props.curve_type = 'CURVES'
+
+        layout.separator()
+        layout.operator("paintcurve.duplicate")
+
+
+class VIEW3D_MT_paintcurve_context_menu(Menu):
+    bl_label = "Paint Curve"
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.operator_context = 'INVOKE_DEFAULT'
+
+        layout.operator_menu_enum("paintcurve.handle_type_set", "type")
+        layout.operator("paintcurve.select_linked")
+        layout.separator()
+        layout.operator("paintcurve.duplicate")
+        layout.separator()
+        layout.operator("paintcurve.split")
+        layout.operator("paintcurve.make_segment")
+        layout.separator()
+        layout.operator("paintcurve.delete_point")
 
 
 class VIEW3D_MT_sculpt_set_pivot(Menu):
@@ -7879,6 +8002,45 @@ class VIEW3D_PT_overlay_sculpt_curves(Panel):
         subrow.prop(overlay, "sculpt_curves_cage_opacity", text="Cage Opacity")
 
 
+class VIEW3D_PT_overlay_sculpt_curve_edit(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_label = "Overlay Curve"
+    bl_ui_units_x = 10
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != 'SCULPT':
+            return False
+        tool_settings = context.tool_settings
+        if tool_settings is None:
+            return False
+        # Check if Curve Edit tool is active
+        tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
+        return tool is not None and tool.idname == "builtin.curves_edit"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+
+        tool_settings = context.tool_settings
+        sculpt = tool_settings.sculpt
+        if sculpt is None:
+            return
+
+        col = layout.column(align=True)
+
+        row = col.row(align=True)
+        row.prop(sculpt, "paint_curve_show_radius_handles", text="Show Radius Handles")
+
+        row = col.row(align=True)
+        row.enabled = sculpt.paint_curve_show_radius_handles
+        row.prop_enum(sculpt, "paint_curve_radius_display_mode", 'ALL')
+        row.prop_enum(sculpt, "paint_curve_radius_display_mode", 'SELECT')
+        row.prop_enum(sculpt, "paint_curve_radius_display_mode", 'TIPS')
+
+
 class VIEW3D_PT_overlay_bones(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -9663,6 +9825,9 @@ classes = (
     VIEW3D_MT_mask,
     VIEW3D_MT_face_sets,
     VIEW3D_MT_face_sets_init,
+    VIEW3D_MT_sculpt_paint_curves,
+    VIEW3D_MT_sculpt_paint_curve_convert,
+    VIEW3D_MT_paintcurve_context_menu,
     VIEW3D_MT_random_mask,
     VIEW3D_MT_particle,
     VIEW3D_MT_particle_context_menu,
@@ -9804,6 +9969,7 @@ classes = (
     VIEW3D_PT_overlay_sculpt_layers,
     VIEW3D_PT_overlay_sculpt_symmetry,
     VIEW3D_PT_overlay_sculpt_curves,
+    VIEW3D_PT_overlay_sculpt_curve_edit,
     VIEW3D_PT_snapping,
     VIEW3D_PT_sculpt_snapping,
     VIEW3D_PT_proportional_edit,

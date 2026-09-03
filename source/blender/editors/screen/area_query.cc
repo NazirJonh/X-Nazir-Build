@@ -19,6 +19,8 @@
 #include "UI_interface.hh"
 #include "UI_view2d.hh"
 
+#include "WM_api.hh"
+
 namespace blender {
 
 bool ED_region_overlap_isect_x(const ARegion *region, const int event_x)
@@ -223,6 +225,46 @@ ARegion *ED_area_find_region_xy_visual(const ScrArea *area,
     }
   }
 
+  return nullptr;
+}
+
+ScrArea *ED_screen_area_of_region(bScreen *screen, const ARegion *region)
+{
+  if (!screen || !region) {
+    return nullptr;
+  }
+  for (ScrArea &area : screen->areabase) {
+    if (BLI_findindex(&area.regionbase, region) != -1) {
+      return &area;
+    }
+  }
+  return nullptr;
+}
+
+ARegion *ED_screen_area_region_under_cursor(wmWindow *win,
+                                            const int space_type,
+                                            const int region_type,
+                                            const int event_xy[2],
+                                            ScrArea **r_area)
+{
+  *r_area = nullptr;
+  if (!win) {
+    return nullptr;
+  }
+  bScreen *screen = WM_window_get_active_screen(win);
+  if (!screen) {
+    return nullptr;
+  }
+  ScrArea *area = BKE_screen_find_area_xy(screen, space_type, event_xy);
+  if (!area) {
+    return nullptr;
+  }
+  ARegion *region_hovered = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, event_xy);
+  ARegion *region_window = BKE_area_find_region_xy(area, region_type, event_xy);
+  if (region_hovered && region_window && region_hovered == region_window) {
+    *r_area = area;
+    return region_window;
+  }
   return nullptr;
 }
 

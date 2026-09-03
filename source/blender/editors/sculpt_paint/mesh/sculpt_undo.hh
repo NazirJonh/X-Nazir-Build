@@ -608,6 +608,12 @@ void restore_from_bmesh_enter_geometry(const StepData &step_data, Mesh &mesh);
 bool has_bmesh_log_entry(const Object &ob);
 
 void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object);
+/**
+ * Take the sculpt mask back to what the open undo step recorded. The mask counterpart of
+ * #restore_position_from_undo_step; both exist so a caller that knows which TARGET a stroke wrote
+ * can revert exactly that one, the way `restore_from_undo_step()` dispatches internally.
+ */
+void restore_mask_from_undo_step(Object &object);
 
 /**
  * Snapshot \a ob's current #Object::object_to_world() into the currently-open sculpt undo step

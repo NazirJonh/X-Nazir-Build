@@ -8,6 +8,8 @@
 
 #define DNA_DEPRECATED_ALLOW
 
+#include <array>
+
 #include "NOD_geometry_nodes_srna.hh"
 
 #include "DNA_ID.h"
@@ -52,6 +54,7 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_paint.hh"
 #include "BKE_report.hh"
 #include "BKE_sculpt_layers.hh"
 
@@ -1366,6 +1369,114 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
           }
         }
       }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 62)) {
+    const Sculpt defaults = {};
+    for (Scene &scene : bmain->scenes) {
+      if (Sculpt *sculpt = scene.toolsettings->sculpt) {
+        sculpt->paint_curve_show_radius_handles = defaults.paint_curve_show_radius_handles;
+        sculpt->paint_curve_radius_display_mode = defaults.paint_curve_radius_display_mode;
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 63)) {
+    /* Curve Patch and Roll are sculpt-only, and Curve Patch is further restricted to the brushes
+     * #supports_curve_patch allows. A brush that stored either outside those bounds would show a
+     * blank stroke method in the UI, since the enum item is no longer offered.
+     *
+     * Since the spec rollout (2026-08-19), Roll and Curve Patch are also exposed in the Image
+     * Editor (Paint mode Texture2D). Curve Patch there is further restricted to Draw brushes
+     * via `image_curve_patch_session_begin()`; that's enforced at runtime, not at version
+     * downgrade time -- brushes that had it set in a texture-paint slot before the spec wrote
+     * 2D support stay selected here so the user sees Curve Patch stay armed. */
+    for (Brush &brush : bmain->brushes) {
+      if (!ELEM(brush.stroke_method, BRUSH_STROKE_CURVE_PATCH, BRUSH_STROKE_ROLL)) {
+        continue;
+      }
+      const bool is_sculpt_brush = (brush.ob_mode & OB_MODE_SCULPT) != 0;
+      const bool is_image_paint_brush = (brush.ob_mode & OB_MODE_TEXTURE_PAINT) != 0;
+      const bool keep_sculpt = is_sculpt_brush && (brush.stroke_method == BRUSH_STROKE_ROLL ||
+                                                   bke::brush::supports_curve_patch(brush));
+      const bool keep_image_paint = is_image_paint_brush &&
+                                    ((brush.stroke_method == BRUSH_STROKE_ROLL) ||
+                                     (brush.stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+                                      brush.image_brush_type == IMAGE_PAINT_BRUSH_TYPE_DRAW));
+      if (!keep_sculpt && !keep_image_paint) {
+        brush.stroke_method = BRUSH_STROKE_SPACE;
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 64)) {
+    /* The Curve Patch brush settings were added with non-zero defaults, which a file written
+     * before they existed cannot carry -- every member reads back as zero. `length_repeat` doubles
+     * as the sentinel for "this brush predates the feature": the UI clamps it to 1..64, so no file
+     * that knew about the settings can store 0. */
+    const Brush defaults = {};
+    for (Brush &brush : bmain->brushes) {
+      if (brush.curve_patch.length_repeat != 0) {
+        continue;
+      }
+      brush.curve_patch.length_repeat = defaults.curve_patch.length_repeat;
+      brush.curve_patch.end_falloff_percent = defaults.curve_patch.end_falloff_percent;
+      brush.curve_patch.cap_start_length = defaults.curve_patch.cap_start_length;
+      brush.curve_patch.cap_end_length = defaults.curve_patch.cap_end_length;
+      brush.roll_pressure_scale = defaults.roll_pressure_scale;
+    }
+
+    /* Paint curves used to keep their control points in a screen-space array of their own. The
+     * bezier geometry is authoritative now, so convert what the reader loaded and drop the legacy
+     * array. */
+    for (PaintCurve &paint_curve : bmain->paintcurves) {
+      const bool had_legacy_points = paint_curve.points != nullptr && paint_curve.tot_points > 0;
+      BKE_paint_curve_legacy_points_convert(paint_curve);
+      /* Converted points stay in screen space, which is what a false #PaintCurve::use_3d_space
+       * means -- promoting them needs a viewport, so it is left to the user. A curve that had
+       * nothing to convert is empty and gets the modern default instead. Both flags default to 1
+       * and would otherwise load as 0. */
+      paint_curve.use_3d_space = had_legacy_points ? 0 : 1;
+      paint_curve.show_radius_handles = 1;
+    }
+  }
+
+  /* NOTE: An earlier revision of this feature zeroed `mtex.random_angle` on Curve Patch
+   * brushes, because STAMPS mode read the amount without the #MTEX_ANGLE_RANDOM switch that
+   * gates it everywhere else.
+   * The gate now lives in `curve_patch_params_from_brush()`, so no stored data needs changing --
+   * and rewriting the amount would have destroyed a deliberate user setting. */
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 65)) {
+    /* Paint curves kept their selection in an attribute of their own, packed as one `int8_t` per
+     * point (bit 0 left handle, bit 1 control point, bit 2 right handle). They use the same
+     * `.selection*` attributes as every other curves editor now.
+     *
+     * Note the inverted default: the old attribute was absent when nothing was selected, but
+     * an absent `.selection` means everything IS selected. So a curve is converted whether or
+     * not it carried the legacy attribute -- writing all-false where it had none is what preserves
+     * "nothing selected" for those files. */
+    for (PaintCurve &paint_curve : bmain->paintcurves) {
+      bke::CurvesGeometry &geometry = paint_curve.geometry.wrap();
+      if (geometry.points_num() == 0) {
+        continue;
+      }
+      bke::MutableAttributeAccessor attributes = geometry.attributes_for_write();
+      const VArray<int8_t> legacy = *attributes.lookup_or_default<int8_t>(
+          "paintcurve_selection", bke::AttrDomain::Point, int8_t(0));
+
+      const std::array<StringRef, 3> names = {
+          ".selection_handle_left", ".selection", ".selection_handle_right"};
+      for (const int bit : IndexRange(3)) {
+        bke::SpanAttributeWriter<bool> selection =
+            attributes.lookup_or_add_for_write_only_span<bool>(names[bit], bke::AttrDomain::Point);
+        for (const int point : geometry.points_range()) {
+          selection.span[point] = (legacy[point] & (1 << bit)) != 0;
+        }
+        selection.finish();
+      }
+      attributes.remove("paintcurve_selection");
     }
   }
 

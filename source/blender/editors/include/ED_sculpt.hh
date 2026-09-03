@@ -27,6 +27,7 @@ struct SculptLayerGroup;
 struct SculptLayerTreeNode;
 struct UndoType;
 struct UndoStep;
+struct WorkSpace;
 struct bContext;
 struct wmKeyConfig;
 struct wmOperator;
@@ -59,6 +60,27 @@ void operatortypes_sculpt();
 void operatormacros_sculpt();
 
 void keymap_sculpt(wmKeyConfig *keyconf);
+
+/* `paint_curve_patch_edit.cc` */
+
+/**
+ * Ask the user what to do with a live Curve Patch before the workspace changes, instead of letting
+ * the change decide for them.
+ *
+ * A workspace switch performs an automatic object-mode change when the incoming workspace uses a
+ * different one, and leaving Sculpt Mode ends the patch -- writing it into the mesh or, for the
+ * image target, into the texture. Deciding that silently is bad enough; deciding it AFTER the
+ * screen has already changed is also unsound, because a restore needs the same intact
+ * `bContext`, PBVH and canvas the session was built against (`curve_patch_restore_only()` turns
+ * itself into a silent no-op once the target has moved underneath it).
+ *
+ * So when a patch is live, the workspace change is refused here and handed to
+ * `SCULPT_OT_curve_patch_edit_confirm`, which resolves the patch and only then performs the change
+ * itself. The second attempt finds no session and proceeds normally, so this cannot loop.
+ *
+ * \return true when the caller must abandon this workspace change; false to carry on unchanged.
+ */
+bool curve_patch_defer_workspace_change(bContext *C, WorkSpace *workspace_new);
 
 /* `sculpt_transform.cc` */
 

@@ -38,6 +38,7 @@
 #include "overlay_origin.hh"
 #include "overlay_outline.hh"
 #include "overlay_paint.hh"
+#include "overlay_paint_curve_cursor.hh"
 #include "overlay_particle.hh"
 #include "overlay_pointcloud.hh"
 #include "overlay_prepass.hh"
@@ -72,6 +73,7 @@ class Instance : public DrawEngine {
   Outline outline;
   MotionPath motion_paths;
   Cursor cursor;
+  PaintCurveCursor paint_curve_cursor;
 
   struct OverlayLayer {
     const SelectionType selection_type_;

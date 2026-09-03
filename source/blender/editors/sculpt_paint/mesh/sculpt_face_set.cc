@@ -4175,8 +4175,8 @@ static void apply_from_color_texture_grids(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 
   if (const MTex *color_mtex = BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT)) {
-    if (color_mtex->tex != nullptr && ss.tex_pool != nullptr) {
-      BKE_texture_fetch_images_for_pool(color_mtex->tex, ss.tex_pool);
+    if (color_mtex->tex != nullptr && ss.tex_pool() != nullptr) {
+      BKE_texture_fetch_images_for_pool(color_mtex->tex, ss.tex_pool());
     }
   }
 
@@ -4324,8 +4324,8 @@ static void apply_from_color_texture_mesh(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 
   if (const MTex *color_mtex = BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT)) {
-    if (color_mtex->tex != nullptr && ss.tex_pool != nullptr) {
-      BKE_texture_fetch_images_for_pool(color_mtex->tex, ss.tex_pool);
+    if (color_mtex->tex != nullptr && ss.tex_pool() != nullptr) {
+      BKE_texture_fetch_images_for_pool(color_mtex->tex, ss.tex_pool());
     }
   }
 

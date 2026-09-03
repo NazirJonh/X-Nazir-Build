@@ -11,9 +11,15 @@
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 
+#include "BLI_math_base.hh"
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
+#include "BLI_rect.h"
 #include "BLI_utildefines.h"
+
+#include <cfloat>
+#include <memory>
 
 #include "BKE_brush.hh"
 #include "BKE_colortools.hh"
@@ -21,6 +27,7 @@
 #include "BKE_layer.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_report.hh"
 #include "BKE_undo_system.hh"
 
 #include "ED_paint.hh"
@@ -38,6 +45,14 @@
 
 #include "ED_image.hh"
 
+#include "UI_resources.hh"
+#include "UI_view2d.hh"
+
+#include "../paint_curve_intern.hh"
+
+#include "../paint_image_curve_patch.hh"
+#include "../paint_image_curve_patch_anchor.hh"
+#include "../paint_image_stroke_hook.hh"
 #include "../paint_intern.hh"
 
 namespace blender {
@@ -131,6 +146,26 @@ class AbstractPaintMode {
                             float distance,
                             float size) = 0;
 
+  /**
+   * Same as #paint_stroke with the per-dab 2D Roll mapping contract (#ImagePaintRollDab).
+   * Only the Image Editor mode consumes the contract; all other modes must not receive a
+   * non-null `roll_dab` and fall back to the plain #paint_stroke behavior.
+   */
+  virtual void paint_stroke_roll(bContext *C,
+                                 void *stroke_handle,
+                                 float prev_mouse[2],
+                                 float mouse[2],
+                                 int eraser,
+                                 float pressure,
+                                 float distance,
+                                 float size,
+                                 const ImagePaintRollDab *roll_dab)
+  {
+    BLI_assert(roll_dab == nullptr);
+    UNUSED_VARS_NDEBUG(roll_dab);
+    paint_stroke(C, stroke_handle, prev_mouse, mouse, eraser, pressure, distance, size);
+  }
+
   virtual void paint_stroke_redraw(const bContext *C, void *stroke_handle, bool final) = 0;
   virtual void paint_stroke_done(void *stroke_handle) = 0;
   virtual void paint_gradient_fill(const bContext *C,
@@ -171,6 +206,19 @@ class ImagePaintMode : public AbstractPaintMode {
                     float size) override
   {
     paint_2d_stroke(stroke_handle, prev_mouse, mouse, eraser, pressure, distance, size);
+  }
+
+  void paint_stroke_roll(bContext * /*C*/,
+                         void *stroke_handle,
+                         float prev_mouse[2],
+                         float mouse[2],
+                         int eraser,
+                         float pressure,
+                         float distance,
+                         float size,
+                         const ImagePaintRollDab *roll_dab) override
+  {
+    paint_2d_stroke(stroke_handle, prev_mouse, mouse, eraser, pressure, distance, size, roll_dab);
   }
 
   void paint_stroke_redraw(const bContext *C, void *stroke_handle, bool final) override
@@ -295,6 +343,16 @@ struct PaintOperation : public PaintModeData {
   wmPaintCursor *cursor = nullptr;
   ViewContext vc = {nullptr};
 
+  /* 2D Roll trajectory. Populated and read by `ImagePaintStroke::update_step` so the Roll
+   * mapping contract reaches `paint_2d_stroke()` per dab without going through the 3D Roll
+   * record path. `#texture_paint_init()` sets `enabled` based on the brush's stroke method and
+   * texture mapping; the buffers stay empty for non-Image Paint modes. */
+  ImagePaintRollTraj2D roll_traj;
+
+  /* This stroke method's own state, or null for a method that needs none. Records the gesture
+   * dab by dab and acts when the stroke ends -- see #ImageStrokeMethodHook. */
+  std::unique_ptr<ImageStrokeMethodHook> method_hook;
+
   PaintOperation() = default;
   ~PaintOperation() override
   {
@@ -384,6 +442,25 @@ static std::unique_ptr<PaintOperation> texture_paint_init(bContext *C,
   }
   else {
     pop->mode = MEM_new<ImagePaintMode>("ImagePaintMode");
+
+    /* 2D Roll mapping must be served by the local UV trajectory, never by the 3D Roll record
+     * path that lives on `PaintStroke::RollSpline`. Decide once here so each `update_step`
+     * call only checks a single boolean instead of recomputing brush state every dab. Empty
+     * trajectory is fine: a brush that does not use Roll never pushes samples. */
+    const bool brush_uses_roll_texture = (brush->mtex.brush_map_mode == MTEX_MAP_MODE_ROLL) ||
+                                         (brush->mask_mtex.brush_map_mode == MTEX_MAP_MODE_ROLL);
+    pop->roll_traj.enabled =
+        (brush->stroke_method == BRUSH_STROKE_ROLL) ||
+        (ELEM(brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH) &&
+         brush_uses_roll_texture);
+    pop->roll_traj.clear();
+
+    /* The only stroke method that currently needs per-stroke state of its own. Created here, in
+     * the Image Editor branch alone, because that is where the Curve Patch anchor is supported;
+     * every other stroke leaves the pointer null and pays nothing. */
+    if (brush->stroke_method == BRUSH_STROKE_CURVE_PATCH) {
+      pop->method_hook = image_curve_patch_anchor_hook_create();
+    }
   }
 
   pop->stroke_handle = pop->mode->paint_new_stroke(C, op, ob, mouse, mode, brush_switch_mode);
@@ -478,8 +555,61 @@ void ImagePaintStroke::update_step(wmOperator *op, PointerRNA *itemptr)
     ED_image_undo_restore(ustack->step_init);
   }
 
-  pop->mode->paint_stroke(
-      this->evil_C, pop->stroke_handle, pop->prevmouse, mouse, eraser, pressure, distance, size);
+  /* Stack-allocated dab so the address is stable across the call into #paint_stroke_roll.
+   * `nullptr` keeps the existing path identical for any brush without 2D Roll mapping. */
+  ImagePaintRollDab roll_dab_local;
+  const ImagePaintRollDab *roll_dab = nullptr;
+
+  /* A stroke-method hook needs the per-dab UV whether or not the brush uses Roll texture mapping:
+   * for the Curve Patch anchor the UVs ARE the gesture that becomes the editable curve. Gating
+   * this on `roll_traj.enabled` (as the first implementation did) silently produced an empty
+   * anchor for every non-Roll brush, so no session was ever opened and no curve appeared. */
+  if (pop->roll_traj.enabled || pop->method_hook) {
+    /* `mouse` here is in window-absolute region pixels, the same coordinate space that
+     * `paint_2d_stroke` passes to `view2d_region_to_view`. In Image Editor, `region->v2d.mask`
+     * spans `[0, winx] x [0, winy]`, so the conversion is direct without a winrct subtract
+     * (the mask already covers the whole region). */
+    ARegion *region = CTX_wm_region(this->evil_C);
+    float dab_uv[2] = {0.0f, 0.0f};
+    if (region && region->v2d.mask.xmax > region->v2d.mask.xmin &&
+        region->v2d.mask.ymax > region->v2d.mask.ymin)
+    {
+      ui::view2d_region_to_view(&region->v2d, mouse[0], mouse[1], &dab_uv[0], &dab_uv[1]);
+
+      if (pop->roll_traj.enabled) {
+        pop->roll_traj.append(float2(dab_uv[0], dab_uv[1]));
+
+        /* Stage 3 mapping (`brush_painter_2d_tex_mapping`) reads
+         * `paint_runtime->start_pixel_radius` directly; `radius_uv` therefore stays
+         * informational here and defaults to `0` -- the Tile-local canvas pixels would need a
+         * per-dab UV conversion, which the opaque `ImagePaintState` does not yet expose. The
+         * contract reserves the field for when a future consumer needs it; the current 2D Roll
+         * path does not. */
+        pop->roll_traj.compute_roll_dab(0.0f, roll_dab_local);
+        roll_dab = &roll_dab_local;
+      }
+
+      if (pop->method_hook) {
+        pop->method_hook->on_dab(float2(dab_uv[0], dab_uv[1]), pressure);
+      }
+    }
+  }
+  /* A recording hook (the Curve Patch anchor) must never paint real dabs onto the canvas: it
+   * only captures the gesture. Rolling the dabs back afterwards is NOT equivalent -- that restore
+   * leaves a visible remnant of the anchor's own stroke permanently baked under the patch.
+   * Skipping the paint call is what actually prevents the remnant from ever reaching the canvas.
+   */
+  if (!pop->method_hook || !pop->method_hook->suppresses_dabs()) {
+    pop->mode->paint_stroke_roll(this->evil_C,
+                                 pop->stroke_handle,
+                                 pop->prevmouse,
+                                 mouse,
+                                 eraser,
+                                 pressure,
+                                 distance,
+                                 size,
+                                 roll_dab);
+  }
 
   copy_v2_v2(pop->prevmouse, mouse);
 
@@ -498,7 +628,7 @@ void ImagePaintStroke::redraw(bool final)
   pop->mode->paint_stroke_redraw(this->evil_C, pop->stroke_handle, final);
 }
 
-void ImagePaintStroke::done(const bool is_cancel, const bool /*stroke_started*/)
+void ImagePaintStroke::done(const bool is_cancel, const bool stroke_started)
 {
   Scene *scene = CTX_data_scene(this->evil_C);
   ToolSettings *toolsettings = scene->toolsettings;
@@ -526,7 +656,22 @@ void ImagePaintStroke::done(const bool is_cancel, const bool /*stroke_started*/)
   pop->mode->paint_stroke_done(pop->stroke_handle);
   pop->stroke_handle = nullptr;
 
-  if (!is_cancel) {
+  /* Drop the dab trajectory so the next stroke starts empty regardless of brush changes. The
+   * `PaintOperation` itself is destroyed right after this, but keeping `clear()` here matches
+   * the contract documented on #ImagePaintRollTraj2D and would survive any future caller that
+   * kept `mode_data_` alive past `done()`. */
+  pop->roll_traj.clear();
+
+  /* Let this stroke method act on the finished gesture. A hook that reports true has taken over
+   * the in-flight image undo step -- it either aborted it or replaced it with one of its own --
+   * so this stroke must not close it. */
+  bool undo_step_taken_over = false;
+  if (pop->method_hook) {
+    undo_step_taken_over = pop->method_hook->on_stroke_end(
+        *this->evil_C, is_cancel, stroke_started);
+  }
+
+  if (!undo_step_taken_over && !is_cancel) {
     ED_image_undo_push_end();
   }
 
@@ -574,8 +719,44 @@ bool ImagePaintStroke::test_start(wmOperator *op, const float mouse[2])
   return true;
 }
 
+/**
+ * Hand a finished anchor stroke over to the live Curve Patch modal editor.
+ *
+ * `ImagePaintStroke::done()` opens the #ImageCurvePatchSession when the anchor completed with
+ * `BRUSH_STROKE_CURVE_PATCH`, but the session is inert until the modal editor that owns its
+ * lifetime is invoked. Both operator exits that can follow a finished stroke must run this: a
+ * real drag ends inside #paint_modal, while a stroke that finishes on the very first event ends
+ * inside #paint_invoke.
+ *
+ * `InvokeDefault` runs the operator's `poll()`. When the image context was lost during the
+ * anchor the poll fails and nothing adopts the session, so cancel it here -- otherwise it leaks
+ * together with its open image-undo transaction, leaving painted pixels no undo entry covers.
+ */
+static void curve_patch_session_takeover(bContext *C)
+{
+  if (!image_curve_patch_session_active()) {
+    return;
+  }
+  WM_operator_name_call(
+      C, "PAINT_OT_image_curve_patch_edit", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
+
+  ImageCurvePatchSession *session = image_curve_patch_session_active_get();
+  if (session != nullptr && !session->modal_active) {
+    image_curve_patch_session_cancel(C, session);
+  }
+}
+
 static wmOperatorStatus paint_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  /* See the matching guard in `sculpt_brush_stroke_invoke()`: one live Curve Patch at a time,
+   * refused before the stroke rather than after it. This is the path the exclusivity actually
+   * matters on -- the 2D modal only registers in its own area, so without this a live Image
+   * Editor patch left 3D painting wide open, and vice versa. */
+  if (const char *blocked = curve_patch_active_session_message(*C)) {
+    BKE_report(op->reports, RPT_WARNING, blocked);
+    return OPERATOR_CANCELLED;
+  }
+
   ImagePaintStroke *stroke = MEM_new<ImagePaintStroke>(__func__, C, op, event->type);
   op->customdata = stroke;
 
@@ -588,6 +769,8 @@ static wmOperatorStatus paint_invoke(bContext *C, wmOperator *op, const wmEvent 
       stroke->finish(C);
       MEM_delete(stroke);
     }
+
+    curve_patch_session_takeover(C);
     return OPERATOR_FINISHED;
   }
   /* add modal handler */
@@ -661,6 +844,12 @@ static wmOperatorStatus paint_modal(bContext *C, wmOperator *op, const wmEvent *
   if (ELEM(retval, OPERATOR_FINISHED, OPERATOR_CANCELLED)) {
     MEM_delete(stroke);
     op->customdata = nullptr;
+
+    /* A dragged stroke always ends here rather than in #paint_invoke, so this is the takeover
+     * point that matters in practice for `BRUSH_STROKE_CURVE_PATCH`. */
+    if (retval == OPERATOR_FINISHED) {
+      curve_patch_session_takeover(C);
+    }
   }
 
   return retval;

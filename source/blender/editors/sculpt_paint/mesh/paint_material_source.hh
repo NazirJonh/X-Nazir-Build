@@ -18,7 +18,9 @@
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
 
+struct ARegion;
 struct Brush;
+struct Paint;
 struct BrushMaterialPaint;
 struct ImagePool;
 struct ImBuf;
@@ -255,6 +257,58 @@ class ChannelSourceSampler {
                bool decode_linear = true) const;
 
   /**
+   * Target scalar for \a channel at explicit 2D coordinates in the CALLER's own
+   * parametrization, instead of through the brush's view / area mapping.
+   *
+   * A Curve Patch ribbon has a frame of its own -- `u` across the ribbon, `v` along it -- and
+   * its own zone textures have always been sampled in it. A channel source sampled through the
+   * brush mapping instead would stay put while the curve turns, which is not what "paint along
+   * this curve" means. The channel's Size / Offset still apply, so its mapping controls keep
+   * working; what is replaced is only WHERE the coordinates come from.
+   *
+   * Falls back to the channel's slider value when there is no usable source, exactly as the
+   * position-based overloads do.
+   */
+  float scalar_at_uv(eMaterialPaintChannel channel, const float2 &uv, int thread) const;
+
+  /** #color counterpart of #scalar_at_uv; see there for why an explicit frame exists. */
+  float3 color_at_uv(eMaterialPaintChannel channel,
+                     const float2 &uv,
+                     int thread,
+                     bool decode_linear = true) const;
+
+  /**
+   * Single-sample counterpart of #gather_tangent_normals_packed: sample the Normal channel, remap
+   * the unpacked decal normal into the destination surface's tangent basis and pack it to 0..1
+   * RGB.
+   *
+   * \param t_decal, b_decal: World-space directions in which the decal's own x and y grow. For a
+   * brush-mapped sample they are the screen right/up projected onto the surface, which is what
+   * the batched overload derives from `t_screen`/`b_screen`; a caller with a frame of its own (a
+   * Curve Patch ribbon) passes that frame's axes instead, and the decal then turns with it.
+   * \param n_m, t_m, b_m: The destination surface's own tangent basis, as built per UV primitive.
+   */
+  float3 tangent_normal_packed(eMaterialPaintChannel channel,
+                               const TexelSampleContext &ctx,
+                               int thread,
+                               const float3 &t_decal,
+                               const float3 &b_decal,
+                               const float3 &n_m,
+                               const float3 &t_m,
+                               const float3 &b_m) const;
+
+  /** #tangent_normal_packed sampled at explicit 2D coordinates; see #scalar_at_uv for why an
+   * explicit frame exists. */
+  float3 tangent_normal_packed_at_uv(eMaterialPaintChannel channel,
+                                     const float2 &uv,
+                                     int thread,
+                                     const float3 &t_decal,
+                                     const float3 &b_decal,
+                                     const float3 &n_m,
+                                     const float3 &t_m,
+                                     const float3 &b_m) const;
+
+  /**
    * Same meaning as calling #color once per element of \a contexts. Zero-factor slots are
    * written as zero so callers can skip them the same way as the per-pixel path.
    * Mapping (Area/View/…) is resolved once for the chunk instead of once per texel.
@@ -305,9 +359,69 @@ class ChannelSourceSampler {
  private:
   using ChannelSource = ChannelSourceSet::ChannelSource;
 
+  /** The stroke's #Paint. The only thing the channel-value fallbacks need from the session, and
+   * factoring it out here is what lets the UV path below be shared with the Image Editor, which
+   * has a #Paint but no #SculptSession. */
+  const Paint &paint() const;
+
   /** Null unless \a source uses Area Plane mapping, in which case it is the channel's own
    * #area_local_mats_ entry rather than the brush's shared local matrix. */
   const float4x4 *area_local_mat_for(int channel, const ChannelSource &source) const;
+};
+
+/**
+ * Channel sampling in a frame the CALLER supplies, with no dependency on a sculpt session.
+ *
+ * #ChannelSourceSampler is tied to a #SculptSession because its brush-mapped sampling needs the
+ * stroke's view and symmetry state. Sampling at explicit 2D coordinates needs none of that -- the
+ * caller has already decided where the texel sits -- so the Image Editor's flat canvas, which has
+ * no session at all, can use exactly the same code as the Sculpt viewport. The Sculpt sampler's
+ * own `*_at_uv` methods delegate here, so the two cannot drift.
+ *
+ * Holds references only; it is built per use, not stored.
+ */
+class ChannelUvSampler {
+  const ChannelSourceSet &sources_;
+  const BrushMaterialPaint &brush_paint_;
+  const PaintModeSettings &settings_;
+  const Paint &paint_;
+  const Brush &brush_;
+
+ public:
+  ChannelUvSampler(const ChannelSourceSet &sources,
+                   const BrushMaterialPaint &brush_paint,
+                   const PaintModeSettings &settings,
+                   const Paint &paint,
+                   const Brush &brush)
+      : sources_(sources),
+        brush_paint_(brush_paint),
+        settings_(settings),
+        paint_(paint),
+        brush_(brush)
+  {
+  }
+
+  /** True when \a channel has a source that can be sampled. */
+  bool has_usable_source(eMaterialPaintChannel channel) const;
+
+  /** See #ChannelSourceSampler::scalar_at_uv. */
+  float scalar_at_uv(eMaterialPaintChannel channel, const float2 &uv, int thread) const;
+
+  /** See #ChannelSourceSampler::color_at_uv. */
+  float3 color_at_uv(eMaterialPaintChannel channel,
+                     const float2 &uv,
+                     int thread,
+                     bool decode_linear = true) const;
+
+  /** See #ChannelSourceSampler::tangent_normal_packed_at_uv. */
+  float3 tangent_normal_packed_at_uv(eMaterialPaintChannel channel,
+                                     const float2 &uv,
+                                     int thread,
+                                     const float3 &t_decal,
+                                     const float3 &b_decal,
+                                     const float3 &n_m,
+                                     const float3 &t_m,
+                                     const float3 &b_m) const;
 };
 
 /**
@@ -346,5 +460,37 @@ bool sample_direct_layout(const DirectSampleLayout &layout,
                           const float2 &view_point_2d,
                           float *r_value,
                           float4 &r_rgba);
+
+/**
+ * Build the two bases a Normal-channel write needs for one UV primitive.
+ *
+ * A normal map sample is a direction in the frame the DECAL is laid out in, while the destination
+ * map stores directions in the frame the SURFACE's UV parametrization defines. Both have to be
+ * known before one can be expressed in the other, and both are constant across a UV primitive --
+ * so this is called once per pixel row, not once per texel.
+ *
+ * \param tri_tangent, tri_bitangent_sign: The primitive's UV tangent and handedness, from
+ * #UVPrimitives.
+ * \param tri_positions: The primitive's three object-space corners, in winding order.
+ * \param view_right: Fallback in-plane direction for a primitive whose screen projection is
+ * degenerate (edge-on), where the screen basis cannot be derived.
+ * \param region, projection_mat: The view the decal is laid out in for a brush-mapped source.
+ * \a region may be null, in which case the \a view_right fallback is used throughout; a caller
+ * whose decal has a frame of its own does not need the screen basis at all.
+ * \param r_t_screen, r_b_screen: Screen right/up projected onto the surface -- the decal frame a
+ * brush-mapped normal source is authored in.
+ * \param r_n_m, r_t_m, r_b_m: The surface's own tangent basis, the frame the map is written in.
+ */
+void build_normal_write_basis(const float3 &tri_tangent,
+                              float tri_bitangent_sign,
+                              Span<float3> tri_positions,
+                              const float3 &view_right,
+                              const ARegion *region,
+                              const float4x4 &projection_mat,
+                              float3 &r_t_screen,
+                              float3 &r_b_screen,
+                              float3 &r_n_m,
+                              float3 &r_t_m,
+                              float3 &r_b_m);
 
 }  // namespace blender::ed::sculpt_paint::material

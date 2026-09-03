@@ -250,6 +250,7 @@ set(SRC
   engines/overlay/overlay_bounds.hh
   engines/overlay/overlay_camera.hh
   engines/overlay/overlay_cursor.hh
+  engines/overlay/overlay_paint_curve_cursor.hh
   engines/overlay/overlay_curve.hh
   engines/overlay/overlay_empty.hh
   engines/overlay/overlay_engine.h

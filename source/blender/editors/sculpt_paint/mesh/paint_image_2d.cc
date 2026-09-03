@@ -165,14 +165,17 @@ struct BrushPainterCache {
 
 /**
  * Affine mapping from a brush image-buffer pixel `(x, y)` to a texture sample coordinate:
- * `texco = origin + x * du + y * dv`. The full 2D basis (`du`, `dv`) can encode canvas rotation
- * (and non-uniform scaling), which an axis-aligned `rctf` cannot. With no canvas rotation this
- * reduces to `du = {xmax, 0}`, `dv = {0, ymax}`, `origin = {xmin, ymin}`.
+ * `texco = origin + x * basis_x + y * basis_y`.
+ *
+ * A full 2D basis rather than an axis-aligned `rctf` (translation + per-axis scale), because two
+ * features need an oriented frame: canvas rotation, which keeps the painted texture locked to the
+ * view, and Roll, which orients the brush buffer along the stroke trajectory. The `rctf` case is
+ * the special case `basis_x = {xmax, 0}`, `basis_y = {0, ymax}`, `origin = {xmin, ymin}`.
  */
 struct BrushImbufMapping {
-  float origin[2];
-  float du[2];
-  float dv[2];
+  float2 origin = float2(0.0f, 0.0f);
+  float2 basis_x = float2(1.0f, 0.0f);
+  float2 basis_y = float2(0.0f, 1.0f);
 };
 
 struct BrushPainter {
@@ -187,9 +190,8 @@ struct BrushPainter {
   bool firsttouch; /* first paint op */
 
   ImagePool *pool; /* image pool */
-  /* Affine mapping from a brush image-buffer pixel to a texture sample coordinate. A full 2D
-   * basis (rather than an axis-aligned `rctf`) is required so that canvas rotation can be
-   * represented; see #brush_imbuf_tex_co. */
+  /* Affine mapping from a brush image-buffer pixel to a texture sample coordinate; a full 2D
+   * basis so canvas rotation and Roll frames can both be represented. See #brush_imbuf_tex_co. */
   BrushImbufMapping tex_mapping;  /* texture coordinate mapping */
   BrushImbufMapping mask_mapping; /* mask texture coordinate mapping */
 
@@ -386,10 +388,10 @@ static void brush_painter_cache_2d_free(BrushPainterCache *cache)
   }
 }
 
-static void brush_imbuf_tex_co(const BrushImbufMapping *mapping, int x, int y, float texco[3])
+static void brush_imbuf_tex_co(const BrushImbufMapping &mapping, int x, int y, float texco[3])
 {
-  texco[0] = mapping->origin[0] + x * mapping->du[0] + y * mapping->dv[0];
-  texco[1] = mapping->origin[1] + x * mapping->du[1] + y * mapping->dv[1];
+  texco[0] = mapping.origin[0] + x * mapping.basis_x[0] + y * mapping.basis_y[0];
+  texco[1] = mapping.origin[1] + x * mapping.basis_x[1] + y * mapping.basis_y[1];
   texco[2] = 0.0f;
 }
 
@@ -553,7 +555,7 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
   const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
       painter->channel_sources->source(channel);
   float3 texco;
-  brush_imbuf_tex_co(&painter->source_mapping, x, y, texco);
+  brush_imbuf_tex_co(painter->source_mapping, x, y, texco);
   ImagePool *pool = painter->channel_sources->pool() != nullptr ?
                         painter->channel_sources->pool() :
                         painter->pool;
@@ -618,7 +620,7 @@ static float paint_2d_view_dab_brush_coverage(const BrushPainter *painter,
     return 1.0f;
   }
   float3 texco;
-  brush_imbuf_tex_co(tex_mapping, x, y, texco);
+  brush_imbuf_tex_co(*tex_mapping, x, y, texco);
   BKE_brush_sample_tex_3d(
       painter->paint, painter->brush, mtex, texco, r_brush_rgba, thread, pool);
   return r_brush_rgba[3];
@@ -863,7 +865,7 @@ static ushort *brush_painter_mask_ibuf_new(BrushPainter *painter, const int size
   for (y = 0; y < size; y++) {
     for (x = 0; x < size; x++, m++) {
       float res;
-      brush_imbuf_tex_co(&mask_mapping, x, y, texco);
+      brush_imbuf_tex_co(mask_mapping, x, y, texco);
       res = BKE_brush_sample_masktex(painter->paint, brush, texco, thread, pool);
       *m = ushort(65535.0f * res);
     }
@@ -908,7 +910,7 @@ static void brush_painter_mask_imbuf_update(BrushPainter *painter,
       ushort *t = tex_mask_cur + (y * diameter + x);
 
       if (!use_texture_old) {
-        brush_imbuf_tex_co(&tex_mapping, x, y, texco);
+        brush_imbuf_tex_co(tex_mapping, x, y, texco);
         res = ushort(65535.0f *
                      BKE_brush_sample_masktex(painter->paint, brush, texco, thread, pool));
       }
@@ -1207,7 +1209,7 @@ static void brush_painter_imbuf_fill(BrushPainter *painter,
         float4 rgba;
 
         if (is_texbrush) {
-          brush_imbuf_tex_co(&tex_mapping, x, y, texco);
+          brush_imbuf_tex_co(tex_mapping, x, y, texco);
           const MTex *mtex = &brush->mtex;
           BKE_brush_sample_tex_3d(painter->paint, brush, mtex, texco, rgba, thread, pool);
           if (!paint_2d_material_channel_replaces_rgb(painter)) {
@@ -1352,7 +1354,7 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
 
             if (!use_texture_old) {
               if (is_texbrush) {
-                brush_imbuf_tex_co(&tex_mapping, x, y, texco);
+                brush_imbuf_tex_co(tex_mapping, x, y, texco);
                 BKE_brush_sample_tex_3d(painter->paint, brush, mtex, texco, rgba, thread, pool);
                 if (!paint_2d_material_channel_replaces_rgb(painter)) {
                   if (cache->is_srgb) {
@@ -1523,6 +1525,7 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
                                          const float pos[2],
                                          const float mouse[2],
                                          int mapmode,
+                                         const ed::sculpt_paint::ImagePaintRollDab *roll_dab,
                                          BrushImbufMapping *r_mapping)
 {
   const float invw = 1.0f / float(tile->canvas->x);
@@ -1533,6 +1536,39 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
   /* find start coordinate of brush in canvas */
   start[0] = pos[0] - diameter / 2.0f;
   start[1] = pos[1] - diameter / 2.0f;
+
+  if (mapmode == MTEX_MAP_MODE_ROLL) {
+    /* Roll mapping: orient the brush buffer along the current trajectory. The Roll frame's
+     * tangent is the texture x-axis and the perpendicular is the y-axis; the frame is centered
+     * on the dab, so the texture repeats once per brush diameter along the path. Sampling
+     * normalizes the coordinates by `start_pixel_radius` later (`BKE_brush_sample_tex_3d()`),
+     * hence the `* start_pixel_radius` here. A dab without a valid frame (e.g. the very first
+     * dab of the stroke) falls back to a stable axis-aligned frame. */
+    /* No canvas-rotation term belongs here: the trajectory this tangent comes from is recorded
+     * through `view2d_region_to_view()`, which already undoes the display rotation, so the frame
+     * is in canvas space like the rest of this function's output. Roll is path-locked rather than
+     * view-locked (unlike VIEW/TILED below), so the painted texture follows the stroke drawn on
+     * the canvas whatever angle the canvas is displayed at.
+     *
+     * The tangent IS a unit vector in image UV space, though, while the basis below steps in
+     * canvas pixels -- on a non-square canvas that is a different direction. Convert first. */
+    float2 tangent(1.0f, 0.0f);
+    if (roll_dab != nullptr && roll_dab->frame_valid) {
+      const float2 tangent_px = float2(roll_dab->tangent.x * float(tile->canvas->x),
+                                       roll_dab->tangent.y * float(tile->canvas->y));
+      const float tangent_len = math::length(tangent_px);
+      if (tangent_len > 1e-6f) {
+        tangent = tangent_px / tangent_len;
+      }
+    }
+    const float2 perp = float2(-tangent.y, tangent.x);
+    const float scale = 2.0f * s->paint->runtime->start_pixel_radius / float(diameter);
+    const float2 half_extent = (tangent + perp) * (0.5f * float(diameter) * scale);
+    r_mapping->origin = -half_extent;
+    r_mapping->basis_x = tangent * scale;
+    r_mapping->basis_y = perp * scale;
+    return;
+  }
 
   if (mapmode == MTEX_MAP_MODE_STENCIL) {
     /* The stencil texture is pinned to a fixed region position (`stencil_pos`) with region-space
@@ -1549,15 +1585,15 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
     uv_to_region(start[0] + 1.0f, start[1], step_x);
     uv_to_region(start[0], start[1] + 1.0f, step_y);
 
-    r_mapping->du[0] = step_x[0] - origin[0];
-    r_mapping->du[1] = step_x[1] - origin[1];
-    r_mapping->dv[0] = step_y[0] - origin[0];
-    r_mapping->dv[1] = step_y[1] - origin[1];
+    r_mapping->basis_x[0] = step_x[0] - origin[0];
+    r_mapping->basis_x[1] = step_x[1] - origin[1];
+    r_mapping->basis_y[0] = step_y[0] - origin[0];
+    r_mapping->basis_y[1] = step_y[1] - origin[1];
     /* Offset for the tile origin (UDIM), expressed along the mapping basis. */
     const float off_u = tile->uv_origin[0] * tile->size[0];
     const float off_v = tile->uv_origin[1] * tile->size[1];
-    r_mapping->origin[0] = origin[0] + off_u * r_mapping->du[0] + off_v * r_mapping->dv[0];
-    r_mapping->origin[1] = origin[1] + off_u * r_mapping->du[1] + off_v * r_mapping->dv[1];
+    r_mapping->origin[0] = origin[0] + off_u * r_mapping->basis_x[0] + off_v * r_mapping->basis_y[0];
+    r_mapping->origin[1] = origin[1] + off_u * r_mapping->basis_x[1] + off_v * r_mapping->basis_y[1];
     return;
   }
 
@@ -1576,15 +1612,15 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
      * the stroke start, so the mapping is a single consistent function of the canvas pixel. A
      * per-dab (`pos`-dependent) anchor would otherwise shift the tile phase between dabs and shear
      * the pattern. Composed with the display rotation this yields a screen-locked tiling. */
-    r_mapping->du[0] = cos_a;
-    r_mapping->du[1] = sin_a;
-    r_mapping->dv[0] = -sin_a;
-    r_mapping->dv[1] = cos_a;
+    r_mapping->basis_x[0] = cos_a;
+    r_mapping->basis_x[1] = sin_a;
+    r_mapping->basis_y[0] = -sin_a;
+    r_mapping->basis_y[1] = cos_a;
     /* `texco = Rot(-a) * (P - floor(start_paintpos))`, with `P = start + (x, y)`. */
     const float anchor[2] = {start[0] - floorf(tile->start_paintpos[0]),
                              start[1] - floorf(tile->start_paintpos[1])};
-    r_mapping->origin[0] = r_mapping->du[0] * anchor[0] + r_mapping->dv[0] * anchor[1];
-    r_mapping->origin[1] = r_mapping->du[1] * anchor[0] + r_mapping->dv[1] * anchor[1];
+    r_mapping->origin[0] = r_mapping->basis_x[0] * anchor[0] + r_mapping->basis_y[0] * anchor[1];
+    r_mapping->origin[1] = r_mapping->basis_x[1] * anchor[0] + r_mapping->basis_y[1] * anchor[1];
     return;
   }
 
@@ -1608,15 +1644,15 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
     ymax = 1.0f;
   }
 
-  r_mapping->du[0] = cos_a * xmax;
-  r_mapping->du[1] = sin_a * xmax;
-  r_mapping->dv[0] = -sin_a * ymax;
-  r_mapping->dv[1] = cos_a * ymax;
+  r_mapping->basis_x[0] = cos_a * xmax;
+  r_mapping->basis_x[1] = sin_a * xmax;
+  r_mapping->basis_y[0] = -sin_a * ymax;
+  r_mapping->basis_y[1] = cos_a * ymax;
 
   /* Rotate the lattice about the brush center: `texco = center_texco + (p - center) * basis`. */
   const float center_texco[2] = {xmin + center * xmax, ymin + center * ymax};
-  r_mapping->origin[0] = center_texco[0] - center * (r_mapping->du[0] + r_mapping->dv[0]);
-  r_mapping->origin[1] = center_texco[1] - center * (r_mapping->du[1] + r_mapping->dv[1]);
+  r_mapping->origin[0] = center_texco[0] - center * (r_mapping->basis_x[0] + r_mapping->basis_y[0]);
+  r_mapping->origin[1] = center_texco[1] - center * (r_mapping->basis_x[1] + r_mapping->basis_y[1]);
 }
 
 static void brush_painter_2d_refresh_cache(ImagePaintState *s,
@@ -1627,7 +1663,8 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
                                            float pressure,
                                            float distance,
                                            float size,
-                                           const ImagePaintState *shared_state)
+                                           const ImagePaintState *shared_state,
+                                           const ed::sculpt_paint::ImagePaintRollDab *roll_dab)
 {
   const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
   Brush *brush = painter->brush;
@@ -1645,12 +1682,18 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
                       BKE_brush_color_jitter_get_settings(painter->paint, brush);
   float tex_rotation = -brush->mtex.rot;
   float mask_rotation = -brush->mask_mtex.rot;
+  /* Roll frames change with every dab: the affine mapping is rebuilt per dab, so the brush
+   * buffer must be regenerated instead of reusing cached pixels (the partial-update shift only
+   * understands translation-only mappings). */
+  const bool roll_mode = (brush->mtex.brush_map_mode == MTEX_MAP_MODE_ROLL);
+  const bool mask_roll_mode = (brush->mask_mtex.brush_map_mode == MTEX_MAP_MODE_ROLL);
 
   painter->pool = painter->pool ? painter->pool : BKE_image_pool_new();
 
   const bool use_2d_channel_source =
       paint_2d_channel_source_usable_2d(painter, painter->material_channel);
-  const bool copy_shared_source = shared_state != nullptr && shared_state->painter != nullptr &&
+  const bool copy_shared_source = !roll_mode && shared_state != nullptr &&
+                                  shared_state->painter != nullptr &&
                                   painter->channel_sources != nullptr &&
                                   painter->use_material_channel_color &&
                                   paint_2d_matching_curve_mask(shared_state, tile, diameter) !=
@@ -1690,14 +1733,14 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       const float start = diameter * 0.5f;
       painter->source_mapping.origin[0] = mouse[0] * inv_zoom - (start - 0.5f) * inv_radius_fac;
       painter->source_mapping.origin[1] = mouse[1] * inv_zoom - (start - 0.5f) * inv_radius_fac;
-      painter->source_mapping.du[0] = inv_radius_fac;
-      painter->source_mapping.du[1] = 0.0f;
-      painter->source_mapping.dv[0] = 0.0f;
-      painter->source_mapping.dv[1] = inv_radius_fac;
+      painter->source_mapping.basis_x[0] = inv_radius_fac;
+      painter->source_mapping.basis_x[1] = 0.0f;
+      painter->source_mapping.basis_y[0] = 0.0f;
+      painter->source_mapping.basis_y[1] = inv_radius_fac;
     }
     else {
       brush_painter_2d_tex_mapping(
-          s, tile, diameter, pos, mouse, source_map_mode, &painter->source_mapping);
+          s, tile, diameter, pos, mouse, source_map_mode, nullptr, &painter->source_mapping);
     }
     paint_2d_source_mtex_2d_update(painter);
   }
@@ -1714,13 +1757,19 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     else if (brush->mtex.brush_map_mode == MTEX_MAP_MODE_RANDOM) {
       do_random = true;
     }
-    else if (!((brush->stroke_method == BRUSH_STROKE_ANCHORED) || update_color)) {
+    else if (!((brush->stroke_method == BRUSH_STROKE_ANCHORED) || update_color || roll_mode)) {
       do_partial_update = true;
     }
 
     if (!copy_shared_source) {
-      brush_painter_2d_tex_mapping(
-          s, tile, diameter, pos, mouse, brush->mtex.brush_map_mode, &painter->tex_mapping);
+      brush_painter_2d_tex_mapping(s,
+                                   tile,
+                                   diameter,
+                                   pos,
+                                   mouse,
+                                   brush->mtex.brush_map_mode,
+                                   roll_dab,
+                                   &painter->tex_mapping);
     }
   }
 
@@ -1734,7 +1783,7 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     else if (brush->mask_mtex.brush_map_mode == MTEX_MAP_MODE_RANDOM) {
       renew_maxmask = true;
     }
-    else if (!(brush->stroke_method == BRUSH_STROKE_ANCHORED)) {
+    else if (!(brush->stroke_method == BRUSH_STROKE_ANCHORED) && !mask_roll_mode) {
       do_partial_update_mask = true;
       renew_maxmask = true;
     }
@@ -1745,12 +1794,18 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     }
 
     if (diameter != cache->lastdiameter || (mask_rotation != cache->last_mask_rotation) ||
-        renew_maxmask)
+        renew_maxmask || mask_roll_mode)
     {
       MEM_SAFE_DELETE(cache->tex_mask);
 
-      brush_painter_2d_tex_mapping(
-          s, tile, diameter, pos, mouse, brush->mask_mtex.brush_map_mode, &painter->mask_mapping);
+      brush_painter_2d_tex_mapping(s,
+                                   tile,
+                                   diameter,
+                                   pos,
+                                   mouse,
+                                   brush->mask_mtex.brush_map_mode,
+                                   roll_dab,
+                                   &painter->mask_mapping);
 
       if (do_partial_update_mask) {
         brush_painter_mask_imbuf_partial_update(painter, tile, pos, diameter);
@@ -1764,12 +1819,12 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   /* Re-initialize the curve mask. Mask is always recreated due to the change of position.
    * Extra material painters share the primary's rasterized mask when the dab diameter matches. */
+  const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(s->image);
 #if PBR_PAINT_2D_STROKE_PROFILE
   {
     const StrokePhaseTimer curve_timer(&g_stroke_curve_mask_seconds, &g_stroke_curve_mask_calls);
 #endif
     const CurveMaskCache *shared_mask = paint_2d_matching_curve_mask(shared_state, tile, diameter);
-    const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(s->image);
     const bool shared_mask_has_selection = shared_state != nullptr &&
                                            BKE_image_paint_selection_mask_has_any(shared_state->image);
     if (shared_mask != nullptr && !has_selection_mask && !shared_mask_has_selection) {
@@ -1817,7 +1872,7 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   /* detect if we need to recreate image brush buffer */
   const bool stamp_shape_changed = diameter != cache->lastdiameter ||
                                    (tex_rotation != cache->last_tex_rotation) || do_random ||
-                                   update_color;
+                                   update_color || roll_mode;
   if (stamp_shape_changed || do_source_rebuild)
   {
     if (do_partial_update) {
@@ -3695,7 +3750,8 @@ static void paint_2d_stroke_single(ImagePaintState *s,
                                    float base_size,
                                    MutableSpan<SymmetryDab> dabs,
                                    MutableSpan<AreaPlaneDabGeom> geoms,
-                                   const ImagePaintState *shared_state)
+                                   const ImagePaintState *shared_state,
+                                   const ed::sculpt_paint::ImagePaintRollDab *roll_dab)
 {
 #if PBR_PAINT_2D_STROKE_PROFILE
   const StrokePhaseTimer single_timer(&g_stroke_single_seconds, &g_stroke_single_calls);
@@ -3892,7 +3948,7 @@ static void paint_2d_stroke_single(ImagePaintState *s,
                                      painter->cache_invert);
 
       brush_painter_2d_refresh_cache(
-          s, painter, tile, new_coord, iter_mval, pressure, distance, size, shared_state);
+          s, painter, tile, new_coord, iter_mval, pressure, distance, size, shared_state, roll_dab);
 
       if (paint_2d_op(s, tile, old_coord, new_coord)) {
         tile->need_redraw = true;
@@ -3956,7 +4012,8 @@ void paint_2d_stroke(void *ps,
                      const bool eraser,
                      float pressure,
                      float distance,
-                     float base_size)
+                     float base_size,
+                     const ed::sculpt_paint::ImagePaintRollDab *roll_dab)
 {
 #if PBR_PAINT_2D_STROKE_PROFILE
   const StrokePhaseTimer wall_timer(&g_stroke_wall_seconds, &g_stroke_wall_calls);
@@ -3979,7 +4036,7 @@ void paint_2d_stroke(void *ps,
   Array<SymmetryDab> dabs(AREA_PLANE_SYMMETRY_SLOTS);
   Array<AreaPlaneDabGeom> geoms(AREA_PLANE_SYMMETRY_SLOTS);
   paint_2d_stroke_single(
-      s, prev_mval, mval, eraser, pressure, distance, base_size, dabs, geoms, nullptr);
+      s, prev_mval, mval, eraser, pressure, distance, base_size, dabs, geoms, nullptr, roll_dab);
   for (int i = 0; i < s->material_extra_states_num; i++) {
     paint_2d_stroke_single(s->material_extra_states[i],
                            prev_mval,
@@ -3990,7 +4047,8 @@ void paint_2d_stroke(void *ps,
                            base_size,
                            dabs,
                            geoms,
-                           s);
+                           s,
+                           roll_dab);
   }
 }
 

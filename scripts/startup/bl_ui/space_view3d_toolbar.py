@@ -24,6 +24,7 @@ from bl_ui.properties_paint_common import (
     SmoothStrokePanel,
     FalloffPanel,
     DisplayPanel,
+    draw_paint_canvas_row,
     draw_brush_texture_image_grid,
     draw_brush_texture_properties,
     draw_brush_mask_texture_properties,
@@ -595,10 +596,9 @@ class SelectPaintSlotHelper:
                 mesh = ob.data
                 uv_text = mesh.uv_layers.active.name if mesh.uv_layers.active else ""
                 mat = ob.active_material if ob else None
-                layout.template_ID_browser(
-                    mode_settings, self.canvas_image_attr_name,
-                    new="image.new", open="image.open",
-                    material=mat,
+                draw_paint_canvas_row(
+                    layout, mode_settings, self.canvas_image_attr_name,
+                    material=mat, new="image.new", open_op="image.open",
                 )
                 if settings.missing_uvs:
                     layout.operator("paint.add_simple_uvs", icon='ADD', text="Add UVs")

@@ -21,6 +21,7 @@ set(SRC
   interface_grid_asset_source.cc
   interface_grid_core_math.cc
   interface_grid_python_source.cc
+  interface_grid_query.cc
   interface_grid_view.hh
   interface_grid_view_settings_utils.hh
   interface_grid_view_sources.hh

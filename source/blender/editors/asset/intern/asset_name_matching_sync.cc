@@ -24,6 +24,7 @@
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "ED_asset_shelf.hh"
 #include "ED_image_grid.hh"
@@ -88,14 +89,18 @@ void name_match_map_type_id_replace(Main &bmain, const StringRef old_id, const S
 
   bool file_browser_changed = false;
 
+  /* The brush-texture image grid keeps one filter state per file, on the window manager, shared by
+   * every editor that shows it. See #ImageGridOwner. */
+  for (wmWindowManager &wm : bmain.wm) {
+    for (ImageGridSlotDNA *slot : {&wm.image_grid, &wm.image_grid_mask}) {
+      name_match_id_list_replace(slot->filter_name_match_map_types, old_id, new_id);
+    }
+  }
   for (bScreen &screen : bmain.screens) {
     for (ScrArea &area : screen.areabase) {
       for (SpaceLink &sl : area.spacedata) {
         if (sl.spacetype == SPACE_VIEW3D) {
           View3D &v3d = reinterpret_cast<View3D &>(sl);
-          for (ImageGridSlotDNA *slot : {&v3d.image_grid, &v3d.image_grid_mask}) {
-            name_match_id_list_replace(slot->filter_name_match_map_types, old_id, new_id);
-          }
           /* The runtime state is seeded from DNA once and never re-synced, so an open grid would
            * keep filtering by the old ID until the file is reloaded (see
            * #image_grid_foreach_live_library_ref for the same reasoning). */

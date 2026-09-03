@@ -12,7 +12,6 @@
 #include "DNA_asset_types.h"
 #include "DNA_color_types.h" /* for Histogram */
 #include "DNA_defs.h"
-#include "DNA_image_grid_types.h"
 #include "DNA_image_types.h" /* ImageUser */
 #include "DNA_listBase.h"
 #include "DNA_mask_types.h"
@@ -718,13 +717,6 @@ struct SpaceImage {
 
   MaskSpaceInfo mask_info;
   SpaceImageOverlay overlay;
-
-  /** Brush-texture image grid state — mirrors #View3D::image_grid /
-   * #image_grid_mask / #image_grid_preview_size (see #ImageGridOwner). */
-  short image_grid_preview_size = 0;
-  char _pad_image_grid[6] = {};
-  ImageGridSlotDNA image_grid;
-  ImageGridSlotDNA image_grid_mask;
 
   /* Runtime data, not written to .blend. */
   ed::image::SpaceImage_Runtime *runtime = nullptr;

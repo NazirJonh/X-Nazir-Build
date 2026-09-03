@@ -338,18 +338,20 @@ void AbstractGridView::scroll(const ViewScrollDirection direction)
   this->scroll_px_set(std::max(row, 0) * tile_height);
 }
 
-void AbstractGridView::fixed_viewport_scroll_active_into_view(const bool scroll_active_to_center)
+bool AbstractGridView::fixed_viewport_scroll_active_into_view(const bool scroll_active_to_center)
 {
   const FixedViewportGeometry geo = this->fixed_viewport_geometry();
   if (geo.cols <= 0) {
-    return;
+    return false;
   }
   const int tile_height = std::max(style_.tile_height, 1);
   const int current_row = this->scroll_px() / tile_height;
+  bool found_active = false;
 
   int index = 0;
   this->foreach_filtered_item([&](AbstractViewItem &item) {
     if (item.is_active()) {
+      found_active = true;
       const int row = index / geo.cols;
       /* Jumping to the active item snaps to whole rows, otherwise the target row would still be
        * cut by a sub-row offset left over from a drag. */
@@ -367,6 +369,7 @@ void AbstractGridView::fixed_viewport_scroll_active_into_view(const bool scroll_
     }
     index++;
   });
+  return found_active;
 }
 
 std::optional<ViewScrollDirection> AbstractGridView::fixed_viewport_scroll_at_y(
@@ -758,13 +761,29 @@ void AbstractGridView::scroll_active_into_view(bContext *C, bool scroll_active_t
     /* Fixed-viewport scrolling is a pixel position in the session (#scroll_px), applied by the
      * next build. When #cols_per_row_ isn't known yet (no build has run), defer to the build
      * instead. */
+    if (session_ != nullptr) {
+      session_->scroll_active_into_view_pending = true;
+      session_->scroll_active_to_center_pending = scroll_active_to_center;
+    }
     if (cols_per_row_ > 0) {
-      this->fixed_viewport_scroll_active_into_view(scroll_active_to_center);
+      if (this->fixed_viewport_scroll_active_into_view(scroll_active_to_center) &&
+          session_ != nullptr)
+      {
+        session_->scroll_active_into_view_pending = false;
+        session_->scroll_active_to_center_pending = false;
+      }
     }
     else {
       scroll_active_into_view_on_build_ = true;
       scroll_active_center_on_build_ = scroll_active_to_center;
     }
+    return;
+  }
+
+  if (cols_per_row_ < 1) {
+    /* No build has run yet, so there is no row layout to resolve an item's position against (and
+     * the row arithmetic below divides by this). The fixed-viewport path above defers to the next
+     * build in the same situation; here the next build simply lays the view out from the top. */
     return;
   }
 
@@ -778,40 +797,47 @@ void AbstractGridView::scroll_active_into_view(bContext *C, bool scroll_active_t
       if (!region) {
         region = CTX_wm_region(C);
       }
-      rctf rect;
-      View2D &v2d = region->v2d;
+      /* Not an early return: #index has to keep counting every filtered item, active or not. */
+      if (region != nullptr) {
+        View2D &v2d = region->v2d;
 
-      if (but) {
-        rctf region_rect;
-        block_to_region_rctf(region, but->block, &region_rect, &but->rect);
+        const IndexRange &visible_range = this->get_visible_range(v2d, nullptr);
+        int first_idx_in_view = visible_range.first();
+        int last_idx_in_view = visible_range.last();
 
-        view2d_region_to_view_rctf(&v2d, &region_rect, &rect);
-      }
+        if (but && but->block) {
+          rctf region_rect;
+          block_to_region_rctf(region, but->block, &region_rect, &but->rect);
+          rctf rect;
+          view2d_region_to_view_rctf(&v2d, &region_rect, &rect);
 
-      const IndexRange &visible_range = this->get_visible_range(v2d, nullptr);
-      int first_idx_in_view = visible_range.first();
-      int last_idx_in_view = visible_range.last();
+          /* When button is slightly outside the view, clamp region to button's height, see:
+           * !159566. Only meaningful with a built button: keyboard navigation can make an item
+           * active while it is still scrolled out of view, and such an item has no button and so
+           * no rect to clamp by -- reading one here is an uninitialized read (#_RTC_UninitUse in
+           * a Debug build). Skipping the clamp leaves the plain visible range, which is exactly
+           * what the scrolling below needs to bring the item in. */
+          first_idx_in_view += rect.ymax > v2d.cur.ymax ? cols_per_row_ : 0;
+          last_idx_in_view -= rect.ymin < v2d.cur.ymin ? cols_per_row_ : 0;
+        }
 
-      /* When button is slightly outside the view, clamp region to button's height, see: !159566 */
-      first_idx_in_view += rect.ymax > v2d.cur.ymax ? cols_per_row_ : 0;
-      last_idx_in_view -= rect.ymin < v2d.cur.ymin ? cols_per_row_ : 0;
+        const int view_height = BLI_rcti_size_y(&v2d.mask);
+        const int count_rows_in_view = std::max(view_height / style_.tile_height, 1);
 
-      const int view_height = BLI_rcti_size_y(&v2d.mask);
-      const int count_rows_in_view = std::max(view_height / style_.tile_height, 1);
-
-      if (index < first_idx_in_view) {
-        int target_row = index / cols_per_row_;
-        target_row -= scroll_active_to_center ? count_rows_in_view / 2 : 0;
-        const int cur_height = BLI_rctf_size_y(&v2d.cur);
-        v2d.cur.ymax = v2d.tot.ymax - target_row * style_.tile_height;
-        v2d.cur.ymin = v2d.cur.ymax - cur_height;
-      }
-      else if (index >= last_idx_in_view) {
-        int target_row = (index / cols_per_row_) + 1;
-        target_row += scroll_active_to_center ? count_rows_in_view / 2 : 0;
-        const int cur_height = BLI_rctf_size_y(&v2d.cur);
-        v2d.cur.ymin = v2d.tot.ymax - target_row * style_.tile_height - 2 * U.pixelsize;
-        v2d.cur.ymax = v2d.cur.ymin + cur_height;
+        if (index < first_idx_in_view) {
+          int target_row = index / cols_per_row_;
+          target_row -= scroll_active_to_center ? count_rows_in_view / 2 : 0;
+          const int cur_height = BLI_rctf_size_y(&v2d.cur);
+          v2d.cur.ymax = v2d.tot.ymax - target_row * style_.tile_height;
+          v2d.cur.ymin = v2d.cur.ymax - cur_height;
+        }
+        else if (index >= last_idx_in_view) {
+          int target_row = (index / cols_per_row_) + 1;
+          target_row += scroll_active_to_center ? count_rows_in_view / 2 : 0;
+          const int cur_height = BLI_rctf_size_y(&v2d.cur);
+          v2d.cur.ymin = v2d.tot.ymax - target_row * style_.tile_height - 2 * U.pixelsize;
+          v2d.cur.ymax = v2d.cur.ymin + cur_height;
+        }
       }
     }
     index++;

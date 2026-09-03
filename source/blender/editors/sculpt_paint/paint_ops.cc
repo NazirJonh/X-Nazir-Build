@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
+#include <string>
 
 #include "MEM_guardedalloc.h"
 
@@ -17,13 +19,20 @@
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
+
+#include "AS_asset_library.hh"
+#include "AS_asset_representation.hh"
 
 #include "IMB_interp.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_image_types.h"
+#include "DNA_material_types.h"
 #include "DNA_object_enums.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_space_types.h"
 
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
@@ -37,6 +46,9 @@
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
+#include "ED_asset_image_utils.hh"
+#include "ED_asset_list.hh"
+#include "ED_asset_menu_utils.hh"
 #include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
@@ -49,6 +61,7 @@
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
+#include "RNA_prototypes.hh"
 
 #include "IMB_colormanagement.hh"
 
@@ -674,7 +687,9 @@ void PAINT_OT_material_channel_source_clear(wmOperatorType *ot)
   ot->description = "Remove this channel's source texture, including one left in a broken state";
   ot->exec = material_channel_source_clear_exec;
   ot->poll = ED_operator_object_active_editable;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* Not registered: this is a picker button, so the redo panel it would raise ("Adjust Last
+   * Operation") is noise. Undo still works, which gates on #OPTYPE_UNDO alone. */
+  ot->flag = OPTYPE_UNDO | OPTYPE_INTERNAL;
 
   ot->prop = RNA_def_enum(ot->srna,
                           "channel",
@@ -683,6 +698,295 @@ void PAINT_OT_material_channel_source_clear(wmOperatorType *ot)
                           "Channel",
                           "Material paint channel whose source texture should be cleared");
 }
+
+/**
+ * Image the activated grid tile stands for. The local grid (#UIGrid) can only hand over a single
+ * string, so it passes the image name in `identifier`; the asset grid instead sets the standard
+ * asset reference properties, exactly as the image texture shelf does
+ * (see #image_shelf_activate_asset_exec).
+ */
+static Image *material_channel_source_image_from_op(bContext *C,
+                                                    wmOperator *op,
+                                                    const StringRef image_name_in)
+{
+  Main *bmain = CTX_data_main(C);
+
+  const std::string image_name = image_name_in;
+  if (!image_name.empty()) {
+    Image *image = reinterpret_cast<Image *>(
+        BKE_libblock_find_name(bmain, ID_IM, image_name.c_str()));
+    if (image == nullptr) {
+      BKE_report(op->reports, RPT_ERROR, "Image not found");
+    }
+    return image;
+  }
+
+  if (!ed::asset::operator_asset_reference_props_is_set(*op->ptr)) {
+    BKE_report(op->reports, RPT_ERROR, "No image given");
+    return nullptr;
+  }
+
+  /* Reported only if every lookup below fails: the "All Libraries" search is expected to come up
+   * empty whenever that combined list has not been fetched, which is the normal state when the
+   * grid only ever fetched the one library it browses. */
+  const asset_system::AssetRepresentation *asset =
+      ed::asset::operator_asset_reference_props_get_asset_from_all_library(*C, *op->ptr, nullptr);
+
+  if (asset == nullptr) {
+    /* Search each library on its own, the way the image texture shelf falls back to the library
+     * it actually fetched (see #image_shelf_activate_asset_exec). */
+    AssetWeakReference weak_ref{};
+    weak_ref.asset_library_type = eAssetLibraryType(RNA_enum_get(op->ptr, "asset_library_type"));
+    weak_ref.asset_library_identifier = RNA_string_get_alloc(
+        op->ptr, "asset_library_identifier", nullptr, 0, nullptr);
+    weak_ref.relative_asset_identifier = RNA_string_get_alloc(
+        op->ptr, "relative_asset_identifier", nullptr, 0, nullptr);
+
+    for (const AssetLibraryReference &library_ref : asset_system::all_valid_asset_library_refs()) {
+      ed::asset::list::storage_fetch(&library_ref, C);
+      ed::asset::list::iterate(library_ref, [&](asset_system::AssetRepresentation &candidate) {
+        if (candidate.make_weak_reference() == weak_ref) {
+          asset = &candidate;
+          return false;
+        }
+        return true;
+      });
+      if (asset != nullptr) {
+        break;
+      }
+    }
+  }
+
+  if (asset == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Asset not found");
+    return nullptr;
+  }
+  if (asset->get_id_type() != ID_IM) {
+    BKE_report(op->reports, RPT_ERROR, "Selected asset is not an image");
+    return nullptr;
+  }
+
+  /* Links or appends the asset when it is not already in this file. */
+  Image *image = ed::asset::resolve_image_from_asset(*bmain, *asset);
+  if (image == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Could not load image asset");
+  }
+  return image;
+}
+
+static wmOperatorStatus material_channel_source_image_set_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active material paint brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Neither grid can pass the channel along with the item through the button system, so it travels
+   * with the item instead: the local grid puts it in front of the image name ("<CHANNEL>/<image>"),
+   * the asset grid sets `context_id`. The layout context is only a fallback for menus, which keep
+   * their context store alive. */
+  const std::string identifier = RNA_string_get(op->ptr, "identifier");
+  const size_t separator = identifier.find('/');
+
+  std::string channel_id;
+  std::string image_name = identifier;
+  if (separator != std::string::npos) {
+    channel_id = identifier.substr(0, separator);
+    image_name = identifier.substr(separator + 1);
+  }
+  else {
+    channel_id = RNA_string_get(op->ptr, "context_id");
+  }
+
+  std::optional<StringRefNull> channel_name;
+  if (!channel_id.empty()) {
+    channel_name = StringRefNull(channel_id);
+  }
+  else {
+    channel_name = CTX_data_string_get(C, "material_paint_channel_id");
+  }
+
+  PointerRNA channel_ptr = PointerRNA_NULL;
+  int channel_value = 0;
+  if (channel_name && RNA_enum_value_from_id(rna_enum_material_paint_channel_items,
+                                             channel_name->c_str(),
+                                             &channel_value))
+  {
+    channel_ptr = RNA_pointer_create_discrete(
+        &brush->id,
+        RNA_BrushMaterialPaintChannel,
+        &brush->material_paint->channels[eMaterialPaintChannel(channel_value)]);
+  }
+  else {
+    /* Menus keep the layout context store alive, so the pointer still works there. */
+    channel_ptr = CTX_data_pointer_get_type(
+        C, "material_paint_channel", RNA_BrushMaterialPaintChannel);
+  }
+  if (channel_ptr.data == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No material paint channel given");
+    return OPERATOR_CANCELLED;
+  }
+
+  Image *image = material_channel_source_image_from_op(C, op, image_name);
+  if (image == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Assign through RNA so the source_image setter's Tex wrapper creation, user counts and
+   * non-color default all stay in one place. */
+  PointerRNA target_ptr = channel_ptr;
+  PointerRNA image_ptr = RNA_id_pointer_create(&image->id);
+  RNA_pointer_set(&target_ptr, "source_image", image_ptr);
+
+  /* The setter can decline (e.g. the Tex wrapper could not be created), which would otherwise
+   * leave the click looking like it did nothing at all. */
+  if (RNA_pointer_get(&target_ptr, "source_image").data != &image->id) {
+    BKE_reportf(op->reports,
+                RPT_ERROR,
+                "Could not assign \"%s\" to this material paint channel",
+                image->id.name + 2);
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_channel_source_image_set(wmOperatorType *ot)
+{
+  ot->name = "Set Source Image";
+  ot->idname = "PAINT_OT_material_channel_source_image_set";
+  ot->description = "Use the picked image as this channel's source texture";
+  ot->exec = material_channel_source_image_set_exec;
+  ot->poll = ED_operator_object_active_editable;
+  /* Not registered: activating a grid tile is a picker click, not an operation worth re-running
+   * from the redo panel, whose properties (a grid identifier or an asset reference) mean nothing
+   * out of that context. Undo still works, which gates on #OPTYPE_UNDO alone. */
+  ot->flag = OPTYPE_UNDO | OPTYPE_INTERNAL;
+
+  ed::asset::operator_asset_reference_props_register(*ot->srna);
+
+  /* Both properties below describe one click and must never be inherited from the previous run:
+   * every invocation sets only the pair its own picker uses, and #WM_operator_last_properties_init
+   * fills in whatever the caller left unset. A stale `identifier` left by a local-grid click would
+   * send an asset-grid click down the image-name branch, which never reads the asset reference at
+   * all. #PROP_SKIP_SAVE keeps them out of that store, as it does for the asset reference
+   * properties registered above (see #operator_asset_reference_props_register). */
+
+  /* Filled in by the asset grid from its `activate_context_id`; see #AssetGridItem::on_activate. */
+  PropertyRNA *prop = RNA_def_string(ot->srna,
+                                     "context_id",
+                                     nullptr,
+                                     0,
+                                     "Context ID",
+                                     "Material paint channel this assignment applies to");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  ot->prop = RNA_def_string(ot->srna,
+                            "identifier",
+                            nullptr,
+                            0,
+                            "Identifier",
+                            "Local grid item, as \"<channel>/<image name>\". When empty, the "
+                            "asset reference properties are used instead");
+  RNA_def_property_flag(ot->prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Cycle Material Paint Canvas
+ *
+ * Steps the Image Editor's shown image (#SpaceImage.image) through the active material's texture
+ * paint slots, in node order. Only available while the Image Editor is in Material (PBR) paint
+ * mode. Bound to `C` / `Shift-C` in the Image Paint keymap.
+ * \{ */
+
+static bool material_canvas_cycle_poll(bContext *C)
+{
+  const SpaceImage *sima = CTX_wm_space_image(C);
+  if (sima == nullptr || sima->mode != SI_MODE_PAINT) {
+    return false;
+  }
+  const Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr ||
+      scene->toolsettings->imapaint.mode != IMAGEPAINT_MODE_MATERIAL)
+  {
+    return false;
+  }
+  const Object *ob = CTX_data_active_object(C);
+  return ob != nullptr && ob->actcol > 0;
+}
+
+static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  Scene *scene = CTX_data_scene(C);
+  Object *ob = CTX_data_active_object(C);
+  Material *ma = ob ? BKE_object_material_get(ob, ob->actcol) : nullptr;
+  if (sima == nullptr || scene == nullptr || ma == nullptr) {
+    BKE_report(op->reports, RPT_WARNING, "No active material paint canvas");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Rebuild the paint-slot cache so it reflects the current node tree (the Image Editor never
+   * calls this itself, unlike entering texture paint mode). */
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+
+  const blender::Vector<Image *> images = BKE_texpaint_slot_canvas_images(ma);
+  if (images.is_empty()) {
+    BKE_report(op->reports, RPT_WARNING, "Active material has no paintable image slots");
+    return OPERATOR_CANCELLED;
+  }
+  const bool keep_view = RNA_boolean_get(op->ptr, "keep_view");
+
+  if (images.size() == 1) {
+    /* Nothing to cycle to; still assign so an out-of-material canvas snaps back. */
+    if (sima->image != images[0]) {
+      ED_space_image_set_ex(CTX_data_main(C), sima, images[0], keep_view);
+      WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+    }
+    return OPERATOR_FINISHED;
+  }
+
+  const bool reverse = RNA_boolean_get(op->ptr, "reverse");
+  const int count = int(images.size());
+  const int current = int(images.first_index_of_try(sima->image));
+  int next;
+  if (current < 0) {
+    next = reverse ? count - 1 : 0;
+  }
+  else {
+    next = (current + (reverse ? -1 : 1) + count) % count;
+  }
+
+  ED_space_image_set_ex(CTX_data_main(C), sima, images[next], keep_view);
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_canvas_cycle(wmOperatorType *ot)
+{
+  ot->name = "Cycle Material Paint Canvas";
+  ot->idname = "PAINT_OT_material_canvas_cycle";
+  ot->description =
+      "Show the next texture paint slot of the active material in the Image Editor (PBR paint)";
+  ot->exec = material_canvas_cycle_exec;
+  ot->poll = material_canvas_cycle_poll;
+  ot->flag = OPTYPE_REGISTER;
+
+  RNA_def_boolean(
+      ot->srna, "reverse", false, "Reverse", "Step to the previous slot instead of the next");
+  RNA_def_boolean(ot->srna,
+                  "keep_view",
+                  true,
+                  "Keep View",
+                  "Preserve the current zoom and pan instead of adopting the next image's "
+                  "remembered view");
+}
+
+/** \} */
 
 void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
 {
@@ -717,8 +1021,15 @@ static wmOperatorStatus material_paint_images_ensure_exec(bContext *C, wmOperato
   PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
   Main *bmain = CTX_data_main(C);
   const BrushMaterialPaint &brush_paint = *brush->material_paint;
-  const int created = BKE_paint_material_images_ensure_writable(
+  const PaintMaterialImagesEnsureResult ensure_result = BKE_paint_material_images_ensure_writable(
       *bmain, *ob, brush_paint, mode_settings, paint->visible_material_channels);
+  const int created = ensure_result.created;
+  if (ensure_result.conflicting_layer_ids) {
+    BKE_report(op->reports,
+               RPT_WARNING,
+               "Enabled channels already belong to different paint layers; "
+               "the new maps were put in a new layer");
+  }
   int missing = 0;
 
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
@@ -1180,6 +1491,8 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);
+  WM_operatortype_append(PAINT_OT_material_channel_source_image_set);
+  WM_operatortype_append(PAINT_OT_material_canvas_cycle);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 

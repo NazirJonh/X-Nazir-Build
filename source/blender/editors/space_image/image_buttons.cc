@@ -123,9 +123,11 @@ static void ui_imageuser_slot_menu(bContext *C, ui::Layout *layout, void *image_
            "");
 }
 
-static bool ui_imageuser_slot_menu_step(bContext *C, int direction, void *image_p)
+/* The menu button's own argument (#Button::poin, the #Image / #ImageUI_Data it was defined with).
+ * These are plain menu buttons with no RNA property, so the return value is unused. */
+static int ui_imageuser_slot_menu_step(bContext *C, int direction, ui::Button *but)
 {
-  Image *image = static_cast<Image *>(image_p);
+  Image *image = static_cast<Image *>(ui::button_menu_arg_get(but));
 
   if (ED_image_slot_cycle(image, direction)) {
     WM_event_add_notifier(C, NC_IMAGE | ND_DRAW, nullptr);
@@ -415,10 +417,10 @@ static void image_multi_cb(bContext *C, void *rnd_pt, void * /*unused*/)
   WM_event_add_notifier(C, NC_IMAGE | ND_DRAW, nullptr);
 }
 
-static bool ui_imageuser_layer_menu_step(bContext *C, int direction, void *rnd_pt)
+static int ui_imageuser_layer_menu_step(bContext *C, int direction, ui::Button *but)
 {
   Scene *scene = CTX_data_scene(C);
-  ImageUI_Data *rnd_data = static_cast<ImageUI_Data *>(rnd_pt);
+  ImageUI_Data *rnd_data = static_cast<ImageUI_Data *>(ui::button_menu_arg_get(but));
   Image *image = rnd_data->image;
   ImageUser *iuser = rnd_data->iuser;
   RenderResult *rr;
@@ -462,10 +464,10 @@ static bool ui_imageuser_layer_menu_step(bContext *C, int direction, void *rnd_p
   return changed;
 }
 
-static bool ui_imageuser_pass_menu_step(bContext *C, int direction, void *rnd_pt)
+static int ui_imageuser_pass_menu_step(bContext *C, int direction, ui::Button *but)
 {
   Scene *scene = CTX_data_scene(C);
-  ImageUI_Data *rnd_data = static_cast<ImageUI_Data *>(rnd_pt);
+  ImageUI_Data *rnd_data = static_cast<ImageUI_Data *>(ui::button_menu_arg_get(but));
   Image *image = rnd_data->image;
   ImageUser *iuser = rnd_data->iuser;
   RenderResult *rr;

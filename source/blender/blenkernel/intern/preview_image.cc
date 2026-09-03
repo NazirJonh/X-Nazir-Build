@@ -78,6 +78,31 @@ static PreviewImage *previewimg_deferred_create(const char *filepath, ThumbSourc
   return prv;
 }
 
+static PreviewImageRenderStopCb previewimg_render_stop_cb = nullptr;
+
+void BKE_previewimg_render_stop_callback_set(PreviewImageRenderStopCb cb)
+{
+  previewimg_render_stop_cb = cb;
+}
+
+/**
+ * Stop a job still rendering \a prv. Deferring the preview's deletion keeps the #PreviewImage
+ * alive but not the ID it renders from, which the caller is about to free -- see
+ * #PreviewImageRenderStopCb.
+ */
+static void previewimg_render_stop(const PreviewImage *prv)
+{
+  if (previewimg_render_stop_cb == nullptr) {
+    return;
+  }
+  for (int i = 0; i < NUM_ICON_SIZES; i++) {
+    if (prv->runtime->tag[i] & PRV_TAG_DEFERRED_RENDERING) {
+      previewimg_render_stop_cb(prv);
+      return;
+    }
+  }
+}
+
 /**
  * \return True if the preview image was deleted or marked for deferred deletion. User counting may
  *     prevent the freeing so this will return false then.
@@ -98,6 +123,10 @@ static bool previewimg_free_or_defer(PreviewImage **prv)
       return false;
     }
   }
+
+  /* Stopping is synchronous, so the render tags below are already cleared for anything that was
+   * running, and this preview is normally deleted right away instead of being deferred. */
+  previewimg_render_stop(*prv);
 
   bool do_delete = true;
 

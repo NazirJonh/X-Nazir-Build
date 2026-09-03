@@ -47,6 +47,7 @@
 #include "ED_asset_mark_clear.hh"
 #include "ED_asset_menu_utils.hh"
 #include "ED_asset_shelf.hh"
+#include "ED_buttons.hh"
 #include "ED_image_grid.hh"
 #include "ED_screen.hh"
 
@@ -348,7 +349,9 @@ int image_grid_effective_rows(const ImageGridOwner owner, const ImageGridSlot gr
 int image_grid_preview_size_get(const ImageGridOwner owner)
 {
   const int stored = owner.preview_size_dna();
-  if (stored >= 24) {
+  /* Anything at or above the hard minimum is a size the user set; 0 (never set) reads as the
+   * default. The soft minimum of 24 only limits dragging, typed-in sizes may go below it. */
+  if (stored >= IMAGE_GRID_PREVIEW_SIZE_MIN) {
     return stored;
   }
   return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
@@ -593,6 +596,30 @@ bool image_grid_set_library(bContext &C,
    * catalog filter via #image_grid_catalog_swap_library (skips committing empty membership paths). */
   image_grid_catalog_swap_library(state, old_lib_ref, new_ref);
   image_grid_catalog_commit_active(state);
+  ed::image_grid::image_grid_reset_scroll(owner, grid_slot);
+  image_grid_pending_clear(state);
+
+  ed::image_grid::image_grid_state_persist(owner, state, grid_slot);
+  image_grid_prepare_browse_shelf(C, state, "VIEW3D_AST_image_texture");
+
+  image_grid_notify_change(C, grid_slot);
+  return true;
+}
+
+bool image_grid_set_membership(bContext &C,
+                               const ImageGridOwner owner,
+                               const ImageGridSlot grid_slot,
+                               const ImageGridCatalogMode mode)
+{
+  BLI_assert(ELEM(mode, ImageGridCatalogMode::Recent, ImageGridCatalogMode::Favorites));
+
+  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, grid_slot);
+  if (state.filter.catalog_mode == mode) {
+    return false;
+  }
+
+  image_grid_filter_set_membership(state, mode);
+  ed::asset::list::storage_fetch(&state.filter.lib_ref, &C);
   ed::image_grid::image_grid_reset_scroll(owner, grid_slot);
   image_grid_pending_clear(state);
 
@@ -1094,21 +1121,9 @@ static wmOperatorStatus image_grid_set_membership_exec(bContext *C, wmOperator *
   }
 
   const ImageGridSlot grid_slot = image_grid_slot_from_context(*C);
-  const ed::image_grid::ImageGridOwner owner = *owner_opt;
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, grid_slot);
-  if (state.filter.catalog_mode == mode) {
+  if (!ed::image_grid::image_grid_set_membership(*C, *owner_opt, grid_slot, mode)) {
     return OPERATOR_CANCELLED;
   }
-
-  image_grid_filter_set_membership(state, mode);
-  ed::asset::list::storage_fetch(&state.filter.lib_ref, C);
-  ed::image_grid::image_grid_reset_scroll(owner, grid_slot);
-  image_grid_pending_clear(state);
-
-  ed::image_grid::image_grid_state_persist(owner, state, grid_slot);
-  image_grid_prepare_browse_shelf(*C, state, "VIEW3D_AST_image_texture");
-
-  image_grid_notify_change(*C, grid_slot);
   return OPERATOR_FINISHED;
 }
 
@@ -1377,6 +1392,11 @@ static wmOperatorStatus image_grid_new_exec(bContext *C, wmOperator *op)
     }
   }
 
+  /* A brand new texture is empty until its type is configured, and the grid cannot show it (it has
+   * no image yet), so bring up the place where it can be set up -- the same switch the "Show
+   * texture in texture tab" button performs. */
+  ED_buttons_texture_show(C, &target_ptr, tex_prop);
+
   WM_event_add_notifier(C, NC_TEXTURE | NA_ADDED, tex);
   WM_event_add_notifier(C, NC_BRUSH, brush);
 
@@ -1392,6 +1412,48 @@ void IMAGE_GRID_OT_new(wmOperatorType *ot)
   ot->idname = "IMAGE_GRID_OT_new";
 
   ot->exec = image_grid_new_exec;
+  ot->poll = image_grid_brush_target_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus image_grid_clear_exec(bContext *C, wmOperator *op)
+{
+  PointerRNA target_ptr;
+  Brush *brush = nullptr;
+  if (!image_grid_brush_target_resolve(C, op, &target_ptr, &brush)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  PropertyRNA *tex_prop = RNA_struct_find_property(&target_ptr, "texture");
+  if (!tex_prop || RNA_property_type(tex_prop) != PROP_POINTER) {
+    return OPERATOR_CANCELLED;
+  }
+  if (!RNA_property_pointer_get(&target_ptr, tex_prop).data) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Assigning null goes through RNA like every other slot change, so the pointer's own setter
+   * handles the user count of the texture being dropped. */
+  RNA_property_pointer_set(&target_ptr, tex_prop, PointerRNA_NULL, nullptr);
+  RNA_property_update(C, &target_ptr, tex_prop);
+
+  BKE_brush_tag_unsaved_changes(brush);
+
+  /* The grid highlights the assigned texture's tile, so it has to rebuild with nothing active. */
+  image_grid_notify_change(*C, image_grid_slot_from_mask_flag(image_grid_slot_is_mask(target_ptr)));
+  WM_event_add_notifier(C, NC_BRUSH, brush);
+
+  return OPERATOR_FINISHED;
+}
+
+void IMAGE_GRID_OT_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Brush Texture";
+  ot->description = "Remove the texture assigned to the brush slot";
+  ot->idname = "IMAGE_GRID_OT_clear";
+
+  ot->exec = image_grid_clear_exec;
   ot->poll = image_grid_brush_target_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
@@ -1498,11 +1560,13 @@ void image_grid_operatortypes()
   WM_operatortype_append(IMAGE_GRID_OT_mark_asset);
   WM_operatortype_append(IMAGE_GRID_OT_new);
   WM_operatortype_append(IMAGE_GRID_OT_open);
+  WM_operatortype_append(IMAGE_GRID_OT_clear);
   WM_operatortype_append(IMAGE_GRID_OT_assign_catalog);
   WM_operatortype_append(IMAGE_GRID_OT_copy_to_library);
   WM_operatortype_append(IMAGE_GRID_OT_move_to_library);
   WM_operatortype_append(IMAGE_GRID_OT_drop_import);
   WM_operatortype_append(VIEW3D_OT_image_shelf_activate_asset);
+  WM_operatortype_append(IMAGE_GRID_OT_show_grid_toggle);
   WM_operatortype_append(IMAGE_GRID_OT_name_match_enabled_toggle);
   WM_operatortype_append(IMAGE_GRID_OT_name_match_map_type_toggle);
   WM_operatortype_append(IMAGE_GRID_OT_name_match_clear);

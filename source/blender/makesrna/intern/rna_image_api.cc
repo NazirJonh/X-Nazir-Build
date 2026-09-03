@@ -11,6 +11,8 @@
 #include <ctime>
 #include <fcntl.h>
 
+#include "DNA_uuid_types.h"
+
 #include "BLI_path_utils.hh"
 
 #include "RNA_define.hh"
@@ -25,6 +27,7 @@
 #  include "BLI_listbase.h"
 #  include "BLI_math_base.h"
 #  include "BLI_string.h"
+#  include "BLI_uuid.h"
 #  include "BLI_vector.hh"
 
 #  include "BKE_context.hh"
@@ -251,6 +254,12 @@ static void rna_Image_gl_free(Image *image)
 static void rna_Image_filepath_from_user(Image *image, ImageUser *image_user, char *filepath)
 {
   BKE_image_user_file_path(image_user, image, filepath);
+}
+
+static void rna_Image_paint_layer_id_ensure(Image *image, char *result)
+{
+  BKE_image_paint_layer_id_ensure(image);
+  BLI_uuid_format(result, image->paint_layer_id);
 }
 
 static void rna_Image_buffers_free(Image *image)
@@ -753,6 +762,19 @@ void RNA_api_image(StructRNA *srna)
 
   func = RNA_def_function(srna, "buffers_free", "rna_Image_buffers_free");
   RNA_def_function_ui_description(func, "Free the image buffers from memory");
+
+  func = RNA_def_function(srna, "paint_layer_id_ensure", "rna_Image_paint_layer_id_ensure");
+  RNA_def_function_ui_description(
+      func,
+      "Return this image's paint layer ID, generating a fresh one if it does not have one yet");
+  parm = RNA_def_string(func,
+                        "result",
+                        nullptr,
+                        UUID_STRING_SIZE,
+                        "Paint Layer ID",
+                        "The image's paint layer ID as a UUID string");
+  RNA_def_parameter_flags(parm, PROP_THICK_WRAP, ParameterFlag(0)); /* string return value */
+  RNA_def_function_output(func, parm);
 
   /* Paint selection mask API (runtime-only, no undo). */
 

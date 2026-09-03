@@ -55,6 +55,16 @@ typedef enum eImageGridSlot {
 #define IMAGE_GRID_SLOT_NUM 2
 
 /**
+ * Thumbnail size range of #wmWindowManager::image_grid_preview_size, in pixels. The hard minimum
+ * goes below the soft one so very small tiles can still be typed in, while dragging the slider
+ * stays in the comfortable range -- same split the asset shelf's own preview size uses. A stored
+ * value below the hard minimum means "never set" and reads as the asset shelf default.
+ */
+#define IMAGE_GRID_PREVIEW_SIZE_MIN 8
+#define IMAGE_GRID_PREVIEW_SIZE_SOFT_MIN 24
+#define IMAGE_GRID_PREVIEW_SIZE_MAX 256
+
+/**
  * Persisted per-slot state for the sculpt/paint brush-texture image grid. Each host space
  * (#View3D, #SpaceImage) keeps one instance per independent slot instead of duplicating each
  * field per slot.
@@ -95,7 +105,12 @@ struct ImageGridSlotDNA {
    * Name Matching master toggle (0/1). Old files: zero → off.
    */
   char filter_name_match_enabled = 0;
-  char _pad_name_match[7] = {};
+  /**
+   * Grid disclosure. Inverted (0 = grid shown) so old .blend files, whose former padding reads as
+   * zero, load expanded without do_version. Takes former `_pad_name_match` bytes.
+   */
+  char hide_grid = 0;
+  char _pad_name_match[6] = {};
   /** Active map-type identifiers (#AssetNameMatchIdLink). Empty = no selection. */
   ListBaseT<AssetNameMatchIdLink> filter_name_match_map_types = {nullptr, nullptr};
 };

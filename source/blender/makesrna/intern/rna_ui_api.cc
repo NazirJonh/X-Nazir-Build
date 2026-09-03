@@ -790,14 +790,48 @@ static void rna_uiTemplateID_browser(Layout *layout,
                                      const char *openop,
                                      const char *unlinkop,
                                      PointerRNA *material_ptr,
-                                     const char *filter_type)
+                                     const char *filter_type,
+                                     const char *text,
+                                     const char *text_ctxt,
+                                     bool translate,
+                                     bool compact,
+                                     const char *image_filter,
+                                     bool use_rename,
+                                     bool use_unlink,
+                                     bool use_users)
 {
   Material *material = nullptr;
   if (material_ptr && material_ptr->data) {
     material = static_cast<Material *>(material_ptr->data);
   }
-  ui::template_id_browser(
-      layout, C, ptr, propname, material, newop, openop, unlinkop, filter_type);
+
+  std::optional<StringRefNull> translated_text = rna_translate_ui_text(
+      text, text_ctxt, nullptr, nullptr, translate);
+
+  ui::IDBrowserParams params;
+  params.filter_type = filter_type;
+  params.text = translated_text ? translated_text->c_str() : nullptr;
+  params.image_filter = image_filter;
+  params.compact = compact;
+  params.use_rename = use_rename;
+  params.use_unlink = use_unlink;
+  params.use_users = use_users;
+  ui::template_id_browser(layout, C, ptr, propname, material, newop, openop, unlinkop, params);
+}
+
+static void rna_uiTemplateID_browser_button(Layout *layout,
+                                            bContext *C,
+                                            PointerRNA *ptr,
+                                            const char *propname,
+                                            PointerRNA *material_ptr,
+                                            const char *filter_type,
+                                            const char *image_filter)
+{
+  Material *material = nullptr;
+  if (material_ptr && material_ptr->data) {
+    material = static_cast<Material *>(material_ptr->data);
+  }
+  ui::template_id_browser_button(layout, C, ptr, propname, material, filter_type, image_filter);
 }
 
 static void rna_uiTemplateAnyID(Layout *layout,
@@ -1269,14 +1303,27 @@ static void rna_uiTemplateAssetImageGrid(
   ui::template_asset_image_grid(layout, C, ptr, propname, is_popover);
 }
 
-static void rna_uiTemplateGridLibrarySelector(Layout *layout, bContext *C, PointerRNA *settings)
+static void rna_uiTemplateGridLibrarySelector(Layout *layout,
+                                              bContext *C,
+                                              PointerRNA *settings,
+                                              bool only_image_libraries,
+                                              const char *catalog_memory_domain,
+                                              bool show_refresh)
 {
-  ui::template_grid_library_selector(layout, C, settings);
+  ui::GridLibrarySelectorParams params;
+  params.show_refresh = show_refresh;
+  params.only_image_libraries = only_image_libraries;
+  params.catalog_memory_domain = catalog_memory_domain;
+  ui::template_grid_library_selector(layout, C, settings, params);
 }
 
-static void rna_uiTemplateGridCatalogSelector(Layout *layout, bContext *C, PointerRNA *settings)
+static void rna_uiTemplateGridCatalogSelector(Layout *layout,
+                                              bContext *C,
+                                              PointerRNA *settings,
+                                              const char *catalog_filter_domain)
 {
-  ui::template_grid_catalog_selector(layout, C, settings);
+  ui::template_grid_catalog_selector(
+      layout, C, settings, /*embed_in_parent_row=*/false, catalog_filter_domain);
 }
 
 static void rna_uiTemplateGridPreviewSize(Layout *layout, bContext *C, PointerRNA *settings)
@@ -1294,9 +1341,25 @@ static void rna_uiTemplateGridViewAsset(Layout *layout,
                                         const char *grid_id,
                                         PointerRNA *settings,
                                         const char *activate_operator,
-                                        const char *drag_operator)
+                                        const char *drag_operator,
+                                        bool use_drag,
+                                        const char *activate_context_id,
+                                        bool use_box,
+                                        PointerRNA *active_id,
+                                        const char *membership_shelf_idname,
+                                        const char *catalog_memory_domain,
+                                        const char *catalog_filter_domain)
 {
-  ui::template_grid_view_asset(layout, C, grid_id, settings, activate_operator, drag_operator);
+  ui::GridViewAssetParams params;
+  params.use_drag = use_drag;
+  params.activate_context_id = activate_context_id;
+  params.use_box = use_box;
+  params.active_id_ptr = active_id;
+  params.membership_shelf_idname = membership_shelf_idname;
+  params.catalog_memory_domain = catalog_memory_domain;
+  params.catalog_filter_domain = catalog_filter_domain;
+  ui::template_grid_view_asset(
+      layout, C, grid_id, settings, activate_operator, drag_operator, params);
 }
 
 static void rna_uiTemplateGridViewCustom(Layout *layout,
@@ -1305,9 +1368,15 @@ static void rna_uiTemplateGridViewCustom(Layout *layout,
                                          const char *gridtype_name,
                                          PointerRNA *dataptr,
                                          const char *propname,
-                                         PointerRNA *settings)
+                                         PointerRNA *settings,
+                                         bool use_box,
+                                         const char *active_identifier)
 {
-  ui::template_grid_view_custom(layout, C, grid_id, gridtype_name, dataptr, propname, settings);
+  ui::GridViewCustomParams params;
+  params.use_box = use_box;
+  params.active_identifier = active_identifier;
+  ui::template_grid_view_custom(
+      layout, C, grid_id, gridtype_name, dataptr, propname, settings, params);
 }
 
 void rna_uiTemplateAssetShelfPopover(Layout *layout,
@@ -2083,7 +2152,10 @@ void RNA_api_ui_layout(StructRNA *srna)
       func,
       "Browse and assign a data-block via a filtered popover, with standard new/open controls. "
       "The listed data-blocks come from the pointer property's ID type; image properties also get "
-      "paint-slot/material filters");
+      "paint-slot/material filters. Passing text switches an Image property to the paint-slot "
+      "layout: while empty it shows a drop button labelled with that text next to an icon-only "
+      "Open, and once assigned a taller row with the image's preview in front of its name. Both "
+      "accept images dropped from the Asset Browser, the Outliner or the file system");
   api_ui_item_rna_common(func);
   RNA_def_string(func, "new", nullptr, 0, "", "Operator identifier to create a new ID block");
   RNA_def_string(func,
@@ -2103,6 +2175,61 @@ void RNA_api_ui_layout(StructRNA *srna)
                  "Filter Type",
                  "bl_idname of a registered IDFilter class to further filter the listed "
                  "data-blocks");
+  api_ui_item_common_text(func);
+  RNA_def_boolean(func,
+                  "compact",
+                  false,
+                  "",
+                  "Draw only the browser button, showing the assigned data-block's preview and "
+                  "name, for places with no room for the full row");
+  RNA_def_string(func,
+                 "image_filter",
+                 "DEFAULT",
+                 0,
+                 "Image Filter",
+                 "Built-in image filtering preset for the browser");
+  RNA_def_boolean(func,
+                  "use_rename",
+                  true,
+                  "Use Rename",
+                  "Let the name be edited in place. Disable when the host owns the data-block's "
+                  "name, so the row shows it read-only");
+  RNA_def_boolean(func,
+                  "use_unlink",
+                  true,
+                  "Use Unlink",
+                  "Show the built-in unlink button. Disable when the host offers its own way to "
+                  "clear the assignment");
+  RNA_def_boolean(func,
+                  "use_users",
+                  true,
+                  "Use Users",
+                  "Show the number-of-users button for the assigned data-block");
+
+  func = RNA_def_function(
+      srna, "template_ID_browser_button", "rna_uiTemplateID_browser_button");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "The ID Browser popover button on its own, without the name field and new/open/unlink "
+      "controls of template_ID_browser. For rows that put their own controls beside the browser");
+  api_ui_item_rna_common(func);
+  parm = RNA_def_pointer(
+      func, "material", "Material", "", "Material providing the filter context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_string(func,
+                 "filter_type",
+                 nullptr,
+                 0,
+                 "Filter Type",
+                 "bl_idname of a registered IDFilter class to further filter the listed "
+                 "data-blocks");
+  RNA_def_string(func,
+                 "image_filter",
+                 "DEFAULT",
+                 0,
+                 "Image Filter",
+                 "Built-in image filtering preset for the browser");
 
   func = RNA_def_function(srna, "template_ID_session_uid", "rna_ui_template_ID_session_uid");
   RNA_def_function_ui_description(func,
@@ -2161,6 +2288,26 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_boolean(func,
+                  "only_image_libraries",
+                  false,
+                  "Only Image Libraries",
+                  "List only libraries set up through \"Add Image Library\", like the brush "
+                  "texture image grid, instead of every asset library");
+  RNA_def_string(func,
+                 "catalog_memory_domain",
+                 nullptr,
+                 0,
+                 "Catalog Memory Domain",
+                 "Preferences catalog-memory domain holding this grid's Recent/Favorites mode "
+                 "(\"image_grid\" shares them with the brush Texture panel). When set, the menu "
+                 "also offers those two entries");
+  RNA_def_boolean(func,
+                  "show_refresh",
+                  true,
+                  "Show Refresh",
+                  "Draw the library refresh button next to the dropdown. Turn off where the "
+                  "catalog selector already offers a refresh");
 
   func = RNA_def_function(
       srna, "template_grid_catalog_selector", "rna_uiTemplateGridCatalogSelector");
@@ -2168,6 +2315,14 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_string(func,
+                 "catalog_filter_domain",
+                 nullptr,
+                 0,
+                 "Catalog Filter Domain",
+                 "Preferences catalog-memory domain this popover writes the enabled catalogs to. "
+                 "Pass the same value as the grid's \"catalog_filter_domain\", which reads it "
+                 "back. Leave unset to share one domain with the Recent/Favorites history");
 
   func = RNA_def_function(srna, "template_grid_preview_size", "rna_uiTemplateGridPreviewSize");
   RNA_def_function_ui_description(func, "Preview tile size control for a reusable grid view");
@@ -2200,6 +2355,54 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_string(
       func, "activate_operator", nullptr, 0, "", "Operator run when an item is clicked");
   RNA_def_string(func, "drag_operator", nullptr, 0, "", "Operator run when an item is dragged");
+  RNA_def_boolean(func,
+                  "use_drag",
+                  true,
+                  "Use Drag",
+                  "Let items be dragged. Disable so a press scrolls the grid instead of starting "
+                  "asset drag and drop");
+  RNA_def_string(func,
+                 "activate_context_id",
+                 nullptr,
+                 0,
+                 "",
+                 "Set on the activate operator's \"context_id\" property, if it has one. Tells the "
+                 "operator what the click applies to, without relying on the layout context");
+  RNA_def_boolean(func,
+                  "use_box",
+                  false,
+                  "Use Box",
+                  "Draw the tiles inside a themed box, like the brush texture image grid");
+  parm = RNA_def_pointer(func,
+                         "active_id",
+                         "ID",
+                         "",
+                         "Data-block the host considers assigned. Its tile is highlighted, and "
+                         "the grid scrolls to it once when the library holding it is opened");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_string(func,
+                 "membership_shelf_idname",
+                 nullptr,
+                 0,
+                 "Membership Shelf",
+                 "Asset shelf whose Recent/Favorites lists this grid shows while the settings are "
+                 "in one of those modes (e.g. \"VIEW3D_AST_image_texture\")");
+  RNA_def_string(func,
+                 "catalog_memory_domain",
+                 nullptr,
+                 0,
+                 "Catalog Memory Domain",
+                 "Preferences catalog-memory domain the Recent/Favorites mode is read from; pass "
+                 "the same value as to template_grid_library_selector");
+  RNA_def_string(func,
+                 "catalog_filter_domain",
+                 nullptr,
+                 0,
+                 "Catalog Filter Domain",
+                 "Preferences catalog-memory domain holding the enabled catalogs this grid "
+                 "filters by. Set it to keep the catalog filter apart from the Recent/Favorites "
+                 "history, and pass the same value to template_grid_catalog_selector, which "
+                 "writes what this reads. Defaults to \"catalog_memory_domain\"");
 
   func = RNA_def_function(srna, "template_grid_view_custom", "rna_uiTemplateGridViewCustom");
   RNA_def_function_ui_description(func, "Reusable grid driven by a registered Python UIGrid type");
@@ -2224,8 +2427,21 @@ void RNA_api_ui_layout(StructRNA *srna)
                          "settings",
                          "GridViewSettings",
                          "",
-                         "Optional; only preview_size is read. Asset-library fields are unused");
+                         "Optional; preview_size and show_names are read. Asset-library fields "
+                         "are unused");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_boolean(func,
+                  "use_box",
+                  false,
+                  "Use Box",
+                  "Draw the tiles inside a themed box, like the brush texture image grid");
+  RNA_def_string(func,
+                 "active_identifier",
+                 nullptr,
+                 0,
+                 "Active Identifier",
+                 "Identifier (as returned by UIGrid.get_item) of the item the host considers "
+                 "assigned; its tile is highlighted");
 
   func = RNA_def_function(srna, "template_matrix", "template_matrix");
   RNA_def_function_ui_description(

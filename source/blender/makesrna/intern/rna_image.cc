@@ -54,6 +54,8 @@ static const EnumPropertyItem image_source_items[] = {
 #  include "BLI_listbase.h"
 #  include "BLI_math_base.h"
 #  include "BLI_math_vector.h"
+#  include "BLI_string.h"
+#  include "BLI_uuid.h"
 
 #  include "BKE_global.hh"
 #  include "BKE_image.hh"
@@ -808,6 +810,58 @@ static void rna_UDIMTile_remove(Image *image, PointerRNA *ptr)
   WM_main_add_notifier(NC_IMAGE | ND_DRAW, nullptr);
 }
 
+static void rna_Image_paint_layer_id_get(PointerRNA *ptr, char *value)
+{
+  const Image *ima = static_cast<const Image *>(ptr->data);
+  if (BLI_uuid_is_nil(ima->paint_layer_id)) {
+    value[0] = '\0';
+    return;
+  }
+  BLI_uuid_format(value, ima->paint_layer_id);
+}
+
+static int rna_Image_paint_layer_id_length(PointerRNA *ptr)
+{
+  const Image *ima = static_cast<const Image *>(ptr->data);
+  return BLI_uuid_is_nil(ima->paint_layer_id) ? 0 : UUID_STRING_SIZE - 1;
+}
+
+static void rna_Image_paint_layer_id_set(PointerRNA *ptr, const char *value)
+{
+  Image *ima = static_cast<Image *>(ptr->data);
+
+  /* Trim surrounding ASCII whitespace into a local buffer. */
+  char trimmed[UUID_STRING_SIZE + 16];
+  BLI_strncpy(trimmed, value, sizeof(trimmed));
+  BLI_str_rstrip(trimmed);
+  const char *start = trimmed;
+  while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r') {
+    start++;
+  }
+
+  /* Empty -> clear (image leaves its layer). */
+  if (start[0] == '\0') {
+    ima->paint_layer_id = BLI_uuid_nil();
+    return;
+  }
+
+  /* Parse into a temporary; only commit on a clean round-trip. #BLI_uuid_parse_string may leave
+   * the out-param partially updated on failure and accepts trailing garbage after a valid prefix,
+   * so re-format and compare (case-insensitively) to reject anything non-canonical. */
+  bUUID parsed;
+  char canonical[UUID_STRING_SIZE];
+  if (BLI_uuid_parse_string(&parsed, start)) {
+    BLI_uuid_format(canonical, parsed);
+    if (BLI_strcasecmp(canonical, start) == 0) {
+      ima->paint_layer_id = parsed; /* Nil string ("000...0") lands here and clears, as intended. */
+      return;
+    }
+  }
+
+  /* Unparseable / non-canonical -> clear, do not raise. */
+  ima->paint_layer_id = BLI_uuid_nil();
+}
+
 }  // namespace blender
 
 #else
@@ -1244,6 +1298,25 @@ static void rna_def_image(BlenderRNA *brna)
   RNA_def_property_boolean_funcs(prop, "rna_Image_dirty_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Dirty", "Image has changed and is not saved");
+
+  prop = RNA_def_property(srna, "is_paint_canvas", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", IMA_PAINT_CANVAS);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Paint Canvas",
+                           "Image was auto-created as a writable paint target (material-paint "
+                           "canvas or texture-paint slot), not chosen as a source texture");
+
+  prop = RNA_def_property(srna, "paint_layer_id", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_maxlength(prop, UUID_STRING_SIZE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_Image_paint_layer_id_get",
+                                "rna_Image_paint_layer_id_length",
+                                "rna_Image_paint_layer_id_set");
+  RNA_def_property_ui_text(prop,
+                           "Paint Layer ID",
+                           "UUID shared by every image that authors the same PBR paint layer; "
+                           "empty when the image is not part of a managed layer");
 
   /* generated image (image_generated_change_cb) */
   prop = RNA_def_property(srna, "generated_type", PROP_ENUM, PROP_NONE);

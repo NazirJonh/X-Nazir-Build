@@ -130,7 +130,9 @@ class PyGridItem : public PreviewGridItem {
              const int badge_icon,
              uiGridType *grid_type,
              const PointerRNA &dataptr,
-             const int index)
+             const int index,
+             const bool show_names,
+             const bool is_active)
       : PreviewGridItem(identifier, label, icon),
         grid_type_(grid_type),
         dataptr_(dataptr),
@@ -140,6 +142,19 @@ class PyGridItem : public PreviewGridItem {
         reorder_operator_(grid_type->reorder_operator),
         badge_icon_(badge_icon)
   {
+    if (!show_names) {
+      this->hide_label();
+    }
+
+    /* Every item answers, so an assignment made outside the grid (a drop on the host's own field)
+     * moves the highlight instead of leaving it on the last clicked tile. Answering
+     * unconditionally also covers the host having nothing assigned at all, which is how clearing
+     * the assignment (#PAINT_OT_material_channel_source_clear) drops the highlight. */
+    this->set_is_active_fn([is_active]() { return is_active; });
+
+    /* Activate on click rather than on press, so a touch/pen drag over the grid scrolls it
+     * instead of activating whatever tile the gesture happened to start on. */
+    this->select_on_click_set();
   }
 
   void on_activate(bContext &C) override
@@ -357,12 +372,20 @@ static void pygrid_draw_context_menu(const bContext &C,
 
 PyCallbackGridDataSource::PyCallbackGridDataSource(uiGridType *grid_type,
                                                    PointerRNA dataptr,
-                                                   const StringRef propname)
-    : grid_type_(grid_type), dataptr_(dataptr), propname_(propname)
+                                                   const StringRef propname,
+                                                   const bool show_names,
+                                                   const StringRef active_identifier,
+                                                   std::string search)
+    : grid_type_(grid_type),
+      dataptr_(dataptr),
+      propname_(propname),
+      show_names_(show_names),
+      active_identifier_(active_identifier),
+      search_(std::move(search))
 {
 }
 
-int PyCallbackGridDataSource::item_count(const bContext &C) const
+int PyCallbackGridDataSource::py_item_count(const bContext &C) const
 {
   uiGrid grid_inst;
   PointerRNA grid_ptr = uigrid_python_pointer(C, grid_type_, grid_inst);
@@ -390,18 +413,76 @@ int PyCallbackGridDataSource::item_count(const bContext &C) const
   return count;
 }
 
+Vector<int> PyCallbackGridDataSource::filtered_indices(const bContext &C) const
+{
+  Vector<int> indices;
+  const int count = this->py_item_count(C);
+  for (const int index : IndexRange(count)) {
+    PyGridItemDesc desc;
+    if (!pygrid_get_item_desc(C, grid_type_, dataptr_, propname_, index, desc)) {
+      continue;
+    }
+    /* Case-insensitive "contains" straight on the label, so no lower-cased copy is allocated per
+     * item; #BLI_strcasestr folds both sides. */
+    if (BLI_strcasestr(desc.label.c_str(), search_.c_str()) != nullptr) {
+      indices.append(index);
+    }
+  }
+  return indices;
+}
+
+int PyCallbackGridDataSource::item_count(const bContext &C) const
+{
+  if (search_.empty()) {
+    return this->py_item_count(C);
+  }
+  return int(this->filtered_indices(C).size());
+}
+
 void PyCallbackGridDataSource::build_window(const bContext &C,
                                             AbstractGridView &view,
                                             const IndexRange window)
 {
-  for (const int index : window) {
+  this->build_window_and_count(C, view, window);
+}
+
+int PyCallbackGridDataSource::build_window_and_count(const bContext &C,
+                                                     AbstractGridView &view,
+                                                     const IndexRange window)
+{
+  /* The window is sized from the viewport, not from the content, so its tail can reach past the
+   * last item. Those indices must not become tiles: they would be hoverable and clickable empty
+   * cells (the fallback identifier below keeps the scrollbar in sync, it does not mean the item
+   * exists). */
+  /* While the search is active, the window indexes the filtered list, so each visible slot has to
+   * be mapped back to the index the Python type knows the item by -- that index is what
+   * #PyGridItem hands to the activate operator. Resolved once here and reused as the count, so a
+   * redraw asks the Python type for every item's label at most once. */
+  const bool use_search = !search_.empty();
+  const Vector<int> filtered = use_search ? this->filtered_indices(C) : Vector<int>();
+  const int count = use_search ? int(filtered.size()) : this->py_item_count(C);
+
+  for (const int window_index : window) {
+    if (window_index >= count) {
+      break;
+    }
+    const int index = use_search ? filtered[window_index] : window_index;
     PyGridItemDesc desc;
     if (!pygrid_get_item_desc(C, grid_type_, dataptr_, propname_, index, desc)) {
       continue;
     }
     view.add_item<PyGridItem>(
-        desc.identifier, desc.label, desc.icon, desc.badge_icon, grid_type_, dataptr_, int(index));
+        desc.identifier,
+        desc.label,
+        desc.icon,
+        desc.badge_icon,
+        grid_type_,
+        dataptr_,
+        int(index),
+        show_names_,
+        !active_identifier_.empty() && desc.identifier == active_identifier_);
   }
+  return count;
 }
 
 }  // namespace blender::ui

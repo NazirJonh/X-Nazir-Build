@@ -17,21 +17,31 @@
 
 #include <fmt/format.h>
 
+#include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 
 #include "BKE_context.hh"
+#include "BKE_asset_catalog_memory.hh"
+#include "BKE_global.hh"
+#include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_library.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
+#include "BKE_preferences.h"
 #include "BKE_preview_image.hh"
 #include "BKE_screen.hh"
 #include "BKE_wm_runtime.hh"
 #include "BKE_name_matching.hh"
 
+#include "BLI_hash.hh"
 #include "BLI_listbase.h"
+#include "BLI_path_utils.hh"
 #include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
+#include "BLI_uuid.h"
 
 #include "BLT_translation.hh"
 
@@ -40,17 +50,21 @@
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
+#include "DNA_object_types.h"
 #include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 
 #include "RNA_access.hh"
+#include "RNA_path.hh"
 #include "RNA_prototypes.hh"
 
 #include "ED_asset.hh"
 #include "ED_asset_import.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_menu_utils.hh"
+#include "ED_image_grid.hh"
 #include "ED_screen.hh"
 
 #include "IMB_imbuf.hh"
@@ -71,6 +85,9 @@
 
 #include "interface_intern.hh"
 #include "interface_templates_intern.hh"
+/* For `operator==(AssetLibraryReference)`, which has no public counterpart. Same reason as the
+ * asset-shelf include below. */
+#include "../../asset/intern/asset_library_reference.hh"
 
 /* #shelf_asset_lists_record_recent / #ShelfAssetRef for the Recent list write-on-activate below.
  * See #interface_template_id_browser_asset.cc for the read side and why this internal header is
@@ -92,6 +109,13 @@ static constexpr float ID_BROWSER_POPOVER_UNITS_X = 15.0f;
  * columns instead of one tall single column.
  */
 static constexpr float ID_BROWSER_LIST_MIN_COL_UNITS_X = 14.0f;
+/**
+ * Unscaled preview size (in pixels) forwarded to grid tiles so #draw_preview_item_stateless scales
+ * the item-name font down. Matches the asset-shelf popover, which uses
+ * #ASSET_SHELF_PREVIEW_SIZE_DEFAULT (48) -- below #PREVIEW_TILE_TEXT_SCALE_THRESHOLD (56) -- to give
+ * the asset name a smaller font. Only affects the label text; the tile size is set separately.
+ */
+static constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_PX = 48;
 
 /* -------------------------------------------------------------------- */
 /** \name Popover registration
@@ -144,6 +168,135 @@ static SpaceLink *image_browser_active_space(const bContext *C, StructRNA **r_sr
   return nullptr;
 }
 
+IDBrowserImageFilter id_browser_image_filter_from_context(const bContext &C)
+{
+  const std::optional<StringRefNull> image_filter = CTX_data_string_get(
+      &C, "id_browser_image_filter");
+  if (image_filter && *image_filter == "PAINT_SOURCE") {
+    return IDBrowserImageFilter::PaintSource;
+  }
+  return IDBrowserImageFilter::Default;
+}
+
+/** Where the browser can show an assigned Image. */
+struct ImageBrowserLocation {
+  eIDBrowserSource source;
+  /** Only meaningful for #ID_BROWSER_SOURCE_ASSET_LIBRARY. */
+  AssetLibraryReference library_ref;
+};
+
+/**
+ * Find the user asset library whose directory contains \a filepath, if that library holds images.
+ */
+static std::optional<AssetLibraryReference> image_user_library_ref(const char *filepath)
+{
+  if (filepath[0] == '\0') {
+    return std::nullopt;
+  }
+  const bUserAssetLibrary *user_library = BKE_preferences_asset_library_deepest_containing_path(
+      &U, filepath);
+  if (user_library == nullptr || (user_library->flag & ASSET_LIBRARY_IS_IMAGE_LIBRARY) == 0) {
+    return std::nullopt;
+  }
+  AssetLibraryReference library_ref{};
+  BKE_preferences_asset_library_reference_set(&U, &library_ref, user_library);
+  return library_ref;
+}
+
+/**
+ * Return the source (and library) the browser has to select for an assigned Image to be visible in
+ * it. Only a viewer image (Render Result / Viewer Node) is nowhere to be found; every other image
+ * is at least a data-block of the current file.
+ */
+static std::optional<ImageBrowserLocation> image_browser_location(const Main &bmain,
+                                                                  const Image &image)
+{
+  const ID &id = image.id;
+  if (image.source == IMA_SRC_VIEWER) {
+    return std::nullopt;
+  }
+
+  /* A local (including packed) Image marked as an asset is listed by the Current File library.
+   * This holds for an unsaved file too, so the blend-file path is deliberately not consulted. */
+  if (id.asset_data != nullptr && id.lib == nullptr && id.library_weak_reference == nullptr) {
+    return ImageBrowserLocation{ID_BROWSER_SOURCE_ASSET_LIBRARY,
+                                asset_system::current_file_library_reference()};
+  }
+
+  char source_filepath[FILE_MAX] = {};
+  if (id.lib != nullptr) {
+    STRNCPY(source_filepath, id.lib->runtime->filepath_abs);
+  }
+  else if (id.library_weak_reference != nullptr) {
+    STRNCPY(source_filepath, id.library_weak_reference->library_filepath);
+    BLI_path_abs(source_filepath, BKE_main_blendfile_path(&bmain));
+  }
+  else if (image.source != IMA_SRC_GENERATED) {
+    /* Assigning an image asset from the browser loads its file directly (see #IDBrowserView's
+     * activate callback), producing a plain local Image with neither asset metadata nor a library
+     * reference. Its image file path is then the only remaining trace of where it came from, and
+     * image libraries are directories of image files rather than of .blend files, so the path is
+     * what locates them anyway. */
+    STRNCPY(source_filepath, image.filepath);
+    BLI_path_abs(source_filepath, BKE_main_blendfile_path(&bmain));
+  }
+
+  if (const std::optional<AssetLibraryReference> library_ref = image_user_library_ref(
+          source_filepath))
+  {
+    return ImageBrowserLocation{ID_BROWSER_SOURCE_ASSET_LIBRARY, *library_ref};
+  }
+  /* Not in any image library: a plain data-block of this file, which is what Blend Data lists. */
+  return ImageBrowserLocation{ID_BROWSER_SOURCE_BLEND_DATA, {}};
+}
+
+static void id_browser_sync_assigned_image_location(const bContext &C,
+                                                    PointerRNA target_ptr,
+                                                    PropertyRNA &target_prop,
+                                                    wmWindowManager &wm)
+{
+  const PointerRNA image_ptr = RNA_property_pointer_get(&target_ptr, &target_prop);
+  const Image *image = image_ptr.data ? static_cast<const Image *>(image_ptr.data) : nullptr;
+  if (image == nullptr) {
+    return;
+  }
+  const std::optional<ImageBrowserLocation> location = image_browser_location(*CTX_data_main(&C),
+                                                                             *image);
+  if (!location) {
+    return;
+  }
+
+  bool changed = wm.id_browser_source != location->source;
+  if (location->source == ID_BROWSER_SOURCE_ASSET_LIBRARY) {
+    /* Custom-library indices are a cache that can change when Preferences are reordered. Compare
+     * the complete reference so opening a different PBR slot follows the library of that slot's
+     * assigned image, rather than the library selected by a previously opened browser. */
+    changed |= !(id_browser_library_ref_get(wm) == location->library_ref);
+
+    /* A remembered catalog or Recent/Favorites membership can hide the asset we are following.
+     * There is no catalog information on Image itself that would let us select a narrower valid
+     * catalog, so use the same safe All fallback as other image-asset follow paths.
+     * Preferences-only write (#BKE_asset_catalog_memory_set_all already flags
+     * #UserDef.runtime.is_dirty), so it must not mark the blend-file modified. */
+    BKE_asset_catalog_memory_set_all(
+        &U, location->library_ref, grid_settings::id_browser_catalog_memory_domain);
+    BKE_asset_catalog_memory_set_all(&U,
+                                     asset_system::all_library_reference(),
+                                     grid_settings::id_browser_catalog_memory_domain);
+  }
+
+  if (!changed) {
+    return;
+  }
+  wm.id_browser_source = location->source;
+  if (location->source == ID_BROWSER_SOURCE_ASSET_LIBRARY) {
+    id_browser_library_ref_set(wm, location->library_ref);
+  }
+  grid_view_session_reset_scroll(id_browser_grid_session_key);
+  /* The window-manager selector is blend-file data, unlike the catalog memory above. */
+  WM_file_tag_modified();
+}
+
 /**
  * Raw pointer to the space's `image_filter_mode` DNA field. Each of the three space types
  * re-declares its own field (rather than sharing one through #SpaceLink), so the concrete type is
@@ -164,33 +317,191 @@ static char *image_filter_mode_pointer(SpaceLink *sl)
   }
 }
 
+/**
+ * Material the "Current Material" image filter compares against.
+ *
+ * The in-popover material picker drives the active object's active slot (#Object::actcol), so the
+ * active-slot material wins whenever it is usable -- this is what lets the filter follow the picker
+ * live, instead of waiting for the outer editor to redraw and push a fresh `id_browser_material`
+ * context. The caller-supplied `id_browser_material` still wins when it points at a material the
+ * active object does not have (a pinned material in the shader-node editor, or a script-supplied
+ * one), and is the fallback when there is no active object at all.
+ */
+static const Material *id_browser_filter_material(const bContext &C)
+{
+  const PointerRNA mat_ptr = CTX_data_pointer_get(&C, "id_browser_material");
+  const Material *context_ma = static_cast<const Material *>(mat_ptr.data);
+
+  Object *ob = CTX_data_active_object(&C);
+  const Material *slot_ma = ob ? BKE_object_material_get(ob, ob->actcol) : nullptr;
+
+  if (slot_ma != nullptr) {
+    const bool context_is_foreign = context_ma != nullptr &&
+                                    BKE_object_material_index_get(ob, context_ma) == -1;
+    if (!context_is_foreign) {
+      return slot_ma;
+    }
+  }
+  if (context_ma != nullptr) {
+    return context_ma;
+  }
+  return slot_ma;
+}
+
+/**
+ * The filter the #TEMPLATE_ID_FILTER_* mask asks for, resolved from its bits into a single mode.
+ */
+enum class ImagePaintFilterMode {
+  /** No paint filter; every image but render-result / compositor passes. */
+  All,
+  /** Assigned somewhere in the active material, in a slot of any type. */
+  CurrentMaterial,
+  /** Assigned to a paint slot of the chosen type in *some* material. */
+  SlotType,
+  /** PBR paint-layer view: the layer's maps, restricted to the active material. */
+  MaterialLayer,
+};
+
+static ImagePaintFilterMode image_paint_filter_mode_resolve(const int filter_mode)
+{
+  const bool filter_material = (filter_mode & TEMPLATE_ID_FILTER_CURRENT_MATERIAL) != 0;
+  const bool filter_slot = (filter_mode & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
+
+  /* Both bits together are the "Slot" filter with its "All" restriction released, which is a mode
+   * of its own rather than the two filters combined. */
+  if (filter_slot && filter_material) {
+    return ImagePaintFilterMode::MaterialLayer;
+  }
+  if (filter_material) {
+    return ImagePaintFilterMode::CurrentMaterial;
+  }
+  if (filter_slot) {
+    return ImagePaintFilterMode::SlotType;
+  }
+  return ImagePaintFilterMode::All;
+}
+
+/**
+ * Whether \a image is one of the maps authoring the layer \a params points at. With a reference
+ * layer (the assigned image's, or a UUID pushed from Python by a paint add-on) this is
+ * #Image::paint_layer_id equality alone -- add-on-authored layer images need not carry
+ * #IMA_PAINT_CANVAS. Without one it widens to any engine-managed paint canvas that has a layer.
+ */
+static bool image_is_in_reference_layer(const Image &image, const ImagePaintFilterParams &params)
+{
+  if (!BLI_uuid_is_nil(params.reference_layer_id)) {
+    return BLI_uuid_equal(image.paint_layer_id, params.reference_layer_id);
+  }
+  return (image.flag & IMA_PAINT_CANVAS) != 0 && !BLI_uuid_is_nil(image.paint_layer_id);
+}
+
 bool image_id_passes_paint_filter(Main &bmain,
                                   const Image &image,
-                                  const int filter_mode,
-                                  const Material *material,
-                                  char slot_type)
+                                  const ImagePaintFilterParams &params)
 {
   if (ELEM(image.type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) {
     return false;
   }
-  const bool filter_material = (filter_mode & TEMPLATE_ID_FILTER_CURRENT_MATERIAL) != 0;
-  const bool filter_slot = (filter_mode & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
 
-  if (filter_material && filter_slot) {
-    return material &&
-           BKE_image_paint_slot_info_is_used_in_material(&bmain, &image, material, slot_type);
+  switch (image_paint_filter_mode_resolve(params.filter_mode)) {
+    case ImagePaintFilterMode::All:
+      return true;
+
+    case ImagePaintFilterMode::CurrentMaterial:
+      /* Assigned somewhere in the active material, in a slot of any type. Nothing passes when
+       * there is no active material to compare against. */
+      return params.material != nullptr &&
+             BKE_image_paint_slot_info_is_used_in_material(
+                 &bmain, &image, params.material, char(NODE_TEX_IMAGE_SLOT_NONE));
+
+    case ImagePaintFilterMode::SlotType:
+      /* Assigned to a paint slot in *some* material -- of the chosen type, or of any type when
+       * #NODE_TEX_IMAGE_SLOT_NONE (which is what #BKE_image_paint_slot_info_has_slot_type already
+       * does for that value). */
+      return BKE_image_paint_slot_info_has_slot_type(&bmain, &image, params.slot_type);
+
+    case ImagePaintFilterMode::MaterialLayer:
+      /* A map of the target layer that the active material actually uses, in a slot of the
+       * selected type (#NODE_TEX_IMAGE_SLOT_NONE meaning "any slot of that material"). */
+      return image_is_in_reference_layer(image, params) && params.material != nullptr &&
+             BKE_image_paint_slot_info_is_used_in_material(
+                 &bmain, &image, params.material, params.slot_type);
   }
-  if (filter_material &&
-      (!material || !BKE_image_paint_slot_info_is_used_in_material(&bmain, &image, material, 0)))
-  {
-    return false;
-  }
-  if (filter_slot && slot_type != NODE_TEX_IMAGE_SLOT_NONE &&
-      !BKE_image_paint_slot_info_has_slot_type(&bmain, &image, slot_type))
-  {
-    return false;
-  }
+
+  BLI_assert_unreachable();
   return true;
+}
+
+/**
+ * Reference layer the #ImagePaintFilterMode::MaterialLayer view centers on, in priority order:
+ *  1. an explicit UUID pushed from Python (#WindowManager.id_browser_filter_layer_id) -- a paint
+ *     add-on such as Ucupaint sets it to the layer the user just selected;
+ *  2. the currently assigned image's layer, but only when that image belongs to \a material
+ *     (otherwise it is a stale pointer to the previously active material's layer and would hide
+ *     everything);
+ *  3. nil -- which the filter widens to "any layer used by this material of the selected slot
+ *     type".
+ */
+static bUUID id_browser_reference_layer_id(Main &bmain,
+                                           const wmWindowManager &wm,
+                                           PointerRNA &target_ptr,
+                                           PropertyRNA &target_prop,
+                                           const Material *material)
+{
+  if (wm.runtime != nullptr && !BLI_uuid_is_nil(wm.runtime->id_browser_filter_layer_id)) {
+    return wm.runtime->id_browser_filter_layer_id;
+  }
+
+  const PointerRNA assigned_ptr = RNA_property_pointer_get(&target_ptr, &target_prop);
+  const Image *assigned = static_cast<const Image *>(assigned_ptr.data);
+  if (assigned != nullptr && material != nullptr && !BLI_uuid_is_nil(assigned->paint_layer_id) &&
+      BKE_image_paint_slot_info_is_used_in_material(
+          &bmain, assigned, material, char(NODE_TEX_IMAGE_SLOT_NONE)))
+  {
+    return assigned->paint_layer_id;
+  }
+  return bUUID{};
+}
+
+/**
+ * Built-in paint-slot filter for an image target, read straight from the Image/Node/3D-View space
+ * data so a refresh sees the current toggle values. Returns the neutral "show everything" filter
+ * for a non-image target or when no space backs the toggles.
+ */
+static ImagePaintFilterParams id_browser_paint_filter_resolve(const bContext &C,
+                                                              Main &bmain,
+                                                              const wmWindowManager &wm,
+                                                              const short idcode,
+                                                              PointerRNA &target_ptr,
+                                                              PropertyRNA &target_prop)
+{
+  ImagePaintFilterParams params;
+  if (idcode != ID_IM) {
+    return params;
+  }
+  StructRNA *space_srna = nullptr;
+  SpaceLink *sl = image_browser_active_space(&C, &space_srna);
+  bScreen *screen = CTX_wm_screen(&C);
+  if (sl == nullptr || screen == nullptr) {
+    return params;
+  }
+
+  PointerRNA space_ptr = RNA_pointer_create_discrete(&screen->id, space_srna, sl);
+  const Material *material = id_browser_filter_material(C);
+
+  int mode = RNA_enum_get(&space_ptr, "image_filter_mode");
+  /* Both material-aware modes (plain "Current Material", and the layer view which also requires
+   * the image to be used by the active material) are meaningless without one. */
+  if (material == nullptr && (mode & TEMPLATE_ID_FILTER_CURRENT_MATERIAL)) {
+    mode = TEMPLATE_ID_FILTER_ALL;
+  }
+
+  params.filter_mode = mode;
+  params.material = material;
+  params.slot_type = char(RNA_enum_get(&space_ptr, "image_filter_slot_type"));
+  params.reference_layer_id = id_browser_reference_layer_id(
+      bmain, wm, target_ptr, target_prop, material);
+  return params;
 }
 
 /** Compact image-filter-mode radio on row 2; fixed intrinsic width so labels do not stretch. */
@@ -241,24 +552,74 @@ static void id_browser_slot_type_filter_button(Layout &parent, char *filter_mode
 }
 
 /**
+ * Drop-down listing the active object's material slots. Picking one switches #Object::actcol, which
+ * is what #id_browser_filter_material resolves the "Current Material" filter against.
+ */
+static void id_browser_material_select_menu(bContext * /*C*/, Layout *layout, void *arg)
+{
+  Object *ob = static_cast<Object *>(arg);
+  if (ob == nullptr || ob->totcol == 0) {
+    layout->label(IFACE_("No Material Slots"), ICON_INFO);
+    return;
+  }
+
+  Block *block = layout->block();
+  block_layout_set_current(block, layout);
+  for (int i = 0; i < ob->totcol; i++) {
+    const Material *ma = BKE_object_material_get(ob, short(i + 1));
+    Button *but = uiDefBut(block,
+                           ButtonType::ButMenu,
+                           ma ? StringRefNull(ma->id.name + 2) : StringRefNull(IFACE_("Empty Slot")),
+                           0,
+                           0,
+                           short(UI_UNIT_X * 8),
+                           short(UI_UNIT_Y),
+                           nullptr,
+                           0.0f,
+                           0.0f,
+                           "");
+    def_but_icon(but, ma ? ICON_MATERIAL : ICON_MATERIAL_DATA, UI_HAS_ICON);
+    if (ob->actcol == i + 1) {
+      button_flag_enable(but, UI_SELECT_DRAW);
+    }
+    const short slot = short(i + 1);
+    button_func_set(but, [ob, slot](bContext &C_cb) {
+      ob->actcol = slot;
+      /* #ND_SHADING_LINKS keeps the rest of the UI (material properties, node editor) in sync.
+       * #NC_ASSET | #ND_ASSET_LIST is what #id_browser_asset_block_listen (registered on the ID
+       * browser popover's own region) reacts to, so the grid behind this nested menu rebuilds
+       * against the new active slot immediately instead of only once the menu closes -- the same
+       * mechanism the catalog / name-match selectors use. */
+      WM_event_add_notifier(&C_cb, NC_MATERIAL | ND_SHADING_LINKS, nullptr);
+      WM_event_add_notifier(&C_cb, NC_ASSET | ND_ASSET_LIST, nullptr);
+      if (ARegion *region = CTX_wm_region(&C_cb)) {
+        ED_region_tag_refresh_ui(region);
+        ED_region_tag_redraw(region);
+      }
+    });
+  }
+}
+
+/**
  * Composable predicate deciding which data-blocks the browser shows. The built-in image paint-slot
  * filter and an optional script-defined #IDFilterType are combined (an empty filter passes
  * everything). Generic over ID type, so the same popover serves any pointer property.
  */
 struct IDBrowserFilter {
-  /** Built-in paint-slot filter mask (#TEMPLATE_ID_FILTER_*); only consulted for #ID_IM. */
-  int paint_mode = TEMPLATE_ID_FILTER_ALL;
-  const Material *material = nullptr;
-  char slot_type = 0;
+  /** Built-in paint-slot filter; only consulted for #ID_IM. */
+  ImagePaintFilterParams paint;
+  bool exclude_paint_canvas = false;
   /** Optional script-defined filter, resolved from the popover's `filter_type` context. */
   const IDFilterType *custom = nullptr;
 
   bool passes(const bContext &C, Main &bmain, const ID &id) const
   {
     if (GS(id.name) == ID_IM) {
-      if (!image_id_passes_paint_filter(
-              bmain, reinterpret_cast<const Image &>(id), paint_mode, material, slot_type))
-      {
+      const Image &image = reinterpret_cast<const Image &>(id);
+      if (exclude_paint_canvas && (image.flag & IMA_PAINT_CANVAS)) {
+        return false;
+      }
+      if (!image_id_passes_paint_filter(bmain, image, paint)) {
         return false;
       }
     }
@@ -515,10 +876,59 @@ static bool id_browser_asset_passes_name_match(const NameMatchResolvedFilter &re
   return BKE_name_match_resolved_asset_passes(resolved, asset.get_name(), metadata_tags);
 }
 
-static NameMatchFilterState id_browser_name_match_state_from_wm(wmWindowManager &wm)
+/**
+ * The name-match filter is scoped per browsed property: enabling it for one channel's image
+ * slot must not leak to another slot or to the Image editor's own browser, which all share the
+ * single #wmWindowManager grid settings otherwise. It is kept in a per-property child
+ * #IDProperty group of those shared settings, keyed by a hash of the target property's full
+ * path (owner ID name + RNA path, so identically named properties on different data-blocks stay
+ * distinct).
+ *
+ * Returns a #GridViewSettings pointer onto that per-property child group, or the shared settings
+ * pointer itself when no stable key is available (which preserves the previous shared behavior).
+ */
+static PointerRNA id_browser_name_match_settings_ptr(wmWindowManager &wm,
+                                                     const PointerRNA &target_ptr,
+                                                     PropertyRNA *target_prop)
 {
   PointerRNA wm_ptr = RNA_id_pointer_create(&wm.id);
-  PointerRNA settings_ptr = RNA_pointer_get(&wm_ptr, "id_browser_grid_view_settings");
+  PointerRNA shared = RNA_pointer_get(&wm_ptr, "id_browser_grid_view_settings");
+  if (shared.data == nullptr || target_ptr.owner_id == nullptr || target_prop == nullptr) {
+    return shared;
+  }
+  const std::optional<std::string> prop_path = RNA_path_from_ID_to_property(&target_ptr,
+                                                                           target_prop);
+  if (!prop_path) {
+    return shared;
+  }
+
+  /* IDProperty names are capped at #MAX_IDPROP_NAME, so the (possibly long) target path is
+   * hashed to a fixed-width key. The separator keeps the ID name and the path from running
+   * together into an ambiguous string. */
+  const uint64_t key_hash = hash_string(std::string(target_ptr.owner_id->name) + "\x1f" +
+                                        *prop_path);
+  const std::string entry_name = fmt::format("nm_{:016x}", key_hash);
+
+  IDProperty *group = static_cast<IDProperty *>(shared.data);
+  IDPropertyTemplate val{};
+  IDProperty *targets = IDP_GetPropertyTypeFromGroup(group, "name_match_targets", IDP_GROUP);
+  if (targets == nullptr) {
+    targets = IDP_New(IDP_GROUP, &val, "name_match_targets");
+    IDP_AddToGroup(group, targets);
+  }
+  IDProperty *entry = IDP_GetPropertyTypeFromGroup(targets, entry_name, IDP_GROUP);
+  if (entry == nullptr) {
+    entry = IDP_New(IDP_GROUP, &val, entry_name);
+    IDP_AddToGroup(targets, entry);
+  }
+  return RNA_pointer_create_discrete(shared.owner_id, shared.type, entry);
+}
+
+static NameMatchFilterState id_browser_name_match_state_get(wmWindowManager &wm,
+                                                            const PointerRNA &target_ptr,
+                                                            PropertyRNA *target_prop)
+{
+  PointerRNA settings_ptr = id_browser_name_match_settings_ptr(wm, target_ptr, target_prop);
   if (settings_ptr.data == nullptr) {
     return {};
   }
@@ -703,44 +1113,131 @@ class IDBrowserView : public AbstractGridView {
           RNA_property_update(&C, &ptr, target_prop);
         });
     item.set_is_active_fn([active_id, asset_ptr]() {
-      const ID *local_id = asset_ptr->local_id();
-      return local_id != nullptr && local_id == active_id;
+      if (active_id == nullptr || GS(active_id->name) != ID_IM) {
+        return false;
+      }
+      return ed::image_grid::image_grid_asset_represents_image(
+          *asset_ptr, *id_cast<const Image *>(active_id));
     });
   }
 };
+
+/** The pointer property the popover browses for, published into its layout context by
+ * #id_browser_popover_context_set. */
+struct IDBrowserGridTarget {
+  PointerRNA ptr;
+  PropertyRNA *prop = nullptr;
+  /** ID type of the browsed data-blocks, taken from the property's pointer type. */
+  short idcode = 0;
+};
+
+/** Resolve the browsed property, or nothing when the context names no usable ID pointer. */
+static std::optional<IDBrowserGridTarget> id_browser_grid_target_from_context(const bContext &C)
+{
+  IDBrowserGridTarget target;
+  target.ptr = CTX_data_pointer_get(&C, "id_browser_ptr");
+  const std::optional<StringRefNull> prop_name = CTX_data_string_get(&C, "id_browser_prop");
+  if (target.ptr.data == nullptr || !prop_name) {
+    return std::nullopt;
+  }
+  target.prop = RNA_struct_find_property(&target.ptr, prop_name->c_str());
+  if (!target.prop || RNA_property_type(target.prop) != PROP_POINTER) {
+    return std::nullopt;
+  }
+
+  /* The browsed items are the data-blocks of the target property's ID type. Not an ID pointer
+   * property means neither source has anything to list. This used to be caught by #which_libbase
+   * returning null, but that only covers the blend-data source, so the asset source would fall
+   * through to an empty grid and a pointless #storage_fetch. */
+  const StructRNA *ptr_type = RNA_property_pointer_type(&target.ptr, target.prop);
+  target.idcode = ptr_type ? RNA_type_to_ID_code(ptr_type) : 0;
+  if (target.idcode == 0) {
+    return std::nullopt;
+  }
+  return target;
+}
+
+/**
+ * Everything that decides which data-blocks the grid shows: the built-in image paint-slot filter
+ * (or the source picker's canvas exclusion) plus any script-defined #IDFilterType.
+ */
+static IDBrowserFilter id_browser_filter_resolve(const bContext &C,
+                                                 Main &bmain,
+                                                 const wmWindowManager &wm,
+                                                 const short idcode,
+                                                 PointerRNA &target_ptr,
+                                                 PropertyRNA &target_prop)
+{
+  IDBrowserFilter filter;
+  /* The source picker lists every image that is not an engine-owned paint canvas, with none of
+   * the space's own paint-slot toggles applied. */
+  if (id_browser_image_filter_from_context(C) == IDBrowserImageFilter::PaintSource) {
+    filter.exclude_paint_canvas = true;
+  }
+  else {
+    filter.paint = id_browser_paint_filter_resolve(
+        C, bmain, wm, idcode, target_ptr, target_prop);
+  }
+  /* Optional script-defined filter, referenced by name (see #template_id_browser `filter_type`). */
+  if (const std::optional<StringRefNull> filter_type_idname = CTX_data_string_get(
+          &C, "id_browser_filter_type"))
+  {
+    filter.custom = id_filter_type_find(*filter_type_idname);
+  }
+  return filter;
+}
+
+/**
+ * Tile size and column count for the chosen view mode. Both modes force the column count as a hint
+ * so float rounding at a boundary cannot drop one and reopen a gap on the popover's right edge.
+ */
+static void id_browser_view_set_tile_size(IDBrowserView &view,
+                                          const Layout &layout,
+                                          const bool list_mode,
+                                          const int cols_hint)
+{
+  if (list_mode) {
+    /* Pack the row width into as many equal columns as fit (each at least
+     * #ID_BROWSER_LIST_MIN_COL_UNITS_X wide), so a widened popover lays items out in horizontal
+     * columns instead of one tall single column. The tile width divides the popover exactly so the
+     * columns fill it with no gap on the right. */
+    const float units_x = layout.ui_units_x() > 0.0f ? layout.ui_units_x() :
+                                                       ID_BROWSER_POPOVER_UNITS_X;
+    const int list_cols = std::max(1, int(units_x / ID_BROWSER_LIST_MIN_COL_UNITS_X));
+    const int tile_w = std::max(1, int(units_x * UI_UNIT_X) / list_cols);
+    view.set_tile_size(tile_w, UI_UNIT_X);
+    view.set_cols_per_row_hint(list_cols);
+    return;
+  }
+
+  view.set_tile_size(UI_UNIT_X * 3, UI_UNIT_Y * 3);
+  /* Shrink the item-name font like the asset-shelf popover does. */
+  view.set_preview_size_px(ID_BROWSER_GRID_PREVIEW_SIZE_PX);
+  if (cols_hint > 0) {
+    /* The popover snaps its width to whole columns. */
+    view.set_cols_per_row_hint(cols_hint);
+  }
+}
 
 static void build_id_grid(const bContext &C,
                           Layout &layout,
                           const float grid_viewport_units,
                           const int cols_hint = 0)
 {
-  PointerRNA target_ptr = CTX_data_pointer_get(&C, "id_browser_ptr");
-  const std::optional<StringRefNull> prop_name = CTX_data_string_get(&C, "id_browser_prop");
-  if (target_ptr.data == nullptr || !prop_name) {
+  const std::optional<IDBrowserGridTarget> target = id_browser_grid_target_from_context(C);
+  if (!target) {
     return;
   }
-  PropertyRNA *target_prop = RNA_struct_find_property(&target_ptr, prop_name->c_str());
-  if (!target_prop || RNA_property_type(target_prop) != PROP_POINTER) {
-    return;
-  }
+  PointerRNA target_ptr = target->ptr;
+  PropertyRNA *target_prop = target->prop;
+  const short idcode = target->idcode;
 
   wmWindowManager *wm = CTX_wm_manager(&C);
   if (wm == nullptr) {
     return;
   }
   PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
-
-  /* The browsed items are the data-blocks of the target property's ID type. */
   Main *bmain = CTX_data_main(&C);
-  const StructRNA *ptr_type = RNA_property_pointer_type(&target_ptr, target_prop);
-  const short idcode = ptr_type ? RNA_type_to_ID_code(ptr_type) : 0;
-  if (idcode == 0) {
-    /* Not an ID pointer property: neither source has anything to list. This used to be caught by
-     * #which_libbase returning null, but that early return only runs for the blend-data source
-     * below, so the asset source would otherwise fall through to an empty grid and a pointless
-     * #storage_fetch. */
-    return;
-  }
 
   const int source = wm->id_browser_source;
   /* Blend-data source needs the ID list; the asset source does not (it iterates the library). */
@@ -761,37 +1258,13 @@ static void build_id_grid(const bContext &C,
     return;
   }
 
-  IDBrowserFilter filter;
-  /* Built-in paint-slot filter: only for image targets, and only when an Image/Node editor backs
-   * its state. Read straight from the space data so a refresh sees the current toggle values. */
-  StructRNA *space_srna = nullptr;
-  SpaceLink *sl = (idcode == ID_IM) ? image_browser_active_space(&C, &space_srna) : nullptr;
-  if (sl != nullptr) {
-    bScreen *screen = CTX_wm_screen(&C);
-    if (screen != nullptr) {
-      PointerRNA space_ptr = RNA_pointer_create_discrete(&screen->id, space_srna, sl);
-      int mode = RNA_enum_get(&space_ptr, "image_filter_mode");
-      const PointerRNA mat_ptr = CTX_data_pointer_get(&C, "id_browser_material");
-      const Material *material = static_cast<const Material *>(mat_ptr.data);
-      if (material == nullptr && (mode & TEMPLATE_ID_FILTER_CURRENT_MATERIAL)) {
-        mode = TEMPLATE_ID_FILTER_ALL;
-      }
-      filter.paint_mode = mode;
-      filter.slot_type = char(RNA_enum_get(&space_ptr, "image_filter_slot_type"));
-      filter.material = material;
-    }
-  }
-  /* Optional script-defined filter, referenced by name (see #template_id_browser `filter_type`). */
-  if (const std::optional<StringRefNull> filter_type_idname = CTX_data_string_get(
-          &C, "id_browser_filter_type"))
-  {
-    filter.custom = id_filter_type_find(*filter_type_idname);
-  }
+  const IDBrowserFilter filter = id_browser_filter_resolve(
+      C, *bmain, *wm, idcode, target_ptr, *target_prop);
 
   const bool list_mode = RNA_enum_get(&wm_ptr, "id_browser_view_mode") ==
                          IMAGE_BROWSER_VIEW_LIST;
 
-  NameMatchFilterState name_match = id_browser_name_match_state_from_wm(*wm);
+  NameMatchFilterState name_match = id_browser_name_match_state_get(*wm, target_ptr, target_prop);
 
   grid_settings::CatalogMode catalog_mode = grid_settings::CatalogMode::All;
   if (source == ID_BROWSER_SOURCE_ASSET_LIBRARY) {
@@ -815,27 +1288,7 @@ static void build_id_grid(const bContext &C,
       idcode,
       std::move(name_match));
 
-  if (list_mode) {
-    /* Pack the row width into as many equal columns as fit (each at least
-     * #ID_BROWSER_LIST_MIN_COL_UNITS_X wide), so a widened popover lays items out in horizontal
-     * columns instead of one tall single column. The tile width divides the popover exactly so the
-     * columns fill it with no gap on the right, and the column count is forced as a hint so float
-     * rounding at the boundary cannot drop one. */
-    const float units_x = layout.ui_units_x() > 0.0f ? layout.ui_units_x() :
-                                                       ID_BROWSER_POPOVER_UNITS_X;
-    const int list_cols = std::max(1, int(units_x / ID_BROWSER_LIST_MIN_COL_UNITS_X));
-    const int tile_w = std::max(1, int(units_x * UI_UNIT_X) / list_cols);
-    view->set_tile_size(tile_w, UI_UNIT_X);
-    view->set_cols_per_row_hint(list_cols);
-  }
-  else {
-    view->set_tile_size(UI_UNIT_X * 3, UI_UNIT_Y * 3);
-    if (cols_hint > 0) {
-      /* The popover snaps its width to whole columns; force the column count so float rounding at
-       * the boundary cannot drop it to one fewer column and reopen the gap on the right. */
-      view->set_cols_per_row_hint(cols_hint);
-    }
-  }
+  id_browser_view_set_tile_size(*view, layout, list_mode, cols_hint);
 
   view->set_min_viewport_height(int(UI_UNIT_Y * grid_viewport_units));
   view->set_fixed_viewport_layout(true);
@@ -882,22 +1335,17 @@ static bool id_browser_popover_poll(const bContext * /*C*/, PanelType * /*panel_
   return true;
 }
 
-/**
- * Add the interactive 2D resize grip. Placed at the bottom-right for a popover that opened
- * downward, or at the top-right (with the vertical axis flipped, so dragging up grows) when it
- * opened upward — e.g. a Shader-editor node button near the bottom of the area. Drives the
- * width/height stored on the window manager; the values persist with the file automatically, so
- * the callback only flags it modified.
- */
-static void id_browser_add_resize_grip(Layout &layout, wmWindowManager &wm, const bool flip_up)
+static Button *id_browser_build_resize_grip_button(Layout &target_row,
+                                                   Layout &restore_current,
+                                                   wmWindowManager &wm,
+                                                   bool flip_up,
+                                                   int icon)
 {
-  Layout &grip_row = layout.row(false);
-  grip_row.alignment_set(LayoutAlign::Right);
-  Block *block = layout.block();
-  block_layout_set_current(block, &grip_row);
+  Block *block = target_row.block();
+  block_layout_set_current(block, &target_row);
   Button *grip = uiDefIconButV(block,
                                ButtonType::Grip,
-                               ICON_GRIP,
+                               icon,
                                0,
                                0,
                                short(UI_UNIT_X),
@@ -909,7 +1357,20 @@ static void id_browser_add_resize_grip(Layout &layout, wmWindowManager &wm, cons
   button_grip_2d_set(grip, &wm.id_browser_popup_height_units, flip_up);
   button_flag_disable(grip, BUT_UNDO);
   button_func_set(grip, [](bContext & /*C*/) { WM_file_tag_modified(); });
-  block_layout_set_current(block, &layout);
+  block_layout_set_current(block, &restore_current);
+  return grip;
+}
+
+/**
+ * Add the interactive 2D resize grip. Placed at the bottom-right for a popover that opened
+ * downward. Drives the width/height stored on the window manager; the values persist with
+ * the file automatically, so the callback only flags it modified.
+ */
+static void id_browser_add_resize_grip(Layout &layout, wmWindowManager &wm, const bool flip_up)
+{
+  Layout &grip_row = layout.row(false);
+  grip_row.alignment_set(LayoutAlign::Right);
+  id_browser_build_resize_grip_button(grip_row, layout, wm, flip_up, ICON_GRIP);
 }
 
 /**
@@ -930,6 +1391,17 @@ static void id_browser_add_resize_grip(Layout &layout, wmWindowManager &wm, cons
 static void id_browser_asset_block_listen(const wmRegionListenerParams *params)
 {
   const wmNotifier *wmn = params->notifier;
+
+  /* Active-material / shading changes from outside the popover (e.g. picking a different slot in
+   * Material Properties sends #NC_MATERIAL | #ND_SHADING_LINKS). The "Current Material" and the
+   * "Slot" paint filters resolve their material from #Object::actcol, so the grid has to rebuild
+   * when that changes even though nothing asset-related happened. */
+  if (wmn->category == NC_MATERIAL || wmn->category == NC_TEXTURE) {
+    ED_region_tag_redraw(params->region);
+    ED_region_tag_refresh_ui(params->region);
+    return;
+  }
+
   if (wmn->category != NC_ASSET) {
     return;
   }
@@ -976,6 +1448,9 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     popover_units_x = grid_cols * 3;
   }
 
+  const IDBrowserImageFilter image_filter = id_browser_image_filter_from_context(*C);
+  const bool paint_source = image_filter == IDBrowserImageFilter::PaintSource;
+
   /* The built-in paint-slot filters need an Image/Node editor's space to store their state; they
    * are optional. When absent (the popover is used elsewhere) the search, view toggle and any
    * script-defined filter still work. */
@@ -993,16 +1468,27 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   PropertyRNA *target_prop = (target_ptr.data && prop_name) ?
                                  RNA_struct_find_property(&target_ptr, prop_name->c_str()) :
                                  nullptr;
+  /* Per-property storage for the name-match filter, so toggling it here does not affect other
+   * browsers sharing the #wmWindowManager grid settings (see #id_browser_name_match_settings_ptr). */
+  PointerRNA name_match_settings_ptr = id_browser_name_match_settings_ptr(
+      *wm, target_ptr, target_prop);
   bool is_image = false;
   if (target_prop && RNA_property_type(target_prop) == PROP_POINTER) {
     const StructRNA *ptr_type = RNA_property_pointer_type(&target_ptr, target_prop);
     is_image = ptr_type && RNA_type_to_ID_code(ptr_type) == ID_IM;
   }
+  /* Only on the first build of the popover's block, i.e. when the user just opened it. Every
+   * later re-draw reuses an old block, and changing the browser state (or tagging the file
+   * modified) from a plain re-draw would be a side effect of drawing. */
+  if (is_image && panel->layout->block()->oldblock == nullptr) {
+    id_browser_sync_assigned_image_location(*C, target_ptr, *target_prop, *wm);
+  }
   const bool asset_source = wm->id_browser_source == ID_BROWSER_SOURCE_ASSET_LIBRARY;
   /* The paint filters need both an image target and a space to back their state, and they only
    * apply to the blend-data source (an asset that is not imported yet has no local #Image to
-   * test). */
-  const bool show_paint_filters = is_image && space_ptr.data != nullptr && !asset_source;
+   * test). In paint_source mode, row 2 is shown regardless of space data. */
+  const bool show_paint_filters = is_image && !asset_source &&
+                                  (space_ptr.data != nullptr || paint_source);
 
   Layout &layout = *panel->layout;
   layout.ui_units_x_set(float(popover_units_x));
@@ -1014,23 +1500,28 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     block_add_dynamic_listener(layout.block(), id_browser_asset_block_listen);
   }
 
-  /* Resolved open direction from the previous frame (the block is positioned, and its direction
-   * copied to the handle, after this draw runs). Unknown (0) on the very first frame, so the grip
-   * defaults to the bottom and corrects on the next refresh. When the popover opened upward, put
-   * the grip on the top (growth) edge so resizing grows it up-and-right, away from the button. */
+  /* Open direction, and whether it is known yet. #block_func_POPOVER resolves
+   * #Block::handle->direction *after* this draw runs, so it is zero on the very first frame and
+   * any guess there can turn out wrong. Rather than guess and let the grip jump when corrected,
+   * the grip is drawn only once the direction is resolved -- its slot (row 1 for an upward
+   * popover, the bottom row for a downward one) is reserved at full size on every frame, so the
+   * grip simply appears at its final edge one frame later without ever moving, and the popover is
+   * the same size throughout. */
   const Block *block = layout.block();
-  const bool flip_up = block->handle && (block->handle->direction & UI_DIR_UP);
-  if (flip_up) {
-    id_browser_add_resize_grip(layout, *wm, true);
-  }
+  const bool grip_dir_known = block->handle && block->handle->direction != 0;
+  const bool flip_up = grip_dir_known && (block->handle->direction & UI_DIR_UP) != 0;
 
   Layout &header = layout.column(true);
   header.fixed_size_set(true);
 
-  const bool has_material = CTX_data_pointer_get(C, "id_browser_material").data != nullptr;
+  Object *filter_object = CTX_data_active_object(C);
+  const bool has_material = id_browser_filter_material(*C) != nullptr;
 
-  /* #Layout::separator uses 6px*UI_SCALE_FAC steps; convert 0.5 #UI_UNIT_Y to that factor. */
+  /* #Layout::separator uses 6px*UI_SCALE_FAC steps. */
   const float half_unit_gap_factor = (0.5f * UI_UNIT_Y) / (6.0f * UI_SCALE_FAC);
+  /* Height of the bottom resize-grip row (grip button is 0.7 #UI_UNIT_Y); an empty spacer of this
+   * height stands in when the grip is elsewhere or not placed yet. */
+  const float grip_row_gap_factor = (0.7f * UI_UNIT_Y) / (6.0f * UI_SCALE_FAC);
 
   /* Row 1: source toggle on the left, view-mode toggle pushed to the right of the same row.
    * #separator_spacer is unsupported in popups, so a Right-aligned, fixed-size group is used
@@ -1045,11 +1536,59 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   source_toggle.prop_enum(&wm_ptr, "id_browser_source", "BLEND_DATA", "", ICON_NONE);
   source_toggle.prop_enum(&wm_ptr, "id_browser_source", "ASSET_LIBRARY", "", ICON_NONE);
 
+  /* Quick source shortcuts, centered between the source toggle and the view-mode toggle. Always
+   * shown; each jumps the browser straight to Recent / Favorites / this file's assets (switching
+   * it to the Asset Library source first) without opening the library selector. A Center-aligned
+   * fixed-size child of the Expand row is treated as free space by #LayoutRow::resolve_impl, so
+   * the group keeps its centered position as the popover width changes. Drawn pressed
+   * (#UI_SELECT_DRAW) when its source is the one currently shown. */
+  {
+    PointerRNA quick_settings = RNA_pointer_get(&wm_ptr, "id_browser_grid_view_settings");
+    const bool is_asset_source = wm->id_browser_source == ID_BROWSER_SOURCE_ASSET_LIBRARY;
+    grid_settings::CatalogMode catalog_mode = grid_settings::CatalogMode::All;
+    AssetLibraryReference lib_ref = {};
+    if (quick_settings.data != nullptr) {
+      catalog_mode = grid_settings::catalog_mode_get(quick_settings);
+      lib_ref = grid_settings::library_ref_get(quick_settings);
+    }
+    const bool recent_active = is_asset_source &&
+                               catalog_mode == grid_settings::CatalogMode::Recent;
+    const bool favorites_active = is_asset_source &&
+                                  catalog_mode == grid_settings::CatalogMode::Favorites;
+    const bool current_file_active = is_asset_source &&
+                                     catalog_mode == grid_settings::CatalogMode::All &&
+                                     lib_ref.type == ASSET_LIBRARY_LOCAL;
+
+    Layout &quick_row = filter_row.row(true);
+    quick_row.alignment_set(LayoutAlign::Center);
+    quick_row.fixed_size_set(true);
+    auto add_quick = [&](const char *op_idname, const char *label, const int icon,
+                         const bool active) {
+      quick_row.op(op_idname, label, icon);
+      if (active) {
+        button_flag_enable(quick_row.block()->last_but(), UI_SELECT_DRAW);
+      }
+    };
+    add_quick("UI_OT_id_browser_show_recent", IFACE_("Recent"), ICON_RECOVER_LAST, recent_active);
+    add_quick("UI_OT_id_browser_show_favorites", IFACE_("Fav"), ICON_SOLO_ON, favorites_active);
+    add_quick("UI_OT_id_browser_show_current_file",
+              IFACE_("Current"),
+              ICON_CURRENT_FILE,
+              current_file_active);
+  }
+
   Layout &view_mode_row = filter_row.row(true);
   view_mode_row.alignment_set(LayoutAlign::Right);
   view_mode_row.fixed_size_set(true);
   view_mode_row.prop_enum(&wm_ptr, "id_browser_view_mode", "GRID", "", ICON_NONE);
   view_mode_row.prop_enum(&wm_ptr, "id_browser_view_mode", "LIST", "", ICON_NONE);
+  if (flip_up) {
+    /* Upward popover: the grip lives here, at the right end of row 1. A gap keeps it from reading
+     * as part of the aligned GRID/LIST pair. Nothing is reserved when the grip is at the bottom
+     * instead -- an empty slot after GRID/LIST would be more noticeable than the grip fading in. */
+    view_mode_row.separator(half_unit_gap_factor);
+    id_browser_build_resize_grip_button(view_mode_row, layout, *wm, true, ICON_GRIP_V);
+  }
 
   /* Same gap as between the source-options row and the search row below, so the header reads as
    * evenly spaced groups instead of one packed block. */
@@ -1078,12 +1617,11 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
       source_options.context_int_set("grid_library_selector_show_recent_favorites", 1);
 
       /* Thin WM RNA property: side-effecting set + image-library itemf. */
-      template_grid_library_selector(&source_options,
-                                     const_cast<bContext *>(C),
-                                     &wm_ptr,
-                                     "id_browser_asset_library_reference",
-                                     /*embed_in_parent_row=*/true,
-                                     /*show_refresh=*/true);
+      GridLibrarySelectorParams selector_params;
+      selector_params.prop_name = "id_browser_asset_library_reference";
+      selector_params.embed_in_parent_row = true;
+      template_grid_library_selector(
+          &source_options, const_cast<bContext *>(C), &wm_ptr, selector_params);
 
       /* The closed dropdown otherwise shows "All Libraries" while Recent/Favorites is active:
        * #id_browser_set_membership stores the mode under #ASSET_LIBRARY_ALL in
@@ -1130,12 +1668,50 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
                                      &settings_ptr,
                                      /*embed_in_parent_row=*/true);
 
-      if (settings_ptr.data != nullptr) {
+      if (name_match_settings_ptr.data != nullptr) {
         Layout &name_match_row = source_options_row.row(true);
         name_match_row.alignment_set(LayoutAlign::Right);
         name_match_row.fixed_size_set(true);
         template_grid_name_match_filter(
-            &name_match_row, const_cast<bContext *>(C), &settings_ptr);
+            &name_match_row, const_cast<bContext *>(C), &name_match_settings_ptr);
+      }
+    }
+    else if (paint_source) {
+      Layout &source_options_row = header.row(false);
+      source_options_row.alignment_set(LayoutAlign::Expand);
+
+      Layout &paint_filters = source_options_row.row(true);
+      paint_filters.fixed_size_set(true);
+      {
+        /* Non-interactive "All" indicator. `PAINT_SOURCE` always lists every source image
+         * (paint canvases are excluded in #build_id_grid) and has no filter modes to switch
+         * between, so this is drawn selected and disabled. It is deliberately *not* bound to
+         * #SpaceImage.image_filter_mode: a stale value left by the Image editor's own browser
+         * would otherwise make the button look unselected while the grid still shows all. */
+        Layout &item = paint_filters.row(false);
+        item.alignment_set(LayoutAlign::Left);
+        item.fixed_size_set(true);
+        Button *all_but = uiDefBut(item.block(),
+                                   ButtonType::ButToggle,
+                                   IFACE_("All"),
+                                   0,
+                                   0,
+                                   short(2.5f * UI_UNIT_X),
+                                   short(UI_UNIT_Y),
+                                   nullptr,
+                                   0.0f,
+                                   1.0f,
+                                   TIP_("Showing all source images; paint canvases are hidden"));
+        button_flag_enable(all_but, UI_SELECT_DRAW);
+        button_disable(all_but, "");
+      }
+
+      if (name_match_settings_ptr.data != nullptr) {
+        Layout &name_match_row = source_options_row.row(true);
+        name_match_row.alignment_set(LayoutAlign::Right);
+        name_match_row.fixed_size_set(true);
+        template_grid_name_match_filter(
+            &name_match_row, const_cast<bContext *>(C), &name_match_settings_ptr);
       }
     }
     else {
@@ -1155,7 +1731,37 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
       id_browser_slot_type_filter_button(paint_filters, filter_mode_poin);
 
       const int mode = RNA_enum_get(&space_ptr, "image_filter_mode");
+      const bool show_current_material = (mode & TEMPLATE_ID_FILTER_CURRENT_MATERIAL) != 0;
       const bool show_slot_type = (mode & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
+
+      /* Material picker: which of the active object's material slots the "Current Material" filter
+       * tests against. Selecting one sets #Object::actcol, which #id_browser_filter_material then
+       * resolves the filter against. Shown only for the plain "Current Material" mode: hidden when
+       * "All" is selected, and hidden once the "Slot" filter is on (that mode either shows every
+       * material's slots, or -- with its "All" released -- switches to the layer-UUID view, and in
+       * both cases keeps the material chosen earlier). Centered in the row like the slot-type group
+       * below (a Center-aligned fixed-size child of the Expand row is treated as free space by
+       * #LayoutRow::resolve_impl). */
+      if (show_current_material && !show_slot_type) {
+        const Material *active_ma = filter_object ?
+                                        BKE_object_material_get(filter_object,
+                                                                filter_object->actcol) :
+                                        nullptr;
+        Layout &mat_center_row = source_options_row.row(true);
+        mat_center_row.alignment_set(LayoutAlign::Center);
+        mat_center_row.fixed_size_set(true);
+        mat_center_row.active_set(filter_object != nullptr);
+
+        Layout &mat_dropdown = mat_center_row.row(true);
+        mat_dropdown.fixed_size_set(true);
+        mat_dropdown.ui_units_x_set(6.0f);
+        mat_dropdown.menu_fn(active_ma ? StringRefNull(active_ma->id.name + 2) :
+                                         StringRefNull(IFACE_("Material")),
+                             active_ma ? ICON_MATERIAL : ICON_MATERIAL_DATA,
+                             id_browser_material_select_menu,
+                             filter_object);
+      }
+
       if (show_slot_type) {
         /* #LayoutAlign::Center on a fixed-size child of an Expand+fixed parent is treated as
          * free space by #LayoutRow::resolve_impl (same trick as the view-mode group on row 1).
@@ -1176,7 +1782,9 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
 
         /* "All" is a parameter nested inside the "Slot" filter: pressed (the default, since the
          * DNA field starts zeroed) means #TEMPLATE_ID_FILTER_CURRENT_MATERIAL is off and every
-         * material's images are shown; releasing it restricts to the active material's slots.
+         * material's images of this slot type are shown; releasing it switches to the PBR
+         * paint-layer view -- the managed paint canvases sharing the assigned image's
+         * #Image::paint_layer_id (see #image_id_passes_paint_filter).
          * #ButtonType::ToggleN is pressed when the underlying bit is *off* (see
          * #button_is_pushed_ex), matching that default, and matches the embossed menu height.
          * Flips the bit directly on the DNA field (bypassing RNA/#prop_enum) so it never touches
@@ -1184,7 +1792,6 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
          * #id_browser_slot_type_filter_button or hide this row. */
         Layout &material_toggle = slot_type_row.row(true);
         material_toggle.fixed_size_set(true);
-        material_toggle.active_set(has_material);
         Block *toggle_block = material_toggle.block();
         uiDefButBit<char>(toggle_block,
                           ButtonType::ToggleN,
@@ -1197,21 +1804,22 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
                           filter_mode_poin,
                           0.0f,
                           0.0f,
-                          TIP_("Show images used by slots of this type in any material, not just "
-                               "the active one"));
+                          TIP_("Show images used by slots of this type in any material. Disable to "
+                               "show the images sharing the assigned image's paint layer"));
       }
 
-      if (settings_ptr.data != nullptr) {
+      if (name_match_settings_ptr.data != nullptr) {
         Layout &name_match_row = source_options_row.row(true);
         name_match_row.fixed_size_set(true);
-        /* When the slot-type group is present it already absorbs the free space (Center above).
-         * Right-aligning name-match too would split that space and break centering — only push
-         * name-match to the trailing edge when it is the sole free child of this row. */
-        if (!show_slot_type) {
+        /* When a centered free child is present (the slot-type group, or the material picker)
+         * it already absorbs the free space. Right-aligning name-match too would split that space
+         * and break centering — only push name-match to the trailing edge when it is the sole free
+         * child of this row. */
+        if (!show_slot_type && !show_current_material) {
           name_match_row.alignment_set(LayoutAlign::Right);
         }
         template_grid_name_match_filter(
-            &name_match_row, const_cast<bContext *>(C), &settings_ptr);
+            &name_match_row, const_cast<bContext *>(C), &name_match_settings_ptr);
       }
     }
   }
@@ -1245,10 +1853,11 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   layout.separator(half_unit_gap_factor);
 
   /* Header/gap height consumed before the grid, kept in sync with the layout built above: the
-   * source + view-mode + name-match row, the 0.5-unit separator, the source-options row (paint
-   * filters, including any inline slot-type selector, or library/catalog), the 0.5-unit separator,
-   * the search row, and the 0.5-unit gaps above and below the grid. */
-  const float non_grid_units = 1.0f + 0.5f + 1.0f + 0.5f + 1.0f + 0.5f + 0.5f;
+   * source + quick-shortcuts + view-mode row, the 0.5-unit separator, the source-options row
+   * (paint filters, including any inline slot-type selector, or library/catalog), the 0.5-unit
+   * separator, the search row, the 0.5-unit gaps above and below the grid, and the always-present
+   * 0.7-unit bottom resize-grip row (a spacer of the same height when the grip is in row 1). */
+  const float non_grid_units = 1.0f + 0.5f + 1.0f + 0.5f + 1.0f + 0.5f + 0.5f + 0.7f;
   const bool list_mode = RNA_enum_get(&wm_ptr, "id_browser_view_mode") ==
                          IMAGE_BROWSER_VIEW_LIST;
   const float tile_units = list_mode ? float(UI_UNIT_X) / float(UI_UNIT_Y) : 3.0f;
@@ -1272,38 +1881,103 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   /* Matching gap under the grid for the persistent scroll-down arrow. */
   layout.separator(half_unit_gap_factor);
 
-  /* Downward popover: grip on the bottom (growth) edge. The upward case is placed at the top above.
-   */
-  if (!flip_up) {
+  /* The grip lives here only for a popover known to have opened downward (its growth edge). For
+   * an upward popover it is in row 1, and until the direction is resolved it is nowhere -- in
+   * both of those cases this row is still laid out, as an empty spacer of the same height, so the
+   * popover is exactly as tall throughout and the grip never has to move. */
+  if (grip_dir_known && !flip_up) {
     id_browser_add_resize_grip(layout, *wm, false);
+  }
+  else {
+    layout.separator(grip_row_gap_factor);
+  }
+}
+
+void id_browser_popover_context_set(Layout &layout, const IDBrowserTarget &target)
+{
+  layout.context_ptr_set("id_browser_ptr", target.ptr);
+  layout.context_string_set("id_browser_prop", target.propname);
+  if (target.material) {
+    PointerRNA mat_ptr = RNA_id_pointer_create(&target.material->id);
+    layout.context_ptr_set("id_browser_material", &mat_ptr);
+  }
+  if (target.filter_type && target.filter_type[0] != '\0') {
+    /* Read back in #build_id_grid via #id_filter_type_find. */
+    layout.context_string_set("id_browser_filter_type", target.filter_type);
+  }
+  if (target.image_filter && target.image_filter[0] != '\0' &&
+      !STREQ(target.image_filter, "DEFAULT"))
+  {
+    layout.context_string_set("id_browser_image_filter", target.image_filter);
   }
 }
 
 void id_browser_add_popover_button(Layout &row,
-                                      const bContext *C,
-                                      PointerRNA *ptr,
-                                      const char *propname,
-                                      Material *material,
-                                      const char *filter_type)
+                                   const bContext *C,
+                                   const IDBrowserTarget &target,
+                                   const bool use_preview_icon)
 {
   id_browser_popover_register();
+  id_browser_popover_context_set(row, target);
 
-  row.context_ptr_set("id_browser_ptr", ptr);
-  row.context_string_set("id_browser_prop", propname);
-  if (material) {
-    PointerRNA mat_ptr = RNA_id_pointer_create(&material->id);
-    row.context_ptr_set("id_browser_material", &mat_ptr);
-  }
-  if (filter_type && filter_type[0] != '\0') {
-    /* Read back in #build_id_grid via #id_filter_type_find. */
-    row.context_string_set("id_browser_filter_type", filter_type);
-  }
-
-  PropertyRNA *prop = RNA_struct_find_property(ptr, propname);
+  PointerRNA *ptr = target.ptr;
+  PropertyRNA *prop = RNA_struct_find_property(ptr, target.propname);
   const StructRNA *type = RNA_property_pointer_type(ptr, prop);
-  const int icon = type ? RNA_struct_ui_icon(type) : ICON_IMAGE_DATA;
+  const int type_icon = type ? RNA_struct_ui_icon(type) : ICON_IMAGE_DATA;
 
-  row.popover(C, "UI_PT_id_browser", "", icon, PopupAttachDirection::VerticalAlignLeft);
+  const PointerRNA idptr = RNA_property_pointer_get(ptr, prop);
+  ID *id = static_cast<ID *>(idptr.data);
+  /* Rendering the preview is deferred, so this may still return the plain type icon at first. */
+  const int preview_icon = (use_preview_icon && id) ? id_icon_get(C, id, true) : ICON_NONE;
+
+  row.popover(C,
+              "UI_PT_id_browser",
+              "",
+              preview_icon ? preview_icon : type_icon,
+              PopupAttachDirection::VerticalAlignLeft);
+
+  if (preview_icon) {
+    /* Draw the assigned data-block as a thumbnail instead of a small icon. The button is widened
+     * to stay roughly square, the row's own scale gives it its height. */
+    Block *block = row.block();
+    Button *but = block->last_but();
+    def_but_icon(but, preview_icon, UI_HAS_ICON | BUT_ICON_PREVIEW);
+    but->rect.xmax = but->rect.xmin + UI_UNIT_X * 2;
+    /* The thumbnail is the obvious place to drop a replacement image on. */
+    button_context_int_set(block, but, "id_browser_drop_target", 1);
+    /* The thumbnail is too small to judge the image by, so hovering it shows the same large
+     * preview and image info the browser's own items use (see #install_id_preview_tooltip). */
+    id_preview_tooltip_set(but, id);
+  }
+}
+
+/**
+ * The assigned data-block's name, drawn as a button that opens the browser instead of as a name
+ * field. Renaming a paint source from here has no meaning (the row is a source picker, not a
+ * data-block manager), and the name is the widest target in the row -- the part a user naturally
+ * clicks to change the assignment.
+ */
+static void id_browser_add_name_popover_button(Layout &row,
+                                               const bContext *C,
+                                               const IDBrowserTarget &target,
+                                               ID *id)
+{
+  id_browser_popover_register();
+  /* Own sub-layout, so only this button becomes an image drop target and not the Open/Unlink
+   * buttons #template_ID appends to the same row afterwards. */
+  Layout &name_row = row.row(true);
+  id_browser_popover_context_set(name_row, target);
+  name_row.context_int_set("id_browser_drop_target", 1);
+  name_row.popover(
+      C, "UI_PT_id_browser", id->name + 2, ICON_NONE, PopupAttachDirection::VerticalAlignLeft);
+
+  Button *but = row.block()->last_but();
+  /* Reads as the name field it replaces: text at the left edge, and no dropdown arrow (which is
+   * sized from the button height and would be oversized on this two-unit-tall row). */
+  button_drawflag_enable(but, BUT_TEXT_LEFT | BUT_NO_MENU_TRIA);
+  /* The name alone does not tell the user what is assigned, so hovering shows the same large
+   * preview the thumbnail beside it does. */
+  id_preview_tooltip_set(but, id);
 }
 
 /** \} */
@@ -1311,6 +1985,81 @@ void id_browser_add_popover_button(Layout &row,
 /* -------------------------------------------------------------------- */
 /** \name Entry point
  * \{ */
+
+ImageBrowserMode image_browser_mode_get(PointerRNA *ptr,
+                                        PropertyRNA *prop,
+                                        const char *drop_text)
+{
+  if (RNA_property_pointer_type(ptr, prop) != RNA_Image || !drop_text || drop_text[0] == '\0') {
+    return ImageBrowserMode::Standard;
+  }
+  const PointerRNA idptr = RNA_property_pointer_get(ptr, prop);
+  return idptr.data ? ImageBrowserMode::PaintSlotAssigned : ImageBrowserMode::PaintSlotEmpty;
+}
+
+/**
+ * Empty paint slot: a labelled button that both opens the browser and accepts a dropped image,
+ * replacing the icon-only browser button and New.
+ */
+static void id_browser_add_drop_button(Layout &row,
+                                       const bContext *C,
+                                       const IDBrowserTarget &target,
+                                       const char *drop_text)
+{
+  id_browser_popover_register();
+  /* Own sub-layout, so only this button becomes an image drop target and not the Open button that
+   * #template_ID appends to the same row afterwards. */
+  Layout &drop_row = row.row(true);
+  id_browser_popover_context_set(drop_row, target);
+  drop_row.context_int_set("id_browser_drop_target", 1);
+  drop_row.popover(
+      C, "UI_PT_id_browser", drop_text, ICON_IMAGE_DATA, PopupAttachDirection::VerticalAlignLeft);
+
+  /* The icon is the button's own, left-aligned one: #widget_draw_text_icon shrinks the text rect
+   * past it, so the centered label can never run into the icon. #BUT_NO_MENU_TRIA drops the
+   * dropdown arrow, which is sized from the button height and would be oversized on this
+   * deliberately two-unit-tall button (and would eat 0.6 of that height as text space). */
+  button_drawflag_enable(row.block()->last_but(),
+                         BUT_ICON_LEFT | BUT_NO_MENU_TRIA);
+}
+
+/**
+ * Compact variant: one popover button showing the assigned data-block's preview and name, for
+ * places that have no room for the full row (a panel header). Opens the same browser, is a drop
+ * target like the full row, and hovering it shows the same large preview as the browser's own
+ * items.
+ */
+static void id_browser_add_compact_button(Layout &row,
+                                          const bContext *C,
+                                          const IDBrowserTarget &target,
+                                          PropertyRNA *prop)
+{
+  id_browser_popover_register();
+  id_browser_popover_context_set(row, target);
+
+  PointerRNA *ptr = target.ptr;
+  const PointerRNA idptr = RNA_property_pointer_get(ptr, prop);
+  ID *id = static_cast<ID *>(idptr.data);
+  const StructRNA *type = RNA_property_pointer_type(ptr, prop);
+  const int type_icon = type ? RNA_struct_ui_icon(type) : ICON_IMAGE_DATA;
+  /* Icon-sized preview, since the button is only one unit tall. */
+  const int icon = id ? id_icon_get(C, id, false) : type_icon;
+
+  row.popover(C,
+              "UI_PT_id_browser",
+              id ? StringRef(id->name + 2) : StringRef(""),
+              icon ? icon : type_icon,
+              PopupAttachDirection::VerticalAlignLeft);
+
+  Block *block = row.block();
+  Button *but = block->last_but();
+  button_drawflag_enable(but, BUT_ICON_LEFT);
+  if (id == nullptr) {
+    return;
+  }
+  button_context_int_set(block, but, "id_browser_drop_target", 1);
+  id_preview_tooltip_set(but, id);
+}
 
 void template_id_browser(Layout *layout,
                          const bContext *C,
@@ -1320,7 +2069,7 @@ void template_id_browser(Layout *layout,
                          const char *newop,
                          const char *openop,
                          const char *unlinkop,
-                         const char *filter_type)
+                         const IDBrowserParams &params)
 {
   PropertyRNA *prop = RNA_struct_find_property(ptr, propname);
   if (!prop || RNA_property_type(prop) != PROP_POINTER) {
@@ -1328,9 +2077,64 @@ void template_id_browser(Layout *layout,
     return;
   }
 
+  const IDBrowserTarget target{ptr, propname, material, params.filter_type, params.image_filter};
+
+  if (params.compact) {
+    id_browser_add_compact_button(layout->row(true), C, target, prop);
+    return;
+  }
+
+  const ImageBrowserMode mode = image_browser_mode_get(ptr, prop, params.text);
+
   Layout &row = layout->row(true);
-  id_browser_add_popover_button(row, C, ptr, propname, material, filter_type);
-  template_id_image_row_append_standard(C, row, ptr, prop, newop, openop, unlinkop);
+  if (mode != ImageBrowserMode::Standard) {
+    /* Two units tall in both paint-slot states: the assigned image needs the height for its
+     * thumbnail, and the empty slot gets a drop area that is easier to hit while dragging.
+     * #item_scale applies this to every button of the row (and its nested layouts), so they stay
+     * aligned. */
+    row.scale_y_set(2.0f);
+  }
+
+  if (mode == ImageBrowserMode::PaintSlotEmpty) {
+    id_browser_add_drop_button(row, C, target, params.text);
+  }
+  else {
+    id_browser_add_popover_button(
+        row, C, target, mode == ImageBrowserMode::PaintSlotAssigned);
+  }
+
+  ImageIDRowParams row_params;
+  row_params.mode = mode;
+  if (mode == ImageBrowserMode::PaintSlotAssigned) {
+    /* Replaces #template_ID's own (locked) name field, see #id_browser_add_name_popover_button. */
+    const PointerRNA idptr = RNA_property_pointer_get(ptr, prop);
+    if (ID *id = static_cast<ID *>(idptr.data)) {
+      id_browser_add_name_popover_button(row, C, target, id);
+      row_params.use_name = false;
+    }
+  }
+  row_params.use_rename = params.use_rename;
+  row_params.use_unlink = params.use_unlink;
+  row_params.use_users = params.use_users;
+  template_id_image_row_append_standard(C, row, ptr, prop, newop, openop, unlinkop, row_params);
+}
+
+void template_id_browser_button(Layout *layout,
+                                const bContext *C,
+                                PointerRNA *ptr,
+                                const char *propname,
+                                Material *material,
+                                const char *filter_type,
+                                const char *image_filter)
+{
+  PropertyRNA *prop = RNA_struct_find_property(ptr, propname);
+  if (!prop || RNA_property_type(prop) != PROP_POINTER) {
+    RNA_warning("Image browse property not found or not a pointer: %s", propname);
+    return;
+  }
+
+  const IDBrowserTarget target{ptr, propname, material, filter_type, image_filter};
+  id_browser_add_popover_button(layout->row(true), C, target, /*use_preview_icon=*/false);
 }
 
 /** \} */

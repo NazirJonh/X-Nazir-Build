@@ -838,6 +838,12 @@ void BKE_image_update_gputexture_delayed(
     Image *ima, ImageTile *image_tile, ImBuf *ibuf, int x, int y, int w, int h);
 
 /**
+ * Assign a fresh random #Image::paint_layer_id when the image does not have one yet. No-op when it
+ * already belongs to a layer.
+ */
+void BKE_image_paint_layer_id_ensure(Image *ima);
+
+/**
  * Runtime index functions for fast image filtering.
  */
 

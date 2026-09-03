@@ -27,6 +27,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_fileops.hh"
+#include "BLI_function_ref.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
@@ -61,6 +62,7 @@
 #include "ED_paint.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
+#include "ED_undo.hh"
 
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
@@ -164,12 +166,14 @@ static bool determine_texture_slot_type(const ui::Button *but,
   return false;
 }
 
-/** Find the texture-slot button without filtering for normal mouse interaction. Asset Browser drags
- * can leave the preview button outside the regular interactive hit-test path. */
-static const ui::Button *find_texture_slot_button_at(const ARegion *region,
-                                                     const wmEvent *event,
-                                                     const Brush *brush,
-                                                     bool *r_use_mask_slot)
+/**
+ * Find the top-most button at the event position that \a predicate accepts, without filtering for
+ * normal mouse interaction. Asset Browser drags can leave the target button outside the regular
+ * interactive hit-test path, so drop-target lookups test the event coordinates directly.
+ */
+static const ui::Button *find_button_at(const ARegion *region,
+                                        const wmEvent *event,
+                                        FunctionRef<bool(const ui::Button &but)> predicate)
 {
   if (!region || !event || !region->runtime) {
     return nullptr;
@@ -183,21 +187,31 @@ static const ui::Button *find_texture_slot_button_at(const ARegion *region,
       if (!ui::button_contains_pt(&but, x, y)) {
         continue;
       }
-      /* Grid tiles (#template_asset_image_grid) already get their own drop target from
-       * #AbstractViewItem::create_drop_target() (see #ImageGridDropTarget), which is what actually
-       * runs the assignment for them. Do not also claim them here, or hovering a tile shows two
-       * overlapping "Assign ... to the brush texture slot" tooltips for the two competing targets.
-       * This drop target stays responsible for the New/Open/Browse row and the legacy
-       * #template_ID_preview widget, neither of which are view items. */
-      if (but.type == ui::ButtonType::ViewItem) {
-        continue;
-      }
-      if (determine_texture_slot_type(&but, brush, r_use_mask_slot)) {
+      if (predicate(but)) {
         return &but;
       }
     }
   }
   return nullptr;
+}
+
+static const ui::Button *find_texture_slot_button_at(const ARegion *region,
+                                                     const wmEvent *event,
+                                                     const Brush *brush,
+                                                     bool *r_use_mask_slot)
+{
+  return find_button_at(region, event, [&](const ui::Button &but) {
+    /* Grid tiles (#template_asset_image_grid) already get their own drop target from
+     * #AbstractViewItem::create_drop_target() (see #ImageGridDropTarget), which is what actually
+     * runs the assignment for them. Do not also claim them here, or hovering a tile shows two
+     * overlapping "Assign ... to the brush texture slot" tooltips for the two competing targets.
+     * This drop target stays responsible for the New/Open/Browse row and the legacy
+     * #template_ID_preview widget, neither of which are view items. */
+    if (but.type == ui::ButtonType::ViewItem) {
+      return false;
+    }
+    return determine_texture_slot_type(&but, brush, r_use_mask_slot);
+  });
 }
 
 /** \} */
@@ -484,8 +498,8 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
 };
 
 std::unique_ptr<ui::DropTargetInterface> brush_texture_slot_drop_target_get(bContext *C,
-                                                                             const ARegion *region,
-                                                                             const wmEvent *event)
+                                                                           const ARegion *region,
+                                                                           const wmEvent *event)
 {
   if (!C || !region || !event) {
     return nullptr;
@@ -514,6 +528,162 @@ std::unique_ptr<ui::DropTargetInterface> brush_texture_slot_drop_target_get(bCon
 /* -------------------------------------------------------------------- */
 /** \name Texture Drop Registration
  * \{ */
+
+/**
+ * Drop target for the labelled Image #template_ID_browser control. The button's context identifies
+ * the target property, so the same target works for every specialized image browser template.
+ */
+class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
+  PointerRNA target_ptr_;
+  PropertyRNA *target_prop_;
+
+  static const wmDragAssetListItem *first_image_item_in_list(const wmDrag &drag)
+  {
+    const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+    if (!asset_drags) {
+      return nullptr;
+    }
+    for (const wmDragAssetListItem &item : *asset_drags) {
+      const ID_Type item_idtype = item.is_external ?
+                                      item.asset_data.external_info->asset->get_id_type() :
+                                      (item.asset_data.local_id ?
+                                           GS(item.asset_data.local_id->name) :
+                                           ID_Type(0));
+      if (item_idtype == ID_IM) {
+        return &item;
+      }
+    }
+    return nullptr;
+  }
+
+ public:
+  ImageIDBrowserDropTarget(const PointerRNA &target_ptr, PropertyRNA *target_prop)
+      : target_ptr_(target_ptr), target_prop_(target_prop)
+  {
+  }
+
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
+  {
+    if (WM_drag_is_ID_type(&drag, ID_IM)) {
+      return true;
+    }
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      return first_image_item_in_list(drag) != nullptr;
+    }
+    if (drag.type == WM_DRAG_PATH) {
+      const char *path = WM_drag_get_single_path(&drag);
+      return path && BLI_path_extension_check_array(path, imb_ext_image);
+    }
+    return false;
+  }
+
+  std::string drop_tooltip(const ui::DragInfo &drag_info) const override
+  {
+    return fmt::format(fmt::runtime(TIP_("Assign {} to the image slot")),
+                       WM_drag_get_item_name(const_cast<wmDrag *>(&drag_info.drag_data)));
+  }
+
+  bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override
+  {
+    const wmDrag &drag = drag_info.drag_data;
+    Main *bmain = CTX_data_main(C);
+    Image *image = nullptr;
+    /* #BKE_image_load_exists hands out an extra user (it either allocates the ID or calls
+     * #id_us_plus), which the property setter does not consume. Released after the assignment, so
+     * a freshly loaded image is never left at zero users if the setter refuses the value. */
+    bool image_has_extra_user = false;
+
+    if (ID *image_id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_IM)) {
+      image = id_cast<Image *>(image_id);
+    }
+    else if (drag.type == WM_DRAG_ASSET) {
+      if (wmDragAsset *asset_drag = WM_drag_get_asset_data(&drag, ID_IM)) {
+        image = ed::asset::resolve_image_from_asset(*bmain, *asset_drag->asset);
+      }
+    }
+    else if (drag.type == WM_DRAG_ASSET_LIST) {
+      if (const wmDragAssetListItem *item = first_image_item_in_list(drag)) {
+        image = item->is_external ?
+                    ed::asset::resolve_image_from_asset(
+                        *bmain, *item->asset_data.external_info->asset) :
+                    id_cast<Image *>(item->asset_data.local_id);
+      }
+    }
+    else if (drag.type == WM_DRAG_PATH) {
+      if (const char *path = WM_drag_get_single_path(&drag)) {
+        image = BKE_image_load_exists(bmain, path, nullptr);
+        image_has_extra_user = image != nullptr;
+      }
+    }
+
+    if (!image) {
+      return false;
+    }
+
+    PointerRNA target_ptr = target_ptr_;
+    RNA_property_pointer_set(
+        &target_ptr, target_prop_, RNA_id_pointer_create(&image->id), nullptr);
+    if (image_has_extra_user && (RNA_property_flag(target_prop_) & PROP_ID_REFCOUNT)) {
+      /* The property setter now owns the real image reference. */
+      id_us_min(&image->id);
+    }
+    RNA_property_update(C, &target_ptr, target_prop_);
+    ED_undo_memfile_push(C, "Assign Image");
+    return true;
+  }
+};
+
+/**
+ * Resolve the Image pointer property a drop-enabled ID-browser button targets. Buttons opt in
+ * through the `id_browser_drop_target` context integer, see #template_id_browser.
+ */
+static bool image_id_browser_button_target(const ui::Button &but,
+                                           PointerRNA *r_ptr,
+                                           PropertyRNA **r_prop)
+{
+  if (ui::button_context_int_get(&but, "id_browser_drop_target").value_or(0) == 0) {
+    return false;
+  }
+
+  const PointerRNA *target_ptr = ui::button_context_ptr_get(&but, "id_browser_ptr", nullptr);
+  std::optional<StringRefNull> prop_name = ui::button_context_string_get(&but, "id_browser_prop");
+  /* The labelled empty-slot button inherits the browser context. The assigned-image name button
+   * uses the standard template-ID context, which identifies its exact PBR channel. */
+  if (!target_ptr || !prop_name) {
+    target_ptr = ui::button_context_ptr_get(&but, "template_id_ptr", nullptr);
+    prop_name = ui::button_context_string_get(&but, "template_id_prop");
+  }
+  if (!target_ptr || !target_ptr->data || !prop_name) {
+    return false;
+  }
+
+  PointerRNA ptr = *target_ptr;
+  PropertyRNA *prop = RNA_struct_find_property(&ptr, prop_name->c_str());
+  if (!prop || RNA_property_type(prop) != PROP_POINTER ||
+      RNA_property_pointer_type(&ptr, prop) != RNA_Image)
+  {
+    return false;
+  }
+
+  *r_ptr = ptr;
+  *r_prop = prop;
+  return true;
+}
+
+std::unique_ptr<ui::DropTargetInterface> image_id_browser_drop_target_get(bContext * /*C*/,
+                                                                         const ARegion *region,
+                                                                         const wmEvent *event)
+{
+  PointerRNA target_ptr{};
+  PropertyRNA *target_prop = nullptr;
+  if (!find_button_at(region, event, [&](const ui::Button &but) {
+        return image_id_browser_button_target(but, &target_ptr, &target_prop);
+      }))
+  {
+    return nullptr;
+  }
+  return std::make_unique<ImageIDBrowserDropTarget>(target_ptr, target_prop);
+}
 
 static bool brush_texture_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
 {

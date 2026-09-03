@@ -1472,6 +1472,16 @@ def km_outliner(params):
         ("outliner.unhide_all", {"type": 'H', "value": 'PRESS', "alt": True}, None),
         ("outliner.start_filter", {"type": 'F', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.clear_filter", {"type": 'F', "value": 'PRESS', "alt": True}, None),
+        # Stack Layers. These poll false in every other display mode, so they fall through to the
+        # data-block bindings above rather than shadowing them.
+        ("outliner.stack_layer_rename", {"type": 'F2', "value": 'PRESS'}, None),
+        ("outliner.stack_layer_duplicate", {"type": 'D', "value": 'PRESS', "shift": True}, None),
+        ("outliner.stack_layer_remove", {"type": 'X', "value": 'PRESS'}, None),
+        ("outliner.stack_layer_remove", {"type": 'DEL', "value": 'PRESS'}, None),
+        ("outliner.stack_layer_move", {"type": 'UP_ARROW', "value": 'PRESS', "ctrl": True},
+         {"properties": [("direction", 'UP')]}),
+        ("outliner.stack_layer_move", {"type": 'DOWN_ARROW', "value": 'PRESS', "ctrl": True},
+         {"properties": [("direction", 'DOWN')]}),
         # Copy/paste.
         ("outliner.id_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.id_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),

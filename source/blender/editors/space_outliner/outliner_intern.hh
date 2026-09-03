@@ -10,11 +10,15 @@
 
 #include <memory>
 
+#include "BLI_vector.hh"
+
 #include "DNA_listBase.h"
 
 #include "BLI_function_ref.hh"
 
 #include "RNA_types.hh"
+
+#include "outliner_stack_source.hh"
 
 /* Needed for `tree_element_cast()`. */
 #include "tree/tree_element.hh"
@@ -27,8 +31,10 @@ struct ARegion;
 struct Collection;
 struct EditBone;
 struct ID;
+struct Image;
 struct LayerCollection;
 struct Main;
+struct Material;
 struct Object;
 struct Scene;
 struct TreeStoreElem;
@@ -65,6 +71,18 @@ struct SpaceOutliner_Runtime {
   std::unique_ptr<treehash::TreeHash> tree_hash;
 
   ListBaseT<ed::outliner::TreeElement> tree = {nullptr, nullptr};
+
+  /* Stack Layers display mode. Transient: none of it is written to a .blend, and a duplicated
+   * space starts over rather than inheriting a focus the user did not set there. */
+
+  /** What the stack is pointed at. Interpreted by the space's #ed::outliner::StackSource. */
+  ed::outliner::StackFocus stack_focus;
+  /** Rows as the source last described them, addressed by #TreeElement through their ordinal. */
+  Vector<ed::outliner::StackRow> stack_rows;
+  /** The data-block #stack_rows was built from, and the source state it was built at. */
+  const ID *stack_owner = nullptr;
+  uint64_t stack_state_hash = 0;
+  bool stack_rows_valid = false;
 
   SpaceOutliner_Runtime() = default;
   /** Used for copying runtime data to a duplicated space. */
@@ -486,6 +504,7 @@ void OUTLINER_OT_parent_clear(wmOperatorType *ot);
 void OUTLINER_OT_scene_drop(wmOperatorType *ot);
 void OUTLINER_OT_material_drop(wmOperatorType *ot);
 void OUTLINER_OT_datastack_drop(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_drop(wmOperatorType *ot);
 void OUTLINER_OT_collection_drop(wmOperatorType *ot);
 
 /* ...................................................... */
@@ -520,6 +539,95 @@ void OUTLINER_OT_keyingset_remove_selected(wmOperatorType *ot);
 
 void OUTLINER_OT_drivers_add_selected(wmOperatorType *ot);
 void OUTLINER_OT_drivers_delete_selected(wmOperatorType *ot);
+
+/* `outliner_stack_layers.cc` */
+
+/** The subset of the context a #ed::outliner::StackSource is allowed to read. */
+ed::outliner::StackReadContext outliner_stack_read_context(const bContext &C);
+/** Drop the cached rows so the next rebuild asks the source again. */
+void outliner_stack_rows_invalidate(SpaceOutliner &space_outliner);
+/** Rebuild #SpaceOutliner_Runtime.stack_rows when the source says its state moved on. */
+void outliner_stack_rows_ensure(const ed::outliner::StackReadContext &ctx,
+                                SpaceOutliner &space_outliner,
+                                ID &owner);
+/** The row with this ordinal, or null. */
+const ed::outliner::StackRow *outliner_stack_row_find(const SpaceOutliner &space_outliner,
+                                                      int ordinal);
+/** The stack's owning data-block for the current focus, or null. */
+ID *outliner_stack_owner_get(const ed::outliner::StackReadContext &ctx,
+                             const SpaceOutliner &space_outliner);
+bool outliner_stack_focus_set(bContext *C,
+                              SpaceOutliner &space_outliner,
+                              Object &object,
+                              int sub_index,
+                              bool enter_paint_mode);
+bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, int ordinal);
+bool outliner_stack_sub_row_activate(bContext *C, SpaceOutliner &space_outliner, int nr);
+/**
+ * Height of one row in pixels.
+ *
+ * #UI_UNIT_Y everywhere except a Stack Layers row with `SO_SL_BIG_ROWS` on, which is why every
+ * place that steps from one row to the next has to ask rather than assume. Anything that compares
+ * a mouse position against a row, walks to the next row, or measures the tree goes through here.
+ */
+int outliner_tree_element_height(const SpaceOutliner &space_outliner, const TreeElement &te);
+
+/** Ordinal of the row the source reports as active, or -1 when there is none. */
+int outliner_stack_active_ordinal_get(const ed::outliner::StackReadContext &ctx,
+                                      SpaceOutliner &space_outliner);
+bool outliner_stack_row_is_active(const ed::outliner::StackReadContext &ctx,
+                                  const SpaceOutliner &space_outliner,
+                                  int ordinal);
+bool outliner_stack_row_reorder(bContext *C,
+                                SpaceOutliner &space_outliner,
+                                int from_ordinal,
+                                int to_ordinal);
+/**
+ * Move a row next to another one, above it or below it; see #StackSource::row_move.
+ *
+ * What a drop means, as opposed to the position #outliner_stack_row_reorder takes.
+ */
+bool outliner_stack_row_move(bContext *C,
+                             SpaceOutliner &space_outliner,
+                             int from_ordinal,
+                             int anchor_ordinal,
+                             ed::outliner::StackMovePlace place);
+bool outliner_stack_row_remove(bContext *C, SpaceOutliner &space_outliner, int ordinal);
+/**
+ * Create a row and, when the source reports where it landed, activate it.
+ *
+ * \return the new ordinal, or -1 when nothing was created.
+ */
+int outliner_stack_row_add(bContext *C,
+                           SpaceOutliner &space_outliner,
+                           ed::outliner::StackAddKind kind,
+                           int ordinal);
+bool outliner_stack_row_set_enabled(bContext *C,
+                                    SpaceOutliner &space_outliner,
+                                    int ordinal,
+                                    bool enable);
+/** Whether the space's source lets its rows change places right now. */
+bool outliner_stack_can_reorder(const bContext &C, const SpaceOutliner &space_outliner);
+/** Forget whatever the sources remember by address; see #StackSource::undo_reset. */
+void outliner_stack_sources_undo_reset();
+
+void OUTLINER_OT_stack_layer_focus(wmOperatorType *ot);
+void OUTLINER_OT_stack_layers_back(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_pin_toggle(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_clear_target(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_show_map(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_group(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_group_add(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_ungroup(wmOperatorType *ot);
+void OUTLINER_OT_stack_focus_sub_index(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot);
 
 void OUTLINER_OT_orphans_purge(wmOperatorType *ot);
 void OUTLINER_OT_orphans_manage(wmOperatorType *ot);
@@ -672,7 +780,9 @@ bool outliner_is_element_visible(const TreeElement *te);
  * Check if the element is displayed within the view bounds. Doesn't check if all parents are
  * open/uncollapsed.
  */
-bool outliner_is_element_in_view(const TreeElement *te, const View2D *v2d);
+bool outliner_is_element_in_view(const SpaceOutliner &space_outliner,
+                                const TreeElement *te,
+                                const View2D *v2d);
 /**
  * Scroll view vertically while keeping within total bounds.
  */

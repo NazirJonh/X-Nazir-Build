@@ -22,6 +22,10 @@ set(SRC
   outliner_ops.cc
   outliner_query.cc
   outliner_select.cc
+  outliner_stack_layers.cc
+  outliner_stack_source.cc
+  outliner_stack_source_paint_material.cc
+  outliner_stack_source_shape_keys.cc
   outliner_sync.cc
   outliner_tools.cc
   outliner_tree.cc
@@ -36,6 +40,7 @@ set(SRC
   tree/tree_display_override_library_properties.cc
   tree/tree_display_scenes.cc
   tree/tree_display_sequencer.cc
+  tree/tree_display_stack_layers.cc
   tree/tree_display_view_layer.cc
   tree/tree_element.cc
   tree/tree_element_action_slot.cc
@@ -77,11 +82,13 @@ set(SRC
   tree/tree_element_scene_objects.cc
   tree/tree_element_seq.cc
   tree/tree_element_shapekey.cc
+  tree/tree_element_stack_layer.cc
   tree/tree_element_view_collection.cc
   tree/tree_element_view_layer.cc
   tree/tree_iterator.cc
 
   outliner_intern.hh
+  outliner_stack_source.hh
   tree/common.hh
   tree/tree_display.hh
   tree/tree_element.hh
@@ -124,6 +131,7 @@ set(SRC
   tree/tree_element_scene_objects.hh
   tree/tree_element_seq.hh
   tree/tree_element_shapekey.hh
+  tree/tree_element_stack_layer.hh
   tree/tree_element_view_collection.hh
   tree/tree_element_view_layer.hh
   tree/tree_iterator.hh

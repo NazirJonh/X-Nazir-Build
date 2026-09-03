@@ -40,10 +40,16 @@ std::unique_ptr<AbstractTreeDisplay> AbstractTreeDisplay::create_from_display_mo
       break;
     case SO_VIEW_LAYER:
       return std::make_unique<TreeDisplayViewLayer>(space_outliner);
+    case SO_STACK_LAYERS:
+      if (space_outliner.stack_layers_view == SO_SL_VIEW_STACK) {
+        return std::make_unique<TreeDisplayStackLayersStack>(space_outliner);
+      }
+      return std::make_unique<TreeDisplayStackLayersObjects>(space_outliner);
   }
 
-  BLI_assert_unreachable();
-  return nullptr;
+  /* A file can outlive a display mode. Never leave outliner_build_tree with a null display. */
+  space_outliner.outlinevis = SO_VIEW_LAYER;
+  return std::make_unique<TreeDisplayViewLayer>(space_outliner);
 }
 
 bool AbstractTreeDisplay::supports_mode_column() const

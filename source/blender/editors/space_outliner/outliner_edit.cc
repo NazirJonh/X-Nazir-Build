@@ -1528,6 +1528,8 @@ void outliner_set_coordinates(const ARegion *region, SpaceOutliner *space_outlin
   tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
     /* store coord and continue, we need coordinates for elements outside view too */
     te->xs = 0;
+    /* A taller row occupies the space below its content, so its bottom is that much lower. */
+    starty -= outliner_tree_element_height(*space_outliner, *te) - UI_UNIT_Y;
     te->ys = float(starty);
     starty -= UI_UNIT_Y;
   });

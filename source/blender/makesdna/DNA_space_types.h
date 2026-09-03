@@ -217,9 +217,13 @@ struct SpaceOutliner {
   eSpaceOutliner_Mode outlinevis = SO_SCENES;
   eSpaceOutliner_LibOverrideViewMode lib_override_view_mode = SO_LIB_OVERRIDE_VIEW_PROPERTIES;
   eSpaceOutliner_StoreFlag storeflag = {};
-  eSpaceOutliner_Search_Flags search_flags = {};
-  char _pad[6] = {};
+  eSpaceOutliner_StackLayersView stack_layers_view = SO_SL_VIEW_OBJECTS;
+  eSpaceOutliner_StackLayersFlag stack_layers_flag = {};
+  /** Which kind of stack #SO_STACK_LAYERS lists. */
+  eSpaceOutliner_StackSource stack_source = SO_STACK_SRC_PAINT_MATERIAL;
 
+  /* Keep the two single-byte members paired: DNA requires 2-byte members to stay aligned. */
+  eSpaceOutliner_Search_Flags search_flags = {};
   /** Selection syncing flag (#WM_OUTLINER_SYNC_SELECT_FROM_OBJECT and similar flags). */
   char sync_select_dirty = 0;
 

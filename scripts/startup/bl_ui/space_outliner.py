@@ -7,6 +7,7 @@ from bpy.types import Header, Menu, Panel
 
 from bpy.app.translations import (
     contexts as i18n_contexts,
+    pgettext_iface as iface_,
 )
 
 
@@ -17,6 +18,78 @@ def has_selected_ids_in_context(context):
         return True
 
     return False
+
+
+class OUTLINER_HT_tool_header(Header):
+    bl_space_type = 'OUTLINER'
+    bl_region_type = 'TOOL_HEADER'
+
+    @classmethod
+    def poll(cls, context):
+        return context.space_data.display_mode == 'STACK_LAYERS'
+
+    def draw(self, context):
+        layout = self.layout
+        space = context.space_data
+
+        if space.stack_layers_view != 'STACK':
+            return
+
+        layout.operator("outliner.stack_layers_back", text="", icon='BACK')
+
+        layout.separator()
+
+        row = layout.row(align=True)
+        row.operator("outliner.stack_layer_add", text="", icon='IMAGE_DATA').type = 'EMPTY'
+        row.operator("outliner.stack_layer_add", text="", icon='COLOR').type = 'FILL'
+        row.operator("outliner.stack_layer_remove", text="", icon='REMOVE')
+
+        row = layout.row(align=True)
+        row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
+        row.operator("outliner.stack_layer_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
+
+        row = layout.row(align=True)
+        row.operator("outliner.stack_layer_group_add", text="", icon='NEWFOLDER')
+        row.operator("outliner.stack_layer_group", text="", icon='FILE_FOLDER')
+
+        row = layout.row(align=True)
+        row.operator("outliner.stack_layer_mask", text="", icon='MOD_MASK').add = True
+
+
+class OUTLINER_MT_stack_layer_context_menu(Menu):
+    bl_label = "Stack Layer"
+
+    def draw(self, _context):
+        layout = self.layout
+
+        layout.operator("outliner.stack_layer_rename", text="Rename...", icon='GREASEPENCIL')
+        layout.operator("outliner.stack_layer_duplicate", text="Duplicate", icon='DUPLICATE')
+        layout.operator("outliner.stack_layer_visibility_toggle", text="Toggle Visibility", icon='HIDE_OFF')
+
+        layout.separator()
+
+        layout.operator("outliner.stack_layer_mask", text="Add Mask", icon='MOD_MASK').add = True
+        layout.operator("outliner.stack_layer_mask", text="Remove Mask", icon='X').add = False
+
+        layout.separator()
+
+        layout.operator("outliner.stack_layer_group_add", text="New Group", icon='NEWFOLDER')
+        layout.operator("outliner.stack_layer_group", text="Group Selected", icon='FILE_FOLDER')
+        layout.operator("outliner.stack_layer_ungroup", text="Ungroup", icon='FILE_FOLDER')
+
+        layout.separator()
+
+        layout.menu("OUTLINER_MT_stack_layer_add", text="Add Layer", icon='ADD')
+        layout.operator("outliner.stack_layer_remove", text="Delete", icon='X')
+
+
+class OUTLINER_MT_stack_layer_add(Menu):
+    bl_label = "Add Layer"
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.operator("outliner.stack_layer_add", text="Empty Layer", icon='IMAGE_DATA').type = 'EMPTY'
+        layout.operator("outliner.stack_layer_add", text="Fill Layer", icon='COLOR').type = 'FILL'
 
 
 class OUTLINER_HT_header(Header):
@@ -38,6 +111,29 @@ class OUTLINER_HT_header(Header):
             OUTLINER_MT_editor_menus.draw_collapsible(context, layout)
         if display_mode == 'LIBRARY_OVERRIDES':
             layout.prop(space, "lib_override_view_mode", text="")
+        elif display_mode == 'STACK_LAYERS':
+            if space.stack_layers_view == 'STACK':
+                row = layout.row(align=True)
+                row.operator(
+                    "outliner.stack_layer_pin_toggle", text="", depress=space.use_stack_layer_pin,
+                    icon='PINNED' if space.use_stack_layer_pin else 'UNPINNED',
+                )
+                row.operator("outliner.stack_layer_clear_target", text="", icon='X')
+                ob = context.active_object
+                material = ob.active_material if ob else None
+                # Which stack of the object is shown -- a material slot, for paint layers. Opens a
+                # search box, since an object can carry many slots.
+                row.operator(
+                    "outliner.stack_focus_sub_index",
+                    text=material.name if material else iface_("No Material"),
+                    icon='MATERIAL',
+                    translate=False,
+                )
+            else:
+                # Which kind of stack is listed is chosen where the objects are: it decides what
+                # every stack below it will be, and once one is open the choice is already made.
+                layout.prop(space, "stack_source", text="")
+                layout.prop(space, "stack_layers_view", text="")
 
         layout.separator_spacer()
 
@@ -58,7 +154,12 @@ class OUTLINER_HT_header(Header):
             row.prop(space, "use_sync_select", icon='UV_SYNC_SELECT', text="")
 
         row = layout.row(align=True)
-        if display_mode in {'SCENES', 'VIEW_LAYER', 'LIBRARY_OVERRIDES'}:
+        if display_mode == 'STACK_LAYERS':
+            row.popover(
+                panel="OUTLINER_PT_stack_layers_filter",
+                text="",
+            )
+        elif display_mode in {'SCENES', 'VIEW_LAYER', 'LIBRARY_OVERRIDES'}:
             row.popover(
                 panel="OUTLINER_PT_filter",
                 text="",
@@ -141,6 +242,17 @@ class OUTLINER_MT_context_menu(Menu):
         space = context.space_data
 
         layout = self.layout
+
+        if space.display_mode == 'STACK_LAYERS':
+            # A stack row is not a data-block, so none of the common entries (assets, overrides,
+            # ID management) apply to it.
+            if space.stack_layers_view == 'STACK':
+                layout.menu_contents("OUTLINER_MT_stack_layer_context_menu")
+                layout.separator()
+            layout.menu("OUTLINER_MT_context_menu_view")
+            layout.separator()
+            layout.menu("INFO_MT_area")
+            return
 
         if space.display_mode == 'VIEW_LAYER':
             OUTLINER_MT_collection_new.draw_without_context_menu(context, layout)
@@ -462,6 +574,34 @@ class OUTLINER_PT_filter(Panel):
             row.prop(space, "use_filter_lib_override_system", text="System Overrides")
 
 
+class OUTLINER_PT_stack_layers_filter(Panel):
+    bl_space_type = 'OUTLINER'
+    bl_region_type = 'HEADER'
+    bl_label = "Stack Layers"
+
+    @classmethod
+    def poll(cls, context):
+        return context.space_data.display_mode == 'STACK_LAYERS'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        space = context.space_data
+
+        col = layout.column(heading="Columns", align=True)
+        col.prop(space, "show_stack_layer_opacity", text="Value")
+        col.prop(space, "show_stack_layer_blend", text="Mode")
+        col.prop(space, "use_stack_layer_visibility_left", text="Visibility First")
+
+        col = layout.column(heading="Rows", align=True)
+        col.prop(space, "show_stack_layer_channels", text="Contents")
+        col.prop(space, "use_stack_layer_big_rows", text="Large")
+        col.prop(space, "use_stack_layer_sort_by_name", text="Sort by Name")
+
+        layout.prop(space, "use_stack_layer_pin")
+
+
 class OUTLINER_PT_options_search(Panel):
     bl_space_type = 'OUTLINER'
     bl_region_type = 'HEADER'
@@ -578,7 +718,10 @@ class OUTLINER_PT_options_filter(Panel):
 
 
 classes = (
+    OUTLINER_HT_tool_header,
     OUTLINER_HT_header,
+    OUTLINER_MT_stack_layer_add,
+    OUTLINER_MT_stack_layer_context_menu,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,
     OUTLINER_MT_collection,
@@ -593,6 +736,7 @@ classes = (
     OUTLINER_MT_context_menu_view,
     OUTLINER_MT_view_pie,
     OUTLINER_PT_filter,
+    OUTLINER_PT_stack_layers_filter,
     OUTLINER_PT_options_search,
     OUTLINER_PT_options_filter,
 )

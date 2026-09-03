@@ -6,6 +6,7 @@
  * \ingroup spoutliner
  */
 
+#include <cstdio>
 #include <cstring>
 
 #include "MEM_guardedalloc.h"
@@ -137,7 +138,9 @@ static TreeElement *outliner_drop_insert_find(bContext *C,
   if (te_hovered) {
     /* Mouse hovers an element (ignoring x-axis),
      * now find out how to insert the dragged item exactly. */
-    const float margin = UI_UNIT_Y * (1.0f / 4);
+    /* A quarter of the row this time, not of a fixed unit: the insert margins have to scale with
+     * the row or a tall row is nearly all "into". */
+    const float margin = outliner_tree_element_height(*space_outliner, *te_hovered) * (1.0f / 4);
 
     if (view_mval[1] < (te_hovered->ys + margin)) {
       if (TSELEM_OPEN(TREESTORE(te_hovered), space_outliner) && !te_hovered->subtree.is_empty()) {
@@ -169,7 +172,7 @@ static TreeElement *outliner_drop_insert_find(bContext *C,
     *r_insert_type = TE_INSERT_AFTER;
     return last;
   }
-  if (view_mval[1] > (first->ys + UI_UNIT_Y)) {
+  if (view_mval[1] > (first->ys + outliner_tree_element_height(*space_outliner, *first))) {
     *r_insert_type = TE_INSERT_BEFORE;
     return first;
   }
@@ -1142,6 +1145,288 @@ void OUTLINER_OT_datastack_drop(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Stack Layer Drop Operator
+ *
+ * Reordering a row of the Stack Layers display mode.
+ *
+ * A path of its own rather than an extension of the data-stack drop above: that one models
+ * ownership by an #Object or a #bPoseChannel and moves a #ListBase entry, and a paint layer is
+ * neither -- it is a position in a node graph, and which data-block owns it is the business of the
+ * mode's #StackSource. The two share the drop-indicator helpers and nothing else.
+ * \{ */
+
+/* TEMP DEBUG: stack layer drag & drop tracing. Remove once the group drop is confirmed. */
+#define SLDBG(...) \
+  do { \
+    printf("[SLDROP] " __VA_ARGS__); \
+    printf("\n"); \
+    fflush(stdout); \
+  } while (0)
+
+struct StackLayerDropData {
+  /**
+   * Rows are addressed by ordinal, not by pointer.
+   *
+   * The row vector is rebuilt whenever the stack changes and a drag outlives at least one rebuild,
+   * so a #StackRow pointer taken at drag start would dangle by the time it is dropped.
+   */
+  int drag_ordinal;
+  /**
+   * The row the dragged one lands at, and where relative to it.
+   *
+   * A drop says "next to that row" or "into that row", not "at position N": no position numbers
+   * the inside of a folder until a layer is already in it.
+   */
+  int anchor_ordinal;
+  StackMovePlace place;
+  TreeElement *drop_te;
+  TreeElementInsertType insert_type;
+};
+
+static void stack_layer_drop_data_init(wmDrag *drag, const TreeStoreElem &tselem)
+{
+  StackLayerDropData *drop_data = MEM_new_zeroed<StackLayerDropData>("stack layer drop data");
+  drop_data->drag_ordinal = tselem.nr;
+  drop_data->anchor_ordinal = -1;
+  drag->poin = drop_data;
+  drag->flags |= WM_DRAG_FREE_DATA;
+}
+
+/**
+ * The stack row under the cursor and which of its three zones the cursor is in.
+ *
+ * A path of its own rather than #outliner_drop_insert_find, which answers a different question: it
+ * redirects a drop near the bottom edge of an open element to that element's first child, so the
+ * area under an expanded group would mean "into the group" when the user is aiming below it, and it
+ * scales the "into" zone to half the row, which on a two-unit row leaves almost nowhere to aim
+ * above. Here every row is split in three even parts: above, into, below.
+ */
+static TreeElement *stack_layer_drop_zone_find(bContext *C,
+                                               const int xy[2],
+                                               TreeElementInsertType *r_insert_type)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  ARegion *region = CTX_wm_region(C);
+  if (space_outliner->runtime->tree.is_empty()) {
+    return nullptr;
+  }
+
+  float view_mval[2];
+  ui::view2d_region_to_view(&region->v2d,
+                            xy[0] - region->winrct.xmin,
+                            xy[1] - region->winrct.ymin,
+                            &view_mval[0],
+                            &view_mval[1]);
+  TreeElement *te = outliner_find_item_at_y(
+      space_outliner, &space_outliner->runtime->tree, view_mval[1]);
+  if (te == nullptr) {
+    /* Past the ends of the list: above the first row, or below the last one. */
+    TreeElement *first = static_cast<TreeElement *>(space_outliner->runtime->tree.first);
+    TreeElement *last = static_cast<TreeElement *>(space_outliner->runtime->tree.last);
+    if (view_mval[1] < last->ys) {
+      *r_insert_type = TE_INSERT_AFTER;
+      return last;
+    }
+    *r_insert_type = TE_INSERT_BEFORE;
+    return first;
+  }
+
+  const float height = float(outliner_tree_element_height(*space_outliner, *te));
+  const float offset = view_mval[1] - float(te->ys);
+  if (offset > height * (2.0f / 3)) {
+    *r_insert_type = TE_INSERT_BEFORE;
+  }
+  else if (offset < height * (1.0f / 3)) {
+    *r_insert_type = TE_INSERT_AFTER;
+  }
+  else {
+    *r_insert_type = TE_INSERT_INTO;
+  }
+  return te;
+}
+
+/** Whether \a ordinal is \a group_ordinal itself or a row that group holds, however deeply. */
+static bool stack_row_is_within(const SpaceOutliner &space_outliner,
+                                const int ordinal,
+                                const int group_ordinal)
+{
+  int walk = ordinal;
+  for (int step = 0; walk >= 0 && step < 64; step++) {
+    if (walk == group_ordinal) {
+      return true;
+    }
+    const StackRow *row = outliner_stack_row_find(space_outliner, walk);
+    if (row == nullptr) {
+      break;
+    }
+    walk = row->parent_ordinal;
+  }
+  return false;
+}
+
+static bool stack_layer_drop_init(bContext *C,
+                                  const wmEvent *event,
+                                  StackLayerDropData *drop_data)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr || space_outliner->outlinevis != SO_STACK_LAYERS ||
+      space_outliner->stack_layers_view != SO_SL_VIEW_STACK)
+  {
+    return false;
+  }
+  if (!outliner_stack_can_reorder(*C, *space_outliner)) {
+    return false;
+  }
+
+  TreeElementInsertType insert_type;
+  TreeElement *te = stack_layer_drop_zone_find(C, event->xy, &insert_type);
+  if (te == nullptr) {
+    SLDBG("init: no row under cursor");
+    return false;
+  }
+  TreeStoreElem *tselem = TREESTORE(te);
+  SLDBG("init: hovered type=%d nr=%d insert=%d drag=%d",
+        int(tselem->type),
+        int(tselem->nr),
+        int(insert_type),
+        drop_data->drag_ordinal);
+  if (tselem->type != TSE_STACK_LAYER || tselem->nr == drop_data->drag_ordinal) {
+    SLDBG("init: rejected (not a layer row, or the dragged one)");
+    return false;
+  }
+
+  const StackRow *drag_row = outliner_stack_row_find(*space_outliner, drop_data->drag_ordinal);
+  const StackRow *target_row = outliner_stack_row_find(*space_outliner, tselem->nr);
+  if (drag_row == nullptr || target_row == nullptr) {
+    SLDBG("init: row lookup failed");
+    return false;
+  }
+
+  /* A group cannot be dropped inside itself: its nodes would have to move into their own tree. */
+  if (drag_row->is_group &&
+      stack_row_is_within(*space_outliner, target_row->ordinal, drag_row->ordinal))
+  {
+    return false;
+  }
+
+  if (insert_type == TE_INSERT_INTO && !target_row->is_group) {
+    /* Only a group has an inside. Aiming at the middle of a plain row is not a mistake worth
+     * refusing, though -- it reads as "put it here", which is above the row it points at. */
+    insert_type = TE_INSERT_BEFORE;
+  }
+  /* The row aimed at is the anchor in every case, the group included: "into that folder" is a
+   * place of its own, so an empty folder -- which has no row inside to aim at -- is a destination
+   * like any other. The list is drawn top of stack first, so "before" on screen is "above". */
+  const int anchor_ordinal = target_row->ordinal;
+  StackMovePlace place = StackMovePlace::Above;
+  if (insert_type == TE_INSERT_INTO) {
+    place = StackMovePlace::Into;
+  }
+  else if (insert_type == TE_INSERT_AFTER) {
+    place = StackMovePlace::Below;
+  }
+
+  if (anchor_ordinal == drop_data->drag_ordinal) {
+    SLDBG("init: anchor is the dragged row");
+    return false;
+  }
+
+  SLDBG("init: accepted anchor=%d place=%d", anchor_ordinal, int(place));
+  drop_data->drop_te = te;
+  drop_data->insert_type = insert_type;
+  drop_data->anchor_ordinal = anchor_ordinal;
+  drop_data->place = place;
+  return true;
+}
+
+static bool stack_layer_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
+{
+  if (drag->type != WM_DRAG_STACK_LAYER) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  ARegion *region = CTX_wm_region(C);
+  const bool changed = outliner_flag_set(
+      *space_outliner, TSE_HIGHLIGHTED_ANY | TSE_DRAG_ANY, false);
+
+  StackLayerDropData *drop_data = static_cast<StackLayerDropData *>(drag->poin);
+  if (drop_data == nullptr || !stack_layer_drop_init(C, event, drop_data)) {
+    if (changed) {
+      ED_region_tag_redraw_no_rebuild(region);
+    }
+    return false;
+  }
+
+  TreeStoreElem *tselem_target = TREESTORE(drop_data->drop_te);
+  if (drop_data->insert_type == TE_INSERT_BEFORE) {
+    tselem_target->flag |= TSE_DRAG_BEFORE;
+  }
+  else if (drop_data->insert_type == TE_INSERT_AFTER) {
+    tselem_target->flag |= TSE_DRAG_AFTER;
+  }
+  else if (drop_data->insert_type == TE_INSERT_INTO) {
+    tselem_target->flag |= TSE_DRAG_INTO;
+  }
+  if (changed) {
+    ED_region_tag_redraw_no_rebuild(region);
+  }
+  return true;
+}
+
+static std::string stack_layer_drop_tooltip(bContext * /*C*/,
+                                            wmDrag *drag,
+                                            const int /*xy*/[2],
+                                            wmDropBox * /*drop*/)
+{
+  const StackLayerDropData *drop_data = static_cast<const StackLayerDropData *>(drag->poin);
+  if (drop_data != nullptr && drop_data->insert_type == TE_INSERT_INTO) {
+    return TIP_("Move layer into group");
+  }
+  return TIP_("Reorder layer");
+}
+
+static wmOperatorStatus stack_layer_drop_invoke(bContext *C,
+                                               wmOperator * /*op*/,
+                                               const wmEvent *event)
+{
+  if (event->custom != EVT_DATA_DRAGDROP) {
+    return OPERATOR_CANCELLED;
+  }
+  ListBaseT<wmDrag> *lb = static_cast<ListBaseT<wmDrag> *>(event->customdata);
+  wmDrag *drag = static_cast<wmDrag *>(lb->first);
+  StackLayerDropData *drop_data = static_cast<StackLayerDropData *>(drag->poin);
+  SLDBG("invoke: anchor=%d", drop_data ? drop_data->anchor_ordinal : -999);
+  if (drop_data == nullptr || drop_data->anchor_ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (!outliner_stack_row_move(C,
+                               *space_outliner,
+                               drop_data->drag_ordinal,
+                               drop_data->anchor_ordinal,
+                               drop_data->place))
+  {
+    return OPERATOR_CANCELLED;
+  }
+  return OPERATOR_FINISHED;
+}
+
+void OUTLINER_OT_stack_layer_drop(wmOperatorType *ot)
+{
+  ot->name = "Stack Layer Drop";
+  ot->description = "Move a layer to another position in the stack";
+  ot->idname = "OUTLINER_OT_stack_layer_drop";
+
+  ot->invoke = stack_layer_drop_invoke;
+  ot->poll = ED_operator_outliner_active;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Collection Drop Operator
  * \{ */
 
@@ -1479,8 +1764,15 @@ static wmOperatorStatus outliner_item_drag_drop_invoke(bContext *C,
   }
 
   TreeStoreElem *tselem = TREESTORE(te);
+  /* A stack row has no draggable ID of its own -- see #tree_element_get_icon -- so it is the one
+   * kind of row that may start a drag without one. */
+  const bool use_stack_layer_drag = tselem->type == TSE_STACK_LAYER;
+  if (use_stack_layer_drag) {
+    /* TEMP DEBUG: remove once the group drop is confirmed. */
+    SLDBG("drag start: ordinal=%d", int(tselem->nr));
+  }
   TreeElementIcon data = tree_element_get_icon(tselem, te);
-  if (!data.drag_id) {
+  if (!use_stack_layer_drag && !data.drag_id) {
     return (OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH);
   }
 
@@ -1511,10 +1803,15 @@ static wmOperatorStatus outliner_item_drag_drop_invoke(bContext *C,
                                        TSE_GPENCIL_EFFECT,
                                        TSE_GPENCIL_EFFECT_BASE);
 
-  const eWM_DragDataType wm_drag_type = use_datastack_drag ? WM_DRAG_DATASTACK : WM_DRAG_ID;
+  const eWM_DragDataType wm_drag_type = use_stack_layer_drag ? WM_DRAG_STACK_LAYER :
+                                        use_datastack_drag  ? WM_DRAG_DATASTACK :
+                                                              WM_DRAG_ID;
   wmDrag *drag = WM_drag_data_create(C, data.icon, wm_drag_type, nullptr, WM_DRAG_NOP);
 
-  if (use_datastack_drag) {
+  if (use_stack_layer_drag) {
+    stack_layer_drop_data_init(drag, *tselem);
+  }
+  else if (use_datastack_drag) {
     TreeElement *te_bone = nullptr;
     bPoseChannel *pchan = outliner_find_parent_bone(te, &te_bone);
     datastack_drop_data_init(
@@ -1648,6 +1945,12 @@ void outliner_dropboxes()
                  nullptr,
                  nullptr,
                  datastack_drop_tooltip);
+  WM_dropbox_add(lb,
+                 "OUTLINER_OT_stack_layer_drop",
+                 stack_layer_drop_poll,
+                 nullptr,
+                 nullptr,
+                 stack_layer_drop_tooltip);
   WM_dropbox_add(lb,
                  "OUTLINER_OT_collection_drop",
                  collection_drop_poll,

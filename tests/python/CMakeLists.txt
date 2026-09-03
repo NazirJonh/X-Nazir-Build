@@ -1708,6 +1708,11 @@ endif()
 # ------------------------------------------------------------------------------
 
 if(WITH_UI_TESTS)
+  add_blender_test_ui(
+    script_outliner_stack_layers
+    --python ${CMAKE_CURRENT_LIST_DIR}/bl_outliner_stack_layers.py
+  )
+
   # This could be generated with:
   # `"${TEST_PYTHON_EXE}" "${CMAKE_CURRENT_LIST_DIR}/ui_simulate/run.py" --list-tests`
   # list explicitly so changes bisecting/updated are sure to re-run CMake.

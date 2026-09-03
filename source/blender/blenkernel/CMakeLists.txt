@@ -260,6 +260,8 @@ set(SRC
   intern/paint_canvas.cc
   intern/paint_material_combined.cc
   intern/paint_material_composite.cc
+  intern/paint_material_layer_edit.cc
+  intern/paint_material_layer_model.cc
   intern/paint_material_resolve.cc
   intern/paint_material_sync.cc
   intern/paint_runtime.cc
@@ -817,6 +819,8 @@ if(WITH_GTESTS)
     intern/paint_material_combined_cache_test.cc
     intern/paint_material_combined_test.cc
     intern/paint_material_composite_test.cc
+    intern/paint_material_layer_edit_test.cc
+    intern/paint_material_layer_model_test.cc
     intern/paint_material_resolve_test.cc
     intern/paint_test.cc
     intern/path_templates_test.cc

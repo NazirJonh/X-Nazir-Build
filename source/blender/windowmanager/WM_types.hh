@@ -1286,6 +1286,8 @@ enum eWM_DragDataType : int8_t {
   WM_DRAG_NODE_TREE_INTERFACE,
   WM_DRAG_BONE_COLLECTION,
   WM_DRAG_SHAPE_KEY,
+  /** Reorder a row of the Outliner's Stack Layers mode. */
+  WM_DRAG_STACK_LAYER,
   /** Reorder an item within an asset-backed grid (Shift+drag) — the asset shelf's Favorites list
    *  today, any future template_grid_view_asset consumer that opts in tomorrow. */
   WM_DRAG_GRID_ITEM_REORDER_ASSET,

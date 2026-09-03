@@ -42,6 +42,7 @@
 #include "tree_element_scene_objects.hh"
 #include "tree_element_seq.hh"
 #include "tree_element_shapekey.hh"
+#include "tree_element_stack_layer.hh"
 #include "tree_element_view_collection.hh"
 #include "tree_element_view_layer.hh"
 
@@ -77,6 +78,14 @@ std::unique_ptr<AbstractTreeElement> AbstractTreeElement::create_from_type(const
       return TreeElementID::create_from_id(legacy_te, *owner_id);
     case TSE_GENERIC_LABEL:
       return std::make_unique<TreeElementLabel>(legacy_te, static_cast<const char *>(create_data));
+    case TSE_STACK_BASE:
+      return std::make_unique<TreeElementStackBase>(legacy_te, *owner_id);
+    case TSE_STACK_LAYER:
+      return std::make_unique<TreeElementStackLayer>(legacy_te,
+                                                     *static_cast<StackRow *>(create_data));
+    case TSE_STACK_ITEM:
+      return std::make_unique<TreeElementStackItem>(legacy_te,
+                                                    *static_cast<StackSubRow *>(create_data));
     case TSE_ANIM_DATA:
       return std::make_unique<TreeElementAnimData>(legacy_te,
                                                    *static_cast<AnimData *>(create_data));

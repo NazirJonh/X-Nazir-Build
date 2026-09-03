@@ -46,6 +46,24 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_constraint_operation);
   WM_operatortype_append(OUTLINER_OT_modifier_operation);
   WM_operatortype_append(OUTLINER_OT_delete);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_focus);
+  WM_operatortype_append(OUTLINER_OT_stack_layers_back);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_pin_toggle);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_activate);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_clear_target);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_move);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_remove);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_add);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_visibility_toggle);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_show_map);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_duplicate);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_group);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_group_add);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_ungroup);
+  WM_operatortype_append(OUTLINER_OT_stack_focus_sub_index);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_rename);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_mask);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_drop);
 
   WM_operatortype_append(OUTLINER_OT_show_one_level);
   WM_operatortype_append(OUTLINER_OT_show_active);

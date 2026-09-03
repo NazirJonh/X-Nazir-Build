@@ -1896,6 +1896,34 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
 
     TreeStoreElem *activate_tselem = TREESTORE(activate_te);
 
+    if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+      if (space_outliner->stack_layers_view == SO_SL_VIEW_OBJECTS &&
+          activate_tselem->type == TSE_SOME_ID && activate_te->idcode == ID_OB)
+      {
+        Object *object = id_cast<Object *>(activate_tselem->id);
+        return outliner_stack_focus_set(C, *space_outliner, *object, -1, true) ?
+                   OPERATOR_FINISHED :
+                   OPERATOR_CANCELLED;
+      }
+      if (space_outliner->stack_layers_view == SO_SL_VIEW_STACK &&
+          activate_tselem->type == TSE_STACK_LAYER && !recurse)
+      {
+        /* Two different things happen to a clicked row, and only one of them is about painting:
+         * a row that names maps becomes the paint target, and *every* row -- a group included --
+         * becomes the selected one, which is what the operators act on. Selection is left to the
+         * generic code below rather than repeated here, so a folder can be renamed, grouped or
+         * deleted like any other row even though no brush can write into it. */
+        outliner_stack_row_activate(C, *space_outliner, activate_tselem->nr);
+      }
+      if (space_outliner->stack_layers_view == SO_SL_VIEW_STACK &&
+          activate_tselem->type == TSE_STACK_ITEM && recurse)
+      {
+        return outliner_stack_sub_row_activate(C, *space_outliner, activate_tselem->nr) ?
+                   OPERATOR_FINISHED :
+                   OPERATOR_CANCELLED;
+      }
+    }
+
     Collection *parent_collection = nullptr;
     if (recurse) {
       parent_collection = outliner_collection_get_for_recursive(C, activate_te);
@@ -2032,7 +2060,9 @@ static void outliner_box_select(bContext *C,
                                 const bool select)
 {
   tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
-    if (te->ys <= rectf->ymax && te->ys + UI_UNIT_Y >= rectf->ymin) {
+    if (te->ys <= rectf->ymax &&
+        te->ys + outliner_tree_element_height(*space_outliner, *te) >= rectf->ymin)
+    {
       outliner_item_select(
           C, space_outliner, te, (select ? OL_ITEM_SELECT : OL_ITEM_DESELECT) | OL_ITEM_EXTEND);
     }

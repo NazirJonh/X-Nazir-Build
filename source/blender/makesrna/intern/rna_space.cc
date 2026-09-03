@@ -865,6 +865,25 @@ static ScrArea *rna_area_from_space(const PointerRNA *ptr)
   return BKE_screen_find_area_from_space(screen, link);
 }
 
+static void rna_SpaceOutliner_display_mode_update(bContext * /*C*/, PointerRNA *ptr)
+{
+  ScrArea *area = rna_area_from_space(ptr);
+  if (area != nullptr) {
+    /* The tool header only carries the Stack Layers controls, so it follows the display mode.
+     * `RGN_FLAG_HIDDEN_BY_USER` is left alone: a user who collapsed it keeps it collapsed. */
+    const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+    const bool show = space_outliner->outlinevis == SO_STACK_LAYERS;
+    for (ARegion &region : area->regionbase) {
+      if (region.regiontype != RGN_TYPE_TOOL_HEADER) {
+        continue;
+      }
+      SET_FLAG_FROM_TEST(region.flag, !show || (region.flag & RGN_FLAG_HIDDEN_BY_USER),
+                         RGN_FLAG_HIDDEN);
+    }
+  }
+  ED_area_tag_refresh(area);
+}
+
 static void area_region_from_regiondata(bScreen *screen,
                                         void *regiondata,
                                         ScrArea **r_area,
@@ -5150,6 +5169,35 @@ static void rna_def_space_outliner(BlenderRNA *brna)
        ICON_ORPHAN_DATA,
        "Unused Data",
        "Display data that is unused and/or will be lost when the file is reloaded"},
+      {SO_STACK_LAYERS,
+       "STACK_LAYERS",
+       ICON_IMAGE_RGB,
+       "Stack Layers",
+       "Display the paint layer stack of the active material"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem stack_layers_view_items[] = {
+      {SO_SL_VIEW_OBJECTS,
+       "OBJECTS",
+       ICON_OBJECT_DATA,
+       "Objects",
+       "Browse the objects that have a stack"},
+      {SO_SL_VIEW_STACK, "STACK", ICON_IMAGE_RGB, "Stack", "Display the focused stack"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem stack_source_items[] = {
+      {SO_STACK_SRC_PAINT_MATERIAL,
+       "PAINT_MATERIAL",
+       ICON_IMAGE_RGB,
+       "Paint Layers",
+       "Paint layers of the active material"},
+      {SO_STACK_SRC_SHAPE_KEYS,
+       "SHAPE_KEYS",
+       ICON_SHAPEKEY_DATA,
+       "Shape Keys",
+       "Shape keys of the active object"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -5185,6 +5233,63 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "outlinevis");
   RNA_def_property_enum_items(prop, display_mode_items);
   RNA_def_property_ui_text(prop, "Display Mode", "Type of information to display");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_SPACE_OUTLINER, "rna_SpaceOutliner_display_mode_update");
+
+  prop = RNA_def_property(srna, "stack_layers_view", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stack_layers_view");
+  RNA_def_property_enum_items(prop, stack_layers_view_items);
+  RNA_def_property_ui_text(
+      prop, "Stack Layers View", "Whether to browse objects or to show one object's stack");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "stack_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stack_source");
+  RNA_def_property_enum_items(prop, stack_source_items);
+  RNA_def_property_ui_text(prop, "Stack Source", "Which kind of layer stack to display");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_pin", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_PINNED);
+  RNA_def_property_ui_text(
+      prop, "Pin Stack", "Keep the focused stack when the active object changes");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "show_stack_layer_opacity", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_OPACITY);
+  RNA_def_property_ui_text(
+      prop, "Show Value", "Show the column that modulates each layer, such as its opacity");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "show_stack_layer_blend", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_BLEND);
+  RNA_def_property_ui_text(
+      prop, "Show Mode", "Show the column that says how each layer combines with the one below");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "show_stack_layer_channels", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_CHANNELS);
+  RNA_def_property_ui_text(
+      prop, "Show Contents", "Show the data-blocks each layer is made of, below it");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_big_rows", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_BIG_ROWS);
+  RNA_def_property_ui_text(prop, "Large Rows", "Use larger Stack Layers rows");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_visibility_left", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_VISIBILITY_LEFT);
+  RNA_def_property_ui_text(prop,
+                           "Visibility First",
+                           "Put the visibility toggle before the layer's name instead of in the "
+                           "columns on the right");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_sort_by_name", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_SORT_BY_NAME);
+  RNA_def_property_ui_text(prop, "Sort by Name", "Sort Stack Layers alphabetically");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 
   prop = RNA_def_property(srna, "lib_override_view_mode", PROP_ENUM, PROP_NONE);

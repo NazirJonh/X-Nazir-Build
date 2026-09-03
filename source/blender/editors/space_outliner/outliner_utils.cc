@@ -71,12 +71,25 @@ void outliner_viewcontext_init(const bContext *C, TreeViewContext *tvc)
 
 /** \} */
 
+int outliner_tree_element_height(const SpaceOutliner &space_outliner, const TreeElement &te)
+{
+  if (space_outliner.outlinevis != SO_STACK_LAYERS ||
+      (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) == 0)
+  {
+    return UI_UNIT_Y;
+  }
+  /* Only the layers themselves grow: their sub-rows are a list of data-blocks and read better at
+   * the usual height, and a taller row for them would only add empty space. */
+  const TreeStoreElem *tselem = TREESTORE(&te);
+  return (tselem != nullptr && tselem->type == TSE_STACK_LAYER) ? 2 * UI_UNIT_Y : UI_UNIT_Y;
+}
+
 TreeElement *outliner_find_item_at_y(const SpaceOutliner *space_outliner,
                                      const ListBaseT<TreeElement> *tree,
                                      float view_co_y)
 {
   for (TreeElement &te_iter : *tree) {
-    if (view_co_y < (te_iter.ys + UI_UNIT_Y)) {
+    if (view_co_y < (te_iter.ys + outliner_tree_element_height(*space_outliner, te_iter))) {
       if (view_co_y >= te_iter.ys) {
         /* co_y is inside this element */
         return &te_iter;
@@ -90,7 +103,9 @@ TreeElement *outliner_find_item_at_y(const SpaceOutliner *space_outliner,
       /* If the coordinate is lower than the next element, we can continue with that one and skip
        * recursion too. */
       const TreeElement *te_next = te_iter.next;
-      if (te_next && (view_co_y < (te_next->ys + UI_UNIT_Y))) {
+      if (te_next &&
+          (view_co_y < (te_next->ys + outliner_tree_element_height(*space_outliner, *te_next))))
+      {
         continue;
       }
 
@@ -352,6 +367,28 @@ float outliner_right_columns_width(const SpaceOutliner *space_outliner)
     case SO_ID_ORPHANS:
       num_columns = 3;
       break;
+    case SO_STACK_LAYERS: {
+      if (space_outliner->stack_layers_view != SO_SL_VIEW_STACK) {
+        return 0.0f;
+      }
+      /* How wide the two columns are is the source's call: an opacity slider and a shape key
+       * value want different room than a blend-mode menu. */
+      const StackColumnLayout layout = stack_source_for_space(*space_outliner)->column_layout();
+      if ((space_outliner->stack_layers_flag & SO_SL_HIDE_OPACITY) == 0) {
+        num_columns += layout.value_width;
+      }
+      if ((space_outliner->stack_layers_flag & SO_SL_HIDE_BLEND) == 0) {
+        num_columns += layout.mode_width;
+      }
+      /* The per-row toggles live to the right of those columns, the way the restriction icons do
+       * in the View Layer, rather than trailing the name. */
+      num_columns += STACK_ROW_ICON_COLUMNS;
+      /* Half a unit of air at the right edge, so the last button is not pressed against the
+       * border. It belongs in the width rather than at each place a column is placed: the name's
+       * clipping, the scrollable width and the hit test that says "the cursor is in the columns"
+       * all measure from here, and they have to agree with where the buttons ended up. */
+      return num_columns * UI_UNIT_X + UI_UNIT_X / 2 + V2D_SCROLL_WIDTH;
+    }
     case SO_VIEW_LAYER:
       if (space_outliner->show_restrict_flags & SO_RESTRICT_ENABLE) {
         num_columns++;
@@ -411,9 +448,12 @@ bool outliner_is_element_visible(const TreeElement *te)
   return true;
 }
 
-bool outliner_is_element_in_view(const TreeElement *te, const View2D *v2d)
+bool outliner_is_element_in_view(const SpaceOutliner &space_outliner,
+                                const TreeElement *te,
+                                const View2D *v2d)
 {
-  return ((te->ys + UI_UNIT_Y) >= v2d->cur.ymin) && (te->ys <= v2d->cur.ymax);
+  return ((te->ys + outliner_tree_element_height(space_outliner, *te)) >= v2d->cur.ymin) &&
+         (te->ys <= v2d->cur.ymax);
 }
 
 bool outliner_item_is_co_over_name_icons(const TreeElement *te, float view_co_x)

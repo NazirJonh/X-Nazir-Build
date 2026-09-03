@@ -2204,7 +2204,6 @@ void style_init();
 
 /** Is \a icon_id a preview icon that is being loaded/rendered? */
 bool icon_is_preview_deferred_loading(int icon_id, bool big);
-int id_icon_get(const bContext *C, ID *id, bool big);
 
 /* `interface_icons_event.cc` */
 
@@ -2672,6 +2671,24 @@ uint32_t get_current_tag_mode_flag(const bContext *C);
 
 /** Glyph picker grid operator. */
 void WM_OT_glyph_picker_grid(wmOperatorType *ot);
+
+/* -------------------------------------------------------------------- */
+/** \name Data-block preview icons
+ *
+ * Internal half of the #UI_interface_icons.hh preview API: the full behavior -- the fall-back to
+ * the type icon, the job a big render may start -- stays module-internal, only the narrow
+ * "preview if ready" wrapper is exported.
+ * \{ */
+
+/**
+ * The icon id that shows \a id: its preview for the data-block types the core renders previews
+ * of (materials, images, worlds, ...), a type-specific icon otherwise. With \a big, the preview
+ * renders at the larger size and the render may run as a job -- the caller only draws what is
+ * ready, and the core owns both the cache and the job.
+ */
+int id_icon_get(const bContext *C, ID *id, bool big);
+
+/** \} */
 
 }  // namespace ui
 }  // namespace blender

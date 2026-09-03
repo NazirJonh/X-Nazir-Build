@@ -2828,6 +2828,16 @@ std::optional<StringRefNull> button_asset_shelf_type_idname_get(const Button *bu
 
 /* templates */
 void template_header(Layout *layout, bContext *C);
+/**
+ * A menu button for an enum property with a fixed width that does not follow the current
+ * item's name. With \a wrap false, Ctrl-Wheel stepping stops at the first and last item
+ * instead of cycling around.
+ */
+void template_enum_menu(Layout *layout,
+                        PointerRNA *ptr,
+                        StringRefNull propname,
+                        float width_units,
+                        bool wrap);
 void template_id(Layout *layout,
                  const bContext *C,
                  PointerRNA *ptr,
@@ -2929,6 +2939,14 @@ void template_id_browser_button(Layout *layout,
 
 /** Pointer to #wmWindowManager::id_browser_grid_view_settings (the ID browser's grid settings). */
 PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm);
+/**
+ * Register the ID-browser popover's panel type (#UI_PT_id_browser), unless it already is.
+ *
+ * Idempotent. The popover is reachable from Python through #UILayout.popover, which cannot
+ * register the panel type itself, so a host that opens it from Python calls this -- the Outliner's
+ * Stack Layers header does, at its space-type registration.
+ */
+void id_browser_popover_register();
 /**
  * Return the browsed asset library by value from #wmWindowManager::id_browser_grid_view_settings,
  * resolved against the current Preferences (see #ed::asset::library_reference_ensure_resolved).

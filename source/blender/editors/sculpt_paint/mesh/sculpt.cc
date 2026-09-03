@@ -5625,6 +5625,10 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
       paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL && ob.type == OB_MESH)
   {
     BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
+    if (brush->material_paint == nullptr && paint_mode_init.mask_image_binding.image != nullptr) {
+      /* #brush above is read-only here; the writable pointer comes from the same #Paint. */
+      BKE_brush_material_paint_ensure(BKE_paint_brush(&sd.paint));
+    }
     if (brush->material_paint != nullptr) {
       const BrushMaterialPaint &brush_paint = *brush->material_paint;
       BKE_paint_material_images_ensure_writable(

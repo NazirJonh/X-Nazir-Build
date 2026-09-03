@@ -15,15 +15,16 @@
 #include "BKE_context.hh"
 #include "BKE_image.hh"
 #include "BKE_main.hh"
-#include "BKE_paint.hh"
 #include "BKE_report.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
+#include "BLI_math_bits.h"
 #include "BLI_string.h"
-#include "BLI_utildefines.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
+
+#include "BLT_translation.hh"
 
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
@@ -35,6 +36,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -46,23 +48,6 @@ namespace blender {
 using ed::material_bake::BakeTargetSpec;
 using ed::material_bake::MaterialBakeToImagesParams;
 using ed::material_bake::MaterialBakeToImagesResult;
-
-/**
- * Bit index `i` of the flag enum is #eMaterialPaintChannel value `i`.
- *
- * Height, ambient occlusion and Custom are absent on purpose: the resolver has no Principled input
- * to bake them from, so offering them would only produce empty maps.
- */
-static const EnumPropertyItem bake_paint_channel_items[] = {
-    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
-    {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
-    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
-    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
-    {PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
-    {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
-    {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
-    {0, nullptr, 0, nullptr, nullptr},
-};
 
 /* -------------------------------------------------------------------- */
 /** \name Bake From Material
@@ -82,12 +67,12 @@ static wmOperatorStatus material_bake_from_material_exec(bContext *C, wmOperator
 
   const int channels_flag = RNA_enum_get(op->ptr, "channels");
   Vector<BakeTargetSpec> targets;
-  for (const EnumPropertyItem *item = bake_paint_channel_items;
+  for (const EnumPropertyItem *item = rna_enum_material_paint_bake_channel_items;
        item->identifier != nullptr;
        item++)
   {
-    if (channels_flag & (1 << item->value)) {
-      targets.append({eMaterialPaintChannel(item->value)});
+    if (channels_flag & item->value) {
+      targets.append({eMaterialPaintChannel(bitscan_forward_uint(item->value))});
     }
   }
   if (targets.is_empty()) {
@@ -131,7 +116,7 @@ void IMAGE_OT_bake_from_material(wmOperatorType *ot)
       ot->srna, "material", nullptr, MAX_ID_NAME - 2, "Material", "Source material name");
   RNA_def_enum_flag(ot->srna,
                     "channels",
-                    bake_paint_channel_items,
+                    rna_enum_material_paint_bake_channel_items,
                     (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
                         (1 << PAINT_MATERIAL_CHANNEL_METALLIC) |
                         (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |

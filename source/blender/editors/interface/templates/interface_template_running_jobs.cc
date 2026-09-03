@@ -20,6 +20,8 @@
 #include "BLI_time.h"
 
 #include "BLI_timecode.h"
+
+#include "DNA_material_types.h"
 #include "BLT_translation.hh"
 
 #include "ED_screen.hh"
@@ -232,6 +234,21 @@ void template_running_jobs(Layout *layout, bContext *C)
       owner = bmain;
       cancel_fn = set_global_break;
       icon = ICON_TEXTURE;
+    }
+  }
+
+  /* A Material paint layer re-bakes its maps in a job keyed on the source material, not on a
+   * scene, so none of the lookups above see it. */
+  if (owner == nullptr) {
+    for (Material &material : bmain->materials) {
+      if (WM_jobs_test(wm, &material, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE)) {
+        owner = &material;
+        icon = ICON_MATERIAL;
+        cancel_fn = [owner](bContext &C) {
+          WM_jobs_stop_all_from_owner(CTX_wm_manager(&C), owner);
+        };
+        break;
+      }
     }
   }
 

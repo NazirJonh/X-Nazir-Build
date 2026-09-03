@@ -247,6 +247,9 @@ static void material_changed(Main *bmain, Material *ma)
   /* The Combined preview reads every channel of this material, so a node-tree edit can change it
    * in ways no input hash is asked about. */
   BKE_paint_material_combined_cache_invalidate(ma);
+  /* A Material paint layer is a bake of this material into maps the user owns; editing the source
+   * is how that layer is re-configured, so its maps follow without being asked. */
+  ed::material_bake::material_bake_images_rebake_stale(*bmain, *ma);
 }
 
 static void lamp_changed(Main *bmain, Light *la)

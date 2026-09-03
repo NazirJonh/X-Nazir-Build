@@ -113,6 +113,14 @@ static void blo_update_defaults_screen(bScreen *screen,
           }
         }
       }
+      if (sl.spacetype == SPACE_OUTLINER) {
+        /* The Stack Layers defaults #SpaceOutliner declares reach a space the code creates, but
+         * the startup file's Outliner was serialized before the field existed and carries a zero.
+         * Applied here rather than through versioning, so the factory startup keeps agreeing with
+         * a freshly split Outliner without touching what a user saved. */
+        SpaceOutliner *space_outliner = reinterpret_cast<SpaceOutliner *>(&sl);
+        space_outliner->stack_layers_flag |= SO_SL_BIG_ROWS | SO_SL_VISIBILITY_LEFT;
+      }
     }
   }
 

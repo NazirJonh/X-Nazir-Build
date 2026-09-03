@@ -538,6 +538,121 @@ class BRUSH_MATERIAL_PT_custom_props(BrushMaterialButtonsPanel, PropertyPanel, P
     _property_type = bpy.types.Material
 
 
+class LayerMaterialButtonsPanel:
+    """Base for the Layer Material tab, which edits the material the active Material paint layer
+    was baked from.
+
+    The material is reached through the scene's paint channel bindings, so there is no slot to pick
+    from and no pinning. Editing it re-bakes the layer's maps on its own.
+    Like #BrushMaterialButtonsPanel, these panels share drawing through module level helpers rather
+    than by subclassing registered panels.
+    """
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "layer_material"
+
+    @classmethod
+    def poll(cls, context):
+        # No COMPAT_ENGINES test, for the same reason as the Brush Material tab: the bake goes
+        # through EEVEE whatever the scene's render engine is.
+        mat = context.material
+        return mat is not None and not mat.grease_pencil
+
+
+class LAYER_MATERIAL_PT_context_material(LayerMaterialButtonsPanel, Panel):
+    bl_idname = "LAYER_MATERIAL_PT_context_material"
+    bl_label = ""
+    bl_options = {'HIDE_HEADER'}
+
+    # Short toggle labels, display only. The channel set itself comes from RNA in draw()
+    # below, so the two cannot drift apart.
+    _short_labels = {
+        'BASE_COLOR': "Color",
+        'METALLIC': "Metal",
+        'ROUGHNESS': "Rough",
+        'SPECULAR': "Spec",
+        'NORMAL': "Normal",
+        'ALPHA': "Alpha",
+        'EMISSION': "Emit",
+    }
+
+    def draw(self, context):
+        layout = self.layout
+        mat = context.material
+
+        row = layout.row()
+        row.label(text=mat.name, icon='MATERIAL')
+        if mat.library is not None:
+            row.label(text="Linked, not editable", icon='LIBRARY_DATA_DIRECT')
+
+        # The active layer is what the channel bindings point at; its channel states are read from
+        # the stack itself, and the bake link only tells a Material layer's maps apart.
+        paint_mode = context.tool_settings.paint_mode
+        maps = {
+            binding.channel: binding.image
+            for binding in paint_mode.channel_image_bindings
+            if binding.image is not None
+        }
+        baked = [image for image in maps.values() if image.material_source == mat]
+
+        # Resolution and re-bake only mean something for a layer baked from this material.
+        if baked:
+            row = layout.row(align=True)
+            row.label(text="Resolution")
+            size = max((image.size[0] for image in baked), default=0)
+            row.operator_menu_enum(
+                "material.paint_layer_bake_size_set",
+                "size",
+                text="{:d} px".format(size) if size else "Resolution",
+            )
+            row.operator("material.paint_layer_rebake", text="", icon='FILE_REFRESH')
+            if any(image.material_source_is_baking for image in baked):
+                layout.label(text="Baking...", icon='RENDER_STILL')
+
+        enabled, disabled = paint_mode.active_layer_channel_states()
+        flow = layout.grid_flow(row_major=True, columns=0, even_columns=True, align=True)
+        # Channels a Material layer can bake, in the order the PBR Paint channel toggles use:
+        # read off the bake function's flag enum rather than kept as a second list.
+        channels_param = bpy.types.Material.bl_rna.functions["bake_paint_channels"].parameters[
+            "channels"]
+        for item in channels_param.enum_items:
+            if not item.identifier:
+                continue
+            flow.operator(
+                "material.paint_layer_channel_toggle",
+                text=self._short_labels.get(item.identifier, item.name),
+                icon='HIDE_ON' if item.identifier in disabled else 'NONE',
+                depress=item.identifier in enabled,
+            ).channel = item.identifier
+
+
+class LAYER_MATERIAL_PT_surface(LayerMaterialButtonsPanel, Panel):
+    bl_idname = "LAYER_MATERIAL_PT_surface"
+    bl_label = "Surface"
+
+    @classmethod
+    def poll(cls, context):
+        if not super().poll(context):
+            return False
+        paint_mode = context.tool_settings.paint_mode
+        mat = context.material
+        return any(
+            binding.image is not None and binding.image.material_source == mat
+            for binding in paint_mode.channel_image_bindings
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        panel_node_draw(layout, context.material.node_tree, 'OUTPUT_MATERIAL', "Surface")
+
+
+class LAYER_MATERIAL_PT_custom_props(LayerMaterialButtonsPanel, PropertyPanel, Panel):
+    bl_idname = "LAYER_MATERIAL_PT_custom_props"
+    _context_path = "material"
+    _property_type = bpy.types.Material
+
+
 classes = (
     MATERIAL_MT_context_menu,
     MATERIAL_UL_matslots,
@@ -561,6 +676,9 @@ classes = (
     BRUSH_MATERIAL_PT_settings_surface,
     BRUSH_MATERIAL_PT_viewport,
     BRUSH_MATERIAL_PT_custom_props,
+    LAYER_MATERIAL_PT_context_material,
+    LAYER_MATERIAL_PT_surface,
+    LAYER_MATERIAL_PT_custom_props,
 )
 
 

@@ -70,6 +70,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_layer_edit.hh"
 #include "BKE_pointcloud.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_scene.hh"
@@ -148,6 +149,10 @@ static void material_copy_data(Main *bmain,
 
   material_dst->gpumaterial.clear_no_delete();
   BKE_paint_material_channel_cache_invalidate(material_dst);
+  /* The struct was shallow-copied before this, so the pointer still names the *source's* runtime:
+   * clearing it is the whole job, and deleting it here would free the source's state under it.
+   * The copy starts with a fresh revision, allocated on its first edit. */
+  material_dst->paint_layer_runtime = nullptr;
 
   /* TODO: Duplicate Engine Settings and set runtime to nullptr. */
 }
@@ -185,6 +190,9 @@ static void material_free_data(ID *id)
   MEM_SAFE_DELETE(material->texpaintslot);
 
   MEM_SAFE_DELETE(material->gp_style);
+
+  /* Runtime-only: the paint layer revision dies with the material. */
+  MEM_SAFE_DELETE(material->paint_layer_runtime);
 
   BKE_previewimg_id_free(&material->id);
 
@@ -260,6 +268,8 @@ static void material_blend_read_data(BlendDataReader *reader, ID *id)
   Material *ma = id_cast<Material *>(id);
 
   ma->texpaintslot = nullptr;
+  /* Runtime-only: the file has nothing to say about the paint layer revision. */
+  ma->paint_layer_runtime = nullptr;
 
   BLO_read_struct(reader, PreviewImage, &ma->preview);
   BKE_previewimg_blend_read(reader, ma->preview);

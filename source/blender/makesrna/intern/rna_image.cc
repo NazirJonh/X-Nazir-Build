@@ -1383,7 +1383,9 @@ static void rna_def_image(BlenderRNA *brna)
       "while Paint Layer ID is set");
 
   /* The read-back of the hidden bake link. Same values as above minus the roles that can never be
-   * baked, plus None for an image that carries no link at all. */
+   * baked, plus None for an image that carries no link at all. Plain values (not flag bits) with
+   * a leading None, so this stays its own array rather than reusing
+   * #rna_enum_material_paint_bake_channel_items. */
   static const EnumPropertyItem material_source_channel_items[] = {
       {PAINT_LAYER_MAP_NONE, "NONE", 0, "None", "The image was not baked from a material"},
       {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},

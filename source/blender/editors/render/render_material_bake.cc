@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 
 #include "MEM_guardedalloc.h"
 
@@ -43,6 +44,7 @@
 #include "BKE_image.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
@@ -250,8 +252,17 @@ static Set<BakeCacheKey> g_bake_pending;
  * #Image session UIDs whose #material_bake_to_images job is in flight, and those marked stale by a
  * change with no hash to compare against. Both are session-local and guarded by the mutex above.
  */
-static Set<uint32_t> g_image_bake_pending;
+/**
+ * Counted rather than a set: restarting a job frees the replaced job's data, which releases the
+ * very UIDs its replacement has just claimed.
+ */
+static Map<uint32_t, int> g_image_bake_pending;
 static Set<uint32_t> g_image_bake_stale;
+/**
+ * Per source material session UID, the node-tree hash of the last automatic re-bake started, so
+ * the repeated editor updates of a single change do not restart the render for the same state.
+ */
+static Map<uint32_t, uint64_t> g_image_rebake_started_hash;
 static uint64_t g_bake_use_serial = 0;
 
 /**
@@ -397,13 +408,16 @@ bool material_source_bake_cache_contains(const Material &ma, const int resolutio
 static void material_bake_images_pending_add(const uint32_t image_session_uid)
 {
   std::lock_guard lock(g_bake_cache_mutex);
-  g_image_bake_pending.add(image_session_uid);
+  g_image_bake_pending.lookup_or_add(image_session_uid, 0)++;
 }
 
 static void material_bake_images_pending_remove(const uint32_t image_session_uid)
 {
   std::lock_guard lock(g_bake_cache_mutex);
-  g_image_bake_pending.remove(image_session_uid);
+  int *count = g_image_bake_pending.lookup_ptr(image_session_uid);
+  if (count != nullptr && --*count <= 0) {
+    g_image_bake_pending.remove(image_session_uid);
+  }
 }
 
 static void material_bake_images_stale_remove(const uint32_t image_session_uid)
@@ -764,11 +778,37 @@ static bool bake_requests_attach(Main &bmain,
  * Every buffer leaves with four float channels whatever its AOV delivered, so a consumer can read
  * them all the same way. On failure nothing is written and \a r_images is left all null.
  */
+/**
+ * Where an images bake job stands on its progress bar: preparing the copy and routing the AOVs is
+ * quick, the EEVEE render is nearly all of it, and the write-back happens after the worker ends.
+ */
+constexpr float BAKE_PROGRESS_ATTACHED = 0.1f;
+constexpr float BAKE_PROGRESS_RENDERED = 0.95f;
+
+/** Maps the render's own progress into the part of a job's progress bar the render takes up. */
+static void bake_render_progress_cb(void *handle, const float progress)
+{
+  wmJobWorkerStatus *worker_status = static_cast<wmJobWorkerStatus *>(handle);
+  worker_status->progress = BAKE_PROGRESS_ATTACHED +
+                            (BAKE_PROGRESS_RENDERED - BAKE_PROGRESS_ATTACHED) * progress;
+  worker_status->do_update = true;
+}
+
+static bool bake_render_test_break_cb(void *handle)
+{
+  return static_cast<wmJobWorkerStatus *>(handle)->stop;
+}
+
+/**
+ * \param worker_status: when given, the render reports into its progress and stops early on its
+ * stop flag; a render stopped that way is reported as failed.
+ */
 static bool bake_requests_render(Main &bmain,
                                  Material &bake_material,
                                  const int resolution,
                                  const Span<BakeSocketRequest> requests,
-                                 MutableSpan<ImBuf *> r_images)
+                                 MutableSpan<ImBuf *> r_images,
+                                 wmJobWorkerStatus *worker_status = nullptr)
 {
   BLI_assert(r_images.size() == requests.size());
   Scene *scene = BKE_scene_add(&bmain, "PBR Paint Bake Scene");
@@ -812,12 +852,16 @@ static bool bake_requests_render(Main &bmain,
   BKE_view_layer_synced_ensure(bmain, scene, view_layer);
 
   Render *render = RE_NewSceneRender(scene);
+  if (worker_status != nullptr) {
+    RE_progress_cb(render, worker_status, bake_render_progress_cb);
+    RE_test_break_cb(render, worker_status, bake_render_test_break_cb);
+  }
   /* The engine binds its own GPU context (#DRW_render_context_enable); enabling one here would
    * take the draw lock a second time on this thread. Like the regular render and preview jobs,
    * leave context handling to the engine. */
   RE_PreviewRender(render, &bmain, scene);
 
-  bool success = true;
+  bool success = worker_status == nullptr || !worker_status->stop;
   RenderResult *render_result = RE_AcquireResultRead(render);
   RenderLayer *render_layer = render_result != nullptr ?
                                   static_cast<RenderLayer *>(render_result->layers.first) :
@@ -826,7 +870,7 @@ static bool bake_requests_render(Main &bmain,
     PBR_BAKE_LOG("render: no render layer (result=%p)\n", (void *)render_result);
     success = false;
   }
-  else {
+  else if (success) {
 #if PBR_MATERIAL_BAKE_DEBUG
     PBR_BAKE_LOG("render: layer='%s' passes present:\n", render_layer->name);
     for (const RenderPass &pass : render_layer->passes) {
@@ -880,6 +924,14 @@ static bool bake_requests_render(Main &bmain,
       const int64_t texel_num = int64_t(resolution) * resolution;
       if (pass->channels == 4) {
         std::memcpy(dst, src, size_t(texel_num) * 4 * sizeof(float));
+        /* An AOV is a Color socket, three channels wide; the fourth the render layer hands back
+         * is whatever the film's own coverage happened to be, not something this AOV defined --
+         * a layer built from it must read as fully covered, the way the scalar branch below
+         * already forces for a Value AOV, or its Mix factor (driven by this alpha as coverage,
+         * see #layer_factor_coverage_link) reads the bake as unpainted and never shows it. */
+        for (const int64_t texel : IndexRange(texel_num)) {
+          dst[texel * 4 + 3] = 1.0f;
+        }
       }
       else {
         /* A scalar channel is broadcast to RGB so the same sample reads correctly whether the
@@ -1500,7 +1552,6 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
   if (requests.is_empty()) {
     baked = false;
   }
-  /* The render cannot be interrupted once under way, so the stop flag is honored before it. */
   if (baked && worker_status != nullptr && worker_status->stop) {
     BKE_main_free(bake_main);
     return;
@@ -1509,8 +1560,24 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
   Vector<ImBuf *> request_images;
   if (baked) {
     request_images.resize(requests.size(), nullptr);
-    baked = bake_requests_attach(*bake_main, *bake_material.nodetree, requests) &&
-            bake_requests_render(*bake_main, bake_material, job.size, requests, request_images);
+    const bool attached = bake_requests_attach(*bake_main, *bake_material.nodetree, requests);
+    if (worker_status != nullptr) {
+      worker_status->progress = BAKE_PROGRESS_ATTACHED;
+      worker_status->do_update = true;
+    }
+    /* Stoppable here, unlike the brush source bake: this job shows a progress bar with a cancel
+     * button, and the status bar's cancel raises the same flag a superseding bake does. */
+    const bool rendered = attached && bake_requests_render(*bake_main,
+                                                           bake_material,
+                                                           job.size,
+                                                           requests,
+                                                           request_images,
+                                                           worker_status);
+    if (worker_status != nullptr) {
+      worker_status->progress = BAKE_PROGRESS_RENDERED;
+      worker_status->do_update = true;
+    }
+    baked = rendered;
   }
   if (baked) {
     for (const int request_index : requests.index_range()) {
@@ -1542,17 +1609,36 @@ static void material_bake_images_endjob(void *customdata)
 {
   MaterialBakeImagesJob &job = *static_cast<MaterialBakeImagesJob *>(customdata);
   Main *bmain = G_MAIN;
+  if (bmain == nullptr) {
+    return;
+  }
+  Material *source_material = nullptr;
+  for (Material &material : bmain->materials) {
+    if (material.id.session_uid == job.material_session_uid) {
+      source_material = &material;
+      break;
+    }
+  }
+  /* The render is of the material as it was copied. An edit since then has already started the
+   * bake of the newer state; an undo since then restores both the material and the maps' link to
+   * the older one, and nothing would ever start a bake to put the undone pixels right. Either way,
+   * these pixels describe a state the material is no longer in. */
+  if (source_material == nullptr ||
+      material_bake_source_node_tree_hash(*source_material) != job.baked_hash)
+  {
+    return;
+  }
   for (const int i : job.channels.index_range()) {
-    ImBuf *rendered = job.rendered[i];
-    job.rendered[i] = nullptr;
+    /* The worker renders a channel once and stores it at the channel's first entry; later targets
+     * of the same channel -- layers baked from one material -- share that buffer. The buffers stay
+     * owned by the job and are freed with it. */
+    const ImBuf *rendered = job.rendered[job.channels.first_index_of(job.channels[i])];
     const uint32_t session_uid = job.target_session_uids[i];
     Image *target = nullptr;
-    if (bmain != nullptr) {
-      for (Image &image : bmain->images) {
-        if (image.id.session_uid == session_uid) {
-          target = &image;
-          break;
-        }
+    for (Image &image : bmain->images) {
+      if (image.id.session_uid == session_uid) {
+        target = &image;
+        break;
       }
     }
     ImageMaterialSource source;
@@ -1564,21 +1650,23 @@ static void material_bake_images_endjob(void *customdata)
     if (rendered == nullptr || !target_valid) {
       /* A channel that failed to render keeps its old pixels and its old hash, so it stays stale
        * and the next re-bake picks it up again. */
-      if (rendered != nullptr) {
-        IMB_freeImBuf(rendered);
-      }
-      material_bake_images_pending_remove(session_uid);
       continue;
     }
     bake_target_image_write_back(*target, *rendered);
-    IMB_freeImBuf(rendered);
+    /* #bake_target_image_write_back only notifies NC_IMAGE, which the Image Editor listens for --
+     * the 3D viewport's shading redraw does not, so a layer added with a still-rendering map (the
+     * common case: the graph is wired and the job started before this endjob ever runs) keeps
+     * showing whatever the placeholder evaluated to until something unrelated sends NC_MATERIAL.
+     * The map just landed in a real material's stack (#source.material, from the same link this
+     * validated above), so that material is what needs telling. */
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &source.material->id);
 
     ImageMaterialSource link = source;
     link.node_tree_hash = job.baked_hash;
     link.bake_size = job.size;
     BKE_image_material_source_set(*target, link);
     material_bake_images_stale_remove(session_uid);
-    material_bake_images_pending_remove(session_uid);
+    /* The pending claim is released by #material_bake_images_free, which always follows. */
   }
 }
 
@@ -1618,13 +1706,22 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
     return result;
   }
 
-  Vector<eMaterialPaintChannel> to_create;
+  /* Deduplicated per channel for new maps; an explicit target is its own entry, so two layers
+   * baked
+   * from one material can both be re-filled by a single render. */
+  Vector<const BakeTargetSpec *> to_create;
   for (const BakeTargetSpec &target : params.targets) {
     if (resolve.channels[target.channel] == ChannelResolution::Unavailable) {
       result.skipped_unavailable.append_non_duplicates(target.channel);
       continue;
     }
-    to_create.append_non_duplicates(target.channel);
+    const bool duplicate = std::any_of(
+        to_create.begin(), to_create.end(), [&](const BakeTargetSpec *other) {
+          return other->channel == target.channel && other->existing == target.existing;
+        });
+    if (!duplicate) {
+      to_create.append(&target);
+    }
   }
   if (to_create.is_empty()) {
     return result;
@@ -1641,8 +1738,10 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 
   Vector<eMaterialPaintChannel> render_channels;
   Vector<uint32_t> render_target_uids;
-  for (const eMaterialPaintChannel channel : to_create) {
-    Image *image = params.reuse_existing ?
+  for (const BakeTargetSpec *target : to_create) {
+    const eMaterialPaintChannel channel = target->channel;
+    Image *image = target->existing != nullptr ? target->existing :
+                   params.reuse_existing ?
                        bake_target_image_find(bmain, *params.material, channel) :
                        bake_target_image_create(
                            bmain, *params.material, channel, size, result.layer_id, current_hash);
@@ -1671,6 +1770,9 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 
   result.ok = !result.created.is_empty();
   if (render_channels.is_empty()) {
+    if (result.ok && params.before_render && !params.before_render(result)) {
+      result.ok = false;
+    }
     return result;
   }
 
@@ -1692,6 +1794,14 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
     material_bake_images_pending_add(session_uid);
   }
 
+  /* After the copy, so a hand-over that edits the source material itself cannot leak into the
+   * bake; before the job, so no worker thread is touching node trees while it runs. */
+  if (params.before_render && !params.before_render(result)) {
+    material_bake_images_free(job);
+    result.ok = false;
+    return result;
+  }
+
   if (params.blocking) {
     material_bake_images_startjob(job, nullptr);
     material_bake_images_endjob(job);
@@ -1700,19 +1810,139 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
   }
 
   /* Keyed on the material, so a second bake of the same material restarts this slot rather than
-   * racing it: v1's overlap unit is the material, and every target belongs to exactly one. */
+   * racing it: v1's overlap unit is the material, and every target belongs to exactly one. Its own
+   * job type keeps it out of the brush source bake's slot for the same material, which would
+   * replace this job's callbacks -- its write-back included; #WM_JOB_EXCL_RENDER queues the two
+   * renders instead. */
   wmJob *wm_job = WM_jobs_get(wm,
                               win,
                               params.material,
                               "Baking material to images...",
-                              WM_JOB_EXCL_RENDER,
-                              WM_JOB_TYPE_MATERIAL_SOURCE_BAKE);
+                              WM_JOB_EXCL_RENDER | WM_JOB_PROGRESS,
+                              WM_JOB_TYPE_MATERIAL_IMAGES_BAKE);
   WM_jobs_customdata_set(wm_job, job, material_bake_images_free);
   WM_jobs_timer(wm_job, 0.2, NC_IMAGE, NC_IMAGE);
   WM_jobs_callbacks(
       wm_job, material_bake_images_startjob, nullptr, nullptr, material_bake_images_endjob);
   WM_jobs_start(wm, wm_job);
   return result;
+}
+
+/**
+ * Collect the maps of \a ma to re-bake: those \a wanted selects, plus every map of \a ma whose
+ * bake
+ * is still in flight. A material has one images job slot, and starting a bake replaces whatever
+ * that slot was rendering -- a map only that job knew about would otherwise never get its pixels.
+ */
+static void rebake_targets_collect(
+    Main &bmain,
+    const Material &ma,
+    const FunctionRef<bool(const Image &, const ImageMaterialSource &)> wanted,
+    Vector<BakeTargetSpec> &r_targets,
+    int &r_size,
+    bool &r_all_pending)
+{
+  r_all_pending = true;
+  for (Image &image : bmain.images) {
+    ImageMaterialSource source;
+    if (!BKE_image_material_source_get(image, source) || source.material != &ma ||
+        !ID_IS_EDITABLE(&image.id))
+    {
+      continue;
+    }
+    bool pending;
+    {
+      std::lock_guard lock(g_bake_cache_mutex);
+      pending = g_image_bake_pending.contains(image.id.session_uid);
+    }
+    if (!pending && !wanted(image, source)) {
+      continue;
+    }
+    r_all_pending &= pending;
+    r_targets.append({eMaterialPaintChannel(source.channel), &image});
+    r_size = std::max(r_size, source.bake_size);
+  }
+}
+
+/** Start the images bake of \a targets and remember the node-tree state it was started for. */
+static void rebake_start(Main &bmain,
+                         Material &ma,
+                         const Span<BakeTargetSpec> targets,
+                         const int size,
+                         const uint64_t current_hash)
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first);
+  if (wm == nullptr || targets.is_empty()) {
+    return;
+  }
+  {
+    std::lock_guard lock(g_bake_cache_mutex);
+    g_image_rebake_started_hash.add_overwrite(ma.id.session_uid, current_hash);
+  }
+  MaterialBakeToImagesParams params;
+  params.material = &ma;
+  params.targets = targets;
+  params.size = size;
+  params.blocking = false;
+  material_bake_to_images(bmain, wm, static_cast<wmWindow *>(wm->windows.first), params);
+}
+
+void material_bake_images_rebake_stale(Main &bmain, Material &ma)
+{
+  if (bmain.wm.first == nullptr || ma.nodetree == nullptr) {
+    return;
+  }
+
+  std::optional<uint64_t> current_hash;
+  auto is_stale = [&](const Image &image, const ImageMaterialSource &source) {
+    /* Hashed only once a map of this material turns up: every material edit reaches here, and
+     * almost none of them were ever baked. */
+    if (!current_hash) {
+      current_hash = material_bake_source_node_tree_hash(ma);
+    }
+    std::lock_guard lock(g_bake_cache_mutex);
+    return source.node_tree_hash != *current_hash ||
+           g_image_bake_stale.contains(image.id.session_uid);
+  };
+  Vector<BakeTargetSpec> targets;
+  int size = 0;
+  bool all_pending = true;
+  rebake_targets_collect(bmain, ma, is_stale, targets, size, all_pending);
+  if (targets.is_empty()) {
+    return;
+  }
+  if (!current_hash) {
+    current_hash = material_bake_source_node_tree_hash(ma);
+  }
+  {
+    std::lock_guard lock(g_bake_cache_mutex);
+    /* One change reaches the editors once per view layer; only a new node-tree state restarts. */
+    if (all_pending &&
+        g_image_rebake_started_hash.lookup_default(ma.id.session_uid, 0) == *current_hash)
+    {
+      return;
+    }
+  }
+  rebake_start(bmain, ma, targets, size, *current_hash);
+}
+
+void material_bake_images_rebake(Main &bmain,
+                                 Material &ma,
+                                 const Span<Image *> images,
+                                 const int size)
+{
+  if (ma.nodetree == nullptr) {
+    return;
+  }
+  auto is_requested = [&](const Image &image, const ImageMaterialSource & /*source*/) {
+    return images.contains(const_cast<Image *>(&image));
+  };
+  Vector<BakeTargetSpec> targets;
+  int max_size = 0;
+  bool all_pending = true;
+  rebake_targets_collect(bmain, ma, is_requested, targets, max_size, all_pending);
+  rebake_start(
+      bmain, ma, targets, size > 0 ? size : max_size, material_bake_source_node_tree_hash(ma));
 }
 
 /** \} */

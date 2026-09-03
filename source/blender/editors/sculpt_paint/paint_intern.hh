@@ -700,6 +700,12 @@ void BRUSH_OT_asset_revert(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint
 
+/* `paint_material_layer_ops.cc` */
+
+void MATERIAL_OT_paint_layer_channel_toggle(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_bake_size_set(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_rebake(wmOperatorType *ot);
+
 /**
  * Delete overlay cursor textures to preserve memory and invalidate all overlay flags.
  */

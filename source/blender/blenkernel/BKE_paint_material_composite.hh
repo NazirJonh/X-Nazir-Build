@@ -29,7 +29,10 @@
 #include <cstdint>
 
 #include "BLI_span.hh"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
+
+#include "BKE_paint_material_layer_model.hh"
 
 #include "DNA_scene_types.h"
 
@@ -43,35 +46,6 @@ struct bNodeTree;
 struct ImageUser;
 struct Material;
 struct rcti;
-
-/**
- * How a layer combines with what is below it.
- *
- * Deliberately a short list: it is the set of Mix node blend modes that
- * #BKE_paint_material_composite_stack_from_material knows how to reproduce byte-exactly. A chain
- * using any other mode is not expressible as a stack and falls to the bake instead of being
- * approximated here.
- */
-enum class CompositeBlend : int8_t {
-  Mix = 0,
-  Multiply,
-  Overlay,
-  Add,
-  /**
-   * Combine two tangent-space normal maps, rather than blending their encoded bytes.
-   *
-   * Encoded normals are not colours: averaging two of them channel by channel flattens the
-   * relief instead of laying one over the other, which is why every layer stack that supports
-   * normals has an operation of its own for it. This is the whiteout blend -- the detail map's
-   * slope added to the base map's, renormalized -- which is what "overlay"/"add" means for a
-   * normal layer.
-   *
-   * Nothing in a plain Mix chain selects this: a Mix node really does interpolate the encoded
-   * values, and reproducing it any other way would make the composite disagree with the render.
-   * It exists for the graph shapes that genuinely combine normals.
-   */
-  NormalCombine,
-};
 
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
 struct PaintMaterialCompositeImageLayer {
@@ -97,6 +71,14 @@ struct PaintMaterialCompositeImageLayer {
   /** How much of #mask_image applies; 0 ignores the mask entirely. */
   float mask_influence = 1.0f;
   bool enabled = true;
+  /**
+   * The layer is a bare Image Texture wired straight into the channel, not a blended layer.
+   *
+   * Such a bottom is copied rather than blended, because it has no Mix node and therefore no blend
+   * mode, opacity or factor of its own. A uniform chain has none of these: its lowest layer blends
+   * over transparency like every other layer, and is composited the same way.
+   */
+  bool is_bare_base = false;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */
@@ -110,6 +92,8 @@ struct PaintMaterialCompositeLayer {
   float opacity = 1.0f;
   float mask_influence = 1.0f;
   bool enabled = true;
+  /** See #PaintMaterialCompositeImageLayer.is_bare_base. */
+  bool is_bare_base = false;
 };
 
 /** Layers bottom to top: index 0 is composited first and everything else lands on top of it. */

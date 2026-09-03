@@ -828,8 +828,69 @@ void ED_object_texture_paint_mode_enter(bContext *C)
   ED_object_texture_paint_mode_enter_ex(bmain, scene, depsgraph, ob);
 }
 
+bool ED_paint_material_mask_edit_end_if_active(Main &bmain,
+                                              Scene &scene,
+                                              Paint &paint,
+                                              PaintModeSettings &mode_settings)
+{
+  if (mode_settings.mask_image_binding.image == nullptr) {
+    return false;
+  }
+  BKE_paint_material_mask_edit_end_ex(bmain, scene, paint, mode_settings);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);
+  return true;
+}
+
+bool ED_paint_material_mask_edit_end_if_active(bContext &C)
+{
+  Main *bmain = CTX_data_main(&C);
+  Scene *scene = CTX_data_scene(&C);
+  Paint *paint = BKE_paint_get_active_from_context(&C);
+  if (bmain == nullptr || scene == nullptr || scene->toolsettings == nullptr ||
+      paint == nullptr)
+  {
+    return false;
+  }
+  PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
+  if (mode_settings.mask_image_binding.image == nullptr) {
+    return false;
+  }
+  BKE_paint_material_mask_edit_end_ex(*bmain, *scene, *paint, mode_settings);
+  WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, nullptr);
+  return true;
+}
+
+void ED_paint_material_mask_edit_begin(bContext &C, Image &mask_image)
+{
+  Main *bmain = CTX_data_main(&C);
+  Scene *scene = CTX_data_scene(&C);
+  Paint *paint = BKE_paint_get_active_from_context(&C);
+  if (bmain == nullptr || scene == nullptr || scene->toolsettings == nullptr ||
+      paint == nullptr)
+  {
+    return;
+  }
+  BKE_paint_material_mask_edit_begin_ex(
+      *bmain, *scene, *paint, scene->toolsettings->paint_mode, mask_image);
+}
+
 void ED_object_texture_paint_mode_exit_ex(Main &bmain, Scene &scene, Object &ob)
 {
+  /* Leaving Texture Paint with a layer mask armed would keep aiming every later stroke at that
+   * hidden mask (see #BKE_paint_material_image_targets_get), so mask editing ends here, in the
+   * one exit the toggle operator, the generic mode switch and the context wrapper all share.
+   * Ended through the texture paint: mask editing begun from another paint mode keeps that
+   * paint and is ended by its own paths. */
+  if (scene.toolsettings != nullptr) {
+    PaintModeSettings &paint_mode = scene.toolsettings->paint_mode;
+    if (paint_mode.mask_image_binding.image != nullptr) {
+      ED_paint_material_mask_edit_end_if_active(
+          bmain, scene, scene.toolsettings->imapaint.paint, paint_mode);
+    }
+  }
+
   ob.mode &= ~OB_MODE_TEXTURE_PAINT;
 
   if (U.glreslimit != 0) {

@@ -72,6 +72,16 @@ bool icon_is_monochrome(int icon_id);
 void icon_render_id(const bContext *C, Scene *scene, ID *id, enum eIconSizes size, bool use_job);
 
 /**
+ * The icon id that shows \a id at the large size a row column draws: its preview for the
+ * data-block types the core renders previews of (materials, images, worlds, ...), a type-specific
+ * icon otherwise, and 0 for types that have neither. The preview id is handed out as soon as the
+ * job is scheduled, so a caller that draws per row must render whatever the icon shows at that
+ * moment -- the core owns both the cache and the job, and the preview may still be blank.
+ * Interface-internal code that needs a different size asks #id_icon_get instead.
+ */
+int icon_id_preview_get(const bContext *C, ID *id);
+
+/**
  * Render the data block into the provided #PreviewImage.
  */
 void icon_render_id_ex(const bContext *C,

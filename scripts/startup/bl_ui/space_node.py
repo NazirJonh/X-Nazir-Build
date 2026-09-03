@@ -188,6 +188,15 @@ class NODE_HT_header(Header):
                 row.enabled = not snode.pin
                 row.template_ID(scene, "world", new="world.new")
 
+            if snode.shader_type == 'PAINT_LAYER':
+                NODE_MT_editor_menus.draw_collapsible(context, layout)
+                layout.separator_spacer()
+                # The material follows the active Material paint layer; there is nothing to pick here.
+                if snode_id:
+                    layout.label(text=snode_id.name, icon='MATERIAL')
+                else:
+                    layout.label(text="No active Material layer", icon='INFO')
+
             if snode.shader_type == 'LINESTYLE':
                 view_layer = context.view_layer
                 lineset = view_layer.freestyle_settings.linesets.active

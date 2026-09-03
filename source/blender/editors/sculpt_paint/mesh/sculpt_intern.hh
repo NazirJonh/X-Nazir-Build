@@ -208,6 +208,8 @@ struct ImagePaintTarget {
    * keeps the stock #Brush.blend behavior unchanged.
    */
   bool is_material_channel = false;
+  /** True when this target is a Stack Layers row's mask being edited, not a material channel. */
+  bool is_mask_target = false;
   eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_METALLIC;
   const char *channel_name = nullptr;
 };

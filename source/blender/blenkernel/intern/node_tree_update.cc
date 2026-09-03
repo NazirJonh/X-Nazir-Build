@@ -2218,8 +2218,12 @@ bool operator==(const bNestedNodePath &a, const bNestedNodePath &b)
  *
  * This could be added to #Main, but given that there is generally only one #Main, that's not
  * really worth it now.
+ *
+ * Per thread, because it only guards recursion: a job updating the trees of its own private #Main
+ * on a worker thread would otherwise silently turn every main-thread update into a no-op for as
+ * long as it runs -- leaving, for example, a freshly assigned group node without sockets.
  */
-static bool is_updating = false;
+static thread_local bool is_updating = false;
 
 void BKE_ntree_update(Main &bmain,
                       const std::optional<Span<bNodeTree *>> modified_trees,

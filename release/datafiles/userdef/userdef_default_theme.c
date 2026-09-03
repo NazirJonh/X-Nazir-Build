@@ -649,6 +649,7 @@ const bTheme U_theme_default = {
     .active_object = RGBA(0xffaf29ff),
     .edited_object = RGBA(0x00806266),
     .row_alternate = RGBA(0xffffff04),
+    .stack_layer_alternate = RGBA(0xffffff0b),
   },
   .space_node = {
     .back = RGBA(0x1a1a1a00),

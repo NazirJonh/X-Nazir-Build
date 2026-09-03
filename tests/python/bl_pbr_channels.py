@@ -439,6 +439,64 @@ class TestPaintLayerIdOldFile(unittest.TestCase):
         self.skipTest("pre-field fixture not yet added")
 
 
+class TestStackLayerKind(unittest.TestCase):
+    """The layer-kind markers the stack reader and Ucupaint both read.
+
+    The guarantee under test: a layer created by any of the older paths carries no marker and
+    reads as Paint, and the markers are plain node IDProperties a Python side can read and write.
+    """
+
+    def _new_paint_material(self, name):
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        generate_monkey(BackendType.MESH)
+        ob = bpy.context.active_object
+
+        mat = bpy.data.materials.new(name)
+        mat.use_nodes = True
+        ob.data.materials.append(mat)
+
+        bpy.context.tool_settings.paint_mode.canvas_source = 'MATERIAL'
+
+        brush = bpy.data.brushes.new(name + "Brush", mode='SCULPT')
+        brush.sculpt_brush_type = 'PAINT'
+        bpy.context.tool_settings.sculpt.brush = brush
+        self.addCleanup(bpy.data.brushes.remove, brush)
+        self.assertEqual(bpy.ops.paint.material_paint_brush_ensure(), {'FINISHED'})
+
+        channels = {c.channel: c for c in brush.material_paint.channels}
+        channels['BASE_COLOR'].use = True
+        self.assertEqual(bpy.ops.paint.material_paint_images_ensure(), {'FINISHED'})
+        return mat
+
+    def _stack_tex_node(self, mat):
+        # The bottom of a one-layer stack is the bare Image Texture feeding the channel; a layer
+        # created before the kinds existed has no marker on it.
+        node_tree = mat.node_tree
+        socket = node_tree.nodes["Principled BSDF"].inputs["Base Color"]
+        while socket is not None and socket.is_linked:
+            node = socket.links[0].from_node
+            if node.type == 'TEX_IMAGE':
+                return node
+            socket = node.inputs[0] if node.inputs else None
+        self.fail("no Image Texture found feeding Base Color")
+
+    def test_kind_defaults_to_paint(self):
+        mat = self._new_paint_material("KindDefaultMat")
+        node = self._stack_tex_node(mat)
+        self.assertNotIn("pbr_paint_layer_kind", node)
+        self.assertNotIn("pbr_paint_fill_color", node)
+        # The documented read: absent marker means Paint.
+        self.assertEqual(node.get("pbr_paint_layer_kind", 0), 0)
+
+    def test_kind_and_fill_color_round_trip(self):
+        mat = self._new_paint_material("KindRoundtripMat")
+        node = self._stack_tex_node(mat)
+        node["pbr_paint_layer_kind"] = 1
+        node["pbr_paint_fill_color"] = (0.25, 0.5, 0.75, 1.0)
+        self.assertEqual(node["pbr_paint_layer_kind"], 1)
+        self.assertEqual(tuple(node["pbr_paint_fill_color"]), (0.25, 0.5, 0.75, 1.0))
+
+
 class TestChannelSourceLifecycle(unittest.TestCase):
     def setUp(self):
         self.brush = bpy.data.brushes.new("LifecycleTest", mode='SCULPT')

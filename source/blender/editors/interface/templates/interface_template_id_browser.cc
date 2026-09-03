@@ -125,7 +125,7 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel);
 static bool id_browser_popover_poll(const bContext *C, PanelType *panel_type);
 static void build_id_grid(const bContext &C, Layout &layout, float grid_viewport_units);
 
-static void id_browser_popover_register()
+void id_browser_popover_register()
 {
   if (WM_paneltype_find("UI_PT_id_browser", true)) {
     return;

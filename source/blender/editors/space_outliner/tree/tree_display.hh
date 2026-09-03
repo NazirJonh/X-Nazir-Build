@@ -171,6 +171,19 @@ class TreeDisplayViewLayer final : public AbstractTreeDisplay {
   void add_layer_collection_objects_children(TreeElement &);
 };
 
+/** Tree-display variants for the paint-layer stack of the focused material. */
+class TreeDisplayStackLayersObjects final : public AbstractTreeDisplay {
+ public:
+  TreeDisplayStackLayersObjects(SpaceOutliner &space_outliner);
+  ListBaseT<TreeElement> build_tree(const TreeSourceData &source_data) override;
+};
+
+class TreeDisplayStackLayersStack final : public AbstractTreeDisplay {
+ public:
+  TreeDisplayStackLayersStack(SpaceOutliner &space_outliner);
+  ListBaseT<TreeElement> build_tree(const TreeSourceData &source_data) override;
+};
+
 /* -------------------------------------------------------------------- */
 /* Library Tree-Display */
 

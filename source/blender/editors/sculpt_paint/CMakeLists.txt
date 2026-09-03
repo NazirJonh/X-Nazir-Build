@@ -50,6 +50,8 @@ set(SRC
   paint_curve_slide.cc
   paint_curve_sync.cc
   paint_curve_undo.cc
+  paint_material_layer.cc
+  paint_material_layer_ops.cc
   paint_ops.cc
   paint_texture_ops.cc
   paint_sample_color.cc
@@ -287,6 +289,7 @@ if(WITH_GTESTS)
     mesh/paint_image_select_warp_tests.cc
     mesh/paint_image_uv_geom_tests.cc
     mesh/paint_image_uv_symmetry_tests.cc
+    mesh/paint_material_source_test.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc
     mesh/sculpt_undo_test.cc

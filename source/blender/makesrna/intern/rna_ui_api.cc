@@ -832,6 +832,12 @@ static void rna_ui_template_ID_session_uid(
   template_ID_session_uid(*layout, C, ptr, propname, idcode);
 }
 
+static void rna_ui_template_enum_menu(
+    Layout *layout, PointerRNA *ptr, const char *propname, float width, bool wrap)
+{
+  ui::template_enum_menu(layout, ptr, propname, width, wrap);
+}
+
 static void rna_uiTemplateID_with_filter_context(Layout *layout,
                                                  bContext *C,
                                                  PointerRNA *ptr,
@@ -2246,6 +2252,23 @@ void RNA_api_ui_layout(StructRNA *srna)
   func = RNA_def_function(srna, "template_header", "template_header");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   RNA_def_function_ui_description(func, "Inserts common Space header UI (editor type selector)");
+
+  func = RNA_def_function(srna, "template_enum_menu", "rna_ui_template_enum_menu");
+  RNA_def_function_ui_description(
+      func, "Menu button for an enum property with a fixed width, independent of the "
+            "current item's name");
+  api_ui_item_rna_common(func);
+  RNA_def_float(func,
+                "width",
+                6.0f,
+                0.0f,
+                100.0f,
+                "Width",
+                "Button width in UI units; zero or negative keeps the default width",
+                0.0f,
+                100.0f);
+  RNA_def_boolean(
+      func, "wrap", true, "", "Wrap around the first and last items when stepping");
 
   func = RNA_def_function(srna, "template_ID", "rna_uiTemplateID");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);

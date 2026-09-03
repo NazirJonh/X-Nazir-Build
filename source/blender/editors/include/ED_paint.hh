@@ -64,6 +64,29 @@ void ED_imapaint_bucket_fill(bContext *C,
                              const float color[3],
                              wmOperator *op,
                              const int mouse[2]);
+/**
+ * Leave PBR layer-mask editing when it is active, restoring the channel brush and tagging the
+ * tool-settings and brush for redraw. No-op when no mask is being edited.
+ *
+ * The single exit every editor path (Outliner activation/clear/remove/focus, Texture Paint exit)
+ * goes through, so a stroke can never keep writing into a hidden mask.
+ *
+ * \return true when mask editing was active and is now off.
+ */
+bool ED_paint_material_mask_edit_end_if_active(bContext &C);
+bool ED_paint_material_mask_edit_end_if_active(Main &bmain,
+                                              Scene &scene,
+                                              Paint &paint,
+                                              PaintModeSettings &mode_settings);
+
+/**
+ * #BKE_paint_material_mask_edit_begin_ex, resolving \a paint and \a mode_settings from \a C.
+ *
+ * Kept apart from the BKE-level `_ex` so the brush switch and its context can live at the editor
+ * level, where #bContext belongs; BKE stays free of it (see
+ * #BKE_paint_material_mask_edit_begin_ex).
+ */
+void ED_paint_material_mask_edit_begin(bContext &C, Image &mask_image);
 
 /* `paint_image_proj.cc` */
 

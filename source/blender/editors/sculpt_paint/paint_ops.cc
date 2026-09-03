@@ -1730,6 +1730,11 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_attribute_add);
   WM_operatortype_append(PAINT_OT_material_attribute_remove);
 
+  /* PBR Paint layer material (Layer Material tab) */
+  WM_operatortype_append(MATERIAL_OT_paint_layer_channel_toggle);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_bake_size_set);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_rebake);
+
   /* partial visibility */
   WM_operatortype_append(hide::PAINT_OT_hide_show_all);
   WM_operatortype_append(hide::PAINT_OT_hide_show_masked);

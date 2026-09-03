@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "BLI_function_ref.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -204,7 +205,16 @@ bool material_bake_source_is_baking(const Image &image);
  */
 struct BakeTargetSpec {
   eMaterialPaintChannel channel;
+  /**
+   * The map to re-fill, when set; it must already carry a bake link to the source material for
+   * #channel. Takes precedence over #MaterialBakeToImagesParams.reuse_existing, which can only
+   * find *a* map of the material's channel -- the wrong one once two layers were baked from the
+   * same material.
+   */
+  Image *existing = nullptr;
 };
+
+struct MaterialBakeToImagesResult;
 
 struct MaterialBakeToImagesParams {
   /** Source material. Not localized by the caller -- #material_bake_to_images copies it. */
@@ -221,6 +231,15 @@ struct MaterialBakeToImagesParams {
   bool reuse_existing = false;
   /** #Image::paint_layer_id to stamp on every created map. Empty -> a fresh UUID is generated. */
   char layer_id[37] = "";
+  /**
+   * Called on the calling thread once the targets exist, before any render starts; returning
+   * false starts none and leaves #MaterialBakeToImagesResult.ok false.
+   *
+   * This is where a caller hands the targets over to the file (a layer add, say). Doing that after
+   * #material_bake_to_images returns would race the job: its worker updates node trees too, and a
+   * refused hand-over frees targets the job would then write back to.
+   */
+  FunctionRef<bool(const MaterialBakeToImagesResult &result)> before_render;
 };
 
 struct MaterialBakeToImagesResult {
@@ -235,13 +254,35 @@ struct MaterialBakeToImagesResult {
  * Bake \a params.targets of \a params.material into one #Image each, on the unit UV square.
  *
  * Preflight, target creation and the link write happen on the calling thread before this returns.
- * The render and the pixel write-back run in a #wmJob unless \a params.blocking. \a wm / \a win may
+ * The render and the pixel write-back run in a #wmJob unless \a params.blocking. \a wm / \a win
+ * may
  * be null only when \a params.blocking is true.
  */
 MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
                                                    wmWindowManager *wm,
                                                    wmWindow *win,
                                                    const MaterialBakeToImagesParams &params);
+
+/**
+ * Start re-filling every editable map baked from \a ma whose bake no longer matches \a ma's node
+ * trees, each map in place and at the size it was baked at.
+ *
+ * Meant for the editor update of a changed material, so it is cheap when nothing was baked from
+ * \a ma and does not restart a running bake for a node-tree state it already started. Starts
+ * nothing without a window manager (file read, background mode).
+ */
+void material_bake_images_rebake_stale(Main &bmain, Material &ma);
+
+/**
+ * Start re-filling \a images, maps baked from \a ma, whether or not they are stale -- after a
+ * resize, or for a map that was just linked to \a ma.
+ *
+ * Every other map of \a ma still being baked is re-rendered along with them, since the material
+ * has a single bake job that this replaces.
+ *
+ * \param size: the square side to render at; zero keeps the largest size the maps were baked at.
+ */
+void material_bake_images_rebake(Main &bmain, Material &ma, Span<Image *> images, int size);
 
 /** \} */
 

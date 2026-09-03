@@ -616,6 +616,15 @@ static float3 curve_patch_channel_flat_color(const paint::image::ImagePaintTarge
                                              const bool invert)
 {
   const bool live_channel = target.is_material_channel && brush.material_paint != nullptr;
+  if (target.is_mask_target) {
+    /* A mask has no channel value to live-sync: paint the grayscale value frozen into
+     * #ImagePaintTarget::color_override when the stroke cache built its targets, never
+     * #BrushMaterialPaint.channels[] (see the design spec's invariant M6). Erasing clears it. */
+    if (invert) {
+      return float3(0.0f);
+    }
+    return target.color_override ? float3(*target.color_override) : float3(1.0f);
+  }
   if (!live_channel) {
     return target.color_override ? float3(*target.color_override) :
                                    BKE_brush_color_get(&paint, &brush);

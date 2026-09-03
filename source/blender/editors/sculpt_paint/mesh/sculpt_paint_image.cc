@@ -39,6 +39,8 @@
 #  include "BLI_hash.h"
 #endif
 
+#include "BLT_translation.hh"
+
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 
@@ -165,8 +167,11 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
         target.is_color_channel = material_target.is_color_channel;
         target.is_normal_channel = material_target.is_normal_channel;
         target.is_material_channel = true;
+        target.is_mask_target = material_target.is_mask_target;
         target.channel = material_target.channel;
-        target.channel_name = BKE_paint_material_channel_info(material_target.channel).ui_name;
+        target.channel_name = material_target.is_mask_target ?
+                                  IFACE_("Mask") :
+                                  BKE_paint_material_channel_info(material_target.channel).ui_name;
         if (material_target.is_color_channel) {
           const float3 rgb = float3(material_target.color);
           target.color_override = float4(rgb, 1.0f);

@@ -350,6 +350,23 @@ bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *bru
   return true;
 }
 
+void WM_toolsystem_brush_bindings_update_from_active(bContext *C, Paint *paint)
+{
+  if (paint == nullptr || paint->brush == nullptr || paint->brush_asset_reference == nullptr) {
+    return;
+  }
+  const bToolRef *active_tool = toolsystem_active_tool_from_context_or_view3d(C);
+  if (active_tool == nullptr || active_tool->runtime == nullptr) {
+    return;
+  }
+  if (active_tool->runtime->brush_type == -1) {
+    toolsystem_main_brush_binding_update_from_active(paint);
+    return;
+  }
+  toolsystem_brush_type_binding_update(
+      paint, BKE_paintmode_get_active_from_context(C), active_tool->runtime->brush_type);
+}
+
 static void toolsystem_brush_activate_from_toolref_for_object_particle(const Main *bmain,
                                                                        const WorkSpace *workspace,
                                                                        const bToolRef *tref)

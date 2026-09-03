@@ -47,6 +47,7 @@
 #include "SEQ_relations.hh"
 #include "SEQ_sequencer.hh"
 
+#include "ED_material_bake.hh"
 #include "ED_node.hh"
 #include "ED_node_preview.hh"
 #include "ED_paint.hh"
@@ -291,6 +292,10 @@ static void image_changed(Main *bmain, Image *ima)
       texture_changed(bmain, tex);
     }
   }
+
+  /* A PBR Paint source-material bake reads image pixels through the shader graph, and nothing in
+   * the node tree changes when those pixels do, so its cache cannot notice this on its own. */
+  ed::material_bake::material_source_bake_tag_image_changed(*ima);
 
   /* Ensure downstream editors are made aware of changes to the Image data. */
   WM_main_add_notifier(NC_IMAGE | NA_EDITED, ima);

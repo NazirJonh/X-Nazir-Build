@@ -1072,6 +1072,34 @@ static void version_material_paint_channel_source_mtex_defaults(Main &bmain)
   }
 }
 
+/* Trailing DNA growth zero-fills, which would leave a zero-sized bake buffer. Maps mode and the
+ * brush layout are correct at zero, so only the size needs restoring. */
+static void version_material_paint_source_defaults_one(BrushMaterialPaint *material_paint)
+{
+  if (material_paint != nullptr && material_paint->source_bake_size == 0) {
+    material_paint->source_bake_size = 1024;
+  }
+}
+
+static void version_material_paint_source_defaults(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    version_material_paint_source_defaults_one(brush.material_paint);
+  }
+  /* The per-brush presets in the tool settings hold their own #BrushMaterialPaint, which grows
+   * with the same DNA and therefore needs the same defaults. */
+  for (Scene &scene : bmain.scenes) {
+    if (scene.toolsettings == nullptr) {
+      continue;
+    }
+    for (PaintMaterialBrushPreset &preset :
+         scene.toolsettings->paint_mode.material_paint_brush_presets)
+    {
+      version_material_paint_source_defaults_one(preset.material_paint);
+    }
+  }
+}
+
 static void version_solid_color_width_height_defaults(Main &bmain)
 {
   for (Scene &scene : bmain.scenes) {
@@ -1886,6 +1914,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
       attributes.remove("paintcurve_selection");
     }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 73)) {
+    version_material_paint_source_defaults(*bmain);
   }
 
   /**

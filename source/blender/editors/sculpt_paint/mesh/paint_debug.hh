@@ -101,4 +101,33 @@
 #  define PBR_PAINT_MATERIAL_PROFILE 0
 #endif
 
+/**
+ * paint_cursor.cc – Source Mode: Material cursor overlay gating.
+ *
+ * Prints one line per gate, and only when the reported state changes, so a cursor redrawn at every
+ * mouse move does not flood the console. This is the only account of why no overlay is drawn for
+ * a brush that looks correctly configured.
+ */
+#if PBR_PAINT_DEBUG_LOG
+#  define PBR_PAINT_CURSOR_DEBUG 1
+#else
+#  define PBR_PAINT_CURSOR_DEBUG 0
+#endif
+
+/**
+ * paint_material_source.cc, paint_image_2d.cc – consumption of a source-material bake.
+ *
+ * Reports which source kind every channel resolved to at stroke start, whether a bake was
+ * available for it, and the first sample taken from one.
+ *
+ * The producing side has a switch of its own, #PBR_MATERIAL_BAKE_DEBUG in
+ * `editors/render/render_material_bake.cc`: that is a different module and cannot reach this
+ * header, so the two halves are enabled independently.
+ */
+#if PBR_PAINT_DEBUG_LOG
+#  define PBR_PAINT_BAKE_DEBUG 1
+#else
+#  define PBR_PAINT_BAKE_DEBUG 0
+#endif
+
 /** \} */

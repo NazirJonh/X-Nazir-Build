@@ -1347,6 +1347,28 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 61)) {
+    /* Initialize the vertex paint channel output flags for existing brushes. */
+    for (Brush &brush : bmain->brushes) {
+      brush.vertex_paint_channel_flag = (BRUSH_VPAINT_CHANNEL_R | BRUSH_VPAINT_CHANNEL_G |
+                                         BRUSH_VPAINT_CHANNEL_B);
+    }
+
+    /* Initialize the vertex paint channel display flags for the 3D viewport overlay. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            if (v3d->overlay.vertex_paint_channel_flag == 0) {
+              v3d->overlay.vertex_paint_channel_flag = V3D_OVERLAY_VPAINT_SHOW_RGB_MASK;
+            }
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

@@ -38,7 +38,10 @@ static PyObject *bpy_rna_uilayout_introspect(PyObject *self)
   PyObject *main_mod = PyC_MainModule_Backup();
   PyObject *py_dict = PyC_DefaultNameSpace("<introspect>");
   PyObject *result = PyRun_String(expr.c_str(), Py_eval_input, py_dict, py_dict);
-  Py_DECREF(py_dict);
+  /* No de-reference of `py_dict`: #PyC_DefaultNameSpace returns the borrowed #PyModule_GetDict of
+   * the temporary `__main__` it installed, which `sys.modules` owns. Dropping it here takes a
+   * reference this function never held; #PyC_MainModule_Restore then releases that module and
+   * frees the dictionary a second time, tripping `_Py_NegativeRefcount` on debug builds. */
   PyC_MainModule_Restore(main_mod);
   return result;
 }

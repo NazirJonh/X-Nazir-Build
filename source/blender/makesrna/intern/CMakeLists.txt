@@ -266,6 +266,7 @@ set(INC
   ../../render
   ../../../../intern/clog
   ../../../../intern/cycles/blender
+  ../../../../intern/guardedalloc
   ../../../../intern/memutil
   ../../../../intern/mantaflow/extern
 

@@ -6,6 +6,7 @@ import bpy
 from bpy.types import (
     Operator,
     OperatorFileListElement,
+    PropertyGroup,
 )
 from bpy.props import (
     BoolProperty,
@@ -13,6 +14,7 @@ from bpy.props import (
     IntProperty,
     StringProperty,
     CollectionProperty,
+    PointerProperty,
 )
 from bpy.app.translations import (
     pgettext_iface as iface_,
@@ -184,6 +186,301 @@ class PREFERENCES_OT_copy_prev(Operator):
             self.report({'INFO'}, "Reload Start-Up file to restore settings")
 
         return {'FINISHED'}
+
+
+def _userconfig_path_is_default():
+    """True when the configuration directory is the automatic per-version one."""
+    import os
+
+    # No automatic per-version configuration exists when the config path is overridden by an
+    # environment variable or this is a portable install, and writing to it would go elsewhere
+    # than the version directories these operators scan.
+    userconfig_path = os.path.normpath(bpy.utils.user_resource('CONFIG'))
+    new_userconfig_path = os.path.normpath(os.path.join(bpy.utils.resource_path('USER'), "config"))
+    return userconfig_path == new_userconfig_path
+
+
+def _disable_missing_addons(context, module_names=None):
+    """Drop add-ons the imported preferences enable but this build does not have.
+
+    The caller is responsible for saving the preferences afterwards.
+    """
+    import addon_utils
+
+    addon_utils.extensions_refresh()
+    available = {module.__name__ for module in addon_utils.modules()}
+    addons = context.preferences.addons
+    missing = []
+    for addon in addons:
+        module_name = addon.module
+        if module_names is not None and module_name not in module_names:
+            continue
+        if addon_utils.check_extension(module_name):
+            continue
+        if module_name not in available:
+            missing.append(module_name)
+
+    for module_name in missing:
+        while module_name in addons:
+            addon = addons.get(module_name)
+            if addon is None:
+                break
+            addons.remove(addon)
+    return missing
+
+
+# Kept alive because Blender does not own the strings returned by a dynamic enum callback.
+_copy_settings_version_items = []
+
+
+def _copy_settings_version_items_cb(self, _context):
+    items = _copy_settings_version_items
+    items.clear()
+    for version in PREFERENCES_OT_copy_settings.find_versions(self.branch):
+        identifier = "{:d}.{:d}".format(*version)
+        items.append((identifier, identifier, PREFERENCES_OT_copy_settings.version_path(version, self.branch)))
+    if not items:
+        items.append(('NONE', "None Found", "No configuration directory was found for this branch"))
+    return items
+
+
+class PREFERENCES_OT_copy_settings(Operator):
+    """Copy settings from another Blender configuration directory"""
+    bl_idname = "preferences.copy_settings"
+    bl_label = "Copy Settings"
+
+    # Mirrors the constant in PREFERENCES_OT_copy_prev, see the reasoning there.
+    MAX_MINOR_VERSION_FOR_PREVIOUS_MAJOR_LOOKUP = 10
+    # Upper bound when scanning forward, an installation newer than this is not looked for.
+    MAX_MINOR_VERSION_FOR_NEWER_LOOKUP = 10
+
+    # Property name paired with the sub-directory it controls.
+    _SUBDIRS = (
+        ("use_config", "config"),
+        ("use_extensions", "extensions"),
+        ("use_scripts", "scripts"),
+    )
+
+    branch: EnumProperty(
+        name="Branch",
+        description="Which family of configuration directories to look in",
+        items=(
+            ('STOCK', "Official Blender", "Configuration directories of an official Blender install"),
+            ('XBLEND', "This Build", "Configuration directories of this build"),
+        ),
+        default='STOCK',
+    )
+    source_version: EnumProperty(
+        name="Version",
+        description="Version to copy the settings from",
+        items=_copy_settings_version_items_cb,
+    )
+    use_config: BoolProperty(
+        name="Configuration",
+        description="Preferences, themes, key maps and other files under \"config\"",
+        default=True,
+    )
+    use_extensions: BoolProperty(
+        name="Extensions",
+        description="Installed extensions. Third party extensions may not work with this build",
+        default=False,
+    )
+    use_scripts: BoolProperty(
+        name="Legacy Add-ons",
+        description="Add-ons installed the legacy way, under \"scripts\". "
+        "Third party add-ons may not work with this build",
+        default=False,
+    )
+    # Set by the caller to pin the source to the stock directory of the current version.
+    lock_source: BoolProperty(
+        default=False,
+        options={'HIDDEN', 'SKIP_SAVE'},
+    )
+
+    @classmethod
+    def version_path(cls, version, branch):
+        return bpy.utils.resource_path(
+            'USER', major=version[0], minor=version[1], stock=(branch == 'STOCK'),
+        )
+
+    @classmethod
+    def find_versions(cls, branch, *, include_current_and_newer=False):
+        """Existing configuration directories, newest first.
+
+        Only versions older than the running one are scanned unless include_current_and_newer is
+        set, which the synchronize operator needs: an official Blender of the same or a newer
+        version is the usual source there.
+        """
+        import os
+
+        found = []
+        version_new = bpy.app.version[:2]
+
+        if include_current_and_newer:
+            # Newest first, so scan forward before scanning backward.
+            newer = []
+            for major in (version_new[0], version_new[0] + 1):
+                minor_min = version_new[1] if major == version_new[0] else 0
+                for minor in range(minor_min, cls.MAX_MINOR_VERSION_FOR_NEWER_LOOKUP + 1):
+                    path = cls.version_path((major, minor), branch)
+                    if path and os.path.isdir(path):
+                        newer.append((major, minor))
+            found.extend(reversed(newer))
+
+        version_old = [version_new[0], version_new[1] - 1]
+
+        while True:
+            while version_old[1] >= 0:
+                path = cls.version_path(version_old, branch)
+                if path and os.path.isdir(path):
+                    found.append(tuple(version_old))
+                version_old[1] -= 1
+            if version_new[0] == version_old[0]:
+                # Retry with older major version.
+                version_old[0] -= 1
+                version_old[1] = cls.MAX_MINOR_VERSION_FOR_PREVIOUS_MAJOR_LOOKUP
+            else:
+                break
+
+        return found
+
+    @classmethod
+    def find_versions_for_sync(cls, branch):
+        """Configuration directories offered as a sync source: this version (if present) and older."""
+        import os
+
+        versions = cls.find_versions(branch, include_current_and_newer=False)
+        current = tuple(bpy.app.version[:2])
+        if current not in versions:
+            path = cls.version_path(current, branch)
+            if path and os.path.isdir(path):
+                versions.insert(0, current)
+        return versions
+
+    @classmethod
+    def stock_current_path(cls):
+        """Stock configuration directory of the running version, or None."""
+        import os
+
+        path = bpy.utils.resource_path('USER', stock=True)
+        return path if path and os.path.isdir(path) else None
+
+    @classmethod
+    def poll(cls, _context):
+        # Unlike PREFERENCES_OT_copy_prev this stays enabled once a configuration exists: the
+        # operator lives in the Preferences editor and overwriting is guarded by the backup.
+        return _userconfig_path_is_default()
+
+    def _source_path(self):
+        import os
+
+        if self.lock_source:
+            path = bpy.utils.resource_path('USER', stock=True)
+        elif self.source_version == 'NONE':
+            return None
+        else:
+            major, minor = (int(number) for number in self.source_version.split("."))
+            path = self.version_path((major, minor), self.branch)
+        return path if path and os.path.isdir(path) else None
+
+    def _selected_subdirs(self):
+        return [name for prop_name, name in self._SUBDIRS if getattr(self, prop_name)]
+
+    def _subdirs_to_replace(self):
+        import os
+
+        dest = bpy.utils.resource_path('USER')
+        return [name for name in self._selected_subdirs() if os.path.isdir(os.path.join(dest, name))]
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        if self.lock_source:
+            source = self._source_path()
+            layout.label(text=source if source else "Not found", translate=False)
+        else:
+            layout.prop(self, "branch", expand=True)
+            layout.prop(self, "source_version")
+
+        col = layout.column(heading="Copy")
+        col.prop(self, "use_config")
+        col.prop(self, "use_extensions")
+        col.prop(self, "use_scripts")
+
+        replaced = self._subdirs_to_replace()
+        if replaced:
+            box = layout.box()
+            box.alert = True
+            box.label(text="Existing settings will be replaced", icon='ERROR')
+            box.label(text="A backup copy is created first")
+
+    def execute(self, context):
+        import os
+        import shutil
+        import time
+
+        source = self._source_path()
+        if source is None:
+            self.report({'ERROR'}, "Source configuration directory not found")
+            return {'CANCELLED'}
+
+        dest = bpy.utils.resource_path('USER')
+        if os.path.normcase(os.path.normpath(source)) == os.path.normcase(os.path.normpath(dest)):
+            self.report({'ERROR'}, "Source and destination are the same directory")
+            return {'CANCELLED'}
+
+        names = [name for name in self._selected_subdirs() if os.path.isdir(os.path.join(source, name))]
+        if not names:
+            self.report({'WARNING'}, "Nothing to copy from the selected source")
+            return {'CANCELLED'}
+
+        # The operation reloads preferences immediately and cannot be undone, so move whatever is
+        # about to be overwritten aside first. Only the selected sub-directories are touched.
+        backup_dir = ""
+        for name in names:
+            dest_subdir = os.path.join(dest, name)
+            if not os.path.isdir(dest_subdir):
+                continue
+            if not backup_dir:
+                backup_dir = os.path.join(dest, "backups", time.strftime("%Y-%m-%d_%H%M%S"))
+                os.makedirs(backup_dir, exist_ok=True)
+            try:
+                shutil.move(dest_subdir, os.path.join(backup_dir, name))
+            except OSError as ex:
+                self.report({'ERROR'}, "Unable to back up \"{:s}\": {:s}".format(name, str(ex)))
+                return {'CANCELLED'}
+
+        for name in names:
+            try:
+                shutil.copytree(
+                    os.path.join(source, name), os.path.join(dest, name),
+                    dirs_exist_ok=True, symlinks=True,
+                )
+            except OSError as ex:
+                self.report({'ERROR'}, "Unable to copy \"{:s}\": {:s}".format(name, str(ex)))
+                return {'CANCELLED'}
+
+        bpy.ops.wm.read_userpref()
+
+        # Saving moved here from the helper, the synchronize operator saves unconditionally.
+        disabled = _disable_missing_addons(context)
+        if disabled:
+            bpy.ops.wm.save_userpref()
+
+        message = "Copied {:s} from {:s}".format(", ".join(names), source)
+        if backup_dir:
+            message += ". Previous settings moved to {:s}".format(backup_dir)
+        if disabled:
+            message += ". Disabled add-ons that are not installed: {:s}".format(", ".join(disabled))
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
 
 
 class PREFERENCES_OT_keyconfig_test(Operator):
@@ -470,6 +767,40 @@ class PREFERENCES_OT_keyconfig_remove(Operator):
 # -----------------------------------------------------------------------------
 # Add-on Operators
 
+
+# Set to True to print glyph synchronization diagnostics to the console.
+_GLYPH_SYNC_DEBUG = False
+
+
+def _refresh_category_glyphs_after_addon_change(context):
+    """Refresh category tab glyph/icon mappings after add-on enable/disable."""
+    try:
+        from bl_ui.glyph_tag_system import api as _glyph_api
+    except ImportError as ex:
+        if _GLYPH_SYNC_DEBUG:
+            print("[GLYPH SYNC] addon change refresh: failed to import glyph_tag_system.api: {:s}".format(str(ex)))
+        return
+
+    try:
+        refresh_result = _glyph_api.sync_glyph_mappings_to_wm()
+        if _GLYPH_SYNC_DEBUG:
+            print("[GLYPH SYNC] addon change refresh: sync_glyph_mappings_to_wm -> {!r}".format(refresh_result))
+    except (AttributeError, RuntimeError, ValueError) as ex:
+        if _GLYPH_SYNC_DEBUG:
+            import traceback
+            print("[GLYPH SYNC] addon change refresh: sync failed: {:s}".format(str(ex)))
+            traceback.print_exc()
+
+    # Force redraw so category tabs pick up updated mappings immediately.
+    wm = context.window_manager if context is not None else bpy.context.window_manager
+    if wm is not None:
+        for window in wm.windows:
+            screen = window.screen
+            if screen is None:
+                continue
+            for area in screen.areas:
+                area.tag_redraw()
+
 class PREFERENCES_OT_addon_enable(Operator):
     """Turn on this add-on"""
     bl_idname = "preferences.addon_enable"
@@ -520,6 +851,8 @@ class PREFERENCES_OT_addon_enable(Operator):
                         "though it is enabled"
                     ).format(*info_ver)
                 )
+
+            _refresh_category_glyphs_after_addon_change(_context)
             result = {'FINISHED'}
         else:
 
@@ -565,6 +898,8 @@ class PREFERENCES_OT_addon_disable(Operator):
 
         if err_str:
             self.report({'ERROR'}, err_str)
+        else:
+            _refresh_category_glyphs_after_addon_change(_context)
 
         if cursor_set:
             _wm_wait_cursor(False)
@@ -1305,6 +1640,7 @@ classes = (
     PREFERENCES_OT_addon_show,
     PREFERENCES_OT_app_template_install,
     PREFERENCES_OT_copy_prev,
+    PREFERENCES_OT_copy_settings,
     PREFERENCES_OT_keyconfig_activate,
     PREFERENCES_OT_keyconfig_export,
     PREFERENCES_OT_keyconfig_import,

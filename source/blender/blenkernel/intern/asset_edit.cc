@@ -80,7 +80,7 @@ static ID *asset_link_id(Main &global_main,
     local_asset->lib->runtime->tag |= LIBRARY_ASSET_EDITABLE;
 
     if ((local_asset->lib->runtime->tag & LIBRARY_IS_ASSET_EDIT_FILE) &&
-        StringRef(filepath).endswith(BLENDER_ASSET_FILE_SUFFIX) &&
+        BKE_blendfile_is_asset_file_path(filepath) &&
         BKE_preferences_asset_library_containing_path(&U, filepath) &&
         BLI_file_is_writable(filepath))
     {
@@ -136,7 +136,7 @@ static std::string asset_blendfile_path_for_save(const bUserAssetLibrary &user_l
    * it seems?
    */
   {
-    const std::string filepath = root_path + SEP + base_name_filesafe + BLENDER_ASSET_FILE_SUFFIX;
+    const std::string filepath = root_path + SEP + base_name_filesafe + XBLEND_ASSET_FILE_SUFFIX;
     if (!BLI_is_file(filepath.c_str())) {
       return filepath;
     }
@@ -145,7 +145,7 @@ static std::string asset_blendfile_path_for_save(const bUserAssetLibrary &user_l
   /* Avoid overwriting existing file by adding number suffix. */
   for (int i = 1;; i++) {
     const std::string filepath = root_path + SEP + base_name_filesafe + "_" + std::to_string(i++) +
-                                 BLENDER_ASSET_FILE_SUFFIX;
+                                 XBLEND_ASSET_FILE_SUFFIX;
     if (!BLI_is_file(filepath.c_str())) {
       return filepath;
     }

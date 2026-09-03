@@ -42,12 +42,12 @@ struct FreestyleLineSet;
 struct FreestyleModuleConfig;
 struct Main;
 struct MTex;
-struct Object;
-struct PropertyDefRNA;
-struct ReportList;
-struct SDNA;
-struct Strip;
-struct ViewLayer;
+ struct Object;
+  struct PropertyDefRNA;
+  struct ReportList;
+  struct SDNA;
+  struct Strip;
+  struct ViewLayer;
 
 /* Data structures used during define */
 

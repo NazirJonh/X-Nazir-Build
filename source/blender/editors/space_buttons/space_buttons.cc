@@ -13,6 +13,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_view2d_types.h"
 
 #include "BLI_bitmap.h"
@@ -55,6 +56,7 @@
 #include "BLO_read_write.hh"
 
 #include "buttons_intern.hh" /* own include */
+#include "../interface/interface_tag_bar.hh"
 
 namespace blender {
 
@@ -77,6 +79,11 @@ static SpaceLink *buttons_create(const ScrArea * /*area*/, const Scene * /*scene
   sbuts->mainb = sbuts->mainbuser = BCONTEXT_OBJECT;
   sbuts->visible_tabs = uint(-1); /* 0xFFFFFFFF - All tabs visible by default. */
 
+  /* Tag bar filter state */
+  sbuts->tabs_state.active_tag_filter_tags[0] = '\0';   /* Empty = all tags visible by default */
+  sbuts->tabs_state.tag_bar_scroll_offset = 0;
+  sbuts->tag_bar_cache = nullptr;
+
   /* header */
   region = BKE_area_region_new();
 
@@ -90,6 +97,16 @@ static SpaceLink *buttons_create(const ScrArea * /*area*/, const Scene * /*scene
   BLI_addtail(&sbuts->regionbase, region);
   region->regiontype = RGN_TYPE_NAV_BAR;
   region->alignment = RGN_ALIGN_LEFT;
+
+  /* tag bar - horizontal category filter bar, floating over the properties list.
+   * Kept in sync with #do_versions_ensure_spaces_have_tag_bar_region, which gives loaded files a
+   * top-aligned, overlapping and visible tag bar for this editor. */
+  region = BKE_area_region_new();
+
+  BLI_addtail(&sbuts->regionbase, region);
+  region->regiontype = RGN_TYPE_TAG_BAR;
+  region->alignment = RGN_ALIGN_TOP;
+  region->overlap = true;
 
 #if 0
   /* context region */
@@ -1078,6 +1095,15 @@ static void buttons_space_blend_write(BlendWriter *writer, SpaceLink *sl)
   writer->write_struct_cast<SpaceProperties>(sl);
 }
 
+/** Keep the tag bar one button tall; it never benefits from being dragged larger. */
+static int buttons_tag_bar_region_snap_size(const ARegion * /*region*/, int size, int axis)
+{
+  if (axis == 1) {
+    return (size < UI_UNIT_Y) ? size : UI_UNIT_Y;
+  }
+  return size;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -1169,6 +1195,21 @@ void ED_spacetype_buttons()
   art->draw = buttons_navigation_bar_region_draw;
   art->message_subscribe = buttons_navigation_bar_region_message_subscribe;
   BLI_addhead(&st->regiontypes, art);
+
+  /* regions: tag bar - horizontal category filter bar */
+  art = MEM_new_zeroed<ARegionType>("spacetype buttons tag bar region");
+  art->regionid = RGN_TYPE_TAG_BAR;
+  art->prefsizex = 0; /* Not used for TOP-aligned regions (full width). */
+  art->prefsizey = UI_UNIT_Y;
+  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D;
+  art->listener = ui::buttons_tag_bar_region_listener;
+  art->message_subscribe = ui::buttons_tag_bar_region_message_subscribe;
+  art->init = ui::buttons_tag_bar_region_init;
+  art->draw = ui::buttons_tag_bar_region_draw;
+  art->snap_size = buttons_tag_bar_region_snap_size;
+  BLI_addhead(&st->regiontypes, art);
+
+  ui::tag_bar_filter_popover_panel_register(art);
 
   BKE_spacetype_register(std::move(st));
 }

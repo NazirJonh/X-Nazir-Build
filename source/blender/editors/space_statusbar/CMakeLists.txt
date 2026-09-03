@@ -15,6 +15,7 @@ set(INC_SYS
 
 set(SRC
   space_statusbar.cc
+  statusbar_popover.cc
 )
 
 set(LIB

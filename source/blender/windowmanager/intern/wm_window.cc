@@ -690,7 +690,7 @@ static std::string wm_window_title_text(
     }
   }
 
-  win_title.append(fmt::format(" - Blender {}", BKE_blender_version_string()));
+  win_title.append(fmt::format(" - X-Nazir Sculpt {}", "0.0.1"));
 
   return win_title;
 }
@@ -1191,6 +1191,9 @@ static void wm_window_ghostwindow_ensure(wmWindowManager *wm, wmWindow *win, boo
 
   /* Add top-bar. */
   ED_screen_global_areas_refresh(win);
+
+  /* Initialize category tabs hover handler for cross-area hover state management. */
+  ED_screen_category_tabs_handlers_ensure(win);
 }
 
 void wm_window_ghostwindows_ensure(wmWindowManager *wm)
@@ -2087,6 +2090,12 @@ static bool ghost_event_proc(const GHOST_IEvent *ghost_event, GHOST_TUserDataPtr
       wm_drags_exit(wm, win);
       const GHOST_TEventDragnDropData *ddd = static_cast<const GHOST_TEventDragnDropData *>(data);
       wm_update_cursor_position_from_drag_and_drop(wm, win, ddd, event_time_ms);
+
+      /* The category-tabs extension-drop preview is drawn from the drag overlay, so force one more
+       * drag redraw to clear the ghost tab left behind when the cursor leaves the window. */
+      if (bScreen *screen = WM_window_get_active_screen(win)) {
+        screen->do_draw_drag = true;
+      }
 
       wm_window_update_eventstate_modifiers_clear(wm, win, event_time_ms);
       /* Buttons are hovered while drag-and-drop, send a #GHOST_kEventWindowDeactivate event so

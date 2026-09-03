@@ -510,4 +510,97 @@ void WM_OT_splash_about(wmOperatorType *ot)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Test Build Warning Popup
+ * \{ */
+
+static ui::Block *wm_block_test_build_warning_create(bContext *C, ARegion *region, void * /*arg*/)
+{
+  const uiStyle *style = ui::style_get_dpi();
+  const int dialog_width = style->widget.points * 44 * UI_SCALE_FAC;
+
+  ui::Block *block = block_begin(C, region, "test_build_warning", ui::EmbossType::Emboss);
+  block_flag_enable(block,
+                    ui::BLOCK_KEEP_OPEN | ui::BLOCK_LOOP | ui::BLOCK_NO_WIN_CLIP |
+                        ui::BLOCK_POPUP_MODAL);
+  block_theme_style_set(block, ui::BLOCK_THEME_STYLE_POPUP);
+
+  ui::Layout &layout = ui::block_layout(block,
+                                        ui::LayoutDirection::Vertical,
+                                        ui::LayoutType::Panel,
+                                        UI_SCALE_FAC * 20,
+                                        0,
+                                        dialog_width,
+                                        0,
+                                        0,
+                                        style);
+
+  {
+    ui::Layout &title_row = layout.row(false);
+    title_row.alignment_set(ui::LayoutAlign::Center);
+    title_row.label(RPT_("Test Build Warning"), ICON_ERROR);
+  }
+  layout.separator(0.5f);
+
+  ui::Layout &col = layout.column(false);
+  col.label(RPT_("This is a test build. Do not use it for important production files."), ICON_NONE);
+  col.label(RPT_("Files saved here may not open correctly in other Blender versions."), ICON_NONE);
+  layout.separator(0.5f);
+
+  layout.row(false).label(
+      RPT_("If you have issues, visit blenderartists.org or check the documentation."),
+      ICON_NONE);
+  ui::Layout &link_row = layout.row(false);
+  link_row.alignment_set(ui::LayoutAlign::Left);
+  link_row.label(RPT_("Watch tutorial videos:"), ICON_NONE);
+  link_row.link("https://www.youtube.com/@XNazirBuild", "X-Nazir Sculpt YouTube Channel", ICON_URL);
+
+  layout.separator(2.0f);
+
+  ui::Layout &close_row = layout.row(false);
+  close_row.alignment_set(ui::LayoutAlign::Center);
+  ui::Block *close_block = close_row.block();
+  ui::Button *ok_but = uiDefBut(close_block,
+                                ui::ButtonType::But,
+                                IFACE_("OK"),
+                                0,
+                                0,
+                                UI_UNIT_X * 4,
+                                UI_UNIT_Y,
+                                nullptr,
+                                0,
+                                0,
+                                "");
+  /* Wire the OK button to close the popup. */
+  button_func_set(ok_but, [block](bContext &C) { wm_block_splash_close(&C, block); });
+  button_drawflag_disable(ok_but, ui::BUT_TEXT_LEFT);
+
+  block_bounds_set_centered(block, 20 * UI_SCALE_FAC);
+  return block;
+}
+
+static wmOperatorStatus wm_test_build_warning_invoke(bContext *C,
+                                                     wmOperator * /*op*/,
+                                                     const wmEvent * /*event*/)
+{
+  /* Mark as shown and dirty so it's saved to preferences. */
+  U.runtime.test_build_warning_shown = 1;
+  U.runtime.is_dirty = 1;
+
+  ui::popup_block_invoke(C, wm_block_test_build_warning_create, nullptr, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void WM_OT_test_build_warning(wmOperatorType *ot)
+{
+  ot->name = "Test Build Warning";
+  ot->idname = "WM_OT_test_build_warning";
+  ot->description = "Show a warning that this is a test build";
+
+  ot->invoke = wm_test_build_warning_invoke;
+  ot->poll = WM_operator_winactive;
+}
+
+/** \} */
+
 }  // namespace blender

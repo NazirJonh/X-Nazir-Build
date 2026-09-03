@@ -7,6 +7,7 @@
  */
 
 #include <cstdio>
+#include <cstring>
 #include <optional>
 
 #include <Python.h>
@@ -641,6 +642,210 @@ bool BPY_run_string_as_intptr(bContext *C,
       run_string_handle_error(err_info);
     }
   });
+
+  return ok;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Call a Module Function with Typed Arguments
+ * \{ */
+
+static PyObject *bpy_call_arg_as_pyobject(const BPy_CallArg &arg)
+{
+  switch (arg.type) {
+    case BPy_CallArg::Type::STRING:
+      return PyUnicode_FromString(arg.as_string ? arg.as_string : "");
+    case BPy_CallArg::Type::INT:
+      return PyLong_FromLongLong(arg.as_int);
+    case BPy_CallArg::Type::DOUBLE:
+      return PyFloat_FromDouble(arg.as_double);
+    case BPy_CallArg::Type::BOOL:
+      return PyBool_FromLong(arg.as_bool ? 1 : 0);
+    case BPy_CallArg::Type::STRING_LIST: {
+      PyObject *py_list = PyList_New(arg.as_string_list.size());
+      if (!py_list) {
+        return nullptr;
+      }
+      for (const int i : arg.as_string_list.index_range()) {
+        PyList_SET_ITEM(py_list, i, PyUnicode_FromString(arg.as_string_list[i]));
+      }
+      return py_list;
+    }
+    case BPy_CallArg::Type::DOUBLE_LIST: {
+      PyObject *py_list = PyList_New(arg.as_double_list.size());
+      if (!py_list) {
+        return nullptr;
+      }
+      for (const int i : arg.as_double_list.index_range()) {
+        PyList_SET_ITEM(py_list, i, PyFloat_FromDouble(arg.as_double_list[i]));
+      }
+      return py_list;
+    }
+  }
+  BLI_assert_unreachable();
+  return nullptr;
+}
+
+/**
+ * Import `module_name`, look up `func_name` and call it with `args`.
+ *
+ * \return A new reference on success, or nullptr with a Python exception set on failure.
+ * Assumes the GIL is already held (see callers below).
+ */
+static PyObject *bpy_call_module_func(const char *module_name,
+                                      const char *func_name,
+                                      const Span<BPy_CallArg> args)
+{
+  PyObject *module = PyImport_ImportModule(module_name);
+  if (!module) {
+    return nullptr;
+  }
+  PyObject *func = PyObject_GetAttrString(module, func_name);
+  Py_DECREF(module);
+  if (!func) {
+    return nullptr;
+  }
+
+  int positional_num = 0;
+  for (const BPy_CallArg &arg : args) {
+    positional_num += (arg.keyword == nullptr);
+  }
+
+  PyObject *py_args = PyTuple_New(positional_num);
+  PyObject *py_kwargs = nullptr;
+  int positional_index = 0;
+
+  for (const BPy_CallArg &arg : args) {
+    PyObject *value = bpy_call_arg_as_pyobject(arg);
+    if (!value) {
+      Py_DECREF(py_args);
+      Py_XDECREF(py_kwargs);
+      Py_DECREF(func);
+      return nullptr;
+    }
+    if (arg.keyword) {
+      if (!py_kwargs) {
+        py_kwargs = PyDict_New();
+      }
+      PyDict_SetItemString(py_kwargs, arg.keyword, value);
+      Py_DECREF(value);
+    }
+    else {
+      /* Steals the reference to `value`. */
+      PyTuple_SET_ITEM(py_args, positional_index++, value);
+    }
+  }
+
+  PyObject *retval = PyObject_Call(func, py_args, py_kwargs);
+  Py_DECREF(func);
+  Py_DECREF(py_args);
+  Py_XDECREF(py_kwargs);
+  return retval;
+}
+
+bool BPY_run_module_func(bContext *C,
+                         const char *module_name,
+                         const char *func_name,
+                         const Span<BPy_CallArg> args,
+                         BPy_RunErrInfo *err_info)
+{
+  PyGILState_STATE gilstate;
+  bpy_context_set_allow_null(C, &gilstate);
+
+  bool ok;
+  if (PyObject *retval = bpy_call_module_func(module_name, func_name, args)) {
+    Py_DECREF(retval);
+    ok = true;
+  }
+  else {
+    ok = false;
+    run_string_handle_error(err_info);
+  }
+
+  bpy_context_clear(C, &gilstate);
+
+  return ok;
+}
+
+bool BPY_run_module_func_as_intptr(bContext *C,
+                                   const char *module_name,
+                                   const char *func_name,
+                                   const Span<BPy_CallArg> args,
+                                   BPy_RunErrInfo *err_info,
+                                   intptr_t *r_value)
+{
+  PyGILState_STATE gilstate;
+  bpy_context_set_allow_null(C, &gilstate);
+
+  bool ok;
+  if (PyObject *retval = bpy_call_module_func(module_name, func_name, args)) {
+    const intptr_t val = intptr_t(PyLong_AsVoidPtr(retval));
+    Py_DECREF(retval);
+    if (val == 0 && PyErr_Occurred()) {
+      ok = false;
+      run_string_handle_error(err_info);
+    }
+    else {
+      *r_value = val;
+      ok = true;
+    }
+  }
+  else {
+    ok = false;
+    run_string_handle_error(err_info);
+  }
+
+  bpy_context_clear(C, &gilstate);
+
+  return ok;
+}
+
+bool BPY_run_module_func_as_json(bContext *C,
+                                 const char *module_name,
+                                 const char *func_name,
+                                 const Span<BPy_CallArg> args,
+                                 BPy_RunErrInfo *err_info,
+                                 char **r_value)
+{
+  PyGILState_STATE gilstate;
+  bpy_context_set_allow_null(C, &gilstate);
+
+  bool ok = false;
+  if (PyObject *retval = bpy_call_module_func(module_name, func_name, args)) {
+    /* `retval` is an arbitrary Python object (list/dict/tuple/str/int/None), so it is passed
+     * as-is to `json.dumps()` via the C-API rather than routed back through
+     * #bpy_call_module_func's typed-argument path. */
+    if (PyObject *json_module = PyImport_ImportModule("json")) {
+      if (PyObject *dumps = PyObject_GetAttrString(json_module, "dumps")) {
+        PyObject *dumps_args = PyTuple_Pack(1, retval);
+        PyObject *dumps_kwargs = PyDict_New();
+        PyDict_SetItemString(dumps_kwargs, "ensure_ascii", Py_False);
+        if (PyObject *json_str = PyObject_Call(dumps, dumps_args, dumps_kwargs)) {
+          Py_ssize_t val_len;
+          if (const char *val = PyUnicode_AsUTF8AndSize(json_str, &val_len)) {
+            char *val_alloc = MEM_new_array_uninitialized<char>(size_t(val_len) + 1, __func__);
+            memcpy(val_alloc, val, (size_t(val_len) + 1) * sizeof(*val_alloc));
+            *r_value = val_alloc;
+            ok = true;
+          }
+          Py_DECREF(json_str);
+        }
+        Py_DECREF(dumps_args);
+        Py_DECREF(dumps_kwargs);
+        Py_DECREF(dumps);
+      }
+      Py_DECREF(json_module);
+    }
+    Py_DECREF(retval);
+  }
+
+  if (!ok) {
+    run_string_handle_error(err_info);
+  }
+
+  bpy_context_clear(C, &gilstate);
 
   return ok;
 }

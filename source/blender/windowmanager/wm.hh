@@ -120,6 +120,7 @@ void wm_autosave_delete();
 
 void WM_OT_splash(wmOperatorType *ot);
 void WM_OT_splash_about(wmOperatorType *ot);
+void WM_OT_test_build_warning(wmOperatorType *ot);
 
 /* `wm_stereo.cc` */
 

@@ -536,6 +536,9 @@ void set_current_brush_texture(Brush *br, Tex *newtex)
     br->mtex.tex = newtex;
     id_us_plus(&newtex->id);
   }
+  else {
+    br->mtex.tex = nullptr;
+  }
   BKE_brush_tag_unsaved_changes(br);
 }
 

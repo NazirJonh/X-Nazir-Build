@@ -38,6 +38,7 @@ _modules = [
     "sequencer",
     "spreadsheet",
     "userpref",
+    "userpref_sync",
     "uvcalc_follow_active",
     "uvcalc_lightmap",
     "uvcalc_transform",
@@ -59,15 +60,19 @@ del _namespace
 
 
 def register():
+    from bpy.props import PointerProperty
     from bpy.utils import register_class
     from . import (
         bone_selection_sets,
         copy_global_transform,
+        userpref_sync,
     )
 
     for mod in _modules_loaded:
         for cls in mod.classes:
             register_class(cls)
+
+    bpy.types.WindowManager.sync_settings = PointerProperty(type=userpref_sync.PreferencesSyncSettings)
 
     bone_selection_sets.register()
     copy_global_transform.register()
@@ -82,6 +87,9 @@ def unregister():
 
     bone_selection_sets.unregister()
     copy_global_transform.unregister()
+
+    if hasattr(bpy.types.WindowManager, "sync_settings"):
+        del bpy.types.WindowManager.sync_settings
 
     for mod in reversed(_modules_loaded):
         for cls in reversed(mod.classes):

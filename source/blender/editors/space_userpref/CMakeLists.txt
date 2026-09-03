@@ -19,6 +19,7 @@ set(SRC
   userpref_asset_libraries_list.cc
   userpref_name_matching.cc
   userpref_ops.cc
+  userpref_sync_ops.cc
   userpref_panels.cc
 
   userpref_intern.hh

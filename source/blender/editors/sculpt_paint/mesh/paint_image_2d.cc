@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -236,8 +237,10 @@ struct BrushPainter {
    * coordinates. Tiled is built separately: its origin holds the screen-space phase `region / zoom`
    * while `du`/`dv` stay at one dab pixel, because #BKE_brush_sample_tex_3d divides by
    * #PaintRuntime.start_pixel_radius rather than by a zoomed radius.
-   */
+  */
   BrushImbufMapping source_mapping = {};
+  /** Dab-pixel to target-canvas UV mapping, used only by Baked Target UV sources. */
+  BrushImbufMapping source_target_uv_mapping = {};
   /**
    * Per-dab copies of the sampled source #MTex, remapped to the 2D mapping mode and indexed by
    * #eMaterialPaintChannel. #BKE_brush_sample_tex_3d has no Area Plane branch (AREA would sample
@@ -409,6 +412,15 @@ static short paint_2d_source_map_mode_for_2d(const short map_mode)
   return map_mode;
 }
 
+static short paint_2d_source_map_mode_for(const BrushPainter *painter, const int channel)
+{
+  const auto &source = painter->channel_sources->source(channel);
+  if (!ed::sculpt_paint::material::channel_source_kind_has_placement(source.kind)) {
+    return MTEX_MAP_MODE_TILED;
+  }
+  return source.mtex->brush_map_mode;
+}
+
 static bool paint_2d_channel_source_usable_2d(const BrushPainter *painter,
                                               const eMaterialPaintChannel channel)
 {
@@ -417,7 +429,7 @@ static bool paint_2d_channel_source_usable_2d(const BrushPainter *painter,
   }
   const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
       painter->channel_sources->source(channel);
-  return source.usable && source.mtex != nullptr;
+  return source.usable;
 }
 
 /**
@@ -462,10 +474,10 @@ static short paint_2d_shared_source_map_mode(const BrushPainter *painter)
     return painter->brush->material_paint->shared_source_mapping.brush_map_mode;
   }
   if (paint_2d_channel_source_usable_2d(painter, painter->material_channel)) {
-    return painter->channel_sources->source(painter->material_channel).mtex->brush_map_mode;
+    return paint_2d_source_map_mode_for(painter, painter->material_channel);
   }
   if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
-    return painter->channel_sources->source(PAINT_MATERIAL_CHANNEL_ALPHA).mtex->brush_map_mode;
+    return paint_2d_source_map_mode_for(painter, PAINT_MATERIAL_CHANNEL_ALPHA);
   }
   return MTEX_MAP_MODE_VIEW;
 }
@@ -488,6 +500,12 @@ static void paint_2d_source_mtex_2d_update(BrushPainter *painter)
     if (!paint_2d_channel_source_usable_2d(painter, channel)) {
       continue;
     }
+    if (!ed::sculpt_paint::material::channel_source_kind_has_placement(
+            painter->channel_sources->source(channel).kind))
+    {
+      painter->source_layouts[channel] = ed::sculpt_paint::material::DirectSampleLayout{};
+      continue;
+    }
     MTex &mtex_2d = painter->source_mtex_2d[channel];
     mtex_2d = dna::shallow_copy(*painter->channel_sources->source(channel).mtex);
     mtex_2d.brush_map_mode = map_mode;
@@ -506,6 +524,7 @@ static void paint_2d_source_mtex_2d_update(BrushPainter *painter)
 static void paint_2d_painter_copy_shared_source(BrushPainter *dst, const BrushPainter *src)
 {
   dst->source_mapping = src->source_mapping;
+  dst->source_target_uv_mapping = src->source_target_uv_mapping;
   dst->tex_mapping = src->tex_mapping;
   dst->mask_mapping = src->mask_mapping;
   for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
@@ -545,15 +564,31 @@ static const CurveMaskCache *paint_2d_matching_curve_mask(const ImagePaintState 
  * sources; Normal skips colorspace decode.
  */
 static float paint_2d_sample_channel_source(const BrushPainter *painter,
-                                            const eMaterialPaintChannel channel,
-                                            const int x,
-                                            const int y,
-                                            const int thread,
-                                            float4 &r_rgba,
-                                            const bool decode_linear = true)
+                                             const eMaterialPaintChannel channel,
+                                             const int x,
+                                             const int y,
+                                             const int thread,
+                                             float4 &r_rgba,
+                                             const bool decode_linear = true)
 {
   const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
       painter->channel_sources->source(channel);
+  if (source.kind == ed::sculpt_paint::material::ChannelSourceKind::Constant) {
+    r_rgba = source.constant_value;
+    return source.constant_value.x;
+  }
+  if (source.kind == ed::sculpt_paint::material::ChannelSourceKind::Baked &&
+      source.baked_target_uv)
+  {
+    float3 texco;
+    brush_imbuf_tex_co(painter->source_target_uv_mapping, x, y, texco);
+    float value;
+    if (!painter->channel_sources->sample_baked(source, texco.x, texco.y, &value, r_rgba)) {
+      r_rgba = float4(0.0f);
+      return 0.0f;
+    }
+    return value;
+  }
   float3 texco;
   brush_imbuf_tex_co(painter->source_mapping, x, y, texco);
   ImagePool *pool = painter->channel_sources->pool() != nullptr ?
@@ -566,9 +601,37 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
   bool decoded_by_engine = false;
 
   const ed::sculpt_paint::material::DirectSampleLayout &layout = painter->source_layouts[channel];
-  if (!ed::sculpt_paint::material::sample_direct_layout(
-          layout, float3(0.0f), float2(texco.x, texco.y), &intensity, r_rgba))
+  const bool sampled_direct = ed::sculpt_paint::material::sample_direct_layout(
+      layout, float3(0.0f), float2(texco.x, texco.y), &intensity, r_rgba);
+  if (!sampled_direct)
   {
+    if (ELEM(source.kind,
+             ed::sculpt_paint::material::ChannelSourceKind::Image,
+             ed::sculpt_paint::material::ChannelSourceKind::Baked))
+    {
+      /* Image and brush-mapped Baked sources have no #Tex for the texture engine to evaluate;
+       * see the same guard in #sample_channel_source_with_layout. */
+#if PBR_PAINT_BAKE_DEBUG
+      {
+        static std::atomic_bool logged = false;
+        if (!logged.exchange(true)) {
+          printf("[PBR-BAKE] 2d-view: returning BLACK channel=%d kind=%d layout.kind=%d "
+                 "direct=%d ibuf=%p map_mode=%d texco=(%.4f, %.4f)\n",
+                 int(channel),
+                 int(source.kind),
+                 int(layout.kind),
+                 int(source.image_direct_sample),
+                 (void *)source.ibuf,
+                 source.mtex != nullptr ? int(source.mtex->brush_map_mode) : -1,
+                 texco.x,
+                 texco.y);
+          fflush(stdout);
+        }
+      }
+#endif
+      r_rgba = float4(0.0f);
+      return 0.0f;
+    }
     const MTex &mtex_2d = painter->source_mtex_2d[channel];
     intensity = BKE_brush_sample_tex_3d(
         painter->paint, painter->brush, &mtex_2d, texco, r_rgba, thread, pool);
@@ -1742,6 +1805,13 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       brush_painter_2d_tex_mapping(
           s, tile, diameter, pos, mouse, source_map_mode, nullptr, &painter->source_mapping);
     }
+    const float start_x = pos[0] - diameter * 0.5f;
+    const float start_y = pos[1] - diameter * 0.5f;
+    painter->source_target_uv_mapping.origin = float2(
+        tile->uv_origin[0] + (start_x + 0.5f) / float(tile->canvas->x),
+        tile->uv_origin[1] + (start_y + 0.5f) / float(tile->canvas->y));
+    painter->source_target_uv_mapping.basis_x = float2(1.0f / float(tile->canvas->x), 0.0f);
+    painter->source_target_uv_mapping.basis_y = float2(0.0f, 1.0f / float(tile->canvas->y));
     paint_2d_source_mtex_2d_update(painter);
   }
   /* Source samples change with the dab; never reuse a previous buffer. */
@@ -2598,6 +2668,19 @@ static bool paint_2d_use_area_plane_mesh(const BrushPainter *painter)
 
 static bool paint_2d_use_area_plane(const BrushPainter *painter)
 {
+#if PBR_PAINT_BAKE_DEBUG
+  {
+    static std::atomic_bool logged = false;
+    if (!logged.exchange(true)) {
+      printf("[PBR-BAKE] 2d-path: use_material_channel_color=%d area_plane_mesh=%d "
+             "shared_map_mode=%d\n",
+             int(painter->use_material_channel_color),
+             int(paint_2d_use_area_plane_mesh(painter)),
+             int(paint_2d_shared_source_map_mode(painter)));
+      fflush(stdout);
+    }
+  }
+#endif
   if (!painter->use_material_channel_color || !paint_2d_use_area_plane_mesh(painter)) {
     return false;
   }
@@ -2625,17 +2708,79 @@ static void paint_2d_sample_area_mtex(
     const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source,
     const float4x4 &local_mat,
     const float3 &position,
+    const float2 &uv,
     const int thread,
     ImagePool *pool,
     float *r_value,
     float4 &r_rgba)
 {
+  if (source.kind == ed::sculpt_paint::material::ChannelSourceKind::Constant) {
+    r_rgba = source.constant_value;
+    if (r_value != nullptr) {
+      *r_value = source.constant_value.x;
+    }
+    return;
+  }
+  if (source.kind == ed::sculpt_paint::material::ChannelSourceKind::Baked &&
+      source.baked_target_uv)
+  {
+    if (!painter->channel_sources->sample_baked(source, uv.x, uv.y, r_value, r_rgba)) {
+      r_rgba = float4(0.0f);
+      if (r_value != nullptr) {
+        *r_value = 0.0f;
+      }
+    }
+    return;
+  }
+  if (source.kind == ed::sculpt_paint::material::ChannelSourceKind::Baked) {
+    float3 point = position;
+    mul_m4_v3(local_mat.ptr(), point);
+    const float tex_x = point.x * source.mtex->size[0] + source.mtex->ofs[0];
+    const float tex_y = point.y * source.mtex->size[1] + source.mtex->ofs[1];
+    const bool ok = painter->channel_sources->sample_image_direct(
+        source, tex_x, tex_y, r_value, r_rgba);
+#if PBR_PAINT_BAKE_DEBUG
+    {
+      static std::atomic_bool logged = false;
+      if (!logged.exchange(true)) {
+        printf("[PBR-BAKE] 2d-area: baked sample ok=%d pos=(%.3f, %.3f, %.3f) tex=(%.4f, %.4f) "
+               "rgba=(%.4f, %.4f, %.4f, %.4f)\n",
+               int(ok),
+               position.x,
+               position.y,
+               position.z,
+               tex_x,
+               tex_y,
+               r_rgba.x,
+               r_rgba.y,
+               r_rgba.z,
+               r_rgba.w);
+        fflush(stdout);
+      }
+    }
+#endif
+    if (!ok) {
+      r_rgba = float4(0.0f);
+      if (r_value != nullptr) {
+        *r_value = 0.0f;
+      }
+    }
+    return;
+  }
   float3 point = position;
   mul_m4_v3(local_mat.ptr(), point);
   const MTex *mtex = source.mtex;
   const float tex_x = point.x * mtex->size[0] + mtex->ofs[0];
   const float tex_y = point.y * mtex->size[1] + mtex->ofs[1];
   if (!painter->channel_sources->sample_image_direct(source, tex_x, tex_y, r_value, r_rgba)) {
+    if (source.kind == ed::sculpt_paint::material::ChannelSourceKind::Image) {
+      /* No #Tex to hand to the texture engine; see #sample_channel_source_with_layout. */
+      r_rgba = float4(0.0f);
+      if (r_value != nullptr) {
+        *r_value = 0.0f;
+      }
+      return;
+    }
     paint_get_tex_pixel(mtex, tex_x, tex_y, pool, thread, r_value, r_rgba);
   }
   add_v3_fl(r_rgba, painter->brush->texture_sample_bias);
@@ -2683,7 +2828,14 @@ static ed::sculpt_paint::AreaPlaneFrame paint_2d_area_channel_frame(
 {
   float rotation = 0.0f;
   if (paint_2d_channel_source_usable_2d(painter, channel)) {
-    rotation = painter->channel_sources->source(channel).mtex->rot;
+    /* A Constant source is usable but carries no placement, so it has no #MTex to rotate by. In
+     * Material mode every channel resolves to Constant or Baked, which makes this the common case
+     * rather than an edge one. */
+    const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
+        painter->channel_sources->source(channel);
+    if (ed::sculpt_paint::material::channel_source_kind_has_placement(source.kind)) {
+      rotation = source.mtex->rot;
+    }
   }
   /* The Area Plane axes follow the triangle's UV (`dpdu`/`dpdv`), which the canvas rotation then
    * turns by `-canvas_rotation` on screen. Adding it back keeps the stamp locked to the view, so
@@ -2695,12 +2847,13 @@ static ed::sculpt_paint::AreaPlaneFrame paint_2d_area_channel_frame(
 }
 
 static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
-                                               const BrushPainterCache *cache,
-                                               const eMaterialPaintChannel channel,
-                                               const float4x4 &local_mat,
-                                               const float3 &position,
-                                               const int thread,
-                                               ImagePool *pool,
+                                                const BrushPainterCache *cache,
+                                                const eMaterialPaintChannel channel,
+                                                const float4x4 &local_mat,
+                                                const float3 &position,
+                                                const float2 &uv,
+                                                const int thread,
+                                                ImagePool *pool,
                                                const PaintModeSettings &paint_mode,
                                                const bool decode_linear,
                                                const bool encode_canvas,
@@ -2721,7 +2874,8 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
       painter->channel_sources->source(channel);
   float value;
   float4 sampled;
-  paint_2d_sample_area_mtex(painter, source, local_mat, position, thread, pool, &value, sampled);
+  paint_2d_sample_area_mtex(
+      painter, source, local_mat, position, uv, thread, pool, &value, sampled);
 
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
@@ -2752,20 +2906,22 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
 }
 
 static float paint_2d_area_sample_alpha_factor(const BrushPainter *painter,
-                                               const float4x4 &alpha_local_mat,
-                                               const float3 &position,
-                                               const int thread,
-                                               ImagePool *pool)
+                                                const float4x4 &alpha_local_mat,
+                                                const float3 &position,
+                                                const float2 &uv,
+                                                const int thread,
+                                                ImagePool *pool)
 {
   float alpha_factor = painter->material_alpha_fallback;
   if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
     float value;
     float4 sampled;
     paint_2d_sample_area_mtex(painter,
-                              painter->channel_sources->source(PAINT_MATERIAL_CHANNEL_ALPHA),
-                              alpha_local_mat,
-                              position,
-                              thread,
+                               painter->channel_sources->source(PAINT_MATERIAL_CHANNEL_ALPHA),
+                               alpha_local_mat,
+                               position,
+                               uv,
+                               thread,
                               pool,
                               &value,
                               sampled);
@@ -2859,6 +3015,7 @@ static constexpr float AREA_PLANE_SYMMETRY_ISLAND_JUMP_FACTOR = 4.0f;
  */
 struct AreaPlaneCoveragePixel {
   float3 sample_position = {};
+  float2 uv = {};
   uint16_t lx = 0;
   uint16_t ly = 0;
   uint16_t falloff = 0;
@@ -3209,11 +3366,12 @@ static bool paint_2d_area_plane_build_tri_coverage(
         float alpha = 1.0f;
         if (capture_alpha) {
           alpha = paint_2d_area_sample_alpha_factor(
-              painter, alpha_local_mat, sample_position, thread, pool);
+              painter, alpha_local_mat, sample_position, uv, thread, pool);
         }
 
         AreaPlaneCoveragePixel pixel;
         pixel.sample_position = sample_position;
+        pixel.uv = uv;
         pixel.lx = uint16_t(lx);
         pixel.ly = uint16_t(ly);
         pixel.falloff = ushort(65535.0f * strength);
@@ -3327,9 +3485,10 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
           paint_2d_area_sample_channel_color(painter,
                                              cache,
                                              channel,
-                                             channel_local_mat,
-                                             pixel.sample_position,
-                                             thread,
+                                              channel_local_mat,
+                                              pixel.sample_position,
+                                              pixel.uv,
+                                              thread,
                                              pool,
                                              paint_mode,
                                              false,
@@ -3368,9 +3527,10 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
           paint_2d_area_sample_channel_color(painter,
                                              cache,
                                              channel,
-                                             channel_local_mat,
-                                             pixel.sample_position,
-                                             thread,
+                                              channel_local_mat,
+                                              pixel.sample_position,
+                                              pixel.uv,
+                                              thread,
                                              pool,
                                              paint_mode,
                                              !skip_colorspace,
@@ -4307,7 +4467,9 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
         for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
           const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
               channel_sources->source(i);
-          if (!source.usable || source.mtex == nullptr) {
+          if (!source.usable ||
+              !ed::sculpt_paint::material::channel_source_kind_has_placement(source.kind))
+          {
             continue;
           }
           if (source.mtex->brush_map_mode == MTEX_MAP_MODE_AREA) {

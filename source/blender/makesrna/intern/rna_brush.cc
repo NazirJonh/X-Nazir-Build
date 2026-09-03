@@ -21,6 +21,8 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8_symbols.h"
 
+#include "BKE_paint_material_resolve.hh"
+
 #include "BLT_translation.hh"
 
 #include "RNA_define.hh"
@@ -545,6 +547,8 @@ static EnumPropertyItem rna_enum_gpencil_brush_modes_items[] = {
 #  include <optional>
 
 #  include "DEG_depsgraph.hh"
+
+#  include "ED_material_bake.hh"
 
 #  include "IMB_colormanagement.hh"
 
@@ -1667,6 +1671,31 @@ static void rna_BrushMaterialPaint_update(Main * /*bmain*/, Scene * /*scene*/, P
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
 }
 
+/**
+ * Update for the properties that select what gets baked: the source material, the source mode and
+ * the bake size.
+ *
+ * Each of them changes which bake the brush will ask for, so each has to kick that bake off. Doing
+ * it here rather than leaving it to the next paint cursor redraw matters because the redraw only
+ * happens once the mouse is over the viewport -- by which point the user may already be painting,
+ * and a stroke never waits for a bake. Idempotent: #material_source_bake_ensure returns
+ * immediately when the bake is already cached or already running.
+ */
+static void rna_BrushMaterialPaint_source_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  rna_BrushMaterialPaint_update(bmain, scene, ptr);
+
+  const Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  if (bmain == nullptr || br->material_paint == nullptr ||
+      br->material_paint->source_mode != BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL ||
+      br->material_paint->source_material == nullptr)
+  {
+    return;
+  }
+  ed::material_bake::material_source_bake_ensure(
+      *bmain, *br->material_paint->source_material, br->material_paint->source_bake_size);
+}
+
 static std::optional<std::string> rna_BrushCurvePatchSettings_path(const PointerRNA * /*ptr*/)
 {
   return "curve_patch";
@@ -1847,6 +1876,50 @@ static int rna_BrushMaterialPaintChannel_name_length(PointerRNA *ptr)
     return int(strlen(BKE_paint_material_channel_info(*channel).ui_name));
   }
   return 0;
+}
+
+/**
+ * What the brush's source material supplies to the channel \a ptr points at.
+ *
+ * The whole material is resolved to answer for one channel because
+ * #BKE_paint_material_source_resolve allocates nothing, and the panel only asks for the channels it
+ * is already drawing. Returns false when there is nothing to resolve against, which the callers
+ * report as #ChannelUnavailableReason::NoMaterial.
+ */
+static bool rna_BrushMaterialPaintChannel_resolve(PointerRNA *ptr,
+                                                  ChannelResolution &r_resolution,
+                                                  ChannelUnavailableReason &r_reason)
+{
+  const std::optional<eMaterialPaintChannel> channel = rna_BrushMaterialPaintChannel_channel_get(
+      ptr);
+  if (!channel) {
+    return false;
+  }
+  const Brush *brush = reinterpret_cast<const Brush *>(ptr->owner_id);
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    return false;
+  }
+  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(
+      brush->material_paint->source_material);
+  r_resolution = resolve.channels[*channel];
+  r_reason = resolve.reasons[*channel];
+  return true;
+}
+
+static int rna_BrushMaterialPaintChannel_material_source_resolution_get(PointerRNA *ptr)
+{
+  ChannelResolution resolution = ChannelResolution::Unavailable;
+  ChannelUnavailableReason reason = ChannelUnavailableReason::NoMaterial;
+  rna_BrushMaterialPaintChannel_resolve(ptr, resolution, reason);
+  return int(resolution);
+}
+
+static int rna_BrushMaterialPaintChannel_material_source_reason_get(PointerRNA *ptr)
+{
+  ChannelResolution resolution = ChannelResolution::Unavailable;
+  ChannelUnavailableReason reason = ChannelUnavailableReason::NoMaterial;
+  rna_BrushMaterialPaintChannel_resolve(ptr, resolution, reason);
+  return int(reason);
 }
 
 static void rna_BrushMaterialPaintChannel_value_range(
@@ -3707,6 +3780,131 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem prop_source_mode_items[] = {
+      {BRUSH_MATERIAL_PAINT_SOURCE_MAPS,
+       "MAPS",
+       0,
+       "Maps",
+       "Take each channel's texture from its own slot"},
+      {BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL,
+       "MATERIAL",
+       0,
+       "Material",
+       "Take every channel from one material's Principled BSDF inputs"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem prop_source_layout_items[] = {
+      {BRUSH_MATERIAL_PAINT_SOURCE_LAYOUT_BRUSH,
+       "BRUSH",
+       0,
+       "Brush Mapping",
+       "Lay the source out through the shared brush mapping"},
+      {BRUSH_MATERIAL_PAINT_SOURCE_LAYOUT_TARGET_UV,
+       "TARGET_UV",
+       0,
+       "Target UV",
+       "Lay the source out one to one with the target's UV"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem prop_source_bake_size_items[] = {
+      {256, "SIZE_256", 0, "256", ""},
+      {512, "SIZE_512", 0, "512", ""},
+      {1024, "SIZE_1024", 0, "1024", ""},
+      {2048, "SIZE_2048", 0, "2048", ""},
+      {4096, "SIZE_4096", 0, "4096", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  /* Mirrors #blender::ChannelResolution. Read-only, so the numbers only ever travel from C++ to
+   * the UI. */
+  static const EnumPropertyItem prop_material_source_resolution_items[] = {
+      {int(ChannelResolution::Unavailable),
+       "UNAVAILABLE",
+       0,
+       "Unavailable",
+       "The source material cannot supply this channel; strokes skip it"},
+      {int(ChannelResolution::Constant),
+       "CONSTANT",
+       0,
+       "Constant",
+       "The Principled input is unlinked, so its value is painted directly"},
+      {int(ChannelResolution::Image),
+       "IMAGE",
+       0,
+       "Image",
+       "The Principled input is an Image Texture, painted straight from its pixels"},
+      {int(ChannelResolution::Baked),
+       "BAKED",
+       0,
+       "Baked",
+       "The Principled input is driven by a node graph and has to be baked"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  /* Mirrors #blender::ChannelUnavailableReason. Only meaningful while the resolution is
+   * Unavailable. */
+  static const EnumPropertyItem prop_material_source_reason_items[] = {
+      {int(ChannelUnavailableReason::None), "NONE", 0, "None", "The channel is usable"},
+      {int(ChannelUnavailableReason::NoMaterial),
+       "NO_MATERIAL",
+       0,
+       "No Material",
+       "No source material is set"},
+      {int(ChannelUnavailableReason::NoNodeTree),
+       "NO_NODE_TREE",
+       0,
+       "No Node Tree",
+       "The source material does not use nodes"},
+      {int(ChannelUnavailableReason::NoPrincipled),
+       "NO_PRINCIPLED",
+       0,
+       "No Principled BSDF",
+       "The material output is not driven by a single Principled BSDF"},
+      {int(ChannelUnavailableReason::AmbiguousOutput),
+       "AMBIGUOUS_OUTPUT",
+       0,
+       "No Active Output",
+       "The material has no single active Material Output"},
+      {int(ChannelUnavailableReason::NoSocketForChannel),
+       "NO_SOCKET_FOR_CHANNEL",
+       0,
+       "No Matching Input",
+       "This channel has no Principled BSDF input to read"},
+      {int(ChannelUnavailableReason::SocketMissingOnNode),
+       "SOCKET_MISSING_ON_NODE",
+       0,
+       "Input Missing",
+       "This Principled BSDF is an older version without that input"},
+      {int(ChannelUnavailableReason::NormalNotTangentSpace),
+       "NORMAL_NOT_TANGENT_SPACE",
+       0,
+       "Normal Map Not Tangent Space",
+       "Only a tangent-space Normal Map can be painted"},
+      {int(ChannelUnavailableReason::NormalStrengthNotOne),
+       "NORMAL_STRENGTH_NOT_ONE",
+       0,
+       "Normal Map Strength Not 1",
+       "Strength is not a linear factor on the encoded map, so it must be left at 1"},
+      {int(ChannelUnavailableReason::NormalNotThroughNormalMap),
+       "NORMAL_NOT_THROUGH_NORMAL_MAP",
+       0,
+       "No Normal Source",
+       "The Normal input of the Principled BSDF has nothing linked into it"},
+      {int(ChannelUnavailableReason::GpuCompileFailed),
+       "GPU_COMPILE_FAILED",
+       0,
+       "Bake Failed",
+       "The source material could not be rendered for baking"},
+      {int(ChannelUnavailableReason::ImageNotSampleable),
+       "IMAGE_NOT_SAMPLEABLE",
+       0,
+       "Image Not Usable",
+       "The Image Texture has no image, or is a tiled (UDIM) image a stroke cannot sample"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   static const EnumPropertyItem prop_source_select_mode_items[] = {
       {BRUSH_MATERIAL_PAINT_SOURCE_SELECT_IMAGE_BROWSER,
        "IMAGE_BROWSER",
@@ -3736,6 +3934,26 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       prop, "rna_BrushMaterialPaintChannel_channel_get_rna", nullptr, nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Channel", "Which material paint channel this entry configures");
+
+  /* Resolved live rather than stored: the answer is a pure function of the source material's node
+   * tree, so caching it in DNA would only create a second copy to keep in sync. */
+  prop = RNA_def_property(srna, "material_source_resolution", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, prop_material_source_resolution_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_BrushMaterialPaintChannel_material_source_resolution_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Material Source Resolution",
+                           "What the brush's source material supplies to this channel");
+
+  prop = RNA_def_property(srna, "material_source_reason", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, prop_material_source_reason_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_BrushMaterialPaintChannel_material_source_reason_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Material Source Reason",
+                           "Why the source material cannot supply this channel");
 
   prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
   RNA_def_property_string_funcs(prop,
@@ -3909,6 +4127,35 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       "Shared Texture Mapping",
       "Mapping settings shared by every channel's source texture, so multi-channel patterns "
       "stay aligned");
+
+  prop = RNA_def_property(srna, "source_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "source_mode");
+  RNA_def_property_enum_items(prop, prop_source_mode_items);
+  RNA_def_property_ui_text(
+      prop, "Source Mode", "Where the brush takes its per-channel textures from");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_source_update");
+
+  prop = RNA_def_property(srna, "source_layout", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "source_layout");
+  RNA_def_property_enum_items(prop, prop_source_layout_items);
+  RNA_def_property_ui_text(
+      prop, "Source Layout", "How the source material is laid out onto the paint target");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "source_bake_size", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "source_bake_size");
+  RNA_def_property_enum_items(prop, prop_source_bake_size_items);
+  RNA_def_property_ui_text(
+      prop, "Bake Size", "Resolution of the cached bake of the source material");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_source_update");
+
+  prop = RNA_def_property(srna, "source_material", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "source_material");
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_ui_text(
+      prop, "Source Material", "Material whose Principled BSDF inputs drive every paint channel");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_source_update");
 
   /* #shared_texture_slot exposes the generic Brush Texture Slot "scale" (soft range -100..100,
    * meant for stencils/procedurals); the Transform panel wants a plain 0..1 slider instead, so

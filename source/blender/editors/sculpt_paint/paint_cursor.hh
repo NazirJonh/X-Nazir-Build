@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "DNA_brush_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -18,6 +20,9 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 
+#include "BLI_math_vector_types.hh"
+
+#include "ED_material_bake.hh"
 #include "ED_view3d.hh"
 
 namespace blender::ed::sculpt_paint {
@@ -51,6 +56,12 @@ struct PaintCursorContext {
    * Sculpt Paint and Image Editor (#PaintMode::Texture2D). Points at
    * #material_preview_mtex_storage when set. */
   const MTex *material_preview_mtex = nullptr;
+  /** Pixels for #material_preview_mtex in Source Mode: Material, where the channel has no #Tex.
+   * Unused (and #MaterialSourcePreview.usable false) in Source Mode: Maps. */
+  ed::material_bake::MaterialSourcePreview material_preview_source;
+  /** Keeps the bake #material_preview_source reads alive for the whole cursor draw: the job that
+   * produced it can replace the cache entry from another thread meanwhile. */
+  std::shared_ptr<const ed::material_bake::MaterialSourceBake> material_preview_bake;
 
   /* Sculpt related data. */
   Sculpt *sd = nullptr;

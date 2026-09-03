@@ -9,6 +9,7 @@
 #include "BKE_brush.hh"
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_resolve.hh"
 #include "BKE_paint_types.hh"
 
 #include "DNA_brush_types.h"
@@ -29,28 +30,48 @@
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
+#include "ED_material_bake.hh"
 #include "ED_view3d.hh"
 
 #include "../paint_intern.hh"
+/* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
+#include "paint_debug.hh"
 #include "paint_material_source.hh"
 #include "sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint::material {
 
-/* WORKAROUND: temporary printf profiling to find where per-channel source-texture sampling
- * spends time on strokes with many source images. Remove once the perf work is done.
- * Toggle all logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
-#include "paint_debug.hh"
-
 /**
- * True when a #TEX_IMAGE source can be bilinear-sampled from its pinned #ImBuf instead of
- * going through #RE_texture_evaluate. Anything that would change the look (nodes, UDIM, crop,
- * colorband, non-flat mapping, non-default filter/color) stays on the texture engine.
+ * True when the #ImBuf behind a #ShaderNodeTexImage source can be bilinear-sampled through
+ * \a mtex's placement.
+ *
+ * Shorter than #channel_source_image_direct_ok because there is no #Tex: an Image Texture node
+ * has no crop, filter, colorband or repeat of its own, so only the shared placement and the
+ * buffer's own layout can rule it out.
  */
+static bool channel_source_image_node_direct_ok(const MTex &mtex, const ImBuf *ibuf)
+{
+  if (mtex.mapping != MTEX_FLAT) {
+    return false;
+  }
+  if (mtex.projx != PROJ_X || mtex.projy != PROJ_Y) {
+    return false;
+  }
+  if (ibuf->x <= 0 || ibuf->y <= 0) {
+    return false;
+  }
+  if (ibuf->float_data() != nullptr) {
+    return ibuf->channels == 4;
+  }
+  return ibuf->byte_data() != nullptr;
+}
+
 static bool channel_source_image_direct_ok(const Tex *tex, const MTex *mtex, const ImBuf *ibuf)
 {
   if (tex->use_nodes && tex->nodetree != nullptr) {
@@ -109,6 +130,33 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
                                    const int visible_material_channels)
 {
   bool any_source = false;
+  const MaterialSourceResolve material_resolve =
+      brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL ?
+          BKE_paint_material_source_resolve(brush_paint.source_material) :
+          MaterialSourceResolve{};
+  if (brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL &&
+      brush_paint.source_material != nullptr)
+  {
+    bool any_baked = false;
+    for (const ChannelResolution resolution : material_resolve.channels) {
+      any_baked |= resolution == ChannelResolution::Baked;
+    }
+    if (any_baked) {
+      /* Whatever is cached right now; the bake itself runs in a job (see
+       * #material_source_bake_ensure), so a stroke never waits on a render. A channel with no bake
+       * yet keeps painting its own value until one lands. */
+      bake_ = ed::material_bake::material_source_bake_get(*brush_paint.source_material,
+                                                          brush_paint.source_bake_size);
+#if PBR_PAINT_BAKE_DEBUG
+      printf("[PBR-BAKE] stroke: source_mode=MATERIAL mat='%s' bake_size=%d cached=%d layout=%d\n",
+             brush_paint.source_material->id.name + 2,
+             brush_paint.source_bake_size,
+             int(bake_ != nullptr),
+             int(brush_paint.source_layout));
+      fflush(stdout);
+#endif
+    }
+  }
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     const bool channel_enabled = BKE_paint_material_channel_is_enabled(
         brush_paint, settings, visible_material_channels, info.channel);
@@ -119,10 +167,110 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
       continue;
     }
     const BrushMaterialPaintChannel &channel = brush_paint.channels[info.channel];
+    ChannelSource &source = sources_[info.channel];
+    if (brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+      switch (material_resolve.channels[info.channel]) {
+        case ChannelResolution::Constant: {
+          source.kind = ChannelSourceKind::Constant;
+          source.constant_value = material_resolve.constants[info.channel];
+          source.usable = true;
+          source.flip_green_channel = false;
+          any_source = true;
+          break;
+        }
+        case ChannelResolution::Image: {
+          const ChannelSourceImage &resolved = material_resolve.images[info.channel];
+          source.kind = ChannelSourceKind::Image;
+          source.image = resolved.image;
+          source.image_iuser = resolved.iuser;
+          /* The node carries no placement of its own, so the source is laid out by the mapping
+           * every channel shares - the same one the Maps slots use. Built through the same helper
+           * rather than from #shared_source_mapping directly: that #MTex only carries
+           * `brush_map_mode`, and projection and size come from the channel's own defaulted slot.
+           * The #Tex is dropped because the pixels come from the node's #Image instead. */
+          BKE_paint_material_channel_effective_mtex(brush_paint, channel, source.effective_mtex);
+          source.effective_mtex.tex = nullptr;
+          source.mtex = &source.effective_mtex;
+          source.flip_green_channel = info.channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
+                                      channel.normal_space ==
+                                          BRUSH_MATERIAL_PAINT_NORMAL_SPACE_DIRECTX;
+          any_source = true;
+          break;
+        }
+        case ChannelResolution::Baked: {
+          source.kind = ChannelSourceKind::Baked;
+          source.ibuf = bake_ != nullptr ?
+                            const_cast<ImBuf *>(bake_->channel_image(info.channel)) :
+                            nullptr;
+          BKE_paint_material_channel_effective_mtex(brush_paint, channel, source.effective_mtex);
+          source.effective_mtex.tex = nullptr;
+          source.mtex = &source.effective_mtex;
+          source.baked_target_uv =
+              brush_paint.source_layout == BRUSH_MATERIAL_PAINT_SOURCE_LAYOUT_TARGET_UV;
+          /* Target UV placement is sampled through #baked_target_uv, not the brush-relative
+           * direct layout below: #sample_channel_source_with_layout tries the direct layout
+           * first, so leaving this true would silently sample the bake with the brush's Area/View
+           * mapping instead of the mesh UV it was actually baked against. */
+          /* The direct samplers stride a float buffer by four, so a buffer of any other shape
+           * would be read out of bounds. #bake_requests_render already normalizes every baked
+           * buffer to four channels; this mirrors the identical guard the Mtex and Image kinds
+           * apply, so a buffer that ever stops conforming disables direct sampling instead of
+           * crashing. */
+          const bool baked_buffer_ok = source.ibuf != nullptr &&
+                                       source.ibuf->float_data() != nullptr &&
+                                       source.ibuf->channels == 4;
+          source.image_direct_sample = baked_buffer_ok && !source.baked_target_uv;
+          /* A baked source has no #Tex for the texture engine to fall back on, so it can only be
+           * sampled through a direct layout -- and #build_direct_layout supports every map mode
+           * except 3D. Left usable, a 3D-mapped channel would reach the samplers, find no layout
+           * and write zeros for the whole stroke: black Base Color, zero Roughness. Unusable is
+           * the documented answer instead, and leaves the channel on its own value.
+           * Target UV placement carries its own coordinates and needs no layout. */
+          const bool map_mode_supported = source.baked_target_uv ||
+                                          source.effective_mtex.brush_map_mode !=
+                                              MTEX_MAP_MODE_3D;
+          source.usable = baked_buffer_ok && map_mode_supported;
+#if PBR_PAINT_BAKE_DEBUG
+          printf("[PBR-BAKE] stroke: channel=%d kind=Baked ibuf=%p %dx%d ch=%d float=%p "
+                 "first=(%.4f, %.4f, %.4f) usable=%d direct=%d map_mode=%d size=(%.3f, %.3f)\n",
+                 int(info.channel),
+                 (void *)source.ibuf,
+                 source.ibuf != nullptr ? source.ibuf->x : 0,
+                 source.ibuf != nullptr ? source.ibuf->y : 0,
+                 source.ibuf != nullptr ? source.ibuf->channels : 0,
+                 source.ibuf != nullptr ? (void *)source.ibuf->float_data() : nullptr,
+                 (source.ibuf != nullptr && source.ibuf->float_data() != nullptr) ?
+                     source.ibuf->float_data()[0] :
+                     -1.0f,
+                 (source.ibuf != nullptr && source.ibuf->float_data() != nullptr) ?
+                     source.ibuf->float_data()[1] :
+                     -1.0f,
+                 (source.ibuf != nullptr && source.ibuf->float_data() != nullptr) ?
+                     source.ibuf->float_data()[2] :
+                     -1.0f,
+                 int(source.usable),
+                 int(source.image_direct_sample),
+                 int(source.effective_mtex.brush_map_mode),
+                 source.effective_mtex.size[0],
+                 source.effective_mtex.size[1]);
+          fflush(stdout);
+#endif
+          source.flip_green_channel = info.channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
+                                      channel.normal_space ==
+                                          BRUSH_MATERIAL_PAINT_NORMAL_SPACE_DIRECTX;
+          any_source |= source.usable;
+          break;
+        }
+        default:
+          /* In Material mode the per-channel slots are not the configured source. */
+          break;
+      }
+      continue;
+    }
     if (!BKE_paint_material_channel_has_source(channel)) {
       continue;
     }
-    ChannelSource &source = sources_[info.channel];
+    source.kind = ChannelSourceKind::Mtex;
     BKE_paint_material_channel_effective_mtex(brush_paint, channel, source.effective_mtex);
     source.mtex = &source.effective_mtex;
     /* Resolved once per stroke, from the DNA flag, instead of on every sample. */
@@ -147,7 +295,35 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
    * stroke pool; a failed acquire marks the source unusable for the whole stroke. */
   for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     ChannelSource &source = sources_[i];
-    if (source.mtex == nullptr) {
+    if (source.kind == ChannelSourceKind::Image) {
+      /* An Image source has no #Tex to fall back on, so it is usable only when the pinned buffer
+       * can be sampled directly. Anything else leaves the channel on its own value rather than
+       * silently painting something the material does not describe. */
+      ImageUser iuser = *source.image_iuser;
+      ImBuf *ibuf = BKE_image_pool_acquire_ibuf(source.image, &iuser, pool_);
+      const bool direct_sample = ibuf != nullptr &&
+                                 channel_source_image_node_direct_ok(*source.mtex, ibuf);
+      if (direct_sample) {
+        if (ibuf->float_data() == nullptr) {
+          source.do_linear_conversion = true;
+          source.colorspace = ibuf->byte_buffer.colorspace;
+        }
+        source.ibuf = ibuf;
+        source.image_direct_sample = true;
+        source.usable = true;
+      }
+      else if (ibuf != nullptr) {
+        BKE_image_pool_release_ibuf(source.image, ibuf, pool_);
+      }
+      active_ |= source.usable;
+      continue;
+    }
+    if (source.kind != ChannelSourceKind::Mtex) {
+      /* Constant and Baked settled their usability in the Material-mode branch above and own no
+       * pooled #ImBuf to probe here, but they still make the sampler active. Without this the
+       * whole sampler reported #is_active false for a Material-mode stroke, callers dropped it
+       * (see #active_sampler in `sculpt_paint_image.cc`), and nothing ever sampled the bake. */
+      active_ |= source.usable;
       continue;
     }
     const Tex *tex = source.mtex->tex;
@@ -185,6 +361,7 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
       const bool direct_sample = ibuf != nullptr &&
                                  channel_source_image_direct_ok(tex, source.mtex, ibuf);
       if (direct_sample) {
+        source.image = tex->ima;
         source.ibuf = ibuf;
         source.image_direct_sample = true;
       }
@@ -209,6 +386,27 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
     active_ |= source.usable;
   }
 
+#if PBR_PAINT_BAKE_DEBUG
+  /* Why the whole sampler ends up active or not, which is what decides between painting the source
+   * and painting nothing at all. */
+  if (brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+    printf("[PBR-BAKE] stroke: SUMMARY active=%d bake=%p bake_size=%d\n",
+           int(active_),
+           (const void *)bake_.get(),
+           brush_paint.source_bake_size);
+    for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      const ChannelSource &s = sources_[i];
+      printf("[PBR-BAKE] stroke:   channel=%d resolved=%d kind=%d usable=%d ibuf=%p\n",
+             i,
+             int(material_resolve.channels[i]),
+             int(s.kind),
+             int(s.usable),
+             (void *)s.ibuf);
+    }
+    fflush(stdout);
+  }
+#endif
+
 #if PBR_PAINT_SOURCE_PROFILE
   const double construct_seconds = BLI_time_now_seconds() - construct_start;
   printf("[pbr_paint] ChannelSourceSet construct: %d image probe(s), %.3fms total\n",
@@ -221,12 +419,12 @@ ChannelSourceSet::~ChannelSourceSet()
 {
   if (pool_ != nullptr) {
     for (ChannelSource &source : sources_) {
-      if (source.ibuf == nullptr || source.mtex == nullptr || source.mtex->tex == nullptr ||
-          source.mtex->tex->ima == nullptr)
-      {
+      /* #image is set alongside #ibuf for every kind that pins one, so the release does not have
+       * to know which kind acquired it. */
+      if (source.ibuf == nullptr || source.image == nullptr) {
         continue;
       }
-      BKE_image_pool_release_ibuf(source.mtex->tex->ima, source.ibuf, pool_);
+      BKE_image_pool_release_ibuf(source.image, source.ibuf, pool_);
       source.ibuf = nullptr;
     }
     BKE_image_pool_free(pool_);
@@ -241,7 +439,7 @@ bool ChannelSourceSet::is_active() const
 bool ChannelSourceSet::channel_source_failed(const eMaterialPaintChannel channel) const
 {
   const ChannelSource &source = sources_[channel];
-  return source.mtex != nullptr && !source.usable;
+  return (source.mtex != nullptr || source.kind == ChannelSourceKind::Baked) && !source.usable;
 }
 
 const ChannelSourceSet::ChannelSource &ChannelSourceSet::source(const int channel) const
@@ -261,7 +459,13 @@ static void attach_direct_sample_image(DirectSampleLayout &layout,
   if (layout.kind == DirectSampleKind::Disabled) {
     return;
   }
-  if (source.ibuf == nullptr || mtex.tex == nullptr) {
+  /* Image and Baked sources have no #Tex: their buffer is the whole description, so only #Mtex
+   * has to prove that its texture is still there. */
+  const bool has_buffer = source.ibuf != nullptr &&
+                          ((source.kind == ChannelSourceKind::Image ||
+                            source.kind == ChannelSourceKind::Baked) ||
+                           (source.kind == ChannelSourceKind::Mtex && mtex.tex != nullptr));
+  if (!has_buffer) {
     layout.kind = DirectSampleKind::Disabled;
     return;
   }
@@ -278,9 +482,11 @@ static void attach_direct_sample_image(DirectSampleLayout &layout,
   }
   layout.ibuf_x = ibuf->x;
   layout.ibuf_y = ibuf->y;
+  /* Image and Baked have no #Tex, so repeat wrapping is their complete extension description.
+   * Kept in step with #ChannelSourceSet::sample_image_direct. */
   const Tex *tex = mtex.tex;
-  layout.wrap = tex->extend == TEX_REPEAT;
-  layout.clip = tex->extend == TEX_CLIP;
+  layout.wrap = tex == nullptr || tex->extend == TEX_REPEAT;
+  layout.clip = tex != nullptr && tex->extend == TEX_CLIP;
   layout.eval_size_x = mtex.size[0];
   layout.eval_size_y = mtex.size[1];
   layout.eval_ofs_x = mtex.ofs[0];
@@ -434,7 +640,7 @@ static DirectSampleLayout make_direct_sample_layout_sculpt(
     return {};
   }
   const bke::PaintRuntime *paint_runtime = ss.cache->paint != nullptr ? ss.cache->paint->runtime :
-                                                                       nullptr;
+                                                                        nullptr;
   return make_direct_sample_layout(
       source,
       *source.mtex,
@@ -524,6 +730,53 @@ static void sample_channel_source_with_layout(const DirectSampleLayout &layout,
                                               float4 &r_rgba)
 {
   if (sample_direct_layout(layout, ctx.symm_point, ctx.view_point_2d, r_value, r_rgba)) {
+#if PBR_PAINT_BAKE_DEBUG
+    if (source.kind == ChannelSourceKind::Baked) {
+      static std::atomic_bool logged = false;
+      if (!logged.exchange(true)) {
+        printf("[PBR-BAKE] sculpt: direct sample OK layout.kind=%d rgba=(%.4f, %.4f, %.4f)\n",
+               int(layout.kind),
+               r_rgba.x,
+               r_rgba.y,
+               r_rgba.z);
+        fflush(stdout);
+      }
+    }
+#endif
+    return;
+  }
+  if (source.kind == ChannelSourceKind::Baked && source.baked_target_uv) {
+    /* Target UV is an explicit alternative to brush placement for baked sources. */
+    if (ctx.uv.x >= 0.0f && sources.sample_baked(source, ctx.uv.x, ctx.uv.y, r_value, r_rgba)) {
+      return;
+    }
+    r_rgba = float4(0.0f);
+    if (r_value != nullptr) {
+      *r_value = 0.0f;
+    }
+    return;
+  }
+  if (source.kind == ChannelSourceKind::Image || source.kind == ChannelSourceKind::Baked) {
+    /* #RE_texture_evaluate needs a #Tex, while Image and brush-mapped Baked sources have none.
+     * Reaching here means the direct placement could not be built, so report nothing rather than
+     * dereferencing the null texture. */
+#if PBR_PAINT_BAKE_DEBUG
+    static std::atomic_bool black_return_logged = false;
+    if (!black_return_logged.exchange(true)) {
+      printf("[PBR-BAKE] sample: returning BLACK -- direct layout disabled. kind=%d "
+             "layout.kind=%d direct=%d ibuf=%p map_mode=%d\n",
+             int(source.kind),
+             int(layout.kind),
+             int(source.image_direct_sample),
+             (void *)source.ibuf,
+             source.mtex != nullptr ? int(source.mtex->brush_map_mode) : -1);
+      fflush(stdout);
+    }
+#endif
+    r_rgba = float4(0.0f);
+    if (r_value != nullptr) {
+      *r_value = 0.0f;
+    }
     return;
   }
   float dummy_value = 0.0f;
@@ -566,9 +819,15 @@ bool ChannelSourceSet::sample_image_direct(const ChannelSource &source,
   }
 
   const MTex *mtex = source.mtex;
+  /* Image and Baked sources have no #Tex, so repeat is their complete extension description. */
   const Tex *tex = mtex->tex;
+  if (tex == nullptr && source.kind != ChannelSourceKind::Image &&
+      source.kind != ChannelSourceKind::Baked)
+  {
+    return false;
+  }
   const ImBuf *ibuf = source.ibuf;
-  if (tex == nullptr || ibuf->x <= 0 || ibuf->y <= 0) {
+  if (ibuf->x <= 0 || ibuf->y <= 0) {
     return false;
   }
 
@@ -579,7 +838,7 @@ bool ChannelSourceSet::sample_image_direct(const ChannelSource &source,
   const float u = (vx + 1.0f) * 0.5f;
   const float v = (vy + 1.0f) * 0.5f;
 
-  if (tex->extend == TEX_CLIP) {
+  if (tex != nullptr && tex->extend == TEX_CLIP) {
     const int x = int(math::floor(u * float(ibuf->x)));
     const int y = int(math::floor(v * float(ibuf->y)));
     if (x < 0 || y < 0 || x >= ibuf->x || y >= ibuf->y) {
@@ -594,7 +853,7 @@ bool ChannelSourceSet::sample_image_direct(const ChannelSource &source,
   /* Pixel coordinates matching #imagewrap's `fx * ibuf->x` (no half-texel offset). */
   const float px = u * float(ibuf->x);
   const float py = v * float(ibuf->y);
-  const bool wrap = tex->extend == TEX_REPEAT;
+  const bool wrap = tex == nullptr || tex->extend == TEX_REPEAT;
 
   if (ibuf->float_data() != nullptr) {
     r_rgba = wrap ? imbuf::interpolate_bilinear_wrap_fl(ibuf, px, py) :
@@ -608,6 +867,36 @@ bool ChannelSourceSet::sample_image_direct(const ChannelSource &source,
 
   if (r_value != nullptr) {
     *r_value = IMB_colormanagement_get_luminance(r_rgba);
+  }
+  return true;
+}
+
+bool ChannelSourceSet::sample_baked(const ChannelSource &source,
+                                    const float u,
+                                    const float v,
+                                    float *r_value,
+                                    float4 &r_rgba) const
+{
+  if (source.kind != ChannelSourceKind::Baked || source.ibuf == nullptr || source.ibuf->x <= 0 ||
+      source.ibuf->y <= 0)
+  {
+    return false;
+  }
+
+  const float px = u * float(source.ibuf->x);
+  const float py = v * float(source.ibuf->y);
+  if (source.ibuf->float_data() != nullptr) {
+    r_rgba = imbuf::interpolate_bilinear_wrap_fl(source.ibuf, px, py);
+  }
+  else if (source.ibuf->byte_data() != nullptr) {
+    const uchar4 col = imbuf::interpolate_bilinear_wrap_byte(source.ibuf, px, py);
+    rgba_uchar_to_float(r_rgba, col);
+  }
+  else {
+    return false;
+  }
+  if (r_value != nullptr) {
+    *r_value = r_rgba.x;
   }
   return true;
 }
@@ -637,7 +926,9 @@ void ChannelSourceSampler::update_area_local_mats(const Object &ob)
   }
   for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     const ChannelSource &source = sources_.source(i);
-    if (!source.usable || source.mtex->brush_map_mode != MTEX_MAP_MODE_AREA) {
+    if (!source.usable || !channel_source_kind_has_placement(source.kind) ||
+        source.mtex->brush_map_mode != MTEX_MAP_MODE_AREA)
+    {
       continue;
     }
     area_local_mats_[i] = calc_area_local_mat(ob, source.mtex->rot);
@@ -654,10 +945,23 @@ bool ChannelSourceSampler::has_usable_source(const eMaterialPaintChannel channel
   return sources_.source(channel).usable;
 }
 
+bool ChannelSourceSampler::uses_baked_target_uv() const
+{
+  for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    const ChannelSource &source = sources_.source(i);
+    if (source.usable && source.kind == ChannelSourceKind::Baked && source.baked_target_uv) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const float4x4 *ChannelSourceSampler::area_local_mat_for(const int channel,
                                                          const ChannelSource &source) const
 {
-  if (source.mtex->brush_map_mode != MTEX_MAP_MODE_AREA) {
+  if (!channel_source_kind_has_placement(source.kind) ||
+      source.mtex->brush_map_mode != MTEX_MAP_MODE_AREA)
+  {
     return nullptr;
   }
   return &area_local_mats_[channel];
@@ -671,6 +975,9 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
   const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
 
   const ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    return math::clamp(source.constant_value.x, range.x, range.y);
+  }
   if (!source.usable) {
     return fallback;
   }
@@ -700,6 +1007,9 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
   const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
 
   const ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    return math::clamp(source.constant_value.x, range.x, range.y);
+  }
   if (!source.usable) {
     return fallback;
   }
@@ -818,6 +1128,12 @@ static bool sample_channel_source_at_uv(const ChannelSourceSet &sources,
   }
   const float tex_x = uv.x * mtex->size[0] + mtex->ofs[0];
   const float tex_y = uv.y * mtex->size[1] + mtex->ofs[1];
+  if (source.kind == ChannelSourceKind::Baked) {
+    /* Placed like every other kind. Sampling the bake at the raw UV instead would make the same
+     * channel jump as soon as the material stops resolving to a plain image and starts being
+     * baked, since the Image path here has always applied the placement. */
+    return sources.sample_baked(source, tex_x, tex_y, r_value, r_rgba);
+  }
   float dummy_value = 0.0f;
   float *value_ptr = r_value != nullptr ? r_value : &dummy_value;
   if (sources.sample_image_direct(source, tex_x, tex_y, value_ptr, r_rgba)) {
@@ -840,6 +1156,9 @@ float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
   const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
 
   const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    return source.constant_value.x;
+  }
   if (!source.usable) {
     return fallback;
   }
@@ -860,6 +1179,9 @@ float3 ChannelUvSampler::color_at_uv(const eMaterialPaintChannel channel,
   const float3 fallback = color_channel_fallback(channel, brush_paint_, paint_, brush_);
 
   const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    return float3(source.constant_value);
+  }
   if (!source.usable) {
     return fallback;
   }
@@ -917,6 +1239,9 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
   const float3 fallback = color_channel_fallback(channel, brush_paint_, this->paint(), brush_);
 
   const ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    return float3(source.constant_value);
+  }
   if (!source.usable) {
     return fallback;
   }
@@ -950,6 +1275,9 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
   const float3 fallback = color_channel_fallback(channel, brush_paint_, this->paint(), brush_);
 
   const ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    return float3(source.constant_value);
+  }
   if (!source.usable) {
     return fallback;
   }
@@ -986,6 +1314,12 @@ void ChannelSourceSampler::gather_colors(const eMaterialPaintChannel channel,
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   const float3 fallback = color_channel_fallback(channel, brush_paint_, this->paint(), brush_);
   const ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    for (const int i : contexts.index_range()) {
+      r_colors[i] = factors[i] == 0.0f ? float3(0.0f) : float3(source.constant_value);
+    }
+    return;
+  }
   if (!source.usable) {
     for (const int i : contexts.index_range()) {
       r_colors[i] = factors[i] == 0.0f ? float3(0.0f) : fallback;
@@ -1035,6 +1369,13 @@ void ChannelSourceSampler::gather_scalars(const eMaterialPaintChannel channel,
   const float2 range = BKE_paint_material_channel_range(settings_, channel);
   const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
   const ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    for (const int i : contexts.index_range()) {
+      r_values[i] = factors[i] == 0.0f ? 0.0f :
+                    math::clamp(source.constant_value.x, range.x, range.y);
+    }
+    return;
+  }
   if (!source.usable) {
     for (const int i : contexts.index_range()) {
       r_values[i] = factors[i] == 0.0f ? 0.0f : fallback;

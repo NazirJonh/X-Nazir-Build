@@ -2318,10 +2318,17 @@ static void outliner_draw_stack_columns(ui::Block *block,
   const bool editable = stack_source_for_space(*space_outliner)->is_editable(*owner);
   const char *disabled_hint = N_("This stack cannot be edited");
 
+  /* With Large rows on, the mode and the value stack in one column instead of sitting side by
+   * side: the row is two units tall, room enough for one full-height button above the other, and
+   * each keeps the combined width of both rather than shrinking to make room for the other. */
+  const bool stacked = show_value && show_mode &&
+                       (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
+
   /* The margin from the right edge is part of that width; see #outliner_right_columns_width. */
   const int column_x = int(region->v2d.cur.xmax - outliner_right_columns_width(space_outliner));
   const int value_width = show_value ? layout.value_width * UI_UNIT_X : 0;
   const int mode_width = show_mode ? layout.mode_width * UI_UNIT_X : 0;
+  const int stacked_width = value_width + mode_width;
 
   tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
     const TreeStoreElem *tselem = TREESTORE(te);
@@ -2334,23 +2341,53 @@ static void outliner_draw_stack_columns(ui::Block *block,
     if (row == nullptr || !row->supported) {
       return;
     }
-    const int content_y = stack_row_content_y(*space_outliner, *te);
 
-    int x = column_x;
+    /* Full #UI_UNIT_Y tall and centered on the row's single content line normally; stacked, each
+     * shrinks a little instead of filling its half of the tall row edge to edge, so the pair reads
+     * as one compact control rather than two stretched widgets touching in the middle. `te->ys` is
+     * the row's own bottom, written by the tree pass that ran before this one. */
+    const int button_height = stacked ? int(UI_UNIT_Y * 0.5f) : int(UI_UNIT_Y);
+    int mode_y, value_y;
+    if (stacked) {
+      const int row_height = outliner_tree_element_height(*space_outliner, *te);
+      const int gap = int(4.0f * UI_SCALE_FAC);
+      const int margin = (row_height - 2 * button_height - gap) / 2;
+      mode_y = te->ys + row_height - margin - button_height;
+      value_y = te->ys + margin;
+    }
+    else {
+      mode_y = stack_row_content_y(*space_outliner, *te);
+      value_y = mode_y;
+    }
+    /* Side by side, value keeps its usual place on the left of mode; stacked, both sit in the same
+     * single column, narrower than the reserved column so the pair reads as compact rather than
+     * stretched edge to edge. */
+    const int value_x = column_x;
+    const int mode_x = stacked ? column_x : column_x + value_width;
+    const int this_value_width = stacked ? int(stacked_width / 1.5f) : value_width;
+    const int this_mode_width = stacked ? int(stacked_width / 1.5f) : mode_width;
+
     if (show_value) {
       ui::Button *button = nullptr;
       if (row->value_ptr && row->value_prop != nullptr) {
         PointerRNA rna_ptr = *row->value_ptr;
         PropertyRNA *prop = RNA_struct_find_property(&rna_ptr, row->value_prop);
         if (prop != nullptr) {
-          button = uiDefAutoButR(
-              block, &rna_ptr, prop, -1, "", ICON_NONE, x, content_y, value_width, UI_UNIT_Y);
+          button = uiDefAutoButR(block,
+                                 &rna_ptr,
+                                 prop,
+                                 -1,
+                                 "",
+                                 ICON_NONE,
+                                 value_x,
+                                 value_y,
+                                 this_value_width,
+                                 button_height);
         }
       }
       if (button != nullptr && !editable) {
         button_disable(button, disabled_hint);
       }
-      x += value_width;
     }
 
     if (show_mode) {
@@ -2359,8 +2396,16 @@ static void outliner_draw_stack_columns(ui::Block *block,
         PointerRNA rna_ptr = *row->mode_ptr;
         PropertyRNA *prop = RNA_struct_find_property(&rna_ptr, row->mode_prop);
         if (prop != nullptr) {
-          button = uiDefAutoButR(
-              block, &rna_ptr, prop, -1, std::nullopt, ICON_NONE, x, content_y, mode_width, UI_UNIT_Y);
+          button = uiDefAutoButR(block,
+                                 &rna_ptr,
+                                 prop,
+                                 -1,
+                                 std::nullopt,
+                                 ICON_NONE,
+                                 mode_x,
+                                 mode_y,
+                                 this_mode_width,
+                                 button_height);
         }
       }
       if (button != nullptr && !editable) {
@@ -3612,6 +3657,55 @@ static bool element_should_draw_faded(const TreeViewContext &tvc,
   return false;
 }
 
+/**
+ * Whether a Stack Layers layer row should read as selected -- either because its own row is, or
+ * because one of the channel rows it holds is. Switching which channel is open is a detail of
+ * working inside the layer, not a different selection, so the layer's own highlight should not
+ * blink out when the click lands on one of its maps instead of on the layer itself.
+ */
+static bool stack_layer_row_selected(const TreeElement &te)
+{
+  if (TREESTORE(&te)->flag & TSE_SELECTED) {
+    return true;
+  }
+  for (const TreeElement &child : te.subtree) {
+    if (TREESTORE(&child)->type == TSE_STACK_ITEM && (TREESTORE(&child)->flag & TSE_SELECTED)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Same reasoning as #stack_layer_row_selected, for the active flag. */
+static bool stack_layer_row_active(const TreeElement &te)
+{
+  if (TREESTORE(&te)->flag & TSE_ACTIVE) {
+    return true;
+  }
+  for (const TreeElement &child : te.subtree) {
+    if (TREESTORE(&child)->type == TSE_STACK_ITEM && (TREESTORE(&child)->flag & TSE_ACTIVE)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a Stack Layers folder directly holds the row that is open right now -- a nested layer
+ * that is itself active, or one holding the active channel. Only one level down: a folder's own
+ * activity comes from what it directly contains, the same way a Collection is only "active"
+ * through the object directly inside it, not through everything nested further down.
+ */
+static bool stack_layer_direct_child_active(const TreeElement &te)
+{
+  for (const TreeElement &child : te.subtree) {
+    if (TREESTORE(&child)->type == TSE_STACK_LAYER && stack_layer_row_active(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void outliner_draw_tree_element(ui::Block *block,
                                        const uiFontStyle *fstyle,
                                        const TreeViewContext &tvc,
@@ -3714,6 +3808,31 @@ static void outliner_draw_tree_element(ui::Block *block,
       if (active != OL_DRAWSEL_NONE) {
         ui::theme::get_color_3ubv(TH_TEXT_HI, text_color);
         text_color[3] = 255;
+      }
+
+      /* Stack Layers rows read their own tree selection for this, on top of whatever the paint
+       * target above already decided. The row actually open right now -- a layer with no channel
+       * drilled into, or the channel itself -- takes the colour the active object gets elsewhere in
+       * the Outliner; a layer lit only because a channel it holds is open keeps the plain
+       * highlighted colour, so the eye still goes to what is actually open. A folder that directly
+       * holds that open row gets the same plain colour a Collection gets for directly holding the
+       * active object -- one level only, the same way a Collection's own container does not light up
+       * in turn. */
+      if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+        if (ELEM(tselem->type, TSE_STACK_LAYER, TSE_STACK_ITEM) && (tselem->flag & TSE_ACTIVE)) {
+          ui::theme::get_color_3ubv(TH_ACTIVE_OBJECT, text_color);
+          text_color[3] = 255;
+          active = OL_DRAWSEL_ACTIVE;
+        }
+        else if (tselem->type == TSE_STACK_LAYER && stack_layer_row_active(*te)) {
+          ui::theme::get_color_3ubv(TH_TEXT_HI, text_color);
+          text_color[3] = 255;
+        }
+        else if (tselem->type == TSE_STACK_LAYER && stack_layer_direct_child_active(*te)) {
+          ui::theme::get_color_3ubv(TH_TEXT_HI, text_color);
+          text_color[3] = 255;
+          active = OL_DRAWSEL_ACTIVE;
+        }
       }
     }
 
@@ -4079,25 +4198,27 @@ static void outliner_draw_highlights(const ARegion *region,
                   start_y + row_height - ufac);
     draw_roundbox_corner_set(ui::CNR_ALL);
 
-    /* Selection status. A boxed row says it another way -- the outline takes the selection colour
-     * and the whole block the layer owns is dimmed -- so filling it here as well would bury both
-     * under a slab of colour; see #outliner_draw_stack_row_boxes. */
-    /* Only the layer rows: the maps a layer holds are ordinary rows and are selected the way rows
-     * are selected everywhere else in the Outliner. */
-    const bool boxed_row = (space_outliner->outlinevis == SO_STACK_LAYERS) &&
-                           (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) &&
-                           tselem->type == TSE_STACK_LAYER;
-    if (boxed_row) {
-      /* Pass. */
-    }
-    else if ((tselem->flag & TSE_ACTIVE) && (tselem->flag & TSE_SELECTED)) {
+    /* Only the layer rows fold in their channels' state: the maps a layer holds are ordinary rows
+     * and are selected the way rows are selected everywhere else in the Outliner, but a layer's own
+     * highlight should not disappear just because the click that opened one of its channels moved
+     * the tree's selection onto that channel row instead. */
+    const bool is_stack_layer = space_outliner->outlinevis == SO_STACK_LAYERS &&
+                               tselem->type == TSE_STACK_LAYER;
+    /* Activeness itself never propagates up -- a layer lit only because a channel it holds is open
+     * reads as an ordinary selected row (the darker fill), the same as an Object's row does while a
+     * data-block nested under it is what is actually active, rather than repeating the brighter
+     * active fill on both rows. */
+    const bool row_active = (tselem->flag & TSE_ACTIVE) != 0;
+    const bool row_selected = is_stack_layer ? stack_layer_row_selected(*te) :
+                                               (tselem->flag & TSE_SELECTED) != 0;
+    if (row_active && row_selected) {
       ui::draw_roundbox_4fv(&rect, true, radius, col_active);
 
       float col_active_outline[4];
       ui::theme::get_color_shade_4fv(TH_SELECT_ACTIVE, 40, col_active_outline);
       ui::draw_roundbox_4fv(&rect, false, radius, col_active_outline);
     }
-    else if (tselem->flag & TSE_SELECTED) {
+    else if (row_selected) {
       ui::draw_roundbox_4fv(&rect, true, radius, col_selection);
     }
 
@@ -4222,7 +4343,11 @@ static void outliner_draw_stack_row_boxes_recursive(const ARegion *region,
 
     const int block_top = start_y + row_height;
     const bool is_layer = tselem->type == TSE_STACK_LAYER;
-    const bool is_selected = (tselem->flag & TSE_SELECTED) != 0;
+    /* A layer's own selection folds in its channels': switching which channel is open moves the
+     * tree's selection onto that channel row, and the layer's surrounding box should keep tracking
+     * it rather than collapse back to an unselected look. */
+    const bool is_selected = is_layer ? stack_layer_row_selected(te) :
+                                       ((tselem->flag & TSE_SELECTED) != 0);
 
     /* A rule between the maps a layer is made of. They are one-line rows of the same shape --
      * "Base Color", "Metallic", "Roughness" -- and without a line between them they read as one
@@ -4268,8 +4393,15 @@ static void outliner_draw_stack_row_boxes_recursive(const ARegion *region,
      * shown by where the row's contents sit, not by where its box begins; a box that stepped right
      * with the indent would leave a slot of background between it and the toggle. */
     const float toggle_right = float(first_column_x + UI_UNIT_X);
-    const float left = visibility_left ? toggle_right : float(startx);
-    const float right = region_right;
+    /* Same margin #outliner_draw_highlights uses for its background rect, so the full-width box
+     * below lines up with it instead of reading a hair narrower. */
+    const float full_width_pad = 3.0f * UI_SCALE_FAC;
+    /* With the toggle off to the side instead of in its own column, the box has nothing to leave
+     * room for on the left, so it runs the full width of the region -- the same edge every depth
+     * uses, rather than `startx`, which steps right with the indent and would make nested rows'
+     * boxes look clipped instead of full width. */
+    const float left = visibility_left ? toggle_right : float(region->v2d.cur.xmin) + full_width_pad;
+    const float right = visibility_left ? region_right : float(region->v2d.cur.xmax) - full_width_pad;
 
     if (is_selected) {
       rctf block{};
@@ -4307,7 +4439,10 @@ static void outliner_draw_stack_row_boxes_recursive(const ARegion *region,
     /* The row the operators will act on is worth seeing at a glance, and the outline is where a
      * boxed row shows it. */
     const float *col = col_outline;
-    if (tselem->flag & TSE_ACTIVE && is_selected) {
+    /* Own activeness only, matching the fill in #outliner_draw_highlights: a layer lit because a
+     * channel it holds is open reads as an ordinary selected row rather than repeating the active
+     * colour on both. */
+    if ((tselem->flag & TSE_ACTIVE) && is_selected) {
       col = col_active;
     }
     else if (is_selected) {

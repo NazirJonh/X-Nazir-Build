@@ -603,6 +603,41 @@ bNodeSocket *mix_output_find(bNode &node)
   return bke::node_find_socket(node, SOCK_OUT, "Color"_ustr);
 }
 
+/**
+ * Wire \a factor to a fresh Math node in Multiply mode instead of to \a coverage directly: one
+ * input takes \a coverage (the layer's own map's Alpha, driving per-pixel "over" compositing the
+ * way it always has), the other is left a plain constant at \a initial_opacity -- the layer's own
+ * opacity, which #BKE_paint_material_layer_stack_from_material can still point a Value slider at.
+ * A bare link into Factor, by contrast, leaves nothing there to edit (`08 §1.4`).
+ *
+ * \return false, leaving the tree unchanged, only when the node could not be created at all.
+ */
+static bool layer_factor_coverage_link(bNodeTree &tree,
+                                       bNode &factor_node,
+                                       bNodeSocket &factor,
+                                       bNode &coverage_node,
+                                       bNodeSocket &coverage,
+                                       const float initial_opacity)
+{
+  bNode *multiply = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  if (multiply == nullptr) {
+    return false;
+  }
+  multiply->custom1 = NODE_MATH_MULTIPLY;
+  bNodeSocket *value_a = static_cast<bNodeSocket *>(BLI_findlink(&multiply->inputs, 0));
+  bNodeSocket *value_b = static_cast<bNodeSocket *>(BLI_findlink(&multiply->inputs, 1));
+  bNodeSocket *result = static_cast<bNodeSocket *>(multiply->outputs.first);
+  if (value_a == nullptr || value_b == nullptr || result == nullptr) {
+    bke::node_remove_node(nullptr, tree, *multiply, true);
+    return false;
+  }
+  static_cast<bNodeSocketValueFloat *>(value_b->default_value)->value = initial_opacity;
+  bke::node_position_relative(*multiply, coverage_node, result, coverage);
+  bke::node_add_link(tree, coverage_node, coverage, *multiply, *value_a);
+  bke::node_add_link(tree, *multiply, *result, factor_node, factor);
+  return true;
+}
+
 /** The nodes one channel contributes to a layer being added. */
 struct NewLayerNodes {
   int channel = -1;
@@ -811,8 +846,8 @@ bool layer_group_fill_channel(Main & /*bmain*/,
         group, *below, *below_out, *mix_copy, *const_cast<bNodeSocket *>(mix.bottom));
     bke::node_add_link(
         group, *map_copy, *map_color, *mix_copy, *const_cast<bNodeSocket *>(mix.top));
-    bke::node_add_link(
-        group, *map_copy, *map_alpha, *mix_copy, *const_cast<bNodeSocket *>(mix.factor));
+    layer_factor_coverage_link(
+        group, *mix_copy, *const_cast<bNodeSocket *>(mix.factor), *map_copy, *map_alpha, 1.0f);
     below = mix_copy;
     below_out = mix_out;
 
@@ -1025,8 +1060,20 @@ static bool chain_bottom_convert(Main &bmain,
     relink_into(tree, *fresh.terminal, *fresh.terminal_node, *mix_node, *mix_out);
   }
   relink_into(tree, *const_cast<bNodeSocket *>(mix.top), *mix_node, *image_node, *image_color);
-  /* The layer covers what is below it exactly where its own map is opaque, like every other. */
-  relink_into(tree, *const_cast<bNodeSocket *>(mix.factor), *mix_node, *image_node, *image_alpha);
+  /* The layer covers what is below it exactly where its own map is opaque, like every other --
+   * and, since this Mix node is newly created, keeps a real opacity alongside that coverage from
+   * the start, rather than a bare link with nothing left to edit. */
+  if (!layer_factor_coverage_link(tree,
+                                  *mix_node,
+                                  *const_cast<bNodeSocket *>(mix.factor),
+                                  *image_node,
+                                  *image_alpha,
+                                  1.0f))
+  {
+    bke::node_remove_node(&bmain, tree, *mix_node, true);
+    r_error = PaintMaterialLayerEditError::CreationFailed;
+    return false;
+  }
   bke::node_position_relative(*mix_node, *image_node, mix_out, *image_color);
 
   BKE_ntree_update_after_single_tree_change(bmain, tree);
@@ -1317,8 +1364,10 @@ bool BKE_paint_material_layer_add(Main &bmain,
   for (ResolvedLayer &entry : resolved) {
     bke::node_add_link(tree, *entry.tex, *entry.tex_color, *entry.layer.node, *entry.layer.top);
     /* The stack drives a layer's factor from its own Alpha: an unpainted texel must not cover
-     * what is below it. */
-    bke::node_add_link(tree, *entry.tex, *entry.tex_alpha, *entry.layer.node, *entry.factor);
+     * what is below it. A Multiply between the two keeps a real, editable opacity alongside that
+     * coverage from the start, rather than a bare link with nothing left for a Value slider. */
+    layer_factor_coverage_link(
+        tree, *entry.layer.node, *entry.factor, *entry.tex, *entry.tex_alpha, 1.0f);
     bke::node_position_relative(*entry.layer.node,
                                 *entry.chain->terminal_node,
                                 entry.layer.output,
@@ -1577,11 +1626,13 @@ static bool layer_move_apply(Main &bmain,
       if (c.mask_copy != nullptr) {
         bNodeSocket *mask_color = bke::node_find_socket(*c.mask_copy, SOCK_OUT, "Color"_ustr);
         if (mask_color != nullptr) {
-          bke::node_add_link(*dst_tree, *c.mask_copy, *mask_color, *c.mix_copy, *c.mix_factor);
+          layer_factor_coverage_link(
+              *dst_tree, *c.mix_copy, *c.mix_factor, *c.mask_copy, *mask_color, 1.0f);
         }
       }
       else {
-        bke::node_add_link(*dst_tree, *c.map_copy, *map_alpha, *c.mix_copy, *c.mix_factor);
+        layer_factor_coverage_link(
+            *dst_tree, *c.mix_copy, *c.mix_factor, *c.map_copy, *map_alpha, 1.0f);
       }
     }
 
@@ -1796,11 +1847,12 @@ static bool layer_move_into_empty_group(Main &bmain,
         coverage = mask_color;
       }
     }
-    bke::node_add_link(*group_tree,
-                       (c.mask_copy != nullptr) ? *c.mask_copy : *c.map_copy,
-                       *coverage,
-                       *c.mix_copy,
-                       *const_cast<bNodeSocket *>(mix.factor));
+    layer_factor_coverage_link(*group_tree,
+                               *c.mix_copy,
+                               *const_cast<bNodeSocket *>(mix.factor),
+                               (c.mask_copy != nullptr) ? *c.mask_copy : *c.map_copy,
+                               *coverage,
+                               1.0f);
     /* The bottom stays unlinked: inside the group this layer blends over transparency, which is
      * what the group composites on. */
     bke::node_add_link(*group_tree, *c.mix_copy, *mix_out, *group_output, *result);
@@ -2273,7 +2325,8 @@ bool BKE_paint_material_layer_group_add(Main &bmain,
     /* Outside the group it is indistinguishable from a layer's map: Result feeds the Mix, Alpha
      * covers it -- and an empty group's Alpha is zero, so the folder shows nothing. */
     bke::node_add_link(tree, *entry.instance, *entry.result, *entry.layer.node, *entry.layer.top);
-    bke::node_add_link(tree, *entry.instance, *entry.alpha, *entry.layer.node, *entry.factor);
+    layer_factor_coverage_link(
+        tree, *entry.layer.node, *entry.factor, *entry.instance, *entry.alpha, 1.0f);
     bke::node_position_relative(
         *entry.instance, *entry.layer.node, entry.result, *entry.layer.top);
     entry.chain->layers.insert(insert_at, entry.layer);
@@ -2625,8 +2678,8 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     layer.image = copy.image;
 
     bke::node_add_link(tree, *copy.tex, *tex_color, *copy.mix, *layer.top);
-    bke::node_add_link(
-        tree, *copy.tex, *tex_alpha, *copy.mix, *const_cast<bNodeSocket *>(mix.factor));
+    layer_factor_coverage_link(
+        tree, *copy.mix, *const_cast<bNodeSocket *>(mix.factor), *copy.tex, *tex_alpha, 1.0f);
     bke::node_position_relative(*copy.mix, *chain->terminal_node, output, *chain->terminal);
     bke::node_position_relative(*copy.tex, *copy.mix, tex_color, *layer.top);
 
@@ -2730,7 +2783,29 @@ bool BKE_paint_material_layer_mask_add(Main &bmain,
     if (!composite_mix_node_read(*layer.node, mix) || mix.factor == nullptr) {
       continue;
     }
-    relink_into(*chain->tree, *const_cast<bNodeSocket *>(mix.factor), *layer.node, *tex, *color);
+    if (mix.factor_opacity != nullptr) {
+      /* Coverage and the layer's own opacity already coexist: swap only what feeds the coverage
+       * side, so the opacity the user may already have set survives adding a mask. */
+      bNodeSocket &coverage = const_cast<bNodeSocket &>(*mix.factor_coverage);
+      bNode &multiply = const_cast<bNode &>(coverage.owner_node());
+      relink_into(*chain->tree, coverage, multiply, *tex, *color);
+    }
+    else {
+      /* Either a bare constant -- carried over as the new Multiply's opacity -- or an old-style
+       * mask with nothing to carry over; either way the layer keeps an editable opacity from here
+       * on, wrapped fresh around the new mask. */
+      float initial_opacity = 1.0f;
+      if (BKE_paint_material_source_socket(*mix.factor) == nullptr) {
+        initial_opacity =
+            static_cast<const bNodeSocketValueFloat *>(mix.factor->default_value)->value;
+      }
+      layer_factor_coverage_link(*chain->tree,
+                                 *layer.node,
+                                 *const_cast<bNodeSocket *>(mix.factor),
+                                 *tex,
+                                 *color,
+                                 initial_opacity);
+    }
   }
   ChainLayer &masked = chains.first()->layers[layer_index];
   bke::node_position_relative(*tex, *masked.node, color, *masked.top);
@@ -2788,23 +2863,34 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
     if (!composite_mix_node_read(*layer.node, mix) || mix.factor == nullptr) {
       continue;
     }
-    bNodeLink *mask_link = sole_link_into(*const_cast<bNodeSocket *>(mix.factor));
+    /* Coverage and opacity coexist: what is being removed lives on the Multiply's coverage
+     * input, and its opacity constant is left exactly as it was. An old-style layer with nothing
+     * to separate an opacity from is masked straight on #factor instead, same as always. */
+    bNodeSocket *coverage_socket = (mix.factor_opacity != nullptr) ?
+                                       const_cast<bNodeSocket *>(mix.factor_coverage) :
+                                       const_cast<bNodeSocket *>(mix.factor);
+    bNode &coverage_owner = const_cast<bNode &>(coverage_socket->owner_node());
+    bNodeLink *mask_link = sole_link_into(*coverage_socket);
     if (mask_link == nullptr) {
+      continue;
+    }
+    /* Coverage goes back to the layer's own map, which is where it comes from for a layer that
+     * never had a mask. Resolved before deciding what "the mask" even is: a layer whose coverage
+     * already comes straight from its own map -- the default shape now, not just the masked one --
+     * has no mask to remove, and mistaking its own Image Texture node for one would delete it. */
+    bNodeLink *map_link = (layer.top == nullptr) ? nullptr : sole_link_into(*layer.top);
+    if (map_link != nullptr && mask_link->fromnode == map_link->fromnode) {
       continue;
     }
     if (mask_link->fromsock->directly_linked_links().size() == 1) {
       mask_nodes.append_non_duplicates({chain.tree, mask_link->fromnode});
     }
-    /* Coverage goes back to the layer's own map, which is where it comes from for a layer that
-     * never had a mask. */
-    bNodeSocket *factor = const_cast<bNodeSocket *>(mix.factor);
-    bNodeLink *map_link = (layer.top == nullptr) ? nullptr : sole_link_into(*layer.top);
     bNodeSocket *alpha = (map_link == nullptr) ?
                              nullptr :
                              bke::node_find_socket(*map_link->fromnode, SOCK_OUT, "Alpha"_ustr);
     if (alpha == nullptr) {
-      /* Nothing to restore the factor from; leaving it unlinked is still a layer without a mask. */
-      for (bNodeLink *link : Vector<bNodeLink *>(factor->directly_linked_links())) {
+      /* Nothing to restore coverage from; leaving it unlinked is still a layer without a mask. */
+      for (bNodeLink *link : Vector<bNodeLink *>(coverage_socket->directly_linked_links())) {
         BKE_ntree_update_tag_link_removed(chain.tree);
         bke::node_remove_link(chain.tree, *link);
       }
@@ -2812,7 +2898,15 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
     }
     /* The map's node is taken from the link rather than from the socket: relinking the previous
      * channel already invalidated the topology cache #owner_node asserts on. */
-    relink_into(*chain.tree, *factor, *layer.node, *map_link->fromnode, *alpha);
+    if (mix.factor_opacity != nullptr) {
+      relink_into(*chain.tree, *coverage_socket, coverage_owner, *map_link->fromnode, *alpha);
+    }
+    else {
+      /* No opacity to preserve here -- wrap the restored coverage in a fresh Multiply so the
+       * layer keeps an editable one going forward. */
+      layer_factor_coverage_link(
+          *chain.tree, *layer.node, *coverage_socket, *map_link->fromnode, *alpha, 1.0f);
+    }
   }
 
   Set<bNodeTree *> touched_trees;

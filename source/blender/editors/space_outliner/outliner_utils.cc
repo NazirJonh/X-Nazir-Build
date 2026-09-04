@@ -372,7 +372,10 @@ float outliner_right_columns_width(const SpaceOutliner *space_outliner)
         return 0.0f;
       }
       /* How wide the two columns are is the source's call: an opacity slider and a shape key
-       * value want different room than a blend-mode menu. */
+       * value want different room than a blend-mode menu. With Large rows on the two stack in one
+       * column instead of sitting side by side, but each still gets the combined width -- the row
+       * is two units tall, room enough for one full-height button above the other, and neither
+       * needs to shrink to make room for it. */
       const StackColumnLayout layout = stack_source_for_space(*space_outliner)->column_layout();
       if ((space_outliner->stack_layers_flag & SO_SL_HIDE_OPACITY) == 0) {
         num_columns += layout.value_width;

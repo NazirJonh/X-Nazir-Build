@@ -113,11 +113,21 @@ void layer_model_read_mix(const bNode &node,
   r_layer.owner_tree = &node.owner_tree();
   r_layer.blend = mix.blend;
   r_layer.enabled = !muted;
-  r_layer.factor = mix.factor;
-  if (BKE_paint_material_source_socket(*mix.factor) != nullptr) {
+  if (mix.factor_opacity != nullptr) {
+    /* Coverage and the layer's own opacity coexist: the row's editable value is the Multiply's
+     * other input, not the linked socket that actually feeds the Mix's Factor. */
+    r_layer.factor = mix.factor_opacity;
+    r_layer.has_mask = true;
+    r_layer.opacity =
+        static_cast<const bNodeSocketValueFloat *>(mix.factor_opacity->default_value)->value;
+  }
+  else if (BKE_paint_material_source_socket(*mix.factor) != nullptr) {
+    /* Linked with nothing to separate an opacity from -- legacy shape, nothing to edit. */
+    r_layer.factor = nullptr;
     r_layer.has_mask = true;
   }
   else {
+    r_layer.factor = mix.factor;
     r_layer.opacity = static_cast<const bNodeSocketValueFloat *>(mix.factor->default_value)->value;
   }
 }
@@ -384,9 +394,16 @@ PaintMaterialLayerStackEntry layer_model_entry_from_node(const Material &materia
     return entry;
   }
   ID &tree_id = const_cast<ID &>(owner_tree->id);
-  if (layer.factor != nullptr && !layer.has_mask) {
+  /* #layer.factor is only ever the constant a layer actually has to edit -- either a bare Factor,
+   * or the Multiply's opacity input when coverage and opacity coexist -- and is null in the one
+   * remaining case, a legacy link straight into Factor with nothing to separate an opacity from.
+   * See #layer_model_read_mix. */
+  if (layer.factor != nullptr) {
+    /* #RNA_PaintMaterialLayerOpacity, not #RNA_NodeSocket's own "default_value": the layer stack
+     * always shows opacity as 0-100%, independent of the user's Factor Display preference, which
+     * a plain node-socket property would otherwise follow. */
     entry.factor_prop = RNA_pointer_create_discrete(
-        &tree_id, RNA_NodeSocket, const_cast<bNodeSocket *>(layer.factor));
+        &tree_id, RNA_PaintMaterialLayerOpacity, const_cast<bNodeSocket *>(layer.factor));
   }
   /* An unregistered node type has no typeinfo; a Mix group has one without a blend enum. */
   if (layer.node->typeinfo != nullptr && layer.node->typeinfo->rna_ext.srna != nullptr) {

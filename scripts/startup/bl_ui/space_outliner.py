@@ -592,7 +592,7 @@ class OUTLINER_PT_stack_layers_filter(Panel):
         col = layout.column(heading="Columns", align=True)
         col.prop(space, "show_stack_layer_opacity", text="Value")
         col.prop(space, "show_stack_layer_blend", text="Mode")
-        col.prop(space, "use_stack_layer_visibility_left", text="Visibility First")
+        col.prop(space, "use_stack_layer_visibility_left", text="Visibility Left Side")
 
         col = layout.column(heading="Rows", align=True)
         col.prop(space, "show_stack_layer_channels", text="Contents")

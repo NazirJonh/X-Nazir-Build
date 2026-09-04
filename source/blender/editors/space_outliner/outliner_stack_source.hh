@@ -451,6 +451,25 @@ class StackSource {
   {
     return -1;
   }
+
+  /**
+   * Bring \a owner's graph into the shape the rest of this interface expects, before its rows are
+   * read for the first time after a focus change.
+   *
+   * A stack built by hand, by an older tool version, or read back from a file that predates a
+   * contract revision can still have a bare bottom row -- one with no Mix node, and so no Factor
+   * for #StackRow::value_ptr to point at. Rows still read correctly either way, but a bare bottom
+   * shows no value. Rather than rewriting the graph as a side effect of drawing it, the read side
+   * calls this once per focus change, so the conversion is its own explicit, undoable step tied to
+   * opening the stack, not a hidden effect of looking at it. Sources with no such legacy shape can
+   * leave this as the no-op default.
+   *
+   * \return true when the graph actually changed, so the caller knows to push an undo step.
+   */
+  virtual bool normalize_for_read(bContext & /*C*/, ID & /*owner*/) const
+  {
+    return false;
+  }
 };
 
 /* The built-in sources. Defined in their own files, listed by `outliner_stack_source.cc`. */

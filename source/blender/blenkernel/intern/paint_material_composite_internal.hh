@@ -25,6 +25,16 @@ struct CompositeMixNode {
    * the edit operations must keep reading it as one. Only the evaluator may refuse it.
    */
   bool blend_supported = true;
+  /**
+   * When #factor is linked through a Math node in Multiply mode that combines a per-pixel
+   * coverage source with a plain constant: that constant -- the layer's own editable opacity,
+   * kept alongside coverage rather than replaced by it. Null when #factor is a bare constant
+   * already, or linked to something this shape does not recognize.
+   */
+  const bNodeSocket *factor_opacity = nullptr;
+  /** The Multiply's other, linked input -- what #factor_opacity multiplies against. Only set
+   * alongside #factor_opacity. */
+  const bNodeSocket *factor_coverage = nullptr;
 };
 
 struct Material;

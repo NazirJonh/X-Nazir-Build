@@ -21,6 +21,7 @@
 
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
+#include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_attribute.h"
@@ -1242,6 +1243,25 @@ static std::optional<std::string> rna_UnifiedPaintSettings_path(const PointerRNA
   return std::nullopt;
 }
 
+/**
+ * A paint layer's opacity is a node socket's `default_value`, a plain #PROP_FACTOR that Blender
+ * shows as 0.0-1.0 or 0-100% depending on the user's own Factor Display preference (`U`).
+ * #PaintMaterialLayerOpacity wraps the same float behind a property that is always a percentage,
+ * independent of that preference: the layer stack's own convention, not the general node-editor
+ * one, and everywhere else in Blender that shows a Factor keeps following the user's choice.
+ */
+static float rna_PaintMaterialLayerOpacity_value_get(PointerRNA *ptr)
+{
+  const bNodeSocket *socket = static_cast<const bNodeSocket *>(ptr->data);
+  return socket->default_value_typed<bNodeSocketValueFloat>()->value * 100.0f;
+}
+
+static void rna_PaintMaterialLayerOpacity_value_set(PointerRNA *ptr, const float value)
+{
+  bNodeSocket *socket = static_cast<bNodeSocket *>(ptr->data);
+  socket->default_value_typed<bNodeSocketValueFloat>()->value = value / 100.0f;
+}
+
 }  // namespace blender
 
 #else
@@ -2303,6 +2323,34 @@ static void rna_def_vertex_paint(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
+/**
+ * A stand-alone wrapper around a paint layer's opacity node socket, so the layer stack's Value
+ * column can always read and write it as 0-100%, independent of the user's Factor Display
+ * preference. Backed by function pointers rather than `RNA_def_struct_sdna`: `ptr->data` is a
+ * `bNodeSocket *`, not a struct of this type's own.
+ */
+static void rna_def_paint_material_layer_opacity(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "PaintMaterialLayerOpacity", nullptr);
+  RNA_def_struct_ui_text(srna,
+                         "Paint Layer Opacity",
+                         "A paint layer's opacity, always shown as a percentage regardless of "
+                         "the Factor Display preference");
+
+  prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_PERCENTAGE);
+  RNA_def_property_range(prop, 0.0f, 100.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 100.0f, 1, 1);
+  RNA_def_property_float_funcs(prop,
+                               "rna_PaintMaterialLayerOpacity_value_get",
+                               "rna_PaintMaterialLayerOpacity_value_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Opacity", "How much this paint layer covers what is below it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+}
+
 static void rna_def_paint_mode(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3245,6 +3293,7 @@ void RNA_def_sculpt_paint(BlenderRNA *brna)
   rna_def_gp_sculptpaint(brna);
   rna_def_gp_weightpaint(brna);
   rna_def_vertex_paint(brna);
+  rna_def_paint_material_layer_opacity(brna);
   rna_def_paint_mode(brna);
   rna_def_image_paint(brna);
   rna_def_particle_edit(brna);

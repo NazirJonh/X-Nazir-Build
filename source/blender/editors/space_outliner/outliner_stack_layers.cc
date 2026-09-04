@@ -34,6 +34,7 @@
 
 #include "ED_object.hh"
 #include "ED_screen.hh"
+#include "ED_undo.hh"
 
 #include "RNA_access.hh"
 #include "RNA_enum_types.hh"
@@ -598,6 +599,17 @@ bool outliner_stack_focus_set(bContext *C,
   outliner_stack_rows_invalidate(space_outliner);
   space_outliner.outlinevis = SO_STACK_LAYERS;
   space_outliner.stack_layers_view = SO_SL_VIEW_STACK;
+
+  /* A stack that predates a contract revision, or was built by hand, can still have a bare bottom
+   * row; bringing it in line is an explicit, undoable step tied to opening the stack here, not a
+   * side effect of reading it every redraw -- see #StackSource::normalize_for_read. */
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner != nullptr &&
+      stack_source_for_space(space_outliner)->normalize_for_read(*C, *owner))
+  {
+    ED_undo_push(C, "Normalize Layer Stack");
+  }
 
   if (enter_paint_mode) {
     BKE_view_layer_base_select_and_set_active(view_layer, base);

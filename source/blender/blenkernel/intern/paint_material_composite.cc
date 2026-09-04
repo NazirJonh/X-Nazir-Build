@@ -271,6 +271,44 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
 
 /** \} */
 
+/**
+ * Whether \a r_mix.factor is linked through a Math node in Multiply mode that combines a
+ * per-pixel coverage source with a plain constant, and if so, fills in #factor_opacity and
+ * #factor_coverage.
+ *
+ * Coverage and opacity coexist this way: the layer's own image still drives per-pixel coverage
+ * through the Multiply's linked input, and the other, unlinked input is a constant the user can
+ * still edit -- unlike a bare link straight into the Mix's Factor, which leaves nothing to edit.
+ */
+static void composite_mix_factor_opacity_detect(CompositeMixNode &r_mix)
+{
+  if (r_mix.factor == nullptr) {
+    return;
+  }
+  const bNode *source = composite_source_node_shallow(*r_mix.factor);
+  if (source == nullptr || source->type_legacy != SH_NODE_MATH ||
+      NodeMathOperation(source->custom1) != NODE_MATH_MULTIPLY)
+  {
+    return;
+  }
+  const bNodeSocket *value_a = static_cast<const bNodeSocket *>(
+      BLI_findlink(&source->inputs, 0));
+  const bNodeSocket *value_b = static_cast<const bNodeSocket *>(
+      BLI_findlink(&source->inputs, 1));
+  if (value_a == nullptr || value_b == nullptr) {
+    return;
+  }
+  const bool a_linked = !value_a->directly_linked_links().is_empty();
+  const bool b_linked = !value_b->directly_linked_links().is_empty();
+  /* Exactly one side has to be the coverage source and the other a plain constant; both linked,
+   * or neither, is not this shape, and the legacy all-or-nothing reading takes over instead. */
+  if (a_linked == b_linked) {
+    return;
+  }
+  r_mix.factor_coverage = a_linked ? value_a : value_b;
+  r_mix.factor_opacity = a_linked ? value_b : value_a;
+}
+
 bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
 {
   if (BKE_paint_material_is_normal_combine_group(node)) {
@@ -280,6 +318,7 @@ bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
     r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "A"_ustr);
     r_mix.top = bke::node_find_socket(node, SOCK_IN, "B"_ustr);
     r_mix.blend = CompositeBlend::NormalCombine;
+    composite_mix_factor_opacity_detect(r_mix);
     return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
   }
   if (node.type_legacy == SH_NODE_MIX_RGB_LEGACY) {
@@ -287,6 +326,7 @@ bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
     r_mix.factor = bke::node_find_socket(node, SOCK_IN, "Fac"_ustr);
     r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "Color1"_ustr);
     r_mix.top = bke::node_find_socket(node, SOCK_IN, "Color2"_ustr);
+    composite_mix_factor_opacity_detect(r_mix);
     return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
   }
   if (node.type_legacy == SH_NODE_MIX) {
@@ -303,6 +343,7 @@ bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
     r_mix.factor = bke::node_find_socket(node, SOCK_IN, "Factor_Float"_ustr);
     r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "A_Color"_ustr);
     r_mix.top = bke::node_find_socket(node, SOCK_IN, "B_Color"_ustr);
+    composite_mix_factor_opacity_detect(r_mix);
     return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
   }
   return false;
@@ -522,8 +563,20 @@ static bool composite_stack_collect(const bNodeSocket &socket,
   if (!composite_image_from_socket(*mix.top, layer.color_image, layer.color_iuser)) {
     return false;
   }
-  if (BKE_paint_material_source_socket(*mix.factor) != nullptr) {
-    /* A linked factor is a mask, and only an image one can be sampled per pixel. */
+  if (mix.factor_opacity != nullptr) {
+    /* Coverage and the layer's own opacity coexist: the mask comes from the Multiply's other
+     * input, not from #mix.factor itself. */
+    if (!composite_image_from_socket(
+            *mix.factor_coverage, layer.mask_image, layer.mask_iuser, &layer.mask_from_alpha))
+    {
+      return false;
+    }
+    layer.opacity =
+        static_cast<const bNodeSocketValueFloat *>(mix.factor_opacity->default_value)->value;
+  }
+  else if (BKE_paint_material_source_socket(*mix.factor) != nullptr) {
+    /* A linked factor with nothing to separate an opacity from is a mask alone, and only an image
+     * one can be sampled per pixel. */
     if (!composite_image_from_socket(
             *mix.factor, layer.mask_image, layer.mask_iuser, &layer.mask_from_alpha))
     {

@@ -271,7 +271,9 @@ class PaintMaterialStackSource final : public StackSource {
                                   ICON_IMAGE_RGB;
       if (entry.factor_prop) {
         row.value_ptr = *entry.factor_prop;
-        row.value_prop = "default_value";
+        /* #RNA_PaintMaterialLayerOpacity's own "value", always 0-100%; see
+         * #layer_model_entry_from_node. */
+        row.value_prop = "value";
       }
       if (entry.blend_prop) {
         row.mode_ptr = *entry.blend_prop;
@@ -721,6 +723,19 @@ class PaintMaterialStackSource final : public StackSource {
     /* Session UIDs survive undo, addresses do not, and the bindings this pointer claims to own may
      * have been restored to something else entirely. */
     g_bindings_owner = nullptr;
+  }
+
+  bool normalize_for_read(bContext &C, ID &owner) const override
+  {
+    if (!this->is_editable(owner)) {
+      return false;
+    }
+    Material &material = reinterpret_cast<Material &>(owner);
+    if (!BKE_paint_material_layer_bottom_normalize(*CTX_data_main(&C), material)) {
+      return false;
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
   }
 };
 

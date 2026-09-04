@@ -1011,6 +1011,23 @@ static void namebutton_fn(bContext *C, TreeStoreElem *tselem, const char *oldnam
           undo_str = CTX_N_(BLT_I18NCONTEXT_OPERATOR_DEFAULT, "Rename Shape Key");
           break;
         }
+        case TSE_STACK_LAYER: {
+          /* The field typed into one channel's node label; a layer is the same row in every
+           * channel it appears in, so the edit API is what carries the name to the rest of them.
+           * Restore the old one first, the way the other cases here do, so that a name the source
+           * refuses -- an empty one, most of all -- leaves the row as it was. */
+          char *name_buffer = outliner_stack_row_name_buffer(*space_outliner, tselem->nr);
+          if (name_buffer == nullptr) {
+            break;
+          }
+          char newname[MAX_NAME];
+          STRNCPY_UTF8(newname, name_buffer);
+          BLI_strncpy_utf8(name_buffer, oldname, MAX_NAME);
+          if (outliner_stack_row_rename(C, *space_outliner, tselem->nr, newname)) {
+            undo_str = CTX_N_(BLT_I18NCONTEXT_OPERATOR_DEFAULT, "Rename Layer");
+          }
+          break;
+        }
         default:
           break;
       }
@@ -2502,17 +2519,36 @@ static void outliner_buttons(const bContext *C,
     len = MAX_ID_NAME - 2;
   }
 
+  SpaceOutliner &space_outliner = *CTX_wm_space_outliner(C);
+  /* What the field edits. Normally the element's own name, which for a renameable element points
+   * at the real name in the data -- so the text survives the rebuilds that happen while the field
+   * is open. A stack row's #TreeElement.name is only a copy, so the source hands out the storage
+   * it derives that name from instead. */
+  char *name_buffer = (char *)te->name;
+  if (tselem->type == TSE_STACK_LAYER) {
+    name_buffer = outliner_stack_row_name_buffer(space_outliner, tselem->nr);
+    if (name_buffer == nullptr) {
+      tselem->flag &= ~TSE_TEXTBUT;
+      return;
+    }
+    /* A layer's name is kept in a node label. */
+    len = MAX_NAME;
+  }
+
   spx = te->xs + 1.8f * UI_UNIT_X;
   dx = region->v2d.cur.xmax - (spx + restrict_column_width + 0.2f * UI_UNIT_X);
+  /* A tall Stack Layers row keeps its content centered rather than at its bottom edge, which is
+   * what `te->ys` is; the field has to sit on the name it replaces. */
+  const int spy = stack_row_content_y(space_outliner, *te);
 
   bt = uiDefBut(block,
                 ui::ButtonType::Text,
                 "",
                 spx,
-                te->ys,
+                spy,
                 dx,
                 UI_UNIT_Y - 1,
-                (void *)te->name,
+                name_buffer,
                 1.0,
                 float(len),
                 "");

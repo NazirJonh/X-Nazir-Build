@@ -90,6 +90,23 @@ struct SpaceOutliner_Runtime {
    * back unselected under its new ordinal.
    */
   int stack_pending_select_ordinal = -1;
+  /**
+   * Whether #stack_pending_select_ordinal is to be applied at all.
+   *
+   * Distinct from the ordinal being negative: an edit that takes a row away -- a remove, an
+   * ungroup -- has no row to hand the selection to, and still has to strip the rows it renumbered
+   * of the selected and active flags they would otherwise inherit from whichever row held their
+   * new ordinal the last time the tree was built.
+   */
+  bool stack_pending_select_apply = false;
+  /**
+   * Groups that were open a moment ago, to be reopened and cleared the next time the tree is
+   * built -- the same problem #stack_pending_select_ordinal solves for the selected row, but for
+   * every group an edit's renumbering might otherwise leave collapsed. Keyed by #StackRow::
+   * stable_id rather than ordinal, since ordinal is exactly what an edit that reshuffles rows
+   * changes.
+   */
+  Vector<bUUID> stack_pending_open_markers;
 
   SpaceOutliner_Runtime() = default;
   /** Used for copying runtime data to a duplicated space. */
@@ -603,6 +620,23 @@ bool outliner_stack_row_move(bContext *C,
                              ed::outliner::StackMovePlace place,
                              int *r_ordinal = nullptr);
 bool outliner_stack_row_remove(bContext *C, SpaceOutliner &space_outliner, int ordinal);
+/**
+ * Give a row a new name, reporting to the user's status bar when the source refuses.
+ *
+ * Shared by the rename operator and by the Outliner's own in-row text button, so that typing a
+ * name over a row and asking for one through the menu go through the same edit.
+ */
+/**
+ * The storage a rename field types into for a row, or null when the row cannot be renamed.
+ *
+ * See #ed::outliner::StackRow::name_buffer: it holds at least #MAX_NAME bytes and outlives the
+ * rows, which is what a text button being edited across redraws needs.
+ */
+char *outliner_stack_row_name_buffer(const SpaceOutliner &space_outliner, int ordinal);
+bool outliner_stack_row_rename(bContext *C,
+                               SpaceOutliner &space_outliner,
+                               int ordinal,
+                               StringRefNull name);
 /**
  * Create a row and, when the source reports where it landed, activate it.
  *

@@ -323,7 +323,8 @@ void OUTLINER_OT_item_openclose(wmOperatorType *ot)
 /** \name Rename Operator
  * \{ */
 
-static void do_item_rename(ARegion *region,
+static void do_item_rename(bContext *C,
+                           ARegion *region,
                            TreeElement *te,
                            TreeStoreElem *tselem,
                            ReportList *reports)
@@ -355,7 +356,11 @@ static void do_item_rename(ARegion *region,
            TSE_SCENE_OBJECTS_BASE,
            TSE_GENERIC_LABEL,
            TSE_GPENCIL_EFFECT_BASE,
-           TSE_SHAPE_KEY_BASE))
+           TSE_SHAPE_KEY_BASE) ||
+      /* Of the Stack Layers rows only the layers carry a name of their own: the base is the row
+       * for the data-block the stack belongs to, and a channel row stands for a map that is named
+       * by renaming the image it points at. */
+      ELEM(tselem->type, TSE_STACK_BASE, TSE_STACK_ITEM))
   {
     BKE_report(reports, RPT_INFO, "Not an editable name");
   }
@@ -376,6 +381,22 @@ static void do_item_rename(ARegion *region,
     }
     else {
       add_textbut = true;
+    }
+  }
+  else if (tselem->type == TSE_STACK_LAYER) {
+    /* The field types straight into the node label the stack reads its name from, so the label has
+     * to already hold what the row is showing: a layer named after its map or its node has no
+     * label yet, and an empty field would read as a name the user just deleted. Setting it here
+     * rather than letting the field open empty is also what makes Escape put the row back the way
+     * it was. */
+    SpaceOutliner &space_outliner = *CTX_wm_space_outliner(C);
+    if (outliner_stack_row_name_buffer(space_outliner, tselem->nr) != nullptr &&
+        outliner_stack_row_rename(C, space_outliner, tselem->nr, te->name))
+    {
+      add_textbut = true;
+    }
+    else {
+      BKE_report(reports, RPT_INFO, "Not an editable name");
     }
   }
   else if (te->idcode == ID_LI) {
@@ -399,7 +420,7 @@ void item_rename_fn(bContext *C,
                     TreeStoreElem *tselem)
 {
   ARegion *region = CTX_wm_region(C);
-  do_item_rename(region, te, tselem, reports);
+  do_item_rename(C, region, te, tselem, reports);
 }
 
 static TreeElement *outliner_item_rename_find_active(const SpaceOutliner *space_outliner,
@@ -461,7 +482,7 @@ static wmOperatorStatus outliner_item_rename_invoke(bContext *C,
     outliner_scroll_view(space_outliner, region, delta_y);
   }
 
-  do_item_rename(region, te, TREESTORE(te), op->reports);
+  do_item_rename(C, region, te, TREESTORE(te), op->reports);
 
   return OPERATOR_FINISHED;
 }

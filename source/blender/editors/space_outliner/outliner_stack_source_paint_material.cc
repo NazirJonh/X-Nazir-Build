@@ -257,6 +257,7 @@ class PaintMaterialStackSource final : public StackSource {
       StackRow row;
       row.ordinal = entry.ordinal;
       row.depth = entry.depth;
+      row.stable_id = entry.marker;
       /* Filled in below: the model lists a group after the layers it holds, so the enclosing row
        * is not in `r_rows` yet. */
       row.parent_ordinal = -1;
@@ -266,6 +267,7 @@ class PaintMaterialStackSource final : public StackSource {
       row.supported = entry.supported;
       row.unsupported_reason = entry.unsupported_reason;
       row.name = std::move(entry.name);
+      row.name_buffer = entry.label;
       row.icon = entry.is_group ? ICON_FILE_FOLDER :
                  entry.has_mask ? ICON_MOD_MASK :
                                   ICON_IMAGE_RGB;

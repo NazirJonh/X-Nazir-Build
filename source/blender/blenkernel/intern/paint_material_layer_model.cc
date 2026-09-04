@@ -18,6 +18,7 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_layer_edit.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "BLI_listbase_iterator.hh"
@@ -352,16 +353,18 @@ bool layer_model_from_channel(const Material &material,
 /** The name a user recognizes: their own node label, else the layer's map, else the node name. */
 std::string layer_model_name_get(const LayerModelNode &layer)
 {
+  /* A label the user set wins over every derived name, groups included: renaming a row writes the
+   * label, so reading the group's node tree first would make renaming a folder do nothing. */
+  if (layer.node != nullptr && layer.node->label[0] != '\0') {
+    return layer.node->label;
+  }
   if (layer.group_node != nullptr && layer.group_node->id != nullptr) {
-    /* A group is named after its node tree: that is the name the Shader Editor shows for it, and
-     * renaming it there should rename the row. */
+    /* An unlabeled group is named after its node tree: that is the name the Shader Editor shows
+     * for it, and renaming it there should rename the row. */
     return layer.group_node->id->name + 2;
   }
   if (layer.node == nullptr) {
     return "Unsupported layer";
-  }
-  if (layer.node->label[0] != '\0') {
-    return layer.node->label;
   }
   if (layer.image != nullptr) {
     return layer.image->id.name + 2;
@@ -388,12 +391,18 @@ PaintMaterialLayerStackEntry layer_model_entry_from_node(const Material &materia
   entry.has_mask = layer.has_mask;
   entry.supported = layer.supported;
   entry.unsupported_reason = layer.unsupported_reason;
+  entry.marker = layer.node ? BKE_paint_material_layer_marker_get(*layer.node) : BLI_uuid_nil();
   const bNodeTree *owner_tree = layer.owner_tree ? layer.owner_tree :
                                                     (layer.node ? &layer.node->owner_tree() : nullptr);
   if (layer.node == nullptr || owner_tree == nullptr) {
     return entry;
   }
   ID &tree_id = const_cast<ID &>(owner_tree->id);
+  /* A bare base has no Mix node of its own to carry a label, and an unsupported row is one this
+   * file could not read in the first place; every other row is named through its node. */
+  if (!layer.is_bare_base && layer.supported) {
+    entry.label = const_cast<char *>(layer.node->label);
+  }
   /* #layer.factor is only ever the constant a layer actually has to edit -- either a bare Factor,
    * or the Multiply's opacity input when coverage and opacity coexist -- and is null in the one
    * remaining case, a legacy link straight into Factor with nothing to separate an opacity from.

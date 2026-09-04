@@ -36,7 +36,8 @@ TreeElementStackLayer::TreeElementStackLayer(TreeElement &legacy_te, const Stack
 {
   BLI_assert(legacy_te_.store_elem->type == TSE_STACK_LAYER);
   /* The row's own string lives in the space runtime, which is rebuilt whenever the stack changes;
-   * the tree element outlives that, so it keeps a copy. */
+   * the tree element outlives that, so it keeps a copy. Display only -- a rename types into
+   * #StackRow::name_buffer instead, which is the source's storage and survives a rebuild. */
   legacy_te_.name = BLI_strdup(row.name.c_str());
   legacy_te_.flag |= TE_FREE_NAME;
 }

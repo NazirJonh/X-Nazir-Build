@@ -32,6 +32,7 @@
 
 #include "BLI_map.hh"
 #include "BLI_span.hh"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "DNA_scene_types.h"
@@ -138,7 +139,23 @@ struct PaintMaterialLayerStackEntry {
   bool is_group = false;
   /** The row is a bare Image Texture wired straight into the channel, not a blended layer. */
   bool is_bare_base = false;
+  /**
+   * The layer's identity, nil for a bare base (it has no Mix node to carry one). Stable across an
+   * edit that moves the row -- unlike #ordinal, which is only ever a position -- so a caller that
+   * has to recognize the same row again after one, such as the Outliner keeping it open or
+   * selected, can key off this instead.
+   */
+  bUUID marker = {};
   std::string name;
+  /**
+   * The layer's own name as editable storage, or null when the row has none.
+   *
+   * #name is what the row reads as, which falls back to the layer's map or its node when the user
+   * has set no name; this is the #bNode::label that name is set through, handed out so that a UI
+   * text field can type straight into it rather than into a copy that the next rebuild discards.
+   * Null for a bare base, which has no Mix node to carry a label, and for an unsupported row.
+   */
+  char *label = nullptr;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   bool enabled = true;

@@ -27,6 +27,7 @@
 #include "BKE_main.hh"
 #include "BKE_report.hh"
 
+#include "BLI_map.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 
@@ -118,6 +119,54 @@ void stack_selected_ordinals_get(SpaceOutliner &space_outliner, Vector<int> &r_o
     }
   });
   std::sort(r_ordinals.begin(), r_ordinals.end());
+}
+
+/**
+ * Stable ids of the groups the user currently has open, by way of #StackRow::stable_id.
+ *
+ * Ordinal alone cannot answer "is this still open" once an edit renumbers rows -- which is
+ * exactly the question a caller about to invalidate #SpaceOutliner_Runtime::stack_rows needs
+ * answered first, so it can ask for the same groups back open afterwards; see
+ * #SpaceOutliner_Runtime::stack_pending_open_markers.
+ */
+void stack_open_group_markers_get(SpaceOutliner &space_outliner, Vector<bUUID> &r_markers)
+{
+  r_markers.clear();
+  Map<int, bUUID> ordinal_to_marker;
+  for (const StackRow &row : space_outliner.runtime->stack_rows) {
+    if (row.is_group && !BLI_uuid_is_nil(row.stable_id)) {
+      ordinal_to_marker.add(int(row.ordinal), row.stable_id);
+    }
+  }
+  tree_iterator::all(space_outliner, [&](const TreeElement *te) {
+    const TreeStoreElem *tselem = TREESTORE(te);
+    if (tselem->type != TSE_STACK_LAYER || (tselem->flag & TSE_CLOSED)) {
+      return;
+    }
+    if (const bUUID *marker = ordinal_to_marker.lookup_ptr(int(tselem->nr))) {
+      r_markers.append(*marker);
+    }
+  });
+}
+
+/**
+ * Remember, for the next tree build, what the edit about to run is about to renumber away.
+ *
+ * Every structural edit -- an add, a remove, a move, a group -- recomputes ordinals, and an
+ * ordinal is what the tree store keys a row's collapsed, selected and active state on. Without
+ * this the rows past the edit come back wearing whatever state the rows that used to hold their
+ * numbers left behind: open folders snap shut, and the selection lands on a row nobody picked.
+ *
+ * Must be called *before* #outliner_stack_rows_invalidate, while the rows and the tree still agree
+ * on what each ordinal means. \a select_ordinal is the row to read as selected afterwards, or -1
+ * when the edit leaves none -- which still clears the inherited flags off every other row.
+ */
+void stack_pending_state_set(SpaceOutliner &space_outliner, const int select_ordinal)
+{
+  SpaceOutliner_Runtime &runtime = *space_outliner.runtime;
+  stack_open_group_markers_get(space_outliner, runtime.stack_pending_open_markers);
+  runtime.stack_pending_select_ordinal = select_ordinal;
+  runtime.stack_pending_select_apply = true;
 }
 
 /**
@@ -319,6 +368,9 @@ wmOperatorStatus stack_rows_group_exec(bContext *C, wmOperator *op)
   if (group_ordinal < 0) {
     return OPERATOR_CANCELLED;
   }
+  /* Wrapping a run of rows inserts the folder row among them, so everything above it is
+   * renumbered; the folder itself is what the user is left working with. */
+  stack_pending_state_set(*space_outliner, group_ordinal);
   outliner_stack_rows_invalidate(*space_outliner);
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
   return OPERATOR_FINISHED;
@@ -340,6 +392,8 @@ wmOperatorStatus stack_group_add_exec(bContext *C, wmOperator *op)
   if (group_ordinal < 0) {
     return OPERATOR_CANCELLED;
   }
+  /* An empty folder is inserted into the stack, so every row above it has a new ordinal. */
+  stack_pending_state_set(*space_outliner, group_ordinal);
   outliner_stack_rows_invalidate(*space_outliner);
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
   return OPERATOR_FINISHED;
@@ -362,6 +416,10 @@ wmOperatorStatus stack_row_ungroup_exec(bContext *C, wmOperator *op)
   {
     return OPERATOR_CANCELLED;
   }
+  /* The folder row is gone and its contents took its place, so there is no row left to hand the
+   * selection to -- but the rows that moved up still have to be stripped of the state the tree
+   * store holds under their new ordinals. */
+  stack_pending_state_set(*space_outliner, -1);
   outliner_stack_rows_invalidate(*space_outliner);
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
   return OPERATOR_FINISHED;
@@ -385,6 +443,9 @@ wmOperatorStatus stack_row_duplicate_exec(bContext *C, wmOperator *op)
   if (new_ordinal < 0) {
     return OPERATOR_CANCELLED;
   }
+  /* The copy is inserted above its original, so the rows over it are renumbered; the copy is what
+   * the user means to work on next. */
+  stack_pending_state_set(*space_outliner, new_ordinal);
   outliner_stack_rows_invalidate(*space_outliner);
   outliner_stack_row_activate(C, *space_outliner, new_ordinal);
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
@@ -398,25 +459,14 @@ wmOperatorStatus stack_row_rename_exec(bContext *C, wmOperator *op)
   if (ordinal < 0) {
     return OPERATOR_CANCELLED;
   }
-  const StackReadContext ctx = outliner_stack_read_context(*C);
-  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
-  if (owner == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
   char name[MAX_NAME];
   RNA_string_get(op->ptr, "name", name);
   if (name[0] == '\0') {
     BKE_report(op->reports, RPT_ERROR, "A layer needs a name");
     return OPERATOR_CANCELLED;
   }
-  if (!stack_source_for_space(*space_outliner)
-           ->row_rename(*C, space_outliner->runtime->stack_focus, *owner, ordinal, name))
-  {
-    return OPERATOR_CANCELLED;
-  }
-  outliner_stack_rows_invalidate(*space_outliner);
-  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
-  return OPERATOR_FINISHED;
+  return outliner_stack_row_rename(C, *space_outliner, ordinal, name) ? OPERATOR_FINISHED :
+                                                                       OPERATOR_CANCELLED;
 }
 
 wmOperatorStatus stack_row_rename_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
@@ -710,7 +760,10 @@ bool outliner_stack_row_reorder(bContext *C,
   {
     return false;
   }
-  /* Ordinals are positions, so every row past the move has a new one. */
+  /* Ordinals are positions, so every row past the move has a new one. The moved row keeps the
+   * selection -- it is the one the user just acted on -- and the groups they had open have to be
+   * asked for by identity rather than by a number that just changed under them. */
+  stack_pending_state_set(space_outliner, to_ordinal);
   outliner_stack_rows_invalidate(space_outliner);
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
   return true;
@@ -752,9 +805,9 @@ bool outliner_stack_row_move(bContext *C,
   /* Ordinals are positions, so every row past the move has a new one. The moved row itself is
    * the one the user was just working with, so it stays the one selected and active rather than
    * the drop reading as if it landed on nothing. */
+  stack_pending_state_set(space_outliner, new_ordinal);
   outliner_stack_rows_invalidate(space_outliner);
   if (new_ordinal >= 0) {
-    space_outliner.runtime->stack_pending_select_ordinal = new_ordinal;
     outliner_stack_row_activate(C, space_outliner, new_ordinal);
   }
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
@@ -780,6 +833,8 @@ int outliner_stack_row_add(bContext *C,
   if (new_ordinal < 0) {
     return -1;
   }
+  /* Inserting a row renumbers everything above it. */
+  stack_pending_state_set(space_outliner, new_ordinal);
   outliner_stack_rows_invalidate(space_outliner);
   /* A layer the user just asked for is the one they mean to work on next. */
   outliner_stack_row_activate(C, space_outliner, new_ordinal);
@@ -827,6 +882,40 @@ bool outliner_stack_row_remove(bContext *C, SpaceOutliner &space_outliner, const
   {
     return false;
   }
+  /* Taking a row out renumbers everything that was above it, and the row that inherits the removed
+   * one's ordinal must not inherit its selection with it. */
+  stack_pending_state_set(space_outliner, -1);
+  outliner_stack_rows_invalidate(space_outliner);
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+  return true;
+}
+
+char *outliner_stack_row_name_buffer(const SpaceOutliner &space_outliner, const int ordinal)
+{
+  const StackRow *row = (ordinal < 0) ? nullptr : outliner_stack_row_find(space_outliner, ordinal);
+  return (row != nullptr) ? row->name_buffer : nullptr;
+}
+
+bool outliner_stack_row_rename(bContext *C,
+                               SpaceOutliner &space_outliner,
+                               const int ordinal,
+                               const StringRefNull name)
+{
+  if (ordinal < 0 || name.is_empty()) {
+    return false;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner == nullptr) {
+    return false;
+  }
+  if (!stack_source_for_space(space_outliner)
+           ->row_rename(*C, space_outliner.runtime->stack_focus, *owner, ordinal, name))
+  {
+    return false;
+  }
+  /* A rename leaves every ordinal where it was, so the rows come back under the same tree store
+   * keys and there is no pending state to carry across. */
   outliner_stack_rows_invalidate(space_outliner);
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
   return true;

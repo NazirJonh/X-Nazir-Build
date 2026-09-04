@@ -107,7 +107,12 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
    * to read as the one still selected and active, which the tree store cannot do on its own: the
    * row's identity here is its ordinal, and that is exactly what just changed. Applied once and
    * cleared below, rather than every rebuild after. */
+  const bool apply_select = runtime.stack_pending_select_apply;
   const int pending_select = runtime.stack_pending_select_ordinal;
+  /* Same problem, for every group the same edit may have renumbered out from under its own open
+   * state; see #stack_open_group_markers_get. Taken rather than copied, which leaves the runtime
+   * field empty again for the next edit to fill. */
+  const Vector<bUUID> pending_open = std::move(runtime.stack_pending_open_markers);
   for (int64_t index = runtime.stack_rows.size() - 1; index >= 0; index--) {
     StackRow &row = runtime.stack_rows[index];
     TreeElement *parent = base;
@@ -127,7 +132,7 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
     if (layer == nullptr) {
       continue;
     }
-    if (pending_select >= 0) {
+    if (apply_select) {
       TreeStoreElem *layer_tselem = TREESTORE(layer);
       if (row.ordinal == pending_select) {
         layer_tselem->flag |= TSE_SELECTED | TSE_ACTIVE;
@@ -143,6 +148,17 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
       if (!TREESTORE(layer)->used) {
         TREESTORE(layer)->flag &= ~TSE_CLOSED;
       }
+      /* This group's own ordinal may have just changed -- an edit renumbers rows past the one it
+       * acted on -- and the tree store's (type, ordinal, owner) key does not know that is still
+       * the same group the user had open a moment ago; #stable_id does. */
+      if (!BLI_uuid_is_nil(row.stable_id)) {
+        for (const bUUID &marker : pending_open) {
+          if (BLI_uuid_equal(marker, row.stable_id)) {
+            TREESTORE(layer)->flag &= ~TSE_CLOSED;
+            break;
+          }
+        }
+      }
     }
     if (!row.supported || !show_sub_rows) {
       continue;
@@ -152,8 +168,9 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
       add_element(&layer->subtree, owner, &sub_row, layer, TSE_STACK_ITEM, short(index), false);
     }
   }
-  if (pending_select >= 0) {
+  if (apply_select) {
     runtime.stack_pending_select_ordinal = -1;
+    runtime.stack_pending_select_apply = false;
   }
   return tree;
 }

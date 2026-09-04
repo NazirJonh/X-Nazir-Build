@@ -28,6 +28,7 @@
 
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "DNA_space_enums.h"
@@ -64,13 +65,26 @@ struct StackRow {
    * Position in the rebuilt model, and the row's identity for the tree store.
    *
    * Deterministic rather than persistent: it survives a rebuild of an unchanged stack, which is
-   * what collapsed and selected state needs, and is recomputed when the stack itself changes.
+   * what collapsed and selected state needs, and is recomputed when the stack itself changes --
+   * which is exactly when it stops being enough for that: an edit that shifts rows past this one
+   * gives it a new ordinal, and a *different* row already sitting at that number the last time the
+   * tree was built leaves its own collapsed or selected state behind for this one to inherit. See
+   * #stable_id for what survives that.
    */
   int16_t ordinal = 0;
   int depth = 0;
   /** Ordinal of the enclosing group row, or -1 at the top level. */
   int16_t parent_ordinal = -1;
   bool is_group = false;
+  /**
+   * The row's identity across an edit that renumbers it, nil when the source has none to give.
+   *
+   * #ordinal is only a position, recomputed by every rebuild; this is what lets a caller ask "is
+   * this the same row I had open a moment ago" when an edit moved it instead, and carry its
+   * collapsed or selected state across rather than have it settle on whichever row now happens to
+   * share its old ordinal.
+   */
+  bUUID stable_id = {};
   /**
    * The row is the stack's own base rather than a layer laid over something.
    *
@@ -88,6 +102,15 @@ struct StackRow {
   const char *unsupported_reason = nullptr;
 
   std::string name;
+  /**
+   * Where a rename types, or null when the row cannot be renamed.
+   *
+   * #name is what the row reads as and is rebuilt with the rows; this is the source's own storage
+   * for it, at least #MAX_NAME bytes, which outlives a rebuild. The Outliner's in-row rename field
+   * writes here directly, the way it writes into a data-block's name everywhere else -- a field
+   * pointed at a copy would lose every keystroke to the next rebuild.
+   */
+  char *name_buffer = nullptr;
   int icon = 0;
 
   /** Property drawn in the value column, typically an opacity or an influence. */

@@ -83,6 +83,13 @@ struct SpaceOutliner_Runtime {
   const ID *stack_owner = nullptr;
   uint64_t stack_state_hash = 0;
   bool stack_rows_valid = false;
+  /**
+   * A row an edit just moved, to be read and cleared the next time the tree is built: the row's
+   * ordinal is its position, so a move that changes position also changes it, and the tree
+   * element the user was working with -- selected and active a moment ago -- would otherwise come
+   * back unselected under its new ordinal.
+   */
+  int stack_pending_select_ordinal = -1;
 
   SpaceOutliner_Runtime() = default;
   /** Used for copying runtime data to a duplicated space. */
@@ -586,12 +593,15 @@ bool outliner_stack_row_reorder(bContext *C,
  * Move a row next to another one, above it or below it; see #StackSource::row_move.
  *
  * What a drop means, as opposed to the position #outliner_stack_row_reorder takes.
+ *
+ * \param r_ordinal: when given, receives the ordinal the moved row has afterwards.
  */
 bool outliner_stack_row_move(bContext *C,
                              SpaceOutliner &space_outliner,
                              int from_ordinal,
                              int anchor_ordinal,
-                             ed::outliner::StackMovePlace place);
+                             ed::outliner::StackMovePlace place,
+                             int *r_ordinal = nullptr);
 bool outliner_stack_row_remove(bContext *C, SpaceOutliner &space_outliner, int ordinal);
 /**
  * Create a row and, when the source reports where it landed, activate it.
@@ -620,7 +630,6 @@ void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
-void OUTLINER_OT_stack_layer_show_map(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_group(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_group_add(wmOperatorType *ot);

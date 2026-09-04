@@ -477,20 +477,6 @@ bool stack_row_mask_poll(bContext *C)
   return owner != nullptr && stack_source_for_space(*space_outliner)->can_mask(*owner);
 }
 
-wmOperatorStatus stack_row_show_map_exec(bContext *C, wmOperator *op)
-{
-  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
-  if (ordinal < 0) {
-    return OPERATOR_CANCELLED;
-  }
-  const int role = RNA_int_get(op->ptr, "role");
-  return outliner_stack_sub_row_activate(
-             C, *space_outliner, ordinal * STACK_ROW_SUB_ROW_STRIDE + role) ?
-             OPERATOR_FINISHED :
-             OPERATOR_CANCELLED;
-}
-
 bool stack_row_reorder_poll(bContext *C)
 {
   if (!ED_operator_outliner_active(C)) {
@@ -734,7 +720,8 @@ bool outliner_stack_row_move(bContext *C,
                              SpaceOutliner &space_outliner,
                              const int from_ordinal,
                              const int anchor_ordinal,
-                             const StackMovePlace place)
+                             const StackMovePlace place,
+                             int *r_ordinal)
 {
   if (from_ordinal < 0 || anchor_ordinal < 0) {
     return false;
@@ -748,17 +735,28 @@ bool outliner_stack_row_move(bContext *C,
   if (!source.can_reorder(*owner)) {
     return false;
   }
+  int new_ordinal = -1;
   if (!source.row_move(*C,
                        space_outliner.runtime->stack_focus,
                        *owner,
                        from_ordinal,
                        anchor_ordinal,
-                       place))
+                       place,
+                       &new_ordinal))
   {
     return false;
   }
-  /* Ordinals are positions, so every row past the move has a new one. */
+  if (r_ordinal != nullptr) {
+    *r_ordinal = new_ordinal;
+  }
+  /* Ordinals are positions, so every row past the move has a new one. The moved row itself is
+   * the one the user was just working with, so it stays the one selected and active rather than
+   * the drop reading as if it landed on nothing. */
   outliner_stack_rows_invalidate(space_outliner);
+  if (new_ordinal >= 0) {
+    space_outliner.runtime->stack_pending_select_ordinal = new_ordinal;
+    outliner_stack_row_activate(C, space_outliner, new_ordinal);
+  }
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
   return true;
 }
@@ -1135,36 +1133,6 @@ void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot)
               SHRT_MAX);
   RNA_def_boolean(
       ot->srna, "add", true, "Add", "Add a mask, rather than removing the one already there");
-}
-
-void OUTLINER_OT_stack_layer_show_map(wmOperatorType *ot)
-{
-  ot->name = "Show Stack Layer Map";
-  ot->idname = "OUTLINER_OT_stack_layer_show_map";
-  ot->description = "Show one of a layer's maps in an Image Editor";
-  ot->exec = stack_row_show_map_exec;
-  ot->poll = ED_operator_outliner_active;
-  /* A view change, not an edit: nothing here belongs in an undo step. */
-  ot->flag = OPTYPE_INTERNAL;
-
-  RNA_def_int(ot->srna,
-              "ordinal",
-              -1,
-              -1,
-              SHRT_MAX,
-              "Ordinal",
-              "Layer whose map to show; -1 uses the active one",
-              -1,
-              SHRT_MAX);
-  RNA_def_int(ot->srna,
-              "role",
-              0,
-              0,
-              STACK_ROW_SUB_ROW_STRIDE - 1,
-              "Role",
-              "Which of the layer's maps to show, as the source numbers them",
-              0,
-              STACK_ROW_SUB_ROW_STRIDE - 1);
 }
 
 void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot)

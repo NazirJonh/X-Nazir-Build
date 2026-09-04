@@ -276,6 +276,8 @@ enum eSpaceOutliner_StackLayersFlag : short {
    * while the columns keep the toggles of every row aligned however deeply they are nested.
    */
   SO_SL_VISIBILITY_LEFT = (1 << 6),
+  /** Group channel rows into alternating pairs instead of alternating every channel row. */
+  SO_SL_PAIR_CHANNELS = (1 << 7),
 };
 ENUM_OPERATORS(eSpaceOutliner_StackLayersFlag)
 

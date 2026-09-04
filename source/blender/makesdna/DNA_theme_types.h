@@ -435,6 +435,12 @@ typedef struct ThemeSpace {
   unsigned char edited_object[4];
   /** Outliner - row color difference. */
   unsigned char row_alternate[4];
+  /** Outliner - Stack Layers band color difference. Falls back to `row_alternate` when unset
+   * (alpha zero), so themes saved before this field existed keep their previous look. */
+  unsigned char stack_layer_alternate[4];
+  /** Pad #ThemeSpace back to an 8-byte multiple: #bTheme embeds it many times and every
+   * embedded struct needs to start 8-byte aligned. */
+  char _pad12[4];
 
   /** Skin modifier root color. */
   unsigned char skin_root[4];

@@ -422,7 +422,8 @@ class PaintMaterialStackSource final : public StackSource {
                 ID &owner,
                 const int from_ordinal,
                 const int anchor_ordinal,
-                const StackMovePlace place) const override
+                const StackMovePlace place,
+                int *r_ordinal) const override
   {
     Material &material = reinterpret_cast<Material &>(owner);
     /* The seam speaks of rows, this file speaks of layers; the two vocabularies meet here. */
@@ -439,17 +440,14 @@ class PaintMaterialStackSource final : public StackSource {
         break;
     }
     PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
-    if (!BKE_paint_material_layer_move(
-            *CTX_data_main(&C), material, from_ordinal, anchor_ordinal, layer_place, &error))
+    if (!BKE_paint_material_layer_move(*CTX_data_main(&C),
+                                       material,
+                                       from_ordinal,
+                                       anchor_ordinal,
+                                       layer_place,
+                                       r_ordinal,
+                                       &error))
     {
-      /* TEMP DEBUG: remove once the group drop is confirmed. */
-      printf("[SLDROP] move %d beside %d (place=%d) failed, error=%d: %s\n",
-             from_ordinal,
-             anchor_ordinal,
-             int(place),
-             int(error),
-             BKE_paint_material_layer_edit_error_message(error));
-      fflush(stdout);
       BKE_report(CTX_wm_reports(&C),
                  RPT_ERROR,
                  RPT_(BKE_paint_material_layer_edit_error_message(error)));

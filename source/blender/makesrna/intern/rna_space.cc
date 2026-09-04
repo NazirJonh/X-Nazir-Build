@@ -5279,6 +5279,13 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Large Rows", "Use larger Stack Layers rows");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 
+  prop = RNA_def_property(srna, "use_stack_layer_pair_channels", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_PAIR_CHANNELS);
+  RNA_def_property_ui_text(prop,
+                           "Pair Channel Rows",
+                           "Use one color for each pair of channel rows");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
   prop = RNA_def_property(srna, "use_stack_layer_visibility_left", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_VISIBILITY_LEFT);
   RNA_def_property_ui_text(prop,

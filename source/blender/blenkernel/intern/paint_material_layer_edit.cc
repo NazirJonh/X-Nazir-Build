@@ -364,12 +364,19 @@ bool chain_forest_collect(bNodeTree &tree,
     if (result == nullptr || !socket_has_link(*result)) {
       continue;
     }
-    layer.sub_chain_index = int(r_chains.size());
+    /* Captured after the call, not before: it may append more than one chain -- its own subgroups'
+     * as well as its own -- and the one this layer opens is always the last of those, whatever the
+     * count. Capturing #r_chains.size() beforehand only holds for a single level of nesting; a
+     * group inside a group left the outer one pointing at the inner one's own chain instead of its
+     * own, and the outer row was then never found -- while a row on either side of it still was,
+     * by coincidence, since a group's own chain and the first one its recursion collects can land
+     * on the same index. */
     if (!chain_forest_collect(
             *group_tree, *result, channel, r_chains, nesting + 1, r_error))
     {
       return false;
     }
+    layer.sub_chain_index = int(r_chains.size()) - 1;
   }
   r_chains.append(std::move(chain));
   return true;
@@ -574,6 +581,46 @@ bool forest_rows_resolve(Vector<Vector<ChannelChain>> &per_channel,
 }
 
 /**
+ * The inverse of #forest_resolve_ordinal: the ordinal the UI model would give the layer at
+ * \a target_layer of \a chains[target_chain] -- its plain position if that chain is the forest's
+ * top level, otherwise counted the same depth-first, a group's children before the group row
+ * itself, way #forest_resolve_ordinal decodes.
+ *
+ * Used to report where a freshly inserted row landed: an edit builds a row directly, in the chain
+ * it belongs to, and has no ordinal for it until this walks the forest to find one.
+ */
+int forest_ordinal_for_position(Span<ChannelChain> chains,
+                                const int target_chain,
+                                const int target_layer)
+{
+  const int top_index = int(chains.size()) - 1;
+  if (target_chain == top_index) {
+    return target_layer;
+  }
+
+  int nested_seen = 0;
+  int found_ordinal = -1;
+  auto walk = [&](auto &&self, const int chain_index, const bool count) -> void {
+    const ChannelChain &chain = chains[chain_index];
+    for (const int64_t index : chain.layers.index_range()) {
+      const ChainLayer &layer = chain.layers[index];
+      if (layer.is_group && layer.sub_chain_index >= 0) {
+        self(self, layer.sub_chain_index, true);
+      }
+      if (!count || found_ordinal >= 0) {
+        continue;
+      }
+      if (chain_index == target_chain && int(index) == target_layer) {
+        found_ordinal = PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE + nested_seen;
+      }
+      nested_seen++;
+    }
+  };
+  walk(walk, top_index, false);
+  return found_ordinal;
+}
+
+/**
  * Whether \a ordinal names a layer of the chain rather than one held inside a group.
  *
  * Ordinals of top-level rows are their position in the chain, so they mean the same thing to the
@@ -708,7 +755,7 @@ Image *layer_image_create(Main &bmain,
  * drives every channel of a layer -- so a group made of those layers has one coverage too.
  */
 bNodeTree *layer_group_tree_add(Main &bmain,
-                                Span<ChannelChain> chains,
+                                Span<ChannelChain *> chains,
                                 const int from_ordinal,
                                 const int to_ordinal)
 {
@@ -723,9 +770,9 @@ bNodeTree *layer_group_tree_add(Main &bmain,
   value.string.subtype = IDP_STRING_SUB_UTF8;
   IDP_AddToGroup(properties, IDP_New(IDP_STRING, &value, LAYER_GROUP_MARKER_PROP));
 
-  for (const ChannelChain &chain : chains) {
+  for (const ChannelChain *chain : chains) {
     const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-        eMaterialPaintChannel(chain.channel));
+        eMaterialPaintChannel(chain->channel));
     char result_name[64];
     SNPRINTF_UTF8(result_name, "Result %s", info.ui_name);
     group->tree_interface.add_socket(
@@ -829,6 +876,9 @@ bool layer_group_fill_channel(Main & /*bmain*/,
     r_nodes_to_remove.append_non_duplicates(map_source);
     r_nodes_to_remove.append_non_duplicates(layer.node);
 
+    /* A previous pass through this loop may have added links, which invalidates the topology
+     * cache #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
+    group.ensure_topology_cache();
     CompositeMixNode mix;
     bNodeSocket *mix_out = mix_output_find(*mix_copy);
     bNodeSocket *map_color = bke::node_find_socket(*map_copy, SOCK_OUT, "Color"_ustr);
@@ -1477,6 +1527,8 @@ static bool layer_move_apply(Main &bmain,
       bNode *mask_source = nullptr;
       Image *image = nullptr;
       bool is_muted = false;
+      /** The opacity to carry over; see how #mask_source is resolved below. */
+      float opacity = 1.0f;
     };
     Vector<MovingChannelNodes> moving_nodes;
 
@@ -1493,7 +1545,24 @@ static bool layer_move_apply(Main &bmain,
       }
       m.map_source = top_link->fromnode;
 
-      if (layer.factor != nullptr) {
+      CompositeMixNode mix;
+      if (layer.node == nullptr || !composite_mix_node_read(*layer.node, mix)) {
+        return fail(PaintMaterialLayerEditError::ChainNotPlain);
+      }
+      if (mix.factor_opacity != nullptr) {
+        /* Coverage and opacity coexist: what might be an explicit mask lives on the Multiply's
+         * coverage input, not on Factor itself -- which now always resolves to the Multiply node,
+         * never to an actual mask, whether the layer has one or not. */
+        m.opacity =
+            static_cast<const bNodeSocketValueFloat *>(mix.factor_opacity->default_value)->value;
+        bNodeLink *coverage_link = sole_link_into(
+            *const_cast<bNodeSocket *>(mix.factor_coverage));
+        if (coverage_link != nullptr && coverage_link->fromnode != m.map_source) {
+          m.mask_source = coverage_link->fromnode;
+        }
+      }
+      else if (layer.factor != nullptr) {
+        /* Legacy shape, nothing to separate an opacity from. */
         bNodeLink *factor_link = sole_link_into(*layer.factor);
         if (factor_link != nullptr && factor_link->fromnode != m.map_source) {
           m.mask_source = factor_link->fromnode;
@@ -1593,6 +1662,9 @@ static bool layer_move_apply(Main &bmain,
 
     for (const int64_t i : to_chains.index_range()) {
       CopiedChannelNodes &c = copies[i];
+      /* A previous channel's links, added below, invalidate the topology cache
+       * #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
+      dst_tree->ensure_topology_cache();
       CompositeMixNode mix;
       bNodeSocket *mix_out = mix_output_find(*c.mix_copy);
       /* A group instance hands each channel a `Result <Channel>` of its own and one shared Alpha,
@@ -1626,13 +1698,21 @@ static bool layer_move_apply(Main &bmain,
       if (c.mask_copy != nullptr) {
         bNodeSocket *mask_color = bke::node_find_socket(*c.mask_copy, SOCK_OUT, "Color"_ustr);
         if (mask_color != nullptr) {
-          layer_factor_coverage_link(
-              *dst_tree, *c.mix_copy, *c.mix_factor, *c.mask_copy, *mask_color, 1.0f);
+          layer_factor_coverage_link(*dst_tree,
+                                     *c.mix_copy,
+                                     *c.mix_factor,
+                                     *c.mask_copy,
+                                     *mask_color,
+                                     moving_nodes[i].opacity);
         }
       }
       else {
-        layer_factor_coverage_link(
-            *dst_tree, *c.mix_copy, *c.mix_factor, *c.map_copy, *map_alpha, 1.0f);
+        layer_factor_coverage_link(*dst_tree,
+                                   *c.mix_copy,
+                                   *c.mix_factor,
+                                   *c.map_copy,
+                                   *map_alpha,
+                                   moving_nodes[i].opacity);
       }
     }
 
@@ -1722,6 +1802,11 @@ static bool layer_move_into_empty_group(Main &bmain,
     return fail(PaintMaterialLayerEditError::ChainNotPlain);
   }
 
+  /* A folder moved into an empty one is one shared group tree with one instance node per
+   * channel, the same shape #BKE_paint_material_layer_group_add builds -- not a map with a Color
+   * and an Alpha, which the rest of this function otherwise assumes. */
+  const bool moving_group = from_chains.first()->layers[from_index].is_group;
+
   /* Everything the graph is asked about is read before the first node is created: creating one
    * invalidates the topology cache the socket walks assert on. */
   struct MovingChannelNodes {
@@ -1731,15 +1816,12 @@ static bool layer_move_into_empty_group(Main &bmain,
     Image *image = nullptr;
     bool is_muted = false;
     int channel = 0;
+    /** The opacity to carry over; see how #mask_source is resolved below. */
+    float opacity = 1.0f;
   };
   Vector<MovingChannelNodes> moving_nodes;
   for (ChannelChain *chain : from_chains) {
     ChainLayer &layer = chain->layers[from_index];
-    if (layer.is_group) {
-      /* A folder inside an empty folder would have to build a chain out of a group instance, which
-       * is a different shape than the one this builds. */
-      return fail(PaintMaterialLayerEditError::ChainNotPlain);
-    }
     MovingChannelNodes m;
     m.channel = chain->channel;
     m.mix_source = layer.node;
@@ -1750,13 +1832,53 @@ static bool layer_move_into_empty_group(Main &bmain,
       return fail(PaintMaterialLayerEditError::ChainNotPlain);
     }
     m.map_source = top_link->fromnode;
-    if (layer.factor != nullptr) {
+    CompositeMixNode mix;
+    if (layer.node == nullptr || !composite_mix_node_read(*layer.node, mix)) {
+      return fail(PaintMaterialLayerEditError::ChainNotPlain);
+    }
+    if (mix.factor_opacity != nullptr) {
+      /* Coverage and opacity coexist: what might be an explicit mask lives on the Multiply's
+       * coverage input, not on Factor itself -- which now always resolves to the Multiply node,
+       * never to an actual mask, whether the layer has one or not. */
+      m.opacity =
+          static_cast<const bNodeSocketValueFloat *>(mix.factor_opacity->default_value)->value;
+      bNodeLink *coverage_link = sole_link_into(*const_cast<bNodeSocket *>(mix.factor_coverage));
+      if (coverage_link != nullptr && coverage_link->fromnode != m.map_source) {
+        m.mask_source = coverage_link->fromnode;
+      }
+    }
+    else if (layer.factor != nullptr) {
+      /* Legacy shape, nothing to separate an opacity from. */
       bNodeLink *factor_link = sole_link_into(*layer.factor);
       if (factor_link != nullptr && factor_link->fromnode != m.map_source) {
         m.mask_source = factor_link->fromnode;
       }
     }
     moving_nodes.append(m);
+  }
+
+  if (moving_group) {
+    /* The instance differs per channel, but every one of them has to point at the same group
+     * tree, the way #BKE_paint_material_layer_group_add builds it -- otherwise the folder being
+     * moved is not the shape this code assumes. */
+    for (const MovingChannelNodes &m : moving_nodes) {
+      if (m.map_source == nullptr || m.map_source->id != moving_nodes.first().map_source->id) {
+        return fail(PaintMaterialLayerEditError::ChannelsDisagree);
+      }
+    }
+    bNodeTree *moved_group_tree = reinterpret_cast<bNodeTree *>(moving_nodes.first().map_source->id);
+    /* A group cannot hold itself, directly or through one of its own folders. */
+    if (moved_group_tree == nullptr || moved_group_tree == group_tree ||
+        bke::node_tree_contains_tree(*moved_group_tree, *group_tree))
+    {
+      return fail(PaintMaterialLayerEditError::ChainNotPlain);
+    }
+    /* Landing deeper than the readers walk would leave a stack they refuse to read at all. */
+    if (group_chains.first()->nesting + 1 + layer_group_depth(*moved_group_tree) >
+        LAYER_GROUP_NESTING_MAX)
+    {
+      return fail(PaintMaterialLayerEditError::NestingTooDeep);
+    }
   }
 
   struct CopiedChannelNodes {
@@ -1819,20 +1941,31 @@ static bool layer_move_into_empty_group(Main &bmain,
 
   for (const int64_t i : moving_nodes.index_range()) {
     CopiedChannelNodes &c = copies[i];
+    /* A previous channel's links, added below, invalidate the topology cache
+     * #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
+    group_tree->ensure_topology_cache();
     CompositeMixNode mix;
     bNodeSocket *mix_out = mix_output_find(*c.mix_copy);
-    bNodeSocket *map_color = bke::node_find_socket(*c.map_copy, SOCK_OUT, "Color"_ustr);
-    bNodeSocket *map_alpha = bke::node_find_socket(*c.map_copy, SOCK_OUT, "Alpha"_ustr);
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+        eMaterialPaintChannel(moving_nodes[i].channel));
+    char result_name[64];
+    SNPRINTF_UTF8(result_name, "Result %s", info.ui_name);
+    /* A group instance hands each channel a `Result <Channel>` of its own and one shared Alpha,
+     * where a map has the Color and Alpha of the image it reads. A group instance's sockets come
+     * from its tree interface and are identified by an auto-generated string ("Socket_0", ...)
+     * rather than by the name shown in the UI, so those two are looked up by name instead. */
+    bNodeSocket *map_color = moving_group ?
+                                socket_find_by_name(*c.map_copy, SOCK_OUT, result_name) :
+                                bke::node_find_socket(*c.map_copy, SOCK_OUT, "Color"_ustr);
+    bNodeSocket *map_alpha = moving_group ?
+                                socket_find_by_name(*c.map_copy, SOCK_OUT, "Alpha") :
+                                bke::node_find_socket(*c.map_copy, SOCK_OUT, "Alpha"_ustr);
     if (mix_out == nullptr || map_color == nullptr || map_alpha == nullptr ||
         !composite_mix_node_read(*c.mix_copy, mix))
     {
       discard();
       return fail(PaintMaterialLayerEditError::CreationFailed);
     }
-    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-        eMaterialPaintChannel(moving_nodes[i].channel));
-    char result_name[64];
-    SNPRINTF_UTF8(result_name, "Result %s", info.ui_name);
     bNodeSocket *result = socket_find_by_name(*group_output, SOCK_IN, result_name);
     if (result == nullptr) {
       discard();
@@ -1852,7 +1985,7 @@ static bool layer_move_into_empty_group(Main &bmain,
                                *const_cast<bNodeSocket *>(mix.factor),
                                (c.mask_copy != nullptr) ? *c.mask_copy : *c.map_copy,
                                *coverage,
-                               1.0f);
+                               moving_nodes[i].opacity);
     /* The bottom stays unlinked: inside the group this layer blends over transparency, which is
      * what the group composites on. */
     bke::node_add_link(*group_tree, *c.mix_copy, *mix_out, *group_output, *result);
@@ -1964,6 +2097,7 @@ bool BKE_paint_material_layer_move(Main &bmain,
                                    const int from_ordinal,
                                    const int anchor_ordinal,
                                    const PaintMaterialLayerMovePlace place,
+                                   int *r_ordinal,
                                    PaintMaterialLayerEditError *r_error)
 {
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
@@ -1989,6 +2123,47 @@ bool BKE_paint_material_layer_move(Main &bmain,
     return fail(error);
   }
 
+  /* The marker survives every move here, and finding the row again by it afterwards is simpler
+   * and more robust than working out its new ordinal from what each branch below does to the
+   * graph -- especially landing in a folder that was empty, which has no chain of its own yet for
+   * an ordinal to be read from. */
+  const bNode *from_node = from_chains.first()->layers[from_index].node;
+  const bUUID moved_marker = (from_node != nullptr) ? BKE_paint_material_layer_marker_get(*from_node) :
+                                                      BLI_uuid_nil();
+  auto finish = [&](const bool ok) {
+    if (!ok) {
+      return false;
+    }
+    if (r_ordinal != nullptr) {
+      *r_ordinal = -1;
+      if (!BLI_uuid_is_nil(moved_marker)) {
+        Vector<Vector<ChannelChain>> fresh_per_channel;
+        PaintMaterialLayerEditError ignore = PaintMaterialLayerEditError::None;
+        if (chains_collect_forest(ma, fresh_per_channel, ignore) && !fresh_per_channel.is_empty()) {
+          const Vector<ChannelChain> &forest0 = fresh_per_channel.first();
+          for (const int64_t chain_index : forest0.index_range()) {
+            const ChannelChain &chain = forest0[chain_index];
+            for (const int64_t layer_index : chain.layers.index_range()) {
+              const ChainLayer &layer = chain.layers[layer_index];
+              if (layer.node != nullptr &&
+                  BLI_uuid_equal(BKE_paint_material_layer_marker_get(*layer.node), moved_marker))
+              {
+                const int ordinal = forest_ordinal_for_position(
+                    forest0, int(chain_index), int(layer_index));
+                *r_ordinal = (ordinal >= 0) ? ordinal : int(layer_index);
+                break;
+              }
+            }
+            if (*r_ordinal >= 0) {
+              break;
+            }
+          }
+        }
+      }
+    }
+    return true;
+  };
+
   if (place == PaintMaterialLayerMovePlace::Into) {
     /* The anchor is the folder itself, so the destination is the chain it opens -- and a folder
      * with nothing in it opens none yet, which is what #layer_move_into_empty_group builds. */
@@ -1997,8 +2172,8 @@ bool BKE_paint_material_layer_move(Main &bmain,
       return fail(PaintMaterialLayerEditError::ChainNotPlain);
     }
     if (group_layer.sub_chain_index < 0) {
-      return layer_move_into_empty_group(
-          bmain, ma, from_chains, from_index, anchor_chains, anchor_index, r_error);
+      return finish(layer_move_into_empty_group(
+          bmain, ma, from_chains, from_index, anchor_chains, anchor_index, r_error));
     }
     Vector<ChannelChain *> to_chains;
     for (const int64_t i : anchor_chains.index_range()) {
@@ -2010,7 +2185,7 @@ bool BKE_paint_material_layer_move(Main &bmain,
     }
     /* On top of what the group holds. */
     const int to_index = int(to_chains.first()->layers.size());
-    return layer_move_apply(bmain, ma, from_chains, from_index, to_chains, to_index, r_error);
+    return finish(layer_move_apply(bmain, ma, from_chains, from_index, to_chains, to_index, r_error));
   }
 
   int to_index = anchor_index + ((place == PaintMaterialLayerMovePlace::Above) ? 1 : 0);
@@ -2022,7 +2197,8 @@ bool BKE_paint_material_layer_move(Main &bmain,
   if (to_index == from_index && from_chains.first() == anchor_chains.first()) {
     return true;
   }
-  return layer_move_apply(bmain, ma, from_chains, from_index, anchor_chains, to_index, r_error);
+  return finish(
+      layer_move_apply(bmain, ma, from_chains, from_index, anchor_chains, to_index, r_error));
 }
 
 bool BKE_paint_material_layer_group_make(Main &bmain,
@@ -2078,7 +2254,11 @@ bool BKE_paint_material_layer_group_make(Main &bmain,
     map_nodes_per_chain.append(std::move(maps));
   }
 
-  bNodeTree *group_tree = layer_group_tree_add(bmain, chains, from_ordinal, to_ordinal);
+  Vector<ChannelChain *> chain_ptrs;
+  for (ChannelChain &chain : chains) {
+    chain_ptrs.append(&chain);
+  }
+  bNodeTree *group_tree = layer_group_tree_add(bmain, chain_ptrs, from_ordinal, to_ordinal);
   if (group_tree == nullptr) {
     return fail(PaintMaterialLayerEditError::CreationFailed);
   }
@@ -2196,21 +2376,60 @@ bool BKE_paint_material_layer_group_add(Main &bmain,
     return fail(PaintMaterialLayerEditError::NotEditable);
   }
   BKE_paint_material_layer_bottom_normalize(bmain, ma);
-  bNodeTree &tree = *ma.nodetree;
 
-  Vector<ChannelChain> chains;
-  if (!chains_collect(ma, chains, error) || !chains_align(chains, error)) {
+  /* An explicit ordinal names a chain wherever it lives -- the material's own tree for a
+   * top-level row, or a group's own tree for one already inside a folder; -1 means the top of the
+   * top-level stack instead, which has no ordinal of its own to resolve. Resolved twice: once
+   * here, and again once the instances below exist, since creating them invalidates every pointer
+   * this first resolve found. */
+  auto resolve_target = [&](Vector<Vector<ChannelChain>> &per_channel,
+                            Vector<ChannelChain *> &r_chains,
+                            int &r_insert_at) {
+    if (!chains_collect_forest(ma, per_channel, error)) {
+      return false;
+    }
+    if (ordinal < 0) {
+      for (Vector<ChannelChain> &forest : per_channel) {
+        r_chains.append(&forest.last());
+      }
+      if (r_chains.is_empty()) {
+        error = PaintMaterialLayerEditError::NotAStack;
+        return false;
+      }
+      const int64_t layer_num = r_chains.first()->layers.size();
+      for (ChannelChain *chain : r_chains) {
+        if (chain->layers.size() != layer_num) {
+          error = PaintMaterialLayerEditError::ChannelsDisagree;
+          return false;
+        }
+      }
+      r_insert_at = int(layer_num);
+      return true;
+    }
+    int layer_index = -1;
+    if (!forest_rows_resolve(per_channel, ordinal, r_chains, layer_index, error)) {
+      return false;
+    }
+    /* Above the row it was given, which is the position after it in a chain listed bottom to
+     * top. */
+    r_insert_at = layer_index + 1;
+    return true;
+  };
+
+  Vector<Vector<ChannelChain>> per_channel;
+  Vector<ChannelChain *> chains;
+  int insert_at = -1;
+  if (!resolve_target(per_channel, chains, insert_at)) {
     return fail(error);
   }
-  if (ordinal >= 0 && !ordinal_is_in_chain(ordinal, error)) {
-    return fail(error);
-  }
-  const int layer_num = int(chains.first().layers.size());
-  /* Above the row it was given, which is the position after it in a chain listed bottom to top. */
-  const int insert_at = (ordinal < 0) ? layer_num : ordinal + 1;
+  const int layer_num = int(chains.first()->layers.size());
   if (insert_at < 1 || insert_at > layer_num) {
     return fail(PaintMaterialLayerEditError::IndexOutOfRange);
   }
+
+  /* The group is created next to the row it was given, in the same tree that row lives in -- the
+   * material's own for a top-level row, or a nested group's own for one already inside a folder. */
+  bNodeTree &tree = *chains.first()->tree;
 
   /* The group holds nothing yet, so its Group Output stays unlinked: an unlinked Result is
    * transparent and its Alpha is zero, which is exactly what an empty folder contributes. */
@@ -2241,9 +2460,9 @@ bool BKE_paint_material_layer_group_add(Main &bmain,
     BKE_id_free(&bmain, group_tree);
   };
 
-  for (const ChannelChain &chain : chains) {
+  for (const ChannelChain *chain : chains) {
     NewGroupNodes nodes;
-    nodes.channel = chain.channel;
+    nodes.channel = chain->channel;
     nodes.instance = bke::node_add_node(nullptr, tree, tree.typeinfo->group_idname);
     if (nodes.instance != nullptr) {
       /* Assigned directly, as #BKE_paint_material_layer_group_make does: user counts of node ID
@@ -2251,7 +2470,7 @@ bool BKE_paint_material_layer_group_add(Main &bmain,
       nodes.instance->id = &group_tree->id;
       id_us_plus(&group_tree->id);
     }
-    nodes.mix = layer_mix_node_create(bmain, tree, chain.channel);
+    nodes.mix = layer_mix_node_create(bmain, tree, chain->channel);
     added.append(nodes);
     if (nodes.instance == nullptr || nodes.mix == nullptr) {
       discard();
@@ -2259,12 +2478,14 @@ bool BKE_paint_material_layer_group_add(Main &bmain,
     }
   }
 
-  /* Sockets of the instances only exist once the tree has been updated, and the chains collected
-   * above describe the tree from before those nodes existed. */
+  /* Sockets of the instances only exist once the tree has been updated, and the chains resolved
+   * above describe the tree from before those nodes existed -- so the row this group belongs next
+   * to is found again, fresh. */
   BKE_ntree_update_after_single_tree_change(bmain, tree);
   tree.ensure_topology_cache();
+  per_channel.clear();
   chains.clear();
-  if (!chains_collect(ma, chains, error) || !chains_align(chains, error)) {
+  if (!resolve_target(per_channel, chains, insert_at)) {
     discard();
     return fail(error);
   }
@@ -2281,9 +2502,9 @@ bool BKE_paint_material_layer_group_add(Main &bmain,
   Vector<ResolvedGroup> resolved;
   for (NewGroupNodes &nodes : added) {
     ChannelChain *chain = nullptr;
-    for (ChannelChain &candidate : chains) {
-      if (candidate.channel == nodes.channel) {
-        chain = &candidate;
+    for (ChannelChain *candidate : chains) {
+      if (candidate->channel == nodes.channel) {
+        chain = candidate;
         break;
       }
     }
@@ -2339,7 +2560,15 @@ bool BKE_paint_material_layer_group_add(Main &bmain,
   DEG_relations_tag_update(&bmain);
   BKE_paint_material_composite_cache_invalidate(&ma);
   if (r_ordinal != nullptr) {
-    *r_ordinal = insert_at;
+    /* Named the same way the outliner numbers its rows: a plain position at the top level, or one
+     * counted depth-first through the forest for a row that landed inside a group. */
+    const int chain_index = (per_channel.is_empty() || resolved.is_empty()) ?
+                                -1 :
+                                int(resolved.first().chain - per_channel.first().data());
+    const int new_ordinal = (chain_index < 0) ?
+                                -1 :
+                                forest_ordinal_for_position(per_channel.first(), chain_index, insert_at);
+    *r_ordinal = (new_ordinal >= 0) ? new_ordinal : insert_at;
   }
   if (r_error != nullptr) {
     *r_error = PaintMaterialLayerEditError::None;
@@ -2500,6 +2729,10 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
     keeper.image = bottom.image;
     bke::node_position_relative(*bottom.node, *keeper.node, bottom.output, *keeper.top);
 
+    /* The two relinks above, and a previous channel's, invalidate the topology cache
+     * #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
+    tree.ensure_topology_cache();
+
     /* Every layer above the bottom one is spliced into the outer chain, in order. */
     int insert_at = ordinal + 1;
     for (const int64_t index : out.layers.index_range().drop_front(1)) {
@@ -2659,6 +2892,9 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
         break;
       }
     }
+    /* A previous channel's links, added below, invalidate the topology cache
+     * #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
+    tree.ensure_topology_cache();
     CompositeMixNode mix;
     bNodeSocket *output = mix_output_find(*copy.mix);
     bNodeSocket *tex_color = bke::node_find_socket(*copy.tex, SOCK_OUT, "Color"_ustr);
@@ -2779,6 +3015,9 @@ bool BKE_paint_material_layer_mask_add(Main &bmain,
 
   for (ChannelChain *chain : chains) {
     ChainLayer &layer = chain->layers[layer_index];
+    /* A previous channel's relink, below, invalidates the topology cache
+     * #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
+    chain->tree->ensure_topology_cache();
     CompositeMixNode mix;
     if (!composite_mix_node_read(*layer.node, mix) || mix.factor == nullptr) {
       continue;
@@ -2859,6 +3098,9 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
   for (ChannelChain *chain_ptr : chains) {
     ChannelChain &chain = *chain_ptr;
     ChainLayer &layer = chain.layers[layer_index];
+    /* A previous channel's relink, below, invalidates the topology cache
+     * #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
+    chain.tree->ensure_topology_cache();
     CompositeMixNode mix;
     if (!composite_mix_node_read(*layer.node, mix) || mix.factor == nullptr) {
       continue;

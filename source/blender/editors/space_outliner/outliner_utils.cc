@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_utildefines.h"
 
 #include "DNA_action_types.h"
@@ -373,19 +374,32 @@ float outliner_right_columns_width(const SpaceOutliner *space_outliner)
       }
       /* How wide the two columns are is the source's call: an opacity slider and a shape key
        * value want different room than a blend-mode menu. With Large rows on the two stack in one
-       * column instead of sitting side by side, but each still gets the combined width -- the row
-       * is two units tall, room enough for one full-height button above the other, and neither
-       * needs to shrink to make room for it. */
+       * column instead of sitting side by side, but only one of the two is ever visible at a time
+       * there, so the column only has to be as wide as the wider of the two, not both together. */
       const StackColumnLayout layout = stack_source_for_space(*space_outliner)->column_layout();
-      if ((space_outliner->stack_layers_flag & SO_SL_HIDE_OPACITY) == 0) {
-        num_columns += layout.value_width;
+      const bool show_value = layout.value_width > 0 &&
+                              (space_outliner->stack_layers_flag & SO_SL_HIDE_OPACITY) == 0;
+      const bool show_mode = layout.mode_width > 0 &&
+                             (space_outliner->stack_layers_flag & SO_SL_HIDE_BLEND) == 0;
+      const bool stacked = show_value && show_mode &&
+                           (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
+      if (stacked) {
+        num_columns += max_ii(layout.value_width, layout.mode_width);
       }
-      if ((space_outliner->stack_layers_flag & SO_SL_HIDE_BLEND) == 0) {
-        num_columns += layout.mode_width;
+      else {
+        if (show_value) {
+          num_columns += layout.value_width;
+        }
+        if (show_mode) {
+          num_columns += layout.mode_width;
+        }
       }
       /* The per-row toggles live to the right of those columns, the way the restriction icons do
-       * in the View Layer, rather than trailing the name. */
-      num_columns += STACK_ROW_ICON_COLUMNS;
+       * in the View Layer, rather than trailing the name -- unless the visibility toggle was
+       * moved to the tree's own first column, in which case nothing is left to reserve room for. */
+      if ((space_outliner->stack_layers_flag & SO_SL_VISIBILITY_LEFT) == 0) {
+        num_columns += STACK_ROW_ICON_COLUMNS;
+      }
       /* Half a unit of air at the right edge, so the last button is not pressed against the
        * border. It belongs in the width rather than at each place a column is placed: the name's
        * clipping, the scrollable width and the hit test that says "the cursor is in the columns"

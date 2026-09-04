@@ -199,11 +199,16 @@ enum class PaintMaterialLayerMovePlace : int8_t {
  */
 bool BKE_paint_material_layer_bottom_normalize(Main &bmain, Material &ma);
 
+/**
+ * \param r_ordinal: when given, receives the ordinal the moved row has after the move -- which
+ * a caller needs to keep it selected, since a move renumbers rows past it.
+ */
 bool BKE_paint_material_layer_move(Main &bmain,
                                    Material &ma,
                                    int from_ordinal,
                                    int anchor_ordinal,
                                    PaintMaterialLayerMovePlace place,
+                                   int *r_ordinal = nullptr,
                                    PaintMaterialLayerEditError *r_error = nullptr);
 
 /**

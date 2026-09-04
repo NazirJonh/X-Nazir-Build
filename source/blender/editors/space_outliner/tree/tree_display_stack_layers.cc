@@ -103,6 +103,11 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
   /* Where each group's children go, by the group's ordinal. A group is listed as one row and the
    * layers it holds hang off it, so the tree has to remember the element it made for it. */
   Map<int, TreeElement *> group_elements;
+  /* An edit that changed ordinals -- a move, most notably -- leaves the row it acted on wanting
+   * to read as the one still selected and active, which the tree store cannot do on its own: the
+   * row's identity here is its ordinal, and that is exactly what just changed. Applied once and
+   * cleared below, rather than every rebuild after. */
+  const int pending_select = runtime.stack_pending_select_ordinal;
   for (int64_t index = runtime.stack_rows.size() - 1; index >= 0; index--) {
     StackRow &row = runtime.stack_rows[index];
     TreeElement *parent = base;
@@ -122,6 +127,15 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
     if (layer == nullptr) {
       continue;
     }
+    if (pending_select >= 0) {
+      TreeStoreElem *layer_tselem = TREESTORE(layer);
+      if (row.ordinal == pending_select) {
+        layer_tselem->flag |= TSE_SELECTED | TSE_ACTIVE;
+      }
+      else {
+        layer_tselem->flag &= ~(TSE_SELECTED | TSE_ACTIVE);
+      }
+    }
     if (row.is_group) {
       group_elements.add(int(row.ordinal), layer);
       /* A folder whose contents are hidden is a folder the user has to open before they can see
@@ -137,6 +151,9 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
       const int index = row.ordinal * STACK_ROW_SUB_ROW_STRIDE + sub_row.role;
       add_element(&layer->subtree, owner, &sub_row, layer, TSE_STACK_ITEM, short(index), false);
     }
+  }
+  if (pending_select >= 0) {
+    runtime.stack_pending_select_ordinal = -1;
   }
   return tree;
 }

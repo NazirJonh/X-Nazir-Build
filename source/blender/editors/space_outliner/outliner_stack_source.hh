@@ -111,14 +111,12 @@ struct StackRow {
 constexpr int STACK_ROW_SUB_ROW_STRIDE = 16;
 
 /**
- * Columns reserved at the right of a stack row for its own toggles: visibility, "show this map"
- * and "show this mask".
+ * Columns reserved at the right of a stack row for its own toggles: the visibility toggle.
  *
  * A fixed count rather than one derived per row, because the columns have to line up down the
- * whole list -- a row without a mask still leaves the mask column empty rather than sliding its
- * neighbours over.
+ * whole list.
  */
-constexpr int STACK_ROW_ICON_COLUMNS = 2;
+constexpr int STACK_ROW_ICON_COLUMNS = 1;
 constexpr int STACK_ROW_ORDINAL_MAX = (32767 / STACK_ROW_SUB_ROW_STRIDE) - 1;
 
 /**
@@ -425,13 +423,17 @@ class StackSource {
    * \note Kept last on purpose. Every method here is virtual, so a new one added in the middle
    * renumbers the ones after it, and a caller left over from a partial build then jumps into the
    * wrong one.
+   *
+   * \param r_ordinal: when given, receives the ordinal the moved row has afterwards -- a move
+   * renumbers rows past it, so a caller that wants to keep it selected needs this.
    */
   virtual bool row_move(bContext & /*C*/,
                         const StackFocus & /*focus*/,
                         ID & /*owner*/,
                         int /*from_ordinal*/,
                         int /*anchor_ordinal*/,
-                        StackMovePlace /*place*/) const
+                        StackMovePlace /*place*/,
+                        int * /*r_ordinal*/ = nullptr) const
   {
     return false;
   }

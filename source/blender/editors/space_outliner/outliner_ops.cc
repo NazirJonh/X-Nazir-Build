@@ -55,7 +55,6 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_remove);
   WM_operatortype_append(OUTLINER_OT_stack_layer_add);
   WM_operatortype_append(OUTLINER_OT_stack_layer_visibility_toggle);
-  WM_operatortype_append(OUTLINER_OT_stack_layer_show_map);
   WM_operatortype_append(OUTLINER_OT_stack_layer_duplicate);
   WM_operatortype_append(OUTLINER_OT_stack_layer_group);
   WM_operatortype_append(OUTLINER_OT_stack_layer_group_add);

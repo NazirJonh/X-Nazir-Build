@@ -293,6 +293,7 @@ enum ThemeColorID {
   TH_ACTIVE_OBJECT,    /* active object color for outliner */
   TH_EDITED_OBJECT,    /* edited object color for outliner */
   TH_ROW_ALTERNATE,    /* overlay on every other row */
+  TH_STACK_ALTERNATE,  /* overlay on every other Stack Layers band */
 
   TH_SKIN_ROOT,
 

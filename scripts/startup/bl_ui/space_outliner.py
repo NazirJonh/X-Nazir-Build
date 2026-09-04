@@ -597,6 +597,7 @@ class OUTLINER_PT_stack_layers_filter(Panel):
         col = layout.column(heading="Rows", align=True)
         col.prop(space, "show_stack_layer_channels", text="Contents")
         col.prop(space, "use_stack_layer_big_rows", text="Large")
+        col.prop(space, "use_stack_layer_pair_channels", text="Pair Channel Rows")
         col.prop(space, "use_stack_layer_sort_by_name", text="Sort by Name")
 
         layout.prop(space, "use_stack_layer_pin")

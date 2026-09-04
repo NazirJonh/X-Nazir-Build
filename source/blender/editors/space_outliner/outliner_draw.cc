@@ -2164,6 +2164,12 @@ static int stack_row_content_y(const SpaceOutliner &space_outliner, const TreeEl
   return stack_row_content_offset(te.ys, outliner_tree_element_height(space_outliner, te));
 }
 
+/** Forward declaration; defined further down, next to the rest of the fading logic. */
+static bool element_should_draw_faded(const TreeViewContext &tvc,
+                                      const SpaceOutliner *space_outliner,
+                                      const TreeElement *te,
+                                      const TreeStoreElem *tselem);
+
 /**
  * The per-row toggles that sit right after a stack row's name.
  *
@@ -2183,11 +2189,15 @@ static void outliner_draw_stack_row_icons(ui::Block *block,
   }
   const StackSource &source = *stack_source_for_space(*space_outliner);
   const bool can_toggle = source.can_set_enabled(*owner);
+  const bool visibility_left = (space_outliner->stack_layers_flag & SO_SL_VISIBILITY_LEFT) != 0;
 
-  /* The toggles sit in their own columns at the right edge, after the value and mode ones, keeping
-   * the same margin from the border that #outliner_right_columns_width reserves. */
+  /* The toggle sits in its own column at the right edge, after the value and mode ones, keeping
+   * the same margin from the border that #outliner_right_columns_width reserves -- unless it was
+   * moved to the tree's own first column instead, in which case that column is not reserved and
+   * this is only where the "row not supported" badge sits. */
   const int pad = UI_UNIT_X / 2;
-  const int icons_x = int(region->v2d.cur.xmax) - STACK_ROW_ICON_COLUMNS * UI_UNIT_X - pad -
+  const int icon_columns = visibility_left ? 0 : STACK_ROW_ICON_COLUMNS;
+  const int icons_x = int(region->v2d.cur.xmax) - icon_columns * UI_UNIT_X - pad -
                       V2D_SCROLL_WIDTH;
   /* The first column of the tree: where the owner row draws its expand arrow, and the one column a
    * layer row leaves empty because it is indented past it. */
@@ -2233,10 +2243,6 @@ static void outliner_draw_stack_row_icons(ui::Block *block,
      * very first column -- the one holding the material row's expand arrow -- which every layer
      * row leaves empty because it is indented past it. So nothing has to move over for it, and
      * the toggles of nested rows line up with the ones above them. */
-    const bool visibility_left = (space_outliner->stack_layers_flag & SO_SL_VISIBILITY_LEFT) != 0;
-    /* With the toggle moved to the left the columns are one narrower, so what is left of them
-     * stays against the right edge rather than leaving a gap there. */
-    int x = visibility_left ? icons_x + UI_UNIT_X : icons_x;
     ui::Button *but = uiDefIconButO(block,
                                     ui::ButtonType::But,
                                     "OUTLINER_OT_stack_layer_visibility_toggle",
@@ -2246,7 +2252,8 @@ static void outliner_draw_stack_row_icons(ui::Block *block,
                                      * it; the column is a unit wide and the button is narrowed by
                                      * the inset at both ends, so half of it lands on either side.
                                      */
-                                    visibility_left ? first_column_x + int(column_inset) : x,
+                                    visibility_left ? first_column_x + int(column_inset) :
+                                                      icons_x,
                                     content_y,
                                     visibility_left ? UI_UNIT_X - 2 * int(column_inset) :
                                                       UI_UNIT_X,
@@ -2255,43 +2262,12 @@ static void outliner_draw_stack_row_icons(ui::Block *block,
                                                    TIP_("Show this layer"));
     RNA_int_set(ui::button_operator_ptr_ensure(but), "ordinal", row->ordinal);
     button_flag_enable(but, ui::BUT_DRAG_LOCK);
-    if (!visibility_left) {
-      x += UI_UNIT_X;
-    }
-
-    /* "Show me this one on its own", for each map the layer has: a view change, so it is a plain
-     * jump of the Image Editor rather than anything the stack remembers. */
-    const int inline_roles[] = {int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), int(PAINT_LAYER_MAP_MASK)};
-    for (const int wanted_role : inline_roles) {
-      const StackSubRow *sub_row = nullptr;
-      for (const StackSubRow &candidate : row->sub_rows) {
-        if (candidate.role == wanted_role) {
-          sub_row = &candidate;
-          break;
-        }
-      }
-      const bool is_mask = wanted_role == PAINT_LAYER_MAP_MASK;
-      if (sub_row == nullptr) {
-        /* Keep the column: a layer without a mask must not slide the next row's icons over. */
-        x += UI_UNIT_X;
-        continue;
-      }
-      ui::Button *view_but = uiDefIconButO(block,
-                                           ui::ButtonType::But,
-                                           "OUTLINER_OT_stack_layer_show_map",
-                                           wm::OpCallContext::ExecDefault,
-                                           is_mask ? ICON_MOD_MASK : ICON_RESTRICT_VIEW_OFF,
-                                           x,
-                                           content_y,
-                                           UI_UNIT_X,
-                                           UI_UNIT_Y,
-                                           is_mask ? TIP_("Show this layer's mask") :
-                                                     TIP_("Show this layer's map on its own"));
-      PointerRNA *op_ptr = ui::button_operator_ptr_ensure(view_but);
-      RNA_int_set(op_ptr, "ordinal", row->ordinal);
-      RNA_int_set(op_ptr, "role", sub_row->role);
-      button_flag_enable(view_but, ui::BUT_DRAG_LOCK);
-      x += UI_UNIT_X;
+    /* Faded the same way the row's own name and icon are -- whether that is because this layer's
+     * own toggle is off, or because a group it sits in is: either way the toggle belongs to a row
+     * that already reads as inactive, and should not be the one thing on it that still looks lit.
+     * #BUT_INACTIVE only dims the button, unlike #BUT_DISABLED it stays clickable. */
+    if (element_should_draw_faded(tvc, space_outliner, te, tselem)) {
+      button_flag_enable(but, ui::BUT_INACTIVE);
     }
   });
 }
@@ -2319,8 +2295,9 @@ static void outliner_draw_stack_columns(ui::Block *block,
   const char *disabled_hint = N_("This stack cannot be edited");
 
   /* With Large rows on, the mode and the value stack in one column instead of sitting side by
-   * side: the row is two units tall, room enough for one full-height button above the other, and
-   * each keeps the combined width of both rather than shrinking to make room for the other. */
+   * side: the row is two units tall, room enough for one full-height button above the other. Only
+   * one of the two is ever visible there, so the column -- and the buttons in it -- are only as
+   * wide as the wider of the two, not both added together. */
   const bool stacked = show_value && show_mode &&
                        (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
 
@@ -2328,7 +2305,7 @@ static void outliner_draw_stack_columns(ui::Block *block,
   const int column_x = int(region->v2d.cur.xmax - outliner_right_columns_width(space_outliner));
   const int value_width = show_value ? layout.value_width * UI_UNIT_X : 0;
   const int mode_width = show_mode ? layout.mode_width * UI_UNIT_X : 0;
-  const int stacked_width = value_width + mode_width;
+  const int stacked_width = max_ii(value_width, mode_width);
 
   tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
     const TreeStoreElem *tselem = TREESTORE(te);
@@ -2360,12 +2337,13 @@ static void outliner_draw_stack_columns(ui::Block *block,
       value_y = mode_y;
     }
     /* Side by side, value keeps its usual place on the left of mode; stacked, both sit in the same
-     * single column, narrower than the reserved column so the pair reads as compact rather than
-     * stretched edge to edge. */
+     * single column and each fills the combined width the column was reserved with -- the reserved
+     * width and the button width have to agree, or the column looks wider than the buttons that
+     * sit in it. */
     const int value_x = column_x;
     const int mode_x = stacked ? column_x : column_x + value_width;
-    const int this_value_width = stacked ? int(stacked_width / 1.5f) : value_width;
-    const int this_mode_width = stacked ? int(stacked_width / 1.5f) : mode_width;
+    const int this_value_width = stacked ? stacked_width : value_width;
+    const int this_mode_width = stacked ? stacked_width : mode_width;
 
     if (show_value) {
       ui::Button *button = nullptr;
@@ -3604,6 +3582,7 @@ static void outliner_set_subtree_coords(TreeElement *te)
 }
 
 static bool element_should_draw_faded(const TreeViewContext &tvc,
+                                      const SpaceOutliner *space_outliner,
                                       const TreeElement *te,
                                       const TreeStoreElem *tselem)
 {
@@ -3625,7 +3604,7 @@ static bool element_should_draw_faded(const TreeViewContext &tvc,
       }
       default: {
         if (te->parent) {
-          return element_should_draw_faded(tvc, te->parent, te->parent->store_elem);
+          return element_should_draw_faded(tvc, space_outliner, te->parent, te->parent->store_elem);
         }
       }
     }
@@ -3643,9 +3622,26 @@ static bool element_should_draw_faded(const TreeViewContext &tvc,
           tree_element_cast<TreeElementGreasePencilNode>(te)->node();
       return !node.is_visible();
     }
+    case TSE_STACK_LAYER: {
+      /* A layer switched off with its own visibility toggle should read the same way the rest of
+       * the Outliner shows something hidden -- faded, not just an icon changed -- so its off state
+       * is obvious at a glance rather than only on hover. */
+      const StackRow *row = (space_outliner != nullptr) ?
+                                outliner_stack_row_find(*space_outliner, tselem->nr) :
+                                nullptr;
+      if (row != nullptr && !row->enabled) {
+        return true;
+      }
+      /* A row's own toggle is not the whole story: switched off, a group takes everything it
+       * holds down with it, the same way a disabled collection fades what is inside it. */
+      if (te->parent) {
+        return element_should_draw_faded(tvc, space_outliner, te->parent, te->parent->store_elem);
+      }
+      break;
+    }
     default: {
       if (te->parent) {
-        return element_should_draw_faded(tvc, te->parent, te->parent->store_elem);
+        return element_should_draw_faded(tvc, space_outliner, te->parent, te->parent->store_elem);
       }
     }
   }
@@ -3739,7 +3735,8 @@ static void outliner_draw_tree_element(ui::Block *block,
   *starty = stack_row_content_offset(row_bottom, row_height);
 
   if (*starty + 2 * UI_UNIT_Y >= region->v2d.cur.ymin && *starty <= region->v2d.cur.ymax) {
-    const float alpha_fac = element_should_draw_faded(tvc, te, tselem) ? 0.5f : 1.0f;
+    const float alpha_fac = element_should_draw_faded(tvc, space_outliner, te, tselem) ? 0.5f :
+                                                                                        1.0f;
     int xmax = region->v2d.cur.xmax;
 
     if ((tselem->flag & TSE_TEXTBUT) && (*te_edit == nullptr)) {
@@ -4082,7 +4079,8 @@ static void outliner_draw_hierarchy_lines_recursive(uint pos,
     }
 
     if (draw_hierarchy_line) {
-      const short alpha_fac = element_should_draw_faded(tvc, &te, tselem) ? 127 : 255;
+      const short alpha_fac = element_should_draw_faded(tvc, space_outliner, &te, tselem) ? 127 :
+                                                                                            255;
       uchar line_color[4];
       if (color_tag != COLLECTION_COLOR_NONE) {
         copy_v4_v4_uchar(line_color, btheme->collection_color[color_tag].color);
@@ -4312,204 +4310,181 @@ static void outliner_draw_paint_layers_badges(ui::Block *block,
 }
 
 /**
- * An outline around each row of the Stack Layers mode, drawn only with `SO_SL_BIG_ROWS`.
+ * Draw alternating Stack Layers backgrounds and the rule between a layer's channel rows, from
+ * the actual row geometry.
  *
- * A tall row holds a name, a value, a mode and several toggles, and without a border it is not
- * obvious where one layer ends and the next begins. At the usual row height the rows are close
- * enough together that the outline would be noise, so it is left off there.
+ * The regular Outliner background uses a fixed one-unit pitch. That cuts a two-unit layer row in
+ * half, so Stack Layers alternates after complete tree elements instead. Channel rows are one unit
+ * high and are therefore handled naturally. In pair mode, direct channel rows are grouped as
+ * [1+2], [3+4], ...; for an odd count the first row is kept on its own: [1], [2+3], [4+5], ... .
  */
-static void outliner_draw_stack_row_boxes_recursive(const ARegion *region,
+static void outliner_draw_stack_row_bands_recursive(const ARegion *region,
                                                     const SpaceOutliner *space_outliner,
                                                     const ListBaseT<TreeElement> *lb,
-                                                    const float col_outline[4],
-                                                    const float col_hovered[4],
-                                                    const float col_selected[4],
-                                                    const float col_active[4],
-                                                    const bool boxed,
-                                                    const int first_column_x,
+                                                    const bool pair_channels,
+                                                    const uint pos,
+                                                    const float col_alternate[4],
+                                                    const float col_divider[4],
                                                     const int startx,
+                                                    int *stripe_index,
                                                     int *io_start_y)
 {
-  const float radius = UI_UNIT_Y / 6.0f;
-  /* The margin the row's own buttons are inset by, so the boxes around them end where they do
-   * rather than at the very edge of the region. */
-  const float pad = UI_UNIT_X / 4.0f;
-  const float region_right = float(region->v2d.cur.xmax) - pad;
-
   for (const TreeElement &te : *lb) {
     const TreeStoreElem *tselem = TREESTORE(&te);
     const int row_height = outliner_tree_element_height(*space_outliner, te);
     const int start_y = *io_start_y + UI_UNIT_Y - row_height;
 
-    const int block_top = start_y + row_height;
-    const bool is_layer = tselem->type == TSE_STACK_LAYER;
-    /* A layer's own selection folds in its channels': switching which channel is open moves the
-     * tree's selection onto that channel row, and the layer's surrounding box should keep tracking
-     * it rather than collapse back to an unselected look. */
-    const bool is_selected = is_layer ? stack_layer_row_selected(te) :
-                                       ((tselem->flag & TSE_SELECTED) != 0);
+    /* The band is drawn first so the rule below always shows on top of it, whichever of the two
+     * rows on either side of the rule is the shaded one. */
+    if ((*stripe_index & 1) != 0) {
+      immUniformColor4fv(col_alternate);
+      immRectf(pos,
+               float(region->v2d.cur.xmin),
+               float(start_y),
+               float(region->v2d.cur.xmax),
+               float(start_y + row_height));
+    }
 
     /* A rule between the maps a layer is made of. They are one-line rows of the same shape --
      * "Base Color", "Metallic", "Roughness" -- and without a line between them they read as one
-     * block of text. The first one needs none: the layer's row is above it. */
+     * block of text. The first one needs none: the layer's row is above it. Starting at the row's
+     * own indent rather than the region edge keeps it off the hierarchy line and expand-arrow
+     * gutter to its left. */
     if (tselem->type == TSE_STACK_ITEM && te.prev != nullptr) {
-      rctf line{};
-      BLI_rctf_init(&line,
-                    float(startx),
-                    region_right,
-                    float(block_top) - U.pixelsize,
-                    float(block_top));
-      draw_roundbox_corner_set(ui::CNR_ALL);
-      ui::draw_roundbox_4fv(&line, true, 0.0f, col_outline);
+      immUniformColor4fv(col_divider);
+      immRectf(pos,
+               float(startx),
+               float(start_y + row_height) - U.pixelsize,
+               float(region->v2d.cur.xmax),
+               float(start_y + row_height));
     }
 
+    (*stripe_index)++;
     *io_start_y -= row_height;
-    if (TSELEM_OPEN(tselem, space_outliner)) {
-      outliner_draw_stack_row_boxes_recursive(region,
-                                              space_outliner,
-                                              &te.subtree,
-                                              col_outline,
-                                              col_hovered,
-                                              col_selected,
-                                              col_active,
-                                              boxed,
-                                              first_column_x,
-                                              startx + UI_UNIT_X,
-                                              io_start_y);
-    }
 
-    if (!is_layer || !boxed) {
+    if (!TSELEM_OPEN(tselem, space_outliner)) {
       continue;
     }
-    /* The children were walked first so that the block's height is known: a selected layer is
-     * shown as one thing -- its own row plus the rows it holds -- rather than as a lit row with
-     * unrelated-looking rows under it. */
-    /* The walk leaves `io_start_y` on the next row's content line, and a row's top edge is one
-     * unit above that -- which is where this block ends. */
-    const int block_bottom = *io_start_y + UI_UNIT_Y;
-    const bool visibility_left = (space_outliner->stack_layers_flag & SO_SL_VISIBILITY_LEFT) != 0;
-    /* The visibility toggle has a column of its own to the left of the row, and the row's box
-     * starts where that column ends -- at every depth, so the two are always one box. Nesting is
-     * shown by where the row's contents sit, not by where its box begins; a box that stepped right
-     * with the indent would leave a slot of background between it and the toggle. */
-    const float toggle_right = float(first_column_x + UI_UNIT_X);
-    /* Same margin #outliner_draw_highlights uses for its background rect, so the full-width box
-     * below lines up with it instead of reading a hair narrower. */
-    const float full_width_pad = 3.0f * UI_SCALE_FAC;
-    /* With the toggle off to the side instead of in its own column, the box has nothing to leave
-     * room for on the left, so it runs the full width of the region -- the same edge every depth
-     * uses, rather than `startx`, which steps right with the indent and would make nested rows'
-     * boxes look clipped instead of full width. */
-    const float left = visibility_left ? toggle_right : float(region->v2d.cur.xmin) + full_width_pad;
-    const float right = visibility_left ? region_right : float(region->v2d.cur.xmax) - full_width_pad;
 
-    if (is_selected) {
-      rctf block{};
-      /* Edge to edge: it is the band the selected layer occupies in the list, and a band that
-       * stops short of either side reads as another box rather than as a band. */
-      BLI_rctf_init(&block,
-                    float(region->v2d.cur.xmin),
-                    float(region->v2d.cur.xmax),
-                    float(block_bottom),
-                    float(block_top));
-      draw_roundbox_corner_set(ui::CNR_ALL);
-      /* Dim rather than colour: the outline already carries the selection colour, and a fill in
-       * it would drown the icons and text the row is made of. */
-      const float col_dim[4] = {0.0f, 0.0f, 0.0f, 0.2f};
-      ui::draw_roundbox_4fv(&block, true, 0.0f, col_dim);
+    if (tselem->type == TSE_STACK_LAYER && pair_channels) {
+      int channel_count = 0;
+      for (const TreeElement &child : te.subtree) {
+        channel_count += TREESTORE(&child)->type == TSE_STACK_ITEM;
+      }
+
+      if (channel_count > 0) {
+        const int channel_x = startx + UI_UNIT_X;
+        int channel_index = 0;
+        const int channel_stripe_index = *stripe_index;
+        for (const TreeElement &child : te.subtree) {
+          if (TREESTORE(&child)->type != TSE_STACK_ITEM) {
+            continue;
+          }
+
+          const int group = (channel_count & 1) ?
+                                (channel_index == 0 ? 0 : 1 + (channel_index - 1) / 2) :
+                                channel_index / 2;
+          const int channel_row_height = outliner_tree_element_height(*space_outliner, child);
+          const int channel_start_y = *io_start_y + UI_UNIT_Y - channel_row_height;
+          if (((channel_stripe_index + group) & 1) != 0) {
+            immUniformColor4fv(col_alternate);
+            immRectf(pos,
+                     float(region->v2d.cur.xmin),
+                     float(channel_start_y),
+                     float(region->v2d.cur.xmax),
+                     float(channel_start_y + channel_row_height));
+          }
+          if (channel_index != 0) {
+            immUniformColor4fv(col_divider);
+            immRectf(pos,
+                     float(channel_x),
+                     float(channel_start_y + channel_row_height) - U.pixelsize,
+                     float(region->v2d.cur.xmax),
+                     float(channel_start_y + channel_row_height));
+          }
+          channel_index++;
+          *io_start_y -= channel_row_height;
+        }
+        *stripe_index = channel_stripe_index + (channel_count + 1) / 2;
+        continue;
+      }
     }
 
-    /* Indented by the walk rather than read from `te->xs`: the coordinates of an element are only
-     * written when the tree is drawn, so right after a rebuild -- which is what opening a row
-     * causes -- they still describe the tree that was there before, or nothing at all. The left
-     * edge sits at this row's own indent, which is to the right of the hierarchy line its parent
-     * draws half a unit further left. */
-    rctf rect{};
-    BLI_rctf_init(&rect,
-                  left,
-                  right,
-                  start_y + 1.0f * UI_SCALE_FAC,
-                  start_y + row_height - 1.0f * UI_SCALE_FAC);
-    /* Where the two meet they are one box, so the side facing the visibility column is left square
-     * and the seam does not read as a gap. A nested row starts further right than that column
-     * ends, so nothing is touching and it keeps all four corners. */
-    const bool touches_toggle = visibility_left;
-    ui::draw_roundbox_corner_set(touches_toggle ? (ui::CNR_TOP_RIGHT | ui::CNR_BOTTOM_RIGHT) :
-                                                  ui::CNR_ALL);
-    /* The row the operators will act on is worth seeing at a glance, and the outline is where a
-     * boxed row shows it. */
-    const float *col = col_outline;
-    /* Own activeness only, matching the fill in #outliner_draw_highlights: a layer lit because a
-     * channel it holds is open reads as an ordinary selected row rather than repeating the active
-     * colour on both. */
-    if ((tselem->flag & TSE_ACTIVE) && is_selected) {
-      col = col_active;
-    }
-    else if (is_selected) {
-      col = col_selected;
-    }
-    else if (tselem->flag & TSE_HIGHLIGHTED) {
-      col = col_hovered;
-    }
-    ui::draw_roundbox_4fv(&rect, false, radius, col);
-
-    /* The visibility toggle gets a box of its own when it sits in the first column: outside the
-     * row's box, it would otherwise look like it belongs to nothing. It reaches all the way to the
-     * row's box on the right, so the two share that edge and read as one box with a bay in it. The
-     * button inside gets no frame of its own -- one box around another around an icon is more
-     * border than content. */
-    if (visibility_left) {
-      /* The box starts where the column does, so the button -- inset by the same amount at both
-       * ends -- sits centered in it, and it is always exactly one column wide: the toggles of a
-       * nested row must line up with the ones above it, and a box that stretched to each row's own
-       * indent would put every depth's edge somewhere else. */
-      const float column_left = float(first_column_x);
-      rctf column{};
-      BLI_rctf_init(&column,
-                    column_left,
-                    float(first_column_x + UI_UNIT_X),
-                    start_y + 1.0f * UI_SCALE_FAC,
-                    start_y + row_height - 1.0f * UI_SCALE_FAC);
-      ui::draw_roundbox_corner_set(touches_toggle ? (ui::CNR_TOP_LEFT | ui::CNR_BOTTOM_LEFT) :
-                                                    ui::CNR_ALL);
-      ui::draw_roundbox_4fv(&column, false, radius, col);
-    }
+    outliner_draw_stack_row_bands_recursive(region,
+                                            space_outliner,
+                                            &te.subtree,
+                                            pair_channels,
+                                            pos,
+                                            col_alternate,
+                                            col_divider,
+                                            startx + UI_UNIT_X,
+                                            stripe_index,
+                                            io_start_y);
   }
 }
 
-static void outliner_draw_stack_row_boxes(const ARegion *region,
+static void outliner_draw_stack_row_bands(const ARegion *region,
                                           const SpaceOutliner *space_outliner,
-                                          const int startx,
-                                          int *io_start_y)
+                                          const int startx)
 {
-  if (space_outliner->outlinevis != SO_STACK_LAYERS) {
+  if (space_outliner->outlinevis != SO_STACK_LAYERS ||
+      space_outliner->stack_layers_view != SO_SL_VIEW_STACK)
+  {
     return;
   }
-  /* The boxes are for tall rows only -- at the usual height the rows sit close enough together
-   * that an outline around each would be noise. The rule between a layer's maps is drawn either
-   * way, since that is about telling one map from the next. */
-  const bool boxed = (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
-  float col_outline[4], col_hovered[4], col_selected[4], col_active[4];
-  ui::theme::get_color_blend_4f(TH_TEXT, TH_BACK, 0.8f, col_outline);
-  /* The hover highlight is a pale wash over the row, and an outline lit from the same end of the
-   * scale disappears into it, so a hovered row's border is drawn darker than what it sits on.
-   * Only a hovered one: everywhere else the lighter border is the one that reads. */
-  ui::theme::get_color_shade_4fv(TH_BACK, -10, col_hovered);
-  ui::theme::get_color_3fv(TH_SELECT_HIGHLIGHT, col_selected);
-  col_selected[3] = 1.0f;
-  ui::theme::get_color_3fv(TH_SELECT_ACTIVE, col_active);
-  col_active[3] = 1.0f;
-  outliner_draw_stack_row_boxes_recursive(region,
+
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+
+  /* Themes saved before #TH_STACK_ALTERNATE existed leave it unset (alpha zero); fall back to
+   * the regular Outliner alternate-row color instead of drawing nothing until the user
+   * re-saves the theme. */
+  float col_stack_alternate[4];
+  ui::theme::get_color_4fv(TH_STACK_ALTERNATE, col_stack_alternate);
+  const int alternate_theme_id = (col_stack_alternate[3] > 0.0f) ? TH_STACK_ALTERNATE :
+                                                                  TH_ROW_ALTERNATE;
+  float col_alternate_raw[4];
+  ui::theme::get_color_4fv(alternate_theme_id, col_alternate_raw);
+  float col_alternate[4];
+  ui::theme::get_color_blend_3f(TH_BACK, alternate_theme_id, col_alternate_raw[3], col_alternate);
+  col_alternate[3] = 1.0f;
+
+  float col_divider[4];
+  ui::theme::get_color_blend_4f(TH_TEXT, TH_BACK, 0.8f, col_divider);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  int stripe_index = 0;
+  int start_y = int(region->v2d.tot.ymax) - UI_UNIT_Y - OL_Y_OFFSET;
+  outliner_draw_stack_row_bands_recursive(region,
                                           space_outliner,
                                           &space_outliner->runtime->tree,
-                                          col_outline,
-                                          col_hovered,
-                                          col_selected,
-                                          col_active,
-                                          boxed,
+                                          (space_outliner->stack_layers_flag &
+                                           SO_SL_PAIR_CHANNELS) != 0,
+                                          pos,
+                                          col_alternate,
+                                          col_divider,
                                           startx,
-                                          startx,
-                                          io_start_y);
+                                          &stripe_index,
+                                          &start_y);
+
+  /* The walk above only covers the tree's own rows. Below the last one, tile the same alternate
+   * band on the Outliner's usual one-unit pitch so an empty stretch of the list reads the same
+   * way it always has, rather than as a plain, un-striped background. */
+  immUniformColor4fv(col_alternate);
+  while (start_y + UI_UNIT_Y > region->v2d.cur.ymin) {
+    if ((stripe_index & 1) != 0) {
+      immRectf(pos,
+               float(region->v2d.cur.xmin),
+               float(start_y),
+               float(region->v2d.cur.xmax),
+               float(start_y + UI_UNIT_Y));
+    }
+    stripe_index++;
+    start_y -= UI_UNIT_Y;
+  }
+
+  immUnbindProgram();
 }
 
 static void outliner_draw_highlights(ARegion *region,
@@ -4564,13 +4539,6 @@ static void outliner_draw_tree(ui::Block *block,
     columns_offset += UI_UNIT_X;
   }
 
-  /* Stack Layers draws boxes around its rows, and a box against the border of the region reads as
-   * a clipped one. Moving the whole tree over keeps the visibility column, the boxes and the rows
-   * together, which they would not be if only the boxes were inset. */
-  if (space_outliner->outlinevis == SO_STACK_LAYERS) {
-    columns_offset += UI_UNIT_X / 6;
-  }
-
   GPU_blend(GPU_BLEND_ALPHA); /* Only once. */
 
   if (space_outliner->outlinevis == SO_DATA_API) {
@@ -4584,11 +4552,8 @@ static void outliner_draw_tree(ui::Block *block,
   {
     int starty = int(region->v2d.tot.ymax) - UI_UNIT_Y - OL_Y_OFFSET;
     int startx = 0;
+    outliner_draw_stack_row_bands(region, space_outliner, columns_offset);
     outliner_draw_highlights(region, space_outliner, startx, &starty);
-
-    starty = int(region->v2d.tot.ymax) - UI_UNIT_Y - OL_Y_OFFSET;
-    /* The same origin the tree itself is drawn from, so the walk's indent matches the rows. */
-    outliner_draw_stack_row_boxes(region, space_outliner, columns_offset, &starty);
 
     /* Set scissor so tree elements or lines can't overlap restriction icons. */
     if (right_column_width > 0.0f) {
@@ -4636,10 +4601,9 @@ static void outliner_draw_tree(ui::Block *block,
 static void outliner_back(const SpaceOutliner &space_outliner, ARegion *region)
 {
   if (space_outliner.outlinevis == SO_STACK_LAYERS &&
-      (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS))
+      space_outliner.stack_layers_view == SO_SL_VIEW_STACK)
   {
-    /* The alternating bands are drawn on a fixed pitch, which no longer lines up with rows that
-     * are taller than one unit. A plain background beats stripes that cut rows in half. */
+    /* Stack Layers draws alternating bands from the actual tree geometry below. */
     return;
   }
 

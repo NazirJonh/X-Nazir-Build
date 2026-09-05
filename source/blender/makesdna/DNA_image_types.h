@@ -293,6 +293,23 @@ struct Image {
    */
   bUUID paint_layer_id = {};
 
+  /**
+   * Which PBR paint channel this image authors within its layer, as #eMaterialPaintChannel, or
+   * -1 when it says nothing.
+   *
+   * The companion of #paint_layer_id: that one groups an image into a layer, this one says what
+   * it is inside it. Both are needed to answer "the Ambient Occlusion map of the layer below
+   * this one", which no node link can answer -- AO has no Principled input at all, and a mask has
+   * no place in the shader graph either, yet both are per-layer maps a user paints and expects to
+   * see composited.
+   *
+   * Deliberately not derived from the image name: "<Channel> TexLayer" is the engine's own naming
+   * of the maps it creates, and an add-on that authors its own layers names them as it likes.
+   * Written from Python as `Image.paint_layer_channel`.
+   */
+  int paint_layer_channel = -1;
+  char _pad_paint_layer[4] = {};
+
   bke::ImageRuntime *runtime = nullptr;
 };
 

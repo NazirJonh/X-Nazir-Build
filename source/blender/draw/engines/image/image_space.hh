@@ -64,6 +64,68 @@ class AbstractSpaceAccessor {
   virtual void release_buffer(blender::Image *image, ImBuf *image_buffer, void *lock) = 0;
 
   /**
+   * Whether this space would display pixels of its own in place of the image's.
+   *
+   * Cheap by contract -- flags and pointers, never a node graph walk or an image lock -- because
+   * the drawing modes ask it on more than one code path per frame. It says what the space is set
+   * to, not that a buffer will really be produced: #acquire_display_override_buffer can still
+   * return null, and the caller then falls back to the image's own pixels.
+   *
+   * The conservative answer is `true`: taking the override path for a space that turns out to have
+   * none costs a full texture update, while missing one draws the wrong pixels.
+   */
+  virtual bool has_display_override() const
+  {
+    return false;
+  }
+
+  /**
+   * A buffer to display in place of the image's own pixels, or null when there is none.
+   *
+   * The image is still what everything else is keyed on -- size, tiles, image user, partial
+   * updates -- only its pixels come from elsewhere. Used by the Image Editor to show a material's
+   * composited layer stack on the canvas of one of its layers.
+   *
+   * A space that returns a buffer here forces the screen-space drawing mode, since the image-space
+   * one draws the image's own GPU texture and would never see these pixels.
+   *
+   * \param bmain: the #Main the override is resolved against. Passed in rather than looked up so
+   *               that the engine resolves against the #Main it was initialized with.
+   * \param r_revision: changes whenever the returned pixels do, so the drawing mode can tell
+   *                    whether the texture it uploaded last frame is still current.
+   * \param r_changed_region: which pixels changed since the previous revision, in the returned
+   *                          buffer's own texel coordinates, so the drawing mode can refresh that
+   *                          much of its texture rather than all of it. Empty means "no idea" as
+   *                          well as "nothing moved" -- the two are told apart by \a r_revision --
+   *                          so a caller that sees a new revision with an empty region must do a
+   *                          full refresh.
+   */
+  virtual ImBuf *acquire_display_override_buffer(Main * /*bmain*/,
+                                                 uint64_t * /*r_revision*/,
+                                                 rcti * /*r_changed_region*/ = nullptr)
+  {
+    return nullptr;
+  }
+
+  /** Release a buffer from #acquire_display_override_buffer. */
+  virtual void release_display_override_buffer(ImBuf * /*image_buffer*/) {}
+
+  /**
+   * The canvas extent the image occupies, in image pixels, or zero when the space cannot say.
+   *
+   * Asked of the space rather than measured from the displayed buffer, because a display override
+   * is only pixels: it may be produced at a fraction of the canvas -- the Image Editor's Combined
+   * preview is shaded at a power-of-two fraction chosen from the zoom -- and sizing the canvas
+   * from it would shrink the drawn image as the zoom crossed an octave.
+   *
+   * Zero means "measure it from the buffer", which is right for every space that has no override.
+   */
+  virtual int2 get_canvas_size() const
+  {
+    return int2(0);
+  }
+
+  /**
    * Update the r_shader_parameters with space specific settings.
    *
    * Only update the #ShaderParameters.flags and #ShaderParameters.shuffle. Other parameters

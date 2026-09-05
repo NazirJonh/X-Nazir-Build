@@ -20,6 +20,7 @@ struct ImBuf;
 struct Image;
 struct ImageUser;
 struct Main;
+struct Material;
 struct Object;
 struct ReportList;
 struct Scene;
@@ -96,6 +97,62 @@ ImBuf *ED_space_image_acquire_buffer(SpaceImage *sima,
                                      void **r_lock,
                                      int tile,
                                      const bool ensure_host_buffer);
+/**
+ * Whether \a sima is set to show a composited pass rather than its image's own pixels.
+ *
+ * Cheap by contract -- a flag and a pointer, never a node graph walk or an image lock -- so that a
+ * caller reached several times per redraw can ask it instead of acquiring a buffer it may not use.
+ * It answers what the space is *set* to, not whether a composite can be produced: a material that
+ * turns out not to be a layer stack still falls back to the image, and only
+ * #ED_space_image_acquire_composite_buffer can tell.
+ */
+bool ED_space_image_has_composite(const SpaceImage *sima);
+/**
+ * The composited layer stack to display instead of the space's own image, or null.
+ *
+ * Non-null only while the space is in composite mode and its material's channel really is a layer
+ * stack; every other case falls back to the image, so a caller that has no interest in the
+ * composite can ignore this entirely and keep using #ED_space_image_acquire_buffer.
+ *
+ * The buffer comes with a reference of its own, so it is released like any other:
+ * #BKE_image_release_ibuf with a null lock, which is what #ED_space_image_release_buffer does.
+ *
+ * \param bmain: searched for the material whose layer stack the space's image belongs to. Explicit
+ *               rather than #G_MAIN because the per-frame caller -- the image engine -- has the
+ *               real one and must not be resolved against a preview or a temporary #Main.
+ * \param r_revision: bumped whenever the composited pixels change, for a caller that keeps a copy
+ *                    of them -- the image editor uploads them to a GPU texture -- and needs to
+ *                    know when its copy went stale.
+ * \param r_changed_region: which pixels changed, in the **returned buffer's** own texel
+ *                          coordinates, so that caller can refresh that much of its copy rather
+ *                          than all of it. Empty when nothing moved, which is exactly when
+ *                          \a r_revision did not move either. Only the Combined pass reports it; a
+ *                          channel pass leaves it empty and its consumer must fall back to a full
+ *                          refresh.
+ */
+ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
+                                               SpaceImage *sima,
+                                               uint64_t *r_revision = nullptr,
+                                               rcti *r_changed_region = nullptr);
+/**
+ * The material whose layer stack or texture set \a image belongs to, or null.
+ *
+ * Exposed because the Image Editor's draw callback needs the same answer the buffer acquisition
+ * does -- to start a bake for the Combined preview -- and re-deriving it there would duplicate
+ * both the search over #Main and the memo that keeps it off the redraw path.
+ */
+Material *ED_space_image_composite_material_get(Main *bmain, const Image *image);
+/**
+ * Forget what #ED_space_image_composite_material_get last resolved.
+ *
+ * The lookup remembers its misses as well as its hits, so that an image belonging to no material
+ * does not pay a scan over every material on every redraw. A miss cannot be re-checked cheaply --
+ * confirming it is the scan -- so it has to be dropped when the thing that could turn it into a
+ * hit happens: a material's node tree changed, or #Main was replaced wholesale.
+ *
+ * Cheap and always safe: the worst a needless call costs is one scan.
+ */
+void ED_space_image_composite_material_memo_clear();
 /**
  * Get the #SpaceImage flag that is valid for the given ibuf.
  */

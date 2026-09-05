@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 
@@ -15,6 +16,7 @@ static constexpr bool RNA_SPACE_DEBUG_ENABLED = false;
 
 #include "BLI_math_constants.h"
 #include "BLI_string_ref.hh"
+#include "BLI_uuid.h"
 #include "BLT_translation.hh"
 
 #include "BKE_context.hh"
@@ -749,6 +751,7 @@ static const EnumPropertyItem spreadsheet_table_id_type_items[] = {
 #  include "BKE_nla.hh"
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_paint_material_composite.hh"
 #  include "BKE_preferences.h"
 #  include "BKE_scene.hh"
 #  include "BKE_screen.hh"
@@ -2464,21 +2467,50 @@ static const EnumPropertyItem *rna_SpaceImageEditor_display_channels_itemf(bCont
 }
 
 /**
- * Identifier for a paint slot whose channel is #NODE_TEX_IMAGE_SLOT_NONE, by position in the
- * canvas list. Static strings rather than formatted ones: RNA does not own enum item strings, and
- * frees only the item array, so anything allocated here would leak on every redraw. Returns null
- * past the end of the table.
+ * Item values of #material_paint_canvas, which lists three kinds of thing at once.
+ *
+ * A layer map is its #ID.session_uid, always positive (the loop below asserts it). The other two
+ * kinds have no data-block to name them, so they take disjoint negative ranges: one pass or one
+ * channel per value, decoded by subtracting the base.
  */
-static const char *material_paint_canvas_fallback_identifier(const int index)
+static constexpr int SPACE_IMAGE_CANVAS_PASS_BASE = -1;
+/** A channel the active layer has no map for. Listed, but selecting it does nothing. */
+static constexpr int SPACE_IMAGE_CANVAS_MISSING_BASE = -1000;
+
+static int space_image_canvas_pass_value(const int pass)
 {
-  constexpr int identifiers_num = 32;
-  static const char *const identifiers[identifiers_num] = {
-      "SLOT_0",  "SLOT_1",  "SLOT_2",  "SLOT_3",  "SLOT_4",  "SLOT_5",  "SLOT_6",  "SLOT_7",
-      "SLOT_8",  "SLOT_9",  "SLOT_10", "SLOT_11", "SLOT_12", "SLOT_13", "SLOT_14", "SLOT_15",
-      "SLOT_16", "SLOT_17", "SLOT_18", "SLOT_19", "SLOT_20", "SLOT_21", "SLOT_22", "SLOT_23",
-      "SLOT_24", "SLOT_25", "SLOT_26", "SLOT_27", "SLOT_28", "SLOT_29", "SLOT_30", "SLOT_31",
-  };
-  return (index >= 0 && index < identifiers_num) ? identifiers[index] : nullptr;
+  return SPACE_IMAGE_CANVAS_PASS_BASE - pass;
+}
+
+static int space_image_canvas_missing_value(const int channel)
+{
+  return SPACE_IMAGE_CANVAS_MISSING_BASE - channel;
+}
+
+/** The UI name of a pass or layer-map role. */
+static const char *space_image_canvas_role_name(const int role)
+{
+  /* Combined first: it is not a channel, and the cast below would hand the descriptor table an
+   * out-of-range value. */
+  if (role == PAINT_LAYER_PASS_COMBINED) {
+    return "Combined";
+  }
+  if (role == PAINT_LAYER_MAP_MASK) {
+    return "Mask";
+  }
+  /* Everything else really is a channel; the descriptor table asserts on anything that is not. */
+  return BKE_paint_material_channel_info(eMaterialPaintChannel(role)).ui_name;
+}
+
+/**
+ * The paint layer whose maps the "Layer Texture Pass" section lists.
+ *
+ * The canvas the editor is showing, since that is the map the user last chose to paint; it carries
+ * the layer's UUID like every other map of that layer. Nil when the canvas is not a layer map.
+ */
+static bUUID space_image_active_layer_id(const SpaceImage &sima)
+{
+  return sima.image != nullptr ? sima.image->paint_layer_id : BLI_uuid_nil();
 }
 
 /**
@@ -2491,10 +2523,11 @@ static const char *material_paint_canvas_fallback_identifier(const int index)
  * through #BKE_libblock_find_session_uid without one.
  */
 static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
-    bContext *C, PointerRNA * /*ptr*/, PropertyRNA * /*prop*/, bool *r_free)
+    bContext *C, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
 {
   EnumPropertyItem *item = nullptr;
   int totitem = 0;
+  Vector<PaintMaterialCompositeImageLayer> composite_layers;
 
   Object *ob = (C != nullptr) ? CTX_data_active_object(C) : nullptr;
   Material *ma = (ob != nullptr) ? BKE_object_material_get(ob, ob->actcol) : nullptr;
@@ -2516,52 +2549,127 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
     }
   }
 
-  /* Shared with #PAINT_OT_material_canvas_cycle so the C / Shift-C hotkey and this selector can
-   * never disagree about the set or the order. */
-  const Vector<Image *> images = BKE_texpaint_slot_canvas_images(ma);
-  for (const int i : images.index_range()) {
-    Image *image = images[i];
-
-    /* Labelled by channel, so the header stays short; the data-block name is the tooltip. A slot
-     * with no channel (#NODE_TEX_IMAGE_SLOT_NONE) has nothing better than its image name. */
-    const char *channel_identifier = nullptr;
-    const char *channel_name = nullptr;
-    for (const int slot : IndexRange(ma->tot_slots)) {
-      if (ma->texpaintslot[slot].ima != image ||
-          ma->texpaintslot[slot].slot_type == NODE_TEX_IMAGE_SLOT_NONE)
-      {
-        continue;
+  /* Enum identifiers reach Python as-is and are copied by reference, so they have to be stable
+   * literals. One pair per role, looked up by the role rather than listed in a fixed order: the
+   * order is #BKE_paint_material_composite_passes, shared with the cycle operator. */
+  struct CanvasRoleIdentifiers {
+    int role;
+    const char *pass_identifier;
+    const char *layer_identifier;
+  };
+  static const CanvasRoleIdentifiers role_identifiers[] = {
+      /* A display mode, not a role: it appears in section 1 only, and section 2 never reaches it
+       * because that loop walks the role list. The layer identifier is a placeholder that is
+       * never emitted; it is not null so that no reader has to guard against one. */
+      {PAINT_LAYER_PASS_COMBINED, "COMPOSITE_COMBINED", "LAYER_COMBINED_UNUSED"},
+      {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "COMPOSITE_BASE_COLOR", "LAYER_BASE_COLOR"},
+      {PAINT_MATERIAL_CHANNEL_METALLIC, "COMPOSITE_METALLIC", "LAYER_METALLIC"},
+      {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "COMPOSITE_ROUGHNESS", "LAYER_ROUGHNESS"},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR, "COMPOSITE_SPECULAR", "LAYER_SPECULAR"},
+      {PAINT_MATERIAL_CHANNEL_NORMAL, "COMPOSITE_NORMAL", "LAYER_NORMAL"},
+      {PAINT_MATERIAL_CHANNEL_HEIGHT, "COMPOSITE_HEIGHT", "LAYER_HEIGHT"},
+      {PAINT_MATERIAL_CHANNEL_ALPHA, "COMPOSITE_ALPHA", "LAYER_ALPHA"},
+      {PAINT_MATERIAL_CHANNEL_AO, "COMPOSITE_AO", "LAYER_AO"},
+      {PAINT_MATERIAL_CHANNEL_EMISSION, "COMPOSITE_EMISSION", "LAYER_EMISSION"},
+      {PAINT_LAYER_MAP_MASK, "COMPOSITE_MASK", "LAYER_MASK"},
+  };
+  auto identifiers_for_role = [&](const int role) -> const CanvasRoleIdentifiers * {
+    for (const CanvasRoleIdentifiers &entry : role_identifiers) {
+      if (entry.role == role) {
+        return &entry;
       }
-      RNA_enum_id_from_value(rna_enum_node_tex_image_paint_slot_type_items,
-                             ma->texpaintslot[slot].slot_type,
-                             &channel_identifier);
-      RNA_enum_name_from_value(rna_enum_node_tex_image_paint_slot_type_items,
-                               ma->texpaintslot[slot].slot_type,
-                               &channel_name);
-      break;
     }
+    return nullptr;
+  };
 
-    EnumPropertyItem slot_item{};
-    /* #ID.session_uid, so the get/set callbacks -- which never receive a #bContext -- can resolve
-     * an item back to its image through #BKE_libblock_find_session_uid. It is a `uint32_t`
-     * counter; the cast is safe for any session that has not created two billion data-blocks. */
-    BLI_assert(image->id.session_uid <= uint32_t(INT_MAX));
-    slot_item.value = int(image->id.session_uid);
-    /* Enum identifiers reach Python as-is, so they must be valid, stable and unique tokens. Image
-     * names are none of those (spaces, dots, duplicates across libraries), hence the channel
-     * identifier, with a positional fallback for a slot that has no channel. */
-    slot_item.identifier = (channel_identifier != nullptr) ?
-                               channel_identifier :
-                               material_paint_canvas_fallback_identifier(i);
-    if (slot_item.identifier == nullptr) {
-      /* Past the fallback table: listing the item without a usable identifier would break Python
-       * assignment for every item after it, so drop it. Only reachable on a material with more
-       * unchanneled paint slots than any real one has. */
+  const Main *bmain = CTX_data_main(C);
+  /* Two lists on purpose. Section 1 lists what can be *displayed*, Combined included; section 2
+   * lists *roles* and indexes `layer_maps` by them, where Combined would read out of bounds. */
+  const Span<int> display_passes = BKE_paint_material_display_passes();
+  const Span<int> passes = BKE_paint_material_composite_passes();
+
+  /* Section 1: the material as a whole. Every pass is listed whether or not the maps behind it
+   * exist yet -- a pass is what the material can supply, and the user picks it before painting
+   * the layers that will fill it. */
+  EnumPropertyItem composite_heading{};
+  composite_heading.identifier = "";
+  composite_heading.name = "Composite";
+  RNA_enum_item_add(&item, &totitem, &composite_heading);
+
+  for (const int pass : display_passes) {
+    const CanvasRoleIdentifiers *identifiers = identifiers_for_role(pass);
+    if (identifiers == nullptr) {
       continue;
     }
-    slot_item.name = (channel_name != nullptr) ? channel_name : image->id.name + 2;
-    slot_item.description = image->id.name + 2;
-    RNA_enum_item_add(&item, &totitem, &slot_item);
+    if (pass == PAINT_LAYER_PASS_COMBINED) {
+      /* Always available: it shades whatever the material supplies, including nothing, so there is
+       * no stack to probe and no "not yet" state to report. */
+      EnumPropertyItem combined_item{};
+      combined_item.value = space_image_canvas_pass_value(pass);
+      combined_item.identifier = identifiers->pass_identifier;
+      combined_item.name = space_image_canvas_role_name(pass);
+      combined_item.description = "All paint passes shaded together on a flat surface";
+      combined_item.icon = ICON_SHADING_RENDERED;
+      RNA_enum_item_add(&item, &totitem, &combined_item);
+      continue;
+    }
+    const bool resolvable = bmain != nullptr &&
+                            BKE_paint_material_composite_stack_from_material(
+                                *bmain, *ma, pass, composite_layers);
+    EnumPropertyItem pass_item{};
+    pass_item.value = space_image_canvas_pass_value(pass);
+    pass_item.identifier = identifiers->pass_identifier;
+    pass_item.name = space_image_canvas_role_name(pass);
+    pass_item.description = resolvable ? "Every layer of this channel, blended together" :
+                                         "No layer stack for this channel yet";
+    pass_item.icon = resolvable ? ICON_NODE_COMPOSITING : ICON_BLANK1;
+    RNA_enum_item_add(&item, &totitem, &pass_item);
+  }
+
+  /* Section 2: one map of the active layer, which is what a stroke actually writes into. */
+  const bUUID layer_id = space_image_active_layer_id(*static_cast<SpaceImage *>(ptr->data));
+  if (BLI_uuid_is_nil(layer_id) || bmain == nullptr) {
+    RNA_enum_item_end(&item, &totitem);
+    *r_free = true;
+    return item;
+  }
+
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM + 1> layer_maps;
+  BKE_paint_material_layer_maps_get(*bmain, *ma, layer_id, layer_maps);
+
+  EnumPropertyItem layer_heading{};
+  layer_heading.identifier = "";
+  layer_heading.name = "Layer Texture Pass";
+  RNA_enum_item_add(&item, &totitem, &layer_heading);
+
+  for (const int role : passes) {
+    const CanvasRoleIdentifiers *identifiers = identifiers_for_role(role);
+    if (identifiers == nullptr) {
+      continue;
+    }
+    const Image *map = layer_maps[role];
+
+    EnumPropertyItem layer_item{};
+    layer_item.identifier = identifiers->layer_identifier;
+    layer_item.name = space_image_canvas_role_name(role);
+    if (map != nullptr) {
+      /* #ID.session_uid, so the get/set callbacks -- which never receive a #bContext -- can
+       * resolve an item back to its image through #BKE_libblock_find_session_uid. It is a
+       * `uint32_t` counter; the cast is safe for any session that has not created two billion
+       * data-blocks. */
+      BLI_assert(map->id.session_uid <= uint32_t(INT_MAX));
+      layer_item.value = int(map->id.session_uid);
+      layer_item.description = map->id.name + 2;
+      layer_item.icon = ICON_IMAGE_DATA;
+    }
+    else {
+      /* Listed rather than hidden, so the section keeps the same shape from layer to layer, and
+       * an unauthored channel reads as missing instead of as absent. Its value selects nothing. */
+      layer_item.value = space_image_canvas_missing_value(role);
+      layer_item.description = "The active layer has no map for this channel";
+      layer_item.icon = ICON_BLANK1;
+    }
+    RNA_enum_item_add(&item, &totitem, &layer_item);
   }
 
   RNA_enum_item_end(&item, &totitem);
@@ -2573,6 +2681,9 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
 static int rna_SpaceImageEditor_material_paint_canvas_get(PointerRNA *ptr)
 {
   const SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  if ((sima->flag & SI_PAINT_COMPOSITE_MODE) != 0) {
+    return space_image_canvas_pass_value(sima->material_paint_pass);
+  }
   /* An image outside the active material's slots matches no item, so the button draws blank; a
    * Ctrl-Wheel step then lands on the first entry, matching #PAINT_OT_material_canvas_cycle. */
   return (sima->image != nullptr) ? int(sima->image->id.session_uid) : 0;
@@ -2581,6 +2692,20 @@ static int rna_SpaceImageEditor_material_paint_canvas_get(PointerRNA *ptr)
 static void rna_SpaceImageEditor_material_paint_canvas_set(PointerRNA *ptr, int value)
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  if (value <= SPACE_IMAGE_CANVAS_MISSING_BASE) {
+    /* A channel the active layer has no map for. The item exists so the section keeps its shape;
+     * there is nothing to select. */
+    return;
+  }
+  if (value <= SPACE_IMAGE_CANVAS_PASS_BASE) {
+    /* #SpaceImage.image is deliberately left alone: it is both what the editor falls back to and
+     * what says which layer and material to composite, and keeping it holds the framing across
+     * the switch. */
+    sima->material_paint_pass = SPACE_IMAGE_CANVAS_PASS_BASE - value;
+    sima->flag |= SI_PAINT_COMPOSITE_MODE;
+    return;
+  }
+  sima->flag &= ~SI_PAINT_COMPOSITE_MODE;
   Main *bmain = G_MAIN;
   Image *image = id_cast<Image *>(BKE_libblock_find_session_uid(bmain, ID_IM, uint32_t(value)));
   if (image == nullptr || image == sima->image) {
@@ -2589,6 +2714,13 @@ static void rna_SpaceImageEditor_material_paint_canvas_set(PointerRNA *ptr, int 
   /* Holds the framing while stepping the equal-sized channel maps of one material, exactly as the
    * C / Shift-C hotkey does. */
   ED_space_image_set_ex(bmain, sima, image, true);
+}
+
+static bool rna_SpaceImageEditor_is_material_paint_combined_get(PointerRNA *ptr)
+{
+  const SpaceImage *sima = static_cast<const SpaceImage *>(ptr->data);
+  return (sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 &&
+         sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED;
 }
 
 static int rna_SpaceImageEditor_display_channels_get(PointerRNA *ptr)
@@ -7236,6 +7368,23 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Material Paint Canvas",
                            "Paint slot of the active material shown in this editor, by channel");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "is_material_paint_combined", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SpaceImageEditor_is_material_paint_combined_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Show Combined Preview",
+                           "The Combined preview is the pass currently shown in this editor");
+
+  prop = RNA_def_property(srna, "material_paint_light_rotation", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "material_paint_light_rot_z");
+  RNA_def_property_range(prop, -M_PI, M_PI);
+  RNA_def_property_ui_text(prop,
+                           "Light Rotation",
+                           "Rotation of the Combined preview's studio light around the canvas "
+                           "normal");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
   prop = RNA_def_property(srna, "image_user", PROP_POINTER, PROP_NONE);

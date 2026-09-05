@@ -6,11 +6,14 @@
  * \ingroup spimage
  */
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "DNA_gpencil_legacy_types.h"
 #include "DNA_image_types.h"
 #include "DNA_mask_types.h"
+#include "DNA_material_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_view3d_types.h"
@@ -20,8 +23,11 @@
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector_types.hh"
+#include "BLI_rect.h"
 #include "BLI_string_utf8.h"
 #include "BLI_threads.h"
+#include "BLI_utildefines.h"
 
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
@@ -31,6 +37,8 @@
 #include "BKE_lib_query.hh"
 #include "BKE_lib_remap.hh"
 #include "BKE_main.hh"
+#include "BKE_paint_material_channel_perf_debug.hh"
+#include "BKE_paint_material_combined.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
 
@@ -46,6 +54,7 @@
 #include "ED_image.hh"
 #include "ED_image_grid.hh"
 #include "ED_mask.hh"
+#include "ED_material_combined.hh"
 #include "ED_node.hh"
 #include "ED_paint.hh"
 #include "ED_render.hh"
@@ -57,8 +66,8 @@
 
 #include "GPU_batch.hh"
 
-#include "NOD_compositor_gizmos.hh"
 #include "../interface/interface_tag_bar.hh"
+#include "NOD_compositor_gizmos.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -297,7 +306,6 @@ static SpaceLink *image_duplicate(SpaceLink *sl)
 
   BKE_scopes_new(&simagen->scopes);
 
-
   /* Floating selection sessions are not copied -- each editor instance owns its own session. */
   simagen->runtime = MEM_new<ed::image::SpaceImage_Runtime>(__func__);
 
@@ -320,6 +328,7 @@ static void image_operatortypes()
   WM_operatortype_append(IMAGE_OT_view_rotate_ccw);
   WM_operatortype_append(IMAGE_OT_view_rotate_reset);
   WM_operatortype_append(IMAGE_OT_view_rotate_interactive);
+  WM_operatortype_append(IMAGE_OT_combined_light_rotate);
 #ifdef WITH_INPUT_NDOF
   WM_operatortype_append(IMAGE_OT_view_ndof);
 #endif
@@ -794,9 +803,9 @@ static void image_main_region_set_view2d(SpaceImage *sima, ARegion *region)
   region->v2d.cur.ymin /= h;
   region->v2d.cur.ymax /= h;
 
-  /* Sync canvas rotation into the View2D so the ortho matrix and the POST_VIEW callback matrix pick
-   * it up (mirrors how `cur` above derives from zoom/pan). Gated by supported modes so a stored
-   * rotation never leaks into the UV editor. */
+  /* Sync canvas rotation into the View2D so the ortho matrix and the POST_VIEW callback matrix
+   * pick it up (mirrors how `cur` above derives from zoom/pan). Gated by supported modes so a
+   * stored rotation never leaks into the UV editor. */
   if (ED_space_image_rotation_supported(sima)) {
     region->v2d.rotation = sima->rotation;
     copy_v2_v2(region->v2d.rotation_pivot, sima->rotation_pivot);
@@ -838,8 +847,118 @@ static void image_main_region_init(wmWindowManager *wm, ARegion *region)
   WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
 }
 
+/**
+ * Holds a #CombinedPreviewDrawState armed for the lifetime of the scope, and clears it however the
+ * scope is left.
+ *
+ * A guard rather than a pair of assignments around #DRW_draw_view, because leaving the state armed
+ * is a silent wrong-pixels bug rather than a crash: #ED_space_image_acquire_composite_buffer is
+ * reached from the eyedropper, the scopes and image saving as well as from the engine, and those
+ * read the whole preview. An early return or a throw added to the draw callback later must not be
+ * able to hand them a preview narrowed to whatever the last frame happened to show.
+ *
+ * Constructing one arms nothing; #arm makes the state live, which is what lets a caller decide
+ * part way through that this frame is not clippable after all.
+ */
+class ScopedCombinedPreviewDraw {
+  ed::image::CombinedPreviewDrawState *state_ = nullptr;
+
+ public:
+  ScopedCombinedPreviewDraw() = default;
+  ScopedCombinedPreviewDraw(const ScopedCombinedPreviewDraw &) = delete;
+  ScopedCombinedPreviewDraw &operator=(const ScopedCombinedPreviewDraw &) = delete;
+
+  ~ScopedCombinedPreviewDraw()
+  {
+    if (state_ != nullptr) {
+      *state_ = ed::image::CombinedPreviewDrawState{};
+    }
+  }
+
+  void arm(ed::image::CombinedPreviewDrawState &state, const rcti &clip, const int2 display_size)
+  {
+    BLI_assert(state_ == nullptr);
+    state.clip = clip;
+    state.display_size = display_size;
+    state_ = &state;
+  }
+};
+
+/**
+ * The axis-aligned bounding rectangle, in canvas pixels, of what \a region currently shows of the
+ * canvas -- padded, and clamped to the canvas.
+ *
+ * The region-to-view mapping comes from #view2d_region_to_view_rctf rather than being read off
+ * `View2D.cur` directly. `cur` is the *navigation* rectangle; the displayed frame also carries the
+ * canvas rotation about its pivot, and that rotation happens in region pixels with the two axes at
+ * different scales, so rotating the corners of `cur` as a plain Euclidean rotation of canvas
+ * coordinates gives the wrong quad on any non-square view. #view2d_region_to_view_rctf is the
+ * exact inverse of what #view2d_view_ortho draws and already returns the bounding box of the
+ * rotated quad, which is a superset -- a little extra shading, never an unshaded pixel on screen.
+ *
+ * The canvas comes from the preview cache rather than from #ED_space_image_get_size, and a
+ * material with nothing cached yet gets no clip at all. Until an entry exists the canvas is only a
+ * guess -- the gather derives it from the first channel that resolves to a layer stack, which need
+ * not be the size of `sima->image` -- and a clip computed against the wrong canvas would narrow
+ * the first frame to the wrong rectangle. An unclipped first frame is what establishes the entry
+ * that every frame after it is clipped against.
+ *
+ * \return false when no clip should be applied, leaving \a r_clip empty.
+ */
+static bool image_combined_preview_clip_calc(const Material &ma,
+                                             const ARegion *region,
+                                             rcti &r_clip,
+                                             int2 &r_canvas_size)
+{
+  BLI_rcti_init(&r_clip, 0, 0, 0, 0);
+  r_canvas_size = int2(0);
+
+  int width, height;
+  if (!BKE_paint_material_combined_cache_size_get(ma, width, height)) {
+    return false;
+  }
+  if (width <= 0 || height <= 0) {
+    return false;
+  }
+  r_canvas_size = int2(width, height);
+
+  /* The drawn area in region pixels is the View2D mask, which #image_main_region_set_view2d has
+   * just filled with the region size. */
+  rctf region_rect;
+  BLI_rctf_rcti_copy(&region_rect, &region->v2d.mask);
+
+  rctf view_rect;
+  ui::view2d_region_to_view_rctf(&region->v2d, &region_rect, &view_rect);
+
+  /* View space here is normalized over the image, so scaling by the canvas size gives texels. The
+   * margin covers the image engine sampling the canvas through #IMB_transform: a texel just
+   * outside the view can still be read by the filter at the edge of the region texture. */
+  const int margin = 8;
+  BLI_rcti_init(&r_clip,
+                int(floorf(view_rect.xmin * float(width))) - margin,
+                int(ceilf(view_rect.xmax * float(width))) + margin,
+                int(floorf(view_rect.ymin * float(height))) - margin,
+                int(ceilf(view_rect.ymax * float(height))) + margin);
+
+  rcti canvas;
+  BLI_rcti_init(&canvas, 0, width, 0, height);
+  rcti clipped;
+  if (!BLI_rcti_isect(&r_clip, &canvas, &clipped)) {
+    /* Nothing of the canvas is on screen. A single texel rather than an empty rectangle, because
+     * empty means "shade everything" to the cache -- the opposite of what this frame needs. */
+    BLI_rcti_init(&r_clip, 0, 1, 0, 1);
+    return true;
+  }
+  r_clip = clipped;
+  return true;
+}
+
 static void image_main_region_draw(const bContext *C, ARegion *region)
 {
+  /* The Combined preview's end-to-end budget is defined on the whole callback, since a frame that
+   * shades nothing is exactly what the "no-op frame" target measures. */
+  PAINT_CHANNEL_PERF_COMBINED_FRAME();
+
   /* draw entirely, view changes should be handled here */
   SpaceImage *sima = CTX_wm_space_image(C);
   Object *obedit = CTX_data_edit_object(C);
@@ -875,10 +994,50 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
     mask = ED_space_image_get_mask(sima);
   }
 
+  /* Resolved once and reused below. #ED_space_image_composite_material_get walks the node tree of
+   * every material until one claims this image, so the second lookup a frame used to cost as much
+   * as the first. */
+  Material *combined_material = nullptr;
+  if (sima != nullptr && (sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 &&
+      sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED && sima->image != nullptr)
+  {
+    combined_material = ED_space_image_composite_material_get(CTX_data_main(C), sima->image);
+  }
+
+  /* The nearest point to the draw that has a real #bContext.
+   * #ED_space_image_acquire_composite_buffer has only a #Main and is also reached from the image
+   * engine, so a job must never be started there. */
+  if (combined_material != nullptr) {
+    ed::material_combined::combined_preview_bake_ensure(*C, *combined_material);
+  }
+
   if (show_viewer) {
     BLI_thread_lock(LOCK_DRAW_IMAGE);
   }
-  DRW_draw_view(C);
+  {
+    /* The Combined preview shades only what this region is about to show, and only for as long as
+     * this scope lasts -- see #SpaceImage_Runtime::combined_preview_draw for why it may not be
+     * left armed a moment longer. */
+    ScopedCombinedPreviewDraw preview_draw;
+    if (combined_material != nullptr && sima->runtime != nullptr) {
+      rcti clip;
+      int2 canvas_size;
+      if (image_combined_preview_clip_calc(*combined_material, region, clip, canvas_size)) {
+        /* The on-screen extent of the canvas, capped by the region -- not the region size itself.
+         * A canvas zoomed into one corner of a large editor covers only part of it, and shading at
+         * the whole editor's resolution would throw the saving away. */
+        float zoomx, zoomy;
+        ED_space_image_get_zoom(sima, region, &zoomx, &zoomy);
+        /* #ARegion.winx is a `short`, so the bound is taken as an `int` rather than letting
+         * #std::min deduce two different types. */
+        const int2 display_size(
+            std::min(int(region->winx), std::max(1, int(ceilf(float(canvas_size.x) * zoomx)))),
+            std::min(int(region->winy), std::max(1, int(ceilf(float(canvas_size.y) * zoomy)))));
+        preview_draw.arm(sima->runtime->combined_preview_draw, clip, display_size);
+      }
+    }
+    DRW_draw_view(C);
+  }
   if (show_viewer) {
     BLI_thread_unlock(LOCK_DRAW_IMAGE);
   }
@@ -927,7 +1086,11 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
     if (ibuf) {
       int x, y;
       rctf frame;
-      BLI_rctf_init(&frame, 0.0f, ibuf->x, 0.0f, ibuf->y);
+      /* The canvas, not the buffer: a Combined preview is shaded at a fraction of the canvas, and
+       * the metadata frame is drawn around the canvas. */
+      int frame_width, frame_height;
+      ED_space_image_get_size(sima, &frame_width, &frame_height);
+      BLI_rctf_init(&frame, 0.0f, float(frame_width), 0.0f, float(frame_height));
       /* Find window pixel coordinates of origin. Navigation frame: the zoom scaling inside
        * #ED_region_image_metadata_draw is relative to the un-rotated origin; the rotation is
        * applied around it below instead. */
@@ -1054,9 +1217,19 @@ static void image_main_region_listener(const wmRegionListenerParams *params)
       }
       break;
     case NC_MATERIAL:
+      /* The Combined preview is shaded from the material, and a source-material bake reports its
+       * completion with nothing but a generic #NC_MATERIAL on a timer
+       * (`render_material_bake.cc`, #WM_jobs_timer). Without this, a bake that lands while the
+       * preview is open is not shown until something else happens to redraw the region. Narrow to
+       * the Combined pass on purpose: every other pass is byte-composited from images and hears
+       * about its own edits through #NC_IMAGE. */
+      if ((sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 &&
+          sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED)
+      {
+        ED_region_tag_redraw(region);
+        break;
+      }
       if (wmn->data == ND_SHADING_LINKS) {
-        SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-
         if (sima->iuser.scene &&
             (sima->iuser.scene->toolsettings->uv_flag & UV_FLAG_SHOW_SAME_IMAGE))
         {

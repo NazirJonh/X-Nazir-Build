@@ -24,6 +24,7 @@
 #  include <cstdint>
 
 #  include "atomic_ops.h"
+#  include "BLI_math_base.h"
 #  include "BLI_string.h"
 #  include "BLI_time.h"
 #  include "BLI_utildefines.h"
@@ -330,11 +331,221 @@ inline void stroke_begin_targets_log(const int target_count,
   CLOG_INFO(&LOG, "stroke_begin targets=%d%s", target_count, targets_desc);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Combined Preview
+ *
+ * The Combined preview is refreshed per *redraw*, not per dab, so it cannot share #DabStats: a
+ * pan is a frame with no dab in it, and the "no-op frame" budget is measured on exactly those.
+ * Everything else -- the compile-time gate, the CLOG category, the clock, the microsecond
+ * accumulation -- is the same mechanism as above, deliberately, so there is one harness to enable.
+ * \{ */
+
+enum class CombinedStage : int {
+  /** The whole of `combined_preview_ensure`, including the two stages below it. */
+  Gather = 0,
+  /** Time spent inside #BKE_paint_material_composite_cache_ensure, summed over channels. */
+  CompositeRefresh,
+  /** #CombinedEvalStats.elapsed_seconds, reported by the evaluator itself. */
+  Evaluator,
+  /** `ImBuf` to GPU texture. */
+  TextureUpload,
+  /** The Image Editor's whole main-region draw callback. */
+  FrameTotal,
+  Num,
+};
+
+struct CombinedFrameStats {
+  uint64_t frame_index = 0;
+  uint64_t stage_us[int(CombinedStage::Num)] = {};
+  int64_t pixels_processed = 0;
+  int width = 0;
+  int height = 0;
+  /**
+   * How the preview was asked for this frame: how many times, the largest clip any of those calls
+   * declared, and how many declared none at all.
+   *
+   * The unclipped count is the load-bearing one. A frame that shades the whole canvas has two very
+   * different explanations -- the view really does show all of it, or something acquired the
+   * buffer without declaring a clip and shaded the remainder -- and only this tells them apart.
+   */
+  int eval_calls = 0;
+  int clip_width = 0;
+  int clip_height = 0;
+  int unclipped_calls = 0;
+  /**
+   * Why the cache shaded: how many calls found the whole entry invalid rather than a region of it,
+   * and the largest dirty rectangle any of them was given.
+   *
+   * A frame whose `pixels` equals the clip area has two explanations -- the entry was invalidated
+   * wholesale, or the dirty region really did cover the view -- and only these tell them apart.
+   */
+  int rebuild_full_calls = 0;
+  int rebuild_region_calls = 0;
+  int dirty_width = 0;
+  int dirty_height = 0;
+};
+
+inline CombinedFrameStats &combined_stats()
+{
+  static CombinedFrameStats stats;
+  return stats;
+}
+
+inline void combined_add_stage_us(const CombinedStage stage, const uint64_t us)
+{
+  atomic_fetch_and_add_uint64(&combined_stats().stage_us[int(stage)], us);
+}
+
+class CombinedScopeTimer {
+ public:
+  explicit CombinedScopeTimer(const CombinedStage stage) : stage_(stage), start_(now_seconds()) {}
+
+  ~CombinedScopeTimer()
+  {
+    combined_add_stage_us(stage_, seconds_to_us(now_seconds() - start_));
+  }
+
+ private:
+  CombinedStage stage_;
+  double start_;
+};
+
+/**
+ * Reported by the evaluator, which measures itself: the cache may not have run it at all.
+ *
+ * Accumulated, not assigned. The preview is gathered more than once per frame -- the drawing mode
+ * resolves it in its sync and again while uploading the texture -- and every call after the first
+ * finds the cache current and does no work. Assigning would therefore report zero for a frame that
+ * really did shade the whole canvas.
+ */
+inline void combined_set_eval(const double elapsed_seconds,
+                              const int64_t pixels_processed,
+                              const int width,
+                              const int height)
+{
+  CombinedFrameStats &stats = combined_stats();
+  stats.eval_calls++;
+  stats.stage_us[int(CombinedStage::Evaluator)] += seconds_to_us(elapsed_seconds);
+  stats.pixels_processed += pixels_processed;
+  if (width > 0 && height > 0) {
+    stats.width = width;
+    stats.height = height;
+  }
+}
+
+/** The clip the gather was handed, so a frame that shaded everything says whether it was asked to. */
+inline void combined_set_clip(const int clip_width, const int clip_height)
+{
+  CombinedFrameStats &stats = combined_stats();
+  if (clip_width <= 0 || clip_height <= 0) {
+    stats.unclipped_calls++;
+    return;
+  }
+  /* The largest, not the last: a frame's cost is bounded by the widest area anyone asked for, and
+   * reporting whichever call happened to come last would hide that. */
+  stats.clip_width = max_ii(stats.clip_width, clip_width);
+  stats.clip_height = max_ii(stats.clip_height, clip_height);
+}
+
+/** Why a cache call shaded, reported from the cache itself. */
+inline void combined_set_rebuild(const bool full, const int dirty_width, const int dirty_height)
+{
+  CombinedFrameStats &stats = combined_stats();
+  if (full) {
+    stats.rebuild_full_calls++;
+  }
+  else {
+    stats.rebuild_region_calls++;
+  }
+  stats.dirty_width = max_ii(stats.dirty_width, dirty_width);
+  stats.dirty_height = max_ii(stats.dirty_height, dirty_height);
+}
+
+inline void combined_frame_end_log()
+{
+  if (!logging_enabled()) {
+    return;
+  }
+  const CombinedFrameStats &stats = combined_stats();
+  /* An idle editor redraws for reasons of its own, and a log of thousands of empty frames buries
+   * the ones that did something. A frame is reported when it shaded anything at all, or when it
+   * cost a millisecond without shading -- which is the "no-op frame" regression the budget names,
+   * so it is exactly the empty frame worth seeing. */
+  if (stats.pixels_processed == 0 && stats.stage_us[int(CombinedStage::FrameTotal)] < 1000) {
+    return;
+  }
+  CLOG_INFO(&LOG,
+            "combined frame=%llu canvas=%dx%d pixels=%lld evals=%d unclipped=%d clip=%dx%d "
+            "full=%d region=%d dirty=%dx%d",
+            unsigned long long(stats.frame_index),
+            stats.width,
+            stats.height,
+            (long long)stats.pixels_processed,
+            stats.eval_calls,
+            stats.unclipped_calls,
+            stats.clip_width,
+            stats.clip_height,
+            stats.rebuild_full_calls,
+            stats.rebuild_region_calls,
+            stats.dirty_width,
+            stats.dirty_height);
+  print_section_ms("gather (a)", stats.stage_us[int(CombinedStage::Gather)]);
+  print_section_ms("composite refresh (b)", stats.stage_us[int(CombinedStage::CompositeRefresh)]);
+  print_section_ms("evaluator (c)", stats.stage_us[int(CombinedStage::Evaluator)]);
+  print_section_ms("texture upload (d)", stats.stage_us[int(CombinedStage::TextureUpload)]);
+  print_section_ms("frame total (e)", stats.stage_us[int(CombinedStage::FrameTotal)]);
+}
+
+/**
+ * Times a whole redraw and reports it when the frame ends.
+ *
+ * One object rather than a begin/scope/end trio because the frame total has to be written *before*
+ * the report is formatted, and a scope timer paired with a separate log call at the end of the
+ * function would always report zero -- the timer destructs after the log, not before it.
+ */
+class CombinedFrameTimer {
+ public:
+  CombinedFrameTimer() : start_(now_seconds())
+  {
+    CombinedFrameStats &stats = combined_stats();
+    const uint64_t index = stats.frame_index + 1;
+    stats = {};
+    stats.frame_index = index;
+  }
+
+  ~CombinedFrameTimer()
+  {
+    combined_add_stage_us(CombinedStage::FrameTotal, seconds_to_us(now_seconds() - start_));
+    combined_frame_end_log();
+  }
+
+ private:
+  double start_;
+};
+
+/** \} */
+
 }  // namespace blender::bke::paint_material_channel_perf
 
 #  define PAINT_CHANNEL_PERF_SCOPE(section) \
     const blender::bke::paint_material_channel_perf::ScopeTimer _paint_channel_perf_scope_##section( \
         blender::bke::paint_material_channel_perf::Section::section)
+
+#  define PAINT_CHANNEL_PERF_COMBINED_SCOPE(stage) \
+    const blender::bke::paint_material_channel_perf::CombinedScopeTimer \
+        _paint_channel_perf_combined_scope_##stage( \
+            blender::bke::paint_material_channel_perf::CombinedStage::stage)
+
+#  define PAINT_CHANNEL_PERF_COMBINED_FRAME() \
+    const blender::bke::paint_material_channel_perf::CombinedFrameTimer \
+        _paint_channel_perf_combined_frame
+#  define PAINT_CHANNEL_PERF_COMBINED_SET_EVAL(seconds, pixels, width, height) \
+    blender::bke::paint_material_channel_perf::combined_set_eval(seconds, pixels, width, height)
+#  define PAINT_CHANNEL_PERF_COMBINED_SET_CLIP(clip_width, clip_height) \
+    blender::bke::paint_material_channel_perf::combined_set_clip(clip_width, clip_height)
+#  define PAINT_CHANNEL_PERF_COMBINED_SET_REBUILD(full, dirty_width, dirty_height) \
+    blender::bke::paint_material_channel_perf::combined_set_rebuild( \
+        full, dirty_width, dirty_height)
 
 #else
 
@@ -364,6 +575,31 @@ inline void add_rows_skipped(uint64_t /*count*/) {}
 
 #  define PAINT_CHANNEL_PERF_SCOPE(section) \
     do { \
+    } while (0)
+
+#  define PAINT_CHANNEL_PERF_COMBINED_SCOPE(stage) \
+    do { \
+    } while (0)
+#  define PAINT_CHANNEL_PERF_COMBINED_FRAME() \
+    do { \
+    } while (0)
+#  define PAINT_CHANNEL_PERF_COMBINED_SET_EVAL(seconds, pixels, width, height) \
+    do { \
+      (void)(seconds); \
+      (void)(pixels); \
+      (void)(width); \
+      (void)(height); \
+    } while (0)
+#  define PAINT_CHANNEL_PERF_COMBINED_SET_CLIP(clip_width, clip_height) \
+    do { \
+      (void)(clip_width); \
+      (void)(clip_height); \
+    } while (0)
+#  define PAINT_CHANNEL_PERF_COMBINED_SET_REBUILD(full, dirty_width, dirty_height) \
+    do { \
+      (void)(full); \
+      (void)(dirty_width); \
+      (void)(dirty_height); \
     } while (0)
 
 #endif

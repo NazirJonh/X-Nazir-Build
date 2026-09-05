@@ -399,6 +399,64 @@ void BLI_rctf_union_y(rctf *rct, const float y)
   rct->ymax = max_ff(rct->ymax, y);
 }
 
+bool BLI_rcti_union_is_exact(const rcti *rct_a, const rcti *rct_b)
+{
+  if (BLI_rcti_inside_rcti(rct_a, rct_b) || BLI_rcti_inside_rcti(rct_b, rct_a)) {
+    return true;
+  }
+  /* Agreeing on one axis and meeting on the other. Meeting rather than overlapping: rectangles
+   * that only touch still union exactly, and this is a half-open comparison for that reason. */
+  if (rct_a->xmin == rct_b->xmin && rct_a->xmax == rct_b->xmax) {
+    return rct_b->ymin <= rct_a->ymax && rct_a->ymin <= rct_b->ymax;
+  }
+  if (rct_a->ymin == rct_b->ymin && rct_a->ymax == rct_b->ymax) {
+    return rct_b->xmin <= rct_a->xmax && rct_a->xmin <= rct_b->xmax;
+  }
+  return false;
+}
+
+bool BLI_rcti_difference_bounds(const rcti *rct_a, const rcti *rct_b, rcti *r_result)
+{
+  rcti overlap;
+  if (BLI_rcti_is_empty(rct_a) || !BLI_rcti_isect(rct_a, rct_b, &overlap)) {
+    *r_result = *rct_a;
+    return true;
+  }
+  if (BLI_rcti_inside_rcti(rct_b, rct_a)) {
+    BLI_rcti_init(r_result, 0, 0, 0, 0);
+    return true;
+  }
+
+  *r_result = *rct_a;
+  bool exact = false;
+  /* Trim only along an axis where the overlap spans the other one completely; otherwise the
+   * remainder is L-shaped and the input rectangle is already its own bounding box. */
+  if (overlap.xmin <= rct_a->xmin && overlap.xmax >= rct_a->xmax) {
+    if (overlap.ymin <= rct_a->ymin) {
+      r_result->ymin = overlap.ymax;
+      exact = true;
+    }
+    else if (overlap.ymax >= rct_a->ymax) {
+      r_result->ymax = overlap.ymin;
+      exact = true;
+    }
+  }
+  else if (overlap.ymin <= rct_a->ymin && overlap.ymax >= rct_a->ymax) {
+    if (overlap.xmin <= rct_a->xmin) {
+      r_result->xmin = overlap.xmax;
+      exact = true;
+    }
+    else if (overlap.xmax >= rct_a->xmax) {
+      r_result->xmax = overlap.xmin;
+      exact = true;
+    }
+  }
+  if (BLI_rcti_is_empty(r_result)) {
+    BLI_rcti_init(r_result, 0, 0, 0, 0);
+  }
+  return exact;
+}
+
 void BLI_rcti_union(rcti *rct_a, const rcti *rct_b)
 {
   if (rct_a->xmin > rct_b->xmin) {

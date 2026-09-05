@@ -902,6 +902,7 @@ void PAINT_OT_sample_color(wmOperatorType *ot);
 void PAINT_OT_brush_colors_flip(wmOperatorType *ot);
 void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot);
 void PAINT_OT_material_paint_source_mode_set(wmOperatorType *ot);
+void PAINT_OT_material_paint_source_material_set(wmOperatorType *ot);
 void PAINT_OT_material_paint_images_ensure(wmOperatorType *ot);
 void PAINT_OT_material_paint_brush_sync(wmOperatorType *ot);
 void PAINT_OT_material_channel_value_invert(wmOperatorType *ot);

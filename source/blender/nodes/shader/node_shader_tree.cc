@@ -8,6 +8,7 @@
 
 #include <cstring>
 
+#include "DNA_brush_types.h"
 #include "DNA_light_types.h"
 #include "DNA_linestyle_types.h"
 #include "DNA_material_types.h"
@@ -37,6 +38,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
+#include "BKE_paint.hh"
 #include "BKE_scene.hh"
 
 #include "RNA_prototypes.hh"
@@ -70,13 +72,14 @@ static void shader_get_from_context(const bContext *C,
                                     ID **r_from)
 {
   SpaceNode *snode = CTX_wm_space_node(C);
-  const Main *bmain = CTX_data_main(C);
-  Scene *scene = CTX_data_scene(C);
-  ViewLayer *view_layer = CTX_data_view_layer(C);
-  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
-  Object *ob = BKE_view_layer_active_object_get(view_layer);
 
   if (snode->shaderfrom == SNODE_SHADER_OBJECT) {
+    const Main *bmain = CTX_data_main(C);
+    Scene *scene = CTX_data_scene(C);
+    ViewLayer *view_layer = CTX_data_view_layer(C);
+    BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+    Object *ob = BKE_view_layer_active_object_get(view_layer);
+
     if (ob) {
       *r_from = &ob->id;
       if (ob->type == OB_LAMP) {
@@ -92,8 +95,19 @@ static void shader_get_from_context(const bContext *C,
       }
     }
   }
+  else if (snode->shaderfrom == SNODE_SHADER_BRUSH) {
+    Paint *paint = BKE_paint_get_active_from_context(C);
+    Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+    if (brush && brush->material_paint && brush->material_paint->source_material) {
+      Material *ma = brush->material_paint->source_material;
+      *r_from = &brush->id;
+      *r_id = &ma->id;
+      *r_ntree = ma->nodetree;
+    }
+  }
 #ifdef WITH_FREESTYLE
   else if (snode->shaderfrom == SNODE_SHADER_LINESTYLE) {
+    ViewLayer *view_layer = CTX_data_view_layer(C);
     FreestyleLineStyle *linestyle = BKE_linestyle_active_from_view_layer(view_layer);
     if (linestyle) {
       *r_from = nullptr;
@@ -103,7 +117,8 @@ static void shader_get_from_context(const bContext *C,
   }
 #endif
   else { /* SNODE_SHADER_WORLD */
-    if (scene->world) {
+    Scene *scene = CTX_data_scene(C);
+    if (scene && scene->world) {
       *r_from = nullptr;
       *r_id = &scene->world->id;
       *r_ntree = scene->world->nodetree;

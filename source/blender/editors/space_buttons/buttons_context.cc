@@ -19,6 +19,7 @@
 #include "BLT_translation.hh"
 
 #include "DNA_armature_types.h"
+#include "DNA_brush_types.h"
 #include "DNA_collection_types.h"
 #include "DNA_linestyle_types.h"
 #include "DNA_material_types.h"
@@ -377,6 +378,22 @@ static bool buttons_context_path_material(ButsContextPath *path)
   return false;
 }
 
+static bool buttons_context_path_brush_material(const bContext *C, ButsContextPath *path)
+{
+  /* NOTE: deliberately no early return on pinned RNA_Material -- see D9. */
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (!brush || !brush->material_paint || !brush->material_paint->source_material) {
+    return false;
+  }
+
+  path->ptr[path->len] = RNA_id_pointer_create(&brush->id);
+  path->len++;
+  path->ptr[path->len] = RNA_id_pointer_create(&brush->material_paint->source_material->id);
+  path->len++;
+  return true;
+}
+
 static bool buttons_context_path_bone(ButsContextPath *path)
 {
   /* if we have an armature, get the active bone */
@@ -619,8 +636,10 @@ static bool buttons_context_path(
   *path = {};
   path->flag = flag;
 
-  /* If some ID datablock is pinned, set the root pointer. */
-  if (sbuts->pinid) {
+  /* If some ID datablock is pinned, set the root pointer.
+   * NOTE: BCONTEXT_BRUSH_MATERIAL always tracks the active brush source material (D9),
+   * so ignore pinned root ID which would put pinned material in path->ptr[0]. */
+  if (sbuts->pinid && mainb != BCONTEXT_BRUSH_MATERIAL) {
     ID *id = sbuts->pinid;
 
     path->ptr[0] = RNA_id_pointer_create(id);
@@ -722,6 +741,9 @@ static bool buttons_context_path(
     case BCONTEXT_STRIP_MODIFIER:
       found = buttons_context_path_strip_modifier(sequencer_scene, path);
       break;
+    case BCONTEXT_BRUSH_MATERIAL:
+      found = buttons_context_path_brush_material(C, path);
+      break;
     default:
       found = false;
       break;
@@ -739,6 +761,11 @@ static bool buttons_shading_context(const bContext *C, int mainb)
   BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
   Object *ob = BKE_view_layer_active_object_get(view_layer);
 
+  /* NOTE: #BCONTEXT_BRUSH_MATERIAL is deliberately absent even though it edits a #Material. The
+   * shading context is the group of tabs that follow the active *object*'s shading data, so that
+   * selecting another object keeps the editor on a comparable tab. The brush source material
+   * belongs to the tool and does not change with the selection, so pulling it into that group
+   * would make an unrelated tab the fallback when the object's material tab disappears. */
   if (ELEM(mainb, BCONTEXT_MATERIAL, BCONTEXT_WORLD, BCONTEXT_TEXTURE)) {
     return true;
   }

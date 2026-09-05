@@ -792,6 +792,15 @@ static void node_area_listener(const wmSpaceTypeListenerParams *params)
         node_area_tag_tree_recalc(snode, area);
       }
       break;
+    case NC_BRUSH:
+      /* NA_SELECTED is used on brush changes, NA_EDITED when the source material is assigned or
+       * cleared. Anything else (stroke feedback and the like) cannot change which tree is shown. */
+      if (ED_node_is_shader(snode) && shader_type == SNODE_SHADER_BRUSH &&
+          ELEM(wmn->action, NA_EDITED, NA_SELECTED))
+      {
+        node_area_tag_tree_recalc(snode, area);
+      }
+      break;
     case NC_OBJECT:
       if (ED_node_is_shader(snode)) {
         if (wmn->data == ND_OB_SHADING) {

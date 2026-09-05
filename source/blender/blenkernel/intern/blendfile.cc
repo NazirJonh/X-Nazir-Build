@@ -1274,13 +1274,14 @@ static void setup_app_data(bContext *C,
   }
 
   if (mode == LOAD_UNDO) {
-    /* Brushes are 'no undo' IDs, carried over untouched, while the textures their PBR Paint
-     * channels point at are regular data-blocks this step may have removed. Clear what is left
-     * dangling before anything walks those pointers, starting with the reference-count pass right
-     * below. See #BKE_brush_material_paint_stale_textures_clear. */
-    if (const int cleared = BKE_brush_material_paint_stale_textures_clear(*bmain)) {
+    /* Brushes are 'no undo' IDs, carried over untouched, while the IDs their PBR Paint
+     * data points at (channel textures, shared source mapping texture, source material) are
+     * regular data-blocks this step may have removed. Clear what is left dangling before
+     * anything walks those pointers, starting with the reference-count pass right
+     * below. See #BKE_brush_material_paint_stale_ids_clear. */
+    if (const int cleared = BKE_brush_material_paint_stale_ids_clear(*bmain)) {
       CLOG_WARN(&LOG_SETUP,
-                "Cleared %d PBR Paint channel texture(s) left pointing at data removed by undo",
+                "Cleared %d PBR Paint ID reference(s) left pointing at data removed by undo",
                 cleared);
     }
   }

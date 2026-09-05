@@ -1821,14 +1821,14 @@ void template_id_browse(Layout *layout,
               false);
 }
 
-void template_id_image_row_append_standard(const bContext *C,
-                                           Layout &layout,
-                                           PointerRNA *ptr,
-                                           PropertyRNA *prop,
-                                           const char *newop,
-                                           const char *openop,
-                                           const char *unlinkop,
-                                           const ImageIDRowParams &params)
+void template_id_browser_row_append_standard(const bContext *C,
+                                             Layout &layout,
+                                             PointerRNA *ptr,
+                                             PropertyRNA *prop,
+                                             const char *newop,
+                                             const char *openop,
+                                             const char *unlinkop,
+                                             const IDBrowserRowParams &params)
 {
   TemplateID template_ui = {};
   template_ui.ptr = *ptr;
@@ -1852,23 +1852,23 @@ void template_id_image_row_append_standard(const bContext *C,
     flag |= UI_ID_NO_FAKE_USER;
   }
   switch (params.mode) {
-    case ImageBrowserMode::Standard:
+    case IDBrowserMode::Standard:
       flag |= UI_ID_RENAME;
       if (newop) {
         flag |= UI_ID_ADD_NEW;
       }
       break;
-    case ImageBrowserMode::PaintSlotEmpty:
+    case IDBrowserMode::PaintSlotEmpty:
       /* The drop button already offers browsing and dropping, so New would only add a third way to
        * fill the slot; Open stays as an icon beside it. */
       flag |= UI_ID_NO_FAKE_USER | UI_ID_NO_RENAME | UI_ID_OPEN_ICON_ONLY;
       break;
-    case ImageBrowserMode::PaintSlotAssigned:
+    case IDBrowserMode::PaintSlotAssigned:
       flag |= UI_ID_NO_FAKE_USER | UI_ID_NO_RENAME | UI_ID_IMAGE_BROWSER_DROP_TARGET;
       break;
   }
   /* Applied after the variant so an explicit opt-out always wins: the paint-slot variants already
-   * lock the name, and #ImageBrowserMode::Standard hosts that own their data-block's name (the
+   * lock the name, and #IDBrowserMode::Standard hosts that own their data-block's name (the
    * PBR paint canvas rows) ask for the same here. */
   if (!params.use_rename) {
     flag |= UI_ID_NO_RENAME;

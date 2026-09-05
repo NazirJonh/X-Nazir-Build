@@ -1929,6 +1929,21 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 75)) {
+    /* BCONTEXT_BRUSH_MATERIAL is new: ensure its tab visibility bit is set so the tab shows
+     * up in older files when a brush with source material is active. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_PROPERTIES) {
+            SpaceProperties &sbuts = reinterpret_cast<SpaceProperties &>(sl);
+            sbuts.visible_tabs |= (1 << BCONTEXT_BRUSH_MATERIAL);
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

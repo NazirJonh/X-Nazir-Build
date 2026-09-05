@@ -2226,7 +2226,17 @@ def draw_material_paint_channels(
             col.label(text="Linked brush cannot use a source material", icon='ERROR')
         sub = col.column()
         sub.enabled = not brush_is_linked
-        sub.template_ID(material_paint, "source_material")
+        # Same control as the per-channel image slots (see #_draw_material_paint_source_texture):
+        # passing text gives the paint-slot layout, a labelled drop button while empty and a
+        # preview row once assigned. Browse and Unlink come with the template.
+        sub.template_ID_browser(
+            material_paint,
+            "source_material",
+            text=iface_("Drop material"),
+            # The user count is not actionable here; the row is a paint source picker, not a
+            # data-block manager.
+            use_users=False,
+        )
         sub.prop(material_paint, "source_layout")
         sub.prop(material_paint, "source_bake_size")
     layout.separator()

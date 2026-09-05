@@ -114,6 +114,7 @@ enum eSpaceButtons_Context : short {
   BCONTEXT_COLLECTION = 17,
   BCONTEXT_STRIP = 18,
   BCONTEXT_STRIP_MODIFIER = 19,
+  BCONTEXT_BRUSH_MATERIAL = 20,
 
   /* Keep last. */
   BCONTEXT_TOT,
@@ -944,6 +945,7 @@ enum eSpaceNode_ShaderFrom : char {
   SNODE_SHADER_OBJECT = 0,
   SNODE_SHADER_WORLD = 1,
   SNODE_SHADER_LINESTYLE = 2,
+  SNODE_SHADER_BRUSH = 3,
 };
 
 /** #SpaceNode.nodes_type */

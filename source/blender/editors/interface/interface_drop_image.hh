@@ -66,6 +66,14 @@ std::unique_ptr<ui::DropTargetInterface> brush_texture_slot_drop_target_get(bCon
                                                                            const wmEvent *event);
 
 /**
+ * Return a drop target for the brush material source slot under the cursor, or null if the button
+ * under the cursor is not the active brush's source material slot. Used by the generic button drop
+ * dispatch #blender::ui::region_but_find_drop_target_at().
+ */
+std::unique_ptr<ui::DropTargetInterface> brush_material_slot_drop_target_get(
+    bContext *C, const ARegion *region, const wmEvent *event);
+
+/**
  * Return a drop target for a specialized Image #template_ID_browser control under the cursor, or
  * null if it is not one. Used by the generic button drop dispatch.
  */

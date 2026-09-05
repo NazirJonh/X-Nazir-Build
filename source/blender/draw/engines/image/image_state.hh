@@ -32,6 +32,32 @@ struct State {
   blender::Image *image = nullptr;
   /** Usage data of the previous time, to identify changes that require a full update. */
   ImageUsage last_usage;
+  /**
+   * Revision of the display override buffer the textures were last uploaded from. Zero when the
+   * space has no override, which is every space but an Image Editor showing a composite.
+   */
+  uint64_t display_override_revision = 0;
+  /**
+   * The part of the override that changed with #display_override_revision, in image coordinates,
+   * or empty when the whole texture has to be rebuilt from it.
+   *
+   * Empty is the conservative answer and covers three different situations: nothing changed, the
+   * override could not say what changed, and the mapping to the texture is one an axis-aligned
+   * rectangle cannot express -- a rotated canvas or tile drawing. Only a non-empty rectangle is
+   * ever a licence to refresh less than everything.
+   *
+   * Consumed by #ScreenSpaceDrawingMode::update_textures in the same frame it is set.
+   */
+  rcti display_override_changed_region = {0, 0, 0, 0};
+  /**
+   * Whether an override buffer was really produced this frame, as opposed to the space merely
+   * being set to want one.
+   *
+   * Resolved once, in #ScreenSpaceDrawingMode::image_sync, and read by the paths that would
+   * otherwise each pay for the composite again. False also covers a space that asked for a
+   * composite its material cannot supply, which then has to be drawn as an ordinary image.
+   */
+  bool has_display_override = false;
 
   PartialImageUpdater partial_update = {};
 

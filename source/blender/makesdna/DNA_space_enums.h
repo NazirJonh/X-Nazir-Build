@@ -814,7 +814,8 @@ enum eSpaceImage_Flag : int {
   SI_SHOW_GPENCIL = (1 << 22),
   SI_FLAG_UNUSED_23 = (1 << 23), /* cleared */
 
-  SI_FLAG_UNUSED_24 = (1 << 24),
+  /** Show the composited layer stack of the active material instead of a single canvas image. */
+  SI_PAINT_COMPOSITE_MODE = (1 << 24),
 
 #ifdef DNA_DEPRECATED_ALLOW
   SI_NO_DRAW_TEXPAINT = (1 << 25), /* deprecated - use SI_NO_DRAW_UV_GUIDE instead, see #135102 */

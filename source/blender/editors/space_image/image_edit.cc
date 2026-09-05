@@ -14,7 +14,9 @@
 
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
+#include "BLI_uuid.h"
 
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
@@ -25,11 +27,17 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_combined.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
 
+#include "DNA_material_types.h"
+
+#include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "ED_image.hh" /* own include */
+#include "ED_material_combined.hh"
 #include "ED_mesh.hh"
 #include "ED_screen.hh"
 #include "ED_uvedit.hh"
@@ -38,6 +46,8 @@
 
 #include "WM_api.hh"
 #include "WM_types.hh"
+
+#include "image_runtime.hh"
 
 namespace blender {
 
@@ -209,12 +219,265 @@ void ED_space_image_set_mask(bContext *C, SpaceImage *sima, Mask *mask)
   }
 }
 
+/**
+ * Whether any channel of \a ma resolves to a layer stack that \a image is a layer of.
+ *
+ * \param layers: scratch space, so that a caller testing many materials allocates once.
+ */
+static bool space_image_composite_material_contains(
+    Main &bmain,
+    Material &ma,
+    const Image &image,
+    Vector<PaintMaterialCompositeImageLayer> &layers)
+{
+  /* A map that is part of a layer without being wired into the graph -- a baked Ambient Occlusion
+   * map, a layer mask -- is recognized through the layer it is tagged with rather than by asking
+   * for its own channel. Asking would make this loop derive every channel from the layer tags for
+   * every material in the file, which is a graph walk per channel plus a pass over every image,
+   * per material, per redraw. */
+  const bool image_has_layer_id = !BLI_uuid_is_nil(image.paint_layer_id);
+
+  /* Any channel identifies the material, not just the composited one: the canvas the user came
+   * from is as likely to be a Roughness layer as a Base Color one, and switching to the composite
+   * should not depend on which channel they were painting. */
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!BKE_paint_material_composite_stack_from_material(
+            bmain, ma, info.channel, layers, /*allow_layer_map_fallback=*/false))
+    {
+      continue;
+    }
+    for (const PaintMaterialCompositeImageLayer &layer : layers) {
+      if (layer.color_image == &image) {
+        return true;
+      }
+      if (image_has_layer_id && layer.color_image != nullptr &&
+          BLI_uuid_equal(layer.color_image->paint_layer_id, image.paint_layer_id))
+      {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * What the last lookup resolved for one image, by #ID.session_uid.
+ *
+ * A redraw asks for the composite at least once per frame, and the search below is a graph walk
+ * per channel per material: without this, a file with many materials pays for all of them every
+ * frame to answer a question whose answer almost never changes.
+ *
+ * A *miss* is remembered as well as a hit, and that is the half that matters for the cost. An
+ * image that belongs to no material at all -- an ordinary picture opened while the space happens
+ * to be in composite mode -- is the case a hit-only memo never covers, and it is the case that
+ * pays the full scan over every material on every single frame.
+ *
+ * The two halves are trusted differently, because they can go stale differently:
+ *
+ * - A hit is re-checked against the material it names, which is the very check the full scan
+ *   makes, just for one candidate instead of all of them. A wrong hit therefore costs one extra
+ *   walk and falls back to the scan.
+ * - A miss cannot be re-checked against anything -- confirming it *is* the scan -- so it has to
+ *   be given up on instead, whenever something could have turned it into a hit. There are two
+ *   such events, and they need different answers:
+ *
+ *   - An existing material was rewired, which #ED_space_image_composite_material_memo_clear
+ *     reports from the same place that already tells the composite cache a node tree changed.
+ *   - A material that was not there before arrived already wired -- linked or appended from
+ *     another file, or built by a script -- and edits nothing, so nothing reports it. Guarded by
+ *     the material count instead, which cannot miss an arrival the way a notifier can. Counting is
+ *     a walk over a linked list of pointers; the scan it stands in for is a walk over every
+ *     channel of every one of those materials' node graphs.
+ *
+ * Session UIDs rather than pointers, since a freed material hands its address to the next one.
+ *
+ * Main thread only, like the composite cache it feeds.
+ */
+struct CompositeMaterialMemo {
+  /** Whether anything is remembered at all. */
+  bool is_set = false;
+  /** What was asked about. */
+  uint32_t image_uid = 0;
+  /** Zero when the remembered answer is "no material owns this image". */
+  uint32_t material_uid = 0;
+  /**
+   * How many materials #Main held when this was recorded.
+   *
+   * Only a remembered miss is held to it. A hit needs no such guard: it is re-checked against the
+   * material it names, and a material arriving alongside cannot make that answer wrong -- the scan
+   * returns the first material that owns the image, and the remembered one still does.
+   */
+  int material_num = 0;
+};
+static CompositeMaterialMemo g_composite_material_memo;
+
+/**
+ * The material whose layer stack \a image belongs to, or null.
+ *
+ * The composite is displayed in place of a canvas image, and the canvas image is what says which
+ * material to composite: the user was painting on one of its layers a moment ago. Derived rather
+ * than stored so that nothing has to be kept in sync, and so that no #Material pointer has to live
+ * in #SpaceImage across undo and file load.
+ *
+ * Walks #Main because it has nothing better to start from; the memo above is what keeps the
+ * steady state from paying for that walk on every redraw.
+ */
+static Material *space_image_composite_material_find(Main &bmain, const Image &image)
+{
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  const CompositeMaterialMemo &memo = g_composite_material_memo;
+
+  if (memo.is_set && memo.image_uid == image.id.session_uid) {
+    if (memo.material_uid == 0) {
+      /* A remembered miss, good only for as long as the set of materials it was concluded from is
+       * the same one. Confirming it any other way is the scan it exists to avoid. */
+      if (memo.material_num == bmain.materials.count()) {
+        return nullptr;
+      }
+    }
+    else {
+      Material *remembered = id_cast<Material *>(
+          BKE_libblock_find_session_uid(&bmain, ID_MA, memo.material_uid));
+      if (remembered != nullptr &&
+          space_image_composite_material_contains(bmain, *remembered, image, layers))
+      {
+        return remembered;
+      }
+    }
+  }
+
+  /* Read once for the record below: the scan does not add or remove materials. */
+  const int material_num = bmain.materials.count();
+  for (Material &ma : bmain.materials) {
+    if (!space_image_composite_material_contains(bmain, ma, image, layers)) {
+      continue;
+    }
+    g_composite_material_memo = {true, image.id.session_uid, ma.id.session_uid, material_num};
+    return &ma;
+  }
+  g_composite_material_memo = {true, image.id.session_uid, 0, material_num};
+  return nullptr;
+}
+
+void ED_space_image_composite_material_memo_clear()
+{
+  g_composite_material_memo = CompositeMaterialMemo{};
+}
+
+Material *ED_space_image_composite_material_get(Main *bmain, const Image *image)
+{
+  if (bmain == nullptr || image == nullptr) {
+    return nullptr;
+  }
+  return space_image_composite_material_find(*bmain, *image);
+}
+
+bool ED_space_image_has_composite(const SpaceImage *sima)
+{
+  /* Without an image there is no material to find, and no #Image for a release to go through
+   * either, which would leak the reference #ED_space_image_acquire_composite_buffer takes. */
+  return sima != nullptr && (sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 && sima->image != nullptr;
+}
+
+ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
+                                               SpaceImage *sima,
+                                               uint64_t *r_revision,
+                                               rcti *r_changed_region)
+{
+  if (r_revision != nullptr) {
+    *r_revision = 0;
+  }
+  if (r_changed_region != nullptr) {
+    BLI_rcti_init(r_changed_region, 0, 0, 0, 0);
+  }
+  if (!ED_space_image_has_composite(sima) || bmain == nullptr) {
+    return nullptr;
+  }
+  Material *ma = space_image_composite_material_find(*bmain, *sima->image);
+  if (ma == nullptr) {
+    return nullptr;
+  }
+
+  const int pass = sima->material_paint_pass;
+
+  if (pass == PAINT_LAYER_PASS_COMBINED) {
+    CombinedPreviewLighting lighting = BKE_paint_material_combined_lighting_default();
+    BKE_paint_material_combined_lighting_rotate_z(lighting, sima->material_paint_light_rot_z);
+    /* Default-constructed unless the main region armed it, which is the whole of the narrowing
+     * contract: a caller that is not drawing -- the eyedropper, the scopes, a save -- gets the
+     * whole preview shaded, exactly as before. */
+    ed::material_combined::CombinedPreviewRequest request;
+    if (sima->runtime != nullptr && sima->runtime->combined_preview_draw.is_armed()) {
+      request.clip = sima->runtime->combined_preview_draw.clip;
+      request.max_output = sima->runtime->combined_preview_draw.display_size;
+    }
+    ImBuf *combined = ed::material_combined::combined_preview_ensure(
+        *bmain, *ma, lighting, request, r_revision, r_changed_region);
+    if (combined == nullptr) {
+      /* Nothing resolved: the plain canvas image is shown, exactly as a channel pass that is not a
+       * layer stack already behaves. Whatever canvas was remembered belongs to a preview that no
+       * longer exists, so it is dropped rather than left to answer #ED_space_image_get_size. */
+      if (sima->runtime != nullptr) {
+        sima->runtime->combined_preview_canvas_image_uid = 0;
+      }
+      return nullptr;
+    }
+    /* Remembered here because this is the once-a-frame point that already holds the material:
+     * #ED_space_image_get_size is reached far more often than this and must not repeat the
+     * lookup. */
+    if (sima->runtime != nullptr) {
+      int canvas_width = 0;
+      int canvas_height = 0;
+      if (BKE_paint_material_combined_cache_size_get(*ma, canvas_width, canvas_height)) {
+        sima->runtime->combined_preview_canvas = int2(canvas_width, canvas_height);
+        sima->runtime->combined_preview_canvas_image_uid = sima->image->id.session_uid;
+      }
+      else {
+        sima->runtime->combined_preview_canvas_image_uid = 0;
+      }
+    }
+    /* Referenced so #ED_space_image_release_buffer releases it like any other buffer, which is
+     * what keeps the two paths symmetrical. */
+    IMB_refImBuf(combined);
+    return combined;
+  }
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  if (!BKE_paint_material_composite_stack_from_material(*bmain, *ma, pass, layers)) {
+    return nullptr;
+  }
+  const uint64_t stack_hash = BKE_paint_material_composite_stack_hash(layers);
+  ImBuf *ibuf = BKE_paint_material_composite_cache_ensure(
+      *ma, pass, layers, stack_hash, r_revision);
+  if (ibuf == nullptr) {
+    return nullptr;
+  }
+  /* Handed out with a reference of its own so that #ED_space_image_release_buffer can release it
+   * exactly like any other buffer. That is what keeps the two paths symmetrical: a caller never
+   * has to know which one it got, and a composite that fails here leaves the ordinary path -- and
+   * its lock -- untouched. */
+  IMB_refImBuf(ibuf);
+  return ibuf;
+}
+
 ImBuf *ED_space_image_acquire_buffer(SpaceImage *sima,
                                      void **r_lock,
                                      int tile,
                                      const bool ensure_host_buffer)
 {
   ImBuf *ibuf;
+
+  if (ED_space_image_has_composite(sima)) {
+    /* #G_MAIN because this entry point has no #Main of its own and is reached from too many
+     * places to be given one. The per-frame caller -- the image engine -- does not come through
+     * here; it calls #ED_space_image_acquire_composite_buffer with its own #Main. */
+    if (ImBuf *composite = ED_space_image_acquire_composite_buffer(G_MAIN, sima)) {
+      *r_lock = nullptr;
+      return composite;
+    }
+    /* A material that is not a layer stack -- or none at all -- shows its plain canvas image
+     * rather than an empty editor. */
+  }
 
   if (sima && sima->image) {
     const Image *image = sima->image;
@@ -305,6 +568,47 @@ void ED_space_image_get_size(SpaceImage *sima, int *r_width, int *r_height)
   Scene *scene = sima->iuser.scene;
   ImBuf *ibuf;
   void *lock;
+
+  /* A composite preview answers from its cache rather than by being produced. Acquiring here would
+   * shade the whole canvas to read two integers, and this is reached several times per redraw --
+   * #image_main_region_set_view2d among them. Falling through when nothing is cached is right:
+   * something has to establish the size once, and the acquisition below is that something.
+   *
+   * Answering from the cache rather than from `sima->image` is deliberate. The gather derives the
+   * preview dimensions from the first channel that resolves to a layer stack, which need not equal
+   * the canvas image size; the cache preserves whatever it decided.
+   *
+   * Narrowed to the Combined pass because a channel pass is served by a different cache -- the
+   * composite one -- and a stale Combined entry left over from an earlier pass would answer for
+   * it. */
+  if (ED_space_image_has_composite(sima) && sima->image != nullptr &&
+      sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED)
+  {
+    /* The fast path, and the one nearly every call takes: the answer was recorded by the last
+     * #ED_space_image_acquire_composite_buffer, so a redraw's several size queries cost a compare
+     * rather than a material lookup each. */
+    if (sima->runtime != nullptr &&
+        sima->runtime->combined_preview_canvas_image_uid == sima->image->id.session_uid &&
+        sima->runtime->combined_preview_canvas.x > 0)
+    {
+      *r_width = sima->runtime->combined_preview_canvas.x;
+      *r_height = sima->runtime->combined_preview_canvas.y;
+      return;
+    }
+    /* Nothing remembered -- a space that has not drawn yet, or one whose image just changed. Ask
+     * the cache directly, which still beats producing the preview to measure it. */
+    if (Material *ma = ED_space_image_composite_material_get(G_MAIN, sima->image)) {
+      if (BKE_paint_material_combined_cache_size_get(*ma, *r_width, *r_height)) {
+        return;
+      }
+    }
+    /* Nothing cached yet -- the first frame, or a material that resolves to nothing. The canvas
+     * image is the answer, and falling through to the acquisition below is not: that returns the
+     * preview buffer, which is shaded at a fraction of the canvas and would report the fraction.
+     */
+    BKE_image_get_size(sima->image, &sima->iuser, r_width, r_height);
+    return;
+  }
 
   /* TODO(lukas): Support tiled images with different sizes */
   ibuf = ED_space_image_acquire_buffer(sima, &lock, 0, false);

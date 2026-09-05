@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -19,6 +20,7 @@
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "AS_asset_library.hh"
@@ -43,6 +45,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -1013,6 +1016,54 @@ static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  const bool reverse = RNA_boolean_get(op->ptr, "reverse");
+  const bool keep_view = RNA_boolean_get(op->ptr, "keep_view");
+  Main *bmain = CTX_data_main(C);
+
+  /* The hotkey steps within whatever the editor is showing, rather than across the two sections
+   * of the canvas selector: a composite steps to the next composited pass, a layer map to the
+   * next map of the same layer. Crossing from one to the other is a deliberate choice, so it
+   * stays a choice made in the selector. */
+  if ((sima->flag & SI_PAINT_COMPOSITE_MODE) != 0) {
+    /* The display list, so the cycle reaches Combined. The second loop below deliberately stays on
+     * the role list: it indexes `layer_maps[role]`, which has no Combined slot. */
+    const Span<int> passes = BKE_paint_material_display_passes();
+    const int current = int(passes.first_index_try(sima->material_paint_pass));
+    const int count = int(passes.size());
+    const int next = (current < 0) ? (reverse ? count - 1 : 0) :
+                                     (current + (reverse ? -1 : 1) + count) % count;
+    sima->material_paint_pass = passes[next];
+    WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+    return OPERATOR_FINISHED;
+  }
+
+  if (sima->image != nullptr && !BLI_uuid_is_nil(sima->image->paint_layer_id)) {
+    /* A map of a paint layer: step through that layer's other maps, in the order the selector
+     * lists them, skipping the channels the layer does not author. */
+    std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM + 1> layer_maps;
+    BKE_paint_material_layer_maps_get(*bmain, *ma, sima->image->paint_layer_id, layer_maps);
+
+    Vector<Image *> present;
+    for (const int role : BKE_paint_material_composite_passes()) {
+      if (layer_maps[role] != nullptr) {
+        present.append(layer_maps[role]);
+      }
+    }
+    if (present.is_empty()) {
+      BKE_report(op->reports, RPT_WARNING, "The active paint layer has no maps");
+      return OPERATOR_CANCELLED;
+    }
+    const int current = int(present.first_index_of_try(sima->image));
+    const int count = int(present.size());
+    const int next = (current < 0) ? (reverse ? count - 1 : 0) :
+                                     (current + (reverse ? -1 : 1) + count) % count;
+    if (present[next] != sima->image) {
+      ED_space_image_set_ex(bmain, sima, present[next], keep_view);
+      WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+    }
+    return OPERATOR_FINISHED;
+  }
+
   /* Rebuild the paint-slot cache so it reflects the current node tree (the Image Editor never
    * calls this itself, unlike entering texture paint mode). */
   BKE_texpaint_slot_refresh_cache(scene, ma, ob);
@@ -1022,18 +1073,15 @@ static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_WARNING, "Active material has no paintable image slots");
     return OPERATOR_CANCELLED;
   }
-  const bool keep_view = RNA_boolean_get(op->ptr, "keep_view");
-
   if (images.size() == 1) {
     /* Nothing to cycle to; still assign so an out-of-material canvas snaps back. */
     if (sima->image != images[0]) {
-      ED_space_image_set_ex(CTX_data_main(C), sima, images[0], keep_view);
+      ED_space_image_set_ex(bmain, sima, images[0], keep_view);
       WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
     }
     return OPERATOR_FINISHED;
   }
 
-  const bool reverse = RNA_boolean_get(op->ptr, "reverse");
   const int count = int(images.size());
   const int current = int(images.first_index_of_try(sima->image));
   int next;
@@ -1044,7 +1092,7 @@ static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
     next = (current + (reverse ? -1 : 1) + count) % count;
   }
 
-  ED_space_image_set_ex(CTX_data_main(C), sima, images[next], keep_view);
+  ED_space_image_set_ex(bmain, sima, images[next], keep_view);
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
   return OPERATOR_FINISHED;
 }

@@ -710,7 +710,34 @@ struct SpaceImage {
   eSpaceImage_Gizmo_Flag gizmo_flag = {};
 
   eSpaceImage_GridShapeSource grid_shape_source = SI_GRID_SHAPE_DYNAMIC;
-  char _pad1[10] = {};
+  /* Four bytes of this went to #material_paint_light_rot_z below, which is what keeps
+   * #mask_info, #overlay and #tabs_state on the 8-byte boundary #makesdna requires of them. */
+  char _pad1[2] = {};
+
+  /**
+   * Which pass to show while #SI_PAINT_COMPOSITE_MODE is set: an #eMaterialPaintChannel,
+   * #PAINT_LAYER_MAP_MASK, or #PAINT_LAYER_PASS_COMBINED.
+   *
+   * Separate from #image on purpose: a composite is a channel of the material, not a data-block,
+   * and #image keeps pointing at the layer map the strokes go to while a pass is shown over it.
+   */
+  int material_paint_pass = 0;
+
+  /**
+   * Rotation of the Combined preview's studio rig around the canvas normal, in radians.
+   *
+   * The same idea as #View3DShading.studiolight_rot_z, in the flat canvas's tangent frame: `+Z`
+   * points at the viewer, so turning the rig about it sweeps the lights across the surface. That
+   * is what makes a normal map read as relief rather than as a blue picture.
+   *
+   * Per editor rather than per scene, beside #material_paint_pass and for the same reason: it is a
+   * property of how this canvas is being *looked at*, not of the material being authored, and two
+   * editors showing the same material may want different lighting.
+   *
+   * Zero is the phase-1 rig exactly, so a file written before this field existed reads back
+   * unchanged and needs no versioning.
+   */
+  float material_paint_light_rot_z = 0.0f;
 
   eSpaceImage_Flag flag = {};
 

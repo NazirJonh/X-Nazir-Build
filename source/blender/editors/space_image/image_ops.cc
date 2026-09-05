@@ -21,11 +21,14 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_dial_2d.h"
 #include "BLI_fileops.h"
 #include "BLI_listbase.h"
+#include "BLI_math_rotation.h"
 #include "BLI_path_utils.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_string_utf8.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 
@@ -35,6 +38,8 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_space_enums.h"
+#include "DNA_space_types.h"
 #include "DNA_screen_types.h"
 
 #include "BKE_colortools.hh"
@@ -853,6 +858,162 @@ void IMAGE_OT_view_zoom(wmOperatorType *ot)
   RNA_def_property_flag(prop, PROP_HIDDEN);
 
   WM_operator_properties_use_cursor_init(ot);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Combined Preview Light Rotation Operator
+ *
+ * Turns the Combined preview's studio rig by dragging, which is the gesture the preview exists for:
+ * a normal map only reads as relief once the light sweeps across it, and reaching for a slider
+ * breaks that loop.
+ * \{ */
+
+struct CombinedLightRotateData {
+  float initial_rotation = 0.0f;
+  /** The button that started the drag, so releasing that same button confirms. */
+  int init_event_type = 0;
+  Dial *dial = nullptr;
+  ARegion *region = nullptr;
+};
+
+/** Only where the rig being turned is actually on screen. */
+static bool space_image_combined_light_poll(bContext *C)
+{
+  if (!space_image_main_region_poll(C)) {
+    return false;
+  }
+  const SpaceImage *sima = CTX_wm_space_image(C);
+  return (sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 &&
+         sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED;
+}
+
+static void image_combined_light_rotate_update_header(bContext *C, const float rotation)
+{
+  char msg[UI_MAX_DRAW_STR];
+  SNPRINTF_UTF8(msg, IFACE_("Light Rotation: %.1f\xc2\xb0"), RAD2DEGF(rotation));
+  ED_area_status_text(CTX_wm_area(C), msg);
+}
+
+static void image_combined_light_rotate_finish(bContext *C,
+                                               wmOperator *op,
+                                               const bool restore_state)
+{
+  CombinedLightRotateData *data = static_cast<CombinedLightRotateData *>(op->customdata);
+  if (data == nullptr) {
+    return;
+  }
+  if (restore_state) {
+    if (SpaceImage *sima = CTX_wm_space_image(C)) {
+      sima->material_paint_light_rot_z = data->initial_rotation;
+    }
+  }
+
+  WM_cursor_modal_restore(CTX_wm_window(C));
+  ED_area_status_text(CTX_wm_area(C), nullptr);
+  if (data->dial != nullptr) {
+    BLI_dial_free(data->dial);
+  }
+  ED_region_tag_redraw(data->region);
+
+  MEM_delete(data);
+  op->customdata = nullptr;
+
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+}
+
+static wmOperatorStatus image_combined_light_rotate_invoke(bContext *C,
+                                                           wmOperator *op,
+                                                           const wmEvent *event)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  ARegion *region = CTX_wm_region(C);
+  if (sima == nullptr || region == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  CombinedLightRotateData *data = MEM_new<CombinedLightRotateData>(__func__);
+  data->initial_rotation = sima->material_paint_light_rot_z;
+  data->init_event_type = event->type;
+  data->region = region;
+
+  /* A dial about the press point, matching #IMAGE_OT_view_rotate_interactive: this editor already
+   * drags one angle that way, and two gestures for two angles in the same editor would be a
+   * needless difference. The cursor's bearing becomes the light's, which is as direct as the
+   * mapping gets. */
+  const float cursor_win[2] = {float(event->xy[0]), float(event->xy[1])};
+  data->dial = BLI_dial_init(cursor_win, FLT_EPSILON);
+
+  wmWindow *win = CTX_wm_window(C);
+  if (WM_cursor_modal_is_set_ok(win)) {
+    WM_cursor_modal_set(win, WM_CURSOR_NSEW_SCROLL);
+  }
+
+  op->customdata = data;
+  image_combined_light_rotate_update_header(C, data->initial_rotation);
+
+  WM_event_add_modal_handler(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus image_combined_light_rotate_modal(bContext *C,
+                                                          wmOperator *op,
+                                                          const wmEvent *event)
+{
+  CombinedLightRotateData *data = static_cast<CombinedLightRotateData *>(op->customdata);
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (data == nullptr || sima == nullptr) {
+    image_combined_light_rotate_finish(C, op, true);
+    return OPERATOR_CANCELLED;
+  }
+
+  if (event->type == MOUSEMOVE) {
+    const float cursor_win[2] = {float(event->xy[0]), float(event->xy[1])};
+    float rotation = data->initial_rotation + BLI_dial_angle(data->dial, cursor_win);
+
+    if (event->modifier & KM_CTRL) {
+      const float snap_angle = DEG2RADF(15.0f);
+      rotation = roundf(rotation / snap_angle) * snap_angle;
+    }
+    rotation = angle_wrap_rad(rotation);
+
+    /* Only a redraw here. The notifier would run the whole UI update per mouse move, and
+     * #image_combined_light_rotate_finish sends one once the drag ends. */
+    sima->material_paint_light_rot_z = rotation;
+    ED_region_tag_redraw(data->region);
+    image_combined_light_rotate_update_header(C, rotation);
+  }
+
+  if (event->type == data->init_event_type && event->val == KM_RELEASE) {
+    image_combined_light_rotate_finish(C, op, false);
+    return OPERATOR_FINISHED;
+  }
+  if (event->type == EVT_ESCKEY && event->val == KM_PRESS) {
+    image_combined_light_rotate_finish(C, op, true);
+    return OPERATOR_CANCELLED;
+  }
+
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static void image_combined_light_rotate_cancel(bContext *C, wmOperator *op)
+{
+  image_combined_light_rotate_finish(C, op, true);
+}
+
+void IMAGE_OT_combined_light_rotate(wmOperatorType *ot)
+{
+  ot->name = "Rotate Combined Preview Light";
+  ot->idname = "IMAGE_OT_combined_light_rotate";
+  ot->description = "Drag to turn the Combined preview's studio light around the canvas normal";
+
+  ot->invoke = image_combined_light_rotate_invoke;
+  ot->modal = image_combined_light_rotate_modal;
+  ot->cancel = image_combined_light_rotate_cancel;
+  ot->poll = space_image_combined_light_poll;
+
+  ot->flag = OPTYPE_BLOCKING | OPTYPE_GRAB_CURSOR_XY;
 }
 
 /** \} */

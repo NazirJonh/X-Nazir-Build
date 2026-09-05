@@ -60,6 +60,7 @@ void IMAGE_OT_view_rotate_cw(wmOperatorType *ot);
 void IMAGE_OT_view_rotate_ccw(wmOperatorType *ot);
 void IMAGE_OT_view_rotate_reset(wmOperatorType *ot);
 void IMAGE_OT_view_rotate_interactive(wmOperatorType *ot);
+void IMAGE_OT_combined_light_rotate(wmOperatorType *ot);
 
 void IMAGE_OT_new(wmOperatorType *ot);
 /**

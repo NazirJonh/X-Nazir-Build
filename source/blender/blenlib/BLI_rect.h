@@ -144,6 +144,37 @@ bool BLI_rcti_inside_rcti(const rcti *rct_a, const rcti *rct_b);
 bool BLI_rctf_inside_rctf(const rctf *rct_a, const rctf *rct_b);
 void BLI_rcti_union(struct rcti *rct_a, const struct rcti *rct_b);
 void BLI_rctf_union(struct rctf *rct_a, const struct rctf *rct_b);
+/**
+ * Whether the union of \a rct_a and \a rct_b is itself a rectangle, so that #BLI_rcti_union claims
+ * no area that neither of them covered.
+ *
+ * Overlapping is not sufficient: `[0,10]x[0,10]` and `[5,15]x[5,15]` overlap, but their bounding
+ * box also claims the corners `[0,5]x[10,15]` and `[10,15]x[0,5]`, which neither ever covered.
+ * That holds only when one contains the other, or when they agree on one axis entirely and meet
+ * on the other.
+ *
+ * Ask this before treating a union as a statement about what *is* covered. A union used only to
+ * bound work to do -- a region to redraw, an area to recompute -- may claim extra freely and does
+ * not need it.
+ *
+ * Empty rectangles are not special-cased, for the same reason #BLI_rcti_union does not: a zeroed
+ * rectangle is indistinguishable from a real one at the origin. Handle "nothing yet" before
+ * calling.
+ */
+bool BLI_rcti_union_is_exact(const struct rcti *rct_a, const struct rcti *rct_b);
+/**
+ * The bounding rectangle of `rct_a` minus `rct_b`, and whether that rectangle *is* the difference.
+ *
+ * A single rectangle cannot express "everything but the middle", so when \a rct_b sits strictly
+ * inside \a rct_a the answer is \a rct_a itself -- a superset. That is safe for deciding what to
+ * *process*, where covering too much costs only time, but it must never be used to decide that a
+ * point is outside the difference. The return value is what tells the two apart.
+ *
+ * \return true when \a r_result is exactly `rct_a \ rct_b`.
+ */
+bool BLI_rcti_difference_bounds(const struct rcti *rct_a,
+                                const struct rcti *rct_b,
+                                struct rcti *r_result);
 void BLI_rctf_union_x(struct rctf *rct, float x);
 void BLI_rctf_union_y(struct rctf *rct, float y);
 void BLI_rcti_rctf_copy(struct rcti *dst, const struct rctf *src);

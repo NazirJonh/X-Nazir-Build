@@ -110,10 +110,10 @@ Block *template_common_search_menu(const bContext *C,
 
 /**
  * Layout variant built by #blender::ui::template_id_browser. Derived once by
- * #image_browser_mode_get and passed down, so the browser row and the appended #template_ID
+ * #id_browser_mode_get and passed down, so the browser row and the appended #template_ID
  * controls cannot disagree about which variant they are building.
  */
-enum class ImageBrowserMode {
+enum class IDBrowserMode {
   /** Ordinary browse row: browser button, editable name, New/Open/Unlink. */
   Standard,
   /** Empty paint slot: labelled drop button beside an icon-only Open, no New, no rename. */
@@ -123,10 +123,16 @@ enum class ImageBrowserMode {
 };
 
 /**
- * The paint-slot variants are opt-in: they need an Image property and a non-empty \a drop_text
- * (the label of the drop button shown while the slot is empty).
+ * The paint-slot variants are opt-in: they need an ID-pointer property and a non-empty
+ * \a drop_text (the label of the drop button shown while the slot is empty).
+ *
+ * Deliberately not restricted to #Image: nothing in the paint-slot layout is image specific (the
+ * drop button takes its icon from the property's own ID type, and the assigned row shows that
+ * ID's preview), which is what lets the PBR Paint brush reuse it for its source #Material slot.
+ * The image-only extras -- paint-slot filters, canvas hiding -- stay gated on #ID_IM inside the
+ * browser itself.
  */
-ImageBrowserMode image_browser_mode_get(PointerRNA *ptr, PropertyRNA *prop, const char *drop_text);
+IDBrowserMode id_browser_mode_get(PointerRNA *ptr, PropertyRNA *prop, const char *drop_text);
 
 /**
  * Which of the optional #template_ID controls an image browse row keeps.
@@ -139,9 +145,9 @@ ImageBrowserMode image_browser_mode_get(PointerRNA *ptr, PropertyRNA *prop, cons
  * not represented here -- they are already opt-out by passing a null operator name. Unlink is,
  * because its button appears whether or not \a unlinkop names an operator.
  */
-struct ImageIDRowParams {
-  /** Which layout variant the row is part of, see #ImageBrowserMode. */
-  ImageBrowserMode mode = ImageBrowserMode::Standard;
+struct IDBrowserRowParams {
+  /** Which layout variant the row is part of, see #IDBrowserMode. */
+  IDBrowserMode mode = IDBrowserMode::Standard;
   /** Editable name field. Off leaves the name visible but disabled. */
   bool use_rename = true;
   /**
@@ -164,16 +170,16 @@ struct ImageIDRowParams {
 /**
  * Append the standard #template_ID controls (rename, new, open, users, etc.) without the browse
  * search-menu button, in the variant \a params asks for. Used with #id_browser_add_popover_button
- * for image paint browsing.
+ * for the paint-slot browse rows.
  */
-void template_id_image_row_append_standard(const bContext *C,
-                                           Layout &layout,
-                                           PointerRNA *ptr,
-                                           PropertyRNA *prop,
-                                           const char *newop,
-                                           const char *openop,
-                                           const char *unlinkop,
-                                           const ImageIDRowParams &params = {});
+void template_id_browser_row_append_standard(const bContext *C,
+                                             Layout &layout,
+                                             PointerRNA *ptr,
+                                             PropertyRNA *prop,
+                                             const char *newop,
+                                             const char *openop,
+                                             const char *unlinkop,
+                                             const IDBrowserRowParams &params = {});
 
 enum class IDBrowserImageFilter {
   Default = 0,

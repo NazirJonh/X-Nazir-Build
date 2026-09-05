@@ -1986,15 +1986,18 @@ static void id_browser_add_name_popover_button(Layout &row,
 /** \name Entry point
  * \{ */
 
-ImageBrowserMode image_browser_mode_get(PointerRNA *ptr,
-                                        PropertyRNA *prop,
-                                        const char *drop_text)
+IDBrowserMode id_browser_mode_get(PointerRNA *ptr, PropertyRNA *prop, const char *drop_text)
 {
-  if (RNA_property_pointer_type(ptr, prop) != RNA_Image || !drop_text || drop_text[0] == '\0') {
-    return ImageBrowserMode::Standard;
+  if (!drop_text || drop_text[0] == '\0') {
+    return IDBrowserMode::Standard;
+  }
+  /* Any ID-pointer property, not just #RNA_Image -- see the header for why. */
+  StructRNA *pointer_type = RNA_property_pointer_type(ptr, prop);
+  if (!pointer_type || RNA_type_to_ID_code(pointer_type) == 0) {
+    return IDBrowserMode::Standard;
   }
   const PointerRNA idptr = RNA_property_pointer_get(ptr, prop);
-  return idptr.data ? ImageBrowserMode::PaintSlotAssigned : ImageBrowserMode::PaintSlotEmpty;
+  return idptr.data ? IDBrowserMode::PaintSlotAssigned : IDBrowserMode::PaintSlotEmpty;
 }
 
 /**
@@ -2004,7 +2007,8 @@ ImageBrowserMode image_browser_mode_get(PointerRNA *ptr,
 static void id_browser_add_drop_button(Layout &row,
                                        const bContext *C,
                                        const IDBrowserTarget &target,
-                                       const char *drop_text)
+                                       const char *drop_text,
+                                       const int icon)
 {
   id_browser_popover_register();
   /* Own sub-layout, so only this button becomes an image drop target and not the Open button that
@@ -2012,8 +2016,7 @@ static void id_browser_add_drop_button(Layout &row,
   Layout &drop_row = row.row(true);
   id_browser_popover_context_set(drop_row, target);
   drop_row.context_int_set("id_browser_drop_target", 1);
-  drop_row.popover(
-      C, "UI_PT_id_browser", drop_text, ICON_IMAGE_DATA, PopupAttachDirection::VerticalAlignLeft);
+  drop_row.popover(C, "UI_PT_id_browser", drop_text, icon, PopupAttachDirection::VerticalAlignLeft);
 
   /* The icon is the button's own, left-aligned one: #widget_draw_text_icon shrinks the text rect
    * past it, so the centered label can never run into the icon. #BUT_NO_MENU_TRIA drops the
@@ -2084,10 +2087,10 @@ void template_id_browser(Layout *layout,
     return;
   }
 
-  const ImageBrowserMode mode = image_browser_mode_get(ptr, prop, params.text);
+  const IDBrowserMode mode = id_browser_mode_get(ptr, prop, params.text);
 
   Layout &row = layout->row(true);
-  if (mode != ImageBrowserMode::Standard) {
+  if (mode != IDBrowserMode::Standard) {
     /* Two units tall in both paint-slot states: the assigned image needs the height for its
      * thumbnail, and the empty slot gets a drop area that is easier to hit while dragging.
      * #item_scale applies this to every button of the row (and its nested layouts), so they stay
@@ -2095,17 +2098,20 @@ void template_id_browser(Layout *layout,
     row.scale_y_set(2.0f);
   }
 
-  if (mode == ImageBrowserMode::PaintSlotEmpty) {
-    id_browser_add_drop_button(row, C, target, params.text);
+  if (mode == IDBrowserMode::PaintSlotEmpty) {
+    /* The empty slot has no data-block to take a preview from, so the button is labelled with the
+     * ID type's own icon (Image, Material, ...) rather than a hard-coded one. */
+    StructRNA *pointer_type = RNA_property_pointer_type(ptr, prop);
+    const int icon = pointer_type ? RNA_struct_ui_icon(pointer_type) : ICON_NONE;
+    id_browser_add_drop_button(row, C, target, params.text, icon);
   }
   else {
-    id_browser_add_popover_button(
-        row, C, target, mode == ImageBrowserMode::PaintSlotAssigned);
+    id_browser_add_popover_button(row, C, target, mode == IDBrowserMode::PaintSlotAssigned);
   }
 
-  ImageIDRowParams row_params;
+  IDBrowserRowParams row_params;
   row_params.mode = mode;
-  if (mode == ImageBrowserMode::PaintSlotAssigned) {
+  if (mode == IDBrowserMode::PaintSlotAssigned) {
     /* Replaces #template_ID's own (locked) name field, see #id_browser_add_name_popover_button. */
     const PointerRNA idptr = RNA_property_pointer_get(ptr, prop);
     if (ID *id = static_cast<ID *>(idptr.data)) {
@@ -2116,7 +2122,7 @@ void template_id_browser(Layout *layout,
   row_params.use_rename = params.use_rename;
   row_params.use_unlink = params.use_unlink;
   row_params.use_users = params.use_users;
-  template_id_image_row_append_standard(C, row, ptr, prop, newop, openop, unlinkop, row_params);
+  template_id_browser_row_append_standard(C, row, ptr, prop, newop, openop, unlinkop, row_params);
 }
 
 void template_id_browser_button(Layout *layout,

@@ -15,6 +15,7 @@
 
 #include "DNA_ID.h"
 #include "DNA_brush_types.h"
+#include "DNA_material_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -47,6 +48,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_main_invariants.hh"
+#include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
@@ -187,6 +189,12 @@ static const ui::Button *find_button_at(const ARegion *region,
       if (!ui::button_contains_pt(&but, x, y)) {
         continue;
       }
+      /* A grayed out slot must not accept a drop: the layouts that disable one (a linked brush,
+       * for instance) rely on that being the only way in, and the operator behind the drop would
+       * just report an error. */
+      if (but.flag & (ui::BUT_DISABLED | ui::UI_HIDDEN)) {
+        continue;
+      }
       if (predicate(but)) {
         return &but;
       }
@@ -211,6 +219,55 @@ static const ui::Button *find_texture_slot_button_at(const ARegion *region,
       return false;
     }
     return determine_texture_slot_type(&but, brush, r_use_mask_slot);
+  });
+}
+
+static bool material_slot_matches_brush(const PointerRNA *slot_ptr,
+                                        const StringRefNull propname,
+                                        const Brush *brush)
+{
+  if (!slot_ptr->type || !RNA_struct_is_a(slot_ptr->type, RNA_BrushMaterialPaint)) {
+    return false;
+  }
+  if (propname != "source_material") {
+    return false;
+  }
+  if (!brush || !brush->material_paint || slot_ptr->data != brush->material_paint) {
+    return false;
+  }
+  return true;
+}
+
+static bool determine_material_slot_type(const ui::Button *but, const Brush *brush)
+{
+  if (!but || !brush || !but->context) {
+    return false;
+  }
+  /* The empty slot's labelled drop button carries the browser context; the assigned row's name
+   * button carries the standard template-ID one. Same two-step lookup as
+   * #image_id_browser_button_target, for the same reason. */
+  const PointerRNA *slot_ptr = CTX_store_ptr_lookup(but->context, "id_browser_ptr");
+  std::optional<StringRefNull> prop_name = CTX_store_string_lookup(but->context,
+                                                                   "id_browser_prop");
+  if (!slot_ptr || !prop_name) {
+    slot_ptr = CTX_store_ptr_lookup(but->context, "template_id_ptr");
+    prop_name = CTX_store_string_lookup(but->context, "template_id_prop");
+  }
+  if (!slot_ptr || !prop_name) {
+    return false;
+  }
+  return material_slot_matches_brush(slot_ptr, *prop_name, brush);
+}
+
+static const ui::Button *find_material_slot_button_at(const ARegion *region,
+                                                      const wmEvent *event,
+                                                      const Brush *brush)
+{
+  return find_button_at(region, event, [&](const ui::Button &but) {
+    if (but.type == ui::ButtonType::ViewItem) {
+      return false;
+    }
+    return determine_material_slot_type(&but, brush);
   });
 }
 
@@ -521,6 +578,130 @@ std::unique_ptr<ui::DropTargetInterface> brush_texture_slot_drop_target_get(bCon
     return nullptr;
   }
   return std::make_unique<BrushTextureSlotDropTarget>(use_mask_slot);
+}
+
+/**
+ * Drop target for the active brush's source material slot. Accepts Material data-blocks and
+ * Material assets, assigning the material as the brush's PBR paint source via
+ * #PAINT_OT_material_paint_source_material_set.
+ */
+class BrushMaterialSlotDropTarget : public ui::DropTargetInterface {
+  static const wmDragAssetListItem *first_material_item_in_list(const wmDrag &drag)
+  {
+    const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+    if (!asset_drags) {
+      return nullptr;
+    }
+    for (const wmDragAssetListItem &item : *asset_drags) {
+      const ID_Type item_idtype = item.is_external ?
+                                      item.asset_data.external_info->asset->get_id_type() :
+                                      (item.asset_data.local_id ?
+                                           GS(item.asset_data.local_id->name) :
+                                           ID_Type(0));
+      if (item_idtype == ID_MA) {
+        return &item;
+      }
+    }
+    return nullptr;
+  }
+
+  static Material *resolve_asset_material(bContext *C, const wmDrag &drag)
+  {
+    Main &bmain = *CTX_data_main(C);
+    if (drag.type == WM_DRAG_ASSET) {
+      wmDragAsset *asset_drag = WM_drag_get_asset_data(&drag, ID_MA);
+      if (!asset_drag) {
+        return nullptr;
+      }
+      ID *id = ed::asset::asset_local_id_ensure_imported(
+          bmain, *asset_drag->asset, 0, ASSET_IMPORT_APPEND_REUSE, std::nullopt, CTX_wm_reports(C));
+      return (id && GS(id->name) == ID_MA) ? id_cast<Material *>(id) : nullptr;
+    }
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      const wmDragAssetListItem *item = first_material_item_in_list(drag);
+      if (!item) {
+        return nullptr;
+      }
+      if (item->is_external) {
+        ID *id = ed::asset::asset_local_id_ensure_imported(
+            bmain,
+            *item->asset_data.external_info->asset,
+            0,
+            ASSET_IMPORT_APPEND_REUSE,
+            std::nullopt,
+            CTX_wm_reports(C));
+        return (id && GS(id->name) == ID_MA) ? id_cast<Material *>(id) : nullptr;
+      }
+      return id_cast<Material *>(item->asset_data.local_id);
+    }
+    return nullptr;
+  }
+
+ public:
+  BrushMaterialSlotDropTarget() = default;
+
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
+  {
+    if (WM_drag_is_ID_type(&drag, ID_MA)) {
+      return true;
+    }
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      return first_material_item_in_list(drag) != nullptr;
+    }
+    return false;
+  }
+
+  std::string drop_tooltip(const ui::DragInfo &drag_info) const override
+  {
+    const std::string material_name = WM_drag_get_item_name(
+        const_cast<wmDrag *>(&drag_info.drag_data));
+    return fmt::format(fmt::runtime(TIP_("Assign material \"{}\" to brush")), material_name);
+  }
+
+  bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override
+  {
+    const wmDrag &drag = drag_info.drag_data;
+
+    const bool is_asset_drag = ELEM(drag.type, WM_DRAG_ASSET, WM_DRAG_ASSET_LIST);
+    Material *ma = is_asset_drag ? resolve_asset_material(C, drag) :
+                                   id_cast<Material *>(WM_drag_get_local_ID(&drag, ID_MA));
+    if (!ma) {
+      /* Nothing usable came out of the drag (a failed asset import, most likely). Reporting is up
+       * to whatever failed; calling the operator without a material would only add a second,
+       * misleading "No material specified" error. */
+      return false;
+    }
+
+    PointerRNA props = WM_operator_properties_create("PAINT_OT_material_paint_source_material_set");
+    RNA_int_set(&props, "session_uid", int(ma->id.session_uid));
+    RNA_string_set(&props, "name", ma->id.name + 2);
+
+    const wmOperatorStatus status = WM_operator_name_call(
+        C,
+        "PAINT_OT_material_paint_source_material_set",
+        wm::OpCallContext::ExecDefault,
+        &props,
+        nullptr);
+    WM_operator_properties_free(&props);
+    return (status & OPERATOR_FINISHED) != 0;
+  }
+};
+
+std::unique_ptr<ui::DropTargetInterface> brush_material_slot_drop_target_get(
+    bContext *C, const ARegion *region, const wmEvent *event)
+{
+  if (!C || !region || !event) {
+    return nullptr;
+  }
+  const Brush *brush = BKE_paint_brush(BKE_paint_get_active_from_context(C));
+  if (!brush) {
+    return nullptr;
+  }
+  const ui::Button *but = find_material_slot_button_at(region, event, brush);
+  if (!but) {
+    return nullptr;
+  }
+  return std::make_unique<BrushMaterialSlotDropTarget>();
 }
 
 /** \} */

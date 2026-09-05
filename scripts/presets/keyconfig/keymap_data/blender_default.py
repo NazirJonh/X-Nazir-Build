@@ -2246,6 +2246,9 @@ def km_image(params):
         ("image.view_rotate_ccw", {"type": 'COMMA', "value": 'PRESS'}, None),
         ("image.view_rotate_reset", {"type": 'HOME', "value": 'PRESS', "alt": True}, None),
         ("image.view_rotate_interactive", {"type": 'LEFTMOUSE', "value": 'PRESS', "alt": True}, None),
+        # Also bound in Image Paint, ahead of the stencil controls. Here as well because material
+        # painting can be driven from Sculpt Mode, where the Image Paint keymap is not active.
+        ("image.combined_light_rotate", {"type": 'RIGHTMOUSE', "value": 'PRESS', "alt": True}, None),
         *((
             "image.view_zoom_ratio",
             {"type": key, "value": 'PRESS', **mod},
@@ -5179,6 +5182,10 @@ def km_image_paint(params):
         ("brush.scale_size", {"type": 'RIGHT_BRACKET', "value": 'PRESS', "repeat": True},
          {"properties": [("scalar", 1.0 / 0.9)]}),
         *_template_paint_radial_control("image_paint", color=True, zoom=True, rotation=True, secondary_rotation=True),
+        # Ahead of the stencil bindings on purpose: this one polls false unless the Combined
+        # preview is the pass on screen, so Alt-RMB keeps moving the secondary stencil everywhere
+        # else. Only while that preview is shown does the light take the gesture.
+        ("image.combined_light_rotate", {"type": 'RIGHTMOUSE', "value": 'PRESS', "alt": True}, None),
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS'},
          {"properties": [("mode", 'TRANSLATION')]}),
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True},

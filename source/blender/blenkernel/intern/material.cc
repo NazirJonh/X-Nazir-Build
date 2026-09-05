@@ -68,6 +68,8 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_combined.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_pointcloud.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_scene.hh"
@@ -153,6 +155,19 @@ static void material_copy_data(Main *bmain,
 static void material_free_data(ID *id)
 {
   Material *material = id_cast<Material *>(id);
+
+  /* Both caches are keyed on #ID.session_uid, so an entry left behind here would never be looked
+   * up again and would hold its buffer until the size budget happened to evict it.
+   *
+   * Evaluated copies are exempt, and must be: a copy-on-evaluation datablock is allocated with
+   * #LIB_ID_CREATE_NO_ALLOCATE and keeps the *original's* session UID, so freeing one -- which the
+   * depsgraph does on every relation rebuild -- would drop the live entry of the material still
+   * sitting in #Main and turn every rebuild into a full re-composite and a full re-shade. */
+  if ((material->id.tag & ID_TAG_COPIED_ON_EVAL) == 0) {
+    BKE_paint_material_composite_cache_free_material(*material);
+    /* Legitimate from here because the Combined cache lives in this module too. */
+    BKE_paint_material_combined_cache_free_material(*material);
+  }
 
   /* Invalidate image paint slot info for all images used in this material. */
   if (material->nodetree != nullptr) {

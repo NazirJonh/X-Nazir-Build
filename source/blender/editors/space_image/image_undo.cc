@@ -32,6 +32,7 @@
 #include "BLI_map.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
+#include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_threads.h"
 #include "BLI_utildefines.h"
@@ -343,6 +344,9 @@ static void ptile_restore_runtime_map(PaintTileMap *paint_tile_map)
 
     BKE_image_partial_update_mark_full_update(image);
 
+    /* Neither material cache is told: both subscribe to the image's partial-update log, which the
+     * full-update mark above already wrote to. */
+
     if (ibuf->float_data()) {
       ibuf->userflags |= IB_RECT_INVALID; /* force recreate of char rect */
     }
@@ -613,6 +617,7 @@ static void uhandle_restore_list(ListBaseT<UndoImageHandle> *undo_handles, bool 
     if (changed) {
       BKE_image_mark_dirty(image, ibuf);
       /* TODO(@jbakker): only mark areas that are actually updated to improve performance. */
+      /* Both material caches subscribe to this log, so the mark is all the telling they need. */
       BKE_image_partial_update_mark_full_update(image);
 
       if (ibuf->float_data()) {
@@ -1469,9 +1474,10 @@ void ED_image_undo_push_end()
    * whoever opened it, so the cost is a lost undo push rather than a type-confused one. */
   if (UNLIKELY(ustack->step_init->type != BKE_UNDOSYS_TYPE_IMAGE)) {
     BLI_assert_unreachable();
-    CLOG_ERROR(&LOG,
-               "image undo push end while a '%s' undo step is open, the image undo push is dropped",
-               ustack->step_init->type ? ustack->step_init->type->name : "<null>");
+    CLOG_ERROR(
+        &LOG,
+        "image undo push end while a '%s' undo step is open, the image undo push is dropped",
+        ustack->step_init->type ? ustack->step_init->type->name : "<null>");
     return;
   }
 

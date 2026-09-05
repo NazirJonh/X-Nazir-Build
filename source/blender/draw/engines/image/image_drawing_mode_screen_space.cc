@@ -8,8 +8,11 @@
 #include "image_instance.hh"
 #include "image_shader.hh"
 
+#include "BLI_memory_utils.hh"
+
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
+#include "BKE_paint_material_channel_perf_debug.hh"
 
 namespace blender::image_engine {
 
@@ -74,9 +77,35 @@ void ScreenSpaceDrawingMode::add_depth_shgroups(blender::Image *image, ImageUser
   }
 }
 
-void ScreenSpaceDrawingMode::update_textures(blender::Image *image, ImageUser *image_user) const
+void ScreenSpaceDrawingMode::update_textures(blender::Image *image,
+                                             ImageUser *image_user,
+                                             ImBuf *override_buffer) const
 {
   State &state = instance_.state;
+
+  /* The partial update checker reports changes to the image's own pixels, which say nothing about
+   * a display override composited from several images. What changed in one was worked out from the
+   * override revision in #image_sync instead, and left in the two fields read here. */
+  if (state.has_display_override) {
+    const rcti changed_region = state.display_override_changed_region;
+    /* Consumed: it describes one revision step and must not be replayed on a later frame. */
+    BLI_rcti_init(&state.display_override_changed_region, 0, 0, 0, 0);
+
+    for (TextureInfo &info : state.texture_infos) {
+      if (info.need_full_update) {
+        do_full_update_gpu_texture(info, image_user, override_buffer);
+        continue;
+      }
+      /* A slot that is already current except for a known rectangle takes only that rectangle.
+       * The whole point of the exercise: a dab on a large canvas used to re-transform and
+       * re-upload the entire region-sized texture, which costs the same whatever the dab was. */
+      if (!BLI_rcti_is_empty(&changed_region) && override_buffer != nullptr) {
+        do_partial_update_texture_slot(info, *override_buffer, float2(0.0f), changed_region);
+      }
+    }
+    return;
+  }
+
   PartialUpdateChecker<ImageTileData> checker(image, image_user, state.partial_update.user);
   PartialUpdateChecker<ImageTileData>::CollectResult changes = checker.collect_changes();
 
@@ -88,8 +117,10 @@ void ScreenSpaceDrawingMode::update_textures(blender::Image *image, ImageUser *i
     case ePartialUpdateCollectResult::NoChangesDetected:
       break;
     case ePartialUpdateCollectResult::PartialChangesDetected:
-      /* Partial update when wrap repeat is enabled is not supported. */
-      if (state.flags.do_tile_drawing) {
+      /* Partial update when wrap repeat is enabled is not supported, and neither is a rotated
+       * canvas: the changed region is mapped to the texture as an axis-aligned rectangle, which
+       * a rotation makes meaningless. */
+      if (state.flags.do_tile_drawing || instance_.space().get_canvas_rotation() != 0.0f) {
         state.float_buffers.clear();
         state.mark_all_texture_slots_dirty();
       }
@@ -98,7 +129,8 @@ void ScreenSpaceDrawingMode::update_textures(blender::Image *image, ImageUser *i
       }
       break;
   }
-  do_full_update_for_dirty_textures(image_user);
+  /* Null on this path by construction: it is only reached when the space produced no override. */
+  do_full_update_for_dirty_textures(image_user, override_buffer);
 }
 
 void ScreenSpaceDrawingMode::do_partial_update_float_buffer(
@@ -126,6 +158,100 @@ void ScreenSpaceDrawingMode::do_partial_update_float_buffer(
   IMB_float_from_byte_ex(float_buffer, src, &clipped_update_region);
 }
 
+void ScreenSpaceDrawingMode::do_partial_update_texture_slot(const TextureInfo &info,
+                                                            const ImBuf &source,
+                                                            const float2 tile_offset,
+                                                            const rcti &changed_region) const
+{
+  /* The extraction below samples float pixels directly. Every caller already arranges for that --
+   * the tile path converts through #FloatBufferCache, and a display override that reports a
+   * changed region at all is the float Combined preview -- but a byte buffer arriving here would
+   * be read as garbage rather than refused, so it is checked rather than assumed. */
+  BLI_assert(source.float_data() != nullptr);
+  if (source.float_data() == nullptr) {
+    return;
+  }
+
+  gpu::Texture *texture = info.texture;
+  const float texture_width = GPU_texture_width(texture);
+  const float texture_height = GPU_texture_height(texture);
+
+  rctf changed_region_in_uv_space;
+  BLI_rctf_init(&changed_region_in_uv_space,
+                float(changed_region.xmin) / float(source.x) + tile_offset.x,
+                float(changed_region.xmax) / float(source.x) + tile_offset.x,
+                float(changed_region.ymin) / float(source.y) + tile_offset.y,
+                float(changed_region.ymax) / float(source.y) + tile_offset.y);
+  rctf changed_overlapping_region_in_uv_space;
+  if (!BLI_rctf_isect(&info.clipping_uv_bounds,
+                      &changed_region_in_uv_space,
+                      &changed_overlapping_region_in_uv_space))
+  {
+    return;
+  }
+
+  /* Convert the overlapping region to texel space and to ss_pixel space...
+   * TODO: first convert to ss_pixel space as integer based. and from there go back to texel
+   * space. But perhaps this isn't needed and we could use an extraction offset somehow. */
+  rcti gpu_texture_region_to_update;
+  BLI_rcti_init(
+      &gpu_texture_region_to_update,
+      floor((changed_overlapping_region_in_uv_space.xmin - info.clipping_uv_bounds.xmin) *
+            texture_width / BLI_rctf_size_x(&info.clipping_uv_bounds)),
+      floor((changed_overlapping_region_in_uv_space.xmax - info.clipping_uv_bounds.xmin) *
+            texture_width / BLI_rctf_size_x(&info.clipping_uv_bounds)),
+      ceil((changed_overlapping_region_in_uv_space.ymin - info.clipping_uv_bounds.ymin) *
+           texture_height / BLI_rctf_size_y(&info.clipping_uv_bounds)),
+      ceil((changed_overlapping_region_in_uv_space.ymax - info.clipping_uv_bounds.ymin) *
+           texture_height / BLI_rctf_size_y(&info.clipping_uv_bounds)));
+  gpu_texture_region_to_update.xmax = min_ii(gpu_texture_region_to_update.xmax,
+                                             info.clipping_bounds.xmax);
+  gpu_texture_region_to_update.ymax = min_ii(gpu_texture_region_to_update.ymax,
+                                             info.clipping_bounds.ymax);
+  /* A change that rounds away to nothing on screen still has to leave the texture alone rather
+   * than upload a zero-sized rectangle. */
+  if (BLI_rcti_is_empty(&gpu_texture_region_to_update)) {
+    return;
+  }
+
+  /* Create an image buffer with a size.
+   * Extract and scale into an imbuf. */
+  const int texture_region_width = BLI_rcti_size_x(&gpu_texture_region_to_update);
+  const int texture_region_height = BLI_rcti_size_y(&gpu_texture_region_to_update);
+
+  ImBuf extracted_buffer;
+  IMB_initImBuf(
+      &extracted_buffer, texture_region_width, texture_region_height, ImBufFlags::FloatData);
+
+  int offset = 0;
+  float *float_data = extracted_buffer.float_data_for_write();
+  for (int y = gpu_texture_region_to_update.ymin; y < gpu_texture_region_to_update.ymax; y++) {
+    float yf = y / float(texture_height);
+    float v = info.clipping_uv_bounds.ymax * yf + info.clipping_uv_bounds.ymin * (1.0 - yf) -
+              tile_offset.y;
+    for (int x = gpu_texture_region_to_update.xmin; x < gpu_texture_region_to_update.xmax; x++) {
+      float xf = x / float(texture_width);
+      float u = info.clipping_uv_bounds.xmax * xf + info.clipping_uv_bounds.xmin * (1.0 - xf) -
+                tile_offset.x;
+      imbuf::interpolate_nearest_border_fl(
+          &source, &float_data[offset * 4], u * source.x, v * source.y);
+      offset++;
+    }
+  }
+  IMB_gpu_clamp_half_float(&extracted_buffer);
+
+  GPU_texture_update_sub(texture,
+                         GPU_DATA_FLOAT,
+                         float_data,
+                         gpu_texture_region_to_update.xmin,
+                         gpu_texture_region_to_update.ymin,
+                         0,
+                         extracted_buffer.x,
+                         extracted_buffer.y,
+                         0);
+  IMB_free_all_data(&extracted_buffer);
+}
+
 void ScreenSpaceDrawingMode::do_partial_update(
     PartialUpdateChecker<ImageTileData>::CollectResult &iterator) const
 {
@@ -140,120 +266,35 @@ void ScreenSpaceDrawingMode::do_partial_update(
       do_partial_update_float_buffer(tile_buffer, iterator);
     }
 
-    const float tile_width = float(iterator.tile_data.tile_buffer->x);
-    const float tile_height = float(iterator.tile_data.tile_buffer->y);
+    const ImageTileWrapper tile_accessor(iterator.tile_data.tile);
+    const float2 tile_offset(float(tile_accessor.get_tile_x_offset()),
+                             float(tile_accessor.get_tile_y_offset()));
 
     for (const TextureInfo &info : instance_.state.texture_infos) {
       /* Dirty images will receive a full update. No need to do a partial one now. */
       if (info.need_full_update) {
         continue;
       }
-      gpu::Texture *texture = info.texture;
-      const float texture_width = GPU_texture_width(texture);
-      const float texture_height = GPU_texture_height(texture);
-      /* TODO: early bound check. */
-      ImageTileWrapper tile_accessor(iterator.tile_data.tile);
-      float tile_offset_x = float(tile_accessor.get_tile_x_offset());
-      float tile_offset_y = float(tile_accessor.get_tile_y_offset());
-      rcti *changed_region_in_texel_space = &iterator.changed_region.region;
-      rctf changed_region_in_uv_space;
-      BLI_rctf_init(
-          &changed_region_in_uv_space,
-          float(changed_region_in_texel_space->xmin) / float(iterator.tile_data.tile_buffer->x) +
-              tile_offset_x,
-          float(changed_region_in_texel_space->xmax) / float(iterator.tile_data.tile_buffer->x) +
-              tile_offset_x,
-          float(changed_region_in_texel_space->ymin) / float(iterator.tile_data.tile_buffer->y) +
-              tile_offset_y,
-          float(changed_region_in_texel_space->ymax) / float(iterator.tile_data.tile_buffer->y) +
-              tile_offset_y);
-      rctf changed_overlapping_region_in_uv_space;
-      const bool region_overlap = BLI_rctf_isect(&info.clipping_uv_bounds,
-                                                 &changed_region_in_uv_space,
-                                                 &changed_overlapping_region_in_uv_space);
-      if (!region_overlap) {
-        continue;
-      }
-      /* Convert the overlapping region to texel space and to ss_pixel space...
-       * TODO: first convert to ss_pixel space as integer based. and from there go back to texel
-       * space. But perhaps this isn't needed and we could use an extraction offset somehow. */
-      rcti gpu_texture_region_to_update;
-      BLI_rcti_init(
-          &gpu_texture_region_to_update,
-          floor((changed_overlapping_region_in_uv_space.xmin - info.clipping_uv_bounds.xmin) *
-                texture_width / BLI_rctf_size_x(&info.clipping_uv_bounds)),
-          floor((changed_overlapping_region_in_uv_space.xmax - info.clipping_uv_bounds.xmin) *
-                texture_width / BLI_rctf_size_x(&info.clipping_uv_bounds)),
-          ceil((changed_overlapping_region_in_uv_space.ymin - info.clipping_uv_bounds.ymin) *
-               texture_height / BLI_rctf_size_y(&info.clipping_uv_bounds)),
-          ceil((changed_overlapping_region_in_uv_space.ymax - info.clipping_uv_bounds.ymin) *
-               texture_height / BLI_rctf_size_y(&info.clipping_uv_bounds)));
-      gpu_texture_region_to_update.xmax = min_ii(gpu_texture_region_to_update.xmax,
-                                                 info.clipping_bounds.xmax);
-      gpu_texture_region_to_update.ymax = min_ii(gpu_texture_region_to_update.ymax,
-                                                 info.clipping_bounds.ymax);
-
-      rcti tile_region_to_extract;
-      BLI_rcti_init(
-          &tile_region_to_extract,
-          floor((changed_overlapping_region_in_uv_space.xmin - tile_offset_x) * tile_width),
-          floor((changed_overlapping_region_in_uv_space.xmax - tile_offset_x) * tile_width),
-          ceil((changed_overlapping_region_in_uv_space.ymin - tile_offset_y) * tile_height),
-          ceil((changed_overlapping_region_in_uv_space.ymax - tile_offset_y) * tile_height));
-
-      /* Create an image buffer with a size.
-       * Extract and scale into an imbuf. */
-      const int texture_region_width = BLI_rcti_size_x(&gpu_texture_region_to_update);
-      const int texture_region_height = BLI_rcti_size_y(&gpu_texture_region_to_update);
-
-      ImBuf extracted_buffer;
-      IMB_initImBuf(
-          &extracted_buffer, texture_region_width, texture_region_height, ImBufFlags::FloatData);
-
-      int offset = 0;
-      float *float_data = extracted_buffer.float_data_for_write();
-      for (int y = gpu_texture_region_to_update.ymin; y < gpu_texture_region_to_update.ymax; y++) {
-        float yf = y / float(texture_height);
-        float v = info.clipping_uv_bounds.ymax * yf + info.clipping_uv_bounds.ymin * (1.0 - yf) -
-                  tile_offset_y;
-        for (int x = gpu_texture_region_to_update.xmin; x < gpu_texture_region_to_update.xmax; x++)
-        {
-          float xf = x / float(texture_width);
-          float u = info.clipping_uv_bounds.xmax * xf + info.clipping_uv_bounds.xmin * (1.0 - xf) -
-                    tile_offset_x;
-          imbuf::interpolate_nearest_border_fl(
-              tile_buffer, &float_data[offset * 4], u * tile_buffer->x, v * tile_buffer->y);
-          offset++;
-        }
-      }
-      IMB_gpu_clamp_half_float(&extracted_buffer);
-
-      GPU_texture_update_sub(texture,
-                             GPU_DATA_FLOAT,
-                             float_data,
-                             gpu_texture_region_to_update.xmin,
-                             gpu_texture_region_to_update.ymin,
-                             0,
-                             extracted_buffer.x,
-                             extracted_buffer.y,
-                             0);
-      IMB_free_all_data(&extracted_buffer);
+      do_partial_update_texture_slot(
+          info, *tile_buffer, tile_offset, iterator.changed_region.region);
     }
   }
 }
 
-void ScreenSpaceDrawingMode::do_full_update_for_dirty_textures(const ImageUser *image_user) const
+void ScreenSpaceDrawingMode::do_full_update_for_dirty_textures(const ImageUser *image_user,
+                                                               ImBuf *override_buffer) const
 {
   for (TextureInfo &info : instance_.state.texture_infos) {
     if (!info.need_full_update) {
       continue;
     }
-    do_full_update_gpu_texture(info, image_user);
+    do_full_update_gpu_texture(info, image_user, override_buffer);
   }
 }
 
 void ScreenSpaceDrawingMode::do_full_update_gpu_texture(TextureInfo &info,
-                                                        const ImageUser *image_user) const
+                                                        const ImageUser *image_user,
+                                                        ImBuf *override_buffer) const
 {
   ImBuf texture_buffer;
   const int texture_width = GPU_texture_width(info.texture);
@@ -267,6 +308,22 @@ void ScreenSpaceDrawingMode::do_full_update_gpu_texture(TextureInfo &info,
   void *lock;
 
   blender::Image *image = instance_.state.image;
+
+  /* A display override replaces the pixels of every tile: it is a single buffer covering the
+   * image, and a stack it could have been composited from cannot be tiled in the first place.
+   *
+   * Resolved by #image_sync and passed in, never acquired here: an acquisition runs the whole
+   * gather -- a graph walk and a composite refresh for each of eight channels -- and this function
+   * runs once per dirty texture slot. */
+  if (override_buffer != nullptr) {
+    const ImageTileWrapper image_tile(static_cast<ImageTile *>(image->tiles.first));
+    do_full_update_texture_slot(info, texture_buffer, *override_buffer, image_tile);
+    IMB_gpu_clamp_half_float(&texture_buffer);
+    GPU_texture_update(info.texture, GPU_DATA_FLOAT, texture_buffer.float_data());
+    IMB_free_all_data(&texture_buffer);
+    return;
+  }
+
   for (ImageTile &image_tile_ptr : image->tiles) {
     const ImageTileWrapper image_tile(&image_tile_ptr);
     tile_user.tile = image_tile.get_tile_number();
@@ -287,26 +344,30 @@ void ScreenSpaceDrawingMode::do_full_update_texture_slot(const TextureInfo &text
                                                          ImBuf &tile_buffer,
                                                          const ImageTileWrapper &image_tile) const
 {
-  const int texture_width = texture_buffer.x;
-  const int texture_height = texture_buffer.y;
   ImBuf *float_tile_buffer = instance_.state.float_buffers.cached_float_buffer(&tile_buffer);
 
-  /* IMB_transform works in a non-consistent space. This should be documented or fixed!.
-   * Construct a variant of the info_uv_to_texture that adds the texel space
-   * transformation. */
-  float3x3 uv_to_texel;
-  rctf texture_area;
-  rctf tile_area;
-
-  BLI_rctf_init(&texture_area, 0.0, texture_width, 0.0, texture_height);
-  BLI_rctf_init(
-      &tile_area,
-      tile_buffer.x * (texture_info.clipping_uv_bounds.xmin - image_tile.get_tile_x_offset()),
-      tile_buffer.x * (texture_info.clipping_uv_bounds.xmax - image_tile.get_tile_x_offset()),
-      tile_buffer.y * (texture_info.clipping_uv_bounds.ymin - image_tile.get_tile_y_offset()),
-      tile_buffer.y * (texture_info.clipping_uv_bounds.ymax - image_tile.get_tile_y_offset()));
-  BLI_rctf_transform_calc_m3_pivot_min(&tile_area, &texture_area, uv_to_texel.ptr());
-  uv_to_texel = math::invert(uv_to_texel);
+  /* Destination texel to source pixel, which is what #IMB_transform maps with.
+   *
+   * Built from #State.ss_to_texture rather than by fitting the two rectangles to each other: the
+   * region-to-image mapping is not a plain rectangle fit once the canvas is rotated, and a
+   * rect-to-rect fit silently drops that rotation -- which is what used to leave a rotated canvas
+   * drawn straight in this drawing mode.
+   *
+   * A texture covers its #TextureInfo.clipping_bounds of the region at one texel per pixel, so a
+   * destination texel becomes a region pixel by that offset and a normalized screen coordinate by
+   * the region size. Taking the offset from the texture info rather than assuming the whole region
+   * is what keeps this correct for a method that splits the region into several textures. */
+  const float2 region_size = float2(instance_.region->winx, instance_.region->winy);
+  const float3x3 texel_to_screen_uv = math::from_scale<float3x3, 2>(1.0f / region_size) *
+                                      math::from_location<float3x3>(
+                                          float2(texture_info.clipping_bounds.xmin,
+                                                 texture_info.clipping_bounds.ymin));
+  const float3x3 image_uv_to_tile_texel =
+      math::from_scale<float3x3, 2>(float2(tile_buffer.x, tile_buffer.y)) *
+      math::from_location<float3x3>(
+          float2(-image_tile.get_tile_x_offset(), -image_tile.get_tile_y_offset()));
+  const float3x3 uv_to_texel = image_uv_to_tile_texel * instance_.state.ss_to_texture *
+                               texel_to_screen_uv;
 
   rctf crop_rect;
   const rctf *crop_rect_ptr = nullptr;
@@ -363,9 +424,60 @@ void ScreenSpaceDrawingMode::image_sync(blender::Image *image, ImageUser *iuser)
   /* Step: Check for changes in the image user compared to the last time. */
   state.update_image_usage(iuser);
 
+  /* Step: A display override brings its own notion of "changed": its pixels are composited from
+   * several images, so the image's own partial-update log does not describe them.
+   *
+   * This is the one place per frame that resolves the override, and the rest of the frame reads
+   * #State.has_display_override. The distinction matters: the space being *set* to show a
+   * composite is not the same as one having been produced -- a material that is not a layer stack
+   * falls back to the image, and the paths below must then treat it as an ordinary image again. */
+  uint64_t override_revision = 0;
+  rcti override_changed_region;
+  BLI_rcti_init(&override_changed_region, 0, 0, 0, 0);
+  ImBuf *override_buffer = instance_.space().has_display_override() ?
+                               instance_.space().acquire_display_override_buffer(
+                                   instance_.main(),
+                                   &override_revision,
+                                   &override_changed_region) :
+                               nullptr;
+  state.has_display_override = override_buffer != nullptr;
+  /* Held until the textures have been filled from it, rather than released here and acquired again
+   * per dirty texture slot: an acquisition is a full gather, and the pixels it produces are the
+   * same ones the upload below needs. */
+  BLI_SCOPED_DEFER([&]() {
+    if (override_buffer != nullptr) {
+      instance_.space().release_display_override_buffer(override_buffer);
+    }
+  });
+  if (override_revision != state.display_override_revision) {
+    state.display_override_revision = override_revision;
+
+    /* A rectangle is only usable while the image-to-texture mapping is an axis-aligned rectangle
+     * itself, which is the same restriction the image's own partial-update path works under. An
+     * override that could not say what changed, or one that went away and left its pixels in the
+     * textures, falls back to the full re-upload this always did -- a zero revision is what "no
+     * override" reads as. */
+    const bool can_update_part = !BLI_rcti_is_empty(&override_changed_region) &&
+                                 override_buffer != nullptr && !state.flags.do_tile_drawing &&
+                                 instance_.space().get_canvas_rotation() == 0.0f;
+    if (can_update_part) {
+      state.display_override_changed_region = override_changed_region;
+    }
+    else {
+      BLI_rcti_init(&state.display_override_changed_region, 0, 0, 0, 0);
+      state.mark_all_texture_slots_dirty();
+      state.float_buffers.clear();
+    }
+  }
+
   /* Step: Update the GPU textures based on the changes in the image. */
-  method.ensure_gpu_textures_allocation();
-  update_textures(image, iuser);
+  {
+    /* Stage (d) of the Combined preview budget: a float RGBA canvas is four times the bytes of an
+     * ordinary one, so the upload is worth measuring apart from the shading that produced it. */
+    PAINT_CHANNEL_PERF_COMBINED_SCOPE(TextureUpload);
+    method.ensure_gpu_textures_allocation();
+    update_textures(image, iuser, override_buffer);
+  }
 
   /* Step: Add the GPU textures to the shgroup. */
   state.update_batches();

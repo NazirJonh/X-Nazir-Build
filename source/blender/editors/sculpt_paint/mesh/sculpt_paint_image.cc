@@ -9,6 +9,9 @@
 #include "DNA_image_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
+/* For #eMaterialPaintChannel, which used to arrive through `BKE_paint_material_composite.hh` --
+ * dropped along with the composite tagging API this file no longer calls. */
+#include "DNA_scene_types.h"
 
 #include <atomic>
 #include <cstdio>
@@ -1763,6 +1766,8 @@ static void mark_gpu_texture_regions_dirty(ImageData &image_data,
                                         region.ymin,
                                         BLI_rcti_size_x(&region),
                                         BLI_rcti_size_y(&region));
+    /* Neither material cache is told: #BKE_image_update_gputexture_delayed above records this very
+     * rectangle in the image's partial-update log, and that is what both of them subscribe to. */
   }
 }
 

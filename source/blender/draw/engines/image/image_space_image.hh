@@ -43,6 +43,31 @@ class SpaceImageAccessor : public AbstractSpaceAccessor {
     ED_space_image_release_buffer(sima, image_buffer, lock);
   }
 
+  bool has_display_override() const override
+  {
+    return ED_space_image_has_composite(sima);
+  }
+
+  ImBuf *acquire_display_override_buffer(Main *bmain,
+                                         uint64_t *r_revision,
+                                         rcti *r_changed_region = nullptr) override
+  {
+    return ED_space_image_acquire_composite_buffer(bmain, sima, r_revision, r_changed_region);
+  }
+
+  void release_display_override_buffer(ImBuf *image_buffer) override
+  {
+    ED_space_image_release_buffer(sima, image_buffer, nullptr);
+  }
+
+  int2 get_canvas_size() const override
+  {
+    int width = 0;
+    int height = 0;
+    ED_space_image_get_size(sima, &width, &height);
+    return int2(width, height);
+  }
+
   void get_shader_parameters(ShaderParameters &r_shader_parameters, ImBuf *image_buffer) override
   {
     const int sima_flag = sima->flag & ED_space_image_get_display_channel_mask(image_buffer);

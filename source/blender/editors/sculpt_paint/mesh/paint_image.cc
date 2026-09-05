@@ -174,6 +174,11 @@ void imapaint_image_update(
     return;
   }
 
+  /* Neither material cache is told about this dab. Both subscribe to the image's own
+   * partial-update log and find it there, which is what keeps a blanket ID tag -- the depsgraph
+   * flush this stroke also triggers -- from turning the dab into "the whole canvas". The log is
+   * written below, on both branches. */
+
   /* When buffer is partial updated the planes should be set to a larger value than 8. This will
    * make sure that partial updating is working but uses more GPU memory as the gpu texture will
    * have 4 channels. When so the whole texture needs to be re-uploaded to the GPU using the new
@@ -200,6 +205,14 @@ void imapaint_image_update(
 #endif
   }
   else {
+    /* No GPU upload on this path, but the *record* of what changed must be written all the same.
+     * #BKE_image_update_gputexture above is what writes it on the other branch, and both material
+     * caches learn of an edit only by polling that log: skipping it here left a stack painted with
+     * "Update Automatically" off showing its pre-stroke pixels for the rest of the session. */
+    ImageTile *tile = image != nullptr ? BKE_image_get_tile_from_iuser(image, iuser) : nullptr;
+    if (tile != nullptr && ibuf != nullptr) {
+      BKE_image_partial_update_mark_region(image, tile, ibuf, &imapaintpartial.dirty_region);
+    }
 #if PBR_PAINT_IMAGE_UPDATE_PROFILE
     printf("[PBR-PERF] image_update image=%s no_gpu_path texpaint=%d locked=%d elapsed=%.3f ms\n",
            image ? image->id.name + 2 : "<null>",
@@ -758,8 +771,8 @@ void ED_object_texture_paint_mode_enter_ex(Main &bmain,
   /* Entering Texture Paint used to push the active paint slot into every unpinned Image Editor.
    * With the Material canvas that overwrites Image Editor: Paint after the user already chose a
    * map (or left it empty for PBR auto-select). Classic IMAGE canvas still syncs. */
-  const bool skip_image_editor_sync =
-      scene.toolsettings->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL;
+  const bool skip_image_editor_sync = scene.toolsettings->paint_mode.canvas_source ==
+                                      PAINT_CANVAS_SOURCE_MATERIAL;
   if (!skip_image_editor_sync) {
     if (imapaint.mode == IMAGEPAINT_MODE_MATERIAL) {
       /* set the current material active paint slot on image editor */

@@ -13,6 +13,7 @@ set(INC_SYS
 )
 
 set(SRC
+  paint_material_combined_gather.cc
   render_internal.cc
   render_material_bake.cc
   render_opengl.cc
@@ -38,6 +39,7 @@ set(LIB
   PRIVATE bf::gpu
   PRIVATE bf::imbuf
   PRIVATE bf::imbuf::movie
+  PRIVATE bf::intern::atomic
   PRIVATE bf::intern::clog
   PRIVATE bf::intern::guardedalloc
   PRIVATE bf::animrig

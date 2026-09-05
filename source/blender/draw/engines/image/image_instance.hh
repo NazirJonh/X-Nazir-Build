@@ -72,8 +72,30 @@ class Instance : public DrawEngine {
   /* Constructs either a screen space or an image space drawing mode depending on if the image can
    * fit in a GPU texture. So we just need to retrieve the image buffer and check if its size is
    * safe for GPU use. */
+  AbstractSpaceAccessor &space()
+  {
+    return *space_;
+  }
+
+  Main *main()
+  {
+    return main_;
+  }
+
   std::unique_ptr<AbstractDrawingMode> get_drawing_mode()
   {
+    /* Pixels that do not come from the image itself can only be shown by the screen-space mode:
+     * the image-space one hands the image's own GPU texture to the shader and would draw the
+     * layer under the composite instead of the composite.
+     *
+     * Asked rather than acquired: producing the override means compositing a layer stack, and a
+     * space that is merely *set* to show one already settles the choice of drawing mode. Screen
+     * space draws an ordinary image correctly too, so the conservative answer costs nothing but
+     * the image-space fast path. */
+    if (space_->has_display_override()) {
+      return std::make_unique<ScreenSpaceDrawingMode>(*this);
+    }
+
     if (this->state.image->source != IMA_SRC_TILED) {
       void *lock;
       ImBuf *buffer = BKE_image_acquire_ibuf_gpu(
@@ -222,8 +244,14 @@ class Instance : public DrawEngine {
     void *lock;
     ImBuf *image_buffer = space_->acquire_image_buffer(state.image, &lock);
 
-    const float2 image_size = float2(image_buffer ? image_buffer->x : 1024.0f,
-                                     image_buffer ? image_buffer->y : 1024.0f);
+    /* The canvas, which a display override does not resize: the override supplies pixels only, and
+     * the Combined preview supplies them at a power-of-two fraction of the canvas. Measuring the
+     * canvas from the buffer would shrink the drawn image as the zoom crossed an octave. */
+    const int2 canvas_size = space_->get_canvas_size();
+    const float2 image_size = canvas_size.x > 0 && canvas_size.y > 0 ?
+                                  float2(canvas_size) :
+                                  float2(image_buffer ? image_buffer->x : 1024.0f,
+                                         image_buffer ? image_buffer->y : 1024.0f);
     float2 offset = float2(0.0f);
     if (image_buffer && space_->use_display_window() &&
         flag_is_set(image_buffer->flags, ImBufFlags::HasDisplayWindow))

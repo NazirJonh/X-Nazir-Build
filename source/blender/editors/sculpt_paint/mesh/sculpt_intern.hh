@@ -44,6 +44,9 @@ namespace blender {
 
 namespace ed::sculpt_paint {
 struct PaintStroke;
+namespace clone {
+struct CloneStrokeRuntime;
+}
 namespace auto_mask {
 struct Cache;
 }
@@ -953,6 +956,14 @@ struct StrokeCache {
   float multiplane_scrape_angle = 0.0f;
 
   Vector<paint::image::ImagePaintTarget> image_paint_targets;
+
+  /**
+   * Clone Stamp: layer/channel targets and their ImBuf locks, built on the first dab of the
+   * stroke. Owned here because the cache is exactly the stroke's lifetime and is what
+   * #do_brush_action can reach; released by #StrokeCache::~StrokeCache so a cancelled or
+   * aborted stroke cannot leak the locks.
+   */
+  clone::CloneStrokeRuntime *clone_runtime = nullptr;
 
   /**
    * Pre-stroke color and coverage for the material channel maps, allocated on the first dab of a

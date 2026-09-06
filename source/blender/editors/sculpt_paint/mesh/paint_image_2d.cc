@@ -80,6 +80,9 @@
 #include "DEG_depsgraph.hh"
 
 #include "../paint_intern.hh"
+#include "../paint_clone.hh"
+#include "../paint_clone_2d.hh"
+#include "../paint_clone_stroke.hh"
 #include "paint_area_plane_2d.hh"
 #include "paint_material_source.hh"
 
@@ -316,6 +319,26 @@ struct ImagePaintState {
    */
   ImagePaintState **material_extra_states;
   int material_extra_states_num;
+
+  /**
+   * Clone Stamp: layer/channel targets and their ImBuf locks for this stroke, built on the first
+   * dab. Owned here -- the 2D path must release its own locks rather than relying on another
+   * module's stroke-done hook to notice them.
+   *
+   * No default initializer: #ImagePaintState is created with #MEM_new_zeroed, which requires a
+   * trivially default-constructible type.
+   */
+  ed::sculpt_paint::clone::CloneStrokeRuntime *clone_runtime;
+
+  /**
+   * The stroke belongs to the 2D Clone Stamp, plus what its dab path needs to build targets.
+   * Dabs stamp through the PBR clone core instead of the tile pipeline below, which would
+   * otherwise paint the brush color on top of the stamp.
+   *
+   * No default initializer: #ImagePaintState is created with #MEM_new_zeroed, which requires a
+   * trivially default-constructible type.
+   */
+  ed::sculpt_paint::clone::Clone2DStrokeContext clone_context;
 };
 
 static BrushPainter *brush_painter_2d_new(Scene *scene,
@@ -2605,10 +2628,12 @@ static int paint_2d_op(void *state,
   return 1;
 }
 
-static int paint_2d_canvas_set(ImagePaintState *s, const Paint *paint)
+static int paint_2d_canvas_set(ImagePaintState *s, const Paint *paint, bool use_pbr_clone_stamp)
 {
-  /* set clone canvas */
-  if (s->brush_type == IMAGE_PAINT_BRUSH_TYPE_CLONE) {
+  /* The legacy Clone brush lifts from #ImagePaintSettings.clone and requires it. The 2D Clone
+   * Stamp reads from its own picked source instead, so the legacy canvas is neither needed nor
+   * required -- demanding it here would abort every Clone Stamp stroke before its first dab. */
+  if (s->brush_type == IMAGE_PAINT_BRUSH_TYPE_CLONE && !use_pbr_clone_stamp) {
     const ImagePaintSettings &image_paint_settings = s->scene->toolsettings->imapaint;
     Image *ima = image_paint_settings.clone;
     ImBuf *ibuf = BKE_image_acquire_ibuf(ima, nullptr, nullptr);
@@ -3091,6 +3116,15 @@ struct SymmetryDab {
   float2 old_uv = float2(0.0f);
   /** #old_uv is a real mirrored hit rather than a copy of #new_uv. */
   bool has_old_uv = false;
+  /**
+   * Local UV Jacobian of this mirror pass (see #symmetry_uv_jacobian): how this pass's UV
+   * responds to a motion of the original dab's UV. A mirrored unwrap makes it a reflection, which
+   * is what turns the Clone Stamp's mirrored dab into a mirror image of the original instead of a
+   * translated copy. Filled only when the caller passes `need_uv_jacobian`; #has_symm_jacobian
+   * says whether it was.
+   */
+  float2x2 symm_jacobian = float2x2::identity();
+  bool has_symm_jacobian = false;
 };
 
 /** Symmetry iterations are the 3 axis bits, so 8 slots cover every combination. */
@@ -3567,11 +3601,15 @@ static bool paint_2d_symmetry_uv(const ed::sculpt_paint::AreaPlaneMesh &mesh,
                                  const float2 &uv_in,
                                  const ePaintSymmetryFlags iteration_symm,
                                  ed::sculpt_paint::AreaPlaneHit &r_hit,
-                                 float2 &r_uv)
+                                 float2 &r_uv,
+                                 ed::sculpt_paint::AreaPlaneHit *r_source_hit = nullptr)
 {
   ed::sculpt_paint::AreaPlaneHit source_hit;
   if (!mesh.hit_at_uv(uv_in, source_hit)) {
     return false;
+  }
+  if (r_source_hit != nullptr) {
+    *r_source_hit = source_hit;
   }
   const float snap = AREA_PLANE_SYMMETRY_SNAP_FACTOR * mesh.edge_length_median();
   if (snap <= 0.0f) {
@@ -3591,7 +3629,8 @@ static void paint_2d_symmetry_dab_ensure(const ed::sculpt_paint::AreaPlaneMesh &
                                          const int index,
                                          const float2 &uv_new,
                                          const float2 &uv_old,
-                                         SymmetryDab &dab)
+                                         SymmetryDab &dab,
+                                         const bool need_uv_jacobian = false)
 {
   if (dab.computed) {
     return;
@@ -3602,11 +3641,31 @@ static void paint_2d_symmetry_dab_ensure(const ed::sculpt_paint::AreaPlaneMesh &
    * every iteration identically and collapse a three-dab fan into one dab drawn three times. */
   const ePaintSymmetryFlags iteration_symm = ePaintSymmetryFlags(index);
 
-  if (!paint_2d_symmetry_uv(mesh, uv_new, iteration_symm, dab.hit, dab.new_uv)) {
+  ed::sculpt_paint::AreaPlaneHit source_hit;
+  if (!paint_2d_symmetry_uv(mesh, uv_new, iteration_symm, dab.hit, dab.new_uv, &source_hit)) {
     return;
   }
   dab.valid = true;
   dab.flipped = (count_bits_i(uint32_t(index) & 7u) & 1) != 0;
+
+  /* UV Jacobian of the mirror, from the two hit triangles' own parametrizations: a motion of the
+   * original dab's UV rides the source triangle's Jacobian into 3D, is reflected, and lands back
+   * in UV through the mirrored triangle's. A mirrored unwrap makes it a reflection -- the matrix
+   * the Clone Stamp composes into its sampling map so the mirrored stamp mirrors the detail too.
+   * Only that caller asks for it; every other dab kind is orientation-blind, and this is two
+   * Jacobians plus a 2x2 solve per dab per pass. */
+  if (need_uv_jacobian) {
+    float3 main_du, main_dv, mirror_du, mirror_dv;
+    if (ed::sculpt_paint::area_plane_triangle_uv_jacobian(
+            mesh.triangle(source_hit.tri_index), main_du, main_dv) &&
+        ed::sculpt_paint::area_plane_triangle_uv_jacobian(
+            mesh.triangle(dab.hit.tri_index), mirror_du, mirror_dv) &&
+        ed::sculpt_paint::symmetry_uv_jacobian(
+            main_du, main_dv, mirror_du, mirror_dv, iteration_symm, dab.symm_jacobian))
+    {
+      dab.has_symm_jacobian = true;
+    }
+  }
 
   ed::sculpt_paint::AreaPlaneHit old_hit;
   float2 old_uv;
@@ -4166,6 +4225,27 @@ static void paint_2d_stroke_profile_log_layouts(const BrushPainter *painter)
 }
 #endif
 
+/**
+ * Flag every tile of every state whose canvas image is a clone target, so the regular redraw
+ * pass (#paint_2d_redraw) picks the stamp up: the clone dab publishes dirty regions itself and
+ * never goes through #paint_2d_op, which is what normally sets #ImagePaintTile.need_redraw.
+ */
+static void paint_2d_clone_stamp_flag_redraw(ImagePaintState &s)
+{
+  const auto flag_state_tiles = [&](ImagePaintState &state) {
+    if (!ed::sculpt_paint::clone::clone_2d_targets_contain_image(s.clone_runtime, state.image)) {
+      return;
+    }
+    for (int i = 0; i < state.num_tiles; i++) {
+      state.tiles[i].need_redraw = true;
+    }
+  };
+  flag_state_tiles(s);
+  for (int i = 0; i < s.material_extra_states_num; i++) {
+    flag_state_tiles(*s.material_extra_states[i]);
+  }
+}
+
 void paint_2d_stroke(void *ps,
                      const float prev_mval[2],
                      const float mval[2],
@@ -4175,11 +4255,64 @@ void paint_2d_stroke(void *ps,
                      float base_size,
                      const ed::sculpt_paint::ImagePaintRollDab *roll_dab)
 {
+  ImagePaintState *s = static_cast<ImagePaintState *>(ps);
+
+  /* Clone Stamp: stamp through the PBR clone core and skip the tile pipeline entirely -- a
+   * regular dab here would paint the brush color over the stamp. Undo is owned by the outer
+   * image-paint stroke; eraser/invert has no clone semantic (same as the sculpt path). */
+  if (s->clone_context.active) {
+    if (!eraser) {
+      float2 new_uv;
+      ui::view2d_region_to_view(s->v2d, mval[0], mval[1], &new_uv[0], &new_uv[1]);
+      /* The stroke system folds pressure and overlap into the brush alpha before this call, so
+       * the alpha is the dab strength, same value the tile pipeline blends with. */
+      const float strength = std::clamp(BKE_brush_alpha_get(s->paint, s->brush), 0.0f, 1.0f);
+
+      /* Symmetry mirrors the dab center through the mesh, the same bridge the regular brush
+       * uses: the Area Plane mesh exists exactly when symmetry is on and an object with UVs is
+       * active (see #paint_2d_new_stroke), so an Image canvas without a mesh simply paints the
+       * main pass. Iteration 0 is the original dab; the stamp ignores the mirrored stroke
+       * origin, it is a full disk per pass. */
+      const char symm = char(s->symmetry & PAINT_SYMM_AXIS_ALL);
+      const bool use_symmetry = symm != 0 && paint_2d_use_area_plane_mesh(s->painter);
+
+      for (int iter = 0; iter <= int(symm); iter++) {
+        if (iter > 0 && !use_symmetry) {
+          break;
+        }
+        if (!ed::sculpt_paint::is_symmetry_iteration_valid(char(iter), symm)) {
+          continue;
+        }
+        float2 dest_uv = new_uv;
+        const float2x2 *symm_jacobian = nullptr;
+        if (iter > 0) {
+          SymmetryDab dab;
+          paint_2d_symmetry_dab_ensure(
+              *s->painter->area_plane_mesh, iter, new_uv, new_uv, dab, true);
+          if (!dab.valid) {
+            continue;
+          }
+          dest_uv = dab.new_uv;
+          if (dab.has_symm_jacobian) {
+            symm_jacobian = &dab.symm_jacobian;
+          }
+        }
+        ed::sculpt_paint::clone::clone_2d_stroke_dab(s->clone_runtime,
+                                                     s->clone_context,
+                                                     *s->paint,
+                                                     *s->brush,
+                                                     dest_uv,
+                                                     strength,
+                                                     iter == 0,
+                                                     symm_jacobian);
+      }
+      paint_2d_clone_stamp_flag_redraw(*s);
+    }
+    return;
+  }
+
 #if PBR_PAINT_2D_STROKE_PROFILE
   const StrokePhaseTimer wall_timer(&g_stroke_wall_seconds, &g_stroke_wall_calls);
-#endif
-  ImagePaintState *s = static_cast<ImagePaintState *>(ps);
-#if PBR_PAINT_2D_STROKE_PROFILE
   if (!g_stroke_meta_logged) {
     g_stroke_meta_logged = true;
     g_stroke_painters = 1 + s->material_extra_states_num;
@@ -4233,7 +4366,8 @@ static ImagePaintState *paint_2d_new_stroke_for_image(bContext *C,
                                                      const float material_channel_value,
                                                      const float *material_channel_rgb,
                                                      const short material_channel_blend,
-                                                     const bool init_brush_tex)
+                                                     const bool init_brush_tex,
+                                                     const bool use_pbr_clone_stamp)
 {
   Scene *scene = CTX_data_scene(C);
   SpaceImage *sima = CTX_wm_space_image(C);
@@ -4307,7 +4441,7 @@ static ImagePaintState *paint_2d_new_stroke_for_image(bContext *C,
     s->tiles[tile_idx].uv_origin[1] = ((tile->tile_number - 1001) / 10);
   }
 
-  if (!paint_2d_canvas_set(s, paint)) {
+  if (!paint_2d_canvas_set(s, paint, use_pbr_clone_stamp)) {
     /* Release acquired tile canvas before freeing the state. */
     BKE_image_release_ibuf(s->image, s->tiles[0].canvas, nullptr);
     s->tiles[0].canvas = nullptr;
@@ -4358,6 +4492,7 @@ static void paint_2d_stroke_done_single(ImagePaintState *s, const bool exit_brus
     paint_brush_exit_tex(s->brush);
   }
 
+  ed::sculpt_paint::clone::clone_stroke_runtime_free(s->clone_runtime);
   MEM_delete(s);
 }
 
@@ -4375,6 +4510,11 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
   {
     return nullptr;
   }
+
+  /* One gate per stroke: active Clone Stamp tool + CLONE brush (+ a set source, warned about
+   * here rather than per dab). Inactive keeps the legacy clone path untouched. */
+  ed::sculpt_paint::clone::Clone2DStrokeContext clone_context;
+  ed::sculpt_paint::clone::clone_2d_stroke_gate(C, op, clone_context);
 
   if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
     if (ob == nullptr) {
@@ -4529,7 +4669,8 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
                                                             value,
                                                             rgb_ptr,
                                                             channel_blend,
-                                                            primary == nullptr);
+                                                            primary == nullptr,
+                                                            clone_context.active);
       if (state == nullptr) {
         /* Surfaced rather than silently dropped: a channel quietly not painting is exactly the
          * kind of no-op a user has no way to notice on their own. */
@@ -4561,6 +4702,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
         primary->material_extra_states[i] = extras[i];
       }
     }
+    primary->clone_context = clone_context;
     return primary;
   }
 
@@ -4568,7 +4710,12 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
   if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE && paint_mode.canvas_image != nullptr) {
     image = paint_mode.canvas_image;
   }
-  return paint_2d_new_stroke_for_image(C, op, mode, image, nullptr, -1.0f, nullptr, -1, true);
+  ImagePaintState *state = paint_2d_new_stroke_for_image(
+      C, op, mode, image, nullptr, -1.0f, nullptr, -1, true, clone_context.active);
+  if (state != nullptr) {
+    state->clone_context = clone_context;
+  }
+  return state;
 }
 
 static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool final)

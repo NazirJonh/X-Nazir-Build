@@ -2056,6 +2056,22 @@ class _defs_sculpt:
         )
 
     @ToolDef.from_fn
+    def clone():
+        def draw_settings(context, layout, _tool):
+            paint = context.tool_settings.sculpt
+            layout.prop(paint, "clone_mode", text="Mode")
+            layout.operator("paint.clone_source_reset", text="Reset Source")
+
+        return dict(
+            idname="builtin_brush.clone",
+            label="Clone Stamp",
+            icon="brush.paint_texture.clone",
+            options={'USE_BRUSHES'},
+            brush_type='CLONE',
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def layer_eraser():
         return dict(
             idname="builtin_brush.layer_eraser",
@@ -2184,6 +2200,22 @@ class _defs_texture_paint:
             icon="brush.paint_texture.clone",
             options={'USE_BRUSHES'},
             brush_type='CLONE',
+        )
+
+    @ToolDef.from_fn
+    def texture_clone():
+        def draw_settings(context, layout, _tool):
+            paint = context.tool_settings.image_paint
+            layout.prop(paint, "clone_mode", text="Mode")
+            layout.operator("paint.clone_source_reset", text="Reset Source")
+
+        return dict(
+            idname="builtin_brush.texture_clone",
+            label="Clone Stamp",
+            icon="brush.paint_texture.clone",
+            options={'USE_BRUSHES'},
+            brush_type='CLONE',
+            draw_settings=draw_settings,
         )
 
     @ToolDef.from_fn
@@ -3846,6 +3878,7 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_texture_paint.blur,
             _defs_texture_paint.smear,
             _defs_texture_paint.clone,
+            _defs_texture_paint.texture_clone,
             _defs_texture_paint.fill,
             _defs_texture_paint.selection_gradient,
             _defs_texture_paint.mask,
@@ -4264,6 +4297,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.curves_edit,
             _defs_sculpt.mask_by_color,
             _defs_sculpt.mask_by_topology_island,
+            _defs_sculpt.clone,
             _defs_sculpt.layer_eraser,
             lambda context: (
                 (_defs_sculpt.texture_fill,)

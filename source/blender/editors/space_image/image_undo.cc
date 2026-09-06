@@ -1459,6 +1459,15 @@ void ED_image_undo_push_begin_selection(const char *name, Image *image)
   }
 }
 
+bool ED_image_undo_is_step_active()
+{
+  const UndoStack *ustack = ED_undo_stack_get();
+  if (ustack == nullptr || ustack->step_init == nullptr) {
+    return false;
+  }
+  return ustack->step_init->type == BKE_UNDOSYS_TYPE_IMAGE;
+}
+
 void ED_image_undo_push_end()
 {
   UndoStack *ustack = ED_undo_stack_get();

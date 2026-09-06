@@ -82,7 +82,13 @@
 
 #include "UI_resources.hh"
 
+#include "UI_view2d.hh"
+
 #include "mesh/sculpt_intern.hh"
+#include "paint_clone.hh"
+#include "paint_clone_2d.hh"
+#include "paint_clone_cursor.hh"
+#include "paint_clone_source.hh"
 #include "paint_curve_intern.hh"
 #include "paint_intern.hh"
 
@@ -1234,6 +1240,7 @@ static bool paint_cursor_context_init(bContext *C,
   pcontext.screen = CTX_wm_screen(C);
   pcontext.depsgraph = CTX_data_depsgraph_pointer(C);
   pcontext.scene = CTX_data_scene(C);
+  pcontext.sima = CTX_wm_space_image(C);
   pcontext.object = CTX_data_active_object(C);
   pcontext.paint = BKE_paint_get_active_from_context(C);
   if (pcontext.paint == nullptr) {
@@ -1496,6 +1503,39 @@ static void paint_draw_2D_view_brush_cursor_default(PaintCursorContext &pcontext
   GPU_line_width(1.0f);
   imm_draw_circle_wire_2d(
       pcontext.pos, pcontext.translation[0], pcontext.translation[1], pcontext.final_radius, 40);
+
+  /* Clone Stamp source marker (Image Editor): the dashed outline at the spot the stamp reads
+   * from, for a CLONE brush with a set 2D source. Same unbind/restore pattern as the Texture3D
+   * marker path above. */
+  if (pcontext.mode == PaintMode::Texture2D && pcontext.region != nullptr &&
+      pcontext.brush != nullptr && pcontext.brush->image_brush_type == IMAGE_PAINT_BRUSH_TYPE_CLONE &&
+      pcontext.scene != nullptr &&
+      ed::sculpt_paint::clone::clone_2d_source_get(pcontext.scene->toolsettings->imapaint)
+          .has_value())
+  {
+    /* #pcontext.translation is window-absolute; the view2d conversion takes region pixels. */
+    const float region_x = pcontext.translation[0] - float(pcontext.region->winrct.xmin);
+    const float region_y = pcontext.translation[1] - float(pcontext.region->winrct.ymin);
+    float cursor_uv[2];
+    ui::view2d_region_to_view(
+        &pcontext.region->v2d, region_x, region_y, &cursor_uv[0], &cursor_uv[1]);
+    int2 canvas_size(0);
+    if (pcontext.sima != nullptr && pcontext.sima->image != nullptr) {
+      BKE_image_get_size(pcontext.sima->image, nullptr, &canvas_size[0], &canvas_size[1]);
+    }
+    immUnbindProgram();
+    ed::sculpt_paint::clone::clone_2d_draw_source_cursor(pcontext.scene->toolsettings->imapaint,
+                                                         *pcontext.paint,
+                                                         *pcontext.brush,
+                                                         *pcontext.region,
+                                                         canvas_size,
+                                                         float2(cursor_uv[0], cursor_uv[1]),
+                                                         pcontext.final_radius);
+    /* Restore what the caller's teardown expects to still be bound. */
+    pcontext.pos = GPU_vertformat_attr_add(
+        immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
+    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+  }
 }
 
 static void paint_draw_2D_view_brush_cursor(PaintCursorContext &pcontext)
@@ -1531,6 +1571,52 @@ static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
    * cursor in the 3D view. */
   if (pcontext.mode == PaintMode::Texture3D) {
     paint_draw_legacy_3D_view_brush_cursor(pcontext);
+    /* PBR Clone source marker: no-op unless CLONE brush + source set + shown. Unlike the sculpt
+     * cursor, this path never sets up a 3D view stage, so the marker has to bring its own: it is
+     * drawn on the surface in object space, which needs the view projection and the object matrix
+     * on the stack, plus a 3-component position attribute the legacy 2D cursor above does not
+     * bind. */
+    if (pcontext.brush != nullptr &&
+        pcontext.brush->image_brush_type == IMAGE_PAINT_BRUSH_TYPE_CLONE &&
+        pcontext.paint != nullptr && pcontext.object != nullptr && pcontext.region != nullptr &&
+        pcontext.vc.v3d != nullptr)
+    {
+      const ed::sculpt_paint::clone::CloneSourcePoint *source =
+          ed::sculpt_paint::clone::clone_source_point_get(pcontext.object);
+      if (source != nullptr) {
+        immUnbindProgram();
+        GPU_matrix_push_projection();
+        ED_view3d_draw_setup_view(pcontext.wm,
+                                  pcontext.win,
+                                  pcontext.depsgraph,
+                                  pcontext.scene,
+                                  pcontext.region,
+                                  pcontext.vc.v3d,
+                                  nullptr,
+                                  nullptr,
+                                  nullptr);
+        GPU_matrix_push();
+        GPU_matrix_mul(pcontext.object->object_to_world().ptr());
+
+        const uint pos = GPU_vertformat_attr_add(
+            immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+        ed::sculpt_paint::clone::clone_dashed_program_bind();
+        /* This path has no surface hit under the cursor, so Relative cannot slide the marker
+         * here; it stays at the picked point until the sculpt cursor draws it. */
+        ed::sculpt_paint::clone::clone_draw_source_cursor(
+            source, pos, nullptr, pcontext.vc, *pcontext.paint, *pcontext.brush);
+        immUnbindProgram();
+
+        GPU_matrix_pop();
+        GPU_matrix_pop_projection();
+
+        /* Restore what #paint_cursor_setup_2D_drawing left bound, since the caller's teardown
+         * unbinds a program it expects to still be there. */
+        pcontext.pos = GPU_vertformat_attr_add(
+            immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
+        immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+      }
+    }
     return;
   }
 
@@ -1539,6 +1625,10 @@ static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
   }
 
   mesh_cursor_update_and_init(pcontext);
+
+  /* Before the branch, so the clone source marker is drawn whichever cursor path follows -- it
+   * matters most DURING a stroke, which is exactly when the inactive path does not run. */
+  mesh_cursor_clone_source_draw(pcontext);
 
   if (pcontext.is_stroke_active) {
     mesh_cursor_active_draw(pcontext);

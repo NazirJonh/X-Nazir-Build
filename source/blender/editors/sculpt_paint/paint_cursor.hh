@@ -14,6 +14,7 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
 #include "DNA_texture_types.h"
 #include "DNA_windowmanager_types.h"
 
@@ -38,6 +39,11 @@ struct PaintCursorContext {
   bScreen *screen = nullptr;
   Depsgraph *depsgraph = nullptr;
   Scene *scene = nullptr;
+  /**
+   * Image Editor space when the cursor draws there, for canvas-relative overlays.
+   * Null in every other space.
+   */
+  SpaceImage *sima = nullptr;
   Object *object = nullptr;
   Base *base = nullptr;
   UnifiedPaintSettings *ups = nullptr;
@@ -131,6 +137,15 @@ void grease_pencil_cursor_draw(PaintCursorContext &pcontext);
 
 void mesh_cursor_update_and_init(PaintCursorContext &pcontext);
 void mesh_cursor_active_draw(PaintCursorContext &pcontext);
+/**
+ * Draw the PBR clone source marker, if the brush is a clone brush with a source set.
+ *
+ * Its own drawing stage rather than an overlay inside one of the two below: the marker has to
+ * stay visible for the whole of a stroke -- that is when it matters most, since Relative moves it
+ * -- and the inactive path is also short-circuited for tube falloff and for an alpha overlay, all
+ * of which would drop it. No-op outside Sculpt mode.
+ */
+void mesh_cursor_clone_source_draw(PaintCursorContext &pcontext);
 void mesh_cursor_inactive_draw(PaintCursorContext &pcontext);
 
 void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext);

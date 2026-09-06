@@ -21,6 +21,11 @@ set(INC_SYS
 
 set(SRC
   brush_asset_ops.cc
+  paint_clone.cc
+  paint_clone_2d.cc
+  paint_clone_cursor.cc
+  paint_clone_source.cc
+  paint_clone_stroke.cc
   paint_cursor.cc
   paint_curve.cc
   paint_curve_convert.cc
@@ -166,6 +171,11 @@ set(SRC
   mesh/sculpt_vdm_insert_mesh.cc
   mesh/sculpt_undo.cc
 
+  paint_clone.hh
+  paint_clone_2d.hh
+  paint_clone_cursor.hh
+  paint_clone_source.hh
+  paint_clone_stroke.hh
   paint_cursor.hh
   paint_curve_geometry.hh
   paint_curve_intern.hh

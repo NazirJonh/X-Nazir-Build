@@ -7,6 +7,9 @@
  */
 
 #include "editors/sculpt_paint/paint_cursor.hh"
+#include "editors/sculpt_paint/paint_clone.hh"
+#include "editors/sculpt_paint/paint_clone_cursor.hh"
+#include "editors/sculpt_paint/paint_clone_source.hh"
 
 #include "DNA_mesh_types.h"
 
@@ -882,6 +885,23 @@ static void cursor_space_overlays_draw(PaintCursorContext &pcontext)
 {
   const Brush &brush = *pcontext.brush;
 
+  /* Clone Stamp shows two outlines at once -- where it writes and where it reads. Dashing both
+   * tells them apart from every other brush's solid ring without adding a second color, and the
+   * source marker uses the same pattern so the pair reads as one tool. */
+  if (pcontext.mode == PaintMode::Sculpt &&
+      brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE)
+  {
+    const bool is_rect = brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
+    immUnbindProgram();
+    clone::clone_dashed_program_bind();
+    clone::clone_dashed_outline_draw(pcontext.pos, pcontext.radius, is_rect);
+    immUnbindProgram();
+    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+    paint_cursor_draw_texture_overlays(pcontext);
+    return;
+  }
+
   /* Main inactive cursor. For the rectangle clip shape in Sculpt mode, draw a square outline
    * aligned to the brush-local XY plane instead of a circle. The GPU matrix is already set up
    * by cursor_space_drawing_setup so that the surface normal is the Z axis; coordinates here are
@@ -950,9 +970,70 @@ static void cursor_space_overlays_draw(PaintCursorContext &pcontext)
   }
 }
 
+void mesh_cursor_clone_source_draw(PaintCursorContext &pcontext)
+{
+  if (pcontext.mode != PaintMode::Sculpt || pcontext.brush == nullptr ||
+      pcontext.brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_CLONE)
+  {
+    return;
+  }
+  if (pcontext.paint == nullptr) {
+    return;
+  }
+  if (pcontext.region == nullptr || pcontext.vc.obact == nullptr || pcontext.vc.v3d == nullptr) {
+    return;
+  }
+  const clone::CloneSourcePoint *source = clone::clone_source_point_get(pcontext.object);
+  if (source == nullptr) {
+    return;
+  }
+
+  /* Where the brush is, for Relative to displace the marker by. During a stroke the hover data is
+   * not refreshed, so the stroke cache is the only thing that still knows -- and it is also the
+   * exact location the dab is reading against. */
+  const SculptSession *ss = pcontext.ss;
+  const float3 *cursor_co = nullptr;
+  if (pcontext.is_stroke_active && ss != nullptr && ss->cache != nullptr) {
+    cursor_co = &ss->cache->location;
+  }
+  else if (pcontext.is_cursor_over_mesh) {
+    cursor_co = &pcontext.location;
+  }
+
+  /* Its own view stage: the marker lives in object space and must survive whichever of the
+   * active / inactive / legacy cursor paths runs afterwards. */
+  wmViewport(&pcontext.region->winrct);
+  GPU_matrix_push_projection();
+  ED_view3d_draw_setup_view(pcontext.wm,
+                            pcontext.win,
+                            pcontext.depsgraph,
+                            pcontext.scene,
+                            pcontext.region,
+                            pcontext.vc.v3d,
+                            nullptr,
+                            nullptr,
+                            nullptr);
+  GPU_matrix_push();
+  GPU_matrix_mul(pcontext.vc.obact->object_to_world().ptr());
+
+  /* Swap the caller's solid program for the dashed one and put it back, the way the texture
+   * overlay does: the surrounding cursor pipeline keeps `pcontext.pos` bound across draws. */
+  immUnbindProgram();
+  clone::clone_dashed_program_bind();
+  clone::clone_draw_source_cursor(
+      source, pcontext.pos, cursor_co, pcontext.vc, *pcontext.paint, *pcontext.brush);
+  immUnbindProgram();
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  GPU_matrix_pop();
+  GPU_matrix_pop_projection();
+  wmWindowViewport(pcontext.win);
+}
+
 void mesh_cursor_inactive_draw(PaintCursorContext &pcontext)
 {
   PRF_scope(ProfileCategory::Draw);
+
   if (!pcontext.is_cursor_over_mesh) {
     inactive_cursor_draw(pcontext);
     return;

@@ -497,6 +497,17 @@ class ColorPalettePanel(BrushPanel):
             layout.template_palette(settings, "palette", show_empty_message=True, show_sort_buttons=True)
 
 
+def _image_editor_clone_stamp_tool_active(context):
+    """The Clone Stamp tool and the legacy Clone tool share the CLONE brush; panels split by tool."""
+    space = context.space_data
+    if space is None or space.type != 'IMAGE_EDITOR':
+        return False
+    if space.mode != 'PAINT':
+        return False
+    tool = context.workspace.tools.from_space_image_mode('PAINT', create=False)
+    return tool is not None and tool.idname == 'builtin_brush.texture_clone'
+
+
 class ClonePanel(BrushPanel):
     bl_label = "Clone"
     bl_options = {'DEFAULT_CLOSED'}
@@ -510,6 +521,8 @@ class ClonePanel(BrushPanel):
 
         mode = cls.get_brush_mode(context)
         if mode == 'PAINT_TEXTURE':
+            if _image_editor_clone_stamp_tool_active(context):
+                return False
             brush = settings.brush
             return brush.image_brush_type == 'CLONE'
         return False
@@ -559,6 +572,44 @@ class ClonePanel(BrushPanel):
             )
             col.label(text="Source Clone UV Map")
             col.menu("VIEW3D_MT_tools_projectpaint_clone", text=clone_text, translate=False)
+
+
+class PBRClonePanel(BrushPanel):
+    bl_label = "Clone Stamp"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        if not super().poll(context):
+            return False
+        mode = cls.get_brush_mode(context)
+        settings = cls.paint_settings(context)
+        if settings is None:
+            return False
+        brush = getattr(settings, "brush", None)
+        if brush is None:
+            return False
+        if mode == 'PAINT_TEXTURE':
+            if not getattr(brush, "image_brush_type", '') == 'CLONE':
+                return False
+            # In the Image Editor the stamp tool owns this panel; the 3D Viewport keeps the
+            # source-based behavior regardless of which CLONE tool selected the brush.
+            space = context.space_data
+            if space is not None and space.type == 'IMAGE_EDITOR':
+                return _image_editor_clone_stamp_tool_active(context)
+            return True
+        if mode == 'SCULPT':
+            return getattr(brush, "sculpt_brush_type", '') == 'CLONE'
+        return False
+
+    def draw(self, context):
+        layout = self.layout
+        settings = self.paint_settings(context)
+        col = layout.column(align=True)
+        col.prop(settings, "clone_mode", text="Mode")
+        # No "Set Source" button: the source is picked with Shift+LMB on the mesh, which the
+        # status bar spells out while the tool is active. A button cannot pick a point anyway.
+        col.operator("paint.clone_source_reset", text="Reset Source")
 
 
 class TextureMaskPanel(BrushPanel):

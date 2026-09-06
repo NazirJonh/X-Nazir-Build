@@ -404,10 +404,10 @@ void ImageColorEffect::ensure_undo_step_live()
    * - an older committed IMAGE step -> the assert fires and our "before" tiles are pushed into a
    *   step that was already committed, corrupting an unrelated point in the undo history.
    *
-   * WHAT THE CHECK BELOW PROVES: that a transaction is in flight AND that its type is
-   * `BKE_UNDOSYS_TYPE_IMAGE`. That is exactly -- and only -- the condition
-   * `BKE_undosys_stack_init_or_active_with_type()` tests, so when it holds the tile-map lookup
-   * returns `step_init`'s own map with `us_p == us_prev` and cannot crash.
+    * WHAT THE CHECK BELOW PROVES: that a transaction is in flight AND that its type is image.
+    * That is exactly -- and only -- the condition `#ED_image_undo_is_step_active()` tests, so
+    * when it holds the tile-map lookup
+    * returns `step_init`'s own map with `us_p == us_prev` and cannot crash.
    *
    * WHAT IT DOES NOT PROVE: that the step is the very allocation we opened. `UndoStep` carries no
    * identity beyond its type and a 64-byte name (`BKE_undo_system.hh:76-79`), and a freed step's
@@ -433,9 +433,7 @@ void ImageColorEffect::ensure_undo_step_live()
    * COST OF REOPENING: the session's pixels end up split across more than one `ImageUndoStep`, so
    * reverting the whole session takes several Ctrl+Z presses instead of one. That is the accepted
    * trade against the crash above. */
-  const UndoStack *ustack = ED_undo_stack_get();
-  const UndoStep *step_init = ustack != nullptr ? ustack->step_init : nullptr;
-  if (step_init != nullptr && step_init->type == BKE_UNDOSYS_TYPE_IMAGE) {
+  if (ED_image_undo_is_step_active()) {
     return;
   }
   ED_image_undo_push_begin(undo_step_name, PaintMode::Sculpt);
@@ -526,10 +524,8 @@ ImageColorEffect::~ImageColorEffect()
     ED_image_undo_push_end();
     return;
   }
-  UndoStack *ustack = ED_undo_stack_get();
-  const UndoStep *step_init = ustack != nullptr ? ustack->step_init : nullptr;
-  if (step_init != nullptr && step_init->type == BKE_UNDOSYS_TYPE_IMAGE) {
-    BKE_undosys_step_push_init_abort(ustack);
+  if (ED_image_undo_is_step_active()) {
+    BKE_undosys_step_push_init_abort(ED_undo_stack_get());
   }
 }
 

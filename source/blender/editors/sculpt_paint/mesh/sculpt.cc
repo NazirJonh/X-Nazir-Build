@@ -111,6 +111,8 @@
 #include "ED_view3d.hh"
 
 #include "../paint_curve_patch_session.hh"
+#include "../paint_clone.hh"
+#include "../paint_clone_stroke.hh"
 #include "../paint_intern.hh"
 #include "paint_material_source.hh"
 #include "sculpt_automask.hh"
@@ -1396,6 +1398,7 @@ static void restore_from_undo_step(const Depsgraph &depsgraph, const Sculpt &sd,
     case SCULPT_BRUSH_TYPE_BLUR:
     case SCULPT_BRUSH_TYPE_PAINT:
     case SCULPT_BRUSH_TYPE_SMEAR:
+    case SCULPT_BRUSH_TYPE_CLONE:
       /* Poly Paint pushes #Type::Material (scalar and/or color channels) where a plain color
        * stroke pushes #Type::Color, so restore whichever the in-progress step actually holds. */
       if (!restore_material_attributes_from_step(object)) {
@@ -2826,6 +2829,7 @@ static float brush_strength(const Sculpt &sd,
     case SCULPT_BRUSH_TYPE_SLIDE_RELAX:
       return alpha * pressure * overlap * feather * 2.0f;
     case SCULPT_BRUSH_TYPE_PAINT:
+    case SCULPT_BRUSH_TYPE_CLONE:
       final_pressure = pressure * pressure;
       return final_pressure * overlap * feather;
     case SCULPT_BRUSH_TYPE_SMEAR:
@@ -4877,6 +4881,15 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *ob.runtime->sculpt_session;
 
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE) {
+    /* PBR Clone v1 writes image pixels only; its undo coverage is the image-undo step opened by
+     * stroke_undo_begin, and attribute canvases are a clean no-op in the dab. Pushing sculpt
+     * nodes here would dereference a null step (get_step_data finds no sculpt undo step on
+     * image-undo strokes). This mirrors the image-canvas arm of the paint branch below, which
+     * likewise pushes nothing. */
+    return;
+  }
+
   undo::NodeDataFlag flags{};
   /* Backing storage for #material_attributes: the spans it hands to #push_nodes must
    * outlive that call. */
@@ -5020,6 +5033,8 @@ static const char *sculpt_brush_type_name(const Brush &brush)
       return "Scene Project Brush";
     case SCULPT_BRUSH_TYPE_TEXTURE_FILL:
       return "Texture Fill Brush";
+    case SCULPT_BRUSH_TYPE_CLONE:
+      return "Clone Brush";
   }
 
   return "Sculpting";
@@ -5430,6 +5445,13 @@ void do_brush_action(const Depsgraph &depsgraph,
       break;
     case SCULPT_BRUSH_TYPE_TEXTURE_FILL:
       /* One-shot fill; handled in SculptPaintStroke::done(). */
+      break;
+    case SCULPT_BRUSH_TYPE_CLONE:
+      /* PBR Clone: dab-center write into layer/channel targets (no geometry change).
+       * Undo is image-undo via sculpt_brush_uses_image_canvas(); targets are owned by the stroke
+       * cache and released with it. */
+      clone::sculpt_clone_dab_apply(
+          depsgraph, sd, ob, brush, paint_mode_settings, ss.cache->clone_runtime);
       break;
   }
 
@@ -6112,6 +6134,7 @@ StrokeCache::StrokeCache() = default;
 
 StrokeCache::~StrokeCache()
 {
+  clone::clone_stroke_runtime_free(this->clone_runtime);
   if (this->dial) {
     BLI_dial_free(this->dial);
   }
@@ -7619,6 +7642,17 @@ struct SculptPaintStroke final : public PaintStroke {
   /* Multi-object ("global") sculpt stroke state -- see #MultiObjectStrokeContext. */
   MultiObjectStrokeContext multi_;
 
+  /**
+   * Which undo system #stroke_undo_begin opened for this stroke, decided once before it ran.
+   *
+   * It cannot be re-derived at stroke end: brush toggles (Shift for smooth, Ctrl for mask) swap
+   * `paint->brush` mid-stroke and restore it in #done, and a multi-object stroke can mix image and
+   * attribute canvases. Meanwhile #BKE_undosys_step_push_init FREES a live step of the other
+   * system, so only the last system opened is closable -- and calling #ED_image_undo_push_end
+   * while a sculpt step is open hits #BLI_assert_unreachable inside image undo.
+   */
+  bool uses_image_undo_ = false;
+
   /* Sculpt layers: Erase Layer transiently arms recording into the recording target layer for
    * the duration of this stroke when REC was not already on (see #test_start / #done). One entry
    * per object that had the Erase Layer brush arm recording this stroke — each sync-group member
@@ -8523,60 +8557,106 @@ bool sculpt_brush_uses_image_canvas(const Brush &brush,
                                     const Paint &paint,
                                     Object &ob)
 {
-  if (!ELEM(brush.sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_TEXTURE_FILL)) {
+  if (!ELEM(brush.sculpt_brush_type,
+             SCULPT_BRUSH_TYPE_PAINT,
+             SCULPT_BRUSH_TYPE_TEXTURE_FILL,
+             SCULPT_BRUSH_TYPE_CLONE))
+  {
     return false;
   }
   return SCULPT_use_image_paint_brush(settings, ob, &brush, paint.visible_material_channels);
 }
 
-static void stroke_undo_begin(const Scene &scene,
+/**
+ * Open the undo transaction for a whole stroke, and report which system it went to.
+ *
+ * The choice is made once, for every object at once: image undo and sculpt undo cannot both be
+ * open (#BKE_undosys_step_push_init frees a live step of the other system), so a multi-object
+ * stroke that mixes canvases has to pick one, and image wins.
+ *
+ * KNOWN LIMITATION: in such a mixed stroke the attribute-canvas objects then paint outside any
+ * undo step, so their attribute writes are not undoable. Deciding per object instead is what the
+ * code used to do, and it was worse: both systems were opened, the second push_init freed the
+ * first system's live step, and the stroke ended with a dangling `step_init` that the next push
+ * adopted -- the first Ctrl+Z afterwards reached past this stroke into the previous one. Covering
+ * both properly needs an undo system that can hold pixels and attributes in one step, which is
+ * out of this tool's scope.
+ */
+static bool stroke_undo_begin(const Scene &scene,
                               const Brush *brush,
                               PaintModeSettings &paint_mode_settings,
                               const Span<Object *> objects,
                               const Paint &paint,
                               wmOperator *op)
 {
+  bool use_image_undo = false;
+  if (brush != nullptr) {
+    for (Object *object_ptr : objects) {
+      if (sculpt_brush_uses_image_canvas(*brush, paint_mode_settings, paint, *object_ptr)) {
+        use_image_undo = true;
+        break;
+      }
+    }
+  }
+
+  if (use_image_undo) {
+    ED_image_undo_push_begin(op->type->name, PaintMode::Sculpt);
+    return true;
+  }
+
+  /* The name only labels the step in the undo history; a stroke can reach here with no brush
+   * (a scripted stroke, or a mode whose brush was unlinked), and the generic name is what
+   * #sculpt_brush_type_name itself falls back to. */
+  const char *step_name = brush != nullptr ? sculpt_brush_type_name(*brush) : "Sculpting";
   bool sculpt_undo_started = false;
   for (Object *object_ptr : objects) {
-    Object &ob = *object_ptr;
-
-    /* Setup the correct undo system. Image painting and sculpting are mutual exclusive.
-     * Color attributes are part of the sculpting undo system. */
-    if (brush && sculpt_brush_uses_image_canvas(*brush, paint_mode_settings, paint, ob))
-    {
-      ED_image_undo_push_begin(op->type->name, PaintMode::Sculpt);
+    if (!sculpt_undo_started) {
+      undo::push_begin_ex(scene, *object_ptr, step_name);
+      sculpt_undo_started = true;
     }
     else {
-      if (!sculpt_undo_started) {
-        undo::push_begin_ex(scene, ob, sculpt_brush_type_name(*brush));
-        sculpt_undo_started = true;
-      }
-      else {
-        undo::push_begin_add_object(ob);
-      }
+      undo::push_begin_add_object(*object_ptr);
     }
   }
+  return false;
 }
 
-static void stroke_undo_end(PaintModeSettings &paint_mode_settings,
-                            const Span<Object *> objects,
-                            const Paint &paint,
-                            Brush *brush)
+/** Close the transaction #stroke_undo_begin opened, in the system it reported. */
+static void stroke_undo_end(const bool uses_image_undo)
 {
-  bool any_sculpt_undo = false;
-  for (Object *object_ptr : objects) {
-    Object &ob = *object_ptr;
-    if (brush && sculpt_brush_uses_image_canvas(*brush, paint_mode_settings, paint, ob))
-    {
+  if (uses_image_undo) {
+    /* Exactly one live image step for the whole stroke. */
+    if (ED_image_undo_is_step_active()) {
       ED_image_undo_push_end();
     }
-    else {
-      any_sculpt_undo = true;
-    }
+    return;
   }
+  undo::push_end_all_ex(false, true);
+}
 
-  if (any_sculpt_undo) {
-    undo::push_end_all_ex(false, true);
+/**
+ * Throw away the transaction #stroke_undo_begin opened, for a stroke the user cancelled.
+ *
+ * The image-undo arm cannot be left to #undo::discard_init_step: that one ignores any step whose
+ * type is not sculpt, so an image-canvas stroke (Paint on a material/image canvas, Clone Stamp)
+ * used to come out of a cancel with its pixels still painted AND its step still sitting in
+ * `step_init`. The dangling step was then adopted or freed by whatever pushed next, and the first
+ * Ctrl+Z afterwards reached past this stroke into the previous one -- undoing a stroke the user
+ * had made with a different brush.
+ *
+ * Image undo also does not roll anything back on its own the way the sculpt system restores
+ * geometry, so the captured tiles are written back here first. That invalidates every one of them,
+ * so the step closed right after carries no pixels and undoing it is a no-op.
+ */
+static void stroke_undo_cancel(const bool uses_image_undo)
+{
+  if (!uses_image_undo) {
+    undo::discard_init_step();
+    return;
+  }
+  if (ED_image_undo_is_step_active()) {
+    ED_image_paint_tile_map_restore(ED_image_paint_tile_map_get());
+    ED_image_undo_push_end();
   }
 }
 
@@ -9109,12 +9189,12 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 
     }
 
-    stroke_undo_begin(*this->scene,
-                      this->brush,
-                      *this->paint_mode_settings_,
-                      this->multi_.mode_objects,
-                      this->sculpt_->paint,
-                      op);
+    this->uses_image_undo_ = stroke_undo_begin(*this->scene,
+                                               this->brush,
+                                               *this->paint_mode_settings_,
+                                               this->multi_.mode_objects,
+                                               this->sculpt_->paint,
+                                               op);
 
     /* Start recording this stroke into each recording object's target layer (primary active, or
      * the sync_uid-matched layer temporarily made active on members). Undo data is recorded at
@@ -9635,6 +9715,10 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
     if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
       flush_update_step(this->vc, ob, UpdateType::Mask);
     }
+    else if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE) {
+      /* Clone paints images only; skip PBVH position rebuild. */
+      flush_update_step(this->vc, ob, UpdateType::Image);
+    }
     else if (brush_type_is_paint(brush.sculpt_brush_type)) {
       if (SCULPT_use_image_paint_brush(
               *this->paint_mode_settings_, ob, &brush, sd.paint.visible_material_channels))
@@ -9896,7 +9980,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
       /* The start refused (see its own guards) and already freed `ss.cache`. Close the
        * transaction the ordinary way so whatever the stroke did stays undoable, and return -- the
        * teardown below would double-free the cache this path has already released. */
-      stroke_undo_end(*paint_mode_settings_, this->multi_.mode_objects, sd.paint, brush);
+      stroke_undo_end(this->uses_image_undo_);
       return;
     }
   }
@@ -9928,7 +10012,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
         curve_patch_handoff_to_editor(this->vc.C, ss);
         return;
       }
-      stroke_undo_end(*paint_mode_settings_, this->multi_.mode_objects, sd.paint, brush);
+      stroke_undo_end(this->uses_image_undo_);
       return;
     }
   }
@@ -9960,10 +10044,10 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     undo::discard_init_step();
   }
   else if (!is_cancel && stroke_started) {
-    stroke_undo_end(*paint_mode_settings_, this->multi_.mode_objects, sd.paint, brush);
+    stroke_undo_end(this->uses_image_undo_);
   }
   else if (is_cancel && stroke_started) {
-    undo::discard_init_step();
+    stroke_undo_cancel(this->uses_image_undo_);
   }
 
   if (is_cancel || !stroke_started) {
@@ -10100,6 +10184,25 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
       return OPERATOR_FINISHED;
     }
     return OPERATOR_CANCELLED;
+  }
+
+  /* Shift+LMB with the Clone Stamp brush sets the clone source instead of starting a stroke: a
+   * clone stroke is meaningless until a source exists, and the one-shot picker needs the mouse
+   * over the 3D viewport (same invoke-time redirect pattern as Ctrl+LMB face-set sampling above).
+   *
+   * The status bar carries the binding: there is no button that could do this job -- picking a
+   * source needs a point on the mesh -- so the shortcut is the whole interface for it and has to
+   * be discoverable somewhere. */
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE) {
+    WorkspaceStatus status(C);
+    status.item(IFACE_("Clone"), ICON_MOUSE_LMB);
+    status.item(IFACE_("Set Source"), ICON_EVENT_SHIFT, ICON_MOUSE_LMB);
+
+    if ((event->modifier & KM_SHIFT) != 0) {
+      WM_operator_name_call(
+          C, "PAINT_OT_clone_source_set", wm::OpCallContext::InvokeDefault, nullptr, event);
+      return OPERATOR_FINISHED;
+    }
   }
 
   stroke = MEM_new<SculptPaintStroke>(__func__, C, op, event->type);

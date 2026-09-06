@@ -1244,6 +1244,13 @@ static void paint_brush_default_essentials_name_get(const PaintMode paint_mode,
           case SCULPT_BRUSH_TYPE_TEXTURE_FILL:
             name = "Fill";
             break;
+          case SCULPT_BRUSH_TYPE_CLONE:
+            /* Requires a dedicated "Clone" essentials brush asset (with its own
+             * `sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE` baked in) in
+             * essentials_brushes-mesh_sculpt.blend; until it ships, the tool
+             * activates the remembered binding or any brush with Brush Type = Clone. */
+            name = "Clone";
+            break;
           case SCULPT_BRUSH_TYPE_SIMPLIFY:
             name = "Density";
             break;

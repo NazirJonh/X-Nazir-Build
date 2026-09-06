@@ -322,6 +322,11 @@ const EnumPropertyItem rna_enum_brush_sculpt_brush_type_items[] = {
     {SCULPT_BRUSH_TYPE_SMEAR, "SMEAR", 0, "Smear", ""},
     {SCULPT_BRUSH_TYPE_BLUR, "BLUR", 0, "Blur", ""},
     {SCULPT_BRUSH_TYPE_TEXTURE_FILL, "TEXTURE_FILL", 0, "Texture Fill", ""},
+    {SCULPT_BRUSH_TYPE_CLONE,
+     "CLONE",
+     0,
+     "Clone Stamp",
+     "Copy every visible material channel from a source point on the mesh"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

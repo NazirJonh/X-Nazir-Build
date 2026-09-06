@@ -234,10 +234,10 @@ void image_select_blend_buffer_into_canvas_at(ImBuf *dst_canvas,
 
 ImageUndoStep *image_select_undo_session_step_get()
 {
-  UndoStack *ustack = ED_undo_stack_get();
-  if (!ustack || !ustack->step_init || ustack->step_init->type != BKE_UNDOSYS_TYPE_IMAGE) {
+  if (!ED_image_undo_is_step_active()) {
     return nullptr;
   }
+  UndoStack *ustack = ED_undo_stack_get();
   return reinterpret_cast<ImageUndoStep *>(ustack->step_init);
 }
 

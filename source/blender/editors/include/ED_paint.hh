@@ -97,6 +97,14 @@ void ED_image_undo_push_begin_with_image_all_udims(const char *name,
 void ED_image_undo_push(Image *image, ImBuf *ibuf, ImageUser *iuser, ImageUndoStep *us);
 void ED_image_undo_push_end();
 /**
+ * Whether an image undo step is the one currently being built.
+ *
+ * Writers that capture pristine tiles have to know this: a tile pushed with no open step is a
+ * pixel edit that can never be undone. Answers the question through the undo API rather than
+ * having every caller reach into #UndoStack::step_init and compare types itself.
+ */
+bool ED_image_undo_is_step_active();
+/**
  * Capture a snapshot of the selection mask for `tile_number` into the currently open image undo
  * step. Must be called after #ED_image_undo_push_begin* and before any mask modifications.
  * On undo, the mask is restored alongside the pixel data.

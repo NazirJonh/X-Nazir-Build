@@ -1620,6 +1620,33 @@ static void rna_def_paint_visible_material_channels(StructRNA *srna,
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
+/**
+ * Define PBR Clone v1 props on Sculpt/ImagePaint (reached through paint.*),
+ * mirroring #rna_def_paint_visible_material_channels.
+ */
+static void rna_def_paint_clone_props(StructRNA *srna, const char *mode_sdna_path)
+{
+  static const EnumPropertyItem clone_mode_items[] = {
+      {CLONE_MODE_ABSOLUTE,
+       "ABSOLUTE",
+       0,
+       "Absolute",
+       "Always clone from the source point, wherever the brush goes"},
+      {CLONE_MODE_RELATIVE,
+       "RELATIVE",
+       0,
+       "Relative",
+       "Keep a fixed offset between the source and the brush, so the source travels with the "
+       "stroke. The offset is taken from the first dab painted after the source is set"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  PropertyRNA *prop = RNA_def_property(srna, "clone_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, mode_sdna_path);
+  RNA_def_property_enum_items(prop, clone_mode_items);
+  RNA_def_property_ui_text(prop, "Clone Mode", "How the clone source follows the brush");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
 static void rna_def_color_picker_palette(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -2265,6 +2292,8 @@ static void rna_def_sculpt(BlenderRNA *brna)
   rna_def_paint_visible_material_channels(
       srna, "paint.visible_material_channels", "rna_Sculpt_visible_material_channels_set");
 
+  rna_def_paint_clone_props(srna, "paint.clone_mode");
+
   prop = RNA_def_property(srna, "lock_x", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flags", SCULPT_LOCK_X);
   RNA_def_property_ui_text(prop, "Lock X", "Disallow changes to the X axis of vertices");
@@ -2781,6 +2810,8 @@ static void rna_def_image_paint(BlenderRNA *brna)
   rna_def_paint_visible_material_channels(
       srna, "paint.visible_material_channels", "rna_ImaPaint_visible_material_channels_set");
 
+  rna_def_paint_clone_props(srna, "paint.clone_mode");
+
   /* functions */
   func = RNA_def_function(srna, "detect_data", "rna_ImaPaint_detect_data");
   RNA_def_function_ui_description(func, "Check if required texpaint data exist");
@@ -2928,6 +2959,20 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Clone Offset", "");
   RNA_def_property_ui_range(prop, -1.0f, 1.0f, 10.0f, 3);
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "clone_source_uv", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "clone_source_uv");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_text(
+      prop, "Clone Source", "Canvas coordinates the Clone Stamp copies from in the Image Editor");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "use_clone_source_set", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "clone_source_flag", IMAGE_PAINT_CLONE_SOURCE_SET);
+  RNA_def_property_ui_text(
+      prop, "Clone Source Set", "A Clone Stamp source point has been picked on the canvas");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
   /* NOTE: there is deliberately no `use_selection_mask` property. Whether selection masking is
    * active is derived from the per-image runtime mask data, which #ImagePaintSettings cannot

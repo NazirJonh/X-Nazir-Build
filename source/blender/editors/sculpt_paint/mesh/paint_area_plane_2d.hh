@@ -47,6 +47,8 @@
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
+#include "DNA_scene_types.h"
+
 namespace blender {
 
 struct BVHTree;
@@ -230,6 +232,37 @@ float4x4 area_plane_local_mat(const float3 &position,
 
 /** Geometric face normal of \a tri (object space), or zero if the triangle is degenerate. */
 float3 area_plane_triangle_face_normal(const AreaPlaneTriangle &tri);
+
+/**
+ * UV Jacobian of \a tri: the object-space directions the surface travels per UV unit
+ * (∂P/∂u, ∂P/∂v). False when the triangle is unwrapped to a point or a line, so the map does
+ * not exist.
+ */
+bool area_plane_triangle_uv_jacobian(const AreaPlaneTriangle &tri,
+                                     float3 &r_dpdu,
+                                     float3 &r_dpdv);
+
+/**
+ * Local UV-space Jacobian of a symmetry pass: how the mirrored destination's UV responds to a
+ * motion of the main destination's UV.
+ *
+ * Both sides' UV Jacobians (`dP/duv` of the main and of the mirrored hit triangle) plus the
+ * reflected axes compose into `J = (BᵀB)⁻¹ Bᵀ · M · A`: a UV motion travels the main triangle's
+ * Jacobian into a 3D offset, the mirror map carries it to the far side, and the mirrored
+ * triangle's Jacobian lands it back in UV (a least-squares solve, since the offset meets that
+ * triangle's plane at a small angle on an asymmetric mesh). For a mirrored unwrap `J` is a
+ * reflection, so it has a negative determinant -- the property that turns a mirrored stamp into
+ * a mirror image instead of a translated copy.
+ *
+ * \param symm_axes: THIS pass's own flipped axes, not the full enabled set.
+ * \return false when either triangle is UV-degenerate.
+ */
+bool symmetry_uv_jacobian(const float3 &main_dp_du,
+                          const float3 &main_dp_dv,
+                          const float3 &mirror_dp_du,
+                          const float3 &mirror_dp_dv,
+                          ePaintSymmetryFlags symm_axes,
+                          float2x2 &r_jacobian);
 
 /**
  * UV-space radius on \a tri matching an object-space dab of \a radius_object.

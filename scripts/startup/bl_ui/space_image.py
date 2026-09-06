@@ -24,6 +24,7 @@ from bl_ui.properties_paint_common import (
     material_paint_writable_channels,
     draw_material_paint_visibility_popover,
     ClonePanel,
+    PBRClonePanel,
     BrushSelectPanel,
     TextureMaskPanel,
     ColorPalettePanel,
@@ -1833,6 +1834,14 @@ class IMAGE_PT_paint_clone(Panel, ImagePaintPanel, ClonePanel):
     bl_context = ".paint_common_2d"
     bl_parent_id = "IMAGE_PT_paint_settings"
     bl_label = "Clone from Image/UV Map"
+
+
+class IMAGE_PT_paint_pbr_clone(Panel, ImagePaintPanel, PBRClonePanel):
+    bl_category = "Tool"
+    bl_context = ".paint_common_2d"
+    bl_parent_id = "IMAGE_PT_paint_settings"
+    bl_label = "Clone Stamp"
+    bl_options = {'DEFAULT_CLOSED'}
 
 
 class IMAGE_PT_tools_brush_display(Panel, BrushButtonsPanel, DisplayPanel):

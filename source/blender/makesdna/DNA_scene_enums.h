@@ -100,6 +100,14 @@ enum PaintCurveVisibilityFlags : int {
 };
 ENUM_OPERATORS(PaintCurveVisibilityFlags)
 
+/** #Paint.clone_mode */
+enum eCloneMode : int8_t {
+  /** Always read from the picked point, wherever the brush goes. */
+  CLONE_MODE_ABSOLUTE = 0,
+  /** Keep a fixed source-to-brush offset, so the source travels with the stroke. */
+  CLONE_MODE_RELATIVE = 1,
+};
+
 /** #SceneRenderLayer::passflag */
 enum eScenePassType : uint32_t {
   SCE_PASS_COMBINED = (1 << 0),

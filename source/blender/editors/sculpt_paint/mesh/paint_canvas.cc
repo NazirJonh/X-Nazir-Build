@@ -60,7 +60,8 @@ static bool paint_brush_uses_canvas(bContext *C)
               SCULPT_BRUSH_TYPE_PAINT,
               SCULPT_BRUSH_TYPE_SMEAR,
               SCULPT_BRUSH_TYPE_BLUR,
-              SCULPT_BRUSH_TYPE_TEXTURE_FILL);
+              SCULPT_BRUSH_TYPE_TEXTURE_FILL,
+              SCULPT_BRUSH_TYPE_CLONE);
 }
 
 static bool paint_brush_type_shading_color_follows_last_used(StringRef idname)

@@ -1164,7 +1164,7 @@ class VIEW3D_HT_header(Header):
                 paint = tool_settings.sculpt
                 brush = paint.brush
                 if brush:
-                    is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'SMEAR', 'TEXTURE_FILL'}
+                    is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'SMEAR', 'TEXTURE_FILL', 'CLONE'}
             else:
                 is_paint_tool = tool and tool.use_paint_canvas
 

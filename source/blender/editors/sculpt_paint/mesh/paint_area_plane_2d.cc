@@ -33,6 +33,8 @@
 
 #include "DEG_depsgraph_query.hh"
 
+#include "../paint_intern.hh"
+
 namespace blender::ed::sculpt_paint {
 
 static constexpr float AREA_PLANE_HIT_EPS = 1e-6f;
@@ -352,9 +354,9 @@ bool AreaPlaneMesh::hit_at_uv(const float2 &uv, AreaPlaneHit &r_hit) const
   return true;
 }
 
-static bool area_plane_triangle_uv_jacobian(const AreaPlaneTriangle &tri,
-                                            float3 &r_dpdu,
-                                            float3 &r_dpdv)
+bool area_plane_triangle_uv_jacobian(const AreaPlaneTriangle &tri,
+                                     float3 &r_dpdu,
+                                     float3 &r_dpdv)
 {
   const float2 duv1 = tri.uv[1] - tri.uv[0];
   const float2 duv2 = tri.uv[2] - tri.uv[0];
@@ -367,6 +369,39 @@ static bool area_plane_triangle_uv_jacobian(const AreaPlaneTriangle &tri,
   const float inv_det = 1.0f / det;
   r_dpdu = (e1 * duv2.y - e2 * duv1.y) * inv_det;
   r_dpdv = (e2 * duv1.x - e1 * duv2.x) * inv_det;
+  return true;
+}
+
+bool symmetry_uv_jacobian(const float3 &main_dp_du,
+                          const float3 &main_dp_dv,
+                          const float3 &mirror_dp_du,
+                          const float3 &mirror_dp_dv,
+                          const ePaintSymmetryFlags symm_axes,
+                          float2x2 &r_jacobian)
+{
+  /* The mirror of a DIRECTION is its linear reflection (#symmetry_flip about the object origin has
+   * no translation part for offsets). */
+  const float3 mirrored_du = symmetry_flip(main_dp_du, symm_axes);
+  const float3 mirrored_dv = symmetry_flip(main_dp_dv, symm_axes);
+
+  /* Least-squares solve of `mirror_dp_* · e' = mirrored_*`: the Gram matrix of the mirrored
+   * triangle's Jacobian, inverted once and applied to both columns of the main one. */
+  const float g11 = math::dot(mirror_dp_du, mirror_dp_du);
+  const float g12 = math::dot(mirror_dp_du, mirror_dp_dv);
+  const float g22 = math::dot(mirror_dp_dv, mirror_dp_dv);
+  const float det = g11 * g22 - g12 * g12;
+  if (math::abs(det) < 1e-24f) {
+    return false;
+  }
+  const float inv_det = 1.0f / det;
+  const auto solve = [&](const float3 &w) {
+    const float b1 = math::dot(mirror_dp_du, w);
+    const float b2 = math::dot(mirror_dp_dv, w);
+    return float2((g22 * b1 - g12 * b2) * inv_det, (g11 * b2 - g12 * b1) * inv_det);
+  };
+  /* Columns: column i is where UV axis i of the main destination lands in the mirrored one. */
+  r_jacobian[0] = solve(mirrored_du);
+  r_jacobian[1] = solve(mirrored_dv);
   return true;
 }
 

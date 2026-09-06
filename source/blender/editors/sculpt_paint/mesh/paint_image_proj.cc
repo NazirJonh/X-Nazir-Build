@@ -118,6 +118,8 @@
 
 // #include "bmesh_tools.hh"
 
+#include "../paint_clone.hh"
+#include "../paint_clone_stroke.hh"
 #include "../paint_intern.hh"
 
 namespace blender {
@@ -255,6 +257,10 @@ struct ProjStrokeHandle {
 
   /* trick to bypass regular paint and allow clone picking */
   bool is_clone_cursor_pick;
+
+  /* Clone Stamp: layer/channel targets and their ImBuf locks for this stroke. Owned here; freed
+   * when the handle is freed, so a cancelled stroke releases them too. */
+  ed::sculpt_paint::clone::CloneStrokeRuntime *clone_runtime;
 
   /* In ProjPaintState, only here for convenience */
   Scene *scene;
@@ -5994,6 +6000,15 @@ void paint_proj_stroke(const bContext *C,
     ProjPaintState *ps = ps_handle->ps_views[i];
     paint_proj_stroke_ps(C, ps_handle_p, prev_pos, pos, eraser, pressure, distance, size, ps);
   }
+
+  /* PBR Clone (full-footprint stamp): no-op unless a PBR clone source is set.
+   * Legacy single-image clone above still runs; PBR fan-out adds multi-layer writes. */
+  if (ps_handle->brush != nullptr &&
+      ps_handle->brush->image_brush_type == IMAGE_PAINT_BRUSH_TYPE_CLONE)
+  {
+    ed::sculpt_paint::clone::clone_pbr_proj_dab(
+        C, ps_handle->clone_runtime, pos, pressure, eraser);
+  }
 }
 
 /* initialize project paint settings from context */
@@ -6131,6 +6146,7 @@ void *paint_proj_new_stroke(bContext *C,
   ps_handle->scene = scene;
   ps_handle->paint = BKE_paint_get_active_from_context(C);
   ps_handle->brush = BKE_paint_brush(&settings->imapaint.paint);
+  ps_handle->clone_runtime = nullptr;
 
   if (BKE_brush_color_jitter_get_settings(&settings->imapaint.paint, ps_handle->brush)) {
     ps_handle->initial_hsv_jitter = seed_hsv_jitter();
@@ -6251,6 +6267,7 @@ void paint_proj_stroke_done(void *ps_handle_p)
   ProjStrokeHandle *ps_handle = static_cast<ProjStrokeHandle *>(ps_handle_p);
 
   if (ps_handle->is_clone_cursor_pick) {
+    ed::sculpt_paint::clone::clone_stroke_runtime_free(ps_handle->clone_runtime);
     MEM_delete(ps_handle);
     return;
   }
@@ -6270,6 +6287,7 @@ void paint_proj_stroke_done(void *ps_handle_p)
     MEM_delete(ps);
   }
 
+  ed::sculpt_paint::clone::clone_stroke_runtime_free(ps_handle->clone_runtime);
   MEM_delete(ps_handle);
 }
 /* use project paint to re-apply an image */

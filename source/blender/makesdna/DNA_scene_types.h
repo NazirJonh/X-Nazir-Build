@@ -1345,7 +1345,9 @@ struct Paint {
   float tile_offset[3] = {1.0f, 1.0f, 1.0f};
   /** PBR channels shown and painted by this paint mode. */
   int visible_material_channels = PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT;
-  char _pad[4] = {};
+  /** #eCloneMode: how the Clone Stamp source follows the brush. */
+  int8_t clone_mode = CLONE_MODE_ABSOLUTE;
+  char _pad_clone[3] = {};
   struct UnifiedPaintSettings unified_paint_settings;
   struct MeshAutomaskingSettings *mesh_automasking_settings = nullptr;
 
@@ -1385,6 +1387,13 @@ enum eImagePaint_Flag : short {
   IMAGEPAINT_PROJECT_LAYER_STENCIL_INV = 1 << 9,
 };
 ENUM_OPERATORS(eImagePaint_Flag)
+
+/** #ImagePaintSettings.clone_source_flag */
+enum eImagePaint_CloneSourceFlag : char {
+  IMAGE_PAINT_CLONE_SOURCE_SET = (1 << 0),
+  IMAGE_PAINT_CLONE_SOURCE_ANCHOR_SET = (1 << 1),
+};
+ENUM_OPERATORS(eImagePaint_CloneSourceFlag)
 
 /** #ImagePaintSettings::missing_data */
 enum eImagePaint_MissingData : short {
@@ -1464,6 +1473,22 @@ struct ImagePaintSettings {
   float clone_offset[2] = {};
   /** Transparency for drawing of clone image in Image editor. */
   float clone_alpha = 0.5f;
+  /**
+   * Clone Stamp: canvas UV the 2D stamp reads from.
+   * Meaningful only with #IMAGE_PAINT_CLONE_SOURCE_SET.
+   */
+  float clone_source_uv[2] = {0.0f, 0.0f};
+  /**
+   * Relative mode anchor: the canvas UV of the first dab painted after the source was set.
+   * Meaningful only with #IMAGE_PAINT_CLONE_SOURCE_ANCHOR_SET.
+   */
+  float clone_source_anchor_uv[2] = {0.0f, 0.0f};
+  /** #eImagePaint_CloneSourceFlag */
+  char clone_source_flag = 0;
+  /* Pad so this block totals 24 bytes. Members below shift, which DNA versioning handles by name,
+   * but the shift has to stay a multiple of 8 so the embedded #ColorBand and the struct's own
+   * size keep their alignment. */
+  char _pad_clone_source[7] = {};
   char _pad2[4] = {};
 
   /* Formerly `use_selection_mask`. Whether selection masking is active is derived from the image

@@ -18,6 +18,7 @@ from bl_ui.properties_paint_common import (
     UnifiedPaintPanel,
     BrushSelectPanel,
     ClonePanel,
+    PBRClonePanel,
     TextureMaskPanel,
     ColorPalettePanel,
     StrokePanel,
@@ -475,6 +476,13 @@ class VIEW3D_PT_tools_brush_clone(Panel, View3DPaintPanel, ClonePanel):
     bl_context = ".paint_common"
     bl_parent_id = "VIEW3D_PT_tools_brush_settings"
     bl_label = "Clone from Paint Slot"
+    bl_options = {'DEFAULT_CLOSED'}
+
+
+class VIEW3D_PT_tools_pbr_clone(Panel, View3DPaintPanel, PBRClonePanel):
+    bl_context = ".paint_common"
+    bl_parent_id = "VIEW3D_PT_tools_brush_settings"
+    bl_label = "Clone Stamp"
     bl_options = {'DEFAULT_CLOSED'}
 
 

@@ -50,6 +50,8 @@
 
 #include "../paint_curve_intern.hh"
 
+#include "../paint_clone.hh"
+#include "../paint_clone_2d.hh"
 #include "../paint_image_curve_patch.hh"
 #include "../paint_image_curve_patch_anchor.hh"
 #include "../paint_image_stroke_hook.hh"
@@ -755,6 +757,21 @@ static wmOperatorStatus paint_invoke(bContext *C, wmOperator *op, const wmEvent 
   if (const char *blocked = curve_patch_active_session_message(*C)) {
     BKE_report(op->reports, RPT_WARNING, blocked);
     return OPERATOR_CANCELLED;
+  }
+
+  /* Shift+LMB with the Clone brush sets the PBR clone source instead of starting a stroke
+   * (same invoke-time redirect as the sculpt-path guard in #sculpt_brush_stroke_invoke).
+   * In the Image Editor only the Clone Stamp tool picks a source: the legacy Clone tool shares
+   * the brush and keeps its stroke (and Shift+Click must not silently switch it to stamping). */
+  const Paint *paint = BKE_paint_get_active_from_context(C);
+  const Brush *brush = (paint != nullptr) ? BKE_paint_brush_for_read(paint) : nullptr;
+  if (brush != nullptr && brush->image_brush_type == IMAGE_PAINT_BRUSH_TYPE_CLONE &&
+      (event->modifier & KM_SHIFT) != 0 &&
+      (CTX_wm_region_view3d(C) != nullptr || ed::sculpt_paint::clone::clone_2d_tool_active(C)))
+  {
+    WM_operator_name_call(
+        C, "PAINT_OT_clone_source_set", wm::OpCallContext::InvokeDefault, nullptr, event);
+    return OPERATOR_FINISHED;
   }
 
   ImagePaintStroke *stroke = MEM_new<ImagePaintStroke>(__func__, C, op, event->type);

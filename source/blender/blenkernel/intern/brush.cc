@@ -2442,7 +2442,8 @@ static bool is_paint_tool(const Brush &brush)
   return ELEM(brush.sculpt_brush_type,
               SCULPT_BRUSH_TYPE_PAINT,
               SCULPT_BRUSH_TYPE_SMEAR,
-              SCULPT_BRUSH_TYPE_BLUR);
+              SCULPT_BRUSH_TYPE_BLUR,
+              SCULPT_BRUSH_TYPE_CLONE);
 }
 /**
  * A helper method for classifying a certain subset of brush types.

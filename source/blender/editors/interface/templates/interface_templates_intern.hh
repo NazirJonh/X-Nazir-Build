@@ -378,6 +378,14 @@ std::string id_browser_shelf_idname(short idcode);
  */
 void id_browser_set_membership(wmWindowManager &wm, grid_settings::CatalogMode mode);
 /**
+ * Single-active-catalog selection for the ID-browser catalog tree: a one-element SET in
+ * the catalog memory (the only mode #id_browser_foreach_asset narrows by).
+ */
+void id_browser_catalog_state_set_single(const AssetLibraryReference &library_ref,
+                                         asset_system::CatalogID catalog_id);
+/** Remove catalog narrowing (mode ALL; for #ASSET_LIBRARY_ALL, for every real library). */
+void id_browser_catalog_state_set_all(const AssetLibraryReference &library_ref);
+/**
  * Iterate the ID browser's Recent or Favorites list (idcode-filtered), in list order (most
  * recent/favorited first). \a mode must be #CatalogMode::Recent or #CatalogMode::Favorites.
  * Iteration stops early when \a fn returns false.

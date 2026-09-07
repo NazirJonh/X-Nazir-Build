@@ -325,11 +325,23 @@ struct wmWindowManager {
   short id_browser_popup_width_units = 0;
   short id_browser_popup_height_units = 0;
   /**
+   * Width of the catalog tree column in the ID-browser popover (#UI_PT_id_browser), in
+   * #UI_UNIT_X units, set by the vertical grip between the catalog tree and the grid.
+   * 0 = use the built-in default. Stored next to #id_browser_popup_width_units (per-`.blend`,
+   * like the other ID-browser popover state).
+   */
+  short id_browser_popup_catalog_width_units = 0;
+  /**
    * Where the ID-browser popover takes its items from. Stored next to #id_browser_view_mode (and
    * for the same reason): the popover is not bound to a specific editor's space. #eIDBrowserSource.
    */
   char id_browser_source = 0;
-  char _pad2[1] = {};
+  /** Show the catalog tree beside the grid in the ID-browser popover (asset source only). */
+  char id_browser_show_catalog_tree = 0;
+  /* The ID-browser block above grew by 8 bytes compared to its pre-catalog-tree layout (the new
+   * short and this block's extra char, minus the single pad byte the char replaced); this padding
+   * makes up the difference, so every field after the block keeps its original, aligned offsets. */
+  char _pad2[6] = {};
 
   /**
    * Brush-texture image grid state (#ImageGridOwner), one instance per `.blend` rather than one

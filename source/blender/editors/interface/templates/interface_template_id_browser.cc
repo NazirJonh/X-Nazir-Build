@@ -17,6 +17,8 @@
 
 #include <fmt/format.h>
 
+#include "AS_asset_catalog.hh"
+#include "AS_asset_catalog_tree.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 
@@ -62,6 +64,7 @@
 
 #include "ED_asset.hh"
 #include "ED_asset_import.hh"
+#include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_menu_utils.hh"
 #include "ED_image_grid.hh"
@@ -74,6 +77,7 @@
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
+#include "UI_tree_view.hh"
 #include "BLI_vector.hh"
 
 #include "interface_grid_view_settings_utils.hh"
@@ -108,7 +112,7 @@ static constexpr float ID_BROWSER_POPOVER_UNITS_X = 15.0f;
  * as many equal columns as fit at this minimum, so a widened popover lays items out in horizontal
  * columns instead of one tall single column.
  */
-static constexpr float ID_BROWSER_LIST_MIN_COL_UNITS_X = 14.0f;
+static constexpr float ID_BROWSER_LIST_MIN_COL_UNITS_X = 28.0f / 3.0f;
 /**
  * Unscaled preview size (in pixels) forwarded to grid tiles so #draw_preview_item_stateless scales
  * the item-name font down. Matches the asset-shelf popover, which uses
@@ -116,6 +120,14 @@ static constexpr float ID_BROWSER_LIST_MIN_COL_UNITS_X = 14.0f;
  * the asset name a smaller font. Only affects the label text; the tile size is set separately.
  */
 static constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_PX = 48;
+
+/** Catalog tree column in the ID-browser popover (asset source only): default/min/max width
+ * in #UI_UNIT_X and the width of the vertical grip between the tree and the grid. Same
+ * bounds as the asset shelf popover's catalog column (its #CATALOG_COL_WIDTH_*_UNITS). */
+static constexpr int ID_BROWSER_CATALOG_COL_DEFAULT_UNITS_X = 10;
+static constexpr int ID_BROWSER_CATALOG_COL_MIN_UNITS_X = 6;
+static constexpr int ID_BROWSER_CATALOG_COL_MAX_UNITS_X = 30;
+static constexpr float ID_BROWSER_CATALOG_GRIP_UNITS_X = 0.4f;
 
 /* -------------------------------------------------------------------- */
 /** \name Popover registration
@@ -1416,6 +1428,426 @@ static void id_browser_asset_block_listen(const wmRegionListenerParams *params)
   }
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Catalog tree (asset source)
+ * \{ */
+
+/* #AssetLibrary::name() is empty for built-ins (Current File / Essentials / Online Essentials);
+ * fall back to the same UI labels the library selector shows. Mirrors
+ * #grid_catalog_library_section_name (interface_template_grid_selectors.cc) -- duplicated rather
+ * than shared because that function is local to a file this one does not otherwise depend on. The
+ * All-Libraries section titles must match, so the section recognition and expansion state stay in
+ * sync with the checkbox selector. */
+static std::string id_browser_catalog_library_section_name(
+    const asset_system::AssetLibrary &library)
+{
+  const std::string &name = library.name();
+  if (!name.empty()) {
+    return name;
+  }
+  if (!library.library_reference().has_value()) {
+    return IFACE_("Asset Library");
+  }
+  switch (library.library_reference()->type) {
+    case ASSET_LIBRARY_LOCAL:
+      return IFACE_("Current File");
+    case ASSET_LIBRARY_ESSENTIALS:
+      return IFACE_("Essentials");
+    case ASSET_LIBRARY_ONLINE_ESSENTIALS:
+      return IFACE_("Online Essentials");
+    default:
+      return IFACE_("Asset Library");
+  }
+}
+
+/**
+ * Catalog tree for the ID-browser popover's asset source, modeled on the asset shelf popover's
+ * #AssetCatalogTreeView: a single active entry (All / one catalog) instead of the checkbox
+ * multi-select of #GridCatalogSelectorTree. Recent/Favorites are intentionally kept in the header
+ * quick buttons, not duplicated in this tree. The selection is written to the same #UserDef catalog
+ * memory ("id_browser" domain) that #id_browser_foreach_asset already filters by, so the grid
+ * filtering code is untouched.
+ */
+class IDBrowserCatalogTreeView : public AbstractTreeView {
+  wmWindowManager &wm_;
+  /* #wmWindowManager::id_browser_grid_view_settings; may be null-data, in which case there is no
+   * #GridViewSettings to persist collapse state in and items just default to expanded. */
+  PointerRNA settings_;
+  /* The browsed library (#id_browser_library_ref_get). */
+  AssetLibraryReference lib_ref_;
+  const bool all_libraries_mode_;
+
+  /* Single-library mode: the browsed library's full catalog tree (not filtered by the grid's
+   * filters, so the tree does not jump around while filtering). Null while the library is still
+   * loading; #build_tree shows a loading row then. Held as the #catalog_tree() shared_ptr so it
+   * stays valid even when the service rebuilds the tree. */
+  std::shared_ptr<const asset_system::AssetCatalogTree> catalog_tree_;
+
+  /* All-Libraries mode: one section per real loaded library behind #ASSET_LIBRARY_ALL. */
+  struct Section {
+    AssetLibraryReference lib_ref;
+    std::string key;
+    std::string title;
+    std::shared_ptr<const asset_system::AssetCatalogTree> tree;
+  };
+  Vector<Section> sections_;
+
+  /* Library keys and section titles must match #GridCatalogSelectorTree::fill_library_sections
+   * exactly (same #BKE_preferences_asset_library_identifier_from_ref keys, same labels), so the
+   * expansion state (#grid_settings::is_library_section_expanded) is shared with the checkbox
+   * selector. */
+  void fill_library_sections()
+  {
+    for (asset_system::AssetLibrary *library :
+         ed::asset::all_mode_libraries(/*exclude_image_libraries=*/false,
+                                       /*only_image_libraries=*/false))
+    {
+      const std::optional<AssetLibraryReference> lib_ref = library->library_reference();
+      if (!lib_ref.has_value()) {
+        continue;
+      }
+      Section section;
+      section.lib_ref = *lib_ref;
+      section.key = BKE_preferences_asset_library_identifier_from_ref(&U, &*lib_ref);
+      section.title = id_browser_catalog_library_section_name(*library);
+      section.tree = library->catalog_service_ptr()->catalog_tree();
+      sections_.append(std::move(section));
+    }
+  }
+
+  /** Parent row for one real library's catalogs in All-Libraries mode. Purely a grouping row (not
+   * activatable), with its children always built -- the generic collapse chevron is what hides
+   * them, unlike #GridCatalogSelectorTree::LibrarySectionItem which gates building on its own
+   * explicit chevron. Expansion persists in the same place the checkbox selector stores it, so
+   * both trees share it. */
+  class SectionItem : public BasicTreeViewItem {
+    PointerRNA settings_;
+    std::string library_key_;
+
+   public:
+    SectionItem(PointerRNA settings, std::string library_key, StringRefNull title)
+        : BasicTreeViewItem(title), settings_(settings), library_key_(std::move(library_key))
+    {
+      /* No #GridViewSettings: nowhere to persist expansion, so just default to expanded. */
+      if (settings_.data == nullptr) {
+        uncollapse_by_default();
+      }
+      /* A section row groups its catalogs; only the catalog rows activate. */
+      this->disable_activatable();
+    }
+
+    std::optional<bool> should_be_collapsed() const override
+    {
+      if (settings_.data == nullptr) {
+        return std::nullopt;
+      }
+      return !grid_settings::is_library_section_expanded(settings_, library_key_);
+    }
+
+    bool set_collapsed(bool collapsed) override
+    {
+      const bool result = BasicTreeViewItem::set_collapsed(collapsed);
+      if (settings_.data != nullptr) {
+        grid_settings::library_section_set_expanded(settings_, library_key_, !collapsed);
+      }
+      return result;
+    }
+  };
+
+  /** One catalog row. Wraps the #asset_system::AssetCatalogTreeItem it represents (owned by the
+   * view's shared catalog tree, so the reference stays valid for the view's lifetime) and, in
+   * All-Libraries mode, the library the catalog belongs to: catalog memory writes are
+   * per-library, and #id_browser_foreach_asset reads the owning library's SET in that mode. */
+  class CatalogItem : public BasicTreeViewItem {
+    const asset_system::AssetCatalogTreeItem &catalog_item_;
+    PointerRNA settings_;
+    /* Key of the owning library; empty in single-library mode, matching what
+     * #GridCatalogSelectorTree passes there. */
+    std::string library_key_;
+    AssetLibraryReference owner_lib_ref_;
+
+   public:
+    CatalogItem(const asset_system::AssetCatalogTreeItem &catalog_item,
+                PointerRNA settings,
+                std::string library_key,
+                const AssetLibraryReference &owner_lib_ref)
+        : BasicTreeViewItem(catalog_item.get_name()),
+          catalog_item_(catalog_item),
+          settings_(settings),
+          library_key_(std::move(library_key)),
+          owner_lib_ref_(owner_lib_ref)
+    {
+      /* No #GridViewSettings: nowhere to persist expansion, so just default to expanded. */
+      if (settings_.data == nullptr) {
+        uncollapse_by_default();
+      }
+    }
+
+    std::optional<bool> should_be_collapsed() const override
+    {
+      if (settings_.data == nullptr) {
+        return std::nullopt;
+      }
+      /* #is_catalog_item_expanded needs a mutable #PointerRNA (it copies it internally). */
+      PointerRNA settings = settings_;
+      return !grid_settings::is_catalog_item_expanded(settings, expansion_key());
+    }
+
+    bool set_collapsed(bool collapsed) override
+    {
+      const bool result = BasicTreeViewItem::set_collapsed(collapsed);
+      if (settings_.data != nullptr) {
+        grid_settings::catalog_item_set_expanded(settings_, expansion_key(), !collapsed);
+      }
+      return result;
+    }
+
+    /* Same key format as #GridCatalogSelectorTree::Item::expansion_key, so both trees share the
+     * nested-catalog expansion state. */
+    std::string expansion_key() const
+    {
+      return expansion_key(library_key_, catalog_item_.catalog_path().str());
+    }
+
+    static std::string expansion_key(StringRef library_key, StringRef catalog_path)
+    {
+      std::string key(library_key);
+      key += '\x1f';
+      key += catalog_path;
+      return key;
+    }
+  };
+
+ public:
+  IDBrowserCatalogTreeView(const bContext & /*C*/, wmWindowManager &wm)
+      : wm_(wm),
+        settings_(id_browser_grid_settings_ptr(wm)),
+        lib_ref_(id_browser_library_ref_get(wm)),
+        all_libraries_mode_(lib_ref_.type == ASSET_LIBRARY_ALL)
+  {
+    if (all_libraries_mode_) {
+      fill_library_sections();
+    }
+    else if (const asset_system::AssetLibrary *library =
+                 ed::asset::list::library_get_once_available(lib_ref_))
+    {
+      catalog_tree_ = library->catalog_service_ptr()->catalog_tree();
+    }
+    /* Keep the popup open when clicking to activate a catalog. */
+    this->set_popup_keep_open();
+  }
+
+  /* Redraw the catalog tree when the catalog set itself changes. Deliberately not
+   * #ND_ASSET_LIST_READING / #ND_ASSET_LIST_PREVIEW: those fire continuously while a library is
+   * being scanned without changing which catalogs exist (see #grid_catalog_selector_region_listen
+   * in interface_template_grid_selectors.cc). Library loading is covered by the popover's block
+   * listener (#id_browser_asset_block_listen). */
+  bool listen(const wmNotifier &wmn) const override
+  {
+    return wmn.category == NC_ASSET && wmn.data == ND_ASSET_CATALOGS;
+  }
+
+  void build_tree() override
+  {
+    /* The browsed library is still loading: nothing to show yet. The popover rebuilds through its
+     * block listener once the read completes. */
+    if (!all_libraries_mode_ && !catalog_tree_) {
+      this->add_tree_item<BasicTreeViewItem>(IFACE_("Loading..."), ICON_INFO);
+      return;
+    }
+
+    BasicTreeViewItem &all_item = this->add_tree_item<BasicTreeViewItem>(IFACE_("All"));
+    all_item.set_on_activate_fn([this](bContext &C, BasicTreeViewItem & /*item*/) {
+      /* For #ASSET_LIBRARY_ALL this also clears every real library's saved set and the
+       * membership modes stored under the #ASSET_LIBRARY_ALL key, in one call. */
+      id_browser_catalog_state_set_all(lib_ref_);
+      WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
+    });
+    all_item.set_is_active_fn([this]() {
+      /* Membership modes are stored under the #ASSET_LIBRARY_ALL key, which the per-library mode
+       * checks below cannot see -- they win over the All state. */
+      if (settings_.data != nullptr &&
+          ELEM(grid_settings::catalog_mode_get(settings_),
+               grid_settings::CatalogMode::Recent,
+               grid_settings::CatalogMode::Favorites))
+      {
+        return false;
+      }
+      if (all_libraries_mode_) {
+        /* Active only when no section library narrows by a catalog anymore. */
+        for (const Section &section : sections_) {
+          if (BKE_asset_catalog_memory_get_mode(
+                  &U, section.lib_ref, grid_settings::id_browser_catalog_memory_domain) ==
+              ASSET_CATALOG_MEMORY_SET)
+          {
+            return false;
+          }
+        }
+        return true;
+      }
+      return BKE_asset_catalog_memory_get_mode(
+                 &U, lib_ref_, grid_settings::id_browser_catalog_memory_domain) !=
+             ASSET_CATALOG_MEMORY_SET;
+    });
+    all_item.uncollapse_by_default();
+
+    if (all_libraries_mode_) {
+      /* Children are always built (no gating on expansion), so the generic collapse chevron can
+       * hide them consistently. */
+      for (const Section &section : sections_) {
+        SectionItem &section_item = this->add_tree_item<SectionItem>(
+            settings_, section.key, section.title);
+        if (!section.tree) {
+          continue;
+        }
+        section.tree->foreach_root_item(
+            [&](const asset_system::AssetCatalogTreeItem &catalog_item) {
+              build_catalog_items_recursive(
+                  section_item, catalog_item, section.lib_ref, section.key);
+            });
+      }
+      return;
+    }
+
+    catalog_tree_->foreach_root_item(
+        [&](const asset_system::AssetCatalogTreeItem &catalog_item) {
+          build_catalog_items_recursive(all_item, catalog_item, lib_ref_, "");
+        });
+  }
+
+  CatalogItem &build_catalog_items_recursive(
+      TreeViewOrItem &parent_view_item,
+      const asset_system::AssetCatalogTreeItem &catalog_item,
+      const AssetLibraryReference &owner_lib_ref,
+      StringRef library_key)
+  {
+    CatalogItem &view_item = parent_view_item.add_tree_item<CatalogItem>(
+        catalog_item, settings_, library_key, owner_lib_ref);
+
+    const asset_system::CatalogID catalog_id = catalog_item.get_catalog_id();
+    view_item.set_on_activate_fn(
+        [this, catalog_id, owner_lib_ref](bContext &C, BasicTreeViewItem & /*item*/) {
+          if (all_libraries_mode_) {
+            /* Picking a catalog from another library's section switches the browsed library --
+             * the memory mechanism cannot express "only catalog C of library X" while browsing
+             * ALL, and #id_browser_foreach_asset only filters precisely in the single-library
+             * path. */
+            id_browser_library_ref_set(wm_, owner_lib_ref);
+            id_browser_catalog_state_set_single(owner_lib_ref, catalog_id);
+          }
+          else {
+            id_browser_catalog_state_set_single(lib_ref_, catalog_id);
+          }
+          WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
+        });
+    view_item.set_is_active_fn([this, catalog_id, owner_lib_ref]() {
+      /* Single active entry: membership (Recent/Favorites) wins over any catalog. The mode is
+       * stored under #ASSET_LIBRARY_ALL, so in All-Libraries mode #catalog_mode_get sees it;
+       * without this guard the stale per-library SET kept for restore (see
+       * #catalog_mode_set_membership) stays active alongside Recent/Favorites and trips the
+       * single-active assert in #AbstractView::change_state_delayed. */
+      if (settings_.data != nullptr &&
+          ELEM(grid_settings::catalog_mode_get(settings_),
+               grid_settings::CatalogMode::Recent,
+               grid_settings::CatalogMode::Favorites))
+      {
+        return false;
+      }
+      /* All-Libraries mode shows every library's section at once, but the view allows only one
+       * active item. Per-library SET memories are independent (see #id_browser_foreach_asset),
+       * so two sections can each hold a single-SET -- without this guard both catalogs would
+       * claim active. Require the owning library to be the sole narrowed section; otherwise no
+       * catalog highlights (All is also inactive then), which is safe. */
+      if (all_libraries_mode_) {
+        int sections_with_set = 0;
+        for (const Section &section : sections_) {
+          if (BKE_asset_catalog_memory_get_mode(
+                  &U, section.lib_ref, grid_settings::id_browser_catalog_memory_domain) ==
+              ASSET_CATALOG_MEMORY_SET)
+          {
+            sections_with_set++;
+            if (sections_with_set > 1) {
+              break;
+            }
+          }
+        }
+        if (sections_with_set != 1) {
+          return false;
+        }
+      }
+      /* Single active entry: the owning library's memory must be narrowed to exactly this one
+       * catalog UUID. */
+      if (BKE_asset_catalog_memory_get_mode(
+              &U, owner_lib_ref, grid_settings::id_browser_catalog_memory_domain) !=
+          ASSET_CATALOG_MEMORY_SET)
+      {
+        return false;
+      }
+      const Vector<bUUID> enabled = BKE_asset_catalog_memory_get_set(
+          &U, owner_lib_ref, grid_settings::id_browser_catalog_memory_domain);
+      return enabled.size() == 1 && enabled.first() == catalog_id;
+    });
+
+    /* Children are always built (no gating on expansion), matching #AssetCatalogTreeView: the
+     * generic collapse mechanism hides them. */
+    catalog_item.foreach_child([&](const asset_system::AssetCatalogTreeItem &child) {
+      build_catalog_items_recursive(view_item, child, owner_lib_ref, library_key);
+    });
+
+    return view_item;
+  }
+};
+
+/**
+ * Build the catalog tree column for the popover's asset source. Mirrors the asset shelf popover's
+ * #catalog_tree_draw and the grid selector panel: warms the asset lists, shows a loading row while
+ * the library reads, and bounds the tree to the exact pixel height of the grid viewport beside it.
+ */
+static void id_browser_catalog_tree_draw(const bContext &C,
+                                         Layout &layout,
+                                         wmWindowManager &wm,
+                                         const int fixed_height_px)
+{
+  AssetLibraryReference lib_ref = id_browser_library_ref_get(wm);
+  /* Asynchronous: the first draw may run before the library list exists. */
+  ed::asset::list::storage_fetch(&lib_ref, &C);
+
+  const bool all_libraries_mode = lib_ref.type == ASSET_LIBRARY_ALL;
+  if (all_libraries_mode) {
+    /* Warm every real library behind "All" -- #storage_fetch above only requested the merged
+     * pseudo-library itself. Without this, a library nobody separately selected yet stays
+     * unloaded for the lifetime of the popover: #IDBrowserCatalogTreeView's All-Libraries
+     * constructor (#ed::asset::all_mode_libraries) only reports already-loaded libraries, so its
+     * section would silently never appear. Cheap to call every redraw: the underlying fetch
+     * early-outs unless a list is new or stale. */
+    ed::asset::fetch_all_mode_libraries(C, /*exclude_image_libraries=*/false,
+                                        /*only_image_libraries=*/false);
+  }
+
+  Block *block = layout.block();
+  block_layout_set_current(block, &layout);
+  /* Distinct view idname per mode: the cross-frame state match
+   * (#AbstractTreeViewItem::matches_single) compares labels only, so the two tree shapes
+   * (per-library sections vs. a flat catalog tree) must never be matched against each other --
+   * same reason #grid_catalog_selector_panel_draw uses two idnames. */
+  AbstractTreeView *tree_view = block_add_view(
+      *block,
+      all_libraries_mode ? "id_browser_catalog_tree_all" : "id_browser_catalog_tree",
+      std::make_unique<IDBrowserCatalogTreeView>(C, wm));
+
+  /* Bound the catalog tree to the exact pixel height of the asset grid viewport so the popover
+   * keeps a stable height with no dead space below either column. Grip-less: the height is fixed
+   * externally (the popover's own resize grip is elsewhere). */
+  tree_view->set_fixed_height_px(fixed_height_px, /*allow_resize=*/false);
+  /* Match the asset grid beside it: a vertical drag scrolls, it does not reach the catalog rows.
+   * Safe here because catalog items are not draggable. */
+  tree_view->set_drag_scroll(true);
+
+  TreeViewBuilder::build_tree_view(C, *tree_view, layout);
+}
+
+/** \} */
+
 static void id_browser_popover_draw(const bContext *C, Panel *panel)
 {
   wmWindowManager *wm = CTX_wm_manager(C);
@@ -1425,6 +1857,10 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   /* The popover's own UI state (view mode, search) lives on the window manager, so it works in any
    * editor. */
   PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
+
+  /* Resolved here already because the catalog-tree width below needs it. It only reads
+   * #wmWindowManager::id_browser_source, so every later use stays valid. */
+  const bool asset_source = wm->id_browser_source == ID_BROWSER_SOURCE_ASSET_LIBRARY;
 
   /* Interactive popover size, remembered on the window manager (per-`.blend`). Materialize a stored
    * 0 ("use the default") so the corner resize grip drags from the size actually shown. */
@@ -1447,6 +1883,33 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     grid_cols = std::max(1, popover_units_x / 3);
     popover_units_x = grid_cols * 3;
   }
+
+  /* Keep the expanded popover's outer width while switching source. Blend Data has no catalog tree,
+   * but its controls and grid then use the width that the tree and asset grid previously occupied. */
+  const bool reserve_catalog_tree_width = wm->id_browser_show_catalog_tree;
+  const bool show_catalog_tree = asset_source && reserve_catalog_tree_width;
+  int catalog_units = wm->id_browser_popup_catalog_width_units > 0 ?
+                          int(wm->id_browser_popup_catalog_width_units) :
+                          ID_BROWSER_CATALOG_COL_DEFAULT_UNITS_X;
+  catalog_units = std::clamp(catalog_units,
+                             ID_BROWSER_CATALOG_COL_MIN_UNITS_X,
+                             ID_BROWSER_CATALOG_COL_MAX_UNITS_X);
+  if (reserve_catalog_tree_width) {
+    /* Keep the popover (tree + grip + grid) inside the window, then re-snap the grid width to
+     * whole tile columns (grid mode only, same snap as above). */
+    popover_units_x = std::min(popover_units_x, std::max(10, win_max_x - catalog_units - 1));
+    if (!view_list_mode) {
+      grid_cols = std::max(1, popover_units_x / 3);
+      popover_units_x = grid_cols * 3;
+    }
+  }
+  const float total_units_x = reserve_catalog_tree_width ?
+      (float(catalog_units) + ID_BROWSER_CATALOG_GRIP_UNITS_X + float(popover_units_x)) :
+      float(popover_units_x);
+  /* When the tree is unavailable (Blend Data), use all reserved width for the single content
+   * column. With the asset tree visible, this remains the grid column width. */
+  const float content_units_x = show_catalog_tree ? float(popover_units_x) : total_units_x;
+  const int content_grid_cols = view_list_mode ? 1 : std::max(1, int(content_units_x) / 3);
 
   const IDBrowserImageFilter image_filter = id_browser_image_filter_from_context(*C);
   const bool paint_source = image_filter == IDBrowserImageFilter::PaintSource;
@@ -1483,7 +1946,6 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   if (is_image && panel->layout->block()->oldblock == nullptr) {
     id_browser_sync_assigned_image_location(*C, target_ptr, *target_prop, *wm);
   }
-  const bool asset_source = wm->id_browser_source == ID_BROWSER_SOURCE_ASSET_LIBRARY;
   /* The paint filters need both an image target and a space to back their state, and they only
    * apply to the blend-data source (an asset that is not imported yet has no local #Image to
    * test). In paint_source mode, row 2 is shown regardless of space data. */
@@ -1491,7 +1953,9 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
                                   (space_ptr.data != nullptr || paint_source);
 
   Layout &layout = *panel->layout;
-  layout.ui_units_x_set(float(popover_units_x));
+  /* Full content width: the grid column width, plus the catalog tree column and the grip when the
+   * tree is shown. #popover_units_x itself keeps meaning the grid column width. */
+  layout.ui_units_x_set(total_units_x);
 
   if (asset_source || show_paint_filters) {
     /* Asset library async load / catalog changes, and GridViewSettings name-match updates
@@ -1519,19 +1983,26 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
 
   /* #Layout::separator uses 6px*UI_SCALE_FAC steps. */
   const float half_unit_gap_factor = (0.5f * UI_UNIT_Y) / (6.0f * UI_SCALE_FAC);
-  /* Height of the bottom resize-grip row (grip button is 0.7 #UI_UNIT_Y); an empty spacer of this
-   * height stands in when the grip is elsewhere or not placed yet. */
-  const float grip_row_gap_factor = (0.7f * UI_UNIT_Y) / (6.0f * UI_SCALE_FAC);
 
   /* Row 1: source toggle on the left, view-mode toggle pushed to the right of the same row.
    * #separator_spacer is unsupported in popups, so a Right-aligned, fixed-size group is used
    * instead: the resolver's "ignore min flag" override (see #LayoutRow::resolve_impl) treats a
    * Right/Center-aligned fixed-size child of an Expand row as free space to consume, which is what
-   * pushes it to the row's right edge. */
+   * pushes it to the row's right edge. With the catalog tree open, the source toggle is contained
+   * in a catalog-column-width area. Its unused width provides the required offset, while the quick
+   * source shortcuts center in the remaining area before the view-mode toggle. */
   Layout &filter_row = header.row(false);
   filter_row.alignment_set(LayoutAlign::Expand);
 
-  Layout &source_toggle = filter_row.row(true);
+  Layout *source_parent = &filter_row;
+  if (show_catalog_tree) {
+    Layout &source_area = filter_row.row(false);
+    source_area.ui_units_x_set(float(catalog_units));
+    source_area.fixed_size_set(true);
+    source_parent = &source_area;
+  }
+
+  Layout &source_toggle = source_parent->row(true);
   source_toggle.fixed_size_set(true);
   source_toggle.prop_enum(&wm_ptr, "id_browser_source", "BLEND_DATA", "", ICON_NONE);
   source_toggle.prop_enum(&wm_ptr, "id_browser_source", "ASSET_LIBRARY", "", ICON_NONE);
@@ -1559,7 +2030,16 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
                                      catalog_mode == grid_settings::CatalogMode::All &&
                                      lib_ref.type == ASSET_LIBRARY_LOCAL;
 
-    Layout &quick_row = filter_row.row(true);
+    Layout *quick_parent = &filter_row;
+    if (show_catalog_tree) {
+      /* This centered child is the only flexible item between the fixed left area and the fixed
+       * view-mode group. Thus it fills precisely that range and centers the quick shortcuts in it. */
+      Layout &quick_area = filter_row.row(false);
+      quick_area.alignment_set(LayoutAlign::Center);
+      quick_parent = &quick_area;
+    }
+
+    Layout &quick_row = quick_parent->row(true);
     quick_row.alignment_set(LayoutAlign::Center);
     quick_row.fixed_size_set(true);
     auto add_quick = [&](const char *op_idname, const char *label, const int icon,
@@ -1578,7 +2058,7 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   }
 
   Layout &view_mode_row = filter_row.row(true);
-  view_mode_row.alignment_set(LayoutAlign::Right);
+  view_mode_row.alignment_set(show_catalog_tree ? LayoutAlign::Left : LayoutAlign::Right);
   view_mode_row.fixed_size_set(true);
   view_mode_row.prop_enum(&wm_ptr, "id_browser_view_mode", "GRID", "", ICON_NONE);
   view_mode_row.prop_enum(&wm_ptr, "id_browser_view_mode", "LIST", "", ICON_NONE);
@@ -1590,9 +2070,40 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     id_browser_build_resize_grip_button(view_mode_row, layout, *wm, true, ICON_GRIP_V);
   }
 
-  /* Same gap as between the source-options row and the search row below, so the header reads as
-   * evenly spaced groups instead of one packed block. */
-  header.separator(half_unit_gap_factor);
+  /* With the catalog tree shown, the first row stays full width while all following asset controls
+   * live in the grid column. The tree starts immediately under this common row and reaches the
+   * bottom toggle. */
+  Layout *asset_controls = &header;
+  Layout *tree_body = nullptr;
+  Layout *catalogs_col = nullptr;
+  Layout *catalog_grip_col = nullptr;
+  Layout *grid_col = nullptr;
+  /* The persistent scroll-up triangle is centered 0.75 UI units above the grid's first row. Leave
+   * a full UI unit below Search in every layout so that triangle has its own space. */
+  const float grid_top_gap_units = 1.0f;
+  if (show_catalog_tree) {
+    /* Keep the tree close to the common row while retaining a visible separation. */
+    layout.separator(half_unit_gap_factor / 6.0f);
+    tree_body = &layout.row(false);
+
+    catalogs_col = &tree_body->column(false);
+    catalogs_col->ui_units_x_set(float(catalog_units));
+    catalogs_col->fixed_size_set(true);
+
+    catalog_grip_col = &tree_body->column(false);
+    catalog_grip_col->fixed_size_set(true);
+
+    grid_col = &tree_body->column(true);
+    grid_col->ui_units_x_set(float(popover_units_x));
+    grid_col->fixed_size_set(true);
+    asset_controls = &grid_col->column(true);
+    asset_controls->fixed_size_set(true);
+  }
+  else {
+    /* Same gap as between the source-options row and the search row below, so the header reads as
+     * evenly spaced groups instead of one packed block. */
+    header.separator(half_unit_gap_factor);
+  }
 
   /* Row 2, source-dependent: the asset source needs a library picker, catalog filter and the
    * name-match filter; the blend-data source keeps the paint filter-mode buttons, the slot-type
@@ -1602,7 +2113,7 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     PointerRNA settings_ptr = RNA_pointer_get(&wm_ptr, "id_browser_grid_view_settings");
 
     if (asset_source) {
-      Layout &source_options_row = header.row(false);
+      Layout &source_options_row = asset_controls->row(false);
       source_options_row.alignment_set(LayoutAlign::Expand);
 
       Layout &source_options = source_options_row.row(true);
@@ -1611,10 +2122,11 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
         source_options.context_string_set("id_browser_prop", *prop_name);
       }
       source_options.context_ptr_set("grid_view_settings", &settings_ptr);
-      /* Only the ID Browser's vertical library menu shows Recent/Favorites (see
-       * #grid_library_selector_menu_draw); other #template_grid_library_selector callers leave
-       * this context key unset and stay unaffected. */
-      source_options.context_int_set("grid_library_selector_show_recent_favorites", 1);
+       /* ID Browser: keep Recent/Favorites out of the library menu. They would switch the browser
+        * to #ASSET_LIBRARY_ALL membership (see #id_browser_set_membership); the header quick
+        * buttons already cover that. Other
+       * #template_grid_library_selector callers leave this key unset and stay unaffected. */
+      source_options.context_int_set("grid_library_selector_show_recent_favorites", 0);
 
       /* Thin WM RNA property: side-effecting set + image-library itemf. */
       GridLibrarySelectorParams selector_params;
@@ -1667,6 +2179,11 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
                                      const_cast<bContext *>(C),
                                      &settings_ptr,
                                      /*embed_in_parent_row=*/true);
+      /* The catalog tree shows and drives the same catalog state; while it is open the checkbox
+       * multi-select popover is fully disabled (#enabled_set, i.e. #BUT_DISABLED), so its popover
+       * cannot open at all and the two can't fight over the memory. Re-enable by closing the tree
+       * (toggle in the bottom row). */
+      catalog_btn.enabled_set(!show_catalog_tree);
 
       if (name_match_settings_ptr.data != nullptr) {
         Layout &name_match_row = source_options_row.row(true);
@@ -1824,17 +2341,17 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     }
   }
 
-  header.separator(half_unit_gap_factor);
+  asset_controls->separator(half_unit_gap_factor);
 
   {
-    Layout &search_row = header.row(true);
+    Layout &search_row = asset_controls->row(true);
     Block *search_block = search_row.block();
     Button *search_but = uiDefBut(search_block,
                                   ButtonType::Text,
                                   "",
                                   0,
                                   0,
-                                  UI_UNIT_X * (popover_units_x - 2),
+                                   UI_UNIT_X * (content_units_x - 2.0f),
                                   UI_UNIT_Y,
                                   wm->runtime->id_browser_search,
                                   0.0f,
@@ -1848,16 +2365,18 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     button_placeholder_set(search_but, IFACE_("Search"));
   }
 
-  /* Empty gap (~0.5 #UI_UNIT_Y) between the search field and the grid; the persistent scroll-up
-   * arrow (#AbstractGridView::draw_overlays) is drawn here, clear of the top tiles. */
-  layout.separator(half_unit_gap_factor);
+  /* Space between Search and the grid, reserving room for the persistent scroll-up arrow
+   * (#AbstractGridView::draw_overlays). */
+  asset_controls->separator(grid_top_gap_units * half_unit_gap_factor / 0.5f);
 
   /* Header/gap height consumed before the grid, kept in sync with the layout built above: the
    * source + quick-shortcuts + view-mode row, the 0.5-unit separator, the source-options row
    * (paint filters, including any inline slot-type selector, or library/catalog), the 0.5-unit
-   * separator, the search row, the 0.5-unit gaps above and below the grid, and the always-present
-   * 0.7-unit bottom resize-grip row (a spacer of the same height when the grip is in row 1). */
-  const float non_grid_units = 1.0f + 0.5f + 1.0f + 0.5f + 1.0f + 0.5f + 0.5f + 0.7f;
+   * separator, the search row, the 1-unit gap above the grid, the 0.5-unit gap below it, and the
+   * always-present 0.7-unit bottom resize-grip row (a spacer of the same height when the grip is in
+   * row 1). */
+  const float non_grid_units =
+      1.0f + 0.5f + 1.0f + 0.5f + 1.0f + grid_top_gap_units + 0.5f + 0.7f;
   const bool list_mode = RNA_enum_get(&wm_ptr, "id_browser_view_mode") ==
                          IMAGE_BROWSER_VIEW_LIST;
   const float tile_units = list_mode ? float(UI_UNIT_X) / float(UI_UNIT_Y) : 3.0f;
@@ -1871,25 +2390,131 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   const float grid_units = popup_grid_fixed_viewport_units(
       C, layout.block(), non_grid_units, tile_units, default_grid_units);
 
-  Layout &grid_area = layout.column(true);
-  grid_area.ui_units_x_set(float(popover_units_x));
-  grid_area.ui_units_y_set(grid_units);
-  grid_area.fixed_size_set(true);
+  if (show_catalog_tree) {
+    BLI_assert(tree_body && catalogs_col && catalog_grip_col && grid_col);
+    /* The left tree spans the right column's controls (options + 0.5 gap + Search + its grid gap)
+     * and grid, so it starts below the common-row gap and reaches the bottom toggle. */
+    const int tree_viewport_px = int((grid_units + 2.5f + grid_top_gap_units) * float(UI_UNIT_Y));
+    id_browser_catalog_tree_draw(*C, *catalogs_col, *wm, tree_viewport_px);
 
-  build_id_grid(*C, grid_area, grid_units, view_list_mode ? 0 : grid_cols);
+    /* Vertical grip between the columns: X-only drag (#button_grip_2d_set with a null second
+     * pointer), hard min/max bounds applied by the grip handler. */
+    {
+      Block *block = layout.block();
+      block_layout_set_current(block, catalog_grip_col);
+      Button *catalog_grip = uiDefIconButV(block,
+                                           ButtonType::Grip,
+                                           ICON_GRIP_V,
+                                           0,
+                                           0,
+                                           short(ID_BROWSER_CATALOG_GRIP_UNITS_X * UI_UNIT_X),
+                                           short(tree_viewport_px),
+                                           &wm->id_browser_popup_catalog_width_units,
+                                           float(ID_BROWSER_CATALOG_COL_MIN_UNITS_X),
+                                           float(ID_BROWSER_CATALOG_COL_MAX_UNITS_X),
+                                           std::nullopt);
+      button_grip_2d_set(catalog_grip, nullptr);
+      button_flag_disable(catalog_grip, BUT_UNDO);
+      button_func_set(catalog_grip, [](bContext & /*C*/) { WM_file_tag_modified(); });
+      block_layout_set_current(block, &layout);
+    }
+
+    Layout &grid_area = grid_col->column(true);
+    grid_area.ui_units_x_set(float(popover_units_x));
+    grid_area.ui_units_y_set(grid_units);
+    grid_area.fixed_size_set(true);
+    build_id_grid(*C, grid_area, grid_units, view_list_mode ? 0 : grid_cols);
+  }
+  else {
+    Layout &grid_area = layout.column(true);
+    grid_area.ui_units_x_set(content_units_x);
+    grid_area.ui_units_y_set(grid_units);
+    grid_area.fixed_size_set(true);
+
+    build_id_grid(*C, grid_area, grid_units, view_list_mode ? 0 : content_grid_cols);
+  }
 
   /* Matching gap under the grid for the persistent scroll-down arrow. */
   layout.separator(half_unit_gap_factor);
 
-  /* The grip lives here only for a popover known to have opened downward (its growth edge). For
-   * an upward popover it is in row 1, and until the direction is resolved it is nowhere -- in
-   * both of those cases this row is still laid out, as an empty spacer of the same height, so the
-   * popover is exactly as tall throughout and the grip never has to move. */
-  if (grip_dir_known && !flip_up) {
-    id_browser_add_resize_grip(layout, *wm, false);
+  /* Bottom row is always present (both sources) so the popover keeps a stable height.
+   * In Blend Data source the tree does not exist, so the toggle stays disabled but still reserves
+   * its slot. The toggle is 0.7 #UI_UNIT_Y tall -- the same height as the grip button -- so this
+   * row never changes height whether the grip is present, absent (first frame), or in row 1
+   * (upward popover), keeping #non_grid_units accurate in all cases.
+   *
+   * Positioning uses the selector width: when the tree is open the toggle keeps its small size
+   * and its right edge sits exactly at the end of the catalog column (a fixed-width child pushes it
+   * there), so the icon stays glued to the divider while the vertical grip is dragged. When closed
+   * it sits at the left edge. No box: the button must not stretch. */
+  Layout &bottom_row = layout.row(true);
+  bottom_row.alignment_set(LayoutAlign::Expand);
+
+  /* Same triangle icons, swapped: closed points left (toward where the tree will appear),
+   * open points right (toward the grid, click to collapse back). */
+  const int tree_icon = wm->id_browser_show_catalog_tree ? ICON_TRIA_RIGHT : ICON_TRIA_LEFT;
+
+  auto build_tree_toggle = [&](Layout &parent) {
+    Block *parent_block = parent.block();
+    block_layout_set_current(parent_block, &parent);
+    Button *tree_toggle = uiDefIconButR(parent_block,
+                                        ButtonType::IconToggle,
+                                        tree_icon,
+                                        0,
+                                        0,
+                                        short(UI_UNIT_X),
+                                        short(UI_UNIT_Y * 0.7f),
+                                        &wm_ptr,
+                                        "id_browser_show_catalog_tree",
+                                        -1,
+                                        0.0f,
+                                        0.0f,
+                                        TIP_("Show the catalog tree beside the asset grid"));
+    button_flag_disable(tree_toggle, BUT_UNDO);
+    block_layout_set_current(parent_block, &layout);
+  };
+
+  if (show_catalog_tree) {
+    /* Offset the small toggle so its right edge is exactly on the catalog/grid divider. The
+     * zero-size separator only keeps the fixed-width layout non-empty; unlike a regular separator
+     * it contributes no height to the bottom row. */
+    Layout &offset_row = bottom_row.row(true);
+    offset_row.fixed_size_set(true);
+    offset_row.ui_units_x_set(float(catalog_units) - 1.0f);
+    offset_row.separator(0.0f);
+
+    Layout &btn_row = bottom_row.row(true);
+    btn_row.fixed_size_set(true);
+    btn_row.alignment_set(LayoutAlign::Left);
+    btn_row.enabled_set(asset_source);
+    build_tree_toggle(btn_row);
+
+    Layout &right_row = bottom_row.row(false);
+    right_row.alignment_set(LayoutAlign::Right);
+    right_row.fixed_size_set(true);
+    /* The grip lives here only for a popover known to have opened downward (its growth edge).
+     * For an upward popover it is in row 1 (see above); until the direction is resolved it is
+     * nowhere -- the toggle already reserves the row height, so no extra spacer is needed. */
+    if (grip_dir_known && !flip_up) {
+      id_browser_build_resize_grip_button(right_row, layout, *wm, false, ICON_GRIP);
+    }
   }
   else {
-    layout.separator(grip_row_gap_factor);
+    Layout &toggle_row = bottom_row.row(true);
+    toggle_row.fixed_size_set(true);
+    toggle_row.alignment_set(LayoutAlign::Left);
+    toggle_row.enabled_set(asset_source);
+    build_tree_toggle(toggle_row);
+
+    Layout &right_row = bottom_row.row(false);
+    right_row.alignment_set(LayoutAlign::Right);
+    right_row.fixed_size_set(true);
+    /* The grip lives here only for a popover known to have opened downward (its growth edge).
+     * For an upward popover it is in row 1 (see above); until the direction is resolved it is
+     * nowhere -- the toggle already reserves the row height, so no extra spacer is needed. */
+    if (grip_dir_known && !flip_up) {
+      id_browser_build_resize_grip_button(right_row, layout, *wm, false, ICON_GRIP);
+    }
   }
 }
 

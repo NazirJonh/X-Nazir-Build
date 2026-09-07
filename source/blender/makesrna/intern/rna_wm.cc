@@ -1605,6 +1605,14 @@ static void rna_WindowManager_id_browser_source_update(Main * /*bmain*/,
   ui::grid_view_session_reset_scroll("id_browser_grid");
 }
 
+static void rna_WindowManager_id_browser_show_catalog_tree_update(Main * /*bmain*/,
+                                                                  Scene * /*scene*/,
+                                                                  PointerRNA * /*ptr*/)
+{
+  /* Like the other ID-browser popover state, the flag is stored per-`.blend`. */
+  WM_file_tag_modified();
+}
+
 static int rna_WindowManager_id_browser_asset_library_get(PointerRNA *ptr)
 {
   wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
@@ -3910,6 +3918,13 @@ static void rna_def_windowmanager(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "ID Browser Source", "Where the ID browser takes its items from");
   RNA_def_property_update(
       prop, NC_ASSET | ND_ASSET_LIST, "rna_WindowManager_id_browser_source_update");
+
+  prop = RNA_def_property(srna, "id_browser_show_catalog_tree", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "id_browser_show_catalog_tree", 1);
+  RNA_def_property_ui_text(
+      prop, "Show Catalog Tree", "Show the catalog tree beside the grid in the ID Browser popover");
+  RNA_def_property_update(
+      prop, NC_ASSET | ND_ASSET_LIST, "rna_WindowManager_id_browser_show_catalog_tree_update");
 
   /* Session-only paint-layer UUID the ID-browser popover's "Slot" filter narrows to, overriding
    * the layer derived from the currently assigned image. Meant for paint add-ons (Ucupaint): set

@@ -213,6 +213,58 @@ void id_browser_foreach_membership_asset(const bContext &C,
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Single active catalog (catalog tree)
+ * \{ */
+
+/**
+ * The catalog tree's single-catalog selection: a one-element SET in the catalog memory.
+ * #id_browser_foreach_asset only narrows by catalogs in #ASSET_CATALOG_MEMORY_SET mode (a
+ * SINGLE-mode memory means "no narrowing" there), so a one-element SET is the only memory
+ * shape the grid's existing filtering applies as a visible filter. Does not switch the
+ * browsed library (the tree does that separately via #id_browser_library_ref_set when a
+ * catalog is picked from another library's section).
+ */
+void id_browser_catalog_state_set_single(const AssetLibraryReference &library_ref,
+                                         asset_system::CatalogID catalog_id)
+{
+  BKE_asset_catalog_memory_set_set(&U,
+                                   library_ref,
+                                   grid_settings::id_browser_catalog_memory_domain,
+                                   Span<bUUID>(&catalog_id, 1));
+  WM_file_tag_modified();
+}
+
+/**
+ * Remove catalog narrowing for the given library. For #ASSET_LIBRARY_ALL, also exits the
+ * Recent/Favorites membership modes (they are stored under the #ASSET_LIBRARY_ALL key,
+ * which the per-library clearing below does not touch -- same approach as
+ * #id_browser_show_current_file_exec) and clears the saved SET of every real library.
+ */
+void id_browser_catalog_state_set_all(const AssetLibraryReference &library_ref)
+{
+  const char *domain = grid_settings::id_browser_catalog_memory_domain;
+  if (library_ref.type == ASSET_LIBRARY_ALL) {
+    BKE_asset_catalog_memory_set_all(&U, asset_system::all_library_reference(), domain);
+    for (asset_system::AssetLibrary *library :
+         ed::asset::all_mode_libraries(/*exclude_image_libraries=*/false,
+                                       /*only_image_libraries=*/false))
+    {
+      const std::optional<AssetLibraryReference> per_lib_ref = library->library_reference();
+      if (!per_lib_ref) {
+        continue;
+      }
+      BKE_asset_catalog_memory_set_all(&U, *per_lib_ref, domain);
+    }
+  }
+  else {
+    BKE_asset_catalog_memory_set_all(&U, library_ref, domain);
+  }
+  WM_file_tag_modified();
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Asset iteration
  * \{ */
 

@@ -648,7 +648,8 @@ static void file_draw_string(int sx,
                              int height,
                              ui::FontStyleAlign align,
                              const uchar col[4],
-                             const FileLayout *layout)
+                             const FileLayout *layout,
+                             const eFileDisplayType display)
 {
   uiFontStyle fs;
   rcti rect;
@@ -661,7 +662,9 @@ static void file_draw_string(int sx,
   const uiStyle *style = ui::style_get();
   fs = style->widget;
 
-  if (layout && layout->is_asset_browser) {
+  /* In Horizontal/Vertical list there is no width constraint for the name, so keep normal text
+   * size. Only Thumbnails (grid) shrink the label for small preview sizes. */
+  if (layout && layout->is_asset_browser && display == FILE_IMGDISPLAY) {
     const float scale_factor = ui::preview_tile_text_scale(round_fl_to_int(layout->prv_h));
     if (scale_factor < 1.0f) {
       fs.points = std::max(int(fs.points * scale_factor), ui::PREVIEW_TILE_TEXT_MIN_POINTS);
@@ -691,7 +694,8 @@ static void file_draw_string_mulitline_clipped(const rcti *rect,
                                                const char *string,
                                                ui::FontStyleAlign align,
                                                const uchar col[4],
-                                               const FileLayout *layout)
+                                               const FileLayout *layout,
+                                               const eFileDisplayType display)
 {
   if (string[0] == '\0' || BLI_rcti_size_x(rect) < 1) {
     return;
@@ -700,7 +704,8 @@ static void file_draw_string_mulitline_clipped(const rcti *rect,
   const uiStyle *style = ui::style_get();
   uiFontStyle fs = style->widget;
 
-  if (layout && layout->is_asset_browser) {
+  /* See file_draw_string(): no text shrinking outside Thumbnails view. */
+  if (layout && layout->is_asset_browser && display == FILE_IMGDISPLAY) {
     const float scale_factor = ui::preview_tile_text_scale(round_fl_to_int(layout->prv_h));
     if (scale_factor < 1.0f) {
       fs.points = std::max(int(fs.points * scale_factor), ui::PREVIEW_TILE_TEXT_MIN_POINTS);
@@ -1343,7 +1348,8 @@ static void draw_columnheader_columns(const FileSelectParams *params,
                      layout->attribute_column_header_h - layout->tile_border_y,
                      ui::UI_STYLE_TEXT_LEFT,
                      text_col,
-                     nullptr);
+                     nullptr,
+                     FILE_VERTICALDISPLAY);
 
     /* Separator line */
     if (column_type != COLUMN_NAME) {
@@ -1463,7 +1469,8 @@ static void draw_details_columns(const FileSelectParams *params,
                        layout->tile_h,
                        ui::FontStyleAlign(column->text_align),
                        text_col,
-                       nullptr);
+                       nullptr,
+                       FILE_VERTICALDISPLAY);
     }
 
     sx += column->width;
@@ -1811,10 +1818,12 @@ void file_draw_list(const bContext *C, ARegion *region)
                          BLI_rcti_size_y(&text_rect),
                          align,
                          text_col,
-                         layout);
+                         layout,
+                         eFileDisplayType(params->display));
       }
       else {
-        file_draw_string_mulitline_clipped(&text_rect, file->name, align, text_col, layout);
+        file_draw_string_mulitline_clipped(
+            &text_rect, file->name, align, text_col, layout, eFileDisplayType(params->display));
       }
     }
 
@@ -1998,8 +2007,15 @@ static void file_draw_invalid_asset_library_hint(const bContext *C,
     file_draw_string_multiline(sx, sy, message, width, line_height, text_col, nullptr, &sy);
 
     sy -= line_height;
-    file_draw_string(
-        sx, sy, library_ui_path, width, line_height, ui::UI_STYLE_TEXT_LEFT, text_col, nullptr);
+    file_draw_string(sx,
+                     sy,
+                     library_ui_path,
+                     width,
+                     line_height,
+                     ui::UI_STYLE_TEXT_LEFT,
+                     text_col,
+                     nullptr,
+                     FILE_VERTICALDISPLAY);
   }
 
   /* Separate a bit further. */
@@ -2281,7 +2297,15 @@ static void file_draw_invalid_library_hint(const bContext * /*C*/,
     file_draw_string_multiline(sx, sy, message, width, line_height, text_col, nullptr, &sy);
 
     sy -= line_height;
-    file_draw_string(sx, sy, blendfile_path, width, line_height, ui::UI_STYLE_TEXT_LEFT, text_col, nullptr);
+    file_draw_string(sx,
+                     sy,
+                     blendfile_path,
+                     width,
+                     line_height,
+                     ui::UI_STYLE_TEXT_LEFT,
+                     text_col,
+                     nullptr,
+                     FILE_VERTICALDISPLAY);
   }
 
   /* Separate a bit further. */

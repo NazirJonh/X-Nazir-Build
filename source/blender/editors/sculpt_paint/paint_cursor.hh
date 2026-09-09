@@ -133,6 +133,13 @@ float brush_rotation_to_cursor_space(const ViewContext &vc,
                                      const float3 &cursor_y,
                                      float brush_rotation_screen);
 
+/**
+ * The #MTex placing the texture the brush applies, whose angle the rectangle clip follows: the
+ * Material Paint channel mapping when the brush paints from material sources, otherwise the
+ * brush's own texture.
+ */
+const MTex &paint_cursor_placement_mtex(const PaintCursorContext &pcontext);
+
 void grease_pencil_cursor_draw(PaintCursorContext &pcontext);
 
 void mesh_cursor_update_and_init(PaintCursorContext &pcontext);

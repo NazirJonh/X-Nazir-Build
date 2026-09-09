@@ -959,23 +959,28 @@ class FalloffPanel(BrushPanel):
             col = layout.column(align=True)
             row = col.row(align=True)
 
+        show_texture_clip_shape = (
+            mode in {'PAINT_2D', 'PAINT_TEXTURE'} or
+            (mode == 'SCULPT' and brush.sculpt_brush_type != 'POSE')
+        )
         show_falloff_shape = False
         if mode in {'SCULPT', 'PAINT_VERTEX', 'PAINT_WEIGHT'} and brush.sculpt_brush_type != 'POSE':
             show_falloff_shape = True
         if not show_falloff_shape and mode == 'SCULPT_CURVES' and context.space_data.type == 'PROPERTIES':
             show_falloff_shape = True
 
+        if show_texture_clip_shape:
+            col.separator()
+            row = col.row(align=True)
+            row.use_property_split = True
+            row.use_property_decorate = False
+            row.prop(brush, "texture_clip_shape", expand=True)
+
         if show_falloff_shape:
             col.separator()
             row = col.row(align=True)
             row.use_property_split = True
             row.use_property_decorate = False
-            if mode == 'SCULPT':
-                row.prop(brush, "texture_clip_shape", expand=True)
-                col.separator()
-                row = col.row(align=True)
-                row.use_property_split = True
-                row.use_property_decorate = False
             row.prop(brush, "falloff_shape", expand=True)
 
 

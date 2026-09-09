@@ -556,11 +556,37 @@ static void paint_2d_painter_copy_shared_source(BrushPainter *dst, const BrushPa
   }
 }
 
+/**
+ * Rotation of the rectangle clip in the dab, matching the texture sample in
+ * #BKE_brush_sample_tex_3d. Material channel sources are placed by the shared source mapping, not
+ * by #Brush.mtex, so the rectangle follows whichever texture actually lands on the canvas.
+ */
+static float paint_2d_curve_mask_rotation(const BrushPainter *painter)
+{
+  const Brush *brush = painter->brush;
+  const float placement_rotation = (painter->channel_sources != nullptr &&
+                                    painter->use_material_channel_color &&
+                                    brush->material_paint != nullptr) ?
+                                       brush->material_paint->shared_source_mapping.rot :
+                                       brush->mtex.rot;
+  return -placement_rotation - painter->paint->runtime->brush_rotation;
+}
+
 static const CurveMaskCache *paint_2d_matching_curve_mask(const ImagePaintState *shared_state,
                                                           const ImagePaintTile *tile,
-                                                          const int diameter)
+                                                          const int diameter,
+                                                          const float rotation)
 {
-  if (shared_state == nullptr || shared_state->tiles == nullptr) {
+  if (shared_state == nullptr || shared_state->tiles == nullptr ||
+      shared_state->painter == nullptr || shared_state->painter->brush == nullptr)
+  {
+    return nullptr;
+  }
+  /* A rectangle mask is rasterized with its painter's placement rotation, which differs when only
+   * one of the painters samples material channel sources. */
+  if (shared_state->painter->brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+      paint_2d_curve_mask_rotation(shared_state->painter) != rotation)
+  {
     return nullptr;
   }
   const size_t expected = size_t(diameter) * size_t(diameter) * sizeof(ushort);
@@ -1755,8 +1781,14 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
   Brush *brush = painter->brush;
   BrushPainterCache *cache = &tile->cache;
+  const float clip_rotation = paint_2d_curve_mask_rotation(painter);
+  /* A rotated rectangle reaches further than `size` along the dab axes, so the axis-aligned dab
+   * must cover its half-extent or the corners are cut off. */
+  const float extent = (brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) ?
+                           size * (std::abs(cosf(clip_rotation)) + std::abs(sinf(clip_rotation))) :
+                           size;
   /* Adding 4 pixels of padding for brush anti-aliasing. */
-  const int diameter = std::max(1, int(size * 2)) + 4;
+  const int diameter = std::max(1, int(ceilf(extent * 2.0f))) + 4;
 
   bool do_random = false;
   bool do_partial_update = false;
@@ -1782,8 +1814,8 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
                                   shared_state->painter != nullptr &&
                                   painter->channel_sources != nullptr &&
                                   painter->use_material_channel_color &&
-                                  paint_2d_matching_curve_mask(shared_state, tile, diameter) !=
-                                      nullptr;
+                                  paint_2d_matching_curve_mask(
+                                      shared_state, tile, diameter, clip_rotation) != nullptr;
   if (copy_shared_source) {
 #if PBR_PAINT_2D_STROKE_PROFILE
     const StrokePhaseTimer source_timer(&g_stroke_source_update_seconds,
@@ -1917,14 +1949,16 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   {
     const StrokePhaseTimer curve_timer(&g_stroke_curve_mask_seconds, &g_stroke_curve_mask_calls);
 #endif
-    const CurveMaskCache *shared_mask = paint_2d_matching_curve_mask(shared_state, tile, diameter);
+    const CurveMaskCache *shared_mask = paint_2d_matching_curve_mask(
+        shared_state, tile, diameter, clip_rotation);
     const bool shared_mask_has_selection = shared_state != nullptr &&
                                            BKE_image_paint_selection_mask_has_any(shared_state->image);
     if (shared_mask != nullptr && !has_selection_mask && !shared_mask_has_selection) {
       paint_curve_mask_cache_copy(&cache->curve_mask_cache, shared_mask);
     }
     else {
-      paint_curve_mask_cache_update(&cache->curve_mask_cache, brush, diameter, size, pos);
+      paint_curve_mask_cache_update(
+          &cache->curve_mask_cache, brush, diameter, size, pos, clip_rotation);
     }
 #if PBR_PAINT_2D_STROKE_PROFILE
   }
@@ -2819,7 +2853,10 @@ static bool paint_2d_area_plane_falloff(const Brush *brush,
 {
   float3 local = position;
   mul_m4_v3(object_to_brush.ptr(), local);
-  const float distance = math::length(local);
+  /* Area Plane uses the same brush-local footprint as the regular 2D dab path. */
+  const float distance = (brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) ?
+                             std::max(std::abs(local.x), std::abs(local.y)) :
+                             math::length(local);
   if (distance > 1.0f) {
     return false;
   }
@@ -2869,6 +2906,18 @@ static ed::sculpt_paint::AreaPlaneFrame paint_2d_area_channel_frame(
   rotation += canvas_rotation;
   return ed::sculpt_paint::area_plane_frame_from_triangle(
       tri, position, radius_object, rotation, mirrored);
+}
+
+/**
+ * Placement angle the Area Plane footprint turns with. Unlike #paint_2d_area_channel_frame it does
+ * not depend on the channel: a Constant source has no placement, but the rectangle must still
+ * follow the shared mapping that the cursor shows, and every channel must share one footprint.
+ */
+static float paint_2d_area_footprint_rotation(const BrushPainter *painter)
+{
+  const Brush *brush = painter->brush;
+  return (brush->material_paint != nullptr) ? brush->material_paint->shared_source_mapping.rot :
+                                              brush->mtex.rot;
 }
 
 static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
@@ -3074,6 +3123,12 @@ struct AreaPlaneDabGeom {
   bool valid = false;
   ed::sculpt_paint::AreaPlaneHit hit;
   float radius_object = 0.0f;
+  /**
+   * Object-space radius of the disc enclosing the whole footprint: larger than #radius_object for
+   * the rectangle clip, whose corners reach `sqrt(2)` in brush-local units.
+   */
+  float footprint_radius_object = 0.0f;
+  /** Brush-local frame the falloff and the rectangle bounds are measured in. */
   float4x4 object_to_brush = float4x4::identity();
   Vector<int> accepted;
   Vector<float4x4> unfold_mats;
@@ -3714,14 +3769,39 @@ static bool paint_2d_area_plane_prepare_from_hit(ImagePaintState *s,
     return false;
   }
 
-  r_geom.object_to_brush = ed::sculpt_paint::area_plane_local_mat(
-      r_geom.hit.position, r_geom.hit.normal, r_geom.radius_object, 0.0f);
   r_geom.dab_tri = mesh.triangle(r_geom.hit.tri_index);
+
+  const bool use_rect_clip = painter->brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
+  r_geom.footprint_radius_object = use_rect_clip ? r_geom.radius_object * float(M_SQRT2) :
+                                                   r_geom.radius_object;
+  if (use_rect_clip) {
+    /* The rectangle bounds are only rotation invariant for a disc, so measure them in the same
+     * UV-aligned, canvas-locked and mirror-aware frame the texture is sampled in, otherwise the
+     * stamp keeps the unrotated outline while the texture and the cursor turn. */
+    const float canvas_rotation = (s->v2d != nullptr) ? s->v2d->rotation : 0.0f;
+    r_geom.object_to_brush = ed::sculpt_paint::area_plane_object_to_local(
+        ed::sculpt_paint::area_plane_frame_from_triangle(
+            r_geom.dab_tri,
+            r_geom.hit.position,
+            r_geom.radius_object,
+            paint_2d_area_footprint_rotation(painter) + canvas_rotation,
+            flipped));
+  }
+  else {
+    r_geom.object_to_brush = ed::sculpt_paint::area_plane_local_mat(
+        r_geom.hit.position, r_geom.hit.normal, r_geom.radius_object, 0.0f);
+  }
 
 #if PBR_PAINT_2D_PROFILE
   const double t1 = BLI_time_now_seconds();
 #endif
-  r_geom.accepted = mesh.triangles_in_sphere(r_geom.object_to_brush);
+  /* The coverage query is a unit sphere, so give it the disc enclosing the rectangle corners. */
+  r_geom.accepted = mesh.triangles_in_sphere(
+      use_rect_clip ? ed::sculpt_paint::area_plane_local_mat(r_geom.hit.position,
+                                                             r_geom.hit.normal,
+                                                             r_geom.footprint_radius_object,
+                                                             0.0f) :
+                      r_geom.object_to_brush);
   if (r_geom.accepted.is_empty()) {
     return false;
   }
@@ -3855,7 +3935,7 @@ static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom
                                                geom.unfold_mats[tri_i],
                                                geom.hit.position,
                                                geom.dab_normal,
-                                               geom.radius_object,
+                                               geom.footprint_radius_object,
                                                capture_alpha,
                                                pool,
                                                local_cov.tris[tri_i]);

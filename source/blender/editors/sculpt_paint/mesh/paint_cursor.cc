@@ -909,26 +909,21 @@ static void cursor_space_overlays_draw(PaintCursorContext &pcontext)
   if (pcontext.mode == PaintMode::Sculpt &&
       brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE)
   {
-    /* Area overlays are drawn in the surface-aligned 3D path and need the screen-to-cursor
-     * rotation conversion. View/Tiled overlays are drawn in screen space; their texture rotation
-     * is already represented by the 2D overlay path and must not rotate this 3D outline. */
-    if (brush.mtex.brush_map_mode == MTEX_MAP_MODE_AREA) {
-      const bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
-      const float total_rotation = brush_rotation_to_cursor_space(
-          pcontext.vc,
-          pcontext.location,
-          pcontext.cursor_space_normal,
-          pcontext.cursor_space_x,
-          pcontext.cursor_space_y,
-          paint_runtime.brush_rotation + brush.mtex.rot);
-      GPU_matrix_push();
-      GPU_matrix_rotate_axis(RAD2DEGF(total_rotation), 'Z');
-      main_inactive_rectangle_cursor_draw(pcontext);
-      GPU_matrix_pop();
-    }
-    else {
-      main_inactive_rectangle_cursor_draw(pcontext);
-    }
+    /* The stamp is bounded in #StrokeCache.brush_local_mat, which is built from the placement
+     * texture angle for every mapping mode (see #update_brush_local_mat), so the outline turns with
+     * it whether the texture is Area, View or Tiled mapped. */
+    const bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
+    const float total_rotation = brush_rotation_to_cursor_space(
+        pcontext.vc,
+        pcontext.location,
+        pcontext.cursor_space_normal,
+        pcontext.cursor_space_x,
+        pcontext.cursor_space_y,
+        paint_runtime.brush_rotation + paint_cursor_placement_mtex(pcontext).rot);
+    GPU_matrix_push();
+    GPU_matrix_rotate_axis(RAD2DEGF(total_rotation), 'Z');
+    main_inactive_rectangle_cursor_draw(pcontext);
+    GPU_matrix_pop();
   }
   else {
     main_inactive_cursor_draw(pcontext);

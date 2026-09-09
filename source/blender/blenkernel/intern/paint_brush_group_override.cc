@@ -154,15 +154,18 @@ static bool brush_group_copy_falloff(const Brush &src, Brush &dst, const PaintMo
     changed = true;
   }
 
-  /* The falloff and texture clip shapes are only exposed for these modes, and never for the
-   * Pose brush, see #FalloffPanel.draw. */
+  /* The falloff shape is only exposed for these modes, and never for the Pose brush. */
   const bool show_shape = ELEM(mode, PaintMode::Sculpt, PaintMode::Vertex, PaintMode::Weight) &&
                           dst.sculpt_brush_type != SCULPT_BRUSH_TYPE_POSE;
   if (show_shape) {
     changed |= assign_changed(dst.falloff_shape, src.falloff_shape);
-    if (mode == PaintMode::Sculpt) {
-      changed |= assign_changed(dst.texture_clip_shape, src.texture_clip_shape);
-    }
+  }
+
+  /* Texture clip shape is exposed in Sculpt and Image Texture Paint (2D and 3D). */
+  if (ELEM(mode, PaintMode::Sculpt, PaintMode::Texture2D, PaintMode::Texture3D) &&
+      (mode != PaintMode::Sculpt || dst.sculpt_brush_type != SCULPT_BRUSH_TYPE_POSE))
+  {
+    changed |= assign_changed(dst.texture_clip_shape, src.texture_clip_shape);
   }
 
   return changed;

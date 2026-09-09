@@ -4875,12 +4875,24 @@ static bool project_image_refresh_tagged(ProjPaintState *ps)
   return redraw;
 }
 
+/** Rotation of the rectangle clip, matching the texture sample in #BKE_brush_sample_tex_3d. */
+static float project_paint_rect_clip_rotation(const ProjPaintState *ps)
+{
+  return -ps->brush->mtex.rot - ps->paint->runtime->brush_rotation;
+}
+
 /* run this per painting onto each mouse location */
 static bool project_bucket_iter_init(ProjPaintState *ps, const float mval_f[2])
 {
   if (ps->source == PROJ_SRC_VIEW) {
     float min_brush[2], max_brush[2];
-    const float radius = ps->brush_size;
+    float radius = ps->brush_size;
+    if (ps->brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) {
+      /* The half-extent of the rotated square along the screen axes, so the corners are not cut
+       * off by the bucket bounds. */
+      const float rotation = project_paint_rect_clip_rotation(ps);
+      radius *= fabsf(cosf(rotation)) + fabsf(sinf(rotation));
+    }
 
     /* so we don't have a bucket bounds that is way too small to paint into */
 #if 0
@@ -5350,6 +5362,11 @@ static void do_projectpaint_thread(TaskPool *__restrict /*pool*/, void *ph_v)
   const float brush_radius = ps->brush_size;
   /* avoid a square root with every dist comparison */
   const float brush_radius_sq = brush_radius * brush_radius;
+  /* The rectangle is tested in the brush-local frame, so the footprint follows the texture angle. */
+  const bool use_rect_clip = brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
+  const float rect_rotation = project_paint_rect_clip_rotation(ps);
+  const float rect_cos = cosf(rect_rotation);
+  const float rect_sin = sinf(rect_rotation);
 
   const bool lock_alpha = ELEM(brush->blend, IMB_BLEND_ERASE_ALPHA, IMB_BLEND_ADD_ALPHA) ?
                               false :
@@ -5543,11 +5560,23 @@ static void do_projectpaint_thread(TaskPool *__restrict /*pool*/, void *ph_v)
 
         projPixel = static_cast<ProjPixel *>(node->link);
 
-        dist_sq = len_squared_v2v2(projPixel->projCoSS, pos);
+        bool inside;
+        if (use_rect_clip) {
+          const float dx = projPixel->projCoSS[0] - pos[0];
+          const float dy = projPixel->projCoSS[1] - pos[1];
+          dist = max_ff(fabsf(dx * rect_cos - dy * rect_sin), fabsf(dx * rect_sin + dy * rect_cos));
+          inside = dist <= brush_radius;
+        }
+        else {
+          dist_sq = len_squared_v2v2(projPixel->projCoSS, pos);
+          /* Faster alternative to `dist < radius` without a #sqrtf. */
+          inside = dist_sq <= brush_radius_sq;
+          if (inside) {
+            dist = sqrtf(dist_sq);
+          }
+        }
 
-        /* Faster alternative to `dist < radius` without a #sqrtf. */
-        if (dist_sq <= brush_radius_sq) {
-          dist = sqrtf(dist_sq);
+        if (inside) {
 
           falloff = BKE_brush_curve_strength_clamped(ps->brush, dist, brush_radius);
 

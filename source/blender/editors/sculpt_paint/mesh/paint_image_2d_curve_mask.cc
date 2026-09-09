@@ -57,7 +57,8 @@ static void update_curve_mask(CurveMaskCache *curve_mask_cache,
                               const Brush *brush,
                               const int diameter,
                               const float radius,
-                              const float cursor_position[2])
+                              const float cursor_position[2],
+                              const float texture_rotation)
 {
   BLI_assert(curve_mask_cache->curve_mask != nullptr);
   int offset = int(floorf(diameter / 2.0f));
@@ -66,6 +67,8 @@ static void update_curve_mask(CurveMaskCache *curve_mask_cache,
   const int aa_samples = aa_samples_per_texel_axis(brush, radius);
   const float aa_offset = 1.0f / (2.0f * float(aa_samples));
   const float aa_step = 1.0f / float(aa_samples);
+  const float cos_rotation = cosf(texture_rotation);
+  const float sin_rotation = sinf(texture_rotation);
 
   float bpos[2];
   bpos[0] = cursor_position[0] - floorf(cursor_position[0]) + offset;
@@ -99,7 +102,15 @@ static void update_curve_mask(CurveMaskCache *curve_mask_cache,
         for (int i = 0; i < aa_samples; i++) {
           pixel_xy[1] = float(y) + aa_offset;
           for (int j = 0; j < aa_samples; j++) {
-            const float len = len_v2v2(pixel_xy, bpos);
+            const float dx = pixel_xy[0] - bpos[0];
+            const float dy = pixel_xy[1] - bpos[1];
+            const float clip_dx = dx * cos_rotation - dy * sin_rotation;
+            const float clip_dy = dx * sin_rotation + dy * cos_rotation;
+            /* Match the brush footprint used by texture sampling. Rectangle clipping must not
+             * fade the corners using the circular distance metric. */
+            const float len = (brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) ?
+                                  max_ff(fabsf(clip_dx), fabsf(clip_dy)) :
+                                  sqrtf(dx * dx + dy * dy);
             const int sample_index = min_ii((len / clamped_radius) * CurveSamplesBaseLen,
                                             CurveSamplesLen - 1);
             const float sample_weight = curve_mask_cache->sampled_curve[sample_index];
@@ -182,7 +193,8 @@ void paint_curve_mask_cache_update(CurveMaskCache *curve_mask_cache,
                                    const Brush *brush,
                                    const int diameter,
                                    const float radius,
-                                   const float cursor_position[2])
+                                   const float cursor_position[2],
+                                   const float texture_rotation)
 {
   if (!ed::sculpt_paint::is_sampled_curve_valid(curve_mask_cache, brush)) {
     ed::sculpt_paint::update_sampled_curve(curve_mask_cache, brush);
@@ -191,7 +203,8 @@ void paint_curve_mask_cache_update(CurveMaskCache *curve_mask_cache,
     ed::sculpt_paint::curve_mask_free(curve_mask_cache);
     ed::sculpt_paint::curve_mask_allocate(curve_mask_cache, diameter);
   }
-  ed::sculpt_paint::update_curve_mask(curve_mask_cache, brush, diameter, radius, cursor_position);
+  ed::sculpt_paint::update_curve_mask(
+      curve_mask_cache, brush, diameter, radius, cursor_position, texture_rotation);
 }
 
 void paint_curve_mask_cache_copy(CurveMaskCache *dst, const CurveMaskCache *src)

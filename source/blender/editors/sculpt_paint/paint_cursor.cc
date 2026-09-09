@@ -166,7 +166,11 @@ void ED_paint_cursor_free_textures()
 namespace ed::sculpt_paint {
 
 /* Forward declaration: defined below, after the shared overlay helpers it relies on. */
-static bool paint_draw_tex_overlay_3d(PaintCursorContext &pcontext, bool primary);
+static bool paint_draw_tex_overlay_3d(
+    PaintCursorContext &pcontext,
+    bool primary,
+    const MTex *mtex_override,
+    const ed::material_bake::MaterialSourcePreview *material_source);
 
 /* Diagnostic tracing of the Source Mode: Material overlay gates. Off unless
  * #PBR_PAINT_CURSOR_DEBUG is enabled in `mesh/paint_debug.hh`. */
@@ -349,6 +353,17 @@ static void paint_sample_material_source(const ed::material_bake::MaterialSource
   r_value = IMB_colormanagement_get_luminance(rgba);
 }
 
+/**
+ * Whether the overlay clips \a mtex to the brush rectangle. Tiled and Stencil coordinates are not
+ * brush-relative, so the rectangle bounds do not apply there (same as #BKE_brush_sample_tex_3d).
+ * The clipped square is baked unrotated and turned as a whole by the overlay transform.
+ */
+static bool paint_tex_overlay_rect_clip(const Brush &brush, const MTex &mtex)
+{
+  return brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+         !ELEM(mtex.brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL);
+}
+
 static void load_tex_task_cb_ex(void *__restrict userdata,
                                 const int j,
                                 const TaskParallelTLS *__restrict tls)
@@ -399,27 +414,17 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
       y = (y - 0.5f) * 2.0f;
     }
 
-    len = sqrtf(x * x + y * y);
+    /* Use the clip shape for the falloff as well as for the bounds check, otherwise the rectangle
+     * accepts its corners but the circular distance still fades them out. */
+    len = paint_tex_overlay_rect_clip(*br, *mtex) ? std::max(std::fabs(x), std::fabs(y)) :
+                                                     sqrtf(x * x + y * y);
 
-    bool inside_bounds;
-    if (br->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
-        !ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL))
-    {
-      /* Tiled is excluded because its coordinates are absolute screen space rather than
-       * brush-relative, so the rectangle bounds don't apply (same as in #BKE_brush_sample_tex_3d).
-       */
-      inside_bounds = std::max(std::fabs(x), std::fabs(y)) <= 1.0f;
-    }
-    else if (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL)) {
-      inside_bounds = true;
-    }
-    else {
-      inside_bounds = len <= 1.0f;
-    }
+    const bool inside_bounds = ELEM(mtex->brush_map_mode,
+                                    MTEX_MAP_MODE_TILED,
+                                    MTEX_MAP_MODE_STENCIL) ||
+                               len <= 1.0f;
 
     if (inside_bounds) {
-      /* It is probably worth optimizing for those cases where the texture is not rotated by
-       * skipping the calls to atan2, sqrtf, sin, and cos. */
       /* A Material source has no #Tex but is still placed by the #MTex, rotation included. */
       if ((mtex->tex || data->material_source != nullptr) &&
           (rotation > 0.001f || rotation < -0.001f))
@@ -538,7 +543,10 @@ static int load_tex(Paint *paint,
   const int curve_preset = br->curve_distance_falloff_preset;
   MTex alpha_mtex_storage = {};
   const MTex *alpha_mtex = nullptr;
-  if (col && paint_overlay_alpha_mask_mtex(paint, br, vc, alpha_mtex_storage)) {
+  /* The Alpha channel only masks material strokes, so it must not dim the brush's own texture. */
+  if (col && mtex_override != nullptr &&
+      paint_overlay_alpha_mask_mtex(paint, br, vc, alpha_mtex_storage))
+  {
     alpha_mtex = &alpha_mtex_storage;
   }
   refresh = !target->overlay_texture || (invalid != 0) ||
@@ -558,10 +566,10 @@ static int load_tex(Paint *paint,
 
   if (refresh) {
     ImagePool *pool = nullptr;
-    /* Stencil and Area modes apply rotation later via GPU matrix (in 3D cursor space).
-     * For View and Tiled modes, pre-rotate the sample coordinates here. */
-    const float rotation = (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL ||
-                            mtex->brush_map_mode == MTEX_MAP_MODE_AREA) ?
+    /* Stencil, Area and a rectangle clip apply the rotation later via the GPU matrix, so the clip
+     * turns together with the texture. Otherwise pre-rotate the sample coordinates here. */
+    const float rotation = (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_STENCIL, MTEX_MAP_MODE_AREA) ||
+                            paint_tex_overlay_rect_clip(*br, *mtex)) ?
                                0.0f :
                                -mtex->rot;
 
@@ -816,11 +824,12 @@ static int load_tex_cursor(Paint *paint, Brush *br, float zoom)
  * twice for the same slot.
  */
 static bool paint_tex_overlay_should_draw(const Brush *brush,
-                                         const MTex *mtex,
-                                         const PaintMode mode,
-                                         bool primary,
-                                         bool allow_area,
-                                         bool ignore_overlay_toggle = false)
+                                          const MTex *mtex,
+                                          const PaintMode mode,
+                                          bool primary,
+                                          bool allow_area,
+                                          bool ignore_overlay_toggle = false,
+                                          bool has_material_source = false)
 {
   /* Non-draw image tools (clone, smear, soften...) don't use the primary texture. */
   if (mode == PaintMode::Texture3D && primary &&
@@ -828,7 +837,7 @@ static bool paint_tex_overlay_should_draw(const Brush *brush,
   {
     return false;
   }
-  if (!mtex->tex) {
+  if (!mtex->tex && !has_material_source) {
     return false;
   }
   if (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL) {
@@ -844,6 +853,52 @@ static bool paint_tex_overlay_should_draw(const Brush *brush,
     return !allow_area;
   }
   return allow_area && mtex->brush_map_mode == MTEX_MAP_MODE_AREA;
+}
+
+/** Whether the stroke places its texture with the Material Paint shared source mapping. */
+static bool paint_cursor_is_material_paint(const PaintCursorContext &pcontext)
+{
+  const Brush &brush = *pcontext.brush;
+  if (brush.material_paint == nullptr || pcontext.scene == nullptr ||
+      pcontext.scene->toolsettings == nullptr)
+  {
+    return false;
+  }
+  const PaintModeSettings &paint_mode_settings = pcontext.scene->toolsettings->paint_mode;
+  if (pcontext.mode == PaintMode::Texture2D) {
+    /* The Image Editor paints channel sources on the Material canvas alone
+     * (#paint_2d_new_stroke). */
+    return paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL;
+  }
+  return pcontext.mode == PaintMode::Sculpt &&
+         brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+         ELEM(paint_mode_settings.canvas_source,
+              PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
+              PAINT_CANVAS_SOURCE_MATERIAL);
+}
+
+const MTex &paint_cursor_placement_mtex(const PaintCursorContext &pcontext)
+{
+  if (pcontext.material_preview_mtex) {
+    return *pcontext.material_preview_mtex;
+  }
+  /* The preview can be hidden (e.g. idle View mapping in Sculpt) while the stroke still places
+   * the texture with the shared mapping. */
+  if (paint_cursor_is_material_paint(pcontext)) {
+    return pcontext.brush->material_paint->shared_source_mapping;
+  }
+  return pcontext.brush->mtex;
+}
+
+/** Whether a surface-aligned (Area) texture overlay has to be drawn by the 3D cursor path. */
+static bool paint_cursor_has_area_tex_overlay(const PaintCursorContext &pcontext)
+{
+  if (pcontext.material_preview_mtex) {
+    return pcontext.material_preview_mtex->brush_map_mode == MTEX_MAP_MODE_AREA;
+  }
+  const Brush *brush = pcontext.brush;
+  return paint_tex_overlay_should_draw(brush, &brush->mtex, pcontext.mode, true, true) ||
+         paint_tex_overlay_should_draw(brush, &brush->mask_mtex, pcontext.mode, false, true);
 }
 
 /**
@@ -946,8 +1001,11 @@ static bool paint_draw_tex_overlay(Paint *paint,
 
       /* Brush rotation. */
       GPU_matrix_translate_2fv(center);
-      GPU_matrix_rotate_2d(
-          RAD2DEGF(primary ? paint_runtime->brush_rotation : paint_runtime->brush_rotation_sec));
+      float rotation = primary ? paint_runtime->brush_rotation : paint_runtime->brush_rotation_sec;
+      if (paint_tex_overlay_rect_clip(*brush, *mtex)) {
+        rotation += mtex->rot;
+      }
+      GPU_matrix_rotate_2d(RAD2DEGF(rotation));
       GPU_matrix_translate_2f(-center[0], -center[1]);
 
       /* Scale based on tablet pressure. */
@@ -1048,7 +1106,8 @@ static bool paint_draw_tex_overlay(Paint *paint,
 
 /* Draw an overlay that shows what effect the brush's texture will
  * have on brush strength. */
-static bool paint_draw_cursor_overlay(Paint *paint, Brush *brush, int x, int y, float zoom)
+static bool paint_draw_cursor_overlay(
+    Paint *paint, Brush *brush, const MTex &placement_mtex, int x, int y, float zoom)
 {
   rctf quad;
   /* Check for overlay mode. */
@@ -1083,12 +1142,21 @@ static bool paint_draw_cursor_overlay(Paint *paint, Brush *brush, int x, int y, 
       quad.ymax = y + radius;
     }
 
-    /* Scale based on tablet pressure. */
-    if (paint_runtime->stroke_active && BKE_brush_use_size_pressure(brush)) {
+    /* Scale based on tablet pressure. A rectangular falloff also follows the texture placement
+     * angle, so the shape stays aligned with the rotated texture overlay. The falloff buffer stays
+     * axis-aligned (#load_tex_cursor_task_cb); the rotation is applied to the quad. */
+    const bool use_pressure = paint_runtime->stroke_active && BKE_brush_use_size_pressure(brush);
+    const bool rotate_rect = brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
+    if (use_pressure || rotate_rect) {
       do_pop = true;
       GPU_matrix_push();
       GPU_matrix_translate_2fv(center);
-      GPU_matrix_scale_1f(paint_runtime->size_pressure_value);
+      if (use_pressure) {
+        GPU_matrix_scale_1f(paint_runtime->size_pressure_value);
+      }
+      if (rotate_rect) {
+        GPU_matrix_rotate_2d(RAD2DEGF(paint_runtime->brush_rotation + placement_mtex.rot));
+      }
       GPU_matrix_translate_2f(-center[0], -center[1]);
     }
 
@@ -1140,6 +1208,7 @@ static bool paint_draw_alpha_overlay(Paint *paint,
                                      int y,
                                      float zoom,
                                      PaintMode mode,
+                                     const MTex &placement_mtex,
                                      const MTex *material_preview_mtex = nullptr,
                                      const ed::material_bake::MaterialSourcePreview *material_source = nullptr)
 {
@@ -1173,7 +1242,7 @@ static bool paint_draw_alpha_overlay(Paint *paint,
           paint, brush, vc, x, y, zoom, mode, false, false);
     }
     if (!(flags & PAINT_OVERLAY_OVERRIDE_CURSOR)) {
-      alpha_overlay_active = paint_draw_cursor_overlay(paint, brush, x, y, zoom);
+      alpha_overlay_active = paint_draw_cursor_overlay(paint, brush, placement_mtex, x, y, zoom);
     }
   }
   else {
@@ -1182,7 +1251,7 @@ static bool paint_draw_alpha_overlay(Paint *paint,
           paint, brush, vc, x, y, zoom, mode, false, true);
     }
     if (!(flags & PAINT_OVERLAY_OVERRIDE_CURSOR)) {
-      alpha_overlay_active = paint_draw_cursor_overlay(paint, brush, x, y, zoom);
+      alpha_overlay_active = paint_draw_cursor_overlay(paint, brush, placement_mtex, x, y, zoom);
     }
   }
 
@@ -1275,13 +1344,14 @@ static bool paint_cursor_context_init(bContext *C,
                  int(try_material_preview));
   if (try_material_preview) {
     const PaintModeSettings &paint_mode_settings = CTX_data_tool_settings(C)->paint_mode;
-    /* Image Editor Paint always uses the 2D cursor; do not require the Sculpt canvas enum, so a
-     * displayed map (or IMAGE canvas with PBR sources) still previews. Sculpt keeps the canvas
-     * gate so Texture Paint 3D without a material canvas does not pick up a leftover preview. */
-    const bool canvas_ok = pcontext.mode == PaintMode::Texture2D ||
-                           ELEM(paint_mode_settings.canvas_source,
-                                PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
-                                PAINT_CANVAS_SOURCE_MATERIAL);
+    /* Preview the channel sources only on the canvases whose strokes actually paint them: the
+     * Image Editor paints them on the Material canvas alone (#paint_2d_new_stroke), otherwise the
+     * brush's own texture is what lands and must be the one previewed. */
+    const bool canvas_ok = (pcontext.mode == PaintMode::Texture2D) ?
+                               paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL :
+                               ELEM(paint_mode_settings.canvas_source,
+                                    PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
+                                    PAINT_CANVAS_SOURCE_MATERIAL);
     PBR_CURSOR_LOG(5,
                    uint64_t(canvas_ok) | uint64_t(paint_mode_settings.canvas_source) << 8 |
                        uint64_t(pcontext.mode) << 16 |
@@ -1314,13 +1384,11 @@ static bool paint_cursor_context_init(bContext *C,
                                                           visible_channels,
                                                           pcontext.material_preview_mtex_storage);
       }
-      /* The overlay drawer only accepts View/Tiled/Stencil, and neither editor has an Area Plane
-       * overlay: the overlay is a flat screen-space quad either way. 2D sampling already remaps
-       * AREA/3D to View for the same reason, so do it here for both, otherwise an Area-mapped
-       * channel -- what Material sources use by default -- never previews at all. In Sculpt, idle
-       * View is still skipped (it only doubles the circle) unless the size is being dragged
-       * (#draw_anchored). */
-      if (ELEM(pcontext.material_preview_mtex_storage.brush_map_mode,
+      /* Image Editor overlays are flat screen-space quads, so it cannot draw Area or 3D mapping.
+       * Sculpt's 3D cursor path handles Area mapping itself; preserving it here lets the PBR
+       * channel overlay follow the surface just like a regular Sculpt brush texture. */
+      if (pcontext.mode == PaintMode::Texture2D &&
+          ELEM(pcontext.material_preview_mtex_storage.brush_map_mode,
                MTEX_MAP_MODE_AREA,
                MTEX_MAP_MODE_3D))
       {
@@ -1484,25 +1552,55 @@ static void paint_update_mouse_cursor(PaintCursorContext &pcontext)
   }
 }
 
+static void paint_draw_2D_view_brush_cursor_outline(const PaintCursorContext &pcontext,
+                                                    const float radius,
+                                                    const float alpha)
+{
+  immUniformColor3fvAlpha(pcontext.outline_col, alpha);
+
+  if (pcontext.brush->texture_clip_shape != BRUSH_TEXTURE_CLIP_RECTANGLE) {
+    imm_draw_circle_wire_2d(pcontext.pos,
+                            pcontext.translation[0],
+                            pcontext.translation[1],
+                            radius,
+                            40);
+    return;
+  }
+
+  const bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
+  GPU_matrix_push();
+  GPU_matrix_translate_2fv(pcontext.translation);
+  GPU_matrix_rotate_2d(
+      RAD2DEGF(paint_runtime.brush_rotation + paint_cursor_placement_mtex(pcontext).rot));
+
+  immBegin(GPU_PRIM_LINE_LOOP, 4);
+  immVertex2f(pcontext.pos, -radius, -radius);
+  immVertex2f(pcontext.pos, radius, -radius);
+  immVertex2f(pcontext.pos, radius, radius);
+  immVertex2f(pcontext.pos, -radius, radius);
+  immEnd();
+
+  GPU_matrix_pop();
+}
+
 static void paint_draw_2D_view_brush_cursor_default(PaintCursorContext &pcontext)
 {
-  immUniformColor3fvAlpha(pcontext.outline_col, pcontext.outline_alpha);
   const bke::PaintRuntime *paint_runtime = pcontext.paint->runtime;
 
   /* Draw brush outline. */
   if (paint_runtime->stroke_active && BKE_brush_use_size_pressure(pcontext.brush)) {
-    imm_draw_circle_wire_2d(pcontext.pos,
-                            pcontext.translation[0],
-                            pcontext.translation[1],
-                            pcontext.final_radius * paint_runtime->size_pressure_value,
-                            40);
+    paint_draw_2D_view_brush_cursor_outline(
+        pcontext, pcontext.final_radius * paint_runtime->size_pressure_value, pcontext.outline_alpha);
     /* Outer at half alpha. */
-    immUniformColor3fvAlpha(pcontext.outline_col, pcontext.outline_alpha * 0.5f);
+    paint_draw_2D_view_brush_cursor_outline(
+        pcontext, pcontext.final_radius, pcontext.outline_alpha * 0.5f);
+  }
+  else {
+    paint_draw_2D_view_brush_cursor_outline(
+        pcontext, pcontext.final_radius, pcontext.outline_alpha);
   }
 
   GPU_line_width(1.0f);
-  imm_draw_circle_wire_2d(
-      pcontext.pos, pcontext.translation[0], pcontext.translation[1], pcontext.final_radius, 40);
 
   /* Clone Stamp source marker (Image Editor): the dashed outline at the spot the stamp reads
    * from, for a CLONE brush with a set 2D source. Same unbind/restore pattern as the Texture3D
@@ -1644,7 +1742,11 @@ static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
       paint_draw_legacy_3D_view_brush_cursor(pcontext);
       return;
     }
-    if (pcontext.alpha_overlay_drawn && brush.texture_clip_shape != BRUSH_TEXTURE_CLIP_RECTANGLE) {
+    /* A 2D overlay already shows the brush size, so the legacy circle is enough, unless a
+     * surface-aligned (Area) texture overlay still has to be drawn by the 3D path below. */
+    if (pcontext.alpha_overlay_drawn && brush.texture_clip_shape != BRUSH_TEXTURE_CLIP_RECTANGLE &&
+        !paint_cursor_has_area_tex_overlay(pcontext))
+    {
       paint_draw_legacy_3D_view_brush_cursor(pcontext);
       return;
     }
@@ -1696,6 +1798,7 @@ static void paint_cursor_check_and_draw_alpha_overlays(PaintCursorContext &pcont
                                                           pcontext.mval.y,
                                                           pcontext.zoomx,
                                                           pcontext.mode,
+                                                          paint_cursor_placement_mtex(pcontext),
                                                           pcontext.material_preview_mtex,
                                                           pcontext.material_preview_source.usable ?
                                                               &pcontext.material_preview_source :
@@ -1874,7 +1977,22 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
 void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext)
 {
   const Brush &brush = *pcontext.brush;
-  if (!(brush.overlay_flags & (BRUSH_OVERLAY_PRIMARY | BRUSH_OVERLAY_SECONDARY))) {
+  const MTex *material_preview_mtex = pcontext.material_preview_mtex;
+  const bool is_material_paint = paint_cursor_is_material_paint(pcontext);
+  const ed::material_bake::MaterialSourcePreview *material_source =
+      pcontext.material_preview_source.usable && pcontext.material_preview_source.ibuf != nullptr ?
+          &pcontext.material_preview_source :
+          nullptr;
+  const bool has_material_preview = material_preview_mtex != nullptr &&
+                                     (material_preview_mtex->tex != nullptr || material_source != nullptr);
+  /* Material Paint has no fallback to #Brush.mtex: without a texture in an enabled PBR channel,
+   * the cursor must not show an unrelated legacy overlay. */
+  if (is_material_paint && !has_material_preview) {
+    return;
+  }
+  if (!(brush.overlay_flags & (BRUSH_OVERLAY_PRIMARY | BRUSH_OVERLAY_SECONDARY)) &&
+      !has_material_preview)
+  {
     return;
   }
 
@@ -1886,11 +2004,18 @@ void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext)
     immUnbindProgram();
   }
 
-  if (brush.overlay_flags & BRUSH_OVERLAY_PRIMARY) {
-    paint_draw_tex_overlay_3d(pcontext, /*primary*/ true);
+  /* A Material Paint brush previews its selected PBR channel instead of #Brush.mtex, which is
+   * normally empty for such brushes and would reject the overlay before the channel texture (or a
+   * baked Material source) is sampled. Only a usable #material_source may be passed on. */
+  if (has_material_preview) {
+    paint_draw_tex_overlay_3d(
+        pcontext, /*primary*/ true, material_preview_mtex, material_source);
   }
-  if (brush.overlay_flags & BRUSH_OVERLAY_SECONDARY) {
-    paint_draw_tex_overlay_3d(pcontext, /*primary*/ false);
+  else if (brush.overlay_flags & BRUSH_OVERLAY_PRIMARY) {
+    paint_draw_tex_overlay_3d(pcontext, /*primary*/ true, nullptr, nullptr);
+  }
+  if (!has_material_preview && (brush.overlay_flags & BRUSH_OVERLAY_SECONDARY)) {
+    paint_draw_tex_overlay_3d(pcontext, /*primary*/ false, nullptr, nullptr);
   }
 
   if (restore_cursor_shader) {
@@ -1938,23 +2063,44 @@ float brush_rotation_to_cursor_space(const ViewContext &vc,
   return atan2f(math::dot(brush_x, cursor_y), math::dot(brush_x, cursor_x));
 }
 
-static bool paint_draw_tex_overlay_3d(PaintCursorContext &pcontext, bool primary)
+static bool paint_draw_tex_overlay_3d(
+    PaintCursorContext &pcontext,
+    bool primary,
+    const MTex *mtex_override,
+    const ed::material_bake::MaterialSourcePreview *material_source)
 {
   Brush *brush = pcontext.brush;
-  MTex *mtex = primary ? &brush->mtex : &brush->mask_mtex;
+  const MTex *mtex = mtex_override ? mtex_override :
+                                     (primary ? &brush->mtex : &brush->mask_mtex);
   const int overlay_alpha = primary ? brush->texture_overlay_alpha : brush->mask_overlay_alpha;
 
   /* The 3D path additionally handles the surface-aligned Area mode. */
-  if (!paint_tex_overlay_should_draw(brush, mtex, pcontext.mode, primary, /*allow_area*/ true)) {
+  if (!paint_tex_overlay_should_draw(brush,
+                                     mtex,
+                                     pcontext.mode,
+                                     primary,
+                                     /*allow_area*/ true,
+                                     /*ignore_overlay_toggle*/ mtex_override != nullptr,
+                                     /*has_material_source*/ material_source != nullptr))
+  {
     return false;
   }
   if (!WM_toolsystem_active_tool_is_brush(pcontext.vc.C)) {
     return false;
   }
 
-  /* The 3D overlay is drawn as a grayscale mask tinted with the user overlay color. */
-  const bool col = false;
-  if (!load_tex(pcontext.paint, brush, &pcontext.vc, pcontext.zoomx, col, primary)) {
+  /* Material Paint previews the actual PBR channel pattern. Ordinary Sculpt overlays remain
+   * grayscale masks tinted with the user's overlay color. */
+  const bool col = mtex_override != nullptr;
+  if (!load_tex(pcontext.paint,
+                brush,
+                &pcontext.vc,
+                pcontext.zoomx,
+                col,
+                primary,
+                mtex_override,
+                material_source))
+  {
     return false;
   }
 

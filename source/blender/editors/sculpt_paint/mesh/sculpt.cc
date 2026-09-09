@@ -4303,6 +4303,13 @@ static void update_brush_local_mat(const Depsgraph &depsgraph,
     const bool use_rectangle_clip = brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
     const float3 &plane_normal = use_rectangle_clip ? cache->texture_plane_normal_symm :
                                                       cache->sculpt_normal_symm;
+    /* The rectangle bounds and falloff are measured in this matrix, so they must turn with the
+     * texture that actually lands: Material Paint places its channel sources with the shared
+     * source mapping (see #material::calc_area_local_mat), not with the brush's own #MTex. */
+    const float rotation = (use_rectangle_clip && cache->material_source_sampler &&
+                            brush->material_paint != nullptr) ?
+                               brush->material_paint->shared_source_mapping.rot :
+                               mask_tex->rot;
 
     if (cache->non_uniform_scale_active) {
       /* The extra own-normal sample (#calc_area_normal_own) that curvature detection needs has a
@@ -4313,7 +4320,7 @@ static void update_brush_local_mat(const Depsgraph &depsgraph,
                                     mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA);
       calc_brush_area_texture_mat(depsgraph,
                                   *brush,
-                                  mask_tex->rot,
+                                  rotation,
                                   ob,
                                   plane_normal,
                                   node_mask,
@@ -4322,7 +4329,7 @@ static void update_brush_local_mat(const Depsgraph &depsgraph,
                                   cache->brush_local_mat_inv);
     }
     else {
-      calc_brush_local_mat(mask_tex->rot,
+      calc_brush_local_mat(rotation,
                            ob,
                            plane_normal,
                            cache->brush_local_mat.ptr(),

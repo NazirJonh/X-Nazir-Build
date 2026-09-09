@@ -1008,11 +1008,19 @@ struct CurveMaskCache {
 };
 
 void paint_curve_mask_cache_free_data(CurveMaskCache *curve_mask_cache);
+/**
+ * Rasterize the brush falloff into \a curve_mask_cache.
+ *
+ * \param texture_rotation: angle in radians the rectangle clip is rotated by, using the sign
+ * convention of #BKE_brush_sample_tex_3d (`-MTex.rot - PaintRuntime.brush_rotation`). Ignored for
+ * the sphere clip shape.
+ */
 void paint_curve_mask_cache_update(CurveMaskCache *curve_mask_cache,
                                    const Brush *brush,
                                    int diameter,
                                    float radius,
-                                   const float cursor_position[2]);
+                                   const float cursor_position[2],
+                                   float texture_rotation);
 /** Copy the rasterized mask pixels from \a src into \a dst, reallocating \a dst if needed. */
 void paint_curve_mask_cache_copy(CurveMaskCache *dst, const CurveMaskCache *src);
 

@@ -12,6 +12,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_enums.h"
 #include "DNA_uuid_types.h"
@@ -1923,6 +1924,57 @@ static void rna_WindowManager_id_browser_filter_layer_id_set(PointerRNA *ptr, co
     }
   }
   dst = BLI_uuid_nil();
+}
+
+/* The material the Stack Layers Add-Material browser last picked. Pointer view of
+ * #bke::WindowManagerRuntime::stack_layer_material_pick. Assigning a non-null material is what
+ * adds the layer: the update turns the pick into an undo-able #OUTLINER_OT_stack_layer_add call
+ * and clears the field again, so a value is never observed outside the click that set it. */
+static PointerRNA rna_WindowManager_stack_layer_material_pick_get(PointerRNA *ptr)
+{
+  const wmWindowManager *wm = static_cast<const wmWindowManager *>(ptr->data);
+  Material *material = (wm->runtime != nullptr) ? wm->runtime->stack_layer_material_pick : nullptr;
+  return (material != nullptr) ? RNA_id_pointer_create(&material->id) : PointerRNA_NULL;
+}
+
+static void rna_WindowManager_stack_layer_material_pick_set(PointerRNA *ptr,
+                                                            const PointerRNA value,
+                                                            ReportList * /*reports*/)
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
+  wm->runtime->stack_layer_material_pick = (value.data != nullptr) ?
+                                               static_cast<Material *>(value.data) :
+                                               nullptr;
+}
+
+/* The paint stack source's add_kinds declares PAINT (0), FILL (1) and MATERIAL (2). The value
+ * rather than the identifier is set because the operator's enum items are built from the Outliner
+ * in context. See outliner_stack_source_paint_material.cc. */
+constexpr int STACK_LAYER_ADD_TYPE_MATERIAL = 2;
+
+static void rna_WindowManager_stack_layer_material_pick_update(bContext *C, PointerRNA * /*ptr*/)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr || wm->runtime == nullptr ||
+      wm->runtime->stack_layer_material_pick == nullptr)
+  {
+    return;
+  }
+  Material *material = wm->runtime->stack_layer_material_pick;
+
+  wmOperatorType *ot = WM_operatortype_find("OUTLINER_OT_stack_layer_add", false);
+  if (ot != nullptr) {
+    PointerRNA op_ptr = WM_operator_properties_create_ptr(ot);
+    RNA_enum_set(&op_ptr, "type", STACK_LAYER_ADD_TYPE_MATERIAL);
+    /* By name, so the call the info log records -- and a repeat of it -- finds the same material. */
+    RNA_string_set(&op_ptr, "source", material->id.name + 2);
+    RNA_int_set(&op_ptr, "ordinal", -1);
+    WM_operator_name_call_ptr(C, ot, wm::OpCallContext::ExecDefault, &op_ptr, nullptr);
+    WM_operator_properties_free(&op_ptr);
+  }
+
+  /* The hand-off is spent whether or not the operator accepted it. */
+  wm->runtime->stack_layer_material_pick = nullptr;
 }
 
 static PointerRNA rna_WindowManager_xr_session_state_get(PointerRNA *ptr)
@@ -3928,6 +3980,26 @@ static void rna_def_windowmanager(BlenderRNA *brna)
                           "by paint add-ons when a layer is selected, empty to follow the assigned "
                           "image");
   RNA_def_property_update(prop, NC_ASSET | ND_ASSET_LIST, nullptr);
+
+  /* Session-only hand-off from the Stack Layers Add-Material browser: assigning a material here is
+   * what adds it as a layer. The update turns the pick into an undo-able
+   * #OUTLINER_OT_stack_layer_add call and clears the field again. Not persisted (see
+   * #bke::WindowManagerRuntime::stack_layer_material_pick). */
+  prop = RNA_def_property(srna, "stack_layer_material_pick", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_WindowManager_stack_layer_material_pick_get",
+                                 "rna_WindowManager_stack_layer_material_pick_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(
+      prop,
+      "Stack Layer Material Pick",
+      "Material the Stack Layers Add-Material browser last picked; assigning one adds it as a "
+      "layer and clears the property again");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_WindowManager_stack_layer_material_pick_update");
 
   /* Asset library browsed by the ID-browser popover's asset source. Backed by
    * #wmWindowManager::id_browser_grid_view_settings through a dynamic enum (get/set/itemf); the set

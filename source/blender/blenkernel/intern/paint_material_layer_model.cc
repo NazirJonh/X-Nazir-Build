@@ -433,6 +433,10 @@ PaintMaterialLayerStackEntry layer_model_entry_from_node(const Material &materia
   if (layer.is_group) {
     entry.color_tag = BKE_paint_material_layer_color_tag_get(*layer.node);
   }
+  /* What the row is, and the colour a Fill row stands for; both live on the same node the layer
+   * marker does, and a row without them reads as an unnamed Paint layer. */
+  entry.kind = int8_t(BKE_paint_material_layer_kind_get(*layer.node));
+  BKE_paint_material_layer_fill_color_get(*layer.node, entry.fill_color);
   return entry;
 }
 

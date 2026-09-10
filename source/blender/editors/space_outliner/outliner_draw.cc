@@ -142,6 +142,38 @@ static void stack_preview_empty_draw(const rctf &preview_rect, const float alpha
   GPU_blend(GPU_BLEND_ALPHA); /* Round-box disables. */
 }
 
+/**
+ * The flat-colour swatch of a row that *is* a colour -- a Fill layer: the colour itself at preview
+ * size, framed the way the empty-texture placeholder is.
+ */
+static void stack_preview_color_draw(const rctf &preview_rect,
+                                     const float color[4],
+                                     const float alpha_fac)
+{
+  float swatch[4];
+  copy_v4_v4(swatch, color);
+  swatch[3] *= alpha_fac;
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  draw_roundbox_corner_set(ui::CNR_ALL);
+  ui::draw_roundbox_aa(&preview_rect, true, UI_UNIT_Y / 5.0f, swatch);
+  GPU_blend(GPU_BLEND_ALPHA); /* Round-box disables. */
+
+  float swatch_border[4];
+  ui::theme::get_color_blend_4f(TH_TEXT, TH_BACK, 0.9f, swatch_border);
+  swatch_border[3] *= alpha_fac;
+  const float margin = OUTLINER_STACK_PREVIEW_FRAME_MARGIN * UI_SCALE_FAC;
+  rctf frame{};
+  BLI_rctf_init(&frame,
+                preview_rect.xmin - margin,
+                preview_rect.xmax + margin,
+                preview_rect.ymin - margin,
+                preview_rect.ymax + margin);
+  draw_roundbox_corner_set(ui::CNR_ALL);
+  ui::draw_roundbox_aa(&frame, false, UI_UNIT_Y / 5.0f, swatch_border);
+  GPU_blend(GPU_BLEND_ALPHA); /* Round-box disables. */
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Tree Size Functions
  * \{ */
@@ -4258,7 +4290,12 @@ static void outliner_draw_tree_element(ui::Block *block,
           const rctf preview_rect = outliner_stack_row_preview_rect(
               *row, float(startx), float(*starty), slot_index);
           const float alpha = (tselem->flag & TSE_HIGHLIGHTED_ICON) ? alpha_fac + 0.5f : alpha_fac;
-          if (slot.is_blank) {
+          if (slot.is_color_swatch) {
+            /* A row that is a colour shows the colour: no thumbnail to fetch, no icon that says
+             * more than the swatch does. */
+            stack_preview_color_draw(preview_rect, slot.color, alpha);
+          }
+          else if (slot.is_blank) {
             /* The data-block exists, but its thumbnail has nothing to show yet: the source says
              * so, and the empty-texture placeholder answers for the slot. */
             stack_preview_empty_draw(preview_rect, alpha);

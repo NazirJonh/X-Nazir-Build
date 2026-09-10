@@ -48,10 +48,26 @@ class OUTLINER_HT_tool_header(Header):
         layout.separator_spacer()
 
         row = layout.row(align=True)
-        # Empty Layer and Fill Layer as separate buttons for quick access. The source defines
-        # these kinds via add_kinds; 'EMPTY' and 'FILL' are their stable identifiers.
-        row.operator("outliner.stack_layer_add", text="", icon='IMAGE_DATA').type = 'EMPTY'
-        row.operator("outliner.stack_layer_add", text="", icon='GP_DRAW_FILL').type = 'FILL'
+        # Paint Layer and Fill Layer as separate buttons for quick access. The source defines
+        # these kinds via add_kinds; 'PAINT' and 'FILL' are their stable identifiers. The Fill
+        # button is a glyph button -- a Material Symbols paint-bucket -- because the fill is the
+        # one kind whose content is a colour, and the picker it opens on click is the add.
+        row.operator("outliner.stack_layer_add", text="", icon='BRUSH_DATA').type = 'PAINT'
+        row.tag_button(
+            "outliner.stack_layer_add",
+            tag_name="stack_layer_fill",
+            glyph="\ue997",  # Material Symbols Rounded "format_color_fill"
+            center_glyph=True,
+            tooltip="Add Fill Layer",
+        ).type = 'FILL'
+        sub = row.row(align=True)
+        # The ID browser is driven only by these two context entries; see
+        # id_browser_popover_context_set in interface_template_id_browser.cc. Picking a material
+        # assigns it to WindowManager.stack_layer_material_pick, whose update turns the pick into
+        # an undo-able stack_layer_add call.
+        sub.context_pointer_set("id_browser_ptr", context.window_manager)
+        sub.context_string_set("id_browser_prop", "stack_layer_material_pick")
+        sub.popover("UI_PT_id_browser", text="", icon='MATERIAL')
 
         row = layout.row(align=True)
         row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
@@ -73,7 +89,7 @@ class OUTLINER_HT_tool_header(Header):
 class OUTLINER_MT_stack_layer_context_menu(Menu):
     bl_label = "Stack Layer"
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
 
         layout.operator("outliner.stack_layer_rename", text="Rename...", icon='GREASEPENCIL')
@@ -90,6 +106,11 @@ class OUTLINER_MT_stack_layer_context_menu(Menu):
             "outliner.stack_layer_mask", "initial_color", text="Add Mask", icon='MOD_MASK')
         layout.operator("outliner.stack_layer_mask", text="Remove Mask", icon='X').add = False
 
+        # Only a row that stands for a colour can be re-filled; the operator's poll answers for
+        # that, the same way the ungroup entry leans on its own poll.
+        if bpy.ops.outliner.stack_layer_fill_color_set.poll():
+            layout.operator("outliner.stack_layer_fill_color_set", text="Fill Color...")
+
         layout.separator()
 
         layout.operator("outliner.stack_layer_group_add", text="New Group", icon='NEWFOLDER')
@@ -103,7 +124,19 @@ class OUTLINER_MT_stack_layer_context_menu(Menu):
 
         layout.separator()
 
-        layout.operator_menu_enum("outliner.stack_layer_add", "type", text="Add Layer", icon='ADD')
+        # The kinds as explicit entries rather than the operator's enum menu: a Material layer is
+        # made from a material the user picks, which is the ID browser's job, not a plain Add.
+        layout.operator(
+            "outliner.stack_layer_add", text="Add Paint Layer", icon='BRUSH_DATA').type = 'PAINT'
+        layout.operator(
+            "outliner.stack_layer_add", text="Add Fill Layer", icon='GP_DRAW_FILL').type = 'FILL'
+        col = layout.column()
+        # Same hand-off as the header's material button: the pick is assigned to
+        # WindowManager.stack_layer_material_pick, whose update adds the layer.
+        col.context_pointer_set("id_browser_ptr", context.window_manager)
+        col.context_string_set("id_browser_prop", "stack_layer_material_pick")
+        col.popover("UI_PT_id_browser", text="Add Material Layer", icon='MATERIAL')
+        layout.separator()
         layout.operator("outliner.stack_layer_copy", text="Copy", icon='COPYDOWN')
         layout.operator("outliner.stack_layer_paste", text="Paste", icon='PASTEDOWN')
         layout.operator("outliner.stack_layer_remove", text="Remove Stack Layer", icon='TRASH')

@@ -41,12 +41,15 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_layer_edit.hh"
+#include "BKE_paint_material_resolve.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 
 #include "BLI_assert.h"
 #include "BLI_hash.h"
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
 #include "BLI_path_utils.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
@@ -58,6 +61,7 @@
 #include "BLT_translation.hh"
 
 #include "ED_image.hh"
+#include "ED_material_bake.hh"
 #include "ED_screen.hh"
 
 #include "RNA_access.hh"
@@ -511,9 +515,35 @@ class PaintMaterialStackSource final : public StackSource,
                                      BKE_paint_material_layer_group_material_get(
                                          entry.group_tree->id) :
                                      nullptr;
+      /* What the row *is*, read off its kind marker: a baked material reads as its material, a
+       * fill as the flat colour it stands for, and a row with no marker stays a plain layer. A
+       * mask keeps its icon priority over all of these. */
+      const PaintMaterialLayerKind row_kind = PaintMaterialLayerKind(entry.kind);
       row.icon = entry.is_group ? (group_material != nullptr ? ICON_MATERIAL : ICON_FILE_FOLDER) :
                  entry.has_mask ? ICON_MOD_MASK :
-                                  ICON_IMAGE_RGB;
+                 row_kind == PaintMaterialLayerKind::Material ? ICON_MATERIAL :
+                 row_kind == PaintMaterialLayerKind::Fill ? ICON_GP_DRAW_FILL :
+                                                            ICON_IMAGE_RGB;
+
+      /* The material a Material row was baked from, resolved off its maps: the first one that
+       * still carries the baked-from link speaks for the row. */
+      Material *source_material = nullptr;
+      if (!entry.is_group && row_kind == PaintMaterialLayerKind::Material) {
+        const Image *base_map = entry.channel_images.lookup_default(
+            PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr);
+        ImageMaterialSource material_source;
+        if (base_map != nullptr && BKE_image_material_source_get(*base_map, material_source)) {
+          source_material = material_source.material;
+        }
+        if (source_material == nullptr) {
+          for (const Image *map : entry.channel_images.values()) {
+            if (map != nullptr && BKE_image_material_source_get(*map, material_source)) {
+              source_material = material_source.material;
+              break;
+            }
+          }
+        }
+      }
 
       /* A row's slots and sections. A group that stands for a material reads as that material:
        * one material slot, no content to switch. A plain group holds no map of its own -- its
@@ -534,6 +564,23 @@ class PaintMaterialStackSource final : public StackSource,
       }
       else if (entry.supported) {
         row.preview_slots.append(paint_channels_slot_build(entry));
+        if (row_kind == PaintMaterialLayerKind::Fill) {
+          /* The colour the layer stands for, beside its map: the map is the fill today, but it is
+           * paintable, and the swatch keeps saying what the layer was filled with. */
+          StackRowPreview fill_swatch;
+          fill_swatch.is_color_swatch = true;
+          copy_v4_v4(fill_swatch.color, entry.fill_color);
+          fill_swatch.label = IFACE_("Fill Color");
+          row.preview_slots.append(std::move(fill_swatch));
+        }
+        if (source_material != nullptr) {
+          /* A baked material row shows its source material's preview, the way a group that stands
+           * for a material does. */
+          StackRowPreview material_slot;
+          material_slot.id_uid = source_material->id.session_uid;
+          material_slot.id_type = ID_MA;
+          row.preview_slots.append(std::move(material_slot));
+        }
         if (mask_image != nullptr) {
           row.preview_slots.append(paint_mask_slot_build(false));
         }
@@ -729,14 +776,26 @@ class PaintMaterialStackSource final : public StackSource,
 
   void add_kinds(Vector<StackAddKindInfo> &r_kinds) const override
   {
-    r_kinds.append({"EMPTY",
-                    "Empty Layer",
+    r_kinds.append({"PAINT",
+                    "Paint Layer",
                     "A layer that shows nothing until it is painted on",
-                    ICON_IMAGE_DATA});
-    r_kinds.append({"FILL",
-                    "Fill Layer",
-                    "A layer that covers what is below it from the start",
-                    ICON_GP_DRAW_FILL});
+                    ICON_BRUSH_DATA});
+    StackAddKindInfo fill{"FILL",
+                          "Fill Layer",
+                          "A layer of one flat colour, revealed by its mask",
+                          ICON_GP_DRAW_FILL};
+    fill.takes_color = true;
+    r_kinds.append(fill);
+    /* Made from a material the user picks: the ID browser chooses it and hands its name to the
+     * Add, so the kind is declared -- scripts and repeats can name it -- but no UI offers it as a
+     * plain Add button. */
+    StackAddKindInfo material{"MATERIAL",
+                              "Material Layer",
+                              "A material from the file or an asset library, baked into the "
+                              "layer's maps",
+                              ICON_MATERIAL};
+    material.source_id_type = ID_MA;
+    r_kinds.append(material);
   }
 
   int row_add(bContext &C,
@@ -747,6 +806,12 @@ class PaintMaterialStackSource final : public StackSource,
   {
     /* The kinds this editor declares, by their place in #add_kinds' list. */
     const int fill_kind = 1;
+    const int material_kind = 2;
+    if (kind == material_kind) {
+      /* A Material layer is made from a material, and this overload is handed none; the Add
+       * resolves one and calls the #StackAddArgs overload instead. */
+      return -1;
+    }
     PaintMaterialLayerAddParams params;
     params.type = (kind == fill_kind) ? PaintMaterialLayerAddType::Fill :
                                         PaintMaterialLayerAddType::Image;
@@ -758,6 +823,132 @@ class PaintMaterialStackSource final : public StackSource,
     const Scene *scene = CTX_data_scene(&C);
     if (scene != nullptr && scene->toolsettings != nullptr) {
       /* The same size the first brush stroke would have created this material's maps at. */
+      params.image_size = scene->toolsettings->paint_mode.new_channel_image_size;
+    }
+    int new_ordinal = -1;
+    this->paint_edit(
+        C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
+          return BKE_paint_material_layer_add(bmain, material, params, &new_ordinal, &error);
+        });
+    return new_ordinal;
+  }
+
+  /**
+   * Add a layer whose maps are a picked material baked per channel.
+   *
+   * \a source is what the Add resolved from its `source` name, so a repeated or scripted call bakes
+   * the same material again. Bake first -- the target Images are created on this thread before the
+   * bake call returns -- then add the layer with those maps as its own, then mark it Material.
+   * Pixels keep arriving in a job after this returns; the row is there from the first redraw.
+   */
+  int row_add_material(bContext &C, ID &owner, const int ordinal, Material &source) const
+  {
+    wmWindowManager *wm = CTX_wm_manager(&C);
+    Material *picked = &source;
+    Main *bmain = CTX_data_main(&C);
+
+    int image_size = 1024;
+    const Scene *scene = CTX_data_scene(&C);
+    if (scene != nullptr && scene->toolsettings != nullptr) {
+      image_size = scene->toolsettings->paint_mode.new_channel_image_size;
+    }
+
+    /* The channels the layer can carry: ones the picked material actually feeds, and the owner's
+     * stack has wired. A channel the source material leaves constant gets no map and simply
+     * behaves as unwired for this layer; a channel the owner never wired could not take a layer
+     * at all. */
+    const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(picked);
+    Vector<int> wired;
+    BKE_paint_material_layer_channels_wired(paint_owner(owner), wired);
+    if (wired.is_empty()) {
+      /* A material with no stack yet gets one from the add below: a bare base on Base Color, the
+       * same way a Paint or Fill layer starts a stack. */
+      wired.append(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    }
+    Vector<ed::material_bake::BakeTargetSpec> targets;
+    for (const int channel : wired) {
+      if (resolve.channels[channel] != ChannelResolution::Unavailable) {
+        targets.append({eMaterialPaintChannel(channel)});
+      }
+    }
+    if (targets.is_empty()) {
+      BKE_reportf(CTX_wm_reports(&C),
+                  RPT_WARNING,
+                  RPT_("Material \"%s\" feeds none of the channels this stack uses"),
+                  picked->id.name + 2);
+      return -1;
+    }
+
+    ed::material_bake::MaterialBakeToImagesParams bake_params;
+    bake_params.material = picked;
+    bake_params.targets = targets;
+    bake_params.size = image_size;
+    bake_params.blocking = false;
+    const ed::material_bake::MaterialBakeToImagesResult bake = ed::material_bake::
+        material_bake_to_images(*bmain, wm, CTX_wm_window(&C), bake_params);
+    if (!bake.ok || bake.created.is_empty()) {
+      return -1;
+    }
+
+    /* The baked maps go in as the layer's own maps: no placeholder is created for those channels
+     * only to be replaced, and each map's one fresh user becomes the user of the node showing it.
+     * The add takes all of them over, so a refused add or a channel the layer does not get leaves
+     * nothing behind here to clean up. */
+    Vector<PaintMaterialLayerChannelImage> baked_maps;
+    for (const int i : bake.created.index_range()) {
+      baked_maps.append({int(bake.created_channels[i]), bake.created[i]});
+    }
+
+    int new_ordinal = -1;
+    this->paint_edit(
+        C, owner, [&](Main &edit_bmain, Material &material, PaintMaterialLayerEditError &error) {
+          PaintMaterialLayerAddParams params;
+          params.type = PaintMaterialLayerAddType::Image;
+          params.anchor_ordinal = ordinal;
+          params.image_size = image_size;
+          params.channel_images = baked_maps;
+          if (!BKE_paint_material_layer_add(edit_bmain, material, params, &new_ordinal, &error)) {
+            return false;
+          }
+          /* The kind marker is what makes the row read as Material rather than as a Paint layer
+           * whose maps happen to carry a bake link. */
+          if (!BKE_paint_material_layer_kind_set(
+                  edit_bmain, material, new_ordinal, PaintMaterialLayerKind::Material, &error))
+          {
+            return false;
+          }
+          return true;
+        });
+    return new_ordinal;
+  }
+
+  int row_add(bContext &C,
+              const StackFocus &focus,
+              ID &owner,
+              const int kind,
+              const int ordinal,
+              const StackAddArgs &args) const override
+  {
+    /* The kinds this editor declares, by their place in #add_kinds' list. */
+    const int fill_kind = 1;
+    const int material_kind = 2;
+    if (kind == material_kind) {
+      /* The Add resolved the source by the ID type this kind declared; anything else is a caller
+       * that went around it. */
+      if (args.source == nullptr || GS(args.source->name) != ID_MA) {
+        return -1;
+      }
+      return this->row_add_material(C, owner, ordinal, *id_cast<Material *>(args.source));
+    }
+    if (kind != fill_kind || args.color == nullptr) {
+      return this->row_add(C, focus, owner, kind, ordinal);
+    }
+    PaintMaterialLayerAddParams params;
+    params.type = PaintMaterialLayerAddType::Fill;
+    copy_v4_v4(params.fill_color, args.color);
+    params.anchor_ordinal = ordinal;
+    const Scene *scene = CTX_data_scene(&C);
+    if (scene != nullptr && scene->toolsettings != nullptr) {
       params.image_size = scene->toolsettings->paint_mode.new_channel_image_size;
     }
     int new_ordinal = -1;
@@ -824,6 +1015,19 @@ class PaintMaterialStackSource final : public StackSource,
           return add ? BKE_paint_material_layer_mask_add(
                            bmain, material, ordinal, initial_color, image_size, &error) :
                        BKE_paint_material_layer_mask_remove(bmain, material, ordinal, &error);
+        });
+  }
+
+  bool row_fill_color_set(bContext &C,
+                          const StackFocus & /*focus*/,
+                          ID &owner,
+                          const int ordinal,
+                          const float color[4]) const override
+  {
+    return this->paint_edit(
+        C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
+          return BKE_paint_material_layer_fill_color_apply(
+              bmain, material, ordinal, color, &error);
         });
   }
 

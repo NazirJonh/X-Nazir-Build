@@ -164,6 +164,10 @@ struct PaintMaterialLayerStackEntry {
   bool has_mask = false;
   /** Color tag for group folders (0-7), or -1 for no tag. */
   int8_t color_tag = -1;
+  /** What the row is; #PaintMaterialLayerKind::Paint for a row that carries no kind marker. */
+  int8_t kind = 0;
+  /** Meaningful only for a Fill row. */
+  float fill_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   bool supported = true;
   const char *unsupported_reason = nullptr;
   std::optional<PointerRNA> factor_prop;

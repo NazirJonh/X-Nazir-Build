@@ -5,6 +5,8 @@
 #include "testing/testing.h"
 
 #include "BLI_assert.h"
+#include "BLI_math_vector.hh"
+#include "BLI_string.h"
 
 #include "BKE_gtest_base.hh"
 #include "BKE_image.hh"
@@ -17,7 +19,10 @@
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_space_types.h"
+
+#include "UI_resources.hh"
 
 #include "outliner_stack_source.hh"
 
@@ -222,6 +227,91 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, copy_starts_with_a_fresh_paint_revi
    * anyone yet, whatever the original has done since. */
   EXPECT_EQ(BKE_material_paint_layer_revision_get(*copy), 0);
   BKE_id_free(bmain, copy);
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, stack_rows_report_layer_kind)
+{
+  Material &material = add_material_with_texture(add_image("Base"));
+
+  PaintMaterialLayerAddParams fill_params;
+  fill_params.image_size = 8;
+  fill_params.type = PaintMaterialLayerAddType::Fill;
+  const float fill_color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  copy_v4_v4(fill_params.fill_color, fill_color);
+  fill_params.name = "Filler";
+  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, fill_params));
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  const StackFocus focus;
+  Vector<StackRow> rows;
+  ASSERT_TRUE(paint_source().rows_build(ctx, focus, material.id, rows));
+  ASSERT_EQ(rows.size(), 2);
+
+  /* The bare base carries no kind marker: it reads as a plain Paint layer. */
+  EXPECT_EQ(rows[0].icon, ICON_IMAGE_RGB);
+
+  /* The Fill row reads as what it is: the Fill icon, and its colour in the second slot. */
+  EXPECT_EQ(rows[1].icon, ICON_GP_DRAW_FILL);
+  ASSERT_EQ(rows[1].preview_slots.size(), 2);
+  EXPECT_TRUE(rows[1].preview_slots[1].is_color_swatch);
+  EXPECT_NEAR(rows[1].preview_slots[1].color[0], 0.25f, 1e-6f);
+  EXPECT_NEAR(rows[1].preview_slots[1].color[1], 0.5f, 1e-6f);
+  EXPECT_NEAR(rows[1].preview_slots[1].color[2], 0.75f, 1e-6f);
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, material_layer_row_resolves_its_source_material)
+{
+  Material &material = add_material_with_texture(add_image("Base"));
+
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.name = "MatLayer";
+  int ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params, &ordinal));
+
+  /* Mark the new layer as baked from another material, and link its map back to it -- the state
+   * the material-bake glue leaves behind. */
+  Material &source_material = *BKE_material_add(bmain, "BakedFrom");
+  bNode *layer_mix = nullptr;
+  for (bNode &node : material.nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_MIX) {
+      layer_mix = &node;
+      break;
+    }
+  }
+  ASSERT_NE(layer_mix, nullptr);
+  BKE_paint_material_layer_kind_set(*layer_mix, PaintMaterialLayerKind::Material);
+
+  Image *layer_map = nullptr;
+  for (Image &image : bmain->images) {
+    if (STREQ(image.id.name + 2, "MatLayer")) {
+      layer_map = &image;
+      break;
+    }
+  }
+  ASSERT_NE(layer_map, nullptr);
+  ImageMaterialSource material_source;
+  material_source.material = &source_material;
+  material_source.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  material_source.bake_size = 8;
+  BKE_image_material_source_set(*layer_map, material_source);
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  const StackFocus focus;
+  Vector<StackRow> rows;
+  ASSERT_TRUE(paint_source().rows_build(ctx, focus, material.id, rows));
+  ASSERT_EQ(rows.size(), 2);
+
+  /* The row reads as its material: the material icon, and the material's preview beside the map. */
+  EXPECT_EQ(rows[1].icon, ICON_MATERIAL);
+  bool material_preview_found = false;
+  for (const StackRowPreview &slot : rows[1].preview_slots) {
+    if (slot.id_type == ID_MA && slot.id_uid == source_material.id.session_uid) {
+      material_preview_found = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(material_preview_found);
 }
 
 }  // namespace blender::ed::outliner::tests

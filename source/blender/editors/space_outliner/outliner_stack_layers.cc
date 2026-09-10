@@ -52,6 +52,7 @@
 
 #include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
+#include "UI_interface_layout.hh"
 #include "../interface/interface_intern.hh"
 
 #include "WM_api.hh"
@@ -624,10 +625,54 @@ wmOperatorStatus stack_row_remove_exec(bContext *C, wmOperator *op)
   return removed_any ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
 }
 
+/** The Add kind \a kind as the space's source declares it; false when it declares no such kind. */
+static bool stack_add_kind_info_get(const bContext &C, const int kind, StackAddKindInfo &r_info)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C);
+  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+    return false;
+  }
+  const StackEditor *editor = stack_source_for_space(*space_outliner)->editor();
+  if (editor == nullptr) {
+    return false;
+  }
+  Vector<StackAddKindInfo> kinds;
+  editor->add_kinds(kinds);
+  if (!kinds.index_range().contains(kind)) {
+    return false;
+  }
+  r_info = std::move(kinds[kind]);
+  return true;
+}
+
 wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
   const int kind = RNA_enum_get(op->ptr, "type");
+  StackAddKindInfo kind_info;
+  if (!stack_add_kind_info_get(*C, kind, kind_info)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  StackAddArgs args;
+  /* A kind made from an existing data-block is handed it by name rather than by a pointer the UI
+   * held on to, so the call stays what the info log shows: a repeat or a script finds the same
+   * data-block again. */
+  char source_name[MAX_ID_NAME - 2];
+  RNA_string_get(op->ptr, "source", source_name);
+  if (kind_info.source_id_type != 0) {
+    args.source = (source_name[0] != '\0') ?
+                      BKE_libblock_find_name(
+                          CTX_data_main(C), kind_info.source_id_type, source_name) :
+                      nullptr;
+    if (args.source == nullptr) {
+      BKE_reportf(op->reports,
+                  RPT_ERROR,
+                  RPT_("No data-block named \"%s\" to make the layer from"),
+                  source_name);
+      return OPERATOR_CANCELLED;
+    }
+  }
 
   /* The row the Add is anchored to: a marker or the explicit "ordinal" property when a script gave
    * one, otherwise the selection and then the active row. -1 names no row and puts the new layer
@@ -635,9 +680,61 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
    * or, when the row is a folder, inside it -- so a row inside a folder keeps the new layer in
    * that folder. */
   const int anchor_ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
-  return outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal) >= 0 ?
+  float fill_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  RNA_float_get_array(op->ptr, "fill_color", fill_color);
+  if (kind_info.takes_color) {
+    args.color = fill_color;
+  }
+  return outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal, args) >= 0 ?
              OPERATOR_FINISHED :
              OPERATOR_CANCELLED;
+}
+
+/** Whether the Add's current kind declared #StackAddKindInfo::takes_color. */
+static bool stack_row_add_takes_color(const bContext &C, wmOperator &op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C);
+  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+    return false;
+  }
+  const StackEditor *editor = stack_source_for_space(*space_outliner)->editor();
+  if (editor == nullptr) {
+    return false;
+  }
+  Vector<StackAddKindInfo> kinds;
+  editor->add_kinds(kinds);
+  const int kind = RNA_enum_get(op.ptr, "type");
+  return kinds.index_range().contains(kind) && kinds[kind].takes_color;
+}
+
+/**
+ * The Add's invoke: a kind whose creation takes a colour opens the color picker first, the rest
+ * run straight through. The picker is what "add a fill layer" means -- the colour is the layer's
+ * content, not an option to be changed afterwards.
+ *
+ * A confirm dialog rather than a redo popup: every change in a redo popup re-runs the whole add,
+ * and dragging a colour would create and throw away a set of full-size maps per mouse move.
+ */
+static wmOperatorStatus stack_row_add_invoke(bContext *C,
+                                             wmOperator *op,
+                                             const wmEvent * /*event*/)
+{
+  if (!stack_row_add_takes_color(*C, *op)) {
+    return stack_row_add_exec(C, op);
+  }
+  return WM_operator_props_dialog_popup(C, op, 220, std::nullopt, IFACE_("Add"));
+}
+
+/**
+ * Only the colour is a choice the user makes here; the anchor, the kind and the marker are what the
+ * button that placed the call already decided.
+ */
+static void stack_row_add_ui(bContext *C, wmOperator *op)
+{
+  if (!stack_row_add_takes_color(*C, *op)) {
+    return;
+  }
+  op->layout->prop(op->ptr, "fill_color", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 }
 
 bool stack_row_add_poll(bContext *C)
@@ -1840,7 +1937,8 @@ bool outliner_stack_row_move(bContext *C,
 int outliner_stack_row_add(bContext *C,
                            SpaceOutliner &space_outliner,
                            const int kind,
-                           const int ordinal)
+                           const int ordinal,
+                           const StackAddArgs &args)
 {
   /* Inserting a row renumbers everything above it. */
   int new_ordinal = -1;
@@ -1853,7 +1951,7 @@ int outliner_stack_row_add(bContext *C,
           const StackFocus &focus,
           ID &owner,
           int &r_select_ordinal) {
-        r_select_ordinal = editor.row_add(*C, focus, owner, kind, ordinal);
+        r_select_ordinal = editor.row_add(*C, focus, owner, kind, ordinal, args);
         return r_select_ordinal >= 0;
       },
       &new_ordinal);
@@ -1863,6 +1961,29 @@ int outliner_stack_row_add(bContext *C,
   /* A layer the user just asked for is the one they mean to work on next. */
   outliner_stack_row_activate(C, space_outliner, new_ordinal);
   return new_ordinal;
+}
+
+bool outliner_stack_row_fill_color_set(bContext *C,
+                                       SpaceOutliner &space_outliner,
+                                       const int ordinal,
+                                       const float color[4])
+{
+  /* A re-fill changes pixels and a marker, not the row order, so needs_renumber = false. */
+  return stack_mutate(
+      *C,
+      space_outliner,
+      false,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int & /*r_select_ordinal*/) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        if (grouping == nullptr) {
+          return false;
+        }
+        return grouping->row_fill_color_set(*C, focus, owner, ordinal, color);
+      });
 }
 
 bool outliner_stack_row_color_tag_set(bContext *C,
@@ -2213,6 +2334,8 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
   ot->idname = "OUTLINER_OT_stack_layer_add";
   ot->description = "Add a layer to the stack";
   ot->exec = stack_row_add_exec;
+  ot->invoke = stack_row_add_invoke;
+  ot->ui = stack_row_add_ui;
   ot->poll = stack_add_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
@@ -2231,6 +2354,34 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
               "is a folder. -1 uses the selected or active row, or the top of the stack",
               -1,
               SHRT_MAX);
+  /* Read only by the kinds that asked for a colour; the others leave it at its white default. */
+  PropertyRNA *fill_prop = RNA_def_float_color(ot->srna,
+                                               "fill_color",
+                                               4,
+                                               nullptr,
+                                               0.0f,
+                                               FLT_MAX,
+                                               "Fill Color",
+                                               "Color a fill layer starts out filled with",
+                                               0.0f,
+                                               1.0f);
+  RNA_def_property_subtype(fill_prop, PROP_COLOR_GAMMA);
+  /* #layout.tag_button writes its tag name into every operator it attaches; the Add never reads
+   * it, but the property keeps that write from warning on every redraw. */
+  PropertyRNA *tag_prop = RNA_def_string(
+      ot->srna, "tag_name", "", 0, "Tag Name", "Tag the button that placed the call belongs to");
+  RNA_def_property_flag(tag_prop, PROP_HIDDEN);
+  /* The data-block a kind with #StackAddKindInfo::source_id_type is made from, by name: what a UI
+   * picked, and what a repeat or a script names again. Bounded, since the exec reads it into an ID
+   * name buffer. */
+  PropertyRNA *source_prop = RNA_def_string(ot->srna,
+                                            "source",
+                                            "",
+                                            MAX_ID_NAME - 2,
+                                            "Source",
+                                            "Name of the data-block the new layer is made from, "
+                                            "for a kind that is made from one");
+  RNA_def_property_flag(source_prop, PROP_HIDDEN);
   rna_def_stack_row_marker(ot);
 }
 
@@ -2416,6 +2567,117 @@ void OUTLINER_OT_stack_layer_color_tag_set(wmOperatorType *ot)
               SHRT_MAX,
               "Ordinal",
               "Group to set color for; -1 uses the active row",
+              -1,
+              SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
+/**
+ * Whether the row a fill color would land on is a fill row.
+ *
+ * A re-fill is refused for any row that does not stand for a colour, and the context menu leans on
+ * this poll to show the entry only where it applies. The poll cannot read the operator's marker,
+ * so it answers for what the operator will do without one: the selection if there is one, the
+ * active row otherwise. The row's colour slot is what says it is a fill -- the source drew it
+ * there for exactly this question.
+ */
+bool stack_row_fill_color_poll(bContext *C)
+{
+  if (!stack_row_add_poll(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  Vector<int> selected;
+  stack_selected_ordinals_get(*space_outliner, selected);
+  const int ordinal = !selected.is_empty() ? selected.first() :
+                                             outliner_stack_active_ordinal_get(
+                                                 outliner_stack_read_context(*C), *space_outliner);
+  const StackRow *row = (ordinal < 0) ? nullptr : outliner_stack_row_find(*space_outliner, ordinal);
+  if (row == nullptr) {
+    return false;
+  }
+  for (const StackRowPreview &slot : row->preview_slots) {
+    if (slot.is_color_swatch) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static wmOperatorStatus stack_row_fill_color_set_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  float color[4];
+  RNA_float_get_array(op->ptr, "color", color);
+  return outliner_stack_row_fill_color_set(C, *space_outliner, ordinal, color) ?
+             OPERATOR_FINISHED :
+             OPERATOR_CANCELLED;
+}
+
+static wmOperatorStatus stack_row_fill_color_set_invoke(bContext *C,
+                                                        wmOperator *op,
+                                                        const wmEvent * /*event*/)
+{
+  /* The dialog starts at the colour the row stands for now, which the source already put in the
+   * row's swatch -- a picker that opens at white is a picker that loses the current colour. */
+  PropertyRNA *color_prop = RNA_struct_find_property(op->ptr, "color");
+  if (!RNA_property_is_set(op->ptr, color_prop)) {
+    SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+    const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+    if (const StackRow *row = (ordinal < 0) ?
+                                  nullptr :
+                                  outliner_stack_row_find(*space_outliner, ordinal))
+    {
+      for (const StackRowPreview &slot : row->preview_slots) {
+        if (slot.is_color_swatch) {
+          RNA_property_float_set_array(op->ptr, color_prop, slot.color);
+          break;
+        }
+      }
+    }
+  }
+  return WM_operator_props_dialog_popup(C, op, 220, IFACE_("Fill Color"), IFACE_("Fill"));
+}
+
+/** The colour is the only choice here; the row was decided by where the call came from. */
+static void stack_row_fill_color_set_ui(bContext * /*C*/, wmOperator *op)
+{
+  op->layout->prop(op->ptr, "color", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+}
+
+void OUTLINER_OT_stack_layer_fill_color_set(wmOperatorType *ot)
+{
+  ot->name = "Set Fill Color";
+  ot->idname = "OUTLINER_OT_stack_layer_fill_color_set";
+  ot->description = "Re-fill a fill layer with a new color, replacing what was drawn on it";
+  ot->exec = stack_row_fill_color_set_exec;
+  ot->invoke = stack_row_fill_color_set_invoke;
+  ot->ui = stack_row_fill_color_set_ui;
+  ot->poll = stack_row_fill_color_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  PropertyRNA *prop = RNA_def_float_color(ot->srna,
+                                          "color",
+                                          4,
+                                          nullptr,
+                                          0.0f,
+                                          FLT_MAX,
+                                          "Color",
+                                          "Color the fill layer stands for",
+                                          0.0f,
+                                          1.0f);
+  RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Fill layer to re-fill; -1 uses the active row",
               -1,
               SHRT_MAX);
   rna_def_stack_row_marker(ot);

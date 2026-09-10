@@ -611,7 +611,7 @@ class StackLayersOutlinerTest(unittest.TestCase):
         self.assertTrue(self.space.debug_stack_layer_row_is_open(ordinal=1))
 
         with self.outliner_override():
-            result = bpy.ops.outliner.stack_layer_add(type='EMPTY', ordinal=0)
+            result = bpy.ops.outliner.stack_layer_add(type='PAINT', ordinal=0)
         self.assertEqual(result, {'FINISHED'})
         self.redraw_window()
         self.assertTrue(self.space.debug_stack_layer_row_is_open(ordinal=2))
@@ -666,7 +666,7 @@ class StackLayersOutlinerTest(unittest.TestCase):
             with self.outliner_override():
                 # A layer at the bottom renumbers every row above it, the group included.
                 self.assertEqual(
-                    bpy.ops.outliner.stack_layer_add(type='EMPTY', ordinal=0), {'FINISHED'})
+                    bpy.ops.outliner.stack_layer_add(type='PAINT', ordinal=0), {'FINISHED'})
             group_ordinal += 1
             self.redraw_window()
             self.assertFalse(self.space.debug_stack_layer_row_is_open(ordinal=group_ordinal))

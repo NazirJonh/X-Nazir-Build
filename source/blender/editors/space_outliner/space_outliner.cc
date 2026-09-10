@@ -35,6 +35,7 @@
 
 #include "DNA_scene_types.h"
 
+#include "UI_interface_c.hh"
 #include "UI_resources.hh"
 #include "UI_view2d.hh"
 
@@ -807,6 +808,10 @@ void ED_spacetype_outliner()
   art->free = outliner_header_region_free;
   art->listener = outliner_header_region_listener;
   BLI_addhead(&st->regiontypes, art);
+
+  /* The Stack Layers header opens the ID-browser popover straight from Python, which cannot
+   * register the popover's panel type itself. */
+  blender::ui::id_browser_popover_register();
 
   BKE_spacetype_register(std::move(st));
 }

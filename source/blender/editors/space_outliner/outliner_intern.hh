@@ -841,16 +841,29 @@ bool outliner_stack_row_rename(bContext *C,
 /**
  * Create a row and, when the source reports where it landed, activate it.
  *
+ * \param args: what the kind asked for in #StackAddKindInfo; a kind that asked for nothing reads
+ * the defaults the same as no arguments at all.
+ *
  * \return the new ordinal, or -1 when nothing was created.
  */
 int outliner_stack_row_add(bContext *C,
                            SpaceOutliner &space_outliner,
                            int kind,
-                           int ordinal);
+                           int ordinal,
+                           const StackAddArgs &args = {});
 bool outliner_stack_row_color_tag_set(bContext *C,
                                       SpaceOutliner &space_outliner,
                                       int ordinal,
                                       int color_tag);
+/**
+ * Re-fill the fill row at \a ordinal with \a color, and record the colour on it.
+ *
+ * \return false when the row is not a fill the source can re-fill.
+ */
+bool outliner_stack_row_fill_color_set(bContext *C,
+                                       SpaceOutliner &space_outliner,
+                                       int ordinal,
+                                       const float color[4]);
 bool outliner_stack_row_set_enabled(bContext *C,
                                     SpaceOutliner &space_outliner,
                                     int ordinal,
@@ -877,6 +890,7 @@ void OUTLINER_OT_stack_layer_group(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_group_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_ungroup(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_color_tag_set(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_fill_color_set(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_merge_down(wmOperatorType *ot);
 void OUTLINER_OT_stack_focus_sub_index(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);

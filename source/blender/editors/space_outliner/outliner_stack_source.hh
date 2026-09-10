@@ -124,6 +124,17 @@ struct StackRowPreview {
    * no brush has touched yet; for another source it will be something else entirely.
    */
   bool is_blank = false;
+
+  /**
+   * The slot shows a flat colour rather than a data-block preview or an icon.
+   *
+   * A row that *is* a colour -- a fill layer, say -- has no thumbnail to fetch and no icon that
+   * says more than the colour itself does. The colour travels here because it is the row's own
+   * fact, and generic code draws exactly what the slot declares.
+   */
+  bool is_color_swatch = false;
+  /** The colour #is_color_swatch draws; meaningless otherwise. */
+  float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 };
 
 /**
@@ -276,6 +287,28 @@ struct StackAddKindInfo {
   std::string description;
   /** Icon drawn next to the name. */
   int icon = 0;
+  /** A kind whose creation takes a colour: the Add UI asks for one before calling #row_add. */
+  bool takes_color = false;
+  /**
+   * The ID type of the existing data-block a row of this kind is made from, or 0 for a kind made
+   * from nothing.
+   *
+   * The Add names that data-block by name and resolves it before calling #row_add, so the call
+   * stays repeatable and scriptable. Choosing *which* data-block is a UI's job -- a browser, not
+   * the plain Add button, which has nothing to hand over.
+   */
+  short source_id_type = 0;
+};
+
+/**
+ * What an Add is given besides its kind and its anchor row. Each field is meaningful only to a
+ * kind that declared the matching need in #StackAddKindInfo; every other kind ignores it.
+ */
+struct StackAddArgs {
+  /** RGBA, for a kind with #StackAddKindInfo::takes_color; null otherwise. */
+  const float *color = nullptr;
+  /** The data-block a kind with #StackAddKindInfo::source_id_type is made from; null otherwise. */
+  ID *source = nullptr;
 };
 
 /** Where a moved row lands relative to the row it was aimed at. */
@@ -520,6 +553,25 @@ class StackGroupingEditor {
   {
     return false;
   }
+
+  /**
+   * Re-fill the maps of the fill row at \a ordinal with \a color, and record the colour on it.
+   *
+   * The fill is a colour rather than a repaint: what the row *stands for* changes with it, which
+   * is why the source records it and not just the pixels. Sources with no fill rows leave the
+   * default.
+   *
+   * \return true when the colour was applied, false when the row is not a fill this source can
+   * re-fill.
+   */
+  virtual bool row_fill_color_set(bContext & /*C*/,
+                                  const StackFocus & /*focus*/,
+                                  ID & /*owner*/,
+                                  int /*ordinal*/,
+                                  const float /*color*/[4]) const
+  {
+    return false;
+  }
 };
 
 /**
@@ -588,6 +640,21 @@ class StackEditor {
                       int /*ordinal*/) const
   {
     return -1;
+  }
+
+  /**
+   * #row_add with what the kind asked for in #StackAddKindInfo -- a colour, a source data-block.
+   *
+   * The default ignores \a args, which is right for a source whose kinds ask for nothing.
+   */
+  virtual int row_add(bContext &C,
+                      const StackFocus &focus,
+                      ID &owner,
+                      int kind,
+                      int ordinal,
+                      const StackAddArgs & /*args*/) const
+  {
+    return this->row_add(C, focus, owner, kind, ordinal);
   }
 
   /** Turn the row at \a ordinal on or off. */

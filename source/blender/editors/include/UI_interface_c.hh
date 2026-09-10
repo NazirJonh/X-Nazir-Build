@@ -2933,6 +2933,14 @@ void template_id_browser_button(Layout *layout,
 /** Pointer to #wmWindowManager::id_browser_grid_view_settings (the ID browser's grid settings). */
 PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm);
 /**
+ * Register the ID-browser popover's panel type (#UI_PT_id_browser), unless it already is.
+ *
+ * Idempotent. The popover is reachable from Python through #UILayout.popover, which cannot
+ * register the panel type itself, so a host that opens it from Python calls this -- the Outliner's
+ * Stack Layers header does, at its space-type registration.
+ */
+void id_browser_popover_register();
+/**
  * Return the browsed asset library by value from #wmWindowManager::id_browser_grid_view_settings,
  * resolved against the current Preferences (see #ed::asset::library_reference_ensure_resolved).
  */

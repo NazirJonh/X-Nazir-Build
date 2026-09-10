@@ -80,6 +80,34 @@ void BKE_paint_material_layer_marker_set(bNode &node, const bUUID &layer_id);
 int BKE_paint_material_layer_color_tag_get(const bNode &node);
 void BKE_paint_material_layer_color_tag_set(bNode &node, int color_tag);
 
+/**
+ * What a layer *is*, as opposed to #PaintMaterialLayerAddType, which is only how one was made.
+ *
+ * Stored as an id-property on the layer's Mix nodes -- on the group's own tree for a group -- the
+ * same way #BKE_paint_material_layer_marker_get stores identity. A layer with no marker at all
+ * reads as #Paint, which is what a stack authored before this contract, or wired by hand in the
+ * Shader Editor, actually is.
+ */
+enum class PaintMaterialLayerKind : int8_t {
+  Paint = 0,
+  Fill,
+  Material,
+  /* Adjustment is deliberately not defined yet; the enum is open so it can be. */
+};
+
+PaintMaterialLayerKind BKE_paint_material_layer_kind_get(const bNode &node);
+void BKE_paint_material_layer_kind_set(bNode &node, PaintMaterialLayerKind kind);
+
+/**
+ * The colour a #PaintMaterialLayerKind::Fill layer stands for.
+ *
+ * The marker rather than the pixels is the source of truth: a fill map can be painted over, and
+ * a painted-over map cannot be asked what colour it was filled with. Returns false, leaving
+ * \a r_color untouched, for a layer that carries no fill colour.
+ */
+bool BKE_paint_material_layer_fill_color_get(const bNode &node, float r_color[4]);
+void BKE_paint_material_layer_fill_color_set(bNode &node, const float color[4]);
+
 /** Why an edit was refused. Never partially applied. */
 enum class PaintMaterialLayerEditError : int8_t {
   None = 0,
@@ -153,6 +181,13 @@ enum class PaintMaterialLayerAddType : int8_t {
   Fill,
 };
 
+/** A map a caller already has for one channel of a layer about to be added. */
+struct PaintMaterialLayerChannelImage {
+  /** An #eMaterialPaintChannel. */
+  int channel = -1;
+  Image *image = nullptr;
+};
+
 /** How a layer is created. Defaults describe "an empty layer on top of the stack". */
 struct PaintMaterialLayerAddParams {
   PaintMaterialLayerAddType type = PaintMaterialLayerAddType::Image;
@@ -177,6 +212,17 @@ struct PaintMaterialLayerAddParams {
   float fill_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   /** Name for the layer; null uses the channel-scoped default the paint code already uses. */
   const char *name = nullptr;
+  /**
+   * Maps the caller already has, used as the new layer's map in their channels instead of creating
+   * one. A channel not listed gets a fresh map as usual.
+   *
+   * Ownership passes to #BKE_paint_material_layer_add with the call, whatever it returns: an image
+   * a new node shows keeps the user it was created with as that node's user, and every other one
+   * -- all of them when the add is refused, and any for a channel the layer is not created in -- is
+   * freed. Hand over fresh, otherwise unreferenced data-blocks only, and do not touch them after
+   * the call except through the layer.
+   */
+  Span<PaintMaterialLayerChannelImage> channel_images;
 };
 
 /**
@@ -335,6 +381,32 @@ bool BKE_paint_material_layer_channel_image_set(Main &bmain,
                                                 int channel,
                                                 Image &image,
                                                 PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * Re-fill the maps of the Fill layer at \a ordinal with \a color, in every wired channel, and
+ * record the colour on the layer's marker.
+ *
+ * Refused with #PaintMaterialLayerEditError::IndexOutOfRange for a layer that is not
+ * #PaintMaterialLayerKind::Fill: re-filling a painted layer would silently destroy work.
+ */
+bool BKE_paint_material_layer_fill_color_apply(Main &bmain,
+                                               Material &ma,
+                                               int ordinal,
+                                               const float color[4],
+                                               PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * Record \a kind on the layer at \a ordinal, on its node in every channel at once.
+ *
+ * This is the marker half of a layer's kind; the pixels are the caller's business (a Fill re-fills
+ * its maps, a Material's maps are the baked ones). A bare base is accepted: the marker is what
+ * makes a bare Image Texture read as anything other than a Paint layer.
+ */
+bool BKE_paint_material_layer_kind_set(Main &bmain,
+                                       Material &ma,
+                                       int ordinal,
+                                       PaintMaterialLayerKind kind,
+                                       PaintMaterialLayerEditError *r_error = nullptr);
 
 /**
  * The channels of \a ma that resolve to a layer stack, in #eMaterialPaintChannel order.

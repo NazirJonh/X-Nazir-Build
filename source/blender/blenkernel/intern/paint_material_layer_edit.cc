@@ -35,6 +35,9 @@
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
+#include "BLI_math_color.h"
+#include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
 #include "BLI_set.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_string_utf8.h"
@@ -50,6 +53,9 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
+
+#include "IMB_colormanagement.hh"
+#include "IMB_imbuf_types.hh"
 
 #include <utility>
 
@@ -81,6 +87,12 @@ const char *LAYER_GROUP_MARKER_PROP = "pbr_paint_node_group";
 const char *LAYER_GROUP_MARKER_VALUE = "LAYER_GROUP";
 /* Color tag for layer group folders, stored as IDProperty on the group node. */
 const char *LAYER_COLOR_TAG_PROP = "pbr_paint_color_tag";
+/* What kind of layer a node is -- #PaintMaterialLayerKind -- on the same nodes the layer marker
+ * lives on. A node without one reads as #Paint. */
+const char *LAYER_KIND_PROP = "pbr_paint_layer_kind";
+/* The colour a Fill layer stands for, as a 4-float array; see
+ * #BKE_paint_material_layer_fill_color_get. */
+const char *LAYER_FILL_COLOR_PROP = "pbr_paint_fill_color";
 
 /** Matches the reader in `paint_material_layer_model.cc`; see `08 §2.2`, Q2. */
 constexpr int LAYER_GROUP_NESTING_MAX = 8;
@@ -821,7 +833,25 @@ struct NewLayerNodes {
   /** Null only for the bottom layer of a stack being created from nothing. */
   bNode *mix = nullptr;
   Image *image = nullptr;
+  /**
+   * Whether #image was created by this transaction. A map the caller handed over through
+   * #PaintMaterialLayerAddParams::channel_images stays the caller's when the add is refused.
+   */
+  bool owns_image = true;
 };
+
+/**
+ * The map the caller handed over for \a channel, or null when this channel's map is to be created.
+ */
+static Image *layer_image_given(const PaintMaterialLayerAddParams &params, const int channel)
+{
+  for (const PaintMaterialLayerChannelImage &given : params.channel_images) {
+    if (given.channel == channel) {
+      return given.image;
+    }
+  }
+  return nullptr;
+}
 
 /**
  * A map for \a channel, in the color space and with the neutral value that channel needs.
@@ -1089,7 +1119,8 @@ void new_layer_nodes_discard(Main &bmain, bNodeTree &tree, MutableSpan<NewLayerN
       added.tex->id = nullptr;
       bke::node_remove_node(&bmain, tree, *added.tex, false);
     }
-    if (added.image != nullptr) {
+    if (added.image != nullptr && added.owns_image) {
+      /* A handed-over map is not this transaction's to free here; the add's own exit does. */
       BKE_id_free(&bmain, added.image);
     }
     added = NewLayerNodes{};
@@ -1127,6 +1158,8 @@ enum class LayerEditOp {
   MaskAdd,
   MaskRemove,
   ChannelImageSet,
+  FillColorSet,
+  KindSet,
   GroupMake,
   GroupAdd,
   Ungroup,
@@ -1559,6 +1592,29 @@ static bool layer_edit_plan_build(Main &bmain,
       return write_scope_ok();
     }
 
+    case LayerEditOp::FillColorSet: {
+      if (!forest_rows_resolve(
+              r_plan.per_channel, ordinal, r_plan.chains, r_plan.layer_index, r_error))
+      {
+        return false;
+      }
+      /* A bare base is accepted, the way #ChannelImageSet accepts one: a Fill added as the very
+       * first layer of a stack is a bare Image Texture carrying the kind marker itself. Whether
+       * the row actually *is* a Fill is the mutation's check, against the marker. */
+      return write_scope_ok();
+    }
+
+    case LayerEditOp::KindSet: {
+      if (!forest_rows_resolve(
+              r_plan.per_channel, ordinal, r_plan.chains, r_plan.layer_index, r_error))
+      {
+        return false;
+      }
+      /* A bare base is accepted, the way #FillColorSet accepts one: the marker is what makes a
+       * bare Image Texture read as anything other than a Paint layer. */
+      return write_scope_ok();
+    }
+
     case LayerEditOp::Duplicate: {
       if (!forest_rows_resolve(
               r_plan.per_channel, ordinal, r_plan.chains, r_plan.layer_index, r_error))
@@ -1849,6 +1905,61 @@ void BKE_paint_material_layer_color_tag_set(bNode &node, const int color_tag)
   IDP_AddToGroup(properties, IDP_NewInt(color_tag, LAYER_COLOR_TAG_PROP));
 }
 
+PaintMaterialLayerKind BKE_paint_material_layer_kind_get(const bNode &node)
+{
+  if (node.prop == nullptr) {
+    return PaintMaterialLayerKind::Paint;
+  }
+  const IDProperty *kind = IDP_GetPropertyTypeFromGroup(node.prop, LAYER_KIND_PROP, IDP_INT);
+  if (kind == nullptr) {
+    return PaintMaterialLayerKind::Paint;
+  }
+  return static_cast<PaintMaterialLayerKind>(IDP_int_get(kind));
+}
+
+void BKE_paint_material_layer_kind_set(bNode &node, const PaintMaterialLayerKind kind)
+{
+  IDProperty *properties = node_properties_ensure(node);
+  IDProperty *kind_prop = IDP_GetPropertyTypeFromGroup(properties, LAYER_KIND_PROP, IDP_INT);
+  if (kind_prop != nullptr) {
+    IDP_int_set(kind_prop, int8_t(kind));
+    return;
+  }
+  IDP_AddToGroup(properties, IDP_NewInt(int8_t(kind), LAYER_KIND_PROP));
+}
+
+bool BKE_paint_material_layer_fill_color_get(const bNode &node, float r_color[4])
+{
+  if (node.prop == nullptr) {
+    return false;
+  }
+  const IDProperty *fill = IDP_GetPropertyTypeFromGroup(
+      node.prop, LAYER_FILL_COLOR_PROP, IDP_ARRAY);
+  if (fill == nullptr || fill->subtype != IDP_FLOAT || fill->len != 4) {
+    return false;
+  }
+  copy_v4_v4(r_color,
+             static_cast<const float *>(IDP_array_voidp_get(const_cast<IDProperty *>(fill))));
+  return true;
+}
+
+void BKE_paint_material_layer_fill_color_set(bNode &node, const float color[4])
+{
+  IDProperty *properties = node_properties_ensure(node);
+  IDProperty *fill = IDP_GetPropertyTypeFromGroup(properties, LAYER_FILL_COLOR_PROP, IDP_ARRAY);
+  if (fill != nullptr && fill->subtype == IDP_FLOAT && fill->len == 4) {
+    copy_v4_v4(static_cast<float *>(IDP_array_voidp_get(fill)), color);
+    return;
+  }
+  if (fill != nullptr) {
+    /* A stale array of the wrong shape is replaced rather than reused. */
+    IDP_RemoveFromGroup(properties, fill);
+    IDP_FreeProperty(fill);
+  }
+  IDP_AddToGroup(properties,
+                 bke::idprop::create(LAYER_FILL_COLOR_PROP, Span<float>(color, 4)).release());
+}
+
 const char *BKE_paint_material_layer_edit_error_message(const PaintMaterialLayerEditError error)
 {
   switch (error) {
@@ -2102,13 +2213,32 @@ bool BKE_paint_material_layer_add(Main &bmain,
                                   PaintMaterialLayerEditError *r_error)
 {
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  /* The maps the caller handed over are this call's from the start. The ones a surviving node shows
+   * are recorded as they are assigned; every exit frees the rest, so no path -- a refusal in the
+   * preflight, a node that could not be created, a channel the layer is not added to -- can leave
+   * one in the file with its creation user and nothing showing it. */
+  Set<Image *> given_used;
+  auto given_release = [&]() {
+    Set<Image *> released;
+    for (const PaintMaterialLayerChannelImage &given : params.channel_images) {
+      if (given.image != nullptr && !given_used.contains(given.image) &&
+          released.add(given.image))
+      {
+        BKE_id_free(&bmain, given.image);
+      }
+    }
+  };
   auto fail = [&](const PaintMaterialLayerEditError reason) {
+    /* Nodes that showed a handed-over map were discarded before this, so none of them is used. */
+    given_used.clear();
+    given_release();
     if (r_error != nullptr) {
       *r_error = reason;
     }
     return false;
   };
   auto succeed = [&](const int ordinal) {
+    given_release();
     if (r_ordinal != nullptr) {
       *r_ordinal = ordinal;
     }
@@ -2181,7 +2311,16 @@ bool BKE_paint_material_layer_add(Main &bmain,
 
     NewLayerNodes base;
     base.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
-    base.image = layer_image_create(bmain, base.channel, params);
+    if (Image *given = layer_image_given(params, base.channel)) {
+      base.image = given;
+      base.owns_image = false;
+      /* The base carries no layer marker, so its map carries no layer identity either -- the
+       * same rule #BKE_paint_material_layer_channel_image_set applies to a base's map. */
+      base.image->paint_layer_id = bUUID{};
+    }
+    else {
+      base.image = layer_image_create(bmain, base.channel, params);
+    }
     if (base.image == nullptr) {
       return fail(PaintMaterialLayerEditError::CreationFailed);
     }
@@ -2196,6 +2335,15 @@ bool BKE_paint_material_layer_add(Main &bmain,
     /* Only assign the image once the node is known to be usable, so a failed setup cannot leave a
      * node pointing at an ID about to be freed. */
     base.tex->id = &base.image->id;
+    if (!base.owns_image) {
+      given_used.add(base.image);
+    }
+    if (params.type == PaintMaterialLayerAddType::Fill) {
+      /* The first layer of a stack is a bare Image Texture with no Mix node; the kind marker lives
+       * on the node the row reads as, which here is the texture itself. */
+      BKE_paint_material_layer_kind_set(*base.tex, PaintMaterialLayerKind::Fill);
+      BKE_paint_material_layer_fill_color_set(*base.tex, params.fill_color);
+    }
     bke::node_position_relative(
         *base.tex, terminal_node, nullptr, *const_cast<bNodeSocket *>(terminal));
     relink_into(
@@ -2224,7 +2372,13 @@ bool BKE_paint_material_layer_add(Main &bmain,
   for (const int channel : new_channels) {
     NewLayerNodes nodes;
     nodes.channel = channel;
-    nodes.image = layer_image_create(bmain, channel, params);
+    if (Image *given = layer_image_given(params, channel)) {
+      nodes.image = given;
+      nodes.owns_image = false;
+    }
+    else {
+      nodes.image = layer_image_create(bmain, channel, params);
+    }
     if (nodes.image == nullptr) {
       added.append(nodes);
       new_layer_nodes_discard(bmain, tree, added);
@@ -2232,6 +2386,10 @@ bool BKE_paint_material_layer_add(Main &bmain,
     }
     nodes.tex = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
     nodes.tex->id = &nodes.image->id;
+    if (!nodes.owns_image) {
+      /* Released again by `fail` if the add is refused after this point. */
+      given_used.add(nodes.image);
+    }
     if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
       /* Tangent-space maps do not blend component-wise; the engine's own group does it properly. */
       bNodeTree *group = BKE_paint_material_normal_combine_group_ensure(bmain);
@@ -2403,6 +2561,12 @@ bool BKE_paint_material_layer_add(Main &bmain,
     }
     bke::node_position_relative(*entry.tex, *entry.layer.node, entry.tex_color, *entry.layer.top);
     BKE_paint_material_layer_marker_set(*entry.layer.node, layer_id);
+    if (params.type == PaintMaterialLayerAddType::Fill) {
+      /* The kind and the colour live on the marker, not only in the pixels: a painted-over fill
+       * map cannot be asked what it was filled with. */
+      BKE_paint_material_layer_kind_set(*entry.layer.node, PaintMaterialLayerKind::Fill);
+      BKE_paint_material_layer_fill_color_set(*entry.layer.node, params.fill_color);
+    }
     if (entry.layer.image != nullptr) {
       entry.layer.image->paint_layer_id = layer_id;
     }
@@ -4443,6 +4607,155 @@ bool BKE_paint_material_layer_channel_image_set(Main &bmain,
 
   BKE_ntree_update_after_single_tree_change(bmain, tree);
   paint_layer_edit_committed(bmain, ma, true);
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
+  }
+  return true;
+}
+
+/** The colour a map of a Fill layer is (re-)filled with; what #layer_image_create starts one as. */
+static void fill_map_color_for(const int channel, const float fill_color[4], float r_color[4])
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  /* A scalar channel has one meaningful component, and the fill color's red carries it. */
+  const float value = info.is_color ? 0.0f : fill_color[0];
+  r_color[0] = info.is_color ? fill_color[0] : value;
+  r_color[1] = info.is_color ? fill_color[1] : value;
+  r_color[2] = info.is_color ? fill_color[2] : value;
+  r_color[3] = 1.0f;
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    /* Flat tangent space, so a filled Normal layer starts out as "no change". */
+    r_color[0] = 0.5f;
+    r_color[1] = 0.5f;
+    r_color[2] = 1.0f;
+  }
+}
+
+/**
+ * Overwrite every pixel of \a image with \a color, and tell the readers the pixels moved.
+ *
+ * \a color is in the same convention #BKE_image_add_generated takes, so a refill and a fresh map
+ * agree on what a colour means.
+ */
+static void image_fill_flat(Image &image, const float color[4])
+{
+  /* A generated map nobody has painted is rebuilt from its tile's colour whenever its buffer is
+   * dropped -- a file reload, a memory purge -- so that colour has to move with the pixels, or the
+   * refill silently reverts to the colour the layer was created with. A map that has been painted
+   * is saved from its buffer instead, and the refill makes it dirty like any other edit. */
+  const bool regenerates = image.source == IMA_SRC_GENERATED && !BKE_image_is_dirty(&image);
+  if (regenerates) {
+    if (ImageTile *tile = BKE_image_get_tile(&image, 0)) {
+      copy_v4_v4(tile->gen_color, color);
+    }
+  }
+
+  ImageUser iuser;
+  BKE_imageuser_default(&iuser);
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, &iuser, &lock);
+  if (ibuf != nullptr) {
+    /* The same colour-space handling the generator applies (see `add_ibuf_for_tile`): a byte
+     * buffer takes the colour as given, a float buffer of a colour map takes it linearized. */
+    if (uint8_t *bytes = ibuf->byte_data_for_write()) {
+      BKE_image_buf_fill_color(bytes, nullptr, ibuf->x, ibuf->y, color);
+    }
+    if (float *floats = ibuf->float_data_for_write()) {
+      float float_color[4];
+      if (IMB_colormanagement_space_name_is_data(image.colorspace_settings.name)) {
+        copy_v4_v4(float_color, color);
+      }
+      else {
+        srgb_to_linearrgb_v4(float_color, color);
+      }
+      BKE_image_buf_fill_color(nullptr, floats, ibuf->x, ibuf->y, float_color);
+    }
+    ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+    if (!regenerates) {
+      BKE_image_mark_dirty(&image, ibuf);
+    }
+    BKE_image_release_ibuf(&image, ibuf, lock);
+  }
+  BKE_image_partial_update_mark_full_update(&image);
+}
+
+bool BKE_paint_material_layer_fill_color_apply(Main &bmain,
+                                               Material &ma,
+                                               const int ordinal,
+                                               const float color[4],
+                                               PaintMaterialLayerEditError *r_error)
+{
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  auto fail = [&](const PaintMaterialLayerEditError reason) {
+    if (r_error != nullptr) {
+      *r_error = reason;
+    }
+    return false;
+  };
+
+  /* 1. Preflight: the row exists, the material is writable, and every channel's node for the row
+   * carries the Fill kind -- all decided without writing a byte. Re-filling a painted layer would
+   * silently destroy work, so the kind check runs across all channels before the first pixel. */
+  LayerEditPlan plan;
+  if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::FillColorSet, plan, error)) {
+    return fail(error);
+  }
+  for (const ChannelChain *chain : plan.chains) {
+    const ChainLayer &layer = chain->layers[plan.layer_index];
+    if (BKE_paint_material_layer_kind_get(*layer.node) != PaintMaterialLayerKind::Fill) {
+      return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+    }
+  }
+  /* 2. Shape: nothing to convert. A bare base takes the fill as its own map, exactly the way
+   * #layer_image_create made it; a Mix layer takes it through the map its top socket shows. */
+  /* 3. Mutation: re-fill every wired channel's map, then record the colour on the marker. */
+  for (ChannelChain *chain : plan.chains) {
+    ChainLayer &layer = chain->layers[plan.layer_index];
+    /* The colour is recorded in every channel, like the kind: a reader may look at any of them. */
+    BKE_paint_material_layer_fill_color_set(*layer.node, color);
+    if (layer.image == nullptr) {
+      /* A channel the layer never got a map for behaves as unwired for this layer. */
+      continue;
+    }
+    float map_color[4];
+    fill_map_color_for(chain->channel, color, map_color);
+    image_fill_flat(*layer.image, map_color);
+  }
+
+  paint_layer_edit_committed(bmain, ma, false);
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
+  }
+  return true;
+}
+
+bool BKE_paint_material_layer_kind_set(Main &bmain,
+                                       Material &ma,
+                                       const int ordinal,
+                                       const PaintMaterialLayerKind kind,
+                                       PaintMaterialLayerEditError *r_error)
+{
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  auto fail = [&](const PaintMaterialLayerEditError reason) {
+    if (r_error != nullptr) {
+      *r_error = reason;
+    }
+    return false;
+  };
+
+  /* 1. Preflight: the row exists and the material is writable, without writing a byte. */
+  LayerEditPlan plan;
+  if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::KindSet, plan, error)) {
+    return fail(error);
+  }
+  /* 2. Mutation: the kind marker is written on the layer's node in every channel at once, so the
+   * row reads as one kind no matter which channel a reader looks at. */
+  for (ChannelChain *chain : plan.chains) {
+    BKE_paint_material_layer_kind_set(*chain->layers[plan.layer_index].node, kind);
+  }
+
+  paint_layer_edit_committed(bmain, ma, false);
   if (r_error != nullptr) {
     *r_error = PaintMaterialLayerEditError::None;
   }

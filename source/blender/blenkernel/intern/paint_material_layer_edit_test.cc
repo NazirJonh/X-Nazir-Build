@@ -19,6 +19,7 @@
 #include <string>
 
 #include "BLI_listbase.h"
+#include "BLI_math_vector.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_uuid.h"
@@ -158,6 +159,32 @@ class PaintMaterialLayerEditTest : public bke::BlenderGTestBase {
     EXPECT_EQ(after.links, before.links);
     EXPECT_EQ(after.markers, before.markers);
     EXPECT_EQ(after.images, before.images);
+  }
+
+  /** The Mix node of the layer named \a label, or null. */
+  bNode *find_layer_node(const char *label)
+  {
+    for (bNode &node : material->nodetree->nodes) {
+      if (node.type_legacy == SH_NODE_MIX && STREQ(node.label, label)) {
+        return &node;
+      }
+    }
+    return nullptr;
+  }
+
+  /** Add a Fill layer named \a name, filled with \a color, and return where it landed. */
+  int add_fill_layer(const float color[4], const char *name)
+  {
+    PaintMaterialLayerAddParams params;
+    params.image_size = 8;
+    params.type = PaintMaterialLayerAddType::Fill;
+    copy_v4_v4(params.fill_color, color);
+    params.name = name;
+    int ordinal = -1;
+    PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+    EXPECT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, &ordinal, &error))
+        << int(error);
+    return ordinal;
   }
 };
 
@@ -402,6 +429,186 @@ TEST_F(PaintMaterialLayerEditTest, added_layers_share_one_marker_and_layer_id)
   }
   EXPECT_TRUE(marker_found);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Layer kinds
+ *
+ * What a layer *is* -- Paint, Fill, Material -- as a marker on the same nodes the identity marker
+ * lives on. A node without one reads as Paint, which is what a hand-wired stack is.
+ * \{ */
+
+TEST_F(PaintMaterialLayerEditTest, layer_kind_defaults_to_paint)
+{
+  /* A stack built by hand, the way an old file or a Shader Editor wiring looks. */
+  build_stack(3);
+  ASSERT_TRUE(BKE_paint_material_layer_markers_ensure(*material));
+
+  for (bNode &node : material->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_MIX_RGB_LEGACY) {
+      EXPECT_EQ(BKE_paint_material_layer_kind_get(node), PaintMaterialLayerKind::Paint);
+      float fill_color[4];
+      EXPECT_FALSE(BKE_paint_material_layer_fill_color_get(node, fill_color));
+    }
+  }
+}
+
+TEST_F(PaintMaterialLayerEditTest, layer_kind_round_trips)
+{
+  /* Three layers: a bare base and the two Mix nodes the loop below marks. */
+  build_stack(3);
+  ASSERT_TRUE(BKE_paint_material_layer_markers_ensure(*material));
+
+  int index = 0;
+  for (bNode &node : material->nodetree->nodes) {
+    if (node.type_legacy != SH_NODE_MIX_RGB_LEGACY) {
+      continue;
+    }
+    const PaintMaterialLayerKind kind = (index++ == 0) ? PaintMaterialLayerKind::Fill :
+                                                         PaintMaterialLayerKind::Material;
+    BKE_paint_material_layer_kind_set(node, kind);
+    EXPECT_EQ(BKE_paint_material_layer_kind_get(node), kind);
+  }
+  EXPECT_EQ(index, 2);
+
+  /* Reading back through a fresh reader of the same nodes, not the same pointer. */
+  const Vector<std::string> names = layer_names();
+  ASSERT_EQ(names.size(), 2);
+}
+
+TEST_F(PaintMaterialLayerEditTest, fill_layer_add_records_its_color)
+{
+  build_stack(2);
+  const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  const int ordinal = add_fill_layer(color, "Filler");
+  ASSERT_EQ(ordinal, 2);
+
+  bNode *filler = find_layer_node("Filler");
+  ASSERT_NE(filler, nullptr);
+  EXPECT_EQ(BKE_paint_material_layer_kind_get(*filler), PaintMaterialLayerKind::Fill);
+  float recorded[4];
+  ASSERT_TRUE(BKE_paint_material_layer_fill_color_get(*filler, recorded));
+  EXPECT_V4_NEAR(float4(recorded), float4(color), 1e-6f);
+}
+
+TEST_F(PaintMaterialLayerEditTest, fill_color_apply_refills_every_wired_channel)
+{
+  /* The Fill as the very first layer of an empty material: a bare Image Texture on Base Color. */
+  const float color[4] = {0.1f, 0.9f, 0.5f, 1.0f};
+  const int ordinal = add_fill_layer(color, "Filler");
+  ASSERT_EQ(ordinal, 0);
+
+  /* Wire Roughness as a second channel, with its own bare base carrying the same kind marker --
+   * the shape a Fill added to a wired channel has. */
+  bNodeTree &tree = *material->nodetree;
+  bNode &principled = principled_node();
+  Image *roughness_image = BKE_image_add_generated(
+      bmain, 8, 8, "Roughness TexLayer", 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
+  bNode *roughness_tex = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+  roughness_tex->id = &roughness_image->id;
+  BKE_paint_material_layer_kind_set(*roughness_tex, PaintMaterialLayerKind::Fill);
+  BKE_paint_material_layer_fill_color_set(*roughness_tex, color);
+  bke::node_add_link(tree,
+                     *roughness_tex,
+                     *bke::node_find_socket(*roughness_tex, SOCK_OUT, "Color"_ustr),
+                     principled,
+                     *bke::node_find_socket(principled, SOCK_IN, "Roughness"_ustr));
+
+  /* A different colour for the re-fill: the scalar Roughness map has to take the red component,
+   * while the Base Color map takes all three. */
+  const float new_color[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(
+      BKE_paint_material_layer_fill_color_apply(*bmain, *material, ordinal, new_color, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 1);
+  Image *color_image = entries[0].channel_images.lookup_default(
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr);
+  Image *roughness_map = entries[0].channel_images.lookup_default(
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS, nullptr);
+  ASSERT_NE(color_image, nullptr);
+  ASSERT_NE(roughness_map, nullptr);
+
+  /* Layer maps are byte buffers, so the expectation is whatever the generator's own fill writes
+   * for the same colour -- comparing against it keeps the test free of the byte conversion. */
+  auto expect_pixel = [](Image *image, const float expected_color[4]) {
+    uint8_t expected[4];
+    BKE_image_buf_fill_color(expected, nullptr, 1, 1, expected_color);
+    void *lock = nullptr;
+    ImBuf *buffer = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_NE(buffer->byte_buffer.data, nullptr);
+    for (int i = 0; i < 4; i++) {
+      EXPECT_EQ(buffer->byte_buffer.data[i], expected[i]) << "component " << i;
+    }
+    BKE_image_release_ibuf(image, buffer, lock);
+  };
+  expect_pixel(color_image, new_color);
+  const float roughness_expected[4] = {0.2f, 0.2f, 0.2f, 1.0f};
+  expect_pixel(roughness_map, roughness_expected);
+
+  /* A generated map nobody painted must rebuild to the new colour, not the creation one. */
+  EXPECT_V4_NEAR(float4(BKE_image_get_tile(color_image, 0)->gen_color), float4(new_color), 1e-6f);
+
+  /* The marker records the colour the layer now stands for. The layer is the stack's bare base,
+   * so the marker lives on the Image Texture that shows its map. */
+  bNode *filler = nullptr;
+  for (bNode &node : material->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id == &color_image->id) {
+      filler = &node;
+      break;
+    }
+  }
+  ASSERT_NE(filler, nullptr);
+  float recorded[4];
+  ASSERT_TRUE(BKE_paint_material_layer_fill_color_get(*filler, recorded));
+  EXPECT_V4_NEAR(float4(recorded), float4(new_color), 1e-6f);
+}
+
+TEST_F(PaintMaterialLayerEditTest, fill_color_apply_refuses_a_paint_layer)
+{
+  build_stack(3);
+  const GraphShape before = graph_shape();
+
+  const float color[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  EXPECT_FALSE(BKE_paint_material_layer_fill_color_apply(*bmain, *material, 1, color, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::IndexOutOfRange);
+  expect_graph_unchanged(before);
+}
+
+TEST_F(PaintMaterialLayerEditTest, layer_kind_survives_reorder_and_duplicate)
+{
+  build_stack(2);
+  const float color[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  const int ordinal = add_fill_layer(color, "Filler");
+  ASSERT_EQ(ordinal, 2);
+
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_reorder(*bmain, *material, 2, 1, &error));
+  bNode *moved = find_layer_node("Filler");
+  ASSERT_NE(moved, nullptr);
+  EXPECT_EQ(BKE_paint_material_layer_kind_get(*moved), PaintMaterialLayerKind::Fill);
+
+  int copy_ordinal = -1;
+  /* After the reorder the Fill sits at 1, directly above the bare base. */
+  ASSERT_TRUE(BKE_paint_material_layer_duplicate(*bmain, *material, 1, &copy_ordinal, &error));
+  int copies = 0;
+  for (bNode &node : material->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_MIX && STREQ(node.label, "Filler")) {
+      EXPECT_EQ(BKE_paint_material_layer_kind_get(node), PaintMaterialLayerKind::Fill);
+      float recorded[4];
+      ASSERT_TRUE(BKE_paint_material_layer_fill_color_get(node, recorded));
+      EXPECT_V4_NEAR(float4(recorded), float4(color), 1e-6f);
+      copies++;
+    }
+  }
+  EXPECT_EQ(copies, 2);
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Transactional refusals

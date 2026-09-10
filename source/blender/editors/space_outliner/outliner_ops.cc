@@ -63,6 +63,7 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_group_add);
   WM_operatortype_append(OUTLINER_OT_stack_layer_ungroup);
   WM_operatortype_append(OUTLINER_OT_stack_layer_color_tag_set);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_fill_color_set);
   WM_operatortype_append(OUTLINER_OT_stack_layer_merge_down);
   WM_operatortype_append(OUTLINER_OT_stack_focus_sub_index);
   WM_operatortype_append(OUTLINER_OT_stack_layer_rename);

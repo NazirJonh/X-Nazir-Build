@@ -1137,6 +1137,16 @@ bool rec_exempt_set(const Mesh &mesh, const SculptLayer *layer);
 bool rec_armed_set(const Mesh &mesh, const SculptLayer *layer);
 
 /**
+ * Carry #SCULPT_LAYER_REC_ARMED from \a mesh_old over to \a mesh_new when a memfile undo re-reads
+ * the mesh. The writer strips the bit, so without this any undo step that re-reads a changed mesh
+ * would re-enter sculpt mode with REC off, and the next stroke would silently edit the base. REC is
+ * session state that undo never restores in either direction (see
+ * #ed::sculpt_paint::layers::rec_active_preserve_after_undo for the sculpt steps), so the bit is
+ * re-armed on whatever layer is active in the restored tree.
+ */
+void rec_armed_undo_preserve(const Mesh &mesh_new, const Mesh &mesh_old);
+
+/**
  * #node_mask_for_composite for a #SCULPT_LAYER_DOMAIN_GRID layer, additionally requiring that the
  * masks are cut one block per grid (`block_size == grid_area`) — the contract the multires paths
  * rely on when they use a grid index as a block index. Masks cut any other way are dropped and the

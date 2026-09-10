@@ -35,6 +35,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "ED_curve_patch.hh"
 #include "ED_render.hh"
 #include "ED_undo.hh"
 #include "ED_util.hh"
@@ -84,7 +85,10 @@ static bool memfile_undosys_step_encode(bContext * /*C*/, Main *bmain, UndoStep 
   /* can be null, use when set. */
   MemFileUndoStep *us_prev = reinterpret_cast<MemFileUndoStep *>(
       BKE_undosys_step_find_by_type(ustack, BKE_UNDOSYS_TYPE_MEMFILE));
+  /* A live Curve Patch preview is not committed data: record the surface it was stamped on. */
+  ED_curve_patch_sessions_preview_swap(*bmain);
   us->data = BKE_memfile_undo_encode(bmain, us_prev ? us_prev->data : nullptr);
+  ED_curve_patch_sessions_preview_swap(*bmain);
   us->step.data_size = us->data->undo_size;
 
   /* Store the fact that we should not re-use old data with that undo step, and reset the Main

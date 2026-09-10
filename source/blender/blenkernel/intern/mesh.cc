@@ -538,6 +538,12 @@ static void mesh_blend_read_data(BlendDataReader *reader, ID *id)
    * RGBA colors. */
 }
 
+static void mesh_undo_preserve(BlendLibReader * /*reader*/, ID *id_new, ID *id_old)
+{
+  blender::bke::sculpt_layers::rec_armed_undo_preserve(*id_cast<const Mesh *>(id_new),
+                                                       *id_cast<const Mesh *>(id_old));
+}
+
 IDTypeInfo IDType_ID_ME = {
     .id_code = Mesh::id_type,
     .id_filter = FILTER_ID_ME,
@@ -564,7 +570,7 @@ IDTypeInfo IDType_ID_ME = {
     .blend_read_data = mesh_blend_read_data,
     .blend_read_after_liblink = nullptr,
 
-    .blend_read_undo_preserve = nullptr,
+    .blend_read_undo_preserve = mesh_undo_preserve,
 
     .lib_override_apply_post = nullptr,
 };

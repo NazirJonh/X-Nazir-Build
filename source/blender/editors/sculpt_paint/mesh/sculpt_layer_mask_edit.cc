@@ -808,10 +808,22 @@ static void mask_edit_cancel(Object &object)
  *
  * \{ */
 
+/* Mask edits recompose the positions, which a live Curve Patch preview must not be folded into; see
+ * #curve_patch_blocks_layer_edit. */
+static bool mask_ops_curve_patch_poll(bContext *C, Object &ob)
+{
+  if (curve_patch_blocks_layer_edit(*CTX_data_main(C), ob)) {
+    CTX_wm_operator_poll_msg_set(C,
+                                 "Finish the Curve Patch first (Return to apply, Esc to cancel)");
+    return false;
+  }
+  return true;
+}
+
 static bool mask_ops_poll(bContext *C)
 {
-  const Object *ob = CTX_data_active_object(C);
-  return ob && (ob->mode & OB_MODE_SCULPT);
+  Object *ob = CTX_data_active_object(C);
+  return ob && (ob->mode & OB_MODE_SCULPT) && mask_ops_curve_patch_poll(C, *ob);
 }
 
 /* UI refresh after a mask change. The redraw belongs to the operator here for the same reason it
@@ -2498,7 +2510,7 @@ static bool mask_edit_finish_poll(bContext *C)
   if (object == nullptr || !(object->mode & OB_MODE_SCULPT)) {
     return false;
   }
-  return mask_edit_open_node(*object) != nullptr;
+  return mask_edit_open_node(*object) != nullptr && mask_ops_curve_patch_poll(C, *object);
 }
 
 /* No fan-out: addresses the active object's open session via #mask_edit_open_node (no sync_uid

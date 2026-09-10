@@ -297,12 +297,37 @@ static PointerRNA rna_Mesh_sculpt_layers_active_get(PointerRNA *ptr)
   return RNA_pointer_create_with_parent(*ptr, RNA_SculptLayer, layer);
 }
 
+static const char *rna_sculpt_layers_curve_patch_refusal =
+    "Finish the Curve Patch first (Return to apply, Esc to cancel)";
+
+/* Shared by every sculpt layer property whose change would redirect or disturb a live Curve Patch;
+ * see #ed::sculpt_paint::layers::curve_patch_blocks_layer_edit. Works for any struct owned by the
+ * mesh (#Mesh, #SculptLayer, #SculptLayerGroup), since only the owner ID is read. */
+static bool rna_sculpt_layers_curve_patch_blocks(const PointerRNA *ptr)
+{
+  return G_MAIN != nullptr && ed::sculpt_paint::layers::curve_patch_blocks_layer_edit_for_mesh(
+                                  *G_MAIN, *rna_mesh(ptr));
+}
+
+static int rna_sculpt_layers_curve_patch_editable(const PointerRNA *ptr, const char **r_info)
+{
+  if (rna_sculpt_layers_curve_patch_blocks(ptr)) {
+    *r_info = rna_sculpt_layers_curve_patch_refusal;
+    return PropertyFlag(0);
+  }
+  return PROP_EDITABLE;
+}
+
 static void rna_Mesh_sculpt_layers_active_set(PointerRNA *ptr,
                                               PointerRNA value,
                                               ReportList *reports)
 {
   Mesh *mesh = rna_mesh(ptr);
   SculptLayer *layer = static_cast<SculptLayer *>(value.data);
+  if (rna_sculpt_layers_curve_patch_blocks(ptr)) {
+    BKE_report(reports, RPT_ERROR, rna_sculpt_layers_curve_patch_refusal);
+    return;
+  }
   /* #active_set records a uid, and every mesh hands out uids from its own counter starting at 1, so
    * a layer belonging to *another* mesh is not rejected downstream — it resolves to whichever local
    * layer happens to share that uid, silently activating the wrong one. The precondition is stated
@@ -607,11 +632,23 @@ static const char *rna_SculptLayer_value_change_refusal(const Mesh *mesh, const 
   return nullptr;
 }
 
+/* The domain-independent refusals, checked for grid layers too; see
+ * #rna_sculpt_layers_curve_patch_blocks. */
+static const char *rna_SculptLayer_change_refusal(PointerRNA *ptr,
+                                                  const Mesh *mesh,
+                                                  const SculptLayer &layer)
+{
+  if (rna_sculpt_layers_curve_patch_blocks(ptr)) {
+    return "a Curve Patch is being edited";
+  }
+  return rna_SculptLayer_value_change_refusal(mesh, layer);
+}
+
 static void rna_SculptLayer_influence_set(PointerRNA *ptr, float value)
 {
   Mesh *mesh = rna_mesh(ptr);
   SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
-  if (const char *refusal = rna_SculptLayer_value_change_refusal(mesh, *layer)) {
+  if (const char *refusal = rna_SculptLayer_change_refusal(ptr, mesh, *layer)) {
     /* Silently ignored from the UI (the list greys these controls out); report so scripts and
      * out-of-context edits can tell the change had no effect. */
     CLOG_WARN(&LOG, "Sculpt layer influence change ignored: %s", refusal);
@@ -642,7 +679,7 @@ static void rna_SculptLayer_enabled_set(PointerRNA *ptr, bool value)
   if (was_enabled == value) {
     return;
   }
-  if (const char *refusal = rna_SculptLayer_value_change_refusal(mesh, *layer)) {
+  if (const char *refusal = rna_SculptLayer_change_refusal(ptr, mesh, *layer)) {
     /* Silently ignored from the UI (the list greys these controls out); report so scripts and
      * out-of-context edits can tell the change had no effect. */
     CLOG_WARN(&LOG, "Sculpt layer visibility change ignored: %s", refusal);
@@ -676,6 +713,10 @@ static void rna_SculptLayerGroup_influence_set(PointerRNA *ptr, float value)
 {
   Mesh *mesh = rna_mesh(ptr);
   SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
+  if (rna_sculpt_layers_curve_patch_blocks(ptr)) {
+    CLOG_WARN(&LOG, "Sculpt layer group influence change ignored: a Curve Patch is being edited");
+    return;
+  }
   value = (value < -10.0f) ? -10.0f : (value > 10.0f ? 10.0f : value);
 
   const Span<SculptLayer *> descendants = bke::sculpt_layers::layers(*group);
@@ -3525,6 +3566,7 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(
       prop, "Influence", "How much this layer contributes to the final sculpted shape");
+  RNA_def_property_editable_func(prop, "rna_sculpt_layers_curve_patch_editable");
   RNA_def_property_update(prop, 0, "rna_Mesh_update_sculpt_layers");
 
   prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
@@ -3532,10 +3574,13 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
       prop, "rna_SculptLayer_enabled_get", "rna_SculptLayer_enabled_set");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(prop, "Enabled", "Include this layer in the combined result");
+  RNA_def_property_editable_func(prop, "rna_sculpt_layers_curve_patch_editable");
   RNA_def_property_update(prop, 0, "rna_Mesh_update_sculpt_layers");
 
   prop = RNA_def_property(srna, "lock", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_LOCKED);
+  /* No setter to refuse in: a lock set mid-session would make the commit edit the base. */
+  RNA_def_property_editable_func(prop, "rna_sculpt_layers_curve_patch_editable");
   RNA_def_property_ui_text(prop, "Lock", "Protect this layer from being recorded into");
   /* Notifier only, as for #SculptLayerGroup.color_tag: the lock state changes what the sculpt layer
    * list draws but nothing that is evaluated, so there is no update callback to run. */
@@ -3626,6 +3671,7 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(
       prop, "Influence", "How much this group's layers contribute to the final sculpted shape");
+  RNA_def_property_editable_func(prop, "rna_sculpt_layers_curve_patch_editable");
   RNA_def_property_update(prop, 0, "rna_Mesh_update_sculpt_layer_group");
 
   prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
@@ -4196,6 +4242,7 @@ static void rna_def_mesh(BlenderRNA *brna)
                                  nullptr,
                                  nullptr);
   RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_editable_func(prop, "rna_sculpt_layers_curve_patch_editable");
   RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
   RNA_def_property_ui_text(prop, "Active Sculpt Layer", "Active sculpt layer");
 

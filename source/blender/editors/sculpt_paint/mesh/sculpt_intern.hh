@@ -1962,6 +1962,15 @@ void rec_active_set(Object &object, bool armed);
 /* Stroke recording into the active layer. */
 void stroke_record_begin(const Depsgraph &depsgraph, Object &object);
 void stroke_record_end(const Depsgraph &depsgraph, Object &object);
+/**
+ * #stroke_record_end for an edit that wrote the positions directly instead of through
+ * #PositionDeformData (e.g. the Curve Patch relief commit), so nothing was accumulated into the layer
+ * per dab. The edit must be bracketed like a stroke: #stroke_record_begin while the surface is still
+ * unmodified, then the position undo nodes pushed against that surface, then the edit written, then
+ * this call before the undo step is closed. With REC off it folds the edit into the base like any
+ * other base stroke, so the layer invariant holds either way.
+ */
+void stroke_record_end_direct_write(const Depsgraph &depsgraph, Object &object);
 /** Revert a cancelled stroke's recording, restoring the pre-stroke influence/visibility state. */
 void stroke_record_cancel(const Depsgraph &depsgraph, Object &object);
 

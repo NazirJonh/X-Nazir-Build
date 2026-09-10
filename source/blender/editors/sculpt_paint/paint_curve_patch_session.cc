@@ -22,6 +22,7 @@
 
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
+#include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -37,6 +38,7 @@
 #include "BLI_bit_vector.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
+#include "BLI_listbase.h"
 #include "BLI_utildefines.h"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
@@ -50,6 +52,9 @@
 #include "ED_curve_patch.hh"
 #include "ED_paint.hh"
 #include "ED_view3d.hh"
+
+#include "WM_api.hh"
+#include "WM_types.hh"
 
 #include "paint_curve_intern.hh"
 #include "paint_curve_patch_sampler.hh"
@@ -530,6 +535,15 @@ const char *curve_patch_active_session_message(const bContext &C)
 /** \name Session Teardown
  * \{ */
 
+/* The sculpt layer controls are locked for exactly the lifetime of a session (see
+ * #layers::curve_patch_blocks_layer_edit), but polls and RNA editable callbacks are only re-run on
+ * redraw. Without this the Properties editor keeps showing them in their old state until the cursor
+ * happens to pass over it. */
+static void curve_patch_session_tag_layer_ui(Object &ob)
+{
+  WM_main_add_notifier(NC_GEOM | ND_DATA, ob.data);
+}
+
 void curve_patch_session_free(Object &ob)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
@@ -538,6 +552,7 @@ void curve_patch_session_free(Object &ob)
   MEM_delete(ss.curve_patch_session);
   ss.curve_patch_session = nullptr;
   ss.free_curve_patch_session = nullptr;
+  curve_patch_session_tag_layer_ui(ob);
 }
 
 bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
@@ -711,6 +726,7 @@ bool curve_patch_session_publish(Object &ob,
 
   ss.curve_patch_session = &session;
   ss.free_curve_patch_session = curve_patch_discard_on_session_end;
+  curve_patch_session_tag_layer_ui(ob);
   session.apply.element_num = session.effect->element_num(ob);
   session.apply.faces_num = -1;
   session.apply.corners_num = -1;
@@ -1221,6 +1237,26 @@ void ED_curve_patch_session_undo_push(Object &ob)
     return;
   }
   ed::sculpt_paint::curve_patch_undo_push(*patch);
+}
+
+void ED_curve_patch_sessions_preview_swap(Main &bmain)
+{
+  for (Object &ob : bmain.objects) {
+    const SculptSession *ss = ob.runtime ? ob.runtime->sculpt_session : nullptr;
+    if (ss == nullptr || ss->curve_patch_session == nullptr) {
+      continue;
+    }
+    ed::sculpt_paint::CurvePatchSession &patch = *ss->curve_patch_session;
+    /* A mesh that changed under the session no longer matches the snapshot keys; the same guard
+     * #curve_patch_restore_only applies. Nothing changes between the paired calls, so both make the
+     * same decision. */
+    if (!patch.effect || patch.apply.invalidated ||
+        ed::sculpt_paint::curve_patch_apply_target_changed(ob, patch))
+    {
+      continue;
+    }
+    patch.effect->preview_swap(ob);
+  }
 }
 
 /** \} */

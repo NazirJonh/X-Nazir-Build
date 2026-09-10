@@ -112,6 +112,7 @@
 #include "IMB_thumbs.hh"
 
 #include "ED_asset.hh"
+#include "ED_curve_patch.hh"
 #include "ED_datafiles.h"
 #include "ED_fileselect.hh"
 #include "ED_image.hh"
@@ -2306,6 +2307,8 @@ static bool wm_file_write(bContext *C,
                "layer's mask weights in place of the sculpt mask. Close the mask session and "
                "repaint the sculpt mask");
   }
+  /* Same reasoning: an uncommitted Curve Patch preview is not user data. */
+  const CurvePatchPreviewWriteGuard curve_patch_guard(*bmain);
 
   ED_editors_flush_edits(bmain);
 
@@ -2451,6 +2454,8 @@ bool WM_autosave_write(wmWindowManager *wm, Main *bmain, ReportList *reports)
                "A sculpt layer mask session could not be suspended: the auto-save was written with "
                "the layer's mask weights in place of the sculpt mask");
   }
+  /* See #wm_file_write. */
+  const CurvePatchPreviewWriteGuard curve_patch_guard(*bmain);
 
   ED_editors_flush_edits(bmain);
   ED_image_internal_autosave_flush(bmain);
@@ -2674,6 +2679,8 @@ static wmOperatorStatus wm_homefile_write_exec(bContext *C, wmOperator *op)
                "A sculpt layer mask session could not be suspended: the startup file was written "
                "with the layer's mask weights in place of the sculpt mask");
   }
+  /* See #wm_file_write. */
+  const CurvePatchPreviewWriteGuard curve_patch_guard(*bmain);
 
   ED_editors_flush_edits(bmain);
 

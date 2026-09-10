@@ -157,6 +157,19 @@ class CurvePatchEffect {
                       Object &ob,
                       const CurvePatchSession &patch) = 0;
 
+  /**
+   * Exchange the live preview with the pre-patch snapshot for every snapshotted element of the
+   * original #Mesh. Calling it twice is the identity. Exists for the memfile undo encoder: the
+   * preview is not committed, so a global undo snapshot taken mid-session (a texture assignment, any
+   * `OPTYPE_UNDO` operator) must capture the surface as it was before the patch, or undoing to that
+   * step brings the uncommitted preview back -- and with sculpt layers, a surface that no longer
+   * matches `base + layers`.
+   *
+   * Nothing is tagged: two calls leave the data exactly as it was. Only data the memfile writes
+   * needs this; multires grids and image pixels are not part of it, so no-op by default.
+   */
+  virtual void preview_swap(Object & /*ob*/) {}
+
   /** Elements the snapshot currently holds. Exists only for the `CURVE_PATCH_PROFILING` line in
    * `curve_patch_restore_and_restamp()`, which reported it before the snapshot moved off the
    * cache; no non-debug caller may rely on it. */

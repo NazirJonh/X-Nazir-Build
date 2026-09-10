@@ -1656,6 +1656,13 @@ void rec_active_set(Object &object, const bool armed)
   if (ss == nullptr || ss->layers.rec_active == armed) {
     return;
   }
+  /* A live Curve Patch settles REC only at its commit (see #stroke_record_end_direct_write), so
+   * disarming it mid-session would silently send the whole relief into the base. Refused here, the
+   * one writer every disarming path goes through, rather than at each caller; the REC operator also
+   * refuses in its poll so the user is told why. */
+  if (!armed && ss->curve_patch_session != nullptr) {
+    return;
+  }
   /* Tested rather than asserted, for the reason #rec_exemption_refresh gives: the session-bearing
    * exit paths this can be reached from also run for objects that carry no sculpt layer tree. */
   if (object.type != OB_MESH || object.data == nullptr) {
@@ -1910,6 +1917,50 @@ Vector<Object *> fanout_targets(const Main &bmain, Object &active_ob)
   result.append(&active_ob);
   result.extend(sync_group_members(bmain, active_ob));
   return result;
+}
+
+static bool curve_patch_live_on(const Object &object)
+{
+  const SculptSession *ss = object.runtime ? object.runtime->sculpt_session : nullptr;
+  return ss != nullptr && ss->curve_patch_session != nullptr;
+}
+
+/* Reached from RNA editable callbacks, i.e. on every redraw of every layer row, so the common case of
+ * no live patch anywhere is answered by one pass over the objects before any sync-group walk. */
+static bool curve_patch_live_anywhere(const Main &bmain)
+{
+  for (const Object &ob : bmain.objects) {
+    if (curve_patch_live_on(ob)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool curve_patch_blocks_layer_edit(const Main &bmain, Object &object)
+{
+  if (!curve_patch_live_anywhere(bmain)) {
+    return false;
+  }
+  for (const Object *ob : fanout_targets(bmain, object)) {
+    if (curve_patch_live_on(*ob)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool curve_patch_blocks_layer_edit_for_mesh(const Main &bmain, const Mesh &mesh)
+{
+  if (!curve_patch_live_anywhere(bmain)) {
+    return false;
+  }
+  for (Object &ob : bmain.objects) {
+    if (ob.data == &mesh.id && curve_patch_blocks_layer_edit(bmain, ob)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool sync_group_all_targets_selected(bContext *C, Object &active_ob)
@@ -2606,7 +2657,9 @@ MutableSpan<float3> active_record_data(Object &object)
   return bke::sculpt_layers::data_get(*layer);
 }
 
-void cancel_recorded_offsets(const Depsgraph &depsgraph, Object &object)
+/* Adds (\a sign 1) or removes (\a sign -1) the net displacement of the stroke in progress to or from
+ * the active layer's data. */
+static void recorded_offsets_apply(const Depsgraph &depsgraph, Object &object, const float sign)
 {
   SculptSession *ss = session_of(object);
   if (!ss || !ss->layers.recording) {
@@ -2620,9 +2673,8 @@ void cancel_recorded_offsets(const Depsgraph &depsgraph, Object &object)
   if (!layer || !layer->data || layer->domain != domain_for(object)) {
     return;
   }
-  /* The stroke was accumulated into the layer per dab (#PositionDeformData::deform). Undo that by
-   * subtracting the net offset, recomputed from the still post-stroke positions and the pre-stroke
-   * positions kept in the in-progress per-node undo data. This must run before the undo system
+  /* The net offset is recomputed from the still post-stroke positions and the pre-stroke positions
+   * kept in the in-progress per-node undo data, which is why this must run before the undo system
    * restores the positions and before #push_end clears that per-node data.
    *
    * Under a shape key the basis (#mesh.vert_positions) is untouched by the stroke — the brush edited
@@ -2634,30 +2686,55 @@ void cancel_recorded_offsets(const Depsgraph &depsgraph, Object &object)
   const Span<float3> positions = ss->shapekey_active ?
                                      bke::pbvh::vert_positions_eval(depsgraph, object) :
                                      mesh.vert_positions();
-  const auto revert = [&](const Span<int> verts, const Span<float3> orig) {
+  const auto offset = [&](const Span<int> verts, const Span<float3> orig) {
     for (const int64_t j : verts.index_range()) {
       const int v = verts[j];
       if (v >= 0 && v < data.size() && v < positions.size()) {
-        data[v] -= positions[v] - orig[j];
+        data[v] += (positions[v] - orig[j]) * sign;
       }
     }
   };
   if (ss->shapekey_active) {
-    undo::foreach_recorded_eval_position_mesh(object, revert);
+    undo::foreach_recorded_eval_position_mesh(object, offset);
   }
   else {
-    undo::foreach_recorded_position_mesh(object, revert);
+    undo::foreach_recorded_position_mesh(object, offset);
   }
+}
+
+void cancel_recorded_offsets(const Depsgraph &depsgraph, Object &object)
+{
+  recorded_offsets_apply(depsgraph, object, -1.0f);
+}
+
+void stroke_record_end_direct_write(const Depsgraph &depsgraph, Object &object)
+{
+  /* The mesh path of #stroke_record_end only stores undo deltas for what #PositionDeformData already
+   * accumulated per dab, so the accumulation is done here in one go. Grids need nothing extra: their
+   * layer is always captured at stroke end by the reshape. */
+  recorded_offsets_apply(depsgraph, object, 1.0f);
+  stroke_record_end(depsgraph, object);
 }
 
 /* -------------------------------------------------------------------------------------------------
  * Operators
  */
 
+/* Shared by both layer polls; see #curve_patch_blocks_layer_edit. */
+static bool layers_curve_patch_poll(bContext *C, Object &ob)
+{
+  if (curve_patch_blocks_layer_edit(*CTX_data_main(C), ob)) {
+    CTX_wm_operator_poll_msg_set(C,
+                                 "Finish the Curve Patch first (Return to apply, Esc to cancel)");
+    return false;
+  }
+  return true;
+}
+
 static bool layers_poll(bContext *C)
 {
-  const Object *ob = CTX_data_active_object(C);
-  return ob && (ob->mode & OB_MODE_SCULPT);
+  Object *ob = CTX_data_active_object(C);
+  return ob && (ob->mode & OB_MODE_SCULPT) && layers_curve_patch_poll(C, *ob);
 }
 
 /* The layer operators the mesh properties panel must also offer outside sculpt mode: selecting the
@@ -2674,7 +2751,7 @@ static bool layers_poll(bContext *C)
  * for it. */
 static bool layers_object_mode_poll(bContext *C)
 {
-  const Object *ob = CTX_data_active_object(C);
+  Object *ob = CTX_data_active_object(C);
   if (ob == nullptr || ob->type != OB_MESH) {
     return false;
   }
@@ -2690,7 +2767,8 @@ static bool layers_object_mode_poll(bContext *C)
       return false;
     }
   }
-  return (ob->mode & OB_MODE_SCULPT) || ob->mode == OB_MODE_OBJECT;
+  return ((ob->mode & OB_MODE_SCULPT) || ob->mode == OB_MODE_OBJECT) &&
+         layers_curve_patch_poll(C, *ob);
 }
 
 /* UI-only refresh for operations that do not change the combined surface (add / move / select).

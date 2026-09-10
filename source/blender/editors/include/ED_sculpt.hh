@@ -205,6 +205,19 @@ namespace layers {
 bool flush_interactive_update(Main &bmain, Mesh &mesh);
 
 /**
+ * True while a Curve Patch is live on \a object or on any member of its sculpt-layer sync group.
+ *
+ * The patch records its relief into the layers only at commit, against whatever the active layer,
+ * its lock and visibility, Solo Base and REC say *then*, and its preview is on the positions until
+ * that point. Any layer edit in between either redirects the commit (a locked or hidden target, or
+ * Solo Base, sends it into the base; a new active layer receives it) or recomposes the positions and
+ * folds the preview into the runtime base. Every layer-editing entry point refuses while this holds.
+ */
+bool curve_patch_blocks_layer_edit(const Main &bmain, Object &object);
+/** #curve_patch_blocks_layer_edit for every object using \a mesh, for the RNA layer properties. */
+bool curve_patch_blocks_layer_edit_for_mesh(const Main &bmain, const Mesh &mesh);
+
+/**
  * Grid-domain influence or visibility change from the RNA setter: request an honest geometry
  * re-evaluation (the CCG is rebuilt from `MDisps + sum(enabled layers)`, which already reflects
  * the changed value) and emit notifiers. MDisps are never written.

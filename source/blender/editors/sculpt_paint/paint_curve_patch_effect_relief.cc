@@ -76,6 +76,7 @@ class ReliefEffect : public CurvePatchEffect {
               const Depsgraph &depsgraph,
               Object &ob,
               const CurvePatchSession &patch) override;
+  void preview_swap(Object &ob) override;
   int64_t snapshot_size() const override;
 
  private:
@@ -564,17 +565,16 @@ void ReliefEffect::push_position_step(const Scene &scene,
                                       const CurvePatchSession &patch,
                                       const bool force_push)
 {
-  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
-
   /* The array `orig_positions` is keyed into, and the same one `ReliefEffect::apply_pass()`
-   * writes the relief to -- there is no intermediate buffer on either path. */
-  MutableSpan<float3> positions;
-  if (pbvh.type() == bke::pbvh::Type::Grids) {
-    positions = ob.runtime->sculpt_session->subdiv_ccg->positions;
-  }
-  else {
-    positions = id_cast<Mesh *>(ob.data)->vert_positions_for_write();
-  }
+   * writes the relief to -- there is no intermediate buffer on either path. Re-fetched after the
+   * layer recording starts, which may recompose the mesh positions into a new buffer. */
+  const auto positions_for_write = [&]() -> MutableSpan<float3> {
+    if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Grids) {
+      return ob.runtime->sculpt_session->subdiv_ccg->positions;
+    }
+    return id_cast<Mesh *>(ob.data)->vert_positions_for_write();
+  };
+  MutableSpan<float3> positions = positions_for_write();
 
   /* Saved in the map's own iteration order. The write-back loop below walks it the same way, which
    * is well-defined precisely because nothing between the two loops mutates the map. */
@@ -584,6 +584,14 @@ void ReliefEffect::push_position_step(const Scene &scene,
     relief.append(positions[item.key]);
     positions[item.key] = item.value;
   }
+
+  /* The relief is written straight into the positions, bypassing the per-dab layer accumulation of
+   * #PositionDeformData, so the commit is bracketed as a stroke of its own. Only here, where the
+   * surface is pristine again, can the layers measure it: the runtime base derived now cannot absorb
+   * the relief, and neither can the recompose a moved REC exemption triggers. Without this an armed
+   * REC was ignored and the relief landed in the base. */
+  layers::stroke_record_begin(depsgraph, ob);
+  positions = positions_for_write();
 
   IndexMaskMemory memory;
   undo::push_begin_ex(scene, ob, "Curve Patch");
@@ -596,6 +604,9 @@ void ReliefEffect::push_position_step(const Scene &scene,
   for (const auto item : orig_positions_.items()) {
     positions[item.key] = relief[i++];
   }
+
+  /* Needs the step's per-node undo data, so it has to precede the `push_end_ex()` below. */
+  layers::stroke_record_end_direct_write(depsgraph, ob);
 
   /* Forced into the stack only when a face-set step follows: that step's `push_begin_ex()` would
    * free this one out of `ustack->step_init` (this operator carries `OPTYPE_UNDO`, so
@@ -858,6 +869,19 @@ void ReliefEffect::end_restamp(Object &ob, CurvePatchSession &patch)
    * #update_type -- all three effects wanted it, differing only in the kind. */
   if (patch.active_item().params.final_quality) {
     this->smooth_relief(ob, patch);
+  }
+}
+
+void ReliefEffect::preview_swap(Object &ob)
+{
+  /* Grids keep the preview in the CCG, which the memfile does not write while the session owns the
+   * stroke cache (see #ED_editors_flush_edits_for_object_ex). */
+  if (orig_positions_.is_empty() || bke::object::pbvh_get(ob)->type() != bke::pbvh::Type::Mesh) {
+    return;
+  }
+  MutableSpan<float3> positions = id_cast<Mesh *>(ob.data)->vert_positions_for_write();
+  for (const int key : orig_positions_.keys()) {
+    std::swap(positions[key], *orig_positions_.lookup_ptr(key));
   }
 }
 

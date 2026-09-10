@@ -69,6 +69,7 @@ class MaskEffect : public CurvePatchEffect {
               const Depsgraph &depsgraph,
               Object &ob,
               const CurvePatchSession &patch) override;
+  void preview_swap(Object &ob) override;
   int64_t snapshot_size() const override
   {
     return orig_masks_.size();
@@ -404,6 +405,24 @@ void MaskEffect::commit(const Scene &scene,
   }
 
   undo::push_end_ex(ob, false);
+}
+
+void MaskEffect::preview_swap(Object &ob)
+{
+  /* Grids keep the mask in the CCG, which the memfile does not write while a session is live. */
+  if (orig_masks_.is_empty() || bke::object::pbvh_get(ob)->type() != bke::pbvh::Type::Mesh) {
+    return;
+  }
+  Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  bke::SpanAttributeWriter<float> masks =
+      mesh.attributes_for_write().lookup_for_write_span<float>(".sculpt_mask");
+  if (!masks) {
+    return;
+  }
+  for (const int key : orig_masks_.keys()) {
+    std::swap(masks.span[key], *orig_masks_.lookup_ptr(key));
+  }
+  masks.finish();
 }
 
 }  // namespace

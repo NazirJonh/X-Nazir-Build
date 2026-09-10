@@ -90,6 +90,7 @@
 
 #include "ED_anim_api.hh"
 #include "ED_asset.hh"
+#include "ED_curve_patch.hh"
 #include "ED_gpencil_legacy.hh"
 #include "ED_grease_pencil.hh"
 #include "ED_image.hh"
@@ -550,6 +551,8 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
                   "A sculpt layer mask session could not be suspended; session recovery is being "
                   "saved with the layer's mask weights in place of the user's sculpt mask.");
       }
+      /* See #wm_file_write: an uncommitted Curve Patch preview is not recovered as user data. */
+      const CurvePatchPreviewWriteGuard curve_patch_guard(*bmain);
 
       ED_editors_flush_edits(bmain);
       ED_image_internal_autosave_flush(bmain);

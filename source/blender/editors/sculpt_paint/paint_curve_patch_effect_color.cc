@@ -152,6 +152,7 @@ class ColorEffect : public CurvePatchEffect {
               const Depsgraph &depsgraph,
               Object &ob,
               const CurvePatchSession &patch) override;
+  void preview_swap(Object &ob) override;
   int64_t snapshot_size() const override;
 
  private:
@@ -749,6 +750,44 @@ void ColorEffect::commit(const Scene &scene,
    * stay parked in `ustack->step_init` for `wm_operator_finished()`. Forcing it here would cost
    * the user one dead Ctrl+Z before the color is undone. */
   undo::push_end_ex(ob, false);
+}
+
+void ColorEffect::preview_swap(Object &ob)
+{
+  Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  if (has_color_target_ && !orig_colors_.is_empty() && this->attribute_matches(mesh)) {
+    bke::GSpanAttributeWriter colors = this->color_writer(mesh);
+    if (colors) {
+      Vector<int> indices;
+      Array<float4> values(orig_colors_.size());
+      indices.reserve(orig_colors_.size());
+      int i = 0;
+      for (const auto item : orig_colors_.items()) {
+        indices.append(item.key);
+        values[i++] = item.value;
+      }
+      color::swap_gathered_colors(indices, colors.span, values);
+      colors.finish();
+      /* The snapshot has to hold what the attribute held, so the next call swaps it back. */
+      for (const int j : indices.index_range()) {
+        orig_colors_.add_overwrite(indices[j], values[j]);
+      }
+    }
+  }
+
+  bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+  for (ScalarTarget &target : scalar_targets_) {
+    if (target.orig_values.is_empty()) {
+      continue;
+    }
+    bke::SpanAttributeWriter<float> attribute = attributes.lookup_for_write_span<float>(
+        target.name);
+    if (!attribute) {
+      continue;
+    }
+    swap_scalar_snapshot(target.orig_values, attribute.span);
+    attribute.finish();
+  }
 }
 
 }  // namespace

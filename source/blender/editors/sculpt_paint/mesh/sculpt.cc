@@ -101,8 +101,9 @@
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
-#include "ED_mesh.hh"
 #include "ED_image.hh"
+#include "ED_mesh.hh"
+#include "ED_object.hh"
 #include "ED_paint.hh"
 #include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
@@ -110,9 +111,9 @@
 #include "ED_undo.hh"
 #include "ED_view3d.hh"
 
-#include "../paint_curve_patch_session.hh"
 #include "../paint_clone.hh"
 #include "../paint_clone_stroke.hh"
+#include "../paint_curve_patch_session.hh"
 #include "../paint_intern.hh"
 #include "paint_material_source.hh"
 #include "sculpt_automask.hh"
@@ -153,7 +154,7 @@ namespace ed::sculpt_paint {
 #if SCULPT_DONE_DEBUG_PERF
 #  define SCULPT_DONE_PERF(...) printf(__VA_ARGS__)
 #else
-template<typename... Args> inline void sculpt_done_perf_discard(const Args &... /*args*/) {}
+template<typename... Args> inline void sculpt_done_perf_discard(const Args &.../*args*/) {}
 #  define SCULPT_DONE_PERF(...) sculpt_done_perf_discard(__VA_ARGS__)
 #endif
 
@@ -1037,8 +1038,7 @@ static int sculpt_brush_needs_normal(const SculptSession &ss, const Brush &brush
            brush.project_ray_direction_type == BRUSH_PROJECT_RAY_DIRECTION_PLANE_NORMAL) ||
           (mask_tex->tex && mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA) ||
           brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE ||
-          material_paint_uses_area_mapping(brush) ||
-          brush_uses_topology_rake(ss, brush) ||
+          material_paint_uses_area_mapping(brush) || brush_uses_topology_rake(ss, brush) ||
           BKE_brush_has_cube_tip(&brush, PaintMode::Sculpt));
 }
 
@@ -3265,10 +3265,10 @@ static SculptBrushTexSampleCoords sculpt_brush_texture_sample_coords_get(
   const float3 symm_point = sculpt_point_to_first_symm_pass(cache, float3(point));
 
   if (sculpt_texture_uses_brush_local_projection(*coord_mtex, brush)) {
-    /* Area mapping always projects through the stroke's local matrix, which #update_brush_local_mat
-     * builds once per symmetry pass from the mask texture rotation. Every caller derives its
-     * coordinates from that same slot, so the matrix must never be rebuilt here: doing it per
-     * sample would put a full matrix construction in the per-vertex loop. */
+    /* Area mapping always projects through the stroke's local matrix, which
+     * #update_brush_local_mat builds once per symmetry pass from the mask texture rotation. Every
+     * caller derives its coordinates from that same slot, so the matrix must never be rebuilt
+     * here: doing it per sample would put a full matrix construction in the per-vertex loop. */
     if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
         !sculpt_point_inside_texture_rectangle_clip(cache, symm_point))
     {
@@ -4755,8 +4755,8 @@ brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
     return {all_leaf_nodes(pbvh, memory), std::nullopt, std::nullopt};
   }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLOTH) {
-    /* The cloth brush gathers its nodes from the simulation area, not from the brush radius, so the
-     * sculpt-layer extension below (which is radius based) does not apply. */
+    /* The cloth brush gathers its nodes from the simulation area, not from the brush radius, so
+     * the sculpt-layer extension below (which is radius based) does not apply. */
     return {cloth::brush_affected_nodes_gather(ob, brush, memory), std::nullopt, std::nullopt};
   }
 
@@ -4782,19 +4782,18 @@ brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
     radius_scale = std::max(radius_scale, float(M_SQRT2));
   }
   else if (face_set::brush_texture_data_mode_is_active(brush) && ss.cache &&
-           ss.cache->non_uniform_scale_active &&
-           brush.falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE)
+           ss.cache->non_uniform_scale_active && brush.falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE)
   {
     /* Face Sets/Color From Texture is a discrete, single-shot per-face assignment measured
      * against the exact same #StrokeCache.position_scale-weighted distance the per-vertex falloff
      * below uses (see #calc_brush_distances_squared), instead of the isotropic `radius / min_axis`
      * padding the generic branch below applies. That padding exists to guarantee coverage for
      * *accumulating* falloff brushes without tearing the mesh at the node-search boundary (see the
-     * comment below); FST has no such accumulation to protect, and on strongly non-uniformly scaled
-     * secondary objects the isotropic padding inflates the node search area (and therefore the
-     * O(faces) texture sampling cost) by up to `1 / min_axis` squared for no benefit. Testing nodes
-     * directly against the true falloff volume avoids both the over-inclusion and the risk of
-     * under-covering the compressed axis that a flat skip of the padding would introduce. */
+     * comment below); FST has no such accumulation to protect, and on strongly non-uniformly
+     * scaled secondary objects the isotropic padding inflates the node search area (and therefore
+     * the O(faces) texture sampling cost) by up to `1 / min_axis` squared for no benefit. Testing
+     * nodes directly against the true falloff volume avoids both the over-inclusion and the risk
+     * of under-covering the compressed axis that a flat skip of the padding would introduce. */
     const float3 &position_scale = ss.cache->position_scale;
     const float3 scaled_location = ss.cache->location_symm * position_scale;
     float radius_sq = math::square(ss.cache->radius);
@@ -4817,13 +4816,13 @@ brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
   else {
     /* Node culling uses a raw local-space sphere (#node_in_sphere), but whenever the
      * non-uniform-scale correction is active the per-vertex falloff is measured through
-     * #StrokeCache.position_scale — a world-isotropic sphere (#calc_brush_distances_squared). Where
-     * position_scale shrinks a local axis
+     * #StrokeCache.position_scale — a world-isotropic sphere (#calc_brush_distances_squared).
+     * Where position_scale shrinks a local axis
      * (< 1) the falloff reaches past the raw radius; expand the node search to cover it so no
      * falloff-affected vertex is culled. Otherwise the factor drops abruptly at the node-search
-     * boundary and accumulating brushes that do not restore between steps (e.g. Snake Hook) tear the
-     * mesh along it. Over-inclusion is harmless: the extra vertices simply receive a zero falloff
-     * factor. */
+     * boundary and accumulating brushes that do not restore between steps (e.g. Snake Hook) tear
+     * the mesh along it. Over-inclusion is harmless: the extra vertices simply receive a zero
+     * falloff factor. */
     if (ss.cache && ss.cache->non_uniform_scale_active) {
       const float3 &position_scale = ss.cache->position_scale;
       const float min_axis = std::min({position_scale.x, position_scale.y, position_scale.z});
@@ -4836,10 +4835,10 @@ brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
               std::nullopt};
   }
 
-  /* Sculpt layers: the gather above works on the composed surface, but with visible layers the brush
-   * measures its falloff on the base view. Add the nodes that footprint reaches, so that no element
-   * with a non-zero factor sits in an ungathered node (which would decide "moves or not" per node
-   * and carve the stroke along node borders). No-op without layers. */
+  /* Sculpt layers: the gather above works on the composed surface, but with visible layers the
+   * brush measures its falloff on the base view. Add the nodes that footprint reaches, so that no
+   * element with a non-zero factor sits in an ungathered node (which would decide "moves or not"
+   * per node and carve the stroke along node borders). No-op without layers. */
   result.node_mask = layers::base_view_extend_node_mask(
       ob, result.node_mask, ss.cache->radius * radius_scale, memory);
   return result;
@@ -5062,10 +5061,8 @@ void do_brush_action(const Depsgraph &depsgraph,
 
 #if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   const bool perf_trace = brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-                          SCULPT_use_image_paint_brush(paint_mode_settings,
-                                                       ob,
-                                                       &brush,
-                                                       sd.paint.visible_material_channels);
+                          SCULPT_use_image_paint_brush(
+                              paint_mode_settings, ob, &brush, sd.paint.visible_material_channels);
   double perf_dab_start = 0.0;
   if (perf_trace) {
     const int symmetry_passes = ss.cache ? (ss.cache->radial_symmetry_pass + 1) *
@@ -5681,9 +5678,8 @@ static void apply_deferred_texture_data(const Depsgraph &depsgraph,
                                         const Brush &brush,
                                         PaintModeSettings &paint_mode_settings)
 {
-  if (!texture_data_is_deferred(brush) ||
-      (!face_set::brush_texture_data_writes_face_sets(brush) &&
-       !face_set::brush_texture_data_writes_color(brush)))
+  if (!texture_data_is_deferred(brush) || (!face_set::brush_texture_data_writes_face_sets(brush) &&
+                                           !face_set::brush_texture_data_writes_color(brush)))
   {
     return;
   }
@@ -7637,6 +7633,22 @@ class ScopedStrokeObjectOverride {
 
 }  // namespace detail
 
+/* A Curve Patch is a stroke method layered on an ordinary sculpt brush; the Roll stroke method
+ * with "Edit After Stroke" bridges into the same editor. Both hand off to
+ * #SCULPT_OT_curve_patch_edit in #SculptPaintStroke::done(), which is single-object: the session,
+ * its effect snapshot and its commit undo step are all keyed to one mesh. So the stroke that
+ * spawns it is confined to one object -- the one under the anchor click -- rather than run as a
+ * multi-object stroke whose other objects would leak their #StrokeCache and keep an un-undoable
+ * anchor dab (see the Curve Patch multi-object design doc). */
+static bool stroke_method_is_curve_patch_target(const Brush *brush)
+{
+  if (brush == nullptr || !bke::brush::supports_curve_patch(*brush)) {
+    return false;
+  }
+  return brush->stroke_method == BRUSH_STROKE_CURVE_PATCH ||
+         (brush->stroke_method == BRUSH_STROKE_ROLL && brush->roll_edit_after);
+}
+
 struct SculptPaintStroke final : public PaintStroke {
   Main *bmain_;
   Sculpt *sculpt_;
@@ -7705,6 +7717,17 @@ struct SculptPaintStroke final : public PaintStroke {
   /** Settle or roll back layer-recording / eraser / temporary-active state from #test_start. */
   void layer_recording_finish(bool is_cancel, bool stroke_started, Brush *brush);
 
+  /** Free `SculptSession::cache` for every #MultiObjectStrokeContext.mode_objects member except
+   * \a keep. Used on the Curve Patch handoff early-returns in #done, where the normal free loop is
+   * skipped; a no-op when the set has been confined to one object (see
+   * #stroke_method_is_curve_patch_target). */
+  void free_stroke_caches_except(Object *keep);
+
+  /** Make \a target the scene's active object so the Curve Patch modal editor -- which resolves
+   * everything through #CTX_data_active_object -- operates on it. Returns false without changing
+   * anything when \a target has no #Base in the active view layer. */
+  bool activate_curve_patch_target(Object &target);
+
   bool get_location(float out[3], const float mouse[2], bool force_original) override;
   bool test_start(wmOperator *op, const float mouse[2]) override;
   void redraw(bool final) override;
@@ -7725,7 +7748,11 @@ bool SculptPaintStroke::get_location(float out[3], const float mouse[2], bool fo
   const bool hit = stroke_get_location_bvh(
       *this->depsgraph, this->vc, sculpt_, this->brush, out, mouse, force_original, &hit_ob);
 
-  if (hit && hit_ob && hit_ob != this->object) {
+  /* Curve Patch / Roll-Edit-After strokes are pinned to the object #test_start resolved under
+   * the anchor click (see #stroke_method_is_curve_patch_target); promoting mid-drag would take
+   * `this->object` out of the single-element #MultiObjectStrokeContext.mode_objects. */
+  if (hit && hit_ob && hit_ob != this->object && !stroke_method_is_curve_patch_target(this->brush))
+  {
     /* WORKAROUND: this raycast queries every sculpt-mode object, unfiltered by brush support (see
      * #paintable_mode_objects, which #test_start uses to drop Multires/Dyntopo objects from
      * #MultiObjectStrokeContext.mode_objects for color-attribute brushes -- Paint/Smear/Blur --
@@ -7852,10 +7879,7 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
       const BrushMaterialPaint &brush_paint = *brush->material_paint;
       for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
         if (!BKE_paint_material_channel_writes_to_target(
-                brush_paint,
-                paint_mode_init,
-                sd.paint.visible_material_channels,
-                info.channel))
+                brush_paint, paint_mode_init, sd.paint.visible_material_channels, info.channel))
         {
           continue;
         }
@@ -7929,10 +7953,7 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
           continue;
         }
         if (!BKE_paint_material_channel_writes_to_target(
-                brush_paint,
-                paint_mode_init,
-                sd.paint.visible_material_channels,
-                info.channel))
+                brush_paint, paint_mode_init, sd.paint.visible_material_channels, info.channel))
         {
           continue;
         }
@@ -8565,9 +8586,9 @@ bool sculpt_brush_uses_image_canvas(const Brush &brush,
                                     Object &ob)
 {
   if (!ELEM(brush.sculpt_brush_type,
-             SCULPT_BRUSH_TYPE_PAINT,
-             SCULPT_BRUSH_TYPE_TEXTURE_FILL,
-             SCULPT_BRUSH_TYPE_CLONE))
+            SCULPT_BRUSH_TYPE_PAINT,
+            SCULPT_BRUSH_TYPE_TEXTURE_FILL,
+            SCULPT_BRUSH_TYPE_CLONE))
   {
     return false;
   }
@@ -8800,9 +8821,9 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
   }
 
   /* Face Set IDs allocated mid-stroke must be free on every object the stroke can reach, not just
-   * on the one that happens to allocate them -- see #StrokeCache::shared_next_face_set_id. Computed
-   * once per stroke (the first step finds no cache carrying it yet) and only for brushes that can
-   * allocate an ID at all, since the scan walks every face of every mesh in the mode. */
+   * on the one that happens to allocate them -- see #StrokeCache::shared_next_face_set_id.
+   * Computed once per stroke (the first step finds no cache carrying it yet) and only for brushes
+   * that can allocate an ID at all, since the scan walks every face of every mesh in the mode. */
   int shared_next_face_set_id = 0;
   for (Object *object_ptr : objects) {
     const SculptSession *ss_iter = object_ptr->runtime->sculpt_session;
@@ -8931,8 +8952,7 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     const float3 y_axis(0.0f, 1.0f, 0.0f);
     const float3 z_axis(0.0f, 0.0f, 1.0f);
     ob.runtime->world_to_object = math::invert(ob.object_to_world());
-    const float4x4 view_to_object = ob.world_to_object() *
-                                    float4x4(cache->vc->rv3d->viewinv);
+    const float4x4 view_to_object = ob.world_to_object() * float4x4(cache->vc->rv3d->viewinv);
     cache->view_normal = math::normalize(math::transform_direction(view_to_object, z_axis));
     /* Camera right/up, in the same object space as #view_normal: together they are the basis a
      * View-mapped brush texture (e.g. a Normal-map decal) is authored in. */
@@ -9051,7 +9071,6 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 {
   /* Don't start the stroke until `mval` goes over the mesh. */
   if (over_mesh(*this->depsgraph, this->vc, *sculpt_, this->brush, op, mval)) {
-    Object &ob = *this->object;
     Brush *brush = this->brush;
 
     /* NOTE: This should be removed when paint mode is available. Paint mode can force based on the
@@ -9064,8 +9083,6 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
         v3d->shading.color_type = V3D_SHADING_VERTEX_COLOR;
       }
     }
-
-    ED_view3d_init_mats_rv3d(&ob, this->vc.rv3d);
 
     /* Capture the sculpt-mode object set once for the whole stroke (see
      * #MultiObjectStrokeContext.mode_objects). #mode_objects must stay stable for the rest of the
@@ -9086,6 +9103,29 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
         return false;
       }
     }
+
+    /* Curve Patch (and Roll + "Edit After Stroke") is single-object: pin this stroke to the mesh
+     * under the anchor click so #stroke_cache_init below creates exactly one #StrokeCache and the
+     * multi-object apply / undo / layer-recording paths degenerate to single-object. Resolved with
+     * the same front-most raycast #stroke_cache_init itself uses (`sculpt.cc`). Must run before
+     * `ob` is bound below: every later use of `ob` in this function (layer recording, undo begin)
+     * has to follow the narrowed #this->object, not the pre-narrowing active one. */
+    if (mval && stroke_method_is_curve_patch_target(this->brush)) {
+      Object *hit_ob = nullptr;
+      float hit_co[3];
+      if (stroke_get_location_bvh(
+              *this->depsgraph, this->vc, sculpt_, this->brush, hit_co, mval, false, &hit_ob) &&
+          hit_ob)
+      {
+        this->object = hit_ob;
+        this->vc.obact = hit_ob;
+        this->multi_.mode_objects = {hit_ob};
+      }
+    }
+
+    Object &ob = *this->object;
+
+    ED_view3d_init_mats_rv3d(&ob, this->vc.rv3d);
 
     stroke_cache_init(mval);
     if (brush && brush_type_is_paint(brush->sculpt_brush_type)) {
@@ -9121,8 +9161,7 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
      * #layer_add_exec and #layer_toggle_rec_exec do, stamping one shared #sync_uid so members
      * can be picked up by the recording set. */
     if (records_into_layer) {
-      layers::stroke_ensure_rec_layer(
-          *this->scene, *this->bmain_, ob, this->multi_.mode_objects);
+      layers::stroke_ensure_rec_layer(*this->scene, *this->bmain_, ob, this->multi_.mode_objects);
     }
 
     this->layer_recording_objects_.clear();
@@ -9150,7 +9189,8 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
          * #stroke_record_begin / eraser arm (which read #active_get) hit the design target.
          * Previous active is restored in #layer_recording_finish. */
         if (member_mesh.sculpt_layers_active_uid != matched->base.uid) {
-          this->layer_recording_saved_active_uid_.add(member, member_mesh.sculpt_layers_active_uid);
+          this->layer_recording_saved_active_uid_.add(member,
+                                                      member_mesh.sculpt_layers_active_uid);
           bke::sculpt_layers::active_set(member_mesh, matched);
         }
         this->layer_recording_objects_.append(member);
@@ -9193,7 +9233,6 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
           }
         }
       }
-
     }
 
     this->uses_image_undo_ = stroke_undo_begin(*this->scene,
@@ -9864,6 +9903,39 @@ void SculptPaintStroke::layer_recording_finish(const bool is_cancel,
   this->layer_recording_saved_active_uid_.clear();
 }
 
+void SculptPaintStroke::free_stroke_caches_except(Object *keep)
+{
+  for (Object *object_ptr : this->multi_.mode_objects) {
+    if (object_ptr == keep) {
+      continue;
+    }
+    SculptSession &ss_iter = *object_ptr->runtime->sculpt_session;
+    if (ss_iter.cache) {
+      face_set::face_set_color_stroke_cache_clear(*ss_iter.cache);
+      MEM_delete(ss_iter.cache);
+      ss_iter.cache = nullptr;
+    }
+  }
+}
+
+bool SculptPaintStroke::activate_curve_patch_target(Object &target)
+{
+  bContext *C = this->vc.C;
+  if (&target == CTX_data_active_object(C)) {
+    return true;
+  }
+  BKE_view_layer_synced_ensure(*this->vc.bmain, this->vc.scene, this->vc.view_layer);
+  Base *target_base = BKE_view_layer_base_find(this->vc.view_layer, &target);
+  if (target_base == nullptr) {
+    /* A sculpt-mode object always has a base in the active view layer; launching the modal with
+     * the session on a non-active object would strand it. Caller aborts the handoff instead. */
+    BLI_assert_unreachable();
+    return false;
+  }
+  ed::object::base_activate(C, target_base);
+  return true;
+}
+
 void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 {
   Sculpt &sd = *this->sculpt_;
@@ -9942,7 +10014,30 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     }
   }
 
-  this->layer_recording_finish(is_cancel, stroke_started, brush);
+  /* Both Curve Patch handoffs below put the mesh back to its pre-stroke state before the editor
+   * takes over, and the editor records the finished relief into the layers itself on commit (see
+   * #layers::stroke_record_end_direct_write). The recording is therefore settled as cancelled:
+   * ending it would keep the displacement the stroke accumulated per dab in the layer while the
+   * positions are restored without it, breaking `positions == base + sum(data * effective)` and
+   * leaving that displacement with no undo step once the handoff aborts the stroke's transaction.
+   * Decided before #layer_recording_finish because the cancel has to read the still-open per-node
+   * undo data. */
+  const bool curve_patch_handoff = !is_cancel && stroke_started &&
+                                   brush->stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+                                   bke::brush::supports_curve_patch(*brush) && !ss.bm;
+  const bool roll_handoff_candidate = !is_cancel && stroke_started &&
+                                      brush->stroke_method == BRUSH_STROKE_ROLL &&
+                                      brush->roll_edit_after &&
+                                      bke::brush::supports_curve_patch(*brush) && !ss.bm;
+  Vector<float3> roll_positions;
+  Vector<float> roll_radii;
+  if (roll_handoff_candidate) {
+    this->extract_roll_control_points(roll_positions, roll_radii);
+  }
+  const bool roll_handoff = roll_handoff_candidate && roll_positions.size() >= 2;
+
+  this->layer_recording_finish(
+      is_cancel || curve_patch_handoff || roll_handoff, stroke_started, brush);
 
   /* Restore cursor if it was changed to eyedropper during Face Sets color sampling. */
   if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
@@ -9953,12 +10048,8 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   }
 
   if (!is_cancel && stroke_started && sculpt_brush_is_texture_fill(*brush)) {
-    paint_image_viewport_fill_at_mouse(this->evil_C,
-                                       &sd.paint,
-                                       brush,
-                                       &ob,
-                                       paint_runtime->draw_inverted,
-                                       ss.cache->mouse_event);
+    paint_image_viewport_fill_at_mouse(
+        this->evil_C, &sd.paint, brush, &ob, paint_runtime->draw_inverted, ss.cache->mouse_event);
     flush_update_step(this->vc, ob, UpdateType::Image);
   }
 
@@ -9979,14 +10070,29 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
       /* Hand off to the Curve Patch modal editor: keep `ss.cache` alive (re-stamp needs it, see
        * Stage 03). */
       if (curve_patch_start_from_anchor(*this->depsgraph, ob, sd, *brush, this->vc)) {
+        /* Make the clicked object the real active object so the modal editor (which works through
+         * #CTX_data_active_object) drives the session just published on it. */
+        if (!this->activate_curve_patch_target(ob)) {
+          /* Could not resolve the target base: unwind the session rather than launch the modal on
+           * a non-active object, and fall through to a normal single-object teardown. */
+          curve_patch_discard_on_session_end(ob);
+          this->free_stroke_caches_except(&ob);
+          BLI_assert(this->multi_.mode_objects.size() == 1);
+          stroke_undo_end(this->uses_image_undo_);
+          return;
+        }
         /* The editor owns the session now, and the mesh is back at its pre-stroke state
          * (`restore_from_undo_step_if_necessary()` inside the call above). */
+        this->free_stroke_caches_except(&ob);
+        BLI_assert(this->multi_.mode_objects.size() == 1);
         curve_patch_handoff_to_editor(this->vc.C, ss);
         return;
       }
       /* The start refused (see its own guards) and already freed `ss.cache`. Close the
        * transaction the ordinary way so whatever the stroke did stays undoable, and return -- the
        * teardown below would double-free the cache this path has already released. */
+      this->free_stroke_caches_except(&ob);
+      BLI_assert(this->multi_.mode_objects.size() == 1);
       stroke_undo_end(this->uses_image_undo_);
       return;
     }
@@ -9998,30 +10104,34 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
    * `orig_positions`). Like the Curve Patch branch above, this keeps `ss.cache` alive for the
    * editor to own and discards the open undo transaction -- the editor builds its own step on
    * commit -- so it returns before the teardown below. */
-  if (!is_cancel && stroke_started && brush->stroke_method == BRUSH_STROKE_ROLL &&
-      brush->roll_edit_after && bke::brush::supports_curve_patch(*brush) && !ss.bm)
-  {
-    Vector<float3> roll_positions;
-    Vector<float> roll_radii;
-    this->extract_roll_control_points(roll_positions, roll_radii);
-    if (roll_positions.size() >= 2) {
-      if (roll_start_curve_patch_from_stroke(*this->depsgraph,
-                                             ob,
-                                             sd,
-                                             *brush,
-                                             this->vc,
-                                             roll_positions.as_span(),
-                                             roll_radii.as_span(),
-                                             this->roll_plane_normal()))
-      {
-        /* The bridge undoes the live roll relief back to pristine before handing over, so the tail
-         * below finds exactly the state the anchor branch does. */
-        curve_patch_handoff_to_editor(this->vc.C, ss);
+  if (roll_handoff) {
+    if (roll_start_curve_patch_from_stroke(*this->depsgraph,
+                                           ob,
+                                           sd,
+                                           *brush,
+                                           this->vc,
+                                           roll_positions.as_span(),
+                                           roll_radii.as_span(),
+                                           this->roll_plane_normal()))
+    {
+      if (!this->activate_curve_patch_target(ob)) {
+        curve_patch_discard_on_session_end(ob);
+        this->free_stroke_caches_except(&ob);
+        BLI_assert(this->multi_.mode_objects.size() == 1);
+        stroke_undo_end(this->uses_image_undo_);
         return;
       }
-      stroke_undo_end(this->uses_image_undo_);
+      /* The bridge undoes the live roll relief back to pristine before handing over, so the tail
+       * below finds exactly the state the anchor branch does. */
+      this->free_stroke_caches_except(&ob);
+      BLI_assert(this->multi_.mode_objects.size() == 1);
+      curve_patch_handoff_to_editor(this->vc.C, ss);
       return;
     }
+    this->free_stroke_caches_except(&ob);
+    BLI_assert(this->multi_.mode_objects.size() == 1);
+    stroke_undo_end(this->uses_image_undo_);
+    return;
   }
 
   /* Free caches. */
@@ -10039,8 +10149,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   ED_workspace_status_text(this->evil_C, nullptr);
 
   const bool insert_mesh_success = !is_cancel && stroke_started && brush &&
-                                   brush_uses_insert_mesh(*brush) &&
-                                   !ss.vdm_stamps.is_empty();
+                                   brush_uses_insert_mesh(*brush) && !ss.vdm_stamps.is_empty();
 
   if (insert_mesh_success) {
     undo::restore_position_from_undo_step(*this->depsgraph, ob);
@@ -10065,8 +10174,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     }
   }
 
-  const bool insert_into_target = insert_mesh_success &&
-                                  (brush->flag2 & BRUSH_INSERT_INTO_ACTIVE);
+  const bool insert_into_target = insert_mesh_success && (brush->flag2 & BRUSH_INSERT_INTO_ACTIVE);
   const bool skip_primary_flush = insert_into_target;
 
   /* Flush final geometry updates and send redraw notifiers for every object that was in
@@ -10241,8 +10349,8 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     }
   }
   /* The cloth simulation solves its constraints and its simulation-area falloff on the composed
-   * surface, which it cannot separate from the layer contribution: it would flatten the layers into
-   * the base instead of riding on top of them (see #layers::stroke_base_view). */
+   * surface, which it cannot separate from the layer contribution: it would flatten the layers
+   * into the base instead of riding on top of them (see #layers::stroke_base_view). */
   if ((brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLOTH ||
        brush.deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM) &&
       layers::in_use(ob))
@@ -10253,19 +10361,18 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  /* A weight-mask editing session has the layer's mask sitting in the standard mask storage exactly
-   * so the mask tools can author it, which is why the attribute-only brushes keep working here. The
-   * brushes that move vertices are refused instead: with the user's mask parked, everything that
-   * consults the mask — automasking, and the mask factor every brush multiplies its strength by —
-   * would read the layer's weights, so the stroke would be shaped by a mask the user cannot see and
-   * did not paint. Refused rather than silently closing the session, which would throw away an
-   * in-progress mask edit as a side effect of an unrelated action. See #mask_edit_blocks_brush. */
+  /* A weight-mask editing session has the layer's mask sitting in the standard mask storage
+   * exactly so the mask tools can author it, which is why the attribute-only brushes keep working
+   * here. The brushes that move vertices are refused instead: with the user's mask parked,
+   * everything that consults the mask — automasking, and the mask factor every brush multiplies
+   * its strength by — would read the layer's weights, so the stroke would be shaped by a mask the
+   * user cannot see and did not paint. Refused rather than silently closing the session, which
+   * would throw away an in-progress mask edit as a side effect of an unrelated action. See
+   * #mask_edit_blocks_brush. */
   if (const SculptSession *ss = ob.runtime->sculpt_session) {
     if (layers::mask_edit_blocks_brush(layers::mask_edit_active_uid(*ss), brush.sculpt_brush_type))
     {
-      BKE_report(op->reports,
-                 RPT_ERROR,
-                 "Close the sculpt layer mask session to sculpt geometry");
+      BKE_report(op->reports, RPT_ERROR, "Close the sculpt layer mask session to sculpt geometry");
       stroke->cancel(C);
       MEM_delete(stroke);
       return OPERATOR_CANCELLED;
@@ -10355,8 +10462,8 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
   brush_stroke_init(C, op);
 
   /* The scripted and redo path into the same stroke, so it must refuse a geometry brush during a
-   * weight-mask editing session for the reason #sculpt_brush_stroke_invoke does. Checked before the
-   * stroke is allocated: there is nothing to cancel yet.
+   * weight-mask editing session for the reason #sculpt_brush_stroke_invoke does. Checked before
+   * the stroke is allocated: there is nothing to cancel yet.
    *
    * Every lookup is null-tested, unlike the invoke path: this runs from Python, where
    * `('EXEC_DEFAULT')` bypasses the poll that would otherwise have established an active object, a
@@ -12239,7 +12346,8 @@ PositionDeformData::PositionDeformData(const Depsgraph &depsgraph, Object &objec
   shape_key_data_ = ShapeKeyData::from_object(object_orig);
 
   /* When a mesh sculpt-layer stroke is being recorded, accumulate the stroke into the layer as it
-   * happens (see #deform) rather than rescanning the whole brushed area at the end of the stroke. */
+   * happens (see #deform) rather than rescanning the whole brushed area at the end of the stroke.
+   */
   layer_record_data_ = layers::active_record_data(object_orig);
 }
 
@@ -12264,13 +12372,13 @@ void PositionDeformData::deform(MutableSpan<float3> translations, const Span<int
     apply_translations(translations, verts, *eval_mut_);
   }
 
-  /* Recording a vertex sculpt layer while a shape key (or a deforming modifier) is active: #eval_mut_
-   * holds the separate display buffer that was just moved above, and the layer is composed as an
-   * object-space offset on top of every deform at evaluation. Capture that object-space displacement
-   * here — BEFORE #apply_crazyspace_to_translations rewrites #translations into the pre-deform base
-   * space — and route it into the layer only, leaving the key blocks and base positions (#orig_)
-   * untouched. Without a deform (#eval_mut_ unset) the base positions ARE the display, so recording
-   * still bakes into them in the plain branch below. */
+  /* Recording a vertex sculpt layer while a shape key (or a deforming modifier) is active:
+   * #eval_mut_ holds the separate display buffer that was just moved above, and the layer is
+   * composed as an object-space offset on top of every deform at evaluation. Capture that
+   * object-space displacement here — BEFORE #apply_crazyspace_to_translations rewrites
+   * #translations into the pre-deform base space — and route it into the layer only, leaving the
+   * key blocks and base positions (#orig_) untouched. Without a deform (#eval_mut_ unset) the base
+   * positions ARE the display, so recording still bakes into them in the plain branch below. */
   if (!layer_record_data_.is_empty() && eval_mut_) {
     this->record_layer_offsets(verts, translations);
     return;

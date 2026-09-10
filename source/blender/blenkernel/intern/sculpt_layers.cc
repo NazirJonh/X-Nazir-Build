@@ -1350,6 +1350,28 @@ bool rec_armed_set(const Mesh &mesh, const SculptLayer *layer)
   return changed;
 }
 
+void rec_armed_undo_preserve(const Mesh &mesh_new, const Mesh &mesh_old)
+{
+  if (&mesh_new == &mesh_old) {
+    return;
+  }
+  bool was_armed = false;
+  for (const SculptLayer *layer : layers(mesh_old)) {
+    if (layer->base.flag & SCULPT_LAYER_REC_ARMED) {
+      was_armed = true;
+      break;
+    }
+  }
+  if (!was_armed) {
+    return;
+  }
+  /* Not matched by uid: the restored tree may no longer hold the layer REC was armed on, and the
+   * sculpt-mode entry only asks whether REC was on, re-arming it on the active layer either way. */
+  if (const SculptLayer *active = active_get(mesh_new)) {
+    rec_armed_set(mesh_new, active);
+  }
+}
+
 /* The one place the two spellings of the bit are required to agree. Checked here rather than in
  * `DNA_mesh_types.h` because that header is parsed by makesdna, which does not accept a static
  * assert. */

@@ -23,6 +23,7 @@
 namespace blender {
 
 struct bContext;
+struct Main;
 struct Object;
 
 namespace bke {
@@ -95,5 +96,34 @@ void ED_curve_patch_session_restamp(bContext &C, Object &ob);
 /** Record the session's current state as a new step on its own undo stack, so Ctrl+Z inside a
  * live Curve Patch edit can step back over a finished G/R/S transform. */
 void ED_curve_patch_session_undo_push(Object &ob);
+
+/**
+ * Exchange every live Curve Patch preview in \a bmain with its pre-patch snapshot; calling it twice
+ * is the identity. The memfile undo encoder brackets its write with it, so a global undo step pushed
+ * mid-session records the surface without the uncommitted preview.
+ */
+void ED_curve_patch_sessions_preview_swap(Main &bmain);
+
+/**
+ * Keeps every live Curve Patch preview out of a blend-file written while the guard is alive, the
+ * same way #bke::sculpt_layers::MaskEditSuspendGuard keeps a layer mask session out of it: only
+ * committed edits are user data. Must span the write itself. The session stays live, so saving does
+ * not cancel the edit.
+ */
+class CurvePatchPreviewWriteGuard {
+  Main &bmain_;
+
+ public:
+  explicit CurvePatchPreviewWriteGuard(Main &bmain) : bmain_(bmain)
+  {
+    ED_curve_patch_sessions_preview_swap(bmain_);
+  }
+  ~CurvePatchPreviewWriteGuard()
+  {
+    ED_curve_patch_sessions_preview_swap(bmain_);
+  }
+  CurvePatchPreviewWriteGuard(const CurvePatchPreviewWriteGuard &) = delete;
+  CurvePatchPreviewWriteGuard &operator=(const CurvePatchPreviewWriteGuard &) = delete;
+};
 
 }  // namespace blender

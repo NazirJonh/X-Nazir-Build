@@ -106,7 +106,6 @@
 
 namespace blender::ed::sculpt_paint {
 
-
 /* #curve_patch_live_inputs_capture plus the one live input only a mesh target has. The shared
  * capture deliberately leaves `symm` at its sentinel -- see its doc-string. */
 static CurvePatchLiveInputs curve_patch_live_inputs_capture_sculpt(const Paint &paint,
@@ -159,6 +158,12 @@ struct CurvePatchEditOpData {
    * unchanged across a switch. Empty when no tool was active at invoke, which disables the check.
    */
   char tool_idname_at_invoke[64] = "";
+  /* `Object::id.session_uid` of the mesh that owns this patch, captured at invoke (Change B has
+   * already made it the active object by then). If the user changes the active object while the
+   * patch is live, the modal's liveness guard uses this to find the real owner and hand it to
+   * #SCULPT_OT_curve_patch_edit_confirm, whose poll / commit would otherwise look at the new
+   * active object. Zero only if invoke somehow ran with no active object. */
+  int object_session_uid_at_invoke = 0;
   /* Snap context reused for the duration of a point drag, mirroring `PointSlideData::snap_ctx`
    * (paint_curve.cc). Only the scene-snap-element level of #paintcurve_surface_place needs it, so
    * it is created lazily on the first MOUSEMOVE that reaches that level and freed when the drag
@@ -293,7 +298,7 @@ void curve_patch_tag_viewports_redraw_after_edit(bContext &C,
 
 /* Defined below; the host reaches them from inside the shared editing core. */
 static void curve_patch_edit_context_menu_open(bContext *C);
-static bool curve_patch_edit_session_finish(bContext *C, bool is_cancel);
+static bool curve_patch_edit_session_finish(bContext *C, bool is_cancel, Object *target = nullptr);
 
 /**
  * 3D Sculpt Mode's target, both for the shared action bodies (`paint_curve_patch_actions.hh`) and
@@ -874,6 +879,9 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C,
       STRNCPY(data->tool_idname_at_invoke, tref->idname);
     }
   }
+  if (const Object *ob = CTX_data_active_object(C)) {
+    data->object_session_uid_at_invoke = int(ob->id.session_uid);
+  }
   WM_event_add_modal_handler_all_windows(C, op, SPACE_VIEW3D, RGN_TYPE_WINDOW);
   /* Drive the live-sync poll at a steady cadence (see `CurvePatchEditOpData::sync_timer`). 20 Hz:
    * fast enough that a panel change feels immediate, light enough that idle ticks -- which only
@@ -955,10 +963,53 @@ static bool curve_patch_edit_session_superseded(const bContext *C,
   return false;
 }
 
+/* Tear down this modal's operator state and hand the still-live session to the blocking
+ * Apply/Cancel dialog #SCULPT_OT_curve_patch_edit_confirm. Used from two places in
+ * `curve_patch_edit_modal()`: the supersede branch (brush / tool switch) and the liveness guard
+ * (the active object was changed out from under a live patch). The dialog is told which brush the
+ * patch was built with and which object owns it, both by `session_uid` so they survive the wait.
+ */
+static wmOperatorStatus curve_patch_edit_hand_to_confirm(bContext *C,
+                                                         wmOperator *op,
+                                                         CurvePatchEditOpData &data)
+{
+  const int brush_session_uid = data.brush_at_invoke ? int(data.brush_at_invoke->id.session_uid) :
+                                                       0;
+  const int object_session_uid = data.object_session_uid_at_invoke;
+
+  curve_patch_edit_teardown(C, op);
+  /* The session outlives the modal here, so the status bar is not cleared by the usual
+   * #curve_patch_edit_session_finish yet -- and its Enter/Esc hints stop being true the moment
+   * this modal stops listening. */
+  ED_workspace_status_text(C, nullptr);
+
+  PointerRNA props = WM_operator_properties_create("SCULPT_OT_curve_patch_edit_confirm");
+  RNA_int_set(&props, "brush_session_uid", brush_session_uid);
+  RNA_int_set(&props, "object_session_uid", object_session_uid);
+  const wmOperatorStatus status = WM_operator_name_call(
+      C, "SCULPT_OT_curve_patch_edit_confirm", wm::OpCallContext::InvokeDefault, &props, nullptr);
+  WM_operator_properties_free(&props);
+
+  /* The dialog owns the session from here. If it never opened -- its poll refused, or the popup
+   * could not be built -- nothing else would ever end the session, so discard it on its real
+   * owner rather than leave a patch with no owner. */
+  if ((status & OPERATOR_RUNNING_MODAL) == 0) {
+    Object *owner = (object_session_uid != 0) ?
+                        id_cast<Object *>(BKE_libblock_find_session_uid(
+                            CTX_data_main(C), ID_OB, uint32_t(object_session_uid))) :
+                        CTX_data_active_object(C);
+    if (owner && owner->runtime->sculpt_session &&
+        owner->runtime->sculpt_session->curve_patch_session)
+    {
+      curve_patch_edit_session_finish(C, /*is_cancel=*/true, owner);
+    }
+  }
+  return OPERATOR_CANCELLED;
+}
+
 static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   CurvePatchEditOpData &data = *static_cast<CurvePatchEditOpData *>(op->customdata);
-
 
   /* The live patch's backing data can vanish out from under this modal operator without an
    * explicit Enter/Esc: unhandled keys (see the `default:` case below) deliberately pass through
@@ -970,6 +1021,22 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   if (!ob_check || !ob_check->runtime->sculpt_session ||
       !ob_check->runtime->sculpt_session->curve_patch_session)
   {
+    /* The active object has no live patch. If the *invoke-time owner* still does, the user
+     * switched the active object away from a live edit -- hand that patch to the Apply/Cancel
+     * dialog, targeted at its real owner, instead of silently stranding it (its preview would
+     * stay on screen with no way to commit, and the exclusivity guards -- which only check the
+     * active object -- would then let a second session start). */
+    const Object *owner =
+        (data.object_session_uid_at_invoke != 0) ?
+            id_cast<Object *>(BKE_libblock_find_session_uid(
+                CTX_data_main(C), ID_OB, uint32_t(data.object_session_uid_at_invoke))) :
+            nullptr;
+    if (owner && owner->runtime->sculpt_session &&
+        owner->runtime->sculpt_session->curve_patch_session)
+    {
+      return curve_patch_edit_hand_to_confirm(C, op, data);
+    }
+
     ED_workspace_status_text(C, nullptr);
     if (data.sync_timer) {
       WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data.sync_timer);
@@ -1014,27 +1081,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
      * incoming one has never been through a paint stroke, so its pressure CurveMappings are
      * uninitialized (see #curve_patch_edit_session_superseded). A `session_uid` also survives the
      * wait, which a raw pointer parked across an unbounded dialog would not. */
-    const int brush_session_uid = data.brush_at_invoke ? int(data.brush_at_invoke->id.session_uid) :
-                                                         0;
-    curve_patch_edit_teardown(C, op);
-    /* The session outlives the modal here, so the status bar is not cleared by the usual
-     * #curve_patch_edit_session_finish yet -- and its Enter/Esc hints stop being true the moment
-     * this modal stops listening. */
-    ED_workspace_status_text(C, nullptr);
-
-    PointerRNA props = WM_operator_properties_create("SCULPT_OT_curve_patch_edit_confirm");
-    RNA_int_set(&props, "brush_session_uid", brush_session_uid);
-    const wmOperatorStatus status = WM_operator_name_call(
-        C, "SCULPT_OT_curve_patch_edit_confirm", wm::OpCallContext::InvokeDefault, &props, nullptr);
-    WM_operator_properties_free(&props);
-
-    /* The dialog owns the session from here. If it never opened -- its poll refused because
-     * something already discarded the session, or the popup could not be built -- nothing else
-     * would ever end the session, so discard it here rather than leave a patch with no owner. */
-    if ((status & OPERATOR_RUNNING_MODAL) == 0 && curve_patch_edit_poll(C)) {
-      curve_patch_edit_session_finish(C, /*is_cancel=*/true);
-    }
-    return OPERATOR_CANCELLED;
+    return curve_patch_edit_hand_to_confirm(C, op, data);
   }
 
   CurvePatchSession &patch = patch_cache_of(C);
@@ -1431,11 +1478,11 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
  * would destroy the editor from inside one of its own calls. The operator tears its state down
  * afterwards, once #CurvePatchCurveEditor::handle_event has returned.
  */
-static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel)
+static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel, Object *target)
 {
   ED_workspace_status_text(C, nullptr);
 
-  Object &ob = *CTX_data_active_object(C);
+  Object &ob = *(target ? target : CTX_data_active_object(C));
   SculptSession &ss = *ob.runtime->sculpt_session;
   CurvePatchSession *patch = ss.curve_patch_session;
 
@@ -1563,8 +1610,8 @@ void SCULPT_OT_curve_patch_edit(wmOperatorType *ot)
  *
  * #WM_window_set_active_workspace calls #ED_workspace_change once per window (the active one, then
  * every child window), and the session is still live for all of them -- so without this the same
- * patch would raise one dialog per window. Only the first refusal takes the decision; the rest fall
- * through and are re-issued by the answer, which switches every window as usual.
+ * patch would raise one dialog per window. Only the first refusal takes the decision; the rest
+ * fall through and are re-issued by the answer, which switches every window as usual.
  *
  * Cleared by whichever of the dialog's two answers runs, and one of them always does: the popup's
  * cancel callback fires even when the block is destroyed without a choice. A flag left stuck would
@@ -1641,9 +1688,26 @@ static void curve_patch_edit_confirm_resume_deferred(bContext *C, wmOperator *op
   curve_patch_edit_confirm_resume_workspace_change(C, op);
 }
 
+/* The object #SCULPT_OT_curve_patch_edit_confirm acts on. The workspace-change and mode-toggle
+ * callers do not set `object_session_uid`, so they keep targeting the active object exactly as
+ * before. The active-object-changed route (see the liveness guard in `curve_patch_edit_modal()`)
+ * sets it, so the dialog commits / restores the patch on its real owner rather than on whichever
+ * object the user switched to. Null when that owner has since been deleted. */
+static Object *curve_patch_confirm_target(bContext *C, wmOperator *op)
+{
+  const uint32_t uid = uint32_t(RNA_int_get(op->ptr, "object_session_uid"));
+  if (uid == 0) {
+    return CTX_data_active_object(C);
+  }
+  return id_cast<Object *>(BKE_libblock_find_session_uid(CTX_data_main(C), ID_OB, uid));
+}
+
 static wmOperatorStatus curve_patch_edit_confirm_exec(bContext *C, wmOperator *op)
 {
-  if (!curve_patch_edit_poll(C)) {
+  Object *target = curve_patch_confirm_target(C, op);
+  const bool live = target && target->runtime->sculpt_session &&
+                    target->runtime->sculpt_session->curve_patch_session;
+  if (!live) {
     /* Nothing left to decide, but a deferred mode or workspace change must not be dropped with
      * it. */
     curve_patch_edit_confirm_resume_deferred(C, op);
@@ -1651,10 +1715,10 @@ static wmOperatorStatus curve_patch_edit_confirm_exec(bContext *C, wmOperator *o
   }
 
   /* Restore the brush the patch was built from for the duration of the commit, exactly as the
-   * modal used to do inline -- #curve_patch_edit_session_finish re-stamps once at final quality and
-   * that pass reads the ACTIVE brush. A direct assignment rather than #BKE_paint_brush_set: this
-   * is a temporary, exactly-symmetric restore that must not touch `Paint::brush_asset_reference`,
-   * which still describes the brush the user switched to. */
+   * modal used to do inline -- #curve_patch_edit_session_finish re-stamps once at final quality
+   * and that pass reads the ACTIVE brush. A direct assignment rather than #BKE_paint_brush_set:
+   * this is a temporary, exactly-symmetric restore that must not touch
+   * `Paint::brush_asset_reference`, which still describes the brush the user switched to. */
   ToolSettings *ts = CTX_data_tool_settings(C);
   Paint *paint = (ts && ts->sculpt) ? &ts->sculpt->paint : nullptr;
   Brush *brush_at_invoke = nullptr;
@@ -1670,7 +1734,7 @@ static wmOperatorStatus curve_patch_edit_confirm_exec(bContext *C, wmOperator *o
   if (swap_brush) {
     paint->brush = brush_at_invoke;
   }
-  const bool committed = curve_patch_edit_session_finish(C, /*is_cancel=*/false);
+  const bool committed = curve_patch_edit_session_finish(C, /*is_cancel=*/false, target);
   if (swap_brush) {
     paint->brush = brush_incoming;
   }
@@ -1682,11 +1746,14 @@ static wmOperatorStatus curve_patch_edit_confirm_exec(bContext *C, wmOperator *o
 
 static void curve_patch_edit_confirm_cancel(bContext *C, wmOperator *op)
 {
-  if (curve_patch_edit_poll(C)) {
+  Object *target = curve_patch_confirm_target(C, op);
+  if (target && target->runtime->sculpt_session &&
+      target->runtime->sculpt_session->curve_patch_session)
+  {
     /* Restores the mesh and, for the image target, discards the session's `ImageUndoStep` through
      * the effect's destructor -- so a declined patch leaves the image untouched. No brush restore
      * is needed: the cancel path re-stamps nothing. */
-    curve_patch_edit_session_finish(C, /*is_cancel=*/true);
+    curve_patch_edit_session_finish(C, /*is_cancel=*/true, target);
   }
   curve_patch_edit_confirm_resume_deferred(C, op);
 }
@@ -1702,9 +1769,11 @@ void SCULPT_OT_curve_patch_edit_confirm(wmOperatorType *ot)
   ot->cancel = curve_patch_edit_confirm_cancel;
   /* The dialog outlives the modal that raised it, so the session can be gone by the time it is
    * answered: a mode exit discards it through #curve_patch_discard_on_session_end, object deletion
-   * through #BKE_sculptsession_free. `exec` and `cancel` re-check for the same reason - the popup
-   * calls them directly, without consulting this poll a second time. */
-  ot->poll = curve_patch_edit_poll;
+   * through #BKE_sculptsession_free. `exec` and `cancel` therefore re-resolve and re-check the
+   * target's liveness themselves (via #curve_patch_confirm_target) rather than relying on this
+   * poll -- which only gates that we are in Sculpt Mode at all. The operator is #OPTYPE_INTERNAL
+   * (invoked programmatically, never from a menu), so a lenient poll is safe. */
+  ot->poll = sculpt_mode_poll;
 
   /* #OPTYPE_UNDO for the same reason #SCULPT_OT_curve_patch_edit carries it: this operator now
    * owns the commit, and `curve_patch_finish_commit()` parks its position step for the calling
@@ -1737,6 +1806,17 @@ void SCULPT_OT_curve_patch_edit_confirm(wmOperatorType *ot)
                      "Workspace Session UID",
                      "Session UID of the workspace to activate once the patch has been applied or "
                      "discarded",
+                     INT_MIN,
+                     INT_MAX);
+  RNA_def_property_flag(prop, PropertyFlag(PROP_HIDDEN | PROP_SKIP_SAVE));
+
+  prop = RNA_def_int(ot->srna,
+                     "object_session_uid",
+                     0,
+                     INT_MIN,
+                     INT_MAX,
+                     "Object Session UID",
+                     "Session UID of the object that owns the patch; 0 means the active object",
                      INT_MIN,
                      INT_MAX);
   RNA_def_property_flag(prop, PropertyFlag(PROP_HIDDEN | PROP_SKIP_SAVE));

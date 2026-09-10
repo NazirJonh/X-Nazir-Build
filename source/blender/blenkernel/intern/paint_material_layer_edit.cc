@@ -671,6 +671,84 @@ int forest_ordinal_for_position(Span<ChannelChain> chains,
   return found_ordinal;
 }
 
+/** One channel's group instance node for an #Add whose anchor is an empty folder. */
+struct AddEmptyGroupInstance {
+  bNode *instance = nullptr;
+  int channel = -1;
+};
+
+/**
+ * Resolve #PaintMaterialLayerAddParams::anchor_ordinal to the chains a new layer goes into and the
+ * index within them.
+ *
+ * The anchor names a UI row. A plain row -- top level or inside a folder -- takes the new layer
+ * directly above itself, in its own chain. A row that is a folder takes it inside, on top of what
+ * the folder holds. A folder that holds nothing yet has no chain to resolve: \a r_into_empty_group
+ * is set and \a r_empty_group_instances receives its per-channel instance nodes, which is where the
+ * mutation wires the first layer's output.
+ */
+static bool add_anchor_resolve(Vector<Vector<ChannelChain>> &per_channel,
+                               const int anchor_ordinal,
+                               Vector<ChannelChain *> &r_chains,
+                               int &r_insert_index,
+                               bool &r_into_empty_group,
+                               Vector<AddEmptyGroupInstance> &r_empty_group_instances,
+                               PaintMaterialLayerEditError &r_error)
+{
+  r_chains.clear();
+  r_insert_index = -1;
+  r_into_empty_group = false;
+  r_empty_group_instances.clear();
+
+  auto disagree = [&]() {
+    r_error = PaintMaterialLayerEditError::ChannelsDisagree;
+    return false;
+  };
+
+  for (Vector<ChannelChain> &chains : per_channel) {
+    const ForestPosition pos = forest_resolve_ordinal(chains, anchor_ordinal);
+    if (pos.chain_index < 0) {
+      r_error = PaintMaterialLayerEditError::IndexOutOfRange;
+      return false;
+    }
+    ChainLayer &anchor_layer = chains[pos.chain_index].layers[pos.layer_index];
+    if (anchor_layer.is_group && anchor_layer.sub_chain_index < 0) {
+      /* An empty folder: nothing to blend over, so the mutation wires a bare map straight to the
+       * group's own Result output. */
+      if (r_insert_index >= 0 && !r_into_empty_group) {
+        return disagree();
+      }
+      bNode *instance = const_cast<bNode *>(composite_source_node_shallow(*anchor_layer.top));
+      if (instance == nullptr) {
+        r_error = PaintMaterialLayerEditError::ChainNotPlain;
+        return false;
+      }
+      r_into_empty_group = true;
+      r_insert_index = 0;
+      r_empty_group_instances.append({instance, chains[pos.chain_index].channel});
+      continue;
+    }
+    ChannelChain &target = anchor_layer.is_group ? chains[anchor_layer.sub_chain_index] :
+                                                   chains[pos.chain_index];
+    const int insert = anchor_layer.is_group ? int(target.layers.size()) : pos.layer_index + 1;
+    if (r_insert_index >= 0 && (r_into_empty_group || insert != r_insert_index)) {
+      return disagree();
+    }
+    r_insert_index = insert;
+    r_chains.append(&target);
+  }
+
+  if (!r_into_empty_group) {
+    const int64_t layer_num = r_chains.first()->layers.size();
+    for (const ChannelChain *chain : r_chains) {
+      if (chain->layers.size() != layer_num) {
+        return disagree();
+      }
+    }
+  }
+  return true;
+}
+
 /**
  * Whether \a ordinal names a layer of the chain rather than one held inside a group.
  *
@@ -1080,6 +1158,11 @@ struct LayerEditPlan {
   int target_index = -1;
   /** A Move::Into whose anchor group holds nothing yet: there is no chain to insert into. */
   bool target_is_empty_group = false;
+  /**
+   * An #Add whose anchor is an empty folder: #chains is empty, and these are the folder's
+   * per-channel instance nodes the first layer's output is wired to.
+   */
+  Vector<AddEmptyGroupInstance> add_empty_group_instances;
   /** A bottom somewhere in the forest is a bare image: the shape conversion comes first. */
   bool needs_bottom_normalize = false;
 };
@@ -1249,9 +1332,12 @@ static bool layer_edit_plan_build(Main &bmain,
     return false;
   }
 
-  /* #Add decides between creating a stack and extending one through the flat reader, exactly as
-   * the mutation will; every other operation works on the forest. */
-  if (op == LayerEditOp::Add) {
+  /* An #Add placed at a plain top-level position extends the stack through the flat reader, exactly
+   * as the mutation will; an #Add placed relative to a row (which may live inside a folder) and
+   * every other operation work on the forest. */
+  const bool add_by_anchor = (op == LayerEditOp::Add) && add_params != nullptr &&
+                             add_params->anchor_ordinal >= 0;
+  if (op == LayerEditOp::Add && !add_by_anchor) {
     BLI_assert(add_params != nullptr);
     Vector<ChannelChain> flat;
     if (!chains_collect(ma, flat, r_error)) {
@@ -1348,6 +1434,61 @@ static bool layer_edit_plan_build(Main &bmain,
 
   switch (op) {
     case LayerEditOp::Add: {
+      if (add_by_anchor) {
+        bool into_empty_group = false;
+        Vector<AddEmptyGroupInstance> empty_group_instances;
+        if (!add_anchor_resolve(r_plan.per_channel,
+                                add_params->anchor_ordinal,
+                                r_plan.chains,
+                                r_plan.layer_index,
+                                into_empty_group,
+                                empty_group_instances,
+                                r_error))
+        {
+          return false;
+        }
+        r_plan.target_is_empty_group = into_empty_group;
+        if (into_empty_group) {
+          r_plan.add_empty_group_instances = std::move(empty_group_instances);
+          /* The write right on every empty folder tree the first layer is created in, plus the
+           * trees a pending shape conversion touches -- the same set #write_scope_ok would
+           * assemble, built here because that lambda reads from #r_plan.chains, which an empty
+           * folder leaves empty. */
+          Vector<bNodeTree *> write_trees;
+          for (const AddEmptyGroupInstance &inst : r_plan.add_empty_group_instances) {
+            bNodeTree *group_tree = layer_group_tree_of(*inst.instance);
+            if (group_tree == nullptr) {
+              r_error = PaintMaterialLayerEditError::ChainNotPlain;
+              return false;
+            }
+            write_trees.append_non_duplicates(group_tree);
+          }
+          if (r_plan.needs_bottom_normalize) {
+            for (const Vector<ChannelChain> &chains : r_plan.per_channel) {
+              for (const ChannelChain &chain : chains) {
+                if (!chain.layers.is_empty() && !chain.layers.first().is_mix()) {
+                  write_trees.append_non_duplicates(chain.tree);
+                }
+              }
+            }
+          }
+          for (bNodeTree *write_tree : write_trees) {
+            if (!tree_write_scope_check(bmain, ma, *write_tree, r_error)) {
+              return false;
+            }
+          }
+          return true;
+        }
+        if (r_plan.layer_index == 0 && bottom_is_bare(r_plan.chains)) {
+          r_error = PaintMaterialLayerEditError::IsBottomLayer;
+          return false;
+        }
+        if (r_plan.layer_index > int(r_plan.chains.first()->layers.size())) {
+          r_error = PaintMaterialLayerEditError::IndexOutOfRange;
+          return false;
+        }
+        return write_scope_ok();
+      }
       if (!top_chains_aligned()) {
         return false;
       }
@@ -2014,7 +2155,14 @@ bool BKE_paint_material_layer_add(Main &bmain,
   }
   /* 3. Mutation: from here, a refusal is impossible. */
 
-  bNodeTree &tree = *ma.nodetree;
+  const bool add_by_anchor = params.anchor_ordinal >= 0;
+  const bool into_empty_group = plan.target_is_empty_group;
+  /* The first layer of an empty folder is created in that folder's own node tree; a layer added
+   * next to a row that lives inside a folder is created in that row's tree; every other add is in
+   * the material's own tree. */
+  bNodeTree &tree = into_empty_group ?
+                        *layer_group_tree_of(*plan.add_empty_group_instances.first().instance) :
+                        (plan.chains.is_empty() ? *ma.nodetree : *plan.chains.first()->tree);
   Vector<NewLayerNodes> added;
 
   if (plan.per_channel.is_empty()) {
@@ -2055,15 +2203,28 @@ bool BKE_paint_material_layer_add(Main &bmain,
     return succeed(0);
   }
 
-  const int insert_at = plan.layer_index;
+  int insert_at = plan.layer_index;
+
+  /* The channels the new layer is created for: one per chain it is inserted into, or -- for an
+   * empty folder, which has no chain yet -- one per folder instance. */
+  Vector<int> new_channels;
+  if (into_empty_group) {
+    for (const AddEmptyGroupInstance &inst : plan.add_empty_group_instances) {
+      new_channels.append(inst.channel);
+    }
+  }
+  else {
+    for (const ChannelChain *chain_ptr : plan.chains) {
+      new_channels.append(chain_ptr->channel);
+    }
+  }
 
   /* Create every node first. Group nodes get their sockets from a tree update, so nothing may be
    * linked before that update has run. */
-  for (ChannelChain *chain_ptr : plan.chains) {
-    ChannelChain &chain = *chain_ptr;
+  for (const int channel : new_channels) {
     NewLayerNodes nodes;
-    nodes.channel = chain.channel;
-    nodes.image = layer_image_create(bmain, chain.channel, params);
+    nodes.channel = channel;
+    nodes.image = layer_image_create(bmain, channel, params);
     if (nodes.image == nullptr) {
       added.append(nodes);
       new_layer_nodes_discard(bmain, tree, added);
@@ -2071,7 +2232,7 @@ bool BKE_paint_material_layer_add(Main &bmain,
     }
     nodes.tex = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
     nodes.tex->id = &nodes.image->id;
-    if (chain.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
       /* Tangent-space maps do not blend component-wise; the engine's own group does it properly. */
       bNodeTree *group = BKE_paint_material_normal_combine_group_ensure(bmain);
       nodes.mix = (group == nullptr) ?
@@ -2108,16 +2269,46 @@ bool BKE_paint_material_layer_add(Main &bmain,
   BKE_ntree_update_after_single_tree_change(bmain, tree);
   tree.ensure_topology_cache();
 
-  Vector<ChannelChain> chains;
-  if (!chains_collect(ma, chains, error) || !chains_align(chains, error)) {
-    new_layer_nodes_discard(bmain, tree, added);
-    return fail(error);
+  /* The chains the new nodes attach to, re-read now that any group instances have their sockets: a
+   * flat re-read for a top-level add, a forest re-read for one placed relative to a row. An empty
+   * folder has no chain -- its instance nodes carry the Result socket the first layer feeds. */
+  Vector<ChannelChain> flat_chains;
+  Vector<Vector<ChannelChain>> forest;
+  Vector<ChannelChain *> target_chains;
+  Vector<AddEmptyGroupInstance> fresh_instances;
+  if (add_by_anchor) {
+    bool fresh_into_empty = false;
+    if (!chains_collect_forest(ma, forest, error) ||
+        !add_anchor_resolve(forest,
+                            params.anchor_ordinal,
+                            target_chains,
+                            insert_at,
+                            fresh_into_empty,
+                            fresh_instances,
+                            error))
+    {
+      new_layer_nodes_discard(bmain, tree, added);
+      return fail(error);
+    }
+  }
+  else {
+    if (!chains_collect(ma, flat_chains, error) || !chains_align(flat_chains, error)) {
+      new_layer_nodes_discard(bmain, tree, added);
+      return fail(error);
+    }
+    for (ChannelChain &chain : flat_chains) {
+      target_chains.append(&chain);
+    }
   }
 
   /* Resolve every socket before touching a link, so a node type that turned out not to match the
    * Mix contract cannot leave half a layer behind. */
   struct ResolvedLayer {
+    /** The chain the layer is inserted into; null for the first layer of an empty folder. */
     ChannelChain *chain = nullptr;
+    /** The folder's Result socket the layer feeds, for the first layer of an empty folder. */
+    bNodeSocket *group_result = nullptr;
+    bNode *group_result_node = nullptr;
     ChainLayer layer;
     bNode *tex = nullptr;
     bNodeSocket *tex_color = nullptr;
@@ -2126,25 +2317,17 @@ bool BKE_paint_material_layer_add(Main &bmain,
   };
   Vector<ResolvedLayer> resolved;
   for (NewLayerNodes &nodes : added) {
-    ChannelChain *chain = nullptr;
-    for (ChannelChain &candidate : chains) {
-      if (candidate.channel == nodes.channel) {
-        chain = &candidate;
-        break;
-      }
-    }
     CompositeMixNode mix;
     bNodeSocket *output = mix_output_find(*nodes.mix);
     bNodeSocket *tex_color = bke::node_find_socket(*nodes.tex, SOCK_OUT, "Color"_ustr);
     bNodeSocket *tex_alpha = bke::node_find_socket(*nodes.tex, SOCK_OUT, "Alpha"_ustr);
-    if (chain == nullptr || output == nullptr || tex_color == nullptr || tex_alpha == nullptr ||
+    if (output == nullptr || tex_color == nullptr || tex_alpha == nullptr ||
         !composite_mix_node_read(*nodes.mix, mix))
     {
       new_layer_nodes_discard(bmain, tree, added);
       return fail(PaintMaterialLayerEditError::CreationFailed);
     }
     ResolvedLayer entry;
-    entry.chain = chain;
     entry.tex = nodes.tex;
     entry.factor = const_cast<bNodeSocket *>(mix.factor);
     entry.layer.node = nodes.mix;
@@ -2154,6 +2337,35 @@ bool BKE_paint_material_layer_add(Main &bmain,
     entry.layer.image = nodes.image;
     entry.tex_color = tex_color;
     entry.tex_alpha = tex_alpha;
+    if (into_empty_group) {
+      bNode *instance = nullptr;
+      for (const AddEmptyGroupInstance &inst : fresh_instances) {
+        if (inst.channel == nodes.channel) {
+          instance = inst.instance;
+          break;
+        }
+      }
+      bNodeSocket *result = (instance == nullptr) ? nullptr :
+                                                    group_result_socket(*instance, nodes.channel);
+      if (result == nullptr) {
+        new_layer_nodes_discard(bmain, tree, added);
+        return fail(PaintMaterialLayerEditError::CreationFailed);
+      }
+      entry.group_result = result;
+      entry.group_result_node = &result->owner_node();
+    }
+    else {
+      for (ChannelChain *candidate : target_chains) {
+        if (candidate->channel == nodes.channel) {
+          entry.chain = candidate;
+          break;
+        }
+      }
+      if (entry.chain == nullptr) {
+        new_layer_nodes_discard(bmain, tree, added);
+        return fail(PaintMaterialLayerEditError::CreationFailed);
+      }
+    }
     resolved.append(entry);
   }
 
@@ -2168,19 +2380,63 @@ bool BKE_paint_material_layer_add(Main &bmain,
      * coverage from the start, rather than a bare link with nothing left for a Value slider. */
     layer_factor_coverage_link(
         tree, *entry.layer.node, *entry.factor, *entry.tex, *entry.tex_alpha, 1.0f);
-    bke::node_position_relative(*entry.layer.node,
-                                *entry.chain->terminal_node,
-                                entry.layer.output,
-                                *entry.chain->terminal);
+    if (into_empty_group) {
+      /* The first layer of the folder blends over the transparency its own bottom socket holds,
+       * and its output becomes what the folder contributes -- its Result. */
+      bke::node_position_relative(*entry.layer.node,
+                                  *entry.group_result_node,
+                                  entry.layer.output,
+                                  *entry.group_result);
+      relink_into(tree,
+                  *entry.group_result,
+                  *entry.group_result_node,
+                  *entry.layer.node,
+                  *entry.layer.output);
+    }
+    else {
+      bke::node_position_relative(*entry.layer.node,
+                                  *entry.chain->terminal_node,
+                                  entry.layer.output,
+                                  *entry.chain->terminal);
+      entry.chain->layers.insert(insert_at, entry.layer);
+      chain_rebuild_links(*entry.chain);
+    }
     bke::node_position_relative(*entry.tex, *entry.layer.node, entry.tex_color, *entry.layer.top);
-    entry.chain->layers.insert(insert_at, entry.layer);
-    chain_rebuild_links(*entry.chain);
     BKE_paint_material_layer_marker_set(*entry.layer.node, layer_id);
     if (entry.layer.image != nullptr) {
       entry.layer.image->paint_layer_id = layer_id;
     }
   }
 
+  if (&tree != ma.nodetree) {
+    /* The new layer's links live in a folder's own node tree; `succeed` updates the material
+     * tree, which the folder's output now feeds a changed value into. */
+    BKE_ntree_update_after_single_tree_change(bmain, tree);
+  }
+
+  if (!add_by_anchor) {
+    return succeed(insert_at);
+  }
+  /* The row just added reads as a #PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE-based ordinal when it
+   * landed inside a folder. Its Mix node carries the layer's marker, so a fresh forest read finds
+   * where it sits without re-deriving the anchor -- which now names a different, shifted row. */
+  Vector<Vector<ChannelChain>> final_forest;
+  if (chains_collect_forest(ma, final_forest, error) && !final_forest.is_empty()) {
+    const Vector<ChannelChain> &channel_forest = final_forest.first();
+    for (const int64_t chain_index : channel_forest.index_range()) {
+      const ChannelChain &chain = channel_forest[chain_index];
+      for (const int64_t layer_index : chain.layers.index_range()) {
+        const bNode *node = chain.layers[layer_index].node;
+        if (node != nullptr &&
+            BLI_uuid_equal(BKE_paint_material_layer_marker_get(*node), layer_id))
+        {
+          const int ordinal = forest_ordinal_for_position(
+              channel_forest, int(chain_index), int(layer_index));
+          return succeed(ordinal >= 0 ? ordinal : insert_at);
+        }
+      }
+    }
+  }
   return succeed(insert_at);
 }
 

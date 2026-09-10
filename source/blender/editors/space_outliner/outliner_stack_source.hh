@@ -567,8 +567,13 @@ class StackEditor {
   virtual void add_kinds(Vector<StackAddKindInfo> & /*r_kinds*/) const {}
 
   /**
-   * Create a row of \a kind -- a place in this editor's own #add_kinds list -- so that it ends up
-   * at \a ordinal; -1 puts it on top.
+   * Create a row of \a kind -- a place in this editor's own #add_kinds list -- placed relative to
+   * the row \a ordinal names: directly above it, or, when that row is a folder, inside it. -1
+   * names no row and puts the new one on top of the stack.
+   *
+   * \a ordinal is the row the Add was invoked on, not a position to land at: a source resolves
+   * "above" or "into" itself, since only it knows whether a row is a folder and where its
+   * contents live.
    *
    * A source that has its own "+" elsewhere in the UI leaves this at its default rather than
    * duplicating it: shape keys are added from the Object Data properties, and a second button that

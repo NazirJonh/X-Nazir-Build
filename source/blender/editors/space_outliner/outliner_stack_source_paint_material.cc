@@ -750,7 +750,11 @@ class PaintMaterialStackSource final : public StackSource,
     PaintMaterialLayerAddParams params;
     params.type = (kind == fill_kind) ? PaintMaterialLayerAddType::Fill :
                                         PaintMaterialLayerAddType::Image;
-    params.ordinal = ordinal;
+    /* The seam hands #row_add the row the Add was invoked on, or -1 for the top of the stack. A
+     * row inside a folder -- or a folder itself -- is placed relative to through
+     * #PaintMaterialLayerAddParams::anchor_ordinal, which walks into that folder's own node
+     * tree; -1 stays the plain "on top of the top-level stack". */
+    params.anchor_ordinal = ordinal;
     const Scene *scene = CTX_data_scene(&C);
     if (scene != nullptr && scene->toolsettings != nullptr) {
       /* The same size the first brush stroke would have created this material's maps at. */

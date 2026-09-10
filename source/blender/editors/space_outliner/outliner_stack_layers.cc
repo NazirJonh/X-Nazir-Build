@@ -644,19 +644,16 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
   const int kind = RNA_enum_get(op->ptr, "type");
-  int ordinal = RNA_int_get(op->ptr, "ordinal");
 
-  /* If ordinal is -1 (default), insert above the row addressed by the Outliner action. This uses
-   * selection first and the paint target only as a fallback. */
-  if (ordinal == -1) {
-    const int anchor_ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
-    if (anchor_ordinal >= 0) {
-      ordinal = anchor_ordinal + 1;
-    }
-  }
-
-  return outliner_stack_row_add(C, *space_outliner, kind, ordinal) >= 0 ? OPERATOR_FINISHED :
-                                                                         OPERATOR_CANCELLED;
+  /* The row the Add is anchored to: a marker or the explicit "ordinal" property when a script gave
+   * one, otherwise the selection and then the active row. -1 names no row and puts the new layer
+   * on top of the stack. The source decides what "anchored to" means -- directly above the row,
+   * or, when the row is a folder, inside it -- so a row inside a folder keeps the new layer in
+   * that folder. */
+  const int anchor_ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  return outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal) >= 0 ?
+             OPERATOR_FINISHED :
+             OPERATOR_CANCELLED;
 }
 
 bool stack_row_add_poll(bContext *C)
@@ -2220,7 +2217,8 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
               -1,
               SHRT_MAX,
               "Ordinal",
-              "Position for the new layer; -1 puts it above the selected or active layer",
+              "Row to anchor the new layer to; it lands above that row, or inside it when the row "
+              "is a folder. -1 uses the selected or active row, or the top of the stack",
               -1,
               SHRT_MAX);
   rna_def_stack_row_marker(ot);

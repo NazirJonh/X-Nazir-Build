@@ -464,6 +464,116 @@ TEST_F(PaintMaterialLayerEditTest, add_bottom_ordinal_leaves_the_graph_alone)
   EXPECT_EQ(layer_names().size(), 2);
 }
 
+TEST_F(PaintMaterialLayerEditTest, add_anchored_to_a_grouped_layer_lands_in_the_group)
+{
+  build_stack(3);
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  int group_ordinal = -1;
+  ASSERT_TRUE(
+      BKE_paint_material_layer_group_make(*bmain, *material, 1, 2, &group_ordinal, &error));
+
+  /* Anchor to "L1", the lower of the two rows the folder holds. */
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.name = "Inserted";
+  params.anchor_ordinal = PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE + 0;
+  int new_ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, &new_ordinal, &error))
+      << int(error);
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+  /* It landed inside the folder, so its ordinal is a group-child one. */
+  EXPECT_GE(new_ordinal, PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE);
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 5);
+  EXPECT_EQ(entries[0].name, "L0");
+  EXPECT_TRUE(entries[1].is_group);
+  EXPECT_EQ(entries[2].name, "L1");
+  EXPECT_EQ(entries[3].name, "Inserted");
+  EXPECT_EQ(entries[4].name, "L2");
+  /* The new row nests exactly as deep as the siblings it was dropped between. */
+  EXPECT_EQ(entries[3].depth, entries[2].depth);
+}
+
+TEST_F(PaintMaterialLayerEditTest, add_anchored_to_a_folder_lands_inside_it_on_top)
+{
+  build_stack(3);
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  int group_ordinal = -1;
+  ASSERT_TRUE(
+      BKE_paint_material_layer_group_make(*bmain, *material, 1, 2, &group_ordinal, &error));
+
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.name = "OnTop";
+  params.anchor_ordinal = group_ordinal;
+  int new_ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, &new_ordinal, &error))
+      << int(error);
+  EXPECT_GE(new_ordinal, PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE);
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 5);
+  EXPECT_EQ(entries[2].name, "L1");
+  EXPECT_EQ(entries[3].name, "L2");
+  EXPECT_EQ(entries[4].name, "OnTop");
+  EXPECT_EQ(entries[4].depth, entries[3].depth);
+}
+
+TEST_F(PaintMaterialLayerEditTest, add_anchored_to_an_empty_folder_creates_its_first_layer)
+{
+  build_stack(3);
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  int folder_ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_group_add(
+      *bmain, *material, -1, PaintMaterialLayerMovePlace::Above, &folder_ordinal, &error))
+      << int(error);
+
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.name = "First";
+  params.anchor_ordinal = folder_ordinal;
+  int new_ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, &new_ordinal, &error))
+      << int(error);
+  EXPECT_GE(new_ordinal, PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE);
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  bool found_nested_first = false;
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    if (entry.name == "First" && entry.depth > 0) {
+      found_nested_first = true;
+    }
+  }
+  EXPECT_TRUE(found_nested_first);
+}
+
+TEST_F(PaintMaterialLayerEditTest, add_anchored_inside_a_shared_folder_is_refused)
+{
+  build_stack(3);
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_group_make(*bmain, *material, 1, 2, nullptr, &error));
+
+  /* A second material whose node tree reaches the same folder tree: adding a layer here would
+   * grow a stack shown in that material too. */
+  Material *twin = id_cast<Material *>(BKE_id_copy(bmain, &material->id));
+  ASSERT_NE(twin, nullptr);
+
+  const GraphShape before = graph_shape();
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.anchor_ordinal = PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE + 0;
+  error = PaintMaterialLayerEditError::None;
+  EXPECT_FALSE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::TreeShared);
+  expect_graph_unchanged(before);
+
+  BKE_id_free(bmain, &twin->id);
+}
+
 TEST_F(PaintMaterialLayerEditTest, reorder_invalid_ordinal_leaves_the_graph_alone)
 {
   build_stack(3);

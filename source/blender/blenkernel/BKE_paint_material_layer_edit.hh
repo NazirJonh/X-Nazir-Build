@@ -159,8 +159,19 @@ struct PaintMaterialLayerAddParams {
   /**
    * Where the new layer ends up. -1 puts it on top; 0 is refused, since the bottom layer is a bare
    * Image Texture rather than a Mix node (#PaintMaterialLayerEditError::IsBottomLayer).
+   *
+   * Ignored when #anchor_ordinal is set.
    */
   int ordinal = -1;
+  /**
+   * Place the new layer relative to the UI row this names, instead of at #ordinal.
+   *
+   * A row inside a folder inserts into that folder, directly above the named row; a row that is
+   * itself a folder inserts into it, on top of what it holds (an empty folder gets its first
+   * layer this way). A plain top-level row inserts directly above itself. -1 falls back to
+   * #ordinal.
+   */
+  int anchor_ordinal = -1;
   int image_size = 1024;
   /** Used by #PaintMaterialLayerAddType::Fill; non-color channels take the red component. */
   float fill_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -178,7 +189,12 @@ struct PaintMaterialLayerAddParams {
  * Transactional like the rest of this file: every node is created and validated before the first
  * link is rewritten, so a channel that cannot take the layer leaves the graph untouched.
  *
- * \param r_ordinal: when given, receives the position the new layer ended up at.
+ * With #PaintMaterialLayerAddParams::anchor_ordinal set, the layer is created inside whichever
+ * folder the anchor row lives in (or the folder the anchor row is), writing to that group's own
+ * node tree.
+ *
+ * \param r_ordinal: when given, receives the position the new layer ended up at -- a
+ * #PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE-based ordinal when the layer landed inside a folder.
  */
 bool BKE_paint_material_layer_add(Main &bmain,
                                   Material &ma,

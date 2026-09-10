@@ -4397,9 +4397,14 @@ static void outliner_draw_tree_element(ui::Block *block,
 
     offsx += int(UI_UNIT_X + ui::fontstyle_string_width(fstyle, te->name));
 
+    /* A collapsed Stack Layers row -- a folder or a texture layer -- keeps just its name. The
+     * merged row of the icons it contains reads as clutter next to the previews the mode already
+     * draws, so it is left off for now. */
+    const bool skip_merged_child_icons = (tselem->type == TSE_STACK_LAYER);
+
     /* Closed item, we draw the icons, not when it's a scene, or master-server list though. */
     int data_icons_end = startx + offsx;
-    if (!TSELEM_OPEN(tselem, space_outliner)) {
+    if (!TSELEM_OPEN(tselem, space_outliner) && !skip_merged_child_icons) {
       if (te->subtree.first) {
         if ((tselem->type == TSE_SOME_ID) && (te->idcode == ID_SCE)) {
           /* Pass. */

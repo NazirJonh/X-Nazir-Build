@@ -765,6 +765,12 @@ ed::outliner::StackItemIdentity outliner_stack_identity_of(const SpaceOutliner &
                                                             int ordinal);
 /** Ordinals of the stack rows the user has selected, in ascending order. Empty when none are. */
 void stack_selected_ordinals_get(SpaceOutliner &space_outliner, blender::Vector<int> &r_ordinals);
+/**
+ * Remove from \a r_ordinals every row that a folder also in the set already carries, keeping only
+ * the roots of the selection. Shared by copy and drag, which both act on whole folders at once.
+ */
+void stack_ordinals_drop_covered_descendants(const SpaceOutliner &space_outliner,
+                                             blender::Vector<int> &r_ordinals);
 /** The stack's owning data-block for the current focus, or null. */
 ID *outliner_stack_owner_get(const ed::outliner::StackReadContext &ctx,
                              SpaceOutliner &space_outliner);

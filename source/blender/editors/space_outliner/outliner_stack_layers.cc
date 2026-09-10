@@ -478,26 +478,10 @@ wmOperatorStatus stack_row_copy_exec(bContext *C, wmOperator *op)
 
   /* A selected folder already carries every row below it. Keeping selected descendants as separate
    * clipboard items would try to paste them once more after their containing folder. */
-  Set<int> selected_set;
-  selected_set.add_multiple(selected);
-  Vector<int> roots;
-  for (const int ordinal : selected) {
-    const StackRow *row = outliner_stack_row_find(*space_outliner, ordinal);
-    bool has_selected_ancestor = false;
-    while (row != nullptr && row->parent_ordinal >= 0) {
-      if (selected_set.contains(row->parent_ordinal)) {
-        has_selected_ancestor = true;
-        break;
-      }
-      row = outliner_stack_row_find(*space_outliner, row->parent_ordinal);
-    }
-    if (!has_selected_ancestor) {
-      roots.append(ordinal);
-    }
-  }
+  stack_ordinals_drop_covered_descendants(*space_outliner, selected);
 
   stack_layer_clipboard.clear();
-  for (const int ordinal : roots) {
+  for (const int ordinal : selected) {
     const StackItemIdentity identity = outliner_stack_identity_of(*space_outliner, ordinal);
     if (identity.is_valid()) {
       stack_layer_clipboard.append(identity);
@@ -1527,6 +1511,32 @@ void stack_selected_ordinals_get(SpaceOutliner &space_outliner, Vector<int> &r_o
     }
   });
   std::sort(r_ordinals.begin(), r_ordinals.end());
+}
+
+void stack_ordinals_drop_covered_descendants(const SpaceOutliner &space_outliner,
+                                             Vector<int> &r_ordinals)
+{
+  /* A folder in the set already carries every row it holds; a descendant kept alongside it is a
+   * second copy of a row that is going to move anyway -- and its group-child ordinal, which is not
+   * a position, breaks any code that treats the set as a contiguous run. */
+  Set<int> ordinal_set;
+  ordinal_set.add_multiple(r_ordinals);
+  Vector<int> roots;
+  for (const int ordinal : r_ordinals) {
+    const StackRow *row = outliner_stack_row_find(space_outliner, ordinal);
+    bool has_selected_ancestor = false;
+    while (row != nullptr && row->parent_ordinal >= 0) {
+      if (ordinal_set.contains(row->parent_ordinal)) {
+        has_selected_ancestor = true;
+        break;
+      }
+      row = outliner_stack_row_find(space_outliner, row->parent_ordinal);
+    }
+    if (!has_selected_ancestor) {
+      roots.append(ordinal);
+    }
+  }
+  r_ordinals = std::move(roots);
 }
 
 bool outliner_stack_layer_debug_drop(bContext &C,

@@ -1210,6 +1210,10 @@ static void stack_layer_drop_data_init(SpaceOutliner &space_outliner,
     selected_ordinals.append(dragged_ordinal);
   }
 
+  /* Every selected row is carried, so the selection is whole again after the move. The rows that
+   * are actually *moved* are the roots of that set -- a folder already brings its contents -- and
+   * the two places that need those roots prune this list themselves. */
+
   /* Convert ordinals to identities and sort by ordinal to preserve stack order. */
   for (int ordinal : selected_ordinals) {
     const StackItemIdentity identity = outliner_stack_identity_of(space_outliner, ordinal);
@@ -1357,10 +1361,18 @@ static bool stack_layer_drop_init(bContext *C, const wmEvent *event, wmDragStack
     if (drag_ordinal == target_ordinal) {
       return false;
     }
+    /* The block is the contiguous run of top-level rows being moved. A row inside a folder is not
+     * a position in that run -- its group-child ordinal is not comparable to a top-level one, and
+     * it only moves because its folder does. Aiming inside a dragged folder is caught below by
+     * #stack_row_is_within. */
+    const StackRow *drag_stack_row = outliner_stack_row_find(*space_outliner, drag_ordinal);
+    if (drag_stack_row != nullptr && drag_stack_row->parent_ordinal >= 0) {
+      continue;
+    }
     block_low = std::min(block_low, drag_ordinal);
     block_high = std::max(block_high, drag_ordinal);
   }
-  if (target_ordinal > block_low && target_ordinal < block_high) {
+  if (block_low <= block_high && target_ordinal > block_low && target_ordinal < block_high) {
     return false;
   }
 
@@ -1488,10 +1500,27 @@ static wmOperatorStatus stack_layer_drop_invoke(bContext *C,
                                                            *space_outliner, active_ordinal_before) :
                                                        StackItemIdentity();
 
+  /* The rows actually moved are the roots of the dragged set: a dragged folder already carries its
+   * dragged descendants, and moving those again would pull them back out of it. Pruned once, by the
+   * ordinals the rows have now, before the first move renumbers anything. The full set is still
+   * used below to put the selection back. */
+  Vector<int> root_ordinals;
+  for (const StackItemIdentity &drag_row : drop_data->drag_rows) {
+    const int ordinal = outliner_stack_identity_resolve(ctx, *space_outliner, drag_row);
+    if (ordinal >= 0) {
+      root_ordinals.append(ordinal);
+    }
+  }
+  stack_ordinals_drop_covered_descendants(*space_outliner, root_ordinals);
+  Vector<StackItemIdentity> rows_to_move;
+  for (const int ordinal : root_ordinals) {
+    rows_to_move.append(outliner_stack_identity_of(*space_outliner, ordinal));
+  }
+
   bool any_moved = false;
   StackItemIdentity last_moved = anchor_identity;
   StackMovePlace place_now = place;
-  for (const StackItemIdentity &drag_row : drop_data->drag_rows) {
+  for (const StackItemIdentity &drag_row : rows_to_move) {
     const int drag_ordinal = outliner_stack_identity_resolve(ctx, *space_outliner, drag_row);
     const int anchor_ordinal = outliner_stack_identity_resolve(ctx, *space_outliner, last_moved);
     if (drag_ordinal < 0 || anchor_ordinal < 0) {

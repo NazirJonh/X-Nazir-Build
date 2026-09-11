@@ -7649,6 +7649,39 @@ static bool stroke_method_is_curve_patch_target(const Brush *brush)
          (brush->stroke_method == BRUSH_STROKE_ROLL && brush->roll_edit_after);
 }
 
+/** The object's active material slot (by #Object.actcol), or null when it has none. */
+static Material *object_active_material(const Object &ob)
+{
+  if (ob.type != OB_MESH || ob.actcol <= 0) {
+    return nullptr;
+  }
+  return BKE_object_material_get(const_cast<Object *>(&ob), ob.actcol);
+}
+
+/**
+ * Material Paint multi-object gate: a hit object may only become the stroke's primary when its
+ * active material matches the stroke object's. #test_start initializes the paint attributes and
+ * the per-object source sampler for the objects that passed #paintable_mode_objects' material
+ * filter only; promoting onto any other object mid-stroke would paint a mesh that was never
+ * prepared. Returns true for every other canvas source (no gating).
+ *
+ * A null reference material (stroke object has no active material slot) disables the gate,
+ * mirroring #paintable_mode_objects.
+ */
+static bool material_paint_hit_allowed(const Brush *brush,
+                                       const PaintModeSettings &settings,
+                                       const Object &stroke_object,
+                                       const Object &hit_object)
+{
+  if (brush == nullptr || !brush_type_is_paint(brush->sculpt_brush_type) ||
+      settings.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL_PAINT)
+  {
+    return true;
+  }
+  const Material *reference = object_active_material(stroke_object);
+  return reference == nullptr || object_active_material(hit_object) == reference;
+}
+
 struct SculptPaintStroke final : public PaintStroke {
   Main *bmain_;
   Sculpt *sculpt_;
@@ -7773,6 +7806,16 @@ bool SculptPaintStroke::get_location(float out[3], const float mouse[2], bool fo
       return false;
     }
 
+    /* Material Paint multi-object: same policy for a material mismatch. #test_start prepared
+     * (attributes + source sampler) only the objects sharing the stroke object's active material;
+     * promoting onto anything else would paint an unprepared mesh. Report the miss so the stroke
+     * stays on the last prepared object. */
+    if (!material_paint_hit_allowed(
+            this->brush, *this->paint_mode_settings_, *this->object, *hit_ob))
+    {
+      return false;
+    }
+
     /* Switch active object of the stroke. */
     this->object = hit_ob;
     this->vc.obact = hit_ob;
@@ -7827,6 +7870,160 @@ static StrokeToggleSettings create_toggle_settings(const wmOperator &op, Main &b
   return toggle_settings;
 }
 
+/**
+ * Material Paint per-object stroke setup: create the enabled channels' attributes and the
+ * per-object source sampler. Extracted from #brush_stroke_init, which only handled the active
+ * object; multi-object strokes call this for every object in #MultiObjectStrokeContext
+ * .mode_objects from #test_start, AFTER #stroke_cache_init gave each object its #StrokeCache
+ * (the sampler and the created-attribute undo list live on it) and BEFORE #stroke_undo_begin
+ * (attribute creation must be part of the stroke's undo step).
+ */
+static void init_material_paint_for_object(const Scene &scene,
+                                           wmOperator *op,
+                                           Object &ob,
+                                           const Brush &brush,
+                                           const Sculpt &sd,
+                                           PaintModeSettings &paint_mode_init)
+{
+  if (!material::paint_supported_on_object(scene, ob)) {
+    return;
+  }
+
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  if (!ss.cache) {
+    /* #stroke_cache_init (the caller's) has created every stroke object's cache already. */
+    return;
+  }
+
+  Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  bool any_created = false;
+  /* Per-channel settings are allocated by the PBR Paint opt-in button, not by the first
+   * stroke. A fresh brush without that setup paints nothing on this canvas. */
+  if (brush.material_paint == nullptr) {
+    return;
+  }
+  const BrushMaterialPaint &brush_paint = *brush.material_paint;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!BKE_paint_material_channel_writes_to_target(
+            brush_paint, paint_mode_init, sd.paint.visible_material_channels, info.channel))
+    {
+      continue;
+    }
+    bool created = false;
+    const std::string attr_name = BKE_paint_material_channel_attribute_name(paint_mode_init,
+                                                                            info.channel);
+    const MaterialPaintAttributeStatus status =
+        info.is_color ?
+            BKE_paint_mesh_material_color_attribute_ensure_named(mesh, attr_name, &created) :
+            BKE_paint_mesh_material_attribute_ensure(mesh, attr_name, &created);
+
+    if (status != MaterialPaintAttributeStatus::Ok) {
+      /* Without this the channel would just silently not paint. */
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "%s channel: %s",
+                  IFACE_(info.ui_name),
+                  TIP_(BKE_paint_material_attribute_status_message(status)));
+      continue;
+    }
+
+    if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
+        paint_mode_init.channel_layer_bindings[PAINT_MATERIAL_CHANNEL_BASE_COLOR]
+                .attribute_name[0] == '\0')
+    {
+      /* Always, not just when newly created: Workbench renders the mesh's active color
+       * attribute, so leaving a pre-existing "Color" inactive would make the stroke write
+       * into an attribute the user cannot see. A redirected layer is exempt - it is an
+       * add-on's storage, not "the" color of the mesh (see
+       * #BKE_paint_mesh_material_color_attribute_ensure_named's contract). */
+      BKE_id_attributes_active_color_set(&mesh.id, attr_name);
+      if (created) {
+        /* Only a brand new attribute takes over as the render default; retargeting the
+         * default of an existing mesh would change how it renders outside paint mode. */
+        BKE_id_attributes_default_color_set(&mesh.id, attr_name);
+      }
+    }
+
+    any_created |= created;
+    if (created) {
+      /* Undo should remove the attribute again rather than leave a zeroed one behind; see
+       * #undo::StepData::MaterialAttributeInfo::created. Color-shaped channels are tracked
+       * here too - the undo step recreates them through the color path on redo. */
+      ss.cache->material_created_attribute_names.append(attr_name);
+    }
+  }
+
+  /* Built here, alongside the per-stroke attribute creation, so the image pool lives exactly
+   * as long as the stroke does. */
+  ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
+      ss, brush, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
+
+  if (any_created) {
+    DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  }
+}
+
+/**
+ * Material canvas (raster image maps) per-object stroke setup: ensure the enabled channels have
+ * a paintable Image Texture and build the per-object channel source sampler that raster image
+ * targets sample through (see #StrokeCache::material_source_sampler in
+ * #SCULPT_do_paint_brush_image). Extracted from #brush_stroke_init, which only handled the active
+ * object; multi-object strokes call this for every object in #MultiObjectStrokeContext
+ * .mode_objects from #test_start, mirroring #init_material_paint_for_object above -- without a
+ * per-object sampler, a secondary object's texture-sourced channels silently fall back to the
+ * brush's flat color, exactly as an unset #StrokeCache::material_source_sampler does for
+ * Material Paint when this step is skipped.
+ */
+static void init_material_canvas_for_object(Main &bmain,
+                                             wmOperator *op,
+                                             Object &ob,
+                                             const Brush &brush,
+                                             const Sculpt &sd,
+                                             PaintModeSettings &paint_mode_init)
+{
+  if (ob.type != OB_MESH) {
+    return;
+  }
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  if (!ss.cache) {
+    /* #stroke_cache_init (the caller's) has created every stroke object's cache already. */
+    return;
+  }
+
+  BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
+  if (brush.material_paint == nullptr) {
+    return;
+  }
+  const BrushMaterialPaint &brush_paint = *brush.material_paint;
+  BKE_paint_material_images_ensure_writable(
+      bmain, ob, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.socket_name == nullptr) {
+      continue;
+    }
+    if (!BKE_paint_material_channel_writes_to_target(
+            brush_paint, paint_mode_init, sd.paint.visible_material_channels, info.channel))
+    {
+      continue;
+    }
+    Image *image;
+    ImageUser *iuser;
+    if (!BKE_paint_principled_channel_image_get(
+            ob, info.channel, &image, &iuser, &paint_mode_init))
+    {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  TIP_("%s channel has no paintable image texture on the active material"),
+                  IFACE_(info.ui_name));
+    }
+  }
+
+  /* Same stroke-scoped sampler as Material Paint: raster image targets also sample per-channel
+   * sources through StrokeCache::material_source_sampler. */
+  ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
+      ss, brush, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
+}
+
 static void brush_stroke_init(bContext *C, const wmOperator *op)
 {
   Object &ob = *CTX_data_active_object(C);
@@ -7865,118 +8062,25 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
     color::ensure_shared_color_attributes(ob, sculpt_mode_objects(vc));
   }
 
-  /* Poly Paint: create enabled material attributes up-front (mirroring the color layer above)
-   * instead of lazily during the stroke. This lets the draw engine's object sync pick them up and
-   * switch the Workbench shader to per-vertex material display before the first dab is drawn.
-   * Painting itself only tags the attribute data dirty; the push-constants that enable reading
-   * them are refreshed during a full object sync, which the geometry tag below forces. */
-  if (brush_type_is_paint(brush->sculpt_brush_type) &&
-      paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT &&
-      material::paint_supported_on_object(*CTX_data_scene(C), ob))
-  {
-    Mesh &mesh = *id_cast<Mesh *>(ob.data);
-    bool any_created = false;
-    /* Per-channel settings are allocated by the PBR Paint opt-in button, not by the first
-     * stroke. A fresh brush without that setup paints nothing on this canvas. */
-    if (brush->material_paint != nullptr) {
-      const BrushMaterialPaint &brush_paint = *brush->material_paint;
-      for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-        if (!BKE_paint_material_channel_writes_to_target(
-                brush_paint, paint_mode_init, sd.paint.visible_material_channels, info.channel))
-        {
-          continue;
-        }
-        bool created = false;
-        const std::string attr_name = BKE_paint_material_channel_attribute_name(paint_mode_init,
-                                                                                info.channel);
-        const MaterialPaintAttributeStatus status =
-            info.is_color ?
-                BKE_paint_mesh_material_color_attribute_ensure_named(mesh, attr_name, &created) :
-                BKE_paint_mesh_material_attribute_ensure(mesh, attr_name, &created);
+  /* Poly Paint (Material Paint canvas): enabled material attributes and the per-object source
+   * sampler are created per stroke object in #SculptPaintStroke::test_start via
+   * #init_material_paint_for_object -- multi-object strokes need them on every participating
+   * mesh, not just the active one, and they must be created after #stroke_cache_init handed
+   * each object its #StrokeCache and before #stroke_undo_begin folds their creation into the
+   * undo step. The up-front (pre-first-dab) creation this block used to do is preserved:
+   * #test_start runs before the first dab, letting the draw engine's object sync pick the
+   * attributes up and switch the Workbench shader to per-vertex material display. */
 
-        if (status != MaterialPaintAttributeStatus::Ok) {
-          /* Without this the channel would just silently not paint. */
-          BKE_reportf(op->reports,
-                      RPT_WARNING,
-                      "%s channel: %s",
-                      IFACE_(info.ui_name),
-                      TIP_(BKE_paint_material_attribute_status_message(status)));
-          continue;
-        }
-
-        if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
-            paint_mode_init.channel_layer_bindings[PAINT_MATERIAL_CHANNEL_BASE_COLOR]
-                    .attribute_name[0] == '\0')
-        {
-          /* Always, not just when newly created: Workbench renders the mesh's active color
-           * attribute, so leaving a pre-existing "Color" inactive would make the stroke write
-           * into an attribute the user cannot see. A redirected layer is exempt - it is an
-           * add-on's storage, not "the" color of the mesh (see
-           * #BKE_paint_mesh_material_color_attribute_ensure_named's contract). */
-          BKE_id_attributes_active_color_set(&mesh.id, attr_name);
-          if (created) {
-            /* Only a brand new attribute takes over as the render default; retargeting the
-             * default of an existing mesh would change how it renders outside paint mode. */
-            BKE_id_attributes_default_color_set(&mesh.id, attr_name);
-          }
-        }
-
-        any_created |= created;
-        if (created) {
-          /* Undo should remove the attribute again rather than leave a zeroed one behind; see
-           * #undo::StepData::MaterialAttributeInfo::created. Color-shaped channels are tracked
-           * here too - the undo step recreates them through the color path on redo. */
-          ss.cache->material_created_attribute_names.append(attr_name);
-        }
-      }
-
-      /* Built here, alongside the per-stroke attribute creation, so the image pool lives exactly
-       * as long as the stroke does. */
-      ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
-          ss, *brush, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
-    }
-    if (any_created) {
-      DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
-    }
-  }
-
-  /* Material canvas: create missing Image Texture maps for enabled channels so a stroke can
-   * write. Invalidate the resolve cache so this stroke does not write into a stale Image after
-   * undo or a Shader Editor edit. */
+  /* Material canvas (raster image maps): per-object image-map creation and the shared
+   * #StrokeCache::material_source_sampler are set up per stroke object in
+   * #SculptPaintStroke::test_start via #init_material_canvas_for_object -- multi-object strokes
+   * need them on every participating mesh, not just the active one, mirroring Material Paint's
+   * #init_material_paint_for_object above. Only the Image Editor auto-select (a UI convenience
+   * pointing the editor at a sensible image, not per-object painting state) stays here, scoped to
+   * the active object. */
   if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
       paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL && ob.type == OB_MESH)
   {
-    BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
-    if (brush->material_paint != nullptr) {
-      const BrushMaterialPaint &brush_paint = *brush->material_paint;
-      BKE_paint_material_images_ensure_writable(
-          *CTX_data_main(C), ob, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
-      for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-        if (info.socket_name == nullptr) {
-          continue;
-        }
-        if (!BKE_paint_material_channel_writes_to_target(
-                brush_paint, paint_mode_init, sd.paint.visible_material_channels, info.channel))
-        {
-          continue;
-        }
-        Image *image;
-        ImageUser *iuser;
-        if (!BKE_paint_principled_channel_image_get(
-                ob, info.channel, &image, &iuser, &paint_mode_init))
-        {
-          BKE_reportf(op->reports,
-                      RPT_WARNING,
-                      TIP_("%s channel has no paintable image texture on the active material"),
-                      IFACE_(info.ui_name));
-        }
-      }
-
-      /* Same stroke-scoped sampler as Material Paint: raster image targets also sample per-channel
-       * sources through StrokeCache::material_source_sampler. */
-      ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
-          ss, *brush, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
-    }
     ED_space_image_paint_auto_select_material_canvas(CTX_data_main(C), &ob);
   }
 
@@ -8727,16 +8831,39 @@ bool color_supported_check(const Scene &scene, Object &object, ReportList *repor
  * practice. */
 static Vector<Object *> paintable_mode_objects(const Scene &scene,
                                                const Span<Object *> mode_objects,
+                                               const PaintModeSettings &paint_mode_settings,
                                                ReportList *reports)
 {
   Vector<Object *> result;
   result.reserve(mode_objects.size());
+
+  /* Material Paint multi-object: all participating meshes must share one material. Channels are
+   * keyed by the material's principled settings / texture nodes, so an object with a different
+   * material has no consistent target to paint. Reference is the first entry (the active object,
+   * first in #MultiObjectStrokeContext.mode_objects); a null reference (no material slot)
+   * disables the filter. Same skip-and-warn policy as the Multires/Dyntopo check below. */
+  const bool is_material_paint =
+      paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT;
+  Material *reference_material = (is_material_paint && !mode_objects.is_empty()) ?
+                                     object_active_material(*mode_objects[0]) :
+                                     nullptr;
+
   for (Object *object : mode_objects) {
     if (!color_supported_check(scene, *object, nullptr)) {
       BKE_reportf(reports,
                   RPT_WARNING,
                   "Painting: skipping \"%s\" (not supported in multiresolution or dynamic "
                   "topology mode)",
+                  object->id.name + 2);
+      continue;
+    }
+    if (is_material_paint && reference_material != nullptr &&
+        object_active_material(*object) != reference_material)
+    {
+      BKE_reportf(reports,
+                  RPT_WARNING,
+                  "Material Paint: skipping \"%s\" (active material differs from the primary "
+                  "object's)",
                   object->id.name + 2);
       continue;
     }
@@ -8781,12 +8908,16 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
      * #paintable_mode_objects. Without it, a color-brush stroke started with the cursor over an
      * incompatible object would adopt it as the shared "primary" reference (world hit
      * location/normal propagated to every other object in the stroke) even though that object
-     * itself is excluded from #mode_objects and never gets painted. */
+     * itself is excluded from #mode_objects and never gets painted.
+     * Material Paint adds the same gate for a material mismatch: the primary defines the
+     * reference material for #paintable_mode_objects' filter, so it must itself match the
+     * stroke-start object's material. */
     if (stroke_get_location_bvh(
             *this->depsgraph, *vc, sculpt_, brush, hit_co, mval, false, &hit_ob) &&
         hit_ob &&
         (!brush || !brush_type_is_paint(brush->sculpt_brush_type) ||
-         color_supported_check(*this->scene, *hit_ob, nullptr)))
+         color_supported_check(*this->scene, *hit_ob, nullptr)) &&
+        material_paint_hit_allowed(brush, *this->paint_mode_settings_, *this->object, *hit_ob))
     {
       primary_ob = hit_ob;
       primary_hit = true;
@@ -9098,10 +9229,11 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     /* Color-attribute brushes (Paint/Smear/Blur) only support Mesh-typed PBVH -- drop any
      * Multires/Dyntopo object from this stroke's object set. See #paintable_mode_objects for why
      * this exists (fixes a crash) and why "skip and warn" was chosen over cancelling the stroke.
+     * Material Paint additionally drops objects whose active material differs from the primary's.
      */
     if (brush && brush_type_is_paint(brush->sculpt_brush_type)) {
       this->multi_.mode_objects = paintable_mode_objects(
-          *this->scene, this->multi_.mode_objects, op->reports);
+          *this->scene, this->multi_.mode_objects, *this->paint_mode_settings_, op->reports);
       if (this->multi_.mode_objects.is_empty()) {
         return false;
       }
@@ -9135,6 +9267,36 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
       BKE_curvemapping_init(brush->curve_rand_hue);
       BKE_curvemapping_init(brush->curve_rand_saturation);
       BKE_curvemapping_init(brush->curve_rand_value);
+    }
+
+    /* Material Paint multi-object: give every stroke object its channel attributes and source
+     * sampler. Must run after #stroke_cache_init (the sampler and the created-attribute list live
+     * on the per-object #StrokeCache) and before #stroke_undo_begin below, so attribute creation
+     * is part of the stroke's undo step. The objects were already reduced to the paintable,
+     * material-matching set by #paintable_mode_objects above. */
+    if (brush && brush_type_is_paint(brush->sculpt_brush_type) &&
+        this->paint_mode_settings_->canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT)
+    {
+      for (Object *object_ptr : this->multi_.mode_objects) {
+        init_material_paint_for_object(
+            *this->scene, op, *object_ptr, *brush, *this->sculpt_, *this->paint_mode_settings_);
+      }
+    }
+
+    /* Material canvas (raster image maps) multi-object: give every stroke object its own
+     * writable image targets and channel source sampler -- mirrors the Material Paint loop above.
+     * Must run after #stroke_cache_init for the same reason (the sampler lives on the per-object
+     * #StrokeCache). Unlike Material Paint, this canvas has no material-match requirement: each
+     * object paints into its own active material's images, independently ensured per object by
+     * #init_material_canvas_for_object. */
+    if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+        this->paint_mode_settings_->canvas_source == PAINT_CANVAS_SOURCE_MATERIAL)
+    {
+      for (Object *object_ptr : this->multi_.mode_objects) {
+        init_material_canvas_for_object(
+            *this->bmain_, op, *object_ptr, *brush, *this->sculpt_, *this->paint_mode_settings_);
+      }
+      ED_space_image_paint_auto_select_material_canvas(this->bmain_, &ob);
     }
 
     cursor_geometry_info_update(*this->depsgraph, *paint, sculpt_, this->vc, base_, mval, false);

@@ -909,6 +909,10 @@ void paint_2d_bucket_fill(const bContext *C,
  * face index matches 2D Image Editor fill and selection expand. Rasterizes in UV space
  * onto `imapaint.canvas` or the hit face's material image.
  *
+ * In Sculpt Mode multi-object editing, \a ob is only the context object: every participating
+ * mesh is raycast and the click resolves to whichever one is actually closest under the cursor,
+ * not necessarily \a ob (see #texture_fill_target_objects).
+ *
  * \return true if any tile was written.
  */
 bool paint_image_proj_geometry_fill(
@@ -922,7 +926,12 @@ bool paint_image_proj_geometry_fill_faces(const bContext *C,
                                           Brush *br,
                                           Object *ob,
                                           Span<int> seed_faces);
-/** Fill faces whose original-mesh screen-space polygons intersect \a rect. */
+/**
+ * Fill faces whose original-mesh screen-space polygons intersect \a rect.
+ *
+ * In Sculpt Mode multi-object editing, \a ob is only the context object: every participating
+ * mesh is filled, not just \a ob (see #texture_fill_target_objects).
+ */
 bool paint_image_proj_geometry_fill_rect(
     const bContext *C, const float color[3], Brush *br, Object *ob, const rcti &rect);
 /** Fill faces whose UV polygons intersect the Image Editor rectangle. */

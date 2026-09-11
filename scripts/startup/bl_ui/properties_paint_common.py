@@ -1480,7 +1480,7 @@ def brush_settings(layout, context, brush, popover=False):
 
         if brush.image_brush_type == 'FILL':
             if brush.color_type == 'COLOR':
-                draw_image_paint_fill_expand(layout, brush)
+                draw_image_paint_fill_expand(layout, context, brush)
                 if brush.fill_expand == 'PIXELS' and mode == 'PAINT_2D':
                     layout.prop(brush, "fill_threshold", text="Fill Threshold", slider=True)
             elif brush.color_type == 'GRADIENT':
@@ -2878,8 +2878,26 @@ def draw_auto_masking_panel(layout, brush):
         col.prop(automasking, "start_normal_falloff", text="Falloff")
 
 
-def draw_image_paint_fill_expand(layout, brush):
-    """Horizontal Pixels / Face / Island / Mesh buttons for Image/Texture Paint Fill."""
+def _image_paint_fill_canvas(context, is_sculpt_texture_fill):
+    """Image the Fill brush writes to, or None when the settings alone cannot tell."""
+    space_data = context.space_data
+    if getattr(space_data, "type", None) == 'IMAGE_EDITOR':
+        # The Image Editor paints the image it displays, not the projection-paint canvas.
+        return space_data.image
+    tool_settings = context.tool_settings
+    if is_sculpt_texture_fill:
+        paint_mode = tool_settings.paint_mode
+        if paint_mode.canvas_source == 'IMAGE':
+            return paint_mode.canvas_image
+        return None
+    image_paint = tool_settings.image_paint
+    if image_paint.mode == 'IMAGE':
+        return image_paint.canvas
+    return None
+
+
+def draw_image_paint_fill_expand(layout, context, brush):
+    """Horizontal Face / Island / Mesh / Pixels buttons for Image/Texture Paint Fill."""
     is_sculpt_texture_fill = getattr(brush, 'sculpt_brush_type', None) == 'TEXTURE_FILL'
     is_image_fill = brush.image_brush_type == 'FILL'
     if (not is_image_fill and not is_sculpt_texture_fill) or brush.color_type != 'COLOR':
@@ -2887,6 +2905,33 @@ def draw_image_paint_fill_expand(layout, brush):
     row = layout.row(align=True)
     row.use_property_split = False
     row.prop(brush, "fill_expand", text="", expand=True, icon_only=True)
+
+    # The fill mirrors across the paint object's mesh symmetry -- the same flag the 3D
+    # viewport header toggles. The 3D header draws those buttons itself, so surface them
+    # only in the Image Editor, where the fill would otherwise mirror invisibly.
+    if getattr(context.space_data, "type", None) == 'IMAGE_EDITOR':
+        ob = context.image_paint_object or context.active_object
+        if ob is not None and ob.type == 'MESH':
+            row = layout.row(align=True)
+            row.label(icon='MOD_MIRROR')
+            sub = row.row(align=True)
+            sub.scale_x = 0.6
+            sub.prop(ob, "use_mesh_mirror_x", text="X", toggle=True)
+            sub.prop(ob, "use_mesh_mirror_y", text="Y", toggle=True)
+            sub.prop(ob, "use_mesh_mirror_z", text="Z", toggle=True)
+
+    # The fixed scalar only reaches non-color data canvases. Hide the controls only when the
+    # canvas is known to be a color image: with a Material canvas source the target depends on
+    # the face being painted, so guessing there would hide the controls for the main workflow.
+    canvas_image = _image_paint_fill_canvas(context, is_sculpt_texture_fill)
+    if canvas_image is not None and not canvas_image.colorspace_settings.is_data:
+        return True
+
+    col = layout.column(align=True)
+    row = col.row(align=True)
+    row.prop(brush, "data_fill_value_color", text="")
+    row.prop(brush, "data_fill_value", slider=True)
+    col.prop(brush, "data_fill_signed")
     return True
 
 
@@ -3107,7 +3152,7 @@ def brush_basic_texpaint_settings(layout, context, brush, *, compact=False):
     """Draw Tool Settings header for Vertex Paint and 2D and 3D Texture Paint modes."""
     capabilities = brush.image_paint_capabilities
 
-    draw_image_paint_fill_expand(layout, brush)
+    draw_image_paint_fill_expand(layout, context, brush)
 
     if capabilities.has_color:
         material_paint = brush.material_paint

@@ -54,6 +54,7 @@
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
+#include "BLI_vector_set.hh"
 
 /* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
 #include "paint_debug.hh"
@@ -67,17 +68,24 @@
 #include "BKE_editmesh_bvh.hh"
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
+#include "BKE_layer.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
+#include "BKE_screen.hh"
 
 #include "BLT_translation.hh"
 #include "bmesh.hh"
 
 #include "DEG_depsgraph.hh"
+
+#include "DRW_select_buffer.hh"
+
+#include "GPU_immediate.hh"
+#include "GPU_state.hh"
 
 #include "../paint_intern.hh"
 #include "../paint_clone.hh"
@@ -89,6 +97,7 @@
 #include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
+#include "ED_space_api.hh"
 #include "ED_uvedit.hh"
 #include "ED_view3d.hh"
 
@@ -5104,13 +5113,15 @@ static ImageUser *paint_2d_get_tile_iuser(ImagePaintState *s, int tile_number)
   return iuser;
 }
 
-struct ImagePaintUVObjectFaces {
-  Object *object = nullptr;
-  BMesh *bm = nullptr;
-  bool owns_bm = false;
+struct ImagePaintGeometryFillSeedGroup {
   BMUVOffsets offsets{};
   Vector<int> faces;
-  Map<int, Vector<int>> tile_faces;
+};
+
+struct ImagePaintGeometryFillTargetGroup {
+  Image *image = nullptr;
+  BMUVOffsets offsets{};
+  Vector<int> faces;
 };
 
 static void paint_2d_geometry_fill_item_discard(ImagePaintUVObjectFaces &item)
@@ -5232,6 +5243,51 @@ static void paint_2d_geometry_fill_bucket_tiles(ImagePaintUVObjectFaces &item)
   }
 }
 
+/* Mirrored faces are appended to `seed` while it is being iterated, so the loop must run by
+ * index over the pre-mirror length: a range-for over the vector would read freed memory as
+ * soon as the first mirror appends reallocate it. */
+static void paint_image_geometry_fill_seed_add_symmetry(Object *ob,
+                                                        BMesh *bm,
+                                                        const Mesh &mesh,
+                                                        Vector<int> &seed)
+{
+  if (mesh.symmetry == 0) {
+    return;
+  }
+  BM_mesh_elem_table_ensure(bm, BM_FACE);
+  const int seed_num = seed.size();
+  for (const int i : IndexRange(seed_num)) {
+    BMFace *efa = BM_face_at_index(bm, seed[i]);
+    float center[3];
+    BM_face_calc_center_median(efa, center);
+    image_paint_symmetry_mirror_faces(ob, bm, float3(center), mesh.symmetry, seed);
+  }
+}
+
+/* UV-space counterpart for the Image Editor path: a 2D rectangle only yields UVs, so the
+ * object-space mirror point is recovered from the face UV center before mirroring. */
+static void paint_image_geometry_fill_seed_add_symmetry_uv(Object *ob,
+                                                           BMesh *bm,
+                                                           const Mesh &mesh,
+                                                           const BMUVOffsets offsets,
+                                                           Vector<int> &seed)
+{
+  if (mesh.symmetry == 0) {
+    return;
+  }
+  BM_mesh_elem_table_ensure(bm, BM_FACE);
+  const int seed_num = seed.size();
+  for (const int i : IndexRange(seed_num)) {
+    BMFace *efa = BM_face_at_index(bm, seed[i]);
+    float center_uv[2];
+    BM_face_uv_calc_center_median(efa, offsets.uv, center_uv);
+    float3 hit_position;
+    if (image_paint_uv_to_object_position(efa, offsets, center_uv, hit_position)) {
+      image_paint_symmetry_mirror_faces(ob, bm, hit_position, mesh.symmetry, seed);
+    }
+  }
+}
+
 static bool paint_2d_geometry_fill_commit(const bContext *C,
                                           const float color[3],
                                           Brush *br,
@@ -5285,15 +5341,17 @@ static bool paint_2d_geometry_fill_commit(const bContext *C,
         continue;
       }
       image_paint_rasterize_faces_to_ibuf(item.bm,
-                                          item.offsets,
-                                          *faces_on_tile,
-                                          origin,
-                                          ima,
-                                          tile_number,
-                                          ibuf,
-                                          color,
-                                          strength,
-                                          IMB_BlendMode(br->blend));
+                                           item.offsets,
+                                           *faces_on_tile,
+                                           origin,
+                                           ima,
+                                           tile_number,
+                                           ibuf,
+                                           color,
+                                           strength,
+                                           IMB_BlendMode(br->blend),
+                                           br->data_fill_value,
+                                           br->data_fill_signed != 0);
     }
   }
 
@@ -5522,6 +5580,415 @@ static BMUVOffsets paint_image_geometry_fill_uv_offsets(BMesh *bm,
   return image_paint_selection_uv_offsets_get(bm, ob, scene);
 }
 
+/** Canvas image and UV layer a material slot paints through, cached per fill call. */
+struct FillMaterialTarget {
+  Image *image = nullptr;
+  BMUVOffsets offsets{};
+};
+
+/**
+ * Original-mesh faces the select engine actually rasterized in the region.
+ *
+ * Box selection must not reach faces hidden behind the object's own geometry: a normal test only
+ * rejects faces turned away from the camera, not ones a nearer part of the same mesh covers.
+ * Rather than approximating depth, this reads the select ID buffer -- the same source Edit Mode
+ * and Face Select box selection read -- whose IDs pass through `orig_index_face`, so they are
+ * original face indices and map straight onto the ones the fill expands.
+ *
+ * The buffer covers the whole region rather than the gesture box, so the highlight (projected
+ * once at gesture start, before any box exists) and the commit agree on what is visible.
+ *
+ * Left inactive -- every face passes -- when the select buffer is unavailable or X-Ray is on,
+ * because Edit Mode selects through the surface in X-Ray and Fill follows that convention.
+ */
+struct ImagePaintGeometryFillVisibleFaces {
+  BLI_bitmap *bitmap = nullptr;
+  uint bitmap_num = 0;
+
+  ~ImagePaintGeometryFillVisibleFaces()
+  {
+    MEM_SAFE_DELETE(bitmap);
+  }
+
+  bool contains(const int face_index) const
+  {
+    if (bitmap == nullptr) {
+      return true;
+    }
+    return uint(face_index) < bitmap_num && BLI_BITMAP_TEST_BOOL(bitmap, face_index);
+  }
+};
+
+static void paint_image_geometry_fill_visible_faces_build(
+    const bContext *C,
+    Object *ob,
+    const int faces_num,
+    ImagePaintGeometryFillVisibleFaces &r_visible)
+{
+  View3D *v3d = CTX_wm_view3d(C);
+  ARegion *region = CTX_wm_region(C);
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  if (v3d == nullptr || region == nullptr || depsgraph == nullptr || XRAY_ENABLED(v3d)) {
+    return;
+  }
+
+  const Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  if (bmain == nullptr || view_layer == nullptr) {
+    return;
+  }
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  Base *base = BKE_view_layer_base_find(view_layer, ob);
+  if (base == nullptr) {
+    return;
+  }
+
+  /* A single-object context makes the returned bitmap indexable by face index directly. */
+  DRW_select_buffer_context_create(depsgraph, {base}, SCE_SELECT_FACE);
+  rcti region_rect;
+  BLI_rcti_init(&region_rect, 0, region->winx, 0, region->winy);
+  r_visible.bitmap = DRW_select_buffer_bitmap_from_rect(
+      depsgraph, region, v3d, &region_rect, &r_visible.bitmap_num);
+
+  /* The IDs are original face indices only while the evaluated mesh carries an origindex
+   * mapping. Should that ever not hold, the bitmap would be too short and every face would read
+   * as hidden -- drop it and fall back to the normal test rather than filling nothing. */
+  if (r_visible.bitmap != nullptr && r_visible.bitmap_num < uint(faces_num)) {
+    MEM_SAFE_DELETE(r_visible.bitmap);
+    r_visible.bitmap_num = 0;
+  }
+}
+
+/** True when the face normal has a component toward the viewer, so its projection is visible. */
+static bool paint_image_geometry_fill_face_facing_view(BMFace *efa,
+                                                       const float3 &view_pos,
+                                                       const float3 &view_dir,
+                                                       const bool is_ortho)
+{
+  float no[3];
+  BM_face_calc_normal(efa, no);
+  if (is_ortho) {
+    /* \a view_dir already points from the scene toward the viewer. */
+    return dot_v3v3(view_dir, no) > 0.0f;
+  }
+  float center[3];
+  BM_face_calc_center_median(efa, center);
+  return dot_v3v3(view_pos - float3(center), no) > 0.0f;
+}
+
+/** Object-space camera position (perspective) / toward-viewer direction (ortho). */
+static void paint_image_geometry_fill_view_vectors_object(const Object &ob,
+                                                          const RegionView3D &rv3d,
+                                                          float3 &r_view_pos,
+                                                          float3 &r_view_dir,
+                                                          bool &r_is_ortho)
+{
+  r_is_ortho = rv3d.is_persp == 0;
+  float ob_imat[4][4];
+  invert_m4_m4(ob_imat, ob.object_to_world().ptr());
+  if (r_is_ortho) {
+    /* The third row of #viewinv is view-space +Z, which points from the scene toward the viewer. */
+    float dir[3] = {rv3d.viewinv[2][0], rv3d.viewinv[2][1], rv3d.viewinv[2][2]};
+    float mat[3][3];
+    copy_m3_m4(mat, ob_imat);
+    mul_m3_v3(mat, dir);
+    normalize_v3(dir);
+    r_view_dir = float3(dir);
+    r_view_pos = float3(0.0f);
+  }
+  else {
+    float pos[3] = {rv3d.viewinv[3][0], rv3d.viewinv[3][1], rv3d.viewinv[3][2]};
+    mul_m4_v3(ob_imat, pos);
+    r_view_pos = float3(pos);
+    r_view_dir = float3(0.0f);
+  }
+}
+
+/**
+ * Expand \a seed against a caller-prepared \a item and rasterize the affected faces.
+ * The item (and its BMesh) is owned by the caller: this function neither builds nor frees it,
+ * so rect/seed entry points can build the BMesh once for seed collection and expansion.
+ *
+ * \a visible: optional occlusion filter from the box-selection entry points, applied to the
+ * mirrored seed faces symmetry appends after the box was tested. The click entry point passes
+ * null: its seed comes from a ray-cast that already hits the front-most face, and culling its
+ * mirror by on-screen visibility would drop symmetry whenever the far side is turned away.
+ */
+static bool paint_image_proj_geometry_fill_faces_impl(
+    const bContext *C,
+    const float color[3],
+    Brush *br,
+    Object *ob,
+    ImagePaintUVObjectFaces &item,
+    const Span<int> seed,
+    const ImagePaintGeometryFillVisibleFaces *visible = nullptr)
+{
+  if (br == nullptr || ob == nullptr || item.bm == nullptr || seed.is_empty()) {
+    return false;
+  }
+
+  BM_mesh_elem_table_ensure(item.bm, BM_FACE);
+  /* Back-face culling: faces turned away from the camera are skipped for the gesture highlight
+   * and the fill alike, so the two always agree. Re-tested here because symmetry adds mirrored
+   * seed faces after the rect/click entry points collected their seeds. */
+  float3 view_pos, view_dir;
+  bool is_ortho = false;
+  bool have_view = false;
+  if (CTX_wm_region(C) != nullptr) {
+    if (RegionView3D *rv3d = CTX_wm_region_view3d(C)) {
+      paint_image_geometry_fill_view_vectors_object(*ob, *rv3d, view_pos, view_dir, is_ortho);
+      have_view = true;
+    }
+  }
+
+  VectorSet<int> valid_seed;
+  valid_seed.reserve(seed.size());
+  for (const int face_index : seed) {
+    BMFace *efa = BM_face_at_index(item.bm, face_index);
+    if (efa == nullptr || BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
+      continue;
+    }
+    if (have_view && !paint_image_geometry_fill_face_facing_view(efa, view_pos, view_dir, is_ortho))
+    {
+      continue;
+    }
+    if (visible != nullptr && !visible->contains(face_index)) {
+      continue;
+    }
+    valid_seed.add(face_index);
+  }
+  if (valid_seed.is_empty()) {
+    return false;
+  }
+
+  Scene *scene = CTX_data_scene(C);
+  /* Both the canvas image and the UV layer follow the face's material slot, so one lookup per
+   * material replaces the per-face calls that dominated large fills. */
+  Map<short, FillMaterialTarget> material_targets;
+  const auto material_target_get = [&](const short mat_nr) -> const FillMaterialTarget & {
+    return material_targets.lookup_or_add_cb(mat_nr, [&] {
+      FillMaterialTarget target;
+      target.image = paint_image_geometry_fill_canvas_image(scene, ob, mat_nr);
+      target.offsets = paint_image_geometry_fill_uv_offsets(item.bm, ob, scene, mat_nr);
+      return target;
+    });
+  };
+
+  VectorSet<int> fill_faces;
+  if (br->fill_expand == IMAGE_PAINT_SELECT_EXPAND_ISLAND) {
+    /* UV islands differ per material's UV layer, so expand runs once per material. */
+    Vector<ImagePaintGeometryFillSeedGroup> seed_groups;
+    Map<short, int> seed_group_by_mat;
+    for (const int face_index : valid_seed) {
+      BMFace *efa = BM_face_at_index(item.bm, face_index);
+      const BMUVOffsets offsets = material_target_get(efa->mat_nr).offsets;
+      if (offsets.uv < 0) {
+        continue;
+      }
+
+      const int *group_index_ptr = seed_group_by_mat.lookup_ptr(efa->mat_nr);
+      const int group_index = (group_index_ptr != nullptr) ?
+                                  *group_index_ptr :
+                                  int(seed_groups.append_and_get_index_as());
+      if (group_index_ptr == nullptr) {
+        seed_group_by_mat.add(efa->mat_nr, group_index);
+        seed_groups[group_index].offsets = offsets;
+      }
+      seed_groups[group_index].faces.append(face_index);
+    }
+
+    for (const ImagePaintGeometryFillSeedGroup &group : seed_groups) {
+      ImagePaintUVObjectFaces expanded_item;
+      expanded_item.bm = item.bm;
+      expanded_item.offsets = group.offsets;
+      paint_2d_geometry_fill_expand(expanded_item, scene, br, group.faces);
+      fill_faces.add_multiple(expanded_item.faces);
+    }
+  }
+  else {
+    paint_2d_geometry_fill_expand(item, scene, br, valid_seed);
+    fill_faces.add_multiple(item.faces);
+  }
+  if (fill_faces.is_empty()) {
+    return false;
+  }
+
+  Vector<ImagePaintGeometryFillTargetGroup> target_groups;
+  Map<short, int> target_group_by_mat;
+  for (const int face_index : fill_faces) {
+    BMFace *efa = BM_face_at_index(item.bm, face_index);
+    const FillMaterialTarget &target = material_target_get(efa->mat_nr);
+    if (target.image == nullptr || target.offsets.uv < 0) {
+      continue;
+    }
+
+    const int *group_index_ptr = target_group_by_mat.lookup_ptr(efa->mat_nr);
+    const int group_index = (group_index_ptr != nullptr) ?
+                                *group_index_ptr :
+                                int(target_groups.append_and_get_index_as());
+    if (group_index_ptr == nullptr) {
+      target_group_by_mat.add(efa->mat_nr, group_index);
+      target_groups[group_index].image = target.image;
+      target_groups[group_index].offsets = target.offsets;
+    }
+    target_groups[group_index].faces.append(face_index);
+  }
+
+  bool did_fill = false;
+  for (ImagePaintGeometryFillTargetGroup &group : target_groups) {
+    ImagePaintUVObjectFaces target_item;
+    target_item.object = ob;
+    target_item.bm = item.bm;
+    target_item.offsets = group.offsets;
+    target_item.faces = std::move(group.faces);
+    paint_2d_geometry_fill_bucket_tiles(target_item);
+
+    Vector<ImagePaintUVObjectFaces> target_items;
+    target_items.append(std::move(target_item));
+    did_fill |= paint_2d_geometry_fill_commit(C, color, br, group.image, nullptr, target_items, true);
+  }
+
+  return did_fill;
+}
+
+bool paint_image_proj_geometry_fill_faces(const bContext *C,
+                                          const float color[3],
+                                          Brush *br,
+                                          Object *ob,
+                                          const Span<int> seed)
+{
+  if (br == nullptr || ob == nullptr) {
+    return false;
+  }
+
+  ImagePaintUVObjectFaces item;
+  if (!paint_2d_geometry_fill_init_bm(ob, item)) {
+    return false;
+  }
+  const bool did_fill = paint_image_proj_geometry_fill_faces_impl(C, color, br, ob, item, seed);
+  paint_2d_geometry_fill_item_discard(item);
+  return did_fill;
+}
+
+static bool paint_image_geometry_fill_polygon_intersects_rect(const Span<float2> coords,
+                                                              const rctf &rect)
+{
+  static_assert(sizeof(float2) == sizeof(float[2]),
+                "The reinterpret_cast below assumes float2 lays out as float[2]");
+  if (coords.is_empty()) {
+    return false;
+  }
+
+  for (const float2 &co : coords) {
+    if (BLI_rctf_isect_pt_v(&rect, co)) {
+      return true;
+    }
+  }
+
+  for (const int i : coords.index_range()) {
+    if (BLI_rctf_isect_segment(&rect, coords[i], coords[(i + 1) % coords.size()])) {
+      return true;
+    }
+  }
+
+  const float rect_corners[4][2] = {{rect.xmin, rect.ymin},
+                                    {rect.xmax, rect.ymin},
+                                    {rect.xmax, rect.ymax},
+                                    {rect.xmin, rect.ymax}};
+  for (const float *corner : rect_corners) {
+    if (isect_point_poly_v2(
+            corner, reinterpret_cast<const float (*)[2]>(coords.data()), uint(coords.size())))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool paint_image_geometry_fill_face_intersects_rect(BMFace *efa,
+                                                           const ARegion *region,
+                                                           const rctf &rect)
+{
+  Vector<float2> screen_coords;
+  screen_coords.reserve(efa->len);
+  BMIter iter;
+  BMLoop *loop;
+  BM_ITER_ELEM (loop, &iter, efa, BM_LOOPS_OF_FACE) {
+    float screen_co[2];
+    if (ED_view3d_project_float_object(
+            region, loop->v->co, screen_co, V3D_PROJ_TEST_CLIP_DEFAULT) != V3D_PROJ_RET_OK)
+    {
+      return false;
+    }
+    screen_coords.append(float2(screen_co));
+  }
+
+  return paint_image_geometry_fill_polygon_intersects_rect(screen_coords, rect);
+}
+
+
+static bool paint_image_proj_geometry_fill_rect_impl(const bContext *C,
+                                                     const float color[3],
+                                                     Brush *br,
+                                                     Object *ob,
+                                                     const rcti &rect)
+{
+  if (br == nullptr || ob == nullptr || ob->type != OB_MESH) {
+    return false;
+  }
+
+  ImagePaintUVObjectFaces item;
+  if (!paint_2d_geometry_fill_init_bm(ob, item)) {
+    return false;
+  }
+  const ARegion *region = CTX_wm_region(C);
+  RegionView3D *rv3d = CTX_wm_region_view3d(C);
+  if (region == nullptr || rv3d == nullptr) {
+    paint_2d_geometry_fill_item_discard(item);
+    return false;
+  }
+
+  rctf rectf;
+  BLI_rctf_rcti_copy(&rectf, &rect);
+
+  /* Screen projection deliberately uses original mesh coordinates. Evaluated mesh faces cannot
+   * supply fill seeds because modifiers may have changed their indexing. */
+  ED_view3d_init_mats_rv3d(ob, rv3d);
+  float3 view_pos, view_dir;
+  bool is_ortho;
+  paint_image_geometry_fill_view_vectors_object(*ob, *rv3d, view_pos, view_dir, is_ortho);
+
+  ImagePaintGeometryFillVisibleFaces visible;
+  paint_image_geometry_fill_visible_faces_build(C, ob, item.bm->totface, visible);
+
+  Vector<int> seed;
+  BMIter fiter;
+  BMFace *efa;
+  int face_index;
+  BM_ITER_MESH_INDEX (efa, &fiter, item.bm, BM_FACES_OF_MESH, face_index) {
+    if (!BM_elem_flag_test(efa, BM_ELEM_HIDDEN) && visible.contains(face_index) &&
+        paint_image_geometry_fill_face_facing_view(efa, view_pos, view_dir, is_ortho) &&
+        paint_image_geometry_fill_face_intersects_rect(efa, region, rectf))
+    {
+      seed.append(face_index);
+    }
+  }
+  if (const Mesh *mesh = id_cast<const Mesh *>(ob->data)) {
+    paint_image_geometry_fill_seed_add_symmetry(ob, item.bm, *mesh, seed);
+  }
+  const bool did_fill = paint_image_proj_geometry_fill_faces_impl(
+      C, color, br, ob, item, seed, &visible);
+  paint_2d_geometry_fill_item_discard(item);
+  return did_fill;
+}
+
+bool paint_image_proj_geometry_fill_rect(
+    const bContext *C, const float color[3], Brush *br, Object *ob, const rcti &rect)
+{
+  return paint_image_proj_geometry_fill_rect_impl(C, color, br, ob, rect);
+}
+
 bool paint_image_proj_geometry_fill(
     const bContext *C, const float color[3], Brush *br, Object *ob, const float mouse[2])
 {
@@ -5540,43 +6007,402 @@ bool paint_image_proj_geometry_fill(
     return false;
   }
 
-  BM_mesh_elem_table_ensure(item.bm, BM_FACE);
-  BMFace *efa = BM_face_at_index(item.bm, face_index);
-  if (efa == nullptr || BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
-    paint_2d_geometry_fill_item_discard(item);
-    return false;
-  }
-
-  Scene *scene = CTX_data_scene(C);
-  Image *ima = paint_image_geometry_fill_canvas_image(scene, ob, efa->mat_nr);
-  if (ima == nullptr) {
-    paint_2d_geometry_fill_item_discard(item);
-    return false;
-  }
-
-  item.offsets = paint_image_geometry_fill_uv_offsets(item.bm, ob, scene, efa->mat_nr);
-  if (item.offsets.uv < 0) {
-    paint_2d_geometry_fill_item_discard(item);
-    return false;
-  }
-
   Vector<int> seed;
   seed.append(face_index);
   /* Mirrored faces join the seed set, so expand and rasterization stay symmetry-agnostic. */
   if (const Mesh *mesh = id_cast<const Mesh *>(ob->data)) {
+    BM_mesh_elem_table_ensure(item.bm, BM_FACE);
     image_paint_symmetry_mirror_faces(ob, item.bm, hit_position, mesh->symmetry, seed);
   }
-  paint_2d_geometry_fill_expand(item, scene, br, seed);
-  if (item.faces.is_empty()) {
-    paint_2d_geometry_fill_item_discard(item);
+  const bool did_fill = paint_image_proj_geometry_fill_faces_impl(C, color, br, ob, item, seed);
+  paint_2d_geometry_fill_item_discard(item);
+  return did_fill;
+}
+
+static bool paint_image_2d_geometry_fill_rect_impl(const bContext *C,
+                                                   const float color[3],
+                                                   Brush *br,
+                                                   const rcti &rect)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  ARegion *region = CTX_wm_region(C);
+  Scene *scene = CTX_data_scene(C);
+  if (sima == nullptr || sima->image == nullptr || region == nullptr || br == nullptr) {
     return false;
   }
 
-  paint_2d_geometry_fill_bucket_tiles(item);
+  rctf uv_rect;
+  const float region_points[2][2] = {{float(rect.xmin), float(rect.ymin)},
+                                     {float(rect.xmax), float(rect.ymax)}};
+  ui::view2d_region_to_view(
+      &region->v2d, region_points[0][0], region_points[0][1], &uv_rect.xmin, &uv_rect.ymin);
+  ui::view2d_region_to_view(
+      &region->v2d, region_points[1][0], region_points[1][1], &uv_rect.xmax, &uv_rect.ymax);
+  if (uv_rect.xmin > uv_rect.xmax) {
+    std::swap(uv_rect.xmin, uv_rect.xmax);
+  }
+  if (uv_rect.ymin > uv_rect.ymax) {
+    std::swap(uv_rect.ymin, uv_rect.ymax);
+  }
+
   Vector<ImagePaintUVObjectFaces> items;
-  items.append(std::move(item));
-  return paint_2d_geometry_fill_commit(C, color, br, ima, nullptr, items, true);
+  for (Object *ob : image_paint_selection_canvas_objects_get(
+           C, sima->image, ImagePaintCanvasPurpose::Fill))
+  {
+    ImagePaintUVObjectFaces item;
+    if (!paint_2d_geometry_fill_init_bm(ob, item)) {
+      continue;
+    }
+    item.offsets = image_paint_selection_uv_offsets_get(item.bm, ob, scene);
+    if (item.offsets.uv < 0) {
+      paint_2d_geometry_fill_item_discard(item);
+      continue;
+    }
+    Vector<int> seed;
+    BMIter fiter;
+    BMFace *efa;
+    int face_index;
+    BM_ITER_MESH_INDEX (efa, &fiter, item.bm, BM_FACES_OF_MESH, face_index) {
+      if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
+        continue;
+      }
+      Vector<float2> uv_coords;
+      uv_coords.reserve(efa->len);
+      BMIter liter;
+      BMLoop *loop;
+      BM_ITER_ELEM (loop, &liter, efa, BM_LOOPS_OF_FACE) {
+        uv_coords.append(float2(BM_ELEM_CD_GET_FLOAT_P(loop, item.offsets.uv)));
+      }
+      if (paint_image_geometry_fill_polygon_intersects_rect(uv_coords, uv_rect)) {
+        seed.append(face_index);
+      }
+    }
+    if (seed.is_empty()) {
+      paint_2d_geometry_fill_item_discard(item);
+      continue;
+    }
+
+    if (const Mesh *mesh = id_cast<const Mesh *>(ob->data)) {
+      paint_image_geometry_fill_seed_add_symmetry_uv(ob, item.bm, *mesh, item.offsets, seed);
+    }
+
+    paint_2d_geometry_fill_expand(item, scene, br, seed);
+    if (item.faces.is_empty()) {
+      paint_2d_geometry_fill_item_discard(item);
+      continue;
+    }
+    paint_2d_geometry_fill_bucket_tiles(item);
+    items.append(std::move(item));
+  }
+
+  if (items.is_empty()) {
+    return false;
+  }
+  const bool did_fill = paint_2d_geometry_fill_commit(
+      C, color, br, sima->image, sima, items, false);
+  /* Every item owns a BMesh built from the original mesh outside Edit Mode. */
+  for (ImagePaintUVObjectFaces &item : items) {
+    paint_2d_geometry_fill_item_discard(item);
+  }
+  return did_fill;
 }
+
+bool paint_image_2d_geometry_fill_rect(
+    const bContext *C, const float color[3], Brush *br, const rcti &rect)
+{
+  return paint_image_2d_geometry_fill_rect_impl(C, color, br, rect);
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Geometry fill box-gesture highlight overlay
+ * \{ */
+
+static void paint_image_geometry_fill_draw_highlight(const bContext * /*C*/,
+                                                     ARegion *region,
+                                                     void *arg)
+{
+  const ImagePaintGeometryFillGestureState *state = static_cast<
+      const ImagePaintGeometryFillGestureState *>(arg);
+  /* The callback list is shared by every region of this type; polygons projected for the
+   * gesture's region are meaningless elsewhere. */
+  if (region != state->gesture_region) {
+    return;
+  }
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  const uint pos = GPU_vertformat_attr_add(
+      immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  for (const ImagePaintGeometryFillGestureItem &gesture_item : state->items) {
+    for (const int polygon_index : gesture_item.highlight_faces) {
+      const Vector<float2> &polygon =
+          gesture_item.faces[polygon_index].polygon;
+      if (polygon.size() < 3) {
+        continue;
+      }
+
+      /* Same hue as the fill itself; translucent so the underlying paint stays readable. */
+      immUniformColor4f(state->color[0], state->color[1], state->color[2], 0.35f);
+      immBegin(GPU_PRIM_TRI_FAN, polygon.size());
+      for (const float2 &co : polygon) {
+        immVertex2f(pos, co.x, co.y);
+      }
+      immEnd();
+
+      immUniformColor4f(state->color[0], state->color[1], state->color[2], 0.9f);
+      immBegin(GPU_PRIM_LINE_LOOP, polygon.size());
+      for (const float2 &co : polygon) {
+        immVertex2f(pos, co.x, co.y);
+      }
+      immEnd();
+    }
+  }
+
+  immUnbindProgram();
+  GPU_blend(GPU_BLEND_NONE);
+}
+
+ImagePaintGeometryFillGestureState::~ImagePaintGeometryFillGestureState()
+{
+  if (draw_handle != nullptr && region_type != nullptr) {
+    ED_region_draw_cb_exit(region_type, draw_handle);
+    draw_handle = nullptr;
+    region_type = nullptr;
+  }
+  for (ImagePaintGeometryFillGestureItem &gesture_item : items) {
+    paint_2d_geometry_fill_item_discard(gesture_item.item);
+  }
+}
+
+bool paint_image_geometry_fill_gesture_begin(const bContext *C,
+                                             const float color[3],
+                                             ImagePaintGeometryFillGestureState **r_state)
+{
+  *r_state = nullptr;
+  ARegion *region = CTX_wm_region(C);
+  if (region == nullptr || region->runtime->type == nullptr) {
+    return false;
+  }
+
+  ImagePaintGeometryFillGestureState *state = MEM_new<ImagePaintGeometryFillGestureState>(__func__);
+  copy_v3_v3(state->color, color);
+
+  if (CTX_wm_space_image(C) != nullptr) {
+    SpaceImage *sima = CTX_wm_space_image(C);
+    Scene *scene = CTX_data_scene(C);
+    if (sima == nullptr || sima->image == nullptr) {
+      MEM_delete(state);
+      return false;
+    }
+    for (Object *ob : image_paint_selection_canvas_objects_get(
+             C, sima->image, ImagePaintCanvasPurpose::Fill))
+    {
+      ImagePaintGeometryFillGestureItem gesture_item;
+      gesture_item.object = ob;
+      if (!paint_2d_geometry_fill_init_bm(ob, gesture_item.item)) {
+        continue;
+      }
+      gesture_item.item.offsets = image_paint_selection_uv_offsets_get(
+          gesture_item.item.bm, ob, scene);
+      if (gesture_item.item.offsets.uv < 0) {
+        paint_2d_geometry_fill_item_discard(gesture_item.item);
+        continue;
+      }
+
+      /* The Image Editor rectangle lives in region pixel space, so pre-convert the loop UVs
+       * once here instead of re-mapping on every resolve. */
+      BMIter fiter;
+      BMFace *efa;
+      int face_index;
+      BM_ITER_MESH_INDEX (efa, &fiter, gesture_item.item.bm, BM_FACES_OF_MESH, face_index) {
+        if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
+          continue;
+        }
+        const int highlight_index = int(gesture_item.faces.append_and_get_index_as());
+        ImagePaintGeometryFillHighlightFace &highlight_face = gesture_item.faces[highlight_index];
+        highlight_face.face_index = face_index;
+        BMIter liter;
+        BMLoop *loop;
+        BM_ITER_ELEM (loop, &liter, efa, BM_LOOPS_OF_FACE) {
+          const float *luv = BM_ELEM_CD_GET_FLOAT_P(loop, gesture_item.item.offsets.uv);
+          float sx, sy;
+          ui::view2d_view_to_region_fl(&region->v2d, luv[0], luv[1], &sx, &sy);
+          highlight_face.polygon.append(float2(sx, sy));
+        }
+      }
+      state->items.append(std::move(gesture_item));
+    }
+  }
+  else {
+    Object *ob = CTX_data_active_object(C);
+    if (ob == nullptr || ob->type != OB_MESH) {
+      MEM_delete(state);
+      return false;
+    }
+    const ARegion *region_3d = region;
+    RegionView3D *rv3d = CTX_wm_region_view3d(C);
+    if (rv3d == nullptr) {
+      MEM_delete(state);
+      return false;
+    }
+
+    ImagePaintGeometryFillGestureItem gesture_item;
+    gesture_item.object = ob;
+    if (!paint_2d_geometry_fill_init_bm(ob, gesture_item.item)) {
+      MEM_delete(state);
+      return false;
+    }
+    gesture_item.item.offsets = image_paint_selection_uv_offsets_get(
+        gesture_item.item.bm, ob, CTX_data_scene(C));
+
+    /* Screen projection deliberately uses original mesh coordinates, like the fill itself. */
+    ED_view3d_init_mats_rv3d(ob, rv3d);
+    float3 view_pos, view_dir;
+    bool is_ortho;
+    paint_image_geometry_fill_view_vectors_object(*ob, *rv3d, view_pos, view_dir, is_ortho);
+
+    /* Same occlusion filter the commit applies, so the highlight never promises a face the fill
+     * will skip. Both read the whole region, which the view cannot change during the gesture. */
+    ImagePaintGeometryFillVisibleFaces visible;
+    paint_image_geometry_fill_visible_faces_build(
+        C, ob, gesture_item.item.bm->totface, visible);
+
+    BMIter fiter;
+    BMFace *efa;
+    int face_index;
+    BM_ITER_MESH_INDEX (efa, &fiter, gesture_item.item.bm, BM_FACES_OF_MESH, face_index) {
+      if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN) || !visible.contains(face_index) ||
+          !paint_image_geometry_fill_face_facing_view(efa, view_pos, view_dir, is_ortho))
+      {
+        continue;
+      }
+      Vector<float2> polygon;
+      polygon.reserve(efa->len);
+      bool clipped = false;
+      BMIter liter;
+      BMLoop *loop;
+      BM_ITER_ELEM (loop, &liter, efa, BM_LOOPS_OF_FACE) {
+        float screen_co[2];
+        if (ED_view3d_project_float_object(
+                region_3d, loop->v->co, screen_co, V3D_PROJ_TEST_CLIP_DEFAULT) != V3D_PROJ_RET_OK)
+        {
+          /* Clipped faces are skipped here and by the fill seed collection alike. */
+          clipped = true;
+          break;
+        }
+        polygon.append(float2(screen_co));
+      }
+      if (clipped) {
+        continue;
+      }
+      const int highlight_index = int(gesture_item.faces.append_and_get_index_as());
+      ImagePaintGeometryFillHighlightFace &highlight_face = gesture_item.faces[highlight_index];
+      highlight_face.face_index = face_index;
+      highlight_face.polygon = std::move(polygon);
+    }
+    state->items.append(std::move(gesture_item));
+  }
+
+  if (state->items.is_empty()) {
+    MEM_delete(state);
+    return false;
+  }
+
+  state->gesture_region = region;
+  state->region_type = region->runtime->type;
+  state->draw_handle = ED_region_draw_cb_activate(
+      state->region_type, paint_image_geometry_fill_draw_highlight, state, REGION_DRAW_POST_PIXEL);
+  *r_state = state;
+  return true;
+}
+
+void paint_image_geometry_fill_gesture_resolve(bContext *C,
+                                               Brush *br,
+                                               ImagePaintGeometryFillGestureState *state,
+                                               const rcti &rect)
+{
+  if (state == nullptr || br == nullptr) {
+    return;
+  }
+  if (!BLI_rcti_is_empty(&state->last_rect) && BLI_rcti_compare(&state->last_rect, &rect)) {
+    return;
+  }
+
+  Scene *scene = CTX_data_scene(C);
+  rctf rectf;
+  BLI_rctf_rcti_copy(&rectf, &rect);
+
+  const bool is_mesh_mode = br->fill_expand == IMAGE_PAINT_SELECT_EXPAND_MESH;
+  for (ImagePaintGeometryFillGestureItem &gesture_item : state->items) {
+    Vector<int> seed;
+    for (const int face_i : gesture_item.faces.index_range()) {
+      if (paint_image_geometry_fill_polygon_intersects_rect(
+              gesture_item.faces[face_i].polygon.as_span(), rectf))
+      {
+        seed.append(gesture_item.faces[face_i].face_index);
+      }
+    }
+    if (seed.is_empty()) {
+      gesture_item.highlight_faces.clear();
+      continue;
+    }
+
+    /* Mesh mode floods the whole vertex-connected component, so re-running it is pointless while
+     * the box only picks up faces the previous flood already reached. It is NOT enough to cache
+     * the first result outright: a mesh with several disconnected components must re-flood once
+     * the box reaches another one, or the highlight would keep showing the first component while
+     * the commit fills both. */
+    if (is_mesh_mode && !gesture_item.expanded_faces.is_empty()) {
+      bool seed_already_expanded = true;
+      for (const int face_index : seed) {
+        if (!gesture_item.expanded_faces.contains(face_index)) {
+          seed_already_expanded = false;
+          break;
+        }
+      }
+      if (seed_already_expanded) {
+        continue;
+      }
+    }
+
+    gesture_item.highlight_faces.clear();
+    if (Object *ob = gesture_item.object) {
+      if (const Mesh *mesh = id_cast<const Mesh *>(ob->data)) {
+        BM_mesh_elem_table_ensure(gesture_item.item.bm, BM_FACE);
+        if (CTX_wm_space_image(C) != nullptr) {
+          paint_image_geometry_fill_seed_add_symmetry_uv(
+              ob, gesture_item.item.bm, *mesh, gesture_item.item.offsets, seed);
+        }
+        else {
+          paint_image_geometry_fill_seed_add_symmetry(ob, gesture_item.item.bm, *mesh, seed);
+        }
+      }
+    }
+
+    /* Expand appends to the item's face list, so it must start empty on every resolve. */
+    gesture_item.item.faces.clear();
+    paint_2d_geometry_fill_expand(gesture_item.item, scene, br, seed);
+    gesture_item.expanded_faces.clear();
+    if (gesture_item.item.faces.is_empty()) {
+      continue;
+    }
+
+    gesture_item.expanded_faces.add_multiple(gesture_item.item.faces);
+    for (const int face_i : gesture_item.faces.index_range()) {
+      if (gesture_item.expanded_faces.contains(gesture_item.faces[face_i].face_index)) {
+        gesture_item.highlight_faces.append(face_i);
+      }
+    }
+  }
+
+  state->last_rect = rect;
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+}
+
+/** \} */
 
 void paint_2d_bucket_fill(const bContext *C,
                           const float color[3],

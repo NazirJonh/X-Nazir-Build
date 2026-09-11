@@ -21,6 +21,8 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8_symbols.h"
 
+#include "BKE_brush.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "BLT_translation.hh"
@@ -2047,6 +2049,28 @@ static float rna_BrushMaterialPaintChannel_t_from_value_color(const float value_
     }
   }
   return t_best;
+}
+
+static void rna_Brush_data_fill_value_color_get(PointerRNA *ptr, float *values)
+{
+  const Brush *brush = static_cast<const Brush *>(ptr->data);
+  const float value_min = brush->data_fill_signed ? -1.0f : 0.0f;
+  const float value_max = 1.0f;
+  const float value = brush_data_fill_value_resolve(brush->data_fill_value,
+                                                    brush->data_fill_signed != 0);
+  const float t = BKE_paint_material_t_from_value(value_min, value_max, value);
+  BKE_paint_material_value_gradient_color(value_min, value_max, t, values);
+}
+
+static void rna_Brush_data_fill_value_color_set(PointerRNA *ptr, const float *values)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  const float value_min = brush->data_fill_signed ? -1.0f : 0.0f;
+  const float value_max = 1.0f;
+  const float gray = (values[0] + values[1] + values[2]) / 3.0f;
+  const float t = rna_BrushMaterialPaintChannel_t_from_value_color(value_min, value_max, gray);
+  const float value = BKE_paint_material_value_from_t(value_min, value_max, t);
+  brush->data_fill_value = brush->data_fill_signed ? (value + 1.0f) * 0.5f : value;
 }
 
 /**
@@ -4360,11 +4384,6 @@ static void rna_def_brush(BlenderRNA *brna)
   };
 
   static const EnumPropertyItem brush_fill_expand_items[] = {
-      {IMAGE_PAINT_SELECT_EXPAND_PIXELS,
-       "PIXELS",
-       ICON_IMAGE,
-       "Pixels",
-       "Current color / view fill"},
       {IMAGE_PAINT_SELECT_EXPAND_FACE,
        "FACE",
        ICON_UV_FACESEL,
@@ -4380,6 +4399,11 @@ static void rna_def_brush(BlenderRNA *brna)
        ICON_MESH_DATA,
        "Mesh",
        "Fill all faces of the vertex-connected mesh under the cursor"},
+      {IMAGE_PAINT_SELECT_EXPAND_PIXELS,
+       "PIXELS",
+       ICON_IMAGE,
+       "Pixels",
+       "Current color / view fill"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -5649,6 +5673,39 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "fill_threshold");
   RNA_def_property_ui_text(
       prop, "Fill Threshold", "Threshold above which filling is not propagated");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "data_fill_value", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "data_fill_value");
+  RNA_def_property_range(prop, 0.0, 1.0);
+  RNA_def_property_ui_text(
+      prop,
+      "Data Fill Value",
+      "Fixed value written to non-color data images by the Fill (Texture Paint) and Texture "
+      "Fill (Sculpt Mode) brushes; color images are unaffected");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "data_fill_value_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_Brush_data_fill_value_color_get",
+                               "rna_Brush_data_fill_value_color_set",
+                               nullptr);
+  /* Derived view of #data_fill_value: there is nothing to store or animate. */
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Data Fill Value Color",
+                           "Grayscale swatch of Data Fill Value on the value-range gradient; "
+                           "derived, editing it writes back to Data Fill Value");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "data_fill_signed", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "data_fill_signed", 1);
+  RNA_def_property_ui_text(prop,
+                           "Signed Data Range",
+                           "Map Data Fill Value from the 0 to 1 range to -1 to 1. Only float "
+                           "data images can hold negative values; byte buffers receive the raw "
+                           "factor");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "fill_expand", PROP_ENUM, PROP_NONE);

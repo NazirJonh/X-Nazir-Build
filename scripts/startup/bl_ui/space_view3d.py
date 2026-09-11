@@ -436,7 +436,7 @@ class _draw_tool_settings_context_mode:
         ups = paint.unified_paint_settings
 
         if brush.sculpt_brush_type == 'TEXTURE_FILL':
-            draw_image_paint_fill_expand(layout, brush)
+            draw_image_paint_fill_expand(layout, context, brush)
 
         if capabilities.has_color or brush.sculpt_brush_type == 'TEXTURE_FILL':
             material_paint = brush.material_paint
@@ -7416,7 +7416,7 @@ class VIEW3D_PT_active_tool(Panel, ToolActivePanelHelper):
         if context.mode == 'SCULPT':
             brush = context.tool_settings.sculpt.brush
             if brush and brush.sculpt_brush_type == 'TEXTURE_FILL':
-                draw_image_paint_fill_expand(self.layout, brush)
+                draw_image_paint_fill_expand(self.layout, context, brush)
 
 
 # FIXME(campbell): remove this second panel once 'HIDE_HEADER' works with category tabs,
@@ -7437,7 +7437,7 @@ class VIEW3D_PT_active_tool_duplicate(Panel, ToolActivePanelHelper):
         if context.mode == 'SCULPT':
             brush = context.tool_settings.sculpt.brush
             if brush and brush.sculpt_brush_type == 'TEXTURE_FILL':
-                draw_image_paint_fill_expand(self.layout, brush)
+                draw_image_paint_fill_expand(self.layout, context, brush)
 
 
 class VIEW3D_PT_view3d_properties(Panel):

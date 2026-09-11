@@ -20,6 +20,7 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_brush.hh"
 #include "BKE_image_paint_selection.hh"
 
 #include "IMB_colormanagement.hh"
@@ -229,6 +230,44 @@ static void face_uv_bounds_init(const BMFace *efa, const BMUVOffsets &offsets, r
   }
 }
 
+/**
+ * OR \a inclusive_bits into every pixel the fill faces cover, and \a strict_bits into the subset
+ * that passes the strict test. Callers that only need a coverage bit pass `strict_bits = 0`.
+ */
+static void image_paint_uv_claim_fill_pass(BMesh *bm,
+                                           const BMUVOffsets &offsets,
+                                           const Span<int> fill_faces,
+                                           const float2 &uv_origin,
+                                           const int width,
+                                           const int height,
+                                           const uint8_t inclusive_bits,
+                                           const uint8_t strict_bits,
+                                           MutableSpan<uint8_t> r_claim)
+{
+  if (bm == nullptr || offsets.uv < 0) {
+    return;
+  }
+
+  BM_mesh_elem_index_ensure(bm, BM_FACE);
+  BM_mesh_elem_table_ensure(bm, BM_FACE);
+
+  for (const int face_index : fill_faces) {
+    BMFace *efa = BM_face_at_index(bm, face_index);
+    if (efa == nullptr) {
+      continue;
+    }
+    foreach_face_pixel(
+        efa, offsets, uv_origin, width, height, [&](const int x, const int y, const bool strict) {
+          const int64_t index = int64_t(y) * int64_t(width) + int64_t(x);
+          r_claim[index] |= inclusive_bits;
+          if (strict) {
+            r_claim[index] |= strict_bits;
+          }
+          return true;
+        });
+  }
+}
+
 void image_paint_uv_claim_buffer_build(BMesh *bm,
                                        const BMUVOffsets &offsets,
                                        const Span<int> fill_faces,
@@ -247,26 +286,20 @@ void image_paint_uv_claim_buffer_build(BMesh *bm,
   BM_mesh_elem_index_ensure(bm, BM_FACE);
   BM_mesh_elem_table_ensure(bm, BM_FACE);
 
+  image_paint_uv_claim_fill_pass(bm,
+                                 offsets,
+                                 fill_faces,
+                                 uv_origin,
+                                 width,
+                                 height,
+                                 UV_CLAIM_FILL_INCLUSIVE,
+                                 UV_CLAIM_FILL_STRICT,
+                                 r_claim);
+
   Set<int> fill_set;
   fill_set.reserve(fill_faces.size());
   for (const int face_index : fill_faces) {
     fill_set.add(face_index);
-  }
-
-  for (const int face_index : fill_faces) {
-    BMFace *efa = BM_face_at_index(bm, face_index);
-    if (efa == nullptr) {
-      continue;
-    }
-    foreach_face_pixel(
-        efa, offsets, uv_origin, width, height, [&](const int x, const int y, const bool strict) {
-          const int64_t index = int64_t(y) * int64_t(width) + int64_t(x);
-          r_claim[index] |= UV_CLAIM_FILL_INCLUSIVE;
-          if (strict) {
-            r_claim[index] |= UV_CLAIM_FILL_STRICT;
-          }
-          return true;
-        });
   }
 
   /* Bounds-reject before any per-pixel work: on a dense mesh most faces live on other
@@ -308,7 +341,9 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
                                          ImBuf *ibuf,
                                          const float color[3],
                                          float strength,
-                                         IMB_BlendMode blend)
+                                         IMB_BlendMode blend,
+                                         const float data_fill_value,
+                                         const bool data_fill_signed)
 {
   if (bm == nullptr || ibuf == nullptr || face_indices.is_empty()) {
     return;
@@ -317,9 +352,23 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
   BM_mesh_elem_table_ensure(bm, BM_FACE);
 
   const bool do_float = (ibuf->float_data() != nullptr);
+  const bool is_data = ibuf->colorspace_is_data();
   float color_f[4];
   uint color_b = 0;
-  if (!do_float) {
+  float data_value = 0.0f;
+  uchar data_byte_value = 0;
+  if (is_data) {
+    /* Signed mode maps onto the bipolar float range only; byte buffers cannot hold negatives. */
+    data_value = brush_data_fill_value_resolve(data_fill_value, do_float && data_fill_signed);
+    color_f[0] = data_value;
+    color_f[1] = data_value;
+    color_f[2] = data_value;
+    color_f[3] = 1.0f;
+    if (!do_float) {
+      data_byte_value = unit_float_to_uchar_clamp(data_value);
+    }
+  }
+  else if (!do_float) {
     float3 ibuf_color = color;
     IMB_colormanagement_scene_linear_to_colorspace_v3(ibuf_color, ibuf->byte_buffer.colorspace);
     rgb_float_to_uchar(reinterpret_cast<uchar *>(&color_b), ibuf_color);
@@ -334,17 +383,89 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
   const int width = ibuf->x;
   const int height = ibuf->y;
 
+  const int64_t pixel_num = int64_t(width) * int64_t(height);
+  Array<uint8_t> claim(pixel_num);
+
+  /* 2x2 quarter-pixel supersampling of the fill-side coverage. Only the data branch needs it:
+   * a hard scalar edge on Roughness/Metallic/Height is far more visible than on paint color.
+   * Each pass ORs its own bit straight into the accumulator, so no per-pass scratch buffer is
+   * cleared and no full-image scan runs between passes -- at 4K that would be four extra
+   * sweeps over 16M pixels for coverage that only the rasterized faces can ever set. */
+  Array<uint8_t> aa_coverage;
+  if (is_data) {
+    aa_coverage.reinitialize(pixel_num);
+    aa_coverage.fill(0);
+    static constexpr float2 aa_offsets[4] = {
+        {-0.25f, -0.25f}, {0.25f, -0.25f}, {-0.25f, 0.25f}, {0.25f, 0.25f}};
+    for (const int pass : IndexRange(4)) {
+      /* Shifting the origin by offset/size moves the polygons by -offset in pixel space, so the
+       * pass tests the quarter-point pixel center + offset instead of the pixel center. */
+      const float2 &offset = aa_offsets[pass];
+      const float2 origin_shifted = uv_origin + float2(offset.x / width, offset.y / height);
+      image_paint_uv_claim_fill_pass(bm,
+                                     offsets,
+                                     face_indices,
+                                     origin_shifted,
+                                     width,
+                                     height,
+                                     uint8_t(1 << pass),
+                                     uint8_t(0),
+                                     aa_coverage);
+    }
+  }
+
   const auto paint_pixel = [&](const int x, const int y) {
-    float weight = 1.0f;
-    if (has_mask) {
-      weight = BKE_image_paint_selection_blend_sample(image, tile_number, x, y);
+    const size_t coordinate = size_t(y) * width + x;
+
+    float weight;
+    if (is_data) {
+      const uint8_t aa_bits = aa_coverage[coordinate];
+      const float aa_weight = float((aa_bits & 1) + ((aa_bits >> 1) & 1) + ((aa_bits >> 2) & 1) +
+                                    ((aa_bits >> 3) & 1)) /
+                              4.0f;
+      if ((claim[coordinate] & UV_CLAIM_FILL_INCLUSIVE) != 0) {
+        /* A pixel-center hit with all quarter-points missed (sliver geometry) still paints. */
+        weight = max_ff(aa_weight, 0.25f);
+      }
+      else {
+        /* Dilated seam-bridging ring: half strength keeps island borders closed while staying
+         * visibly softer than the interior. */
+        weight = (aa_weight > 0.0f) ? aa_weight : 0.5f;
+      }
+      if (has_mask) {
+        weight *= BKE_image_paint_selection_blend_sample(image, tile_number, x, y);
+      }
+    }
+    else {
+      weight = 1.0f;
+      if (has_mask) {
+        weight = BKE_image_paint_selection_blend_sample(image, tile_number, x, y);
+      }
     }
     if (weight <= 0.001f) {
       return;
     }
 
-    const size_t coordinate = size_t(y) * width + x;
-    if (do_float) {
+    if (is_data) {
+      if (do_float) {
+        float *dst = ibuf->float_data_for_write() + 4 * coordinate;
+        /* Lerp the existing scalar towards the fill value; alpha stays untouched so data
+         * buffers keep their own coverage channel. */
+        dst[0] += (data_value - dst[0]) * weight;
+        dst[1] += (data_value - dst[1]) * weight;
+        dst[2] += (data_value - dst[2]) * weight;
+      }
+      else {
+        uchar *dst = ibuf->byte_data_for_write() + 4 * coordinate;
+        const float mixed = float(dst[0]) * (1.0f - weight) + float(data_byte_value) * weight;
+        const uchar out = unit_float_to_uchar_clamp(mixed / 255.0f);
+        dst[0] = out;
+        dst[1] = out;
+        dst[2] = out;
+        /* Alpha stays untouched: data buffers keep their own coverage channel. */
+      }
+    }
+    else if (do_float) {
       float color_f_masked[4];
       copy_v4_v4(color_f_masked, color_f);
       mul_v4_fl(color_f_masked, weight);
@@ -366,7 +487,6 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
     }
   };
 
-  Array<uint8_t> claim(int64_t(width) * int64_t(height));
   image_paint_uv_claim_buffer_build(bm, offsets, face_indices, uv_origin, width, height, claim);
 
   Vector<int2> filled_pixels;

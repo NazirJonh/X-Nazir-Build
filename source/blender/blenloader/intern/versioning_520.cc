@@ -1944,6 +1944,16 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 76)) {
+    for (Brush &brush : bmain->brushes) {
+      /* #Brush.data_fill_value is new and defaults to full intensity. */
+      brush.data_fill_value = 1.0f;
+      /* The default fill mode moved from Pixels to Face. Without this, brushes from older
+       * files read `fill_expand == 0` and switch to Pixels, changing their behavior. */
+      brush.fill_expand = IMAGE_PAINT_SELECT_EXPAND_FACE;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

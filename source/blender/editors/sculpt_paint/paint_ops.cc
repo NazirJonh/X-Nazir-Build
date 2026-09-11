@@ -1730,6 +1730,8 @@ void ED_operatortypes_paint()
   /* image */
   WM_operatortype_append(PAINT_OT_texture_paint_toggle);
   WM_operatortype_append(PAINT_OT_image_paint);
+  WM_operatortype_append(PAINT_OT_texture_fill);
+  WM_operatortype_append(PAINT_OT_texture_fill_mode_set);
   WM_operatortype_append(image::curve_patch::edit::PAINT_OT_image_curve_patch_edit);
   WM_operatortype_append(image::curve_patch::edit::PAINT_OT_image_curve_patch_handle_type_set);
   WM_operatortype_append(image::curve_patch::edit::PAINT_OT_image_curve_patch_delete_point);

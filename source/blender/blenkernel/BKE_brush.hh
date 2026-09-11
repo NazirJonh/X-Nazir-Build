@@ -379,6 +379,16 @@ void BKE_brush_scale_size(int *r_brush_size,
  */
 bool BKE_brush_has_cube_tip(const Brush *brush, PaintMode paint_mode);
 
+/**
+ * Map the data-fill UI factor onto the image value written by Geometry Fill.
+ * Signed mode stretches the [0..1] factor over the bipolar [-1..1] range; only float data
+ * buffers can hold negative values, so byte destinations must pass `is_signed = false`.
+ */
+inline float brush_data_fill_value_resolve(const float value, const bool is_signed)
+{
+  return is_signed ? value * 2.0f - 1.0f : value;
+}
+
 namespace bke::brush {
 float normal_weight_get(const Brush &brush, bool invert);
 }

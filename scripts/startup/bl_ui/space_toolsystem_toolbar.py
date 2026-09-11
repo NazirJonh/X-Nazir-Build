@@ -1505,31 +1505,6 @@ class _defs_sculpt:
             brush_type='PAINT',
         )
 
-    @staticmethod
-    def poll_texture_fill(context):
-        if context is None:
-            return True
-        ob = context.sculpt_object
-        if ob is None or ob.type != 'MESH':
-            return False
-        if ob.use_dynamic_topology_sculpting:
-            return False
-        pm = context.scene.tool_settings.paint_mode
-        if pm.canvas_source == 'COLOR_ATTRIBUTE':
-            return False
-        if pm.canvas_source == 'IMAGE':
-            return pm.canvas_image is not None
-        if pm.canvas_source == 'MATERIAL':
-            mat = ob.active_material
-            if mat is None:
-                return False
-            if mat.texture_paint_images and mat.texture_paint_slots:
-                slot = mat.paint_active_slot
-                if 0 <= slot < len(mat.texture_paint_images):
-                    return mat.texture_paint_images[slot] is not None
-            return False
-        return False
-
     @ToolDef.from_fn
     def texture_fill():
         return dict(
@@ -4299,11 +4274,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.mask_by_topology_island,
             _defs_sculpt.clone,
             _defs_sculpt.layer_eraser,
-            lambda context: (
-                (_defs_sculpt.texture_fill,)
-                if _defs_sculpt.poll_texture_fill(context)
-                else ()
-            ),
+            _defs_sculpt.texture_fill,
             None,
             _defs_transform.translate,
             _defs_transform.rotate,

@@ -22,11 +22,13 @@
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BKE_context.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
 #include "BLI_listbase_wrapper.hh"
@@ -41,6 +43,7 @@
 #include "ED_image.hh"
 #include "ED_object.hh"
 #include "ED_outliner_stack_automation.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
 
@@ -1966,7 +1969,8 @@ int outliner_stack_row_add(bContext *C,
 bool outliner_stack_row_fill_color_set(bContext *C,
                                        SpaceOutliner &space_outliner,
                                        const int ordinal,
-                                       const float color[4])
+                                       const float color[4],
+                                       PaintTileMap *session_tiles)
 {
   /* A re-fill changes pixels and a marker, not the row order, so needs_renumber = false. */
   return stack_mutate(
@@ -1982,8 +1986,36 @@ bool outliner_stack_row_fill_color_set(bContext *C,
         if (grouping == nullptr) {
           return false;
         }
-        return grouping->row_fill_color_set(*C, focus, owner, ordinal, color);
+        return grouping->row_fill_color_set(*C, focus, owner, ordinal, color, session_tiles);
       });
+}
+
+bool outliner_stack_row_fill_color_preview(bContext *C,
+                                           SpaceOutliner &space_outliner,
+                                           const int ordinal,
+                                           const float color[4],
+                                           PaintTileMap *session_tiles)
+{
+  /* A preview tick touches pixels only: no row is renumbered, so -- unlike the bake above --
+   * the cached rows stay standing and no selection is re-targeted. No undo step either: the
+   * caller is the picker's RNA update, and the commit (a memfile step plus one image-undo
+   * entry) belongs to the dialog's exec. */
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner == nullptr) {
+    return false;
+  }
+  const StackSource &source = *stack_source_for_space(space_outliner);
+  const StackEditor *editor = source.editor();
+  if (editor == nullptr || !source.is_editable(*owner)) {
+    return false;
+  }
+  const StackGroupingEditor *grouping = editor->grouping();
+  if (grouping == nullptr) {
+    return false;
+  }
+  return grouping->row_fill_color_preview(
+      *C, space_outliner.runtime->stack_focus, *owner, ordinal, color, session_tiles);
 }
 
 bool outliner_stack_row_color_tag_set(bContext *C,
@@ -2604,18 +2636,76 @@ bool stack_row_fill_color_poll(bContext *C)
   return false;
 }
 
+/**
+ * What the Fill color picker remembers while its dialog is open: the session "before" pixels
+ * everything rolls back to or commits from, and whether any preview tick ran. No ordinal lives
+ * here -- the target is re-resolved through #stack_operator_ordinal_get on every phase, with the
+ * marker first.
+ *
+ * Owned by the operator: invoke allocates, exec and cancel free. File-static state is banned
+ * here -- popups of different windows are not mutually exclusive.
+ */
+struct FillColorPreviewData {
+  PaintTileMap *tiles = nullptr;
+  bool did_preview = false;
+};
+
+static void stack_row_fill_color_preview_data_free(FillColorPreviewData *preview_data)
+{
+  if (preview_data == nullptr) {
+    return;
+  }
+  if (preview_data->tiles != nullptr) {
+    ED_image_paint_tile_map_free(preview_data->tiles);
+  }
+  MEM_delete(preview_data);
+}
+
 static wmOperatorStatus stack_row_fill_color_set_exec(bContext *C, wmOperator *op)
 {
+  /* The commit owns two history entries, pixels on top: the memfile step covers the marker
+   * (and the DNA around it), the image-undo entry the texture -- which the memfile alone
+   * cannot restore, since live ImBuf pixels of unpacked images are not part of it (the same
+   * reason every paint operator pushes image undo rather than relying on global undo). The
+   * first Ctrl+Z therefore lands on the texture, the second on the marker. Deliberately no
+   * #OPTYPE_UNDO on this operator: the automatic push would land on top of the image entry
+   * and the first undo would revert the marker while leaving the texture painted. */
+  FillColorPreviewData *preview_data = static_cast<FillColorPreviewData *>(op->customdata);
+  op->customdata = nullptr;
+
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
   const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
-  if (ordinal < 0) {
-    return OPERATOR_CANCELLED;
+  wmOperatorStatus status = OPERATOR_CANCELLED;
+  if (ordinal >= 0) {
+    float color[4];
+    RNA_float_get_array(op->ptr, "color", color);
+    PaintTileMap *commit_map = (preview_data != nullptr) ? preview_data->tiles : nullptr;
+    PaintTileMap *owned_map = nullptr;
+    if (commit_map == nullptr) {
+      /* A bake without a picker session around it (a scripted call): capture into a throwaway
+       * map so the commit below still covers the texture. */
+      owned_map = ED_image_paint_tile_map_new();
+      commit_map = owned_map;
+    }
+    if (outliner_stack_row_fill_color_set(C, *space_outliner, ordinal, color, commit_map)) {
+      status = OPERATOR_FINISHED;
+      /* No ticks, no pixels moved: an OK straight away commits no history entries. */
+      if ((preview_data != nullptr && preview_data->did_preview) || preview_data == nullptr) {
+        ED_undo_push(C, op->type->name);
+        ED_image_undo_push_from_tile_map(op->type->name, PaintMode::Texture2D, commit_map);
+      }
+    }
+    else if (commit_map != nullptr) {
+      /* A refused bake must not strand preview pixels without history: put back whatever the
+       * session captured. */
+      ED_image_paint_tile_map_restore(commit_map);
+    }
+    if (owned_map != nullptr) {
+      ED_image_paint_tile_map_free(owned_map);
+    }
   }
-  float color[4];
-  RNA_float_get_array(op->ptr, "color", color);
-  return outliner_stack_row_fill_color_set(C, *space_outliner, ordinal, color) ?
-             OPERATOR_FINISHED :
-             OPERATOR_CANCELLED;
+  stack_row_fill_color_preview_data_free(preview_data);
+  return status;
 }
 
 static wmOperatorStatus stack_row_fill_color_set_invoke(bContext *C,
@@ -2640,13 +2730,100 @@ static wmOperatorStatus stack_row_fill_color_set_invoke(bContext *C,
       }
     }
   }
-  return WM_operator_props_dialog_popup(C, op, 220, IFACE_("Fill Color"), IFACE_("Fill"));
+  /* The session owns its "before" pixels from here on: the first preview tick captures the
+   * pristine canvas into the map (later ticks keep those originals), the commit turns the map
+   * into one image-undo entry, the cancel restores from it. */
+  FillColorPreviewData *preview_data = MEM_new<FillColorPreviewData>(__func__);
+  preview_data->tiles = ED_image_paint_tile_map_new();
+  preview_data->did_preview = false;
+  op->customdata = preview_data;
+  return WM_operator_props_dialog_popup(C, op, 260, IFACE_("Fill Color"), IFACE_("Fill"));
 }
 
-/** The colour is the only choice here; the row was decided by where the call came from. */
+/**
+ * The operator behind a Fill color picker properties change, resolved the way the glyph picker
+ * resolves its own target: the running operators owning these properties first, the block's
+ * active operator (which the dialog registers for its child popups) second.
+ */
+static wmOperator *stack_row_fill_color_op_from_properties(bContext *C, const PointerRNA *ptr)
+{
+  if (ptr == nullptr || ptr->data == nullptr) {
+    return nullptr;
+  }
+  if (wmWindowManager *wm = CTX_wm_manager(C)) {
+    for (wmOperator *op = static_cast<wmOperator *>(wm->runtime->operators.last); op;
+         op = op->prev)
+    {
+      if (op != nullptr && op->properties == ptr->data) {
+        return op;
+      }
+    }
+  }
+  if (wmOperator *active_op = ui::context_active_operator_get(C)) {
+    if (active_op->ptr != nullptr && active_op->ptr->data == ptr->data) {
+      return active_op;
+    }
+  }
+  return nullptr;
+}
+
+/** A picker tick: show the colour on the texture now, record nothing, push no undo. */
+static void stack_row_fill_color_preview_update(bContext *C, PointerRNA *ptr, PropertyRNA * /*prop*/)
+{
+  wmOperator *op = stack_row_fill_color_op_from_properties(C, ptr);
+  if (op == nullptr || op->type == nullptr ||
+      !STREQ(op->type->idname, "OUTLINER_OT_stack_layer_fill_color_set"))
+  {
+    return;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return;
+  }
+  FillColorPreviewData *preview_data = static_cast<FillColorPreviewData *>(op->customdata);
+  if (preview_data == nullptr) {
+    return;
+  }
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return;
+  }
+  float color[4];
+  RNA_float_get_array(ptr, "color", color);
+  /* A refused tick stays silent: this runs per drag motion, and every tick reporting would spam
+   * the status bar. */
+  if (!outliner_stack_row_fill_color_preview(
+          C, *space_outliner, ordinal, color, preview_data->tiles))
+  {
+    return;
+  }
+  preview_data->did_preview = true;
+  ED_region_tag_redraw(CTX_wm_region(C));
+}
+
+/** Esc / close without confirming: put the pristine pixels back, write no history. */
+static void stack_row_fill_color_set_cancel(bContext *C, wmOperator *op)
+{
+  FillColorPreviewData *preview_data = static_cast<FillColorPreviewData *>(op->customdata);
+  op->customdata = nullptr;
+  if (preview_data == nullptr) {
+    return;
+  }
+  /* Nothing was ever pushed onto the undo stack for this session, so there is nothing to
+   * discard either -- and unlike a flat re-fill with the start colour, the restore keeps
+   * brushwork the layer already carried when the picker opened. */
+  if (preview_data->tiles != nullptr) {
+    ED_image_paint_tile_map_restore(preview_data->tiles);
+    ED_region_tag_redraw(CTX_wm_region(C));
+  }
+  stack_row_fill_color_preview_data_free(preview_data);
+}
+
+/** The dialog is the picker: the wheel edits the color straight away, without the extra
+ * click a color button would need. Every tick flows through the property update below. */
 static void stack_row_fill_color_set_ui(bContext * /*C*/, wmOperator *op)
 {
-  op->layout->prop(op->ptr, "color", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  template_color_picker(op->layout, op->ptr, "color", true, false, false, false);
 }
 
 void OUTLINER_OT_stack_layer_fill_color_set(wmOperatorType *ot)
@@ -2658,7 +2835,11 @@ void OUTLINER_OT_stack_layer_fill_color_set(wmOperatorType *ot)
   ot->invoke = stack_row_fill_color_set_invoke;
   ot->ui = stack_row_fill_color_set_ui;
   ot->poll = stack_row_fill_color_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->cancel = stack_row_fill_color_set_cancel;
+  /* Deliberately no OPTYPE_UNDO: exec pushes its history itself -- a memfile step for the
+   * marker, then one image-undo entry for the texture on top, so the first Ctrl+Z lands on
+   * the texture. The automatic push would land on top of the image entry instead. */
+  ot->flag = OPTYPE_REGISTER;
 
   PropertyRNA *prop = RNA_def_float_color(ot->srna,
                                           "color",
@@ -2671,6 +2852,11 @@ void OUTLINER_OT_stack_layer_fill_color_set(wmOperatorType *ot)
                                           0.0f,
                                           1.0f);
   RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);
+  /* Live texture preview per picker tick (pixels only, no marker, no undo); the bake stays in
+   * exec, the rollback in cancel. A plain string update cannot deliver the context this needs,
+   * hence the runtime callback. */
+  RNA_def_property_update_runtime_with_context_and_property(
+      prop, stack_row_fill_color_preview_update);
   RNA_def_int(ot->srna,
               "ordinal",
               -1,

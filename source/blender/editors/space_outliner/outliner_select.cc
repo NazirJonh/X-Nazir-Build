@@ -114,6 +114,42 @@ static bool outliner_stack_preview_section_from_cursor(const SpaceOutliner &spac
   return false;
 }
 
+/**
+ * Whether the cursor names a fill layer's colour swatch.
+ *
+ * The swatch carries no section of its own -- the section hit-test above deliberately answers
+ * false for it -- so it needs its own question: a hit here opens the fill color picker rather
+ * than switching the row's content.
+ */
+static bool outliner_stack_fill_swatch_from_cursor(const SpaceOutliner &space_outliner,
+                                                   const TreeElement &te,
+                                                   const float view_x)
+{
+  const TreeStoreElem *tselem = TREESTORE(&te);
+  if (tselem->type != TSE_STACK_LAYER ||
+      (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) == 0)
+  {
+    return false;
+  }
+
+  const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
+  if (row == nullptr || row->preview_slots.is_empty()) {
+    return false;
+  }
+
+  for (const int slot_index : row->preview_slots.index_range()) {
+    const rctf preview_rect = outliner_stack_row_preview_rect(
+        *row, float(te.xs), float(te.ys), slot_index);
+    if (view_x < preview_rect.xmin || view_x > preview_rect.xmax) {
+      continue;
+    }
+    if (row->preview_slots[slot_index].is_color_swatch) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Internal Utilities
  * \{ */
@@ -1934,6 +1970,12 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
     bool is_over_icon = false;
     TreeElement *activate_te = outliner_find_item_at_x_in_row(
         space_outliner, te, view_mval[0], &merged_elements, &is_over_icon);
+    /* A fill swatch click opens the color picker. Stashed here, acted on after the generic
+     * selection below: the picker's own poll answers for the selected row, so selection has to
+     * land first (a click on an unselected row must still open its picker). */
+    bool open_fill_picker = false;
+    StackItemIdentity fill_picker_identity;
+    int fill_picker_ordinal = -1;
 
     /* If the selected icon was an aggregate of multiple elements, run the search popup */
     if (merged_elements) {
@@ -1960,6 +2002,14 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
          * becomes the selected one, which is what the operators act on. Selection is left to the
          * generic code below rather than repeated here, so a folder can be renamed, grouped or
          * deleted like any other row even though no brush can write into it. */
+        if (outliner_stack_fill_swatch_from_cursor(
+                *space_outliner, *activate_te, view_mval[0]))
+        {
+          fill_picker_ordinal = activate_tselem->nr;
+          fill_picker_identity = outliner_stack_identity_of(*space_outliner,
+                                                            fill_picker_ordinal);
+          open_fill_picker = fill_picker_identity.is_valid();
+        }
         std::string preview_section;
         const bool is_preview_click = outliner_stack_preview_section_from_cursor(
             *space_outliner, *activate_te, view_mval[0], preview_section);
@@ -2039,6 +2089,26 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
       if (is_over_icon) {
         outliner_set_properties_tab(C, activate_te, activate_tselem);
       }
+    }
+
+    /* A stashed fill swatch click, run after selection landed: the picker's poll answers for
+     * the now-selected row, and both addresses travel along -- the marker first -- so a row
+     * renumbered mid-dialog still resolves. */
+    if (open_fill_picker) {
+      PointerRNA props = WM_operator_properties_create(
+          "OUTLINER_OT_stack_layer_fill_color_set");
+      RNA_int_set(&props, "ordinal", fill_picker_ordinal);
+      if (!BLI_uuid_is_nil(fill_picker_identity.row_id)) {
+        char marker_str[UUID_STRING_SIZE];
+        BLI_uuid_format(marker_str, fill_picker_identity.row_id);
+        RNA_string_set(&props, "marker", marker_str);
+      }
+      WM_operator_name_call(C,
+                            "OUTLINER_OT_stack_layer_fill_color_set",
+                            wm::OpCallContext::InvokeDefault,
+                            &props,
+                            nullptr);
+      WM_operator_properties_free(&props);
     }
 
     changed = true;

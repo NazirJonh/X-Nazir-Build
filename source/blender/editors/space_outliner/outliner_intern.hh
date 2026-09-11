@@ -41,6 +41,8 @@ struct LayerCollection;
 struct Main;
 struct Material;
 struct Object;
+/* Session "before" pixels for a fill-color picker; see #ED_image_paint_tile_map_new. */
+struct PaintTileMap;
 struct Scene;
 struct ScrArea;
 struct TreeStoreElem;
@@ -858,12 +860,31 @@ bool outliner_stack_row_color_tag_set(bContext *C,
 /**
  * Re-fill the fill row at \a ordinal with \a color, and record the colour on it.
  *
+ * When \a session_tiles is given, the layer's pristine pixels are captured into it before the
+ * bake writes, so the caller can commit one image-undo entry or roll back. Null means a
+ * one-shot call with no session around it.
+ *
  * \return false when the row is not a fill the source can re-fill.
  */
 bool outliner_stack_row_fill_color_set(bContext *C,
                                        SpaceOutliner &space_outliner,
                                        int ordinal,
-                                       const float color[4]);
+                                       const float color[4],
+                                       PaintTileMap *session_tiles);
+/**
+ * Show \a color on the fill row at \a ordinal without recording it and without an undo step.
+ *
+ * The picker-tick path: cached rows stay standing, refusals stay silent. Pristine pixels are
+ * captured into \a session_tiles on first touch when given. The dialog's exec owns the commit
+ * (a memfile step plus one image-undo entry), its cancel the rollback to the captured state.
+ *
+ * \return false when the row is not a fill the source can preview.
+ */
+bool outliner_stack_row_fill_color_preview(bContext *C,
+                                           SpaceOutliner &space_outliner,
+                                           int ordinal,
+                                           const float color[4],
+                                           PaintTileMap *session_tiles);
 bool outliner_stack_row_set_enabled(bContext *C,
                                     SpaceOutliner &space_outliner,
                                     int ordinal,

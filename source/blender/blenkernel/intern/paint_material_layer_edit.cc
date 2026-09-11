@@ -29,6 +29,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
+#include "BKE_preview_image.hh"
 
 #include "BLT_translation.hh"
 
@@ -58,6 +59,9 @@
 #include "IMB_imbuf_types.hh"
 
 #include <utility>
+
+/* TEMP-DEBUG (remove before merge with the MAT_LAYER prints below). */
+#include <cstdio>
 
 #include "paint_material_composite_internal.hh"
 
@@ -1993,6 +1997,8 @@ const char *BKE_paint_material_layer_edit_error_message(const PaintMaterialLayer
       return "The layer group's node tree is a library override and cannot be edited";
     case PaintMaterialLayerEditError::TreeShared:
       return "The layer group's node tree is used by another material";
+    case PaintMaterialLayerEditError::ChannelHasUnsupportedSource:
+      return "A needed channel is wired to nodes that are not paint layers; refusing to rewire it";
   }
   return "";
 }
@@ -4486,6 +4492,935 @@ void BKE_paint_material_layer_channels_wired(Material &ma, Vector<int> &r_channe
   }
 }
 
+namespace {
+
+/**
+ * Whether the Principled input of \a channel carries a user link right now.
+ *
+ * A missing socket (older Principled without this input) reads as unlinked: the caller asked
+ * for this channel, so a missing socket skips rather than denies (same as the forest reader,
+ * which simply never reports such a channel).
+ */
+bool ensure_principled_input_is_linked(Material &ma, const int channel)
+{
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  const bNode *principled = BKE_paint_material_principled_find(ma, reason);
+  if (principled == nullptr) {
+    return false;
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  if (info.socket_name == nullptr) {
+    return false;
+  }
+  bNodeSocket *socket = socket_find_by_name(
+      const_cast<bNode &>(*principled), SOCK_IN, StringRef(info.socket_name));
+  if (socket == nullptr) {
+    return false;
+  }
+  return socket_has_link(*socket);
+}
+
+/** The Principled input of \a channel, or null when there is no Principled or no such input. */
+bNodeSocket *ensure_principled_input_find(Material &ma, const int channel)
+{
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  const bNode *principled = BKE_paint_material_principled_find(ma, reason);
+  if (principled == nullptr) {
+    return nullptr;
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  if (info.socket_name == nullptr) {
+    return nullptr;
+  }
+  return socket_find_by_name(
+      const_cast<bNode &>(*principled), SOCK_IN, StringRef(info.socket_name));
+}
+
+/** A socket's own default as a fill color: scalars ride the red channel, like fills do. */
+void ensure_socket_default_color(const bNodeSocket &socket, float r_color[4])
+{
+  switch (socket.type) {
+    case SOCK_FLOAT: {
+      const float value = static_cast<const bNodeSocketValueFloat *>(socket.default_value)->value;
+      r_color[0] = value;
+      r_color[1] = value;
+      r_color[2] = value;
+      r_color[3] = 1.0f;
+      break;
+    }
+    case SOCK_RGBA: {
+      const float *value = static_cast<const bNodeSocketValueRGBA *>(socket.default_value)->value;
+      r_color[0] = value[0];
+      r_color[1] = value[1];
+      r_color[2] = value[2];
+      r_color[3] = value[3];
+      break;
+    }
+    case SOCK_VECTOR: {
+      const float *value = static_cast<const bNodeSocketValueVector *>(socket.default_value)
+                               ->value;
+      r_color[0] = value[0];
+      r_color[1] = value[1];
+      r_color[2] = value[2];
+      r_color[3] = 1.0f;
+      break;
+    }
+    default:
+      r_color[0] = 0.0f;
+      r_color[1] = 0.0f;
+      r_color[2] = 0.0f;
+      r_color[3] = 1.0f;
+      break;
+  }
+}
+
+/** Size of the map \a ref shows, so a neutral mirror stays a drop-in tile. Falls back silently. */
+void ensure_ref_image_size(Image *ref, int &r_size_x, int &r_size_y)
+{
+  if (ref == nullptr) {
+    return;
+  }
+  ImageUser iuser;
+  BKE_imageuser_default(&iuser);
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(ref, &iuser, &lock);
+  if (ibuf == nullptr) {
+    return;
+  }
+  if (ibuf->x > 0 && ibuf->y > 0) {
+    r_size_x = ibuf->x;
+    r_size_y = ibuf->y;
+  }
+  BKE_image_release_ibuf(ref, ibuf, lock);
+}
+
+/**
+ * A neutral map for \a channel: transparent, so a row fed by it contributes nothing -- except
+ * the bottom of a top-level chain, which is opaque and carries \a opaque_color (the constant
+ * the free Principled input used to supply on its own).
+ */
+Image *ensure_neutral_image_create(Main &bmain,
+                                   const int channel,
+                                   const int size_x,
+                                   const int size_y,
+                                   const bool opaque,
+                                   const float opaque_color[4])
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  char image_name[MAX_ID_NAME - 2];
+  SNPRINTF_UTF8(image_name, "%s Neutral", info.ui_name);
+  float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    /* Flat tangent space; the alpha still decides coverage, like on every channel. */
+    color[0] = 0.5f;
+    color[1] = 0.5f;
+    color[2] = 1.0f;
+  }
+  if (opaque) {
+    if (opaque_color != nullptr && channel != PAINT_MATERIAL_CHANNEL_NORMAL) {
+      color[0] = opaque_color[0];
+      color[1] = opaque_color[1];
+      color[2] = opaque_color[2];
+    }
+    color[3] = 1.0f;
+  }
+  Image *image = BKE_image_add_generated(&bmain,
+                                         size_x,
+                                         size_y,
+                                         image_name,
+                                         32,
+                                         false,
+                                         IMA_GENTYPE_BLANK,
+                                         color,
+                                         false,
+                                         !info.is_color,
+                                         false);
+  if (image != nullptr) {
+    image->flag |= IMA_PAINT_CANVAS;
+  }
+  return image;
+}
+
+/** How #ensure_discard releases one created node. */
+enum class EnsureNodeKind : int8_t {
+  /** Plain node with no ID users of its own (Mix, Normal Map). */
+  Plain = 0,
+  /** Group instance this transaction gave a user (`id_us_plus`): give it back. */
+  Instance,
+  /** Image Texture showing a transaction image: clear the reference before the image goes. */
+  Texture,
+};
+
+struct EnsureCreated {
+  bNodeTree *tree = nullptr;
+  bNode *node = nullptr;
+  EnsureNodeKind kind = EnsureNodeKind::Plain;
+};
+
+/**
+ * Undo one channel's node creation. Interface sockets added to group trees stay behind:
+ * unlinked they are transparent, which is exactly what an empty Result contributes.
+ */
+void ensure_discard(Main &bmain, Vector<EnsureCreated> &r_created, Vector<Image *> &r_images)
+{
+  for (const EnsureCreated &created : r_created) {
+    if (created.node == nullptr || created.tree == nullptr) {
+      continue;
+    }
+    if (created.kind == EnsureNodeKind::Instance && created.node->id != nullptr) {
+      id_us_min(created.node->id);
+      created.node->id = nullptr;
+    }
+    if (created.kind == EnsureNodeKind::Texture) {
+      created.node->id = nullptr;
+    }
+    bke::node_remove_node(&bmain, *created.tree, *created.node, false);
+  }
+  r_created.clear();
+  for (Image *image : r_images) {
+    if (image != nullptr) {
+      BKE_id_free(&bmain, image);
+    }
+  }
+  r_images.clear();
+}
+
+/** One built row: the nodes a reference row mirrors into. */
+struct EnsureBuiltRow {
+  bNode *tex = nullptr;
+  Image *image = nullptr;
+  bNode *mix = nullptr;
+  bNode *instance = nullptr;
+  bool is_group = false;
+};
+
+/** Where a mirrored chain feeds: resolved fresh after the tree update, never cached across one. */
+struct EnsureTerminal {
+  bNode *node = nullptr;
+  eNodeSocketInOut in_out = SOCK_IN;
+  const char *socket_name = nullptr;
+};
+
+/** The Group Output node of \a group_tree, or null when the folder lost it. */
+bNode *ensure_group_output_find(bNodeTree &group_tree)
+{
+  for (bNode &node : group_tree.nodes) {
+    if (node.type_legacy == NODE_GROUP_OUTPUT) {
+      return &node;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * The `Result <Channel>` input of \a group_tree's output, adding the interface socket first
+ * when this channel reaches the folder for the first time.
+ */
+bool ensure_group_result_socket(Main &bmain,
+                                bNodeTree &group_tree,
+                                const int channel,
+                                PaintMaterialLayerEditError &r_error)
+{
+  bNode *output = ensure_group_output_find(group_tree);
+  if (output == nullptr) {
+    r_error = PaintMaterialLayerEditError::ChainNotPlain;
+    return false;
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  char result_name[64];
+  SNPRINTF_UTF8(result_name, "Result %s", info.ui_name);
+  if (socket_find_by_name(*output, SOCK_IN, StringRef(result_name)) != nullptr) {
+    return true;
+  }
+  if (group_tree.tree_interface.add_socket(
+          result_name, "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr) == nullptr)
+  {
+    r_error = PaintMaterialLayerEditError::CreationFailed;
+    return false;
+  }
+  BKE_ntree_update_after_single_tree_change(bmain, group_tree);
+  group_tree.ensure_topology_cache();
+  return true;
+}
+
+/**
+ * Build one chain mirroring \a ref_chain's rows for \a channel, bottom to top.
+ *
+ * Plain rows get a neutral map (transparent, except an opaque socket-default bottom on a
+ * top-level chain) blended by a fresh Mix node; group rows get a fresh instance of the same
+ * folder blended by a keeper Mix. Every Mix carries its reference row's marker -- minted onto
+ * the reference itself when an old stack never got one -- so the row keeps one identity in
+ * every channel at once.
+ */
+static bool ensure_mirror_chain(Main &bmain,
+                                bNodeTree &tree,
+                                const int channel,
+                                const ChannelChain &ref_chain,
+                                const EnsureTerminal &terminal,
+                                const bool bottom_opaque,
+                                const float bottom_color[4],
+                                Vector<EnsureCreated> &r_created,
+                                Vector<Image *> &r_images,
+                                int &io_fallback_size,
+                                PaintMaterialLayerEditError &r_error)
+{
+  /* 1. Create every node first: group instances only grow their sockets on a tree update. */
+  Vector<EnsureBuiltRow> rows;
+  for (const int64_t j : ref_chain.layers.index_range()) {
+    const ChainLayer &ref_layer = ref_chain.layers[j];
+    if (!ref_layer.is_mix() || ref_layer.node == nullptr || ref_layer.top == nullptr) {
+      r_error = PaintMaterialLayerEditError::ChainNotPlain;
+      return false;
+    }
+    bUUID row_id = BKE_paint_material_layer_marker_get(*ref_layer.node);
+    if (BLI_uuid_is_nil(row_id)) {
+      row_id = BLI_uuid_generate_random();
+      BKE_paint_material_layer_marker_set(*ref_layer.node, row_id);
+    }
+
+    EnsureBuiltRow row;
+    row.is_group = ref_layer.is_group;
+    if (!ref_layer.is_group) {
+      int size_x = io_fallback_size, size_y = io_fallback_size;
+      ensure_ref_image_size(ref_layer.image, size_x, size_y);
+      io_fallback_size = size_x;
+      const bool opaque = bottom_opaque && j == 0;
+      row.image = ensure_neutral_image_create(
+          bmain, channel, size_x, size_y, opaque, opaque ? bottom_color : nullptr);
+      if (row.image == nullptr) {
+        r_error = PaintMaterialLayerEditError::CreationFailed;
+        return false;
+      }
+      r_images.append(row.image);
+      row.image->paint_layer_id = row_id;
+      row.tex = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+      if (row.tex == nullptr) {
+        r_error = PaintMaterialLayerEditError::CreationFailed;
+        return false;
+      }
+      row.tex->id = &row.image->id;
+      r_created.append({&tree, row.tex, EnsureNodeKind::Texture});
+    }
+    else {
+      const bNode *ref_instance = composite_source_node_shallow(*ref_layer.top);
+      if (ref_instance == nullptr || ref_instance->id == nullptr || tree.typeinfo == nullptr ||
+          tree.typeinfo->group_idname == nullptr)
+      {
+        r_error = PaintMaterialLayerEditError::ChainNotPlain;
+        return false;
+      }
+      row.instance = bke::node_add_node(nullptr, tree, tree.typeinfo->group_idname);
+      if (row.instance == nullptr) {
+        r_error = PaintMaterialLayerEditError::CreationFailed;
+        return false;
+      }
+      row.instance->id = ref_instance->id;
+      id_us_plus(row.instance->id);
+      r_created.append({&tree, row.instance, EnsureNodeKind::Instance});
+    }
+    row.mix = layer_mix_node_create(bmain, tree, channel);
+    if (row.mix == nullptr) {
+      /* TEMP-DEBUG (remove before merge). */
+      printf("[MAT_LAYER] mirror ch=%d create-mix null\n", channel);
+      fflush(stdout);
+      r_error = PaintMaterialLayerEditError::CreationFailed;
+      return false;
+    }
+    r_created.append({&tree, row.mix, EnsureNodeKind::Plain});
+    if (ref_layer.node->label[0] != '\0') {
+      STRNCPY_UTF8(row.mix->label, ref_layer.node->label);
+    }
+    if ((ref_layer.node->flag & NODE_MUTED) != 0) {
+      row.mix->flag |= NODE_MUTED;
+    }
+    BKE_paint_material_layer_marker_set(*row.mix, row_id);
+    rows.append(row);
+  }
+
+  /* 2. Sockets exist only after the update; resolve everything before touching a link. */
+  BKE_ntree_update_after_single_tree_change(bmain, tree);
+  tree.ensure_topology_cache();
+
+  bNodeSocket *terminal_socket = socket_find_by_name(
+      *terminal.node, terminal.in_out, StringRef(terminal.socket_name));
+  if (terminal_socket == nullptr) {
+    /* TEMP-DEBUG (remove before merge). */
+    printf("[MAT_LAYER] mirror ch=%d resolve-terminal missing\n", channel);
+    fflush(stdout);
+    r_error = PaintMaterialLayerEditError::CreationFailed;
+    return false;
+  }
+
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  char result_name[64];
+  SNPRINTF_UTF8(result_name, "Result %s", info.ui_name);
+
+  /* TEMP-DEBUG (remove before merge). */
+  printf("[MAT_LAYER] mirror ch=%d rows=%d\n", channel, int(ref_chain.layers.size()));
+  fflush(stdout);
+
+  ChannelChain built;
+  built.tree = &tree;
+  built.channel = channel;
+  built.terminal = terminal_socket;
+  built.terminal_node = terminal.node;
+  for (EnsureBuiltRow &row : rows) {
+    CompositeMixNode mix_prm;
+    bNodeSocket *output = mix_output_find(*row.mix);
+    const bool mix_read = (output == nullptr) ?
+                              false :
+                              composite_mix_node_read(*row.mix, mix_prm);
+    if (output == nullptr || !mix_read) {
+      /* TEMP-DEBUG (remove before merge). */
+      printf("[MAT_LAYER] mirror ch=%d resolve-mix output=%d read=%d iscombine=%d grouprow=%d\n",
+             channel,
+             int(output != nullptr),
+             int(mix_read),
+             int(BKE_paint_material_is_normal_combine_group(*row.mix)),
+             int(row.is_group));
+      fflush(stdout);
+      r_error = PaintMaterialLayerEditError::CreationFailed;
+      return false;
+    }
+    ChainLayer layer;
+    layer.node = row.mix;
+    layer.bottom = const_cast<bNodeSocket *>(mix_prm.bottom);
+    layer.top = const_cast<bNodeSocket *>(mix_prm.top);
+    layer.factor = const_cast<bNodeSocket *>(mix_prm.factor);
+    layer.output = output;
+    layer.image = row.image;
+    if (!row.is_group) {
+      bNodeSocket *tex_color = bke::node_find_socket(*row.tex, SOCK_OUT, "Color"_ustr);
+      bNodeSocket *tex_alpha = bke::node_find_socket(*row.tex, SOCK_OUT, "Alpha"_ustr);
+      if (tex_color == nullptr || tex_alpha == nullptr) {
+        /* TEMP-DEBUG (remove before merge). */
+        printf("[MAT_LAYER] mirror ch=%d resolve-tex color=%d alpha=%d\n",
+               channel,
+               int(tex_color != nullptr),
+               int(tex_alpha != nullptr));
+        fflush(stdout);
+        r_error = PaintMaterialLayerEditError::CreationFailed;
+        return false;
+      }
+      bke::node_add_link(tree, *row.tex, *tex_color, *row.mix, *layer.top);
+      if (!layer_factor_coverage_link(
+              tree, *row.mix, *layer.factor, *row.tex, *tex_alpha, 1.0f))
+      {
+        r_error = PaintMaterialLayerEditError::CreationFailed;
+        return false;
+      }
+      bke::node_position_relative(*row.tex, *row.mix, tex_color, *layer.top);
+    }
+    else {
+      /* The folder gained its Result socket up front; a missing one now means the interface
+       * and the instances disagree. */
+      bNodeSocket *result = socket_find_by_name(*row.instance, SOCK_OUT, result_name);
+      bNodeSocket *alpha = socket_find_by_name(*row.instance, SOCK_OUT, "Alpha");
+      if (result == nullptr || alpha == nullptr) {
+        r_error = PaintMaterialLayerEditError::CreationFailed;
+        return false;
+      }
+      bke::node_add_link(tree, *row.instance, *result, *row.mix, *layer.top);
+      if (!layer_factor_coverage_link(
+              tree, *row.mix, *layer.factor, *row.instance, *alpha, 1.0f))
+      {
+        r_error = PaintMaterialLayerEditError::CreationFailed;
+        return false;
+      }
+      layer.is_group = true;
+      bke::node_position_relative(*row.instance, *row.mix, result, *layer.top);
+    }
+    bke::node_position_relative(*row.mix, *terminal.node, layer.output, *terminal_socket);
+    built.layers.append(layer);
+  }
+
+  /* 3. Wire bottom-up; the terminal takes the top, like every other chain. */
+  chain_rebuild_links(built);
+  /* TEMP-DEBUG (remove before merge). */
+  printf("[MAT_LAYER] mirror ch=%d linked\n", channel);
+  fflush(stdout);
+  return true;
+}
+
+/**
+ * Migrate one missing channel into \a ref_forest's shape: primary wiring at the Principled
+ * input (a fresh Normal Map for Normal), a `Result` interface socket on every folder, and a
+ * mirrored chain in every tree. Either the whole channel lands or nothing does.
+ */
+static bool ensure_migrate_channel(Main &bmain,
+                                   Material &ma,
+                                   const int channel,
+                                   const Vector<ChannelChain> &ref_forest,
+                                   PaintMaterialLayerEditError &r_error)
+{
+  Vector<EnsureCreated> created;
+  Vector<Image *> images;
+  auto fail = [&](const PaintMaterialLayerEditError error) {
+    ensure_discard(bmain, created, images);
+    r_error = error;
+    return false;
+  };
+
+  /* Folders this channel reaches for the first time need their Result socket up front:
+   * the outer instances only grow it on a tree update. */
+  Vector<bNodeTree *> group_trees;
+  Set<bNodeTree *> group_seen;
+  for (const ChannelChain &ref_chain : ref_forest) {
+    for (const ChainLayer &ref_layer : ref_chain.layers) {
+      if (!ref_layer.is_group || ref_layer.top == nullptr) {
+        continue;
+      }
+      const bNode *ref_instance = composite_source_node_shallow(*ref_layer.top);
+      bNodeTree *group_tree = (ref_instance == nullptr) ? nullptr :
+                                                            layer_group_tree_of(*ref_instance);
+      if (group_tree == nullptr) {
+        return fail(PaintMaterialLayerEditError::ChainNotPlain);
+      }
+      if (group_seen.add(group_tree)) {
+        group_trees.append(group_tree);
+      }
+    }
+  }
+
+  /* The Normal chain starts one node earlier, at a fresh Normal Map: the Principled Normal
+   * input carries an already transformed vector no stack can be recovered from. */
+  bNode *normal_map = nullptr;
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    normal_map = bke::node_add_static_node(nullptr, *ma.nodetree, SH_NODE_NORMAL_MAP);
+    if (normal_map == nullptr) {
+      return fail(PaintMaterialLayerEditError::CreationFailed);
+    }
+    created.append({ma.nodetree, normal_map, EnsureNodeKind::Plain});
+    bNodeSocket *map_color = bke::node_find_socket(*normal_map, SOCK_IN, "Color"_ustr);
+    bNodeSocket *map_normal = bke::node_find_socket(*normal_map, SOCK_OUT, "Normal"_ustr);
+    bNodeSocket *principled_normal = ensure_principled_input_find(ma, channel);
+    if (map_color == nullptr || map_normal == nullptr || principled_normal == nullptr) {
+      return fail(PaintMaterialLayerEditError::CreationFailed);
+    }
+    bNode &principled = const_cast<bNode &>(principled_normal->owner_node());
+    bke::node_add_link(*ma.nodetree, *normal_map, *map_normal, principled, *principled_normal);
+    bke::node_position_relative(*normal_map, principled, map_normal, *principled_normal);
+  }
+
+  for (bNodeTree *group_tree : group_trees) {
+    if (!ensure_group_result_socket(bmain, *group_tree, channel, r_error)) {
+      ensure_discard(bmain, created, images);
+      return false;
+    }
+  }
+
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  const int top_index = int(ref_forest.size()) - 1;
+  int fallback_size = 1024;
+  for (const int64_t k : ref_forest.index_range()) {
+    const ChannelChain &ref_chain = ref_forest[k];
+    EnsureTerminal terminal;
+    float bottom_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool bottom_opaque = false;
+    char result_name[64] = "";
+    if (k == top_index) {
+      /* The bottom keeps showing what the free input used to supply on its own. */
+      bottom_opaque = true;
+      if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+        bottom_color[0] = 0.5f;
+        bottom_color[1] = 0.5f;
+        bottom_color[2] = 1.0f;
+        bottom_color[3] = 1.0f;
+        terminal.node = normal_map;
+        terminal.in_out = SOCK_IN;
+        terminal.socket_name = "Color";
+      }
+      else {
+        bNodeSocket *input = ensure_principled_input_find(ma, channel);
+        if (input == nullptr) {
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        ensure_socket_default_color(*input, bottom_color);
+        terminal.node = &const_cast<bNode &>(input->owner_node());
+        terminal.in_out = SOCK_IN;
+        terminal.socket_name = info.socket_name;
+      }
+    }
+    else {
+      bNode *output = ensure_group_output_find(*ref_chain.tree);
+      if (output == nullptr) {
+        return fail(PaintMaterialLayerEditError::ChainNotPlain);
+      }
+      SNPRINTF_UTF8(result_name, "Result %s", info.ui_name);
+      terminal.node = output;
+      terminal.in_out = SOCK_IN;
+      terminal.socket_name = result_name;
+    }
+    if (!ensure_mirror_chain(bmain,
+                             *ref_chain.tree,
+                             channel,
+                             ref_chain,
+                             terminal,
+                             bottom_opaque,
+                             bottom_color,
+                             created,
+                             images,
+                             fallback_size,
+                             r_error))
+    {
+      ensure_discard(bmain, created, images);
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+bool BKE_paint_material_layer_channels_ensure(Main &bmain,
+                                              Material &ma,
+                                              Span<int> channels,
+                                              PaintMaterialLayerEditError *r_error)
+{
+  auto fail = [&](const PaintMaterialLayerEditError error) {
+    if (r_error != nullptr) {
+      *r_error = error;
+    }
+    return false;
+  };
+  /* Channels with no Principled input (Custom, Height, AO) can never be wired: asking for
+   * them is meaningless, so they drop out before the forest is even read. */
+  Vector<int> work;
+  for (const int channel : channels) {
+    if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+      return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+    }
+    if (BKE_paint_material_channel_info(eMaterialPaintChannel(channel)).socket_name == nullptr) {
+      continue;
+    }
+    work.append_non_duplicates(channel);
+  }
+  if (work.is_empty()) {
+    if (r_error != nullptr) {
+      *r_error = PaintMaterialLayerEditError::None;
+    }
+    return true;
+  }
+  if (!ID_IS_EDITABLE(&ma.id) || ID_IS_OVERRIDE_LIBRARY(&ma.id) || ma.nodetree == nullptr ||
+      !ID_IS_EDITABLE(&ma.nodetree->id) || ID_IS_OVERRIDE_LIBRARY(ma.nodetree))
+  {
+    return fail(PaintMaterialLayerEditError::NotEditable);
+  }
+  /* Empty material takes path E (#BKE_paint_material_layer_add_material_base); there is no
+   * forest to mirror here. */
+  Vector<Vector<ChannelChain>> forest;
+  PaintMaterialLayerEditError forest_error = PaintMaterialLayerEditError::None;
+  if (!chains_collect_forest(ma, forest, forest_error)) {
+    return fail(forest_error);
+  }
+  /* The stack the other operations already refuse to rewrite is refused here too, before a
+   * byte is written. */
+  {
+    const int64_t top_len = forest.first().last().layers.size();
+    for (const Vector<ChannelChain> &per_channel : forest) {
+      if (per_channel.last().layers.size() != top_len) {
+        return fail(PaintMaterialLayerEditError::ChannelsDisagree);
+      }
+    }
+  }
+  {
+    Set<const bNodeTree *> scope_seen;
+    const auto scope_check = [&](bNodeTree &tree) {
+      if (scope_seen.add(&tree)) {
+        PaintMaterialLayerEditError scope_error = PaintMaterialLayerEditError::None;
+        if (!tree_write_scope_check(bmain, ma, tree, scope_error)) {
+          forest_error = scope_error;
+          return false;
+        }
+      }
+      return true;
+    };
+    if (!scope_check(*ma.nodetree)) {
+      return fail(forest_error);
+    }
+    for (const ChannelChain &ref_chain : forest.first()) {
+      for (const ChainLayer &ref_layer : ref_chain.layers) {
+        if (!ref_layer.is_group || ref_layer.top == nullptr) {
+          continue;
+        }
+        const bNode *ref_instance = composite_source_node_shallow(*ref_layer.top);
+        bNodeTree *group_tree = (ref_instance == nullptr) ? nullptr :
+                                                          layer_group_tree_of(*ref_instance);
+        if (group_tree == nullptr) {
+          return fail(PaintMaterialLayerEditError::ChainNotPlain);
+        }
+        if (!scope_check(*group_tree)) {
+          return fail(forest_error);
+        }
+      }
+    }
+  }
+  auto have_channel = [&](const Vector<Vector<ChannelChain>> &look, const int channel) {
+    for (const Vector<ChannelChain> &per_channel : look) {
+      if (!per_channel.is_empty() && per_channel.last().channel == channel) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const int channel : work) {
+    if (have_channel(forest, channel)) {
+      continue;
+    }
+    /* A link that is not a stack is someone's deliberate graph: replacing it would silently
+     * change what the material looks like. */
+    if (ensure_principled_input_is_linked(ma, channel)) {
+      return fail(PaintMaterialLayerEditError::ChannelHasUnsupportedSource);
+    }
+  }
+  /* Bare bottoms cannot lend a marker to their mirror: wrap them first, the way every other
+   * operation does once its preflight has passed. */
+  if (forest_has_bare_bottom(forest)) {
+    if (BKE_paint_material_layer_bottom_normalize(bmain, ma)) {
+      BKE_paint_material_layer_markers_ensure(ma);
+    }
+    if (!chains_collect_forest(ma, forest, forest_error)) {
+      return fail(forest_error);
+    }
+  }
+  for (const int channel : work) {
+    if (have_channel(forest, channel)) {
+      continue;
+    }
+    /* TEMP-DEBUG (remove before merge). */
+    printf("[MAT_LAYER] migrate ch=%d ref_chains=%d ref_top_rows=%d\n",
+           channel,
+           int(forest.first().size()),
+           int(forest.first().last().layers.size()));
+    fflush(stdout);
+    if (!ensure_migrate_channel(bmain, ma, channel, forest.first(), forest_error)) {
+      /* TEMP-DEBUG (remove before merge). */
+      printf("[MAT_LAYER] migrate ch=%d FAILED err=%d\n", channel, int(forest_error));
+      fflush(stdout);
+      return fail(forest_error);
+    }
+    /* The new channel invalidates the collected topology: read the forest again so the next
+     * channel mirrors a graph as it is, with the markers just minted still on it. */
+    if (!chains_collect_forest(ma, forest, forest_error)) {
+      return fail(forest_error);
+    }
+  }
+  BKE_paint_material_layer_markers_ensure(ma);
+  BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
+  paint_layer_edit_committed(bmain, ma, true);
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
+  }
+  return true;
+}
+
+/**
+ * Path E: the first layer of an empty material, built directly as one normalized Mix row
+ * per baked channel -- never as bare images, which carry no marker and would leave the row
+ * without one identity across its channels.
+ *
+ * Takes \a baked_maps over like #BKE_paint_material_layer_add does: shown maps keep their
+ * fresh user on the node, and every other map -- all of them on refusal -- is freed.
+ */
+bool BKE_paint_material_layer_add_material_base(Main &bmain,
+                                                Material &ma,
+                                                Span<PaintMaterialLayerChannelImage> baked_maps,
+                                                int *r_ordinal,
+                                                PaintMaterialLayerEditError *r_error)
+{
+  Set<Image *> given_used;
+  auto given_release = [&]() {
+    Set<Image *> released;
+    for (const PaintMaterialLayerChannelImage &given : baked_maps) {
+      if (given.image != nullptr && !given_used.contains(given.image) &&
+          released.add(given.image))
+      {
+        BKE_id_free(&bmain, given.image);
+      }
+    }
+  };
+  auto fail = [&](const PaintMaterialLayerEditError reason) {
+    given_used.clear();
+    given_release();
+    if (r_error != nullptr) {
+      *r_error = reason;
+    }
+    return false;
+  };
+
+  if (baked_maps.is_empty()) {
+    return fail(PaintMaterialLayerEditError::CreationFailed);
+  }
+  /* TEMP-DEBUG (remove before merge). */
+  printf("[MAT_LAYER] base maps=%d\n", int(baked_maps.size()));
+  fflush(stdout);
+  if (!ID_IS_EDITABLE(&ma.id) || ID_IS_OVERRIDE_LIBRARY(&ma.id) || ma.nodetree == nullptr ||
+      !ID_IS_EDITABLE(&ma.nodetree->id) || ID_IS_OVERRIDE_LIBRARY(ma.nodetree))
+  {
+    return fail(PaintMaterialLayerEditError::NotEditable);
+  }
+  /* Path E is only for an empty canvas: a stack already there takes the ensure+add route. */
+  {
+    Vector<Vector<ChannelChain>> existing;
+    PaintMaterialLayerEditError existing_error = PaintMaterialLayerEditError::None;
+    if (chains_collect_forest(ma, existing, existing_error)) {
+      return fail(PaintMaterialLayerEditError::ChannelsDisagree);
+    }
+    if (existing_error != PaintMaterialLayerEditError::NotAStack) {
+      return fail(existing_error);
+    }
+  }
+  ChannelUnavailableReason principled_reason = ChannelUnavailableReason::None;
+  if (BKE_paint_material_principled_find(ma, principled_reason) == nullptr) {
+    return fail(PaintMaterialLayerEditError::NoPrincipled);
+  }
+  /* Validate everything up front: channel ids, duplicates, and free Principled inputs. A
+   * linked input here is someone's graph, not an empty canvas -- same policy as ensure. */
+  Set<int> seen_channels;
+  for (const PaintMaterialLayerChannelImage &given : baked_maps) {
+    if (given.image == nullptr || given.channel < 0 ||
+        given.channel >= PAINT_MATERIAL_CHANNEL_NUM ||
+        BKE_paint_material_channel_info(eMaterialPaintChannel(given.channel)).socket_name ==
+            nullptr)
+    {
+      return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+    }
+    if (!seen_channels.add(given.channel)) {
+      return fail(PaintMaterialLayerEditError::CreationFailed);
+    }
+    if (ensure_principled_input_is_linked(ma, given.channel)) {
+      return fail(PaintMaterialLayerEditError::ChannelHasUnsupportedSource);
+    }
+  }
+
+  bNodeTree &tree = *ma.nodetree;
+  if (tree.typeinfo == nullptr || tree.typeinfo->group_idname == nullptr) {
+    return fail(PaintMaterialLayerEditError::CreationFailed);
+  }
+
+  /* One identity for the whole row, restamped onto the baked maps the way layer_add does:
+   * the bake's own layer id only ever lived in the bake link. */
+  const bUUID layer_id = BLI_uuid_generate_random();
+
+  struct BaseRow {
+    int channel = -1;
+    bNode *tex = nullptr;
+    bNode *mix = nullptr;
+  };
+  Vector<BaseRow> rows;
+  Vector<EnsureCreated> created;
+  auto fail_nodes = [&](const PaintMaterialLayerEditError reason) {
+    Vector<Image *> owned;
+    ensure_discard(bmain, created, owned);
+    return fail(reason);
+  };
+
+  /* Normal starts one node earlier, at its own Normal Map (same as ensure's primary). */
+  bNode *normal_map = nullptr;
+  for (const PaintMaterialLayerChannelImage &given : baked_maps) {
+    if (given.channel != PAINT_MATERIAL_CHANNEL_NORMAL) {
+      continue;
+    }
+    normal_map = bke::node_add_static_node(nullptr, tree, SH_NODE_NORMAL_MAP);
+    if (normal_map == nullptr) {
+      return fail_nodes(PaintMaterialLayerEditError::CreationFailed);
+    }
+    created.append({&tree, normal_map, EnsureNodeKind::Plain});
+    bNodeSocket *map_color = bke::node_find_socket(*normal_map, SOCK_IN, "Color"_ustr);
+    bNodeSocket *map_normal = bke::node_find_socket(*normal_map, SOCK_OUT, "Normal"_ustr);
+    bNodeSocket *principled_normal = ensure_principled_input_find(ma, given.channel);
+    if (map_color == nullptr || map_normal == nullptr || principled_normal == nullptr) {
+      return fail_nodes(PaintMaterialLayerEditError::CreationFailed);
+    }
+    bNode &principled = const_cast<bNode &>(principled_normal->owner_node());
+    bke::node_add_link(tree, *normal_map, *map_normal, principled, *principled_normal);
+    bke::node_position_relative(*normal_map, principled, map_normal, *principled_normal);
+  }
+
+  for (const PaintMaterialLayerChannelImage &given : baked_maps) {
+    BaseRow row;
+    row.channel = given.channel;
+    row.tex = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+    if (row.tex == nullptr) {
+      return fail_nodes(PaintMaterialLayerEditError::CreationFailed);
+    }
+    row.tex->id = &given.image->id;
+    given_used.add(given.image);
+    created.append({&tree, row.tex, EnsureNodeKind::Texture});
+    row.mix = layer_mix_node_create(bmain, tree, given.channel);
+    if (row.mix == nullptr) {
+      return fail_nodes(PaintMaterialLayerEditError::CreationFailed);
+    }
+    created.append({&tree, row.mix, EnsureNodeKind::Plain});
+    BKE_paint_material_layer_marker_set(*row.mix, layer_id);
+    given.image->paint_layer_id = layer_id;
+    rows.append(row);
+  }
+
+  BKE_ntree_update_after_single_tree_change(bmain, tree);
+  tree.ensure_topology_cache();
+
+  for (BaseRow &row : rows) {
+    CompositeMixNode mix_prm;
+    bNodeSocket *output = mix_output_find(*row.mix);
+    bNodeSocket *tex_color = bke::node_find_socket(*row.tex, SOCK_OUT, "Color"_ustr);
+    bNodeSocket *tex_alpha = bke::node_find_socket(*row.tex, SOCK_OUT, "Alpha"_ustr);
+    if (output == nullptr || tex_color == nullptr || tex_alpha == nullptr ||
+        !composite_mix_node_read(*row.mix, mix_prm))
+    {
+      return fail_nodes(PaintMaterialLayerEditError::CreationFailed);
+    }
+    /* #CompositeMixNode hands out const sockets; links need mutable ones, like the layer
+     * structs everywhere else in this file. */
+    bNodeSocket *mix_top = const_cast<bNodeSocket *>(mix_prm.top);
+    bNodeSocket *mix_factor = const_cast<bNodeSocket *>(mix_prm.factor);
+    bNodeSocket *terminal = nullptr;
+    bNode *terminal_node = nullptr;
+    if (row.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+      if (normal_map == nullptr) {
+        return fail_nodes(PaintMaterialLayerEditError::CreationFailed);
+      }
+      terminal = bke::node_find_socket(*normal_map, SOCK_IN, "Color"_ustr);
+      terminal_node = normal_map;
+    }
+    else {
+      terminal = ensure_principled_input_find(ma, row.channel);
+      terminal_node = (terminal == nullptr) ?
+                          nullptr :
+                          &const_cast<bNode &>(terminal->owner_node());
+    }
+    if (terminal == nullptr || terminal_node == nullptr) {
+      return fail_nodes(PaintMaterialLayerEditError::CreationFailed);
+    }
+    bke::node_add_link(tree, *row.tex, *tex_color, *row.mix, *mix_top);
+    if (!layer_factor_coverage_link(
+            tree, *row.mix, *mix_factor, *row.tex, *tex_alpha, 1.0f))
+    {
+      return fail_nodes(PaintMaterialLayerEditError::CreationFailed);
+    }
+    bke::node_position_relative(*row.tex, *row.mix, tex_color, *mix_top);
+    bke::node_position_relative(*row.mix, *terminal_node, output, *terminal);
+    relink_into(tree, *terminal, *terminal_node, *row.mix, *output);
+  }
+
+  BKE_ntree_update_after_single_tree_change(bmain, tree);
+  paint_layer_edit_committed(bmain, ma, true);
+  given_release();
+  if (r_ordinal != nullptr) {
+    *r_ordinal = 0;
+  }
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
+  }
+  return true;
+}
+
 bool BKE_paint_material_layer_channel_image_set(Main &bmain,
                                                 Material &ma,
                                                 const int ordinal,
@@ -4677,6 +5612,13 @@ static void image_fill_flat(Image &image, const float color[4])
     }
     BKE_image_release_ibuf(&image, ibuf, lock);
   }
+  /* The Outliner row and every other consumer of the ID's preview icon draw the cached
+   * thumbnail: without clearing it here they keep showing the pre-fill colour until something
+   * else happens to invalidate it. The next draw re-renders it from the new pixels (as a job),
+   * so both picker ticks and the bake refresh the row preview. */
+  if (image.preview != nullptr) {
+    BKE_previewimg_clear(image.preview);
+  }
   BKE_image_partial_update_mark_full_update(&image);
 }
 
@@ -4714,6 +5656,56 @@ bool BKE_paint_material_layer_fill_color_apply(Main &bmain,
     ChainLayer &layer = chain->layers[plan.layer_index];
     /* The colour is recorded in every channel, like the kind: a reader may look at any of them. */
     BKE_paint_material_layer_fill_color_set(*layer.node, color);
+    if (layer.image == nullptr) {
+      /* A channel the layer never got a map for behaves as unwired for this layer. */
+      continue;
+    }
+    float map_color[4];
+    fill_map_color_for(chain->channel, color, map_color);
+    image_fill_flat(*layer.image, map_color);
+  }
+
+  paint_layer_edit_committed(bmain, ma, false);
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
+  }
+  return true;
+}
+
+bool BKE_paint_material_layer_fill_color_preview(Main &bmain,
+                                                 Material &ma,
+                                                 const int ordinal,
+                                                 const float color[4],
+                                                 PaintMaterialLayerEditError *r_error)
+{
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  auto fail = [&](const PaintMaterialLayerEditError reason) {
+    if (r_error != nullptr) {
+      *r_error = reason;
+    }
+    return false;
+  };
+
+  /* 1. Preflight, exactly like #BKE_paint_material_layer_fill_color_apply: the row exists, the
+   * material is writable, and every channel's node for the row carries the Fill kind -- all
+   * decided without writing a byte. */
+  LayerEditPlan plan;
+  if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::FillColorSet, plan, error)) {
+    return fail(error);
+  }
+  for (const ChannelChain *chain : plan.chains) {
+    const ChainLayer &layer = chain->layers[plan.layer_index];
+    if (BKE_paint_material_layer_kind_get(*layer.node) != PaintMaterialLayerKind::Fill) {
+      return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+    }
+  }
+  /* 2. Shape: nothing to convert, like the apply. */
+  /* 3. Mutation: re-fill every wired channel's map, deliberately recording nothing on the
+   * layer's marker -- the marker is what the layer *stands for*, and only the dialog's exec
+   * (the bake) moves it. The revision bump and cache invalidation below are still needed so
+   * the stack reader and the compositor see the new pixels. */
+  for (ChannelChain *chain : plan.chains) {
+    ChainLayer &layer = chain->layers[plan.layer_index];
     if (layer.image == nullptr) {
       /* A channel the layer never got a map for behaves as unwired for this layer. */
       continue;

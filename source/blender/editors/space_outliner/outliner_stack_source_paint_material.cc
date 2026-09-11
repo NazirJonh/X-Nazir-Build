@@ -19,6 +19,7 @@
  */
 
 #include <climits>
+#include <cstdio>
 
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
@@ -48,6 +49,7 @@
 #include "BLI_assert.h"
 #include "BLI_hash.h"
 #include "BLI_listbase_iterator.hh"
+#include "BLI_listbase_wrapper.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_path_utils.hh"
@@ -60,8 +62,11 @@
 
 #include "BLT_translation.hh"
 
+#include "IMB_imbuf_types.hh"
+
 #include "ED_image.hh"
 #include "ED_material_bake.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 
 #include "RNA_access.hh"
@@ -729,6 +734,77 @@ class PaintMaterialStackSource final : public StackSource,
     return true;
   }
 
+  /**
+   * The quiet shape of #paint_edit for per-tick picker previews: the same BKE call and the same
+   * notifier on success, but a refusal stays silent -- a picker tick must never spam the status
+   * bar -- and no undo step is involved either way (the caller is an RNA update, not an exec).
+   */
+  template<typename Fn> bool paint_preview(bContext &C, ID &owner, Fn &&fn) const
+  {
+    Material &material = paint_owner(owner);
+    Main &bmain = *CTX_data_main(&C);
+    PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+    if (!fn(bmain, material, error)) {
+      return false;
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
+  }
+
+  /**
+   * Capture the layer's pristine pixels into the picker's session tile map, before the first
+   * byte a preview tick or a bake writes.
+   *
+   * First touch wins: #ED_image_paint_tile_push captures a tile only once, so calling this on
+   * every tick keeps the true pre-picker canvas while staying a hash lookup after the first
+   * pass. Best effort -- a layer whose rows cannot be resolved (a mid-dialog race) simply
+   * captures nothing, and the fill proceeds without a safety net for those maps.
+   */
+  static void paint_fill_session_ensure(Main &bmain,
+                                       Material &material,
+                                       const int ordinal,
+                                       PaintTileMap &session_tiles)
+  {
+    Vector<PaintMaterialLayerStackEntry> entries;
+    if (!BKE_paint_material_layer_stack_from_material(bmain, material, entries)) {
+      return;
+    }
+    const PaintMaterialLayerStackEntry *target = nullptr;
+    for (const PaintMaterialLayerStackEntry &entry : entries) {
+      if (entry.ordinal == ordinal) {
+        target = &entry;
+        break;
+      }
+    }
+    if (target == nullptr) {
+      return;
+    }
+    for (Image *image : target->channel_images.values()) {
+      if (image == nullptr) {
+        continue;
+      }
+      for (ImageTile *tile : ListBaseWrapper<ImageTile>(image->tiles)) {
+        ImageUser iuser;
+        BKE_imageuser_default(&iuser);
+        iuser.tile = tile->tile_number;
+        void *lock = nullptr;
+        ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, &lock);
+        if (ibuf == nullptr) {
+          continue;
+        }
+        const int tiles_x = ED_IMAGE_UNDO_TILE_NUMBER(ibuf->x);
+        const int tiles_y = ED_IMAGE_UNDO_TILE_NUMBER(ibuf->y);
+        for (int ty = 0; ty < tiles_y; ty++) {
+          for (int tx = 0; tx < tiles_x; tx++) {
+            ED_image_paint_tile_push(
+                &session_tiles, image, ibuf, &iuser, tx, ty, nullptr, nullptr, false, true);
+          }
+        }
+        BKE_image_release_ibuf(image, ibuf, lock);
+      }
+    }
+  }
+
   bool can_reorder(const ID &owner) const override
   {
     return this->is_editable(owner);
@@ -853,30 +929,71 @@ class PaintMaterialStackSource final : public StackSource,
       image_size = scene->toolsettings->paint_mode.new_channel_image_size;
     }
 
-    /* The channels the layer can carry: ones the picked material actually feeds, and the owner's
-     * stack has wired. A channel the source material leaves constant gets no map and simply
-     * behaves as unwired for this layer; a channel the owner never wired could not take a layer
-     * at all. */
+    /* The channels the layer can carry: every material channel the picked material
+     * actually feeds. Constant channels bake as flat fills without a render; only
+     * Unavailable ones are skipped. What the owner's stack has wired does not limit this:
+     * missing chains are migrated up front, and an empty owner takes a dedicated path. */
     const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(picked);
-    Vector<int> wired;
-    BKE_paint_material_layer_channels_wired(paint_owner(owner), wired);
-    if (wired.is_empty()) {
-      /* A material with no stack yet gets one from the add below: a bare base on Base Color, the
-       * same way a Paint or Fill layer starts a stack. */
-      wired.append(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    }
-    Vector<ed::material_bake::BakeTargetSpec> targets;
-    for (const int channel : wired) {
+    Vector<int> required;
+    for (const int channel : PAINT_MATERIAL_LAYER_MATERIAL_CHANNELS) {
       if (resolve.channels[channel] != ChannelResolution::Unavailable) {
-        targets.append({eMaterialPaintChannel(channel)});
+        required.append(channel);
       }
     }
-    if (targets.is_empty()) {
+    if (required.is_empty()) {
       BKE_reportf(CTX_wm_reports(&C),
                   RPT_WARNING,
-                  RPT_("Material \"%s\" feeds none of the channels this stack uses"),
+                  RPT_("Material \"%s\" feeds none of the paint channels"),
                   picked->id.name + 2);
       return -1;
+    }
+
+    Material &target_material = paint_owner(owner);
+    const uint64_t revision_before = BKE_material_paint_layer_revision_get(target_material);
+
+    /* TEMP-DEBUG (remove before merge): trace which stage drops the gesture. */
+    printf("[MAT_LAYER] required:");
+    for (const int channel : required) {
+      printf(" %d", channel);
+    }
+    printf("\n");
+    fflush(stdout);
+
+    /* Route E (empty canvas) vs S (existing stack). An ensure refusal for a channel wired
+     * to a foreign graph stops the gesture before a single bake image exists. */
+    bool use_base = false;
+    {
+      Vector<PaintMaterialLayerStackEntry> probe;
+      if (!BKE_paint_material_layer_stack_from_material(*bmain, target_material, probe)) {
+        use_base = true;
+      }
+      else {
+        PaintMaterialLayerEditError ensure_error = PaintMaterialLayerEditError::None;
+        if (!BKE_paint_material_layer_channels_ensure(
+                *bmain, target_material, required.as_span(), &ensure_error))
+        {
+          /* TEMP-DEBUG (remove before merge). */
+          printf("[MAT_LAYER] ensure failed err=%d\n", int(ensure_error));
+          fflush(stdout);
+          if (ensure_error == PaintMaterialLayerEditError::NotAStack) {
+            use_base = true;
+          }
+          else {
+            BKE_report(CTX_wm_reports(&C),
+                       RPT_ERROR,
+                       RPT_(BKE_paint_material_layer_edit_error_message(ensure_error)));
+            return -1;
+          }
+        }
+      }
+      /* TEMP-DEBUG (remove before merge). */
+      printf("[MAT_LAYER] route use_base=%d\n", int(use_base));
+      fflush(stdout);
+    }
+
+    Vector<ed::material_bake::BakeTargetSpec> targets;
+    for (const int channel : required) {
+      targets.append({eMaterialPaintChannel(channel)});
     }
 
     ed::material_bake::MaterialBakeToImagesParams bake_params;
@@ -886,7 +1003,22 @@ class PaintMaterialStackSource final : public StackSource,
     bake_params.blocking = false;
     const ed::material_bake::MaterialBakeToImagesResult bake = ed::material_bake::
         material_bake_to_images(*bmain, wm, CTX_wm_window(&C), bake_params);
+    /* TEMP-DEBUG (remove before merge). */
+    printf("[MAT_LAYER] bake ok=%d created=%d skipped=%d\n",
+           int(bake.ok),
+           int(bake.created.size()),
+           int(bake.skipped_unavailable.size()));
+    fflush(stdout);
     if (!bake.ok || bake.created.is_empty()) {
+      /* An ensure that already widened the stack stays behind as its own visible change;
+       * say so plainly instead of leaving a silent preparation. */
+      if (BKE_material_paint_layer_revision_get(paint_owner(owner)) != revision_before) {
+        BKE_reportf(CTX_wm_reports(&C),
+                    RPT_ERROR,
+                    RPT_("Bake of \"%s\" failed after preparing the layer channels; "
+                         "no Material layer was added"),
+                    picked->id.name + 2);
+      }
       return -1;
     }
 
@@ -902,12 +1034,28 @@ class PaintMaterialStackSource final : public StackSource,
     int new_ordinal = -1;
     this->paint_edit(
         C, owner, [&](Main &edit_bmain, Material &material, PaintMaterialLayerEditError &error) {
-          PaintMaterialLayerAddParams params;
-          params.type = PaintMaterialLayerAddType::Image;
-          params.anchor_ordinal = ordinal;
-          params.image_size = image_size;
-          params.channel_images = baked_maps;
-          if (!BKE_paint_material_layer_add(edit_bmain, material, params, &new_ordinal, &error)) {
+          bool step_ok = false;
+          if (use_base) {
+            /* Path E: the empty canvas becomes one normalized row holding the baked maps. */
+            step_ok = BKE_paint_material_layer_add_material_base(
+                edit_bmain, material, baked_maps.as_span(), &new_ordinal, &error);
+          }
+          else {
+            PaintMaterialLayerAddParams params;
+            params.type = PaintMaterialLayerAddType::Image;
+            params.anchor_ordinal = ordinal;
+            params.image_size = image_size;
+            params.channel_images = baked_maps;
+            step_ok = BKE_paint_material_layer_add(
+                edit_bmain, material, params, &new_ordinal, &error);
+          }
+          /* TEMP-DEBUG (remove before merge). */
+          printf("[MAT_LAYER] add ok=%d ordinal=%d err=%d\n",
+                 int(step_ok),
+                 new_ordinal,
+                 int(error));
+          fflush(stdout);
+          if (!step_ok) {
             return false;
           }
           /* The kind marker is what makes the row read as Material rather than as a Paint layer
@@ -915,8 +1063,14 @@ class PaintMaterialStackSource final : public StackSource,
           if (!BKE_paint_material_layer_kind_set(
                   edit_bmain, material, new_ordinal, PaintMaterialLayerKind::Material, &error))
           {
+            /* TEMP-DEBUG (remove before merge). */
+            printf("[MAT_LAYER] kind_set failed err=%d\n", int(error));
+            fflush(stdout);
             return false;
           }
+          /* TEMP-DEBUG (remove before merge). */
+          printf("[MAT_LAYER] done ordinal=%d\n", new_ordinal);
+          fflush(stdout);
           return true;
         });
     return new_ordinal;
@@ -1019,14 +1173,39 @@ class PaintMaterialStackSource final : public StackSource,
   }
 
   bool row_fill_color_set(bContext &C,
-                          const StackFocus & /*focus*/,
-                          ID &owner,
-                          const int ordinal,
-                          const float color[4]) const override
+                           const StackFocus & /*focus*/,
+                           ID &owner,
+                           const int ordinal,
+                           const float color[4],
+                           PaintTileMap *session_tiles) const override
   {
+    if (session_tiles != nullptr) {
+      Material &target_material = paint_owner(owner);
+      Main &bmain = *CTX_data_main(&C);
+      paint_fill_session_ensure(bmain, target_material, ordinal, *session_tiles);
+    }
     return this->paint_edit(
         C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
           return BKE_paint_material_layer_fill_color_apply(
+              bmain, material, ordinal, color, &error);
+        });
+  }
+
+  bool row_fill_color_preview(bContext &C,
+                              const StackFocus & /*focus*/,
+                              ID &owner,
+                              const int ordinal,
+                              const float color[4],
+                              PaintTileMap *session_tiles) const override
+  {
+    if (session_tiles != nullptr) {
+      Material &target_material = paint_owner(owner);
+      Main &bmain = *CTX_data_main(&C);
+      paint_fill_session_ensure(bmain, target_material, ordinal, *session_tiles);
+    }
+    return this->paint_preview(
+        C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
+          return BKE_paint_material_layer_fill_color_preview(
               bmain, material, ordinal, color, &error);
         });
   }

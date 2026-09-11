@@ -57,6 +57,14 @@ struct wmEvent;
 struct wmNotifier;
 struct wmRegionMessageSubscribeParams;
 
+namespace blender {
+/* Session "before" pixels for a fill-color picker, owned by the picker's operator (see
+ * #ED_image_paint_tile_map_new): the image-undo entry committed at close restores the texture,
+ * which the memfile step alone cannot. Forward-declared to keep this seam free of the paint
+ * module's headers; only passed through as an opaque session handle, never dereferenced here. */
+struct PaintTileMap;
+}  // namespace blender
+
 namespace blender::ed::outliner {
 
 /**
@@ -557,6 +565,11 @@ class StackGroupingEditor {
   /**
    * Re-fill the maps of the fill row at \a ordinal with \a color, and record the colour on it.
    *
+   * When \a session_tiles is given, the source first captures the layer's pristine pixels into
+   * it (first touch wins, later captures keep the originals) before writing a byte, so the
+   * caller can later commit exactly one image-undo entry or roll back. Null means a one-shot
+   * call with no session around it.
+   *
    * The fill is a colour rather than a repaint: what the row *stands for* changes with it, which
    * is why the source records it and not just the pixels. Sources with no fill rows leave the
    * default.
@@ -568,7 +581,33 @@ class StackGroupingEditor {
                                   const StackFocus & /*focus*/,
                                   ID & /*owner*/,
                                   int /*ordinal*/,
-                                  const float /*color*/[4]) const
+                                  const float /*color*/[4],
+                                  PaintTileMap * /*session_tiles*/) const
+  {
+    return false;
+  }
+
+  /**
+   * Live preview for a fill-color picker: show \a color on the fill row at \a ordinal without
+   * recording it and without pushing an undo step.
+   *
+   * Session handling is the same as #row_fill_color_set: pristine pixels are captured into \a
+   * session_tiles on first touch when given, so a later commit or rollback sees the true
+   * pre-picker canvas rather than an intermediate tick.
+   *
+   * Unlike #row_fill_color_set, a refusal here must stay silent: this runs per picker tick, and
+   * every tick reporting would spam the status bar. Sources with no fill rows leave the
+   * default.
+   *
+   * \return true when the preview was shown, false when the row is not a fill this source can
+   * preview.
+   */
+  virtual bool row_fill_color_preview(bContext & /*C*/,
+                                      const StackFocus & /*focus*/,
+                                      ID & /*owner*/,
+                                      int /*ordinal*/,
+                                      const float /*color*/[4],
+                                      PaintTileMap * /*session_tiles*/) const
   {
     return false;
   }

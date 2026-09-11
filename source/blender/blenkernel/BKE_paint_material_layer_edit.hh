@@ -152,6 +152,12 @@ enum class PaintMaterialLayerEditError : int8_t {
    * copy of the group first is the way out, and nothing here does that implicitly.
    */
   TreeShared,
+  /**
+   * A channel needed for the operation is wired to a node network that is not a paint
+   * layer stack (procedural, group output, foreign mask). Rewiring it would silently
+   * destroy the material's look, so the operation refuses before baking anything.
+   */
+  ChannelHasUnsupportedSource,
 };
 
 /** A message for #BKE_report, already translated at the call site by the caller if needed. */
@@ -396,6 +402,23 @@ bool BKE_paint_material_layer_fill_color_apply(Main &bmain,
                                                PaintMaterialLayerEditError *r_error = nullptr);
 
 /**
+ * Live preview for the Fill color picker: re-fill every wired channel's map with \a color,
+ * exactly like #BKE_paint_material_layer_fill_color_apply, but record nothing on the layer's
+ * marker and push no undo step.
+ *
+ * The picker's RNA update calls this per tick; the dialog's exec does the real apply (pixels +
+ * marker + undo) once, cancel restores the start color through this same path.
+ *
+ * Refused with #PaintMaterialLayerEditError::IndexOutOfRange for a layer that is not
+ * #PaintMaterialLayerKind::Fill, writing nothing.
+ */
+bool BKE_paint_material_layer_fill_color_preview(Main &bmain,
+                                                 Material &ma,
+                                                 int ordinal,
+                                                 const float color[4],
+                                                 PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
  * Record \a kind on the layer at \a ordinal, on its node in every channel at once.
  *
  * This is the marker half of a layer's kind; the pixels are the caller's business (a Fill re-fills
@@ -556,8 +579,43 @@ bool BKE_paint_material_layer_set_enabled(Main &bmain,
  * function's to delete.
  */
 bool BKE_paint_material_layer_remove(Main &bmain,
-                                     Material &ma,
-                                     int ordinal,
-                                     PaintMaterialLayerEditError *r_error = nullptr);
+                                      Material &ma,
+                                      int ordinal,
+                                      PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * The channels a Material layer carries: Base Color, Metallic, Roughness, Specular, Normal,
+ * Alpha, Emission (as raw #eMaterialPaintChannel values 0,1,2,3,4,7,9).
+ *
+ * Excludes Custom/Height/AO, which have no Principled input. Raw ints (not the DNA enum)
+ * keep this header free of `DNA_scene_types.h`.
+ */
+constexpr int PAINT_MATERIAL_LAYER_MATERIAL_CHANNELS[7] = {0, 1, 2, 3, 4, 7, 9};
+
+/**
+ * Bring every channel forest of \a ma to the same row structure for \a channels.
+ *
+ * Only path S (a stack already exists): an empty material refuses with NotAStack and the
+ * caller takes path E (#BKE_paint_material_layer_add_material_base) instead.
+ * A needed channel wired to a non-stack network refuses with ChannelHasUnsupportedSource
+ * before anything is written; never partially applied.
+ */
+bool BKE_paint_material_layer_channels_ensure(Main &bmain,
+                                              Material &ma,
+                                              Span<int> channels,
+                                              PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * Path E: build the first layer of an empty material directly as normalized Mix chains
+ * holding \a baked_maps (single row, single marker, kind=Material).
+ *
+ * Ownership of \a baked_maps follows #BKE_paint_material_layer_add: shown maps keep their
+ * user, the rest (all of them on refusal) are freed.
+ */
+bool BKE_paint_material_layer_add_material_base(Main &bmain,
+                                                Material &ma,
+                                                Span<PaintMaterialLayerChannelImage> baked_maps,
+                                                int *r_ordinal = nullptr,
+                                                PaintMaterialLayerEditError *r_error = nullptr);
 
 }  // namespace blender

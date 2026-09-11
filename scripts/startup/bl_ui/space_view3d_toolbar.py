@@ -569,6 +569,9 @@ class SelectPaintSlotHelper:
                         not mode_settings.use_brush_sync):
                     self._draw_material_paint_brush_sync(context, layout, mode_settings)
 
+                if canvas_source == 'MATERIAL_PAINT' and ob is not None and ob.mode == 'SCULPT':
+                    self._draw_material_paint_object_mismatch_warning(context, layout)
+
             case 'MATERIAL':
                 if len(ob.material_slots) > 1:
                     layout.template_list(
@@ -670,6 +673,39 @@ class SelectPaintSlotHelper:
         row = layout.row(align=True)
         row.label(text="Image Editor brush differs: %s" % ", ".join(diff), icon='ERROR')
         row.menu("PAINT_MT_material_paint_brush_sync", text="Sync Brush", icon='UV_SYNC_SELECT')
+
+    @staticmethod
+    def _draw_material_paint_object_mismatch_warning(context, layout):
+        """Warn when a multi-object Sculpt Mode stroke would skip some of the sculpt-mode objects.
+
+        Material Paint requires every participating object to share the active object's active
+        material (matching pointer) - see #paintable_mode_objects in sculpt.cc. Objects that do
+        not match are silently skipped mid-stroke with only a console WARNING report; surface the
+        same condition here so it is visible before the user starts painting.
+        """
+        sd = context.tool_settings.sculpt
+        if sd.multi_object_edit_scope == 'ACTIVE':
+            # Brush strokes are confined to the active object in this scope - see
+            # #sculpt_mode_objects - so there is nothing to mismatch against.
+            return
+
+        ob = context.active_object
+        reference_mat = ob.active_material
+        if reference_mat is None:
+            return
+
+        mismatched = any(
+            o.active_material != reference_mat
+            for o in context.view_layer.objects
+            if o != ob and o.type == 'MESH' and o.mode == 'SCULPT'
+        )
+        if not mismatched:
+            return
+
+        layout.label(
+            text="Material mismatch: some sculpt objects will be skipped",
+            icon='ERROR',
+        )
 
 
 class VIEW3D_PT_slots_projectpaint(SelectPaintSlotHelper, View3DPanel, Panel):

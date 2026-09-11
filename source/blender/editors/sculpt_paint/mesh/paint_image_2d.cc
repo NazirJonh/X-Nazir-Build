@@ -13,12 +13,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <utility>
 
 #include "MEM_guardedalloc.h"
 
 #include "DNA_brush_types.h"
+#include "DNA_layer_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_enums.h"
@@ -115,6 +117,7 @@
 #include "paint_image_select_intern.hh"
 #include "paint_image_uv_geom.hh"
 #include "paint_image_uv_symmetry.hh"
+#include "sculpt_intern.hh"
 
 namespace blender {
 
@@ -234,6 +237,14 @@ struct BrushPainter {
    * could not be copied (then AREA falls back to View Plane).
    */
   std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh> area_plane_mesh;
+  /**
+   * Multi-object (shared material) stroke: Area Plane meshes of the OTHER objects participating
+   * in this Image Editor stroke (objects in sculpt/texture-paint mode sharing the active object's
+   * active material). The channel images are shared by all of them, so pixel writes already land
+   * on every surface; each secondary mesh exists to place the mirrored dab at ITS OWN island's UV
+   * (see #paint_2d_secondary_mesh_symmetry_dabs). Empty for single-object strokes.
+   */
+  Vector<std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh>> secondary_area_plane_meshes;
   /** Which material paint channel this painter writes. Only meaningful when
    * #use_material_channel_color is set. */
   eMaterialPaintChannel material_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
@@ -3754,6 +3765,7 @@ static void paint_2d_symmetry_dab_ensure(const ed::sculpt_paint::AreaPlaneMesh &
  * \param flipped: this is a mirrored dab, so its tangent frame is the reflected one.
  */
 static bool paint_2d_area_plane_prepare_from_hit(ImagePaintState *s,
+                                                 const ed::sculpt_paint::AreaPlaneMesh &mesh,
                                                  const ed::sculpt_paint::AreaPlaneHit &hit,
                                                  const float base_size,
                                                  const bool flipped,
@@ -3761,7 +3773,6 @@ static bool paint_2d_area_plane_prepare_from_hit(ImagePaintState *s,
 {
   r_geom = AreaPlaneDabGeom{};
   BrushPainter *painter = s->painter;
-  const ed::sculpt_paint::AreaPlaneMesh &mesh = *painter->area_plane_mesh;
 
   r_geom.hit = hit;
   r_geom.flipped = flipped;
@@ -3840,27 +3851,28 @@ static bool paint_2d_area_plane_prepare_from_hit(ImagePaintState *s,
 
 /** Original (iteration 0) dab: UV center → surface hit → shared tail. */
 static bool paint_2d_area_plane_prepare(ImagePaintState *s,
+                                        const ed::sculpt_paint::AreaPlaneMesh &mesh,
                                         const float uv_center[2],
                                         const float base_size,
                                         AreaPlaneDabGeom &r_geom)
 {
-  const ed::sculpt_paint::AreaPlaneMesh &mesh = *s->painter->area_plane_mesh;
   ed::sculpt_paint::AreaPlaneHit hit;
   if (!mesh.hit_at_uv(float2(uv_center[0], uv_center[1]), hit)) {
     r_geom = AreaPlaneDabGeom{};
     return false;
   }
-  return paint_2d_area_plane_prepare_from_hit(s, hit, base_size, false, r_geom);
+  return paint_2d_area_plane_prepare_from_hit(s, mesh, hit, base_size, false, r_geom);
 }
 
-static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom)
+static void paint_2d_area_plane_apply(ImagePaintState *s,
+                                      AreaPlaneDabGeom &geom,
+                                      const ed::sculpt_paint::AreaPlaneMesh &mesh)
 {
 #if PBR_PAINT_2D_STROKE_PROFILE
   const StrokePhaseTimer area_timer(&g_stroke_area_seconds, &g_stroke_area_calls);
   int64_t area_pixels = 0;
 #endif
   BrushPainter *painter = s->painter;
-  const ed::sculpt_paint::AreaPlaneMesh &mesh = *painter->area_plane_mesh;
   /* Read from the View2D rather than #SpaceImage: it is the value the display actually rotates by,
    * already gated to the modes that support a canvas rotation. */
   const float canvas_rotation = (s->v2d != nullptr) ? s->v2d->rotation : 0.0f;
@@ -4006,19 +4018,22 @@ static void paint_2d_area_plane_stroke(ImagePaintState *s,
                                        const float2 &origin_uv,
                                        AreaPlaneDabGeom *shared_geom)
 {
+  BrushPainter *painter = s->painter;
+  const ed::sculpt_paint::AreaPlaneMesh &mesh = *painter->area_plane_mesh;
+
   if (shared_geom != nullptr && shared_geom->valid) {
-    paint_2d_area_plane_apply(s, *shared_geom);
+    paint_2d_area_plane_apply(s, *shared_geom, mesh);
     return;
   }
 
   AreaPlaneDabGeom local;
   bool prepared = false;
   if (dab == nullptr) {
-    prepared = paint_2d_area_plane_prepare(s, uv_center, base_size, local);
+    prepared = paint_2d_area_plane_prepare(s, mesh, uv_center, base_size, local);
   }
   else if (dab->valid) {
     prepared = paint_2d_area_plane_prepare_from_hit(
-        s, dab->hit, base_size, dab->flipped, local);
+        s, mesh, dab->hit, base_size, dab->flipped, local);
   }
   if (!prepared) {
     return;
@@ -4042,10 +4057,84 @@ static void paint_2d_area_plane_stroke(ImagePaintState *s,
 
   if (shared_geom != nullptr) {
     *shared_geom = std::move(local);
-    paint_2d_area_plane_apply(s, *shared_geom);
+    paint_2d_area_plane_apply(s, *shared_geom, mesh);
   }
   else {
-    paint_2d_area_plane_apply(s, local);
+    paint_2d_area_plane_apply(s, local, mesh);
+  }
+}
+
+/**
+ * Multi-object (shared material) stroke: mirrored dabs placed through the OTHER participating
+ * objects' Area Plane meshes (#BrushPainter.secondary_area_plane_meshes).
+ *
+ * The stroke's channel images are shared by every object with the same material, so the
+ * un-mirrored dab's pixels are written exactly once by the primary pass above; what a secondary
+ * mesh adds is the mirrored placement: each symmetry iteration lands the mirror on that object's
+ * own surface at its own island's UV, which is generally a different pixel location than the
+ * primary's mirror. A secondary mesh whose island is not under the cursor yields no hit in
+ * #paint_2d_symmetry_dab_ensure and simply contributes nothing.
+ *
+ * Duplicate suppression is UV-only and crosses meshes: the primary pass's 3D merge test compares
+ * positions in one object space, which does not translate between meshes. \a primary_placed_uvs
+ * carries the UV centers the primary pass already painted this event (original dab + valid
+ * mirrors); a secondary mirror landing on any of them, or on a mirror a previous secondary mesh
+ * placed, would blend the same texels twice.
+ *
+ * View Plane and Clone Stamp strokes stay single-object: their mirrored placement is interleaved
+ * with the primary mesh's segment interpolation / stamp mapping, and extending them needs the
+ * same per-object treatment inside those paths.
+ */
+static void paint_2d_secondary_mesh_symmetry_dabs(ImagePaintState *s,
+                                                  const float2 &uv_new,
+                                                  const float2 &uv_old,
+                                                  const float base_size,
+                                                  const blender::Span<float2> primary_placed_uvs)
+{
+  BrushPainter *painter = s->painter;
+  const char symm = char(s->symmetry & PAINT_SYMM_AXIS_ALL);
+  if (symm == 0 || painter->secondary_area_plane_meshes.is_empty()) {
+    return;
+  }
+
+  Vector<float2> placed_uvs(primary_placed_uvs);
+
+  for (const std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh> &mesh :
+       painter->secondary_area_plane_meshes)
+  {
+    for (int i = 1; i <= int(symm); i++) {
+      if (!ed::sculpt_paint::is_symmetry_iteration_valid(char(i), symm)) {
+        continue;
+      }
+      SymmetryDab dab;
+      paint_2d_symmetry_dab_ensure(*mesh, i, uv_new, uv_old, dab);
+      if (!dab.valid) {
+        continue;
+      }
+      AreaPlaneDabGeom local;
+      if (!paint_2d_area_plane_prepare_from_hit(s, *mesh, dab.hit, base_size, dab.flipped, local))
+      {
+        continue;
+      }
+      const float radius_uv = ed::sculpt_paint::area_plane_triangle_radius_uv(
+          local.dab_tri, local.radius_object);
+      if (radius_uv > 0.0f) {
+        bool duplicate = false;
+        for (const float2 &placed : placed_uvs) {
+          if (math::distance(dab.new_uv, placed) <
+              AREA_PLANE_SYMMETRY_MERGE_FACTOR * radius_uv)
+          {
+            duplicate = true;
+            break;
+          }
+        }
+        if (duplicate) {
+          continue;
+        }
+        placed_uvs.append(dab.new_uv);
+      }
+      paint_2d_area_plane_apply(s, local, *mesh);
+    }
   }
 }
 
@@ -4108,6 +4197,18 @@ static void paint_2d_stroke_single(ImagePaintState *s,
         }
         paint_2d_area_plane_stroke(
             s, new_uv, base_size, &dabs[i], origin_position, uv_new, &geoms[i]);
+      }
+      /* Multi-object (shared material): mirrored dabs on the other participating objects'
+       * surfaces, through their own Area Plane meshes. */
+      if (!painter->secondary_area_plane_meshes.is_empty()) {
+        Vector<float2> primary_placed;
+        primary_placed.append(uv_new);
+        for (const int i : IndexRange(1, int(symm))) {
+          if (dabs[i].valid) {
+            primary_placed.append(dabs[i].new_uv);
+          }
+        }
+        paint_2d_secondary_mesh_symmetry_dabs(s, uv_new, uv_old, base_size, primary_placed);
       }
     }
     painter->firsttouch = false;
@@ -4585,6 +4686,50 @@ static void paint_2d_stroke_done_single(ImagePaintState *s, const bool exit_brus
   MEM_delete(s);
 }
 
+/**
+ * Multi-object (shared material) 2D paint: the other objects participating in this stroke.
+ *
+ * Objects in sculpt or texture-paint mode sharing the active object's ACTIVE material slot
+ * (same Material pointer) join the Image Editor stroke: they share that material's channel
+ * images, so a pixel write already lands on every participant's surface. Their remaining need is
+ * per-object UV geometry for the mirrored dab (see #paint_2d_secondary_mesh_symmetry_dabs).
+ * Objects with a different or no active material are skipped silently: 2D painting stays fully
+ * usable without them and a per-stroke warning would be noise, unlike the Sculpt multi-object
+ * filter (#paintable_mode_objects) which warns because there the object is silently NOT painted.
+ */
+static Vector<Object *> paint_2d_material_shared_objects(bContext *C, const Object &active_ob)
+{
+  Vector<Object *> result;
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  if (view_layer == nullptr || active_ob.actcol <= 0) {
+    return result;
+  }
+  const Material *reference = BKE_object_material_get(const_cast<Object *>(&active_ob),
+                                                      active_ob.actcol);
+  if (reference == nullptr) {
+    return result;
+  }
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
+    Object *ob_iter = base.object;
+    if (ob_iter == nullptr || ob_iter == &active_ob || ob_iter->type != OB_MESH) {
+      continue;
+    }
+    if ((ob_iter->mode & (OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT)) == 0) {
+      continue;
+    }
+    if (ob_iter->actcol <= 0 ||
+        BKE_object_material_get(ob_iter, ob_iter->actcol) != reference)
+    {
+      continue;
+    }
+    result.append(ob_iter);
+  }
+  return result;
+}
+
 void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mode)
 {
   Scene *scene = CTX_data_scene(C);
@@ -4680,6 +4825,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
         brush_paint, paint_mode, PAINT_MATERIAL_CHANNEL_ALPHA);
 
     std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh> area_plane_mesh;
+    Vector<std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh>> secondary_area_plane_meshes;
     {
       const bool symmetry_on = (settings->imapaint.paint.symmetry_flags &
                                 PAINT_SYMM_AXIS_ALL) != 0;
@@ -4714,6 +4860,18 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
               *depsgraph, *ob, "");
           if (!area_plane_mesh->is_valid()) {
             area_plane_mesh.reset();
+          }
+          else {
+            /* Multi-object (shared material): build the other participants' meshes for their
+             * mirrored dabs. Only meaningful alongside a valid primary mesh, and only for the
+             * same use_area cases (symmetry is the sole consumer). */
+            for (Object *sec_ob : paint_2d_material_shared_objects(C, *ob)) {
+              auto sec_mesh = std::make_shared<ed::sculpt_paint::AreaPlaneMesh>(
+                  *depsgraph, *sec_ob, "");
+              if (sec_mesh->is_valid()) {
+                secondary_area_plane_meshes.append(std::move(sec_mesh));
+              }
+            }
           }
         }
       }
@@ -4772,6 +4930,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       state->painter->material_channel = target.channel;
       state->painter->channel_sources = channel_sources;
       state->painter->area_plane_mesh = area_plane_mesh;
+      state->painter->secondary_area_plane_meshes = secondary_area_plane_meshes;
       state->painter->material_alpha_masking = alpha_masking;
       state->painter->material_alpha_fallback = alpha_fallback;
       if (primary == nullptr) {
@@ -5540,6 +5699,76 @@ static bool paint_image_geometry_fill_raycast_orig_face(
   return *r_face_index >= 0;
 }
 
+/**
+ * Objects Texture Fill should hit-test and fill against, given \a active_ob as the operator's
+ * context object. In Sculpt Mode this mirrors #ed::sculpt_paint::sculpt_mode_objects -- every
+ * mesh participating in the current multi-object edit scope, not just the active one, the same
+ * object set brush strokes use (see #ed::sculpt_paint::paintable_mode_objects). Any other mode
+ * keeps the historical single-object behavior: Texture/Image Paint has no equivalent
+ * multi-object edit scope in this codebase.
+ */
+static Vector<Object *> texture_fill_target_objects(const bContext *C, Object *active_ob)
+{
+  if (active_ob == nullptr) {
+    return {};
+  }
+  if (active_ob->type == OB_MESH && (active_ob->mode & OB_MODE_SCULPT)) {
+    Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+    ViewContext vc = ED_view3d_viewcontext_init(const_cast<bContext *>(C), depsgraph);
+    Vector<Object *> objects = ed::sculpt_paint::sculpt_mode_objects(vc);
+    objects.remove_if([](const Object *ob) { return ob->type != OB_MESH; });
+    return objects;
+  }
+  return {active_ob};
+}
+
+/**
+ * Multi-object variant of #paint_image_geometry_fill_raycast_orig_face: raycasts every object in
+ * \a objects and keeps the closest hit by true world-space depth, so a click resolves to the
+ * object actually under the cursor instead of always the active one (mirrors the world-depth
+ * comparison #stroke_get_location_bvh_ex uses to pick the hit object across sculpt-mode objects).
+ */
+static bool paint_image_geometry_fill_raycast_orig_face_multi(const bContext *C,
+                                                               const Span<Object *> objects,
+                                                               const float mouse[2],
+                                                               Object **r_hit_ob,
+                                                               int *r_face_index,
+                                                               float3 *r_hit_position)
+{
+  *r_hit_ob = nullptr;
+  *r_face_index = -1;
+  *r_hit_position = float3(0.0f);
+
+  const ARegion *region = CTX_wm_region(C);
+  const View3D *v3d = CTX_wm_view3d(C);
+  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  float3 ray_start_world, ray_normal_world;
+  if (region == nullptr || v3d == nullptr ||
+      !ED_view3d_win_to_ray_clipped(
+          depsgraph, region, v3d, mouse, ray_start_world, ray_normal_world, true))
+  {
+    return false;
+  }
+
+  float best_depth = std::numeric_limits<float>::max();
+  for (Object *ob : objects) {
+    int face_index;
+    float3 hit_position;
+    if (!paint_image_geometry_fill_raycast_orig_face(C, ob, mouse, &face_index, &hit_position)) {
+      continue;
+    }
+    const float3 hit_world = math::transform_point(ob->object_to_world(), hit_position);
+    const float depth = math::distance_squared(ray_start_world, hit_world);
+    if (depth < best_depth) {
+      best_depth = depth;
+      *r_hit_ob = ob;
+      *r_face_index = face_index;
+      *r_hit_position = hit_position;
+    }
+  }
+  return *r_hit_ob != nullptr;
+}
+
 static Image *paint_image_geometry_fill_canvas_image(const Scene *scene,
                                                      Object *ob,
                                                      const short mat_nr)
@@ -5589,11 +5818,20 @@ struct FillMaterialTarget {
 /**
  * Original-mesh faces the select engine actually rasterized in the region.
  *
- * Box selection must not reach faces hidden behind the object's own geometry: a normal test only
- * rejects faces turned away from the camera, not ones a nearer part of the same mesh covers.
- * Rather than approximating depth, this reads the select ID buffer -- the same source Edit Mode
- * and Face Select box selection read -- whose IDs pass through `orig_index_face`, so they are
- * original face indices and map straight onto the ones the fill expands.
+ * Box selection must not reach faces hidden behind nearer geometry: a normal test only rejects
+ * faces turned away from the camera, not ones a nearer part of the same mesh -- or of a different
+ * participating object -- covers. Rather than approximating depth, this reads the select ID
+ * buffer -- the same source Edit Mode and Face Select box selection read -- whose IDs pass
+ * through `orig_index_face`, so they are original face indices and map straight onto the ones
+ * the fill expands.
+ *
+ * All objects a Texture Fill operation targets (see #texture_fill_target_objects) are rendered
+ * into one shared select context, so occlusion in multi-object Sculpt Mode is mutual between
+ * them: a face on one participating object hidden behind another is excluded exactly like a face
+ * hidden behind a nearer part of its own mesh, instead of only ever considering an object's own
+ * geometry. The IDs of a combined context are one contiguous range per object (see
+ * #DRW_select_buffer_context_offset_for_object_elem), so a lookup for a given object must offset
+ * its face index by that object's range start -- #contains does this internally.
  *
  * The buffer covers the whole region rather than the gesture box, so the highlight (projected
  * once at gesture start, before any box exists) and the commit agree on what is visible.
@@ -5604,31 +5842,40 @@ struct FillMaterialTarget {
 struct ImagePaintGeometryFillVisibleFaces {
   BLI_bitmap *bitmap = nullptr;
   uint bitmap_num = 0;
+  Map<const Object *, uint> face_offset_by_object;
 
   ~ImagePaintGeometryFillVisibleFaces()
   {
     MEM_SAFE_DELETE(bitmap);
   }
 
-  bool contains(const int face_index) const
+  bool contains(const Object *ob, const int face_index) const
   {
     if (bitmap == nullptr) {
       return true;
     }
-    return uint(face_index) < bitmap_num && BLI_BITMAP_TEST_BOOL(bitmap, face_index);
+    /* An object the shared context was not built for (should not happen for any object the
+     * caller actually iterates) is treated as unfiltered rather than silently hidden. */
+    const uint *offset = face_offset_by_object.lookup_ptr(ob);
+    if (offset == nullptr) {
+      return true;
+    }
+    const uint index = *offset + uint(face_index);
+    return index < bitmap_num && BLI_BITMAP_TEST_BOOL(bitmap, index);
   }
 };
 
 static void paint_image_geometry_fill_visible_faces_build(
     const bContext *C,
-    Object *ob,
-    const int faces_num,
+    const Span<Object *> objects,
     ImagePaintGeometryFillVisibleFaces &r_visible)
 {
   View3D *v3d = CTX_wm_view3d(C);
   ARegion *region = CTX_wm_region(C);
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
-  if (v3d == nullptr || region == nullptr || depsgraph == nullptr || XRAY_ENABLED(v3d)) {
+  if (v3d == nullptr || region == nullptr || depsgraph == nullptr || XRAY_ENABLED(v3d) ||
+      objects.is_empty())
+  {
     return;
   }
 
@@ -5639,24 +5886,31 @@ static void paint_image_geometry_fill_visible_faces_build(
     return;
   }
   BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
-  Base *base = BKE_view_layer_base_find(view_layer, ob);
-  if (base == nullptr) {
+
+  Vector<Base *> bases;
+  bases.reserve(objects.size());
+  for (Object *ob : objects) {
+    if (Base *base = BKE_view_layer_base_find(view_layer, ob)) {
+      bases.append(base);
+    }
+  }
+  if (bases.is_empty()) {
     return;
   }
 
-  /* A single-object context makes the returned bitmap indexable by face index directly. */
-  DRW_select_buffer_context_create(depsgraph, {base}, SCE_SELECT_FACE);
+  DRW_select_buffer_context_create(depsgraph, bases, SCE_SELECT_FACE);
   rcti region_rect;
   BLI_rcti_init(&region_rect, 0, region->winx, 0, region->winy);
   r_visible.bitmap = DRW_select_buffer_bitmap_from_rect(
       depsgraph, region, v3d, &region_rect, &r_visible.bitmap_num);
+  if (r_visible.bitmap == nullptr) {
+    return;
+  }
 
-  /* The IDs are original face indices only while the evaluated mesh carries an origindex
-   * mapping. Should that ever not hold, the bitmap would be too short and every face would read
-   * as hidden -- drop it and fall back to the normal test rather than filling nothing. */
-  if (r_visible.bitmap != nullptr && r_visible.bitmap_num < uint(faces_num)) {
-    MEM_SAFE_DELETE(r_visible.bitmap);
-    r_visible.bitmap_num = 0;
+  r_visible.face_offset_by_object.reserve(objects.size());
+  for (Object *ob : objects) {
+    r_visible.face_offset_by_object.add(
+        ob, DRW_select_buffer_context_offset_for_object_elem(depsgraph, ob, SCE_SELECT_FACE));
   }
 }
 
@@ -5753,7 +6007,7 @@ static bool paint_image_proj_geometry_fill_faces_impl(
     {
       continue;
     }
-    if (visible != nullptr && !visible->contains(face_index)) {
+    if (visible != nullptr && !visible->contains(ob, face_index)) {
       continue;
     }
     valid_seed.add(face_index);
@@ -5928,13 +6182,17 @@ static bool paint_image_geometry_fill_face_intersects_rect(BMFace *efa,
 }
 
 
-static bool paint_image_proj_geometry_fill_rect_impl(const bContext *C,
-                                                     const float color[3],
-                                                     Brush *br,
-                                                     Object *ob,
-                                                     const rcti &rect)
+static bool paint_image_proj_geometry_fill_rect_object(
+    const bContext *C,
+    const float color[3],
+    Brush *br,
+    Object *ob,
+    const ARegion &region,
+    RegionView3D &rv3d,
+    const rctf &rectf,
+    const ImagePaintGeometryFillVisibleFaces &visible)
 {
-  if (br == nullptr || ob == nullptr || ob->type != OB_MESH) {
+  if (ob == nullptr || ob->type != OB_MESH) {
     return false;
   }
 
@@ -5942,34 +6200,22 @@ static bool paint_image_proj_geometry_fill_rect_impl(const bContext *C,
   if (!paint_2d_geometry_fill_init_bm(ob, item)) {
     return false;
   }
-  const ARegion *region = CTX_wm_region(C);
-  RegionView3D *rv3d = CTX_wm_region_view3d(C);
-  if (region == nullptr || rv3d == nullptr) {
-    paint_2d_geometry_fill_item_discard(item);
-    return false;
-  }
-
-  rctf rectf;
-  BLI_rctf_rcti_copy(&rectf, &rect);
 
   /* Screen projection deliberately uses original mesh coordinates. Evaluated mesh faces cannot
    * supply fill seeds because modifiers may have changed their indexing. */
-  ED_view3d_init_mats_rv3d(ob, rv3d);
+  ED_view3d_init_mats_rv3d(ob, &rv3d);
   float3 view_pos, view_dir;
   bool is_ortho;
-  paint_image_geometry_fill_view_vectors_object(*ob, *rv3d, view_pos, view_dir, is_ortho);
-
-  ImagePaintGeometryFillVisibleFaces visible;
-  paint_image_geometry_fill_visible_faces_build(C, ob, item.bm->totface, visible);
+  paint_image_geometry_fill_view_vectors_object(*ob, rv3d, view_pos, view_dir, is_ortho);
 
   Vector<int> seed;
   BMIter fiter;
   BMFace *efa;
   int face_index;
   BM_ITER_MESH_INDEX (efa, &fiter, item.bm, BM_FACES_OF_MESH, face_index) {
-    if (!BM_elem_flag_test(efa, BM_ELEM_HIDDEN) && visible.contains(face_index) &&
+    if (!BM_elem_flag_test(efa, BM_ELEM_HIDDEN) && visible.contains(ob, face_index) &&
         paint_image_geometry_fill_face_facing_view(efa, view_pos, view_dir, is_ortho) &&
-        paint_image_geometry_fill_face_intersects_rect(efa, region, rectf))
+        paint_image_geometry_fill_face_intersects_rect(efa, &region, rectf))
     {
       seed.append(face_index);
     }
@@ -5980,6 +6226,41 @@ static bool paint_image_proj_geometry_fill_rect_impl(const bContext *C,
   const bool did_fill = paint_image_proj_geometry_fill_faces_impl(
       C, color, br, ob, item, seed, &visible);
   paint_2d_geometry_fill_item_discard(item);
+  return did_fill;
+}
+
+static bool paint_image_proj_geometry_fill_rect_impl(const bContext *C,
+                                                     const float color[3],
+                                                     Brush *br,
+                                                     Object *ob,
+                                                     const rcti &rect)
+{
+  if (br == nullptr || ob == nullptr || ob->type != OB_MESH) {
+    return false;
+  }
+  const ARegion *region = CTX_wm_region(C);
+  RegionView3D *rv3d = CTX_wm_region_view3d(C);
+  if (region == nullptr || rv3d == nullptr) {
+    return false;
+  }
+
+  rctf rectf;
+  BLI_rctf_rcti_copy(&rectf, &rect);
+
+  /* Multi-object Sculpt Mode: fill on every participating object whose faces intersect the box,
+   * not just \a ob (the active object). See #texture_fill_target_objects. All targets share one
+   * occlusion context (see #paint_image_geometry_fill_visible_faces_build) so a face hidden
+   * behind ANOTHER participating object is excluded exactly like one hidden behind nearer
+   * geometry of its own mesh. */
+  const Vector<Object *> objects = texture_fill_target_objects(C, ob);
+  ImagePaintGeometryFillVisibleFaces visible;
+  paint_image_geometry_fill_visible_faces_build(C, objects, visible);
+
+  bool did_fill = false;
+  for (Object *target_ob : objects) {
+    did_fill |= paint_image_proj_geometry_fill_rect_object(
+        C, color, br, target_ob, *region, *rv3d, rectf, visible);
+  }
   return did_fill;
 }
 
@@ -5996,9 +6277,14 @@ bool paint_image_proj_geometry_fill(
     return false;
   }
 
+  /* Multi-object Sculpt Mode: resolve which participating object is actually under the cursor
+   * instead of always filling on \a ob (the active object). See #texture_fill_target_objects. */
+  const Vector<Object *> objects = texture_fill_target_objects(C, ob);
   int face_index = -1;
   float3 hit_position;
-  if (!paint_image_geometry_fill_raycast_orig_face(C, ob, mouse, &face_index, &hit_position)) {
+  if (!paint_image_geometry_fill_raycast_orig_face_multi(
+          C, objects, mouse, &ob, &face_index, &hit_position))
+  {
     return false;
   }
 
@@ -6235,8 +6521,8 @@ bool paint_image_geometry_fill_gesture_begin(const bContext *C,
     }
   }
   else {
-    Object *ob = CTX_data_active_object(C);
-    if (ob == nullptr || ob->type != OB_MESH) {
+    Object *active_ob = CTX_data_active_object(C);
+    if (active_ob == nullptr || active_ob->type != OB_MESH) {
       MEM_delete(state);
       return false;
     }
@@ -6247,61 +6533,67 @@ bool paint_image_geometry_fill_gesture_begin(const bContext *C,
       return false;
     }
 
-    ImagePaintGeometryFillGestureItem gesture_item;
-    gesture_item.object = ob;
-    if (!paint_2d_geometry_fill_init_bm(ob, gesture_item.item)) {
-      MEM_delete(state);
-      return false;
-    }
-    gesture_item.item.offsets = image_paint_selection_uv_offsets_get(
-        gesture_item.item.bm, ob, CTX_data_scene(C));
-
-    /* Screen projection deliberately uses original mesh coordinates, like the fill itself. */
-    ED_view3d_init_mats_rv3d(ob, rv3d);
-    float3 view_pos, view_dir;
-    bool is_ortho;
-    paint_image_geometry_fill_view_vectors_object(*ob, *rv3d, view_pos, view_dir, is_ortho);
-
-    /* Same occlusion filter the commit applies, so the highlight never promises a face the fill
-     * will skip. Both read the whole region, which the view cannot change during the gesture. */
+    /* Multi-object Sculpt Mode: preview the highlight on every participating object, not just
+     * \a active_ob, so it matches what the eventual fill (see
+     * #paint_image_proj_geometry_fill_rect_impl) actually covers. See
+     * #texture_fill_target_objects. All targets share one occlusion context (see
+     * #paint_image_geometry_fill_visible_faces_build), so the preview -- like the commit --
+     * excludes a face hidden behind ANOTHER participating object, not just its own mesh. */
+    const Vector<Object *> objects = texture_fill_target_objects(C, active_ob);
     ImagePaintGeometryFillVisibleFaces visible;
-    paint_image_geometry_fill_visible_faces_build(
-        C, ob, gesture_item.item.bm->totface, visible);
+    paint_image_geometry_fill_visible_faces_build(C, objects, visible);
 
-    BMIter fiter;
-    BMFace *efa;
-    int face_index;
-    BM_ITER_MESH_INDEX (efa, &fiter, gesture_item.item.bm, BM_FACES_OF_MESH, face_index) {
-      if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN) || !visible.contains(face_index) ||
-          !paint_image_geometry_fill_face_facing_view(efa, view_pos, view_dir, is_ortho))
-      {
+    for (Object *ob : objects) {
+      ImagePaintGeometryFillGestureItem gesture_item;
+      gesture_item.object = ob;
+      if (!paint_2d_geometry_fill_init_bm(ob, gesture_item.item)) {
         continue;
       }
-      Vector<float2> polygon;
-      polygon.reserve(efa->len);
-      bool clipped = false;
-      BMIter liter;
-      BMLoop *loop;
-      BM_ITER_ELEM (loop, &liter, efa, BM_LOOPS_OF_FACE) {
-        float screen_co[2];
-        if (ED_view3d_project_float_object(
-                region_3d, loop->v->co, screen_co, V3D_PROJ_TEST_CLIP_DEFAULT) != V3D_PROJ_RET_OK)
+      gesture_item.item.offsets = image_paint_selection_uv_offsets_get(
+          gesture_item.item.bm, ob, CTX_data_scene(C));
+
+      /* Screen projection deliberately uses original mesh coordinates, like the fill itself. */
+      ED_view3d_init_mats_rv3d(ob, rv3d);
+      float3 view_pos, view_dir;
+      bool is_ortho;
+      paint_image_geometry_fill_view_vectors_object(*ob, *rv3d, view_pos, view_dir, is_ortho);
+
+      BMIter fiter;
+      BMFace *efa;
+      int face_index;
+      BM_ITER_MESH_INDEX (efa, &fiter, gesture_item.item.bm, BM_FACES_OF_MESH, face_index) {
+        if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN) || !visible.contains(ob, face_index) ||
+            !paint_image_geometry_fill_face_facing_view(efa, view_pos, view_dir, is_ortho))
         {
-          /* Clipped faces are skipped here and by the fill seed collection alike. */
-          clipped = true;
-          break;
+          continue;
         }
-        polygon.append(float2(screen_co));
+        Vector<float2> polygon;
+        polygon.reserve(efa->len);
+        bool clipped = false;
+        BMIter liter;
+        BMLoop *loop;
+        BM_ITER_ELEM (loop, &liter, efa, BM_LOOPS_OF_FACE) {
+          float screen_co[2];
+          if (ED_view3d_project_float_object(
+                  region_3d, loop->v->co, screen_co, V3D_PROJ_TEST_CLIP_DEFAULT) !=
+              V3D_PROJ_RET_OK)
+          {
+            /* Clipped faces are skipped here and by the fill seed collection alike. */
+            clipped = true;
+            break;
+          }
+          polygon.append(float2(screen_co));
+        }
+        if (clipped) {
+          continue;
+        }
+        const int highlight_index = int(gesture_item.faces.append_and_get_index_as());
+        ImagePaintGeometryFillHighlightFace &highlight_face = gesture_item.faces[highlight_index];
+        highlight_face.face_index = face_index;
+        highlight_face.polygon = std::move(polygon);
       }
-      if (clipped) {
-        continue;
-      }
-      const int highlight_index = int(gesture_item.faces.append_and_get_index_as());
-      ImagePaintGeometryFillHighlightFace &highlight_face = gesture_item.faces[highlight_index];
-      highlight_face.face_index = face_index;
-      highlight_face.polygon = std::move(polygon);
+      state->items.append(std::move(gesture_item));
     }
-    state->items.append(std::move(gesture_item));
   }
 
   if (state->items.is_empty()) {

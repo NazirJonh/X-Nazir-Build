@@ -27,6 +27,7 @@ struct bContext;
 struct FileAssetSelectParams;
 struct Main;
 struct UserDef;
+struct ARegionType;
 
 namespace blender {
 
@@ -91,7 +92,8 @@ bool ED_asset_browser_name_match_entry_visible(bool filter_enabled,
                                                StringRef asset_name,
                                                Span<StringRef> metadata_tag_names);
 
-void ED_asset_browser_name_match_panel_register();
+
+void ED_asset_browser_name_match_panel_register(ARegionType *art);
 
 /**
  * Toggle \a identifier in \a state and enable the filter. Shared host policy: picking a map type

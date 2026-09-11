@@ -265,7 +265,7 @@ static void asset_browser_name_match_panel_draw(const bContext *C, Panel *panel)
                          });
 }
 
-void ED_asset_browser_name_match_panel_register()
+void ED_asset_browser_name_match_panel_register(ARegionType *art)
 {
   if (WM_paneltype_find("ASSETBROWSER_PT_name_match", true)) {
     return;
@@ -278,6 +278,7 @@ void ED_asset_browser_name_match_panel_register()
   pt->description = N_("Select map types for name matching in the Asset Browser");
   pt->draw = asset_browser_name_match_panel_draw;
   pt->ui_units_x = 10;
+  BLI_addtail(&art->paneltypes, pt);
   WM_paneltype_add(pt);
 }
 

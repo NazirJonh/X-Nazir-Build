@@ -647,6 +647,11 @@ struct Brush {
 
   /* fill tool */
   float fill_threshold = 0.2f;
+  /** Fixed scalar written by Geometry Fill to non-color data images. */
+  float data_fill_value = 1.0f;
+  /** Map #data_fill_value from [0..1] to [-1..1] for float data images. */
+  char data_fill_signed = 0;
+  char _pad_fill_data[3] = {};
 
   float add_col[4] = {1.0, 0.39, 0.39, 0.9};
   float sub_col[4] = {0.39, 0.39, 1.0, 0.9};
@@ -685,8 +690,8 @@ struct Brush {
                                    BRUSH_VPAINT_CHANNEL_B);
   char _pad4[4] = {};
 
-  /** #eImagePaint_SelectionExpand — Fill pick mode. Default Pixels = current flood/view fill. */
-  char fill_expand = IMAGE_PAINT_SELECT_EXPAND_PIXELS;
+  /** #eImagePaint_SelectionExpand — Fill pick mode. */
+  char fill_expand = IMAGE_PAINT_SELECT_EXPAND_FACE;
   /* Keep #Brush 8-byte aligned: #face_set_color_mtex above ends on an 8-byte
    * boundary, so this char plus its padding must add up to 8. */
   char _pad_fill[7] = {};

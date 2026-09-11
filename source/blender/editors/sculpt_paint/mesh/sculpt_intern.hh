@@ -1620,6 +1620,16 @@ inline bool sculpt_brush_is_texture_fill(const Brush &brush)
   return brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_TEXTURE_FILL;
 }
 
+/**
+ * Whether Alt may switch this brush to Smooth for the duration of the stroke.
+ * Fill brushes act once at stroke end and never deform the surface, so the toggle would
+ * only surprise; add future end-of-stroke brushes here instead of the stroke setup code.
+ */
+inline bool sculpt_brush_type_has_alt_smooth(const Brush &brush)
+{
+  return !sculpt_brush_is_texture_fill(brush);
+}
+
 bool sculpt_brush_uses_image_canvas(const Brush &brush,
                                     PaintModeSettings &settings,
                                     const Paint &paint,

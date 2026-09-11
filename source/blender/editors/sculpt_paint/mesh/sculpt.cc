@@ -7809,8 +7809,11 @@ static StrokeToggleSettings create_toggle_settings(const wmOperator &op, Main &b
 
   StrokeToggleSettings toggle_settings;
 
+  const Brush *brush = BKE_paint_brush(&paint);
   toggle_settings.invert = stroke_mode == BrushStrokeMode::Invert || pen_flip;
-  toggle_settings.alt_smooth = brush_switch_mode == BrushSwitchMode::Smooth;
+  toggle_settings.alt_smooth = brush != nullptr &&
+                               brush_switch_mode == BrushSwitchMode::Smooth &&
+                               sculpt_brush_type_has_alt_smooth(*brush);
   toggle_settings.alt_mask = brush_switch_mode == BrushSwitchMode::Mask;
 
   /* Alt-Smooth. */

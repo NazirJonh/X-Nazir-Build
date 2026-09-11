@@ -8,6 +8,8 @@
  */
 
 #include "DNA_brush_types.h"
+#include "DNA_material_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 
@@ -19,18 +21,22 @@
 #include "BLI_utildefines.h"
 
 #include <cfloat>
+#include <cstdlib>
 #include <memory>
 
 #include "BKE_brush.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_layer.hh"
+#include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_undo_system.hh"
 
 #include "ED_paint.hh"
+#include "ED_screen.hh"
+#include "ED_undo.hh"
 #include "ED_view3d.hh"
 
 #include "GPU_immediate.hh"
@@ -39,13 +45,13 @@
 #include "MEM_guardedalloc.h"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
 
 #include "ED_image.hh"
 
-#include "UI_resources.hh"
 #include "UI_view2d.hh"
 
 #include "../paint_curve_intern.hh"
@@ -58,6 +64,376 @@
 #include "../paint_intern.hh"
 
 namespace blender {
+
+static bool texture_fill_context_get(
+    bContext *C, bool require_geometry_mode, Paint **r_paint, Brush **r_brush);
+static void texture_fill_color_get(
+    const Paint *paint, const Brush *brush, bool invert, float r_color[3]);
+
+/**
+ * Gesture-local click/drag bookkeeping plus the optional highlight overlay.
+ *
+ * Held by the box gesture's user data; #WM_generic_user_data_free runs on every exit path
+ * (finish, cancel, click passthrough), so the overlay is never left behind.
+ */
+struct TextureFillGesture {
+  /** Mouse position of the gesture start, for click-vs-drag detection. */
+  int2 start_xy = {0, 0};
+  bool is_drag = false;
+  /** Highlight overlay state; null when there is nothing to project (no canvas, clipped view). */
+  ImagePaintGeometryFillGestureState *highlight = nullptr;
+
+  ~TextureFillGesture()
+  {
+    if (highlight != nullptr) {
+      MEM_delete(highlight);
+      highlight = nullptr;
+    }
+  }
+};
+
+static TextureFillGesture *texture_fill_gesture_get(const wmOperator *op)
+{
+  const wmGesture *gesture = static_cast<const wmGesture *>(op->customdata);
+  return gesture ? static_cast<TextureFillGesture *>(gesture->user_data.data) : nullptr;
+}
+
+/**
+ * Resolve the active paint context for the Texture Fill operators.
+ * \a require_geometry_mode excludes Pixels mode, which is handled by the regular paint operator.
+ */
+static bool texture_fill_context_get(bContext *C,
+                                     const bool require_geometry_mode,
+                                     Paint **r_paint,
+                                     Brush **r_brush)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (paint == nullptr || brush == nullptr) {
+    return false;
+  }
+  if (require_geometry_mode &&
+      !ELEM(brush->fill_expand,
+            IMAGE_PAINT_SELECT_EXPAND_FACE,
+            IMAGE_PAINT_SELECT_EXPAND_ISLAND,
+            IMAGE_PAINT_SELECT_EXPAND_MESH))
+  {
+    return false;
+  }
+
+  if (CTX_wm_space_image(C) != nullptr) {
+    if (image_select_canvas_paint_blocked(C) || !ED_image_tools_paint_poll(C) ||
+        brush->image_brush_type != IMAGE_PAINT_BRUSH_TYPE_FILL)
+    {
+      return false;
+    }
+  }
+  else {
+    const Object *ob = CTX_data_active_object(C);
+    if (ob == nullptr || !CTX_wm_region_view3d(C) ||
+        !ELEM(ob->mode, OB_MODE_TEXTURE_PAINT, OB_MODE_SCULPT))
+    {
+      return false;
+    }
+    if ((ob->mode & OB_MODE_TEXTURE_PAINT) &&
+        brush->image_brush_type != IMAGE_PAINT_BRUSH_TYPE_FILL)
+    {
+      return false;
+    }
+    if ((ob->mode & OB_MODE_SCULPT) &&
+        brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_TEXTURE_FILL)
+    {
+      return false;
+    }
+  }
+
+  if (r_paint != nullptr) {
+    *r_paint = paint;
+  }
+  if (r_brush != nullptr) {
+    *r_brush = brush;
+  }
+  return true;
+}
+
+/**
+ * Check whether the viewport (3D sculpt/texture paint) canvas has a texture assigned to fill
+ * into. The tool itself stays visible and enabled without one; #texture_fill_click and
+ * #texture_fill_exec use this to report why nothing was filled instead of failing silently.
+ */
+static bool texture_fill_canvas_has_texture(const bContext *C, const Object *ob)
+{
+  if (CTX_wm_space_image(C) != nullptr || ob == nullptr) {
+    return true;
+  }
+
+  const Scene *scene = CTX_data_scene(C);
+  const PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  switch (ePaintCanvasSource(paint_mode.canvas_source)) {
+    case PAINT_CANVAS_SOURCE_IMAGE:
+      return paint_mode.canvas_image != nullptr;
+    case PAINT_CANVAS_SOURCE_MATERIAL: {
+      const Material *mat = BKE_object_material_get(const_cast<Object *>(ob), ob->actcol);
+      if (mat == nullptr || mat->texpaintslot == nullptr ||
+          mat->paint_active_slot >= mat->tot_slots)
+      {
+        return false;
+      }
+      return mat->texpaintslot[mat->paint_active_slot].ima != nullptr;
+    }
+    default:
+      return false;
+  }
+}
+
+static bool texture_fill_poll(bContext *C)
+{
+  Paint *paint;
+  Brush *brush;
+  return texture_fill_context_get(C, true, &paint, &brush);
+}
+
+static bool texture_fill_mode_set_poll(bContext *C)
+{
+  Brush *brush;
+  return texture_fill_context_get(C, false, nullptr, &brush);
+}
+
+static PaintMode texture_fill_paint_mode_get(const bContext *C)
+{
+  if (CTX_wm_space_image(C) != nullptr) {
+    return PaintMode::Texture2D;
+  }
+  const Object *ob = CTX_data_active_object(C);
+  return (ob != nullptr && (ob->mode & OB_MODE_SCULPT)) ? PaintMode::Sculpt : PaintMode::Texture3D;
+}
+
+static void texture_fill_color_get(const Paint *paint,
+                                   const Brush *brush,
+                                   const bool invert,
+                                   float r_color[3])
+{
+  if (invert) {
+    copy_v3_v3(r_color, BKE_brush_secondary_color_get(paint, brush));
+  }
+  else {
+    copy_v3_v3(r_color, BKE_brush_color_get(paint, brush));
+  }
+}
+
+static bool texture_fill_click(bContext *C, wmOperator *op, const float mouse[2])
+{
+  Paint *paint;
+  Brush *brush;
+  if (!texture_fill_context_get(C, true, &paint, &brush)) {
+    return false;
+  }
+  if (!texture_fill_canvas_has_texture(C, CTX_data_active_object(C))) {
+    BKE_report(op->reports, RPT_WARNING, "Texture Fill requires a PBR Paint texture to fill into");
+    return false;
+  }
+
+  const bool invert = RNA_boolean_get(op->ptr, "invert");
+  float color[3];
+  texture_fill_color_get(paint, brush, invert, color);
+
+  ED_image_undo_push_begin(op->type->name, texture_fill_paint_mode_get(C));
+  bool did_fill;
+  if (CTX_wm_space_image(C) != nullptr) {
+    paint_2d_bucket_fill(C, color, brush, mouse, mouse, nullptr);
+    did_fill = true;
+  }
+  else {
+    did_fill = paint_image_viewport_fill_at_mouse(
+        C, paint, brush, CTX_data_active_object(C), invert, mouse);
+  }
+  ED_image_undo_push_end();
+
+  return did_fill;
+}
+
+static wmOperatorStatus texture_fill_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint;
+  Brush *brush;
+  if (!texture_fill_context_get(C, true, &paint, &brush)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (!texture_fill_canvas_has_texture(C, CTX_data_active_object(C))) {
+    BKE_report(op->reports, RPT_WARNING, "Texture Fill requires a PBR Paint texture to fill into");
+    return OPERATOR_CANCELLED;
+  }
+
+  rcti rect;
+  WM_operator_properties_border_to_rcti(op, &rect);
+  if (BLI_rcti_size_x(&rect) == 0 || BLI_rcti_size_y(&rect) == 0) {
+    return OPERATOR_CANCELLED;
+  }
+
+  float color[3];
+  texture_fill_color_get(paint, brush, RNA_boolean_get(op->ptr, "invert"), color);
+
+  ED_image_undo_push_begin(op->type->name, texture_fill_paint_mode_get(C));
+  bool did_fill;
+  if (CTX_wm_space_image(C) != nullptr) {
+    did_fill = paint_image_2d_geometry_fill_rect(C, color, brush, rect);
+  }
+  else {
+    did_fill = paint_image_proj_geometry_fill_rect(C, color, brush, CTX_data_active_object(C), rect);
+  }
+  ED_image_undo_push_end();
+
+  return did_fill ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+static wmOperatorStatus texture_fill_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  Paint *paint;
+  Brush *brush;
+  if (!texture_fill_context_get(C, true, &paint, &brush)) {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
+
+  RNA_boolean_set(op->ptr, "invert", event->modifier & KM_CTRL);
+  const wmOperatorStatus status = WM_gesture_box_invoke(C, op, event);
+  if (status & OPERATOR_RUNNING_MODAL) {
+    wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
+    if (gesture) {
+      TextureFillGesture *gesture_state = MEM_new<TextureFillGesture>(__func__);
+      gesture_state->start_xy = int2(event->mval[0], event->mval[1]);
+      gesture->user_data.data = gesture_state;
+      gesture->user_data.free_fn = [](void *data) {
+        MEM_delete(static_cast<TextureFillGesture *>(data));
+      };
+      gesture->user_data.use_free = true;
+
+      float color[3];
+      texture_fill_color_get(paint, brush, RNA_boolean_get(op->ptr, "invert"), color);
+      paint_image_geometry_fill_gesture_begin(C, color, &gesture_state->highlight);
+    }
+  }
+  return status;
+}
+
+static wmOperatorStatus texture_fill_modal(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  TextureFillGesture *gesture_state = texture_fill_gesture_get(op);
+  if (event->type == MOUSEMOVE && gesture_state != nullptr && !gesture_state->is_drag) {
+    /* #WM_event_drag_threshold is DPI-aware, unlike a hardcoded pixel count. */
+    const int drag_threshold = WM_event_drag_threshold(event);
+    if (std::abs(event->mval[0] - gesture_state->start_xy.x) >= drag_threshold ||
+        std::abs(event->mval[1] - gesture_state->start_xy.y) >= drag_threshold)
+    {
+      gesture_state->is_drag = true;
+    }
+  }
+
+  if (event->type == EVT_MODAL_MAP &&
+      ELEM(event->val, GESTURE_MODAL_SELECT, GESTURE_MODAL_DESELECT, GESTURE_MODAL_IN,
+           GESTURE_MODAL_OUT) &&
+      (gesture_state == nullptr || !gesture_state->is_drag))
+  {
+    const float2 mouse = gesture_state ? float2(gesture_state->start_xy) : float2(0.0f);
+    /* The overlay state dies with the gesture, through its own destructor. */
+    WM_gesture_box_cancel(C, op);
+    return texture_fill_click(C, op, mouse) ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+  }
+
+  const wmOperatorStatus status = WM_gesture_box_modal(C, op, event);
+  if ((status & OPERATOR_RUNNING_MODAL) && event->type == MOUSEMOVE &&
+      gesture_state != nullptr && gesture_state->is_drag)
+  {
+    if (gesture_state->highlight != nullptr) {
+      Paint *paint;
+      Brush *brush;
+      if (texture_fill_context_get(C, true, &paint, &brush)) {
+        /* #WM_gesture_box_modal has already written the sorted rect into the operator
+         * properties for this move. The gesture's own rect must not be used: it stores the
+         * drag start and end verbatim, so dragging left or up leaves `xmin > xmax` and every
+         * intersection test fails -- the highlight would vanish for half the drag directions
+         * while the fill, which reads the same sorted properties, still covers those faces. */
+        rcti rect;
+        WM_operator_properties_border_to_rcti(op, &rect);
+        if (BLI_rcti_size_x(&rect) != 0 && BLI_rcti_size_y(&rect) != 0) {
+          paint_image_geometry_fill_gesture_resolve(C, brush, gesture_state->highlight, rect);
+        }
+      }
+    }
+  }
+  return status;
+}
+
+static void texture_fill_cancel(bContext *C, wmOperator *op)
+{
+  /* The gesture frees the gesture state through its own destructor. */
+  WM_gesture_box_cancel(C, op);
+}
+
+void PAINT_OT_texture_fill(wmOperatorType *ot)
+{
+  ot->name = "Texture Fill";
+  ot->idname = "PAINT_OT_texture_fill";
+  ot->description = "Fill faces with a click or rectangular gesture";
+
+  ot->invoke = texture_fill_invoke;
+  ot->modal = texture_fill_modal;
+  ot->exec = texture_fill_exec;
+  ot->cancel = texture_fill_cancel;
+  ot->poll = texture_fill_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+
+  WM_operator_properties_border(ot);
+  PropertyRNA *prop = RNA_def_boolean(
+      ot->srna, "invert", false, "Invert", "Use the secondary brush color");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+}
+
+static wmOperatorStatus texture_fill_mode_set_exec(bContext *C, wmOperator *op)
+{
+  Brush *brush;
+  if (!texture_fill_context_get(C, false, nullptr, &brush)) {
+    /* Defensive: #texture_fill_mode_set_poll should have caught this. */
+    return OPERATOR_CANCELLED;
+  }
+
+  brush->fill_expand = RNA_enum_get(op->ptr, "mode");
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_texture_fill_mode_set(wmOperatorType *ot)
+{
+  static const EnumPropertyItem mode_items[] = {
+      {IMAGE_PAINT_SELECT_EXPAND_FACE, "FACE", 0, "Face", "Fill the clicked faces"},
+      {IMAGE_PAINT_SELECT_EXPAND_ISLAND,
+       "ISLAND",
+       0,
+       "Island",
+       "Fill connected UV islands"},
+      {IMAGE_PAINT_SELECT_EXPAND_MESH, "MESH", 0, "Mesh", "Fill all visible faces"},
+      {IMAGE_PAINT_SELECT_EXPAND_PIXELS,
+       "PIXELS",
+       0,
+       "Pixels",
+       "Flood fill connected pixels"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  ot->name = "Set Texture Fill Mode";
+  ot->idname = "PAINT_OT_texture_fill_mode_set";
+  ot->description = "Set the expansion mode for the active Texture Fill brush";
+
+  ot->exec = texture_fill_mode_set_exec;
+  ot->poll = texture_fill_mode_set_poll;
+  /* Brush data changes must be undoable like other brush edits. */
+  ot->flag = OPTYPE_UNDO;
+
+  ot->prop = RNA_def_enum(
+      ot->srna, "mode", mode_items, IMAGE_PAINT_SELECT_EXPAND_FACE, "Mode", "Fill expansion mode");
+  RNA_def_property_flag(ot->prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+}
 
 bool paint_image_viewport_fill_at_mouse(const bContext *C,
                                         const Paint *paint,
@@ -91,6 +467,16 @@ bool paint_image_viewport_fill_at_mouse(const bContext *C,
   }
 
   /* Pixel flood — minimal projection stroke session */
+  UndoStack *ustack = ED_undo_stack_get();
+  if (ustack == nullptr || ustack->step_init == nullptr ||
+      ustack->step_init->type != BKE_UNDOSYS_TYPE_IMAGE)
+  {
+    /* The flood piggy-backs on the caller's open image undo step; reaching this means the
+     * caller forgot to open one and the fill would silently do nothing. */
+    BLI_assert_msg(0, "Pixel flood fill expects an open image undo step");
+    return false;
+  }
+
   bContext *C_mut = const_cast<bContext *>(C);
   Scene *scene = CTX_data_scene(C);
   ToolSettings *ts = scene->toolsettings;

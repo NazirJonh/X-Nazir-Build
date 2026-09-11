@@ -5164,6 +5164,17 @@ def km_image_paint(params):
     items.extend([
         # Temporary lasso selection mask (does not switch the active tool).
         *_template_items_image_paint_select_lasso_gesture(params),
+        # Texture Fill. 1-4 switch the active Fill brush's expansion mode; the operator
+        # reads Ctrl itself for the secondary color, so one binding covers both.
+        ("paint.texture_fill_mode_set", {"type": 'ONE', "value": 'PRESS'},
+         {"properties": [("mode", 'FACE')]}),
+        ("paint.texture_fill_mode_set", {"type": 'TWO', "value": 'PRESS'},
+         {"properties": [("mode", 'ISLAND')]}),
+        ("paint.texture_fill_mode_set", {"type": 'THREE', "value": 'PRESS'},
+         {"properties": [("mode", 'MESH')]}),
+        ("paint.texture_fill_mode_set", {"type": 'FOUR', "value": 'PRESS'},
+         {"properties": [("mode", 'PIXELS')]}),
+        ("paint.texture_fill", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("paint.image_paint", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("paint.image_paint", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True},
          {"properties": [("mode", 'INVERT')]}),
@@ -5433,6 +5444,17 @@ def km_sculpt(params):
 
     items.extend([
         # Brush strokes
+        # Texture Fill. 1-4 switch the active Fill brush's expansion mode; the operator
+        # reads Ctrl itself for the secondary color, so one binding covers both.
+        ("paint.texture_fill_mode_set", {"type": 'ONE', "value": 'PRESS'},
+         {"properties": [("mode", 'FACE')]}),
+        ("paint.texture_fill_mode_set", {"type": 'TWO', "value": 'PRESS'},
+         {"properties": [("mode", 'ISLAND')]}),
+        ("paint.texture_fill_mode_set", {"type": 'THREE', "value": 'PRESS'},
+         {"properties": [("mode", 'MESH')]}),
+        ("paint.texture_fill_mode_set", {"type": 'FOUR', "value": 'PRESS'},
+         {"properties": [("mode", 'PIXELS')]}),
+        ("paint.texture_fill", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("sculpt.brush_stroke", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("sculpt.brush_stroke", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True},
          {"properties": [("mode", 'INVERT')]}),

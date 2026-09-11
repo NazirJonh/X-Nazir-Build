@@ -9,12 +9,15 @@
 #pragma once
 
 #include "BLI_index_mask_fwd.hh"
+#include "BLI_map.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rand.hh"
+#include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
 #include "BKE_curve_patch.hh"
+#include "BKE_customdata.hh"
 
 #include "DNA_object_enums.h"
 #include "DNA_scene_enums.h"
@@ -32,7 +35,9 @@ namespace blender {
 enum class PaintMode : int8_t;
 
 struct ARegion;
+struct ARegionType;
 struct bContext;
+struct BMesh;
 struct Brush;
 struct Depsgraph;
 struct Image;
@@ -76,6 +81,58 @@ namespace ocio {
 class Display;
 }
 using ColorManagedDisplay = ocio::Display;
+
+/** Per-object face set built on the original mesh / Edit BMesh for geometry fill. */
+struct ImagePaintUVObjectFaces {
+  Object *object = nullptr;
+  BMesh *bm = nullptr;
+  bool owns_bm = false;
+  BMUVOffsets offsets{};
+  Vector<int> faces;
+  Map<int, Vector<int>> tile_faces;
+};
+
+/** Region-space polygon of one face, cached for the geometry-fill gesture highlight. */
+struct ImagePaintGeometryFillHighlightFace {
+  /** Original mesh face index the polygon belongs to. */
+  int face_index = -1;
+  /** Closed polygon in region (pixel) coordinates. */
+  Vector<float2> polygon;
+};
+
+/** One canvas object's candidate faces for the geometry-fill gesture highlight. */
+struct ImagePaintGeometryFillGestureItem {
+  Object *object = nullptr;
+  /* BMesh and UV offsets kept for the expand step of every resolve. */
+  ImagePaintUVObjectFaces item;
+  /** Candidate faces in region space, culled for hidden and back-facing. */
+  Vector<ImagePaintGeometryFillHighlightFace> faces;
+  /** Indices into #faces currently under the gesture box. */
+  Vector<int> highlight_faces;
+  /** Original face indices the last expansion produced, to skip redundant Mesh-mode floods. */
+  Set<int> expanded_faces;
+};
+
+/**
+ * Overlay state for the geometry-fill box gesture. Faces are projected into region pixel space
+ * once at invoke -- the view cannot change while the box gesture runs -- and the faces under the
+ * dragged box are highlighted. Resolving never touches image buffers; pixels change only when
+ * the fill is committed.
+ */
+struct ImagePaintGeometryFillGestureState {
+  Vector<ImagePaintGeometryFillGestureItem> items;
+  /** Last rect the highlight was computed for, to skip redundant resolves. */
+  rcti last_rect = {0, 0, 0, 0};
+  /** Fill color, shared by the fill and the outline overlay passes. */
+  float color[3] = {0.0f, 0.0f, 0.0f};
+  /** Region the polygons were projected into; other regions of the same type skip drawing. */
+  ARegion *gesture_region = nullptr;
+  /** Overlay registration, released by the destructor on every exit path. */
+  ARegionType *region_type = nullptr;
+  void *draw_handle = nullptr;
+
+  ~ImagePaintGeometryFillGestureState();
+};
 
 /* paint_stroke.cc */
 
@@ -846,7 +903,7 @@ void paint_2d_bucket_fill(const bContext *C,
                           const float mouse_final[2],
                           void *ps);
 /**
- * 3D Texture Paint Face/Island fill.
+ * 3D Texture Paint Face/Island/Mesh fill.
  *
  * Ray-casts the original mesh / Edit BMesh of \a ob (not the evaluated mesh) so the hit
  * face index matches 2D Image Editor fill and selection expand. Rasterizes in UV space
@@ -856,6 +913,42 @@ void paint_2d_bucket_fill(const bContext *C,
  */
 bool paint_image_proj_geometry_fill(
     const bContext *C, const float color[3], Brush *br, Object *ob, const float mouse[2]);
+/**
+ * Geometry fill from original mesh face indices. The indices must belong to \a ob's original mesh
+ * or Edit BMesh, rather than an evaluated mesh with potentially different topology.
+ */
+bool paint_image_proj_geometry_fill_faces(const bContext *C,
+                                          const float color[3],
+                                          Brush *br,
+                                          Object *ob,
+                                          Span<int> seed_faces);
+/** Fill faces whose original-mesh screen-space polygons intersect \a rect. */
+bool paint_image_proj_geometry_fill_rect(
+    const bContext *C, const float color[3], Brush *br, Object *ob, const rcti &rect);
+/** Fill faces whose UV polygons intersect the Image Editor rectangle. */
+bool paint_image_2d_geometry_fill_rect(
+    const bContext *C, const float color[3], Brush *br, const rcti &rect);
+
+/**
+ * Project candidate faces into region pixel space and register the highlight overlay for the
+ * box gesture. The view does not change during the gesture, so the projection is computed once
+ * here and reused on every mouse move.
+ *
+ * \return false when there is nothing to highlight (no canvas, no region); \a r_state is then
+ * left null and no overlay is registered.
+ */
+bool paint_image_geometry_fill_gesture_begin(const bContext *C,
+                                             const float color[3],
+                                             ImagePaintGeometryFillGestureState **r_state);
+/**
+ * Recompute the highlighted faces for \a rect. Skipped when the rect did not change since the
+ * previous resolve, and -- in Mesh expansion mode -- after the first non-empty result, since the
+ * expansion then no longer depends on the box.
+ */
+void paint_image_geometry_fill_gesture_resolve(bContext *C,
+                                               Brush *br,
+                                               ImagePaintGeometryFillGestureState *state,
+                                               const rcti &rect);
 /**
  * Single-shot texture fill from 3D viewport screen coords.
  * Solid color only (v1). Geometry expand or pixel flood depending on \a brush.fill_expand.
@@ -914,6 +1007,8 @@ void PAINT_OT_project_image(wmOperatorType *ot);
 void PAINT_OT_image_from_view(wmOperatorType *ot);
 void PAINT_OT_add_texture_paint_slot(wmOperatorType *ot);
 void PAINT_OT_image_paint(wmOperatorType *ot);
+void PAINT_OT_texture_fill(wmOperatorType *ot);
+void PAINT_OT_texture_fill_mode_set(wmOperatorType *ot);
 void PAINT_OT_add_simple_uvs(wmOperatorType *ot);
 void PAINT_OT_brush_group_override_toggle(wmOperatorType *ot);
 

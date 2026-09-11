@@ -109,6 +109,11 @@ void image_paint_uv_claim_buffer_build(BMesh *bm,
  *
  * \a color is the same sRGB-space RGB that `paint_2d_bucket_fill` receives.
  * The rasterizer converts per destination \a ibuf (byte vs float, colorspace).
+ * Non-color data images ignore \a strength and \a blend and receive the fixed scalar
+ * \a data_fill_value instead: 2x2 quarter-pixel supersampling weights the edge texels and
+ * the destination alpha is preserved. \a data_fill_signed only applies to float data
+ * images, where it maps the scalar from [0..1] to [-1..1]; byte buffers cannot hold
+ * negative values and always receive the raw factor.
  */
 void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
                                          const BMUVOffsets &offsets,
@@ -119,7 +124,9 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
                                          ImBuf *ibuf,
                                          const float color[3],
                                          float strength,
-                                         IMB_BlendMode blend);
+                                         IMB_BlendMode blend,
+                                         float data_fill_value,
+                                         bool data_fill_signed);
 
 /**
  * Visit every pixel center covered by a triangle given in tile-local pixel space.

@@ -865,6 +865,12 @@ struct ImageMaterialSource {
 bool BKE_image_material_source_get(const Image &image, ImageMaterialSource &r_source);
 /** Write / overwrite the link. \a source.material must be non-null. */
 void BKE_image_material_source_set(Image &image, const ImageMaterialSource &source);
+/**
+ * Whether \a image is a baked map set aside by a switched-off layer channel: its link is kept so
+ * switching the channel back on is instant, but nothing should re-bake it while it is off.
+ */
+bool BKE_image_material_source_parked_get(const Image &image);
+void BKE_image_material_source_parked_set(Image &image, bool parked);
 /** Remove the link. No-op when absent. */
 void BKE_image_material_source_clear(Image &image);
 

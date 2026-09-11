@@ -3346,7 +3346,7 @@ void BKE_image_paint_layer_id_ensure(Image *ima)
  * \{ */
 
 static const char *image_material_source_keys[] = {
-    "pbr_bake_material", "pbr_bake_channel", "pbr_bake_size", "pbr_bake_hash"};
+    "pbr_bake_material", "pbr_bake_channel", "pbr_bake_size", "pbr_bake_hash", "pbr_bake_parked"};
 
 bool BKE_image_material_source_get(const Image &image, ImageMaterialSource &r_source)
 {
@@ -3387,6 +3387,30 @@ void BKE_image_material_source_set(Image &image, const ImageMaterialSource &sour
   BLI_snprintf(hash_hex, sizeof(hash_hex), "%016llx", hash_value);
   IDP_ReplaceInGroup(root,
                      bke::idprop::create("pbr_bake_hash", StringRefNull(hash_hex)).release());
+}
+
+bool BKE_image_material_source_parked_get(const Image &image)
+{
+  const IDProperty *root = IDP_ID_system_properties_get(const_cast<ID *>(&image.id));
+  if (root == nullptr) {
+    return false;
+  }
+  const IDProperty *parked = IDP_GetPropertyTypeFromGroup(root, "pbr_bake_parked", IDP_INT);
+  return parked != nullptr && IDP_int_get(parked) != 0;
+}
+
+void BKE_image_material_source_parked_set(Image &image, const bool parked)
+{
+  if (!parked) {
+    if (IDProperty *root = IDP_ID_system_properties_get(&image.id)) {
+      if (IDProperty *prop = IDP_GetPropertyFromGroup(root, "pbr_bake_parked")) {
+        IDP_FreeFromGroup(root, prop);
+      }
+    }
+    return;
+  }
+  IDP_ReplaceInGroup(IDP_ID_system_properties_ensure(&image.id),
+                     bke::idprop::create("pbr_bake_parked", 1).release());
 }
 
 void BKE_image_material_source_clear(Image &image)

@@ -205,6 +205,13 @@ bool material_bake_source_is_baking(const Image &image);
  */
 struct BakeTargetSpec {
   eMaterialPaintChannel channel;
+  /**
+   * The map to re-fill, when set; it must already carry a bake link to the source material for
+   * #channel. Takes precedence over #MaterialBakeToImagesParams.reuse_existing, which can only
+   * find *a* map of the material's channel -- the wrong one once two layers were baked from the
+   * same material.
+   */
+  Image *existing = nullptr;
 };
 
 struct MaterialBakeToImagesResult;
@@ -254,6 +261,27 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
                                                    wmWindowManager *wm,
                                                    wmWindow *win,
                                                    const MaterialBakeToImagesParams &params);
+
+/**
+ * Start re-filling every editable map baked from \a ma whose bake no longer matches \a ma's node
+ * trees, each map in place and at the size it was baked at.
+ *
+ * Meant for the editor update of a changed material, so it is cheap when nothing was baked from
+ * \a ma and does not restart a running bake for a node-tree state it already started. Starts
+ * nothing without a window manager (file read, background mode).
+ */
+void material_bake_images_rebake_stale(Main &bmain, Material &ma);
+
+/**
+ * Start re-filling \a images, maps baked from \a ma, whether or not they are stale -- after a
+ * resize, or for a map that was just linked to \a ma.
+ *
+ * Every other map of \a ma still being baked is re-rendered along with them, since the material
+ * has a single bake job that this replaces.
+ *
+ * \param size: the square side to render at; zero keeps the largest size the maps were baked at.
+ */
+void material_bake_images_rebake(Main &bmain, Material &ma, Span<Image *> images, int size);
 
 /** \} */
 

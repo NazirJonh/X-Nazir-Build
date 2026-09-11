@@ -753,6 +753,13 @@ static void node_area_listener(const wmSpaceTypeListenerParams *params)
         case ND_FRAME:
           node_area_tag_tree_recalc(snode, area);
           break;
+        case ND_TOOLSETTINGS:
+          /* Activating a paint layer rebinds the paint channels, which is what decides the tree
+           * shown for #SNODE_SHADER_PAINT_LAYER. */
+          if (ED_node_is_shader(snode) && shader_type == SNODE_SHADER_PAINT_LAYER) {
+            node_area_tag_tree_recalc(snode, area);
+          }
+          break;
         case ND_COMPO_RESULT: {
           ED_area_tag_redraw(area);
           /* Backdrop image offset is calculated during compositing so gizmos need to be updated

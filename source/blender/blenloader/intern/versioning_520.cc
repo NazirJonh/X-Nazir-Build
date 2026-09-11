@@ -1874,6 +1874,21 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 73)) {
+    /* BCONTEXT_LAYER_MATERIAL is new; like the Brush Material tab, its visibility bit starts set
+     * so the tab can show up in older files once a Material paint layer is active. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_PROPERTIES) {
+            SpaceProperties &sbuts = reinterpret_cast<SpaceProperties &>(sl);
+            sbuts.visible_tabs |= (1 << BCONTEXT_LAYER_MATERIAL);
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

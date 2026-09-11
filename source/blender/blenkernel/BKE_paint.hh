@@ -1113,6 +1113,16 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
                                             PaintModeSettings *mode_settings = nullptr);
 
 /**
+ * The material the active Material paint layer was baked from, or null when the active layer is
+ * not one.
+ *
+ * The active layer is whatever \a mode_settings' channel bindings point at; a Material layer is the
+ * one whose maps carry a bake link (#ImageMaterialSource), and any of them names the source.
+ * Editable only when the returned material is: a linked source cannot be re-configured.
+ */
+Material *BKE_paint_material_active_layer_source_get(const PaintModeSettings &mode_settings);
+
+/**
  * Image the Image Editor should show for the Material canvas when nothing is selected.
  *
  * Prefers Base Color, then other created Principled maps, with Normal and Alpha last.

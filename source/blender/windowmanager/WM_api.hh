@@ -2006,6 +2006,11 @@ enum eWM_JobType {
   WM_JOB_TYPE_GENERATE_TEXTURE_CACHE,
   WM_JOB_TYPE_SOUND_MIXDOWN,
   WM_JOB_TYPE_MATERIAL_SOURCE_BAKE,
+  /**
+   * Separate from #WM_JOB_TYPE_MATERIAL_SOURCE_BAKE although both are keyed on the material: a job
+   * slot is shared by owner and type, and the two install different callbacks into it.
+   */
+  WM_JOB_TYPE_MATERIAL_IMAGES_BAKE,
   /* Add as needed, bake, seq proxy build
    * if having hard coded values is a problem. */
 };

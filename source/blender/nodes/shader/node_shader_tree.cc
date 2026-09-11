@@ -105,6 +105,19 @@ static void shader_get_from_context(const bContext *C,
       *r_ntree = ma->nodetree;
     }
   }
+  else if (snode->shaderfrom == SNODE_SHADER_PAINT_LAYER) {
+    Scene *scene = CTX_data_scene(C);
+    Material *ma = (scene && scene->toolsettings) ?
+                       BKE_paint_material_active_layer_source_get(scene->toolsettings->paint_mode) :
+                       nullptr;
+    if (ma) {
+      /* The layer is not an ID of its own: the material is reached through the scene's paint
+       * bindings, the way the World is reached through the scene. */
+      *r_from = nullptr;
+      *r_id = &ma->id;
+      *r_ntree = ma->nodetree;
+    }
+  }
 #ifdef WITH_FREESTYLE
   else if (snode->shaderfrom == SNODE_SHADER_LINESTYLE) {
     ViewLayer *view_layer = CTX_data_view_layer(C);

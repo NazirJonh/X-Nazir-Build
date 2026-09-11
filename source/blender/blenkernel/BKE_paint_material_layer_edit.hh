@@ -389,6 +389,16 @@ bool BKE_paint_material_layer_channel_image_set(Main &bmain,
                                                 PaintMaterialLayerEditError *r_error = nullptr);
 
 /**
+ * A fresh transparent map for \a channel, \a size pixels square: a layer that shows it in
+ * \a channel contributes nothing there, since its coverage comes from the map's alpha.
+ *
+ * This is how a layer drops one channel without breaking the stack's shape, which needs every
+ * channel's chain to hold the same rows. The image comes with the one user a new data-block has;
+ * see #BKE_paint_material_layer_channel_image_set for handing it over.
+ */
+Image *BKE_paint_material_layer_neutral_image_create(Main &bmain, int channel, int size);
+
+/**
  * Re-fill the maps of the Fill layer at \a ordinal with \a color, in every wired channel, and
  * record the colour on the layer's marker.
  *

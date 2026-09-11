@@ -93,6 +93,9 @@ void ED_operatortypes_render()
   /* `render_material_bake_ops.cc` */
   WM_operatortype_append(IMAGE_OT_bake_from_material);
   WM_operatortype_append(IMAGE_OT_rebake_stale_material_sources);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_channel_toggle);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_bake_size_set);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_rebake);
 }
 
 }  // namespace blender

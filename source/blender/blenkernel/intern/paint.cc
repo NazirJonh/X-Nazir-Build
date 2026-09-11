@@ -3895,6 +3895,17 @@ void BKE_paint_material_channel_cache_invalidate(Material *ma)
   }
 }
 
+Material *BKE_paint_material_active_layer_source_get(const PaintModeSettings &mode_settings)
+{
+  for (const MaterialPaintChannelImageBinding &binding : mode_settings.channel_image_bindings) {
+    ImageMaterialSource source;
+    if (binding.image != nullptr && BKE_image_material_source_get(*binding.image, source)) {
+      return source.material;
+    }
+  }
+  return nullptr;
+}
+
 bool BKE_paint_principled_channel_image_get(Object &ob,
                                             eMaterialPaintChannel channel,
                                             Image **r_image,

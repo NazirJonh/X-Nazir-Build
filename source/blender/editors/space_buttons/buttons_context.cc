@@ -394,6 +394,22 @@ static bool buttons_context_path_brush_material(const bContext *C, ButsContextPa
   return true;
 }
 
+static bool buttons_context_path_layer_material(const Scene *scene, ButsContextPath *path)
+{
+  /* Pinning is ignored like for #BCONTEXT_BRUSH_MATERIAL: the tab follows the active paint layer. */
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return false;
+  }
+  Material *material = BKE_paint_material_active_layer_source_get(
+      scene->toolsettings->paint_mode);
+  if (material == nullptr) {
+    return false;
+  }
+  path->ptr[path->len] = RNA_id_pointer_create(&material->id);
+  path->len++;
+  return true;
+}
+
 static bool buttons_context_path_bone(ButsContextPath *path)
 {
   /* if we have an armature, get the active bone */
@@ -639,7 +655,7 @@ static bool buttons_context_path(
   /* If some ID datablock is pinned, set the root pointer.
    * NOTE: BCONTEXT_BRUSH_MATERIAL always tracks the active brush source material (D9),
    * so ignore pinned root ID which would put pinned material in path->ptr[0]. */
-  if (sbuts->pinid && mainb != BCONTEXT_BRUSH_MATERIAL) {
+  if (sbuts->pinid && !ELEM(mainb, BCONTEXT_BRUSH_MATERIAL, BCONTEXT_LAYER_MATERIAL)) {
     ID *id = sbuts->pinid;
 
     path->ptr[0] = RNA_id_pointer_create(id);
@@ -743,6 +759,9 @@ static bool buttons_context_path(
       break;
     case BCONTEXT_BRUSH_MATERIAL:
       found = buttons_context_path_brush_material(C, path);
+      break;
+    case BCONTEXT_LAYER_MATERIAL:
+      found = buttons_context_path_layer_material(scene, path);
       break;
     default:
       found = false;

@@ -64,6 +64,7 @@
 
 #include "IMB_imbuf_types.hh"
 
+#include "ED_buttons.hh"
 #include "ED_image.hh"
 #include "ED_material_bake.hh"
 #include "ED_paint.hh"
@@ -683,6 +684,24 @@ class PaintMaterialStackSource final : public StackSource,
     }
     g_bindings_owner_uid = material.id.session_uid;
     WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+    /* A Material layer is re-configured through its source material, so activating one brings
+     * that material up the way selecting any other Outliner element brings up its tab. */
+    if (Material *source = BKE_paint_material_active_layer_source_get(paint_mode)) {
+      PointerRNA source_ptr = RNA_id_pointer_create(&source->id);
+      if (bScreen *screen = CTX_wm_screen(&C)) {
+        for (ScrArea &area : screen->areabase) {
+          if (area.spacetype != SPACE_PROPERTIES) {
+            continue;
+          }
+          SpaceProperties *sbuts = static_cast<SpaceProperties *>(area.spacedata.first);
+          if (ED_buttons_should_sync_with_outliner(&C, sbuts, &area)) {
+            ED_buttons_set_context(&C, sbuts, &source_ptr, BCONTEXT_LAYER_MATERIAL);
+            ED_area_tag_redraw(&area);
+          }
+        }
+      }
+    }
     return true;
   }
 
@@ -948,6 +967,26 @@ class PaintMaterialStackSource final : public StackSource,
       return -1;
     }
 
+    /* The layer is re-configured by editing its source, which a linked material -- an asset,
+     * typically -- does not allow, and the bake link must not point into a library either. */
+    if (ID_IS_LINKED(&picked->id)) {
+      BKE_lib_id_make_local(bmain, &picked->id, 0);
+      if (picked->id.newid != nullptr) {
+        /* Still used from inside its library, so a local copy was made instead. */
+        Material *local = id_cast<Material *>(picked->id.newid);
+        picked->id.newid = nullptr;
+        picked = local;
+      }
+      if (ID_IS_LINKED(&picked->id)) {
+        BKE_reportf(CTX_wm_reports(&C),
+                    RPT_ERROR,
+                    RPT_("Material \"%s\" could not be made local"),
+                    picked->id.name + 2);
+        return -1;
+      }
+      WM_event_add_notifier(&C, NC_ID | NA_EDITED, nullptr);
+    }
+
     Material &target_material = paint_owner(owner);
     const uint64_t revision_before = BKE_material_paint_layer_revision_get(target_material);
 
@@ -1004,6 +1043,9 @@ class PaintMaterialStackSource final : public StackSource,
     int new_ordinal = -1;
     bool edit_attempted = false;
     bool edit_ok = false;
+    /* Whether the add took the maps over. Distinct from #edit_ok: once they are on the layer's
+     * nodes they have to be filled even if the kind marker then fails. */
+    bool maps_taken = false;
     /* The add runs between target creation and the render: the job's worker updates node trees
      * of its own, and a refused add frees maps a running job would then look for. */
     auto add_layer = [&](const ed::material_bake::MaterialBakeToImagesResult &bake) {
@@ -1045,6 +1087,7 @@ class PaintMaterialStackSource final : public StackSource,
           if (!step_ok) {
             return false;
           }
+          maps_taken = true;
           /* The kind marker is what makes the row read as Material rather than as a Paint layer
            * whose maps happen to carry a bake link. */
           const bool kind_ok = BKE_paint_material_layer_kind_set(
@@ -1056,7 +1099,7 @@ class PaintMaterialStackSource final : public StackSource,
           }
           return true;
         });
-      return edit_ok;
+      return maps_taken;
     };
 
     ed::material_bake::MaterialBakeToImagesParams bake_params;

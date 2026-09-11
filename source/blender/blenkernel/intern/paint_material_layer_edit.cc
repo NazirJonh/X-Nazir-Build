@@ -118,6 +118,20 @@ void paint_layer_edit_committed(Main &bmain, Material &ma, const bool relations)
   BKE_material_paint_layer_runtime_get(ma).edit_revision++;
   DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
   if (relations) {
+    /* The shading component does not refresh the evaluated copy, and a relation edit is exactly
+     * what that copy must not miss: images are not copied for evaluation, so its nodes point at
+     * the original data-blocks, and one the edit freed would be left dangling there -- read the
+     * next time the material compiles. #BKE_main_ensure_invariants tags node tree edits the same
+     * way. */
+    DEG_id_tag_update(&ma.id, ID_RECALC_SYNC_TO_EVAL);
+    /* A relation edit reshapes what the tree's output actually reads (a layer added, moved, or
+     * removed relinks the chain), which #BKE_main_ensure_invariants' tree_output_changed_fn tags
+     * as #ID_RECALC_NTREE_OUTPUT on the tree itself -- this file's hand-rolled update never does,
+     * so without it the viewport keeps the old result until some unrelated redraw (e.g. a
+     * workspace switch) happens to force one. */
+    if (ma.nodetree != nullptr) {
+      DEG_id_tag_update(&ma.nodetree->id, ID_RECALC_NTREE_OUTPUT);
+    }
     DEG_relations_tag_update(&bmain);
   }
   BKE_paint_material_composite_cache_invalidate(&ma);
@@ -2634,6 +2648,79 @@ bool BKE_paint_material_layer_add(Main &bmain,
     if (entry.layer.image != nullptr) {
       entry.layer.image->paint_layer_id = layer_id;
     }
+  }
+
+  /* TEMP-DEBUG [MAT_LAYER]: remove before merge. Dump what each new layer's Mix node actually
+   * ended up wired to, to settle whether bottom/top got swapped or the factor isn't what the
+   * coverage link should have produced. */
+  {
+    tree.ensure_topology_cache();
+    for (const ResolvedLayer &entry : resolved) {
+      bNodeLink *bottom_link = (entry.layer.bottom == nullptr) ?
+                                   nullptr :
+                                   sole_link_into(*entry.layer.bottom);
+      bNodeLink *top_link = (entry.layer.top == nullptr) ? nullptr :
+                                                            sole_link_into(*entry.layer.top);
+      CompositeMixNode mix_dbg;
+      composite_mix_node_read(*entry.layer.node, mix_dbg);
+      const float factor_default = (mix_dbg.factor != nullptr &&
+                                    mix_dbg.factor->default_value != nullptr) ?
+                                       static_cast<const bNodeSocketValueFloat *>(
+                                           mix_dbg.factor->default_value)
+                                           ->value :
+                                       -1.0f;
+      bNodeLink *factor_link = (mix_dbg.factor == nullptr) ?
+                                   nullptr :
+                                   sole_link_into(*const_cast<bNodeSocket *>(mix_dbg.factor));
+      printf("[MAT_LAYER]   layer_add wired ch=%d mix='%s' bottom<-'%s' top<-'%s' "
+             "factor_default=%.3f factor<-'%s'\n",
+             entry.chain != nullptr ? entry.chain->channel : -1,
+             entry.layer.node->name,
+             bottom_link != nullptr ? bottom_link->fromnode->name : "(none)",
+             top_link != nullptr ? top_link->fromnode->name : "(none)",
+             double(factor_default),
+             factor_link != nullptr ? factor_link->fromnode->name : "(none)");
+      /* The Factor dump above only shows what feeds the Mix's Factor socket (the Math node
+       * itself); it never looked inside that Math node to check which of its two inputs the
+       * coverage (this layer's own Alpha) actually landed on, or what the other one holds. */
+      if (factor_link != nullptr && factor_link->fromnode->type_legacy == SH_NODE_MATH) {
+        bNode *math_node = factor_link->fromnode;
+        bNodeSocket *value_a = static_cast<bNodeSocket *>(BLI_findlink(&math_node->inputs, 0));
+        bNodeSocket *value_b = static_cast<bNodeSocket *>(BLI_findlink(&math_node->inputs, 1));
+        bNodeLink *a_link = (value_a == nullptr) ? nullptr : sole_link_into(*value_a);
+        bNodeLink *b_link = (value_b == nullptr) ? nullptr : sole_link_into(*value_b);
+        const float a_default = (value_a != nullptr) ?
+                                    static_cast<const bNodeSocketValueFloat *>(
+                                        value_a->default_value)
+                                        ->value :
+                                    -1.0f;
+        const float b_default = (value_b != nullptr) ?
+                                    static_cast<const bNodeSocketValueFloat *>(
+                                        value_b->default_value)
+                                        ->value :
+                                    -1.0f;
+        printf("[MAT_LAYER]     math='%s' op=%d a_default=%.3f a<-'%s' b_default=%.3f b<-'%s'\n",
+               math_node->name,
+               math_node->custom1,
+               double(a_default),
+               a_link != nullptr ? a_link->fromnode->name : "(none)",
+               double(b_default),
+               b_link != nullptr ? b_link->fromnode->name : "(none)");
+      }
+      /* Whether the chain's actual terminal (the Principled input, or whatever a Normal Map's
+       * Color feeds) ended up reading from this new layer at all -- #chain_rebuild_links is
+       * supposed to relink it, but nothing upstream of this dump has verified that it did. */
+      if (entry.chain != nullptr && entry.chain->terminal != nullptr) {
+        bNodeLink *terminal_link = sole_link_into(*entry.chain->terminal);
+        printf("[MAT_LAYER]   layer_add terminal ch=%d terminal_node='%s' terminal<-'%s' "
+               "(expected '%s')\n",
+               entry.chain->channel,
+               entry.chain->terminal_node != nullptr ? entry.chain->terminal_node->name : "?",
+               terminal_link != nullptr ? terminal_link->fromnode->name : "(none)",
+               entry.layer.node->name);
+      }
+    }
+    fflush(stdout);
   }
 
   if (&tree != ma.nodetree) {
@@ -5472,6 +5559,16 @@ bool BKE_paint_material_layer_add_material_base(Main &bmain,
   return true;
 }
 
+Image *BKE_paint_material_layer_neutral_image_create(Main &bmain,
+                                                     const int channel,
+                                                     const int size)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM || size <= 0) {
+    return nullptr;
+  }
+  return ensure_neutral_image_create(bmain, channel, size, size, false, nullptr);
+}
+
 bool BKE_paint_material_layer_channel_image_set(Main &bmain,
                                                 Material &ma,
                                                 const int ordinal,
@@ -5592,6 +5689,11 @@ bool BKE_paint_material_layer_channel_image_set(Main &bmain,
   image.paint_layer_channel = channel;
 
   BKE_ntree_update_after_single_tree_change(bmain, tree);
+  /* The map may sit in a folder's own node tree, whose evaluated copy is separate from the
+   * material's; see #paint_layer_edit_committed for why it has to be refreshed. */
+  if (&tree != ma.nodetree) {
+    DEG_id_tag_update(&tree.id, ID_RECALC_SYNC_TO_EVAL);
+  }
   paint_layer_edit_committed(bmain, ma, true);
   if (r_error != nullptr) {
     *r_error = PaintMaterialLayerEditError::None;
@@ -5871,7 +5973,11 @@ bool BKE_paint_material_layer_set_enabled(Main &bmain,
     BKE_ntree_update_tag_node_mute(chain->tree, &node);
   }
   BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
-  paint_layer_edit_committed(bmain, ma, false);
+  /* The Shading component is NO_COW_TAG_ON_UPDATE: ID_RECALC_SHADING alone never re-copies the
+   * evaluated material, so the mute flag GPU compilation reads would stay on whatever it was at
+   * the last relation sync. #SYNC_TO_EVAL is what actually refreshes it, the same fix already
+   * applied where a node's ID field changes (see #paint_layer_edit_committed). */
+  paint_layer_edit_committed(bmain, ma, true);
   if (r_error != nullptr) {
     *r_error = PaintMaterialLayerEditError::None;
   }

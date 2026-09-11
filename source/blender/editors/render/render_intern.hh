@@ -111,5 +111,8 @@ void RENDER_OT_opengl(wmOperatorType *ot);
 
 void IMAGE_OT_bake_from_material(wmOperatorType *ot);
 void IMAGE_OT_rebake_stale_material_sources(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_channel_toggle(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_bake_size_set(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_rebake(wmOperatorType *ot);
 
 }  // namespace blender

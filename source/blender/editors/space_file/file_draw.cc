@@ -143,7 +143,7 @@ void ED_file_path_button(bScreen *screen,
 
 struct FileTooltipData {
   const SpaceFile *sfile;
-  const FileDirEntry *file;
+  std::string file_relpath;
 };
 
 /* Below this tile size (px), an asset's list/grid tile is too small to read, so its tooltip adds a
@@ -168,10 +168,18 @@ static int file_tooltip_preview_tile_size_get(const FileSelectParams *params)
 
 static FileTooltipData *file_tooltip_data_create(const SpaceFile *sfile, const FileDirEntry *file)
 {
-  FileTooltipData *data = MEM_new_uninitialized<FileTooltipData>(__func__);
-  data->sfile = sfile;
-  data->file = file;
-  return data;
+  return MEM_new<FileTooltipData>(__func__, FileTooltipData{sfile, file->relpath});
+}
+
+static const FileDirEntry *file_tooltip_data_file_get(const FileTooltipData &tooltip_data)
+{
+  FileList *files = tooltip_data.sfile->files;
+  if (files == nullptr) {
+    return nullptr;
+  }
+
+  const int file_index = filelist_file_find_path(files, tooltip_data.file_relpath.c_str());
+  return filelist_file_ex(files, file_index, true);
 }
 
 static void file_draw_tooltip_custom_func(bContext & /*C*/,
@@ -183,7 +191,10 @@ static void file_draw_tooltip_custom_func(bContext & /*C*/,
   const SpaceFile *sfile = file_data->sfile;
   const FileList *files = sfile->files;
   const FileSelectParams *params = ED_fileselect_get_active_params(sfile);
-  const FileDirEntry *file = file_data->file;
+  const FileDirEntry *file = file_tooltip_data_file_get(*file_data);
+  if (file == nullptr) {
+    return;
+  }
 
   BLI_assert_msg(!file->asset, "Asset tooltip should never be overridden here.");
 
@@ -414,7 +425,10 @@ static void file_draw_asset_tooltip_custom_func(bContext &C,
                                                 void *argN)
 {
   const auto *tooltip_data = static_cast<FileTooltipData *>(argN);
-  const FileDirEntry *file = tooltip_data->file;
+  const FileDirEntry *file = file_tooltip_data_file_get(*tooltip_data);
+  if (file == nullptr || file->asset == nullptr) {
+    return;
+  }
   ed::asset::asset_tooltip(&C, *file->asset, tip);
 
   /* Below the tile size where the list/grid thumbnail itself is too small to read, add a bigger
@@ -528,13 +542,13 @@ static void file_but_tooltip_func_set(const SpaceFile *sfile,
     button_func_tooltip_custom_set(but,
                                    file_draw_asset_tooltip_custom_func,
                                    file_tooltip_data_create(sfile, file),
-                                   MEM_delete_void);
+                                   ui::but_func_argN_free<FileTooltipData>);
   }
   else {
     button_func_tooltip_custom_set(but,
                                    file_draw_tooltip_custom_func,
                                    file_tooltip_data_create(sfile, file),
-                                   MEM_delete_void);
+                                   ui::but_func_argN_free<FileTooltipData>);
   }
 }
 

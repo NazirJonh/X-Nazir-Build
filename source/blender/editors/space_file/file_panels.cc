@@ -24,6 +24,7 @@
 #include "RNA_define.hh"
 #include "RNA_prototypes.hh"
 
+#include "ED_asset_name_matching.hh"
 #include "ED_fileselect.hh"
 
 #include "UI_interface.hh"
@@ -308,6 +309,8 @@ void file_header_panels_register(ARegionType *art)
   pt->draw = file_panel_asset_catalog_buttons_draw;
   BLI_addtail(&art->paneltypes, pt);
   WM_paneltype_add(pt);
+
+  ed::asset::ED_asset_browser_name_match_panel_register(art);
 }
 
 }  // namespace blender

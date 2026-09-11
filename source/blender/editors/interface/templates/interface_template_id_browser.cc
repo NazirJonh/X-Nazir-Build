@@ -142,14 +142,14 @@ static void id_browser_popover_register()
   if (WM_paneltype_find("UI_PT_id_browser", true)) {
     return;
   }
-  PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
-  STRNCPY_UTF8(pt->idname, "UI_PT_id_browser");
-  STRNCPY_UTF8(pt->label, N_("Image Browser"));
-  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
-  pt->description = N_("Browse and assign an image with paint-slot filters");
-  pt->draw = id_browser_popover_draw;
-  pt->poll = id_browser_popover_poll;
-  WM_paneltype_add(pt);
+  static PanelType pt{};
+  STRNCPY_UTF8(pt.idname, "UI_PT_id_browser");
+  STRNCPY_UTF8(pt.label, N_("Image Browser"));
+  STRNCPY_UTF8(pt.translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  pt.description = N_("Browse and assign an image with paint-slot filters");
+  pt.draw = id_browser_popover_draw;
+  pt.poll = id_browser_popover_poll;
+  WM_paneltype_add(&pt);
 }
 
 /** \} */

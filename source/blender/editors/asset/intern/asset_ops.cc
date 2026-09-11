@@ -2535,7 +2535,6 @@ void operatortypes_asset()
 
   WM_operatortype_append(ASSET_OT_browser_name_match_map_type_toggle);
   WM_operatortype_append(ASSET_OT_browser_name_match_clear);
-  ED_asset_browser_name_match_panel_register();
 
   WM_operatortype_append(shelf::ASSETSHELF_OT_asset_favorite_toggle);
   WM_operatortype_append(shelf::ASSETSHELF_OT_asset_favorite_reorder);

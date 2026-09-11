@@ -612,6 +612,10 @@ void wm_close_and_free(bContext *C, wmWindowManager *wm)
   /* Per-`.blend` asset shelf popup sizes are plain (no nested allocations). */
   BLI_freelistN(&wm->asset_shelf_popup_sizes);
 
+  BLI_freelistN(&wm->category_glyph_mappings);
+  BLI_freelistN(&wm->category_glyph_overrides);
+  BLI_freelistN(&wm->category_tags);
+
   /* Shared brush-texture grid state, see #ImageGridOwner. */
   ed::image_grid::image_grid_slot_dna_free(wm->image_grid);
   ed::image_grid::image_grid_slot_dna_free(wm->image_grid_mask);

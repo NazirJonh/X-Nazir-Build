@@ -941,15 +941,15 @@ static void grid_catalog_selector_panel_register()
     return;
   }
 
-  PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
-  STRNCPY_UTF8(pt->idname, "GRIDVIEW_PT_catalog_selector");
-  STRNCPY_UTF8(pt->label, N_("Catalog Selector"));
-  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
-  pt->description = N_("Select asset catalogs to display in the grid");
-  pt->draw = grid_catalog_selector_panel_draw;
-  pt->listener = grid_catalog_selector_region_listen;
+  static PanelType pt{};
+  STRNCPY_UTF8(pt.idname, "GRIDVIEW_PT_catalog_selector");
+  STRNCPY_UTF8(pt.label, N_("Catalog Selector"));
+  STRNCPY_UTF8(pt.translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  pt.description = N_("Select asset catalogs to display in the grid");
+  pt.draw = grid_catalog_selector_panel_draw;
+  pt.listener = grid_catalog_selector_region_listen;
   /* Not bound to any region type list — popovers are located via the global type registry. */
-  WM_paneltype_add(pt);
+  WM_paneltype_add(&pt);
 }
 
 /** \} */
@@ -981,14 +981,14 @@ static void grid_preview_size_panel_register()
     return;
   }
 
-  PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
-  STRNCPY_UTF8(pt->idname, "GRIDVIEW_PT_preview_size");
-  STRNCPY_UTF8(pt->label, N_("Display Settings"));
-  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
-  pt->description = N_("Adjust preview tile size for the grid");
-  pt->draw = grid_preview_size_panel_draw;
+  static PanelType pt{};
+  STRNCPY_UTF8(pt.idname, "GRIDVIEW_PT_preview_size");
+  STRNCPY_UTF8(pt.label, N_("Display Settings"));
+  STRNCPY_UTF8(pt.translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  pt.description = N_("Adjust preview tile size for the grid");
+  pt.draw = grid_preview_size_panel_draw;
   /* Not bound to any region type list — popovers are located via the global type registry. */
-  WM_paneltype_add(pt);
+  WM_paneltype_add(&pt);
 }
 
 /** \} */
@@ -1097,13 +1097,13 @@ static void grid_name_match_filter_panel_register()
     return;
   }
 
-  PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
-  STRNCPY_UTF8(pt->idname, "GRIDVIEW_PT_name_match_filter");
-  STRNCPY_UTF8(pt->label, N_("Name Match Filter"));
-  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
-  pt->description = N_("Select map types for name matching in the grid");
-  pt->draw = grid_name_match_panel_draw;
-  WM_paneltype_add(pt);
+  static PanelType pt{};
+  STRNCPY_UTF8(pt.idname, "GRIDVIEW_PT_name_match_filter");
+  STRNCPY_UTF8(pt.label, N_("Name Match Filter"));
+  STRNCPY_UTF8(pt.translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  pt.description = N_("Select map types for name matching in the grid");
+  pt.draw = grid_name_match_panel_draw;
+  WM_paneltype_add(&pt);
 }
 
 /** \} */

@@ -298,7 +298,12 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
   link(*group_input, "Socket_2", *mix, "Factor_Float");
   link(*mix, "Result_Color", *group_output, "Socket_3");
 
+  /* The Mix node's `data_type` and the Vector Math nodes' `operation` were set on the storage
+   * after the nodes were created, so their socket declarations are still the defaults. Tag the
+   * whole tree and run the update now: without this the group instantiates into a shader with
+   * the wrong sockets and the node inliner asserts when EEVEE compiles a material using it. */
   BKE_ntree_update_tag_all(group);
+  BKE_ntree_update_after_single_tree_change(bmain, *group);
   return group;
 }
 
@@ -345,11 +350,14 @@ static void composite_mix_factor_opacity_detect(CompositeMixNode &r_mix)
 bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
 {
   if (BKE_paint_material_is_normal_combine_group(node)) {
-    /* Sockets by name: the group is the engine's own, and its interface names are the contract
-     * an add-on wiring it up sees. */
-    r_mix.factor = bke::node_find_socket(node, SOCK_IN, "Factor"_ustr);
-    r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "A"_ustr);
-    r_mix.top = bke::node_find_socket(node, SOCK_IN, "B"_ustr);
+    /* A group instance inherits the interface's `Socket_N` identifiers, not its display names;
+     * #node_find_socket matches identifiers. See #NORMAL_COMBINE_ID_*. */
+    r_mix.factor = bke::node_find_socket(
+        node, SOCK_IN, UString::from_ptr_noinline(NORMAL_COMBINE_ID_FACTOR));
+    r_mix.bottom = bke::node_find_socket(
+        node, SOCK_IN, UString::from_ptr_noinline(NORMAL_COMBINE_ID_A));
+    r_mix.top = bke::node_find_socket(
+        node, SOCK_IN, UString::from_ptr_noinline(NORMAL_COMBINE_ID_B));
     r_mix.blend = CompositeBlend::NormalCombine;
     composite_mix_factor_opacity_detect(r_mix);
     return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;

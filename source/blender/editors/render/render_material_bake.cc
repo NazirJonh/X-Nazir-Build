@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio> /* TEMP-DEBUG [MAT_LAYER]: remove with the prints below. */
 #include <cstring>
 #include <mutex>
 
@@ -1509,8 +1510,20 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
   Vector<ImBuf *> request_images;
   if (baked) {
     request_images.resize(requests.size(), nullptr);
-    baked = bake_requests_attach(*bake_main, *bake_material.nodetree, requests) &&
-            bake_requests_render(*bake_main, bake_material, job.size, requests, request_images);
+    const bool attached = bake_requests_attach(*bake_main, *bake_material.nodetree, requests);
+    const bool rendered = attached && bake_requests_render(
+                                          *bake_main, bake_material, job.size, requests,
+                                          request_images);
+    /* TEMP-DEBUG [MAT_LAYER]: remove before merge. */
+    printf("[MAT_LAYER] bake.startjob requests=%d attached=%d rendered=%d\n",
+           int(requests.size()), int(attached), int(rendered));
+    fflush(stdout);
+    baked = rendered;
+  }
+  else {
+    /* TEMP-DEBUG [MAT_LAYER]: remove before merge. */
+    printf("[MAT_LAYER] bake.startjob nothing to render (requests=%d)\n", int(requests.size()));
+    fflush(stdout);
   }
   if (baked) {
     for (const int request_index : requests.index_range()) {
@@ -1561,6 +1574,11 @@ static void material_bake_images_endjob(void *customdata)
                               source.channel == int(job.channels[i]) &&
                               source.material != nullptr &&
                               source.material->id.session_uid == job.material_session_uid;
+    /* TEMP-DEBUG [MAT_LAYER]: remove before merge. */
+    printf("[MAT_LAYER] bake.endjob ch=%d rendered=%d target=%d valid=%d\n",
+           int(job.channels[i]), int(rendered != nullptr), int(target != nullptr),
+           int(target_valid));
+    fflush(stdout);
     if (rendered == nullptr || !target_valid) {
       /* A channel that failed to render keeps its old pixels and its old hash, so it stays stale
        * and the next re-bake picks it up again. */
@@ -1671,6 +1689,9 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 
   result.ok = !result.created.is_empty();
   if (render_channels.is_empty()) {
+    if (result.ok && params.before_render && !params.before_render(result)) {
+      result.ok = false;
+    }
     return result;
   }
 
@@ -1690,6 +1711,14 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 
   for (const uint32_t session_uid : job->target_session_uids) {
     material_bake_images_pending_add(session_uid);
+  }
+
+  /* After the copy, so a hand-over that edits the source material itself cannot leak into the
+   * bake; before the job, so no worker thread is touching node trees while it runs. */
+  if (params.before_render && !params.before_render(result)) {
+    material_bake_images_free(job);
+    result.ok = false;
+    return result;
   }
 
   if (params.blocking) {

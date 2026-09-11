@@ -579,9 +579,9 @@ bool BKE_paint_material_layer_set_enabled(Main &bmain,
  * function's to delete.
  */
 bool BKE_paint_material_layer_remove(Main &bmain,
-                                      Material &ma,
-                                      int ordinal,
-                                      PaintMaterialLayerEditError *r_error = nullptr);
+                                    Material &ma,
+                                    int ordinal,
+                                    PaintMaterialLayerEditError *r_error = nullptr);
 
 /**
  * The channels a Material layer carries: Base Color, Metallic, Roughness, Specular, Normal,
@@ -598,7 +598,11 @@ constexpr int PAINT_MATERIAL_LAYER_MATERIAL_CHANNELS[7] = {0, 1, 2, 3, 4, 7, 9};
  * Only path S (a stack already exists): an empty material refuses with NotAStack and the
  * caller takes path E (#BKE_paint_material_layer_add_material_base) instead.
  * A needed channel wired to a non-stack network refuses with ChannelHasUnsupportedSource
- * before anything is written; never partially applied.
+ * before anything is written.
+ *
+ * The whole preflight and each single channel's migration are all-or-nothing. If a later
+ * channel's migration fails, the channels already migrated on this call stay in the graph;
+ * the caller runs under #OPTYPE_UNDO, so one undo step still takes the partial migration back.
  */
 bool BKE_paint_material_layer_channels_ensure(Main &bmain,
                                               Material &ma,
@@ -607,7 +611,8 @@ bool BKE_paint_material_layer_channels_ensure(Main &bmain,
 
 /**
  * Path E: build the first layer of an empty material directly as normalized Mix chains
- * holding \a baked_maps (single row, single marker, kind=Material).
+ * holding \a baked_maps (a single row sharing one marker). The caller stamps the kind
+ * afterwards with #BKE_paint_material_layer_kind_set, the same as every other add.
  *
  * Ownership of \a baked_maps follows #BKE_paint_material_layer_add: shown maps keep their
  * user, the rest (all of them on refusal) are freed.

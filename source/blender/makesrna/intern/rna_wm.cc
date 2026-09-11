@@ -1942,6 +1942,9 @@ static void rna_WindowManager_stack_layer_material_pick_set(PointerRNA *ptr,
                                                             ReportList * /*reports*/)
 {
   wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
+  if (wm->runtime == nullptr) {
+    return;
+  }
   wm->runtime->stack_layer_material_pick = (value.data != nullptr) ?
                                                static_cast<Material *>(value.data) :
                                                nullptr;

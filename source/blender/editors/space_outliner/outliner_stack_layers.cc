@@ -2387,10 +2387,11 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
               -1,
               SHRT_MAX);
   /* Read only by the kinds that asked for a colour; the others leave it at its white default. */
+  static const float fill_color_default[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   PropertyRNA *fill_prop = RNA_def_float_color(ot->srna,
                                                "fill_color",
                                                4,
-                                               nullptr,
+                                               fill_color_default,
                                                0.0f,
                                                FLT_MAX,
                                                "Fill Color",
@@ -2401,14 +2402,14 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
   /* #layout.tag_button writes its tag name into every operator it attaches; the Add never reads
    * it, but the property keeps that write from warning on every redraw. */
   PropertyRNA *tag_prop = RNA_def_string(
-      ot->srna, "tag_name", "", 0, "Tag Name", "Tag the button that placed the call belongs to");
+      ot->srna, "tag_name", nullptr, 0, "Tag Name", "Tag the button that placed the call belongs to");
   RNA_def_property_flag(tag_prop, PROP_HIDDEN);
   /* The data-block a kind with #StackAddKindInfo::source_id_type is made from, by name: what a UI
    * picked, and what a repeat or a script names again. Bounded, since the exec reads it into an ID
    * name buffer. */
   PropertyRNA *source_prop = RNA_def_string(ot->srna,
                                             "source",
-                                            "",
+                                            nullptr,
                                             MAX_ID_NAME - 2,
                                             "Source",
                                             "Name of the data-block the new layer is made from, "
@@ -2841,10 +2842,11 @@ void OUTLINER_OT_stack_layer_fill_color_set(wmOperatorType *ot)
    * the texture. The automatic push would land on top of the image entry instead. */
   ot->flag = OPTYPE_REGISTER;
 
+  static const float color_default[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   PropertyRNA *prop = RNA_def_float_color(ot->srna,
                                           "color",
                                           4,
-                                          nullptr,
+                                          color_default,
                                           0.0f,
                                           FLT_MAX,
                                           "Color",

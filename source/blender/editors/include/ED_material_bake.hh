@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "BLI_function_ref.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -206,6 +207,8 @@ struct BakeTargetSpec {
   eMaterialPaintChannel channel;
 };
 
+struct MaterialBakeToImagesResult;
+
 struct MaterialBakeToImagesParams {
   /** Source material. Not localized by the caller -- #material_bake_to_images copies it. */
   Material *material = nullptr;
@@ -221,6 +224,15 @@ struct MaterialBakeToImagesParams {
   bool reuse_existing = false;
   /** #Image::paint_layer_id to stamp on every created map. Empty -> a fresh UUID is generated. */
   char layer_id[37] = "";
+  /**
+   * Called on the calling thread once the targets exist, before any render starts; returning
+   * false starts none and leaves #MaterialBakeToImagesResult.ok false.
+   *
+   * This is where a caller hands the targets over to the file (a layer add, say). Doing that after
+   * #material_bake_to_images returns would race the job: its worker updates node trees too, and a
+   * refused hand-over frees targets the job would then write back to.
+   */
+  FunctionRef<bool(const MaterialBakeToImagesResult &result)> before_render;
 };
 
 struct MaterialBakeToImagesResult {

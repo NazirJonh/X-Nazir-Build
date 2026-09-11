@@ -496,7 +496,7 @@ TEST_F(PaintMaterialLayerEditTest, material_channel_set_and_multichannel_api_dec
 
 TEST_F(PaintMaterialLayerEditTest, channels_ensure_empty_is_not_a_stack)
 {
-  /* SetUp-материал: Principled без цепочек. */
+  /* The fixture's material is a bare Principled with no chains. */
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   int ch[1] = {0};
   EXPECT_FALSE(
@@ -506,7 +506,7 @@ TEST_F(PaintMaterialLayerEditTest, channels_ensure_empty_is_not_a_stack)
 
 TEST_F(PaintMaterialLayerEditTest, channels_ensure_procedural_denied)
 {
-  /* BaseColor — стек, Metallic занят процедурой (Value → Metallic). */
+  /* Base Color is a stack; Metallic is driven by a procedural node (Value -> Metallic). */
   build_stack(2);
   bNodeTree &tree = *material->nodetree;
   bNode *val = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);

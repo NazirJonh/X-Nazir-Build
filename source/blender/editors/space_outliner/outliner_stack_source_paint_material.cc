@@ -86,6 +86,19 @@
 
 namespace blender::ed::outliner {
 
+/**
+ * The mask-editing half of a preview-slot click, testable without a #bContext (see
+ * #PaintMaterialStackSource::preview_activate, which resolves \a scene from context and calls
+ * this). \a paint is the Paint whose brush is swapped. \a section_id names which preview was
+ * clicked ("MASK" or "CHANNELS", see #outliner_stack_preview_section_from_cursor); any other
+ * value is a no-op.
+ */
+bool paint_material_mask_preview_activate(Main &bmain,
+                                          Scene &scene,
+                                          Paint &paint,
+                                          const StackRow &row,
+                                          const StringRef section_id);
+
 namespace {
 
 /**
@@ -1198,12 +1211,77 @@ class PaintMaterialStackSource final : public StackSource,
         image_size = scene->toolsettings->paint_mode.new_channel_image_size;
       }
     }
-    return this->paint_edit(
+    Material &owner_material = paint_owner(owner);
+    Scene *scene = CTX_data_scene(&C);
+    if (!add && scene != nullptr && scene->toolsettings != nullptr) {
+      const Image *edited = scene->toolsettings->paint_mode.mask_image_binding.image;
+      if (edited != nullptr &&
+          edited == paint_row_mask_image_get(*CTX_data_main(&C), owner_material, ordinal))
+      {
+        /* Leave mask editing before the image is freed: the remap would only null the target and
+         * leave the mask brush active instead of restoring the one the channels were painted
+         * with. */
+        BKE_paint_material_mask_edit_end(C);
+        WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+        WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, nullptr);
+      }
+    }
+    const bool changed = this->paint_edit(
         C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
           return add ? BKE_paint_material_layer_mask_add(
                            bmain, material, ordinal, initial_color, image_size, &error) :
                        BKE_paint_material_layer_mask_remove(bmain, material, ordinal, &error);
         });
+    if (changed && add) {
+      paint_mask_edit_begin_for_new_mask(C, owner, owner_material, ordinal);
+    }
+    return changed;
+  }
+
+  /** The mask Image of the layer at \a ordinal, or null when it has none. */
+  static Image *paint_row_mask_image_get(Main &bmain, Material &material, const int ordinal)
+  {
+    Vector<PaintMaterialLayerStackEntry> entries;
+    if (!BKE_paint_material_layer_stack_from_material(bmain, material, entries)) {
+      return nullptr;
+    }
+    for (const PaintMaterialLayerStackEntry &entry : entries) {
+      if (entry.ordinal == ordinal) {
+        return entry.channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr);
+      }
+    }
+    return nullptr;
+  }
+
+  /**
+   * A mask is added to be painted: make it the stroke target right away and show its content, the
+   * same state a click on its preview slot leads to (see #preview_activate).
+   */
+  static void paint_mask_edit_begin_for_new_mask(bContext &C,
+                                                 ID &owner,
+                                                 Material &material,
+                                                 const int ordinal)
+  {
+    Image *mask_image = paint_row_mask_image_get(*CTX_data_main(&C), material, ordinal);
+    if (mask_image == nullptr) {
+      return;
+    }
+    BKE_paint_material_mask_edit_begin(C, *mask_image);
+    WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+    WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, nullptr);
+
+    SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C);
+    if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+      return;
+    }
+    /* The rows still describe the graph before the mask existed; its state hash changed, so this
+     * rebuilds them and the row has its "MASK" section to switch to. The UI state set here is
+     * captured by the invalidation #stack_mutate does after this returns. */
+    const StackReadContext ctx = outliner_stack_read_context(C);
+    outliner_stack_rows_ensure(ctx, *space_outliner, owner);
+    if (const StackRow *row = outliner_stack_row_find(*space_outliner, ordinal)) {
+      outliner_stack_row_active_section_set(*space_outliner, *row, "MASK");
+    }
   }
 
   bool row_fill_color_set(bContext &C,
@@ -1420,6 +1498,28 @@ class PaintMaterialStackSource final : public StackSource,
     ED_space_image_set(CTX_data_main(&C), space_image, id_cast<Image *>(sub_row.id), false);
     WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_IMAGE, space_image);
     return true;
+  }
+
+  bool preview_activate(bContext &C,
+                        ID & /*owner*/,
+                        const StackRow &row,
+                        const StringRef section_id) const override
+  {
+    Main *bmain = CTX_data_main(&C);
+    Scene *scene = CTX_data_scene(&C);
+    /* The Paint of the current object mode: a Sculpt Mode material stroke reads its brush from
+     * #ToolSettings::sculpt, not #ToolSettings::imapaint. */
+    Paint *paint = BKE_paint_get_active_from_context(&C);
+    if (bmain == nullptr || scene == nullptr || paint == nullptr) {
+      return false;
+    }
+    const bool changed = paint_material_mask_preview_activate(
+        *bmain, *scene, *paint, row, section_id);
+    if (changed) {
+      WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+      WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, nullptr);
+    }
+    return changed;
   }
 
   bool target_clear(bContext &C) const override
@@ -1730,6 +1830,45 @@ class PaintMaterialStackSource final : public StackSource,
 };
 
 }  // namespace
+
+bool paint_material_mask_preview_activate(Main &bmain,
+                                          Scene &scene,
+                                          Paint &paint,
+                                          const StackRow &row,
+                                          const StringRef section_id)
+{
+  if (scene.toolsettings == nullptr) {
+    return false;
+  }
+  PaintModeSettings &paint_mode = scene.toolsettings->paint_mode;
+
+  if (section_id == "MASK") {
+    Image *mask_image = nullptr;
+    for (const StackContentSection &section : row.content_sections) {
+      if (section.identifier != "MASK") {
+        continue;
+      }
+      for (const StackSubRow &sub_row : section.sub_rows) {
+        mask_image = id_cast<Image *>(sub_row.id);
+      }
+    }
+    if (mask_image == nullptr || paint_mode.mask_image_binding.image == mask_image) {
+      return false;
+    }
+    BKE_paint_material_mask_edit_begin_ex(bmain, scene, paint, paint_mode, *mask_image);
+    return true;
+  }
+
+  if (section_id == "CHANNELS") {
+    if (paint_mode.mask_image_binding.image == nullptr) {
+      return false;
+    }
+    BKE_paint_material_mask_edit_end_ex(bmain, scene, paint, paint_mode);
+    return true;
+  }
+
+  return false;
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Assign Dropped Image to a Channel

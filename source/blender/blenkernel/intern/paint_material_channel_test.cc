@@ -2389,4 +2389,12 @@ TEST_F(PaintMaterialChannelTest, LocalBrushChannelDataSurvivesSaveReload)
   BKE_id_free(bmain, scene);
 }
 
+TEST(PaintModeSettingsMaskDefaults, mask_mode_is_off_by_default)
+{
+  PaintModeSettings settings;
+  EXPECT_EQ(settings.mask_image_binding.image, nullptr);
+  EXPECT_EQ(settings.mask_active_brush, nullptr);
+  EXPECT_EQ(settings.mask_saved_brush, nullptr);
+}
+
 }  // namespace blender

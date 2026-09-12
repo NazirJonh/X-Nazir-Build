@@ -1797,6 +1797,27 @@ bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, con
       ->row_activate(*C, space_outliner.runtime->stack_focus, *owner, ordinal, *row);
 }
 
+bool outliner_stack_row_preview_activate(bContext *C,
+                                         SpaceOutliner &space_outliner,
+                                         const int ordinal,
+                                         const StringRef section_id)
+{
+  if (ordinal < 0) {
+    return false;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner == nullptr) {
+    return false;
+  }
+  outliner_stack_rows_ensure(ctx, space_outliner, *owner);
+  const StackRow *row = outliner_stack_row_find(space_outliner, ordinal);
+  if (row == nullptr) {
+    return false;
+  }
+  return stack_source_for_space(space_outliner)->preview_activate(*C, *owner, *row, section_id);
+}
+
 bool outliner_stack_sub_row_activate(bContext *C, SpaceOutliner &space_outliner, const int nr)
 {
   const StackReadContext ctx = outliner_stack_read_context(*C);
@@ -2249,6 +2270,7 @@ static wmOperatorStatus stack_preview_section_activate_exec(bContext *C, wmOpera
   {
     return OPERATOR_CANCELLED;
   }
+  outliner_stack_row_preview_activate(C, *space_outliner, ordinal, section_id);
 
   ED_region_tag_redraw(CTX_wm_region(C));
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);

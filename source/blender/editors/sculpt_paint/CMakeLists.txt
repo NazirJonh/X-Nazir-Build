@@ -287,6 +287,7 @@ if(WITH_GTESTS)
     mesh/paint_image_select_warp_tests.cc
     mesh/paint_image_uv_geom_tests.cc
     mesh/paint_image_uv_symmetry_tests.cc
+    mesh/paint_material_source_test.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc
     mesh/sculpt_undo_test.cc

@@ -3993,6 +3993,88 @@ Material *BKE_paint_material_active_layer_owner_get(Main &bmain,
   return nullptr;
 }
 
+void BKE_paint_material_mask_edit_begin_ex(Main &bmain,
+                                           Scene &scene,
+                                           Paint &paint,
+                                           PaintModeSettings &mode_settings,
+                                           Image &mask_image)
+{
+  const bool already_editing_a_mask = mode_settings.mask_image_binding.image != nullptr;
+  if (!already_editing_a_mask) {
+    mode_settings.mask_saved_brush = paint.brush;
+    if (mode_settings.mask_active_brush == nullptr) {
+      /* First mask edit ever: pick the texture-paint default ("Paint Hard", see
+       * #paint_brush_default_essentials_name_get) through the paint's own mode. Falls back to a
+       * plain local brush when the essentials library is unavailable (unit tests, minimal
+       * installs) -- mask strokes never read #BrushMaterialPaint.channels[] (invariant M6), so
+       * any brush paints a mask once #BKE_brush_material_paint_ensure ran on it below. */
+      const PaintMode paint_mode = paint.runtime != nullptr ? paint.runtime->paint_mode :
+                                                              PaintMode::Texture3D;
+      mode_settings.mask_active_brush = BKE_paint_brush_from_essentials(
+          &bmain, paint_mode, "Paint Hard");
+      if (mode_settings.mask_active_brush == nullptr) {
+        const eObjectMode ob_mode = paint.runtime != nullptr && paint.runtime->ob_mode != 0 ?
+            eObjectMode(paint.runtime->ob_mode) :
+            OB_MODE_TEXTURE_PAINT;
+        mode_settings.mask_active_brush = BKE_brush_add(&bmain, "Mask", ob_mode);
+      }
+    }
+    if (mode_settings.mask_active_brush != nullptr) {
+      BKE_brush_material_paint_ensure(mode_settings.mask_active_brush);
+      BKE_paint_brush_set_synced(scene, paint, mode_settings.mask_active_brush);
+    }
+  }
+  if (mode_settings.mask_image_binding.image != &mask_image) {
+    /* Same contract as the channel bindings: a zeroed #ImageUser is not a valid tile/frame
+     * address, and the first stroke would find no buffer to write into. */
+    BKE_imageuser_default(&mode_settings.mask_image_binding.iuser);
+  }
+  mode_settings.mask_image_binding.image = &mask_image;
+}
+
+void BKE_paint_material_mask_edit_end_ex(Main &bmain,
+                                         Scene &scene,
+                                         Paint &paint,
+                                         PaintModeSettings &mode_settings)
+{
+  if (mode_settings.mask_image_binding.image == nullptr) {
+    return;
+  }
+  mode_settings.mask_active_brush = paint.brush;
+  if (mode_settings.mask_saved_brush != nullptr) {
+    BKE_paint_brush_set_synced(scene, paint, mode_settings.mask_saved_brush);
+  }
+  else {
+    BKE_paint_brush_set_default(&bmain, &scene, &paint);
+  }
+  mode_settings.mask_saved_brush = nullptr;
+  mode_settings.mask_image_binding.image = nullptr;
+}
+
+void BKE_paint_material_mask_edit_begin(bContext &C, Image &mask_image)
+{
+  Main *bmain = CTX_data_main(&C);
+  Scene *scene = CTX_data_scene(&C);
+  Paint *paint = BKE_paint_get_active_from_context(&C);
+  if (bmain == nullptr || scene == nullptr || paint == nullptr) {
+    return;
+  }
+  BKE_paint_material_mask_edit_begin_ex(
+      *bmain, *scene, *paint, scene->toolsettings->paint_mode, mask_image);
+}
+
+void BKE_paint_material_mask_edit_end(bContext &C)
+{
+  Main *bmain = CTX_data_main(&C);
+  Scene *scene = CTX_data_scene(&C);
+  Paint *paint = BKE_paint_get_active_from_context(&C);
+  if (bmain == nullptr || scene == nullptr || paint == nullptr) {
+    return;
+  }
+  BKE_paint_material_mask_edit_end_ex(
+      *bmain, *scene, *paint, scene->toolsettings->paint_mode);
+}
+
 bool BKE_paint_principled_channel_image_get(Object &ob,
                                             eMaterialPaintChannel channel,
                                             Image **r_image,
@@ -4192,6 +4274,11 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
   BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
 
   PaintMaterialImagesEnsureResult result;
+  if (mode_settings.mask_image_binding.image != nullptr) {
+    /* The one target already exists -- it is the mask itself, created by
+     * #BKE_paint_material_layer_mask_add. Nothing to create, nothing to skip-and-report. */
+    return result;
+  }
 
   /* A stack row is the paint target when a channel is bound to one of its maps; its other
    * channels stay as the user left them instead of growing a map on the first stroke. Only this
@@ -4321,9 +4408,21 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     Object &ob,
     PaintModeSettings &mode_settings,
     const BrushMaterialPaint *brush_paint,
-    const int visible_material_channels)
+    const int visible_material_channels,
+    const float mask_stroke_value)
 {
   Vector<PaintMaterialImageTarget> targets;
+  if (mode_settings.mask_image_binding.image != nullptr) {
+    PaintMaterialImageTarget target;
+    target.image = mode_settings.mask_image_binding.image;
+    target.iuser = &mode_settings.mask_image_binding.iuser;
+    target.value = mask_stroke_value;
+    target.is_color_channel = false;
+    target.is_normal_channel = false;
+    target.is_mask_target = true;
+    targets.append(target);
+    return targets;
+  }
   if (brush_paint == nullptr) {
     return targets;
   }

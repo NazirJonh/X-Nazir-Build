@@ -9,13 +9,17 @@
 #include "BLI_string.h"
 
 #include "BKE_gtest_base.hh"
+#include "BKE_brush.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_node.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_material_layer_edit.hh"
+#include "BKE_scene.hh"
 
+#include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
@@ -26,15 +30,27 @@
 
 #include "outliner_stack_source.hh"
 
-namespace blender::ed::outliner::tests {
+namespace blender::ed::outliner {
+
+bool paint_material_mask_preview_activate(Main &bmain,
+                                          Scene &scene,
+                                          Paint &paint,
+                                          const StackRow &row,
+                                          StringRef section_id);
+
+namespace tests {
 
 class OutlinerStackPaintMaterialSourceTest : public bke::BlenderGTestBase {
  public:
   Main *bmain = nullptr;
+  Scene *scene = nullptr;
 
   void SetUp() override
   {
     bmain = BKE_main_new();
+    scene = BKE_scene_add(bmain, "MaskPreviewScene");
+    Paint *paint = &scene->toolsettings->imapaint.paint;
+    BKE_paint_ensure(scene->toolsettings, &paint);
   }
 
   void TearDown() override
@@ -314,4 +330,126 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, material_layer_row_resolves_its_sou
   EXPECT_TRUE(material_preview_found);
 }
 
-}  // namespace blender::ed::outliner::tests
+TEST_F(OutlinerStackPaintMaterialSourceTest, mask_preview_click_enters_mask_mode)
+{
+  Material &material = add_material_with_texture(add_image("Base"));
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  int ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params, &ordinal));
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, material, ordinal, white, 8, &error))
+      << int(error);
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  const StackFocus focus;
+  Vector<StackRow> rows;
+  ASSERT_TRUE(paint_source().rows_build(ctx, focus, material.id, rows));
+  const StackRow *row = nullptr;
+  for (const StackRow &candidate : rows) {
+    if (candidate.ordinal == ordinal) {
+      row = &candidate;
+    }
+  }
+  ASSERT_NE(row, nullptr);
+
+  Brush *original = BKE_brush_add(bmain, "OriginalBrush", OB_MODE_TEXTURE_PAINT);
+  scene->toolsettings->imapaint.paint.brush = original;
+
+  EXPECT_TRUE(paint_material_mask_preview_activate(
+      *bmain, *scene, scene->toolsettings->imapaint.paint, *row, "MASK"));
+  EXPECT_NE(scene->toolsettings->paint_mode.mask_image_binding.image, nullptr);
+  EXPECT_NE(BKE_paint_brush(&scene->toolsettings->imapaint.paint), original);
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, channels_preview_click_after_mask_restores_brush)
+{
+  Material &material = add_material_with_texture(add_image("Base2"));
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  int ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params, &ordinal));
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, material, ordinal, white, 8, &error))
+      << int(error);
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  const StackFocus focus;
+  Vector<StackRow> rows;
+  ASSERT_TRUE(paint_source().rows_build(ctx, focus, material.id, rows));
+  const StackRow *row = nullptr;
+  for (const StackRow &candidate : rows) {
+    if (candidate.ordinal == ordinal) {
+      row = &candidate;
+    }
+  }
+  ASSERT_NE(row, nullptr);
+
+  Brush *original = BKE_brush_add(bmain, "OriginalBrush2", OB_MODE_TEXTURE_PAINT);
+  scene->toolsettings->imapaint.paint.brush = original;
+  ASSERT_TRUE(paint_material_mask_preview_activate(
+      *bmain, *scene, scene->toolsettings->imapaint.paint, *row, "MASK"));
+
+  EXPECT_TRUE(paint_material_mask_preview_activate(
+      *bmain, *scene, scene->toolsettings->imapaint.paint, *row, "CHANNELS"));
+  EXPECT_EQ(scene->toolsettings->paint_mode.mask_image_binding.image, nullptr);
+  EXPECT_EQ(BKE_paint_brush(&scene->toolsettings->imapaint.paint), original);
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, mask_a_to_b_to_channels_uses_the_right_images)
+{
+  Material &material = add_material_with_texture(add_image("Base3"));
+  PaintMaterialLayerAddParams params_a;
+  params_a.image_size = 8;
+  int ordinal_a = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params_a, &ordinal_a));
+  PaintMaterialLayerAddParams params_b;
+  params_b.image_size = 8;
+  int ordinal_b = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params_b, &ordinal_b));
+
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, material, ordinal_a, white, 8, &error))
+      << int(error);
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, material, ordinal_b, white, 8, &error))
+      << int(error);
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  const StackFocus focus;
+  Vector<StackRow> rows;
+  ASSERT_TRUE(paint_source().rows_build(ctx, focus, material.id, rows));
+  const StackRow *row_a = nullptr;
+  const StackRow *row_b = nullptr;
+  for (const StackRow &candidate : rows) {
+    if (candidate.ordinal == ordinal_a) {
+      row_a = &candidate;
+    }
+    if (candidate.ordinal == ordinal_b) {
+      row_b = &candidate;
+    }
+  }
+  ASSERT_NE(row_a, nullptr);
+  ASSERT_NE(row_b, nullptr);
+
+  ASSERT_TRUE(paint_material_mask_preview_activate(
+      *bmain, *scene, scene->toolsettings->imapaint.paint, *row_a, "MASK"));
+  Image *mask_a = scene->toolsettings->paint_mode.mask_image_binding.image;
+  ASSERT_NE(mask_a, nullptr);
+
+  /* A -> B: replaces only the image (brush snapshot covered at the BKE level in Task 7). */
+  ASSERT_TRUE(paint_material_mask_preview_activate(
+      *bmain, *scene, scene->toolsettings->imapaint.paint, *row_b, "MASK"));
+  Image *mask_b = scene->toolsettings->paint_mode.mask_image_binding.image;
+  EXPECT_NE(mask_b, mask_a);
+
+  /* Exit: the binding is cleared. */
+  EXPECT_TRUE(paint_material_mask_preview_activate(
+      *bmain, *scene, scene->toolsettings->imapaint.paint, *row_b, "CHANNELS"));
+  EXPECT_EQ(scene->toolsettings->paint_mode.mask_image_binding.image, nullptr);
+}
+
+}  // namespace tests
+}  // namespace blender::ed::outliner

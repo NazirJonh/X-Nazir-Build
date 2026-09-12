@@ -789,6 +789,10 @@ bool outliner_stack_focus_set(bContext *C,
                               int sub_index,
                               bool enter_edit_mode);
 bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, int ordinal);
+bool outliner_stack_row_preview_activate(bContext *C,
+                                         SpaceOutliner &space_outliner,
+                                         int ordinal,
+                                         StringRef section_id);
 bool outliner_stack_sub_row_activate(bContext *C, SpaceOutliner &space_outliner, int nr);
 /**
  * Height of one row in pixels.

@@ -886,6 +886,19 @@ class StackSource {
     return false;
   }
 
+  /**
+   * A single click landed on a preview slot naming a content section, right after #row_activate
+   * already ran for the row it belongs to. Sources with nothing extra to do on a preview click
+   * need not implement this.
+   */
+  virtual bool preview_activate(bContext & /*C*/,
+                                ID & /*owner*/,
+                                const StackRow & /*row*/,
+                                StringRef /*section_id*/) const
+  {
+    return false;
+  }
+
   /** Undo the effect of #row_activate on the rest of the file. */
   virtual bool target_clear(bContext & /*C*/) const
   {

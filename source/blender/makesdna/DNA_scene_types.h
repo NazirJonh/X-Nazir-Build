@@ -1626,6 +1626,28 @@ struct PaintModeSettings {
    */
   int stack_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   char _pad_stack_layer_channel[4] = {};
+
+  /**
+   * The mask Image currently being painted instead of the material's channels, or an empty
+   * binding (image == nullptr) when no mask is being edited -- the normal #channel_image_bindings
+   * are the paint target then. Deliberately not part of #channel_image_bindings:
+   * #PAINT_LAYER_MAP_MASK is not a valid index into that array.
+   */
+  MaterialPaintChannelImageBinding mask_image_binding = {};
+
+  /**
+   * The brush last used while painting a mask, remembered globally (not per material/object) so
+   * returning to mask editing keeps using it. Null before the first time a mask is edited, in
+   * which case a default is picked and assigned here
+   * (see #BKE_paint_material_mask_edit_begin).
+   */
+  Brush *mask_active_brush = nullptr;
+
+  /**
+   * The brush that was active in PBR Paint right before switching to mask editing; restored on
+   * the way back and then cleared. Null when not currently editing a mask.
+   */
+  Brush *mask_saved_brush = nullptr;
 };
 
 /** #PaintModeSettings::new_channel_image_size */

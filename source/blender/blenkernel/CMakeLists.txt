@@ -821,6 +821,7 @@ if(WITH_GTESTS)
     intern/paint_material_composite_test.cc
     intern/paint_material_layer_edit_test.cc
     intern/paint_material_layer_model_test.cc
+    intern/paint_material_mask_edit_test.cc
     intern/paint_material_resolve_test.cc
     intern/paint_test.cc
     intern/path_templates_test.cc

@@ -1131,6 +1131,40 @@ Material *BKE_paint_material_active_layer_owner_get(Main &bmain,
                                                     int *r_ordinal);
 
 /**
+ * Enter mask-editing mode: \a mask_image becomes the paint target instead of the material's
+ * channels. The first call (no mask currently being edited) snapshots \a paint's active brush
+ * into \a mode_settings.mask_saved_brush and switches to \a mode_settings.mask_active_brush
+ * (creating a default one, with #Brush.material_paint allocated, the very first time this is ever
+ * called). A call while a *different* mask is already being edited only replaces
+ * \a mode_settings.mask_image_binding -- the brush was already switched and stays switched.
+ *
+ * Exposed separately from #BKE_paint_material_mask_edit_begin so it can be unit tested without a
+ * #bContext.
+ */
+void BKE_paint_material_mask_edit_begin_ex(Main &bmain,
+                                           Scene &scene,
+                                           Paint &paint,
+                                           PaintModeSettings &mode_settings,
+                                           Image &mask_image);
+
+/**
+ * Leave mask-editing mode: restores the brush that was active before the first
+ * #BKE_paint_material_mask_edit_begin_ex call (falling back to #BKE_paint_brush_set_default when
+ * that brush no longer exists), and remembers whatever brush is active right now as the mask
+ * brush for next time. A no-op when no mask is currently being edited.
+ */
+void BKE_paint_material_mask_edit_end_ex(Main &bmain,
+                                         Scene &scene,
+                                         Paint &paint,
+                                         PaintModeSettings &mode_settings);
+
+/** #BKE_paint_material_mask_edit_begin_ex, resolving \a paint and \a mode_settings from \a C. */
+void BKE_paint_material_mask_edit_begin(bContext &C, Image &mask_image);
+
+/** #BKE_paint_material_mask_edit_end_ex, resolving \a paint and \a mode_settings from \a C. */
+void BKE_paint_material_mask_edit_end(bContext &C);
+
+/**
  * Image the Image Editor should show for the Material canvas when nothing is selected.
  *
  * Prefers Base Color, then other created Principled maps, with Normal and Alpha last.
@@ -1212,6 +1246,10 @@ struct PaintMaterialImageTarget {
   float color[3] = {0.0f, 0.0f, 0.0f};
   bool is_color_channel = false;
   bool is_normal_channel = false;
+  /** True when this target is a Stack Layers row's mask being edited (see
+   * #PaintModeSettings::mask_image_binding), not a Principled material channel. #channel is
+   * meaningless when this is true -- readers must check this first. */
+  bool is_mask_target = false;
 };
 
 /**
@@ -1220,12 +1258,16 @@ struct PaintMaterialImageTarget {
  * Missing maps are skipped. Channels without a socket (Custom) are never included.
  * Order follows #BKE_paint_material_channels.
  * When \a brush_paint is null, returns an empty list (no channels enabled).
+ * When #PaintModeSettings.mask_image_binding.image is set, returns a single mask target instead
+ * of reading channels at all; \a brush_paint may be null in that case and \a mask_stroke_value
+ * is the flat value written.
  */
 Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     Object &ob,
     PaintModeSettings &mode_settings,
     const BrushMaterialPaint *brush_paint,
-    int visible_material_channels);
+    int visible_material_channels,
+    float mask_stroke_value = 1.0f);
 
 /**
  * Whether a face with \a face_material_index should receive image writes while painting

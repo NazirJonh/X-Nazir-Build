@@ -2023,6 +2023,11 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
               rebuild_tree = true;
             }
           }
+          if (outliner_stack_row_preview_activate(
+                  C, *space_outliner, activate_tselem->nr, preview_section))
+          {
+            rebuild_tree = true;
+          }
         }
       }
       if (space_outliner->stack_layers_view == SO_SL_VIEW_STACK &&

@@ -711,6 +711,27 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     reader,
                                                     &toolsett_old->paint_mode.canvas_image,
                                                     IDWALK_CB_NOP);
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &toolsett->paint_mode.mask_image_binding.image,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &toolsett_old->paint_mode.mask_image_binding.image,
+                                                    IDWALK_CB_NOP);
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &toolsett->paint_mode.mask_active_brush,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &toolsett_old->paint_mode.mask_active_brush,
+                                                    IDWALK_CB_NOP);
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &toolsett->paint_mode.mask_saved_brush,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &toolsett_old->paint_mode.mask_saved_brush,
+                                                    IDWALK_CB_NOP);
   for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
     /* The paint bindings are deliberately preserved across an undo restore (they do not follow
      * the graph back): a live paint target must not jump when an undo rolls the graph back. The
@@ -1584,6 +1605,9 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
     }
 
     BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.canvas_image);
+    BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.mask_image_binding.image);
+    BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.mask_active_brush);
+    BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.mask_saved_brush);
     for (MaterialPaintChannelImageBinding &binding :
         sce->toolsettings->paint_mode.channel_image_bindings)
     {

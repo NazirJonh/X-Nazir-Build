@@ -2861,10 +2861,9 @@ static wmOperatorStatus layer_add_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
-  /* Commits below without closing an open session first, so the multires rebuild would discard it.
-   * See #mask_edit_refuse_ccg_rebuild; the operators that instead *close* the session (removal,
-   * validate, select, the group removals, the bakes) call #mask_edit_end and are not refused. */
-  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+  /* Adding a layer was never taught to run alongside an open session or to close one first; see
+   * #mask_edit_refuse_active_session. */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   Main *bmain = CTX_data_main(C);
@@ -2904,7 +2903,7 @@ static wmOperatorStatus layer_add_exec(bContext *C, wmOperator *op)
     if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
       flush_pending_multires_base(*member);
     }
-    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+    if (mask_edit_refuse_active_session(op, *member)) {
       continue;
     }
     eligible.append(member);
@@ -3049,6 +3048,11 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
+  /* Removal was closing the session and proceeding rather than refusing; see
+   * #mask_edit_refuse_active_session for why every structural tree operator now refuses instead. */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   /* The tree view can hold several layers selected at once, so a removal targets the whole
    * selection plus the active layer. The active layer is included even when it sits outside the
    * selection: it is what the rest of the panel points at, so leaving it behind would contradict
@@ -3075,12 +3079,10 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
    * them synced is skipped entirely; a member missing only some of them still has the rest
    * removed, with a warning naming what was left behind.
    *
-   * Unlike #layer_add_exec / #layer_clear_exec this gather does NOT call
-   * #mask_edit_refuse_ccg_rebuild on a member: removal is one of the operators that *closes* an
-   * open mask-edit session rather than refusing on its account (see #layer_add_exec's own comment
-   * on that split, and #layer_group_delete_exec for the group-shaped equivalent), and the
-   * per-member loop below closes each member's own session unconditionally, exactly as the active
-   * object's own body does. */
+   * Like #layer_add_exec, this gather calls #mask_edit_refuse_active_session on a member rather
+   * than closing its session and proceeding: removal used to be one of the operators that closed
+   * an open mask-edit session instead of refusing on its account, but every structural tree
+   * operator now refuses uniformly (see #mask_edit_refuse_active_session). */
   Vector<Object *> eligible;
   eligible.append(ctx.object);
   Vector<RemoveFanoutMember> fanout_members;
@@ -3101,6 +3103,9 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
                   "Remove Sculpt Layer: skipping \"%s\" (sculpt layers are not available for "
                   "this object)",
                   member->id.name + 2);
+      continue;
+    }
+    if (mask_edit_refuse_active_session(op, *member)) {
       continue;
     }
     /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree,
@@ -3169,26 +3174,10 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
     fanout_members.append(std::move(fanout_member));
   }
 
-  /* Read before the close below, which clears it. Zero when no session is open, which is the common
-   * case. */
-  const SculptSession *ss = session_of(*ctx.object);
-  const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
-  /* A removal closes an open weight-mask editing session, exactly as a change of active layer does
-   * (see #layer_select_exec). Left open across the deletion of its own node the session becomes
-   * invisible — the row and its mask icon are gone — while the node's weights stay in the standard
-   * mask storage with the user's own mask parked, so every subsequent brush is silently masked by a
-   * layer that no longer exists. Closed *before* the payload capture below so the capture takes the
-   * settled mask #mask_edit_end just compressed onto the node, rather than the pre-session value. */
-  /* Before the close, which clears the session struct the parked tool idname lives on. */
-  mask_edit_exit_ui(C, *ctx.object);
-  mask_edit_end(*ctx.object);
-  /* Derive the mesh base from the still-consistent pre-change state. */
+  /* No session can be open here, on the active object or on any member reaching `eligible`: both
+   * were refused above by #mask_edit_refuse_active_session rather than closed. */
   session_state_ensure(*ctx.object);
   undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
-  /* Active object: unchanged from the single-object path. */
-  if (session_uid != 0) {
-    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
-  }
   /* Capture every payload while the list is still intact so each records the neighbour it really
    * followed; undo re-inserts them in capture order and rebuilds the original stack. Capturing and
    * removing one at a time would make each layer record a stale neighbour instead (see
@@ -3214,16 +3203,9 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
   for (RemoveFanoutMember &fanout_member : fanout_members) {
     Object &member = *fanout_member.object;
     Mesh &member_mesh = mesh_of(member);
-    /* Read before the close below, which clears it -- this member's own session, not the active
-     * object's. */
-    const SculptSession *member_ss = session_of(member);
-    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
-    mask_edit_exit_ui(C, member);
-    mask_edit_end(member);
+    /* No session can be open on this member either: the gather loop above refused it via
+     * #mask_edit_refuse_active_session rather than reaching this point with one still open. */
     session_state_ensure(member);
-    if (member_session_uid != 0) {
-      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
-    }
     Vector<undo::SculptLayerUndoPayload> member_removed;
     for (SculptLayer *layer : fanout_member.targets) {
       member_removed.append(undo::sculpt_layer_payload_capture(
@@ -3581,7 +3563,9 @@ static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
-  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+  /* Reparenting was never taught to run alongside an open session or to close one first; see
+   * #mask_edit_refuse_active_session. */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   Mesh &mesh = *ctx.mesh;
@@ -3832,7 +3816,7 @@ static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
          * that. */
         flush_pending_multires_base(*member);
       }
-      if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      if (mask_edit_refuse_active_session(op, *member)) {
         continue;
       }
     }
@@ -3972,7 +3956,7 @@ static wmOperatorStatus layer_duplicate_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
-  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   SculptLayer *src = bke::sculpt_layers::active_get(*ctx.mesh);
@@ -4037,7 +4021,7 @@ static wmOperatorStatus layer_duplicate_exec(bContext *C, wmOperator *op)
        * while the live CCG still matches the stored layers. */
       flush_pending_multires_base(*member);
     }
-    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+    if (mask_edit_refuse_active_session(op, *member)) {
       continue;
     }
     eligible.append(member);
@@ -4415,14 +4399,14 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   /* Neither guard was needed while a masked participant was refused outright — a session implies a
-   * mask, so it could not be reached. Now that masks are folded, an open session has to be settled
-   * back onto its node first (it parks the weights in the standard mask storage and leaves
-   * #SculptLayerTreeNode::mask holding the pre-session snapshot), and a grid session is refused
-   * rather than closed, as everywhere else in this module. */
-  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+   * mask, so it could not be reached. Now that masks are folded, an open session's node holds only
+   * the pre-session snapshot in #SculptLayerTreeNode::mask (the live weights sit in the standard
+   * mask storage instead), so merging while one is open would fold stale data; refused outright
+   * rather than closed, like every other structural tree operator (see
+   * #mask_edit_refuse_active_session). */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
-  mask_edit_end(*ctx.object);
 
   const MergeMaskPolicy policy_raw = merge_mask_policy_get(op);
   /* No folder dissolves here, so there is no group mask to keep and the option collapses to the one
@@ -4586,14 +4570,11 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
        * that. Placed after the cheap gates so a member that is skipped anyway is left alone. */
       flush_pending_multires_base(*member);
     }
-    /* The active object's own pair of session guards, in the same order and for the same reasons.
-     * #mask_edit_end has to run before every mask-reading guard below, exactly as it does above:
-     * it settles an open session's weights back onto the node, and the guards must see the settled
-     * mask rather than the pre-session snapshot #SculptLayerTreeNode::mask still holds. */
-    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+    /* The active object's own session guard, for the same reason: see
+     * #mask_edit_refuse_active_session. */
+    if (mask_edit_refuse_active_session(op, *member)) {
       continue;
     }
-    mask_edit_end(*member);
 
     const SculptLayerGroup *member_stop_above = member_below->base.parent;
     const int64_t member_mask_elem_num = mask_layout_for_object(*member).totelem;
@@ -4938,11 +4919,10 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_ERROR, "Cannot merge sculpt layers inside a disabled group");
     return OPERATOR_CANCELLED;
   }
-  /* See #layer_merge_down_exec for why both guards are needed only now. */
-  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+  /* See #layer_merge_down_exec for why this refusal is needed only now. */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
-  mask_edit_end(*ctx.object);
 
   const MergeMaskPolicy policy_raw = merge_mask_policy_get(op);
   /* No folder dissolves here, so KeepGroup has no group mask to keep and collapses to Combine, as in
@@ -5140,14 +5120,11 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
        * that. Placed after the cheap gates so a member that is skipped anyway is left alone. */
       flush_pending_multires_base(*member);
     }
-    /* The active object's own pair of session guards, in the same order and for the same reasons.
-     * #mask_edit_end has to run before every mask-reading guard below, exactly as it does above:
-     * it settles an open session's weights back onto the node, and the guards must see the settled
-     * mask rather than the pre-session snapshot #SculptLayerTreeNode::mask still holds. */
-    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+    /* The active object's own session guard, for the same reason: see
+     * #mask_edit_refuse_active_session. */
+    if (mask_edit_refuse_active_session(op, *member)) {
       continue;
     }
-    mask_edit_end(*member);
 
     Vector<SculptLayer *> member_participants;
     member_participants.append(member_active);
@@ -5488,6 +5465,11 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
+  /* Baking used to close the session and proceed rather than refusing; see
+   * #mask_edit_refuse_active_session for why every structural tree operator now refuses instead. */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   /* Baking keeps the combined result and drops all layers: their effect becomes part of the base
    * geometry. Which carrier that is depends on the session:
    * - Multires: fold each enabled layer's tangent displacement into the base MDisps (an exact
@@ -5508,10 +5490,10 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
    * same full-stack bake; there is no per-node #sync_uid gate. The active object was already
    * validated by #op_context_get and is included unconditionally.
    *
-   * Unlike #layer_add_exec / #layer_clear_exec this gather does NOT call
-   * #mask_edit_refuse_ccg_rebuild on a member: bake is one of the operators that *closes* an open
-   * mask-edit session rather than refusing on its account (see #layer_add_exec's comment on that
-   * split), and the per-member loop below closes each member's own session unconditionally. */
+   * Like #layer_add_exec, this gather calls #mask_edit_refuse_active_session on a member rather
+   * than closing its session and proceeding: bake used to be one of the operators that closed an
+   * open mask-edit session instead of refusing on its account, but every structural tree operator
+   * now refuses uniformly. */
   Vector<Object *> eligible;
   eligible.append(ctx.object);
   Vector<BakeFanoutMember> fanout_members;
@@ -5534,6 +5516,9 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
                   member->id.name + 2);
       continue;
     }
+    if (mask_edit_refuse_active_session(op, *member)) {
+      continue;
+    }
     Mesh &member_mesh = mesh_of(*member);
     /* Captured here, on this member's own tree, and carried forward -- see #BakeFanoutMember.
      * Must happen before ANY #bke::sculpt_layers::remove runs (the active object's included). */
@@ -5550,26 +5535,9 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
     fanout_members.append(std::move(fanout_member));
   }
 
-  /* Read before the close below, which clears it. Zero when no session is open, which is the common
-   * case. */
-  const SculptSession *bake_ss = session_of(*ctx.object);
-  const int session_uid = bake_ss ? bake_ss->layers.mask_edit.node_uid : 0;
-  /* A bake drops every layer, so it closes an open weight-mask editing session for the same reason
-   * #layer_remove_exec does: left open across the deletion of its own node the session becomes
-   * unreachable — the row and its mask icon are gone with the layer — while the node's weights stay
-   * in the standard mask storage with the user's own mask parked, silently masking every subsequent
-   * brush by a layer that no longer exists. Closed *before* the fold below so the bake applies the
-   * mask the user is currently painting: the fold reads the mask off the node
-   * (#node_mask_for_composite / #grid_masks_for_composite), and during a session the node still
-   * holds the pre-session snapshot while the live edits sit in the standard mask storage. */
-  /* Before the close, which clears the session struct the parked tool idname lives on. */
-  mask_edit_exit_ui(C, *ctx.object);
-  mask_edit_end(*ctx.object);
+  /* No session can be open here, on the active object or on any member reaching `eligible`: both
+   * were refused above by #mask_edit_refuse_active_session rather than closed. */
   undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
-  /* Active object: unchanged from the single-object path. */
-  if (session_uid != 0) {
-    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
-  }
   const KeyBlock *bake_key = ctx.grids ?
                                  nullptr :
                                  bke::sculpt_layers::bake_vert_layers_into_new_shape_key(*ctx.mesh);
@@ -5622,18 +5590,6 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
     /* Eligibility and the session guards already ran for every entry of `fanout_members` in the
      * gather pass above, before the undo bracket opened -- nothing here can fail or need skipping
      * (mirrors #layer_add_exec's own second loop). */
-
-    /* Read before the close below, which clears it -- this member's own session, not the active
-     * object's. Both halves of the close fan out: #mask_edit_end because the member's own layers
-     * are about to be destroyed under its own session, and #mask_edit_exit_ui because it is safe
-     * to fan out per member (Task 9d1: returns immediately when this object has no open session). */
-    const SculptSession *member_ss = session_of(member);
-    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
-    mask_edit_exit_ui(C, member);
-    mask_edit_end(member);
-    if (member_session_uid != 0) {
-      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
-    }
 
     const KeyBlock *member_bake_key =
         member_grids ? nullptr :
@@ -5757,6 +5713,12 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
     BKE_report(op->reports, RPT_ERROR, "No sculpt layers to bake");
     return OPERATOR_CANCELLED;
   }
+  /* The delegating branch below reaches #layer_bake_exec, which refuses on its own account; the
+   * bootstrap branch needs its own refusal for the same reason: see
+   * #mask_edit_refuse_active_session. */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   /* Mesh already has shape keys: #SCULPT_OT_layer_bake already appends one new dial-able relative
    * block to the existing key (its #bake_key / #bake_key_uid undo path). Delegate rather than
    * duplicate that logic; the delegate's own sculpt-undo push provides the single undo step, so
@@ -5779,8 +5741,8 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
    * mesh-only, matching the active-object guard above. Empty-layer members are skipped for the
    * same reason the active object cancels above.
    *
-   * Unlike #layer_add_exec this gather does NOT call #mask_edit_refuse_ccg_rebuild: bake closes
-   * an open mask-edit session rather than refusing (see #layer_bake_exec). */
+   * Like #layer_add_exec, this gather calls #mask_edit_refuse_active_session on a member rather
+   * than closing its session and proceeding: bake now refuses uniformly (see #layer_bake_exec). */
   Vector<Object *> eligible;
   eligible.append(ctx.object);
   Vector<BakeFanoutMember> fanout_members;
@@ -5810,6 +5772,9 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
                   member->id.name + 2);
       continue;
     }
+    if (mask_edit_refuse_active_session(op, *member)) {
+      continue;
+    }
     Mesh &member_mesh = mesh_of(*member);
     Vector<SculptLayer *> member_layers(bke::sculpt_layers::layers(member_mesh));
     if (member_layers.is_empty()) {
@@ -5826,21 +5791,11 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
     fanout_members.append(std::move(fanout_member));
   }
 
-  /* Only the bootstrap path reaches here; the delegating branch above closes the session inside
-   * #layer_bake_exec. Same reasoning as there: the layers this drops include the session's own node,
-   * and the fold below has to see the mask the user is currently painting. */
-  const SculptSession *bake_ss = session_of(*ctx.object);
-  const int session_uid = bake_ss ? bake_ss->layers.mask_edit.node_uid : 0;
-  /* Before the close, which clears the session struct the parked tool idname lives on. */
-  mask_edit_exit_ui(C, *ctx.object);
-  mask_edit_end(*ctx.object);
-
+  /* Only the bootstrap path reaches here; the delegating branch above already refused inside
+   * #layer_bake_exec. No session can be open on the active object or on any member reaching
+   * `eligible`: both were refused above rather than closed. */
   const short pre_bake_shapenr = ctx.object->shapenr;
   undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
-  /* Active object: unchanged from the single-object bootstrap path. */
-  if (session_uid != 0) {
-    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
-  }
 
   /* Bootstrap the Key: mirrors #insert_meshkey (object.cc). #BKE_key_add's ID_ME case already
    * strips the layer contribution out of `vert_positions` (see
@@ -5889,14 +5844,6 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
     Object &member = *fanout_member.object;
     Mesh &member_mesh = mesh_of(member);
     const Span<SculptLayer *> member_all = fanout_member.layers;
-
-    const SculptSession *member_ss = session_of(member);
-    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
-    mask_edit_exit_ui(C, member);
-    mask_edit_end(member);
-    if (member_session_uid != 0) {
-      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
-    }
 
     if (member_mesh.key != nullptr) {
       /* Existing-key path: same fold #layer_bake_exec uses for a mesh that already has shape keys. */
@@ -6103,7 +6050,7 @@ static wmOperatorStatus layer_clear_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
-  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
@@ -6166,7 +6113,7 @@ static wmOperatorStatus layer_clear_exec(bContext *C, wmOperator *op)
        * while the live CCG still matches the stored layers. */
       flush_pending_multires_base(*member);
     }
-    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+    if (mask_edit_refuse_active_session(op, *member)) {
       continue;
     }
     eligible.append(member);
@@ -6220,7 +6167,7 @@ static wmOperatorStatus layer_invert_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
-  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
@@ -6295,7 +6242,7 @@ static wmOperatorStatus layer_invert_exec(bContext *C, wmOperator *op)
        * while the live CCG still matches the stored layers. */
       flush_pending_multires_base(*member);
     }
-    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+    if (mask_edit_refuse_active_session(op, *member)) {
       continue;
     }
     eligible.append(member);
@@ -6392,6 +6339,12 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   const ValidateAction action = ValidateAction(RNA_enum_get(op->ptr, "action"));
+  /* Both actions rewrite the very nodes a session could be open on — Remove deletes them outright,
+   * Clear drops a mask that no longer fits — so this refuses uniformly rather than closing first;
+   * see #mask_edit_refuse_active_session. */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   Main *bmain = CTX_data_main(C);
 
   /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
@@ -6399,10 +6352,8 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
    * own stale set; there is no per-node #sync_uid gate. The active object already passed the
    * non-empty stale gate above and is included unconditionally.
    *
-   * Unlike #layer_add_exec / #layer_clear_exec this gather does NOT call
-   * #mask_edit_refuse_ccg_rebuild on a member: validate is one of the operators that *closes* an
-   * open mask-edit session rather than refusing on its account (see #layer_add_exec's comment on
-   * that split), and the per-member loop below closes each member's own session unconditionally. */
+   * Like #layer_add_exec, this gather calls #mask_edit_refuse_active_session on a member rather
+   * than closing its session and proceeding. */
   Vector<Object *> eligible;
   eligible.append(ctx.object);
   Vector<ValidateFanoutMember> fanout_members;
@@ -6423,6 +6374,9 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
                   "Repair Stale Sculpt Layers: skipping \"%s\" (sculpt layers are not available "
                   "for this object)",
                   member->id.name + 2);
+      continue;
+    }
+    if (mask_edit_refuse_active_session(op, *member)) {
       continue;
     }
     Mesh &member_mesh = mesh_of(*member);
@@ -6450,24 +6404,10 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
     fanout_members.append(std::move(fanout_member));
   }
 
-  /* Read before the close below, which clears it. Zero when no session is open. */
-  const SculptSession *ss = session_of(*ctx.object);
-  const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
-  /* Both actions rewrite the very nodes a session could be open on — Remove deletes them outright,
-   * Clear drops a mask that no longer fits (below) — so the session is closed first, for the reason
-   * spelled out in #layer_remove_exec. Closing it also puts the node's weights back on the node,
-   * which is what lets #undo::push_sculpt_layer_mask below capture a mask that is not stale by
-   * construction. */
-  /* Before the close, which clears the session struct the parked tool idname lives on. */
-  mask_edit_exit_ui(C, *ctx.object);
-  mask_edit_end(*ctx.object);
-
+  /* No session can be open here, on the active object or on any member reaching `eligible`: both
+   * were refused above by #mask_edit_refuse_active_session rather than closed. */
   session_state_ensure(*ctx.object);
   undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
-  /* Active object: unchanged from the single-object path. */
-  if (session_uid != 0) {
-    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
-  }
   if (action == ValidateAction::Remove) {
     /* Captured in list order while the list is still intact, then removed, so undo restores each
      * layer next to the neighbour it really had (see #layer_bake_exec). */
@@ -6536,19 +6476,9 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
      * gather pass above, before the undo bracket opened -- nothing here can fail or need skipping
      * (mirrors #layer_add_exec's own second loop). */
 
-    /* Read before the close below, which clears it -- this member's own session, not the active
-     * object's. Both halves of the close fan out: #mask_edit_end because the member's own stale
-     * layers are about to be rewritten under its own session, and #mask_edit_exit_ui because it is
-     * safe to fan out per member (Task 9d1: returns immediately when this object has no open
-     * session). */
-    const SculptSession *member_ss = session_of(member);
-    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
-    mask_edit_exit_ui(C, member);
-    mask_edit_end(member);
+    /* No session can be open on this member either: the gather loop above refused it via
+     * #mask_edit_refuse_active_session rather than reaching this point with one still open. */
     session_state_ensure(member);
-    if (member_session_uid != 0) {
-      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
-    }
 
     if (action == ValidateAction::Remove) {
       Vector<undo::SculptLayerUndoPayload> removed;
@@ -8828,7 +8758,7 @@ static wmOperatorStatus layer_group_add_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
-  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   Mesh &mesh = *ctx.mesh;
@@ -8863,7 +8793,7 @@ static wmOperatorStatus layer_group_add_exec(bContext *C, wmOperator *op)
     if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
       flush_pending_multires_base(*member);
     }
-    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+    if (mask_edit_refuse_active_session(op, *member)) {
       continue;
     }
     eligible.append(member);
@@ -9037,6 +8967,11 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
    * inside is removed — cascading deletion is a separate feature (design doc, non-goals). */
   SculptLayerGroup &parent = *group->base.parent;
   const int parent_uid = parent.base.uid;
+  /* Disbanding used to close an open session and proceed rather than refusing; see
+   * #mask_edit_refuse_active_session for why every structural tree operator now refuses instead. */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   Main *bmain = CTX_data_main(C);
 
   /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
@@ -9053,11 +8988,10 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
    * resolves is a child of some folder and always carries a non-null #base.parent — unlike
    * #group_row_lookup, which has to refuse uid 0 explicitly.
    *
-   * Unlike #layer_add_exec / #layer_clear_exec this gather does NOT call
-   * #mask_edit_refuse_ccg_rebuild on a member: a disband is one of the operators that *closes* an
-   * open mask-edit session rather than refusing on its account (see #layer_add_exec's own comment
-   * on that split), and the fan-out loop below closes each member's own session unconditionally,
-   * exactly as the active object's own body does. */
+   * Like #layer_add_exec, this gather calls #mask_edit_refuse_active_session on a member rather
+   * than closing its session and proceeding: a disband used to be one of the operators that closed
+   * an open mask-edit session instead of refusing on its account, but every structural tree
+   * operator now refuses uniformly. */
   Vector<Object *> eligible;
   eligible.append(ctx.object);
   Vector<GroupRemoveFanoutMember> fanout_members;
@@ -9105,6 +9039,9 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
                   member->id.name + 2);
       continue;
     }
+    if (mask_edit_refuse_active_session(op, *member)) {
+      continue;
+    }
     if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
       /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
        * while the live CCG still matches the stored layers, before the disband below invalidates
@@ -9118,16 +9055,8 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
     fanout_members.append(fanout_member);
   }
 
-  /* Read before the close below, which clears it. Zero when no session is open. */
-  const SculptSession *ss = session_of(*ctx.object);
-  const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
-  /* Disbanding destroys this folder, so an open session on it would be orphaned — see
-   * #layer_remove_exec for what that state does to every subsequent brush. Closed before the mask
-   * report just below as well as before the removal: #mask_edit_end compresses the session's weights
-   * back onto the folder, so the report tests the mask the folder really ends up losing. */
-  /* Before the close, which clears the session struct the parked tool idname lives on. */
-  mask_edit_exit_ui(C, *ctx.object);
-  mask_edit_end(*ctx.object);
+  /* No session can be open here, on the active object or on any member reaching `eligible`: both
+   * were refused above by #mask_edit_refuse_active_session rather than closed. */
 
   /* The folder's own weight mask attenuates its whole subtree through
    * #bke::sculpt_layers::chain_mask, and disbanding destroys it with the folder: the lifted-out
@@ -9143,10 +9072,6 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
 
   session_state_ensure(*ctx.object);
   undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
-  /* Active object: unchanged from the single-object path. */
-  if (session_uid != 0) {
-    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
-  }
 
   /* The lift-out is a real relink now, not a retag of a folder field: a folder owns its children,
    * and #bke::sculpt_layers::group_remove refuses one that still has any (it would leak the
@@ -9211,17 +9136,8 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
     const int member_group_uid = member_group.base.uid;
     const int member_parent_uid = member_parent.base.uid;
 
-    /* Read before the close below, which clears it -- this member's own session, not the active
-     * object's. Both halves of the close fan out, as in #layer_remove_exec: #mask_edit_end because
-     * the member's own folder is about to be destroyed under its own session, and
-     * #mask_edit_exit_ui because it is a no-op for anything but the object whose session is
-     * actually open (it returns immediately when the object has no session or none open, and only
-     * then restores the parked tool). Calling it per member is therefore how the ONE object that
-     * owns the open session gets its tool back, whichever object in the group that is. */
-    const SculptSession *member_ss = session_of(member);
-    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
-    mask_edit_exit_ui(C, member);
-    mask_edit_end(member);
+    /* No session can be open on this member either: the gather loop above refused it via
+     * #mask_edit_refuse_active_session rather than reaching this point with one still open. */
 
     /* Per member and naming the member, for the reason the active object's own report gives: the
      * lifted-out children going back to contributing in full is a shape change on THAT object, and
@@ -9237,9 +9153,6 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
     }
 
     session_state_ensure(member);
-    if (member_session_uid != 0) {
-      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
-    }
 
     Vector<SculptLayerTreeNode *> member_children;
     for (SculptLayerTreeNode &child : member_group.children) {
@@ -9397,7 +9310,7 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
-  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   Mesh &mesh = *ctx.mesh;
@@ -9433,13 +9346,6 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
       return OPERATOR_CANCELLED;
     }
   }
-  /* Settle an open session's weights back onto their node before any mask below is read, for the
-   * reason #layer_bake_exec closes one: during a session #SculptLayerTreeNode::mask holds the
-   * pre-session snapshot while the live weights sit in the standard mask storage, so folding the
-   * node's mask would bake weights the user has since painted over. The grid domain never reaches
-   * here — #mask_edit_refuse_ccg_rebuild above refused it. */
-  mask_edit_end(*ctx.object);
-
   const MergeMaskPolicy policy = merge_mask_policy_get(op);
   /* Exclusive upper bound of the fold. Under KeepGroup the folder's own mask survives on the result
    * and must not also go into the data, so the fold stops *at* the folder; otherwise the folder
@@ -9605,14 +9511,11 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
       /* Placed after the cheap gates so a member that is skipped anyway is left alone. */
       flush_pending_multires_base(*member);
     }
-    /* The active object's own pair of session guards, in the same order and for the same reasons.
-     * #mask_edit_end has to run before every mask-reading guard below, exactly as it does above:
-     * it settles an open session's weights back onto the node, and the guards must see the settled
-     * mask rather than the pre-session snapshot #SculptLayerTreeNode::mask still holds. */
-    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+    /* The active object's own session guard, for the same reason: see
+     * #mask_edit_refuse_active_session. */
+    if (mask_edit_refuse_active_session(op, *member)) {
       continue;
     }
-    mask_edit_end(*member);
 
     /* This member's own fold bound, derived from ITS folder -- the shared `policy` decides only
      * whether the folder is inside or outside the fold, exactly as on the active object. */
@@ -10023,6 +9926,11 @@ static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   SculptLayerGroup &parent = *group->base.parent;
+  /* Deleting used to close an open session and proceed rather than refusing; see
+   * #mask_edit_refuse_active_session for why every structural tree operator now refuses instead. */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
 
   /* Every layer in the folder's subtree, depth-first — an owning copy, because the removals below
    * invalidate the cached span. Unlike #SCULPT_OT_layer_group_remove (which disbands the folder and
@@ -10045,11 +9953,10 @@ static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
    * ordinary request, and the loops below simply move and remove nothing before the folder itself
    * goes.
    *
-   * Unlike #layer_add_exec / #layer_clear_exec this gather does NOT call
-   * #mask_edit_refuse_ccg_rebuild on a member, matching this operator's own active-object path,
-   * which does not call it either: a delete is one of the operators that *closes* an open mask-edit
-   * session rather than refusing on its account (see #layer_add_exec's comment on that split), and
-   * the fan-out loop below closes each member's own session unconditionally. */
+   * Like #layer_add_exec, this gather calls #mask_edit_refuse_active_session on a member rather
+   * than closing its session and proceeding: a delete used to be one of the operators that closed
+   * an open mask-edit session instead of refusing on its account, but every structural tree
+   * operator now refuses uniformly. */
   Vector<Object *> eligible;
   eligible.append(ctx.object);
   Vector<GroupDeleteFanoutMember> fanout_members;
@@ -10102,6 +10009,9 @@ static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
      * in #layer_remove_exec and #layer_merge_selected_exec: #bke::sculpt_layers::layers walks each
      * children list exactly once, so a node can appear at most once no matter what the file holds,
      * and a double #bke::sculpt_layers::remove of one node is therefore impossible. */
+    if (mask_edit_refuse_active_session(op, *member)) {
+      continue;
+    }
     Vector<SculptLayer *> member_subtree_layers(bke::sculpt_layers::layers(*member_group));
     if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
       /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
@@ -10117,24 +10027,13 @@ static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
     fanout_members.append(std::move(fanout_member));
   }
 
-  /* Read before the close below, which clears it. Zero when no session is open. */
-  const SculptSession *ss = session_of(*ctx.object);
-  const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
-  /* This deletes the folder, every nested folder and every layer below it, so an open session on any
-   * of them would be orphaned — see #layer_remove_exec. Closed before the payload captures below so
-   * each captures the settled mask rather than the pre-session value. */
-  /* Before the close, which clears the session struct the parked tool idname lives on. */
-  mask_edit_exit_ui(C, *ctx.object);
-  mask_edit_end(*ctx.object);
+  /* No session can be open here, on the active object or on any member reaching `eligible`: both
+   * were refused above by #mask_edit_refuse_active_session rather than closed. */
 
   /* Derive the mesh base from the still-consistent pre-change state: dropping the layers changes the
    * combined surface, and the commit below recomputes it from that base. */
   session_state_ensure(*ctx.object);
   undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
-  /* Active object: unchanged from the single-object path. */
-  if (session_uid != 0) {
-    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
-  }
 
   /* Capture every layer at its *original* position before the lift below moves it, so undo re-inserts
    * it where it really sat (with its data buffer). */
@@ -10181,25 +10080,13 @@ static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
      * gather pass above, before the undo bracket opened -- nothing here can fail or need skipping
      * (mirrors #layer_add_exec's own second loop). */
 
-    /* Read before the close below, which clears it -- this member's own session, not the active
-     * object's. Both halves of the close fan out, as in #layer_group_remove_exec: #mask_edit_end
-     * because the member's own folder and layers are about to be destroyed under its own session,
-     * and #mask_edit_exit_ui because it is a no-op for anything but the object whose session is
-     * actually open (it returns immediately when the object has no session or none open, and only
-     * then restores the parked tool). Calling it per member is therefore how the ONE object that
-     * owns the open session gets its tool back, whichever object in the group that is. */
-    const SculptSession *member_ss = session_of(member);
-    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
-    mask_edit_exit_ui(C, member);
-    mask_edit_end(member);
+    /* No session can be open on this member either: the gather loop above refused it via
+     * #mask_edit_refuse_active_session rather than reaching this point with one still open. */
 
     /* Mirrors #session_state_ensure's call above for the active object: it has to run before this
      * member's own data changes, or the mesh base captured here would fold an already-deleted state
      * into the base (see #commit_layers_change's comment on capture ordering). */
     session_state_ensure(member);
-    if (member_session_uid != 0) {
-      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
-    }
 
     /* Captured at their original positions, before the lift moves them; see the active object's own
      * two passes above for why capture and removal cannot be one loop. */
@@ -10437,15 +10324,23 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
      * edited is exactly what a user does while working. */
     return OPERATOR_FINISHED;
   }
+  /* Selecting a genuinely different layer used to close an open session and proceed rather than
+   * refusing; see #mask_edit_refuse_active_session for why every structural tree operator now
+   * refuses instead. The no-op above is unaffected: it returns before this is ever reached. */
+  if (mask_edit_refuse_active_session(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   Main *bmain = CTX_data_main(C);
 
   /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
    * before any undo bracket opens. The active object is included unconditionally; every other
    * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
    * object, plus a find-shaped gate #layer_add_exec has no analog for: the member must actually
-   * hold a layer synced to the one being selected. #mask_edit_refuse_ccg_rebuild is NOT applied
-   * on members: the active path closes sessions instead of refusing, and that session close is
-   * deliberately active-only (see the function's own decision comment). */
+   * hold a layer synced to the one being selected. A member's own open session is left alone here,
+   * deliberately: selecting the active object's layer does not touch a member's tree at all unless
+   * that member's own synced layer is also becoming active on it (below), and #mask_edit_end there
+   * is what used to settle it — now replaced by leaving that layer out of the fan-out instead (see
+   * the per-member uid check below). */
   Vector<Object *> eligible;
   eligible.append(ctx.object);
   Vector<SelectFanoutMember> fanout_members;
@@ -10497,6 +10392,9 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
     if (member_mesh.sculpt_layers_active_uid == member_layer->base.uid) {
       continue;
     }
+    if (mask_edit_refuse_active_session(op, *member)) {
+      continue;
+    }
     if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
       /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
        * while the live CCG still matches the stored layers -- load-bearing here because
@@ -10510,38 +10408,12 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
     fanout_members.append(fanout_member);
   }
 
-  /* Read before the close below, which clears it. Zero when no session is open, which is the
-   * common case. ACTIVE OBJECT ONLY: a member's open mask-edit session is unrelated to which
-   * layer the active object just selected, so #mask_edit_exit_ui / #mask_edit_end /
-   * #push_sculpt_layer_mask_session must not fan out. */
-  const SculptSession *ss = session_of(*ctx.object);
-  const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
-
-  /* Any change of the active layer closes an open weight-mask editing session, whichever node it
-   * was opened on. The session is presented as a mode of the row it belongs to, so leaving that row
-   * with the mask tools still writing into the layer's mask — and the user's own mask still parked
-   * — would be a state with no visible cause. Closed before the undo push below so the step
-   * records the settled layer data rather than the borrowed mask storage. */
-  /* Before the close, which clears the session struct the parked tool idname lives on. */
-  mask_edit_exit_ui(C, *ctx.object);
-  mask_edit_end(*ctx.object);
+  /* No session can be open here, on the active object or on any member reaching `eligible`: both
+   * were refused above by #mask_edit_refuse_active_session rather than closed. */
   /* Selection must ride on a sculpt undo step: without one, #OPTYPE_UNDO used to push a plain
    * memfile step, and undoing across it between two stroke SCULPT steps corrupted the delta-based
    * sculpt undo state. */
   undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
-  /* The close above is part of what this step did, so undoing it must reopen the session and
-   * redoing it must close one again. No mask has to be captured alongside: #mask_edit_end compresses
-   * the session's dense weights onto #SculptLayerTreeNode::mask, so the node already carries exactly
-   * the mask the session was authoring, and the reopen on undo expands that same mask back into the
-   * standard storage. Recording a mask here would be redundant at best — and actively wrong at
-   * worst, since #undo::push_sculpt_layer_mask refuses a node with an open session and the pre-close
-   * value of that field is stale by construction.
-   *
-   * Pushed after #push_begin because there is no step to record into before it, which is why the uid
-   * is read out above rather than here. ACTIVE-ONLY (see above). */
-  if (session_uid != 0) {
-    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
-  }
   undo::push_sculpt_layer_active(*ctx.object, uid_from, uid);
   ctx.mesh->sculpt_layers_active_uid = uid;
   /* Written straight to the field rather than through #active_set, so the tag the other selection

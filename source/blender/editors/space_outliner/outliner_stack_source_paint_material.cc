@@ -1565,8 +1565,9 @@ class PaintMaterialStackSource final : public StackSource,
   /**
    * Three cases: reordering a row of this same stack; an image dropped onto it, which the row
    * under the drop takes as a channel's map, or, over empty space, a new layer takes as its own;
-   * and a material dropped on it, which a group standing for that material takes, inserted where
-   * the drop was aimed -- beside the row under it, or on top when the drop named no row.
+   * and a material dropped on it, which is baked into fresh maps for a Material-kind layer
+   * inserted where the drop was aimed -- beside the row under it, or on top when the drop named
+   * no row.
    */
   bool can_accept(const StackReadContext &ctx,
                   const ID &owner,
@@ -1616,15 +1617,15 @@ class PaintMaterialStackSource final : public StackSource,
       return false;
     }
     if (payload.id_type == ID_MA && payload.id_uid != 0) {
-      /* The group standing for the material is created in this stack, so its material needs the
-       * same editability every other edit needs. The dropped material itself is only referenced,
-       * not changed, so a linked one is fine. */
+      /* The Material layer built from the dropped material is created in this stack, so the stack
+       * needs the same editability every other edit needs. The dropped material itself is only
+       * read for the bake, not changed, so a linked one is fine. */
       if (!this->is_editable(owner)) {
         *r_disabled_hint = TIP_("The material of this stack is linked or overridden");
         return false;
       }
-      /* The row the drop is aimed at has to still be there: the group is inserted next to it, and
-       * silently landing somewhere else is worse than refusing. */
+      /* The row the drop is aimed at has to still be there: the new layer is inserted next to it,
+       * and silently landing somewhere else is worse than refusing. */
       if (ctx.bmain == nullptr) {
         return true;
       }
@@ -1678,8 +1679,9 @@ class PaintMaterialStackSource final : public StackSource,
     }
 
     if (payload.id_type == ID_MA && payload.id_uid != 0) {
-      /* The group that stands for the material is inserted where the drop was aimed, the way a
-       * reorder lands: above the anchor row, or below it. A drop that named no row -- empty
+      /* The same gesture as the Add's Material kind: the material is baked into fresh maps, one
+       * per channel it feeds, and the Material-kind layer that takes them over is inserted where
+       * the drop was aimed -- above the anchor row, or below it. A drop that named no row -- empty
        * space, the breadcrumb -- puts it on top, which is what -1 means here. Undo is the drop
        * operator's own step. */
       Main *bmain = CTX_data_main(&C);
@@ -1697,29 +1699,19 @@ class PaintMaterialStackSource final : public StackSource,
       const PaintMaterialLayerMovePlace place = (target.place == StackMovePlace::Below) ?
                                                     PaintMaterialLayerMovePlace::Below :
                                                     PaintMaterialLayerMovePlace::Above;
-      PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
-      int new_ordinal = -1;
-      if (!BKE_paint_material_layer_group_material_add(*bmain,
-                                                       paint_owner(owner),
-                                                       *source_material,
-                                                       insert_anchor,
-                                                       place,
-                                                       &new_ordinal,
-                                                       &error))
-      {
-        /* A refused drop has no operator reports to carry the reason; the reports are where a
-         * scripted or shortcut-driven call looks next, and the tooltip said why while dragging. */
-        BKE_report(CTX_wm_reports(&C),
-                   RPT_ERROR,
-                   RPT_(BKE_paint_material_layer_edit_error_message(error)));
+      const int new_ordinal = ed::sculpt_paint::material_layer::add_from_material(
+          C, paint_owner(owner), insert_anchor, *source_material, place);
+      if (new_ordinal < 0) {
+        /* The refusals along the bake path report their own reasons; a refused drop has no
+         * operator reports to carry anything further. */
         return false;
       }
       WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &owner);
       /* #OUTLINER_OT_stack_layer_id_drop deliberately carries no #OPTYPE_UNDO -- the same
        * operator also just hands an image drop over to a popup that has not mutated anything
        * yet, and an automatic push at that point would land before the popup's own real step.
-       * A material drop mutates right here instead, so it pushes its own step, the same way
-       * #stack_row_fill_color_set_exec does for its own reason. */
+       * A material drop's layer lands in the bake's #before_render step, the way the Add's own
+       * gesture does it, so this push wraps the whole gesture the same way #OPTYPE_UNDO would. */
       ED_undo_push(&C, "Add Material Layer");
       if (r_affected_ordinal != nullptr) {
         *r_affected_ordinal = new_ordinal;

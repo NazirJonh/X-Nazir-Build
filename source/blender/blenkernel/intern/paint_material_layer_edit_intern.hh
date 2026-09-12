@@ -321,6 +321,19 @@ int layer_group_depth(bNodeTree &tree, int guard = 0);
 /** Whether any chain of any channel still ends in a bare Image Texture. */
 bool forest_has_bare_bottom(const Vector<Vector<ChannelChain>> &per_channel);
 
+/**
+ * Bring every wired channel back to the row structure the stack UI draws (the first wired
+ * channel's): a channel holding extra rows has them trimmed off the top, one missing rows has
+ * its whole chain re-mirrored from the reference. Flat top-level chains only; a stack whose
+ * rows live inside groups is refused unchanged.
+ *
+ * Repairs the drifted graphs every other edit refuses with
+ * #PaintMaterialLayerEditError::ChannelsDisagree; a no-op on an aligned stack.
+ */
+bool BKE_paint_material_layer_channels_realign(Main &bmain,
+                                               Material &ma,
+                                               PaintMaterialLayerEditError *r_error);
+
 void forest_top_chains(Vector<Vector<ChannelChain>> &per_channel,
                        Vector<ChannelChain *> &r_top);
 

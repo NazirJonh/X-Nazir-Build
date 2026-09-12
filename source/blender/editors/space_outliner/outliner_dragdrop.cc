@@ -1601,7 +1601,7 @@ void OUTLINER_OT_stack_layer_drop(wmOperatorType *ot)
 /** \name Stack Layer Data-Block Drop
  *
  * A data-block dropped on a stack row or in empty space becomes something of the source's own
- * making -- a new layer, a channel's map, a group standing for a material, or whatever a future
+ * making -- a new layer, a channel's map, a Material layer baked from a material, or whatever a future
  * source reads it as. Which types are worth catching, how a drag not already carrying a local
  * data-block resolves into one, and the wording of the tooltip are all the source's business,
  * asked through #StackDropHandler; nothing below this point names a domain type.

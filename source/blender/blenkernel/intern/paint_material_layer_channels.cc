@@ -710,6 +710,158 @@ bool BKE_paint_material_layer_channels_ensure(Main &bmain,
   return true;
 }
 
+namespace {
+
+/** The nodes making up a chain's top row, resolved while the topology cache is still good. */
+struct RealignTopRowNodes {
+  bNode *mix = nullptr;
+  bNode *map = nullptr;
+  /** The Multiply a mask or the map's own alpha reads through, when the Factor has one. */
+  bNode *coverage = nullptr;
+};
+
+RealignTopRowNodes realign_top_row_resolve(bNodeTree &tree, const ChainLayer &top)
+{
+  RealignTopRowNodes row;
+  tree.ensure_topology_cache();
+  row.mix = top.node;
+  CompositeMixNode mix;
+  if (row.mix != nullptr && composite_mix_node_read(*row.mix, mix)) {
+    row.map = const_cast<bNode *>(composite_mix_map_node(mix));
+    if (mix.factor != nullptr) {
+      if (bNodeLink *factor_link = sole_link_into(*const_cast<bNodeSocket *>(mix.factor))) {
+        if (factor_link->fromnode != row.map) {
+          row.coverage = factor_link->fromnode;
+        }
+      }
+    }
+  }
+  return row;
+}
+
+void realign_top_row_remove(Main &bmain, bNodeTree &tree, const RealignTopRowNodes &row)
+{
+  if (row.coverage != nullptr) {
+    bke::node_remove_node(&bmain, tree, *row.coverage, true);
+  }
+  if (row.map != nullptr) {
+    bke::node_remove_node(&bmain, tree, *row.map, true);
+  }
+  if (row.mix != nullptr) {
+    bke::node_remove_node(&bmain, tree, *row.mix, true);
+  }
+}
+
+/**
+ * Remove \a channel's top-level rows until \a keep_num of them are left; \a keep_num == 0 takes
+ * the whole chain down, leaving the channel unwired for a fresh migration.
+ */
+bool realign_channel_trim_to(Main &bmain,
+                             Material &ma,
+                             const int channel,
+                             const int64_t keep_num,
+                             PaintMaterialLayerEditError &r_error)
+{
+  for (int pass = 0; pass < 64; pass++) {
+    const bNodeSocket *terminal = paint_material_channel_socket_find(ma, channel);
+    if (terminal == nullptr) {
+      return true;
+    }
+    ma.nodetree->ensure_topology_cache();
+    ChannelChain chain;
+    chain.channel = channel;
+    if (!chain_collect(*ma.nodetree, *const_cast<bNodeSocket *>(terminal), chain, r_error)) {
+      /* An unlinked terminal reads as ChainNotPlain: the channel is fully unwired, which is
+       * where a trim to zero was headed anyway. Anything else is a chain this cannot rewrite. */
+      return keep_num == 0;
+    }
+    if (int64_t(chain.layers.size()) <= keep_num) {
+      return true;
+    }
+    /* The top row goes: whatever read it -- the terminal, since only flat top-level chains are
+     * realigned -- reads the row under it instead, then the row's own nodes come off. */
+    bNodeTree &tree = *chain.tree;
+    if (chain.layers.size() >= 2) {
+      ChainLayer &below = chain.layers[chain.layers.size() - 2];
+      relink_into(tree, *chain.terminal, *chain.terminal_node, *below.node, *below.output);
+    }
+    const RealignTopRowNodes row = realign_top_row_resolve(tree, chain.layers.last());
+    realign_top_row_remove(bmain, tree, row);
+    BKE_ntree_update_after_single_tree_change(bmain, tree);
+  }
+  r_error = PaintMaterialLayerEditError::ChainNotPlain;
+  return false;
+}
+
+}  // namespace
+
+bool BKE_paint_material_layer_channels_realign(Main &bmain,
+                                               Material &ma,
+                                               PaintMaterialLayerEditError *r_error)
+{
+  auto fail = [&](const PaintMaterialLayerEditError error) {
+    if (r_error != nullptr) {
+      *r_error = error;
+    }
+    return false;
+  };
+  auto succeed = [&]() {
+    if (r_error != nullptr) {
+      *r_error = PaintMaterialLayerEditError::None;
+    }
+    return true;
+  };
+
+  if (ma.nodetree == nullptr) {
+    return fail(PaintMaterialLayerEditError::NotAStack);
+  }
+  Vector<Vector<ChannelChain>> forest;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  if (!chains_collect_forest(ma, forest, error)) {
+    return fail(error);
+  }
+  if (forest.is_empty()) {
+    return succeed();
+  }
+  /* Groups hold sub-chains of their own; matching those up is not something this repairs. */
+  for (const Vector<ChannelChain> &per_channel : forest) {
+    if (per_channel.size() > 1) {
+      return fail(PaintMaterialLayerEditError::HasGroups);
+    }
+  }
+  /* The channel the stack UI draws its rows from is the contract; every other wired channel is
+   * brought to it -- extra rows come off the top, missing ones are mirrored in, the same
+   * migration an unwired channel gets. */
+  const int64_t ref_num = forest.first().last().layers.size();
+  bool changed = false;
+  for (const int64_t ci : forest.index_range().drop_front(1)) {
+    const ChannelChain &chain = forest[ci].last();
+    const int64_t cur_num = chain.layers.size();
+    if (cur_num == ref_num) {
+      continue;
+    }
+    changed = true;
+    if (cur_num > ref_num) {
+      if (!realign_channel_trim_to(bmain, ma, chain.channel, ref_num, error)) {
+        return fail(error);
+      }
+      continue;
+    }
+    /* Fewer rows than the reference: the channel's own shape is not worth keeping -- it does not
+     * match the stack the UI draws anyway. It comes down and the reference is mirrored into it. */
+    if (!realign_channel_trim_to(bmain, ma, chain.channel, 0, error) ||
+        !ensure_migrate_channel(bmain, ma, chain.channel, forest.first(), error))
+    {
+      return fail(error);
+    }
+  }
+  if (changed) {
+    BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
+    paint_layer_edit_committed(bmain, ma, true);
+  }
+  return succeed();
+}
+
 /**
  * Path E: the first layer of an empty material, built directly as one normalized Mix row
  * per baked channel -- never as bare images, which carry no marker and would leave the row
@@ -951,7 +1103,14 @@ bool BKE_paint_material_layer_channel_image_set(Main &bmain,
    * A bare base is accepted -- see the plan's case for why this operation is the one exception. */
   LayerEditPlan plan;
   if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::ChannelImageSet, plan, error)) {
-    return fail(error);
+    /* Channels that have drifted out of step refuse every edit; bringing them back to the row
+     * structure the UI draws is what lets the assignment through. */
+    if (error != PaintMaterialLayerEditError::ChannelsDisagree ||
+        !BKE_paint_material_layer_channels_realign(bmain, ma, &error) ||
+        !layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::ChannelImageSet, plan, error))
+    {
+      return fail(error);
+    }
   }
   /* 2. Shape: nothing to convert, and #plan.needs_bottom_normalize is ignored on purpose -- a
    * bare base takes the image as its own map, a Mix layer takes it through its existing top

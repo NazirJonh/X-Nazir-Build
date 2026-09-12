@@ -73,7 +73,11 @@ static int paint_layer_map_size(Image &image)
   return size;
 }
 
-int add_from_material(bContext &C, Material &owner, const int anchor_ordinal, Material &source)
+int add_from_material(bContext &C,
+                      Material &owner,
+                      const int anchor_ordinal,
+                      Material &source,
+                      const PaintMaterialLayerMovePlace place)
 {
   using namespace ed::material_bake;
   wmWindowManager *wm = CTX_wm_manager(&C);
@@ -193,7 +197,15 @@ int add_from_material(bContext &C, Material &owner, const int anchor_ordinal, Ma
     else {
       PaintMaterialLayerAddParams params;
       params.kind = PaintMaterialLayerKind::Material;
-      params.anchor_ordinal = anchor_ordinal;
+      /* Below the anchor is the anchor's own position in the add's absolute numbering (the add
+       * fills a place, a move names a neighbor); above it keeps the neighbor wording, which also
+       * carries an insert into a folder the anchor names. */
+      if (place == PaintMaterialLayerMovePlace::Below && anchor_ordinal >= 0) {
+        params.ordinal = anchor_ordinal;
+      }
+      else {
+        params.anchor_ordinal = anchor_ordinal;
+      }
       params.image_size = image_size;
       params.channel_images = baked_maps;
       step_ok = BKE_paint_material_layer_add(*bmain, owner, params, &new_ordinal, &error);

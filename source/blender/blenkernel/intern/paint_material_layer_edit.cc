@@ -387,7 +387,22 @@ bool BKE_paint_material_layer_add(Main &bmain,
                              PaintMaterialLayerMovePlace::Above,
                              &params))
   {
-    return fail(error);
+    /* Channels that have drifted out of step -- a stray row in one of them, mostly -- refuse
+     * every add; bringing them back to the row structure the UI draws is what lets the gesture
+     * through. */
+    if (error != PaintMaterialLayerEditError::ChannelsDisagree ||
+        !BKE_paint_material_layer_channels_realign(bmain, ma, &error) ||
+        !layer_edit_plan_build(bmain, ma,
+                               params.ordinal,
+                               LayerEditOp::Add,
+                               plan,
+                               error,
+                               -1,
+                               PaintMaterialLayerMovePlace::Above,
+                               &params))
+    {
+      return fail(error);
+    }
   }
   /* 2. Shape: a bottom that is still a bare image is wrapped in a Mix node first, now that the
    * add is known to happen. The conversion changes the chains, so the plan is read again

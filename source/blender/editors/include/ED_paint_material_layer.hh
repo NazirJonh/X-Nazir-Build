@@ -19,6 +19,8 @@
  * Material tab's operators; neither owns it, so neither may drift from the other.
  */
 
+#include "BKE_paint_material_layer_edit.hh"
+
 struct bContext;
 struct Material;
 struct ReportList;
@@ -30,13 +32,22 @@ namespace blender::ed::sculpt_paint::material_layer {
  * (#PaintMaterialLayerAddParams::anchor_ordinal terms), baking every Principled channel
  * \a source feeds into fresh maps and taking them over as the new layer's own.
  *
+ * \a place says which side of the anchor the layer lands on: #Above (and #Into, which the
+ * add itself reads as "above, inside the anchor") inserts above the anchor the way the
+ * #anchor_ordinal terms mean it; #Below inserts below it, at the anchor's own position in the
+ * #PaintMaterialLayerAddParams::ordinal terms.
+ *
  * A linked \a source (an asset, typically) is made local first: the layer is re-configured by
  * editing its source, which a linked material does not allow. Refusals -- nothing baked, the
  * source could not be made local, the bake failed -- are reported to \a C's window manager.
  *
  * \return the new layer's ordinal, or -1 when nothing was added.
  */
-int add_from_material(bContext &C, Material &owner, int anchor_ordinal, Material &source);
+int add_from_material(bContext &C,
+                      Material &owner,
+                      int anchor_ordinal,
+                      Material &source,
+                      PaintMaterialLayerMovePlace place = PaintMaterialLayerMovePlace::Above);
 
 /**
  * Switch \a channel of the active Material paint layer (#BKE_paint_material_active_layer_get) on

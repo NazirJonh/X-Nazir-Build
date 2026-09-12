@@ -53,6 +53,16 @@ class Sculpts : Overlay {
  private:
   PassSimple sculpt_mask_ = {"SculptMaskAndFaceSet"};
   PassSimple::Sub *mesh_ps_ = nullptr;
+  /**
+   * Same shader and geometry state as #mesh_ps_, but with the layer mask/preview opacities
+   * forced to zero. Used whenever the object falls back to #DRW_mesh_batch_cache_get_sculpt_overlays
+   * instead of a PBVH batch (deforming modifiers, external render engines): that cached batch's
+   * vertex format has no `layer_weight` / `layer_preview` attributes (see
+   * #extract_sculpt_data), so the shader would sample the GPU's default value for them instead of
+   * the neutral weight the PBVH fillers write. Forcing the opacity to zero cancels out whatever
+   * value is sampled, rather than tinting the whole surface as if every layer were fully masked.
+   */
+  PassSimple::Sub *mesh_fallback_ps_ = nullptr;
   PassSimple::Sub *curves_ps_ = nullptr;
 
   PassSimple sculpt_curve_cage_ = {"SculptCage"};
@@ -239,6 +249,22 @@ class Sculpts : Overlay {
         sub.push_constant("layer_preview_opacity", layer_preview_opacity);
         sub.push_constant("layer_preview_tint", layer_preview_tint);
         mesh_ps_ = &sub;
+      }
+      {
+        /* See #mesh_fallback_ps_. Mask/face-set opacity stay real: the cached batch does carry
+         * those attributes correctly, only the layer channels are unrepresentable here. */
+        auto &sub = sculpt_mask_.sub("MeshFallback");
+        sub.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | DRW_STATE_BLEND_MUL,
+                      state.clipping_plane_count);
+        sub.shader_set(res.shaders->sculpt_mesh.get());
+        sub.push_constant("mask_opacity", mask_opacity);
+        sub.push_constant("face_sets_opacity", face_set_opacity);
+        sub.push_constant("layer_mask_opacity", 0.0f);
+        sub.push_constant("layer_mask_tint", layer_mask_tint);
+        sub.push_constant("layer_preview_threshold", layer_preview_threshold);
+        sub.push_constant("layer_preview_opacity", 0.0f);
+        sub.push_constant("layer_preview_tint", layer_preview_tint);
+        mesh_fallback_ps_ = &sub;
       }
       {
         auto &sub = sculpt_mask_.sub("Curves");
@@ -463,7 +489,9 @@ class Sculpts : Overlay {
 
       Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*ob_ref.object);
       gpu::Batch *sculpt_overlays = DRW_mesh_batch_cache_get_sculpt_overlays(mesh);
-      mesh_ps_->draw(sculpt_overlays, handle);
+      /* #mesh_fallback_ps_: this batch has no `layer_weight` / `layer_preview` attributes, so the
+       * layer channels must be forced neutral here rather than drawn with #mesh_ps_. */
+      mesh_fallback_ps_->draw(sculpt_overlays, handle);
     }
   }
 

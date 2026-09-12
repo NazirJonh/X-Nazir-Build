@@ -2407,6 +2407,21 @@ void tag_layer_overlays_dirty(Object &object);
  */
 bool mask_edit_refuse_ccg_rebuild(wmOperator *op, const Object &object);
 
+/**
+ * Refuse (reporting) a layer-tree operator that has no path to run safely alongside an open
+ * weight-mask edit session, on either domain: adding, duplicating, reordering, clearing, inverting,
+ * isolating or soloing a layer or folder. Unlike #mask_edit_refuse_ccg_rebuild, this is not scoped
+ * to the grid domain — the tree structure itself is what changes under the session here, not merely
+ * a rebuild the mesh path happens to avoid — and unlike the operators that call #mask_edit_end to
+ * close the session first (removal, the merges, the bakes, validate, select, the group removals),
+ * these were never taught to commit-and-continue. True when it was refused.
+ *
+ * Influence and Visibility operators are deliberately not routed through this: neither reads nor
+ * writes the standard mask storage a session borrows, or the node it is pinned to by uid, so both
+ * stay usable for as long as the session runs.
+ */
+bool mask_edit_refuse_active_session(wmOperator *op, const Object &object);
+
 /** \} */
 
 /** Where #SCULPT_OT_layer_move_to places the moved items relative to its anchor. Values are the

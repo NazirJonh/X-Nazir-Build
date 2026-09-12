@@ -4850,12 +4850,50 @@ brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
  * The color attribute is created once at stroke start (see #SculptPaintStroke::test_start), so
  * this only flags the undo step; it must never create the attribute while pushing nodes, as
  * mutating the mesh mid-step would desynchronize the position undo nodes in the same step.
+ *
+ * Whether texture-as-data Face Set / Color writes must be suppressed because this dab belongs
+ * to the anchor phase of a Curve Patch (or Roll + "Edit After Stroke") stroke.
+ *
+ * The anchor stroke runs through the ordinary sculpt pipeline before handing off to
+ * #SCULPT_OT_curve_patch_edit, and the handoff restores the mesh to pristine via
+ * #restore_from_undo_step_if_necessary() which only reverts positions for non-Draw-Face-Sets
+ * brushes. Writing Face Sets / colors per-dab would therefore bake them in before the session
+ * even starts, and the handoff's undo abort would leave them without an undo step.
+ * The finished values are recorded only on final commit
+ * (#ReliefEffect::commit / #ColorEffect::commit), mirroring the existing image-canvas guard
+ * in #do_brush_action.
+ *
+ * Must read the live brush on every dab: the stroke method can be switched mid-stroke.
+ * Once #SculptSession::curve_patch_session exists, re-stamps go through #session_apply and no
+ * longer reach this path, so the guard naturally stops applying.
  */
+static bool curve_patch_anchor_suppresses_texture_data(const Brush &brush,
+                                                       const SculptSession *ss)
+{
+  if (ss != nullptr && ss->curve_patch_session != nullptr) {
+    return false;
+  }
+  if (!bke::brush::supports_curve_patch(brush)) {
+    return false;
+  }
+  return brush.stroke_method == BRUSH_STROKE_CURVE_PATCH ||
+         (brush.stroke_method == BRUSH_STROKE_ROLL && brush.roll_edit_after);
+}
+
 static undo::NodeDataFlag texture_data_undo_flags(const Brush &brush, const Object &ob)
 {
   undo::NodeDataFlag flags{};
   if (!face_set::brush_texture_data_mode_is_active(brush)) {
     return flags;
+  }
+  /* Curve Patch anchor phase writes nothing until final commit (see
+   * #curve_patch_anchor_suppresses_texture_data), so it needs no FaceSet/Color undo coverage.
+   * Without this the anchor would push empty FaceSet nodes and keep them after the handoff
+   * aborts the stroke transaction. */
+  if (const SculptSession *ss = ob.runtime ? ob.runtime->sculpt_session : nullptr) {
+    if (curve_patch_anchor_suppresses_texture_data(brush, ss)) {
+      return flags;
+    }
   }
   if (face_set::brush_texture_data_writes_face_sets(brush)) {
     flags |= undo::NodeDataFlag::FaceSet;
@@ -5493,6 +5531,7 @@ void do_brush_action(const Depsgraph &depsgraph,
   if (!use_pixels && !texture_data_is_deferred(brush) &&
       brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
       face_set::brush_texture_data_mode_is_active(brush) &&
+      !curve_patch_anchor_suppresses_texture_data(brush, &ss) &&
       (face_set::brush_texture_data_writes_face_sets(brush) ||
        face_set::brush_texture_data_writes_color(brush)))
   {
@@ -5682,6 +5721,14 @@ static void apply_deferred_texture_data(const Depsgraph &depsgraph,
                                            !face_set::brush_texture_data_writes_color(brush)))
   {
     return;
+  }
+  /* Curve Patch / Roll handoff restores to pristine before the editor takes over; a deferred
+   * write here would land right before that restore and either survive it (Face Sets have no
+   * per-dab restore for ordinary brushes) or waste an undo step that the handoff aborts. */
+  if (const SculptSession *ss = ob.runtime ? ob.runtime->sculpt_session : nullptr) {
+    if (curve_patch_anchor_suppresses_texture_data(brush, ss)) {
+      return;
+    }
   }
 
   IndexMaskMemory memory;
@@ -7642,11 +7689,13 @@ class ScopedStrokeObjectOverride {
  * anchor dab (see the Curve Patch multi-object design doc). */
 static bool stroke_method_is_curve_patch_target(const Brush *brush)
 {
-  if (brush == nullptr || !bke::brush::supports_curve_patch(*brush)) {
+  if (brush == nullptr) {
     return false;
   }
-  return brush->stroke_method == BRUSH_STROKE_CURVE_PATCH ||
-         (brush->stroke_method == BRUSH_STROKE_ROLL && brush->roll_edit_after);
+  /* Brush part of #curve_patch_anchor_suppresses_texture_data without the session gate: this
+   * helper is used for stroke routing (single-object pinning, promotion guards) where the
+   * session does not exist yet by construction. */
+  return curve_patch_anchor_suppresses_texture_data(*brush, nullptr);
 }
 
 /** The object's active material slot (by #Object.actcol), or null when it has none. */
@@ -8978,9 +9027,14 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
    * object's #StrokeCache in the loop below -- see #StrokeCache::face_set_color_cache's doc
    * comment. Done before the loop (order-independent of its own iteration order, which starts at
    * the ACTIVE object per #MultiObjectStrokeContext.mode_objects, not necessarily the primary)
-   * so no object races another to lazily allocate its own divergent cache. */
+   * so no object races another to lazily allocate its own divergent cache. Skipped for the
+   * Curve Patch anchor phase, which defers all Face Set / color writes to final commit. */
   std::shared_ptr<face_set::FaceSetColorStrokeCache> shared_face_set_color_cache;
-  if (brush && face_set::brush_texture_data_mode_is_color(*brush)) {
+  const bool curve_patch_anchor_no_color_cache = brush &&
+      curve_patch_anchor_suppresses_texture_data(
+          *brush, primary_ob->runtime ? primary_ob->runtime->sculpt_session : nullptr);
+  if (brush && face_set::brush_texture_data_mode_is_color(*brush) &&
+      !curve_patch_anchor_no_color_cache) {
     SculptSession &primary_ss_mut = *primary_ob->runtime->sculpt_session;
     if (!primary_ss_mut.cache) {
       primary_ss_mut.cache = MEM_new<StrokeCache>(__func__);
@@ -9303,9 +9357,11 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 
     /* When writing texture data to vertex colors, create the color attribute once here, before the
      * undo step begins. Creating it lazily while pushing undo nodes would mutate the mesh
-     * mid-stroke and corrupt the position undo nodes captured in the same step. */
+     * mid-stroke and corrupt the position undo nodes captured in the same step. Skipped for the
+     * Curve Patch anchor phase, which writes colors only on final commit via #ColorEffect. */
     if (brush && face_set::brush_texture_data_mode_is_active(*brush) &&
-        face_set::brush_texture_data_writes_color(*brush) && !ob.runtime->sculpt_session->bm)
+        face_set::brush_texture_data_writes_color(*brush) && !ob.runtime->sculpt_session->bm &&
+        !curve_patch_anchor_suppresses_texture_data(*brush, ob.runtime->sculpt_session))
     {
       if (bke::object::pbvh_get(ob)->type() != bke::pbvh::Type::BMesh) {
         ED_mesh_color_ensure(id_cast<Mesh *>(ob.data), nullptr);

@@ -789,8 +789,12 @@ class StrokePanel(BrushPanel):
             (brush.stroke_method == 'ROLL' and brush.use_roll_edit_after)
         )
         if show_face_set:
-            col.prop(brush.curve_patch, "use_face_set", text="Create Face Set")
-            col.separator()
+            # An active Face Sets From Texture mode implies Create Face Set on commit: the
+            # per-dab texture write is suppressed for the whole Curve Patch anchor phase, so the
+            # commit is its only chance. Showing both would be a duplicate.
+            if brush.texture_data_mode == 'NONE':
+                col.prop(brush.curve_patch, "use_face_set", text="Create Face Set")
+                col.separator()
 
         if brush.stroke_method == 'ANCHORED':
             col.prop(brush, "use_edge_to_edge", text="Edge to Edge")

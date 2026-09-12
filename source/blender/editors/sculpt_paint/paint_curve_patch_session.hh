@@ -147,6 +147,14 @@ struct CurvePatchSession {
    * EVERY mouse event, so an unguarded message would flood the info line. */
   bool reported_frame_cap = false;
 
+  /** Frozen `brush.curve_patch.face_set` from the anchor stroke (see #curve_patch_begin_editing).
+   * `ReliefEffect::face_set_masks()` reads the LIVE brush so the toggle can be flipped mid-edit,
+   * but falls back to this when no live brush is available at commit time. An active Face Sets
+   * From Texture mode implies the request as well (see the live OR there): its per-dab write is
+   * suppressed for the whole anchor phase, so the commit is its only chance. Without the fallback
+   * a brush switch mid-edit or a null `StrokeCache::paint` would silently drop the Face Set. */
+  bool use_face_set_on_commit = false;
+
   /** Forwards to #CurvePatchDocument::has_active_item. */
   bool has_active_item() const
   {

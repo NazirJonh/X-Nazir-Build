@@ -61,6 +61,7 @@
 #include "paint_image_curve_patch.hh"
 #include "paint_intern.hh"
 
+#include "mesh/sculpt_face_set.hh"
 #include "mesh/sculpt_intern.hh"
 #include "mesh/sculpt_undo.hh"
 
@@ -809,6 +810,13 @@ static bool curve_patch_begin_editing(Object &ob,
    * whole lifetime of the patch (see `CurvePatchSession::view_context`). */
   session->view_context = vc;
   cache.vc = &session->view_context;
+
+  /* Freeze the anchor brush's Face Set request: `ReliefEffect::face_set_masks()` prefers the live
+   * brush so the toggle stays flippable mid-edit, but needs this fallback when no live brush is
+   * available at commit time (see `CurvePatchSession::use_face_set_on_commit`). Texture mode
+   * implies the request for the same reason as the live OR there. */
+  session->use_face_set_on_commit = brush.curve_patch.face_set != 0 ||
+                                    face_set::brush_texture_data_mode_is_active(brush);
 
   /* Stage 1's brush gate should have refused this brush long before a session was started; refuse
    * defensively rather than publishing a session with no effect. Both callers hand this function

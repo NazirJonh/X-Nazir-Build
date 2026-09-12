@@ -436,12 +436,14 @@ bool mask_edit_begin(Depsgraph &depsgraph,
     return false;
   }
 
-  /* Refused while REC is armed, not merely while a stroke is in flight: recording writes the full
-   * stroke delta into the layer regardless of its mask (see #node_mask_for_composite), so letting
-   * the two run together would show the user a surface that does not match what is being stored.
-   * #SculptSession::layers::rec_active is the armed state; #recording is only true for the duration
-   * of one stroke, and testing that alone would let a session open between two dabs. */
-  if (ss->layers.rec_active || ss->layers.recording) {
+  /* Refused only while a stroke is literally in flight, not merely while REC is armed: REC can only
+   * ever write through a position-changing brush stroke, and #mask_edit_blocks_brush already refuses
+   * every one of those for as long as this session stays open, on every layer of the object, not
+   * only the one being masked. There is therefore nothing left for an armed REC to corrupt by
+   * coexisting with an open session. #SCULPT_LAYER_REC_EXEMPT is handled below instead of forcing
+   * REC off: it is lifted from the node being masked so the user can see the very mask they are
+   * painting, and #mask_edit_close restores it via #rec_exemption_refresh once the session ends. */
+  if (ss->layers.recording) {
     return false;
   }
 
@@ -504,6 +506,19 @@ bool mask_edit_begin(Depsgraph &depsgraph,
     return false;
   }
 
+  /* Lift the exemption from the node being masked, if REC happens to be armed on it: otherwise
+   * #node_mask_for_composite would keep answering "unmasked" for exactly the mask the user just
+   * opened a session to paint, and every dab would appear to do nothing. REC itself stays armed
+   * (see the note on #mask_edit_enter); only this one derived bit moves, and only on this node. A
+   * folder resolves to null here and is left untouched, since #SCULPT_LAYER_REC_EXEMPT is only ever
+   * carried by a #SculptLayer. */
+  if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node);
+      layer != nullptr && (layer->base.flag & SCULPT_LAYER_REC_EXEMPT))
+  {
+    layer->base.flag &= ~SCULPT_LAYER_REC_EXEMPT;
+    commit_layers_change(object);
+  }
+
   /* Not because anything dangles: a cached chain never aliases this pointer, since #chain_mask
    * stores a #mask_copy or a #mask_multiply and both allocate. It is staleness. The cached
    * product was folded from a mask that is gone, and the domain of the one replaced here is what
@@ -520,21 +535,11 @@ bool mask_edit_enter(Depsgraph &depsgraph, Main &bmain, Object &object, SculptLa
   if (ss == nullptr) {
     return false;
   }
-  /* Disarmed through #rec_active_set rather than by writing the flag, because the flag has a DNA
-   * mirror (#SCULPT_LAYER_REC_EXEMPT) that decides whether the composite honors this very mask. The
-   * worst case that contract exists for is exactly this one: a node entering a mask edit carries a
-   * weight map by definition, so the protective multires flush is not a theoretical branch here. */
-  rec_active_set(object, false);
-  if (!mask_edit_begin(depsgraph, bmain, object, node)) {
-    /* Left disarmed, even though this is the rollback of a *failed* entry, because the two halves of
-     * #rec_active_set are not inverses of each other: disarming only clears the flag, while arming
-     * pins the active layer to #SCULPT_LAYER_ENABLED with `influence = 1.0f` (see
-     * #layer_toggle_rec_exec). Re-arming here would therefore overwrite an influence the user set
-     * while REC was armed, with no undo record to get it back. Disarming is one-way on every path
-     * for that reason; see the note in #mask_edit_end. */
-    return false;
-  }
-  return true;
+  /* REC is deliberately left exactly as it stands: it no longer needs to be disarmed to open a
+   * session, since #mask_edit_begin now lifts #SCULPT_LAYER_REC_EXEMPT on the node itself rather
+   * than requiring REC off. Leaving it armed is also what lets #mask_edit_close simply re-derive
+   * the exemption through #rec_exemption_refresh, with no state to roll back on a failed entry. */
+  return mask_edit_begin(depsgraph, bmain, object, node);
 }
 
 /**
@@ -753,15 +758,13 @@ static bool mask_edit_close(Object &object, const bool store_weights)
                           mask_edit_end_grids(*ss, node, store_weights) :
                           mask_edit_end_mesh(object, *ss, node, store_weights);
 
-  /* REC is deliberately *not* re-armed here, even though entering the session disarmed it. Arming is
-   * not a flag assignment: #layer_toggle_rec_exec pins the active layer to enabled with
-   * `influence = 1.0`, brackets that in an undo push, and refuses outright when the active layer
-   * sits in a disabled folder — none of which this path can reproduce. The tree can have moved under
-   * the session (a layer or its folder switched off), so replaying the arming from here would pin
-   * state the user just changed, with no undo record and past the refusal that protects
-   * `positions == base + sum(data * effective)`. Leaving REC disarmed costs the user one click
-   * through the operator that owns those invariants. */
+  /* REC's armed state was never touched by opening this session (see #mask_edit_begin), only the
+   * derived #SCULPT_LAYER_REC_EXEMPT bit was — and only on the node just closed. Re-derive it now
+   * from the live #rec_active/active-layer state, exactly as every other site that can move either
+   * of those already does: this reinstates the exemption if REC is still armed on this same layer,
+   * or leaves it clear otherwise, with no separate rollback bookkeeping to carry across the session. */
   ss->layers.mask_edit = SculptLayerMaskEdit{};
+  rec_exemption_refresh(object);
 
   if (node != nullptr) {
     tag_masked_chains_dirty(*node);
@@ -1019,6 +1022,33 @@ bool mask_edit_refuse_ccg_rebuild(wmOperator *op, const Object &object)
   BKE_reportf(op->reports,
               RPT_ERROR,
               "A weight mask is being edited on '%s'; finish that edit first",
+              open_node ? open_node->name : "");
+  return true;
+}
+
+/**
+ * Refuse (reporting) a layer-tree operator that has no graceful way to run while a weight-mask
+ * edit session is open, on either domain — unlike #mask_edit_refuse_ccg_rebuild, which only covers
+ * the multires case where a commit would rebuild the CCG out from under the session, and unlike
+ * the operators that instead call #mask_edit_end to close the session first (removal, the merges,
+ * the bakes, validate, select, the group removals). Creating, duplicating, reordering, clearing,
+ * inverting, isolating or soloing a layer all change the tree or the composite in ways that were
+ * never taught to survive a live session gracefully, so they are refused outright rather than
+ * risking the session's parked weights or the node it is pinned to by uid. Influence and Visibility
+ * are deliberately not routed through this: neither reads or writes the standard mask storage a
+ * session borrows, so both stay usable while it is open. */
+bool mask_edit_refuse_active_session(wmOperator *op, const Object &object)
+{
+  const int uid = mask_edit_active_uid(object);
+  if (uid == 0) {
+    return false;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const SculptLayerTreeNode *open_node = bke::sculpt_layers::node_find_by_uid(mesh, uid);
+  BKE_reportf(op->reports,
+              RPT_ERROR,
+              "A sculpt layer weight mask is being edited on '%s'; finish or cancel that edit "
+              "first",
               open_node ? open_node->name : "");
   return true;
 }

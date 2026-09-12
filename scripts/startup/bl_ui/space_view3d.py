@@ -8760,7 +8760,7 @@ class VIEW3D_PT_overlay_sculpt_layers(Panel):
         row.prop(overlay, "show_sculpt_layer_mask", text="")
         sub = row.row()
         sub.active = overlay.show_sculpt_layer_mask and has_layers
-        sub.prop(overlay, "sculpt_mode_layer_mask_opacity", text="Sculpt Layers")
+        sub.prop(overlay, "sculpt_mode_layer_mask_opacity", text="Sculpt Layers Mask")
 
         # Backed by the tool settings rather than the viewport overlay flags, so that the same
         # toggle is reachable from the sculpt layer context menu in the Properties editor. No None

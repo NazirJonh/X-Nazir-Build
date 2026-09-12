@@ -1345,12 +1345,19 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
     block->is_color_gamma_picker = true;
   }
 
+  /* The final block flags must be set before the UI is built. #block_begin pre-sets #BLOCK_LOOP
+   * only while the popup region is still invisible, which holds for the initial build only, so
+   * assigning the flags afterwards made layout code that reads them during button creation see a
+   * different state on refresh: #block_is_popup_any() in #Layout::panel_prop flipped, adding a
+   * leading indent button to panel headers and shifting the Color Palette title away from the
+   * left edge (same for other icon-only buttons created without explicit draw flags). */
+  block->flag = BLOCK_LOOP | BLOCK_KEEP_OPEN | BLOCK_OUT_1 | BLOCK_MOVEMOUSE_QUIT | BLOCK_POPUP;
+  block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
+
   copy_v3_v3(handle->retvec, but->editvec);
 
   block_colorpicker(C, block, but, handle->retvec, true);
 
-  block->flag = BLOCK_LOOP | BLOCK_KEEP_OPEN | BLOCK_OUT_1 | BLOCK_MOVEMOUSE_QUIT | BLOCK_POPUP;
-  block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
   block_bounds_set_normal(block, 0.5 * UI_UNIT_X);
 
   block->block_event_func = colorpicker_wheel_cb;

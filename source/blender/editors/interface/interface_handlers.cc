@@ -13598,6 +13598,15 @@ static int handler_region_menu(bContext *C, const wmEvent *event, void * /*userd
     return WM_UI_HANDLER_CONTINUE;
   }
 
+  if (has_active_drag && event->type == EVT_DROP) {
+    /* External drag-and-drop (e.g. from the OS file browser) arrives as EVT_DROP directly and
+     * never goes through the LEFTMOUSE-release conversion above. Pass it on like #popup_handler
+     * does, so it reaches the popup region's drop-box handlers. Otherwise a drop onto a
+     * button-attached popover (which does not install #popup_handler) is swallowed here and its
+     * drop targets never fire. */
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
   /* we block all events, this is modal interaction */
   return WM_UI_HANDLER_BREAK;
 }

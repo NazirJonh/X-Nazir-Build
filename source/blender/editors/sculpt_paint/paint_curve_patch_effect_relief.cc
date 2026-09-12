@@ -632,7 +632,7 @@ void ReliefEffect::push_position_step(const Scene &scene,
  * `memory` must outlive both returned masks.
  */
 bool ReliefEffect::face_set_masks(Object &ob,
-                                  const CurvePatchSession & /*patch*/,
+                                  const CurvePatchSession &patch,
                                   IndexMaskMemory &memory,
                                   IndexMask &r_face_mask,
                                   IndexMask &r_node_mask)
@@ -643,9 +643,23 @@ bool ReliefEffect::face_set_masks(Object &ob,
   /* Read the LIVE brush rather than the patch's frozen params: this toggle is a commit-time
    * behavior switch, not a relief parameter, so the user may flip it while the patch is being
    * edited. Same live-sync pattern the texture-source toggles use in
-   * `curve_patch_restore_and_restamp()`. */
+   * `curve_patch_restore_and_restamp()`. Falls back to the anchor brush's frozen request
+   * (#CurvePatchSession::use_face_set_on_commit) when no live brush is available, so a brush
+   * switch mid-edit or a null `StrokeCache::paint` cannot silently drop the Face Set.
+   *
+   * An active Face Sets From Texture mode implies Create Face Set: the per-dab texture write is
+   * suppressed for the whole anchor phase (see #curve_patch_anchor_suppresses_texture_data in
+   * `mesh/sculpt.cc`), so without this OR a texture-mode brush would never get any Face Set --
+   * neither early nor on commit. The commit burns the relief footprint as one fresh set instead
+   * of the threshold-based per-dab assignment, whose brush mapping does not exist along a curve.
+   */
   const Brush *brush = ss.cache ? BKE_paint_brush_for_read(ss.cache->paint) : nullptr;
-  if (brush == nullptr || brush->curve_patch.face_set == 0) {
+  const bool live_wants_face_set = brush != nullptr &&
+                                   (brush->curve_patch.face_set != 0 ||
+                                    face_set::brush_texture_data_mode_is_active(*brush));
+  const bool frozen_wants_face_set = patch.use_face_set_on_commit;
+  const bool wants_face_set = (brush != nullptr) ? live_wants_face_set : frozen_wants_face_set;
+  if (!wants_face_set) {
     return false;
   }
 

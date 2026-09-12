@@ -54,6 +54,7 @@
 #include "paint_curve_patch_session.hh"
 #include "paint_intern.hh"
 
+#include "mesh/sculpt_face_set.hh"
 #include "mesh/sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint {
@@ -238,6 +239,8 @@ bool curve_patch_apply(const Scene &scene,
   auto *session = MEM_new<CurvePatchSession>(__func__);
   session->doc.patches.resize(control_curves.size());
   session->doc.active_patch = 0;
+  session->use_face_set_on_commit = brush->curve_patch.face_set != 0 ||
+                                    face_set::brush_texture_data_mode_is_active(*brush);
   for (const int i : control_curves.index_range()) {
     session->doc.patches[i].control_curve = control_curves[i];
     session->doc.patches[i].params = params[i];

@@ -1275,13 +1275,18 @@ class VIEW3D_PT_tools_brush_face_set_texture(Panel, View3DPaintPanel):
         use_from_texture = brush.use_face_sets_from_texture
         is_alpha = (brush.texture_data_mode == 'FACE_SETS_FROM_TEXTURE')
         is_color = (brush.texture_data_mode == 'FACE_SETS_COLOR_FROM_TEXTURE')
+        # For a Curve Patch target the per-dab texture write is suppressed and the commit burns
+        # the relief footprint as one fresh set instead, so the toggle reads as Create Face Sets.
+        is_curve_patch = (brush.stroke_method == 'CURVE_PATCH' or
+                          (brush.stroke_method == 'ROLL' and brush.use_roll_edit_after))
+        face_sets_toggle_text = "Create Face Sets" if is_curve_patch else "Face Sets From Texture"
 
         layout.use_property_split = False
 
         if self.is_popover:
             row = layout.row(align=True)
             row.alignment = 'LEFT'
-            row.prop(brush, "use_face_sets_from_texture", text="Face Sets From Texture")
+            row.prop(brush, "use_face_sets_from_texture", text=face_sets_toggle_text)
             tex_panel = layout.column()
             _draw_face_sets_from_texture_content(
                 tex_panel, context, brush, use_from_texture, is_alpha, is_color)
@@ -1293,7 +1298,7 @@ class VIEW3D_PT_tools_brush_face_set_texture(Panel, View3DPaintPanel):
             header.use_property_split = False
             row = header.row(align=True)
             row.alignment = 'LEFT'
-            row.prop(brush, "use_face_sets_from_texture", text="Face Sets From Texture")
+            row.prop(brush, "use_face_sets_from_texture", text=face_sets_toggle_text)
 
             if tex_panel:
                 _draw_face_sets_from_texture_content(

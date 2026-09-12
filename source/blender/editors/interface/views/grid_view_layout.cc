@@ -419,10 +419,6 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
                               "");
       auto *but_scroll = reinterpret_cast<ButtonScrollBar *>(but);
       but_scroll->visual_height = float(visible_height);
-      uchar scroll_track_bg[4];
-      theme::get_color_4ubv(TH_BACK, scroll_track_bg);
-      scroll_track_bg[3] = 255;
-      button_color_set(but, scroll_track_bg);
       button_flag_disable(but, BUT_UNDO);
       button_func_set(but, [](bContext &C) {
         ARegion *region = CTX_wm_region_popup(&C) ? CTX_wm_region_popup(&C) : CTX_wm_region(&C);

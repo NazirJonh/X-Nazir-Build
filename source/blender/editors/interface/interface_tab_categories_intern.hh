@@ -145,13 +145,24 @@ const CategoryGlyphItem *category_glyph_mapping_find(const wmWindowManager *wm, 
 bool category_name_is_glyph(const char *category_id);
 /* Defined in interface_tab_categories_lookup.cc; used from the tag utilities in
  * interface_tab_categories.cc and from other translation units (edit.cc, interface_template_glyph.cc). */
-const CategoryGlyphItem *category_item_find_overrides(const wmWindowManager *wm, const char *category, int space_type);
-const CategoryGlyphItem *category_item_find_mappings(const wmWindowManager *wm, const char *category, int space_type);
 const char *panel_category_glyph_lookup(const wmWindowManager *wm, const char *category, const PanelType *panel_type, bool *r_is_fallback_letter, float r_color[3], int space_type);
 bool panel_category_first_letter_lookup(const wmWindowManager *wm, const char *category, int space_type, char r_letter[8]);
 
 /* Defined in interface_tab_categories_draw.cc, used by interface_tab_categories.cc. */
 bool category_tab_should_expand_name(const ARegion *region, const char *category_id, const eUserPref_CategoryTabsDisplayMode display_mode, const bool is_active, const bool use_minimized_gate, const bool is_panel_minimized);
 void deferred_category_activation_execute(const bContext *C, ARegion *region);
+
+/* Tooltip placement shared by hover / active-scroll / drag tab tooltips.
+ * Defined in interface_tab_categories.cc.
+ * If tab_rect_local is nullptr, the overlap spans the full region width and the tooltip is
+ * parked strictly outside the region (active-scroll, drag). Otherwise it spans the given tab
+ * (region-local rect) so the tooltip stays next to the tab even when there is no room outside
+ * the region (hover). */
+void category_tab_tooltip_placement_get(const ARegion *region,
+                                        const rcti *tab_rect_local,
+                                        const int cursor_xy[2],
+                                        rcti *r_overlap_screen,
+                                        int r_position[2],
+                                        bool *r_prefer_left);
 
 }  // namespace blender::ui

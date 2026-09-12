@@ -2257,7 +2257,7 @@ static void rna_Object_sculpt_layer_sync_group_uid_get(PointerRNA *ptr, char *va
     value[0] = '\0';
     return;
   }
-  BLI_snprintf(value, 32, "%llu", unsigned long long(ob->sculpt_layer_sync_group_key));
+  BLI_snprintf(value, 32, "%llu", static_cast<unsigned long long>(ob->sculpt_layer_sync_group_key));
 }
 
 static int rna_Object_sculpt_layer_sync_group_uid_length(PointerRNA *ptr)

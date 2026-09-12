@@ -1395,7 +1395,64 @@ void draw_category_tab_builtin_icon(const rcti *rct,
                icon_tint,
                false,
                UI_NO_ICON_OVERLAY_TEXT);
-  GPU_blend(GPU_BLEND_NONE);
+   GPU_blend(GPU_BLEND_NONE);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Tooltip Placement
+ * \{ */
+
+/**
+ * Compute shared placement for category-tab tooltips (hover, active-tab fast-scroll, drag).
+ *
+ * The overlap rectangle uses screen coordinates with a thin vertical band around the cursor.
+ * Horizontally it spans either the FULL width of the panel region (when tab_rect_local is
+ * nullptr) or just the given tab (region-local rect). Since `tooltip_create_with_data` (with
+ * tab positioning) refuses to place the tooltip over this rectangle and tries the outside of
+ * the tab strip first, the result is:
+ * - region-wide anchor: tooltip always lands OUTSIDE the panel region (right of right-aligned
+ *   tab strips such as the N-panel sidebar, left of left-aligned ones), falling back to the
+ *   opposite outside side near the screen edge -- panel content is never covered;
+ * - tab anchor: tooltip still prefers the outside, but when there is no room it lands right
+ *   next to the tab (hover use-case).
+ */
+void category_tab_tooltip_placement_get(const ARegion *region,
+                                        const rcti *tab_rect_local,
+                                        const int cursor_xy[2],
+                                        rcti *r_overlap_screen,
+                                        int r_position[2],
+                                        bool *r_prefer_left)
+{
+  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
+
+  if (tab_rect_local != nullptr) {
+    r_overlap_screen->xmin = region->winrct.xmin + tab_rect_local->xmin;
+    r_overlap_screen->xmax = region->winrct.xmin + tab_rect_local->xmax;
+  }
+  else {
+    r_overlap_screen->xmin = region->winrct.xmin;
+    r_overlap_screen->xmax = region->winrct.xmax;
+  }
+  r_overlap_screen->ymin = cursor_xy[1] - UI_UNIT_Y / 2;
+  r_overlap_screen->ymax = cursor_xy[1] + UI_UNIT_Y / 2;
+
+  if (is_left) {
+    /* Tabs sit on the left edge of the region: park the tooltip left of the region. */
+    r_position[0] = r_overlap_screen->xmin - UI_POPUP_MARGIN;
+    if (r_prefer_left != nullptr) {
+      *r_prefer_left = true;
+    }
+  }
+  else {
+    /* Tabs sit on the right edge (e.g. N-panel sidebar): park it right of the region. */
+    r_position[0] = r_overlap_screen->xmax + UI_POPUP_MARGIN;
+    if (r_prefer_left != nullptr) {
+      *r_prefer_left = false;
+    }
+  }
+  r_position[1] = cursor_xy[1];
 }
 
 /** \} */

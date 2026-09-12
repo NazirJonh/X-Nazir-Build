@@ -70,6 +70,7 @@
 #include "interface_tag_bar.hh"
 
 #include "interface_intern.hh" /* own include */
+#include "interface_tab_categories_intern.hh"
 
 namespace blender::ui {
 
@@ -2461,9 +2462,6 @@ static ARegion *ui_panel_category_tooltip_init(
   mval[0] = event->xy[0] - region->winrct.xmin;
   mval[1] = event->xy[1] - region->winrct.ymin;
 
-  /* Determine if tabs are on the left or right side. */
-  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
-
   /* Get window manager for category display name lookup. */
   wm = CTX_wm_manager(C);
 
@@ -2510,52 +2508,18 @@ static ARegion *ui_panel_category_tooltip_init(
         }
       }
 
-      /* Position tooltip to avoid overlapping the tab.
-       * Convert tab rect from region-local to screen coordinates.
-       * Use mouse Y position for the rect to keep tooltip aligned with cursor vertically. */
+      /* Park the tooltip next to the hovered tab (shared helper): it prefers the outside
+       * of the region, but when there is no room it lands right next to the tab instead of
+       * jumping to the far side of the panel region. The tab under the cursor was already
+       * resolved above for the tooltip text. */
       rcti tab_rect_screen;
-      tab_rect_screen.xmin = region->winrct.xmin + pc_dyn.rect.xmin;
-      tab_rect_screen.xmax = region->winrct.xmin + pc_dyn.rect.xmax;
-      /* Use mouse Y position to keep tooltip vertically aligned with cursor. */
-      tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
-      tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
-
-      /* Account for visual effect expansion when hovering over a tab.
-       * When visual effect is enabled and the tab is hovered, it expands
-       * horizontally, so the tooltip needs extra offset to avoid overlap.
-       * We must expand tab_rect_screen because tooltip_create_with_data
-       * uses init_rect_overlap to calculate tooltip position. */
-      if (U.category_tabs_visual_effect) {
-        const int tab_width = pc_dyn.rect.xmax - pc_dyn.rect.xmin;
-        const int extra_width = round_fl_to_int(tab_width * (UI_TABS_VISUAL_EFFECT_SCALE - 1.0f));
-        const int available_extra_width = is_left ?
-                                              std::max(region->winrct.xmax - tab_rect_screen.xmax, 0) :
-                                              std::max(tab_rect_screen.xmin - region->winrct.xmin, 0);
-        const int applied_extra_width = std::min(extra_width, available_extra_width);
-        if (is_left) {
-          /* Tab expands to the right when hovered. */
-          tab_rect_screen.xmax += applied_extra_width;
-        }
-        else {
-          /* Tab expands to the left when hovered. */
-          tab_rect_screen.xmin -= applied_extra_width;
-        }
-      }
-
       int position[2];
-      if (is_left) {
-        /* Tabs on left side: position tooltip to the right of tabs. */
-        position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN;
+      bool prefer_left = false;
+      {
+        const int cursor_xy[2] = {event->xy[0], event->xy[1]};
+        category_tab_tooltip_placement_get(
+            region, &pc_dyn.rect, cursor_xy, &tab_rect_screen, position, &prefer_left);
       }
-      else {
-        /* Tabs on right side: position tooltip to the left of tabs. */
-        position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN;
-      }
-      position[1] = event->xy[1];
-
-      /* Use init_rect_overlap to ensure tooltip doesn't overlap the tab.
-       * For tabs on right side, prefer left side positioning first. */
-      const bool prefer_left = !is_left;
       return tooltip_create_from_text(
           C, tooltip_text.c_str(), position, &tab_rect_screen, prefer_left);
     }
@@ -2567,26 +2531,15 @@ static ARegion *ui_panel_category_tooltip_init(
     /* Show tooltip for settings button. */
     const char *tooltip_text = IFACE_("Display Mode Settings");
 
-    /* Position tooltip to avoid overlapping the button.
-     * Convert button rect from region-local to screen coordinates. */
+    /* Same tab-anchored placement as hover tooltips (shared helper). */
     rcti settings_rect_screen;
-    settings_rect_screen.xmin = region->winrct.xmin + settings_rct->xmin;
-    settings_rect_screen.xmax = region->winrct.xmin + settings_rct->xmax;
-    settings_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
-    settings_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
-
     int position[2];
-    if (is_left) {
-      /* Tabs on left side: position tooltip to the right of button. */
-      position[0] = settings_rect_screen.xmax + UI_POPUP_MARGIN;
+    bool prefer_left = false;
+    {
+      const int cursor_xy[2] = {event->xy[0], event->xy[1]};
+      category_tab_tooltip_placement_get(
+          region, settings_rct, cursor_xy, &settings_rect_screen, position, &prefer_left);
     }
-    else {
-      /* Tabs on right side: position tooltip to the left of button. */
-      position[0] = settings_rect_screen.xmin - UI_POPUP_MARGIN;
-    }
-    position[1] = event->xy[1];
-
-    const bool prefer_left = !is_left;
     return tooltip_create_from_text(
         C, tooltip_text, position, &settings_rect_screen, prefer_left);
   }
@@ -2628,42 +2581,17 @@ static ARegion *ui_panel_category_active_tooltip_init(
   wmWindow *win = CTX_wm_window(C);
   const wmEvent *event = win->runtime->eventstate;
 
-  /* Find the category tab for the active category. */
-  const PanelCategoryDyn *pc_dyn = panel_category_find(region, category_idname);
-  
+  /* Park the tooltip strictly outside the panel region (shared helper, region-wide
+   * anchor): it follows the cursor vertically but never covers panel content,
+   * even while fast-scrolling tabs. */
   rcti tab_rect_screen;
-  bool use_tab_rect = false;
-
   int position[2];
-
-  if (pc_dyn) {
-      tab_rect_screen.xmin = region->winrct.xmin + pc_dyn->rect.xmin;
-      tab_rect_screen.xmax = region->winrct.xmin + pc_dyn->rect.xmax;
-      tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
-      tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
-
-      const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
-
-
-      if (is_left) {
-        tab_rect_screen.xmax += 8;
-        position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN / 4;
-      }
-      else {
-        tab_rect_screen.xmin -= 8;
-        position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN / 4;
-      }
-      position[1] = event->xy[1];
-      use_tab_rect = true;
-  } else {
-      position[0] = event->xy[0];
-      position[1] = event->xy[1] - UI_POPUP_MARGIN / 4;
+  bool prefer_left = false;
+  {
+    const int cursor_xy[2] = {event->xy[0], event->xy[1]};
+    category_tab_tooltip_placement_get(
+        region, nullptr, cursor_xy, &tab_rect_screen, position, &prefer_left);
   }
-
-  /* Tooltip always follows cursor Y position. */
-
-  const bool is_left = RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT;
-  const bool prefer_left = !is_left;
 
   const uiStyle *style = style_get();
   uiFontStyle fstyle = style->tooltip;
@@ -2686,34 +2614,15 @@ static ARegion *ui_panel_category_active_tooltip_init(
   const int lineh = BLF_height_max(font_id);
   int min_width = max_text_width + int(round(lineh * 1.95f));
 
-  /* When panels are expanded, match tooltip width to the panel content area width. */
-  {
-    ScrArea *area = CTX_wm_area(C);
-    if (area) {
-      const eUserPref_CategoryTabsDisplayMode display_mode = ED_category_tabs_display_mode_get(area);
-      const float category_tabs_zoom = category_tabs_zoom_value_get(area, display_mode);
-      const float raw_aspect = BLI_listbase_is_empty(&region->runtime->uiblocks) ?
-                               1.0f :
-                               (static_cast<Block *>(region->runtime->uiblocks.first))->aspect;
-      const float aspect = (std::abs(raw_aspect - 1.0f) < 0.001f) ? 1.0f : raw_aspect;
-      const float zoom = (1.0f / aspect) * category_tabs_zoom;
-      const int category_tabs_width = round_fl_to_int(UI_PANEL_CATEGORY_MARGIN_WIDTH * zoom);
-      const int category_tabs_min_w = category_tabs_min_width_get(area, aspect, display_mode);
-      const bool too_narrow = BLI_rcti_size_x(&region->winrct) <= category_tabs_min_w;
-
-      if (!too_narrow) {
-        const int panel_content_width = region->winx - category_tabs_width - 2 * UI_PANEL_MARGIN_X;
-        min_width = max_ii(min_width, panel_content_width);
-      }
-    }
-  }
+  /* Keep the tooltip compact (widest tab name only): a panel-wide tooltip cannot be
+   * parked outside the region near the screen edge and would end up covering panels. */
 
   return tooltip_create_from_text_with_colored_suffix_fixed_width(C,
                                                                  tooltip_prefix,
                                                                  tooltip_suffix,
                                                                  TIP_LC_ACTIVE,
                                                                  position,
-                                                                 use_tab_rect ? &tab_rect_screen : nullptr,
+                                                                 &tab_rect_screen,
                                                                  prefer_left,
                                                                  min_width,
                                                                  true,

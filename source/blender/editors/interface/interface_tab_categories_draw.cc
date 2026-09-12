@@ -3470,31 +3470,19 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   state->is_reserved = is_reserved_glyph;
 
   if (is_reserved_glyph) {
-    /* Create persistent tooltip with proper alignment to avoid overlapping tabs. */
+    /* Create persistent tooltip parked strictly outside the panel region (shared helper,
+     * region-wide anchor) so it never covers panel content. */
     char msg[128];
     SNPRINTF(msg, "%s (Cannot Reorder)", IFACE_(clicked_pc->idname));
 
-    /* Use the same positioning logic as hover tooltips. */
-    const bool is_left = (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT);
-
-    /* Position tooltip to avoid overlapping the tab.
-     * Convert tab rect from region-local to screen coordinates. */
     rcti tab_rect_screen;
-    tab_rect_screen.xmin = region->winrct.xmin + clicked_pc->rect.xmin;
-    tab_rect_screen.xmax = region->winrct.xmin + clicked_pc->rect.xmax;
-    tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
-    tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
-
     int position[2];
-    if (is_left) {
-      position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN;
+    bool prefer_left = false;
+    {
+      const int cursor_xy[2] = {event->xy[0], event->xy[1]};
+      category_tab_tooltip_placement_get(
+          region, nullptr, cursor_xy, &tab_rect_screen, position, &prefer_left);
     }
-    else {
-      position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN;
-    }
-    position[1] = event->xy[1];
-
-    const bool prefer_left = !is_left;
     state->tooltip_region = tooltip_create_from_text(
         C, msg, position, &tab_rect_screen, prefer_left);
     /* Store initial X position and dimensions for tooltip management during drag. */
@@ -3527,33 +3515,16 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
       /* Get category display name using the same method as hover tooltips. */
       const char *category_display_name = panel_category_tooltip_name_get(region, wm, clicked_pc->idname);
       if (category_display_name && category_display_name[0]) {
-        /* Create tooltip with proper alignment to avoid overlapping tabs.
-         * Uses the same positioning logic as hover tooltips. */
-        const bool is_left = (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) != RGN_ALIGN_RIGHT);
-
-        /* Position tooltip to avoid overlapping the tab.
-         * Convert tab rect from region-local to screen coordinates.
-         * Use mouse Y position to keep tooltip aligned with cursor vertically. */
+        /* Park the tooltip strictly outside the panel region (shared helper,
+         * region-wide anchor). */
         rcti tab_rect_screen;
-        tab_rect_screen.xmin = region->winrct.xmin + clicked_pc->rect.xmin;
-        tab_rect_screen.xmax = region->winrct.xmin + clicked_pc->rect.xmax;
-        /* Use mouse Y position to keep tooltip vertically aligned with cursor. */
-        tab_rect_screen.ymin = event->xy[1] - UI_UNIT_Y / 2;
-        tab_rect_screen.ymax = event->xy[1] + UI_UNIT_Y / 2;
-
         int position[2];
-        if (is_left) {
-          /* Tabs on left side: position tooltip to the right of tabs. */
-          position[0] = tab_rect_screen.xmax + UI_POPUP_MARGIN;
+        bool prefer_left = false;
+        {
+          const int cursor_xy[2] = {event->xy[0], event->xy[1]};
+          category_tab_tooltip_placement_get(
+              region, nullptr, cursor_xy, &tab_rect_screen, position, &prefer_left);
         }
-        else {
-          /* Tabs on right side: position tooltip to the left of tabs. */
-          position[0] = tab_rect_screen.xmin - UI_POPUP_MARGIN;
-        }
-        position[1] = event->xy[1];
-
-        /* For tabs on right side, prefer left side positioning first. */
-        const bool prefer_left = !is_left;
         state->tooltip_region = tooltip_create_from_text(
             C, IFACE_(category_display_name), position, &tab_rect_screen, prefer_left);
         /* Store initial X position and dimensions for tooltip management during drag. */

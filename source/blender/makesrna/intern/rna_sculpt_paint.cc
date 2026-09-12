@@ -27,6 +27,7 @@
 #include "BKE_attribute.h"
 #include "BKE_colorband.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_layer_edit.hh"
 #include "BKE_paint_material_sync.hh"
 
 #include "ED_asset_shelf.hh"
@@ -987,6 +988,79 @@ static void rna_PaintModeSettings_brush_sync_update(bContext *C, PointerRNA * /*
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
 }
 
+static void rna_PaintModeSettings_active_layer_channel_states(PaintModeSettings *mode,
+                                                              Main *bmain,
+                                                              int *r_enabled,
+                                                              int *r_disabled)
+{
+  /* One read of the stack for every channel: the Layer Material tab draws all of them at once. */
+  *r_enabled = 0;
+  *r_disabled = 0;
+  int ordinal = -1;
+  Material *owner = BKE_paint_material_active_layer_owner_get(*bmain, *mode, &ordinal);
+  if (owner == nullptr) {
+    return;
+  }
+  PaintMaterialLayerChannelState states[PAINT_MATERIAL_CHANNEL_NUM];
+  BKE_paint_material_layer_channel_states_get(
+      *bmain, *owner, ordinal, MutableSpan(states, PAINT_MATERIAL_CHANNEL_NUM));
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    if (states[channel] == PaintMaterialLayerChannelState::Enabled) {
+      *r_enabled |= 1 << channel;
+    }
+    else if (states[channel] == PaintMaterialLayerChannelState::Disabled) {
+      *r_disabled |= 1 << channel;
+    }
+  }
+}
+
+static const EnumPropertyItem *rna_PaintModeSettings_stack_layer_channel_itemf(
+    bContext *C, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
+{
+  /* The channels wired by the stack being edited -- the one the channel bindings point into, else
+   * the active object's -- in the order the channel table lists them. With no stack to read every
+   * paintable channel is offered, and the stored channel always stays listed: an enum value missing
+   * from its items leaves the picker blank. */
+  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
+  Main *bmain = (C != nullptr) ? CTX_data_main(C) : nullptr;
+  Material *ma = nullptr;
+  if (bmain != nullptr && mode != nullptr) {
+    ma = BKE_paint_material_active_layer_owner_get(*bmain, *mode, nullptr);
+  }
+  if (ma == nullptr && C != nullptr) {
+    Object *ob = CTX_data_active_object(C);
+    ma = (ob != nullptr) ? BKE_object_material_get(ob, ob->actcol) : nullptr;
+  }
+  Vector<int> wired;
+  if (ma != nullptr) {
+    BKE_paint_material_layer_channels_wired(*ma, wired);
+  }
+  const int current = (mode != nullptr) ? mode->stack_layer_channel : -1;
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  for (const EnumPropertyItem *item = rna_enum_material_paint_channel_items;
+       item->identifier != nullptr;
+       item++)
+  {
+    if (item->identifier[0] == '\0') {
+      continue;
+    }
+    const bool has_socket =
+        item->value >= 0 && item->value < PAINT_MATERIAL_CHANNEL_NUM &&
+        BKE_paint_material_channel_info(eMaterialPaintChannel(item->value)).socket_name != nullptr;
+    if (!has_socket) {
+      continue;
+    }
+    if (!wired.is_empty() && !wired.contains(item->value) && item->value != current) {
+      continue;
+    }
+    RNA_enum_item_add(&items, &items_num, item);
+  }
+  RNA_enum_item_end(&items, &items_num);
+  *r_free = true;
+  return items;
+}
+
 static void rna_paint_visible_material_channels_set(PointerRNA *ptr, Paint *paint, int value)
 {
   const int added = value & ~paint->visible_material_channels;
@@ -1260,6 +1334,17 @@ static void rna_PaintMaterialLayerOpacity_value_set(PointerRNA *ptr, const float
 {
   bNodeSocket *socket = static_cast<bNodeSocket *>(ptr->data);
   socket->default_value_typed<bNodeSocketValueFloat>()->value = value / 100.0f;
+}
+
+static void rna_PaintMaterialLayerOpacity_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
+{
+  if (ptr->owner_id == nullptr || GS(ptr->owner_id->name) != ID_NT) {
+    return;
+  }
+  BKE_paint_material_layer_opacity_changed(*bmain,
+                                           *id_cast<bNodeTree *>(ptr->owner_id),
+                                           *static_cast<bNodeSocket *>(ptr->data));
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
 }
 
 }  // namespace blender
@@ -2348,13 +2433,15 @@ static void rna_def_paint_material_layer_opacity(BlenderRNA *brna)
                                "rna_PaintMaterialLayerOpacity_value_set",
                                nullptr);
   RNA_def_property_ui_text(prop, "Opacity", "How much this paint layer covers what is below it");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+  RNA_def_property_update(prop, 0, "rna_PaintMaterialLayerOpacity_update");
 }
 
 static void rna_def_paint_mode(BlenderRNA *brna)
 {
   StructRNA *srna;
   PropertyRNA *prop;
+  FunctionRNA *func;
+  PropertyRNA *parm;
 
   srna = RNA_def_struct(brna, "MaterialPaintChannelLayerBinding", nullptr);
   RNA_def_struct_sdna(srna, "MaterialPaintChannelLayerBinding");
@@ -2499,6 +2586,27 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       "Per-channel material paint image redirect for the image/texture canvas, indexed by "
       "material paint channel");
 
+  func = RNA_def_function(
+      srna, "active_layer_channel_states", "rna_PaintModeSettings_active_layer_channel_states");
+  RNA_def_function_flag(func, FUNC_USE_MAIN);
+  RNA_def_function_ui_description(
+      func,
+      "Channels switched on and off on the active Stack Layers row; every other channel is absent");
+  parm = RNA_def_enum_flag(func,
+                           "enabled",
+                           rna_enum_visible_material_paint_channel_items,
+                           0,
+                           "Enabled",
+                           "Channels whose map the row shows");
+  RNA_def_function_output(func, parm);
+  parm = RNA_def_enum_flag(func,
+                           "disabled",
+                           rna_enum_visible_material_paint_channel_items,
+                           0,
+                           "Disabled",
+                           "Channels whose map the row keeps but has switched off");
+  RNA_def_function_output(func, parm);
+
   static const EnumPropertyItem new_channel_image_size_items[] = {
       {PAINT_NEW_CHANNEL_IMAGE_SIZE_256, "SIZE_256", 0, "256 (256 x 256)", "256 x 256"},
       {PAINT_NEW_CHANNEL_IMAGE_SIZE_512, "SIZE_512", 0, "512 (512 x 512)", "512 x 512"},
@@ -2518,6 +2626,15 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "Width and height used for material paint channel images that "
                            "are auto-created when a channel is enabled");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "stack_layer_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stack_layer_channel");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_enum_funcs(prop, nullptr, nullptr, "rna_PaintModeSettings_stack_layer_channel_itemf");
+  RNA_def_property_ui_text(prop,
+                           "Layer Channel",
+                           "Channel whose Blending Mode and Opacity the layer stack shows and edits");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 
   prop = RNA_def_enum_flag(srna,
                            "material_shader_visible_channels",

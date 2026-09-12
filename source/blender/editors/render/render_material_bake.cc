@@ -29,9 +29,7 @@
 
 #include <algorithm>
 #include <array>
-#include <cfloat> /* TEMP-DEBUG [MAT_LAYER]: remove with the prints below. */
 #include <cstdint>
-#include <cstdio> /* TEMP-DEBUG [MAT_LAYER]: remove with the prints below. */
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -946,27 +944,6 @@ static bool bake_requests_render(Main &bmain,
           dst[texel * 4 + 3] = 1.0f;
         }
       }
-      /* TEMP-DEBUG [MAT_LAYER]: remove before merge. What the AOV itself delivered, before any
-       * write-back, to tell an empty render pass apart from a write that never lands. */
-      {
-        float src_min = FLT_MAX, src_max = -FLT_MAX;
-        double src_sum = 0.0;
-        for (const int64_t texel : IndexRange(texel_num)) {
-          const float value = src[texel * pass->channels];
-          src_min = std::min(src_min, value);
-          src_max = std::max(src_max, value);
-          src_sum += value;
-        }
-        printf("[MAT_LAYER] render AOV='%s' is_color=%d pass_channels=%d src_r min=%.3f max=%.3f "
-               "mean=%.3f\n",
-               request.name,
-               int(request.is_color),
-               pass->channels,
-               double(src_min),
-               double(src_max),
-               src_sum / double(texel_num));
-        fflush(stdout);
-      }
       r_images[request_index] = ibuf;
     }
   }
@@ -1600,16 +1577,7 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
       worker_status->progress = BAKE_PROGRESS_RENDERED;
       worker_status->do_update = true;
     }
-    /* TEMP-DEBUG [MAT_LAYER]: remove before merge. */
-    printf("[MAT_LAYER] bake.startjob requests=%d attached=%d rendered=%d\n",
-           int(requests.size()), int(attached), int(rendered));
-    fflush(stdout);
     baked = rendered;
-  }
-  else {
-    /* TEMP-DEBUG [MAT_LAYER]: remove before merge. */
-    printf("[MAT_LAYER] bake.startjob nothing to render (requests=%d)\n", int(requests.size()));
-    fflush(stdout);
   }
   if (baked) {
     for (const int request_index : requests.index_range()) {
@@ -1679,11 +1647,6 @@ static void material_bake_images_endjob(void *customdata)
                               source.channel == int(job.channels[i]) &&
                               source.material != nullptr &&
                               source.material->id.session_uid == job.material_session_uid;
-    /* TEMP-DEBUG [MAT_LAYER]: remove before merge. */
-    printf("[MAT_LAYER] bake.endjob ch=%d rendered=%d target=%d valid=%d\n",
-           int(job.channels[i]), int(rendered != nullptr), int(target != nullptr),
-           int(target_valid));
-    fflush(stdout);
     if (rendered == nullptr || !target_valid) {
       /* A channel that failed to render keeps its old pixels and its old hash, so it stays stale
        * and the next re-bake picks it up again. */
@@ -1697,39 +1660,6 @@ static void material_bake_images_endjob(void *customdata)
      * The map just landed in a real material's stack (#source.material, from the same link this
      * validated above), so that material is what needs telling. */
     WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &source.material->id);
-
-    /* TEMP-DEBUG [MAT_LAYER]: remove before merge. Read the alpha back from both the rendered
-     * buffer and the written-back target, at the centre texel, to settle whether the AOV
-     * alpha-forcing fix actually reaches the image the layer's coverage factor samples. */
-    {
-      const int64_t center = (int64_t(rendered->y) / 2) * rendered->x + rendered->x / 2;
-      const float rendered_alpha = (rendered->float_data() != nullptr) ?
-                                       rendered->float_data()[center * 4 + 3] :
-                                       -1.0f;
-      const float rendered_r = (rendered->float_data() != nullptr) ?
-                                   rendered->float_data()[center * 4 + 0] :
-                                   -1.0f;
-      void *lock = nullptr;
-      const ImBuf *target_ibuf = BKE_image_acquire_ibuf(target, nullptr, &lock);
-      float target_alpha = -1.0f;
-      float target_r = -1.0f;
-      if (target_ibuf != nullptr && target_ibuf->float_data() != nullptr) {
-        const int64_t target_center = (int64_t(target_ibuf->y) / 2) * target_ibuf->x +
-                                      target_ibuf->x / 2;
-        target_alpha = target_ibuf->float_data()[target_center * 4 + 3];
-        target_r = target_ibuf->float_data()[target_center * 4 + 0];
-      }
-      BKE_image_release_ibuf(target, const_cast<ImBuf *>(target_ibuf), lock);
-      printf("[MAT_LAYER] bake.endjob ch=%d image='%s' alpha rendered=%.3f "
-             "target_after_writeback=%.3f r rendered=%.3f target_after_writeback=%.3f\n",
-             int(job.channels[i]),
-             target->id.name + 2,
-             double(rendered_alpha),
-             double(target_alpha),
-             double(rendered_r),
-             double(target_r));
-      fflush(stdout);
-    }
 
     ImageMaterialSource link = source;
     link.node_tree_hash = job.baked_hash;

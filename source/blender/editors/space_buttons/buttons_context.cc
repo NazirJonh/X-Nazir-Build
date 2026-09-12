@@ -394,14 +394,21 @@ static bool buttons_context_path_brush_material(const bContext *C, ButsContextPa
   return true;
 }
 
-static bool buttons_context_path_layer_material(const Scene *scene, ButsContextPath *path)
+static bool buttons_context_path_layer_material(Main *bmain,
+                                                 const Scene *scene,
+                                                 ButsContextPath *path)
 {
   /* Pinning is ignored like for #BCONTEXT_BRUSH_MATERIAL: the tab follows the active paint layer. */
-  if (scene == nullptr || scene->toolsettings == nullptr) {
+  if (bmain == nullptr || scene == nullptr || scene->toolsettings == nullptr) {
     return false;
   }
-  Material *material = BKE_paint_material_active_layer_source_get(
-      scene->toolsettings->paint_mode);
+  const PaintModeSettings &mode = scene->toolsettings->paint_mode;
+  /* A Material layer edits the material it was baked from; any other row shows its channels on
+   * the material that owns the stack. */
+  Material *material = BKE_paint_material_active_layer_source_get(mode);
+  if (material == nullptr) {
+    material = BKE_paint_material_active_layer_owner_get(*bmain, mode, nullptr);
+  }
   if (material == nullptr) {
     return false;
   }
@@ -761,7 +768,7 @@ static bool buttons_context_path(
       found = buttons_context_path_brush_material(C, path);
       break;
     case BCONTEXT_LAYER_MATERIAL:
-      found = buttons_context_path_layer_material(scene, path);
+      found = buttons_context_path_layer_material(CTX_data_main(C), scene, path);
       break;
     default:
       found = false;

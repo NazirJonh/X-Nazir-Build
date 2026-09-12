@@ -14,7 +14,6 @@
 #include <cstddef>
 
 #include "BKE_context.hh"
-#include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
@@ -251,26 +250,32 @@ void IMAGE_OT_rebake_stale_material_sources(wmOperatorType *ot)
 /** \name Material Paint Layer Settings
  *
  * The Layer Material tab's controls. The active layer is the one the scene's channel bindings
- * point at, and what the layer holds is read back from its maps: a channel is on while its map
- * carries a bake link, and the maps' bake size is the layer's resolution. Nothing else is stored.
+ * point at (#BKE_paint_material_active_layer_owner_get). Its channel states are read from the
+ * stack; a Material layer's source and resolution are read back from its maps' bake links.
  * \{ */
-
-/** A switched-off channel's map only has to be transparent; its size is irrelevant. */
-constexpr int PAINT_LAYER_NEUTRAL_MAP_SIZE = 4;
 
 struct ActiveMaterialLayer {
   Material *owner = nullptr;
   int ordinal = -1;
-  bool is_bare_base = false;
-  /** The layer's map per channel, for every channel the owner wires as a stack. */
+  PaintMaterialLayerKind kind = PaintMaterialLayerKind::Paint;
+  /** The layer's map per channel, Disabled ones included, for every channel wired as a stack. */
   Map<int, Image *> maps;
+  /** The material the layer's maps are baked from, when any of them carries a bake link. */
   Material *source = nullptr;
-  /** Number of maps that still carry a bake link, and the largest size they were baked at. */
-  int enabled_num = 0;
+  /** The largest size the layer's baked maps were baked at. */
   int bake_size = 0;
+
+  /**
+   * Whether the row is re-baked from a source material. The kind decides it, not the bake link
+   * alone: a Paint layer whose map happens to carry one is still painted by hand.
+   */
+  bool is_material() const
+  {
+    return this->kind == PaintMaterialLayerKind::Material && this->source != nullptr;
+  }
 };
 
-/** The Material layer the scene's channel bindings currently point at. */
+/** The stack row the scene's channel bindings currently point at, whatever kind it is. */
 static bool active_material_layer_find(Main &bmain,
                                        const Scene &scene,
                                        ActiveMaterialLayer &r_layer)
@@ -278,56 +283,35 @@ static bool active_material_layer_find(Main &bmain,
   if (scene.toolsettings == nullptr) {
     return false;
   }
-  Set<const Image *> bound;
-  for (const MaterialPaintChannelImageBinding &binding :
-       scene.toolsettings->paint_mode.channel_image_bindings)
-  {
-    if (binding.image != nullptr) {
-      bound.add(binding.image);
-    }
-  }
-  if (bound.is_empty()) {
+  int ordinal = -1;
+  Material *owner = BKE_paint_material_active_layer_owner_get(
+      bmain, scene.toolsettings->paint_mode, &ordinal);
+  if (owner == nullptr) {
     return false;
   }
-  for (Material &material : bmain.materials) {
-    if (material.nodetree == nullptr) {
+  Vector<PaintMaterialLayerStackEntry> entries;
+  if (!BKE_paint_material_layer_stack_from_material(bmain, *owner, entries)) {
+    return false;
+  }
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    if (entry.ordinal != ordinal) {
       continue;
     }
-    Vector<PaintMaterialLayerStackEntry> entries;
-    if (!BKE_paint_material_layer_stack_from_material(bmain, material, entries)) {
-      continue;
-    }
-    for (const PaintMaterialLayerStackEntry &entry : entries) {
-      if (entry.kind != int8_t(PaintMaterialLayerKind::Material)) {
+    r_layer.owner = owner;
+    r_layer.ordinal = entry.ordinal;
+    r_layer.kind = PaintMaterialLayerKind(entry.kind);
+    for (const auto item : entry.channel_images.items()) {
+      if (item.key < 0 || item.key >= PAINT_MATERIAL_CHANNEL_NUM || item.value == nullptr) {
         continue;
       }
-      bool is_active = false;
-      for (const Image *image : entry.channel_images.values()) {
-        if (image != nullptr && bound.contains(image)) {
-          is_active = true;
-          break;
-        }
+      r_layer.maps.add(item.key, item.value);
+      ImageMaterialSource source;
+      if (BKE_image_material_source_get(*item.value, source)) {
+        r_layer.source = source.material;
+        r_layer.bake_size = std::max(r_layer.bake_size, source.bake_size);
       }
-      if (!is_active) {
-        continue;
-      }
-      r_layer.owner = &material;
-      r_layer.ordinal = entry.ordinal;
-      r_layer.is_bare_base = entry.is_bare_base;
-      for (const auto item : entry.channel_images.items()) {
-        if (item.key < 0 || item.key >= PAINT_MATERIAL_CHANNEL_NUM || item.value == nullptr) {
-          continue;
-        }
-        r_layer.maps.add(item.key, item.value);
-        ImageMaterialSource source;
-        if (BKE_image_material_source_get(*item.value, source)) {
-          r_layer.source = source.material;
-          r_layer.enabled_num++;
-          r_layer.bake_size = std::max(r_layer.bake_size, source.bake_size);
-        }
-      }
-      return r_layer.source != nullptr;
     }
+    return true;
   }
   return false;
 }
@@ -348,78 +332,6 @@ static void paint_layer_binding_set(MaterialPaintChannelImageBinding &binding, I
   BKE_imageuser_default(&binding.iuser);
 }
 
-/**
- * Make \a replacement the layer's map for \a channel in place of \a previous, which the node tree
- * then frees as the orphan it becomes.
- *
- * \a replacement arrives with the one user a new data-block has. The binding moves first, so that
- * once the node lets go of \a previous nothing holds it any more.
- */
-static bool paint_layer_map_replace(Main &bmain,
-                                    const ActiveMaterialLayer &layer,
-                                    MaterialPaintChannelImageBinding &binding,
-                                    const int channel,
-                                    Image &previous,
-                                    Image &replacement,
-                                    PaintMaterialLayerEditError &r_error)
-{
-  const bool rebind = binding.image == &previous;
-  if (rebind) {
-    paint_layer_binding_set(binding, &replacement);
-  }
-  /* The creation user goes back: #BKE_paint_material_layer_channel_image_set counts the node's. */
-  id_us_min(&replacement.id);
-  if (BKE_paint_material_layer_channel_image_set(
-          bmain, *layer.owner, layer.ordinal, channel, replacement, &r_error))
-  {
-    return true;
-  }
-  if (rebind) {
-    paint_layer_binding_set(binding, &previous);
-  }
-  if (replacement.id.us <= 0) {
-    BKE_id_free(&bmain, &replacement);
-  }
-  return false;
-}
-
-/** Where a switched-off channel's stand-in keeps the baked map it replaced. */
-constexpr const char *PAINT_LAYER_PARKED_MAP_PROP = "pbr_parked_map";
-
-/** Park \a map on \a stand_in; the reference counts as a user of \a map. */
-static void paint_layer_parked_map_set(Image &stand_in, Image *map)
-{
-  IDP_ReplaceInGroup(IDP_ID_system_properties_ensure(&stand_in.id),
-                     bke::idprop::create(PAINT_LAYER_PARKED_MAP_PROP, &map->id).release());
-}
-
-/**
- * The map parked on \a stand_in, when it is still a bake of \a source for \a channel. Anything
- * else -- a stale reference, a map re-linked since -- is ignored, and the channel is baked anew.
- */
-static Image *paint_layer_parked_map_get(const Image &stand_in,
-                                         const Material &source,
-                                         const int channel)
-{
-  const IDProperty *root = IDP_ID_system_properties_get(const_cast<ID *>(&stand_in.id));
-  if (root == nullptr) {
-    return nullptr;
-  }
-  const IDProperty *prop = IDP_GetPropertyTypeFromGroup(root, PAINT_LAYER_PARKED_MAP_PROP, IDP_ID);
-  ID *id = prop != nullptr ? IDP_ID_get(prop) : nullptr;
-  if (id == nullptr || GS(id->name) != ID_IM) {
-    return nullptr;
-  }
-  Image *map = id_cast<Image *>(id);
-  ImageMaterialSource link;
-  if (!BKE_image_material_source_get(*map, link) || link.material != &source ||
-      link.channel != channel)
-  {
-    return nullptr;
-  }
-  return map;
-}
-
 /** The pixel width \a image currently has, or zero when it has no buffer. */
 static int paint_layer_map_size(Image &image)
 {
@@ -436,14 +348,49 @@ static bool paint_layer_settings_poll(bContext *C)
   Scene *scene = CTX_data_scene(C);
   ActiveMaterialLayer layer;
   if (scene == nullptr || !active_material_layer_find(*bmain, *scene, layer)) {
-    CTX_wm_operator_poll_msg_set(C, "No active Material paint layer");
+    CTX_wm_operator_poll_msg_set(C, "No active paint layer");
     return false;
   }
-  if (!ID_IS_EDITABLE(&layer.owner->id) || !ID_IS_EDITABLE(&layer.source->id)) {
+  if (!ID_IS_EDITABLE(&layer.owner->id) ||
+      (layer.source != nullptr && !ID_IS_EDITABLE(&layer.source->id)))
+  {
     CTX_wm_operator_poll_msg_set(C, "The layer's material is not editable");
     return false;
   }
   return true;
+}
+
+static bool paint_layer_material_settings_poll(bContext *C)
+{
+  if (!paint_layer_settings_poll(C)) {
+    return false;
+  }
+  Main *bmain = CTX_data_main(C);
+  ActiveMaterialLayer layer;
+  active_material_layer_find(*bmain, *CTX_data_scene(C), layer);
+  if (!layer.is_material()) {
+    CTX_wm_operator_poll_msg_set(C, "The active layer is not a Material layer");
+    return false;
+  }
+  return true;
+}
+
+/** The map \a channel of the row \a ordinal shows now, or null when it has none or is off. */
+static Image *paint_layer_channel_target(Main &bmain, Material &owner, const int ordinal, const int channel)
+{
+  if (BKE_paint_material_layer_channel_state_get(bmain, owner, ordinal, channel) !=
+      PaintMaterialLayerChannelState::Enabled)
+  {
+    return nullptr;
+  }
+  Vector<PaintMaterialLayerStackEntry> entries;
+  BKE_paint_material_layer_stack_from_material(bmain, owner, entries);
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    if (entry.ordinal == ordinal) {
+      return entry.channel_images.lookup_default(channel, nullptr);
+    }
+  }
+  return nullptr;
 }
 
 static wmOperatorStatus paint_layer_channel_toggle_exec(bContext *C, wmOperator *op)
@@ -454,71 +401,24 @@ static wmOperatorStatus paint_layer_channel_toggle_exec(bContext *C, wmOperator 
   const int channel = RNA_enum_get(op->ptr, "channel");
   ActiveMaterialLayer layer;
   if (!active_material_layer_find(*bmain, *scene, layer)) {
-    BKE_report(op->reports, RPT_ERROR, "No active Material paint layer");
+    BKE_report(op->reports, RPT_ERROR, "No active paint layer");
     return OPERATOR_CANCELLED;
   }
-  Image *current = layer.maps.lookup_default(channel, nullptr);
-  if (current == nullptr) {
-    BKE_report(op->reports, RPT_ERROR, "The layer stack does not wire this channel");
-    return OPERATOR_CANCELLED;
-  }
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   MaterialPaintChannelImageBinding &binding =
       scene->toolsettings->paint_mode.channel_image_bindings[channel];
-  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
-  ImageMaterialSource link;
 
-  if (BKE_image_material_source_get(*current, link)) {
-    if (layer.enabled_num <= 1) {
-      /* The layer is found through its baked maps; with none left it would stop being one. */
-      BKE_report(op->reports, RPT_ERROR, "A Material layer keeps at least one channel");
-      return OPERATOR_CANCELLED;
-    }
-    if (layer.is_bare_base) {
-      BKE_report(op->reports, RPT_ERROR, "The bottom layer cannot drop a channel");
-      return OPERATOR_CANCELLED;
-    }
-    Image *neutral = BKE_paint_material_layer_neutral_image_create(
-        *bmain, channel, PAINT_LAYER_NEUTRAL_MAP_SIZE);
-    if (neutral == nullptr) {
-      return OPERATOR_CANCELLED;
-    }
-    /* Parked on the stand-in rather than freed: switching the channel straight back on then costs
-     * no bake and no new data-block. The reference holds a user, so the swap below leaves the map
-     * alive, and it goes with the stand-in whenever that is removed. */
-    paint_layer_parked_map_set(*neutral, current);
-    BKE_image_material_source_parked_set(*current, true);
-    if (!paint_layer_map_replace(*bmain, layer, binding, channel, *current, *neutral, error)) {
-      /* The failed swap freed the stand-in, and the reference with it. */
-      BKE_image_material_source_parked_set(*current, false);
-      BKE_report(op->reports, RPT_ERROR, BKE_paint_material_layer_edit_error_message(error));
-      return OPERATOR_CANCELLED;
-    }
-  }
-  else if (Image *parked = paint_layer_parked_map_get(*current, *layer.source, channel)) {
-    /* The swap hands over as if from a fresh data-block, which comes with one user of its own. */
-    id_us_plus(&parked->id);
-    if (!paint_layer_map_replace(*bmain, layer, binding, channel, *current, *parked, error)) {
-      BKE_report(op->reports, RPT_ERROR, BKE_paint_material_layer_edit_error_message(error));
-      return OPERATOR_CANCELLED;
-    }
-    BKE_image_material_source_parked_set(*parked, false);
-    /* Only a map that fell behind is rendered again: the material was edited while the channel was
-     * off, or the layer's resolution moved. */
-    const int size = layer.bake_size;
-    ImageMaterialSource parked_link;
-    BKE_image_material_source_get(*parked, parked_link);
-    const bool resized = size > 0 && paint_layer_map_size(*parked) != size;
-    if (resized) {
-      BKE_image_scale(parked, size, size, nullptr);
-      parked_link.bake_size = size;
-      BKE_image_material_source_set(*parked, parked_link);
-    }
-    if (resized || ed::material_bake::material_bake_source_is_stale(*parked)) {
-      ed::material_bake::material_bake_images_rebake(
-          *bmain, *layer.source, Span<Image *>(&parked, 1), size);
-    }
-  }
-  else {
+  /* The shown state -- a file from before per-channel states left some channels linked like an
+   * enabled one but showing a neutral stand-in; #BKE_paint_material_layer_channel_state_get and
+   * #BKE_paint_material_layer_channel_enabled_set agree that such a channel reads as Disabled and
+   * restore its parked map on the way back to Enabled. */
+  const PaintMaterialLayerChannelState state = BKE_paint_material_layer_channel_state_get(
+      *bmain, *layer.owner, layer.ordinal, channel);
+  const bool enable = state != PaintMaterialLayerChannelState::Enabled;
+
+  if (enable && state == PaintMaterialLayerChannelState::Absent && layer.is_material()) {
+    /* A Material layer's new channel is a bake of its source; the map is handed over before
+     * the render starts, like every Material layer map (see #before_render). */
     const int size = layer.bake_size > 0 ? layer.bake_size :
                                            scene->toolsettings->paint_mode.new_channel_image_size;
     const BakeTargetSpec target = {eMaterialPaintChannel(channel)};
@@ -526,23 +426,19 @@ static wmOperatorStatus paint_layer_channel_toggle_exec(bContext *C, wmOperator 
     params.material = layer.source;
     params.targets = Span(&target, 1);
     params.size = size;
-    BLI_uuid_format(params.layer_id, current->paint_layer_id);
-    bool replaced = false;
-    /* The map goes onto the layer before the render starts; see #before_render. Named, because
-     * #FunctionRef does not own the callable it refers to. */
+    bool handed_over = false;
     auto hand_over = [&](const MaterialBakeToImagesResult &result) {
       if (result.created.is_empty()) {
         return false;
       }
-      Image &baked = *result.created.first();
-      baked.flag |= IMA_PAINT_CANVAS;
-      replaced = paint_layer_map_replace(*bmain, layer, binding, channel, *current, baked, error);
-      return replaced;
+      handed_over = BKE_paint_material_layer_channel_enabled_set(
+          *bmain, *layer.owner, layer.ordinal, channel, true, result.created.first(), &error);
+      return handed_over;
     };
     params.before_render = hand_over;
     const MaterialBakeToImagesResult result = material_bake_to_images(
         *bmain, CTX_wm_manager(C), CTX_wm_window(C), params);
-    if (!replaced) {
+    if (!handed_over) {
       BKE_report(op->reports,
                  RPT_ERROR,
                  !result.skipped_unavailable.is_empty() ?
@@ -551,6 +447,35 @@ static wmOperatorStatus paint_layer_channel_toggle_exec(bContext *C, wmOperator 
       return OPERATOR_CANCELLED;
     }
   }
+  else if (!BKE_paint_material_layer_channel_enabled_set(
+               *bmain, *layer.owner, layer.ordinal, channel, enable, nullptr, &error))
+  {
+    BKE_report(op->reports, RPT_ERROR, BKE_paint_material_layer_edit_error_message(error));
+    return OPERATOR_CANCELLED;
+  }
+
+  /* A Disabled bake that fell behind -- source edited, the resolution moved, or (a legacy file)
+   * the parked map was never re-baked while it sat aside -- is rendered again now that it shows.
+   * Read fresh rather than through \a layer's snapshot: a legacy restore just swapped the node's
+   * map, and the old one -- \a layer's own copy of the pointer -- may already be freed. */
+  if (enable && state == PaintMaterialLayerChannelState::Disabled && layer.is_material()) {
+    if (Image *map = paint_layer_channel_target(*bmain, *layer.owner, layer.ordinal, channel)) {
+      const bool resized = layer.bake_size > 0 && paint_layer_map_size(*map) != layer.bake_size;
+      if (resized) {
+        BKE_image_scale(map, layer.bake_size, layer.bake_size, nullptr);
+        ImageMaterialSource link;
+        BKE_image_material_source_get(*map, link);
+        link.bake_size = layer.bake_size;
+        BKE_image_material_source_set(*map, link);
+      }
+      if (resized || material_bake_source_is_stale(*map)) {
+        material_bake_images_rebake(*bmain, *layer.source, Span<Image *>(&map, 1), layer.bake_size);
+      }
+    }
+  }
+  /* A switched-off channel is not a paint target (spec 6). */
+  paint_layer_binding_set(
+      binding, paint_layer_channel_target(*bmain, *layer.owner, layer.ordinal, channel));
 
   WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &layer.owner->id);
   WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
@@ -561,9 +486,9 @@ void MATERIAL_OT_paint_layer_channel_toggle(wmOperatorType *ot)
 {
   ot->name = "Toggle Paint Layer Channel";
   ot->description =
-      "Switch this channel of the active Material paint layer on or off. Off leaves the channel to "
-      "the layers below and keeps its map aside, so switching it back on needs no new bake unless "
-      "the material changed meanwhile";
+      "Switch this channel of the active paint layer on or off. Off keeps the map and leaves the "
+      "channel to the layers below; on restores it, or gives the layer the channel when it has "
+      "none";
   ot->idname = "MATERIAL_OT_paint_layer_channel_toggle";
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
   ot->exec = paint_layer_channel_toggle_exec;
@@ -612,7 +537,7 @@ void MATERIAL_OT_paint_layer_rebake(wmOperatorType *ot)
   /* No undo step: the maps' pixels are not part of undo, and nothing else changes. */
   ot->flag = OPTYPE_REGISTER;
   ot->exec = paint_layer_rebake_exec;
-  ot->poll = paint_layer_settings_poll;
+  ot->poll = paint_layer_material_settings_poll;
 }
 
 static const EnumPropertyItem paint_layer_bake_size_items[] = {
@@ -666,7 +591,7 @@ void MATERIAL_OT_paint_layer_bake_size_set(wmOperatorType *ot)
   ot->idname = "MATERIAL_OT_paint_layer_bake_size_set";
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
   ot->exec = paint_layer_bake_size_set_exec;
-  ot->poll = paint_layer_settings_poll;
+  ot->poll = paint_layer_material_settings_poll;
 
   ot->prop = RNA_def_enum(ot->srna,
                           "size",

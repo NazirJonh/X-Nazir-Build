@@ -31,6 +31,7 @@ struct Image;
 struct Main;
 struct Material;
 struct bNode;
+struct bNodeSocket;
 struct bNodeTree;
 
 /**
@@ -158,6 +159,13 @@ enum class PaintMaterialLayerEditError : int8_t {
    * destroy the material's look, so the operation refuses before baking anything.
    */
   ChannelHasUnsupportedSource,
+  /** The row is a folder: its channels are what the layers inside it make them. */
+  ChannelNotToggleable,
+  /**
+   * A layer is found through the maps its enabled channels bind as paint targets; switching off
+   * the last one would lose the active layer. Hiding the layer is the way to take it out.
+   */
+  LastEnabledChannel,
 };
 
 /** A message for #BKE_report, already translated at the call site by the caller if needed. */
@@ -220,7 +228,9 @@ struct PaintMaterialLayerAddParams {
   const char *name = nullptr;
   /**
    * Maps the caller already has, used as the new layer's map in their channels instead of creating
-   * one. A channel not listed gets a fresh map as usual.
+   * one. A channel not listed is Absent in the new row. With no maps given at all, the row is an
+   * empty Paint or Fill layer and gets a fresh map in Base Color only. On a material with no stack
+   * yet, only a Base Color map is used: the first row is built in Base Color alone.
    *
    * Ownership passes to #BKE_paint_material_layer_add with the call, whatever it returns: an image
    * a new node shows keeps the user it was created with as that node's user, and every other one
@@ -580,6 +590,76 @@ bool BKE_paint_material_layer_set_enabled(Main &bmain,
                                           int ordinal,
                                           bool enable,
                                           PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * Tell the stack that a layer's Opacity socket was written directly (the Outliner writes it
+ * through #RNA_PaintMaterialLayerOpacity). Tags the socket and refreshes the owning material's
+ * evaluated copy -- a bare notifier leaves the viewport on the old value.
+ */
+void BKE_paint_material_layer_opacity_changed(Main &bmain, bNodeTree &tree, bNodeSocket &socket);
+
+/** How one channel of one stack row stands; see the spec's invariants I1 and I2. */
+enum class PaintMaterialLayerChannelState : int8_t {
+  /** No map: the row keeps its Mix and Multiply, its coverage is unlinked and zero. */
+  Absent = 0,
+  /** A map feeds the row, its coverage comes from the map's alpha or the layer's mask. */
+  Enabled,
+  /** The map stays on its (muted) node, the coverage is unlinked and zero. */
+  Disabled,
+};
+
+/**
+ * The state of \a channel on the row \a ordinal, read from the graph alone. A row this file cannot
+ * read as a supported layer, a folder, or a channel without a chain all read as Absent.
+ */
+PaintMaterialLayerChannelState BKE_paint_material_layer_channel_state_get(Main &bmain,
+                                                                          Material &ma,
+                                                                          int ordinal,
+                                                                          int channel);
+
+/**
+ * #BKE_paint_material_layer_channel_state_get for every channel at once, indexed by
+ * #eMaterialPaintChannel, from one read of the stack. \a r_states must hold
+ * #PAINT_MATERIAL_CHANNEL_NUM items.
+ */
+void BKE_paint_material_layer_channel_states_get(Main &bmain,
+                                                 Material &ma,
+                                                 int ordinal,
+                                                 MutableSpan<PaintMaterialLayerChannelState> r_states);
+
+/** Where a stand-in of the old channel switch-off keeps the baked map it replaced. */
+inline constexpr const char *PAINT_LAYER_PARKED_MAP_PROP = "pbr_parked_map";
+
+/**
+ * Whether \a image is a stand-in the old channel switch-off put in place of a baked map (files
+ * from before per-channel states). Such a channel is linked like an enabled one but reads as
+ * Disabled; switching it on puts the parked map back.
+ */
+bool BKE_paint_material_layer_map_is_legacy_stand_in(const Image &image);
+
+/**
+ * The map \a stand_in parked when a file predating per-channel states switched this channel off,
+ * or null when \a stand_in is not a legacy stand-in (#BKE_paint_material_layer_map_is_legacy_stand_in).
+ */
+Image *BKE_paint_material_layer_legacy_parked_map_get(const Image &stand_in);
+
+/**
+ * Switch \a channel of the row \a ordinal on or off.
+ *
+ * Off keeps the map (Disabled). On restores a Disabled map, or gives an Absent channel a map: \a
+ * new_map when given (a Material layer's bake), otherwise a fresh one -- transparent for a Paint
+ * layer, filled with the layer's colour for a Fill layer. A channel with no chain yet gets one first.
+ *
+ * \a new_map is a fresh data-block with its one user; ownership passes with the call whatever it
+ * returns. Nothing is written on refusal.
+ */
+bool BKE_paint_material_layer_channel_enabled_set(Main &bmain,
+                                                  Material &ma,
+                                                  int ordinal,
+                                                  int channel,
+                                                  bool enable,
+                                                  Image *new_map,
+                                                  PaintMaterialLayerEditError *r_error = nullptr);
 
 /**
  * Remove the layer at \a ordinal from every channel, closing the chain over it.

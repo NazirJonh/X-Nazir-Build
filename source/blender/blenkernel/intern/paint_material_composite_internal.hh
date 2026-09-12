@@ -5,6 +5,7 @@
 #pragma once
 
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_layer_edit.hh"
 
 namespace blender {
 
@@ -60,7 +61,33 @@ struct Material;
  */
 const bNodeSocket *paint_material_channel_socket_find(const Material &ma, int channel);
 
+/** A socket's own default as a colour: scalars ride every component, like fills do. */
+void paint_layer_socket_default_color(const bNodeSocket &socket, float r_color[4]);
+
 bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix);
+
+/**
+ * The Image Texture a layer's map input reads, when a single link from one is all that feeds it.
+ * The topology cache of the node's tree must be current.
+ */
+const bNode *composite_mix_map_node(const CompositeMixNode &mix);
+
+/**
+ * Whether the row adds nothing to this channel by construction: the per-channel Multiply shape
+ * with its coverage input unlinked (invariant I1), whatever feeds the map input.
+ */
+bool composite_mix_coverage_off(const CompositeMixNode &mix);
+
+/**
+ * The row's state in this channel, read from the graph alone (invariant I2). False when the Mix is
+ * not the per-channel shape -- no coverage/opacity Multiply, or a map input fed by something other
+ * than one Image Texture -- which is none of the three states and is left alone by every edit.
+ *
+ * The one place the rule lives: the evaluator, the stack model and the graph editor all read a
+ * row's channel through here, so they cannot disagree.
+ */
+bool composite_mix_channel_state_get(const CompositeMixNode &mix,
+                                     PaintMaterialLayerChannelState &r_state);
 bool composite_image_from_socket(const bNodeSocket &socket,
                                  Image *&r_image,
                                  const ImageUser *&r_iuser,

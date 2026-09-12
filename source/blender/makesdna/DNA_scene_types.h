@@ -1619,6 +1619,13 @@ struct PaintModeSettings {
   /** Per-brush PBR Paint channel/texture presets, keyed by brush identity.
    *  See #PaintMaterialBrushPreset. */
   ListBaseT<PaintMaterialBrushPreset> material_paint_brush_presets = {nullptr, nullptr};
+
+  /**
+   * The #eMaterialPaintChannel whose Blending Mode and Opacity the Stack Layers rows show and edit.
+   * Not a paint target: strokes still follow #channel_image_bindings.
+   */
+  int stack_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  char _pad_stack_layer_channel[4] = {};
 };
 
 /** #PaintModeSettings::new_channel_image_size */

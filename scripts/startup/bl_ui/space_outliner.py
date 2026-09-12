@@ -44,6 +44,9 @@ class OUTLINER_HT_tool_header(Header):
             return
 
         layout.operator("outliner.stack_layers_back", text="", icon='BACK')
+        if space.stack_source == 'PAINT_MATERIAL':
+            # Which channel's Blending Mode and Opacity the rows below show and edit.
+            layout.prop(context.tool_settings.paint_mode, "stack_layer_channel", text="")
 
         layout.separator_spacer()
 

@@ -1283,6 +1283,12 @@ static wmOperatorStatus material_paint_images_ensure_exec(bContext *C, wmOperato
                "Enabled channels already belong to different paint layers; "
                "the new maps were put in a new layer");
   }
+  if (ensure_result.skipped_stack_channels > 0 && created == 0) {
+    BKE_report(op->reports,
+               RPT_INFO,
+               "The active layer has none of the brush's other channels; turn them on in the "
+               "Layer Material tab");
+  }
   int missing = 0;
 
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {

@@ -79,6 +79,11 @@ struct StackSubRow {
   /** The data-block the sub-row stands for, or null. Only used for display and activation. */
   ID *id = nullptr;
   int icon = 0;
+  /**
+   * The data-block is kept but switched off: it is still listed, but never made a target when the
+   * row is activated.
+   */
+  bool inactive = false;
 };
 
 /**

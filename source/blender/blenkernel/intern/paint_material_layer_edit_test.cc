@@ -5,16 +5,20 @@
 #include "testing/testing.h"
 
 #include "BKE_gtest_base.hh"
+#include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_node.hh"
+#include "BKE_node_tree_update.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_layer_edit.hh"
 
 #include "MEM_guardedalloc.h"
+
+#include "paint_material_composite_internal.hh"
 
 #include <string>
 
@@ -31,6 +35,7 @@
 #include "DNA_node_types.h"
 
 #include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
 
 namespace blender::bke::tests {
 
@@ -186,6 +191,95 @@ class PaintMaterialLayerEditTest : public bke::BlenderGTestBase {
         << int(error);
     return ordinal;
   }
+
+  /** The Mix (or Normal Combine group) of layer \a label in the chain of \a channel. */
+  bNode *layer_mix_in_channel(const char *label, const eMaterialPaintChannel channel)
+  {
+    material->nodetree->ensure_topology_cache();
+    const bNodeSocket *terminal = paint_material_channel_socket_find(*material, channel);
+    if (terminal == nullptr) {
+      return nullptr;
+    }
+    const bNodeSocket *socket = terminal;
+    for (int step = 0; step < 64; step++) {
+      if (socket->directly_linked_links().is_empty()) {
+        return nullptr;
+      }
+      bNode *from = socket->directly_linked_links().first()->fromnode;
+      CompositeMixNode mix;
+      if (!composite_mix_node_read(*from, mix)) {
+        return nullptr;
+      }
+      if (STREQ(from->label, label)) {
+        return from;
+      }
+      socket = mix.bottom;
+    }
+    return nullptr;
+  }
+
+  bNode *coverage_multiply_of(bNode &mix_node)
+  {
+    material->nodetree->ensure_topology_cache();
+    CompositeMixNode mix;
+    if (!composite_mix_node_read(mix_node, mix) || mix.factor->directly_linked_links().is_empty()) {
+      return nullptr;
+    }
+    bNode *math = mix.factor->directly_linked_links().first()->fromnode;
+    return math->type_legacy == SH_NODE_MATH ? math : nullptr;
+  }
+
+  static bNodeSocket &math_input(bNode &math, const int index)
+  {
+    return *static_cast<bNodeSocket *>(BLI_findlink(&math.inputs, index));
+  }
+
+  /** Graph edit a test uses to stand in for the API before it exists: coverage off (I1). */
+  void unlink_coverage_by_hand(bNode &mix_node)
+  {
+    bNodeTree &tree = *material->nodetree;
+    bNode *math = coverage_multiply_of(mix_node);
+    ASSERT_NE(math, nullptr);
+    bNodeSocket &a = math_input(*math, 0);
+    for (bNodeLink *link : Vector<bNodeLink *>(a.directly_linked_links())) {
+      bke::node_remove_link(&tree, *link);
+    }
+    a.default_value_typed<bNodeSocketValueFloat>()->value = 0.0f;
+    BKE_ntree_update_after_single_tree_change(*bmain, tree);
+  }
+
+  void make_disabled_by_hand(bNode &mix_node)
+  {
+    material->nodetree->ensure_topology_cache();
+    CompositeMixNode mix;
+    ASSERT_TRUE(composite_mix_node_read(mix_node, mix));
+    bNode *tex = mix.top->directly_linked_links().first()->fromnode;
+    unlink_coverage_by_hand(mix_node);
+    tex->flag |= NODE_MUTED;
+    BKE_ntree_update_tag_node_mute(material->nodetree, tex);
+    BKE_ntree_update_after_single_tree_change(*bmain, *material->nodetree);
+  }
+
+  void make_absent_by_hand(bNode &mix_node)
+  {
+    bNodeTree &tree = *material->nodetree;
+    tree.ensure_topology_cache();
+    CompositeMixNode mix;
+    ASSERT_TRUE(composite_mix_node_read(mix_node, mix));
+    bNode *tex = mix.top->directly_linked_links().first()->fromnode;
+    unlink_coverage_by_hand(mix_node);
+    bke::node_remove_node(bmain, tree, *tex, true);
+    BKE_ntree_update_after_single_tree_change(*bmain, tree);
+  }
+
+  /** Switch Roughness on for the row, so that its Base Color is not the last channel left on. */
+  void keep_roughness_on(const int ordinal)
+  {
+    PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+    ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+        *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, true, nullptr, &error))
+        << int(error);
+  }
 };
 
 TEST_F(PaintMaterialLayerEditTest, markers_are_assigned_once_and_kept)
@@ -309,7 +403,7 @@ TEST_F(PaintMaterialLayerEditTest, add_paint_layer_on_empty_material)
   ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, &ordinal, &error))
       << int(error);
 
-  /* The first layer of an empty material is the bottom one: a bare Image Texture on Base Color. */
+  /* The first layer of an empty material is a normal blended row with a marker. */
   EXPECT_EQ(ordinal, 0);
   EXPECT_EQ(layer_names().size(), 1);
   EXPECT_TRUE(BKE_paint_material_has_layer_stack(*material));
@@ -553,40 +647,32 @@ TEST_F(PaintMaterialLayerEditTest, channels_ensure_mirrors_missing_channel_trans
   EXPECT_EQ(wired.size(), 2);
 
   /* One row per channel per layer, bottom to top. The hand-built Base maps carry no
-   * paint id, so the merge reads them positionally while the mirrored maps carry theirs. */
+   * paint id, so the merge reads them positionally; the mirrored channel carries no maps at
+   * all (Absent), so it contributes nothing. */
   Vector<PaintMaterialLayerStackEntry> entries;
   ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
   ASSERT_EQ(entries.size(), 3);
-  Vector<bUUID> metal_ids;
   for (const PaintMaterialLayerStackEntry &entry : entries) {
     Image *base = entry.channel_images.lookup_default(
         PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr);
     Image *metal = entry.channel_images.lookup_default(
         PAINT_MATERIAL_CHANNEL_METALLIC, nullptr);
     ASSERT_NE(base, nullptr);
-    ASSERT_NE(metal, nullptr);
-    /* One identity per mirrored row. */
-    EXPECT_FALSE(BLI_uuid_is_nil(metal->paint_layer_id));
-    for (const bUUID &seen : metal_ids) {
-      EXPECT_FALSE(BLI_uuid_equal(seen, metal->paint_layer_id));
-    }
-    metal_ids.append(metal->paint_layer_id);
+    EXPECT_EQ(metal, nullptr);
   }
-  /* Synthetic rows stay out of the way (transparent); the mirrored bottom keeps showing
-   * what the free input used to supply (opaque). */
-  const auto gen_alpha = [&](const Image *image) {
-    const ImageTile *tile = BKE_image_get_tile(const_cast<Image *>(image), 0);
-    EXPECT_NE(tile, nullptr);
-    return (tile == nullptr) ? -1.0f : tile->gen_color[3];
-  };
-  EXPECT_FLOAT_EQ(
-      gen_alpha(entries[2].channel_images.lookup_default(
-          PAINT_MATERIAL_CHANNEL_METALLIC, nullptr)),
-      0.0f);
-  EXPECT_FLOAT_EQ(
-      gen_alpha(entries[0].channel_images.lookup_default(
-          PAINT_MATERIAL_CHANNEL_METALLIC, nullptr)),
-      1.0f);
+  /* Mirrored rows stay out of the way: no map, coverage unlinked and zero (I1). */
+  for (const char *label : {"L1", "L2"}) {
+    bNode *mix_node = layer_mix_in_channel(label, PAINT_MATERIAL_CHANNEL_METALLIC);
+    ASSERT_NE(mix_node, nullptr) << label;
+    CompositeMixNode mix;
+    ASSERT_TRUE(composite_mix_node_read(*mix_node, mix)) << label;
+    EXPECT_TRUE(mix.top->directly_linked_links().is_empty()) << label;
+    ASSERT_NE(mix.factor_coverage, nullptr) << label;
+    EXPECT_TRUE(mix.factor_coverage->directly_linked_links().is_empty()) << label;
+    EXPECT_FLOAT_EQ(mix.factor_coverage->default_value_typed<bNodeSocketValueFloat>()->value,
+                    0.0f)
+        << label;
+  }
 }
 
 TEST_F(PaintMaterialLayerEditTest, material_base_builds_single_normalized_row)
@@ -1535,6 +1621,671 @@ TEST_F(PaintMaterialLayerEditTest, edits_inside_a_shared_group_are_refused)
   expect_graph_unchanged(before);
 
   BKE_id_free(bmain, &twin->id);
+}
+
+TEST_F(PaintMaterialLayerEditTest, opacity_change_bumps_the_stack_revision)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "Base");
+  add_fill_layer(red, "Top");
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_TRUE(entries.last().factor_prop.has_value());
+  bNodeSocket &socket = *static_cast<bNodeSocket *>(entries.last().factor_prop->data);
+
+  const uint64_t before = BKE_material_paint_layer_revision_get(*material);
+  socket.default_value_typed<bNodeSocketValueFloat>()->value = 0.25f;
+  BKE_paint_material_layer_opacity_changed(*bmain, *material->nodetree, socket);
+  EXPECT_GT(BKE_material_paint_layer_revision_get(*material), before);
+}
+
+TEST_F(PaintMaterialLayerEditTest, absent_row_reads_as_a_supported_layer)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "Base");
+  add_fill_layer(red, "Top");
+  bNode *top = layer_mix_in_channel("Top", PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(top, nullptr);
+  make_absent_by_hand(*top);
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 2);
+  EXPECT_TRUE(entries.last().supported);
+  EXPECT_FALSE(entries.last().channel_images.contains(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  /* Opacity is still found on the Multiply's second input. */
+  ASSERT_TRUE(entries.last().factor_prop.has_value());
+}
+
+TEST_F(PaintMaterialLayerEditTest, multiply_without_links_splits_coverage_and_opacity)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "Base");
+  add_fill_layer(red, "Top");
+  bNode *top = layer_mix_in_channel("Top", PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  make_disabled_by_hand(*top);
+  material->nodetree->ensure_topology_cache();
+  CompositeMixNode mix;
+  ASSERT_TRUE(composite_mix_node_read(*top, mix));
+  bNode *math = coverage_multiply_of(*top);
+  EXPECT_EQ(mix.factor_coverage, &math_input(*math, 0));
+  EXPECT_EQ(mix.factor_opacity, &math_input(*math, 1));
+}
+
+TEST_F(PaintMaterialLayerEditTest, disabled_channel_leaves_no_texture_in_the_localized_tree)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "Base");
+  add_fill_layer(red, "Top");
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error));
+
+  bNode *top = layer_mix_in_channel("Top", PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(top, nullptr);
+  material->nodetree->ensure_topology_cache();
+  CompositeMixNode mix_before;
+  ASSERT_TRUE(composite_mix_node_read(*top, mix_before));
+  const std::string tex_name = mix_before.top->directly_linked_links().first()->fromnode->name;
+  const std::string math_name = coverage_multiply_of(*top)->name;
+  make_disabled_by_hand(*top);
+
+  bNodeTree *local = bke::node_tree_localize(material->nodetree, std::nullopt);
+  ASSERT_NE(local, nullptr);
+  local->ensure_topology_cache();
+  bool texture_left = false;
+  const bNode *math = nullptr;
+  for (const bNode &node : local->nodes) {
+    texture_left |= tex_name == node.name;
+    if (math_name == node.name) {
+      math = &node;
+    }
+  }
+  EXPECT_FALSE(texture_left);
+  ASSERT_NE(math, nullptr);
+  const bNodeSocket *a = static_cast<const bNodeSocket *>(math->inputs.first);
+  EXPECT_TRUE(a->directly_linked_links().is_empty());
+  EXPECT_FLOAT_EQ(a->default_value_typed<bNodeSocketValueFloat>()->value, 0.0f);
+
+  bke::node_tree_free_tree(*local);
+  MEM_delete(local);
+}
+
+TEST_F(PaintMaterialLayerEditTest, base_value_follows_the_principled_default)
+{
+  bNodeSocket *roughness = bke::node_find_socket(principled_node(), SOCK_IN, "Roughness"_ustr);
+  roughness->default_value_typed<bNodeSocketValueFloat>()->value = 0.3f;
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  const int ch[1] = {PAINT_MATERIAL_CHANNEL_ROUGHNESS};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(ch, 1), &error));
+  add_fill_layer(red, "L2");
+
+  auto bottom_a = [&]() {
+    material->nodetree->ensure_topology_cache();
+    bNode *l1 = layer_mix_in_channel("L1", PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+    CompositeMixNode mix;
+    composite_mix_node_read(*l1, mix);
+    return mix.bottom->default_value_typed<bNodeSocketValueRGBA>()->value[0];
+  };
+  EXPECT_FLOAT_EQ(bottom_a(), 0.3f);
+
+  /* L1 removed: L2 becomes the bottom and takes the base value over. */
+  ASSERT_TRUE(BKE_paint_material_layer_remove(*bmain, *material, 0, &error)) << int(error);
+  material->nodetree->ensure_topology_cache();
+  bNode *l2 = layer_mix_in_channel("L2", PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(l2, nullptr);
+  CompositeMixNode mix;
+  ASSERT_TRUE(composite_mix_node_read(*l2, mix));
+  EXPECT_FLOAT_EQ(mix.bottom->default_value_typed<bNodeSocketValueRGBA>()->value[0], 0.3f);
+}
+
+TEST_F(PaintMaterialLayerEditTest, normal_base_is_flat)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  const int ch[1] = {PAINT_MATERIAL_CHANNEL_NORMAL};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(ch, 1), &error));
+  material->nodetree->ensure_topology_cache();
+  const bNodeSocket *terminal = paint_material_channel_socket_find(
+      *material, PAINT_MATERIAL_CHANNEL_NORMAL);
+  bNode *bottom = nullptr;
+  const bNodeSocket *socket = terminal;
+  while (!socket->directly_linked_links().is_empty()) {
+    bNode *from = socket->directly_linked_links().first()->fromnode;
+    CompositeMixNode mix;
+    if (!composite_mix_node_read(*from, mix)) {
+      break;
+    }
+    bottom = from;
+    socket = mix.bottom;
+  }
+  ASSERT_NE(bottom, nullptr);
+  float value[4];
+  paint_layer_socket_default_color(*socket, value);
+  EXPECT_FLOAT_EQ(value[0], 0.5f);
+  EXPECT_FLOAT_EQ(value[1], 0.5f);
+  EXPECT_FLOAT_EQ(value[2], 1.0f);
+}
+
+TEST_F(PaintMaterialLayerEditTest, ensured_channel_creates_no_images)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  const int images_before = BLI_listbase_count(&bmain->images);
+  const int ch[1] = {PAINT_MATERIAL_CHANNEL_ROUGHNESS};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(ch, 1), &error));
+  EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before);
+
+  for (const char *label : {"L1", "L2"}) {
+    bNode *mix_node = layer_mix_in_channel(label, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+    ASSERT_NE(mix_node, nullptr) << label;
+    CompositeMixNode mix;
+    ASSERT_TRUE(composite_mix_node_read(*mix_node, mix));
+    EXPECT_TRUE(mix.top->directly_linked_links().is_empty()) << label;
+    ASSERT_NE(mix.factor_coverage, nullptr) << label;
+    EXPECT_TRUE(mix.factor_coverage->directly_linked_links().is_empty()) << label;
+    EXPECT_FLOAT_EQ(mix.factor_coverage->default_value_typed<bNodeSocketValueFloat>()->value,
+                    0.0f);
+  }
+}
+
+TEST_F(PaintMaterialLayerEditTest, ensure_leaves_existing_channels_untouched)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  Vector<PaintMaterialLayerStackEntry> before;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, before));
+  const int ch[1] = {PAINT_MATERIAL_CHANNEL_METALLIC};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(ch, 1), &error));
+  Vector<PaintMaterialLayerStackEntry> after;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, after));
+  ASSERT_EQ(after.size(), before.size());
+  for (const int i : before.index_range()) {
+    EXPECT_EQ(after[i].channel_images.lookup_default(PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr),
+              before[i].channel_images.lookup_default(PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr));
+    EXPECT_FALSE(after[i].channel_images.contains(PAINT_MATERIAL_CHANNEL_METALLIC));
+  }
+}
+
+TEST_F(PaintMaterialLayerEditTest, ensure_into_folders_keeps_ordinals)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  add_fill_layer(red, "L3");
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_group_make(*bmain, *material, 1, 2, nullptr, &error))
+      << int(error);
+  Vector<PaintMaterialLayerStackEntry> before;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, before));
+
+  const int ch[1] = {PAINT_MATERIAL_CHANNEL_ROUGHNESS};
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(ch, 1), &error))
+      << int(error);
+  Vector<PaintMaterialLayerStackEntry> after;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, after));
+  ASSERT_EQ(after.size(), before.size());
+  for (const int i : before.index_range()) {
+    EXPECT_EQ(after[i].ordinal, before[i].ordinal);
+    EXPECT_TRUE(after[i].supported) << i;
+  }
+}
+
+TEST_F(PaintMaterialLayerEditTest, refused_ensure_leaves_no_math_nodes)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  /* A foreign network on Metallic makes the second channel refuse after the first one migrated;
+   * the refused channel itself must leave nothing behind. */
+  bNode *value = bke::node_add_static_node(nullptr, *material->nodetree, SH_NODE_VALUE);
+  bke::node_add_link(*material->nodetree,
+                     *value,
+                     *static_cast<bNodeSocket *>(value->outputs.first),
+                     principled_node(),
+                     *bke::node_find_socket(principled_node(), SOCK_IN, "Metallic"_ustr));
+  const GraphShape before = graph_shape();
+  const int ch[1] = {PAINT_MATERIAL_CHANNEL_METALLIC};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  EXPECT_FALSE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(ch, 1), &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::ChannelHasUnsupportedSource);
+  expect_graph_unchanged(before);
+}
+
+TEST_F(PaintMaterialLayerEditTest, paint_layer_gets_base_color_only)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  const int ch[2] = {PAINT_MATERIAL_CHANNEL_ROUGHNESS, PAINT_MATERIAL_CHANNEL_METALLIC};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(ch, 2), &error));
+
+  const int images_before = BLI_listbase_count(&bmain->images);
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.name = "New";
+  int ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, &ordinal, &error));
+  EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before + 1);
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  const PaintMaterialLayerStackEntry &added = entries.last();
+  EXPECT_TRUE(added.channel_images.contains(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_FALSE(added.channel_images.contains(PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+  EXPECT_FALSE(added.channel_images.contains(PAINT_MATERIAL_CHANNEL_METALLIC));
+  bNode *rough = layer_mix_in_channel("New", PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(rough, nullptr);
+  CompositeMixNode mix;
+  ASSERT_TRUE(composite_mix_node_read(*rough, mix));
+  EXPECT_FLOAT_EQ(mix.factor_coverage->default_value_typed<bNodeSocketValueFloat>()->value, 0.0f);
+}
+
+TEST_F(PaintMaterialLayerEditTest, channel_toggle_round_trip_keeps_the_map)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  const int base = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(*bmain, *material, 1, base),
+            PaintMaterialLayerChannelState::Enabled);
+  keep_roughness_on(1);
+
+  bNode *mix_node = layer_mix_in_channel("L2", PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  bNode *math = coverage_multiply_of(*mix_node);
+  math_input(*math, 1).default_value_typed<bNodeSocketValueFloat>()->value = 0.4f;
+  Vector<PaintMaterialLayerStackEntry> entries;
+  BKE_paint_material_layer_stack_from_material(*bmain, *material, entries);
+  const uint32_t map_uid = entries[1].channel_images.lookup(base)->id.session_uid;
+
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, base, false, nullptr, &error)) << int(error);
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(*bmain, *material, 1, base),
+            PaintMaterialLayerChannelState::Disabled);
+  material->nodetree->ensure_topology_cache();
+  CompositeMixNode mix;
+  ASSERT_TRUE(composite_mix_node_read(*mix_node, mix));
+  EXPECT_TRUE(mix.factor_coverage->directly_linked_links().is_empty());
+  EXPECT_FLOAT_EQ(mix.factor_coverage->default_value_typed<bNodeSocketValueFloat>()->value, 0.0f);
+  EXPECT_TRUE(mix.top->directly_linked_links().first()->fromnode->is_muted());
+  EXPECT_FALSE(mix_node->is_muted());
+  EXPECT_FLOAT_EQ(mix.factor_opacity->default_value_typed<bNodeSocketValueFloat>()->value, 0.4f);
+
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, base, true, nullptr, &error)) << int(error);
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(*bmain, *material, 1, base),
+            PaintMaterialLayerChannelState::Enabled);
+  entries.clear();
+  BKE_paint_material_layer_stack_from_material(*bmain, *material, entries);
+  EXPECT_EQ(entries[1].channel_images.lookup(base)->id.session_uid, map_uid);
+}
+
+TEST_F(PaintMaterialLayerEditTest, absent_to_enabled_fills_a_fill_layer)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  const float grey[4] = {0.7f, 0.7f, 0.7f, 1.0f};
+  add_fill_layer(grey, "L2");
+  const int rough = PAINT_MATERIAL_CHANNEL_ROUGHNESS;
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(*bmain, *material, 1, rough),
+            PaintMaterialLayerChannelState::Absent);
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, rough, true, nullptr, &error)) << int(error);
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  Image *map = entries[1].channel_images.lookup_default(rough, nullptr);
+  ASSERT_NE(map, nullptr);
+  ImBuf *ibuf = BKE_image_acquire_ibuf(map, nullptr, nullptr);
+  ASSERT_NE(ibuf, nullptr);
+  ASSERT_NE(ibuf->byte_buffer.data, nullptr);
+  EXPECT_NEAR(ibuf->byte_buffer.data[0] / 255.0f, 0.7f, 0.01f);
+  EXPECT_EQ(ibuf->byte_buffer.data[3], 255);
+  BKE_image_release_ibuf(map, ibuf, nullptr);
+  /* L1 was not touched: still Absent in Roughness. */
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(*bmain, *material, 0, rough),
+            PaintMaterialLayerChannelState::Absent);
+}
+
+TEST_F(PaintMaterialLayerEditTest, masked_layer_switches_coverage_between_mask_and_zero)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  const int rough_ch[1] = {PAINT_MATERIAL_CHANNEL_ROUGHNESS};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(rough_ch, 1), &error));
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_ROUGHNESS, true, nullptr, &error));
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error));
+
+  auto coverage_source = [&](const eMaterialPaintChannel channel) -> const bNode * {
+    material->nodetree->ensure_topology_cache();
+    CompositeMixNode mix;
+    composite_mix_node_read(*layer_mix_in_channel("L2", channel), mix);
+    return mix.factor_coverage->directly_linked_links().is_empty() ?
+               nullptr :
+               mix.factor_coverage->directly_linked_links().first()->fromnode;
+  };
+  const bNode *mask_node = coverage_source(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(mask_node, nullptr);
+
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_ROUGHNESS, false, nullptr, &error));
+  EXPECT_EQ(coverage_source(PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  EXPECT_EQ(coverage_source(PAINT_MATERIAL_CHANNEL_BASE_COLOR), mask_node);
+
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_ROUGHNESS, true, nullptr, &error));
+  EXPECT_EQ(coverage_source(PAINT_MATERIAL_CHANNEL_ROUGHNESS), mask_node);
+}
+
+TEST_F(PaintMaterialLayerEditTest, mask_add_skips_switched_off_channels)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  const int rough_ch[1] = {PAINT_MATERIAL_CHANNEL_ROUGHNESS};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(rough_ch, 1), &error));
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error));
+  material->nodetree->ensure_topology_cache();
+  CompositeMixNode mix;
+  ASSERT_TRUE(composite_mix_node_read(
+      *layer_mix_in_channel("L2", PAINT_MATERIAL_CHANNEL_ROUGHNESS), mix));
+  EXPECT_TRUE(mix.factor_coverage->directly_linked_links().is_empty());
+  ASSERT_TRUE(BKE_paint_material_layer_mask_remove(*bmain, *material, 1, &error)) << int(error);
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(
+                *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_ROUGHNESS),
+            PaintMaterialLayerChannelState::Absent);
+}
+
+TEST_F(PaintMaterialLayerEditTest, channel_toggle_refusals)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  add_fill_layer(red, "L3");
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  EXPECT_FALSE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_AO, true, nullptr, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::IndexOutOfRange);
+
+  ASSERT_TRUE(BKE_paint_material_layer_kind_set(
+      *bmain, *material, 2, PaintMaterialLayerKind::Material, &error));
+  EXPECT_FALSE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 2, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false, nullptr, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::LastEnabledChannel);
+
+  /* A Fill or Paint layer too: with nothing left on it could no longer be found as the active
+   * layer, nor switched back on. */
+  EXPECT_FALSE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false, nullptr, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::LastEnabledChannel);
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(
+                *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            PaintMaterialLayerChannelState::Enabled);
+}
+
+TEST_F(PaintMaterialLayerEditTest, layer_visibility_keeps_channel_state)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  const int base = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  keep_roughness_on(1);
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, base, false, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_set_enabled(*bmain, *material, 1, false, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_set_enabled(*bmain, *material, 1, true, &error));
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(*bmain, *material, 1, base),
+            PaintMaterialLayerChannelState::Disabled);
+}
+
+TEST_F(PaintMaterialLayerEditTest, refused_absent_to_enabled_leaves_graph_unchanged)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  bNode *value = bke::node_add_static_node(nullptr, *material->nodetree, SH_NODE_VALUE);
+  bke::node_add_link(*material->nodetree,
+                     *value,
+                     *static_cast<bNodeSocket *>(value->outputs.first),
+                     principled_node(),
+                     *bke::node_find_socket(principled_node(), SOCK_IN, "Metallic"_ustr));
+  const GraphShape before = graph_shape();
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  EXPECT_FALSE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_METALLIC, true, nullptr, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::ChannelHasUnsupportedSource);
+  expect_graph_unchanged(before);
+}
+
+TEST_F(PaintMaterialLayerEditTest, duplicate_keeps_channel_states)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  const int metal_ch[1] = {PAINT_MATERIAL_CHANNEL_METALLIC};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(metal_ch, 1), &error));
+  keep_roughness_on(1);
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false, nullptr, &error));
+  int copy = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_duplicate(*bmain, *material, 1, &copy, &error)) << int(error);
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(
+                *bmain, *material, copy, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            PaintMaterialLayerChannelState::Disabled);
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(
+                *bmain, *material, copy, PAINT_MATERIAL_CHANNEL_ROUGHNESS),
+            PaintMaterialLayerChannelState::Enabled);
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(
+                *bmain, *material, copy, PAINT_MATERIAL_CHANNEL_METALLIC),
+            PaintMaterialLayerChannelState::Absent);
+}
+
+TEST_F(PaintMaterialLayerEditTest, normal_channel_toggles_through_the_combine_group)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  const int normal = PAINT_MATERIAL_CHANNEL_NORMAL;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, normal, true, nullptr, &error)) << int(error);
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(*bmain, *material, 1, normal),
+            PaintMaterialLayerChannelState::Enabled);
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, normal, false, nullptr, &error)) << int(error);
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(*bmain, *material, 1, normal),
+            PaintMaterialLayerChannelState::Disabled);
+}
+
+TEST_F(PaintMaterialLayerEditTest, first_layer_of_an_empty_material_is_a_blended_row)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "First");
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 1);
+  EXPECT_FALSE(entries[0].is_bare_base);
+  EXPECT_FALSE(BLI_uuid_is_nil(entries[0].marker));
+  EXPECT_EQ(entries[0].kind, int8_t(PaintMaterialLayerKind::Fill));
+}
+
+TEST_F(PaintMaterialLayerEditTest, stack_entry_exposes_props_per_channel)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  const int ch[2] = {PAINT_MATERIAL_CHANNEL_ROUGHNESS, PAINT_MATERIAL_CHANNEL_NORMAL};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(ch, 2), &error));
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  const PaintMaterialLayerStackEntry &top = entries.last();
+  EXPECT_EQ(top.channel_factor_props.size(), 3);
+  EXPECT_EQ(top.channel_blend_props.size(), 2);
+  EXPECT_FALSE(top.channel_blend_props.contains(PAINT_MATERIAL_CHANNEL_NORMAL));
+
+  bNodeSocket &rough_opacity = *static_cast<bNodeSocket *>(
+      top.channel_factor_props.lookup(PAINT_MATERIAL_CHANNEL_ROUGHNESS).data);
+  bNodeSocket &base_opacity = *static_cast<bNodeSocket *>(
+      top.channel_factor_props.lookup(PAINT_MATERIAL_CHANNEL_BASE_COLOR).data);
+  EXPECT_NE(&rough_opacity, &base_opacity);
+  rough_opacity.default_value_typed<bNodeSocketValueFloat>()->value = 0.25f;
+  EXPECT_FLOAT_EQ(base_opacity.default_value_typed<bNodeSocketValueFloat>()->value, 1.0f);
+}
+
+TEST_F(PaintMaterialLayerEditTest, stack_entry_flags_disabled_channels)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  keep_roughness_on(1);
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false, nullptr, &error));
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  EXPECT_EQ(entries.last().disabled_channels_mask, 1u << PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_TRUE(entries.last().channel_images.contains(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+}
+
+TEST_F(PaintMaterialLayerEditTest, channel_states_read_every_channel_at_once)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  const int metal_ch[1] = {PAINT_MATERIAL_CHANNEL_METALLIC};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(*bmain, *material, Span<int>(metal_ch, 1), &error));
+  keep_roughness_on(1);
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false, nullptr, &error));
+
+  PaintMaterialLayerChannelState states[PAINT_MATERIAL_CHANNEL_NUM];
+  BKE_paint_material_layer_channel_states_get(
+      *bmain, *material, 1, MutableSpan(states, PAINT_MATERIAL_CHANNEL_NUM));
+  EXPECT_EQ(states[PAINT_MATERIAL_CHANNEL_BASE_COLOR], PaintMaterialLayerChannelState::Disabled);
+  EXPECT_EQ(states[PAINT_MATERIAL_CHANNEL_ROUGHNESS], PaintMaterialLayerChannelState::Enabled);
+  EXPECT_EQ(states[PAINT_MATERIAL_CHANNEL_METALLIC], PaintMaterialLayerChannelState::Absent);
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    EXPECT_EQ(states[channel],
+              BKE_paint_material_layer_channel_state_get(*bmain, *material, 1, channel))
+        << channel;
+  }
+}
+
+TEST_F(PaintMaterialLayerEditTest, legacy_stand_in_reads_as_disabled)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  Image *stand_in = entries[1].channel_images.lookup(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  Image *parked = entries[0].channel_images.lookup(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_FALSE(BKE_paint_material_layer_map_is_legacy_stand_in(*stand_in));
+
+  /* What the old switch-off left behind: the node shows a stand-in parking the real map. */
+  IDP_ReplaceInGroup(IDP_ID_system_properties_ensure(&stand_in->id),
+                     bke::idprop::create(PAINT_LAYER_PARKED_MAP_PROP, &parked->id).release());
+  EXPECT_TRUE(BKE_paint_material_layer_map_is_legacy_stand_in(*stand_in));
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(
+                *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            PaintMaterialLayerChannelState::Disabled);
+  entries.clear();
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  EXPECT_EQ(entries[1].disabled_channels_mask, 1u << PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+TEST_F(PaintMaterialLayerEditTest, enabling_a_legacy_stand_in_restores_the_parked_map)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  Image *stand_in = entries[1].channel_images.lookup(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+
+  /* A standalone image, unrelated to any row, standing in for what the old switch-off parked: no
+   * node references it, so -- like the genuine article -- it sits at zero users, kept alive only
+   * by the (non-counting) id-property reference below. */
+  const float blue[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+  Image *parked = BKE_image_add_generated(
+      bmain, 8, 8, "Parked", 32, false, IMA_GENTYPE_BLANK, blue, false, false, false);
+  id_us_min(&parked->id);
+  ASSERT_EQ(parked->id.us, 0);
+  IDP_ReplaceInGroup(IDP_ID_system_properties_ensure(&stand_in->id),
+                     bke::idprop::create(PAINT_LAYER_PARKED_MAP_PROP, &parked->id).release());
+  ASSERT_TRUE(BKE_paint_material_layer_map_is_legacy_stand_in(*stand_in));
+  ASSERT_EQ(BKE_paint_material_layer_channel_state_get(
+                *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            PaintMaterialLayerChannelState::Disabled);
+
+  /* #BKE_paint_material_layer_channel_state_get already calls this Disabled; "enable" has to
+   * agree, rather than read the graph's raw Enabled shape and treat it as a no-op. */
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
+      *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true, nullptr, &error))
+      << int(error);
+  EXPECT_EQ(BKE_paint_material_layer_channel_state_get(
+                *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            PaintMaterialLayerChannelState::Enabled);
+  entries.clear();
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  EXPECT_EQ(entries[1].channel_images.lookup(PAINT_MATERIAL_CHANNEL_BASE_COLOR), parked);
+  /* Exactly the node's own user: neither leaked (a manual plus this call forgot to give back)
+   * nor short (the swap forgetting the map needs one at all). */
+  EXPECT_EQ(parked->id.us, 1);
+}
+
+TEST_F(PaintMaterialLayerEditTest, refused_first_layer_frees_the_given_map_once)
+{
+  /* A foreign network on Base Color makes the first row refuse. The map handed over for it is the
+   * call's to free -- exactly once, whichever step refuses; a second free fails the guarded
+   * allocator. */
+  bNode *value = bke::node_add_static_node(nullptr, *material->nodetree, SH_NODE_VALUE);
+  bke::node_add_link(*material->nodetree,
+                     *value,
+                     *static_cast<bNodeSocket *>(value->outputs.first),
+                     principled_node(),
+                     *bke::node_find_socket(principled_node(), SOCK_IN, "Base Color"_ustr));
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *given = BKE_image_add_generated(
+      bmain, 8, 8, "Given", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  const int images_before = BLI_listbase_count(&bmain->images);
+
+  const PaintMaterialLayerChannelImage maps[1] = {{PAINT_MATERIAL_CHANNEL_BASE_COLOR, given}};
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.channel_images = Span<PaintMaterialLayerChannelImage>(maps, 1);
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  EXPECT_FALSE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+  EXPECT_NE(error, PaintMaterialLayerEditError::None);
+  EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before - 1);
+}
+
+TEST(PaintMaterialLayerChannelSelector, defaults_to_base_color)
+{
+  PaintModeSettings settings;
+  EXPECT_EQ(settings.stack_layer_channel, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
 }
 
 /** \} */

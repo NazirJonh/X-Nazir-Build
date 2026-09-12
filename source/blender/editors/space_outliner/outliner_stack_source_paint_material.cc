@@ -19,7 +19,6 @@
  */
 
 #include <climits>
-#include <cstdio> /* TEMP-DEBUG [MAT_LAYER]: remove with the prints below. */
 
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
@@ -241,7 +240,9 @@ Image *paint_row_map_get(const StackRow &row, const int role)
 {
   for (const StackContentSection &section : row.content_sections) {
     for (const StackSubRow &sub_row : section.sub_rows) {
-      if (sub_row.role == role) {
+      /* A switched-off channel's map is not a paint target (spec 6), and the bindings the toggle
+       * leaves for it are null: activating and "is active" both have to agree with that. */
+      if (sub_row.role == role && !sub_row.inactive) {
         return id_cast<Image *>(sub_row.id);
       }
     }
@@ -351,6 +352,8 @@ StackContentSection paint_channels_section_build(const PaintMaterialLayerStackEn
     sub_row.name = item.value->id.name + 2;
     sub_row.id = &item.value->id;
     sub_row.icon = paint_channel_icon(item.key);
+    sub_row.inactive = item.key >= 0 && item.key < 32 &&
+                       (entry.disabled_channels_mask & (uint32_t(1) << item.key)) != 0;
     section.sub_rows.append(std::move(sub_row));
   }
   return section;
@@ -595,14 +598,19 @@ class PaintMaterialStackSource final : public StackSource,
           row.content_sections.append(paint_mask_section_build(*mask_image));
         }
       }
-      if (entry.factor_prop) {
-        row.value_ptr = *entry.factor_prop;
+      /* Blending Mode and Opacity are per channel in the graph; the scene's layer-channel picker
+       * says which one the row shows. A row without that channel keeps the columns empty. */
+      const int shown_channel = ctx.scene != nullptr && ctx.scene->toolsettings != nullptr ?
+                                    ctx.scene->toolsettings->paint_mode.stack_layer_channel :
+                                    int(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+      if (const PointerRNA *factor = entry.channel_factor_props.lookup_ptr(shown_channel)) {
+        row.value_ptr = *factor;
         /* #RNA_PaintMaterialLayerOpacity's own "value", always 0-100%; see
          * #layer_model_entry_from_node. */
         row.value_prop = "value";
       }
-      if (entry.blend_prop) {
-        row.mode_ptr = *entry.blend_prop;
+      if (const PointerRNA *blend = entry.channel_blend_props.lookup_ptr(shown_channel)) {
+        row.mode_ptr = *blend;
         row.mode_prop = "blend_type";
       }
 
@@ -685,10 +693,13 @@ class PaintMaterialStackSource final : public StackSource,
     g_bindings_owner_uid = material.id.session_uid;
     WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
-    /* A Material layer is re-configured through its source material, so activating one brings
-     * that material up the way selecting any other Outliner element brings up its tab. */
-    if (Material *source = BKE_paint_material_active_layer_source_get(paint_mode)) {
-      PointerRNA source_ptr = RNA_id_pointer_create(&source->id);
+    /* Activating a layer brings up the Layer Material tab the way selecting any other Outliner
+     * element brings up its own: a Material layer shows the material it was baked from, every
+     * other row the material that owns the stack, where its channels are switched. */
+    {
+      const Material *source = BKE_paint_material_active_layer_source_get(paint_mode);
+      PointerRNA source_ptr = RNA_id_pointer_create(
+          const_cast<ID *>(source != nullptr ? &source->id : &material.id));
       if (bScreen *screen = CTX_wm_screen(&C)) {
         for (ScrArea &area : screen->areabase) {
           if (area.spacetype != SPACE_PROPERTIES) {
@@ -992,23 +1003,11 @@ class PaintMaterialStackSource final : public StackSource,
 
     /* Route E (empty canvas) vs S (existing stack). An ensure refusal for a channel wired
      * to a foreign graph stops the gesture before a single bake image exists. */
-    /* TEMP-DEBUG [MAT_LAYER]: remove before merge. */
-    printf("[MAT_LAYER] row_add_material src='%s' required=%d chans=[", picked->id.name + 2,
-           int(required.size()));
-    for (const int c : required) {
-      printf("%d ", c);
-    }
-    printf("]\n");
-    fflush(stdout);
-
     bool use_base = false;
     {
       Vector<PaintMaterialLayerStackEntry> probe;
       const bool probe_ok = BKE_paint_material_layer_stack_from_material(
           *bmain, target_material, probe);
-      printf("[MAT_LAYER] probe stack_from_material=%d entries=%d\n",
-             int(probe_ok), int(probe.size()));
-      fflush(stdout);
       if (!probe_ok) {
         use_base = true;
       }
@@ -1016,9 +1015,6 @@ class PaintMaterialStackSource final : public StackSource,
         PaintMaterialLayerEditError ensure_error = PaintMaterialLayerEditError::None;
         const bool ensure_ok = BKE_paint_material_layer_channels_ensure(
             *bmain, target_material, required.as_span(), &ensure_error);
-        printf("[MAT_LAYER] channels_ensure ok=%d err=%d\n",
-               int(ensure_ok), int(ensure_error));
-        fflush(stdout);
         if (!ensure_ok) {
           if (ensure_error == PaintMaterialLayerEditError::NotAStack) {
             use_base = true;
@@ -1032,8 +1028,6 @@ class PaintMaterialStackSource final : public StackSource,
         }
       }
     }
-    printf("[MAT_LAYER] route use_base=%d\n", int(use_base));
-    fflush(stdout);
 
     Vector<ed::material_bake::BakeTargetSpec> targets;
     for (const int channel : required) {
@@ -1059,9 +1053,6 @@ class PaintMaterialStackSource final : public StackSource,
         baked_maps.append({int(bake.created_channels[i]), bake.created[i]});
       }
 
-      printf("[MAT_LAYER] baked_maps=%d\n", int(baked_maps.size()));
-      fflush(stdout);
-
       edit_ok = this->paint_edit(
         C, owner, [&](Main &edit_bmain, Material &material, PaintMaterialLayerEditError &error) {
           bool step_ok = false;
@@ -1079,11 +1070,6 @@ class PaintMaterialStackSource final : public StackSource,
             step_ok = BKE_paint_material_layer_add(
                 edit_bmain, material, params, &new_ordinal, &error);
           }
-          /* TEMP-DEBUG [MAT_LAYER]: remove before merge. */
-          printf("[MAT_LAYER] %s ok=%d ordinal=%d err=%d\n",
-                 use_base ? "add_material_base" : "layer_add",
-                 int(step_ok), new_ordinal, int(error));
-          fflush(stdout);
           if (!step_ok) {
             return false;
           }
@@ -1092,8 +1078,6 @@ class PaintMaterialStackSource final : public StackSource,
            * whose maps happen to carry a bake link. */
           const bool kind_ok = BKE_paint_material_layer_kind_set(
               edit_bmain, material, new_ordinal, PaintMaterialLayerKind::Material, &error);
-          printf("[MAT_LAYER] kind_set ok=%d err=%d\n", int(kind_ok), int(error));
-          fflush(stdout);
           if (!kind_ok) {
             return false;
           }
@@ -1108,13 +1092,7 @@ class PaintMaterialStackSource final : public StackSource,
     bake_params.size = image_size;
     bake_params.blocking = false;
     bake_params.before_render = add_layer;
-    const ed::material_bake::MaterialBakeToImagesResult bake = ed::material_bake::
-        material_bake_to_images(*bmain, wm, CTX_wm_window(&C), bake_params);
-    /* TEMP-DEBUG [MAT_LAYER]: remove before merge. */
-    printf("[MAT_LAYER] bake ok=%d created=%d skipped=%d attempted=%d\n",
-           int(bake.ok), int(bake.created.size()), int(bake.skipped_unavailable.size()),
-           int(edit_attempted));
-    fflush(stdout);
+    ed::material_bake::material_bake_to_images(*bmain, wm, CTX_wm_window(&C), bake_params);
     if (!edit_attempted) {
       /* An ensure that already widened the stack stays behind as its own visible change;
        * say so plainly instead of leaving a silent preparation. */
@@ -1126,23 +1104,6 @@ class PaintMaterialStackSource final : public StackSource,
                     picked->id.name + 2);
       }
       return -1;
-    }
-    printf("[MAT_LAYER] edit_ok=%d new_ordinal=%d\n", int(edit_ok), new_ordinal);
-    fflush(stdout);
-    {
-      Vector<PaintMaterialLayerStackEntry> after;
-      const bool after_ok = BKE_paint_material_layer_stack_from_material(
-          *bmain, target_material, after);
-      printf("[MAT_LAYER] after-add stack_from_material=%d entries=%d\n",
-             int(after_ok), int(after.size()));
-      for (const PaintMaterialLayerStackEntry &e : after) {
-        printf("[MAT_LAYER]   entry ordinal=%d kind=%d maps=%d bare=%d supported=%d group=%d "
-               "reason='%s'\n",
-               int(e.ordinal), int(e.kind), int(e.channel_images.size()),
-               int(e.is_bare_base), int(e.supported), int(e.is_group),
-               e.unsupported_reason ? e.unsupported_reason : "");
-      }
-      fflush(stdout);
     }
     /* The add committed but the kind marker did not: the row exists without its Material
      * identity, so report nothing was added rather than hand back a half-built ordinal. */

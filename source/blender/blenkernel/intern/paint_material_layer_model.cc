@@ -232,7 +232,11 @@ void layer_model_collect(const bNodeSocket &socket,
       }
 
       const ImageUser *iuser = nullptr;
-      if (!composite_image_from_socket(*muted_mix.top, layer.image, iuser)) {
+      /* An unlinked map input is a channel this layer does not have: a supported row with no map,
+       * whose unlinked coverage keeps it from contributing anything. */
+      if (composite_source_node_shallow(*muted_mix.top) != nullptr &&
+          !composite_image_from_socket(*muted_mix.top, layer.image, iuser))
+      {
         layer.supported = false;
         layer.unsupported_reason = "Layer source is not an image";
       }
@@ -332,7 +336,11 @@ void layer_model_collect(const bNodeSocket &socket,
   }
 
   const ImageUser *iuser = nullptr;
-  if (!composite_image_from_socket(*mix.top, layer.image, iuser)) {
+  /* An unlinked map input is a channel this layer does not have: a supported row with no map,
+   * whose unlinked coverage keeps it from contributing anything. */
+  if (composite_source_node_shallow(*mix.top) != nullptr &&
+      !composite_image_from_socket(*mix.top, layer.image, iuser))
+  {
     layer.supported = false;
     layer.unsupported_reason = "Layer source is not an image";
   }
@@ -372,6 +380,49 @@ std::string layer_model_name_get(const LayerModelNode &layer)
     return layer.image->id.name + 2;
   }
   return layer.node->name;
+}
+
+/**
+ * The row's per-channel editable pointers and Disabled bit, taken from the Mix node of \a layer in
+ * the chain of \a channel. Positions agree across channels (the stack's positional invariant), so
+ * the caller hands in the node at the same index of every channel's chain.
+ */
+void layer_model_channel_props_add(const LayerModelNode &layer,
+                                   const int channel,
+                                   PaintMaterialLayerStackEntry &r_entry)
+{
+  if (layer.node == nullptr || !layer.supported || layer.is_bare_base) {
+    return;
+  }
+  const bNodeTree *owner_tree = layer.owner_tree ? layer.owner_tree : &layer.node->owner_tree();
+  ID &tree_id = const_cast<ID &>(owner_tree->id);
+  if (layer.factor != nullptr) {
+    r_entry.channel_factor_props.add_overwrite(
+        channel,
+        RNA_pointer_create_discrete(
+            &tree_id, RNA_PaintMaterialLayerOpacity, const_cast<bNodeSocket *>(layer.factor)));
+  }
+  if (layer.node->typeinfo != nullptr && layer.node->typeinfo->rna_ext.srna != nullptr) {
+    PointerRNA node_ptr = RNA_pointer_create_discrete(
+        &tree_id, layer.node->typeinfo->rna_ext.srna, const_cast<bNode *>(layer.node));
+    if (RNA_struct_find_property(&node_ptr, "blend_type") != nullptr) {
+      r_entry.channel_blend_props.add_overwrite(channel, node_ptr);
+    }
+  }
+  CompositeMixNode mix;
+  PaintMaterialLayerChannelState state = PaintMaterialLayerChannelState::Absent;
+  if (layer.is_group || channel < 0 || channel >= 32 ||
+      !composite_mix_node_read(*layer.node, mix) || !composite_mix_channel_state_get(mix, state))
+  {
+    return;
+  }
+  /* A stand-in of the old switch-off is linked like an enabled map, but the channel is off. */
+  const bool legacy_off = state == PaintMaterialLayerChannelState::Enabled &&
+                          layer.image != nullptr &&
+                          BKE_paint_material_layer_map_is_legacy_stand_in(*layer.image);
+  if (state == PaintMaterialLayerChannelState::Disabled || legacy_off) {
+    r_entry.disabled_channels_mask |= uint32_t(1) << channel;
+  }
 }
 
 PaintMaterialLayerStackEntry layer_model_entry_from_node(const Material &material,
@@ -519,6 +570,7 @@ bool BKE_paint_material_layer_stack_from_material(
     else {
       entry.ordinal = int16_t(PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE + nested_num++);
     }
+    layer_model_channel_props_add(reference_layers[index], reference_role, entry);
     if (reference_layers[index].image != nullptr) {
       entry.channel_images.add_overwrite(reference_role, reference_layers[index].image);
     }
@@ -532,6 +584,11 @@ bool BKE_paint_material_layer_stack_from_material(
     Vector<LayerModelNode> channel_layers;
     if (!layer_model_from_channel(material, role, channel_layers)) {
       continue;
+    }
+    if (channel_layers.size() == reference_layers.size()) {
+      for (const int index : r_entries.index_range()) {
+        layer_model_channel_props_add(channel_layers[index], role, r_entries[index]);
+      }
     }
     for (const int index : r_entries.index_range()) {
       const LayerModelNode *match = nullptr;

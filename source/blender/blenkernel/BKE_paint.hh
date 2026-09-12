@@ -1123,6 +1123,14 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
 Material *BKE_paint_material_active_layer_source_get(const PaintModeSettings &mode_settings);
 
 /**
+ * The material whose Stack Layers row the channel bindings point at, whatever kind the row is,
+ * and that row's ordinal. Null when no binding is set or no stack holds the bound maps.
+ */
+Material *BKE_paint_material_active_layer_owner_get(Main &bmain,
+                                                    const PaintModeSettings &mode_settings,
+                                                    int *r_ordinal);
+
+/**
  * Image the Image Editor should show for the Material canvas when nothing is selected.
  *
  * Prefers Base Color, then other created Principled maps, with Normal and Alpha last.
@@ -1158,6 +1166,11 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
 struct PaintMaterialImagesEnsureResult {
   /** Number of Image maps newly created this call. */
   int created = 0;
+  /**
+   * Channels the brush writes to that the active Stack Layers row does not have (Absent) or has
+   * switched off (Disabled). No map is created for them: the row's channels are the user's choice.
+   */
+  int skipped_stack_channels = 0;
   /**
    * True only when the ensured channels already carried more than one distinct non-nil
    * #Image::paint_layer_id AND at least one new Image was created this call, i.e. the new maps

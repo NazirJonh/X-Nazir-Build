@@ -170,9 +170,21 @@ struct PaintMaterialLayerStackEntry {
   float fill_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   bool supported = true;
   const char *unsupported_reason = nullptr;
+  /**
+   * Opacity and blend of the reference channel (the first wired one) only. Kept for readers that
+   * predate per-channel values; new code reads #channel_factor_props and #channel_blend_props.
+   */
   std::optional<PointerRNA> factor_prop;
   std::optional<PointerRNA> blend_prop;
+  /** Per #eMaterialPaintChannel: the row's map, Disabled ones included (see
+   * #disabled_channels_mask). */
   Map<int, Image *> channel_images;
+  /** Per #eMaterialPaintChannel: the Opacity socket as #RNA_PaintMaterialLayerOpacity. */
+  Map<int, PointerRNA> channel_factor_props;
+  /** Per #eMaterialPaintChannel: the node carrying `blend_type`; no entry for Normal. */
+  Map<int, PointerRNA> channel_blend_props;
+  /** Bit per #eMaterialPaintChannel whose map is kept but switched off (Disabled). */
+  uint32_t disabled_channels_mask = 0;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */

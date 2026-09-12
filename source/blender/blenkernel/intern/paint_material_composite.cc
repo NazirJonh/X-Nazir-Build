@@ -317,6 +317,7 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
  * Coverage and opacity coexist this way: the layer's own image still drives per-pixel coverage
  * through the Multiply's linked input, and the other, unlinked input is a constant the user can
  * still edit -- unlike a bare link straight into the Mix's Factor, which leaves nothing to edit.
+ * Neither input linked is the shape of a switched-off channel (coverage first, opacity second).
  */
 static void composite_mix_factor_opacity_detect(CompositeMixNode &r_mix)
 {
@@ -338,9 +339,16 @@ static void composite_mix_factor_opacity_detect(CompositeMixNode &r_mix)
   }
   const bool a_linked = !value_a->directly_linked_links().is_empty();
   const bool b_linked = !value_b->directly_linked_links().is_empty();
-  /* Exactly one side has to be the coverage source and the other a plain constant; both linked,
-   * or neither, is not this shape, and the legacy all-or-nothing reading takes over instead. */
-  if (a_linked == b_linked) {
+  if (a_linked && b_linked) {
+    /* Two sources and no constant: not this shape, the legacy reading takes over. */
+    return;
+  }
+  if (!a_linked && !b_linked) {
+    /* A channel the layer has switched off or never had: coverage is unlinked and zero, and the
+     * opacity keeps its own input. #layer_factor_coverage_link always puts coverage first, so the
+     * order is what tells the two apart when neither is linked. */
+    r_mix.factor_coverage = value_a;
+    r_mix.factor_opacity = value_b;
     return;
   }
   r_mix.factor_coverage = a_linked ? value_a : value_b;
@@ -388,6 +396,39 @@ bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
     return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
   }
   return false;
+}
+
+const bNode *composite_mix_map_node(const CompositeMixNode &mix)
+{
+  const Span<const bNodeLink *> links = mix.top->directly_linked_links();
+  if (links.size() != 1 || links[0]->fromnode->type_legacy != SH_NODE_TEX_IMAGE) {
+    return nullptr;
+  }
+  return links[0]->fromnode;
+}
+
+bool composite_mix_coverage_off(const CompositeMixNode &mix)
+{
+  return mix.factor_opacity != nullptr && mix.factor_coverage != nullptr &&
+         mix.factor_coverage->directly_linked_links().is_empty();
+}
+
+bool composite_mix_channel_state_get(const CompositeMixNode &mix,
+                                     PaintMaterialLayerChannelState &r_state)
+{
+  if (mix.factor_opacity == nullptr || mix.factor_coverage == nullptr) {
+    return false;
+  }
+  if (mix.top->directly_linked_links().is_empty()) {
+    r_state = PaintMaterialLayerChannelState::Absent;
+    return true;
+  }
+  if (composite_mix_map_node(mix) == nullptr) {
+    return false;
+  }
+  r_state = composite_mix_coverage_off(mix) ? PaintMaterialLayerChannelState::Disabled :
+                                              PaintMaterialLayerChannelState::Enabled;
+  return true;
 }
 
 /**
@@ -601,6 +642,11 @@ static bool composite_stack_collect(const bNodeSocket &socket,
     return composite_stack_collect_group(*mix.top, *top_source, r_layers, depth);
   }
 
+  if (composite_mix_coverage_off(mix)) {
+    /* Absent or Disabled in this channel: its Factor is zero by construction, so it contributes
+     * nothing and the rows below it composite exactly as if it were not there. */
+    return true;
+  }
   if (!composite_image_from_socket(*mix.top, layer.color_image, layer.color_iuser)) {
     return false;
   }

@@ -21,6 +21,8 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_layer_edit.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
@@ -684,6 +686,41 @@ TEST_F(PaintMaterialChannelTest, channel_image_binding_skips_auto_creation)
       *ob, mode_settings, &brush_paint, visible_channels);
   ASSERT_EQ(targets.size(), 1);
   EXPECT_EQ(targets[0].image, layer_image);
+}
+
+TEST_F(PaintMaterialChannelTest, stack_row_missing_channel_skips_stroke_map_creation)
+{
+  Object *ob = add_mesh_object("StackSkipOb");
+  Material *ma = add_material_with_principled(*ob, "StackSkipMat");
+
+  PaintModeSettings mode_settings{};
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].use = 1;
+
+  /* The active stack row has a Base Color map only: Roughness is Absent there. */
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  PaintMaterialLayerAddParams params;
+  params.type = PaintMaterialLayerAddType::Fill;
+  params.image_size = 8;
+  copy_v4_v4(params.fill_color, red);
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *ma, params, nullptr, nullptr));
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *ma, entries));
+  Image *base_map = entries.last().channel_images.lookup(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  mode_settings.channel_image_bindings[PAINT_MATERIAL_CHANNEL_BASE_COLOR].image = base_map;
+  id_us_plus(&base_map->id);
+
+  const int images_before = BLI_listbase_count(&bmain->images);
+  const int nodes_before = BLI_listbase_count(&ma->nodetree->nodes);
+  const PaintMaterialImagesEnsureResult result = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings,
+      (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) | (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+  EXPECT_EQ(result.created, 0);
+  EXPECT_EQ(result.skipped_stack_channels, 1);
+  EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before);
+  EXPECT_EQ(BLI_listbase_count(&ma->nodetree->nodes), nodes_before);
+  EXPECT_EQ(mode_settings.channel_image_bindings[PAINT_MATERIAL_CHANNEL_ROUGHNESS].image, nullptr);
 }
 
 TEST_F(PaintMaterialChannelTest, image_paint_layer_id_defaults_to_nil)

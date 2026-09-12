@@ -42,6 +42,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_noise.hh"
 #include "BLI_resource_scope.hh"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
@@ -78,6 +79,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_material_channel_perf_debug.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -3906,6 +3908,91 @@ Material *BKE_paint_material_active_layer_source_get(const PaintModeSettings &mo
   return nullptr;
 }
 
+static Set<const Image *> paint_material_bound_images(const PaintModeSettings &mode_settings)
+{
+  Set<const Image *> bound;
+  for (const MaterialPaintChannelImageBinding &binding : mode_settings.channel_image_bindings) {
+    if (binding.image != nullptr) {
+      bound.add(binding.image);
+    }
+  }
+  return bound;
+}
+
+/**
+ * Whether \a tree, or a group it nests, has a node showing one of \a images. A cheap walk over the
+ * node lists that spares reading the stack of every material that cannot hold the active row.
+ */
+static bool paint_material_tree_shows_image(const bNodeTree &tree,
+                                            const Set<const Image *> &images,
+                                            Set<const bNodeTree *> &r_visited)
+{
+  if (!r_visited.add(&tree)) {
+    return false;
+  }
+  for (const bNode &node : tree.nodes) {
+    if (node.id == nullptr) {
+      continue;
+    }
+    if (GS(node.id->name) == ID_IM && images.contains(id_cast<const Image *>(node.id))) {
+      return true;
+    }
+    if (GS(node.id->name) == ID_NT &&
+        paint_material_tree_shows_image(*id_cast<const bNodeTree *>(node.id), images, r_visited))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The ordinal of the row of \a material's stack that holds one of \a bound, if one does. */
+static std::optional<int> paint_material_stack_row_holding(const Main &bmain,
+                                                           const Material &material,
+                                                           const Set<const Image *> &bound)
+{
+  if (material.nodetree == nullptr || bound.is_empty()) {
+    return std::nullopt;
+  }
+  Set<const bNodeTree *> visited;
+  if (!paint_material_tree_shows_image(*material.nodetree, bound, visited)) {
+    return std::nullopt;
+  }
+  Vector<PaintMaterialLayerStackEntry> entries;
+  if (!BKE_paint_material_layer_stack_from_material(bmain, material, entries)) {
+    return std::nullopt;
+  }
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    for (const Image *image : entry.channel_images.values()) {
+      if (image != nullptr && bound.contains(image)) {
+        return entry.ordinal;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+Material *BKE_paint_material_active_layer_owner_get(Main &bmain,
+                                                    const PaintModeSettings &mode_settings,
+                                                    int *r_ordinal)
+{
+  const Set<const Image *> bound = paint_material_bound_images(mode_settings);
+  if (bound.is_empty()) {
+    return nullptr;
+  }
+  for (Material &material : bmain.materials) {
+    if (const std::optional<int> ordinal = paint_material_stack_row_holding(
+            bmain, material, bound))
+    {
+      if (r_ordinal != nullptr) {
+        *r_ordinal = *ordinal;
+      }
+      return &material;
+    }
+  }
+  return nullptr;
+}
+
 bool BKE_paint_principled_channel_image_get(Object &ob,
                                             eMaterialPaintChannel channel,
                                             Image **r_image,
@@ -4106,6 +4193,15 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
 
   PaintMaterialImagesEnsureResult result;
 
+  /* A stack row is the paint target when a channel is bound to one of its maps; its other
+   * channels stay as the user left them instead of growing a map on the first stroke. Only this
+   * object's own stack counts: bindings left over from another material say nothing about it. */
+  const Material *active_material = BKE_object_material_get(&ob, ob.actcol);
+  const bool stack_row_active = active_material != nullptr &&
+                                paint_material_stack_row_holding(
+                                    bmain, *active_material, paint_material_bound_images(mode_settings))
+                                    .has_value();
+
   /* Distinct non-nil layer ids already on the channels we are ensuring, and the maps this call
    * newly creates. Only maps in `new_images` get tagged; pre-existing images are never touched. */
   Vector<bUUID> existing_ids;
@@ -4118,6 +4214,10 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
     if (!BKE_paint_material_channel_writes_to_target(
             brush_paint, mode_settings, visible_material_channels, info.channel))
     {
+      continue;
+    }
+    if (stack_row_active && mode_settings.channel_image_bindings[info.channel].image == nullptr) {
+      result.skipped_stack_channels++;
       continue;
     }
     Image *existing = nullptr;

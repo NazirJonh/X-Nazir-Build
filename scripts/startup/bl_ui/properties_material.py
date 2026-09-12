@@ -584,42 +584,55 @@ class LAYER_MATERIAL_PT_context_material(LayerMaterialButtonsPanel, Panel):
         if mat.library is not None:
             row.label(text="Linked, not editable", icon='LIBRARY_DATA_DIRECT')
 
-        # The active layer is what the channel bindings point at; a channel is on while its map
-        # still carries the bake link to this material, which is all the layer stores.
+        # The active layer is what the channel bindings point at; its channel states are read from
+        # the stack itself, and the bake link only tells a Material layer's maps apart.
+        paint_mode = context.tool_settings.paint_mode
         maps = {
             binding.channel: binding.image
-            for binding in context.tool_settings.paint_mode.channel_image_bindings
+            for binding in paint_mode.channel_image_bindings
             if binding.image is not None
         }
         baked = [image for image in maps.values() if image.material_source == mat]
 
-        row = layout.row(align=True)
-        row.label(text="Resolution")
-        size = max((image.size[0] for image in baked), default=0)
-        row.operator_menu_enum(
-            "material.paint_layer_bake_size_set",
-            "size",
-            text="{:d} px".format(size) if size else "Resolution",
-        )
-        row.operator("material.paint_layer_rebake", text="", icon='FILE_REFRESH')
-        if any(image.material_source_is_baking for image in baked):
-            layout.label(text="Baking...", icon='RENDER_STILL')
+        # Resolution and re-bake only mean something for a layer baked from this material.
+        if baked:
+            row = layout.row(align=True)
+            row.label(text="Resolution")
+            size = max((image.size[0] for image in baked), default=0)
+            row.operator_menu_enum(
+                "material.paint_layer_bake_size_set",
+                "size",
+                text="{:d} px".format(size) if size else "Resolution",
+            )
+            row.operator("material.paint_layer_rebake", text="", icon='FILE_REFRESH')
+            if any(image.material_source_is_baking for image in baked):
+                layout.label(text="Baking...", icon='RENDER_STILL')
 
+        enabled, disabled = paint_mode.active_layer_channel_states()
         flow = layout.grid_flow(row_major=True, columns=0, even_columns=True, align=True)
         for channel_id, label in self._channels:
-            image = maps.get(channel_id)
-            if image is None:
-                continue
             flow.operator(
                 "material.paint_layer_channel_toggle",
                 text=label,
-                depress=image.material_source == mat,
+                icon='HIDE_ON' if channel_id in disabled else 'NONE',
+                depress=channel_id in enabled,
             ).channel = channel_id
 
 
 class LAYER_MATERIAL_PT_surface(LayerMaterialButtonsPanel, Panel):
     bl_idname = "LAYER_MATERIAL_PT_surface"
     bl_label = "Surface"
+
+    @classmethod
+    def poll(cls, context):
+        if not super().poll(context):
+            return False
+        paint_mode = context.tool_settings.paint_mode
+        mat = context.material
+        return any(
+            binding.image is not None and binding.image.material_source == mat
+            for binding in paint_mode.channel_image_bindings
+        )
 
     def draw(self, context):
         layout = self.layout

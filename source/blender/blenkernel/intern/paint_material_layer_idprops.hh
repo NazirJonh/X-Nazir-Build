@@ -52,6 +52,10 @@ inline constexpr const char *LAYER_KIND_PROP = "pbr_paint_layer_kind";
 inline constexpr const char *LAYER_FILL_COLOR_PROP = "pbr_paint_fill_color";
 /** The material a layer group stands for, on the group's own tree. */
 inline constexpr const char *LAYER_GROUP_MATERIAL_PROP = "pbr_paint_layer_material";
+/** Which part of a correction layer the node stands for, on the correction's own Mix nodes. */
+inline constexpr const char *CORRECTION_SECTION_PROP = "pbr_paint_correction_section";
+/** What a correction layer applies to the layer under it. */
+inline constexpr const char *CORRECTION_EFFECT_PROP = "pbr_paint_correction_effect";
 /**
  * The bake link on an #Image: which material, channel, size and node-tree hash it was baked
  * from. Owned by `image.cc` (#ImageMaterialSource); the keys live here so they are spelled once.
@@ -72,6 +76,17 @@ void color_tag_set(bNode &node, int color_tag);
 
 PaintMaterialLayerKind kind_get(const bNode &node);
 void kind_set(bNode &node, PaintMaterialLayerKind kind);
+
+/** Which part of a correction layer the node stands for; reads as Content when unset. */
+PaintMaterialCorrectionSection correction_section_get(const bNode &node);
+void correction_section_set(bNode &node, PaintMaterialCorrectionSection section);
+
+/** What a correction layer applies to the layer under it; reads as Paint when unset. */
+PaintMaterialCorrectionEffect correction_effect_get(const bNode &node);
+void correction_effect_set(bNode &node, PaintMaterialCorrectionEffect effect);
+
+/** Whether the node is a correction layer: #kind_get(node) == Correction. */
+bool node_is_correction(const bNode &node);
 
 bool fill_color_get(const bNode &node, float r_color[4]);
 void fill_color_set(bNode &node, const float color[4]);

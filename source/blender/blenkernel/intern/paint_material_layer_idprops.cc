@@ -100,7 +100,13 @@ PaintMaterialLayerKind kind_get(const bNode &node)
   if (kind == nullptr) {
     return PaintMaterialLayerKind::Paint;
   }
-  return static_cast<PaintMaterialLayerKind>(IDP_int_get(kind));
+  const int value = IDP_int_get(kind);
+  if (value < 0 || value > int8_t(PaintMaterialLayerKind::Correction)) {
+    /* A value this build does not know -- written by a newer one, or by hand -- reads as Paint
+     * rather than as a number outside the enum. */
+    return PaintMaterialLayerKind::Paint;
+  }
+  return static_cast<PaintMaterialLayerKind>(value);
 }
 
 void kind_set(bNode &node, const PaintMaterialLayerKind kind)
@@ -112,6 +118,61 @@ void kind_set(bNode &node, const PaintMaterialLayerKind kind)
     return;
   }
   IDP_AddToGroup(properties, IDP_NewInt(int8_t(kind), LAYER_KIND_PROP));
+}
+
+PaintMaterialCorrectionSection correction_section_get(const bNode &node)
+{
+  if (node.prop == nullptr) {
+    return PaintMaterialCorrectionSection::Content;
+  }
+  const IDProperty *section = IDP_GetPropertyTypeFromGroup(
+      node.prop, CORRECTION_SECTION_PROP, IDP_INT);
+  if (section == nullptr) {
+    return PaintMaterialCorrectionSection::Content;
+  }
+  return static_cast<PaintMaterialCorrectionSection>(IDP_int_get(section));
+}
+
+void correction_section_set(bNode &node, const PaintMaterialCorrectionSection section)
+{
+  IDProperty *properties = node_properties_ensure(node);
+  IDProperty *section_prop = IDP_GetPropertyTypeFromGroup(
+      properties, CORRECTION_SECTION_PROP, IDP_INT);
+  if (section_prop != nullptr) {
+    IDP_int_set(section_prop, int8_t(section));
+    return;
+  }
+  IDP_AddToGroup(properties, IDP_NewInt(int8_t(section), CORRECTION_SECTION_PROP));
+}
+
+PaintMaterialCorrectionEffect correction_effect_get(const bNode &node)
+{
+  if (node.prop == nullptr) {
+    return PaintMaterialCorrectionEffect::Paint;
+  }
+  const IDProperty *effect = IDP_GetPropertyTypeFromGroup(
+      node.prop, CORRECTION_EFFECT_PROP, IDP_INT);
+  if (effect == nullptr) {
+    return PaintMaterialCorrectionEffect::Paint;
+  }
+  return static_cast<PaintMaterialCorrectionEffect>(IDP_int_get(effect));
+}
+
+void correction_effect_set(bNode &node, const PaintMaterialCorrectionEffect effect)
+{
+  IDProperty *properties = node_properties_ensure(node);
+  IDProperty *effect_prop = IDP_GetPropertyTypeFromGroup(
+      properties, CORRECTION_EFFECT_PROP, IDP_INT);
+  if (effect_prop != nullptr) {
+    IDP_int_set(effect_prop, int8_t(effect));
+    return;
+  }
+  IDP_AddToGroup(properties, IDP_NewInt(int8_t(effect), CORRECTION_EFFECT_PROP));
+}
+
+bool node_is_correction(const bNode &node)
+{
+  return kind_get(node) == PaintMaterialLayerKind::Correction;
 }
 
 bool fill_color_get(const bNode &node, float r_color[4])

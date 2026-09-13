@@ -5,8 +5,11 @@
 #include "testing/testing.h"
 
 #include "BLI_assert.h"
+#include "BLI_map.hh"
 #include "BLI_math_vector.hh"
+#include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_uuid.h"
 
 #include "BKE_gtest_base.hh"
 #include "BKE_brush.hh"
@@ -17,6 +20,7 @@
 #include "BKE_node.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_layer_edit.hh"
+#include "BKE_paint_material_layer_model.hh"
 #include "BKE_scene.hh"
 
 #include "DNA_brush_types.h"
@@ -39,6 +43,19 @@ bool paint_material_mask_preview_activate(Main &bmain,
                                            StringRef section_id);
 
 bool paint_row_owns_mask_image(const StackRow &row, const Image *mask_image);
+
+/* The route the paint stack source addresses its rows by, file-local in the source and
+ * duplicated here -- the same shape, the way the two function declarations above are -- so the
+ * tests can call the budget builder directly. */
+struct PaintStackRowRoute {
+  bool is_correction = false;
+  int layer_ordinal = -1;
+  bUUID correction = {};
+  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+};
+
+Map<int, PaintStackRowRoute> paint_stack_routes_build(
+    Span<PaintMaterialLayerStackEntry> entries, int &r_first_unaddressable_index);
 
 namespace tests {
 
@@ -502,6 +519,112 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, row_owns_mask_image_matches_the_mas
 
   Image &stranger = add_image("Stranger");
   EXPECT_FALSE(paint_row_owns_mask_image(*row_a, &stranger));
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, attached_rows_plan_places_under_parent)
+{
+  Vector<StackRow> rows;
+  auto add = [&](int16_t ordinal, int16_t parent, const char *section, bool supported = true) {
+    StackRow row;
+    row.ordinal = ordinal;
+    row.parent_ordinal = parent;
+    row.parent_section_id = section;
+    row.supported = supported;
+    rows.append(std::move(row));
+  };
+  add(0, -1, "");            /* layer 0 */
+  add(2046, 0, "CHANNELS");  /* content correction, bottom */
+  add(2045, 0, "CHANNELS");  /* content correction, top */
+  add(2044, 0, "MASK");      /* mask correction */
+  add(1, -1, "", false);     /* unsupported layer 1 */
+  add(2043, 1, "CHANNELS");
+
+  const Vector<StackAttachedPlacement> plan = outliner_stack_attached_rows_plan(
+      rows, [](const StackRow &) { return StringRef("CHANNELS"); });
+  ASSERT_EQ(plan.size(), 2);
+  EXPECT_EQ(plan[0].row_index, 2); /* top correction first */
+  EXPECT_EQ(plan[1].row_index, 1);
+  EXPECT_EQ(plan[0].parent_row_index, 0);
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, correction_rows_are_addressable)
+{
+  Image &base = add_image("Base");
+  Material &material = add_material_with_texture(base);
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params));
+  bUUID c = {}, m = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain, material, 1, PaintMaterialCorrectionSection::Content, "C", &c));
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain, material, 1, PaintMaterialCorrectionSection::Mask, "M", &m));
+
+  const StackSource &source = *stack_source_get(SO_STACK_SRC_PAINT_MATERIAL);
+  StackReadContext ctx;
+  ctx.bmain = bmain;
+  ctx.scene = scene;
+  Vector<StackRow> rows;
+  ASSERT_TRUE(source.rows_build(ctx, {}, material.id, rows));
+
+  int attached = 0;
+  Set<int> ordinals;
+  for (const StackRow &row : rows) {
+    EXPECT_TRUE(row.supported);
+    EXPECT_LE(row.ordinal, STACK_ROW_ORDINAL_MAX);
+    EXPECT_TRUE(ordinals.add(row.ordinal));
+    if (!row.parent_section_id.empty()) {
+      attached++;
+      EXPECT_EQ(row.parent_ordinal, 1);
+      EXPECT_GE(row.ordinal, STACK_ROW_ORDINAL_MAX - 1);
+      EXPECT_TRUE(BLI_uuid_equal(row.stable_id, c) || BLI_uuid_equal(row.stable_id, m));
+      EXPECT_EQ(row.parent_section_id,
+                BLI_uuid_equal(row.stable_id, c) ? "CHANNELS" : "MASK");
+    }
+  }
+  EXPECT_EQ(attached, 2);
+  /* The layer exposes a MASK section although it has no mask image (spec D15). */
+  for (const StackRow &row : rows) {
+    if (row.ordinal == 1) {
+      bool has_mask_section = false;
+      for (const StackContentSection &section : row.content_sections) {
+        has_mask_section |= section.identifier == "MASK";
+      }
+      EXPECT_TRUE(has_mask_section);
+    }
+  }
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, routes_allocate_corrections_downwards_within_budget)
+{
+  Vector<PaintMaterialLayerStackEntry> list(2);
+  list[0].ordinal = 0;
+  list[1].ordinal = PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE; /* one group child */
+  list[1].depth = 1;
+  for (int i = 0; i < 1022; i++) {
+    PaintMaterialLayerCorrectionEntry correction;
+    correction.marker = BLI_uuid_generate_random();
+    list[0].content_corrections.append(correction);
+  }
+
+  int first_unaddressable = 0;
+  Map<int, PaintStackRowRoute> routes = paint_stack_routes_build(list, first_unaddressable);
+  EXPECT_EQ(first_unaddressable, -1);
+  EXPECT_FALSE(routes.lookup(0).is_correction);
+  EXPECT_FALSE(routes.lookup(PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE).is_correction);
+  const PaintStackRowRoute &top = routes.lookup(STACK_ROW_ORDINAL_MAX);
+  EXPECT_TRUE(top.is_correction);
+  EXPECT_EQ(top.layer_ordinal, 0);
+  EXPECT_TRUE(BLI_uuid_equal(top.correction, list[0].content_corrections[0].marker));
+  EXPECT_TRUE(routes.lookup(PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE + 1).is_correction);
+
+  /* One more meets the group child's ordinal: it is the first row that cannot be addressed. */
+  PaintMaterialLayerCorrectionEntry extra;
+  extra.marker = BLI_uuid_generate_random();
+  list[0].content_corrections.append(extra);
+  routes = paint_stack_routes_build(list, first_unaddressable);
+  EXPECT_EQ(first_unaddressable, 1022);
 }
 
 }  // namespace tests

@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <utility>
 
 #include "MEM_guardedalloc.h"
 
@@ -3975,10 +3976,13 @@ static bool paint_material_tree_shows_image(const bNodeTree &tree,
   return false;
 }
 
-/** The ordinal of the row of \a material's stack that holds one of \a bound, if one does. */
-static std::optional<int> paint_material_stack_row_holding(const Main &bmain,
-                                                           const Material &material,
-                                                           const Set<const Image *> &bound)
+/**
+ * The row of \a material's stack that holds one of \a bound, if one does: its ordinal, and the
+ * correction of that row holding the image -- nil when it is the layer's own map that is held.
+ * The scan order is the model's own, bottom to top, a row's maps ahead of its corrections'.
+ */
+static std::optional<std::pair<int, bUUID>> paint_material_stack_row_holding(
+    const Main &bmain, const Material &material, const Set<const Image *> &bound)
 {
   if (material.nodetree == nullptr || bound.is_empty()) {
     return std::nullopt;
@@ -3994,7 +3998,18 @@ static std::optional<int> paint_material_stack_row_holding(const Main &bmain,
   for (const PaintMaterialLayerStackEntry &entry : entries) {
     for (const Image *image : entry.channel_images.values()) {
       if (image != nullptr && bound.contains(image)) {
-        return entry.ordinal;
+        return std::make_pair(entry.ordinal, bUUID{});
+      }
+    }
+    for (const Vector<PaintMaterialLayerCorrectionEntry> *corrections :
+         {&entry.content_corrections, &entry.mask_corrections})
+    {
+      for (const PaintMaterialLayerCorrectionEntry &correction : *corrections) {
+        for (const Image *image : correction.channel_images.values()) {
+          if (image != nullptr && bound.contains(image)) {
+            return std::make_pair(entry.ordinal, correction.marker);
+          }
+        }
       }
     }
   }
@@ -4020,9 +4035,64 @@ struct ActiveLayerCache {
   uint32_t owner_uid = 0;
   uint64_t owner_revision = 0;
   int ordinal = -1;
+  /** The correction the answer names, nil when it names the row's layer itself. */
+  bUUID correction = {};
 };
 
 ActiveLayerCache g_active_layer_cache;
+
+/**
+ * The channelless correction the Outliner last activated (see
+ * #BKE_paint_material_active_correction_set): with no maps to bind, the channel bindings cannot
+ * name it, so it is remembered here instead. By session UID rather than by address, like the
+ * cache above, so a freed-and-reused material can never read back as a hit; the model lookup on
+ * every read catches a correction that was removed in between.
+ */
+struct ActiveCorrectionMemo {
+  uint32_t material_uid = 0;
+  bUUID correction = {};
+};
+
+ActiveCorrectionMemo g_active_correction;
+
+/**
+ * Assemble the answer for a correction row: the entry of \a owner's stack whose correction is
+ * \a correction, its kind forced to #PaintMaterialLayerKind::Correction, its maps the
+ * correction's own. Corrections are not baked from a material, so #source stays null.
+ */
+std::optional<PaintMaterialActiveLayer> paint_material_active_correction_build(
+    const Main &bmain, Material &owner, const bUUID &correction)
+{
+  Vector<PaintMaterialLayerStackEntry> entries;
+  if (!BKE_paint_material_layer_stack_from_material(bmain, owner, entries)) {
+    return std::nullopt;
+  }
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    for (const Vector<PaintMaterialLayerCorrectionEntry> *corrections :
+         {&entry.content_corrections, &entry.mask_corrections})
+    {
+      for (const PaintMaterialLayerCorrectionEntry &corr : *corrections) {
+        if (!BLI_uuid_equal(corr.marker, correction)) {
+          continue;
+        }
+        PaintMaterialActiveLayer result;
+        result.owner = &owner;
+        result.ordinal = entry.ordinal;
+        result.kind = PaintMaterialLayerKind::Correction;
+        result.correction = corr.marker;
+        result.correction_section = corr.section;
+        for (const auto item : corr.channel_images.items()) {
+          if (item.key < 0 || item.key >= PAINT_MATERIAL_CHANNEL_NUM || item.value == nullptr) {
+            continue;
+          }
+          result.maps.add(item.key, item.value);
+        }
+        return result;
+      }
+    }
+  }
+  return std::nullopt;
+}
 
 }  // namespace
 
@@ -4039,11 +4109,23 @@ std::optional<PaintMaterialActiveLayer> BKE_paint_material_active_layer_get(
     }
   }
   if (!any_bound) {
-    return std::nullopt;
+    /* Nothing bound: a channelless correction remembered by the Outliner may still be the paint
+     * target, since bindings cannot name a row that has no maps. Re-read through the model every
+     * time, so a correction removed after being remembered stops answering. */
+    if (g_active_correction.material_uid == 0 || BLI_uuid_is_nil(g_active_correction.correction)) {
+      return std::nullopt;
+    }
+    Material *owner = id_cast<Material *>(
+        BKE_libblock_find_session_uid(&bmain, ID_MA, g_active_correction.material_uid));
+    if (owner == nullptr) {
+      return std::nullopt;
+    }
+    return paint_material_active_correction_build(bmain, *owner, g_active_correction.correction);
   }
 
   Material *owner = nullptr;
   int ordinal = -1;
+  bUUID correction = {};
   if (g_active_layer_cache.owner_uid != 0 && binding_uids == g_active_layer_cache.binding_uids) {
     Material *cached = id_cast<Material *>(
         BKE_libblock_find_session_uid(&bmain, ID_MA, g_active_layer_cache.owner_uid));
@@ -4052,6 +4134,7 @@ std::optional<PaintMaterialActiveLayer> BKE_paint_material_active_layer_get(
     {
       owner = cached;
       ordinal = g_active_layer_cache.ordinal;
+      correction = g_active_layer_cache.correction;
     }
   }
 
@@ -4060,11 +4143,12 @@ std::optional<PaintMaterialActiveLayer> BKE_paint_material_active_layer_get(
      * every material this whole cache exists to spare repeated redraws from. */
     const Set<const Image *> bound = paint_material_bound_images(mode_settings);
     for (Material &material : bmain.materials) {
-      if (const std::optional<int> found = paint_material_stack_row_holding(
+      if (const std::optional<std::pair<int, bUUID>> found = paint_material_stack_row_holding(
               bmain, material, bound))
       {
         owner = &material;
-        ordinal = *found;
+        ordinal = found->first;
+        correction = found->second;
         break;
       }
     }
@@ -4075,6 +4159,11 @@ std::optional<PaintMaterialActiveLayer> BKE_paint_material_active_layer_get(
     g_active_layer_cache.owner_uid = owner->id.session_uid;
     g_active_layer_cache.owner_revision = BKE_material_paint_layer_revision_get(*owner);
     g_active_layer_cache.ordinal = ordinal;
+    g_active_layer_cache.correction = correction;
+  }
+
+  if (!BLI_uuid_is_nil(correction)) {
+    return paint_material_active_correction_build(bmain, *owner, correction);
   }
 
   Vector<PaintMaterialLayerStackEntry> entries;
@@ -4103,6 +4192,19 @@ std::optional<PaintMaterialActiveLayer> BKE_paint_material_active_layer_get(
     return result;
   }
   return std::nullopt;
+}
+
+void BKE_paint_material_active_correction_set(const Material *material, const bUUID &correction)
+{
+  if (material == nullptr || BLI_uuid_is_nil(correction)) {
+    g_active_correction = {};
+    return;
+  }
+  g_active_correction.material_uid = material->id.session_uid;
+  g_active_correction.correction = correction;
+  /* The layer cache may hold a positive answer keyed to bindings that stopped naming the target
+   * the moment this was called: drop it, so the next read re-resolves. */
+  g_active_layer_cache = ActiveLayerCache{};
 }
 
 void BKE_paint_material_channel_binding_set(MaterialPaintChannelImageBinding &binding,
@@ -4387,9 +4489,10 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
     return result;
   }
 
-  /* A stack row is the paint target when a channel is bound to one of its maps; its other
-   * channels stay as the user left them instead of growing a map on the first stroke. Only this
-   * object's own stack counts: bindings left over from another material say nothing about it. */
+  /* A stack row -- a layer's own maps or a correction's -- is the paint target when a channel is
+   * bound to one of its maps; the other channels stay as the user left them instead of growing a
+   * map on the first stroke. Only this object's own stack counts: bindings left over from another
+   * material say nothing about it. */
   const Material *active_material = BKE_object_material_get(&ob, ob.actcol);
   const bool stack_row_active = active_material != nullptr &&
                                 paint_material_stack_row_holding(

@@ -32,11 +32,25 @@ namespace blender {
 struct Image;
 struct Main;
 struct Material;
+struct CompositeMixNode;
 struct bNode;
 struct bNodeLink;
 struct bNodeSocket;
 struct bNodeTree;
 enum eNodeSocketInOut : short;
+
+/** The nodes one correction owns in one channel. */
+struct ChainCorrection {
+  bUUID marker = {};
+  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+  PaintMaterialCorrectionEffect effect = PaintMaterialCorrectionEffect::Paint;
+  bNode *mix = nullptr;             /* CorrMix / MCorrMix, or the Normal Combine instance */
+  bNode *factor_multiply = nullptr; /* coverage x opacity */
+  bNode *over_invert = nullptr;     /* Content only */
+  bNode *over_combine = nullptr;    /* Content only */
+  bNode *map = nullptr;             /* Image Texture, null when Absent */
+  Image *image = nullptr;
+};
 
 /** One rung of a channel's chain. The bottom rung is a bare Image Texture and has no sockets. */
 struct ChainLayer {
@@ -52,6 +66,18 @@ struct ChainLayer {
   /** For a group layer, which chain of the forest holds its sub-stack; -1 otherwise. */
   int sub_chain_index = -1;
   Image *image = nullptr;
+  /**
+   * The corrections hanging on this layer's content input, bottom to top (spec 18 §4.5). Empty
+   * when the layer has none, and for a group layer, whose content stays inside its folder.
+   */
+  Vector<ChainCorrection> content_corrections;
+  /** The corrections hanging on this layer's coverage input, bottom to top. */
+  Vector<ChainCorrection> mask_corrections;
+  /**
+   * The Image Texture of the layer's own map, read below the content corrections; null when the
+   * layer is Absent in this channel, and for a group layer, whose content is its folder's.
+   */
+  bNode *base_map = nullptr;
 
   bool is_mix() const
   {
@@ -105,7 +131,7 @@ struct NewLayerNodes {
   bool owns_image = true;
 };
 
-/** The twelve operations a plan can be built for: one builder, one order of checks. */
+/** The operations a plan can be built for: one builder, one order of checks. */
 enum class LayerEditOp {
   Add,
   Remove,
@@ -122,6 +148,8 @@ enum class LayerEditOp {
   GroupMake,
   GroupAdd,
   Ungroup,
+  /** Add, remove, reorder, rename or toggle one correction of the row at the ordinal. */
+  CorrectionEdit,
 };
 
 /**
@@ -204,6 +232,13 @@ bool chain_forest_collect(bNodeTree &tree,
                           const int nesting,
                           PaintMaterialLayerEditError &r_error);
 
+/**
+ * Fill \a layer's correction lists and #base_map by descending its content and coverage inputs
+ * (spec 18 §4.5 p.2). The layer must be a Mix layer this file reads; a group layer keeps nothing
+ * to read here.
+ */
+bool correction_chain_read(ChainLayer &layer, PaintMaterialLayerEditError &r_error);
+
 /** Relink \a into's link so it comes from \a from_socket on \a from_node instead. */
 void relink_into(bNodeTree &tree,
                  bNodeSocket &into,
@@ -219,6 +254,16 @@ void chain_rebuild_links(ChannelChain &chain);
 
 /** Whether every chain of \a chains has the same layer count. */
 bool chains_align(Span<ChannelChain> chains, PaintMaterialLayerEditError &r_error);
+
+/**
+ * Spec 18 §4.5 p.3: the corrections of the row at \a layer_index must be the same UUID sequence
+ * per section, with the same section and effect, in every chain. False with
+ * #PaintMaterialLayerEditError::ChannelsDisagree when they are not; true when there is no resolved
+ * row to compare (\a chains empty or \a layer_index outside it).
+ */
+bool layer_corrections_agree(Span<ChannelChain *> chains,
+                             int layer_index,
+                             PaintMaterialLayerEditError &r_error);
 
 /** #chain_forest_collect for every channel of \a ma, one forest per channel. */
 bool chains_collect_forest(Material &ma,
@@ -274,6 +319,65 @@ bNode *layer_factor_absent_link(bNodeTree &tree,
                                 bNodeSocket &factor,
                                 const float opacity);
 
+/**
+ * Accumulate coverage the way an "over" does, `a = a_below + a_layer * (1 - a_below)`, as a
+ * Subtract + Multiply-Add pair. \a below_socket null means nothing below (a_below = 0).
+ * \return the Multiply-Add node; \a r_output its Value output, \a r_invert when given the
+ * Subtract of the pair, whose node a later edit has to know to remove the whole thing.
+ */
+bNode *coverage_over_link(bNodeTree &tree,
+                          bNode *below_node,
+                          bNodeSocket *below_socket,
+                          bNode &layer_node,
+                          bNodeSocket &layer_alpha,
+                          bNodeSocket *&r_output,
+                          bNode **r_invert = nullptr);
+
+/**
+ * The whole-row on/off gate of a content correction's over pair (spec 18 §4.1). On: the
+ * Multiply-Add's A input carries the coverage Multiply's output, the Subtract's first input keeps
+ * its `1 - a_below` constant. Off: the Multiply-Add's A is unlinked and explicitly zero --
+ * `combine = 0*b + c = a_below` -- so the row covers nothing, and the Multiply's output rides on
+ * the Subtract's first input instead. The pair is never expressed by muting its nodes: a muted
+ * Math node passes its first connected input, which for the Multiply-Add is the correction's own
+ * alpha. The gate link also keeps the pair discoverable from the Multiply while it is off, even
+ * for a row with nothing below it; #correction_nodes_read reads it back.
+ */
+void correction_over_gate_set(bNodeTree &tree,
+                              bNode &factor_multiply,
+                              bNode &over_invert,
+                              bNode &over_combine,
+                              const bool enable);
+
+/** Spec 18 §4.3: socket that consumes the layer's content coverage (the "mask base"), or null
+ * when a mask image owns it and the accumulated coverage goes nowhere. */
+bNodeSocket *layer_mask_base_consumer(ChainLayer &layer);
+
+/**
+ * Switch one correction's nodes in one channel on or off as a whole row (spec 18 §4.1): the mute
+ * on its Mix, the gate of its over pair (#correction_over_gate_set), and the mute of its map --
+ * shader localization drops a muted map, so a muted Mix with nothing below reads the explicit
+ * black base instead of the map it would otherwise pass through. A content map also stays muted
+ * while its channel is Disabled.
+ */
+void correction_row_enabled_apply(bNodeTree &tree, const ChainCorrection &nodes, bool enable);
+
+/**
+ * Bring \a layer's mask corrections in this channel to the form what the row puts into the channel
+ * implies (spec 18 §4.3, I1, I2'). Where the base map is on or a content correction paints, the
+ * mask chain sits on the row's coverage and each mask correction reads its map's alpha; where the
+ * row puts nothing in, the chain's base and every mask correction's coverage are unlinked and
+ * zero, so no mask blend can raise the coverage of a row that paints nothing. A mask has no
+ * per-channel switch of its own: this is its whole per-channel state. No-op without mask
+ * corrections.
+ */
+void layer_mask_corrections_sync(bNodeTree &tree, ChainLayer &layer);
+
+/** Whether a content correction of the row paints in this channel: it owns a map, and neither its
+ * Mix nor its map is muted. Drives the I2' coverage link and the last-enabled-channel check; a
+ * mask correction brings no pixels of its own and never counts. */
+bool row_channel_painted_by_corrections(const ChainLayer &layer);
+
 Image *layer_image_given(const PaintMaterialLayerAddParams &params, const int channel);
 
 void fill_map_color_for(const int channel, const float fill_color[4], float r_color[4]);
@@ -297,21 +401,124 @@ bNode *layer_mix_node_create(Main &bmain, bNodeTree &tree, const int channel);
 
 /**
  * The single map node feeding each layer of \a chain from \a from_ordinal to \a to_ordinal, or
- * empty when any layer in the range has no single map to move.
+ * empty when any layer in the range has no single map to move. Read through #ChainLayer::base_map,
+ * which sits below the row's content corrections -- its top socket shows the topmost correction
+ * when it has any, not its map.
  */
 Vector<bNode *> chain_range_map_nodes(ChannelChain &chain,
                                       const int from_ordinal,
                                       const int to_ordinal);
 
-bool layer_group_fill_channel(Main & /*bmain*/,
-                              bNodeTree & /*tree*/,
+/**
+ * Move one channel's rows `from_ordinal + 1 .. to_ordinal` -- and the map of `from_ordinal` with
+ * them -- into \a group, leaving the Mix node of `from_ordinal` behind to blend the group in. A
+ * kept row that carries corrections moves whole: its map, its corrections and every node between
+ * them go in as one unit, topped by a copy of the kept Mix itself (the row the corrections hang
+ * on inside the folder); \a keeper_copy_marker is the identity that copy gets, minted once by the
+ * caller so every channel's copy is the same row.
+ *
+ * Nodes are copied into the group and the originals collected in \a r_nodes_to_remove: there is
+ * no "move a node to another tree" in the node API, and copying keeps the id-properties -- the
+ * layer marker and a correction's among them -- which is what makes a layer inside a group still
+ * the same layer.
+ */
+bool layer_group_fill_channel(Main &bmain,
+                              bNodeTree &tree,
                               bNodeTree &group,
                               ChannelChain &chain,
                               Span<bNode *> map_nodes,
                               const int from_ordinal,
                               const int to_ordinal,
+                              const bUUID &keeper_copy_marker,
                               const bool build_alpha,
                               Vector<bNode *> &r_nodes_to_remove);
+
+/**
+ * Insert a correction on top of \a section's inner stack of \a layer in \a chain, Absent in this
+ * channel (no map, coverage unlinked and zero -- spec 18 §4.1a). Stamps marker/kind/section/effect
+ * on the Mix node. Does not update the tree; the caller does, once, after every channel.
+ */
+bool correction_channel_insert(Main &bmain,
+                               ChannelChain &chain,
+                               ChainLayer &layer,
+                               PaintMaterialCorrectionSection section,
+                               const bUUID &marker,
+                               ChainCorrection &r_nodes);
+
+/**
+ * Take one correction's nodes out of one channel, relinking what was below to what was above:
+ * the layer's stack reads as if the correction had never been there. For a content section that
+ * also means carrying the correction's `a_below` source (the base alpha, or the over output of
+ * the correction under it) over to the consumer of its accumulated-coverage output, so the Over
+ * chain of the corrections left stays intact. The correction's map node goes with it when
+ * nothing besides this correction reads it.
+ *
+ * Does not update the tree; the caller does, once, after every channel.
+ */
+void correction_channel_remove(Main &bmain,
+                               ChannelChain &chain,
+                               ChainLayer &layer,
+                               const ChainCorrection &nodes);
+
+/**
+ * The map node of one channel's Multiply form switched on or off: the muted node only spares
+ * the sampler, the coverage input's explicit zero -- the caller's clear -- is what makes the
+ * channel contribute nothing (invariant I1). The one mute toggle a layer row's channel and a
+ * correction's channel share; written once so the two cannot drift.
+ */
+void channel_map_mute_set(bNodeTree &tree, bNode &map, bool enable);
+
+/**
+ * The image tagged as \a channel's map of the correction carrying \a marker, found across
+ * #Main's images the way the stack model finds a correction's maps -- a correction's map does
+ * not need a node of its own in \a channel's graph (AO) to be its map. Null when none is.
+ */
+Image *correction_tagged_map_find(Main &bmain, const bUUID &marker, int channel);
+
+/**
+ * The nodes one correction's links wire together, read back from the Mix \a corr of \a node: its
+ * stamped identity, the coverage Multiply feeding it, and -- for a Content section -- the
+ * Subtract + Multiply-Add over pair, plus the correction's own map. False when the links are not
+ * the shape #correction_channel_insert builds.
+ */
+bool correction_nodes_read(const bNode &node,
+                           const CompositeMixNode &corr,
+                           ChainCorrection &r_nodes);
+
+/**
+ * Every node the row \a layer owns in one channel: its Mix, the coverage Multiply its Factor
+ * hangs on, its base map, its own mask when one sits on the coverage path, and every node of
+ * every correction hanging on it -- the whole unit a move, a duplicate or a removal has to carry
+ * along (spec 18 §4.5). What feeds the row from outside -- the row below it -- is not part of the
+ * set. Clears \a r_nodes first; a row the channel shows nothing of (a bare base) leaves it empty.
+ */
+void layer_owned_nodes_collect(const ChainLayer &layer, Vector<bNode *> &r_nodes);
+
+/**
+ * Copy the owned \a nodes into \a dst_tree, preserving every link whose both ends are in the set:
+ * the map into the corrections and the row's Mix, a correction's over pair, a mask onto the
+ * coverage it drives. Feeds from outside the set -- the row below -- stay unlinked; the caller
+ * wires those. Fills \a r_socket_map for every copied socket and \a r_node_map for every copied
+ * node, so the caller can resolve the copies of the row's own handles (#ChainLayer::node and
+ * #base_map, a correction's Mix). False when a node could not be copied; the caller then removes
+ * what was copied so far, which the two maps name.
+ *
+ * The source tree's topology cache must be current when this runs. Copying into the very tree the
+ * nodes live in is fine: a copy only adds nodes, and the cached link spans of the old nodes keep
+ * describing them.
+ */
+bool layer_owned_nodes_copy(bNodeTree &dst_tree,
+                            Span<bNode *> nodes,
+                            Map<const bNodeSocket *, bNodeSocket *> &r_socket_map,
+                            Map<const bNode *, bNode *> &r_node_map);
+
+/**
+ * Whether every link leaving \a node lands on a node of \a owned -- vacuously true when nothing
+ * consumes it -- so that removing \a owned can take \a node along without breaking a consumer
+ * outside the set. Consulted for the maps of a set being removed; the Mix, the Multiply and the
+ * corrections' own nodes go regardless.
+ */
+bool layer_owned_node_consumed_by(Span<bNode *> owned, const bNode &node);
 
 void new_layer_nodes_discard(Main &bmain, bNodeTree &tree, MutableSpan<NewLayerNodes> nodes);
 
@@ -357,7 +564,8 @@ bool tree_write_scope_check(Main &bmain,
  * operation has.
  *
  * \a target_ordinal, \a move_place and \a add_params are meaningful only to the operations that
- * take a second row or extra arguments; every other operation ignores them.
+ * take a second row or extra arguments (#CorrectionEdit carries the correction section the edit
+ * aims at, as an int); every other operation ignores them.
  */
 bool layer_edit_plan_build(Main &bmain,
                            Material &ma,

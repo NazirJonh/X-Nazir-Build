@@ -47,6 +47,36 @@ struct ImageUser;
 struct Material;
 struct rcti;
 
+/**
+ * One correction of a layer, as data-blocks: an image blended onto the layer's colour (a content
+ * section) or onto its coverage (a mask one), below the layer's own blend.
+ *
+ * A correction has no buffer of its own outside the channel it was built for, so a stack derived
+ * for one channel carries that channel's corrections only -- a correction with no map in this
+ * channel is Absent here: #image null, and the evaluator skips it.
+ */
+struct PaintMaterialCompositeCorrection {
+  Image *image = nullptr; /* null: Absent in this channel -> skipped */
+  /**
+   * The correction's own map node's #ImageUser, or null. Owned by the material: copy it before
+   * acquiring a buffer, since acquisition writes to it.
+   */
+  const ImageUser *iuser = nullptr;
+  CompositeBlend blend = CompositeBlend::Mix;
+  float opacity = 1.0f;
+  /** On in this channel: the row is on and its coverage here is not the switched-off form. */
+  bool enabled = true;
+  /**
+   * The row itself is on (its Mix is not muted), whatever this channel's coverage says. A stack
+   * derived for another channel by tag (AO) starts from this rather than from #enabled, since the
+   * reference channel's coverage says nothing about the other channel's map.
+   */
+  bool row_enabled = true;
+  /** The correction's identity, shared by every channel's nodes for it (spec 18 AO: map lookup by
+   * tag). */
+  bUUID marker = {};
+};
+
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
 struct PaintMaterialCompositeImageLayer {
   Image *color_image = nullptr;
@@ -79,11 +109,30 @@ struct PaintMaterialCompositeImageLayer {
    * over transparency like every other layer, and is composited the same way.
    */
   bool is_bare_base = false;
+  /**
+   * The corrections blended onto the layer's colour, bottom to top (spec 18 §4.5). May carry the
+   * layer on their own, which is why #color_image may be null: a layer Absent in this channel
+   * still paints through the content corrections it holds.
+   */
+  Vector<PaintMaterialCompositeCorrection> content_corrections;
+  /** The corrections blended onto the layer's coverage, bottom to top. */
+  Vector<PaintMaterialCompositeCorrection> mask_corrections;
+};
+
+/** One correction of a layer, as buffers. This is what the evaluator reads. */
+struct PaintMaterialCompositeCorrectionBuffer {
+  ImBuf *ibuf = nullptr;
+  CompositeBlend blend = CompositeBlend::Mix;
+  float opacity = 1.0f;
+  bool enabled = true;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */
 struct PaintMaterialCompositeLayer {
-  /** Byte or float RGBA, matching the stack dimensions. */
+  /**
+   * Byte or float RGBA, matching the stack dimensions. Null when the layer is Absent in this
+   * channel and its content corrections are what it paints with.
+   */
   ImBuf *color_ibuf = nullptr;
   ImBuf *mask_ibuf = nullptr;
   /** See #PaintMaterialCompositeImageLayer.mask_from_alpha. */
@@ -94,6 +143,11 @@ struct PaintMaterialCompositeLayer {
   bool enabled = true;
   /** See #PaintMaterialCompositeImageLayer.is_bare_base. */
   bool is_bare_base = false;
+  /** The corrections blended onto the colour, bottom to top; see
+   * #PaintMaterialCompositeImageLayer.content_corrections. */
+  Vector<PaintMaterialCompositeCorrectionBuffer> content_corrections;
+  /** The corrections blended onto the coverage, bottom to top. */
+  Vector<PaintMaterialCompositeCorrectionBuffer> mask_corrections;
 };
 
 /** Layers bottom to top: index 0 is composited first and everything else lands on top of it. */
@@ -166,7 +220,8 @@ bool BKE_paint_material_composite_stack_dimensions(
  * order, blending and masking come from the channel that does have a chain, and each layer's map
  * for \a channel is found by #Image.paint_layer_id and #Image.paint_layer_channel. That is the
  * whole reason those two fields exist; a user who bakes an AO map per layer has no node link that
- * could express the same thing.
+ * could express the same thing. The layers' corrections come along the same way, their maps found
+ * by the correction's marker, and stay Absent where no map carries them.
  *
  * Cheap enough for a redraw, like the resolver: it allocates only \a r_layers and touches no
  * pixels.
@@ -237,7 +292,8 @@ void BKE_paint_material_layer_maps_get(const Main &bmain,
 
 /**
  * Hash of everything about \a image_layers that changes the composited pixels except the pixels
- * themselves -- which images, in which order, with which blend, opacity and mask.
+ * themselves -- which images, in which order, with which blend, opacity and mask, the layers'
+ * corrections included.
  *
  * Image *contents* are deliberately not in here; there is no content version to hash. An edit to a
  * layer's pixels is found instead by #BKE_paint_material_composite_cache_ensure, which polls each

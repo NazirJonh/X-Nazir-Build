@@ -11,6 +11,9 @@
 #include <optional>
 #include <variant>
 
+/* For #PaintMaterialCorrectionSection, named by the active-layer answer. */
+#include "BKE_paint_material_layer_model.hh"
+
 #include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
 #include "BLI_enum_flags.hh"
@@ -1154,6 +1157,14 @@ struct PaintMaterialActiveLayer {
   Material *source = nullptr;
   /** The largest size the row's baked maps were baked at; meaningful only alongside #source. */
   int bake_size = 0;
+  /**
+   * The row's own identity when it is a correction row (spec D16): nil means the answer names the
+   * layer itself, non-nil the correction hanging off #ordinal, with #correction_section saying
+   * which part of the layer it adjusts.
+   */
+  bUUID correction = {};
+  /** Meaningful only alongside a non-nil #correction. */
+  PaintMaterialCorrectionSection correction_section = PaintMaterialCorrectionSection::Content;
 
   /**
    * Whether the row is re-baked from a source material. #kind decides it, not #source alone: a
@@ -1177,10 +1188,21 @@ struct PaintMaterialActiveLayer {
  * themselves changing. The owner is re-resolved by session UID on every cache hit, never trusted
  * as a raw pointer across calls, so a freed-and-reused address can never read back as a hit.
  *
- * \return nothing when no binding is set or no material's stack holds the bound maps.
+ * \return nothing when no binding is set (and no channelless correction is remembered), or no
+ * material's stack holds the bound maps.
  */
 std::optional<PaintMaterialActiveLayer> BKE_paint_material_active_layer_get(
     Main &bmain, const PaintModeSettings &mode_settings);
+
+/**
+ * Remember \a correction of \a material as active while it has no bound maps; null clears.
+ *
+ * A correction whose row names no map cannot be reached through #PaintModeSettings'
+ * channel bindings -- there is nothing to bind -- so activating its row remembers it here, and
+ * #BKE_paint_material_active_layer_get falls back to this when every binding is null. Activating
+ * any row that does name maps clears the memory again, the bindings being the target then.
+ */
+void BKE_paint_material_active_correction_set(const Material *material, const bUUID &correction);
 
 /**
  * Point \a binding at \a image, moving the user the binding holds along with it.

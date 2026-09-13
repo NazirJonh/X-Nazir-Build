@@ -12,6 +12,7 @@
 #include <fmt/format.h>
 
 #include "BLI_math_base.h"
+#include "BLI_uuid.h"
 
 #include "BLT_translation.hh"
 
@@ -27,6 +28,7 @@
 
 #include "BKE_attribute.h"
 #include "BKE_colorband.hh"
+#include "BKE_global.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_layer_edit.hh"
 #include "BKE_paint_material_sync.hh"
@@ -989,6 +991,56 @@ static void rna_PaintModeSettings_brush_sync_update(bContext *C, PointerRNA * /*
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
 }
 
+/** The correction \a marker in either section of the stack entry \a entry, or null. */
+static const PaintMaterialLayerCorrectionEntry *paint_material_correction_entry_find(
+    const PaintMaterialLayerStackEntry &entry, const bUUID &marker)
+{
+  for (const PaintMaterialLayerCorrectionEntry &correction : entry.content_corrections) {
+    if (correction.marker == marker) {
+      return &correction;
+    }
+  }
+  for (const PaintMaterialLayerCorrectionEntry &correction : entry.mask_corrections) {
+    if (correction.marker == marker) {
+      return &correction;
+    }
+  }
+  return nullptr;
+}
+
+/** The channel states of the correction \a correction, from the stack model the layer path reads
+ * the same way: a channel with a map on is enabled, one with a map kept but switched off is
+ * disabled, and a channel with no map is neither. */
+static void paint_material_correction_channel_states_get(
+    const PaintMaterialLayerCorrectionEntry &correction, int *r_enabled, int *r_disabled)
+{
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    if (correction.channel_images.lookup_default(channel, nullptr) == nullptr) {
+      continue;
+    }
+    if ((correction.disabled_channels_mask & (uint32_t(1) << channel)) != 0) {
+      *r_disabled |= 1 << channel;
+    }
+    else {
+      *r_enabled |= 1 << channel;
+    }
+  }
+}
+
+static bool rna_PaintModeSettings_active_layer_is_correction_get(PointerRNA *ptr)
+{
+  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
+  /* A property getter has no context to take the data-file from; the global main is what the
+   * active-layer read needs, and the UI that draws this runs with it set. */
+  Main *bmain = G.main;
+  if (bmain == nullptr) {
+    return false;
+  }
+  const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
+      *bmain, *mode);
+  return layer.has_value() && !BLI_uuid_is_nil(layer->correction);
+}
+
 static void rna_PaintModeSettings_active_layer_channel_states(PaintModeSettings *mode,
                                                               Main *bmain,
                                                               int *r_enabled,
@@ -1000,6 +1052,24 @@ static void rna_PaintModeSettings_active_layer_channel_states(PaintModeSettings 
   const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
       *bmain, *mode);
   if (!layer.has_value()) {
+    return;
+  }
+  if (!BLI_uuid_is_nil(layer->correction)) {
+    /* An active correction row: its channels live on the correction, not on the layer holding it,
+     * so the states read the correction's own entries out of the model. */
+    Vector<PaintMaterialLayerStackEntry> entries;
+    BKE_paint_material_layer_stack_from_material(*bmain, *layer->owner, entries);
+    for (const PaintMaterialLayerStackEntry &entry : entries) {
+      if (entry.ordinal != layer->ordinal) {
+        continue;
+      }
+      const PaintMaterialLayerCorrectionEntry *correction = paint_material_correction_entry_find(
+          entry, layer->correction);
+      if (correction != nullptr) {
+        paint_material_correction_channel_states_get(*correction, r_enabled, r_disabled);
+      }
+      break;
+    }
     return;
   }
   PaintMaterialLayerChannelState states[PAINT_MATERIAL_CHANNEL_NUM];
@@ -2611,6 +2681,15 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "Disabled",
                            "Channels whose map the row keeps but has switched off");
   RNA_def_function_output(func, parm);
+
+  prop = RNA_def_property(srna, "active_layer_is_correction", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_PaintModeSettings_active_layer_is_correction_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Active Layer Is Correction",
+                           "The Stack Layers row the channel bindings point at is a correction "
+                           "hanging on a layer, not a layer row");
 
   static const EnumPropertyItem new_channel_image_size_items[] = {
       {PAINT_NEW_CHANNEL_IMAGE_SIZE_256, "SIZE_256", 0, "256 (256 x 256)", "256 x 256"},

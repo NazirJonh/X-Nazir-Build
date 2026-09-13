@@ -75,8 +75,22 @@ enum class PaintMaterialLayerKind : int8_t {
   Paint = 0,
   Fill,
   Material,
-  /* Adjustment is deliberately not defined yet; the enum is open so it can be. */
+  /**
+   * A child of a layer: its Mix nodes sit between the layer's base and the layer's own Mix node
+   * (spec 18 §4.1).
+   */
+  Correction,
+  /* The enum stays open: a kind this build does not know reads back as #Paint. */
 };
+
+/**
+ * Which part of a correction layer the row's UI shows: the adjustment it applies, or the mask
+ * that limits where it applies. Stored next to the kind on the correction's own Mix nodes.
+ */
+enum class PaintMaterialCorrectionSection : int8_t { Content = 0, Mask = 1 };
+
+/** What a correction layer applies to the layer it hangs under. */
+enum class PaintMaterialCorrectionEffect : int8_t { Paint = 0 };
 
 /** How one channel of one stack row stands; see the spec's invariants I1 and I2. */
 enum class PaintMaterialLayerChannelState : int8_t {
@@ -98,6 +112,43 @@ enum class PaintMaterialLayerChannelState : int8_t {
  * that can only act on the chain.
  */
 constexpr int PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE = 1024;
+
+/**
+ * One correction of a layer row, as the UI shows it (spec 18 §4.5): a child row carrying either
+ * the adjustment a layer applies or the mask limiting where it applies.
+ *
+ * Like a layer row it preserves node identity while staying independent from the pixel evaluator.
+ * Every channel owns its own nodes for the same correction -- they share the marker -- so the
+ * per-channel maps are keyed by #eMaterialPaintChannel, while the row's maps are found by its
+ * marker rather than by the position a channel's chain happens to give it.
+ */
+struct PaintMaterialLayerCorrectionEntry {
+  /** The correction's identity, shared by every channel's nodes for it. */
+  bUUID marker = {};
+  /** Which part of the parent layer this row adjusts. */
+  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+  PaintMaterialCorrectionEffect effect = PaintMaterialCorrectionEffect::Paint;
+  /** The row's display name: the node's label, or "Correction" when the user set none. */
+  std::string name;
+  /**
+   * The #bNode::label of the correction's Mix in the reference channel, handed out the way a
+   * layer row hands its own out: a pointer into the node, so a UI text field can type straight
+   * into it rather than into a copy the next rebuild discards. Never null.
+   */
+  char *label = nullptr;
+  CompositeBlend blend = CompositeBlend::Mix;
+  float opacity = 1.0f;
+  bool enabled = true;
+  bool supported = true;
+  /** Per #eMaterialPaintChannel: the correction's map, Disabled ones included. */
+  Map<int, Image *> channel_images;
+  /** Per #eMaterialPaintChannel: the Opacity socket as #RNA_PaintMaterialLayerOpacity. */
+  Map<int, PointerRNA> channel_factor_props;
+  /** Per #eMaterialPaintChannel: the node carrying `blend_type`. */
+  Map<int, PointerRNA> channel_blend_props;
+  /** Bit per #eMaterialPaintChannel whose map is kept but switched off (Disabled). */
+  uint32_t disabled_channels_mask = 0;
+};
 
 /**
  * One paint layer as it appears in a UI. Unlike #PaintMaterialCompositeImageLayer, this preserves
@@ -154,6 +205,15 @@ struct PaintMaterialLayerStackEntry {
   Map<int, PointerRNA> channel_blend_props;
   /** Bit per #eMaterialPaintChannel whose map is kept but switched off (Disabled). */
   uint32_t disabled_channels_mask = 0;
+  /** The corrections hanging on the row's content stack, bottom to top (spec 18 §4.5). */
+  Vector<PaintMaterialLayerCorrectionEntry> content_corrections;
+  /** The corrections limiting where the row applies, bottom to top. */
+  Vector<PaintMaterialLayerCorrectionEntry> mask_corrections;
+  /**
+   * Bit per #eMaterialPaintChannel the row actually paints into (spec 18 I2'): its base map is on
+   * in the channel, or one of its corrections is.
+   */
+  uint32_t contributing_channels_mask = 0;
 };
 
 /**

@@ -1376,6 +1376,31 @@ static bool stack_layer_drop_init(bContext *C, const wmEvent *event, wmDragStack
     return false;
   }
 
+  /* A row attached to a parent's content section only ever lands among its own kind: beside a
+   * sibling from the same section, and never inside anything -- "into" would read as joining the
+   * target's content, which is not a move between rows at all. A plain row, in turn, never lands
+   * beside an attached one: the run between a parent's attached rows is that section's own
+   * ordering, not a place among the plain rows. */
+  for (const StackItemIdentity &drag_row : drop_data->drag_rows) {
+    const int drag_ordinal = outliner_stack_identity_resolve(ctx, *space_outliner, drag_row);
+    const StackRow *drag_stack_row = (drag_ordinal >= 0) ?
+                                         outliner_stack_row_find(*space_outliner, drag_ordinal) :
+                                         nullptr;
+    if (drag_stack_row == nullptr) {
+      continue;
+    }
+    if (!drag_stack_row->parent_section_id.empty()) {
+      if (insert_type == TE_INSERT_INTO ||
+          !stack_rows_are_siblings(*drag_stack_row, *target_row))
+      {
+        return false;
+      }
+    }
+    else if (!target_row->parent_section_id.empty()) {
+      return false;
+    }
+  }
+
   /* A group cannot be dropped inside itself. Check each dragged row. */
   for (const StackItemIdentity &drag_row : drop_data->drag_rows) {
     const int drag_ordinal = outliner_stack_identity_resolve(ctx, *space_outliner, drag_row);

@@ -22,6 +22,7 @@
 
 #include "BLI_map.hh"
 #include "BLI_span.hh"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
@@ -58,6 +59,23 @@ static Image *paint_layer_channel_target(Main &bmain,
   for (const PaintMaterialLayerStackEntry &entry : entries) {
     if (entry.ordinal == ordinal) {
       return entry.channel_images.lookup_default(channel, nullptr);
+    }
+  }
+  return nullptr;
+}
+
+/** The correction \a marker in either section of the stack entry \a entry, or null. */
+static const PaintMaterialLayerCorrectionEntry *paint_layer_correction_find(
+    const PaintMaterialLayerStackEntry &entry, const bUUID &marker)
+{
+  for (const PaintMaterialLayerCorrectionEntry &correction : entry.content_corrections) {
+    if (correction.marker == marker) {
+      return &correction;
+    }
+  }
+  for (const PaintMaterialLayerCorrectionEntry &correction : entry.mask_corrections) {
+    if (correction.marker == marker) {
+      return &correction;
     }
   }
   return nullptr;
@@ -257,6 +275,46 @@ bool channel_toggle(bContext &C, ReportList &reports, const int channel)
   MaterialPaintChannelImageBinding &binding =
       scene->toolsettings->paint_mode.channel_image_bindings[channel];
 
+  /* An active correction row toggles the correction's channels, not the ones of the layer it hangs
+   * on: the Layer Material tab is showing the correction's own channel set then. */
+  if (!BLI_uuid_is_nil(layer->correction)) {
+    const PaintMaterialLayerChannelState state =
+        BKE_paint_material_layer_correction_channel_state_get(
+            *bmain, *layer->owner, layer->correction, channel);
+    const bool enable = state != PaintMaterialLayerChannelState::Enabled;
+    if (!BKE_paint_material_layer_correction_channel_enabled_set(
+            *bmain, *layer->owner, layer->correction, channel, enable, &error))
+    {
+      BKE_report(&reports, RPT_ERROR, BKE_paint_material_layer_edit_error_message(error));
+      return false;
+    }
+    /* The binding follows the toggle, read fresh like the layer path does: the switch just
+     * rewired the correction's nodes, and \a layer's snapshot predates it. */
+    Vector<PaintMaterialLayerStackEntry> entries;
+    BKE_paint_material_layer_stack_from_material(*bmain, *layer->owner, entries);
+    Image *map = nullptr;
+    bool map_on = false;
+    for (const PaintMaterialLayerStackEntry &entry : entries) {
+      if (entry.ordinal != layer->ordinal) {
+        continue;
+      }
+      const PaintMaterialLayerCorrectionEntry *correction = paint_layer_correction_find(
+          entry, layer->correction);
+      if (correction != nullptr) {
+        map = correction->channel_images.lookup_default(channel, nullptr);
+        map_on = (map != nullptr) &&
+                 (correction->disabled_channels_mask & (uint32_t(1) << channel)) == 0;
+      }
+      break;
+    }
+    /* A switched-off channel is not a paint target (spec 6). */
+    BKE_paint_material_channel_binding_set(binding, map_on ? map : nullptr);
+
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &layer->owner->id);
+    WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+    return true;
+  }
+
   /* The shown state: #BKE_paint_material_layer_channel_state_get and
    * #BKE_paint_material_layer_channel_enabled_set agree on it. */
   const PaintMaterialLayerChannelState state = BKE_paint_material_layer_channel_state_get(
@@ -385,6 +443,10 @@ bool resize(bContext &C, ReportList &reports, const int size)
   if (baked_maps.is_empty()) {
     return false;
   }
+  /* The corrections of the layer scale with it (spec 18 D8): left at the old resolution, their
+   * maps would disagree with the layer's own the moment it moved. Only once the resize is known
+   * to go through -- a refused one ends the operator cancelled, with no undo step for a scale. */
+  BKE_paint_material_layer_corrections_scale(*bmain, *layer->owner, layer->ordinal, size, size);
   ed::material_bake::material_bake_images_rebake(*bmain, *layer->source, baked_maps, size);
 
   WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &layer->owner->id);

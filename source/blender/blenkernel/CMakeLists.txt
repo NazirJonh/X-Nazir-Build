@@ -262,6 +262,7 @@ set(SRC
   intern/paint_material_composite.cc
   intern/paint_material_layer_chain.cc
   intern/paint_material_layer_channels.cc
+  intern/paint_material_layer_corrections.cc
   intern/paint_material_layer_edit.cc
   intern/paint_material_layer_idprops.cc
   intern/paint_material_layer_model.cc
@@ -823,6 +824,7 @@ if(WITH_GTESTS)
     intern/paint_material_combined_cache_test.cc
     intern/paint_material_combined_test.cc
     intern/paint_material_composite_test.cc
+    intern/paint_material_layer_correction_test.cc
     intern/paint_material_layer_edit_test.cc
     intern/paint_material_layer_model_test.cc
     intern/paint_material_mask_edit_test.cc

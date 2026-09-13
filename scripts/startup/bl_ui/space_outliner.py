@@ -55,7 +55,7 @@ class OUTLINER_HT_tool_header(Header):
         # these kinds via add_kinds; 'PAINT' and 'FILL' are their stable identifiers. The Fill
         # button is a glyph button -- a Material Symbols paint-bucket -- because the fill is the
         # one kind whose content is a colour, and the picker it opens on click is the add.
-        row.operator("outliner.stack_layer_add", text="", icon='BRUSH_DATA').type = 'PAINT'
+        row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB').type = 'PAINT'
         row.tag_button(
             "outliner.stack_layer_add",
             tag_name="stack_layer_fill",
@@ -71,6 +71,9 @@ class OUTLINER_HT_tool_header(Header):
         sub.context_pointer_set("id_browser_ptr", context.window_manager)
         sub.context_string_set("id_browser_prop", "stack_layer_material_pick")
         sub.popover("UI_PT_id_browser", text="", icon='MATERIAL')
+        # Corrections hang on the row the Add lands on; the two kinds share one menu rather than
+        # a button each, since neither takes a source or a colour of its own.
+        row.menu("OUTLINER_MT_stack_layer_add_correction", text="", icon='BRUSH_DATA')
 
         row = layout.row(align=True)
         row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
@@ -87,6 +90,18 @@ class OUTLINER_HT_tool_header(Header):
 
         row = layout.row(align=True)
         row.operator("outliner.stack_layer_remove", text="", icon='TRASH')
+
+
+class OUTLINER_MT_stack_layer_add_correction(Menu):
+    bl_label = "Add Correction"
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.operator(
+            "outliner.stack_layer_add", text="Correction", icon='BRUSH_DATA').type = 'CORRECTION'
+        layout.operator(
+            "outliner.stack_layer_add", text="Mask Correction", icon='BRUSH_DATA',
+        ).type = 'MASK_CORRECTION'
 
 
 class OUTLINER_MT_stack_layer_context_menu(Menu):
@@ -130,9 +145,11 @@ class OUTLINER_MT_stack_layer_context_menu(Menu):
         # The kinds as explicit entries rather than the operator's enum menu: a Material layer is
         # made from a material the user picks, which is the ID browser's job, not a plain Add.
         layout.operator(
-            "outliner.stack_layer_add", text="Add Paint Layer", icon='BRUSH_DATA').type = 'PAINT'
+            "outliner.stack_layer_add", text="Add Paint Layer", icon='IMAGE_RGB').type = 'PAINT'
         layout.operator(
             "outliner.stack_layer_add", text="Add Fill Layer", icon='GP_DRAW_FILL').type = 'FILL'
+        # Anchored to the same row the Add Paint and Fill entries above land on.
+        layout.menu("OUTLINER_MT_stack_layer_add_correction")
         col = layout.column()
         # Same hand-off as the header's material button: the pick is assigned to
         # WindowManager.stack_layer_material_pick, whose update adds the layer.
@@ -770,6 +787,7 @@ classes = (
     OUTLINER_HT_tool_header,
     OUTLINER_HT_header,
     OUTLINER_MT_stack_layer_context_menu,
+    OUTLINER_MT_stack_layer_add_correction,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,
     OUTLINER_MT_collection,

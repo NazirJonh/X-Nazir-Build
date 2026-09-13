@@ -610,6 +610,9 @@ class LAYER_MATERIAL_PT_context_material(LayerMaterialButtonsPanel, Panel):
                 layout.label(text="Baking...", icon='RENDER_STILL')
 
         enabled, disabled = paint_mode.active_layer_channel_states()
+        # An active correction row owns the toggles below: its channels, not the layer's.
+        if paint_mode.active_layer_is_correction:
+            layout.label(text="Correction Channels")
         flow = layout.grid_flow(row_major=True, columns=0, even_columns=True, align=True)
         # Channels a Material layer can bake, in the order the PBR Paint channel toggles use:
         # read off the bake function's flag enum rather than kept as a second list.

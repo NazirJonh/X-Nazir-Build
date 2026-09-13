@@ -19,6 +19,7 @@
 #include "BLI_uuid.h"
 
 #include <array>
+#include <cstring>
 #include <utility>
 
 #include "DNA_image_types.h"
@@ -413,6 +414,102 @@ TEST_F(PaintMaterialCompositeEvalTest, empty_stack_is_rejected)
   stack.height = size;
   ImBuf *composite = add_buffer(0, 0, 0, 255);
   EXPECT_FALSE(BKE_paint_material_composite_eval(stack, composite));
+}
+
+TEST_F(PaintMaterialCompositeEvalTest, content_correction_over_absent_base)
+{
+  /* A layer with no map of its own paints through its corrections: a transparent base that the
+   * correction brings its own coverage into (spec 18 §5.3). */
+  PaintMaterialCompositeStack stack;
+  stack.width = size;
+  stack.height = size;
+  PaintMaterialCompositeLayer layer;
+  layer.color_ibuf = nullptr; /* Absent base */
+  layer.mask_from_alpha = true;
+  PaintMaterialCompositeCorrectionBuffer corr;
+  corr.ibuf = add_buffer(255, 0, 0, 255);
+  layer.content_corrections.append(corr);
+  stack.layers.append(layer);
+
+  ImBuf *composite = add_buffer(0, 0, 0, 0);
+  ASSERT_TRUE(BKE_paint_material_composite_eval(stack, composite));
+  const uchar *result = pixel(*composite, 2, 2);
+  EXPECT_EQ(result[0], 255); /* C = mix(0, red, 1) */
+  EXPECT_EQ(result[3], 255); /* a = 0 + 1 * (1 - 0) */
+}
+
+TEST_F(PaintMaterialCompositeEvalTest, muted_correction_changes_nothing)
+{
+  PaintMaterialCompositeStack stack;
+  stack.width = size;
+  stack.height = size;
+  PaintMaterialCompositeLayer layer;
+  layer.color_ibuf = add_buffer(0, 0, 255, 255);
+  layer.mask_ibuf = layer.color_ibuf;
+  layer.mask_from_alpha = true;
+  PaintMaterialCompositeCorrectionBuffer corr;
+  corr.ibuf = add_buffer(255, 0, 0, 255);
+  corr.enabled = false;
+  layer.content_corrections.append(corr);
+  stack.layers.append(layer);
+  ImBuf *composite = add_buffer(0, 0, 0, 0);
+  ASSERT_TRUE(BKE_paint_material_composite_eval(stack, composite));
+  EXPECT_EQ(pixel(*composite, 0, 0)[2], 255);
+  EXPECT_EQ(pixel(*composite, 0, 0)[0], 0);
+}
+
+TEST_F(PaintMaterialCompositeEvalTest, mask_correction_multiplies_coverage)
+{
+  PaintMaterialCompositeStack stack;
+  stack.width = size;
+  stack.height = size;
+  PaintMaterialCompositeLayer below;
+  below.color_ibuf = add_buffer(0, 0, 0, 255);
+  below.is_bare_base = true;
+  stack.layers.append(below);
+  PaintMaterialCompositeLayer layer;
+  layer.color_ibuf = add_buffer(255, 255, 255, 255);
+  layer.mask_ibuf = layer.color_ibuf;
+  layer.mask_from_alpha = true;
+  PaintMaterialCompositeCorrectionBuffer mask_corr;
+  mask_corr.ibuf = add_buffer(0, 0, 0, 255); /* black, fully covering */
+  mask_corr.blend = CompositeBlend::Multiply;
+  layer.mask_corrections.append(mask_corr);
+  stack.layers.append(layer);
+  ImBuf *composite = add_buffer(0, 0, 0, 0);
+  ASSERT_TRUE(BKE_paint_material_composite_eval(stack, composite));
+  /* m = 1 * (1 - 1) + 1 * 0 * 1 = 0: the layer is hidden wherever its mask correction is black. */
+  EXPECT_EQ(pixel(*composite, 1, 1)[0], 0);
+}
+
+TEST_F(PaintMaterialCompositeEvalTest, region_update_matches_full_with_corrections)
+{
+  ImBuf *corr_ibuf = add_buffer(0, 255, 0, 128);
+  PaintMaterialCompositeStack stack;
+  stack.width = size;
+  stack.height = size;
+  PaintMaterialCompositeLayer layer;
+  layer.mask_from_alpha = true;
+  PaintMaterialCompositeCorrectionBuffer corr;
+  corr.ibuf = corr_ibuf;
+  corr.opacity = 0.5f;
+  layer.content_corrections.append(corr);
+  stack.layers.append(layer);
+
+  ImBuf *partial = add_buffer(0, 0, 0, 0);
+  ASSERT_TRUE(BKE_paint_material_composite_eval(stack, partial));
+
+  /* A stroke touches one pixel of the correction; only its rectangle is refreshed. */
+  uchar *edited = corr_ibuf->byte_data_for_write() + (int64_t(1) * size + 1) * 4;
+  edited[0] = 255;
+  edited[3] = 255;
+  rcti region;
+  BLI_rcti_init(&region, 1, 2, 1, 2);
+  ASSERT_TRUE(BKE_paint_material_composite_eval(stack, partial, &region));
+
+  ImBuf *reference = add_buffer(0, 0, 0, 0);
+  ASSERT_TRUE(BKE_paint_material_composite_eval(stack, reference));
+  EXPECT_EQ(memcmp(partial->byte_data(), reference->byte_data(), size_t(size) * size * 4), 0);
 }
 
 /** \} */

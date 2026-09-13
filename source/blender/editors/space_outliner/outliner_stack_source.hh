@@ -34,6 +34,7 @@
 #include <optional>
 #include <string>
 
+#include "BLI_function_ref.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_uuid.h"
@@ -181,6 +182,12 @@ struct StackRow {
   int depth = 0;
   /** Ordinal of the enclosing group row, or -1 at the top level. */
   int16_t parent_ordinal = -1;
+  /**
+   * Identifier of the parent's #StackContentSection this row is attached to, or empty for a row
+   * that is a plain child of a folder (or top-level). An attached row is listed under its parent
+   * only while that section is active, after the section's sub-rows.
+   */
+  std::string parent_section_id;
   /** The row can hold other rows: dropping onto it and nesting under it mean something. */
   bool can_hold_children = false;
   /** #can_hold_children and currently holds at least one. */
@@ -266,6 +273,25 @@ struct StackRow {
 };
 
 /**
+ * One row the plan of #outliner_stack_attached_rows_plan lists under a parent, as indexes into the
+ * vector the plan was made from.
+ */
+struct StackAttachedPlacement {
+  int64_t row_index = -1;
+  int64_t parent_row_index = -1;
+};
+
+/**
+ * Which attached rows to list and under which parent, in listing order (top first), given \a rows
+ * bottom to top as #StackSource::rows_build produces them.
+ */
+Vector<StackAttachedPlacement> outliner_stack_attached_rows_plan(
+    Span<StackRow> rows, FunctionRef<StringRef(const StackRow &)> active_section_get);
+
+/** Whether \a a and \a b reorder among themselves: same parent, same attachment section. */
+bool stack_rows_are_siblings(const StackRow &a, const StackRow &b);
+
+/**
  * Sub-rows share the layer's #TreeStoreElem.nr, which is a short.
  *
  * The key of a sub-row is `ordinal * STACK_ROW_SUB_ROW_STRIDE + role`, so a fixed stride bounds
@@ -317,6 +343,11 @@ struct StackAddArgs {
   const float *color = nullptr;
   /** The data-block a kind with #StackAddKindInfo::source_id_type is made from; null otherwise. */
   ID *source = nullptr;
+  /**
+   * The #StackContentSection active on the anchor row when the Add was invoked, or empty. A
+   * source whose kinds depend on what the user is looking at reads it; others ignore it.
+   */
+  std::string section_id;
 };
 
 /** Where a moved row lands relative to the row it was aimed at. */
@@ -851,6 +882,43 @@ class StackEditor {
                         int /*anchor_ordinal*/,
                         StackMovePlace /*place*/,
                         int * /*r_ordinal*/ = nullptr) const
+  {
+    return false;
+  }
+
+  /**
+   * Whether a copy of \a source can be pasted into the row \a target_ordinal of \a owner.
+   *
+   * The clipboard's copy-paste pair asks this before it asks #rows_paste_into, so a source that
+   * cannot take a kind of row answers here rather than by refusing mid-paste. The default of
+   * false is what a source with no paste vocabulary of its own keeps.
+   */
+  virtual bool can_paste_into(const StackReadContext & /*ctx*/,
+                              const StackFocus & /*focus*/,
+                              const ID & /*owner*/,
+                              const StackItemIdentity & /*source*/,
+                              int /*target_ordinal*/) const
+  {
+    return false;
+  }
+
+  /**
+   * Paste copies of \a sources into the row \a target_ordinal, keeping their order.
+   *
+   * Every copy is a new row the way a duplicate makes one, and \a r_created receives the
+   * identities the copies are addressed by afterwards, in the order the sources name them.
+   * Sources that name rows this source has none of are left out rather than taken down with the
+   * rest; what was skipped travels through \a reports, which the caller owns.
+   *
+   * \return true when at least one copy was made.
+   */
+  virtual bool rows_paste_into(bContext & /*C*/,
+                               const StackFocus & /*focus*/,
+                               ID & /*owner*/,
+                               Span<StackItemIdentity> /*sources*/,
+                               int /*target_ordinal*/,
+                               Vector<StackItemIdentity> & /*r_created*/,
+                               ReportList * /*reports*/) const
   {
     return false;
   }

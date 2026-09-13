@@ -38,6 +38,40 @@ StackReadContext stack_read_context_from_source(const TreeSourceData &source_dat
 
 }  // namespace
 
+/**
+ * Hand the row's remembered state back to the element the tree just made for it.
+ *
+ * The tree store hands this row whatever state the row that used to hold its ordinal left behind;
+ * what the user did with *this* row is in the map, keyed by identity, and overrides it. A row the
+ * source gives no identity for has nothing to be remembered by and keeps the tree store's state,
+ * which is what it has always had.
+ */
+static void stack_row_ui_state_apply(SpaceOutliner_Runtime &runtime,
+                                     Set<UUID> &seen,
+                                     TreeElement *layer,
+                                     const StackRow &row)
+{
+  if (BLI_uuid_is_nil(row.stable_id)) {
+    return;
+  }
+  seen.add(row.stable_id);
+  if (const StackRowUiState *state = runtime.stack_row_ui_state.lookup_ptr(row.stable_id)) {
+    TreeStoreElem *layer_tselem = TREESTORE(layer);
+    layer_tselem->flag &= ~(TSE_CLOSED | TSE_SELECTED | TSE_ACTIVE);
+    layer_tselem->flag |= (state->closed ? TSE_CLOSED : eTreeStoreElem_Flag{}) |
+                          (state->selected ? TSE_SELECTED : eTreeStoreElem_Flag{}) |
+                          (state->active ? TSE_ACTIVE : eTreeStoreElem_Flag{});
+  }
+  else {
+    /* A row the state map has never met: added from outside since the last snapshot, or met once
+     * and pruned away. The tree store hands it whatever flags the row that used to hold its
+     * ordinal left behind, which is a removed row's state, not this row's -- start it the way a
+     * first meeting does, open and unselected. */
+    TreeStoreElem *layer_tselem = TREESTORE(layer);
+    layer_tselem->flag &= ~(TSE_CLOSED | TSE_SELECTED | TSE_ACTIVE);
+  }
+}
+
 TreeDisplayStackLayersObjects::TreeDisplayStackLayersObjects(SpaceOutliner &space_outliner)
     : AbstractTreeDisplay(space_outliner)
 {
@@ -97,10 +131,18 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
   /* Where each group's children go, by the group's ordinal. A group is listed as one row and the
    * layers it holds hang off it, so the tree has to remember the element it made for it. */
   Map<int, TreeElement *> group_elements;
+  /* Every row the first pass listed, by ordinal: the second pass hangs the rows attached to a
+   * parent's content section off the element made for that parent here. */
+  Map<int, TreeElement *> row_elements;
   /* Every row listed here, so the map can drop what the stack no longer holds. */
   Set<UUID> seen;
   for (int64_t index = runtime.stack_rows.size() - 1; index >= 0; index--) {
     StackRow &row = runtime.stack_rows[index];
+    /* Rows attached to a parent's content section wait for the second pass below: their element
+     * hangs off the parent's, and that has to exist first. */
+    if (!row.parent_section_id.empty()) {
+      continue;
+    }
     TreeElement *parent = nullptr;
     if (row.parent_ordinal >= 0) {
       TreeElement *const *found = group_elements.lookup_ptr(int(row.parent_ordinal));
@@ -119,6 +161,7 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
     if (layer == nullptr) {
       continue;
     }
+    row_elements.add(int(row.ordinal), layer);
     if (row.can_hold_children) {
       group_elements.add(int(row.ordinal), layer);
       /* A folder whose contents are hidden is a folder the user has to open before they can see
@@ -127,28 +170,7 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
         TREESTORE(layer)->flag &= ~TSE_CLOSED;
       }
     }
-    /* The tree store hands this row whatever state the row that used to hold its ordinal left
-     * behind; what the user did with *this* row is in the map, keyed by identity, and overrides
-     * it. A row the source gives no identity for has nothing to be remembered by and keeps the
-     * tree store's state, which is what it has always had. */
-    if (!BLI_uuid_is_nil(row.stable_id)) {
-      seen.add(row.stable_id);
-      if (const StackRowUiState *state = runtime.stack_row_ui_state.lookup_ptr(row.stable_id)) {
-        TreeStoreElem *layer_tselem = TREESTORE(layer);
-        layer_tselem->flag &= ~(TSE_CLOSED | TSE_SELECTED | TSE_ACTIVE);
-        layer_tselem->flag |= (state->closed ? TSE_CLOSED : eTreeStoreElem_Flag{}) |
-                              (state->selected ? TSE_SELECTED : eTreeStoreElem_Flag{}) |
-                              (state->active ? TSE_ACTIVE : eTreeStoreElem_Flag{});
-      }
-      else {
-        /* A row the state map has never met: added from outside since the last snapshot, or met
-         * once and pruned away. The tree store hands it whatever flags the row that used to hold
-         * its ordinal left behind, which is a removed row's state, not this row's -- start it the
-         * way a first meeting does, open and unselected. */
-        TreeStoreElem *layer_tselem = TREESTORE(layer);
-        layer_tselem->flag &= ~(TSE_CLOSED | TSE_SELECTED | TSE_ACTIVE);
-      }
-    }
+    stack_row_ui_state_apply(runtime, seen, layer, row);
     if (!row.supported || !show_sub_rows) {
       continue;
     }
@@ -187,6 +209,36 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
                   short(index),
                   false);
     }
+  }
+  /* The second pass lists the rows attached to a parent's active content section, now that every
+   * parent got its element in the first pass. They land after the parent's sub-rows and show
+   * whenever their section is active: #SO_SL_HIDE_ITEMS hides a row's *content*, not rows of the
+   * stack itself. */
+  for (const StackAttachedPlacement &placement : outliner_stack_attached_rows_plan(
+           runtime.stack_rows,
+           [&](const StackRow &stack_row) {
+             return outliner_stack_row_active_section_get(space_outliner_, stack_row);
+           }))
+  {
+    StackRow &row = runtime.stack_rows[placement.row_index];
+    const StackRow &parent_row = runtime.stack_rows[placement.parent_row_index];
+    TreeElement *const *parent_element = row_elements.lookup_ptr(int(parent_row.ordinal));
+    if (parent_element == nullptr) {
+      /* The parent never made it into the tree -- its own group is missing, the same reason the
+       * first pass drops a plain child of it. */
+      continue;
+    }
+    TreeElement *layer = add_element(&(*parent_element)->subtree,
+                                     owner,
+                                     &row,
+                                     *parent_element,
+                                     TSE_STACK_LAYER,
+                                     row.ordinal,
+                                     false);
+    if (layer == nullptr) {
+      continue;
+    }
+    stack_row_ui_state_apply(runtime, seen, layer, row);
   }
   outliner_stack_row_ui_state_prune(runtime, std::move(seen));
   return tree;

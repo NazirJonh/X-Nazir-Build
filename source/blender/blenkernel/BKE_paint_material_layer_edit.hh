@@ -25,6 +25,7 @@
 
 #include "BKE_paint_material_layer_model.hh"
 
+#include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 #include "BLI_uuid.h"
 
@@ -154,6 +155,26 @@ enum class PaintMaterialLayerEditError : int8_t {
    * the last one would lose the active layer. Hiding the layer is the way to take it out.
    */
   LastEnabledChannel,
+  /** No correction anywhere in the stack carries the marker the operation named. */
+  CorrectionNotFound,
+  /**
+   * The operation does not apply to the correction's section: a mask correction has no
+   * per-channel switch, its form in each channel follows the row (spec 18 §4.3).
+   */
+  CorrectionSectionMismatch,
+  /**
+   * A content correction hangs on the layer's content stack, which a group keeps inside its own
+   * folder -- there is nothing on the group row itself to correct. A mask section limits the
+   * folder's result and is allowed.
+   */
+  CorrectionNotAllowedOnGroup,
+  /** A correction's nodes are not the shape this module builds (spec 18 §4.1a). */
+  CorrectionChainNotPlain,
+  /**
+   * The folder carries mask corrections, which shape the folder's result as a whole; once the
+   * rows are spliced out there is no result left for them to shape.
+   */
+  GroupHasMaskCorrections,
 };
 
 /** A message for #BKE_report, already translated at the call site by the caller if needed. */
@@ -363,6 +384,231 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
  * focus switch, before trusting it as a stroke target -- without caring which row owns it.
  */
 bool BKE_paint_material_layer_stack_contains_mask(Main &bmain, Material &ma, const Image &image);
+
+/**
+ * Add a correction on the layer at \a layer_ordinal, in every channel that is already wired as a
+ * stack (spec 18 §4.1).
+ *
+ * The correction starts Absent in every channel: no map, its coverage unlinked and zero -- it
+ * contributes nothing until a map is set for it. A #PaintMaterialCorrectionSection::Mask
+ * correction is the exception: a mask has no per-channel choice (spec 18 §4.3), so it gets one
+ * transparent map right away, shared by every channel and sized by
+ * #BKE_paint_material_layer_map_size_get.
+ *
+ * A content correction hangs on the layer's own content stack and is refused on a group row
+ * (#PaintMaterialLayerEditError::CorrectionNotAllowedOnGroup), since a group's content stays
+ * inside its folder; a mask section limits the folder's result and is allowed. A bare base is
+ * supported: the shape conversion runs first, and the correction hangs on the Mix the base
+ * becomes.
+ *
+ * Transactional like every edit here: the preconditions are checked across all channels before
+ * the first node is created.
+ *
+ * \param name: the row's display name, stored as the label of the correction's Mix nodes; null
+ *   leaves the row unnamed, which the stack model reads as "Correction".
+ * \param r_correction: when given, receives the new correction's identity -- the marker its nodes
+ *   carry in every channel and its map is tagged with.
+ */
+bool BKE_paint_material_layer_correction_add(Main &bmain,
+                                            Material &ma,
+                                            int layer_ordinal,
+                                            PaintMaterialCorrectionSection section,
+                                            const char *name,
+                                            bUUID *r_correction = nullptr,
+                                            PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * Remove the correction \a correction from every channel, closing the chain over it.
+ *
+ * The layer reads as if the correction had never been there: what the correction's nodes blended
+ * over feeds whatever consumed their result, in every channel at once. The correction's map node
+ * goes with it when nothing else reads it; the #Image data-block itself is left to the usual
+ * user-count rules, since a map the user painted is not this function's to delete.
+ */
+bool BKE_paint_material_layer_correction_remove(Main &bmain,
+                                                Material &ma,
+                                                const bUUID &correction,
+                                                PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * Move the correction \a correction so that it ends up at \a new_index of its section, in every
+ * channel.
+ *
+ * Only the links between the section's corrections are rewritten; the nodes keep their maps,
+ * opacity and identity, and no node is created or removed. \a new_index counts from the bottom of
+ * the section, the way the stack model lists its correction rows.
+ */
+bool BKE_paint_material_layer_correction_reorder(Main &bmain,
+                                                Material &ma,
+                                                const bUUID &correction,
+                                                int new_index,
+                                                PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * Turn the correction \a correction on or off, in every channel.
+ *
+ * Implemented by muting the correction's nodes, which is what the stack model reads back as
+ * "disabled" -- the same graph mutation toggling a layer is, and it changes what renders exactly
+ * as toggling the nodes by hand would.
+ */
+bool BKE_paint_material_layer_correction_set_enabled(Main &bmain,
+                                                    Material &ma,
+                                                    const bUUID &correction,
+                                                    bool enable,
+                                                    PaintMaterialLayerEditError *r_error =
+                                                        nullptr);
+
+/**
+ * Set the correction \a correction's opacity (0..1) in every channel at once.
+ *
+ * Unlike a layer's own Opacity -- one node per channel, genuinely independent -- a correction's
+ * opacity is meant to read as one shared strength regardless of which channel's Blending Mode the
+ * stack currently shows (plan 19 review): painting the correction's map, or picking its per-channel
+ * Blending Mode, still varies by channel, but how hard the correction pushes does not. Implemented
+ * the same way #BKE_paint_material_layer_correction_set_enabled keeps Enabled shared: every
+ * channel's own coverage-multiply constant is written to the same value.
+ */
+bool BKE_paint_material_layer_correction_opacity_set(Main &bmain,
+                                                     Material &ma,
+                                                     const bUUID &correction,
+                                                     float opacity,
+                                                     PaintMaterialLayerEditError *r_error =
+                                                         nullptr);
+
+/**
+ * The state of \a channel on the correction \a correction, read from the graph alone -- the
+ * per-channel half of #BKE_paint_material_layer_correction_set_enabled, the way
+ * #BKE_paint_material_layer_channel_state_get is the one of a layer row's toggle.
+ *
+ * A channel with no graph of its own (AO) reads by its tagged map alone: the map exists or it
+ * does not, and there is no Disabled form to keep it in. Every other channel reads the
+ * correction's nodes: no chain, no correction in the chain, or a shape this module does not
+ * build all read as Absent.
+ */
+PaintMaterialLayerChannelState BKE_paint_material_layer_correction_channel_state_get(
+    Main &bmain, Material &ma, const bUUID &correction, int channel);
+
+/**
+ * Switch \a channel of the correction \a correction on or off.
+ *
+ * Off keeps the map (Disabled), the way a layer row's toggle does. On restores a Disabled map,
+ * or gives an Absent channel a fresh one sized by #BKE_paint_material_layer_map_size_get. A
+ * channel the material has not wired yet gets its chain first, corrections included; a channel
+ * with no graph of its own (AO) keeps only the tagged map -- there are no nodes to build, and
+ * switching it off untags rather than mutes, since the map is all the state there is.
+ *
+ * When the row's base is Absent or Disabled in this channel, the coverage its content
+ * corrections accumulate is what still paints (spec 18 I2'): enabling a channel relinks it into
+ * the row's coverage input wherever nothing owns that input, and disabling takes the link back
+ * out once no correction contributes there anymore. A mask owns the coverage input and is never
+ * touched.
+ */
+bool BKE_paint_material_layer_correction_channel_enabled_set(Main &bmain,
+                                                            Material &ma,
+                                                            const bUUID &correction,
+                                                            int channel,
+                                                            bool enable,
+                                                            PaintMaterialLayerEditError *r_error =
+                                                                nullptr);
+
+/**
+ * Rename the correction \a correction.
+ *
+ * The name a user sees is the label of the correction's Mix nodes, so this sets it in every
+ * channel at once.
+ */
+bool BKE_paint_material_layer_correction_rename(Main &bmain,
+                                                Material &ma,
+                                                const bUUID &correction,
+                                                StringRef name,
+                                                PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * The ordinal of the layer holding \a correction, or -1 when no correction anywhere in the stack
+ * carries it.
+ *
+ * \a r_section and \a r_index are optional: the section the correction hangs on, and its position
+ * in it, counting from the bottom.
+ */
+int BKE_paint_material_layer_correction_owner_ordinal(
+    Main &bmain,
+    Material &ma,
+    const bUUID &correction,
+    PaintMaterialCorrectionSection *r_section = nullptr,
+    int *r_index = nullptr);
+
+/** One source of a correction copy: the material it hangs on, and its identity there. */
+struct PaintMaterialCorrectionRef {
+  /** The #ID.session_uid of the material the correction to copy lives on. */
+  uint32_t material_session_uid = 0;
+  /** The correction's marker in that material. */
+  bUUID correction = {};
+};
+
+/** What a copy skipped or had to build along the way, for a caller that reports it. */
+struct PaintMaterialCorrectionCopyReport {
+  /** Refs whose material or correction was not found; the rest of the call carried on without
+   * them. */
+  int skipped_missing = 0;
+  /** Content corrections aimed at a group row, which keeps its content inside its folder. */
+  int skipped_group = 0;
+  /** The parent channels the copy wired into the target because a copied channel needed them. */
+  Vector<int> enabled_parent_channels;
+  /** How many copied maps were scaled to the size the target's own maps have. */
+  int scaled_maps = 0;
+};
+
+/**
+ * Copy the corrections \a sources name onto the layer at \a target_layer_ordinal of \a target,
+ * maps and all -- across materials as readily as within one (spec 18 §4.5).
+ *
+ * Every copy is a new row with a new identity and new #Image data-blocks, the way a duplicate is.
+ * The source's name, blend, opacity, on/off state and per-channel channels come along, and a
+ * channel the source has the correction on gets wired into the target first: copying a Metallic
+ * correction is what gives a target without a Metallic chain one. A copied map is scaled to the
+ * size the target's own maps have.
+ *
+ * A ref whose material or correction cannot be found is skipped and counted in the report; so is
+ * a content correction aimed at a group row, since the group's content lives inside its folder.
+ * Any other refusal fails the call -- before the first write when the preflight gives it, as a
+ * partial result for the caller's undo step to take back when it happens mid-copy.
+ *
+ * \param r_created: receives the new corrections' markers, one per copied ref, in order.
+ */
+bool BKE_paint_material_layer_corrections_copy(Main &bmain,
+                                              Span<PaintMaterialCorrectionRef> sources,
+                                              Material &target,
+                                              int target_layer_ordinal,
+                                              Vector<bUUID> &r_created,
+                                              PaintMaterialCorrectionCopyReport *r_report =
+                                                  nullptr,
+                                              PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * Scale every correction map of the layer at \a layer_ordinal to \a width x \a height (spec 18
+ * D8): a correction's maps are its pixels, so a layer moved to a new resolution takes them along,
+ * whichever channel or section they paint and whether their channel is on or off.
+ *
+ * False when the ordinal names no layer, leaving every map untouched.
+ */
+bool BKE_paint_material_layer_corrections_scale(Main &bmain,
+                                                Material &ma,
+                                                int layer_ordinal,
+                                                int width,
+                                                int height);
+
+/**
+ * The map size a new map of the layer at \a layer_ordinal should have (spec 18 §6.1): the first
+ * existing map of the layer -- any channel, a mask included -- then the maps of its corrections,
+ * then the size the stack composites at, read from the Base Color channel.
+ *
+ * False when the stack gives up no size at all, leaving \a r_width and \a r_height untouched.
+ */
+bool BKE_paint_material_layer_map_size_get(Main &bmain,
+                                           Material &ma,
+                                           int layer_ordinal,
+                                           int &r_width,
+                                           int &r_height);
 
 /**
  * Set \a image as the map of \a channel on the layer at \a ordinal, leaving every other channel

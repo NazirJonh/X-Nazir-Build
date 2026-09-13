@@ -54,6 +54,7 @@
 #include "BLI_hash.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_listbase_wrapper.hh"
+#include "BLI_map.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_path_utils.hh"
@@ -108,11 +109,37 @@ bool paint_material_mask_preview_activate(Main &bmain,
                                            const StringRef section_id);
 
 /**
- * Whether the MASK content section of \a row shows \a mask_image. Testable without a #bContext
- * like #paint_material_mask_preview_activate above: row activation uses it to decide if the mask
- * being painted survives the switch.
+ * Whether the MASK content section of \a row shows \a mask_image -- or, for a mask correction
+ * row, whether the image is the correction's own map (named by its preview slot). Testable
+ * without a #bContext like #paint_material_mask_preview_activate above: row activation uses it
+ * to decide if the mask being painted survives the switch.
  */
 bool paint_row_owns_mask_image(const StackRow &row, const Image *mask_image);
+
+/**
+ * One row of the stack, by the ordinal that addresses it: a layer row itself, or one of the
+ * corrections hanging off it.
+ *
+ * File-local like the two declarations above, and duplicated into the test file for the same
+ * reason they are: the routes are what the tests have to check directly.
+ */
+struct PaintStackRowRoute {
+  /** False for the row a layer or group itself gets, true for one of its corrections. */
+  bool is_correction = false;
+  /** The ordinal of the layer row the route stands for, or hangs off. */
+  int layer_ordinal = -1;
+  /** The correction's identity; nil for a layer route. */
+  bUUID correction = {};
+  /** The parent's section the correction hangs under; meaningless for a layer route. */
+  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+};
+
+/**
+ * The deterministic ordinal budget the rows are addressed by, shared by #rows_build and every
+ * edit that routes an ordinal. Defined below, next to the other test-facing functions.
+ */
+Map<int, PaintStackRowRoute> paint_stack_routes_build(
+    Span<PaintMaterialLayerStackEntry> entries, int &r_first_unaddressable_index);
 
 /**
  * This source's own color session: the pixel-diff record a live fill-color edit captures the
@@ -368,12 +395,19 @@ StackContentSection paint_channels_section_build(const PaintMaterialLayerStackEn
   return section;
 }
 
-/** The section a mask expands into: the mask image itself. */
-StackContentSection paint_mask_section_build(const Image &mask_image)
+/** The MASK section of a row whose mask is made of corrections only: nothing below it yet. */
+StackContentSection paint_mask_section_empty_build()
 {
   StackContentSection section;
   section.identifier = "MASK";
   section.name = IFACE_("Mask Content");
+  return section;
+}
+
+/** The section a mask expands into: the mask image itself. */
+StackContentSection paint_mask_section_build(const Image &mask_image)
+{
+  StackContentSection section = paint_mask_section_empty_build();
 
   StackSubRow sub_row;
   sub_row.role = PAINT_LAYER_MAP_MASK;
@@ -382,6 +416,173 @@ StackContentSection paint_mask_section_build(const Image &mask_image)
   sub_row.icon = ICON_MOD_MASK;
   section.sub_rows.append(std::move(sub_row));
   return section;
+}
+
+/**
+ * The route \a ordinal names in \a material's model as it stands now, or nullopt when it names no
+ * row the tree could have shown. The mutating methods route on this: a correction row goes to the
+ * correction API, a layer row to the layer API.
+ */
+std::optional<PaintStackRowRoute> paint_stack_route_get(Main &bmain,
+                                                        Material &material,
+                                                        const int ordinal)
+{
+  if (ordinal < 0) {
+    return std::nullopt;
+  }
+  Vector<PaintMaterialLayerStackEntry> entries;
+  if (!BKE_paint_material_layer_stack_from_material(bmain, material, entries)) {
+    return std::nullopt;
+  }
+  int first_unaddressable = -1;
+  const Map<int, PaintStackRowRoute> routes = paint_stack_routes_build(entries,
+                                                                       first_unaddressable);
+  const PaintStackRowRoute *route = routes.lookup_ptr(ordinal);
+  if (route == nullptr) {
+    return std::nullopt;
+  }
+  return *route;
+}
+
+/** The ordinal the correction \a marker is addressed by after an edit, or -1. */
+int paint_correction_route_ordinal_get(Main &bmain, Material &material, const bUUID &marker)
+{
+  Vector<PaintMaterialLayerStackEntry> entries;
+  if (!BKE_paint_material_layer_stack_from_material(bmain, material, entries)) {
+    return -1;
+  }
+  int first_unaddressable = -1;
+  const Map<int, PaintStackRowRoute> routes = paint_stack_routes_build(entries,
+                                                                       first_unaddressable);
+  for (const auto item : routes.items()) {
+    if (item.value.is_correction && BLI_uuid_equal(item.value.correction, marker)) {
+      return item.key;
+    }
+  }
+  return -1;
+}
+
+/** One correction row: hangs off its parent layer's row, under the parent's section it adjusts. */
+StackRow paint_correction_row_build(const PaintMaterialLayerStackEntry &parent,
+                                    const PaintMaterialLayerCorrectionEntry &correction,
+                                    const PaintStackRowRoute &route,
+                                    const int route_ordinal,
+                                    const int shown_channel)
+{
+  StackRow row;
+  row.ordinal = int16_t(route_ordinal);
+  row.depth = parent.depth + 1;
+  row.parent_ordinal = parent.ordinal;
+  row.parent_section_id = (route.section == PaintMaterialCorrectionSection::Mask) ? "MASK" :
+                                                                                    "CHANNELS";
+  row.stable_id = correction.marker;
+  row.enabled = correction.enabled;
+  row.supported = correction.supported;
+  row.unsupported_reason = correction.supported ? nullptr : "Correction is not supported";
+  row.name = correction.name;
+  row.name_buffer = correction.label;
+  row.icon = ICON_BRUSH_DATA;
+
+  /* The same per-channel value and mode columns a layer row shows, read off the channel the
+   * scene's picker names; a correction absent in that channel keeps the columns empty. */
+  if (const PointerRNA *factor = correction.channel_factor_props.lookup_ptr(shown_channel)) {
+    row.value_ptr = *factor;
+    row.value_prop = "value";
+  }
+  if (const PointerRNA *blend = correction.channel_blend_props.lookup_ptr(shown_channel)) {
+    row.mode_ptr = *blend;
+    row.mode_prop = "blend_type";
+  }
+
+  /* One preview slot, showing the map the section it hangs under is about: a mask correction's
+   * single shared map is tagged with the mask role, a content correction's map with the channel
+   * it paints. A correction with no map there yet shows the empty thumbnail. */
+  StackRowPreview slot;
+  slot.section_id = row.parent_section_id;
+  const int slot_channel = (route.section == PaintMaterialCorrectionSection::Mask) ?
+                               int(PAINT_LAYER_MAP_MASK) :
+                               shown_channel;
+  const Image *map = correction.channel_images.lookup_default(slot_channel, nullptr);
+  if (map != nullptr) {
+    slot.id_uid = map->id.session_uid;
+    slot.id_type = ID_IM;
+    slot.is_blank = paint_image_is_blank(*map);
+  }
+  else {
+    slot.is_blank = true;
+  }
+  row.preview_slots.append(std::move(slot));
+  return row;
+}
+
+/**
+ * The correction rows of \a entries, appended after every layer row of \a r_rows.
+ *
+ * The tree lists them under the parent's active content section, so their place in \a r_rows only
+ * has to keep the parent-resolution walk from mistaking one for a group; they go out in the same
+ * walk #paint_stack_routes_build allocates by, which is bottom to top of each parent's sections.
+ * When the ordinal budget ran out, everything unaddressed collapses into the same stub row a
+ * stack too large to display gets -- unless the layer walk already emitted it.
+ */
+void paint_correction_rows_append(Span<PaintMaterialLayerStackEntry> entries,
+                                  const Set<int> &shown_layer_ordinals,
+                                  const bool overflow_stub_emitted,
+                                  const int shown_channel,
+                                  Vector<StackRow> &r_rows)
+{
+  int first_unaddressable = -1;
+  const Map<int, PaintStackRowRoute> routes = paint_stack_routes_build(entries,
+                                                                       first_unaddressable);
+  if (routes.is_empty()) {
+    return;
+  }
+  /* Correction routes by marker: the walk below goes in the model's own order, which is the order
+   * the budget allocated in, and asks each correction for the ordinal it was given. */
+  Map<UUID, int> ordinal_by_marker;
+  for (const auto item : routes.items()) {
+    if (item.value.is_correction) {
+      ordinal_by_marker.add(UUID(item.value.correction), item.key);
+    }
+  }
+
+  int correction_index = 0;
+  std::string stub_name;
+  bool stub_needed = false;
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    for (const Vector<PaintMaterialLayerCorrectionEntry> *corrections :
+         {&entry.content_corrections, &entry.mask_corrections})
+    {
+      for (const PaintMaterialLayerCorrectionEntry &correction : *corrections) {
+        const int *route_ordinal = ordinal_by_marker.lookup_ptr(UUID(correction.marker));
+        if (route_ordinal == nullptr) {
+          /* Out of the budget: this and every correction after it in the walk has no ordinal the
+           * tree can address. The first one is what the stub row stands in for. */
+          stub_needed = true;
+          if (correction_index == first_unaddressable) {
+            stub_name = correction.name;
+          }
+        }
+        else {
+          const PaintStackRowRoute &route = routes.lookup(*route_ordinal);
+          if (shown_layer_ordinals.contains(route.layer_ordinal)) {
+            r_rows.append(paint_correction_row_build(
+                entry, correction, route, *route_ordinal, shown_channel));
+          }
+        }
+        correction_index++;
+      }
+    }
+  }
+
+  if (stub_needed && !overflow_stub_emitted) {
+    StackRow row;
+    row.ordinal = STACK_ROW_ORDINAL_MAX + 1;
+    row.supported = false;
+    row.unsupported_reason = "Stack is too large to display";
+    row.name = std::move(stub_name);
+    row.icon = ICON_IMAGE_RGB;
+    r_rows.append(std::move(row));
+  }
 }
 
 class PaintMaterialStackSource final : public StackSource,
@@ -496,6 +697,16 @@ class PaintMaterialStackSource final : public StackSource,
     if (!BKE_paint_material_layer_stack_from_material(*ctx.bmain, material, entries)) {
       return false;
     }
+    /* Blending Mode and Opacity are per channel in the graph; the scene's layer-channel picker
+     * says which one the rows show. A row without that channel keeps the columns empty. Layer
+     * rows and correction rows read the same channel. */
+    const int shown_channel = ctx.scene != nullptr && ctx.scene->toolsettings != nullptr ?
+                                  ctx.scene->toolsettings->paint_mode.stack_layer_channel :
+                                  int(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    /* The ordinals the layer rows below were actually emitted at: a correction hangs off its
+     * parent's row, so one whose parent is missing has nothing to hang off. */
+    Set<int> shown_layer_ordinals;
+    bool overflow_stub_emitted = false;
     for (PaintMaterialLayerStackEntry &entry : entries) {
       if (entry.ordinal > STACK_ROW_ORDINAL_MAX) {
         /* The tree store keys the sub-rows as `ordinal * STACK_ROW_SUB_ROW_STRIDE + role`, so
@@ -510,6 +721,7 @@ class PaintMaterialStackSource final : public StackSource,
         row.name = std::move(entry.name);
         row.icon = ICON_IMAGE_RGB;
         r_rows.append(std::move(row));
+        overflow_stub_emitted = true;
         break;
       }
       StackRow row;
@@ -569,6 +781,7 @@ class PaintMaterialStackSource final : public StackSource,
        * only slot is the mask it may have. A layer gets the channels slot and section, plus the
        * mask pair when a mask exists. */
       const Image *mask_image = entry.channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr);
+      const bool has_mask_section = mask_image != nullptr || !entry.mask_corrections.is_empty();
       if (group_material != nullptr) {
         StackRowPreview material_slot;
         material_slot.id_uid = group_material->id.session_uid;
@@ -576,9 +789,13 @@ class PaintMaterialStackSource final : public StackSource,
         row.preview_slots.append(std::move(material_slot));
       }
       else if (entry.is_group) {
-        if (mask_image != nullptr) {
+        /* A group's MASK section lists its mask corrections (D15) even before it has a mask
+         * image of its own: the section is what the correction rows hang under. */
+        if (has_mask_section) {
           row.preview_slots.append(paint_mask_slot_build(true));
-          row.content_sections.append(paint_mask_section_build(*mask_image));
+          row.content_sections.append(mask_image != nullptr ?
+                                          paint_mask_section_build(*mask_image) :
+                                          paint_mask_section_empty_build());
         }
       }
       else if (entry.supported) {
@@ -600,19 +817,19 @@ class PaintMaterialStackSource final : public StackSource,
           material_slot.id_type = ID_MA;
           row.preview_slots.append(std::move(material_slot));
         }
-        if (mask_image != nullptr) {
+        if (has_mask_section) {
           row.preview_slots.append(paint_mask_slot_build(false));
         }
         row.content_sections.append(paint_channels_section_build(entry));
         if (mask_image != nullptr) {
           row.content_sections.append(paint_mask_section_build(*mask_image));
         }
+        else if (!entry.mask_corrections.is_empty()) {
+          /* The layer exposes its MASK section although it has no mask image (spec D15): the
+           * corrections limiting where it applies are what the section lists. */
+          row.content_sections.append(paint_mask_section_empty_build());
+        }
       }
-      /* Blending Mode and Opacity are per channel in the graph; the scene's layer-channel picker
-       * says which one the row shows. A row without that channel keeps the columns empty. */
-      const int shown_channel = ctx.scene != nullptr && ctx.scene->toolsettings != nullptr ?
-                                    ctx.scene->toolsettings->paint_mode.stack_layer_channel :
-                                    int(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
       if (const PointerRNA *factor = entry.channel_factor_props.lookup_ptr(shown_channel)) {
         row.value_ptr = *factor;
         /* #RNA_PaintMaterialLayerOpacity's own "value", always 0-100%; see
@@ -624,8 +841,13 @@ class PaintMaterialStackSource final : public StackSource,
         row.mode_prop = "blend_type";
       }
 
+      shown_layer_ordinals.add(entry.ordinal);
       r_rows.append(std::move(row));
     }
+
+    paint_correction_rows_append(
+        entries, shown_layer_ordinals, overflow_stub_emitted, shown_channel, r_rows);
+
     /* A group is listed after the rows it holds -- that is the order the reader walks the graph in
      * -- so the enclosing row of a nested one is the first row *after* it that sits one level up.
      * Resolved here, once every row exists. */
@@ -635,6 +857,10 @@ class PaintMaterialStackSource final : public StackSource,
         continue;
       }
       for (int64_t next = index + 1; next < r_rows.size(); next++) {
+        if (!r_rows[next].parent_section_id.empty()) {
+          /* A correction row is nobody's parent: it hangs off a layer itself. */
+          continue;
+        }
         if (r_rows[next].depth == row.depth - 1) {
           row.parent_ordinal = r_rows[next].ordinal;
           break;
@@ -662,7 +888,7 @@ class PaintMaterialStackSource final : public StackSource,
   bool row_activate(bContext &C,
                     const StackFocus & /*focus*/,
                     ID &owner,
-                    const int /*ordinal*/,
+                    const int ordinal,
                     const StackRow &row) const override
   {
     Material &material = paint_owner(owner);
@@ -698,6 +924,22 @@ class PaintMaterialStackSource final : public StackSource,
       ED_paint_material_mask_edit_end_if_active(C);
     }
 
+    /* A correction row points the brush at the correction's own maps (spec D16), which is a
+     * different activation than a layer row's: routed here rather than through the channel
+     * bindings below. */
+    if (Main *bmain = CTX_data_main(&C)) {
+      const std::optional<PaintStackRowRoute> route = paint_stack_route_get(*bmain,
+                                                                            material,
+                                                                            ordinal);
+      if (route.has_value() && route->is_correction) {
+        return this->row_correction_activate(C, *bmain, *scene, material, paint_mode, *route);
+      }
+    }
+
+    /* A remembered channelless correction stops being the target the moment a row that is not it
+     * activates: whatever this row ends up naming, it is not that correction. */
+    BKE_paint_material_active_correction_set(nullptr, {});
+
     /* A row that names no map -- a group -- is not something the brush can write into, and
      * clearing the bindings for it would silently take the paint target away from the user. */
     if (!paint_row_has_map(row)) {
@@ -713,23 +955,121 @@ class PaintMaterialStackSource final : public StackSource,
     /* Activating a layer brings up the Layer Material tab the way selecting any other Outliner
      * element brings up its own: a Material layer shows the material it was baked from, every
      * other row the material that owns the stack, where its channels are switched. */
-    {
-      const Material *source = BKE_paint_material_active_layer_source_get(paint_mode);
-      PointerRNA source_ptr = RNA_id_pointer_create(
-          const_cast<ID *>(source != nullptr ? &source->id : &material.id));
-      if (bScreen *screen = CTX_wm_screen(&C)) {
-        for (ScrArea &area : screen->areabase) {
-          if (area.spacetype != SPACE_PROPERTIES) {
-            continue;
-          }
-          SpaceProperties *sbuts = static_cast<SpaceProperties *>(area.spacedata.first);
-          if (ED_buttons_should_sync_with_outliner(&C, sbuts, &area)) {
-            ED_buttons_set_context(&C, sbuts, &source_ptr, BCONTEXT_LAYER_MATERIAL);
-            ED_area_tag_redraw(&area);
-          }
+    this->properties_sync(C, material, BKE_paint_material_active_layer_source_get(paint_mode));
+    return true;
+  }
+
+  /**
+   * The Layer Material tab follows an activation, the way selecting any other Outliner element
+   * brings up its own: \a source when the activated row names one, the material owning the stack
+   * otherwise.
+   */
+  void properties_sync(bContext &C, const Material &material, const Material *source) const
+  {
+    PointerRNA source_ptr = RNA_id_pointer_create(
+        const_cast<ID *>(source != nullptr ? &source->id : &material.id));
+    if (bScreen *screen = CTX_wm_screen(&C)) {
+      for (ScrArea &area : screen->areabase) {
+        if (area.spacetype != SPACE_PROPERTIES) {
+          continue;
+        }
+        SpaceProperties *sbuts = static_cast<SpaceProperties *>(area.spacedata.first);
+        if (ED_buttons_should_sync_with_outliner(&C, sbuts, &area)) {
+          ED_buttons_set_context(&C, sbuts, &source_ptr, BCONTEXT_LAYER_MATERIAL);
+          ED_area_tag_redraw(&area);
         }
       }
     }
+  }
+
+  /**
+   * The correction half of #row_activate (spec D16): the brush moves onto the correction's own
+   * maps. A mask correction edits its mask with the mask brush; a content correction paints the
+   * channels it has maps for, and one with none is remembered by identity alone, since bindings
+   * cannot name it.
+   */
+  bool row_correction_activate(bContext &C,
+                               Main &bmain,
+                               Scene &scene,
+                               Material &material,
+                               PaintModeSettings &paint_mode,
+                               const PaintStackRowRoute &route) const
+  {
+    Vector<PaintMaterialLayerStackEntry> entries;
+    if (!BKE_paint_material_layer_stack_from_material(bmain, material, entries)) {
+      return false;
+    }
+    const PaintMaterialLayerCorrectionEntry *correction = nullptr;
+    for (const PaintMaterialLayerStackEntry &entry : entries) {
+      if (entry.ordinal != route.layer_ordinal) {
+        continue;
+      }
+      for (const Vector<PaintMaterialLayerCorrectionEntry> *corrections :
+           {&entry.content_corrections, &entry.mask_corrections})
+      {
+        for (const PaintMaterialLayerCorrectionEntry &corr : *corrections) {
+          if (BLI_uuid_equal(corr.marker, route.correction)) {
+            correction = &corr;
+            break;
+          }
+        }
+        if (correction != nullptr) {
+          break;
+        }
+      }
+      if (correction != nullptr) {
+        break;
+      }
+    }
+    if (correction == nullptr) {
+      return false;
+    }
+
+    if (route.section == PaintMaterialCorrectionSection::Mask) {
+      /* Same form as #paint_material_mask_preview_activate: the correction's own map becomes the
+       * mask being edited, replacing whatever mask was. A correction with no map there yet has
+       * nothing to switch the mask brush onto -- and mask editing cannot survive, since the row
+       * that owned it just stopped being shown as editable. */
+      if (Image *mask_image = correction->channel_images.lookup_default(PAINT_LAYER_MAP_MASK,
+                                                                        nullptr);
+          mask_image != nullptr)
+      {
+        Paint *paint = BKE_paint_get_active_from_context(&C);
+        if (paint == nullptr) {
+          return false;
+        }
+        BKE_paint_material_mask_edit_begin_ex(bmain, scene, *paint, paint_mode, *mask_image);
+        /* The mask brush was just swapped in, the way a preview-slot click tells the brush UI. */
+        WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, nullptr);
+      }
+      else if (paint_mode.mask_image_binding.image != nullptr) {
+        ED_paint_material_mask_edit_end_if_active(C);
+      }
+      WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+      this->properties_sync(C, material, nullptr);
+      return true;
+    }
+
+    /* A content correction paints the channels its maps are on and unbinds the rest: a channel
+     * without a map of the correction's own stays empty rather than writing into the layer
+     * underneath. */
+    ED_paint_material_mask_edit_end_if_active(C);
+    bool any_map = false;
+    for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+      Image *map = correction->channel_images.lookup_default(channel, nullptr);
+      any_map = any_map || map != nullptr;
+      BKE_paint_material_channel_binding_set(paint_mode.channel_image_bindings[channel], map);
+    }
+    /* The maps name the row by themselves; only a correction without any is remembered, for
+     * #BKE_paint_material_active_layer_get to still answer with once the bindings are all null. */
+    if (any_map) {
+      BKE_paint_material_active_correction_set(nullptr, {});
+    }
+    else {
+      BKE_paint_material_active_correction_set(&material, route.correction);
+    }
+    WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+    this->properties_sync(C, material, nullptr);
     return true;
   }
 
@@ -743,14 +1083,22 @@ class PaintMaterialStackSource final : public StackSource,
     {
       return false;
     }
-    /* The shared resolver names the row by (owner, ordinal), which a map-less row -- a group --
-     * can never be: it holds no channel map of its own for the resolver to match a binding
+    /* The shared resolver names a layer row by (owner, ordinal), which a map-less row -- a group
+     * -- can never be: it holds no channel map of its own for the resolver to match a binding
      * against, so it is never the row a search over #bmain.materials lands on. No separate check
      * is needed for that case here. */
     const std::optional<PaintMaterialActiveLayer> active = BKE_paint_material_active_layer_get(
         *ctx.bmain, ctx.scene->toolsettings->paint_mode);
-    return active.has_value() && active->owner == &paint_owner(owner) &&
-           active->ordinal == row.ordinal;
+    if (!active.has_value() || active->owner != &paint_owner(owner)) {
+      return false;
+    }
+    /* A correction row is named by its marker, not by an ordinal: the resolver answers with the
+     * correction's owning layer's ordinal, and the row's own budget lives above the layers'.
+     * A nil answer correction is a layer row, matched the old way. */
+    if (!BLI_uuid_is_nil(active->correction)) {
+      return BLI_uuid_equal(active->correction, row.stable_id);
+    }
+    return active->ordinal == row.ordinal;
   }
 
   /**
@@ -791,6 +1139,27 @@ class PaintMaterialStackSource final : public StackSource,
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
+  }
+
+  /**
+   * The route \a ordinal names when it names a correction row, against the model as it stands
+   * now. Every mutating method asks this first and hands the correction to the correction API;
+   * a layer row (or an ordinal naming nothing) falls through to the layer path.
+   */
+  std::optional<PaintStackRowRoute> correction_route_get(bContext &C,
+                                                         ID &owner,
+                                                         const int ordinal) const
+  {
+    Main *bmain = CTX_data_main(&C);
+    if (bmain == nullptr) {
+      return std::nullopt;
+    }
+    const std::optional<PaintStackRowRoute> route = paint_stack_route_get(
+        *bmain, paint_owner(owner), ordinal);
+    if (route.has_value() && route->is_correction) {
+      return route;
+    }
+    return std::nullopt;
   }
 
   /**
@@ -858,6 +1227,39 @@ class PaintMaterialStackSource final : public StackSource,
                    const int from_ordinal,
                    const int to_ordinal) const override
   {
+    const std::optional<PaintStackRowRoute> from_correction = this->correction_route_get(
+        C, owner, from_ordinal);
+    if (from_correction.has_value()) {
+      const std::optional<PaintStackRowRoute> to_correction = this->correction_route_get(
+          C, owner, to_ordinal);
+      /* Two corrections trade places only within one section of one layer; anything else is a
+       * move the correction API does not express. */
+      if (!to_correction.has_value() ||
+          to_correction->layer_ordinal != from_correction->layer_ordinal ||
+          to_correction->section != from_correction->section)
+      {
+        return false;
+      }
+      const bUUID moved = from_correction->correction;
+      const bUUID target = to_correction->correction;
+      return this->paint_edit(
+          C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
+            /* #BKE_paint_material_layer_correction_reorder names the destination by its index in
+             * the section, which is the position the row it lands at -- the one \a to_ordinal
+             * names -- has right now. */
+            PaintMaterialCorrectionSection to_section = PaintMaterialCorrectionSection::Content;
+            int to_index = -1;
+            if (BKE_paint_material_layer_correction_owner_ordinal(
+                    bmain, material, target, &to_section, &to_index) < 0 ||
+                to_index < 0)
+            {
+              error = PaintMaterialLayerEditError::CorrectionNotFound;
+              return false;
+            }
+            return BKE_paint_material_layer_correction_reorder(
+                bmain, material, moved, to_index, &error);
+          });
+    }
     return this->paint_edit(
         C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
           return BKE_paint_material_layer_reorder(
@@ -873,6 +1275,51 @@ class PaintMaterialStackSource final : public StackSource,
                 const StackMovePlace place,
                 int *r_ordinal) const override
   {
+    const std::optional<PaintStackRowRoute> from_correction = this->correction_route_get(
+        C, owner, from_ordinal);
+    if (from_correction.has_value()) {
+      /* A drop beside a correction row reorders within the section it hangs under: only
+       * Above/Below of an anchor correction in that same section is a place the correction API
+       * names, and no reading of Into exists for a row that holds nothing. */
+      if (place == StackMovePlace::Into) {
+        return false;
+      }
+      const std::optional<PaintStackRowRoute> anchor_correction = this->correction_route_get(
+          C, owner, anchor_ordinal);
+      if (!anchor_correction.has_value() ||
+          anchor_correction->layer_ordinal != from_correction->layer_ordinal ||
+          anchor_correction->section != from_correction->section)
+      {
+        return false;
+      }
+      const bUUID moved = from_correction->correction;
+      const bUUID anchor_marker = anchor_correction->correction;
+      const bool anchor_above = (place == StackMovePlace::Above);
+      const bool moved_ok = this->paint_edit(
+          C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
+            PaintMaterialCorrectionSection anchor_section =
+                PaintMaterialCorrectionSection::Content;
+            int anchor_index = -1;
+            if (BKE_paint_material_layer_correction_owner_ordinal(
+                    bmain, material, anchor_marker, &anchor_section, &anchor_index) < 0 ||
+                anchor_index < 0)
+            {
+              error = PaintMaterialLayerEditError::CorrectionNotFound;
+              return false;
+            }
+            return BKE_paint_material_layer_correction_reorder(
+                bmain, material, moved, anchor_above ? anchor_index : anchor_index + 1, &error);
+          });
+      if (moved_ok && r_ordinal != nullptr) {
+        /* The destination is the anchor's old address only when it moved above it; below it takes
+         * the next one down, so the moved row's ordinal comes off a fresh read. */
+        Main *bmain = CTX_data_main(&C);
+        *r_ordinal = (bmain != nullptr) ?
+                         paint_correction_route_ordinal_get(*bmain, paint_owner(owner), moved) :
+                         -1;
+      }
+      return moved_ok;
+    }
     /* The seam speaks of rows, this file speaks of layers; the two vocabularies meet here. */
     PaintMaterialLayerMovePlace layer_place = PaintMaterialLayerMovePlace::Above;
     switch (place) {
@@ -915,6 +1362,17 @@ class PaintMaterialStackSource final : public StackSource,
                               ICON_MATERIAL};
     material.source_id_type = ID_MA;
     r_kinds.append(material);
+    /* A correction hangs off the row the Add was anchored on, so these kinds mean nothing without
+     * an anchor; #row_add refuses when the anchor names no row. Which section the correction
+     * lands in follows the anchor -- see #row_add. */
+    r_kinds.append({"CORRECTION",
+                    IFACE_("Correction"),
+                    "An adjustment row hung on the content of the row this is added from",
+                    ICON_BRUSH_DATA});
+    r_kinds.append({"MASK_CORRECTION",
+                    IFACE_("Mask Correction"),
+                    "A correction limiting where the row this is added from applies",
+                    ICON_BRUSH_DATA});
   }
 
   /**
@@ -940,6 +1398,8 @@ class PaintMaterialStackSource final : public StackSource,
     /* The kinds this editor declares, by their place in #add_kinds' list. */
     const int fill_kind = 1;
     const int material_kind = 2;
+    const int correction_kind = 3;
+    const int mask_correction_kind = 4;
     if (kind == material_kind) {
       /* The Add resolved the source by the ID type this kind declared; anything else is a caller
        * that went around it. */
@@ -947,6 +1407,43 @@ class PaintMaterialStackSource final : public StackSource,
         return -1;
       }
       return this->row_add_material(C, owner, ordinal, *id_cast<Material *>(args.source));
+    }
+    if (ELEM(kind, correction_kind, mask_correction_kind)) {
+      /* A correction hangs off the layer the anchor row stands for -- the anchor row itself when
+       * it is a layer, its parent when it is another correction. An Add with no anchor names no
+       * parent, and inventing one would put the correction somewhere the user did not ask for. */
+      Main *bmain = CTX_data_main(&C);
+      if (bmain == nullptr) {
+        return -1;
+      }
+      const std::optional<PaintStackRowRoute> anchor = paint_stack_route_get(
+          *bmain, paint_owner(owner), ordinal);
+      if (!anchor.has_value()) {
+        return -1;
+      }
+      PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+      if (kind == mask_correction_kind ||
+          (anchor->is_correction &&
+           anchor->section == PaintMaterialCorrectionSection::Mask) ||
+          args.section_id == "MASK")
+      {
+        section = PaintMaterialCorrectionSection::Mask;
+      }
+      const int layer_ordinal = anchor->layer_ordinal;
+      bUUID marker = {};
+      const bool added = this->paint_edit(
+          C,
+          owner,
+          [&](Main &route_bmain, Material &material, PaintMaterialLayerEditError &error) {
+            return BKE_paint_material_layer_correction_add(
+                route_bmain, material, layer_ordinal, section, nullptr, &marker, &error);
+          });
+      if (!added) {
+        return -1;
+      }
+      /* The new row's address comes off a fresh read: the budget allocated by the model the edit
+       * just changed. */
+      return paint_correction_route_ordinal_get(*bmain, paint_owner(owner), marker);
     }
     PaintMaterialLayerAddParams params;
     params.kind = (kind == fill_kind) ? PaintMaterialLayerKind::Fill :
@@ -978,6 +1475,15 @@ class PaintMaterialStackSource final : public StackSource,
                        const int ordinal,
                        const bool enable) const override
   {
+    if (const std::optional<PaintStackRowRoute> correction = this->correction_route_get(
+            C, owner, ordinal))
+    {
+      return this->paint_edit(
+          C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
+            return BKE_paint_material_layer_correction_set_enabled(
+                bmain, material, correction->correction, enable, &error);
+          });
+    }
     return this->paint_edit(
         C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
           return BKE_paint_material_layer_set_enabled(bmain, material, ordinal, enable, &error);
@@ -989,6 +1495,31 @@ class PaintMaterialStackSource final : public StackSource,
                     ID &owner,
                     const int ordinal) const override
   {
+    if (const std::optional<PaintStackRowRoute> correction = this->correction_route_get(
+            C, owner, ordinal))
+    {
+      const int layer_ordinal = correction->layer_ordinal;
+      Vector<bUUID> created;
+      PaintMaterialCorrectionCopyReport copy_report;
+      const bool copied = this->paint_edit(
+          C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
+            /* One ref of this material's own correction onto the same layer: the copy API is the
+             * cross-material one, and a duplicate is the within-one-material reading of it. */
+            const PaintMaterialCorrectionRef source_ref{material.id.session_uid,
+                                                        correction->correction};
+            return BKE_paint_material_layer_corrections_copy(
+                bmain, {source_ref}, material, layer_ordinal, created, &copy_report, &error);
+          });
+      if (!copied || created.is_empty()) {
+        return -1;
+      }
+      /* The copy's address comes off a fresh read: the budget allocated by the model the edit
+       * just changed, and the copy is a new correction in it. */
+      Main *bmain = CTX_data_main(&C);
+      return (bmain != nullptr) ?
+                 paint_correction_route_ordinal_get(*bmain, paint_owner(owner), created[0]) :
+                 -1;
+    }
     int new_ordinal = -1;
     this->paint_edit(
         C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
@@ -998,12 +1529,168 @@ class PaintMaterialStackSource final : public StackSource,
     return new_ordinal;
   }
 
+  bool can_paste_into(const StackReadContext &ctx,
+                      const StackFocus & /*focus*/,
+                      const ID &owner,
+                      const StackItemIdentity &source,
+                      const int target_ordinal) const override
+  {
+    if (ctx.bmain == nullptr || source.source_type != this->type() || !source.is_valid() ||
+        BLI_uuid_is_nil(source.row_id))
+    {
+      return false;
+    }
+    Material *source_material = id_cast<Material *>(
+        BKE_libblock_find_session_uid(ctx.bmain, ID_MA, source.owner_uid));
+    if (source_material == nullptr) {
+      return false;
+    }
+    /* The source side: the identity has to name a correction this source's model still has. The
+     * section it hangs under decides what it can be pasted onto. */
+    PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+    if (BKE_paint_material_layer_correction_owner_ordinal(
+            *ctx.bmain, *source_material, source.row_id, &section, nullptr) < 0)
+    {
+      return false;
+    }
+    /* The target side: a layer takes corrections in either section; a group keeps its content
+     * inside its folder, so only a mask correction -- one limiting where the group's result
+     * applies -- is a paste a group row can take. */
+    Vector<PaintMaterialLayerStackEntry> target_entries;
+    if (!BKE_paint_material_layer_stack_from_material(*ctx.bmain,
+                                                      paint_owner(owner),
+                                                      target_entries))
+    {
+      return false;
+    }
+    for (const PaintMaterialLayerStackEntry &entry : target_entries) {
+      if (entry.ordinal == target_ordinal) {
+        return !entry.is_group || section == PaintMaterialCorrectionSection::Mask;
+      }
+    }
+    return false;
+  }
+
+  bool rows_paste_into(bContext &C,
+                       const StackFocus & /*focus*/,
+                       ID &owner,
+                       const Span<StackItemIdentity> sources,
+                       const int target_ordinal,
+                       Vector<StackItemIdentity> &r_created,
+                       ReportList *reports) const override
+  {
+    Main *bmain = CTX_data_main(&C);
+    if (bmain == nullptr) {
+      return false;
+    }
+    Material &target = paint_owner(owner);
+    /* Only this source's rows name a correction of ours; the rest of a mixed clipboard is left
+     * out rather than taken down with the copies it cannot name. */
+    Vector<PaintMaterialCorrectionRef> refs;
+    for (const StackItemIdentity &source : sources) {
+      if (source.source_type != this->type() || !source.is_valid() ||
+          BLI_uuid_is_nil(source.row_id))
+      {
+        continue;
+      }
+      refs.append({source.owner_uid, source.row_id});
+    }
+    if (refs.is_empty()) {
+      return false;
+    }
+
+    /* The target row's name, read before the copy: the reports below name the layer the channels
+     * were wired on. */
+    std::string target_name;
+    Vector<PaintMaterialLayerStackEntry> target_entries;
+    if (BKE_paint_material_layer_stack_from_material(*bmain, target, target_entries)) {
+      for (const PaintMaterialLayerStackEntry &entry : target_entries) {
+        if (entry.ordinal == target_ordinal) {
+          target_name = entry.name;
+          break;
+        }
+      }
+    }
+
+    Vector<bUUID> created_markers;
+    PaintMaterialCorrectionCopyReport copy_report;
+    PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+    const bool copied = BKE_paint_material_layer_corrections_copy(*bmain,
+                                                                  refs,
+                                                                  target,
+                                                                  target_ordinal,
+                                                                  created_markers,
+                                                                  &copy_report,
+                                                                  &error);
+    if (!copied) {
+      /* A refusal can still have pasted some of the copies -- a mid-copy failure leaves what it
+       * wrote for the caller's undo step to take back or keep -- so what landed is reported all
+       * the same, as a warning rather than an error. */
+      BKE_reportf(reports,
+                  RPT_WARNING,
+                  RPT_("Could not copy all corrections: %s"),
+                  RPT_(BKE_paint_material_layer_edit_error_message(error)));
+    }
+    for (const int channel : copy_report.enabled_parent_channels) {
+      const char *channel_name = IFACE_("Channel");
+      RNA_enum_name_gettexted(rna_enum_material_paint_channel_items,
+                              channel,
+                              BLT_I18NCONTEXT_DEFAULT,
+                              &channel_name);
+      BKE_reportf(reports,
+                  RPT_INFO,
+                  RPT_("Enabled channel %s on \"%s\""),
+                  channel_name,
+                  target_name.c_str());
+    }
+    if (copy_report.scaled_maps > 0) {
+      int width = 0;
+      int height = 0;
+      if (BKE_paint_material_layer_map_size_get(*bmain, target, target_ordinal, width, height)) {
+        BKE_reportf(reports,
+                    RPT_INFO,
+                    RPT_("Scaled %d map(s) to %dx%d"),
+                    copy_report.scaled_maps,
+                    width,
+                    height);
+      }
+      else {
+        BKE_reportf(reports, RPT_INFO, RPT_("Scaled %d map(s)"), copy_report.scaled_maps);
+      }
+    }
+    const int skipped = copy_report.skipped_missing + copy_report.skipped_group;
+    if (skipped > 0) {
+      BKE_reportf(reports, RPT_INFO, RPT_("Skipped %d correction(s)"), skipped);
+    }
+
+    for (const bUUID &marker : created_markers) {
+      StackItemIdentity identity;
+      identity.owner_uid = target.id.session_uid;
+      identity.source_type = this->type();
+      identity.row_id = marker;
+      r_created.append(identity);
+    }
+    if (!created_markers.is_empty()) {
+      WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &target.id);
+    }
+    return !created_markers.is_empty();
+  }
+
   bool row_rename(bContext &C,
                   const StackFocus & /*focus*/,
                   ID &owner,
                   const int ordinal,
                   const StringRefNull name) const override
   {
+    if (const std::optional<PaintStackRowRoute> correction = this->correction_route_get(
+            C, owner, ordinal))
+    {
+      return this->paint_edit(
+          C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
+            return BKE_paint_material_layer_correction_rename(
+                bmain, material, correction->correction, name, &error);
+          });
+    }
     return this->paint_edit(
         C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
           return BKE_paint_material_layer_rename(bmain, material, ordinal, name.c_str(), &error);
@@ -1017,6 +1704,11 @@ class PaintMaterialStackSource final : public StackSource,
                     const bool add,
                     const float initial_color[4]) const override
   {
+    if (this->correction_route_get(C, owner, ordinal).has_value()) {
+      /* A correction has no mask image of its own to add or take away -- the MASK section it
+       * hangs under is already the mask half of its parent. */
+      return false;
+    }
     int image_size = 1024;
     if (add) {
       const Scene *scene = CTX_data_scene(&C);
@@ -1133,6 +1825,9 @@ class PaintMaterialStackSource final : public StackSource,
                           const float color[4],
                           StackColorSession *session) const override
   {
+    if (this->correction_route_get(C, owner, ordinal).has_value()) {
+      return false;
+    }
     if (session != nullptr && session->tiles != nullptr) {
       Material &target_material = paint_owner(owner);
       Main &bmain = *CTX_data_main(&C);
@@ -1152,6 +1847,9 @@ class PaintMaterialStackSource final : public StackSource,
                               const float color[4],
                               StackColorSession *session) const override
   {
+    if (this->correction_route_get(C, owner, ordinal).has_value()) {
+      return false;
+    }
     if (session != nullptr && session->tiles != nullptr) {
       Material &target_material = paint_owner(owner);
       Main &bmain = *CTX_data_main(&C);
@@ -1203,6 +1901,12 @@ class PaintMaterialStackSource final : public StackSource,
                  const int from_ordinal,
                  const int to_ordinal) const override
   {
+    if (this->correction_route_get(C, owner, from_ordinal).has_value() ||
+        this->correction_route_get(C, owner, to_ordinal).has_value())
+    {
+      /* A correction is not something a folder can be made out of, nor a folder to make. */
+      return -1;
+    }
     int group_ordinal = -1;
     this->paint_edit(
         C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
@@ -1217,6 +1921,11 @@ class PaintMaterialStackSource final : public StackSource,
                      ID &owner,
                      const int ordinal) const override
   {
+    if (this->correction_route_get(C, owner, ordinal).has_value()) {
+      /* A correction has no row of its own below it to merge into: it hangs off its parent's
+       * content, and the pair already reads as one. */
+      return -1;
+    }
     int group_ordinal = -1;
     this->paint_edit(
         C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
@@ -1288,6 +1997,10 @@ class PaintMaterialStackSource final : public StackSource,
                          const int ordinal,
                          const int color_tag) const override
   {
+    if (this->correction_route_get(C, owner, ordinal).has_value()) {
+      /* Color tags are a group-row affordance; a correction is not a folder. */
+      return false;
+    }
     /* Color tags are stored on the group node, not in the layer stack itself, so this does not go
      * through paint_edit (which triggers stack mutations). It is a direct node property change. */
     Material &material = paint_owner(owner);
@@ -1335,6 +2048,18 @@ class PaintMaterialStackSource final : public StackSource,
                   ID &owner,
                   const int ordinal) const override
   {
+    if (const std::optional<PaintStackRowRoute> correction = this->correction_route_get(
+            C, owner, ordinal))
+    {
+      /* A correction owns no mask image the paint target could be on -- the MASK section it hangs
+       * under belongs to its parent -- so the layer path's mask-editing bail-out does not apply.
+       * The operator re-activates a neighboring row of its own accord. */
+      return this->paint_edit(
+          C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
+            return BKE_paint_material_layer_correction_remove(
+                bmain, material, correction->correction, &error);
+          });
+    }
     /* Removing the row whose mask is being painted -- or the group holding it -- leaves mask
      * editing first, for the same reason #row_mask_set does. */
     const Scene *scene = CTX_data_scene(&C);
@@ -1889,6 +2614,50 @@ class PaintMaterialStackSource final : public StackSource,
 
 }  // namespace
 
+Map<int, PaintStackRowRoute> paint_stack_routes_build(
+    Span<PaintMaterialLayerStackEntry> entries, int &r_first_unaddressable_index)
+{
+  Map<int, PaintStackRowRoute> routes;
+  r_first_unaddressable_index = -1;
+  /* Layers and groups own the ordinals the model gave them; a correction's budget descends from
+   * the top of the addressable range and stops at the first one of those it runs into. */
+  Set<int> occupied;
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    occupied.add(entry.ordinal);
+    PaintStackRowRoute route;
+    route.layer_ordinal = entry.ordinal;
+    routes.add(entry.ordinal, route);
+  }
+
+  int next = STACK_ROW_ORDINAL_MAX;
+  int correction_index = 0;
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    for (const Vector<PaintMaterialLayerCorrectionEntry> *corrections :
+         {&entry.content_corrections, &entry.mask_corrections})
+    {
+      for (const PaintMaterialLayerCorrectionEntry &correction : *corrections) {
+        if (next < 0 || occupied.contains(next)) {
+          /* The descent ran into a row a layer owns, or below the addressable range altogether:
+           * this correction, and every one after it in the walk, has no ordinal the tree can
+           * address. The walk stops here so the same model always budgets the same way. */
+          r_first_unaddressable_index = correction_index;
+          return routes;
+        }
+        PaintStackRowRoute route;
+        route.is_correction = true;
+        route.layer_ordinal = entry.ordinal;
+        route.correction = correction.marker;
+        route.section = correction.section;
+        routes.add(next, route);
+        occupied.add(next);
+        next--;
+        correction_index++;
+      }
+    }
+  }
+  return routes;
+}
+
 bool paint_row_owns_mask_image(const StackRow &row, const Image *mask_image)
 {
   if (mask_image == nullptr) {
@@ -1902,6 +2671,15 @@ bool paint_row_owns_mask_image(const StackRow &row, const Image *mask_image)
       if (sub_row.id == &mask_image->id) {
         return true;
       }
+    }
+  }
+  /* A mask correction has no content section of its own; its map is named by the row's preview
+   * slot instead (see #paint_correction_row_build): the slot of a mask correction carries the
+   * map's session UID under the MASK section id, where a layer's own mask slot names no image at
+   * all and never matches. */
+  for (const StackRowPreview &slot : row.preview_slots) {
+    if (slot.section_id == "MASK" && slot.id_uid == mask_image->id.session_uid) {
+      return true;
     }
   }
   return false;

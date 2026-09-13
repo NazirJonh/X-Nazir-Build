@@ -89,6 +89,14 @@ bool composite_mix_coverage_off(const CompositeMixNode &mix);
  */
 bool composite_mix_channel_state_get(const CompositeMixNode &mix,
                                      PaintMaterialLayerChannelState &r_state);
+
+/**
+ * State of the layer's own map (spec 18 I1'), read below any corrections. Replaces the "map input
+ * fed by one Image Texture" test of #composite_mix_channel_state_get for layers that have
+ * corrections; identical to it for layers that do not.
+ */
+bool composite_layer_base_state_get(const bNode &layer_mix,
+                                    PaintMaterialLayerChannelState &r_state);
 bool composite_image_from_socket(const bNodeSocket &socket,
                                  Image *&r_image,
                                  const ImageUser *&r_iuser,

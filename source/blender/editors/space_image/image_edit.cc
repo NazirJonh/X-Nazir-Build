@@ -219,7 +219,8 @@ void ED_space_image_set_mask(bContext *C, SpaceImage *sima, Mask *mask)
 }
 
 /**
- * Whether any channel of \a ma resolves to a layer stack that \a image is a layer of.
+ * Whether any channel of \a ma resolves to a layer stack that \a image is a layer of -- or one of
+ * its corrections' maps, which the brush can be painting into just the same.
  *
  * \param layers: scratch space, so that a caller testing many materials allocates once.
  */
@@ -231,7 +232,8 @@ static bool space_image_composite_material_contains(
 {
   /* Any channel identifies the material, not just the composited one: the canvas the user came
    * from is as likely to be a Roughness layer as a Base Color one, and switching to the composite
-   * should not depend on which channel they were painting. */
+   * should not depend on which channel they were painting. A correction's map identifies it too
+   * (spec D16): painting into one composites the material it hangs on, like painting a layer. */
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (!BKE_paint_material_composite_stack_from_material(bmain, ma, info.channel, layers)) {
       continue;
@@ -239,6 +241,16 @@ static bool space_image_composite_material_contains(
     for (const PaintMaterialCompositeImageLayer &layer : layers) {
       if (layer.color_image == &image) {
         return true;
+      }
+      for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+        if (correction.image == &image) {
+          return true;
+        }
+      }
+      for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
+        if (correction.image == &image) {
+          return true;
+        }
       }
     }
   }

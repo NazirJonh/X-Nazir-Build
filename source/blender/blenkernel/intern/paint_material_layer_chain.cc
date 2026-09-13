@@ -47,6 +47,7 @@
 #include "BLI_set.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_string_utf8.h"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "DEG_depsgraph.hh"
@@ -200,6 +201,193 @@ bool socket_has_link(bNodeSocket &socket)
 }
 
 /**
+ * One step of the correction walk inside #correction_chain_read: the node feeding \a socket must
+ * be a correction of \a section whose links are the shape #correction_channel_insert builds, and
+ * its base socket -- what it blends over -- is returned in \a r_next.
+ */
+static bool correction_walk_step(const bNodeSocket &at,
+                                 const PaintMaterialCorrectionSection section,
+                                 ChainCorrection &r_correction,
+                                 const bNodeSocket *&r_next,
+                                 PaintMaterialLayerEditError &r_error)
+{
+  bNodeLink *link = sole_link_into(const_cast<bNodeSocket &>(at));
+  if (link == nullptr) {
+    /* Linked, but not in a shape this file can rewrite: several links, or a muted one. */
+    r_error = PaintMaterialLayerEditError::ChainNotPlain;
+    return false;
+  }
+  bNode &from = *link->fromnode;
+  CompositeMixNode corr_mix;
+  if (!composite_mix_node_read(from, corr_mix) || corr_mix.bottom == nullptr) {
+    r_error = PaintMaterialLayerEditError::ChainNotPlain;
+    return false;
+  }
+  if (!correction_nodes_read(from, corr_mix, r_correction) || r_correction.section != section) {
+    /* A correction of the other section, or one whose links are not the shape this module
+     * builds: neither belongs on this path of the layer. */
+    r_error = PaintMaterialLayerEditError::ChainNotPlain;
+    return false;
+  }
+  if (link->fromsock->directly_linked_links().size() != 1) {
+    /* A result consumed by anything but the layer (or correction) above cannot be rewritten
+     * without changing what that other consumer sees. */
+    r_error = PaintMaterialLayerEditError::ChainIsShared;
+    return false;
+  }
+  if (socket_has_link(const_cast<bNodeSocket &>(*corr_mix.top)) && r_correction.map == nullptr) {
+    /* The correction's map input is fed, and not by the one Image Texture a map is. */
+    r_error = PaintMaterialLayerEditError::ChainNotPlain;
+    return false;
+  }
+  r_next = corr_mix.bottom;
+  return true;
+}
+
+/**
+ * Reverse \a top_down into \a r_list: the walk meets the topmost correction first, and the lists
+ * read bottom to top, like #ChannelChain.layers does.
+ */
+static void correction_list_reverse(const Vector<ChainCorrection> &top_down,
+                                    Vector<ChainCorrection> &r_list)
+{
+  for (const int64_t i : top_down.index_range()) {
+    r_list.append(top_down[top_down.size() - 1 - i]);
+  }
+}
+
+bool correction_chain_read(ChainLayer &layer, PaintMaterialLayerEditError &r_error)
+{
+  layer.content_corrections.clear();
+  layer.mask_corrections.clear();
+  layer.base_map = nullptr;
+  layer.image = nullptr;
+  if (layer.node == nullptr) {
+    return true;
+  }
+  CompositeMixNode layer_mix;
+  if (!composite_mix_node_read(*layer.node, layer_mix) || layer_mix.top == nullptr) {
+    r_error = PaintMaterialLayerEditError::ChainNotPlain;
+    return false;
+  }
+
+  /* The content stack: the corrections hanging on the layer's map input, down to the layer's own
+   * map -- or to nothing, which is the layer being Absent in this channel.
+   *
+   * The walk follows links, not #composite_source_node_shallow: a muted node must not stop the
+   * reading of the shape, because a muted map is exactly the Disabled state the channel state
+   * has to report under the corrections. Reroutes are refused, the way the layer walk refuses
+   * them: this file is about to rewrite these links. */
+  Vector<ChainCorrection> top_down;
+  bool base_resolved = false;
+  const bNodeSocket *socket = layer_mix.top;
+  for (int step = 0; step < 64 && socket != nullptr; step++) {
+    if (!socket_has_link(const_cast<bNodeSocket &>(*socket))) {
+      base_resolved = true;
+      break;
+    }
+    bNodeLink *link = sole_link_into(const_cast<bNodeSocket &>(*socket));
+    if (link == nullptr) {
+      r_error = PaintMaterialLayerEditError::ChainNotPlain;
+      return false;
+    }
+    bNode &from = *link->fromnode;
+    if (from.type_legacy == SH_NODE_TEX_IMAGE) {
+      layer.base_map = &from;
+      layer.image = (from.id != nullptr && GS(from.id->name) == ID_IM) ?
+                        id_cast<Image *>(from.id) :
+                        nullptr;
+      base_resolved = true;
+      break;
+    }
+    if (BKE_paint_material_is_layer_group(from)) {
+      /* A group row's map is the folder's Result: the rows it holds live inside the folder, and
+       * the row itself carries no content corrections (D7). The base is the instance itself. */
+      base_resolved = true;
+      break;
+    }
+    if (!bke::paint_layer::node_is_correction(from)) {
+      /* Anything else on the map input -- a reroute, a hand-wired node -- is read the way it was
+       * before corrections existed: no correction to collect, and the image it resolves to, if
+       * any. Refusing it here would lock every edit of the whole material. */
+      const ImageUser *iuser = nullptr;
+      composite_image_from_socket(*socket, layer.image, iuser);
+      base_resolved = true;
+      break;
+    }
+    ChainCorrection correction;
+    const bNodeSocket *next = nullptr;
+    if (!correction_walk_step(*socket,
+                              PaintMaterialCorrectionSection::Content,
+                              correction,
+                              next,
+                              r_error))
+    {
+      return false;
+    }
+    top_down.append(correction);
+    socket = next;
+  }
+  if (!base_resolved) {
+    /* Ran out of depth without reaching the map. */
+    r_error = PaintMaterialLayerEditError::ChainNotPlain;
+    return false;
+  }
+  correction_list_reverse(top_down, layer.content_corrections);
+
+  /* The mask chain: the corrections limiting what covers the layer, down to the coverage source
+   * the layer would have without them -- its own map's alpha, a mask image, or the over output
+   * of a content correction. None of these is a base map of its own, so the walk stops there and
+   * #base_map stays on the content stack's answer. */
+  top_down.clear();
+  bool coverage_resolved = (layer_mix.factor_coverage == nullptr);
+  socket = layer_mix.factor_coverage;
+  for (int step = 0; step < 64 && socket != nullptr; step++) {
+    if (!socket_has_link(const_cast<bNodeSocket &>(*socket))) {
+      coverage_resolved = true;
+      break;
+    }
+    bNodeLink *link = sole_link_into(const_cast<bNodeSocket &>(*socket));
+    if (link == nullptr) {
+      r_error = PaintMaterialLayerEditError::ChainNotPlain;
+      return false;
+    }
+    bNode &from = *link->fromnode;
+    if (from.type_legacy == SH_NODE_TEX_IMAGE ||
+        (from.type_legacy == SH_NODE_MATH &&
+         NodeMathOperation(from.custom1) == NODE_MATH_MULTIPLY_ADD))
+    {
+      coverage_resolved = true;
+      break;
+    }
+    if (BKE_paint_material_is_layer_group(from) || !bke::paint_layer::node_is_correction(from)) {
+      /* The folder's own Alpha, or any other coverage source a row had before corrections
+       * existed: where the mask chain ends, read as it always was. */
+      coverage_resolved = true;
+      break;
+    }
+    ChainCorrection correction;
+    const bNodeSocket *next = nullptr;
+    if (!correction_walk_step(*socket,
+                              PaintMaterialCorrectionSection::Mask,
+                              correction,
+                              next,
+                              r_error))
+    {
+      return false;
+    }
+    top_down.append(correction);
+    socket = next;
+  }
+  if (!coverage_resolved) {
+    r_error = PaintMaterialLayerEditError::ChainNotPlain;
+    return false;
+  }
+  correction_list_reverse(top_down, layer.mask_corrections);
+  return true;
+}
+
+/**
  * Walk \a terminal down to the bottom of the chain.
  *
  * Unlike the reader, this refuses reroutes: it is about to rewrite these links, and a reroute is a
@@ -240,6 +428,13 @@ bool chain_collect(bNodeTree &tree,
       r_error = PaintMaterialLayerEditError::ChainNotPlain;
       return false;
     }
+    /* A correction hangs on a layer's own inputs -- its map, or its coverage -- never between
+     * two layers. Corrections are Mix nodes, so this has to be tested before the layer read
+     * below mistakes one for a layer. */
+    if (bke::paint_layer::node_is_correction(from)) {
+      r_error = PaintMaterialLayerEditError::ChainNotPlain;
+      return false;
+    }
 
     CompositeMixNode mix;
     if (composite_mix_node_read(from, mix)) {
@@ -257,9 +452,12 @@ bool chain_collect(bNodeTree &tree,
       layer.output = link->fromsock;
       const bNode *top_source = composite_source_node_shallow(*mix.top);
       layer.is_group = top_source != nullptr && BKE_paint_material_is_layer_group(*top_source);
-      if (!layer.is_group) {
-        const ImageUser *iuser = nullptr;
-        composite_image_from_socket(*mix.top, layer.image, iuser);
+      /* The corrections hanging on the row's own inputs are read with it, group rows included:
+       * a mask section limits the folder's result and hangs on the row's own coverage Multiply
+       * (spec 18 §4.3), and an edit moving the row has to move them too. #correction_chain_read
+       * stops at the instance for a group, so the folder's insides are not walked here. */
+      if (!correction_chain_read(layer, r_error)) {
+        return false;
       }
       r_chain.group_num += layer.is_group ? 1 : 0;
       top_down.append(layer);
@@ -541,6 +739,50 @@ bool chains_align(Span<ChannelChain> chains, PaintMaterialLayerEditError &r_erro
     if (chain.layers.size() != layer_num) {
       /* Matching by marker would let the counts differ, but a stack whose channels disagree is a
        * stack the UI is already drawing wrong; refusing here is the honest answer. */
+      r_error = PaintMaterialLayerEditError::ChannelsDisagree;
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Spec 18 §4.5 p.3: same UUID sequence per section, same section and effect, in every chain. */
+bool layer_corrections_agree(Span<ChannelChain *> chains,
+                             const int layer_index,
+                             PaintMaterialLayerEditError &r_error)
+{
+  if (chains.is_empty() || layer_index < 0 || layer_index >= chains.first()->layers.size()) {
+    /* No resolved row to compare -- an add at the top of a stack, an empty folder. The
+     * corrections an operation would touch do not exist yet. */
+    return true;
+  }
+  const ChainLayer &reference = chains.first()->layers[layer_index];
+  auto sections_disagree = [](const Span<ChainCorrection> reference_sections,
+                              const Span<ChainCorrection> sections) {
+    if (reference_sections.size() != sections.size()) {
+      return true;
+    }
+    for (const int64_t i : reference_sections.index_range()) {
+      if (!BLI_uuid_equal(reference_sections[i].marker, sections[i].marker) ||
+          reference_sections[i].section != sections[i].section ||
+          reference_sections[i].effect != sections[i].effect)
+      {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const ChannelChain *chain : chains.drop_front(1)) {
+    if (layer_index >= chain->layers.size()) {
+      r_error = PaintMaterialLayerEditError::ChannelsDisagree;
+      return false;
+    }
+    const ChainLayer &layer = chain->layers[layer_index];
+    if (sections_disagree(reference.content_corrections, layer.content_corrections) ||
+        sections_disagree(reference.mask_corrections, layer.mask_corrections))
+    {
+      /* One channel's correction stack drifted from the reference's: the rows no longer say the
+       * same thing in every channel, and an edit would move one half of the disagreement. */
       r_error = PaintMaterialLayerEditError::ChannelsDisagree;
       return false;
     }
@@ -1039,14 +1281,6 @@ bNode *layer_mix_node_create(Main &bmain, bNodeTree &tree, const int channel)
 }
 
 /**
- * Move one channel's layers `from_ordinal + 1 .. to_ordinal` into \a group, and the map of
- * `from_ordinal` with them, leaving the Mix node of `from_ordinal` behind to blend the group in.
- *
- * Nodes are copied into the group and the originals collected in \a r_nodes_to_remove: there is no
- * "move a node to another tree" in the node API, and copying keeps the id-properties -- the layer
- * marker among them -- which is what makes a layer inside a group still the same layer.
- */
-/**
  * The map node of every layer in a range, resolved while the topology cache is still good.
  *
  * Creating a node invalidates that cache, and the group is built by creating a great many of them;
@@ -1060,6 +1294,13 @@ Vector<bNode *> chain_range_map_nodes(ChannelChain &chain,
   Vector<bNode *> maps;
   for (const int ordinal : IndexRange(from_ordinal, to_ordinal - from_ordinal + 1)) {
     ChainLayer &layer = chain.layers[ordinal];
+    /* The row's own map is the one read below its content corrections; its top socket shows the
+     * topmost correction when it has any. A group row has no map of its own -- its instance is
+     * what moves. */
+    if (!layer.is_group && layer.base_map != nullptr) {
+      maps.append(layer.base_map);
+      continue;
+    }
     bNodeLink *link = (layer.top == nullptr) ? nullptr : sole_link_into(*layer.top);
     if (link == nullptr) {
       return {};
@@ -1076,6 +1317,7 @@ bool layer_group_fill_channel(Main & /*bmain*/,
                               Span<bNode *> map_nodes,
                               const int from_ordinal,
                               const int to_ordinal,
+                              const bUUID &keeper_copy_marker,
                               const bool build_alpha,
                               Vector<bNode *> &r_nodes_to_remove)
 {
@@ -1101,84 +1343,235 @@ bool layer_group_fill_channel(Main & /*bmain*/,
   }
 
   Map<const bNodeSocket *, bNodeSocket *> socket_map;
-  bNode *below = bke::node_copy_with_mapping(
-      &group, *map_nodes.first(), LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
-  if (below == nullptr) {
-    return false;
-  }
-  r_nodes_to_remove.append_non_duplicates(map_nodes.first());
-  bNodeSocket *below_out = bke::node_find_socket(*below, SOCK_OUT, "Color"_ustr);
-  bNodeSocket *alpha_so_far = bke::node_find_socket(*below, SOCK_OUT, "Alpha"_ustr);
-  if (below_out == nullptr || alpha_so_far == nullptr) {
-    return false;
-  }
-  bNode *alpha_node = below;
+  ChainLayer &keeper = chain.layers[from_ordinal];
+  const bool keeper_has_corrections = !keeper.content_corrections.is_empty() ||
+                                      !keeper.mask_corrections.is_empty();
+
+  bNode *below = nullptr;
+  bNodeSocket *below_out = nullptr;
+  bNodeSocket *alpha_so_far = nullptr;
+  bNode *alpha_node = nullptr;
   float location_x = 0.0f;
+
+  if (keeper_has_corrections) {
+    /* The kept row moves whole: its map becomes the sub-stack's bottom and its corrections hang
+     * on a copy of its own Mix -- the row they belong to inside the folder. The kept Mix outside
+     * stays, and blends the group instance as the folder's own row. A channel that shows no map
+     * for the row (Absent) brings the corrections over nothing: they keep the explicit-zero base
+     * they had, and the folder's alpha starts from nothing. */
+    /* A kept folder row has no map: its instance is what the folder's alpha starts from. Read
+     * while the outer tree's topology cache is still good. */
+    bNodeLink *keeper_instance_link = (keeper.is_group && keeper.top != nullptr) ?
+                                          sole_link_into(*keeper.top) :
+                                          nullptr;
+    bNode *keeper_instance = (keeper_instance_link != nullptr) ? keeper_instance_link->fromnode :
+                                                                 nullptr;
+    Vector<bNode *> owned;
+    layer_owned_nodes_collect(keeper, owned);
+    Map<const bNode *, bNode *> node_map;
+    if (!layer_owned_nodes_copy(group, owned, socket_map, node_map)) {
+      return false;
+    }
+    bNode *mix_copy = node_map.lookup(keeper.node);
+    if (mix_copy == nullptr) {
+      return false;
+    }
+    for (bNode *node : owned) {
+      if (node != keeper.node) {
+        /* The kept Mix itself stays outside; everything else it owns is in the folder now. */
+        r_nodes_to_remove.append_non_duplicates(node);
+      }
+    }
+    if (keeper.base_map != nullptr) {
+      below = node_map.lookup(keeper.base_map);
+      r_nodes_to_remove.append_non_duplicates(map_nodes.first());
+      if (below == nullptr) {
+        return false;
+      }
+      below_out = bke::node_find_socket(*below, SOCK_OUT, "Color"_ustr);
+      alpha_so_far = bke::node_find_socket(*below, SOCK_OUT, "Alpha"_ustr);
+      if (below_out == nullptr || alpha_so_far == nullptr) {
+        return false;
+      }
+      alpha_node = below;
+    }
+    else if (keeper_instance != nullptr) {
+      if (bNode *const *instance_copy = node_map.lookup_ptr(keeper_instance)) {
+        alpha_node = *instance_copy;
+        alpha_so_far = socket_find_by_name(**instance_copy, SOCK_OUT, "Alpha");
+      }
+    }
+    bNodeSocket *mix_copy_out = mix_output_find(*mix_copy);
+    if (mix_copy_out == nullptr) {
+      return false;
+    }
+    /* The copy is the row the corrections hang on, and the one the rows above blend over. */
+    location_x += 300.0f;
+    const float delta_x = location_x - mix_copy->location[0];
+    for (bNode *copy : node_map.values()) {
+      copy->location[0] += delta_x;
+    }
+    BKE_paint_material_layer_marker_set(*mix_copy, keeper_copy_marker);
+    /* The folder's alpha starts from what the kept row covers: its coverage input carries the
+     * content corrections' accumulated coverage and its mask chain, which the map's alpha alone
+     * would miss. Unlinked, the row covers nothing here and the alpha starts from nothing. */
+    group.ensure_topology_cache();
+    CompositeMixNode keeper_mix;
+    if (composite_mix_node_read(*mix_copy, keeper_mix) && keeper_mix.factor_coverage != nullptr) {
+      bNodeLink *coverage_link = sole_link_into(
+          *const_cast<bNodeSocket *>(keeper_mix.factor_coverage));
+      alpha_node = (coverage_link != nullptr) ? coverage_link->fromnode : nullptr;
+      alpha_so_far = (coverage_link != nullptr) ? coverage_link->fromsock : nullptr;
+    }
+    below = mix_copy;
+    below_out = mix_copy_out;
+  }
+  else {
+    below = bke::node_copy_with_mapping(
+        &group, *map_nodes.first(), LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
+    if (below == nullptr) {
+      return false;
+    }
+    r_nodes_to_remove.append_non_duplicates(map_nodes.first());
+    below_out = bke::node_find_socket(*below, SOCK_OUT, "Color"_ustr);
+    alpha_so_far = bke::node_find_socket(*below, SOCK_OUT, "Alpha"_ustr);
+    if (below_out == nullptr || alpha_so_far == nullptr) {
+      return false;
+    }
+    alpha_node = below;
+  }
 
   for (const int ordinal : IndexRange(from_ordinal + 1, to_ordinal - from_ordinal)) {
     ChainLayer &layer = chain.layers[ordinal];
     bNode *map_source = map_nodes[ordinal - from_ordinal];
-    bNode *map_copy = bke::node_copy_with_mapping(
-        &group, *map_source, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
-    bNode *mix_copy = bke::node_copy_with_mapping(
-        &group, *layer.node, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
-    if (map_copy == nullptr || mix_copy == nullptr) {
-      return false;
-    }
-    r_nodes_to_remove.append_non_duplicates(map_source);
-    r_nodes_to_remove.append_non_duplicates(layer.node);
-
-    /* A previous pass through this loop may have added links, which invalidates the topology
-     * cache #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
-    group.ensure_topology_cache();
+    bNode *map_copy = nullptr;
+    bNode *mix_copy = nullptr;
+    bNodeSocket *mix_out = nullptr;
+    bNodeSocket *map_alpha = nullptr;
     CompositeMixNode mix;
-    bNodeSocket *mix_out = mix_output_find(*mix_copy);
-    bNodeSocket *map_color = bke::node_find_socket(*map_copy, SOCK_OUT, "Color"_ustr);
-    bNodeSocket *map_alpha = bke::node_find_socket(*map_copy, SOCK_OUT, "Alpha"_ustr);
-    if (mix_out == nullptr || map_color == nullptr || map_alpha == nullptr ||
-        !composite_mix_node_read(*mix_copy, mix))
-    {
-      return false;
-    }
-    location_x += 300.0f;
-    mix_copy->location[0] = location_x;
-    map_copy->location[0] = location_x - 200.0f;
+    /* What the row covers, for the folder's alpha: a plain row's map alpha, or -- for a row with
+     * corrections -- whatever feeds its coverage input. */
+    bool row_has_corrections = false;
+    bNode *row_alpha_node = nullptr;
+    bNodeSocket *row_alpha_socket = nullptr;
 
-    bke::node_add_link(
-        group, *below, *below_out, *mix_copy, *const_cast<bNodeSocket *>(mix.bottom));
-    bke::node_add_link(
-        group, *map_copy, *map_color, *mix_copy, *const_cast<bNodeSocket *>(mix.top));
-    layer_factor_coverage_link(
-        group, *mix_copy, *const_cast<bNodeSocket *>(mix.factor), *map_copy, *map_alpha, 1.0f);
-    below = mix_copy;
-    below_out = mix_out;
-
-    if (build_alpha) {
-      /* Coverage accumulates the way an "over" does: `a = a_below + a_layer * (1 - a_below)`. */
-      bNode *invert = bke::node_add_static_node(nullptr, group, SH_NODE_MATH);
-      invert->custom1 = NODE_MATH_SUBTRACT;
-      bNode *combine = bke::node_add_static_node(nullptr, group, SH_NODE_MATH);
-      combine->custom1 = NODE_MATH_MULTIPLY_ADD;
-      bNodeSocket *invert_a = static_cast<bNodeSocket *>(BLI_findlink(&invert->inputs, 0));
-      bNodeSocket *invert_b = static_cast<bNodeSocket *>(BLI_findlink(&invert->inputs, 1));
-      bNodeSocket *invert_out = static_cast<bNodeSocket *>(invert->outputs.first);
-      bNodeSocket *combine_a = static_cast<bNodeSocket *>(BLI_findlink(&combine->inputs, 0));
-      bNodeSocket *combine_b = static_cast<bNodeSocket *>(BLI_findlink(&combine->inputs, 1));
-      bNodeSocket *combine_c = static_cast<bNodeSocket *>(BLI_findlink(&combine->inputs, 2));
-      bNodeSocket *combine_out = static_cast<bNodeSocket *>(combine->outputs.first);
-      if (invert_a == nullptr || invert_b == nullptr || combine_c == nullptr) {
+    if (!layer.content_corrections.is_empty() || !layer.mask_corrections.is_empty()) {
+      /* The row moves whole (spec 18 §4.5): its map, its corrections, its coverage Multiply and
+       * its mask come over with their links, and only what it blends over -- the row below --
+       * is wired here. A channel that shows no map for the row brings the corrections over
+       * nothing, the way the kept row's own Absent form does. */
+      Vector<bNode *> owned;
+      layer_owned_nodes_collect(layer, owned);
+      Map<const bNode *, bNode *> node_map;
+      if (!layer_owned_nodes_copy(group, owned, socket_map, node_map)) {
         return false;
       }
-      static_cast<bNodeSocketValueFloat *>(invert_a->default_value)->value = 1.0f;
+      /* A folder row's "map" is its instance, which the owned set carries for it. */
+      map_copy = layer.is_group ? node_map.lookup_default(map_source, nullptr) :
+                 (layer.base_map != nullptr) ? node_map.lookup(layer.base_map) :
+                                               nullptr;
+      mix_copy = node_map.lookup(layer.node);
+      if (mix_copy == nullptr || ((layer.is_group || layer.base_map != nullptr) && map_copy == nullptr))
+      {
+        return false;
+      }
+      for (bNode *node : owned) {
+        r_nodes_to_remove.append_non_duplicates(node);
+      }
+      /* The copies' links, added below, invalidate the topology cache
+       * #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
+      group.ensure_topology_cache();
+      mix_out = mix_output_find(*mix_copy);
+      /* A group instance's sockets carry generated identifiers; its Alpha is found by name. */
+      map_alpha = (map_copy == nullptr) ? nullptr :
+                  layer.is_group        ? socket_find_by_name(*map_copy, SOCK_OUT, "Alpha") :
+                                          bke::node_find_socket(*map_copy, SOCK_OUT, "Alpha"_ustr);
+      if (mix_out == nullptr || (map_copy != nullptr && map_alpha == nullptr) ||
+          !composite_mix_node_read(*mix_copy, mix))
+      {
+        return false;
+      }
+      row_has_corrections = true;
+      if (mix.factor_coverage != nullptr) {
+        if (bNodeLink *coverage_link = sole_link_into(
+                *const_cast<bNodeSocket *>(mix.factor_coverage)))
+        {
+          row_alpha_node = coverage_link->fromnode;
+          row_alpha_socket = coverage_link->fromsock;
+        }
+      }
+      location_x += 300.0f;
+      const float delta_x = location_x - mix_copy->location[0];
+      for (bNode *copy : node_map.values()) {
+        copy->location[0] += delta_x;
+      }
+      bke::node_add_link(
+          group, *below, *below_out, *mix_copy, *const_cast<bNodeSocket *>(mix.bottom));
+      below = mix_copy;
+      below_out = mix_out;
+    }
+    else {
+      map_copy = bke::node_copy_with_mapping(
+          &group, *map_source, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
+      mix_copy = bke::node_copy_with_mapping(
+          &group, *layer.node, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
+      if (map_copy == nullptr || mix_copy == nullptr) {
+        return false;
+      }
+      r_nodes_to_remove.append_non_duplicates(map_source);
+      r_nodes_to_remove.append_non_duplicates(layer.node);
+
+      /* A previous pass through this loop may have added links, which invalidates the topology
+       * cache #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
+      group.ensure_topology_cache();
+      mix_out = mix_output_find(*mix_copy);
+      bNodeSocket *map_color = bke::node_find_socket(*map_copy, SOCK_OUT, "Color"_ustr);
+      map_alpha = bke::node_find_socket(*map_copy, SOCK_OUT, "Alpha"_ustr);
+      if (mix_out == nullptr || map_color == nullptr || map_alpha == nullptr ||
+          !composite_mix_node_read(*mix_copy, mix))
+      {
+        return false;
+      }
+      location_x += 300.0f;
+      mix_copy->location[0] = location_x;
+      map_copy->location[0] = location_x - 200.0f;
+
+      bke::node_add_link(
+          group, *below, *below_out, *mix_copy, *const_cast<bNodeSocket *>(mix.bottom));
+      bke::node_add_link(
+          group, *map_copy, *map_color, *mix_copy, *const_cast<bNodeSocket *>(mix.top));
+      layer_factor_coverage_link(
+          group, *mix_copy, *const_cast<bNodeSocket *>(mix.factor), *map_copy, *map_alpha, 1.0f);
+      below = mix_copy;
+      below_out = mix_out;
+    }
+
+    if (!row_has_corrections) {
+      row_alpha_node = map_copy;
+      row_alpha_socket = map_alpha;
+    }
+    if (build_alpha && row_alpha_node != nullptr && row_alpha_socket != nullptr) {
+      /* Coverage accumulates the way an "over" does: `a = a_below + a_layer * (1 - a_below)`.
+       * The pair hangs one row below the row being added, at the x the loop is tracking -- the
+       * layout is this loop's own bookkeeping, so it stays here rather than in the shared
+       * helper, which the corrections build with a different one. A row that covers nothing in
+       * this channel brings no alpha to accumulate. */
+      bNode *invert = nullptr;
+      bNodeSocket *combine_out = nullptr;
+      bNode *combine = coverage_over_link(group,
+                                          alpha_node,
+                                          alpha_so_far,
+                                          *row_alpha_node,
+                                          *row_alpha_socket,
+                                          combine_out,
+                                          &invert);
+      if (combine == nullptr || invert == nullptr || combine_out == nullptr) {
+        return false;
+      }
       invert->location[0] = location_x;
       invert->location[1] = -300.0f;
       combine->location[0] = location_x + 150.0f;
       combine->location[1] = -300.0f;
-
-      bke::node_add_link(group, *alpha_node, *alpha_so_far, *invert, *invert_b);
-      bke::node_add_link(group, *map_copy, *map_alpha, *combine, *combine_a);
-      bke::node_add_link(group, *invert, *invert_out, *combine, *combine_b);
-      bke::node_add_link(group, *alpha_node, *alpha_so_far, *combine, *combine_c);
       alpha_node = combine;
       alpha_so_far = combine_out;
     }
@@ -1189,7 +1582,7 @@ bool layer_group_fill_channel(Main & /*bmain*/,
     return false;
   }
   bke::node_add_link(group, *below, *below_out, *output, *result_in);
-  if (build_alpha) {
+  if (build_alpha && alpha_node != nullptr && alpha_so_far != nullptr) {
     if (bNodeSocket *alpha_in = socket_find_by_name(*output, SOCK_IN, "Alpha")) {
       bke::node_add_link(group, *alpha_node, *alpha_so_far, *output, *alpha_in);
     }
@@ -1380,7 +1773,8 @@ bool tree_write_scope_check(Main &bmain,
  * refused edit leaves the graph exactly as it was.
  *
  * \param target_ordinal: the second row of a two-row operation: #Reorder's destination, #Move's
- *   anchor, #GroupMake's range end.
+ *   anchor, #GroupMake's range end. #CorrectionEdit carries the correction section the edit aims
+ *   at, as an int.
  * \param move_place: how a #Move lands beside or inside its anchor.
  * \param add_params: the add parameters, required for #Add.
  */
@@ -1503,6 +1897,16 @@ bool layer_edit_plan_build(Main &bmain,
     }
     return true;
   };
+  /* The corrections a row carries are part of what every channel has to agree on, the way its
+   * position is: a stack whose channels drifted apart under spec 18 §4.1a is refused before the
+   * first byte moves. Runs wherever #r_plan.chains and #r_plan.layer_index name a resolved row;
+   * the guards inside #layer_corrections_agree pass the operations that resolve none. */
+  auto plan_ready = [&]() {
+    if (!layer_corrections_agree(r_plan.chains, r_plan.layer_index, r_error)) {
+      return false;
+    }
+    return write_scope_ok();
+  };
 
   switch (op) {
     case LayerEditOp::Add: {
@@ -1559,7 +1963,7 @@ bool layer_edit_plan_build(Main &bmain,
           r_error = PaintMaterialLayerEditError::IndexOutOfRange;
           return false;
         }
-        return write_scope_ok();
+        return plan_ready();
       }
       if (!top_chains_aligned()) {
         return false;
@@ -1583,7 +1987,7 @@ bool layer_edit_plan_build(Main &bmain,
       }
       r_plan.chains = top_chains;
       r_plan.layer_index = (add_params->ordinal < 0) ? top_layers_num() : add_params->ordinal;
-      return write_scope_ok();
+      return plan_ready();
     }
 
     case LayerEditOp::Remove: {
@@ -1598,7 +2002,7 @@ bool layer_edit_plan_build(Main &bmain,
         r_error = PaintMaterialLayerEditError::IsBottomLayer;
         return false;
       }
-      return write_scope_ok();
+      return plan_ready();
     }
 
     case LayerEditOp::Rename:
@@ -1615,7 +2019,7 @@ bool layer_edit_plan_build(Main &bmain,
         r_error = PaintMaterialLayerEditError::IsBottomLayer;
         return false;
       }
-      return write_scope_ok();
+      return plan_ready();
     }
 
     case LayerEditOp::ChannelImageSet: {
@@ -1628,7 +2032,7 @@ bool layer_edit_plan_build(Main &bmain,
        * channel's own map, and setting an image on it is replacing that map. Nothing in this
        * operation needs a Mix node, so #needs_bottom_normalize stays advisory and the mutation
        * ignores it. */
-      return write_scope_ok();
+      return plan_ready();
     }
 
     case LayerEditOp::FillColorSet: {
@@ -1640,7 +2044,7 @@ bool layer_edit_plan_build(Main &bmain,
       /* A bare base is accepted, the way #ChannelImageSet accepts one: a Fill added as the very
        * first layer of a stack is a bare Image Texture carrying the kind marker itself. Whether
        * the row actually *is* a Fill is the mutation's check, against the marker. */
-      return write_scope_ok();
+      return plan_ready();
     }
 
     case LayerEditOp::KindSet: {
@@ -1651,7 +2055,7 @@ bool layer_edit_plan_build(Main &bmain,
       }
       /* A bare base is accepted, the way #FillColorSet accepts one: the marker is what makes a
        * bare Image Texture read as anything other than a Paint layer. */
-      return write_scope_ok();
+      return plan_ready();
     }
 
     case LayerEditOp::Duplicate: {
@@ -1665,7 +2069,7 @@ bool layer_edit_plan_build(Main &bmain,
         r_error = PaintMaterialLayerEditError::IsBottomLayer;
         return false;
       }
-      return write_scope_ok();
+      return plan_ready();
     }
 
     case LayerEditOp::GroupMake: {
@@ -1697,7 +2101,7 @@ bool layer_edit_plan_build(Main &bmain,
       r_plan.chains = top_chains;
       r_plan.layer_index = ordinal;
       r_plan.target_index = target_ordinal;
-      return write_scope_ok();
+      return plan_ready();
     }
 
     case LayerEditOp::GroupAdd: {
@@ -1733,7 +2137,7 @@ bool layer_edit_plan_build(Main &bmain,
         r_error = PaintMaterialLayerEditError::IndexOutOfRange;
         return false;
       }
-      return write_scope_ok();
+      return plan_ready();
     }
 
     case LayerEditOp::Ungroup: {
@@ -1757,7 +2161,31 @@ bool layer_edit_plan_build(Main &bmain,
       }
       r_plan.chains = top_chains;
       r_plan.layer_index = ordinal;
-      return write_scope_ok();
+      return plan_ready();
+    }
+
+    case LayerEditOp::CorrectionEdit: {
+      if (!forest_rows_resolve(
+              r_plan.per_channel, ordinal, r_plan.chains, r_plan.layer_index, r_error))
+      {
+        return false;
+      }
+      /* The correction section the edit aims at, carried the way a two-row operation carries its
+       * destination row. */
+      const auto section = PaintMaterialCorrectionSection(target_ordinal);
+      /* A bare base has no Mix node to hang a correction on: the mutator converts it first and
+       * plans again, the way an add does for a position the conversion opens up. */
+      const bool bare_base = (r_plan.layer_index == 0 && bottom_is_bare(r_plan.chains));
+      if (!bare_base && r_plan.chains.first()->layers[r_plan.layer_index].is_group &&
+          section == PaintMaterialCorrectionSection::Content)
+      {
+        /* D7: a group's content stack lives inside its folder, so there is nothing on the group
+         * row itself for a content correction to hang on. A mask section limits the folder's
+         * result and is allowed. */
+        r_error = PaintMaterialLayerEditError::CorrectionNotAllowedOnGroup;
+        return false;
+      }
+      return plan_ready();
     }
 
     case LayerEditOp::Reorder:
@@ -1882,7 +2310,7 @@ bool layer_edit_plan_build(Main &bmain,
           }
         }
       }
-      return write_scope_ok();
+      return plan_ready();
     }
   }
   BLI_assert_unreachable();

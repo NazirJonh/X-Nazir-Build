@@ -142,6 +142,26 @@ bool BKE_paint_material_layer_mask_add(Main &bmain,
     if (!composite_mix_node_read(*layer.node, mix) || mix.factor == nullptr) {
       continue;
     }
+    if (!layer.mask_corrections.is_empty()) {
+      /* The mask becomes the base of the mask-correction chain (spec 18 §4.3): it feeds what the
+       * lowest mask correction blends over, exactly where the coverage the row had without the
+       * mask used to sit, so the mask defines the coverage the corrections then shape. A channel
+       * whose chain base is unlinked keeps the explicit-zero form (I1) -- the mask is picked up
+       * when the channel gets coverage. */
+      const ChainCorrection &lowest = layer.mask_corrections.first();
+      CompositeMixNode lowest_mix;
+      if (lowest.mix == nullptr || !composite_mix_node_read(*lowest.mix, lowest_mix) ||
+          lowest_mix.bottom == nullptr)
+      {
+        continue;
+      }
+      bNodeSocket &bottom = *const_cast<bNodeSocket *>(lowest_mix.bottom);
+      if (!socket_has_link(bottom)) {
+        continue;
+      }
+      relink_into(*chain->tree, bottom, *lowest.mix, *tex, *color);
+      continue;
+    }
     if (mix.factor_opacity != nullptr) {
       if (composite_mix_coverage_off(mix)) {
         /* Absent or Disabled here: the mask must not become this channel's coverage (I1). It is
@@ -216,6 +236,9 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
   bNodeTree &tree = *plan.chains.first()->tree;
 
   Vector<std::pair<bNodeTree *, bNode *>> mask_nodes;
+  /* The masks whose nodes go below, for the orphan check at the end: a generated blank nothing
+   * reads anymore must not keep answering as the row's mask to the model and the paint canvas. */
+  Vector<Image *> mask_images;
   for (ChannelChain *chain_ptr : plan.chains) {
     ChannelChain &chain = *chain_ptr;
     ChainLayer &layer = chain.layers[layer_index];
@@ -224,6 +247,68 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
     chain.tree->ensure_topology_cache();
     CompositeMixNode mix;
     if (!composite_mix_node_read(*layer.node, mix) || mix.factor == nullptr) {
+      continue;
+    }
+    if (!layer.mask_corrections.is_empty()) {
+      /* The mask corrections stay; what goes is the mask image at the chain's base, and what
+       * comes back is the coverage the row had without the mask -- the content corrections'
+       * accumulated coverage, or the row's own map's alpha. */
+      const ChainCorrection &lowest = layer.mask_corrections.first();
+      CompositeMixNode lowest_mix;
+      if (lowest.mix == nullptr || !composite_mix_node_read(*lowest.mix, lowest_mix) ||
+          lowest_mix.bottom == nullptr)
+      {
+        continue;
+      }
+      bNodeSocket &bottom = *const_cast<bNodeSocket *>(lowest_mix.bottom);
+      bNodeLink *mask_link = sole_link_into(bottom);
+      if (mask_link == nullptr) {
+        /* Nothing feeds the chain's base here -- the Absent form: no mask in this channel. */
+        continue;
+      }
+      bNode *mask_node = mask_link->fromnode;
+      if (mask_node->type_legacy != SH_NODE_TEX_IMAGE || mask_node->id == nullptr ||
+          GS(mask_node->id->name) != ID_IM)
+      {
+        continue;
+      }
+      Image &mask_image = *id_cast<Image *>(mask_node->id);
+      /* The row's own mask is the tagged one; the map's alpha (or a correction's over output) at
+         the base is the no-mask shape, not a mask to remove. */
+      if (mask_image.paint_layer_channel != PAINT_LAYER_MAP_MASK ||
+          !BLI_uuid_equal(mask_image.paint_layer_id,
+                          BKE_paint_material_layer_marker_get(*layer.node)))
+      {
+        continue;
+      }
+      bNode *base_node = nullptr;
+      bNodeSocket *base_socket = nullptr;
+      if (!layer.content_corrections.is_empty()) {
+        const ChainCorrection &top = layer.content_corrections.last();
+        if (top.over_combine != nullptr) {
+          base_node = top.over_combine;
+          base_socket = static_cast<bNodeSocket *>(base_node->outputs.first);
+        }
+      }
+      if (base_node == nullptr && layer.base_map != nullptr) {
+        base_node = layer.base_map;
+        base_socket = bke::node_find_socket(*base_node, SOCK_OUT, "Alpha"_ustr);
+      }
+      /* Counted before the relink: the Color output's remaining links say whether the node is
+         the last reader's, the same rule the plain path below follows. */
+      if (mask_link->fromsock->directly_linked_links().size() == 1) {
+        mask_nodes.append_non_duplicates({chain.tree, mask_node});
+        mask_images.append_non_duplicates(&mask_image);
+      }
+      if (base_node != nullptr && base_socket != nullptr) {
+        relink_into(*chain.tree, bottom, *lowest.mix, *base_node, *base_socket);
+      }
+      else {
+        for (bNodeLink *link : Vector<bNodeLink *>(bottom.directly_linked_links())) {
+          BKE_ntree_update_tag_link_removed(chain.tree);
+          bke::node_remove_link(chain.tree, *link);
+        }
+      }
       continue;
     }
     /* Coverage and opacity coexist: what is being removed lives on the Multiply's coverage
@@ -278,6 +363,15 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
     BKE_ntree_update_tag_node_removed(entry.first);
     touched_trees.add(entry.first);
   }
+  for (Image *image : mask_images) {
+    /* The node removal gave the mask's user back; a generated blank nothing reads anymore is
+     * freed the way every other exit in this module disposes of its own orphans -- left tagged
+     * and user-less it would still reach the stack model's maps-by-tag pass. */
+    if (image->id.us == 0 && image->source == IMA_SRC_GENERATED) {
+      BKE_id_free(&bmain, image);
+    }
+  }
+  mask_images.clear();
   for (bNodeTree *touched : touched_trees) {
     if (touched != ma.nodetree) {
       BKE_ntree_update_after_single_tree_change(bmain, *touched);
@@ -593,6 +687,28 @@ void BKE_paint_material_layer_opacity_changed(Main &bmain, bNodeTree &tree, bNod
 {
   BKE_ntree_update_tag_socket_property(&tree, &socket);
   BKE_ntree_update_after_single_tree_change(bmain, tree);
+
+  /* A correction's opacity is meant to read as one shared strength across every channel, unlike a
+   * layer's own opacity -- one node per channel, genuinely independent (plan 19 review). The
+   * Outliner only ever writes the socket of the channel #stack_layer_channel currently shows, so
+   * without this the other channels' copies of the same correction would silently keep the old
+   * value. #socket sits on the correction's coverage-multiply node; its single output feeds the
+   * correction's own Mix, which is where the marker naming the row lives. */
+  bUUID correction_marker = {};
+  bool is_correction = false;
+  {
+    tree.ensure_topology_cache();
+    bNodeSocket *result = static_cast<bNodeSocket *>(socket.owner_node().outputs.first);
+    if (result != nullptr && result->directly_linked_links().size() == 1) {
+      bNode *host = result->directly_linked_links()[0]->tonode;
+      if (host != nullptr && bke::paint_layer::node_is_correction(*host)) {
+        correction_marker = BKE_paint_material_layer_marker_get(*host);
+        is_correction = true;
+      }
+    }
+  }
+  const float opacity_value = socket.default_value_typed<bNodeSocketValueFloat>()->value;
+
   /* The socket may live in a folder's own tree, whose evaluated copy is separate; every material
    * reaching it is refreshed too, since the Shading component alone never re-copies the evaluated
    * material (see #paint_layer_edit_committed). */
@@ -602,6 +718,10 @@ void BKE_paint_material_layer_opacity_changed(Main &bmain, bNodeTree &tree, bNod
       continue;
     }
     if (ma.nodetree == &tree || bke::node_tree_contains_tree(*ma.nodetree, tree)) {
+      if (is_correction) {
+        BKE_paint_material_layer_correction_opacity_set(
+            bmain, ma, correction_marker, opacity_value, nullptr);
+      }
       paint_layer_edit_committed(bmain, ma, false);
       DEG_id_tag_update(&ma.id, ID_RECALC_SYNC_TO_EVAL);
     }

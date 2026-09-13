@@ -154,6 +154,16 @@ const char *BKE_paint_material_layer_edit_error_message(const PaintMaterialLayer
       return N_("A folder's channels follow the layers inside it");
     case PaintMaterialLayerEditError::LastEnabledChannel:
       return N_("A layer keeps at least one channel switched on; hide the layer instead");
+    case PaintMaterialLayerEditError::CorrectionNotFound:
+      return N_("No correction with this identity is in the stack");
+    case PaintMaterialLayerEditError::CorrectionSectionMismatch:
+      return N_("Mask corrections have no channel switches; they follow the layer's channels");
+    case PaintMaterialLayerEditError::CorrectionNotAllowedOnGroup:
+      return N_("Content corrections are not allowed on a layer group");
+    case PaintMaterialLayerEditError::CorrectionChainNotPlain:
+      return N_("A correction's nodes are not the shape the paint layer stack builds");
+    case PaintMaterialLayerEditError::GroupHasMaskCorrections:
+      return N_("Remove the folder's mask corrections before ungrouping it");
   }
   return "";
 }
@@ -441,7 +451,6 @@ bool BKE_paint_material_layer_add(Main &bmain,
      * start, so it has a marker, an opacity and a mute like every other row and nothing has to
      * convert it later. */
     Image *image = layer_image_given(params, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    const bool owns_image = image == nullptr;
     if (image == nullptr) {
       image = layer_image_create(bmain, PAINT_MATERIAL_CHANNEL_BASE_COLOR, params);
     }
@@ -852,6 +861,16 @@ static bool layer_move_apply(Main &bmain,
       bool is_muted = false;
       /** The opacity to carry over; see how #mask_source is resolved below. */
       float opacity = 1.0f;
+      /**
+       * A row with corrections moves as one owned unit (spec 18 §4.5): its map, its coverage
+       * Multiply, its mask and every node of its corrections, copied into the destination and
+       * taken out of the source together. #map_source and #mask_source name single nodes and are
+       * not used when this is set.
+       */
+      bool has_corrections = false;
+      Vector<bNode *> owned;
+      /** The row's own map, below its content corrections; null when the channel shows none. */
+      bNode *base_map_source = nullptr;
     };
     Vector<MovingChannelNodes> moving_nodes;
 
@@ -867,6 +886,7 @@ static bool layer_move_apply(Main &bmain,
         return fail(PaintMaterialLayerEditError::ChainNotPlain);
       }
       m.map_source = top_link->fromnode;
+      m.base_map_source = layer.base_map;
 
       CompositeMixNode mix;
       if (layer.node == nullptr || !composite_mix_node_read(*layer.node, mix)) {
@@ -891,6 +911,11 @@ static bool layer_move_apply(Main &bmain,
           m.mask_source = factor_link->fromnode;
         }
       }
+      /* A folder row carries its mask corrections along too: its owned set holds its instance. */
+      if (!layer.content_corrections.is_empty() || !layer.mask_corrections.is_empty()) {
+        m.has_corrections = true;
+        layer_owned_nodes_collect(layer, m.owned);
+      }
       moving_nodes.append(m);
     }
 
@@ -904,6 +929,8 @@ static bool layer_move_apply(Main &bmain,
       bNodeSocket *mix_top = nullptr;
       bNodeSocket *mix_factor = nullptr;
       bNodeSocket *mix_output = nullptr;
+      /** Filled for an owned set (a row with corrections); empty for the single-node copies. */
+      Map<const bNode *, bNode *> node_map;
     };
     Vector<CopiedChannelNodes> copies;
     Vector<bNode *> created_in_dst;
@@ -946,6 +973,30 @@ static bool layer_move_apply(Main &bmain,
     for (const int64_t i : from_chains.index_range()) {
       const MovingChannelNodes &m = moving_nodes[i];
       Map<const bNodeSocket *, bNodeSocket *> socket_map;
+
+      if (m.has_corrections) {
+        /* The owned set comes over with its internal links -- the map into the corrections and
+         * the Mix, a mask onto the coverage it drives -- so nothing here rewires them; the only
+         * feed left is the row's bottom, which the destination chain's rebuild does. */
+        Map<const bNode *, bNode *> node_map;
+        if (!layer_owned_nodes_copy(*dst_tree, m.owned, socket_map, node_map)) {
+          for (bNode *copy : node_map.values()) {
+            created_in_dst.append(copy);
+          }
+          discard_copies();
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        CopiedChannelNodes c;
+        c.mix_copy = node_map.lookup(m.mix_source);
+        c.map_copy = (m.base_map_source != nullptr) ? node_map.lookup(m.base_map_source) : nullptr;
+        c.image = m.image;
+        c.node_map = std::move(node_map);
+        for (bNode *copy : c.node_map.values()) {
+          created_in_dst.append(copy);
+        }
+        copies.append(c);
+        continue;
+      }
 
       bNode *map_copy = bke::node_copy_with_mapping(
           dst_tree, *m.map_source, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
@@ -991,6 +1042,19 @@ static bool layer_move_apply(Main &bmain,
       dst_tree->ensure_topology_cache();
       CompositeMixNode mix;
       bNodeSocket *mix_out = mix_output_find(*c.mix_copy);
+      if (!c.node_map.is_empty()) {
+        /* The owned set brought its map, mask, coverage Multiply and correction links along; the
+         * row's own handles are resolved here for the destination chain's entry. */
+        if (mix_out == nullptr || !composite_mix_node_read(*c.mix_copy, mix)) {
+          discard_copies();
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        c.mix_bottom = const_cast<bNodeSocket *>(mix.bottom);
+        c.mix_top = const_cast<bNodeSocket *>(mix.top);
+        c.mix_factor = const_cast<bNodeSocket *>(mix.factor);
+        c.mix_output = mix_out;
+        continue;
+      }
       /* A group instance hands each channel a `Result <Channel>` of its own and one shared Alpha,
        * where a map has the Color and Alpha of the image it reads. */
       bNodeSocket *map_color = nullptr;
@@ -1045,10 +1109,19 @@ static bool layer_move_apply(Main &bmain,
     for (const int64_t i : from_chains.index_range()) {
       ChannelChain *chain = from_chains[i];
       const MovingChannelNodes &m = moving_nodes[i];
-      nodes_to_remove_from_src.append_non_duplicates(m.mix_source);
-      nodes_to_remove_from_src.append_non_duplicates(m.map_source);
-      if (m.mask_source != nullptr) {
-        nodes_to_remove_from_src.append_non_duplicates(m.mask_source);
+      if (m.has_corrections) {
+        /* The corrections are children of the row (spec 18 §4.5): the whole owned set goes with
+         * it, not just the Mix and the nodes its own sockets happen to show. */
+        for (bNode *node : m.owned) {
+          nodes_to_remove_from_src.append_non_duplicates(node);
+        }
+      }
+      else {
+        nodes_to_remove_from_src.append_non_duplicates(m.mix_source);
+        nodes_to_remove_from_src.append_non_duplicates(m.map_source);
+        if (m.mask_source != nullptr) {
+          nodes_to_remove_from_src.append_non_duplicates(m.mask_source);
+        }
       }
       chain->layers.remove(from_index);
       chain_rebuild_links(*chain);
@@ -1071,6 +1144,11 @@ static bool layer_move_apply(Main &bmain,
       layer.output = c.mix_output;
       layer.image = c.image;
       layer.is_group = moving_group;
+      /* The row's own map is the copied base map, read below its corrections; the corrections
+       * themselves are re-read from the copied links with the next collection. */
+      if (!c.node_map.is_empty() && moving_nodes[i].base_map_source != nullptr) {
+        layer.base_map = c.node_map.lookup(moving_nodes[i].base_map_source);
+      }
 
       chain->layers.insert(to_index, layer);
       chain_rebuild_links(*chain);
@@ -1140,6 +1218,14 @@ static bool layer_move_into_empty_group(Main &bmain,
     int channel = 0;
     /** The opacity to carry over; see how #mask_source is resolved below. */
     float opacity = 1.0f;
+    /**
+     * A row with corrections moves as one owned unit (spec 18 §4.5); see the same field in
+     * #layer_move_apply, which shares this shape.
+     */
+    bool has_corrections = false;
+    Vector<bNode *> owned;
+    /** The row's own map, below its content corrections; null when the channel shows none. */
+    bNode *base_map_source = nullptr;
   };
   Vector<MovingChannelNodes> moving_nodes;
   for (ChannelChain *chain : from_chains) {
@@ -1154,6 +1240,7 @@ static bool layer_move_into_empty_group(Main &bmain,
       return fail(PaintMaterialLayerEditError::ChainNotPlain);
     }
     m.map_source = top_link->fromnode;
+    m.base_map_source = layer.base_map;
     CompositeMixNode mix;
     if (layer.node == nullptr || !composite_mix_node_read(*layer.node, mix)) {
       return fail(PaintMaterialLayerEditError::ChainNotPlain);
@@ -1175,6 +1262,11 @@ static bool layer_move_into_empty_group(Main &bmain,
       if (factor_link != nullptr && factor_link->fromnode != m.map_source) {
         m.mask_source = factor_link->fromnode;
       }
+    }
+    /* A folder row carries its mask corrections along too: its owned set holds its instance. */
+    if (!layer.content_corrections.is_empty() || !layer.mask_corrections.is_empty()) {
+      m.has_corrections = true;
+      layer_owned_nodes_collect(layer, m.owned);
     }
     moving_nodes.append(m);
   }
@@ -1207,6 +1299,8 @@ static bool layer_move_into_empty_group(Main &bmain,
     bNode *mix_copy = nullptr;
     bNode *map_copy = nullptr;
     bNode *mask_copy = nullptr;
+    /** Filled for an owned set (a row with corrections); empty for the single-node copies. */
+    Map<const bNode *, bNode *> node_map;
   };
   Vector<CopiedChannelNodes> copies;
   Vector<bNode *> created;
@@ -1220,6 +1314,28 @@ static bool layer_move_into_empty_group(Main &bmain,
   for (const MovingChannelNodes &m : moving_nodes) {
     Map<const bNodeSocket *, bNodeSocket *> socket_map;
     CopiedChannelNodes c;
+
+    if (m.has_corrections) {
+      /* The owned set comes over with its internal links -- the map into the corrections and the
+       * Mix, a mask onto the coverage it drives. Only the row's bottom stays unwired: inside the
+       * group it blends over transparency. */
+      Map<const bNode *, bNode *> node_map;
+      if (!layer_owned_nodes_copy(*group_tree, m.owned, socket_map, node_map)) {
+        for (bNode *copy : node_map.values()) {
+          created.append(copy);
+        }
+        discard();
+        return fail(PaintMaterialLayerEditError::CreationFailed);
+      }
+      c.mix_copy = node_map.lookup(m.mix_source);
+      c.node_map = std::move(node_map);
+      for (bNode *copy : c.node_map.values()) {
+        created.append(copy);
+      }
+      copies.append(c);
+      continue;
+    }
+
     c.map_copy = bke::node_copy_with_mapping(
         group_tree, *m.map_source, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
     c.mix_copy = bke::node_copy_with_mapping(
@@ -1273,6 +1389,42 @@ static bool layer_move_into_empty_group(Main &bmain,
         eMaterialPaintChannel(moving_nodes[i].channel));
     char result_name[64];
     SNPRINTF_UTF8(result_name, "Result %s", info.ui_name);
+
+    if (!c.node_map.is_empty()) {
+      /* The owned set brought the map, the mask, the coverage Multiply and the correction links
+       * along. The row's result becomes what the folder hands out, and what the folder covers is
+       * what drives the row's coverage -- the same feed the single-node path takes the raw mask
+       * or map alpha from. */
+      if (mix_out == nullptr || !composite_mix_node_read(*c.mix_copy, mix) ||
+          mix.factor == nullptr)
+      {
+        discard();
+        return fail(PaintMaterialLayerEditError::CreationFailed);
+      }
+      bNodeSocket *result = socket_find_by_name(*group_output, SOCK_IN, result_name);
+      if (result == nullptr) {
+        discard();
+        return fail(PaintMaterialLayerEditError::CreationFailed);
+      }
+      /* The bottom stays unlinked: inside the group this layer blends over transparency, which
+       * is what the group composites on. */
+      bke::node_add_link(*group_tree, *c.mix_copy, *mix_out, *group_output, *result);
+      if (i == 0) {
+        if (bNodeSocket *alpha_in = socket_find_by_name(*group_output, SOCK_IN, "Alpha")) {
+          if (bNodeLink *coverage_link = sole_link_into(*const_cast<bNodeSocket *>(
+                  (mix.factor_coverage != nullptr) ? mix.factor_coverage : mix.factor)))
+          {
+            bke::node_add_link(*group_tree,
+                               *coverage_link->fromnode,
+                               *coverage_link->fromsock,
+                               *group_output,
+                               *alpha_in);
+          }
+        }
+      }
+      continue;
+    }
+
     /* A group instance hands each channel a `Result <Channel>` of its own and one shared Alpha,
      * where a map has the Color and Alpha of the image it reads. A group instance's sockets come
      * from its tree interface and are identified by an auto-generated string ("Socket_0", ...)
@@ -1330,10 +1482,19 @@ static bool layer_move_into_empty_group(Main &bmain,
   Vector<bNode *> nodes_to_remove;
   for (const int64_t i : from_chains.index_range()) {
     const MovingChannelNodes &m = moving_nodes[i];
-    nodes_to_remove.append_non_duplicates(m.mix_source);
-    nodes_to_remove.append_non_duplicates(m.map_source);
-    if (m.mask_source != nullptr) {
-      nodes_to_remove.append_non_duplicates(m.mask_source);
+    if (m.has_corrections) {
+      /* The corrections are children of the row (spec 18 §4.5): the whole owned set goes with
+       * it, not just the Mix and the nodes its own sockets happen to show. */
+      for (bNode *node : m.owned) {
+        nodes_to_remove.append_non_duplicates(node);
+      }
+    }
+    else {
+      nodes_to_remove.append_non_duplicates(m.mix_source);
+      nodes_to_remove.append_non_duplicates(m.map_source);
+      if (m.mask_source != nullptr) {
+        nodes_to_remove.append_non_duplicates(m.mask_source);
+      }
     }
     from_chains[i]->layers.remove(from_index);
     chain_rebuild_links(*from_chains[i]);
@@ -1582,6 +1743,10 @@ bool BKE_paint_material_layer_group_make(Main &bmain,
    * separate chains, but they are the same group. */
   Vector<bNode *> instances;
   Vector<bNode *> nodes_to_remove;
+  /* A kept row that carries corrections gets a copy of its own Mix inside the folder -- the row
+   * its corrections hang on there. One identity for it, shared by every channel's copy, the way
+   * every row carries one marker across its channels. */
+  const bUUID keeper_copy_marker = BLI_uuid_generate_random();
   /* Freeing the group tree while a node still points at it leaves that pointer dangling, and the
    * next thing to read it trips the ID type assert rather than reporting the refusal. So the
    * instances go first, and only a tree nothing references is freed. */
@@ -1612,6 +1777,7 @@ bool BKE_paint_material_layer_group_make(Main &bmain,
                                   map_nodes_per_chain[chain_index],
                                   from,
                                   to,
+                                  keeper_copy_marker,
                                   chain_index == 0,
                                   nodes_to_remove))
     {
@@ -1971,6 +2137,13 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
   if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::Ungroup, plan, error)) {
     return fail(error);
   }
+  for (ChannelChain *chain : plan.chains) {
+    if (!chain->layers[plan.layer_index].mask_corrections.is_empty()) {
+      /* A folder's mask corrections shape its result as a whole; spliced out, the rows have no
+       * result left for them to shape, and moving them onto one row would draw something else. */
+      return fail(PaintMaterialLayerEditError::GroupHasMaskCorrections);
+    }
+  }
   /* 2. Shape: a bottom that is still a bare image is wrapped in a Mix node first, now that the
    * ungrouping is known to happen; the plan is read again afterwards. */
   if (plan.needs_bottom_normalize) {
@@ -1992,6 +2165,17 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
     bNode *instance = nullptr;
     /* Bottom first: index 0 is the map that goes back onto the group's own Mix node. */
     Vector<ChainLayer> layers;
+    /* Set when the sub-stack's bottom row IS the kept Mix's own content stack -- a folder made
+     * from a corrections-bearing row (spec 18 §4.5). Its nodes re-attach to the kept Mix, and no
+     * new row is spliced in for it. */
+    bool bottom_merged = false;
+    /* For a merged bottom row: the copied sockets the kept Mix re-adopts its content and its
+     * coverage from. */
+    bNode *keeper_top_node = nullptr;
+    bNodeSocket *keeper_top_socket = nullptr;
+    bNode *keeper_factor_node = nullptr;
+    bNodeSocket *keeper_factor_socket = nullptr;
+    Image *keeper_image = nullptr;
   };
   Vector<UngroupedChannel> unpacked;
   Vector<bNode *> created;
@@ -2055,17 +2239,113 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
     for (const int64_t index : inner.layers.index_range()) {
       ChainLayer &inner_layer = inner.layers[index];
       Map<const bNodeSocket *, bNodeSocket *> socket_map;
-      bNode *copy = bke::node_copy_with_mapping(&tree,
-                                                *inner_layer.node,
-                                                LIB_ID_COPY_DEFAULT,
-                                                std::nullopt,
-                                                std::nullopt,
-                                                socket_map);
-      if (copy == nullptr) {
-        discard();
-        return fail(PaintMaterialLayerEditError::CreationFailed);
+
+      if (index == 0 && !inner_layer.is_mix()) {
+        /* The bottom of the sub-stack is a bare map; it goes back onto the group's Mix node. */
+        bNode *copy = bke::node_copy_with_mapping(&tree,
+                                                  *inner_layer.node,
+                                                  LIB_ID_COPY_DEFAULT,
+                                                  std::nullopt,
+                                                  std::nullopt,
+                                                  socket_map);
+        if (copy == nullptr) {
+          discard();
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        created.append(copy);
+
+        ChainLayer layer;
+        layer.node = copy;
+        layer.image = inner_layer.image;
+        layer.output = bke::node_find_socket(*copy, SOCK_OUT, "Color"_ustr);
+        layer.factor = bke::node_find_socket(*copy, SOCK_OUT, "Alpha"_ustr);
+        if (layer.output == nullptr || layer.factor == nullptr) {
+          discard();
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        out.layers.append(layer);
+        continue;
       }
-      created.append(copy);
+
+      const bool has_corrections = !inner_layer.content_corrections.is_empty() ||
+                                   !inner_layer.mask_corrections.is_empty();
+      if (index == 0 && has_corrections) {
+        /* The sub-stack's bottom row is the kept Mix's own content stack -- the folder was made
+         * from a corrections-bearing row. Its owned nodes come back out and re-attach to the kept
+         * Mix; the Mix the folder held a copy of is not needed, the kept one serves. */
+        Vector<bNode *> owned;
+        layer_owned_nodes_collect(inner_layer, owned);
+        owned.remove_first_occurrence_and_reorder(inner_layer.node);
+        Map<const bNode *, bNode *> node_map;
+        if (!layer_owned_nodes_copy(tree, owned, socket_map, node_map)) {
+          for (bNode *node_copy : node_map.values()) {
+            created.append(node_copy);
+          }
+          discard();
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        for (bNode *node_copy : node_map.values()) {
+          created.append(node_copy);
+        }
+        /* What the copy read its content and its coverage from -- a correction's result, or the
+           map, and the coverage Multiply -- is what the kept Mix reads once the row is out. */
+        bNodeLink *top_feed = (inner_layer.top != nullptr) ?
+                                  sole_link_into(*const_cast<bNodeSocket *>(inner_layer.top)) :
+                                  nullptr;
+        bNodeLink *factor_feed = (inner_layer.factor != nullptr) ?
+                                     sole_link_into(
+                                         *const_cast<bNodeSocket *>(inner_layer.factor)) :
+                                     nullptr;
+        if (top_feed == nullptr || factor_feed == nullptr ||
+            node_map.lookup_ptr(top_feed->fromnode) == nullptr ||
+            node_map.lookup_ptr(factor_feed->fromnode) == nullptr ||
+            socket_map.lookup_ptr(top_feed->fromsock) == nullptr ||
+            socket_map.lookup_ptr(factor_feed->fromsock) == nullptr)
+        {
+          discard();
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        out.bottom_merged = true;
+        out.keeper_top_node = node_map.lookup(top_feed->fromnode);
+        out.keeper_top_socket = socket_map.lookup(top_feed->fromsock);
+        out.keeper_factor_node = node_map.lookup(factor_feed->fromnode);
+        out.keeper_factor_socket = socket_map.lookup(factor_feed->fromsock);
+        out.keeper_image = inner_layer.image;
+        continue;
+      }
+
+      bNode *copy = nullptr;
+      if (has_corrections) {
+        /* The row's corrections are spliced out with it (spec 18 §4.5): the owned set comes over
+         * with its links, and only what the row blends over is left to the chain's rebuild. */
+        Vector<bNode *> owned;
+        layer_owned_nodes_collect(inner_layer, owned);
+        Map<const bNode *, bNode *> node_map;
+        if (!layer_owned_nodes_copy(tree, owned, socket_map, node_map)) {
+          for (bNode *node_copy : node_map.values()) {
+            created.append(node_copy);
+          }
+          discard();
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        for (bNode *node_copy : node_map.values()) {
+          created.append(node_copy);
+        }
+        copy = node_map.lookup(inner_layer.node);
+      }
+      else {
+        copy = bke::node_copy_with_mapping(&tree,
+                                           *inner_layer.node,
+                                           LIB_ID_COPY_DEFAULT,
+                                           std::nullopt,
+                                           std::nullopt,
+                                           socket_map);
+        if (copy == nullptr) {
+          discard();
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        created.append(copy);
+      }
 
       ChainLayer layer;
       layer.node = copy;
@@ -2094,13 +2374,30 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
   for (UngroupedChannel &out : unpacked) {
     ChannelChain &chain = *out.chain;
     ChainLayer &keeper = chain.layers[plan.layer_index];
-    ChainLayer &bottom = out.layers.first();
 
-    /* The group's Mix node goes back to blending a map, which is what it did before grouping. */
-    relink_into(tree, *keeper.top, *keeper.node, *bottom.node, *bottom.output);
-    relink_into(tree, *keeper.factor, *keeper.node, *bottom.node, *bottom.factor);
-    keeper.image = bottom.image;
-    bke::node_position_relative(*bottom.node, *keeper.node, bottom.output, *keeper.top);
+    if (out.bottom_merged) {
+      /* The kept Mix re-adopts the content stack that came out of the folder: it reads the
+       * corrections' result and its coverage Multiply again, exactly as it did before grouping. */
+      relink_into(
+          tree, *keeper.top, *keeper.node, *out.keeper_top_node, *out.keeper_top_socket);
+      relink_into(tree,
+                  *keeper.factor,
+                  *keeper.node,
+                  *out.keeper_factor_node,
+                  *out.keeper_factor_socket);
+      keeper.image = out.keeper_image;
+      bke::node_position_relative(
+          *out.keeper_top_node, *keeper.node, out.keeper_top_socket, *keeper.top);
+    }
+    else {
+      ChainLayer &bottom = out.layers.first();
+
+      /* The group's Mix node goes back to blending a map, which is what it did before grouping. */
+      relink_into(tree, *keeper.top, *keeper.node, *bottom.node, *bottom.output);
+      relink_into(tree, *keeper.factor, *keeper.node, *bottom.node, *bottom.factor);
+      keeper.image = bottom.image;
+      bke::node_position_relative(*bottom.node, *keeper.node, bottom.output, *keeper.top);
+    }
 
     /* The two relinks above, and a previous channel's, invalidate the topology cache
      * #composite_mix_node_read now reads (to detect the opacity/coverage Multiply). */
@@ -2108,7 +2405,8 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
 
     /* Every layer above the bottom one is spliced into the outer chain, in order. */
     int insert_at = plan.layer_index + 1;
-    for (const int64_t index : out.layers.index_range().drop_front(1)) {
+    const int64_t splice_from = out.bottom_merged ? 0 : 1;
+    for (const int64_t index : out.layers.index_range().drop_front(splice_from)) {
       ChainLayer &layer = out.layers[index];
       CompositeMixNode mix;
       bNodeSocket *output = mix_output_find(*layer.node);
@@ -2121,7 +2419,7 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
       layer.output = output;
       chain.layers.insert(insert_at++, layer);
     }
-    restored_num = int(out.layers.size());
+    restored_num = int(out.layers.size()) + (out.bottom_merged ? 1 : 0);
     chain_rebuild_links(chain);
     nodes_to_remove.append_non_duplicates(out.instance);
   }
@@ -2183,6 +2481,13 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
         (source_link != nullptr) ? layer_group_tree_of(*source_link->fromnode) : nullptr;
     if (source_group == nullptr) {
       return fail(PaintMaterialLayerEditError::ChainNotPlain);
+    }
+
+    /* The folder's mask corrections belong to the group row, not to the tree it opens: the tree
+     * copy does not carry them, so they are copied onto the new row once it exists. */
+    Vector<PaintMaterialCorrectionRef> mask_refs;
+    for (const ChainCorrection &correction : source_layer.mask_corrections) {
+      mask_refs.append({ma.id.session_uid, correction.marker});
     }
 
     bNodeTree *group_copy = bke::node_tree_copy_tree(&bmain, *source_group);
@@ -2286,6 +2591,16 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     BKE_ntree_update_after_single_tree_change(bmain, tree);
     BKE_ntree_update_after_single_tree_change(bmain, *group_copy);
     paint_layer_edit_committed(bmain, ma, true);
+    if (!mask_refs.is_empty()) {
+      Vector<bUUID> created_corrections;
+      if (!BKE_paint_material_layer_corrections_copy(
+              bmain, mask_refs, ma, group_ordinal, created_corrections, nullptr, &error))
+      {
+        /* The duplicate stands; the corrections that could not follow go with it in the caller's
+         * undo step. */
+        return fail(error);
+      }
+    }
     if (r_ordinal != nullptr) {
       *r_ordinal = group_ordinal;
     }
@@ -2301,10 +2616,59 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     bNode *mix = nullptr;
     bNode *tex = nullptr;
     Image *image = nullptr;
+    /** Filled for an owned set (a row with corrections); empty for the single-node copies. */
+    Map<const bNode *, bNode *> node_map;
+  };
+  /* The maps deep-copied for the duplicate, by their source: a copy that shared the original's
+   * maps would be the same layer listed twice -- and a mask correction's shared map must stay one
+   * map across the channels, so the copies are made once per source image. */
+  Map<Image *, Image *> copied_images;
+  auto image_copy_get = [&](Image &source) -> Image * {
+    if (Image *const *found = copied_images.lookup_ptr(&source)) {
+      return *found;
+    }
+    Image *copy = id_cast<Image *>(BKE_id_copy(&bmain, &source.id));
+    if (copy != nullptr) {
+      copied_images.add_new(&source, copy);
+    }
+    return copy;
+  };
+  /* One new marker per source marker (spec 18 §4.5): a duplicate's corrections are new rows, not
+   * aliases of the originals, and every channel's copy of one correction shares its marker. */
+  struct MarkerCopy {
+    bUUID source;
+    bUUID copy;
+  };
+  Vector<MarkerCopy> correction_markers;
+  struct CorrectionMapCopy {
+    bUUID source_marker;
+    Image *image = nullptr;
+  };
+  Vector<CorrectionMapCopy> correction_map_copies;
+  /* Copies of the row's own mask, re-tagged with the duplicate's identity once it is minted. */
+  Vector<Image *> row_mask_copies;
+  /* The first node shown a copy takes the user the copy was created with; each further node -- a
+   * mask correction's map is one node per channel -- adds one of its own. The node's user of the
+   * original goes back either way. */
+  Set<Image *> assigned_copies;
+  auto image_copy_assign = [&](bNode &node, Image &copy) {
+    id_us_min(node.id);
+    node.id = &copy.id;
+    if (!assigned_copies.add(&copy)) {
+      id_us_plus(&copy.id);
+    }
   };
   Vector<DuplicatedLayer> copies;
   auto discard = [&]() {
     for (DuplicatedLayer &copy : copies) {
+      if (!copy.node_map.is_empty()) {
+        /* The owned set's copies hold real users of their own -- the originals' images, a shared
+         * group's tree -- and the removal is what hands those back. */
+        for (bNode *node_copy : copy.node_map.values()) {
+          bke::node_remove_node(&bmain, tree, *node_copy, true);
+        }
+        continue;
+      }
       if (copy.mix != nullptr) {
         bke::node_remove_node(&bmain, tree, *copy.mix, false);
       }
@@ -2317,6 +2681,14 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
       }
     }
     copies.clear();
+    for (Image *image : copied_images.values()) {
+      /* A generated blank no copied node ended up showing goes the way the add's own exits free
+       * theirs; one a node took over was already given back by the removal above. */
+      if (image->id.us == 0) {
+        BKE_id_free(&bmain, image);
+      }
+    }
+    copied_images.clear();
   };
 
   for (ChannelChain *chain_ptr : plan.chains) {
@@ -2324,6 +2696,109 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     ChainLayer &source = chain.layers[layer_index];
     DuplicatedLayer copy;
     copy.chain = &chain;
+
+    const bool has_corrections = !source.content_corrections.is_empty() ||
+                                 !source.mask_corrections.is_empty();
+    if (has_corrections) {
+      /* The corrections are duplicated with the row (spec 18 §4.5): the owned set comes over with
+       * its links, the maps it shows become new Image data-blocks, and the corrections get new
+       * identities. */
+      Vector<bNode *> owned;
+      layer_owned_nodes_collect(source, owned);
+      Map<const bNodeSocket *, bNodeSocket *> socket_map;
+      Map<const bNode *, bNode *> node_map;
+      if (!layer_owned_nodes_copy(tree, owned, socket_map, node_map)) {
+        copy.node_map = std::move(node_map);
+        copies.append(copy);
+        discard();
+        return fail(PaintMaterialLayerEditError::CreationFailed);
+      }
+      copy.mix = node_map.lookup(source.node);
+      copy.tex = (source.base_map != nullptr) ? node_map.lookup(source.base_map) : nullptr;
+      if (copy.tex != nullptr) {
+        Image *image_copy = (source.image != nullptr) ? image_copy_get(*source.image) : nullptr;
+        if (image_copy == nullptr) {
+          copy.node_map = std::move(node_map);
+          copies.append(copy);
+          discard();
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        /* The copied texture node still points at the original map, with the user
+         * #node_copy_with_mapping gave it, and is about to stop: without this the original keeps
+         * a user it no longer has. The copy needs no matching #id_us_plus -- a freshly created ID
+         * already carries one user, and this node is it. */
+        image_copy_assign(*copy.tex, *image_copy);
+        copy.image = image_copy;
+      }
+      for (const Vector<ChainCorrection> *rows :
+           {&source.content_corrections, &source.mask_corrections})
+      {
+        for (const ChainCorrection &correction : *rows) {
+          if (correction.map == nullptr || correction.image == nullptr) {
+            /* Absent in this channel: the copied correction stays Absent the same way. */
+            continue;
+          }
+          Image *image_copy = image_copy_get(*correction.image);
+          if (image_copy == nullptr) {
+            copy.node_map = std::move(node_map);
+            copies.append(copy);
+            discard();
+            return fail(PaintMaterialLayerEditError::CreationFailed);
+          }
+          image_copy_assign(*node_map.lookup(correction.map), *image_copy);
+          correction_map_copies.append({correction.marker, image_copy});
+        }
+      }
+      /* The row's own mask travels in the owned set too; a duplicate still showing it would paint
+       * into the original's mask. */
+      const bUUID source_marker = BKE_paint_material_layer_marker_get(*source.node);
+      for (bNode *node : owned) {
+        if (node->type_legacy != SH_NODE_TEX_IMAGE || node == source.base_map ||
+            node->id == nullptr || GS(node->id->name) != ID_IM)
+        {
+          continue;
+        }
+        Image &image = *id_cast<Image *>(node->id);
+        if (image.paint_layer_channel != PAINT_LAYER_MAP_MASK ||
+            !BLI_uuid_equal(image.paint_layer_id, source_marker))
+        {
+          continue;
+        }
+        Image *mask_copy = image_copy_get(image);
+        if (mask_copy == nullptr) {
+          copy.node_map = std::move(node_map);
+          copies.append(copy);
+          discard();
+          return fail(PaintMaterialLayerEditError::CreationFailed);
+        }
+        image_copy_assign(*node_map.lookup(node), *mask_copy);
+        row_mask_copies.append_non_duplicates(mask_copy);
+      }
+      for (const Vector<ChainCorrection> *rows :
+           {&source.content_corrections, &source.mask_corrections})
+      {
+        for (const ChainCorrection &correction : *rows) {
+          if (correction.mix == nullptr) {
+            continue;
+          }
+          bUUID new_marker = BLI_uuid_nil();
+          for (const MarkerCopy &marker : correction_markers) {
+            if (BLI_uuid_equal(marker.source, correction.marker)) {
+              new_marker = marker.copy;
+              break;
+            }
+          }
+          if (BLI_uuid_is_nil(new_marker)) {
+            new_marker = BLI_uuid_generate_random();
+            correction_markers.append({correction.marker, new_marker});
+          }
+          bke::paint_layer::marker_set(*node_map.lookup(correction.mix), new_marker);
+        }
+      }
+      copy.node_map = std::move(node_map);
+      copies.append(copy);
+      continue;
+    }
 
     bNodeLink *top_link = sole_link_into(*source.top);
     if (top_link == nullptr) {
@@ -2361,6 +2836,17 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     copies.append(copy);
   }
 
+  /* A correction's map carries its identity the way a layer's own maps carry the row's: the
+   * copied maps are re-tagged with the duplicate's regenerated markers. */
+  for (const CorrectionMapCopy &map_copy : correction_map_copies) {
+    for (const MarkerCopy &marker : correction_markers) {
+      if (BLI_uuid_equal(marker.source, map_copy.source_marker)) {
+        map_copy.image->paint_layer_id = marker.copy;
+        break;
+      }
+    }
+  }
+
   BKE_ntree_update_after_single_tree_change(bmain, tree);
   tree.ensure_topology_cache();
 
@@ -2386,9 +2872,16 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     tree.ensure_topology_cache();
     CompositeMixNode mix;
     bNodeSocket *output = mix_output_find(*copy.mix);
-    bNodeSocket *tex_color = bke::node_find_socket(*copy.tex, SOCK_OUT, "Color"_ustr);
-    bNodeSocket *tex_alpha = bke::node_find_socket(*copy.tex, SOCK_OUT, "Alpha"_ustr);
-    if (chain == nullptr || output == nullptr || tex_color == nullptr || tex_alpha == nullptr ||
+    /* The map copy is only looked at on the single-node path; an owned set carries its own links
+     * and needs none of the rewiring. */
+    bNodeSocket *tex_color = (copy.tex != nullptr) ?
+                                 bke::node_find_socket(*copy.tex, SOCK_OUT, "Color"_ustr) :
+                                 nullptr;
+    bNodeSocket *tex_alpha = (copy.tex != nullptr) ?
+                                 bke::node_find_socket(*copy.tex, SOCK_OUT, "Alpha"_ustr) :
+                                 nullptr;
+    if (chain == nullptr || output == nullptr ||
+        (copy.tex != nullptr && (tex_color == nullptr || tex_alpha == nullptr)) ||
         !composite_mix_node_read(*copy.mix, mix))
     {
       discard();
@@ -2402,11 +2895,20 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     layer.output = output;
     layer.image = copy.image;
 
-    bke::node_add_link(tree, *copy.tex, *tex_color, *copy.mix, *layer.top);
-    layer_factor_coverage_link(
-        tree, *copy.mix, *const_cast<bNodeSocket *>(mix.factor), *copy.tex, *tex_alpha, 1.0f);
+    if (copy.node_map.is_empty()) {
+      bke::node_add_link(tree, *copy.tex, *tex_color, *copy.mix, *layer.top);
+      layer_factor_coverage_link(
+          tree, *copy.mix, *const_cast<bNodeSocket *>(mix.factor), *copy.tex, *tex_alpha, 1.0f);
+    }
+    else {
+      /* The owned set is already wired: the map reads into the corrections and the corrections
+         into the Mix, and the coverage Multiply the source row had came along with its opacity. */
+      layer.base_map = copy.tex;
+    }
     bke::node_position_relative(*copy.mix, *chain->terminal_node, output, *chain->terminal);
-    bke::node_position_relative(*copy.tex, *copy.mix, tex_color, *layer.top);
+    if (copy.node_map.is_empty()) {
+      bke::node_position_relative(*copy.tex, *copy.mix, tex_color, *layer.top);
+    }
 
     chain->layers.insert(insert_at, layer);
     chain_rebuild_links(*chain);
@@ -2415,6 +2917,27 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     BKE_paint_material_layer_marker_set(*copy.mix, layer_id);
     if (copy.image != nullptr) {
       copy.image->paint_layer_id = layer_id;
+    }
+  }
+
+  for (Image *mask : row_mask_copies) {
+    mask->paint_layer_id = layer_id;
+  }
+  /* A channel with no graph of its own (AO) holds a correction's map by its tag alone, with no
+   * node the owned copy could carry it through: the duplicate's corrections get deep copies
+   * tagged with their new identity, each held by its creation user the way an enabled AO map is. */
+  for (const MarkerCopy &marker : correction_markers) {
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      if (info.socket_name != nullptr) {
+        continue;
+      }
+      Image *source_map = correction_tagged_map_find(bmain, marker.source, info.channel);
+      if (source_map == nullptr) {
+        continue;
+      }
+      if (Image *map_copy = id_cast<Image *>(BKE_id_copy(&bmain, &source_map->id))) {
+        map_copy->paint_layer_id = marker.copy;
+      }
     }
   }
 
@@ -2473,6 +2996,8 @@ bool BKE_paint_material_layer_remove(Main &bmain,
     bNodeLink *top_link = nullptr;
     bool bare_base = false;
     bool map_is_sole_user = false;
+    /** Every node the row owns, for a row with corrections; empty otherwise. */
+    Vector<bNode *> owned;
   };
   Vector<ResolvedRemoval> resolved;
   for (ChannelChain *chain_ptr : chains) {
@@ -2484,8 +3009,33 @@ bool BKE_paint_material_layer_remove(Main &bmain,
     bNodeLink *top_link = (removed.top == nullptr) ? nullptr : sole_link_into(*removed.top);
     const bool map_is_sole_user = top_link != nullptr &&
                                   top_link->fromsock->directly_linked_links().size() == 1;
-    resolved.append({chain_ptr, top_link, bare_base, map_is_sole_user});
+    ResolvedRemoval entry;
+    entry.chain = chain_ptr;
+    entry.top_link = top_link;
+    entry.bare_base = bare_base;
+    entry.map_is_sole_user = map_is_sole_user;
+    if (!removed.content_corrections.is_empty() || !removed.mask_corrections.is_empty()) {
+      layer_owned_nodes_collect(removed, entry.owned);
+    }
+    resolved.append(std::move(entry));
   }
+  /* A mask correction's map is one node every channel's correction reads, so a map is kept only
+   * when something outside *every* channel's owned set reads it -- decided now, while the links
+   * are the ones the sets were read from -- and each node is queued once. */
+  Vector<bNode *> all_owned;
+  for (const ResolvedRemoval &entry : resolved) {
+    for (bNode *node : entry.owned) {
+      all_owned.append_non_duplicates(node);
+    }
+  }
+  Set<bNode *> kept_maps;
+  for (bNode *node : all_owned) {
+    if (node->type_legacy == SH_NODE_TEX_IMAGE && !layer_owned_node_consumed_by(all_owned, *node))
+    {
+      kept_maps.add(node);
+    }
+  }
+  Set<bNode *> removal_queued;
 
   for (const ResolvedRemoval &entry : resolved) {
     ChannelChain &chain = *entry.chain;
@@ -2496,20 +3046,64 @@ bool BKE_paint_material_layer_remove(Main &bmain,
       if (entry.top_link == nullptr) {
         return fail(PaintMaterialLayerEditError::ChainNotPlain);
       }
-      ChainLayer new_base;
-      new_base.node = entry.top_link->fromnode;
-      new_base.output = entry.top_link->fromsock;
-      new_base.image = chain.layers[1].image;
+      ChainLayer &above = chain.layers[1];
       nodes_to_remove.append({chain.tree, chain.layers[0].node});
-      nodes_to_remove.append({chain.tree, chain.layers[1].node});
-      chain.layers.remove(0);
-      chain.layers[0] = new_base;
+      if (!above.content_corrections.is_empty() || !above.mask_corrections.is_empty()) {
+        /* The row above keeps its map as the new base; its corrections, its coverage Multiply and
+         * its mask go with the Mix that carried them (spec 18 §4.5). */
+        if (above.base_map == nullptr) {
+          return fail(PaintMaterialLayerEditError::ChainNotPlain);
+        }
+        for (bNode *node : entry.owned) {
+          if (node == above.base_map) {
+            /* The map stays: it is the new bottom the chain reads. */
+            continue;
+          }
+          if (removal_queued.add(node)) {
+            nodes_to_remove.append({chain.tree, node});
+          }
+        }
+        ChainLayer new_base;
+        new_base.node = above.base_map;
+        new_base.output = bke::node_find_socket(*above.base_map, SOCK_OUT, "Color"_ustr);
+        new_base.image = above.image;
+        if (new_base.output == nullptr) {
+          return fail(PaintMaterialLayerEditError::ChainNotPlain);
+        }
+        chain.layers.remove(0);
+        chain.layers[0] = new_base;
+      }
+      else {
+        ChainLayer new_base;
+        new_base.node = entry.top_link->fromnode;
+        new_base.output = entry.top_link->fromsock;
+        new_base.image = chain.layers[1].image;
+        nodes_to_remove.append({chain.tree, chain.layers[1].node});
+        chain.layers.remove(0);
+        chain.layers[0] = new_base;
+      }
     }
     else {
-      nodes_to_remove.append({chain.tree, chain.layers[layer_index].node});
-      /* The map that only this layer read goes with it; one shared with another layer stays. */
-      if (entry.map_is_sole_user) {
-        nodes_to_remove.append({chain.tree, entry.top_link->fromnode});
+      ChainLayer &removed = chain.layers[layer_index];
+      if (!removed.content_corrections.is_empty() || !removed.mask_corrections.is_empty()) {
+        /* The corrections are children of the row (spec 18 §4.5): the whole owned set goes with
+         * it. A map some hand-wired consumer outside the set still reads stays, the same rule
+         * that keeps a map shared with another row below. */
+        for (bNode *node : entry.owned) {
+          if (kept_maps.contains(node)) {
+            continue;
+          }
+          if (removal_queued.add(node)) {
+            nodes_to_remove.append({chain.tree, node});
+          }
+        }
+      }
+      else {
+        nodes_to_remove.append({chain.tree, chain.layers[layer_index].node});
+        /* The map that only this layer read goes with it; one shared with another layer stays. */
+        if (entry.map_is_sole_user) {
+          nodes_to_remove.append({chain.tree, entry.top_link->fromnode});
+        }
       }
       chain.layers.remove(layer_index);
     }

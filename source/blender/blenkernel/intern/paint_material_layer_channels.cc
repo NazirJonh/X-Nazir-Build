@@ -45,7 +45,10 @@
 #include "BLI_set.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_string_utf8.h"
+#include "BLI_utildefines.h"
 #include "BLI_vector.hh"
+
+#include <utility>
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
@@ -306,6 +309,9 @@ bool ensure_group_result_socket(Main &bmain,
  * blended by a keeper Mix. Every Mix carries its reference row's marker -- minted onto
  * the reference itself when an old stack never got one -- so the row keeps one identity in
  * every channel at once.
+ *
+ * \a r_built, when given, receives the chain it built: the handles its mirror-corrections pass
+ * (#ensure_corrections_mirror) inserts through.
  */
 static bool ensure_mirror_chain(Main &bmain,
                                 bNodeTree &tree,
@@ -313,6 +319,7 @@ static bool ensure_mirror_chain(Main &bmain,
                                 const ChannelChain &ref_chain,
                                 const EnsureTerminal &terminal,
                                 Vector<EnsureCreated> &r_created,
+                                ChannelChain *r_built,
                                 PaintMaterialLayerEditError &r_error)
 {
   /* 1. Create every node first: group instances only grow their sockets on a tree update. */
@@ -453,6 +460,181 @@ static bool ensure_mirror_chain(Main &bmain,
 
   /* 3. Wire bottom-up; the terminal takes the top, like every other chain. */
   chain_rebuild_links(built);
+  if (r_built != nullptr) {
+    *r_built = std::move(built);
+  }
+  return true;
+}
+
+/**
+ * The reference rows' corrections, mirrored into \a built's channel (spec 18 §4.5): every wired
+ * channel carries the same correction rows, so a migrated channel gets them too, and a channel
+ * that drifted -- a correction taken out of it by hand -- is brought back to the reference's
+ * sequence. A section whose UUID sequence differs is rebuilt: the rows the channel shows beyond
+ * the reference come out (#correction_channel_remove closes their links), then the reference's
+ * rows are inserted bottom to top -- an insert appends on top, so the order comes out right. Each
+ * insert starts Absent -- the shape #correction_channel_insert builds -- then takes the
+ * reference's label, blend, opacity and mute state, which are the row's, not the channel's. A
+ * mask section's shared map is wired in from the start, the way
+ * #BKE_paint_material_layer_correction_add gives a mask one; no map by that tag leaves the
+ * correction Absent here. A section the two chains already agree on is left untouched: the
+ * channel's own maps and mute states are its own.
+ *
+ * The inserts register their nodes with \a r_created, so a later failure of the migration takes
+ * them back out; an insert that refuses undoes its own nodes. \a r_changed says whether anything
+ * was built or taken out.
+ */
+static bool ensure_corrections_mirror(Main &bmain,
+                                      const ChannelChain &ref_chain,
+                                      ChannelChain &built,
+                                      Vector<EnsureCreated> &r_created,
+                                      bool &r_changed,
+                                      PaintMaterialLayerEditError &r_error)
+{
+  auto rows_have_corrections = [](const ChannelChain &chain) {
+    for (const ChainLayer &layer : chain.layers) {
+      if (!layer.content_corrections.is_empty() || !layer.mask_corrections.is_empty()) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (!rows_have_corrections(ref_chain) && !rows_have_corrections(built)) {
+    return true;
+  }
+  bNodeTree &tree = *built.tree;
+  for (const int64_t j : ref_chain.layers.index_range()) {
+    const ChainLayer &ref_layer = ref_chain.layers[j];
+    ChainLayer &layer = built.layers[j];
+    bool layer_changed = false;
+    for (const int section_i : IndexRange(2)) {
+      const auto section = PaintMaterialCorrectionSection(section_i);
+      const Vector<ChainCorrection> &ref_rows =
+          (section == PaintMaterialCorrectionSection::Content) ? ref_layer.content_corrections :
+                                                                 ref_layer.mask_corrections;
+      Vector<ChainCorrection> &rows = (section == PaintMaterialCorrectionSection::Content) ?
+                                          layer.content_corrections :
+                                          layer.mask_corrections;
+
+      bool same = ref_rows.size() == rows.size();
+      for (const int64_t i : ref_rows.index_range()) {
+        same = same && BLI_uuid_equal(ref_rows[i].marker, rows[i].marker);
+      }
+      if (same) {
+        continue;
+      }
+      for (const ChainCorrection &nodes : rows) {
+        /* The drifted row's own nodes go, links closed behind them (spec 18 §4.1a). */
+        tree.ensure_topology_cache();
+        correction_channel_remove(bmain, built, layer, nodes);
+        r_changed = true;
+      }
+      rows.clear();
+
+      for (const ChainCorrection &ref : ref_rows) {
+        /* The previous insert left the cache stale; this one reads the row's links. */
+        tree.ensure_topology_cache();
+        ChainCorrection nodes;
+        if (!correction_channel_insert(bmain, built, layer, section, ref.marker, nodes)) {
+          r_error = PaintMaterialLayerEditError::CreationFailed;
+          return false;
+        }
+        r_changed = true;
+        /* Registered so a later failure of this migration takes the row back out. */
+        r_created.append({&tree, nodes.mix, EnsureNodeKind::Plain});
+        r_created.append({&tree, nodes.factor_multiply, EnsureNodeKind::Plain});
+        if (nodes.over_invert != nullptr) {
+          r_created.append({&tree, nodes.over_invert, EnsureNodeKind::Plain});
+        }
+        if (nodes.over_combine != nullptr) {
+          r_created.append({&tree, nodes.over_combine, EnsureNodeKind::Plain});
+        }
+        tree.ensure_topology_cache();
+        CompositeMixNode row_mix;
+        CompositeMixNode ref_mix;
+        if (nodes.mix == nullptr || ref.mix == nullptr ||
+            !composite_mix_node_read(*nodes.mix, row_mix) ||
+            !composite_mix_node_read(*ref.mix, ref_mix))
+        {
+          r_error = PaintMaterialLayerEditError::ChainNotPlain;
+          return false;
+        }
+        /* The row is one identity across channels: name, blend, opacity and the on/off state
+         * are the reference's. */
+        if (ref.mix->label[0] != '\0') {
+          STRNCPY_UTF8(nodes.mix->label, ref.mix->label);
+        }
+        if (nodes.mix->type_legacy == SH_NODE_MIX && ref.mix->type_legacy == SH_NODE_MIX) {
+          static_cast<NodeShaderMix *>(nodes.mix->storage)->blend_type =
+              static_cast<const NodeShaderMix *>(ref.mix->storage)->blend_type;
+        }
+        else if (nodes.mix->type_legacy == SH_NODE_MIX &&
+                 ref.mix->type_legacy == SH_NODE_MIX_RGB_LEGACY)
+        {
+          static_cast<NodeShaderMix *>(nodes.mix->storage)->blend_type = int8_t(ref.mix->custom1);
+        }
+        if (ref_mix.factor_opacity != nullptr && row_mix.factor_opacity != nullptr) {
+          static_cast<bNodeSocketValueFloat *>(
+              const_cast<bNodeSocket *>(row_mix.factor_opacity)->default_value)
+              ->value = static_cast<const bNodeSocketValueFloat *>(
+                            ref_mix.factor_opacity->default_value)
+                            ->value;
+        }
+        if (section == PaintMaterialCorrectionSection::Mask) {
+          /* A mask has no per-channel choice (spec 18 §4.3): the shared map the reference shows
+           * is what this channel's correction shows too. */
+          Image *mask = correction_tagged_map_find(bmain, ref.marker, PAINT_LAYER_MAP_MASK);
+          if (mask != nullptr && row_mix.top != nullptr && row_mix.factor_coverage != nullptr)
+          {
+            bNode *tex = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+            bNodeSocket *tex_color = (tex != nullptr) ?
+                                         bke::node_find_socket(*tex, SOCK_OUT, "Color"_ustr) :
+                                         nullptr;
+            bNodeSocket *tex_alpha = (tex != nullptr) ?
+                                         bke::node_find_socket(*tex, SOCK_OUT, "Alpha"_ustr) :
+                                         nullptr;
+            if (tex == nullptr || tex_color == nullptr || tex_alpha == nullptr) {
+              if (tex != nullptr) {
+                bke::node_remove_node(&bmain, tree, *tex, false);
+              }
+              r_error = PaintMaterialLayerEditError::CreationFailed;
+              return false;
+            }
+            /* The image is shared with the other channels' nodes: this node is one more user. */
+            tex->id = &mask->id;
+            id_us_plus(&mask->id);
+            /* Registered as an Instance: the discard gives the user back before the node goes. */
+            r_created.append({&tree, tex, EnsureNodeKind::Instance});
+            /* The map's Color is what the correction blends towards, its Alpha what covers --
+             * the same reading the stack model and the compositor give a correction's map. */
+            bke::node_add_link(
+                tree, *tex, *tex_color, *nodes.mix, *const_cast<bNodeSocket *>(row_mix.top));
+            bke::node_add_link(tree,
+                               *tex,
+                               *tex_alpha,
+                               *nodes.factor_multiply,
+                               *const_cast<bNodeSocket *>(row_mix.factor_coverage));
+            bke::node_position_relative(
+                *tex, *nodes.mix, tex_color, *const_cast<bNodeSocket *>(row_mix.top));
+            nodes.map = tex;
+            nodes.image = mask;
+          }
+        }
+        /* The row switches as one (spec 18 §4.1): the reference's on/off state, applied the way
+         * #BKE_paint_material_layer_correction_set_enabled applies it -- Mix and maps muted, the
+         * over pair gated rather than muted. */
+        correction_row_enabled_apply(tree, nodes, (ref.mix->flag & NODE_MUTED) == 0);
+        rows.append(nodes);
+      }
+      layer_changed = true;
+    }
+    if (layer_changed) {
+      /* The rebuilt mask rows take the form what the row puts into this channel implies. */
+      layer_mask_corrections_sync(tree, layer);
+    }
+  }
+  /* The inserts wrote nodes, links and flags after the mirror's own update ran. */
+  BKE_ntree_update_after_single_tree_change(bmain, tree);
   return true;
 }
 
@@ -556,14 +738,23 @@ static bool ensure_migrate_channel(Main &bmain,
       terminal.in_out = SOCK_IN;
       terminal.socket_name = result_name;
     }
+    ChannelChain built;
     if (!ensure_mirror_chain(bmain,
                              *ref_chain.tree,
                              channel,
                              ref_chain,
                              terminal,
                              created,
+                             &built,
                              r_error))
     {
+      ensure_discard(bmain, created, images);
+      return false;
+    }
+    /* The corrections the reference rows carry are part of the row structure being mirrored
+     * (spec 18 §4.1a); a migrated channel without them would disagree with every other one. */
+    bool mirror_changed = false;
+    if (!ensure_corrections_mirror(bmain, ref_chain, built, created, mirror_changed, r_error)) {
       ensure_discard(bmain, created, images);
       return false;
     }
@@ -718,6 +909,10 @@ struct RealignTopRowNodes {
   bNode *map = nullptr;
   /** The Multiply a mask or the map's own alpha reads through, when the Factor has one. */
   bNode *coverage = nullptr;
+  /** The nodes of the row's corrections and its mask (spec 18 §4.5): they hang on the row's own
+   * inputs, so a trimmed row takes them with it. Empty for a row without corrections, which the
+   * removal below leaves exactly as it handled it before. */
+  Vector<bNode *> corrections;
 };
 
 RealignTopRowNodes realign_top_row_resolve(bNodeTree &tree, const ChainLayer &top)
@@ -736,11 +931,26 @@ RealignTopRowNodes realign_top_row_resolve(bNodeTree &tree, const ChainLayer &to
       }
     }
   }
+  /* What the row owns beyond the three nodes above -- its corrections and its mask -- is read
+   * with it by the chain collector, and goes when the row goes. Only rows with corrections take
+   * this path: a row without any is removed exactly as it was before they existed. */
+  if (!top.content_corrections.is_empty() || !top.mask_corrections.is_empty()) {
+    Vector<bNode *> owned;
+    layer_owned_nodes_collect(top, owned);
+    for (bNode *node : owned) {
+      if (node != row.mix && node != row.map && node != row.coverage) {
+        row.corrections.append_non_duplicates(node);
+      }
+    }
+  }
   return row;
 }
 
 void realign_top_row_remove(Main &bmain, bNodeTree &tree, const RealignTopRowNodes &row)
 {
+  for (bNode *node : row.corrections) {
+    bke::node_remove_node(&bmain, tree, *node, true);
+  }
   if (row.coverage != nullptr) {
     bke::node_remove_node(&bmain, tree, *row.coverage, true);
   }
@@ -852,6 +1062,25 @@ bool BKE_paint_material_layer_channels_realign(Main &bmain,
     if (!realign_channel_trim_to(bmain, ma, chain.channel, 0, error) ||
         !ensure_migrate_channel(bmain, ma, chain.channel, forest.first(), error))
     {
+      return fail(error);
+    }
+  }
+  /* The rows are level now; their corrections may not be -- a correction taken out of one channel
+   * by hand, say. Every channel carries the reference's correction rows (spec 18 §4.5), the same
+   * mirror a migrated channel gets; agreeing sections are left, and their per-channel maps and
+   * mute states with them. */
+  if (!chains_collect_forest(ma, forest, error)) {
+    return fail(error);
+  }
+  for (const int64_t ci : forest.index_range().drop_front(1)) {
+    const ChannelChain &ref_chain = forest.first().last();
+    ChannelChain &chain = forest[ci].last();
+    if (chain.layers.size() != ref_chain.layers.size()) {
+      /* The rows themselves failed to level above; nothing to mirror corrections onto. */
+      continue;
+    }
+    Vector<EnsureCreated> scratch_created;
+    if (!ensure_corrections_mirror(bmain, ref_chain, chain, scratch_created, changed, error)) {
       return fail(error);
     }
   }
@@ -1292,7 +1521,61 @@ void layer_coverage_restore(bNodeTree &tree,
   relink_into(tree, coverage, multiply, source, *output);
 }
 
+/**
+ * Coverage back on for a row whose base map just came on, when nothing covers it: the mask image
+ * when the row has one, otherwise what the row's content corrections accumulate over the map, and
+ * the map's own alpha for a row without any. A row with mask corrections is left alone -- their
+ * chain owns the coverage input, and #layer_mask_corrections_sync gives it its base.
+ */
+void layer_coverage_reconnect(bNodeTree &tree,
+                              const ChainLayer &layer,
+                              const CompositeMixNode &mix,
+                              bNode &map)
+{
+  if (!layer.mask_corrections.is_empty()) {
+    return;
+  }
+  tree.ensure_topology_cache();
+  bNodeSocket &coverage = const_cast<bNodeSocket &>(*mix.factor_coverage);
+  if (socket_has_link(coverage)) {
+    return;
+  }
+  const bool has_mask = layer_mask_node_find(tree, BKE_paint_material_layer_marker_get(*layer.node)) !=
+                        nullptr;
+  if (!has_mask && !layer.content_corrections.is_empty() &&
+      layer.content_corrections.last().over_combine != nullptr)
+  {
+    bNode &over = *layer.content_corrections.last().over_combine;
+    if (bNodeSocket *over_out = static_cast<bNodeSocket *>(over.outputs.first)) {
+      relink_into(tree, coverage, coverage.owner_node(), over, *over_out);
+    }
+    return;
+  }
+  layer_coverage_restore(tree, layer, mix, map);
+}
+
 }  // namespace
+
+void channel_map_mute_set(bNodeTree &tree, bNode &map, const bool enable)
+{
+  /* The muted map only spares the sampler; the coverage input's explicit zero -- the caller's
+   * clear -- is what makes the channel contribute nothing (I1). */
+  SET_FLAG_FROM_TEST(map.flag, !enable, NODE_MUTED);
+  BKE_ntree_update_tag_node_mute(&tree, &map);
+}
+
+Image *correction_tagged_map_find(Main &bmain, const bUUID &marker, const int channel)
+{
+  for (Image &image : bmain.images) {
+    if (image.paint_layer_channel != channel) {
+      continue;
+    }
+    if (BLI_uuid_equal(image.paint_layer_id, marker)) {
+      return &image;
+    }
+  }
+  return nullptr;
+}
 
 void BKE_paint_material_layer_channel_states_get(
     Main &bmain,
@@ -1400,20 +1683,26 @@ bool BKE_paint_material_layer_channel_enabled_set(Main &bmain,
   }
   const PaintMaterialLayerKind kind = BKE_paint_material_layer_kind_get(*any_row.node);
   if (!enable) {
-    /* The active layer is found through the maps its enabled channels bind; with none left on it
-     * could no longer be found, nor switched back on. Every kind of row keeps one. */
-    int enabled_num = 0;
+    /* The active layer is found through the channels it paints (spec 18 I2'): its base's enabled
+     * ones, and the ones its corrections keep painting while the base is Absent or Disabled
+     * there. The toggle only touches the base, so what is left when it is off is exactly what
+     * the corrections still bring -- a row whose correction paints the channel being switched
+     * off keeps painting it, and stays findable either way. */
+    bool paints_somewhere = false;
     for (ChannelChain *other : plan.chains) {
+      other->tree->ensure_topology_cache();
       CompositeMixNode other_mix;
       PaintMaterialLayerChannelState other_state = PaintMaterialLayerChannelState::Absent;
-      other->tree->ensure_topology_cache();
-      if (layer_channel_state_read(other->layers[plan.layer_index], other_mix, other_state) &&
-          other_state == PaintMaterialLayerChannelState::Enabled)
-      {
-        enabled_num++;
+      const bool base_on = layer_channel_state_read(other->layers[plan.layer_index], other_mix,
+                                                    other_state) &&
+                           other_state == PaintMaterialLayerChannelState::Enabled &&
+                           other->channel != channel;
+      if (base_on || row_channel_painted_by_corrections(other->layers[plan.layer_index])) {
+        paints_somewhere = true;
+        break;
       }
     }
-    if (enabled_num <= 1) {
+    if (!paints_somewhere) {
       return fail(PaintMaterialLayerEditError::LastEnabledChannel);
     }
   }
@@ -1424,19 +1713,37 @@ bool BKE_paint_material_layer_channel_enabled_set(Main &bmain,
   if (chain != nullptr && state != PaintMaterialLayerChannelState::Absent) {
     release_map();
     bNodeTree &tree = *chain->tree;
-    bNode &map = *layer_map_node(mix);
+    /* The row's own map sits directly on its map input -- or below the content corrections that
+     * hang there (spec 18 I1'); it is the node a switched-off channel mutes. */
+    bNode *row_map = layer_map_node(mix);
+    if (row_map == nullptr) {
+      row_map = chain->layers[plan.layer_index].base_map;
+    }
+    if (row_map == nullptr) {
+      return fail(PaintMaterialLayerEditError::ChainNotPlain);
+    }
+    bNode &map = *row_map;
     if (enable) {
-      map.flag &= ~NODE_MUTED;
-      BKE_ntree_update_tag_node_mute(&tree, &map);
-      layer_coverage_restore(tree, chain->layers[plan.layer_index], mix, map);
+      channel_map_mute_set(tree, map, true);
+      /* The coverage input keeps whatever covered the row before -- a content correction's
+       * accumulated coverage when corrections hang on it. Only a row whose coverage was taken
+       * away reads its mask, or its own map's alpha, back. */
+      layer_coverage_reconnect(tree, chain->layers[plan.layer_index], mix, map);
     }
     else {
-      layer_coverage_clear(tree, mix);
-      /* Only spares the sampler; the zero coverage above is what makes the channel contribute
-       * nothing (I1). */
-      map.flag |= NODE_MUTED;
-      BKE_ntree_update_tag_node_mute(&tree, &map);
+      /* The row's corrections keep painting this channel when its base goes off (spec 18 I2'):
+       * the coverage they accumulate stays on the row's Multiply, and the muted map reads as an
+       * absent base under them. With nothing of the row's own left painting, the coverage goes
+       * back to the explicit-zero form (I1) -- on the coverage input itself, unless mask
+       * corrections own it: their chain stays linked, and the sync below zeroes it instead. */
+      const ChainLayer &layer = chain->layers[plan.layer_index];
+      if (!row_channel_painted_by_corrections(layer) && layer.mask_corrections.is_empty()) {
+        layer_coverage_clear(tree, mix);
+      }
+      channel_map_mute_set(tree, map, false);
     }
+    /* The mask corrections follow what the row now puts into the channel (spec 18 §4.3). */
+    layer_mask_corrections_sync(tree, chain->layers[plan.layer_index]);
     BKE_ntree_update_after_single_tree_change(bmain, tree);
     if (&tree != ma.nodetree) {
       DEG_id_tag_update(&tree.id, ID_RECALC_SYNC_TO_EVAL);
@@ -1513,9 +1820,41 @@ bool BKE_paint_material_layer_channel_enabled_set(Main &bmain,
   owned_map = nullptr;
   bNodeTree &tree = *chain->tree;
   ChainLayer &layer = chain->layers[plan.layer_index];
-  bke::node_add_link(tree, *map, *map_color, *layer.node, const_cast<bNodeSocket &>(*mix.top));
-  bke::node_position_relative(*map, *layer.node, nullptr, const_cast<bNodeSocket &>(*mix.top));
-  layer_coverage_restore(tree, layer, mix, *map);
+  if (layer.content_corrections.is_empty()) {
+    bke::node_add_link(tree, *map, *map_color, *layer.node, const_cast<bNodeSocket &>(*mix.top));
+    bke::node_position_relative(*map, *layer.node, nullptr, const_cast<bNodeSocket &>(*mix.top));
+  }
+  else {
+    /* Under content corrections the map input is theirs: the new map is the base of their stack,
+     * feeding the lowest correction's base and, by its alpha, the lowest over pair's `a_below`. A
+     * second link into the row's map input would be a shape nothing reads. */
+    const ChainCorrection &lowest = layer.content_corrections.first();
+    tree.ensure_topology_cache();
+    CompositeMixNode lowest_mix;
+    bNodeSocket *map_alpha = bke::node_find_socket(*map, SOCK_OUT, "Alpha"_ustr);
+    if (lowest.mix != nullptr && map_alpha != nullptr &&
+        composite_mix_node_read(*lowest.mix, lowest_mix) && lowest_mix.bottom != nullptr)
+    {
+      bNodeSocket &base = const_cast<bNodeSocket &>(*lowest_mix.bottom);
+      relink_into(tree, base, *lowest.mix, *map, *map_color);
+      bke::node_position_relative(*map, *lowest.mix, map_color, base);
+      for (const std::pair<bNode *, int> &input : {std::pair<bNode *, int>{lowest.over_invert, 1},
+                                                   std::pair<bNode *, int>{lowest.over_combine, 2}})
+      {
+        if (input.first == nullptr) {
+          continue;
+        }
+        if (bNodeSocket *socket = static_cast<bNodeSocket *>(
+                BLI_findlink(&input.first->inputs, input.second)))
+        {
+          relink_into(tree, *socket, *input.first, *map, *map_alpha);
+        }
+      }
+    }
+  }
+  layer.base_map = map;
+  layer_coverage_reconnect(tree, layer, mix, *map);
+  layer_mask_corrections_sync(tree, layer);
 
   /* 3.5 */
   chain_rebuild_links(*chain);

@@ -376,12 +376,76 @@ bool composite_mix_channel_state_get(const CompositeMixNode &mix,
     r_state = PaintMaterialLayerChannelState::Absent;
     return true;
   }
+  /* A correction hanging on the map input owns the shape between the layer and its map. The
+   * coverage input it relinks is the over chain's, so the unlinked-coverage test below can no
+   * longer see a switched-off channel: the state is the base map's, read under the corrections
+   * (spec 18 I1'). */
+  const Span<const bNodeLink *> top_links = mix.top->directly_linked_links();
+  if (top_links.size() == 1 && top_links[0]->is_available() && !top_links[0]->is_muted() &&
+      bke::paint_layer::node_is_correction(*top_links[0]->fromnode))
+  {
+    return composite_layer_base_state_get(mix.top->owner_node(), r_state);
+  }
+  /* Mask corrections own the coverage input the same way: it stays linked to their chain in every
+   * state, so the muted map is again what tells a switched-off channel apart. */
+  const Span<const bNodeLink *> coverage_links = mix.factor_coverage->directly_linked_links();
+  if (coverage_links.size() == 1 && coverage_links[0]->is_available() &&
+      !coverage_links[0]->is_muted() &&
+      bke::paint_layer::node_is_correction(*coverage_links[0]->fromnode))
+  {
+    return composite_layer_base_state_get(mix.top->owner_node(), r_state);
+  }
   if (composite_mix_map_node(mix) == nullptr) {
     return false;
   }
   r_state = composite_mix_coverage_off(mix) ? PaintMaterialLayerChannelState::Disabled :
                                               PaintMaterialLayerChannelState::Enabled;
   return true;
+}
+
+bool composite_layer_base_state_get(const bNode &layer_mix,
+                                    PaintMaterialLayerChannelState &r_state)
+{
+  CompositeMixNode mix;
+  if (!composite_mix_node_read(layer_mix, mix) || mix.top == nullptr) {
+    return false;
+  }
+  /* Descend the content stack by its links, corrections included. A muted node must not stop the
+   * walk: a muted map is exactly the Disabled state this has to report, and a muted correction
+   * still hangs where it hangs. Reroutes and anything else this shape does not build are not one
+   * of the three states. */
+  const bNodeSocket *socket = mix.top;
+  for (int step = 0; step < 64; step++) {
+    if (socket->directly_linked_links().is_empty()) {
+      /* No map below the corrections: whatever they hold, the layer is Absent here. */
+      r_state = PaintMaterialLayerChannelState::Absent;
+      return true;
+    }
+    const bNodeLink *link = socket->directly_linked_links()[0];
+    if (!link->is_available() || link->is_muted()) {
+      return false;
+    }
+    const bNode &from = *link->fromnode;
+    if (from.type_legacy == SH_NODE_TEX_IMAGE) {
+      /* The layer's own map. Under corrections the coverage input is fed by the over chain, so
+       * the muted map is what tells a switched-off channel from a live one. */
+      r_state = from.is_muted() ? PaintMaterialLayerChannelState::Disabled :
+                                  PaintMaterialLayerChannelState::Enabled;
+      return true;
+    }
+    if (!bke::paint_layer::node_is_correction(from) ||
+        bke::paint_layer::correction_section_get(from) !=
+            PaintMaterialCorrectionSection::Content)
+    {
+      return false;
+    }
+    CompositeMixNode below;
+    if (!composite_mix_node_read(from, below) || below.bottom == nullptr) {
+      return false;
+    }
+    socket = below.bottom;
+  }
+  return false;
 }
 
 /**
@@ -510,6 +574,191 @@ static bool composite_stack_collect_group(const bNodeSocket &socket,
   return false;
 }
 
+/**
+ * The corrections hanging on \a socket's input, walked down by their links to what feeds them.
+ *
+ * The walk follows the links, not #composite_source_node_shallow: a muted node must not stop the
+ * reading of the shape, because a muted correction still hangs where it hangs -- it is collected
+ * switched off instead. Reroutes and muted links are the shapes the chain reader refuses, and so
+ * does this. On return \a r_base is the socket the corrections sit on -- the layer's map, a mask
+ * image, the "over" pair's output, or nothing, which the caller tells apart -- and
+ * \a r_any_contributes says whether any correction brings pixels of its own, the test that keeps
+ * a switched-off channel from swallowing a row that its corrections still paint (spec 18 I2').
+ *
+ * \return false when the chain's shape is not one this module reproduces: the whole channel goes
+ * to the bake rather than being composited wrong.
+ */
+static bool composite_corrections_walk(const bNodeSocket &socket,
+                                       const PaintMaterialCorrectionSection section,
+                                       Vector<PaintMaterialCompositeCorrection> &r_corrections,
+                                       const bNodeSocket *&r_base,
+                                       bool &r_any_contributes)
+{
+  r_corrections.clear();
+  r_any_contributes = false;
+  const bNodeSocket *current = &socket;
+  /* A malformed tree can in principle cycle; bound the walk rather than trust the data. */
+  for (int step = 0; step < 64; step++) {
+    const Span<const bNodeLink *> links = current->directly_linked_links();
+    if (links.is_empty()) {
+      /* Nothing under the corrections: the base is absent, the layer's own shape. */
+      r_base = current;
+      return true;
+    }
+    const bNodeLink *link = links[0];
+    const bNode &from = *link->fromnode;
+    if (!bke::paint_layer::node_is_correction(from)) {
+      /* The map, a mask image, the "over" pair, or something the caller will refuse -- the
+       * corrections end here either way. */
+      r_base = current;
+      return true;
+    }
+    /* A correction only hangs here in the shape the engine builds, which is one available link. */
+    if (links.size() != 1 || !link->is_available()) {
+      return false;
+    }
+    if (bke::paint_layer::correction_section_get(from) != section) {
+      /* A correction of the other section does not belong on this path. */
+      r_base = current;
+      return true;
+    }
+    CompositeMixNode corr;
+    if (!composite_mix_node_read(from, corr) || corr.top == nullptr || corr.bottom == nullptr) {
+      return false;
+    }
+    if (!corr.blend_supported) {
+      /* As with a layer's own blend: the bake reproduces it, a byte composite cannot. */
+      return false;
+    }
+
+    PaintMaterialCompositeCorrection correction;
+    correction.blend = corr.blend;
+    correction.marker = bke::paint_layer::marker_get(from);
+    /* Switched off twice over: a muted node, or the unlinked-coverage form (invariant I1) whose
+     * factor is zero by construction. The buffer model reads a correction's coverage from its own
+     * alpha, so the latter must be carried as off rather than applied at full alpha. */
+    correction.enabled = !from.is_muted() && !composite_mix_coverage_off(corr);
+    correction.row_enabled = !from.is_muted();
+    /* The same reading of the opacity a layer row gets: the coverage Multiply's constant, or the
+     * bare Factor when the per-channel shape is not there. */
+    if (corr.factor_opacity != nullptr) {
+      correction.opacity =
+          static_cast<const bNodeSocketValueFloat *>(corr.factor_opacity->default_value)->value;
+    }
+    else if (corr.factor != nullptr &&
+             BKE_paint_material_source_socket(*corr.factor) == nullptr)
+    {
+      correction.opacity =
+          static_cast<const bNodeSocketValueFloat *>(corr.factor->default_value)->value;
+    }
+    /* The correction's own map: the one Image Texture its top input reads, null when it is
+     * Absent in this channel. */
+    const bNode *map_node = composite_mix_map_node(corr);
+    if (map_node != nullptr) {
+      if (map_node->id == nullptr || GS(map_node->id->name) != ID_IM) {
+        return false;
+      }
+      Image *image = id_cast<Image *>(map_node->id);
+      if (image->source == IMA_SRC_TILED) {
+        /* A tiled image has no single buffer to composite, the same rule as everywhere here. */
+        return false;
+      }
+      correction.image = image;
+    }
+    else if (!corr.top->directly_linked_links().is_empty()) {
+      /* Fed, but not by the one Image Texture a correction map is. */
+      return false;
+    }
+    r_any_contributes = r_any_contributes ||
+                        (correction.enabled && (correction.image != nullptr ||
+                                                (corr.factor_coverage != nullptr &&
+                                                 !corr.factor_coverage->directly_linked_links()
+                                                      .is_empty())));
+    r_corrections.append(correction);
+    current = corr.bottom;
+  }
+  return false;
+}
+
+/**
+ * Append the layer \a mix builds, carrying the corrections walked off its inputs.
+ *
+ * A layer whose corrections contribute is collected even when its own coverage is switched off
+ * (the unlinked-coverage shape): the corrections are what the row still paints with (spec 18
+ * I2'). Its base map may be absent entirely, which is why #color_image may be left null -- the
+ * buffer model composites the corrections over transparency then.
+ *
+ * The coverage the layer blends by comes from whatever fed the coverage input under the mask
+ * corrections: a mask image stays a mask image, while the map's own alpha and the content
+ * corrections' accumulated "over" coverage both read as the layer masking itself by its own
+ * alpha -- the buffer model's way of saying the factor is that accumulated alpha.
+ *
+ * \param base_on: the row's own map is on in this channel. A Disabled map stays linked but is
+ * muted, which shader localization reads as no map at all -- so it composites as an absent base.
+ */
+static bool composite_collect_layer_with_corrections(
+    const CompositeMixNode &mix,
+    const Vector<PaintMaterialCompositeCorrection> &content_corrections,
+    const Vector<PaintMaterialCompositeCorrection> &mask_corrections,
+    const bNodeSocket &content_base,
+    const bNodeSocket *coverage_base,
+    const bool base_on,
+    PaintMaterialCompositeImageLayer &r_layer,
+    Vector<PaintMaterialCompositeImageLayer> &r_layers)
+{
+  r_layer.content_corrections = content_corrections;
+  r_layer.mask_corrections = mask_corrections;
+
+  /* The base under the content corrections: one image, or nothing -- Absent in this channel. */
+  if (base_on && !content_base.directly_linked_links().is_empty()) {
+    if (!composite_image_from_socket(content_base, r_layer.color_image, r_layer.color_iuser)) {
+      return false;
+    }
+  }
+
+  /* The layer's own opacity, kept editable by the coverage Multiply the corrections leave in
+   * place; a bare factor keeps its own constant. A factor linked without a Multiply has already
+   * been consumed as the coverage above, and leaves nothing editable. */
+  if (mix.factor_opacity != nullptr) {
+    r_layer.opacity =
+        static_cast<const bNodeSocketValueFloat *>(mix.factor_opacity->default_value)->value;
+  }
+  else if (mix.factor != nullptr &&
+           BKE_paint_material_source_socket(*mix.factor) == nullptr)
+  {
+    r_layer.opacity =
+        static_cast<const bNodeSocketValueFloat *>(mix.factor->default_value)->value;
+  }
+
+  /* Self-masking by default: the map's own alpha, or -- with an absent base -- the corrections'
+   * accumulated coverage, which an absent map reads as zero. */
+  r_layer.mask_from_alpha = true;
+  r_layer.mask_image = r_layer.color_image;
+  r_layer.mask_iuser = r_layer.color_iuser;
+  if (coverage_base != nullptr && !coverage_base->directly_linked_links().is_empty()) {
+    bool coverage_from_alpha = false;
+    Image *coverage_image = nullptr;
+    const ImageUser *coverage_iuser = nullptr;
+    if (composite_image_from_socket(
+            *coverage_base, coverage_image, coverage_iuser, &coverage_from_alpha))
+    {
+      if (!coverage_from_alpha) {
+        /* A mask image of its own, rather than the map's alpha. */
+        r_layer.mask_image = coverage_image;
+        r_layer.mask_iuser = coverage_iuser;
+        r_layer.mask_from_alpha = false;
+      }
+    }
+    else if (content_corrections.is_empty()) {
+      /* Not an image and nothing of the layer's own that could have accumulated there: a shape
+       * this module does not build. */
+      return false;
+    }
+  }
+  r_layers.append(r_layer);
+  return true;
+}
+
 static bool composite_stack_collect(const bNodeSocket &socket,
                                     Vector<PaintMaterialCompositeImageLayer> &r_layers,
                                     const int depth)
@@ -571,11 +820,50 @@ static bool composite_stack_collect(const bNodeSocket &socket,
     return false;
   }
 
+  /* The corrections hanging on the layer's own inputs, walked down to whatever feeds them: the
+   * content stack off the map input, the mask chain off the coverage input. */
+  Vector<PaintMaterialCompositeCorrection> content_corrections;
+  bool content_contributes = false;
+  const bNodeSocket *content_base = mix.top;
+  if (!composite_corrections_walk(*mix.top,
+                                  PaintMaterialCorrectionSection::Content,
+                                  content_corrections,
+                                  content_base,
+                                  content_contributes))
+  {
+    return false;
+  }
+  Vector<PaintMaterialCompositeCorrection> mask_corrections;
+  bool mask_contributes = false;
+  const bNodeSocket *coverage_base = nullptr;
+  {
+    const bNodeSocket *coverage_socket = (mix.factor_opacity != nullptr) ? mix.factor_coverage :
+                                                                          mix.factor;
+    if (coverage_socket != nullptr &&
+        !composite_corrections_walk(*coverage_socket,
+                                    PaintMaterialCorrectionSection::Mask,
+                                    mask_corrections,
+                                    coverage_base,
+                                    mask_contributes))
+    {
+      return false;
+    }
+  }
+  const bool has_corrections = !content_corrections.is_empty() || !mask_corrections.is_empty();
+
   PaintMaterialCompositeImageLayer layer;
   layer.blend = mix.blend;
 
   const bNode *top_source = composite_source_node_shallow(*mix.top);
   if (top_source != nullptr && BKE_paint_material_is_layer_group(*top_source)) {
+    if (has_corrections) {
+      /* A mask correction on a folder limits the folder's result as a whole (spec 18 §4.3), but
+       * flattening lists the layers it holds one by one: there is no combined folder buffer for
+       * the correction to shape, and applying it to each layer's own coverage would composite
+       * something else. Not a shape this module reproduces -- the channel goes to the bake,
+       * which evaluates the graph properly, rather than one that quietly differs. */
+      return false;
+    }
     /* An isolated group flattens into this list only when the node above it does nothing but
      * stack the two: any other blend, or a factor below one, composites the group as a whole and
      * is not the same as compositing its layers one after another. Reporting those as not-a-stack
@@ -593,6 +881,29 @@ static bool composite_stack_collect(const bNodeSocket &socket,
       return false;
     }
     return composite_stack_collect_group(*mix.top, *top_source, r_layers, depth);
+  }
+
+  if (has_corrections) {
+    /* What the row puts into this channel (spec 18 I2'): its own map switched on, or a content
+     * correction painting. A mask correction brings no pixels of its own -- where the row puts
+     * nothing in, its mask chain is zeroed in the graph (#layer_mask_corrections_sync) -- so it
+     * never keeps a row. A base the reader does not recognize keeps the old reading: on. */
+    PaintMaterialLayerChannelState base_state = PaintMaterialLayerChannelState::Enabled;
+    const bool base_on = !composite_layer_base_state_get(*shallow_source, base_state) ||
+                         base_state == PaintMaterialLayerChannelState::Enabled;
+    if (!base_on && !content_contributes) {
+      /* Absent or Disabled in this channel, and nothing the corrections hold brings pixels back:
+       * it contributes nothing and the rows below composite exactly as if it were not there. */
+      return true;
+    }
+    return composite_collect_layer_with_corrections(mix,
+                                                    content_corrections,
+                                                    mask_corrections,
+                                                    *content_base,
+                                                    coverage_base,
+                                                    base_on,
+                                                    layer,
+                                                    r_layers);
   }
 
   if (composite_mix_coverage_off(mix)) {
@@ -696,6 +1007,17 @@ static Image *composite_layer_map_find(const Main &bmain, const bUUID &layer_id,
   return nullptr;
 }
 
+/** The image tagged as the map of the correction \a marker in \a channel, or null. */
+static Image *composite_correction_map_find(const Main &bmain,
+                                            const bUUID &marker,
+                                            const int channel)
+{
+  if (BLI_uuid_is_nil(marker)) {
+    return nullptr;
+  }
+  return composite_layer_map_find(bmain, marker, channel);
+}
+
 /**
  * Assemble \a channel from the paint layers themselves rather than from the graph.
  *
@@ -706,7 +1028,10 @@ static Image *composite_layer_map_find(const Main &bmain, const bUUID &layer_id,
  * \a channel is looked up by its #Image.paint_layer_id.
  *
  * A layer with no map for this channel contributes nothing and is skipped, rather than failing the
- * whole stack: a user who baked AO for one layer only should still see that layer's AO.
+ * whole stack: a user who baked AO for one layer only should still see that layer's AO. The same
+ * holds for a layer's corrections, whose maps are tagged by the correction's marker -- one without
+ * a map here is kept, Absent, since the correction still exists in the channel the row was built
+ * from.
  */
 static bool composite_stack_from_layer_maps(
     const Main &bmain,
@@ -734,6 +1059,27 @@ static bool composite_stack_from_layer_maps(
        * same relationship holds for this channel's map. */
       layer.mask_image = map;
       layer.mask_iuser = nullptr;
+    }
+    /* The reference's corrections arrive pointing at the reference channel's maps; this channel's
+     * own are found by the correction's marker, the way the layer's own map was. */
+    layer.content_corrections.clear();
+    for (const PaintMaterialCompositeCorrection &correction : reference.content_corrections) {
+      PaintMaterialCompositeCorrection remapped = correction;
+      remapped.image = composite_correction_map_find(bmain, correction.marker, channel);
+      remapped.iuser = nullptr;
+      /* The reference channel's coverage says whether *its* map is on; this channel's map is on
+       * exactly when it exists, as long as the row itself is. */
+      remapped.enabled = correction.row_enabled && remapped.image != nullptr;
+      layer.content_corrections.append(remapped);
+    }
+    layer.mask_corrections.clear();
+    for (const PaintMaterialCompositeCorrection &correction : reference.mask_corrections) {
+      PaintMaterialCompositeCorrection remapped = correction;
+      /* A mask has one map for every channel (spec 18 §4.3), tagged with the mask role rather
+       * than with a channel. */
+      remapped.image = composite_correction_map_find(bmain, correction.marker, PAINT_LAYER_MAP_MASK);
+      remapped.iuser = nullptr;
+      layer.mask_corrections.append(remapped);
     }
     r_layers.append(layer);
   }
@@ -938,6 +1284,36 @@ static float mask_factor_at(
 }
 
 /**
+ * The mean colour and the alpha of a mask-correction pixel, read the way #mask_factor_at reads a
+ * mask.
+ *
+ * A mask correction blends a coverage factor, not a colour, so its buffer is sampled as the
+ * scalar the graph's color-to-value conversion would produce -- the mean of its RGB -- while its
+ * own alpha is the coverage the correction applies with.
+ */
+static void correction_mask_values_at(const ImBuf *ibuf,
+                                      const int x,
+                                      const int y,
+                                      float &r_gray,
+                                      float &r_alpha)
+{
+  const int channels = ibuf->channels == 0 ? 4 : ibuf->channels;
+  const int64_t offset = (int64_t(y) * ibuf->x + x) * channels;
+  if (ibuf->byte_buffer.data != nullptr) {
+    const uchar *pixel = ibuf->byte_data() + offset;
+    r_gray = (float(pixel[0]) + float(pixel[1]) + float(pixel[2])) / (3.0f * 255.0f);
+    r_alpha = channels == 4 ? float(pixel[3]) / 255.0f : 1.0f;
+  }
+  else {
+    const float *pixel = ibuf->float_buffer.data + offset;
+    r_gray = (pixel[0] + pixel[1] + pixel[2]) / 3.0f;
+    r_alpha = channels == 4 ? pixel[3] : 1.0f;
+  }
+  r_gray = clamp_f(r_gray, 0.0f, 1.0f);
+  r_alpha = clamp_f(r_alpha, 0.0f, 1.0f);
+}
+
+/**
  * Lay the tangent-space normal \a top over \a bottom, both encoded in [0, 1].
  *
  * The whiteout blend: decode both, add the detail map's slope to the base map's, keep the product
@@ -1033,6 +1409,123 @@ static void blend_layer_byte(uchar dst[4],
   }
 }
 
+/**
+ * One scalar component of #blend_layer_byte, for the mask corrections that blend a coverage
+ * factor rather than a colour (spec 18 §5.3).
+ *
+ * The formulas are the per-component bodies of #blend_layer_byte on a single channel.
+ * NormalCombine has no scalar form -- whiteout needs a direction -- so it is evaluated on an
+ * isotropic pair, all channels equal, and averaged: a shape no graph this module builds puts on a
+ * mask, kept total rather than special-cased away.
+ */
+static float blend_value(const float bottom,
+                         const float top,
+                         const CompositeBlend blend,
+                         const float fac)
+{
+  const float clamped = clamp_f(fac, 0.0f, 1.0f);
+  if (clamped == 0.0f) {
+    return bottom;
+  }
+  switch (blend) {
+    case CompositeBlend::Mix:
+      return bottom + (top - bottom) * clamped;
+    case CompositeBlend::Multiply:
+      return bottom * (1.0f - clamped) + bottom * top * clamped;
+    case CompositeBlend::Overlay:
+      return blend_overlay_channel(bottom, top, clamped);
+    case CompositeBlend::Add:
+      return bottom * (1.0f - clamped) + (bottom + top) * clamped;
+    case CompositeBlend::NormalCombine: {
+      const float bottom_rgba[4] = {bottom, bottom, bottom, 1.0f};
+      const float top_rgba[4] = {top, top, top, 1.0f};
+      float combined[3];
+      blend_normal_combine(bottom_rgba, top_rgba, combined);
+      return (combined[0] + combined[1] + combined[2]) / 3.0f;
+    }
+  }
+  return bottom;
+}
+
+/**
+ * Composite one pixel of a layer that carries corrections (spec 18 §5.3).
+ *
+ * The colour starts at the layer's own map -- or at nothing, for a layer Absent in this channel
+ * whose content corrections are what it paints with. Each content correction blends by its own
+ * alpha, the way the graph routes a correction's map alpha into its coverage Multiply, and the
+ * accumulated coverage grows the way the engine's "over" pair does:
+ * `a = a + f * (1 - a)`.
+ *
+ * What the layer finally blends by is the mask image when it has one -- the graph leaves the
+ * corrections' accumulated coverage unwired there -- and the accumulated coverage everywhere else.
+ * Mask corrections blend onto that factor after #mask_influence, which the base coverage already
+ * carries: the mask image establishes the coverage, the corrections sit on top of it.
+ *
+ * \param offset: the pixel's offset into every layer buffer, which all match the stack dimensions.
+ */
+static void composite_correction_pixel_apply(const PaintMaterialCompositeLayer &layer,
+                                             const int64_t offset,
+                                             const int x,
+                                             const int y,
+                                             uchar *r_dst)
+{
+  uchar top[4] = {0, 0, 0, 0};
+  if (layer.color_ibuf != nullptr) {
+    const uchar *base = layer.color_ibuf->byte_data() + offset;
+    top[0] = base[0];
+    top[1] = base[1];
+    top[2] = base[2];
+  }
+
+  /* The coverage the layer starts from: its own mask, its own alpha, or full. The mask cases read
+   * exactly as the no-correction path reads them; with no mask at all, an alpha-driven layer
+   * covers by its own alpha -- where an absent base has none, and the corrections are what bring
+   * coverage in -- and a plain one covers fully, like the null-mask factor does. */
+  float alpha;
+  if (layer.mask_ibuf != nullptr) {
+    alpha = mask_factor_at(layer.mask_ibuf, layer.mask_from_alpha, x, y, layer.mask_influence);
+  }
+  else if (layer.mask_from_alpha) {
+    alpha = (layer.color_ibuf != nullptr) ?
+                float(layer.color_ibuf->byte_data()[offset + 3]) / 255.0f :
+                0.0f;
+  }
+  else {
+    alpha = 1.0f;
+  }
+  /* A mask image owns the coverage: what the corrections accumulate goes to the layer's alpha
+   * alone, not to the factor the layer blends by. */
+  const float mask_base = alpha;
+
+  for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
+    if (!correction.enabled || correction.ibuf == nullptr) {
+      continue;
+    }
+    const uchar *corr_pixel = correction.ibuf->byte_data() + offset;
+    const float corr_alpha = float(corr_pixel[3]) / 255.0f;
+    /* The correction's colour and its coverage ride the same factor, as the graph's own coverage
+     * Multiply does for a layer. */
+    blend_layer_byte(top, corr_pixel, correction.blend, correction.opacity, corr_alpha);
+    const float fac = clamp_f(correction.opacity * corr_alpha, 0.0f, 1.0f);
+    alpha = alpha + fac * (1.0f - alpha);
+  }
+
+  float mask_factor = (layer.mask_ibuf != nullptr && !layer.mask_from_alpha) ? mask_base : alpha;
+  for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.mask_corrections) {
+    if (!correction.enabled || correction.ibuf == nullptr) {
+      continue;
+    }
+    float gray = 0.0f;
+    float corr_alpha = 0.0f;
+    correction_mask_values_at(correction.ibuf, x, y, gray, corr_alpha);
+    mask_factor = blend_value(
+        mask_factor, gray, correction.blend, correction.opacity * corr_alpha);
+  }
+
+  top[3] = uchar(clamp_i(int(alpha * 255.0f + 0.5f), 0, 255));
+  blend_layer_byte(r_dst, top, layer.blend, layer.opacity, mask_factor);
+}
+
 static bool composite_stack_validate(const PaintMaterialCompositeStack &stack)
 {
   if (stack.width <= 0 || stack.height <= 0 || stack.layers.is_empty()) {
@@ -1043,13 +1536,36 @@ static bool composite_stack_validate(const PaintMaterialCompositeStack &stack)
     if (!layer.enabled) {
       continue;
     }
-    if (!composite_ibuf_is_byte_rgba(layer.color_ibuf, stack.width, stack.height)) {
+    const bool has_corrections = !layer.content_corrections.is_empty() ||
+                                 !layer.mask_corrections.is_empty();
+    if (layer.color_ibuf != nullptr) {
+      if (!composite_ibuf_is_byte_rgba(layer.color_ibuf, stack.width, stack.height)) {
+        return false;
+      }
+    }
+    else if (!has_corrections) {
+      /* A layer without a map has nothing to composite unless its content corrections carry it
+       * (spec 18 §5.3); refusing it here is what sends such a stack to the bake. */
       return false;
     }
     if (layer.mask_ibuf != nullptr &&
         !composite_mask_ibuf_is_valid(layer.mask_ibuf, stack.width, stack.height))
     {
       return false;
+    }
+    for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
+      if (correction.ibuf != nullptr &&
+          !composite_ibuf_is_byte_rgba(correction.ibuf, stack.width, stack.height))
+      {
+        return false;
+      }
+    }
+    for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.mask_corrections) {
+      if (correction.ibuf != nullptr &&
+          !composite_mask_ibuf_is_valid(correction.ibuf, stack.width, stack.height))
+      {
+        return false;
+      }
     }
     any_enabled = true;
   }
@@ -1094,7 +1610,10 @@ bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
     if (!layer.enabled) {
       continue;
     }
-    const uchar *layer_pixels = layer.color_ibuf->byte_data();
+    const bool has_corrections = !layer.content_corrections.is_empty() ||
+                                 !layer.mask_corrections.is_empty();
+    const uchar *layer_pixels = (layer.color_ibuf != nullptr) ? layer.color_ibuf->byte_data() :
+                                                               nullptr;
 
     if (!composite_initialized) {
       /* A bare bottom is copied rather than blended: it has no Mix node, so it has no blend mode
@@ -1105,19 +1624,41 @@ bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
       threading::parallel_for(rows, 64, [&](const IndexRange range) {
         for (const int64_t y : range) {
           const int64_t offset = y * row_stride + int64_t(area.xmin) * 4;
-          if (layer.is_bare_base) {
+          if (layer.is_bare_base && layer_pixels != nullptr) {
             memcpy(composite_pixels + offset, layer_pixels + offset, size_t(area_width * 4));
           }
           else {
+            /* Including a corrections layer with no base of its own: its bottom is transparency,
+             * and its corrections bring what coverage there is (spec 18 §5.3). */
             memset(composite_pixels + offset, 0, size_t(area_width * 4));
           }
         }
       });
       composite_initialized = true;
-      if (layer.is_bare_base) {
+      if (layer.is_bare_base && !has_corrections) {
         layers_evaluated++;
         continue;
       }
+    }
+
+    if (has_corrections) {
+      /* The corrections path: per pixel, the layer's colour and coverage rebuilt under its
+       * corrections before it blends onto the composite. Same row layout as the plain path, so a
+       * region refresh covers the same rectangle whichever path a layer takes. */
+      threading::parallel_for(rows, 64, [&](const IndexRange range) {
+        for (const int64_t y : range) {
+          const int64_t row_offset = y * row_stride;
+          for (const int64_t x : IndexRange(area.xmin, area_width)) {
+            composite_correction_pixel_apply(layer,
+                                             row_offset + x * 4,
+                                             int(x),
+                                             int(y),
+                                             composite_pixels + row_offset + x * 4);
+          }
+        }
+      });
+      layers_evaluated++;
+      continue;
     }
 
     threading::parallel_for(rows, 64, [&](const IndexRange range) {
@@ -1204,14 +1745,21 @@ static bool composite_stack_build(Span<PaintMaterialCompositeImageLayer> image_l
     return false;
   }
   for (const PaintMaterialCompositeImageLayer &image_layer : image_layers) {
-    if (!image_layer.enabled || image_layer.color_image == nullptr) {
+    if (!image_layer.enabled) {
+      continue;
+    }
+    const bool has_corrections = !image_layer.content_corrections.is_empty() ||
+                                 !image_layer.mask_corrections.is_empty();
+    if (image_layer.color_image == nullptr && !has_corrections) {
       continue;
     }
     PaintMaterialCompositeLayer layer;
-    layer.color_ibuf = composite_image_acquire(
-        image_layer.color_image, image_layer.color_iuser, r_locks);
-    if (layer.color_ibuf == nullptr) {
-      return false;
+    if (image_layer.color_image != nullptr) {
+      layer.color_ibuf = composite_image_acquire(
+          image_layer.color_image, image_layer.color_iuser, r_locks);
+      if (layer.color_ibuf == nullptr) {
+        return false;
+      }
     }
     if (image_layer.mask_image != nullptr) {
       layer.mask_ibuf = composite_image_acquire(
@@ -1219,6 +1767,28 @@ static bool composite_stack_build(Span<PaintMaterialCompositeImageLayer> image_l
       if (layer.mask_ibuf == nullptr) {
         return false;
       }
+    }
+    for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
+      PaintMaterialCompositeCorrectionBuffer buffer;
+      buffer.ibuf = composite_image_acquire(correction.image, correction.iuser, r_locks);
+      if (buffer.ibuf == nullptr && correction.image != nullptr) {
+        return false;
+      }
+      buffer.blend = correction.blend;
+      buffer.opacity = correction.opacity;
+      buffer.enabled = correction.enabled;
+      layer.content_corrections.append(buffer);
+    }
+    for (const PaintMaterialCompositeCorrection &correction : image_layer.mask_corrections) {
+      PaintMaterialCompositeCorrectionBuffer buffer;
+      buffer.ibuf = composite_image_acquire(correction.image, correction.iuser, r_locks);
+      if (buffer.ibuf == nullptr && correction.image != nullptr) {
+        return false;
+      }
+      buffer.blend = correction.blend;
+      buffer.opacity = correction.opacity;
+      buffer.enabled = correction.enabled;
+      layer.mask_corrections.append(buffer);
     }
     layer.blend = image_layer.blend;
     layer.opacity = image_layer.opacity;
@@ -1246,6 +1816,32 @@ bool BKE_paint_material_composite_eval_images(Span<PaintMaterialCompositeImageLa
 }
 
 /**
+ * The image whose buffer answers the bottom layer's size and colorspace: the layer's own map, or
+ * -- when the layer is Absent here and its corrections carry it -- the first correction map.
+ */
+static Image *composite_bottom_layer_size_image(const PaintMaterialCompositeImageLayer &layer,
+                                                const ImageUser *&r_iuser)
+{
+  if (layer.color_image != nullptr) {
+    r_iuser = layer.color_iuser;
+    return layer.color_image;
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+    if (correction.image != nullptr) {
+      r_iuser = correction.iuser;
+      return correction.image;
+    }
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
+    if (correction.image != nullptr) {
+      r_iuser = correction.iuser;
+      return correction.image;
+    }
+  }
+  return nullptr;
+}
+
+/**
  * Dimensions and byte colorspace of the bottom-most enabled layer.
  *
  * The colorspace is reported alongside the size because the composite has to inherit it rather
@@ -1269,11 +1865,16 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
     *r_byte_colorspace = nullptr;
   }
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
-    if (!layer.enabled || layer.color_image == nullptr) {
+    if (!layer.enabled) {
+      continue;
+    }
+    const ImageUser *size_iuser = nullptr;
+    Image *size_image = composite_bottom_layer_size_image(layer, size_iuser);
+    if (size_image == nullptr) {
       continue;
     }
     Vector<CompositeImageLock> locks;
-    const ImBuf *ibuf = composite_image_acquire(layer.color_image, layer.color_iuser, locks);
+    const ImBuf *ibuf = composite_image_acquire(size_image, size_iuser, locks);
     if (ibuf != nullptr) {
       r_width = ibuf->x;
       r_height = ibuf->y;
@@ -1291,6 +1892,32 @@ bool BKE_paint_material_composite_stack_dimensions(
     Span<PaintMaterialCompositeImageLayer> image_layers, int &r_width, int &r_height)
 {
   return composite_stack_bottom_layer_info(image_layers, r_width, r_height, nullptr);
+}
+
+/** Extend \a hash with everything about one correction that changes the composited pixels. */
+static uint64_t composite_correction_hash(uint64_t hash,
+                                          const PaintMaterialCompositeCorrection &correction)
+{
+  /* The marker hashed field by field: it is the correction's identity, so a map re-tagged to a
+   * different correction must not keep serving the old composite. */
+  const bUUID &marker = correction.marker;
+  uint64_t node_bytes = 0;
+  for (const int i : IndexRange(6)) {
+    node_bytes |= uint64_t(marker.node[i]) << (8 * (5 - i));
+  }
+  hash = get_default_hash(hash,
+                          marker.time_low,
+                          uint64_t(marker.time_mid) << 16 | marker.time_hi_and_version,
+                          uint64_t(marker.clock_seq_hi_and_reserved) << 8 |
+                              marker.clock_seq_low,
+                          node_bytes);
+  /* Session UID rather than a pointer, like the layers' own maps: a freed image's address can
+   * come back as a different one. */
+  return get_default_hash(hash,
+                          correction.image != nullptr ? correction.image->id.session_uid : 0,
+                          int(correction.blend),
+                          correction.enabled,
+                          correction.opacity);
 }
 
 uint64_t BKE_paint_material_composite_stack_hash(
@@ -1311,6 +1938,14 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.mask_influence);
     /* Split rather than appended: #get_default_hash mixes a fixed number of values at once. */
     hash = get_default_hash(hash, layer.is_bare_base);
+    /* A correction changes the composite like any other layer input, and so belongs in the hash
+     * that decides whether the whole stack has to be re-flattened. */
+    for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+      hash = composite_correction_hash(hash, correction);
+    }
+    for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
+      hash = composite_correction_hash(hash, correction);
+    }
   }
   return hash;
 }
@@ -1486,16 +2121,43 @@ static void composite_cache_enforce_budget(const CompositeCacheKey &keep)
   }
 }
 
+/**
+ * The images one layer is read from: its maps, then its corrections'.
+ *
+ * The cache subscribes to each image's partial-update log through this one list, so a correction's
+ * own map reports its edits exactly the way a layer's map does. Deduplicated, since a layer that
+ * masks itself by its own map names the same image twice and one subscription per image is all a
+ * poll can use.
+ */
+static Vector<Image *> composite_layer_images(const PaintMaterialCompositeImageLayer &layer)
+{
+  Vector<Image *> images;
+  if (layer.color_image != nullptr) {
+    images.append_non_duplicates(layer.color_image);
+  }
+  if (layer.mask_image != nullptr) {
+    images.append_non_duplicates(layer.mask_image);
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+    if (correction.image != nullptr) {
+      images.append_non_duplicates(correction.image);
+    }
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
+    if (correction.image != nullptr) {
+      images.append_non_duplicates(correction.image);
+    }
+  }
+  return images;
+}
+
 static void composite_entry_image_dependencies_set(
     CompositeCacheEntry &entry, Span<PaintMaterialCompositeImageLayer> image_layers)
 {
   entry.image_session_uids.clear();
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
-    if (layer.color_image != nullptr) {
-      entry.image_session_uids.append_non_duplicates(layer.color_image->id.session_uid);
-    }
-    if (layer.mask_image != nullptr) {
-      entry.image_session_uids.append_non_duplicates(layer.mask_image->id.session_uid);
+    for (Image *image : composite_layer_images(layer)) {
+      entry.image_session_uids.append_non_duplicates(image->id.session_uid);
     }
   }
 
@@ -1563,10 +2225,7 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
    * resize, which drops the subscriptions with the buffer, is followed by fresh ones whose first
    * poll asks for the full rebuild a resize needs anyway. */
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
-    for (Image *image : {layer.color_image, layer.mask_image}) {
-      if (image == nullptr) {
-        continue;
-      }
+    for (Image *image : composite_layer_images(layer)) {
       PartialUpdateUser *user =
           entry.partial_update_users
               .lookup_or_add_cb(

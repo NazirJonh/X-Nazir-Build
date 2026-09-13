@@ -36,6 +36,7 @@
 #include "RNA_prototypes.hh"
 
 #include "paint_material_composite_internal.hh"
+#include "paint_material_layer_idprops.hh"
 
 namespace blender {
 
@@ -62,6 +63,10 @@ struct LayerModelNode {
   bool supported = true;
   const char *unsupported_reason = nullptr;
   const bNodeSocket *factor = nullptr;
+  /** The corrections between this row and its map, bottom to top (spec 18 §4.5). */
+  Vector<const bNode *> content_correction_nodes;
+  /** The corrections between this row and its coverage, bottom to top. */
+  Vector<const bNode *> mask_correction_nodes;
 };
 
 void layer_model_append_unsupported(Vector<LayerModelNode> &r_layers,
@@ -132,6 +137,60 @@ void layer_model_read_mix(const bNode &node,
   else {
     r_layer.factor = mix.factor;
     r_layer.opacity = static_cast<const bNodeSocketValueFloat *>(mix.factor->default_value)->value;
+  }
+}
+
+/**
+ * The corrections hanging between \a socket and the row's own map, walked by their links (spec 18
+ * §4.5): each step's source must be a correction of \a section, and the walk continues at what
+ * that correction blends over. Appends the nodes met, topmost first, and returns the socket the
+ * map itself feeds -- \a socket when there are no corrections.
+ *
+ * Follows links rather than #composite_source_node_shallow: a muted correction still hangs where
+ * it hangs, and a row the user switched off cannot be a row the model stops listing.
+ */
+const bNodeSocket *layer_model_corrections_descend(
+    const bNodeSocket &socket,
+    const PaintMaterialCorrectionSection section,
+    Vector<const bNode *> &r_corrections)
+{
+  const bNodeSocket *current = &socket;
+  /* A malformed tree can cycle; bound the walk rather than trust the data. */
+  for (int step = 0; step < 64; step++) {
+    if (current->directly_linked_links().is_empty()) {
+      return current;
+    }
+    const bNodeLink *link = current->directly_linked_links()[0];
+    if (!link->is_available() || link->is_muted()) {
+      return current;
+    }
+    const bNode &from_node = *link->fromnode;
+    if (from_node.is_reroute()) {
+      current = static_cast<const bNodeSocket *>(from_node.inputs.first);
+      continue;
+    }
+    if (!bke::paint_layer::node_is_correction(from_node) ||
+        bke::paint_layer::correction_section_get(from_node) != section)
+    {
+      return current;
+    }
+    r_corrections.append(&from_node);
+    CompositeMixNode below;
+    if (!composite_mix_node_read(from_node, below) || below.bottom == nullptr) {
+      /* Not the shape the insert builds: stop here and let the map input speak for itself. */
+      return current;
+    }
+    current = below.bottom;
+  }
+  return current;
+}
+
+/** The walk meets the topmost correction first; the rows read bottom to top, like the layers. */
+void layer_model_corrections_reverse(Vector<const bNode *> &r_corrections)
+{
+  const int64_t size = r_corrections.size();
+  for (const int64_t i : IndexRange(size / 2)) {
+    std::swap(r_corrections[i], r_corrections[size - 1 - i]);
   }
 }
 
@@ -218,6 +277,16 @@ void layer_model_collect(const bNodeSocket &socket,
       if (group != nullptr) {
         layer.is_group = true;
         layer.group_node = group;
+        /* The folder's own mask corrections hang on the coverage input of the row's Multiply,
+         * exactly as on any other row (spec 18 §4.5); the folder takes no content corrections
+         * (D7), so only the mask section descends here. Without it the rows are missing from
+         * the model, and remove or rename answer CorrectionNotFound. */
+        if (muted_mix.factor_coverage != nullptr) {
+          layer_model_corrections_descend(*muted_mix.factor_coverage,
+                                          PaintMaterialCorrectionSection::Mask,
+                                          layer.mask_correction_nodes);
+          layer_model_corrections_reverse(layer.mask_correction_nodes);
+        }
         if (nesting >= LAYER_GROUP_NESTING_MAX) {
           layer.supported = false;
           layer.unsupported_reason = "Layer groups are nested too deeply";
@@ -232,14 +301,27 @@ void layer_model_collect(const bNodeSocket &socket,
       }
 
       const ImageUser *iuser = nullptr;
-      /* An unlinked map input is a channel this layer does not have: a supported row with no map,
-       * whose unlinked coverage keeps it from contributing anything. */
-      if (composite_source_node_shallow(*muted_mix.top) != nullptr &&
-          !composite_image_from_socket(*muted_mix.top, layer.image, iuser))
+      /* The corrections between this row and its map are rows of their own (spec 18 §4.5), and
+       * the map itself is whatever the walk ends on. An unlinked map input is a channel this
+       * layer does not have: a supported row with no map, whose unlinked coverage keeps it from
+       * contributing anything -- not a broken shape. */
+      const bNodeSocket *content_base = layer_model_corrections_descend(
+          *muted_mix.top,
+          PaintMaterialCorrectionSection::Content,
+          layer.content_correction_nodes);
+      if (muted_mix.factor_coverage != nullptr) {
+        layer_model_corrections_descend(*muted_mix.factor_coverage,
+                                        PaintMaterialCorrectionSection::Mask,
+                                        layer.mask_correction_nodes);
+      }
+      if (content_base != nullptr && composite_source_node_shallow(*content_base) != nullptr &&
+          !composite_image_from_socket(*content_base, layer.image, iuser))
       {
         layer.supported = false;
         layer.unsupported_reason = "Layer source is not an image";
       }
+      layer_model_corrections_reverse(layer.content_correction_nodes);
+      layer_model_corrections_reverse(layer.mask_correction_nodes);
       r_layers.append(layer);
       return;
     }
@@ -249,7 +331,9 @@ void layer_model_collect(const bNodeSocket &socket,
   if (shallow_source != nullptr && BKE_paint_material_is_layer_group(*shallow_source)) {
     /* A group at the bottom of a chain: a row of its own, with its sub-stack below it. Handled
      * here because the resolver would otherwise walk straight through the group instance and
-     * report a node inside it as if it were a layer of this chain. */
+     * report a node inside it as if it were a layer of this chain. The instance is the row
+     * itself, with no Mix and so no coverage input of its own for mask corrections to hang on
+     * -- a shape the edit path refuses, which is why no descent happens here. */
     LayerModelNode layer;
     layer.node = shallow_source;
     layer.owner_tree = &shallow_source->owner_tree();
@@ -323,6 +407,16 @@ void layer_model_collect(const bNodeSocket &socket,
      * -- meets the group before the rows that belong to it. */
     layer.is_group = true;
     layer.group_node = group;
+    /* The folder's own mask corrections hang on the coverage input of the row's Multiply, the
+     * same place #correction_channel_insert puts them on any row (spec 18 §4.5); the folder
+     * takes no content corrections (D7), so only the mask section descends here. Without it the
+     * rows are missing from the model, and remove or rename answer CorrectionNotFound. */
+    if (mix.factor_coverage != nullptr) {
+      layer_model_corrections_descend(*mix.factor_coverage,
+                                      PaintMaterialCorrectionSection::Mask,
+                                      layer.mask_correction_nodes);
+      layer_model_corrections_reverse(layer.mask_correction_nodes);
+    }
     if (nesting >= LAYER_GROUP_NESTING_MAX) {
       layer.supported = false;
       layer.unsupported_reason = "Layer groups are nested too deeply";
@@ -337,14 +431,24 @@ void layer_model_collect(const bNodeSocket &socket,
   }
 
   const ImageUser *iuser = nullptr;
-  /* An unlinked map input is a channel this layer does not have: a supported row with no map,
-   * whose unlinked coverage keeps it from contributing anything. */
-  if (composite_source_node_shallow(*mix.top) != nullptr &&
-      !composite_image_from_socket(*mix.top, layer.image, iuser))
+  /* The corrections between this row and its map are rows of their own (spec 18 §4.5), and the
+   * map itself is whatever the walk ends on. An unlinked map input is a channel this layer does
+   * not have: a supported row with no map, whose unlinked coverage keeps it from contributing
+   * anything -- not a broken shape. */
+  const bNodeSocket *content_base = layer_model_corrections_descend(
+      *mix.top, PaintMaterialCorrectionSection::Content, layer.content_correction_nodes);
+  if (mix.factor_coverage != nullptr) {
+    layer_model_corrections_descend(
+        *mix.factor_coverage, PaintMaterialCorrectionSection::Mask, layer.mask_correction_nodes);
+  }
+  if (content_base != nullptr && composite_source_node_shallow(*content_base) != nullptr &&
+      !composite_image_from_socket(*content_base, layer.image, iuser))
   {
     layer.supported = false;
     layer.unsupported_reason = "Layer source is not an image";
   }
+  layer_model_corrections_reverse(layer.content_correction_nodes);
+  layer_model_corrections_reverse(layer.mask_correction_nodes);
   r_layers.append(layer);
 }
 
@@ -419,6 +523,188 @@ void layer_model_channel_props_add(const LayerModelNode &layer,
   }
   if (state == PaintMaterialLayerChannelState::Disabled) {
     r_entry.disabled_channels_mask |= uint32_t(1) << channel;
+  }
+  else if (state == PaintMaterialLayerChannelState::Enabled) {
+    /* Spec 18 I2': the base map being on makes the row contribute to this channel, corrections
+     * or not -- a correction can only add channels on top of this, never take one away. Under
+     * corrections the state is the base's own, read below them (spec 18 I1'). */
+    r_entry.contributing_channels_mask |= uint32_t(1) << channel;
+  }
+}
+
+/** The correction row of \a corrections carrying \a marker, or null when there is none. */
+PaintMaterialLayerCorrectionEntry *correction_model_row_find(
+    Vector<PaintMaterialLayerCorrectionEntry> &corrections, const bUUID &marker)
+{
+  for (PaintMaterialLayerCorrectionEntry &correction : corrections) {
+    if (BLI_uuid_equal(correction.marker, marker)) {
+      return &correction;
+    }
+  }
+  return nullptr;
+}
+
+/** The correction row carrying \a marker anywhere in the stack, or null when there is none. */
+PaintMaterialLayerCorrectionEntry *correction_model_by_marker_find(
+    Vector<PaintMaterialLayerStackEntry> &r_entries, const bUUID &marker)
+{
+  for (PaintMaterialLayerStackEntry &entry : r_entries) {
+    PaintMaterialLayerCorrectionEntry *correction = correction_model_row_find(
+        entry.content_corrections, marker);
+    if (correction == nullptr) {
+      correction = correction_model_row_find(entry.mask_corrections, marker);
+    }
+    if (correction != nullptr) {
+      return correction;
+    }
+  }
+  return nullptr;
+}
+
+/** The UI row of one correction's Mix node; the per-channel state joins later, by marker. */
+PaintMaterialLayerCorrectionEntry correction_model_entry_from_node(const bNode &node)
+{
+  PaintMaterialLayerCorrectionEntry correction;
+  correction.marker = BKE_paint_material_layer_marker_get(node);
+  correction.section = bke::paint_layer::correction_section_get(node);
+  correction.effect = bke::paint_layer::correction_effect_get(node);
+  /* The insert leaves the node's label empty -- the row is named by the model, not by the graph
+   * -- so an unnamed correction reads as "Correction" instead of an empty cell. */
+  correction.name = (node.label[0] != '\0') ? node.label : "Correction";
+  correction.label = const_cast<char *>(node.label);
+  CompositeMixNode mix;
+  if (!composite_mix_node_read(node, mix)) {
+    return correction;
+  }
+  correction.blend = mix.blend;
+  correction.enabled = !node.is_muted();
+  /* The same reading of coverage and opacity the layer rows use: the editable value is the
+   * Multiply's constant when the per-channel shape is there, the bare Factor when it is not. */
+  if (mix.factor_opacity != nullptr) {
+    correction.opacity =
+        static_cast<const bNodeSocketValueFloat *>(mix.factor_opacity->default_value)->value;
+  }
+  else if (mix.factor != nullptr && BKE_paint_material_source_socket(*mix.factor) == nullptr) {
+    correction.opacity =
+        static_cast<const bNodeSocketValueFloat *>(mix.factor->default_value)->value;
+  }
+  return correction;
+}
+
+/**
+ * The correction row's per-channel editable pointers and Disabled bit, joined by marker: each
+ * channel owns its own nodes for the correction, and only the marker says they are one row.
+ */
+void correction_model_channel_props_add(const bNode &node,
+                                        const bNodeTree *owner_tree,
+                                        const int channel,
+                                        PaintMaterialLayerCorrectionEntry &r_correction)
+{
+  const bNodeTree *tree = (owner_tree != nullptr) ? owner_tree : &node.owner_tree();
+  ID &tree_id = const_cast<ID &>(tree->id);
+  CompositeMixNode mix;
+  if (!composite_mix_node_read(node, mix)) {
+    return;
+  }
+  const bNodeSocket *factor = mix.factor_opacity;
+  if (factor == nullptr && mix.factor != nullptr &&
+      BKE_paint_material_source_socket(*mix.factor) == nullptr)
+  {
+    factor = mix.factor;
+  }
+  if (factor != nullptr) {
+    r_correction.channel_factor_props.add_overwrite(
+        channel,
+        RNA_pointer_create_discrete(
+            &tree_id, RNA_PaintMaterialLayerOpacity, const_cast<bNodeSocket *>(factor)));
+  }
+  if (node.typeinfo != nullptr && node.typeinfo->rna_ext.srna != nullptr) {
+    PointerRNA node_ptr = RNA_pointer_create_discrete(
+        &tree_id, node.typeinfo->rna_ext.srna, const_cast<bNode *>(&node));
+    if (RNA_struct_find_property(&node_ptr, "blend_type") != nullptr) {
+      r_correction.channel_blend_props.add_overwrite(channel, node_ptr);
+    }
+  }
+  PaintMaterialLayerChannelState state = PaintMaterialLayerChannelState::Absent;
+  if (channel < 0 || channel >= 32 || !composite_mix_channel_state_get(mix, state)) {
+    return;
+  }
+  if (state == PaintMaterialLayerChannelState::Disabled) {
+    r_correction.disabled_channels_mask |= uint32_t(1) << channel;
+  }
+}
+
+/** Whether \a nodes carry the same marker sequence as \a corrections, order included. */
+bool correction_model_sequences_agree(
+    const Vector<const bNode *> &nodes,
+    const Vector<PaintMaterialLayerCorrectionEntry> &corrections)
+{
+  if (nodes.size() != corrections.size()) {
+    return false;
+  }
+  for (const int i : corrections.index_range()) {
+    if (!BLI_uuid_equal(BKE_paint_material_layer_marker_get(*nodes[i]),
+                        corrections[i].marker))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Join \a channel_layer's corrections to the rows the reference channel built, by marker, and
+ * flag the row when the channels disagree: the UI shows one row per correction, so channels that
+ * cannot agree on which corrections a row has have no rows to show. The reference channel's
+ * sequence is the one the row was built from, so it is what the others answer to.
+ */
+void correction_model_channel_join(const LayerModelNode &channel_layer,
+                                   const int channel,
+                                   PaintMaterialLayerStackEntry &r_entry)
+{
+  if (!correction_model_sequences_agree(channel_layer.content_correction_nodes,
+                                        r_entry.content_corrections) ||
+      !correction_model_sequences_agree(channel_layer.mask_correction_nodes,
+                                        r_entry.mask_corrections))
+  {
+    r_entry.supported = false;
+    r_entry.unsupported_reason = "Layer corrections disagree between channels";
+    return;
+  }
+  for (const bNode *node : channel_layer.content_correction_nodes) {
+    PaintMaterialLayerCorrectionEntry *correction = correction_model_row_find(
+        r_entry.content_corrections, BKE_paint_material_layer_marker_get(*node));
+    if (correction != nullptr) {
+      correction_model_channel_props_add(*node, channel_layer.owner_tree, channel, *correction);
+    }
+  }
+  for (const bNode *node : channel_layer.mask_correction_nodes) {
+    PaintMaterialLayerCorrectionEntry *correction = correction_model_row_find(
+        r_entry.mask_corrections, BKE_paint_material_layer_marker_get(*node));
+    if (correction != nullptr) {
+      correction_model_channel_props_add(*node, channel_layer.owner_tree, channel, *correction);
+    }
+  }
+}
+
+/**
+ * The channels \a correction brings its row into (spec 18 I2'): a channel whose map it has on --
+ * not switched off -- while the correction itself is not muted. The maps were joined by marker
+ * across every channel and the Disabled bits collected with them, so this reads the row only
+ * once both are done; a correction that is Absent in a channel has no map there and adds none.
+ */
+void correction_model_contributing_add(const PaintMaterialLayerCorrectionEntry &correction,
+                                       PaintMaterialLayerStackEntry &r_entry)
+{
+  /* Only content brings pixels: a mask correction shapes coverage the row already has. */
+  if (!correction.enabled || correction.section != PaintMaterialCorrectionSection::Content) {
+    return;
+  }
+  for (const int channel : correction.channel_images.keys()) {
+    if (correction.disabled_channels_mask & (uint32_t(1) << channel)) {
+      continue;
+    }
+    r_entry.contributing_channels_mask |= uint32_t(1) << channel;
   }
 }
 
@@ -552,6 +838,22 @@ bool BKE_paint_material_layer_stack_from_material(
     if (reference_layers[index].image != nullptr) {
       entry.channel_images.add_overwrite(reference_role, reference_layers[index].image);
     }
+    /* The correction rows hang under this row (spec 18 §4.5): the reference channel's nodes give
+     * them their identity, and every other channel joins its own nodes to them by marker. */
+    for (const bNode *node : reference_layers[index].content_correction_nodes) {
+      entry.content_corrections.append(correction_model_entry_from_node(*node));
+      correction_model_channel_props_add(*node,
+                                         reference_layers[index].owner_tree,
+                                         reference_role,
+                                         entry.content_corrections.last());
+    }
+    for (const bNode *node : reference_layers[index].mask_correction_nodes) {
+      entry.mask_corrections.append(correction_model_entry_from_node(*node));
+      correction_model_channel_props_add(*node,
+                                         reference_layers[index].owner_tree,
+                                         reference_role,
+                                         entry.mask_corrections.last());
+    }
     r_entries.append(std::move(entry));
   }
 
@@ -566,6 +868,7 @@ bool BKE_paint_material_layer_stack_from_material(
     if (channel_layers.size() == reference_layers.size()) {
       for (const int index : r_entries.index_range()) {
         layer_model_channel_props_add(channel_layers[index], role, r_entries[index]);
+        correction_model_channel_join(channel_layers[index], role, r_entries[index]);
       }
     }
     for (const int index : r_entries.index_range()) {
@@ -592,27 +895,52 @@ bool BKE_paint_material_layer_stack_from_material(
     }
   }
 
-  /* Ambient Occlusion and masks have no Principled socket, so their maps are found by tag rather
-   * than by link. Collected in one pass: #Main can hold thousands of images and this runs on every
-   * tree rebuild. */
+  /* Maps with no link to travel by are found by tag rather than by link. A correction's map
+   * belongs to the correction row -- its marker is what the tag carries -- and the rest keep the
+   * old rule: a map belongs to the layer whose marker it carries, and a channel's own map reached
+   * its layer through the UUID match in the pass above, so only the two roles without a Principled
+   * socket are matched here. Collected in one pass: #Main can hold thousands of images and this
+   * runs on every tree rebuild. */
   Vector<Image *> tagged_maps;
   for (Image &image : const_cast<Main &>(bmain).images) {
-    if (ELEM(image.paint_layer_channel, PAINT_MATERIAL_CHANNEL_AO, PAINT_LAYER_MAP_MASK) &&
-        !BLI_uuid_is_nil(image.paint_layer_id))
+    if (image.paint_layer_channel < 0 || image.paint_layer_channel > PAINT_LAYER_MAP_MASK ||
+        BLI_uuid_is_nil(image.paint_layer_id))
     {
-      tagged_maps.append(&image);
+      continue;
     }
+    tagged_maps.append(&image);
   }
-  if (!tagged_maps.is_empty()) {
+  for (Image *map : tagged_maps) {
+    PaintMaterialLayerCorrectionEntry *correction = correction_model_by_marker_find(
+        r_entries, map->paint_layer_id);
+    if (correction != nullptr) {
+      /* Keyed by the channel the map paints, whatever role the tag carries. */
+      correction->channel_images.add_overwrite(map->paint_layer_channel, map);
+      continue;
+    }
+    if (!ELEM(map->paint_layer_channel, PAINT_MATERIAL_CHANNEL_AO, PAINT_LAYER_MAP_MASK)) {
+      continue;
+    }
     for (PaintMaterialLayerStackEntry &entry : r_entries) {
       if (BLI_uuid_is_nil(entry.marker)) {
         continue;
       }
-      for (Image *map : tagged_maps) {
-        if (BLI_uuid_equal(map->paint_layer_id, entry.marker)) {
-          entry.channel_images.add_overwrite(map->paint_layer_channel, map);
-        }
+      if (BLI_uuid_equal(map->paint_layer_id, entry.marker)) {
+        entry.channel_images.add_overwrite(map->paint_layer_channel, map);
       }
+    }
+  }
+
+  /* Spec 18 I2': a row contributes to the channels its base map is on -- collected per channel by
+   * the props pass above -- and to the ones a correction of its own paints into. The maps and
+   * Disabled bits the corrections gathered across every channel are what that answer reads, so
+   * this runs after them. */
+  for (PaintMaterialLayerStackEntry &entry : r_entries) {
+    for (const PaintMaterialLayerCorrectionEntry &correction : entry.content_corrections) {
+      correction_model_contributing_add(correction, entry);
+    }
+    for (const PaintMaterialLayerCorrectionEntry &correction : entry.mask_corrections) {
+      correction_model_contributing_add(correction, entry);
     }
   }
   return !r_entries.is_empty();

@@ -75,6 +75,14 @@ namespace {
  * semantics. */
 Vector<StackItemIdentity> stack_layer_clipboard;
 
+/* The kind of rows the clipboard holds: false for plain rows, true for rows attached to a
+ * parent's content section. The two never share a clipboard, because they paste through
+ * different paths (a plain row is duplicated beside its anchor, an attached row is
+ * re-attached into a target row), and a mixed copy would have to pick the half the user did not
+ * copy. Set by every copy, read by a paste the identities of which no longer resolve -- one that
+ * crossed between owners. */
+static bool stack_layer_clipboard_attached = false;
+
 bool stack_row_activate_poll(bContext *C)
 {
   if (!ED_operator_outliner_active(C)) {
@@ -334,6 +342,31 @@ static int stack_operator_marker_ordinal_get(bContext &C,
   return -1;
 }
 
+/**
+ * The ordinal \a row shifts to for a one-step move up or down the listed order, or -1 when no
+ * sibling sits in that direction.
+ *
+ * Rows attached to a parent's content section share the run of ordinals with the plain rows around
+ * them but only reorder among themselves, so the step walks past everything the sibling predicate
+ * refuses -- an attached row never lands among plain rows, and a plain row never lands between
+ * another row's attached rows.
+ */
+static int stack_row_sibling_ordinal_find(const SpaceOutliner &space_outliner,
+                                          const StackRow &row,
+                                          const bool move_up)
+{
+  const int step = move_up ? 1 : -1;
+  for (int candidate = row.ordinal + step; candidate >= 0 && candidate <= STACK_ROW_ORDINAL_MAX;
+       candidate += step)
+  {
+    const StackRow *candidate_row = outliner_stack_row_find(space_outliner, candidate);
+    if (candidate_row != nullptr && stack_rows_are_siblings(row, *candidate_row)) {
+      return candidate;
+    }
+  }
+  return -1;
+}
+
 wmOperatorStatus stack_row_move_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
@@ -375,8 +408,11 @@ wmOperatorStatus stack_row_move_exec(bContext *C, wmOperator *op)
     std::sort(ordinals_to_move.begin(), ordinals_to_move.end());
   }
 
-  /* Move each row one step in the direction, resolving its ordinal fresh: every move renumbers
-   * the stack, so an ordinal read before a move can name a different row after it. */
+  /* Move each row one sibling step in the direction, resolving its ordinal fresh: every move
+   * renumbers the stack, so an ordinal read before a move can name a different row after it. The
+   * step lands on the nearest sibling rather than the next ordinal -- rows attached to a parent's
+   * section and rows under another parent share the run of ordinals but reorder among themselves
+   * only, so they are passed over rather than landed between. */
   bool any_moved = false;
   for (const int original_ordinal : ordinals_to_move) {
     const StackItemIdentity identity = outliner_stack_identity_of(*space_outliner,
@@ -389,7 +425,16 @@ wmOperatorStatus stack_row_move_exec(bContext *C, wmOperator *op)
     if (current_ordinal < 0) {
       continue;
     }
-    const int target_ordinal = current_ordinal + (move_up ? 1 : -1);
+    const StackRow *current_row = outliner_stack_row_find(*space_outliner, current_ordinal);
+    if (current_row == nullptr) {
+      continue;
+    }
+    const int target_ordinal = stack_row_sibling_ordinal_find(*space_outliner,
+                                                              *current_row,
+                                                              move_up);
+    if (target_ordinal < 0) {
+      continue;
+    }
     if (outliner_stack_row_reorder(C, *space_outliner, current_ordinal, target_ordinal)) {
       any_moved = true;
     }
@@ -411,12 +456,41 @@ wmOperatorStatus stack_row_copy_exec(bContext *C, wmOperator *op)
     }
   }
 
-  /* A selected folder already carries every row below it. Keeping selected descendants as separate
-   * clipboard items would try to paste them once more after their containing folder. */
-  stack_ordinals_drop_covered_descendants(*space_outliner, selected);
+  /* The kind the copy carries, named by the active row when it is one of the copied rows, and by
+   * the first of them otherwise: plain rows copy as plain rows, rows attached to a parent's
+   * content section copy as those. Rows of the other kind are left out rather than mixed in -- a
+   * paste reads one kind out of the clipboard, and the report says what was not taken. */
+  int kind_ordinal = outliner_stack_active_ordinal_get(outliner_stack_read_context(*C),
+                                                       *space_outliner);
+  if (kind_ordinal < 0 || !selected.contains(kind_ordinal)) {
+    kind_ordinal = selected.is_empty() ? -1 : selected[0];
+  }
+  const StackRow *kind_row = (kind_ordinal >= 0) ?
+                                 outliner_stack_row_find(*space_outliner, kind_ordinal) :
+                                 nullptr;
+  const bool copy_attached = (kind_row != nullptr) && !kind_row->parent_section_id.empty();
+
+  int skipped_kind = 0;
+  Vector<int> copied_rows;
+  for (const int ordinal : selected) {
+    const StackRow *row = outliner_stack_row_find(*space_outliner, ordinal);
+    const bool row_attached = (row != nullptr) && !row->parent_section_id.empty();
+    if (row_attached != copy_attached) {
+      skipped_kind++;
+      continue;
+    }
+    copied_rows.append(ordinal);
+  }
+  if (skipped_kind > 0) {
+    BKE_reportf(op->reports, RPT_INFO, "Skipped %d row(s) of a different kind", skipped_kind);
+  }
+  /* A folder kept by the kind filter still carries every row below it; running the walk after the
+   * filter also keeps an attached row whose parent row was selected -- the folder would drop the
+   * row as covered before the filter had said which kind the copy carries. */
+  stack_ordinals_drop_covered_descendants(*space_outliner, copied_rows);
 
   stack_layer_clipboard.clear();
-  for (const int ordinal : selected) {
+  for (const int ordinal : copied_rows) {
     const StackItemIdentity identity = outliner_stack_identity_of(*space_outliner, ordinal);
     if (identity.is_valid()) {
       stack_layer_clipboard.append(identity);
@@ -426,6 +500,7 @@ wmOperatorStatus stack_row_copy_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_INFO, "No stack layers to copy");
     return OPERATOR_CANCELLED;
   }
+  stack_layer_clipboard_attached = copy_attached;
   BKE_reportf(
       op->reports, RPT_INFO, "Copied %d stack layer(s)", int(stack_layer_clipboard.size()));
   return OPERATOR_FINISHED;
@@ -440,6 +515,142 @@ wmOperatorStatus stack_row_paste_exec(bContext *C, wmOperator *op)
 
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
   const StackReadContext ctx = outliner_stack_read_context(*C);
+
+  /* The paste path the clipboard asks for. An identity that still resolves is the authority on
+   * the kind it carries; when none does -- a clipboard pasted into another owner's stack -- the
+   * flag the copy set is what still names it. */
+  bool paste_attached = false;
+  const int first_ordinal = outliner_stack_identity_resolve(ctx,
+                                                            *space_outliner,
+                                                            stack_layer_clipboard.first());
+  const StackRow *first_row = (first_ordinal >= 0) ?
+                                  outliner_stack_row_find(*space_outliner, first_ordinal) :
+                                  nullptr;
+  if (first_row != nullptr) {
+    paste_attached = !first_row->parent_section_id.empty();
+  }
+  else {
+    paste_attached = stack_layer_clipboard_attached;
+  }
+  if (paste_attached) {
+    /* Rows attached to a parent's content section paste into rows rather than beside them, and
+     * the source owns how. Everything below runs the source's paste vocabulary per target row. */
+    ID *paste_owner = outliner_stack_owner_get(ctx, *space_outliner);
+    if (paste_owner == nullptr) {
+      BKE_report(op->reports, RPT_INFO, "Nothing to paste");
+      return OPERATOR_CANCELLED;
+    }
+    outliner_stack_rows_ensure(ctx, *space_outliner, *paste_owner);
+
+    /* The rows the copies hang on: every selected plain row, or the active row when nothing is
+     * selected. An attached active row aims at its parent row -- pasting onto an attached row is
+     * pasting beside it, onto the parent both hang under. */
+    Vector<int> targets;
+    Vector<int> selected;
+    stack_selected_ordinals_get(*space_outliner, selected);
+    int skipped_kind = 0;
+    for (const int ordinal : selected) {
+      const StackRow *row = outliner_stack_row_find(*space_outliner, ordinal);
+      if (row != nullptr && row->parent_section_id.empty()) {
+        targets.append(ordinal);
+      }
+      else {
+        skipped_kind++;
+      }
+    }
+    if (targets.is_empty()) {
+      const int active_ordinal = outliner_stack_active_ordinal_get(ctx, *space_outliner);
+      const StackRow *active_row = (active_ordinal >= 0) ?
+                                       outliner_stack_row_find(*space_outliner, active_ordinal) :
+                                       nullptr;
+      if (active_row != nullptr) {
+        const int aim_ordinal = active_row->parent_section_id.empty() ?
+                                    active_ordinal :
+                                    active_row->parent_ordinal;
+        if (aim_ordinal >= 0 && outliner_stack_row_find(*space_outliner, aim_ordinal) != nullptr)
+        {
+          targets.append(aim_ordinal);
+        }
+      }
+    }
+    if (targets.is_empty()) {
+      BKE_report(op->reports, RPT_INFO, "Nothing to paste");
+      return OPERATOR_CANCELLED;
+    }
+    if (skipped_kind > 0) {
+      BKE_reportf(op->reports, RPT_INFO, "Skipped %d row(s) of a different kind", skipped_kind);
+    }
+
+    /* Adding an attached row does not move the rows around it -- a new one takes its ordinal from
+     * the top of the range -- so this is not a renumbering: the selection below is what carries
+     * the new rows' state across the rebuild. */
+    Vector<StackItemIdentity> pasted;
+    for (const int target_ordinal : targets) {
+      Vector<StackItemIdentity> created;
+      const bool pasted_into = stack_mutate(
+          *C,
+          *space_outliner,
+          false,
+          [&](const StackSource & /*source*/,
+              const StackEditor &editor,
+              const StackFocus &focus,
+              ID &owner,
+              int & /*r_select_ordinal*/) {
+            bool pasteable = false;
+            for (const StackItemIdentity &source_identity : stack_layer_clipboard) {
+              if (editor.can_paste_into(ctx, focus, owner, source_identity, target_ordinal)) {
+                pasteable = true;
+                break;
+              }
+            }
+            if (!pasteable) {
+              return false;
+            }
+            return editor.rows_paste_into(*C,
+                                          focus,
+                                          owner,
+                                          stack_layer_clipboard,
+                                          target_ordinal,
+                                          created,
+                                          op->reports);
+          });
+      if (pasted_into) {
+        pasted.extend(created);
+      }
+    }
+
+    if (pasted.is_empty()) {
+      BKE_report(op->reports, RPT_INFO, "Nothing to paste");
+      return OPERATOR_CANCELLED;
+    }
+
+    SpaceOutliner_Runtime &runtime = *space_outliner->runtime;
+    for (StackRowUiState &state : runtime.stack_row_ui_state.values()) {
+      state.selected = false;
+      state.active = false;
+    }
+    for (const StackItemIdentity &identity : pasted) {
+      /* A row the source gives no identity for cannot be addressed by this map; keying it at nil
+       * would fold every such row into one shared state. */
+      if (BLI_uuid_is_nil(identity.row_id)) {
+        continue;
+      }
+      runtime.stack_row_ui_state.lookup_or_add_default(identity.row_id).selected = true;
+    }
+    const int last_ordinal = outliner_stack_identity_resolve(ctx, *space_outliner, pasted.last());
+    if (last_ordinal >= 0) {
+      outliner_stack_row_activate(C, *space_outliner, last_ordinal);
+      if (!BLI_uuid_is_nil(pasted.last().row_id)) {
+        StackRowUiState &state = runtime.stack_row_ui_state.lookup_or_add_default(
+            pasted.last().row_id);
+        state.active = true;
+        state.selected = true;
+      }
+    }
+    BKE_reportf(op->reports, RPT_INFO, "Pasted %d item(s)", int(pasted.size()));
+    return OPERATOR_FINISHED;
+  }
+
   const int active_ordinal = outliner_stack_active_ordinal_get(ctx, *space_outliner);
   if (active_ordinal < 0) {
     return OPERATOR_CANCELLED;
@@ -614,6 +825,15 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
    * or, when the row is a folder, inside it -- so a row inside a folder keeps the new layer in
    * that folder. */
   const int anchor_ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  /* The section the anchor row is showing, for a kind that hangs off one of its anchor's sections:
+   * the Add lands where the user is looking, the way an anchor inside a folder keeps the folder.
+   * Sources whose kinds mean nothing by a section ignore this. */
+  if (anchor_ordinal >= 0) {
+    const StackRow *anchor_row = outliner_stack_row_find(*space_outliner, anchor_ordinal);
+    if (anchor_row != nullptr) {
+      args.section_id = outliner_stack_row_active_section_get(*space_outliner, *anchor_row);
+    }
+  }
   float fill_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   RNA_float_get_array(op->ptr, "fill_color", fill_color);
   if (kind_info.takes_color) {
@@ -1413,6 +1633,47 @@ bool outliner_stack_row_active_section_set(SpaceOutliner &space_outliner,
   return true;
 }
 
+bool stack_rows_are_siblings(const StackRow &a, const StackRow &b)
+{
+  return a.parent_ordinal == b.parent_ordinal && a.parent_section_id == b.parent_section_id;
+}
+
+Vector<StackAttachedPlacement> outliner_stack_attached_rows_plan(
+    Span<StackRow> rows, FunctionRef<StringRef(const StackRow &)> active_section_get)
+{
+  Vector<StackAttachedPlacement> plan;
+  /* Ordinal to index, plain rows only: an attached row hangs off the plain row its
+   * #StackRow::parent_ordinal names, never off another attached row. */
+  Map<int16_t, int64_t> plain_indices;
+  for (const int64_t index : rows.index_range()) {
+    if (rows[index].parent_section_id.empty()) {
+      plain_indices.add(rows[index].ordinal, index);
+    }
+  }
+  /* The rows run bottom to top, so walking them backward lists the plan top first -- the order a
+   * stack is displayed in. */
+  for (int64_t index = rows.size() - 1; index >= 0; index--) {
+    const StackRow &row = rows[index];
+    if (row.parent_section_id.empty() || !row.supported) {
+      continue;
+    }
+    const int64_t *parent_index = plain_indices.lookup_ptr(row.parent_ordinal);
+    if (parent_index == nullptr) {
+      continue;
+    }
+    const StackRow &parent = rows[*parent_index];
+    /* An unsupported parent has no sections of its own to list anything under. */
+    if (!parent.supported) {
+      continue;
+    }
+    if (active_section_get(parent) != StringRef(row.parent_section_id)) {
+      continue;
+    }
+    plan.append({index, *parent_index});
+  }
+  return plan;
+}
+
 void outliner_stack_rows_ensure(const StackReadContext &ctx,
                                 SpaceOutliner &space_outliner,
                                 ID &owner)
@@ -1551,7 +1812,10 @@ void stack_ordinals_drop_covered_descendants(const SpaceOutliner &space_outliner
 {
   /* A folder in the set already carries every row it holds; a descendant kept alongside it is a
    * second copy of a row that is going to move anyway -- and its group-child ordinal, which is not
-   * a position, breaks any code that treats the set as a contiguous run. */
+   * a position, breaks any code that treats the set as a contiguous run. A row attached to a
+   * parent's content section needs no separate case: its #StackRow::parent_ordinal is the row it
+   * hangs under, so selecting that row drops it from the set with everything else the walk lifts
+   * out. */
   Set<int> ordinal_set;
   ordinal_set.add_multiple(r_ordinals);
   Vector<int> roots;

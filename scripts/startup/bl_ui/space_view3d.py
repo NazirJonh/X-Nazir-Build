@@ -23,6 +23,7 @@ from bl_ui.properties_paint_common import (
     BrushAssetShelf,
     brush_color_eyedropper_draw,
     draw_material_paint_channels,
+    material_paint_has_any_map,
 )
 from bl_ui.properties_grease_pencil_common import (
     AnnotationDataPanel,
@@ -8712,7 +8713,18 @@ class VIEW3D_PT_overlay_sculpt_general(Panel):
         brush = sculpt.brush if sculpt else None
         is_paint_brush = brush and brush.sculpt_brush_type == 'PAINT'
 
+        # PBR Paint (the Material / Image canvas) paints image textures, so the vertex-color
+        # channel display does not apply once its maps exist. Before that the mesh may still
+        # display its color attribute, so the section stays until then.
+        is_pbr_paint = False
         if is_paint_brush:
+            paint_mode = context.tool_settings.paint_mode
+            if paint_mode.canvas_source == 'MATERIAL':
+                is_pbr_paint = material_paint_has_any_map(context.active_object)
+            elif paint_mode.canvas_source == 'IMAGE':
+                is_pbr_paint = paint_mode.canvas_image is not None
+
+        if is_paint_brush and not is_pbr_paint:
             layout.separator()
             layout.label(text="Channel Display:")
 

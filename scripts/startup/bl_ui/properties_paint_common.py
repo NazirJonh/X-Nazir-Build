@@ -1555,6 +1555,18 @@ _MATERIAL_PAINT_CHANNEL_UI_ORDER = (
     'EMISSION',
     'SPECULAR',
 )
+# Channels that can own a Principled paint map on the Material canvas. Height, AO and Custom have
+# no Principled socket, so they cannot be created as maps and are excluded (see
+# #material_paint_missing_map_channels).
+_MATERIAL_PAINT_MAP_CHANNELS = (
+    'BASE_COLOR',
+    'METALLIC',
+    'ROUGHNESS',
+    'SPECULAR',
+    'NORMAL',
+    'ALPHA',
+    'EMISSION',
+)
 # Channels the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas can store: one float (or
 # color) per vertex has no meaningful representation for a texture-map-only channel. Must match
 # #MaterialPaintChannelInfo.supports_vertex_paint in source/blender/blenkernel/intern/paint.cc.
@@ -2172,6 +2184,21 @@ def draw_material_paint_sync_toggle(layout, paint_mode_settings):
     )
 
 
+def material_paint_has_any_map(ob):
+    """True when at least one of `ob`'s Principled channels has a paint map image.
+
+    "Create PBR Paint Maps" and "Create Missing Maps" link every map they create into the
+    Principled BSDF, so a single hit means the PBR Paint texture workflow is set up on `ob`:
+    strokes land in images, not vertex colors, and vertex-color display controls (the Overlay
+    channel display) no longer describe what the viewport shows. Returns False when `ob` is
+    None or has no such channel images yet.
+    """
+    has_image_fn = getattr(ob, "principled_paint_channel_has_image", None)
+    if has_image_fn is None:
+        return False
+    return any(has_image_fn(channel) for channel in _MATERIAL_PAINT_MAP_CHANNELS)
+
+
 def material_paint_missing_map_channels(ob, brush, paint, paint_mode_settings):
     """Channel identifiers that are writable but have no Principled Image Texture yet.
 
@@ -2183,12 +2210,9 @@ def material_paint_missing_map_channels(ob, brush, paint, paint_mode_settings):
     if writable is None:
         return set()
     has_image_fn = getattr(ob, "principled_paint_channel_has_image", None) if ob else None
-    map_ids = {
-        'BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL', 'ALPHA', 'EMISSION',
-    }
     missing = set()
     for channel_id in writable:
-        if channel_id not in map_ids:
+        if channel_id not in _MATERIAL_PAINT_MAP_CHANNELS:
             continue
         if has_image_fn is None or not has_image_fn(channel_id):
             missing.add(channel_id)
@@ -2689,15 +2713,21 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
 
         # Vertex Paint Channel Output. Only the Paint brush writes color attributes through
         # the channel-masked path shared with Vertex Paint Mode (see #sculpt_paint_color.cc).
+        # PBR Paint (MATERIAL) and Image (IMAGE) canvases paint images (or do nothing when
+        # empty, see do_paint_brush early-out for MATERIAL/IMAGE), so the vertex channel
+        # mask never applies there.
         if brush.sculpt_brush_type == 'PAINT':
-            container.separator()
-            col = container.column(align=True)
-            col.label(text="Channel Output:", icon='GROUP_VCOL')
+            paint_mode_settings = getattr(getattr(context, "tool_settings", None), "paint_mode", None)
+            canvas_source = getattr(paint_mode_settings, "canvas_source", None)
+            if canvas_source not in {'MATERIAL', 'IMAGE'}:
+                container.separator()
+                col = container.column(align=True)
+                col.label(text="Channel Output:", icon='GROUP_VCOL')
 
-            row = col.row(align=True)
-            row.prop(brush, "use_vertex_paint_channel_r", text="Red", icon='RGB_RED', toggle=True)
-            row.prop(brush, "use_vertex_paint_channel_g", text="Green", icon='RGB_GREEN', toggle=True)
-            row.prop(brush, "use_vertex_paint_channel_b", text="Blue", icon='RGB_BLUE', toggle=True)
+                row = col.row(align=True)
+                row.prop(brush, "use_vertex_paint_channel_r", text="Red", icon='RGB_RED', toggle=True)
+                row.prop(brush, "use_vertex_paint_channel_g", text="Green", icon='RGB_GREEN', toggle=True)
+                row.prop(brush, "use_vertex_paint_channel_b", text="Blue", icon='RGB_BLUE', toggle=True)
 
         # sculpt plane settings
         if capabilities.has_sculpt_plane:

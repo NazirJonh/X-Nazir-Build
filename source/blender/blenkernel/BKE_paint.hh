@@ -1399,10 +1399,10 @@ bool BKE_paint_material_channel_has_source(const BrushMaterialPaintChannel &chan
 /**
  * Fills \a r_mtex with \a channel's own source #Tex combined with \a brush_paint's mapping
  * shared by every channel (see #BrushMaterialPaint.shared_source_mapping: map_mode, size,
- * offset, angle). Sampling and cursor-preview code read mapping through this instead of
- * #BrushMaterialPaintChannel.source_mtex directly, so every channel's texture samples with
- * identical mapping and multi-channel patterns (a Base Color texture with a matching
- * Normal/Roughness texture) stay aligned.
+ * offset, angle, angle mode with random angle). Sampling and cursor-preview code read mapping
+ * through this instead of #BrushMaterialPaintChannel.source_mtex directly, so every channel's
+ * texture samples with identical mapping and multi-channel patterns (a Base Color texture with a
+ * matching Normal/Roughness texture) stay aligned.
  *
  * Out-parameter rather than a return value: #MTex disables copy/move (see
  * #DNA_DEFINE_CXX_METHODS) so callers own the storage and this only ever assigns into it via

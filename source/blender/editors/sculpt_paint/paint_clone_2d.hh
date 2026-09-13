@@ -103,6 +103,8 @@ bool clone_2d_stroke_gate(bContext *C, wmOperator *op, Clone2DStrokeContext &r_c
  * image-paint stroke; the dab pushes its tiles through #clone_capture_undo_tile and publishes
  * dirty regions through #ED_imapaint_dirty_region.
  *
+ * \param radius: current dab radius in canvas pixels, including pressure and stroke-level size
+ * randomization.
  * \param strength: brush alpha with pressure already folded in by the caller.
  * \param is_main_pass: the un-mirrored pass of this stroke event. Only it records the dab center
  *                      the symmetry duplicate test compares against, and only it may fix the
@@ -118,6 +120,7 @@ void clone_2d_stroke_dab(CloneStrokeRuntime *&owner,
                          const Paint &paint,
                          const Brush &brush,
                          const float2 &dest_uv,
+                         float radius,
                          float strength,
                          bool is_main_pass,
                          const float2x2 *symmetry_jacobian = nullptr);

@@ -1974,6 +1974,8 @@ def _draw_material_paint_shared_mapping(layout, material_paint):
     Multi-channel patterns (a Base Color texture with a matching Normal/Roughness texture meant
     to tile together) need identical mapping to stay aligned, so there is deliberately no
     per-channel override and no Offset control.
+    Below the texture mapping, Size Random varies the brush dab size itself per stroke step; the
+    value is shared by every channel, since the dab geometry is shared too.
     """
     slot = material_paint.shared_texture_slot
     col = layout.column(align=True)
@@ -1982,6 +1984,13 @@ def _draw_material_paint_shared_mapping(layout, material_paint):
     col.prop(material_paint, "shared_mapping_size_y", text="Size Y", slider=True)
     if slot.has_texture_angle:
         col.prop(slot, "angle", text="Angle")
+        if slot.has_texture_angle_source:
+            col.prop(slot, "use_random", text="Random")
+            if slot.use_random:
+                col.prop(slot, "random_angle", text="Random Angle")
+
+    col.separator()
+    col.prop(material_paint, "size_random", text="Size Random", slider=True)
 
 
 def _draw_material_paint_value_ramp(layout, context, channel, channel_id, *, source_enabled=True):

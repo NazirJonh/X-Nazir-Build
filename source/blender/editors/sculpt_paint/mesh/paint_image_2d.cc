@@ -4559,6 +4559,7 @@ void paint_2d_stroke(void *ps,
                                                      *s->paint,
                                                      *s->brush,
                                                      dest_uv,
+                                                     base_size,
                                                      strength,
                                                      iter == 0,
                                                      symm_jacobian);

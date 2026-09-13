@@ -9477,6 +9477,20 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
   return false;
 }
 
+/**
+ * Per-dab #BrushMaterialPaint::size_random factor for radii derived from the brush radius. Curve
+ * strokes get 1: their stroke point radius already carries the factor (#PaintStroke::add_step).
+ * Every place that derives a dab radius from the brush radius must apply it, otherwise secondary
+ * objects of a multi-object stroke paint with a different size than the primary one.
+ */
+static float stroke_size_random_factor(const Paint &paint, const Brush &brush)
+{
+  if (brush.stroke_method == BRUSH_STROKE_CURVE) {
+    return 1.0f;
+  }
+  return paint.runtime->size_random_value;
+}
+
 bool object_geometry_intersects_world_sphere(Object &ob,
                                              const StrokeCache &cache,
                                              Paint &paint,
@@ -9496,7 +9510,7 @@ bool object_geometry_intersects_world_sphere(Object &ob,
   /* Compute the brush radius in this object's local space at the projected center.
    * object_space_radius_get already accounts for the object's scale and camera distance. */
   const float obj_radius = object_space_radius_get(*cache.vc, paint, brush, obj_center) *
-                           radius_multiplier;
+                           radius_multiplier * stroke_size_random_factor(paint, brush);
   const float obj_radius_sq = obj_radius * obj_radius;
 
   /* Does any PBVH node of this object intersect the brush volume? If not, there is no geometry to
@@ -9561,7 +9575,16 @@ void stroke_cache_apply_world_center(
   }
 
   bke::PaintRuntime &paint_runtime = *paint.runtime;
-  if (BKE_brush_use_size_pressure(&brush) && paint_supports_dynamic_size(brush, PaintMode::Sculpt))
+  if (brush.stroke_method == BRUSH_STROKE_CURVE) {
+    /* Mirror #stroke_cache_update: a curve point carries its own, already size-randomized, pixel
+     * radius, which #PaintStroke::add_step leaves in #PaintRuntime::pixel_radius. */
+    cache.initial_radius = paint_calc_object_space_radius(
+        *cache.vc, obj_center, paint_runtime.pixel_radius);
+    cache.radius = cache.initial_radius;
+    cache.dyntopo_pixel_radius = paint_runtime.pixel_radius;
+  }
+  else if (BKE_brush_use_size_pressure(&brush) &&
+           paint_supports_dynamic_size(brush, PaintMode::Sculpt))
   {
     cache.radius = brush_dynamic_size_get(brush, cache, cache.initial_radius);
     cache.dyntopo_pixel_radius = brush_dynamic_size_get(
@@ -9571,6 +9594,10 @@ void stroke_cache_apply_world_center(
     cache.radius = cache.initial_radius;
     cache.dyntopo_pixel_radius = paint_runtime.initial_pixel_radius;
   }
+
+  const float size_random_factor = stroke_size_random_factor(paint, brush);
+  cache.radius *= size_random_factor;
+  cache.dyntopo_pixel_radius *= size_random_factor;
 
   cache_paint_invariants_update(cache, brush);
   cache.radius_squared = cache.radius * cache.radius;
@@ -9706,6 +9733,16 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
     cache.radius = cache.initial_radius;
     cache.dyntopo_pixel_radius = paint_runtime.initial_pixel_radius;
   }
+
+  /* PBR Size Random (#BrushMaterialPaint::size_random): scale this step's dab radius so the
+   * painted area, the brush local matrix (Area mapping) and the dyntopo detail size all follow
+   * the same randomized size. Curve stroke points already carry the factor in their RNA `size`
+   * value.
+   * Anchored strokes never generate a factor (excluded on the stroke level), and their override
+   * below recomputes the radius from the un-randomized pixel radius. */
+  const float size_random_factor = stroke_size_random_factor(paint, brush);
+  cache.radius *= size_random_factor;
+  cache.dyntopo_pixel_radius *= size_random_factor;
 
   cache_paint_invariants_update(cache, brush);
 

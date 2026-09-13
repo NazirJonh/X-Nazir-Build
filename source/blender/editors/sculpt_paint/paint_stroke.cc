@@ -235,6 +235,63 @@ static bool paint_brush_type_require_inbetween_mouse_events(const Brush &brush,
   return true;
 }
 
+/**
+ * Whether this stroke actually paints PBR material channels. #Brush.material_paint alone is not
+ * enough: it persists once a brush was set up for PBR Paint, also while the mode or canvas paints
+ * nothing through it, and its stroke randomness must not reach such strokes.
+ */
+static bool paint_stroke_material_paint_active(const Scene &scene,
+                                               const Paint &paint,
+                                               const Brush &brush,
+                                               const PaintMode mode)
+{
+  if (brush.material_paint == nullptr || scene.toolsettings == nullptr) {
+    return false;
+  }
+  const PaintModeSettings &mode_settings = scene.toolsettings->paint_mode;
+  /* Same canvas and brush type conditions under which the strokes set up their channel painters:
+   * #SculptPaintStroke::test_start for Sculpt, the Material canvas for Texture Paint. */
+  switch (mode) {
+    case PaintMode::Sculpt:
+      if (mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT) {
+        if (!brush_type_is_paint(brush.sculpt_brush_type)) {
+          return false;
+        }
+      }
+      else if (mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
+        if (brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_PAINT) {
+          return false;
+        }
+      }
+      else {
+        return false;
+      }
+      break;
+    case PaintMode::Texture2D:
+    case PaintMode::Texture3D:
+      if (mode_settings.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL) {
+        return false;
+      }
+      break;
+    default:
+      return false;
+  }
+  const BrushMaterialPaint &brush_paint = *brush.material_paint;
+  if (BKE_paint_material_channel_masks_stroke(
+          brush_paint, mode_settings, paint.visible_material_channels))
+  {
+    return true;
+  }
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (BKE_paint_material_channel_writes_to_target(
+            brush_paint, mode_settings, paint.visible_material_channels, info.channel))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool PaintStroke::update(bContext *C,
                          const Brush &brush,
                          const PaintMode mode,
@@ -255,6 +312,24 @@ bool PaintStroke::update(bContext *C,
   bool is_dry_run = false;
   bool do_random = false;
   bool do_random_mask = false;
+  /* PBR Paint shared stroke randomness (#BrushMaterialPaint): one random angle for every
+   * channel's source texture and one size factor per dab, so multi-channel patterns stay
+   * aligned. Anchored and grab-like strokes are excluded through the same gate as the regular
+   * texture coordinate randomization below. */
+  const BrushMaterialPaint *material_paint =
+      paint_stroke_material_paint_active(*scene, *paint, brush, mode) ? brush.material_paint :
+                                                                         nullptr;
+  const bool do_pbr_random_angle = material_paint != nullptr &&
+                                   paint_supports_dynamic_tex_coords(brush, mode) &&
+                                   ELEM(material_paint->shared_source_mapping.brush_map_mode,
+                                        MTEX_MAP_MODE_VIEW,
+                                        MTEX_MAP_MODE_AREA,
+                                        MTEX_MAP_MODE_RANDOM) &&
+                                   (material_paint->shared_source_mapping.brush_angle_mode &
+                                    MTEX_ANGLE_RANDOM);
+  const bool do_pbr_size_random = material_paint != nullptr &&
+                                  material_paint->size_random > 0.0f &&
+                                  paint_supports_dynamic_tex_coords(brush, mode);
   *r_location_is_set = false;
   /* XXX: Use pressure value from first brush step for brushes which don't
    *      support strokes (grab, thumb). They depends on initial state and
@@ -428,16 +503,28 @@ bool PaintStroke::update(bContext *C,
     }
   }
 
-  if ((do_random || do_random_mask) && !rng_) {
+  if ((do_random || do_random_mask || do_pbr_random_angle || do_pbr_size_random) && !rng_) {
     /* Lazy initialization. */
     rng_ = RandomNumberGenerator::from_random_seed();
   }
 
-  if (do_random) {
+  /* Both angles land in the shared #PaintRuntime::brush_rotation, so with PBR Random Angle active
+   * the brush texture's own random angle is skipped: a dab gets exactly one random angle instead
+   * of the sum of two. */
+  if (do_random && !do_pbr_random_angle) {
     if (brush.mtex.brush_angle_mode & MTEX_ANGLE_RANDOM) {
       paint_runtime.brush_rotation += -brush.mtex.random_angle / 2.0f +
                                       brush.mtex.random_angle * rng_->get_float();
     }
+  }
+
+  if (do_pbr_random_angle) {
+    /* Same symmetric distribution as the regular texture angle above: a range of
+     * +-random_angle / 2, shared by every PBR channel of this dab. RNG order is stable: brush
+     * angle or PBR shared angle, mask angle, PBR size. */
+    paint_runtime.brush_rotation +=
+        -material_paint->shared_source_mapping.random_angle / 2.0f +
+        material_paint->shared_source_mapping.random_angle * rng_->get_float();
   }
 
   if (do_random_mask) {
@@ -445,6 +532,19 @@ bool PaintStroke::update(bContext *C,
       paint_runtime.brush_rotation_sec += -brush.mask_mtex.random_angle / 2.0f +
                                           brush.mask_mtex.random_angle * rng_->get_float();
     }
+  }
+
+  if (do_pbr_size_random) {
+    /* Symmetric range of +-size_random / 2 around the base size, applied to this dab's radius
+     * only (the initial/start radii stay untouched). Everything downstream — the sculpt stroke
+     * cache, the recorded stroke point size and the 2D dab diameter — reads the multiplied
+     * #PaintRuntime::pixel_radius, so no path applies the factor twice. */
+    paint_runtime.size_random_value = 1.0f +
+                                      material_paint->size_random * (rng_->get_float() - 0.5f);
+    paint_runtime.pixel_radius *= paint_runtime.size_random_value;
+  }
+  else {
+    paint_runtime.size_random_value = 1.0f;
   }
 
   if (!location_sampled) {
@@ -621,6 +721,10 @@ void PaintStroke::add_step(bContext *C,
   if (curve_point_radius) {
     paint_runtime->pixel_radius = paintcurve_radius_to_pixel_radius(
         this->paint, &brush, *curve_point_radius);
+    /* Curve points replace the base radius after #update(). Apply the same per-dab factor here so
+     * 2D and 3D curve strokes stay consistent; #stroke_cache_update skips its usual factor for
+     * Curve because this radius is already randomized. */
+    paint_runtime->pixel_radius *= paint_runtime->size_random_value;
   }
 
   {
@@ -1140,6 +1244,9 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
       paint_runtime->brush_rotation_sec = 0.0f;
     }
   }
+
+  /* The per-dab size random factor must not leak into the next stroke or the cursor. */
+  paint_runtime->size_random_value = 1.0f;
 
   /* TODO: Is this stroke_started_ guard necessary? */
   if (stroke_started_) {

@@ -4156,6 +4156,8 @@ void BKE_paint_material_channel_effective_mtex(const BrushMaterialPaint &brush_p
   copy_v3_v3(r_mtex.size, shared.size);
   copy_v3_v3(r_mtex.ofs, shared.ofs);
   r_mtex.rot = shared.rot;
+  r_mtex.brush_angle_mode = shared.brush_angle_mode;
+  r_mtex.random_angle = shared.random_angle;
 }
 
 Span<eMaterialPaintChannel> BKE_paint_material_channel_preview_order()

@@ -255,11 +255,20 @@ struct BrushMaterialPaint {
    * #BrushMaterialPaintChannel.source_mtex.tex, only reading mapping from here at paint time.
    */
   struct MTex shared_source_mapping;
+  /**
+   * Random brush-size variation per stroke step, 0..1. Each dab multiplies its radius by
+   * `1 + size_random * (rand - 0.5)`, i.e. a symmetric range of +-(size_random / 2) around the
+   * base radius; 0 keeps the size untouched. The transient per-dab factor lives in
+   * #bke::PaintRuntime::size_random_value.
+   */
+  float size_random = 0.0f;
   /** #eBrushMaterialPaintSourceMode. */
   char source_mode = 0;
   /** #eBrushMaterialPaintSourceLayout. */
   char source_layout = 0;
-  char _pad2[2] = {};
+  /* #source_material is pointer-aligned: 4 (size_random) + 2 (modes) + this padding keep the
+   * int + pointer pair below on their natural boundaries without hidden compiler padding. */
+  char _pad2[6] = {};
   /**
    * Side of the square bake buffer in pixels. Deliberately smaller than
    * #PaintModeSettings.new_channel_image_size: this is a scratch buffer several channels of which

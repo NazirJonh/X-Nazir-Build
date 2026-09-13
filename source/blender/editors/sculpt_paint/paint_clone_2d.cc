@@ -33,7 +33,6 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_utildefines.h"
 
-#include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
 #include "BKE_material.hh"
@@ -237,6 +236,7 @@ void clone_2d_stroke_dab(CloneStrokeRuntime *&owner,
                          const Paint &paint,
                          const Brush &brush,
                          const float2 &dest_uv,
+                         const float radius,
                          const float strength,
                          const bool is_main_pass,
                          const float2x2 *symmetry_jacobian)
@@ -272,7 +272,7 @@ void clone_2d_stroke_dab(CloneStrokeRuntime *&owner,
   if (canvas_w <= 0) {
     canvas_w = 1024;
   }
-  const float uv_radius = BKE_brush_radius_get(&paint, &brush) / float(canvas_w);
+  const float uv_radius = radius / float(canvas_w);
   if (uv_radius <= 0.0f) {
     return;
   }

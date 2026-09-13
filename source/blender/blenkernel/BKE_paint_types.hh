@@ -116,6 +116,13 @@ struct PaintRuntime : NonCopyable, NonMovable {
   /** Evaluated size pressure value */
   float size_pressure_value = 0.0f;
 
+  /**
+   * Transient per-dab #BrushMaterialPaint::size_random factor the brush radius is multiplied by.
+   * Recomputed on every stroke step; 1.0 means no size randomization (feature off, or a stroke
+   * method that excludes it, e.g. anchored).
+   */
+  float size_random_value = 1.0f;
+
   /** Position of mouse, used to sample the texture. */
   float2 tex_mouse = float2(0.0f, 0.0f);
 

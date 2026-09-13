@@ -4209,6 +4209,15 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       prop, "Size Y", "Vertical scale of every channel's shared source-texture mapping");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_shared_mapping_update");
 
+  prop = RNA_def_property(srna, "size_random", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "size_random");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Size Random",
+                           "Randomly vary the brush size with every stroke step by a symmetric "
+                           "factor of up to half this amount around the base size");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
   prop = RNA_def_property(srna, "base_color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "base_color");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);

@@ -22,6 +22,7 @@ from bl_ui.properties_paint_common import (
     draw_material_paint_visibility_chevron,
     draw_material_paint_sync_toggle,
     material_paint_writable_channels,
+    material_paint_has_any_map,
     draw_material_paint_visibility_popover,
     ClonePanel,
     PBRClonePanel,
@@ -1632,12 +1633,7 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
                     )
 
                 if canvas_source == 'MATERIAL' and ob:
-                    has_image_fn = getattr(ob, "principled_paint_channel_has_image", None)
-                    if has_image_fn is not None:
-                        have_image = any(
-                            has_image_fn(channel)
-                            for channel in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL', 'ALPHA', 'EMISSION')
-                        )
+                    have_image = material_paint_has_any_map(ob)
 
                 draw_material_paint_channels(
                     context,

@@ -178,6 +178,7 @@ static void do_paint_color_task(Object &object,
                                 const OffsetIndices<int> faces,
                                 const Span<int> corner_verts,
                                 const GroupedSpan<int> vert_to_face_map,
+                                const Span<bool> select_poly,
                                 const eMaterialPaintChannel channel,
                                 const float3 &target_rgb,
                                 const IMB_BlendMode blend_mode,
@@ -257,7 +258,8 @@ static void do_paint_color_task(Object &object,
                           color_attribute.domain,
                           verts[i],
                           result,
-                          color_attribute.span);
+                          color_attribute.span,
+                          select_poly);
   }
 #if PBR_PAINT_MATERIAL_PROFILE
   g_color_profile.sample_and_blend_seconds.fetch_add(BLI_time_now_seconds() - sample_start);
@@ -423,6 +425,7 @@ static void paint_color_channel(
     const IMB_BlendMode blend_mode,
     const float brush_alpha,
     const StrokeCache::MaterialDabScratch &dab,
+    const Span<bool> select_poly,
     bke::MutableAttributeAccessor &attributes,
     bke::pbvh::Tree &pbvh,
     MutableSpan<bke::pbvh::MeshNode> nodes,
@@ -521,6 +524,7 @@ static void paint_color_channel(
                             faces,
                             corner_verts,
                             vert_to_face_map,
+                            select_poly,
                             channel,
                             target_rgb,
                             blend_mode,
@@ -580,6 +584,13 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
 #endif
 
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  /* Face selection masking with nothing selected: nothing is paintable, skip the whole dab
+   * (factors, source sampling and channel writes all read unchanged data). The state is cached in
+   * the stroke, so this is O(1) per dab. */
+  const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(ob);
+  if (face_selection_mask.state == FaceSelectionMaskState::Empty) {
+    return;
+  }
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
 
   const bool invert = ss.cache->toggle_settings.invert;
@@ -593,6 +604,7 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
 
   const Span<float3> vert_positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
   const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, ob);
+  const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
   const MeshAttributeData attribute_data(mesh);
 
   threading::EnumerableThreadSpecific<MaterialPaintLocalData> all_tls;
@@ -646,6 +658,7 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
         /* NOTE: no automasking call here. #calc_factors_common_mesh_indexed already applies it
          * (as it does for every other brush); calling it again would multiply the automask factor
          * in a second time, squaring it. */
+        filter_factors_with_face_selection(face_selection_mask, verts, factors);
         /* #calc_factors_common_mesh_indexed does not fold in the brush Strength slider; every
          * other paint task (see #sculpt_paint_color.cc's do_paint_task) applies it explicitly
          * after computing the base falloff, which this channel-shared factor pass mirrors. */
@@ -711,6 +724,7 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
                           channel_blend_mode,
                           brush_alpha,
                           dab,
+                          face_selection_mask.select_poly,
                           attributes,
                           pbvh,
                           nodes,

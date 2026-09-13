@@ -69,11 +69,14 @@ namespace {
 /** Calls `fn` with every color-attribute element belonging to `vert`: the vertex itself on
  * `AttrDomain::Point`, or each of its corners on `AttrDomain::Corner`. Mirrors the traversal
  * `color::color_vert_set()` performs (`mesh/sculpt_paint_color.cc:112-137`), so the snapshot keys
- * and the written elements are guaranteed to be the same set. */
+ * and the written elements are guaranteed to be the same set. When \a select_poly is non-empty
+ * (face selection masking enabled) corners of unselected faces are skipped, mirroring the
+ * face-selection-aware `color_vert_set` overload. */
 template<typename Fn>
 void foreach_vert_domain_element(const Mesh &mesh,
                                  const bke::AttrDomain domain,
                                  const int vert,
+                                 const Span<bool> select_poly,
                                  Fn &&fn)
 {
   if (domain == bke::AttrDomain::Point) {
@@ -84,6 +87,9 @@ void foreach_vert_domain_element(const Mesh &mesh,
   const Span<int> corner_verts = mesh.corner_verts();
   const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
   for (const int face : vert_to_face_map[vert]) {
+    if (!select_poly.is_empty() && !select_poly[face]) {
+      continue;
+    }
     fn(bke::mesh::face_find_corner_from_vert(faces[face], corner_verts, vert));
   }
 }
@@ -347,6 +353,12 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
 
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  /* Face selection masking with nothing selected: the patch paints nothing on this object. The
+   * state is cached in the stroke, so this is O(1) per pass. */
+  const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(ob);
+  if (face_selection_mask.state == FaceSelectionMaskState::Empty) {
+    return;
+  }
   if (has_color_target_ && !this->attribute_matches(mesh)) {
     return;
   }
@@ -361,6 +373,9 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
   const Span<float3> normals = mesh.vert_normals();
   const MeshAttributeData attribute_data(mesh);
   const Span<float> mask = attribute_data.mask;
+  /* Face selection masking: vertices with no selected owning face are skipped, and corner-domain
+   * writes are restricted to the corners of selected faces. Empty when the masking is disabled. */
+  const Span<bool> select_poly = face_selection_mask.select_poly;
 
   curve_patch_effect_ensure_falloff_curve(brush);
 
@@ -414,6 +429,14 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
           LocalData &local = all_tls.local();
           const int64_t before = local.writes.size() + local.scalar_writes.size();
           for (const int vert : nodes[i].verts()) {
+            if (face_selection_mask.state == FaceSelectionMaskState::Active &&
+                !face_selection_mask.vert_paintable[vert])
+            {
+              /* Face selection masking: a vertex participates only when at least one of its
+               * owning faces is selected (point-domain values cannot be masked more strictly).
+               * O(1) via the per-stroke vertex table. */
+              continue;
+            }
             const std::optional<CurvePatchSample> sample = sampler.sample(vert, thread_id);
             if (!sample) {
               continue;
@@ -425,7 +448,8 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
             if (!has_color_target_) {
               continue;
             }
-            foreach_vert_domain_element(mesh, domain_, vert, [&](const int elem) {
+            foreach_vert_domain_element(
+                mesh, domain_, vert, select_poly, [&](const int elem) {
               const float4 *orig_ptr = orig_colors_.lookup_ptr(elem);
               float4 orig;
               if (orig_ptr) {

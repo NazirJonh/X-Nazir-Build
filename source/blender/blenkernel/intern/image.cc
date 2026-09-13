@@ -224,6 +224,7 @@ static void image_free_data(ID *id)
   image->tiles.free_no_destruct();
 
   BKE_image_paint_selection_mask_free(image);
+  BKE_image_paint_selection_face_mask_free(image);
   image_runtime_free_data(image);
   /* Nulled, unlike a plain #MEM_delete: `runtime` is dereferenced unconditionally all over
    * blenkernel (#BKE_image_acquire_ibuf and friends), so a stale access after free must fault on a
@@ -745,6 +746,7 @@ void BKE_image_free_buffers_ex(Image *ima, bool do_lock)
   /* Paint selection masks (and their GPU textures) are built against the image buffers being
    * freed here; keeping them would leak the textures and leave stale-sized masks behind. */
   BKE_image_paint_selection_mask_free(ima);
+  BKE_image_paint_selection_face_mask_free(ima);
   if (do_lock) {
     ima->runtime->cache_mutex.unlock();
   }

@@ -1043,7 +1043,17 @@ bool image_texture_paint_poll(bContext *C)
 
 bool facemask_paint_poll(bContext *C)
 {
-  return BKE_paint_select_face_test(CTX_data_active_object(C));
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr || ob->type != OB_MESH) {
+    return false;
+  }
+  /* Sculpt Mode is handled explicitly here (it is not part of #BKE_paint_select_face_test, see
+   * the note there): the face selection tools are independent of the active brush, so they are
+   * available whenever the face selection masking is enabled. */
+  if (ob->mode == OB_MODE_SCULPT) {
+    return (id_cast<Mesh *>(ob->data)->editflag & ME_EDIT_PAINT_FACE_SEL) != 0;
+  }
+  return BKE_paint_select_face_test(ob);
 }
 
 bool vert_paint_poll(bContext *C)

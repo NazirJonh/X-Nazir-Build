@@ -2110,6 +2110,10 @@ class VIEW3D_MT_editor_menus(Menu):
                 layout.menu("VIEW3D_MT_select_paint_mask")
             elif mesh.use_paint_mask_vertex and mode_string in {'PAINT_WEIGHT', 'PAINT_VERTEX'}:
                 layout.menu("VIEW3D_MT_select_paint_mask_vertex")
+        elif mode_string == 'SCULPT':
+            # Face selection masking for sculpt painting (color attribute / image canvases).
+            if obj is not None and obj.type == 'MESH' and obj.data.use_paint_mask:
+                layout.menu("VIEW3D_MT_select_paint_mask")
         elif mode_string not in {
                 'SCULPT', 'SCULPT_CURVES', 'PAINT_GREASE_PENCIL', 'SCULPT_GREASE_PENCIL', 'WEIGHT_GREASE_PENCIL',
                 'VERTEX_GREASE_PENCIL',

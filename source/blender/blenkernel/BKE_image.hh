@@ -173,11 +173,40 @@ struct ImageRuntime {
 
   /* Per-tile selection masks for 2D image paint (runtime only). */
   Map<int, ImBuf *> paint_selection_masks;
+  /**
+   * Runtime flag: the derived masks in #paint_selection_face_masks mirror the painting objects'
+   * face selection (#Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL + `.select_poly`, see the
+   * #image_paint_selection_mask_from_face_selection sync). While set, a derived selection with no
+   * selected pixel blocks 2D painting entirely instead of meaning "no mask". Never saved.
+   */
+  bool paint_selection_from_faces = false;
+  /**
+   * Per-tile selection masks derived from the mesh face selection (runtime only). Kept strictly
+   * separate from #paint_selection_masks so the face-selection sync never touches user-authored
+   * masks (no undo loss, no provenance bookkeeping); the two are combined at sampling time inside
+   * #BKE_image_paint_selection_blend_sample. Never saved.
+   */
+  Map<int, ImBuf *> paint_selection_face_masks;
+  /* Cached smooth blend weights derived from #paint_selection_face_masks (runtime only). */
+  Map<int, ImBuf *> paint_selection_face_blend_masks;
+  /**
+   * True while the derived face-selection masks hold no selected pixel (empty selection, or no
+   * UV map to rasterize through). Only meaningful while #paint_selection_from_faces is set: the
+   * combination blocks every pixel (#BKE_image_paint_selection_blocks_all_paint). Never saved.
+   */
+  bool paint_selection_faces_empty = true;
+  /**
+   * Cache key of the last face-selection sync (a hash over every contributing object's mesh UID,
+   * selection contents and active UV map; see #image_paint_selection_mask_from_face_selection).
+   * While it matches, the sync keeps the existing derived masks instead of rebuilding them, so
+   * unchanged selections cost nothing per stroke. Never saved.
+   */
+  uint64_t paint_selection_faces_sync_key = 0;
   /* Cached smooth blend weights derived from #paint_selection_masks (runtime only). */
   Map<int, ImBuf *> paint_selection_blend_masks;
-  /* Guards #paint_selection_blend_masks: lazily filled from
-   * #BKE_image_paint_selection_blend_sample_bilinear, which multi-threaded rasterizers (e.g. the
-   * gradient tool) call concurrently from worker threads for the same image. */
+  /* Guards #paint_selection_blend_masks and #paint_selection_face_blend_masks: lazily filled
+   * from #BKE_image_paint_selection_blend_sample_bilinear and the face-selection samplers, which
+   * multi-threaded rasterizers (e.g. the gradient tool) call concurrently for the same image. */
   Mutex paint_selection_blend_masks_mutex;
   /** Edge compositing policy for the active selection (box=all hard, lasso/circle=feathered). */
   PaintSelectionEdgePolicy paint_selection_edge_policy;

@@ -14,6 +14,8 @@
 
 #include "DEG_depsgraph_query.hh"
 
+#include "ED_paint.hh"
+
 #include "draw_cache.hh"
 #include "draw_cache_impl.hh"
 
@@ -50,6 +52,10 @@ class Paints : Overlay {
   /* Effective paint context mode, falling back to the object mode when the global context mode
    * doesn't match (e.g. during certain mode transitions). */
   int paint_ctx_mode_ = -1;
+  /* Sculpt Mode only: the active tool consumes the face selection mask (a painting tool). The
+   * face-selection display is hidden for mesh-deforming tools, see
+   * #ED_paint_sculpt_face_selection_mask_supported. */
+  bool sculpt_face_mask_tool_ok_ = false;
   SymmetryContourOverlay symmetry_contour_;
 
  public:
@@ -82,7 +88,17 @@ class Paints : Overlay {
                ELEM(paint_ctx_mode_,
                     CTX_MODE_PAINT_WEIGHT,
                     CTX_MODE_PAINT_VERTEX,
-                    CTX_MODE_PAINT_TEXTURE);
+                    CTX_MODE_PAINT_TEXTURE,
+                    CTX_MODE_SCULPT);
+
+    if (paint_ctx_mode_ == CTX_MODE_SCULPT) {
+      /* The face-selection display is only meaningful for the painting tools that consume the
+       * face selection mask; mesh-deforming tools hide it. With no active tool known
+       * (non-interactive draws) the decision falls back to the active sculpt brush. */
+      const Object *ob_orig = state.object_active ? DEG_get_original(state.object_active) : nullptr;
+      sculpt_face_mask_tool_ok_ = ED_paint_sculpt_face_selection_mask_supported(
+          state.scene, ob_orig, state.active_tool_idname);
+    }
 
     /* Init in any case to release the data. */
     paint_region_ps_.init();
@@ -232,6 +248,14 @@ class Paints : Overlay {
           return;
         }
         break;
+      case CTX_MODE_SCULPT:
+        /* Only the face-selection display below is relevant in Sculpt Mode; the mode specific
+         * weight/texture sub-passes do not apply. Tools that don't consume the face selection
+         * mask (mesh-deforming brushes) hide it. */
+        if (ob_ref.object->mode != OB_MODE_SCULPT || !sculpt_face_mask_tool_ok_) {
+          return;
+        }
+        break;
       default:
         return;
     }
@@ -260,6 +284,10 @@ class Paints : Overlay {
           gpu::Batch *geom = DRW_cache_mesh_surface_texpaint_single_get(ob_ref.object);
           paint_mask_ps_.draw(geom, manager.unique_handle(ob_ref));
         }
+        break;
+      }
+      case CTX_MODE_SCULPT: {
+        /* Painted color on the surface is handled by the render engine; nothing extra here. */
         break;
       }
       default:

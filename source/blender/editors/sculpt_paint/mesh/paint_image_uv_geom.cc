@@ -379,7 +379,10 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
     color_f[3] = strength;
   }
 
-  const bool has_mask = BKE_image_paint_selection_mask_has_any(image);
+  /* Any gating source (user mask or the derived face-selection masks): the blend sample combines
+   * both, and an empty derived selection reports zero weight everywhere, so no special block-all
+   * branch is needed. */
+  const bool has_mask = BKE_image_paint_selection_gates_paint(image);
   const int width = ibuf->x;
   const int height = ibuf->y;
 

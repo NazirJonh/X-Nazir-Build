@@ -95,6 +95,45 @@ void BKE_image_paint_selection_mask_tile_reassign(Image *image,
 /** \return True when at least one tile holds a selection mask. */
 bool BKE_image_paint_selection_mask_has_any(const Image *image);
 
+/**
+ * True when paint weight sampling must consult the 2D selection mask.
+ *
+ * Unlike #BKE_image_paint_selection_mask_has_any (which only reports an actual user selection),
+ * this also returns true while the derived masks mirror a mesh face selection
+ * (#ImageRuntime::paint_selection_from_faces) even when that selection is empty -- painting must
+ * then be blocked entirely instead of running unmasked.
+ */
+bool BKE_image_paint_selection_gates_paint(const Image *image);
+
+/**
+ * True when the face-selection-derived part of the mask blocks every pixel: the sync is active
+ * (#ImageRuntime::paint_selection_from_faces) and the derived selection is empty (or nothing
+ * could be rasterized, e.g. without a UV map). Users of the samplers early-out on this instead
+ * of the previous "gates but has no user selection" pattern.
+ */
+bool BKE_image_paint_selection_blocks_all_paint(const Image *image);
+
+/**
+ * Free the face-selection-derived masks (#ImageRuntime::paint_selection_face_masks) and their
+ * blend cache. Never touches the user-authored masks. Called by the face-selection sync and
+ * when the image's buffers are freed.
+ */
+void BKE_image_paint_selection_face_mask_free(Image *image);
+
+/**
+ * A writable (or size-validated) derived face-selection mask for \a tile_number, created from
+ * scratch when missing, mirroring #BKE_image_paint_selection_mask_get for the user masks.
+ */
+ImBuf *BKE_image_paint_selection_face_mask_get(Image *image, int tile_number, int width, int height);
+
+/**
+ * Hard binary sample of the derived face-selection mask: 1.0 while the sync is inactive
+ * (#ImageRuntime::paint_selection_from_faces clear), otherwise 1.0 inside the selected faces and
+ * 0.0 everywhere else (including tiles the selection doesn't reach). Unlike the blend samplers
+ * this ignores the edge feathering policy, for flood-fill style inside tests.
+ */
+float BKE_image_paint_selection_face_mask_sample(const Image *image, int tile_number, int x, int y);
+
 /** \return First UDIM tile number that has a non-empty selection, or 0 if none. */
 int BKE_image_paint_selection_mask_first_tile_with_selection(const Image *image);
 

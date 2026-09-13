@@ -448,6 +448,8 @@ struct GradientRowTaskData {
   const Image *image;
   int tile_number;
   bool use_selection_mask;
+  /** Face-selection masking with an empty selection: every pixel is rejected. */
+  bool selection_blocks_all;
   ImagePaintGradientParams params;
   float2 start_px;
   float2 end_px;
@@ -538,6 +540,10 @@ static void image_paint_gradient_composite_pixel_float(const GradientRowTaskData
 
   float sel_w = 1.0f;
   if (data.use_selection_mask) {
+    if (data.selection_blocks_all) {
+      /* Face-selection masking with an empty selection: nothing is paintable. */
+      return;
+    }
     sel_w = BKE_image_paint_selection_blend_sample_bilinear(
         data.image, data.tile_number, float(px) + 0.5f, float(py) + 0.5f);
     if (sel_w <= 0.0f) {
@@ -562,6 +568,10 @@ static void image_paint_gradient_composite_pixel_byte(const GradientRowTaskData 
 
   float sel_w = 1.0f;
   if (data.use_selection_mask) {
+    if (data.selection_blocks_all) {
+      /* Face-selection masking with an empty selection: nothing is paintable. */
+      return;
+    }
     sel_w = BKE_image_paint_selection_blend_sample_bilinear(
         data.image, data.tile_number, float(px) + 0.5f, float(py) + 0.5f);
     if (sel_w <= 0.0f) {
@@ -644,7 +654,8 @@ void image_paint_gradient_apply_region(const Scene *scene,
   task_data.scene = scene;
   task_data.image = image;
   task_data.tile_number = tile_number;
-  task_data.use_selection_mask = BKE_image_paint_selection_mask_has_any(image);
+  task_data.use_selection_mask = BKE_image_paint_selection_gates_paint(image);
+  task_data.selection_blocks_all = BKE_image_paint_selection_blocks_all_paint(image);
   task_data.params = params;
   task_data.start_px = start_px;
   task_data.end_px = end_px;
@@ -925,7 +936,7 @@ static void image_select_gradient_collect_affected_tiles(
     return;
   }
 
-  const bool use_selection_mask = BKE_image_paint_selection_mask_has_any(ima);
+  const bool use_selection_mask = BKE_image_paint_selection_gates_paint(ima);
   /* Without the multi-UDIM option the gradient is confined to the tile where the drag started. The
    * tile is stored in the session rather than derived from start_uv: moving the start handle
    * across a UDIM boundary must not switch the canvas backup or selection mask to another tile. */
@@ -1377,6 +1388,11 @@ static void image_select_gradient_apply_session(bContext *C, ImageSelectGradient
 {
   Image *ima = state->owner_sima->image;
   Scene *scene = CTX_data_scene(C);
+  /* Face selection masking: while enabled on any canvas object, the image's derived 2D selection
+   * masks are rebuilt from the objects' face selections before the mask state is read below (a
+   * no-op with the flag off). With an empty derived selection the rebuilt state blocks every
+   * pixel. */
+  image_paint_selection_mask_from_face_selection(C, scene, ima);
   const ImagePaintGradientParams params = image_select_gradient_current_params(scene);
 
   image_select_gradient_run_preview(C, state, params, true, /*use_viewport_clip=*/false);

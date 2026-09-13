@@ -143,6 +143,7 @@ static void color_filter_task(const Depsgraph &depsgraph,
                               const Span<int> corner_verts,
                               const GroupedSpan<int> vert_to_face_map,
                               const MeshAttributeData &attribute_data,
+                              const FaceSelectionMask &face_selection_mask,
                               const FilterType mode,
                               const float filter_strength,
                               const float3 &filter_fill_color,
@@ -159,6 +160,7 @@ static void color_filter_task(const Depsgraph &depsgraph,
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
+  filter_factors_with_face_selection(face_selection_mask, verts, factors);
   auto_mask::calc_vert_factors(
       depsgraph, ob, ss.filter_cache->automasking.get(), node, verts, factors);
   scale_factors(factors, filter_strength);
@@ -289,7 +291,8 @@ static void color_filter_task(const Depsgraph &depsgraph,
                                    vert_to_face_map,
                                    color_attribute.span,
                                    color_attribute.domain,
-                                   verts[i]);
+                                   verts[i],
+                                   face_selection_mask.select_poly);
       }
 
       const GroupedSpan<int> neighbors = calc_vert_neighbors(faces,
@@ -302,11 +305,13 @@ static void color_filter_task(const Depsgraph &depsgraph,
 
       tls.average_colors.resize(verts.size());
       const MutableSpan<float4> average_colors = tls.average_colors;
-      smooth::neighbor_color_average(faces,
+      smooth::neighbor_color_average(face_selection_mask,
+                                     faces,
                                      corner_verts,
                                      vert_to_face_map,
                                      color_attribute.span,
                                      color_attribute.domain,
+                                     colors,
                                      neighbors,
                                      average_colors);
 
@@ -351,7 +356,8 @@ static void color_filter_task(const Depsgraph &depsgraph,
                    color_attribute.domain,
                    verts[i],
                    new_colors[i],
-                   color_attribute.span);
+                   color_attribute.span,
+                   face_selection_mask.select_poly);
   }
 }
 
@@ -364,6 +370,8 @@ static void sculpt_color_presmooth_init(const Mesh &mesh, Object &object)
   const OffsetIndices<int> faces = mesh.faces();
   const Span<int> corner_verts = mesh.corner_verts();
   const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+  const MeshAttributeData attribute_data(mesh);
+  const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(object);
   const bke::GAttributeReader color_attribute = active_color_attribute(mesh);
   const GVArraySpan colors = *color_attribute;
 
@@ -375,8 +383,13 @@ static void sculpt_color_presmooth_init(const Mesh &mesh, Object &object)
   node_mask.foreach_index(
       [&](const int i) {
         for (const int vert : nodes[i].verts()) {
-          pre_smoothed_color[vert] = color_vert_get(
-              faces, corner_verts, vert_to_face_map, colors, color_attribute.domain, vert);
+          pre_smoothed_color[vert] = color_vert_get(faces,
+                                                    corner_verts,
+                                                    vert_to_face_map,
+                                                    colors,
+                                                    color_attribute.domain,
+                                                    vert,
+                                                    face_selection_mask.select_poly);
         }
       },
       exec_mode::grain_size(1));
@@ -387,6 +400,13 @@ static void sculpt_color_presmooth_init(const Mesh &mesh, Object &object)
     Vector<float4> averaged_colors;
   };
   threading::EnumerableThreadSpecific<LocalData> all_tls;
+  /* The pre-smoothing averages over the vertex 1-ring topology. With the face selection masking
+   * active, neighbors without a selected face are skipped (and the average renormalized): their
+   * masked colors read as zero and would darken the selection boundary. Without the masking the
+   * plain topology average is used. Only the negative-strength unsharp path consumes this data. */
+  const bool filter = face_selection_mask.state == FaceSelectionMaskState::Active;
+  const Span<bool> vert_paintable = filter ? face_selection_mask.vert_paintable.as_span() :
+                                             Span<bool>();
   for ([[maybe_unused]] const int iteration : IndexRange(2)) {
     node_mask.foreach_index(
         [&](const int i) {
@@ -403,8 +423,25 @@ static void sculpt_color_presmooth_init(const Mesh &mesh, Object &object)
 
           tls.averaged_colors.resize(verts.size());
           const MutableSpan<float4> averaged_colors = tls.averaged_colors;
-          smooth::neighbor_data_average_mesh(
-              pre_smoothed_color.as_span(), neighbors, averaged_colors);
+          if (filter) {
+            for (const int i : verts.index_range()) {
+              float4 sum(0);
+              int valid = 0;
+              for (const int neighbor : neighbors[i]) {
+                if (!vert_paintable[neighbor]) {
+                  continue;
+                }
+                sum += pre_smoothed_color[neighbor];
+                valid++;
+              }
+              averaged_colors[i] = valid > 0 ? sum / float(valid) :
+                                               pre_smoothed_color[verts[i]];
+            }
+          }
+          else {
+            smooth::neighbor_data_average_mesh(
+                pre_smoothed_color.as_span(), neighbors, averaged_colors);
+          }
 
           for (const int i : verts.index_range()) {
             pre_smoothed_color[verts[i]] = math::interpolate(
@@ -435,6 +472,11 @@ static void sculpt_color_filter_apply_object(bContext *C, wmOperator *op, Object
      * attribute; skip them entirely (mirrors the brush path's early return). */
     return;
   }
+  /* Face selection masking with nothing selected: nothing is filterable on this object. */
+  const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(ob);
+  if (face_selection_mask.state == FaceSelectionMaskState::Empty) {
+    return;
+  }
   if (filter_strength < 0.0 && ss.filter_cache->pre_smoothed_color.is_empty()) {
     sculpt_color_presmooth_init(mesh, ob);
   }
@@ -461,6 +503,7 @@ static void sculpt_color_filter_apply_object(bContext *C, wmOperator *op, Object
                           corner_verts,
                           vert_to_face_map,
                           attribute_data,
+                          face_selection_mask,
                           mode,
                           filter_strength,
                           fill_color,
@@ -604,6 +647,9 @@ static int sculpt_color_filter_init(bContext *C, wmOperator *op)
   for (Object *object : objects) {
     BKE_sculpt_update_object_for_edit(depsgraph, object, true);
 
+    /* NOTE: The filter cache is built even when the face selection masking blocks every vertex:
+     * the modal handler reads the active object's cache unconditionally. The apply pass skips
+     * such objects through the cached #FaceSelectionMaskState::Empty state. */
     filter::cache_init(C,
                        *object,
                        sd,
@@ -611,6 +657,9 @@ static int sculpt_color_filter_init(bContext *C, wmOperator *op)
                        mval_fl,
                        RNA_float_get(op->ptr, "area_normal_radius"),
                        RNA_float_get(op->ptr, "strength"));
+    /* Build the face selection masking state once here, so the per-step apply pass reads it from
+     * the filter cache instead of re-deriving it on every step. */
+    face_selection_mask_ensure(*object);
     const SculptSession &ss = *object->runtime->sculpt_session;
     filter::Cache *filter_cache = ss.filter_cache;
     filter_cache->active_face_set = face_set_none_id;

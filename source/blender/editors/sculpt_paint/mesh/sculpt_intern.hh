@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,9 @@
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
+#include "BLI_virtual_array.hh"
+
+#include "paint_face_selection_mask.hh"
 
 #include "IMB_colormanagement.hh"
 
@@ -479,6 +483,9 @@ struct StrokeToggleSettings {
  * needed for individual brush strokes.
  */
 struct StrokeCache {
+  /** Face selection masking state, built lazily on the first dab of the stroke. */
+  FaceSelectionMask face_selection_mask;
+
   /* Invariants */
   float initial_radius = 0.0f;
   float3 scale = float3(0);

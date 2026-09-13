@@ -10,11 +10,14 @@
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <functional>
 
 #include "MEM_guardedalloc.h"
 
 #include "BLI_array.hh"
+#include "BLI_array_utils.hh"
 #include "BLI_bitmap_draw_2d.h"
+#include "BLI_hash.hh"
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_map.hh"
 #include "BLI_math_geom.h"
@@ -27,6 +30,7 @@
 #include "BLI_rect.h"
 #include "BLI_span.hh"
 #include "BLI_string.h"
+#include "BLI_task.hh"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
@@ -39,8 +43,8 @@
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 
+#include "BKE_attribute.hh"
 #include "BKE_blender.hh"
-#include "BKE_context.hh"
 #include "BKE_customdata.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_image.hh"
@@ -93,6 +97,7 @@
 
 #include "../../space_image/image_runtime.hh"
 #include "../paint_intern.hh"
+#include "mesh_brush_common.hh"
 #include "paint_image_select_gesture.hh"
 #include "paint_image_select_gradient.hh"
 #include "paint_image_select_intern.hh"
@@ -783,6 +788,302 @@ static void image_paint_selection_expand_for_object(Scene *scene,
   if (owns_bm) {
     BM_mesh_free(bm);
   }
+}
+
+/**
+ * Rebuild the image's runtime face-selection-derived 2D paint masks from the face selection
+ * (#Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL + `.select_poly`) of every canvas object, rasterized
+ * through each object's active paint-canvas UV map. Called when 2D painting sessions begin so
+ * Image Editor strokes, fills and curve patches respect the same face selection the 3D viewport
+ * does while the masking is enabled.
+ *
+ * The derived masks live in #ImageRuntime::paint_selection_face_masks, strictly separate from the
+ * user-authored masks: the sync never touches those, and the two are combined at sampling time
+ * (#BKE_image_paint_selection_blend_sample). With no selected face anywhere (or no UV map to
+ * rasterize through) the derived state blocks every pixel
+ * (#BKE_image_paint_selection_blocks_all_paint).
+ *
+ * A cache key over every contributing object's mesh UID, selection contents and UV map keeps
+ * unchanged selections from rebuilding anything: the common stroke start costs one hash pass
+ * instead of a full BMesh conversion, rasterization and blend-mask invalidation.
+ *
+ * Bucketing walks the UDIM grid (tiles `1001 + ty*10 + tx`, `tx` 0..9): UVs outside the valid
+ * grid are ignored, matching the tiled canvas model.
+ */
+void image_paint_selection_mask_from_face_selection(const bContext *C,
+                                                    const Scene *scene,
+                                                    Image *image)
+{
+  if (image == nullptr || image->runtime == nullptr || scene == nullptr) {
+    return;
+  }
+  bke::ImageRuntime &runtime = *image->runtime;
+
+  /* A generous candidate set (see #ImagePaintCanvasPurpose::Mask): every object that may paint
+   * into this image, multi-object included. */
+  const Vector<Object *> objects = image_paint_selection_canvas_objects_get(
+      C, image, ImagePaintCanvasPurpose::Mask);
+
+  /* A lightweight per-object source: the selection and UV attributes only, without the per-stroke
+   * #ed::sculpt_paint::FaceSelectionMask (whose per-vertex table the rasterization never uses). */
+  struct FaceSelectionSyncSource {
+    const Mesh *mesh = nullptr;
+    /** Selection varray; invalid when the mesh has no `.select_poly` (empty selection). */
+    VArray<bool> select_poly_varray;
+    /** The object's paint-canvas UVs (corner domain); invalid when there is no UV map to
+     * rasterize through. */
+    VArray<float2> uvs_varray;
+    VArraySpan<float2> uvs;
+    /** At least one selected face and a UV map to rasterize it through. */
+    bool rasterizable = false;
+  };
+
+  /* Chunked, order-independent hashing so the per-object key inputs combine in parallel: each
+   * chunk hashes with its own seed and the partial hashes XOR together (a plain rolling hash
+   * cannot be split across threads). */
+  const auto hash_chunks = [](const int64_t size, auto item_hash) -> uint64_t {
+    return threading::parallel_reduce(
+        IndexRange(size),
+        2048,
+        uint64_t(0),
+        [&](const IndexRange range, const uint64_t ident) {
+          uint64_t chunk = get_default_hash(range.first());
+          for (const int64_t i : range) {
+            chunk = ((chunk << 5) + chunk) ^ item_hash(i);
+          }
+          return ident ^ chunk;
+        },
+        std::bit_xor<uint64_t>());
+  };
+
+  Vector<FaceSelectionSyncSource> sources;
+  uint64_t sync_key = 0;
+  bool any_flag_on = false;
+  bool any_active = false;
+  for (Object *ob : objects) {
+    if (ob == nullptr || ob->type != OB_MESH || ob->data == nullptr) {
+      continue;
+    }
+    const Mesh &mesh = *id_cast<const Mesh *>(ob->data);
+    if (!(mesh.editflag & ME_EDIT_PAINT_FACE_SEL)) {
+      continue;
+    }
+    any_flag_on = true;
+    FaceSelectionSyncSource source;
+    source.mesh = &mesh;
+    source.select_poly_varray = *mesh.attributes().lookup<bool>(".select_poly",
+                                                                bke::AttrDomain::Face);
+    /* Resolve the UV map the paint canvas is sampled through (material slot override first),
+     * matching #image_paint_selection_uv_offsets_get's BMesh-based resolution directly on the
+     * mesh. */
+    std::string uv_name;
+    const ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
+    if (imapaint.mode == IMAGEPAINT_MODE_MATERIAL) {
+      Material *ma = BKE_object_material_get(ob, ob->actcol);
+      if (ma && ma->texpaintslot && ma->paint_active_slot < ma->tot_slots) {
+        const char *uvname = ma->texpaintslot[ma->paint_active_slot].uvname;
+        if (uvname && uvname[0]) {
+          uv_name = uvname;
+        }
+      }
+    }
+    if (uv_name.empty()) {
+      if (const std::optional<StringRef> uv_ref = BKE_paint_canvas_uvmap_name_get(
+              &scene->toolsettings->paint_mode, ob))
+      {
+        if (!uv_ref->is_empty()) {
+          uv_name = std::string(*uv_ref);
+        }
+      }
+    }
+    if (!uv_name.empty()) {
+      source.uvs_varray = *mesh.attributes().lookup<float2>(uv_name, bke::AttrDomain::Corner);
+      if (source.uvs_varray) {
+        source.uvs = VArraySpan<float2>(source.uvs_varray);
+      }
+    }
+
+    uint64_t poly_hash = 0;
+    uint64_t uv_hash = 0;
+    if (source.select_poly_varray) {
+      const VArray<bool> &select_poly = source.select_poly_varray;
+      poly_hash = hash_chunks(mesh.faces_num,
+                              [&](const int64_t i) { return uint64_t(select_poly[int(i)]); });
+      if (array_utils::booleans_mix_calc(select_poly) != array_utils::BooleanMix::AllFalse &&
+          source.uvs_varray)
+      {
+        source.rasterizable = true;
+        any_active = true;
+      }
+    }
+    if (source.uvs_varray) {
+      /* Hash the raw UV bits: re-unwrapping or editing the active map must invalidate the derived
+       * masks even when the selection itself didn't change. */
+      const VArray<float2> &uvs = source.uvs_varray;
+      uv_hash = hash_chunks(mesh.corners_num, [&](const int64_t i) {
+        const float2 &uv = uvs[int(i)];
+        return get_default_hash(uv.x, uv.y);
+      });
+    }
+    /* Order-independent per-object key (XOR): the same set of contributions always produces the
+     * same key. Mesh identity, selection contents, the UV map name AND contents all feed it, so
+     * any of them changing forces a rebuild. */
+    sync_key ^= get_default_hash(mesh.id.session_uid,
+                                 mesh.faces_num,
+                                 mesh.corners_num,
+                                 poly_hash,
+                                 uv_hash,
+                                 get_default_hash(uv_name));
+    sources.append(std::move(source));
+  }
+
+  /* The image's tile set and resolutions feed the key too: adding or removing a tile, or resizing
+   * the image, must rebuild the derived masks (they are per-tile, per-resolution). The ibufs are
+   * cached, so probing them here is cheap. */
+  for (ImageTile *tile : ListBaseWrapper<ImageTile>(image->tiles)) {
+    ImageUser iuser{};
+    iuser.tile = tile->tile_number;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, nullptr);
+    const int2 size = ibuf ? int2(ibuf->x, ibuf->y) : int2(0);
+    if (ibuf) {
+      BKE_image_release_ibuf(image, ibuf, nullptr);
+    }
+    sync_key ^= get_default_hash(uint(tile->tile_number), size.x, size.y);
+  }
+
+  if (!any_flag_on) {
+    if (runtime.paint_selection_from_faces) {
+      /* The masking was turned off: drop the derived masks (and only those -- the user-authored
+       * masks are never touched) so 2D painting returns to the unmasked, user-driven state. */
+      BKE_image_paint_selection_face_mask_free(image);
+      runtime.paint_selection_faces_sync_key = 0;
+    }
+    runtime.paint_selection_from_faces = false;
+    return;
+  }
+
+  runtime.paint_selection_from_faces = true;
+  if (runtime.paint_selection_faces_sync_key == sync_key) {
+    /* The selection and every other key input are unchanged since the derived masks were built:
+     * keep them. No free, no rasterization, no blend-mask invalidation this stroke. */
+    return;
+  }
+  runtime.paint_selection_faces_sync_key = sync_key;
+
+  /* Rebuild the derived masks from scratch. */
+  BKE_image_paint_selection_face_mask_free(image);
+  if (!any_active) {
+    /* Every contributing selection is empty: the flag set above blocks every pixel. */
+    return;
+  }
+
+  /* Bucket selected faces by the UDIM tile(s) their UVs fall on; a face straddling a tile border
+   * is registered with every tile it overlaps (the rasterizer clips per tile). Face indices are
+   * per source. */
+  Map<int, Vector<std::pair<int, int>>> tile_faces;
+  for (const int src_i : sources.index_range()) {
+    const FaceSelectionSyncSource &source = sources[src_i];
+    if (!source.rasterizable) {
+      continue;
+    }
+    const VArraySpan<bool> select_poly(source.select_poly_varray);
+    const OffsetIndices<int> faces = source.mesh->faces();
+    const VArraySpan<bool> hide_poly = *source.mesh->attributes().lookup<bool>(".hide_poly",
+                                                                              bke::AttrDomain::Face);
+    for (const int face : faces.index_range()) {
+      if (select_poly.is_empty() || !select_poly[face]) {
+        continue;
+      }
+      if (!hide_poly.is_empty() && hide_poly[face]) {
+        continue;
+      }
+      rctf face_uv_bounds;
+      BLI_rctf_init_minmax(&face_uv_bounds);
+      for (const int corner : faces[face]) {
+        BLI_rctf_do_minmax_v(&face_uv_bounds, source.uvs[corner]);
+      }
+      const int tx_min = int(floorf(face_uv_bounds.xmin));
+      const int tx_max = int(floorf(face_uv_bounds.xmax));
+      const int ty_min = int(floorf(face_uv_bounds.ymin));
+      const int ty_max = int(floorf(face_uv_bounds.ymax));
+      for (int ty = ty_min; ty <= ty_max; ty++) {
+        if (ty < 0) {
+          continue;
+        }
+        for (int tx = tx_min; tx <= tx_max; tx++) {
+          /* UDIM tiles span columns 0..9; ignore UVs outside the valid grid. */
+          if (tx < 0 || tx > 9) {
+            continue;
+          }
+          const int tile_number = 1001 + ty * 10 + tx;
+          if (tile_number > IMA_UDIM_MAX) {
+            continue;
+          }
+          tile_faces.lookup_or_add_default(tile_number).append({src_i, face});
+        }
+      }
+    }
+  }
+
+  struct FaceSelectionTileJob {
+    int tile_number;
+    ImBuf *tile_mask = nullptr;
+    Vector<std::pair<int, int>> faces;
+  };
+  Vector<FaceSelectionTileJob> jobs;
+  for (ImageTile *tile : ListBaseWrapper<ImageTile>(image->tiles)) {
+    const Vector<std::pair<int, int>> *faces = tile_faces.lookup_ptr(tile->tile_number);
+    if (faces == nullptr) {
+      continue;
+    }
+    FaceSelectionTileJob job;
+    job.tile_number = tile->tile_number;
+    job.faces = *faces;
+    ImageUser iuser{};
+    iuser.tile = job.tile_number;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, nullptr);
+    if (ibuf) {
+      job.tile_mask = BKE_image_paint_selection_face_mask_get(
+          image, job.tile_number, ibuf->x, ibuf->y);
+      BKE_image_release_ibuf(image, ibuf, nullptr);
+    }
+    jobs.append(std::move(job));
+  }
+
+  const bool any_tile_mask = std::any_of(jobs.begin(), jobs.end(), [](const FaceSelectionTileJob &job) {
+    return job.tile_mask != nullptr;
+  });
+
+  /* Each tile writes its own mask buffer, so tiles fill in parallel; the masks (and the map
+   * holding them) were created serially above. */
+  threading::parallel_for(jobs.index_range(), 1, [&](const IndexRange range) {
+    for (const int j : range) {
+      FaceSelectionTileJob &job = jobs[j];
+      if (job.tile_mask == nullptr) {
+        continue;
+      }
+      float *data = job.tile_mask->float_data_for_write();
+      const int width = job.tile_mask->x;
+      const int height = job.tile_mask->y;
+      const float2 uv_origin = image_select_udim_tile_uv_origin(job.tile_number);
+      for (const auto &[src_i, face] : job.faces) {
+        const FaceSelectionSyncSource &source = sources[src_i];
+        Vector<float2, 8> px_verts;
+        const OffsetIndices<int> faces = source.mesh->faces();
+        for (const int corner : faces[face]) {
+          const float2 uv = source.uvs[corner];
+          px_verts.append(
+              float2((uv.x - uv_origin.x) * width, (uv.y - uv_origin.y) * height));
+        }
+        foreach_uv_polygon_pixel(
+            px_verts, width, height, [&](const int x, const int y, const bool /*strict*/) {
+              data[size_t(y) * width + x] = 1.0f;
+              return true;
+            });
+      }
+    }
+  });
+  runtime.paint_selection_faces_empty = !any_tile_mask;
 }
 
 void image_paint_selection_expand(bContext *C,

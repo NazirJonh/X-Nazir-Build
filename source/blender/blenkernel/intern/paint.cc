@@ -1758,9 +1758,16 @@ bool BKE_palette_is_empty(const Palette *palette)
 
 bool BKE_paint_select_face_test(const Object *ob)
 {
+  /* NOTE: Sculpt Mode is deliberately not part of this predicate. Extending it would also flip
+   * `need_mapping` in sculpt mesh evaluation (skipping non-mapping modifiers like Geometry Nodes
+   * in the viewport) and change Frame Selected, just because the sculpt face-mask toggle is on.
+   * Sculpt gets its own explicit checks instead: the face select operator poll
+   * (#facemask_paint_poll) and the paint overlay (#Paints overlay), both gated on
+   * #Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL plus the active sculpt tool. */
   return ((ob != nullptr) && (ob->type == OB_MESH) && (ob->data != nullptr) &&
           ((id_cast<Mesh *>(ob->data))->editflag & ME_EDIT_PAINT_FACE_SEL) &&
-          (ob->mode & (OB_MODE_VERTEX_PAINT | OB_MODE_WEIGHT_PAINT | OB_MODE_TEXTURE_PAINT)));
+          (ob->mode &
+           (OB_MODE_VERTEX_PAINT | OB_MODE_WEIGHT_PAINT | OB_MODE_TEXTURE_PAINT)));
 }
 
 bool BKE_paint_select_vert_test(const Object *ob)

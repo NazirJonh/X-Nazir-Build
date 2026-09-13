@@ -422,25 +422,49 @@ void bmesh_four_neighbor_average(float avg[3], const float3 &direction, const BM
   }
 }
 
-void neighbor_color_average(const OffsetIndices<int> faces,
+void neighbor_color_average(const FaceSelectionMask &face_selection_mask,
+                            const OffsetIndices<int> faces,
                             const Span<int> corner_verts,
                             const GroupedSpan<int> vert_to_face_map,
                             const GSpan color_attribute,
                             const bke::AttrDomain color_domain,
+                            const Span<float4> own_colors,
                             const GroupedSpan<int> vert_neighbors,
                             const MutableSpan<float4> smooth_colors)
 {
   PRF_scope(ProfileCategory::Editor);
   BLI_assert(vert_neighbors.size() == smooth_colors.size());
 
+  /* Face selection masking: corner-domain colors of vertices without a selected face read as
+   * zero; averaging them in would darken the selection boundary. Skip such neighbors and divide
+   * by the number of valid ones, falling back to the vertex's own color when none remain. */
+  const bool filter = face_selection_mask.state == FaceSelectionMaskState::Active;
+  const Span<bool> vert_paintable = filter ? face_selection_mask.vert_paintable.as_span() :
+                                             Span<bool>();
+  const Span<bool> select_poly = filter ? Span<bool>(face_selection_mask.select_poly) :
+                                          Span<bool>();
+
   for (const int i : vert_neighbors.index_range()) {
     float4 sum(0);
+    int valid = 0;
     const Span<int> neighbors = vert_neighbors[i];
     for (const int vert : neighbors) {
+      if (filter && !vert_paintable[vert]) {
+        continue;
+      }
       sum += color::color_vert_get(
-          faces, corner_verts, vert_to_face_map, color_attribute, color_domain, vert);
+          faces, corner_verts, vert_to_face_map, color_attribute, color_domain, vert, select_poly);
+      valid++;
     }
-    smooth_colors[i] = math::safe_divide(sum, float(neighbors.size()));
+    if (valid > 0) {
+      smooth_colors[i] = sum / float(valid);
+    }
+    else if (!own_colors.is_empty()) {
+      smooth_colors[i] = own_colors[i];
+    }
+    else {
+      smooth_colors[i] = float4(0);
+    }
   }
 }
 

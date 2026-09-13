@@ -917,6 +917,49 @@ struct MaterialPaintFilter {
 };
 
 /**
+ * Per-face filter for the face selection masking (#Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL):
+ * image painting is restricted to the faces selected with `.select_poly`. Faces without the
+ * attribute are treated as unselected, matching the projection texture paint's strict behavior.
+ * The face selection comes from the per-stroke #FaceSelectionMask (no per-dab attribute lookup).
+ */
+struct FaceSelectionPaintFilter {
+  bool use_filter = false;
+  /** Masking enabled but the mesh has no face selection attribute: callers must skip painting. */
+  bool blocks_paint = false;
+  Span<int> corner_tri_faces;
+  Span<bool> select_poly;
+
+  static FaceSelectionPaintFilter from_object(Object &object)
+  {
+    FaceSelectionPaintFilter filter;
+    const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(object);
+    if (face_selection_mask.state == FaceSelectionMaskState::Empty) {
+      filter.blocks_paint = true;
+      return filter;
+    }
+    if (face_selection_mask.state != FaceSelectionMaskState::Active) {
+      return filter;
+    }
+    const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+    filter.use_filter = true;
+    filter.corner_tri_faces = mesh.corner_tri_faces();
+    /* Points into the stroke cache's #FaceSelectionMask, which outlives every dab. */
+    filter.select_poly = face_selection_mask.select_poly;
+    return filter;
+  }
+
+  bool uv_primitive_matches(const PixelNode &pixel_node, const int uv_primitive_index) const
+  {
+    if (!use_filter) {
+      return true;
+    }
+    const int tri_index = pixel_node.uv_primitives.tri_indices[uv_primitive_index];
+    const int face_i = corner_tri_faces[tri_index];
+    return select_poly[face_i];
+  }
+};
+
+/**
  * Per-tile cache of brush falloff/hardness/strength/texture factors for one pixel node.
  * These only depend on brush, stroke cache and geometry, never on which Material channel image
  * is being written, so they are computed once per dab and shared by every enabled channel
@@ -951,6 +994,7 @@ static Array<RowFactorCache> compute_paint_row_factors(
     const Span<float3> positions,
     const Brush &brush,
     const MaterialPaintFilter &material_filter,
+    const FaceSelectionPaintFilter &face_selection_filter,
     const ed::sculpt_paint::material::ChannelSourceSampler *active_sampler,
     const bool alpha_masking_active,
     const ImageData &layout_image_data,
@@ -978,7 +1022,9 @@ static Array<RowFactorCache> compute_paint_row_factors(
           if (!brush_test[pixel_row.uv_primitive_index]) {
             return false;
           }
-          return material_filter.uv_primitive_matches(pixel_node, pixel_row.uv_primitive_index);
+          return material_filter.uv_primitive_matches(pixel_node, pixel_row.uv_primitive_index) &&
+                 face_selection_filter.uv_primitive_matches(pixel_node,
+                                                            pixel_row.uv_primitive_index);
         });
 
     tile_cache.row_changed = Array<bool>(tile_cache.valid_rows.min_array_size(), false);
@@ -1852,6 +1898,12 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                     PAINT_CANVAS_SOURCE_MATERIAL;
   const MaterialPaintFilter material_filter = MaterialPaintFilter::from_object(
       ob, material_canvas_mode);
+  const FaceSelectionPaintFilter face_selection_filter = FaceSelectionPaintFilter::from_object(ob);
+  if (face_selection_filter.blocks_paint) {
+    /* Masking enabled but nothing is selected (defensive; the caller's
+     * #face_selection_mask_blocks_paint check normally catches this first). */
+    return;
+  }
 
   /* The plain Mode=`Image` canvas paints the brush color itself, so its dab color gets the
    * Randomize Color jitter here - the material channel targets below resolve their own stroke
@@ -2166,6 +2218,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                                                 positions,
                                                                 *brush,
                                                                 material_filter,
+                                                                face_selection_filter,
                                                                 active_sampler,
                                                                 alpha_masking_active,
                                                                 image_data,

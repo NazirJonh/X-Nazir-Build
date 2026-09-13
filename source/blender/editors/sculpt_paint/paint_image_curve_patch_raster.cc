@@ -403,6 +403,11 @@ static void blend_tile_region(const TileRegion &region,
                               const int2 &ref_tile_resolution,
                               const char mirror_pass)
 {
+  /* Nothing paintable on this canvas (face-selection masking with an empty selection): skip the
+   * whole tile region instead of evaluating a sampler per pixel just to reject it. */
+  if (BKE_image_paint_selection_blocks_all_paint(&image)) {
+    return;
+  }
   /* Whether this canvas takes its RGB from the RIBBON's own texture. Normal packs a direction and
    * a scalar channel carries one value, so neither can. Mirrors the 3D `target_paints_color`. */
   const bool target_paints_color = !target.is_normal_channel &&
@@ -412,7 +417,9 @@ static void blend_tile_region(const TileRegion &region,
   const bool target_masked_by_alpha = target.is_material_channel &&
                                        material::channel_uses_alpha_mask(alpha_masking,
                                                                          target.channel);
-  const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(&image);
+  /* Any gating source (user mask or the derived face-selection masks); the blend sample combines
+   * both and reports zero weight where the face selection doesn't cover. */
+  const bool has_selection_mask = BKE_image_paint_selection_gates_paint(&image);
   const bool is_float = ibuf.float_data() != nullptr;
   float *float_data = is_float ? ibuf.float_data_for_write() : nullptr;
   uchar *byte_data = is_float ? nullptr : ibuf.byte_data_for_write();

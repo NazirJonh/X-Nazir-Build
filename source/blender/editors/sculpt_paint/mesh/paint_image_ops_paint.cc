@@ -9,6 +9,7 @@
 
 #include "DNA_brush_types.h"
 #include "DNA_material_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
@@ -55,6 +56,8 @@
 #include "UI_view2d.hh"
 
 #include "../paint_curve_intern.hh"
+
+#include "mesh_brush_common.hh"
 
 #include "../paint_clone.hh"
 #include "../paint_clone_2d.hh"
@@ -443,6 +446,13 @@ bool paint_image_viewport_fill_at_mouse(const bContext *C,
                                         const float mouse[2])
 {
   if (brush == nullptr || ob == nullptr) {
+    return false;
+  }
+  /* Face selection masking with nothing selected: nothing is fillable, skip the projection state
+   * build (pixel flood) and the seed collection (geometry fill) entirely. */
+  if (ob->type == OB_MESH &&
+      ed::sculpt_paint::face_selection_mask_blocks_paint(*id_cast<const Mesh *>(ob->data)))
+  {
     return false;
   }
   if (brush->flag & BRUSH_USE_GRADIENT) {

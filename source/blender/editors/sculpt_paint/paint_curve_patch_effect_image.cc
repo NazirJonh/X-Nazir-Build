@@ -1104,6 +1104,12 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
     return;
   }
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  /* Face selection masking with nothing selected: the patch paints nothing on this object. The
+   * state is cached in the stroke, so this is O(1) per pass. */
+  const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(ob);
+  if (face_selection_mask.state == FaceSelectionMaskState::Empty) {
+    return;
+  }
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   if (pbvh.type() != bke::pbvh::Type::Mesh || pbvh.pixels_ == nullptr) {
     return;
@@ -1114,6 +1120,10 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   const Span<float3> normals = mesh.vert_normals();
   const MeshAttributeData attribute_data(mesh);
   const Span<float> mask = attribute_data.mask;
+  /* Face selection masking: chunks whose owning face is unselected are rejected before any
+   * per-pixel work (see #process_chunk). Empty when the masking is disabled. */
+  const Span<bool> select_poly = face_selection_mask.select_poly;
+  const Span<int> corner_tri_faces = mesh.corner_tri_faces();
 
   /* Only a brush-mapped Normal source projects into the view; a session whose view context is
    * gone falls back to #StrokeCache::view_right, which #build_normal_write_basis handles. */
@@ -1413,6 +1423,11 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
              * polyline. */
             const int cull_tri_index =
                 pixel_node.uv_primitives.tri_indices[pixel_row.uv_primitive_index];
+            if (!select_poly.is_empty() && !select_poly[corner_tri_faces[cull_tri_index]]) {
+              /* Face selection masking: the whole row belongs to one UV primitive (one face), so
+               * this chunk is entirely on an unselected face. */
+              return;
+            }
             const float2 cull_delta_bary =
                 pixel_node.uv_primitives.delta_barycentric_coords[pixel_row.uv_primitive_index];
             const float2 cull_bary_first = pixel_row.start_barycentric_coord +

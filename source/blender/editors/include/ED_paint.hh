@@ -450,6 +450,24 @@ eV3DShadingColorType ED_paint_shading_color_override(bContext *C,
  */
 bool ED_paint_brush_type_use_canvas(bContext *C, bToolRef *tref);
 
+/**
+ * True when the active Sculpt Mode tool consumes the face selection paint mask (#Mesh.editflag &
+ * #ME_EDIT_PAINT_FACE_SEL): the painting brushes (Paint, Smear, Blur, Fill) and the Mask by Color
+ * operator tool. Only these show the face-selection toggle and the face-selection overlay in
+ * Sculpt Mode; mesh-deforming tools don't. Clone paints a canvas but is excluded: its 3D path
+ * does not consult the face selection (Image Editor 2D strokes are gated through the derived
+ * mask).
+ *
+ * \param ob: the active object, used to hide the toggle on PBVH types that don't support color
+ * painting (multires grids, dynamic topology). May be null.
+ * \param active_tool_idname: idname of the active area tool (#bToolRef::idname). May be null
+ * (non-interactive draws): the Mask by Color check is skipped then and the decision falls back to
+ * the active sculpt brush.
+ */
+bool ED_paint_sculpt_face_selection_mask_supported(const Scene *scene,
+                                                   const Object *ob,
+                                                   const char *active_tool_idname);
+
 /** Store the last used tool in the sculpt session. */
 void ED_paint_brush_type_update_sticky_shading_color(bContext *C, Object *ob);
 

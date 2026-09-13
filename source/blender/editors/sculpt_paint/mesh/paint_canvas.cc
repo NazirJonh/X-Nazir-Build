@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "BLI_string_ref.hh"
+#include "BLI_utildefines.h"
 
 #include "DNA_brush_types.h"
 #include "DNA_material_types.h"
@@ -13,6 +14,7 @@
 #include "BKE_material.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_bvh.hh"
 
 #include "WM_toolsystem.hh"
 
@@ -48,6 +50,20 @@ static bool paint_tool_uses_canvas(StringRef idname)
   return ELEM(idname, "builtin.color_filter");
 }
 
+/* The sculpt brushes that paint color (color attribute or image canvas) and therefore consume the
+ * face selection mask in the 3D viewport. Clone deliberately excluded: its 3D path clones the
+ * color attribute contents without consulting the face selection (only Image Editor 2D strokes
+ * are gated through the derived mask), so showing the toggle for it would promise masking the
+ * brush doesn't deliver. */
+static bool brush_type_consumes_face_selection(const eBrushSculptType type)
+{
+  return ELEM(type,
+              SCULPT_BRUSH_TYPE_PAINT,
+              SCULPT_BRUSH_TYPE_SMEAR,
+              SCULPT_BRUSH_TYPE_BLUR,
+              SCULPT_BRUSH_TYPE_TEXTURE_FILL);
+}
+
 static bool paint_brush_uses_canvas(bContext *C)
 {
   const Paint *paint = BKE_paint_get_active_from_context(C);
@@ -56,12 +72,10 @@ static bool paint_brush_uses_canvas(bContext *C)
     return false;
   }
 
-  return ELEM(brush->sculpt_brush_type,
-              SCULPT_BRUSH_TYPE_PAINT,
-              SCULPT_BRUSH_TYPE_SMEAR,
-              SCULPT_BRUSH_TYPE_BLUR,
-              SCULPT_BRUSH_TYPE_TEXTURE_FILL,
-              SCULPT_BRUSH_TYPE_CLONE);
+  /* Clone paints into its canvas too, so it uses one (#brush_type_consumes_face_selection
+   * explains why it is nevertheless not face-selection-masked in 3D). */
+  return brush_type_consumes_face_selection(brush->sculpt_brush_type) ||
+         brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE;
 }
 
 static bool paint_brush_type_shading_color_follows_last_used(StringRef idname)
@@ -115,6 +129,33 @@ bool ED_paint_brush_type_use_canvas(bContext *C, bToolRef *tref)
   }
 
   return paint_tool_uses_canvas(tref->idname) || (C && paint_brush_uses_canvas(C));
+}
+
+bool ED_paint_sculpt_face_selection_mask_supported(const Scene *scene,
+                                                   const Object *ob,
+                                                   const char *active_tool_idname)
+{
+  /* Mask by Color is an operator tool: it masks from the painted colors and owns no brush of its
+   * own, so the active brush below says nothing about it. Its mask writing respects the face
+   * selection (see #mask_by_color_*_mesh). */
+  if (active_tool_idname != nullptr && StringRef(active_tool_idname) == "builtin.mask_by_color") {
+    return true;
+  }
+  if (scene == nullptr || scene->toolsettings == nullptr ||
+      scene->toolsettings->sculpt == nullptr)
+  {
+    return false;
+  }
+  /* Face selection masking only applies to the mesh PBVH; multires grids and dynamic topology
+   * don't paint color attributes. */
+  if (ob != nullptr) {
+    const SculptSession *ss = ob->runtime->sculpt_session;
+    if (ss != nullptr && ss->pbvh != nullptr && ss->pbvh->type() != bke::pbvh::Type::Mesh) {
+      return false;
+    }
+  }
+  const Brush *brush = BKE_paint_brush_for_read(&scene->toolsettings->sculpt->paint);
+  return brush != nullptr && brush_type_consumes_face_selection(brush->sculpt_brush_type);
 }
 
 eV3DShadingColorType ED_paint_shading_color_override(bContext *C,

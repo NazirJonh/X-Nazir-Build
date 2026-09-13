@@ -450,8 +450,15 @@ static void paint_color_channel(
   }
 
   SculptSession &ss = *ob.runtime->sculpt_session;
-  const float3 target_rgb = BKE_paint_material_channel_color_get(
-      brush_paint, sd.paint, brush, channel, ss.cache->toggle_settings.invert);
+  const float3 target_rgb = BKE_paint_material_channel_stroke_color_get(
+      brush_paint,
+      sd.paint,
+      brush,
+      channel,
+      ss.cache->toggle_settings.invert,
+      ss.cache->initial_hsv_jitter,
+      ss.cache->stroke_distance,
+      ss.cache->pressure);
 
   Array<float4> &mix_colors = ss.cache->material_mix_base_color;
   if (mix_colors.is_empty()) {
@@ -468,6 +475,18 @@ static void paint_color_channel(
    * painting the channel. Gather the node's samples still encoded and decode them all in one
    * batched call instead. */
   const bool batch_decode = use_source && sampler->needs_linear_conversion(channel);
+
+  /* One Randomize Color evaluation per channel pass: the sampled source texels below get the
+   * same per-dab transform the channel value got through
+   * #BKE_paint_material_channel_stroke_color_get, so a texture-driven Base Color stroke is
+   * randomized exactly like a value-driven one. */
+  const float3 dab_color_jitter = BKE_paint_stroke_color_jitter_factors_get(
+      sd.paint,
+      brush,
+      ss.cache->toggle_settings.invert,
+      ss.cache->initial_hsv_jitter,
+      ss.cache->stroke_distance,
+      ss.cache->pressure);
 
   node_mask.foreach_index(
       [&](const int i, const int pos) {
@@ -487,6 +506,13 @@ static void paint_color_channel(
           if (batch_decode) {
             ChannelSourceSampler::decode_linear_batch(local.source_colors,
                                                       sampler->colorspace(channel));
+          }
+          /* Randomize Color on the sampled texels - Base Color only, the same scoping as the
+           * channel value. The transform is color-independent, so the node's samples shift
+           * uniformly. */
+          if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+            BKE_paint_stroke_color_jitter_apply(dab_color_jitter,
+                                                local.source_colors.as_mutable_span());
           }
           source_colors = local.source_colors;
         }

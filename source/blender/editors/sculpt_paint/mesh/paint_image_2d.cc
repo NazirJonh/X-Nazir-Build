@@ -248,6 +248,14 @@ struct BrushPainter {
   /** Which material paint channel this painter writes. Only meaningful when
    * #use_material_channel_color is set. */
   eMaterialPaintChannel material_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  /**
+   * Randomize Color transform for the current dab, as
+   * #BKE_paint_stroke_color_jitter_factors_get returns it: (additive hue offset, saturation
+   * scale, value scale). Resolved once per dab where the stroke color is resolved, and applied to
+   * the sampled source texels so a texture-driven Base Color stroke randomizes exactly like a
+   * value-driven one. Identity when the jitter is inactive.
+   */
+  float3 dab_color_jitter = float3(0.0f, 1.0f, 1.0f);
   /** True when Alpha is set to mask the stroke; other channels' dab coverage is scaled by the
    * Alpha source (or its slider fallback). The Alpha channel itself is never clipped this way. */
   bool material_alpha_masking = false;
@@ -733,6 +741,12 @@ static bool paint_2d_view_dab_material_batch_enabled(const BrushPainter *painter
          paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA);
 }
 
+static bool paint_2d_color_jitter_active(const BrushPainter *painter)
+{
+  const float3 &jitter = painter->dab_color_jitter;
+  return jitter[0] != 0.0f || jitter[1] != 1.0f || jitter[2] != 1.0f;
+}
+
 /**
  * Brush dab coverage for the View Plane path. When a material channel source supplies RGB, the
  * brush texture is still sampled for alpha but its RGB and any post-sample colorspace conversion
@@ -856,13 +870,22 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
                               (paint_runtime == nullptr || !paint_runtime->do_linear_conversion);
     const bool skip_colorspace = batch_decode &&
                                  paint_2d_area_source_matches_canvas_encoding(source, cache);
-    if (batch_decode && !skip_colorspace) {
+    const bool apply_color_jitter = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
+                                    paint_2d_color_jitter_active(painter);
+    /* A source that already matches the canvas encoding can skip the round-trip normally. Base
+     * Color jitter is defined in scene-linear space, so that optimization is not valid while it
+     * is active. */
+    if (batch_decode && (!skip_colorspace || apply_color_jitter)) {
       ed::sculpt_paint::material::ChannelSourceSampler::decode_linear_batch(colors,
                                                                             source.colorspace);
     }
+    /* Randomize Color on sampled Base Color texels while the array is scene-linear. */
+    if (apply_color_jitter) {
+      BKE_paint_stroke_color_jitter_apply(painter->dab_color_jitter, colors);
+    }
     /* #paint_2d_sample_channel_source already flips green per-texel above; flipping the whole
      * array again here would cancel it back out. */
-    if (!skip_colorspace && !is_normal && !cache->is_data && !is_float &&
+    if ((!skip_colorspace || apply_color_jitter) && !is_normal && !cache->is_data && !is_float &&
         cache->byte_colorspace != nullptr)
     {
       IMB_colormanagement_scene_linear_to_colorspace(reinterpret_cast<float *>(colors.data()),
@@ -944,6 +967,13 @@ static void paint_2d_apply_material_sources(const BrushPainter *painter,
                                PAINT_MATERIAL_CHANNEL_EMISSION,
                                PAINT_MATERIAL_CHANNEL_NORMAL);
     if (is_color) {
+      /* Randomize Color on the sampled texels - Base Color only, applied while the sample is
+       * still scene-linear (the same space the channel-value path jitters in). */
+      if (painter->material_channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+        sampled = float4(BKE_paint_stroke_color_jitter_apply_color(painter->dab_color_jitter,
+                                                                   float3(sampled)),
+                         sampled.w);
+      }
       rgba[0] = sampled[0];
       rgba[1] = sampled[1];
       rgba[2] = sampled[2];
@@ -1289,7 +1319,15 @@ static void brush_painter_imbuf_fill(BrushPainter *painter,
   /* get brush color */
   if (brush->image_brush_type == IMAGE_PAINT_BRUSH_TYPE_DRAW) {
     if (painter->use_material_channel_color) {
-      copy_v3_v3(brush_rgb, painter->material_channel_color);
+      float3 channel_rgb(painter->material_channel_color);
+      /* The stored channel color is resolved once at stroke init; only Base Color paints a real
+       * color, so only it gets the Randomize Color jitter - the same rule the Sculpt engines
+       * apply through #BKE_paint_material_channel_stroke_color_get. */
+      if (painter->material_channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+        channel_rgb = BKE_paint_stroke_color_jitter_apply_color(painter->dab_color_jitter,
+                                                                channel_rgb);
+      }
+      copy_v3_v3(brush_rgb, channel_rgb);
     }
     else {
       paint_brush_color_get(
@@ -1423,7 +1461,14 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
   /* get brush color */
   if (brush->image_brush_type == IMAGE_PAINT_BRUSH_TYPE_DRAW) {
     if (painter->use_material_channel_color) {
-      copy_v3_v3(brush_rgb, painter->material_channel_color);
+      float3 channel_rgb(painter->material_channel_color);
+      /* Same Randomize Color rule as #brush_painter_imbuf_fill, with the same frozen distance and
+       * pressure the classic path below uses on this update path. */
+      if (painter->material_channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+        channel_rgb = BKE_paint_stroke_color_jitter_apply_color(painter->dab_color_jitter,
+                                                                channel_rgb);
+      }
+      copy_v3_v3(brush_rgb, channel_rgb);
     }
     else {
       paint_brush_color_get(
@@ -3519,6 +3564,8 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
                              PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                              PAINT_MATERIAL_CHANNEL_EMISSION,
                              PAINT_MATERIAL_CHANNEL_NORMAL);
+  const bool apply_color_jitter = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
+                                  paint_2d_color_jitter_active(painter);
   const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(s->image);
   const int tile_number = tile->iuser.tile;
   /* Coverage is shared between material channels, but selection masks belong to an Image. Keep
@@ -3557,6 +3604,9 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
     float3 rgb(painter->material_channel_color[0],
                painter->material_channel_color[1],
                painter->material_channel_color[2]);
+    if (apply_color_jitter) {
+      rgb = BKE_paint_stroke_color_jitter_apply_color(painter->dab_color_jitter, rgb);
+    }
     paint_2d_area_encode_canvas_rgb(cache, is_normal, rgb);
     threading::parallel_for(cov.pixels.index_range(), 4096, [&](const IndexRange range) {
       for (const int64_t i : range) {
@@ -3579,7 +3629,7 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
                               (paint_runtime == nullptr || !paint_runtime->do_linear_conversion);
     const bool skip_colorspace = batch_decode &&
                                  paint_2d_area_source_matches_canvas_encoding(source, cache);
-    if (batch_decode && !skip_colorspace) {
+    if (batch_decode && (!skip_colorspace || apply_color_jitter)) {
       Array<float3> raw(cov.pixels.size());
       Array<ushort> strengths(cov.pixels.size());
       threading::parallel_for(cov.pixels.index_range(), 1024, [&](const IndexRange range) {
@@ -3616,6 +3666,9 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
           if (source.flip_green_channel) {
             rgb.y = 1.0f - rgb.y;
           }
+          if (apply_color_jitter) {
+            rgb = BKE_paint_stroke_color_jitter_apply_color(painter->dab_color_jitter, rgb);
+          }
           paint_2d_area_encode_canvas_rgb(cache, false, rgb);
           const int idx = int(cov.pixels[i].ly) * stride + int(cov.pixels[i].lx);
           paint_2d_area_plane_write_rgb(float_data, byte_data, idx, rgb);
@@ -3641,11 +3694,15 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
                                               pixel.uv,
                                               thread,
                                              pool,
-                                             paint_mode,
-                                             !skip_colorspace,
-                                             !skip_colorspace,
-                                             true,
-                                             rgb);
+                                              paint_mode,
+                                              !skip_colorspace || apply_color_jitter,
+                                              !skip_colorspace && !apply_color_jitter,
+                                              true,
+                                              rgb);
+          if (apply_color_jitter) {
+            rgb = BKE_paint_stroke_color_jitter_apply_color(painter->dab_color_jitter, rgb);
+            paint_2d_area_encode_canvas_rgb(cache, false, rgb);
+          }
           const int idx = int(pixel.ly) * stride + int(pixel.lx);
           paint_2d_area_plane_write_rgb(float_data, byte_data, idx, rgb);
           triangle_mask[idx] = strength;
@@ -4155,6 +4212,16 @@ static void paint_2d_stroke_single(ImagePaintState *s,
 #endif
   float new_uv[2], old_uv[2];
   BrushPainter *painter = s->painter;
+
+  /* Resolve the transform before selecting the View or Area Plane path. The latter paints
+   * directly from its rasterizer and therefore does not pass through the brush ImBuf builder. */
+  painter->dab_color_jitter = BKE_paint_stroke_color_jitter_factors_get(
+      *painter->paint,
+      *painter->brush,
+      eraser || painter->cache_invert,
+      painter->initial_hsv_jitter,
+      distance,
+      pressure);
 
   s->blend = s->brush->blend;
   if (eraser) {

@@ -603,7 +603,9 @@ static bool curve_patch_layout_matches(const bke::pbvh::Tree &pbvh,
  * Roughness slider would move and the texture would not.
  *
  * Resolved through the same BKE helpers #init_image_paint_targets uses, so the two cannot drift
- * on what a channel's paint value means.
+ * on what a channel's paint value means. Deliberately PURE: Randomize Color is applied once to
+ * the final paint color per pixel (see `apply_pass()`), so the sampled source texels, the ribbon
+ * texture's RGB and this flat color get exactly one transform each.
  */
 static float3 curve_patch_channel_flat_color(const paint::image::ImagePaintTarget &target,
                                              const Brush &brush,
@@ -1248,6 +1250,19 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * from the target's cached override -- see #curve_patch_channel_flat_color. */
   const float3 target_flat_color = curve_patch_channel_flat_color(
       target, brush, *cache.paint, *paint_mode_settings_, cache.toggle_settings.invert);
+  /* Randomize Color, evaluated once per pass: the sampled source texels, the ribbon texture's RGB
+   * and the flat channel color all get the same per-dab transform when PHASE 2 picks the final
+   * paint color, so a texture-driven stroke randomizes exactly like a value-driven one. The
+   * stroke cache stays alive for the whole anchor-drag session, so its per-stroke seed keeps the
+   * color stable across the session's re-stamps. Base Color only -- the same scoping as the
+   * stroke engines (see #BKE_paint_material_channel_stroke_color_get). */
+  const float3 dab_color_jitter = BKE_paint_stroke_color_jitter_factors_get(
+      *cache.paint,
+      brush,
+      cache.toggle_settings.invert,
+      cache.initial_hsv_jitter,
+      cache.stroke_distance,
+      cache.pressure);
 #if CURVE_PATCH_PROFILING
   /* Taken per canvas, not once before the loop: the two waves below run once per target, so a
    * timestamp hoisted out of the loop would charge every later canvas with the PHASE 1/2 time of
@@ -1923,13 +1938,20 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
         /* Precedence, matching the stroke engine: the CHANNEL's own source wins (that is the
          * image assigned to Base Color in the channel panel); failing that the ribbon's own
          * texture supplies the color; failing that the flat channel/brush color. A ribbon
-         * texture still contributes its intensity and alpha through `factor` either way. */
-        const float3 paint_rgb = target_has_source ?
-                                     pixel.source_color :
-                                     (target_paints_color ?
-                                          curve_patch_paint_color(
-                                              brush_color, pixel.tex_color, pixel.tex_valid) :
+         * texture still contributes its intensity and alpha through `factor` either way.
+         * Randomize Color applies once to whichever color won, so a source- or texture-driven
+         * patch randomizes exactly like a value-driven one; PHASE 1 decoded the sampled texels
+         * to scene-linear, the same space the channel-value path jitters in. */
+        const float3 paint_rgb_raw = target_has_source ?
+                                         pixel.source_color :
+                                         (target_paints_color ?
+                                              curve_patch_paint_color(
+                                                  brush_color, pixel.tex_color, pixel.tex_valid) :
                                           brush_color);
+        const float3 paint_rgb =
+            (target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR || !target.is_material_channel) ?
+                BKE_paint_stroke_color_jitter_apply_color(dab_color_jitter, paint_rgb_raw) :
+                paint_rgb_raw;
         if (blend_mode == IMB_BLEND_NORMAL_MIX) {
           /* A packed tangent normal is an ENCODED direction, not a linear color, so it must NOT
            * be pre-multiplied by coverage the way every other mode's source is: scaling it toward

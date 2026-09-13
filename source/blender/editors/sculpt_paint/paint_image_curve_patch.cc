@@ -185,6 +185,11 @@ ImageCurvePatchSession *image_curve_patch_session_begin(bContext *C,
   /* The canvas has exactly one patch; every consumer reaches it through `doc.active_item()`. */
   session->doc.patches.resize(1);
   session->params = image_curve_patch_capture_params(brush, paint);
+  /* Randomize Color: one seed per session, frozen like the rest of #params -- see the field's doc
+   * comment on #ImageCurvePatchSession. */
+  if (paint != nullptr && BKE_brush_color_jitter_get_settings(paint, brush)) {
+    session->initial_hsv_jitter = seed_hsv_jitter();
+  }
   /* The session's own "before" pixels. Nothing is pushed onto the undo stack until commit, so no
    * foreign operator can take a transaction out from under a patch that is still being edited. */
   session->tiles = ED_image_paint_tile_map_new();

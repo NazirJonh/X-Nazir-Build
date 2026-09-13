@@ -2106,11 +2106,14 @@ void BKE_paint_stroke_get_average(const Paint *paint, const Object *ob, float st
   }
 }
 
-float3 BKE_paint_randomize_color(const BrushColorJitterSettings &color_jitter,
-                                 const float3 &initial_hsv_jitter,
-                                 const float distance,
-                                 const float pressure,
-                                 const float3 &color)
+/** The shared core of #BKE_paint_randomize_color and #BKE_paint_stroke_color_jitter_factors_get:
+ * the per-dab Randomize Color transform as (additive hue offset, saturation scale, value scale).
+ * The transform is independent of the color it applies to, so one evaluation describes every
+ * color a dab paints. */
+static float3 paint_color_jitter_factors_get(const BrushColorJitterSettings &color_jitter,
+                                             const float3 &initial_hsv_jitter,
+                                             const float distance,
+                                             const float pressure)
 {
   constexpr float noise_scale = 1 / 20.0f;
 
@@ -2142,10 +2145,24 @@ float3 BKE_paint_randomize_color(const BrushColorJitterSettings &color_jitter,
     val_jitter_scale *= BKE_curvemapping_evaluateF(color_jitter.curve_val_jitter, 0, pressure);
   }
 
+  return float3(math::interpolate(0.5f, random_hue, hue_jitter_scale) - 0.5f,
+                math::interpolate(1.0f, random_sat * 2.0f, sat_jitter_scale),
+                math::interpolate(1.0f, random_val * 2.0f, val_jitter_scale));
+}
+
+float3 BKE_paint_randomize_color(const BrushColorJitterSettings &color_jitter,
+                                 const float3 &initial_hsv_jitter,
+                                 const float distance,
+                                 const float pressure,
+                                 const float3 &color)
+{
+  const float3 jitter = paint_color_jitter_factors_get(
+      color_jitter, initial_hsv_jitter, distance, pressure);
+
   float3 hsv;
   rgb_to_hsv_v(color, hsv);
 
-  hsv[0] += math::interpolate(0.5f, random_hue, hue_jitter_scale) - 0.5f;
+  hsv[0] += jitter[0];
   /* Wrap hue. */
   if (hsv[0] > 1.0f) {
     hsv[0] -= 1.0f;
@@ -2154,12 +2171,79 @@ float3 BKE_paint_randomize_color(const BrushColorJitterSettings &color_jitter,
     hsv[0] += 1.0f;
   }
 
-  hsv[1] *= math::interpolate(1.0f, random_sat * 2.0f, sat_jitter_scale);
-  hsv[2] *= math::interpolate(1.0f, random_val * 2.0f, val_jitter_scale);
+  hsv[1] *= jitter[1];
+  hsv[2] *= jitter[2];
 
   float3 random_color;
   hsv_to_rgb_v(hsv, random_color);
   return random_color;
+}
+
+float3 BKE_paint_stroke_color_jitter_factors_get(const Paint &paint,
+                                                 const Brush &brush,
+                                                 const bool invert,
+                                                 const std::optional<float3> &initial_hsv_jitter,
+                                                 const float stroke_distance,
+                                                 const float pressure)
+{
+  /* The identity transform: no hue offset, neutral saturation and value scales. */
+  constexpr float3 identity_jitter(0.0f, 1.0f, 1.0f);
+  if (invert || !initial_hsv_jitter.has_value()) {
+    return identity_jitter;
+  }
+  const std::optional<BrushColorJitterSettings> color_jitter = BKE_brush_color_jitter_get_settings(
+      &paint, &brush);
+  if (!color_jitter) {
+    return identity_jitter;
+  }
+  return paint_color_jitter_factors_get(
+      *color_jitter, *initial_hsv_jitter, stroke_distance, pressure);
+}
+
+float3 BKE_paint_stroke_color_jitter_apply_color(const float3 &jitter_factors, const float3 &color)
+{
+  if (jitter_factors[0] == 0.0f && jitter_factors[1] == 1.0f && jitter_factors[2] == 1.0f) {
+    return color;
+  }
+
+  float3 hsv;
+  rgb_to_hsv_v(color, hsv);
+
+  hsv[0] += jitter_factors[0];
+  /* Wrap hue. */
+  if (hsv[0] > 1.0f) {
+    hsv[0] -= 1.0f;
+  }
+  else if (hsv[0] < 0.0f) {
+    hsv[0] += 1.0f;
+  }
+
+  hsv[1] *= jitter_factors[1];
+  hsv[2] *= jitter_factors[2];
+
+  float3 jittered_color;
+  hsv_to_rgb_v(hsv, jittered_color);
+  return jittered_color;
+}
+
+void BKE_paint_stroke_color_jitter_apply(const float3 &jitter_factors, MutableSpan<float3> colors)
+{
+  for (const int i : colors.index_range()) {
+    colors[i] = BKE_paint_stroke_color_jitter_apply_color(jitter_factors, colors[i]);
+  }
+}
+
+float3 BKE_paint_stroke_color_jitter(const Paint &paint,
+                                     const Brush &brush,
+                                     const bool invert,
+                                     const std::optional<float3> &initial_hsv_jitter,
+                                     const float stroke_distance,
+                                     const float pressure,
+                                     const float3 &color)
+{
+  const float3 jitter_factors = BKE_paint_stroke_color_jitter_factors_get(
+      paint, brush, invert, initial_hsv_jitter, stroke_distance, pressure);
+  return BKE_paint_stroke_color_jitter_apply_color(jitter_factors, color);
 }
 
 void BKE_paint_blend_write(BlendWriter *writer, Paint *paint)
@@ -4195,6 +4279,27 @@ float3 BKE_paint_material_channel_color_get(const BrushMaterialPaint &brush_pain
     return float3(value);
   }
   return float3(brush_paint.channels[channel].value);
+}
+
+float3 BKE_paint_material_channel_stroke_color_get(
+    const BrushMaterialPaint &brush_paint,
+    const Paint &paint,
+    const Brush &brush,
+    const eMaterialPaintChannel channel,
+    const bool invert,
+    const std::optional<float3> &initial_hsv_jitter,
+    const float stroke_distance,
+    const float pressure)
+{
+  const float3 channel_color = BKE_paint_material_channel_color_get(
+      brush_paint, paint, brush, channel, invert);
+  /* Randomize Color describes a paintable color, so only Base Color jitters; the scalar channels
+   * (and Emission) have no hue to shift. */
+  if (channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    return channel_color;
+  }
+  return BKE_paint_stroke_color_jitter(
+      paint, brush, invert, initial_hsv_jitter, stroke_distance, pressure, channel_color);
 }
 
 /**

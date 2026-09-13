@@ -295,6 +295,13 @@ gpu::Batch *DRW_mesh_batch_cache_get_edituv_facedots(Object &object, Mesh &mesh)
  * \{ */
 
 gpu::Batch *DRW_mesh_batch_cache_get_uv_faces(Object &object, Mesh &mesh);
+/**
+ * UV faces of every visible face of \a mesh, paired with the per-corner paint overlay flag: 1 for
+ * the faces the face selection paint mask selects, 0 for the ones a masked stroke leaves out, and
+ * -1 for hidden faces. Drawn by the Image Editor's face selection overlay to veil the faces that
+ * strokes will not paint.
+ */
+gpu::Batch *DRW_mesh_batch_cache_get_uv_face_selection(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_all_uv_wireframe(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_uv_wireframe(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_edit_mesh_analysis(Mesh &mesh);

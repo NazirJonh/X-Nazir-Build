@@ -11,6 +11,8 @@
 
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BLI_utildefines.h"
 
@@ -18,6 +20,7 @@
 #include "BKE_editmesh.hh"
 #include "BKE_layer.hh"
 #include "BKE_object.hh"
+#include "BKE_paint.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -25,6 +28,7 @@
 #include "RNA_prototypes.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "UI_interface.hh"
@@ -115,10 +119,23 @@ static void uiTemplatePaintModeSelection(ui::Layout *layout, bContext *C)
   BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
   Object *ob = BKE_view_layer_active_object_get(view_layer);
 
-  /* Gizmos aren't used in paint modes */
-  if (!ELEM(ob->mode, OB_MODE_SCULPT, OB_MODE_PARTICLE_EDIT)) {
-    /* masks aren't used for sculpt and particle painting */
-    PointerRNA meshptr = RNA_pointer_create_discrete(ob->data, RNA_Mesh, ob->data);
+  PointerRNA meshptr = RNA_pointer_create_discrete(ob->data, RNA_Mesh, ob->data);
+  if (ob->mode == OB_MODE_SCULPT) {
+    /* Sculpt painting (color attribute / image canvases) supports the face selection mask to
+     * restrict strokes to selected faces; vertex masking and bone selection are not used. Only
+     * the tools that consume the mask show the toggle -- but the toggle always stays reachable
+     * while the masking is enabled, so it can be turned off again. */
+    const bool mask_enabled = RNA_boolean_get(&meshptr, "use_paint_mask");
+    const bToolRef *active_tool = WM_toolsystem_ref_from_context(C);
+    const char *active_tool_idname = active_tool != nullptr ? active_tool->idname : nullptr;
+    if (mask_enabled ||
+        BKE_paint_sculpt_face_selection_mask_supported(scene, ob, active_tool_idname))
+    {
+      layout->prop(&meshptr, "use_paint_mask", ui::ITEM_R_ICON_ONLY, "", ICON_NONE);
+    }
+  }
+  else if (ob->mode != OB_MODE_PARTICLE_EDIT) {
+    /* masks aren't used for particle painting */
     if (ob->mode & OB_MODE_TEXTURE_PAINT) {
       layout->prop(&meshptr, "use_paint_mask", ui::ITEM_R_ICON_ONLY, "", ICON_NONE);
     }

@@ -7657,6 +7657,15 @@ def km_image_editor_tool_paint_select_lasso(params, *, fallback):
     )
 
 
+def km_image_editor_tool_paint_mask_island(params):
+    return (
+        "Image Editor Tool: Paint, Paint Mask Island",
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": _template_items_tool_select_actions_simple(
+            "paint.paint_mask_island", type=params.tool_mouse, value='PRESS')},
+    )
+
+
 def km_image_editor_tool_paint_select_polyline(params, *, fallback):
     return (
         _fallback_id("Image Editor Tool: Paint, Select Polyline", fallback),
@@ -9567,6 +9576,7 @@ def generate_keymaps(params=None):
         km_image_editor_tool_mask_primitive_circle(params),
         km_image_editor_tool_mask_primitive_square(params),
         *(km_image_editor_tool_paint_select_box(params, fallback=fallback) for fallback in (False, True)),
+        km_image_editor_tool_paint_mask_island(params),
         *(km_image_editor_tool_paint_select_circle(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_lasso(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_polyline(params, fallback=fallback) for fallback in (False, True)),

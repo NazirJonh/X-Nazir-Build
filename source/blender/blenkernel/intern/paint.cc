@@ -1758,9 +1758,51 @@ bool BKE_palette_is_empty(const Palette *palette)
 
 bool BKE_paint_select_face_test(const Object *ob)
 {
+  /* NOTE: Sculpt Mode is deliberately not part of this predicate. Extending it would also flip
+   * `need_mapping` in sculpt mesh evaluation (skipping non-mapping modifiers like Geometry Nodes
+   * in the viewport) and change Frame Selected, just because the sculpt face-mask toggle is on.
+   * Sculpt gets its own explicit checks instead: the face select operator poll
+   * (#facemask_paint_poll) and the paint overlay (#Paints overlay), both gated on
+   * #Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL plus the active sculpt tool. */
   return ((ob != nullptr) && (ob->type == OB_MESH) && (ob->data != nullptr) &&
           ((id_cast<Mesh *>(ob->data))->editflag & ME_EDIT_PAINT_FACE_SEL) &&
-          (ob->mode & (OB_MODE_VERTEX_PAINT | OB_MODE_WEIGHT_PAINT | OB_MODE_TEXTURE_PAINT)));
+          (ob->mode &
+           (OB_MODE_VERTEX_PAINT | OB_MODE_WEIGHT_PAINT | OB_MODE_TEXTURE_PAINT)));
+}
+
+bool BKE_paint_sculpt_brush_type_consumes_face_selection(const eBrushSculptType type)
+{
+  return ELEM(type,
+              SCULPT_BRUSH_TYPE_PAINT,
+              SCULPT_BRUSH_TYPE_SMEAR,
+              SCULPT_BRUSH_TYPE_BLUR,
+              SCULPT_BRUSH_TYPE_TEXTURE_FILL);
+}
+
+bool BKE_paint_sculpt_face_selection_mask_supported(const Scene *scene,
+                                                    const Object *ob,
+                                                    const char *active_tool_idname)
+{
+  /* Mask by Color is an operator tool: it masks from the painted colors and owns no brush of its
+   * own, so the active brush below says nothing about it. Its mask writing respects the face
+   * selection (see the Mask by Color implementation). */
+  if (active_tool_idname != nullptr && StringRef(active_tool_idname) == "builtin.mask_by_color") {
+    return true;
+  }
+  if (scene == nullptr || scene->toolsettings == nullptr || scene->toolsettings->sculpt == nullptr) {
+    return false;
+  }
+  /* Face selection masking only applies to the mesh PBVH; multires grids and dynamic topology
+   * don't paint color attributes. */
+  if (ob != nullptr) {
+    const SculptSession *ss = ob->runtime->sculpt_session;
+    if (ss != nullptr && ss->pbvh != nullptr && ss->pbvh->type() != bke::pbvh::Type::Mesh) {
+      return false;
+    }
+  }
+  const Brush *brush = BKE_paint_brush_for_read(&scene->toolsettings->sculpt->paint);
+  return brush != nullptr &&
+         BKE_paint_sculpt_brush_type_consumes_face_selection(brush->sculpt_brush_type);
 }
 
 bool BKE_paint_select_vert_test(const Object *ob)

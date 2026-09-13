@@ -578,7 +578,7 @@ void PAINT_OT_face_select_hide(wmOperatorType *ot)
   ot->idname = "PAINT_OT_face_select_hide";
 
   ot->exec = face_select_hide_exec;
-  ot->poll = facemask_paint_poll;
+  ot->poll = facemask_hide_paint_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 

@@ -17,7 +17,9 @@
 
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
+#include "BLI_implicit_sharing.hh"
 #include "BLI_task.hh"
+#include "BLI_threads.h"
 #include "BLI_utildefines.h"
 
 #include "DNA_image_types.h"
@@ -577,8 +579,252 @@ float BKE_image_paint_selection_sample_mask_imbuf_bilinear(const ImBuf *mask,
          wx * wy * v11;
 }
 
-float BKE_image_paint_selection_blend_sample(const Image *image, int tile_number, int x, int y)
+/* -------------------------------------------------------------------- */
+/** \name Face-Selection Derived Masks
+ * Masks rasterized from the mesh face selection by the paint sync
+ * (#image_paint_selection_mask_from_face_selection). Strictly separate from the user-authored
+ * masks above: the sync never touches those, and the two sources are combined at sampling time.
+ * \{ */
+
+static void paint_selection_face_blend_mask_tile_invalidate(Image *image, const int tile_number)
 {
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **blend_ptr = runtime->paint_selection_face_blend_masks.lookup_ptr(tile_number);
+  if (blend_ptr) {
+    if (*blend_ptr) {
+      IMB_freeImBuf(*blend_ptr);
+    }
+    runtime->paint_selection_face_blend_masks.remove(tile_number);
+  }
+}
+
+static const ImBuf *paint_selection_face_mask_lookup(const Image *image, const int tile_number)
+{
+  return image->runtime->paint_selection_face_masks.lookup_default(tile_number, nullptr);
+}
+
+static ImBuf *paint_selection_face_blend_mask_ensure(Image *image, const int tile_number)
+{
+  const ImBuf *binary = paint_selection_face_mask_lookup(image, tile_number);
+  if (!binary || !binary->float_buffer.data) {
+    return nullptr;
+  }
+
+  bke::ImageRuntime *runtime = image->runtime;
+  /* Same concurrency contract as the user blend mask: multi-threaded rasterizers call this
+   * per-pixel for the same image. */
+  std::scoped_lock lock(runtime->paint_selection_blend_masks_mutex);
+
+  ImBuf **blend_ptr = runtime->paint_selection_face_blend_masks.lookup_ptr(tile_number);
+  if (blend_ptr && *blend_ptr && (*blend_ptr)->x == binary->x && (*blend_ptr)->y == binary->y) {
+    return *blend_ptr;
+  }
+
+  paint_selection_face_blend_mask_tile_invalidate(image, tile_number);
+  const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
+  ImBuf *blend = BKE_image_paint_selection_compute_blend_mask(binary, edge_policy);
+  if (blend) {
+    runtime->paint_selection_face_blend_masks.add_new(tile_number, blend);
+  }
+  return blend;
+}
+
+/**
+ * The face-selection-derived weight of a pixel: 1.0 while the sync is inactive; otherwise the
+ * sampled derived mask where present, and 0.0 on tiles the face selection doesn't reach (unlike
+ * user masks, where a missing tile means unmasked -- an unselected face must block).
+ */
+static float paint_selection_face_weight(const Image *image,
+                                         const int tile_number,
+                                         const int x,
+                                         const int y)
+{
+  const bke::ImageRuntime *runtime = image->runtime;
+  if (!runtime->paint_selection_derived_active) {
+    return 1.0f;
+  }
+  const ImBuf *binary = paint_selection_face_mask_lookup(image, tile_number);
+  if (!binary || !binary->float_buffer.data) {
+    return 0.0f;
+  }
+  if (x < 0 || x >= binary->x || y < 0 || y >= binary->y) {
+    return 0.0f;
+  }
+  const float binary_value = binary->float_buffer.data[size_t(y) * binary->x + x];
+  const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
+  if (!edge_policy.use_outward_feather) {
+    return binary_value > IMAGE_PAINT_SELECTION_MASK_THRESHOLD ? 1.0f : 0.0f;
+  }
+  ImBuf *blend = paint_selection_face_blend_mask_ensure(const_cast<Image *>(image), tile_number);
+  if (!blend) {
+    return binary_value;
+  }
+  return paint_selection_blend_mask_sample_imbuf(blend, x, y);
+}
+
+static float paint_selection_face_weight_bilinear(const Image *image,
+                                                  const int tile_number,
+                                                  const float fx,
+                                                  const float fy)
+{
+  const bke::ImageRuntime *runtime = image->runtime;
+  if (!runtime->paint_selection_derived_active) {
+    return 1.0f;
+  }
+  const ImBuf *binary = paint_selection_face_mask_lookup(image, tile_number);
+  if (!binary || !binary->float_buffer.data) {
+    return 0.0f;
+  }
+  const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
+  if (!edge_policy.use_outward_feather) {
+    const int x = int(floorf(fx));
+    const int y = int(floorf(fy));
+    if (x < 0 || x >= binary->x || y < 0 || y >= binary->y) {
+      return 0.0f;
+    }
+    return binary->float_buffer.data[size_t(y) * binary->x + x] >
+                   IMAGE_PAINT_SELECTION_MASK_THRESHOLD ?
+               1.0f :
+               0.0f;
+  }
+  ImBuf *blend = paint_selection_face_blend_mask_ensure(const_cast<Image *>(image), tile_number);
+  if (!blend) {
+    return BKE_image_paint_selection_sample_mask_imbuf_bilinear(binary, fx, fy);
+  }
+  return BKE_image_paint_selection_sample_mask_imbuf_bilinear(blend, fx, fy);
+}
+
+ImBuf *BKE_image_paint_selection_face_mask_get(Image *image,
+                                               const int tile_number,
+                                               const int width,
+                                               const int height)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  ImBuf **mask_ptr = runtime->paint_selection_face_masks.lookup_ptr(tile_number);
+  if (mask_ptr) {
+    ImBuf *mask = *mask_ptr;
+    if (mask->x == width && mask->y == height) {
+      return mask;
+    }
+    /* Size changed, free old mask. */
+    IMB_freeImBuf(mask);
+    runtime->paint_selection_face_masks.remove(tile_number);
+    paint_selection_face_blend_mask_tile_invalidate(image, tile_number);
+  }
+
+  ImBuf *mask = IMB_allocImBuf(width, height, ImBufFlags::Zero);
+  IMB_alloc_float_pixels(mask, 1);
+  memset(mask->float_data_for_write(), 0, size_t(width) * height * sizeof(float));
+  runtime->paint_selection_face_masks.add_new(tile_number, mask);
+  paint_selection_face_blend_mask_tile_invalidate(image, tile_number);
+  return mask;
+}
+
+void BKE_image_paint_selection_face_mask_free(Image *image)
+{
+  if (!image || !image->runtime) {
+    return;
+  }
+  bke::ImageRuntime *runtime = image->runtime;
+  for (ImBuf *mask : runtime->paint_selection_face_masks.values()) {
+    IMB_freeImBuf(mask);
+  }
+  runtime->paint_selection_face_masks.clear();
+  for (ImBuf *blend : runtime->paint_selection_face_blend_masks.values()) {
+    IMB_freeImBuf(blend);
+  }
+  runtime->paint_selection_face_blend_masks.clear();
+  for (const ImplicitSharingInfo *info : runtime->paint_selection_derived_sharing_infos) {
+    info->remove_weak_user_and_delete_if_last();
+  }
+  runtime->paint_selection_derived_sharing_infos.clear();
+  /* Dropping the masks invalidates the derived state and its sync key, so the next sync rebuilds
+   * even if nothing else changed (e.g. after the image buffers were reloaded). */
+  runtime->paint_selection_derived_active = false;
+  runtime->paint_selection_derived_sync_key = 0;
+}
+
+float BKE_image_paint_selection_face_mask_sample(const Image *image,
+                                                 const int tile_number,
+                                                 const int x,
+                                                 const int y)
+{
+  if (!image || !image->runtime) {
+    return 1.0f;
+  }
+  const bke::ImageRuntime *runtime = image->runtime;
+  if (!runtime->paint_selection_derived_active) {
+    return 1.0f;
+  }
+  const ImBuf *binary = paint_selection_face_mask_lookup(image, tile_number);
+  if (!binary || !binary->float_buffer.data) {
+    return 0.0f;
+  }
+  if (x < 0 || x >= binary->x || y < 0 || y >= binary->y) {
+    return 0.0f;
+  }
+  return binary->float_buffer.data[size_t(y) * binary->x + x] >
+                 IMAGE_PAINT_SELECTION_MASK_THRESHOLD ?
+             1.0f :
+             0.0f;
+}
+
+bool BKE_image_paint_selection_face_mask_bounds(const Image *image,
+                                                const int tile_number,
+                                                int r_min[2],
+                                                int r_max[2])
+{
+  r_min[0] = r_min[1] = r_max[0] = r_max[1] = 0;
+  if (!image || !image->runtime) {
+    return false;
+  }
+  bke::ImageRuntime &runtime = *image->runtime;
+  if (!runtime.paint_selection_derived_active) {
+    return false;
+  }
+  /* The memoized bounds are written without a lock. */
+  BLI_assert(BLI_thread_is_main());
+
+  if (runtime.paint_selection_face_bounds_sync_key != runtime.paint_selection_derived_sync_key) {
+    runtime.paint_selection_face_bounds_cache.clear();
+    runtime.paint_selection_face_bounds_sync_key = runtime.paint_selection_derived_sync_key;
+  }
+
+  const PaintSelectionBounds *cached = runtime.paint_selection_face_bounds_cache.lookup_ptr(
+      tile_number);
+  if (!cached) {
+    PaintSelectionBounds bounds;
+    const ImBuf *mask = paint_selection_face_mask_lookup(image, tile_number);
+    bounds.has_selection = image_paint_selection_mask_imbuf_bounds(
+        mask, bounds.min, bounds.max);
+    cached = &runtime.paint_selection_face_bounds_cache.lookup_or_add(tile_number, bounds);
+  }
+
+  r_min[0] = cached->min[0];
+  r_min[1] = cached->min[1];
+  r_max[0] = cached->max[0];
+  r_max[1] = cached->max[1];
+  return cached->has_selection;
+}
+
+/** \} */
+
+/**
+ * The user-authored weight of a pixel: 1.0 without a user selection; otherwise the hard binary
+ * sample, or the feathered blend mask when the edge policy asks for it. With \a use_bilinear the
+ * blend mask is sampled bilinearly at (\a fx, \a fy), the binary test always uses the pixel.
+ */
+static float paint_selection_user_weight(const Image *image,
+                                         const int tile_number,
+                                         const float fx,
+                                         const float fy,
+                                         const bool use_bilinear)
+{
+  if (!BKE_image_paint_selection_mask_has_any(image)) {
+    return 1.0f;
+  }
+  const int x = int(floorf(fx));
+  const int y = int(floorf(fy));
   const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
   if (!edge_policy.use_outward_feather) {
     return BKE_image_paint_selection_mask_sample(image, tile_number, x, y) >
@@ -586,12 +832,20 @@ float BKE_image_paint_selection_blend_sample(const Image *image, int tile_number
                1.0f :
                0.0f;
   }
-
   ImBuf *blend = paint_selection_blend_mask_ensure(const_cast<Image *>(image), tile_number);
   if (!blend) {
     return 1.0f;
   }
-  return paint_selection_blend_mask_sample_imbuf(blend, x, y);
+  return use_bilinear ? BKE_image_paint_selection_sample_mask_imbuf_bilinear(blend, fx, fy) :
+                        paint_selection_blend_mask_sample_imbuf(blend, x, y);
+}
+
+float BKE_image_paint_selection_blend_sample(const Image *image, int tile_number, int x, int y)
+{
+  /* Pixels outside an active derived face selection are blocked, see
+   * #paint_selection_face_weight. */
+  return paint_selection_user_weight(image, tile_number, float(x), float(y), false) *
+         paint_selection_face_weight(image, tile_number, x, y);
 }
 
 float BKE_image_paint_selection_blend_sample_bilinear(const Image *image,
@@ -599,21 +853,8 @@ float BKE_image_paint_selection_blend_sample_bilinear(const Image *image,
                                                       const float fx,
                                                       const float fy)
 {
-  const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
-  if (!edge_policy.use_outward_feather) {
-    const int x = int(floorf(fx));
-    const int y = int(floorf(fy));
-    return BKE_image_paint_selection_mask_sample(image, tile_number, x, y) >
-                   IMAGE_PAINT_SELECTION_MASK_THRESHOLD ?
-               1.0f :
-               0.0f;
-  }
-
-  ImBuf *blend = paint_selection_blend_mask_ensure(const_cast<Image *>(image), tile_number);
-  if (!blend) {
-    return 1.0f;
-  }
-  return BKE_image_paint_selection_sample_mask_imbuf_bilinear(blend, fx, fy);
+  return paint_selection_user_weight(image, tile_number, fx, fy, true) *
+         paint_selection_face_weight_bilinear(image, tile_number, fx, fy);
 }
 
 ImBuf *BKE_image_paint_selection_compute_blend_mask(const ImBuf *binary_mask,
@@ -781,6 +1022,22 @@ bool BKE_image_paint_selection_mask_has_any(const Image *image)
     }
   }
   return false;
+}
+
+bool BKE_image_paint_selection_is_active(const Image *image)
+{
+  if (!image || !image->runtime) {
+    return false;
+  }
+  /* Either a user-authored selection exists or a derived face-selection mask is active. An
+   * inactive derived state (no active canvas object) imposes no restriction. */
+  return image->runtime->paint_selection_derived_active ||
+         BKE_image_paint_selection_mask_has_any(image);
+}
+
+bool BKE_image_paint_selection_derived_active(const Image *image)
+{
+  return image && image->runtime && image->runtime->paint_selection_derived_active;
 }
 
 int BKE_image_paint_selection_mask_first_tile_with_selection(const Image *image)

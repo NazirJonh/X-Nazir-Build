@@ -24,7 +24,6 @@ struct SubdivCCGCoord;
 namespace bke {
 enum class AttrDomain : int8_t;
 }
-
 namespace ed::sculpt_paint::smooth {
 
 /**
@@ -33,11 +32,26 @@ namespace ed::sculpt_paint::smooth {
  */
 void bmesh_four_neighbor_average(float avg[3], const float3 &direction, const BMVert *v);
 
-void neighbor_color_average(OffsetIndices<int> faces,
+/**
+ * Average the colors of every vertex in \a vert_neighbors. When \a vert_paintable is non-empty
+ * (the face selection masking is active), corner-domain colors of neighbors without a selected
+ * face are skipped and the average is taken over the valid ones only; a vertex with no valid
+ * neighbor keeps its own color from \a own_colors. This keeps the selection boundary from
+ * darkening towards the zero colors the masked-out vertices read as.
+ *
+ * \param vert_paintable: Per-vertex "at least one owning face is selected", or an empty span when
+ * the masking is disabled. Passing the spans instead of a #FaceSelectionMask keeps this module
+ * independent of the sculpt masking state type.
+ * \param select_poly: Face selection used by #color::color_vert_get, or an empty span.
+ */
+void neighbor_color_average(Span<bool> vert_paintable,
+                            Span<bool> select_poly,
+                            OffsetIndices<int> faces,
                             Span<int> corner_verts,
                             GroupedSpan<int> vert_to_face_map,
                             GSpan color_attribute,
                             bke::AttrDomain color_domain,
+                            const Span<float4> own_colors,
                             GroupedSpan<int> vert_neighbors,
                             MutableSpan<float4> smooth_colors);
 

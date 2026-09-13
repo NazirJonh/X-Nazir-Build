@@ -95,6 +95,57 @@ void BKE_image_paint_selection_mask_tile_reassign(Image *image,
 /** \return True when at least one tile holds a selection mask. */
 bool BKE_image_paint_selection_mask_has_any(const Image *image);
 
+/**
+ * True when a selection constrains sampling: either a user-authored selection exists or a derived
+ * face-selection mask is active (#ImageRuntime::paint_selection_derived_active). An inactive
+ * derived state imposes no restriction, so this never reports "no selection" as blocking.
+ */
+bool BKE_image_paint_selection_is_active(const Image *image);
+
+/**
+ * True while a derived face-selection mask constrains sampling
+ * (#ImageRuntime::paint_selection_derived_active). Unlike a user-authored mask, a derived mask has
+ * no per-tile bounding box API; it blocks tiles it doesn't cover per pixel, so callers that skip
+ * work by bounding box must not use it to filter tiles.
+ */
+bool BKE_image_paint_selection_derived_active(const Image *image);
+
+/**
+ * Free the derived masks (#ImageRuntime::paint_selection_face_masks) and their blend cache. Never
+ * touches the user-authored masks. Called by the face-selection sync when it goes inactive and
+ * when the image's buffers are freed.
+ */
+void BKE_image_paint_selection_face_mask_free(Image *image);
+
+/**
+ * A writable (or size-validated) derived face-selection mask for \a tile_number, created from
+ * scratch when missing, mirroring #BKE_image_paint_selection_mask_get for the user masks.
+ */
+ImBuf *BKE_image_paint_selection_face_mask_get(Image *image, int tile_number, int width, int height);
+
+/**
+ * Hard binary sample of the derived face-selection mask: 1.0 while the derived state is inactive
+ * (#ImageRuntime::paint_selection_derived_active clear), otherwise 1.0 inside the selected faces
+ * and 0.0 everywhere else (including tiles the selection doesn't reach). Unlike the blend samplers
+ * this ignores the edge feathering policy, for flood-fill style inside tests.
+ */
+float BKE_image_paint_selection_face_mask_sample(const Image *image, int tile_number, int x, int y);
+
+/**
+ * Bounding box of the selected pixels of the derived face-selection mask for \a tile_number.
+ * Mirrors #BKE_image_paint_selection_mask_bounds for the face-derived mask, memoized against
+ * #ImageRuntime::paint_selection_derived_sync_key. Main thread only: the memo is not locked.
+ *
+ * \note For narrowing a raster region *within* a tile already known to be affected, not for
+ * deciding whether a tile is affected: unlike a user-authored mask, a tile with no face mask entry
+ * is blocked rather than unmasked (see #BKE_image_paint_selection_derived_active), so callers must
+ * not use this to skip tiles.
+ */
+bool BKE_image_paint_selection_face_mask_bounds(const Image *image,
+                                                int tile_number,
+                                                int r_min[2],
+                                                int r_max[2]);
+
 /** \return First UDIM tile number that has a non-empty selection, or 0 if none. */
 int BKE_image_paint_selection_mask_first_tile_with_selection(const Image *image);
 

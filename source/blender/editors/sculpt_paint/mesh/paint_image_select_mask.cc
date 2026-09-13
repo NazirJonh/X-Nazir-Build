@@ -10,11 +10,16 @@
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <functional>
 
 #include "MEM_guardedalloc.h"
 
 #include "BLI_array.hh"
+#include "BLI_array_utils.hh"
 #include "BLI_bitmap_draw_2d.h"
+#include "BLI_function_ref.hh"
+#include "BLI_hash.hh"
+#include "BLI_implicit_sharing.hh"
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_map.hh"
 #include "BLI_math_geom.h"
@@ -27,8 +32,10 @@
 #include "BLI_rect.h"
 #include "BLI_span.hh"
 #include "BLI_string.h"
+#include "BLI_task.hh"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
+#include "BLI_vector_set.hh"
 
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
@@ -39,8 +46,8 @@
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 
+#include "BKE_attribute.hh"
 #include "BKE_blender.hh"
-#include "BKE_context.hh"
 #include "BKE_customdata.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_image.hh"
@@ -93,6 +100,7 @@
 
 #include "../../space_image/image_runtime.hh"
 #include "../paint_intern.hh"
+#include "paint_face_selection_mask.hh"
 #include "paint_image_select_gesture.hh"
 #include "paint_image_select_gradient.hh"
 #include "paint_image_select_intern.hh"
@@ -536,28 +544,64 @@ Vector<Object *> image_paint_selection_canvas_objects_get(const bContext *C,
   return objects;
 }
 
-BMUVOffsets image_paint_selection_uv_offsets_get(BMesh *bm, Object *ob, const Scene *scene)
+/**
+ * The UV-map name candidates the paint canvas may be sampled through for \a ob, in priority order:
+ * the active material slot's UV override first (image paint Material mode), then
+ * #BKE_paint_canvas_uvmap_name_get.
+ *
+ * The names are deliberately not checked here: the mesh and the BMesh keep separate layer stores (a
+ * UV map created or renamed in Edit Mode lives in the BMesh until it is flushed), so an existence
+ * check must run against the caller's own data. #image_paint_canvas_mesh_uv_name_get does it for
+ * the mesh, `image_paint_selection_uv_offsets_get` for the BMesh.
+ */
+static Vector<std::string> image_paint_canvas_uv_name_candidates(const Scene &scene, Object &ob)
 {
-  const ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
+  Vector<std::string> candidates;
 
+  const ImagePaintSettings &imapaint = scene.toolsettings->imapaint;
   if (imapaint.mode == IMAGEPAINT_MODE_MATERIAL) {
-    Material *ma = BKE_object_material_get(ob, ob->actcol);
+    Material *ma = BKE_object_material_get(&ob, ob.actcol);
     if (ma && ma->texpaintslot && ma->paint_active_slot < ma->tot_slots) {
       const char *uvname = ma->texpaintslot[ma->paint_active_slot].uvname;
       if (uvname && uvname[0]) {
-        const int layer = CustomData_get_named_layer_index(&bm->ldata, CD_PROP_FLOAT2, uvname);
-        if (layer != -1) {
-          return BM_uv_map_offsets_from_layer(bm, layer);
-        }
+        candidates.append(std::string(uvname));
       }
     }
   }
-
-  if (const std::optional<StringRef> uv_name = BKE_paint_canvas_uvmap_name_get(
-          &scene->toolsettings->paint_mode, ob))
+  if (const std::optional<StringRef> uv_ref = BKE_paint_canvas_uvmap_name_get(
+          &scene.toolsettings->paint_mode, &ob))
   {
+    if (!uv_ref->is_empty()) {
+      candidates.append(std::string(*uv_ref));
+    }
+  }
+  return candidates;
+}
+
+/**
+ * The first UV-map candidate of #image_paint_canvas_uv_name_candidates that exists as a
+ * corner-domain float2 attribute on \a mesh, or no value. A material slot can keep pointing at a
+ * renamed or deleted UV map, and rasterizing the derived masks through a missing layer would
+ * silently produce an empty mask.
+ */
+static std::optional<std::string> image_paint_canvas_mesh_uv_name_get(const Scene &scene,
+                                                                      Object &ob,
+                                                                      const Mesh &mesh)
+{
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  for (const std::string &name : image_paint_canvas_uv_name_candidates(scene, ob)) {
+    if (attributes.lookup<float2>(name, bke::AttrDomain::Corner)) {
+      return name;
+    }
+  }
+  return std::nullopt;
+}
+
+BMUVOffsets image_paint_selection_uv_offsets_get(BMesh *bm, Object *ob, const Scene *scene)
+{
+  for (const std::string &uv_name : image_paint_canvas_uv_name_candidates(*scene, *ob)) {
     const int layer = CustomData_get_named_layer_index(
-        &bm->ldata, CD_PROP_FLOAT2, uv_name->data());
+        &bm->ldata, CD_PROP_FLOAT2, uv_name.c_str());
     if (layer != -1) {
       return BM_uv_map_offsets_from_layer(bm, layer);
     }
@@ -783,6 +827,351 @@ static void image_paint_selection_expand_for_object(Scene *scene,
   if (owns_bm) {
     BM_mesh_free(bm);
   }
+}
+
+/**
+ * Rebuild the image's runtime face-selection-derived 2D paint masks from the face selection
+ * (#Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL + `.select_poly`) of every canvas object, rasterized
+ * through each object's active paint-canvas UV map. Called when 2D painting sessions begin so
+ * Image Editor strokes, fills and curve patches respect the same face selection the 3D viewport
+ * does while the masking is enabled.
+ *
+ * The derived masks live in #ImageRuntime::paint_selection_face_masks, strictly separate from the
+ * user-authored masks: the sync never touches those, and the two are combined at sampling time
+ * (#BKE_image_paint_selection_blend_sample). The derived state is Active only when at least one
+ * canvas object has an active selection; every other object rasterizes all its visible faces, so
+ * an object that is masked off in 3D is unrestricted in 2D rather than blocked. With no active
+ * selection anywhere (or no UV map to rasterize through) the derived state is Inactive and the
+ * masks are freed.
+ *
+ * A cache key over every contributing object's mesh UID, selection contents and UV map keeps
+ * unchanged selections from rebuilding anything: the common stroke start costs one hash pass
+ * instead of a full BMesh conversion, rasterization and blend-mask invalidation.
+ *
+ * Bucketing walks the UDIM grid (tiles `1001 + ty*10 + tx`, `tx` 0..9): UVs outside the valid
+ * grid are ignored, matching the tiled canvas model.
+ */
+void image_paint_selection_mask_from_face_selection(const bContext *C,
+                                                    const Scene *scene,
+                                                    Image *image)
+{
+  if (image == nullptr || image->runtime == nullptr || scene == nullptr) {
+    return;
+  }
+  bke::ImageRuntime &runtime = *image->runtime;
+
+  /* A generous candidate set (see #ImagePaintCanvasPurpose::Mask): every object that may paint
+   * into this image, multi-object included. */
+  const Vector<Object *> objects = image_paint_selection_canvas_objects_get(
+      C, image, ImagePaintCanvasPurpose::Mask);
+
+  /* A lightweight per-object source: the selection state and UV attributes only, without the
+   * per-stroke #ed::sculpt_paint::FaceSelectionMask (whose per-vertex table the rasterization
+   * never uses). */
+  struct FaceSelectionSyncSource {
+    const Mesh *mesh = nullptr;
+    /** Mesh-level masking state. Only #FaceSelectionState::Active restricts to the selected faces;
+     * every other state draws all visible faces so the 2D result matches the 3D viewport for that
+     * object. */
+    ed::sculpt_paint::FaceSelectionState selection_state =
+        ed::sculpt_paint::FaceSelectionState::Disabled;
+    /** Selection varray; invalid when the mesh has no `.select_poly` (empty/disabled). */
+    VArray<bool> select_poly_varray;
+    /** The object's paint-canvas UVs (corner domain); invalid when there is no UV map to
+     * rasterize through. */
+    VArray<float2> uvs_varray;
+    VArraySpan<float2> uvs;
+  };
+
+  /* Determine whether any canvas object has an active selection at all (with a UV map to rasterize
+   * it through). If not, the derived state is Inactive and nothing is hashed or rasterized -- the
+   * common "masking off" stroke start. */
+  bool any_active = false;
+  for (Object *ob : objects) {
+    if (ob == nullptr || ob->type != OB_MESH || ob->data == nullptr) {
+      continue;
+    }
+    const Mesh &mesh = *id_cast<const Mesh *>(ob->data);
+    if (ed::sculpt_paint::face_selection_state(mesh) !=
+        ed::sculpt_paint::FaceSelectionState::Active)
+    {
+      continue;
+    }
+    if (image_paint_canvas_mesh_uv_name_get(*scene, *ob, mesh)) {
+      any_active = true;
+      break;
+    }
+  }
+  if (!any_active) {
+    if (runtime.paint_selection_derived_active ||
+        !runtime.paint_selection_derived_sharing_infos.is_empty())
+    {
+      /* The masking was turned off (or no active selection is left): drop the derived masks -- and
+       * only those, the user-authored masks are never touched -- so 2D painting returns to the
+       * unmasked, user-driven state. Also releases the held sharing infos. */
+      BKE_image_paint_selection_face_mask_free(image);
+    }
+    runtime.paint_selection_derived_active = false;
+    return;
+  }
+
+  /* Deterministic chunked hashing so the per-object key inputs can combine in parallel: every item
+   * is hashed together with its index and the chunk hashes XOR together, which makes the result
+   * independent of how the range is split across threads. The previous scheme seeded each chunk
+   * with `range.first()`, so the same data could produce different keys depending on the
+   * scheduling and force spurious rebuilds. */
+  const auto hash_chunks = [](const int64_t size, auto item_hash) -> uint64_t {
+    return threading::parallel_reduce(
+        IndexRange(size),
+        2048,
+        uint64_t(0),
+        [&](const IndexRange range, const uint64_t /*ident*/) {
+          uint64_t chunk = 0;
+          for (const int64_t i : range) {
+            chunk ^= item_hash(i);
+          }
+          return chunk;
+        },
+        std::bit_xor<uint64_t>());
+  };
+
+  /* An attribute's contribution to the key. Shared attribute data is identified by its sharing
+   * info and #ImplicitSharingInfo::version, which every write through an attribute writer bumps:
+   * O(1) instead of hashing every face and corner on each stroke start. The infos are kept alive
+   * with weak users once the key is stored (see #ImageRuntime::paint_selection_derived_sharing_infos),
+   * so a matching address always means the same attribute. Data without a sharing info falls back
+   * to hashing its contents. */
+  Vector<const ImplicitSharingInfo *> sharing_infos;
+  const auto attribute_key = [&](const ImplicitSharingInfo *info,
+                                 const FunctionRef<uint64_t()> content_hash) -> uint64_t {
+    if (info == nullptr) {
+      return content_hash();
+    }
+    sharing_infos.append(info);
+    return get_default_hash(uint64_t(uintptr_t(info)), uint64_t(info->version()));
+  };
+
+  Vector<FaceSelectionSyncSource> sources;
+  /* The same Mesh can back several canvas objects (linked duplicates, Alt+D), and its selection and
+   * UVs are identical for all of them. Deduplicating by (mesh, UV map) keeps every physical
+   * contribution in the key exactly once: the previous plain XOR let a duplicated mesh cancel its
+   * own contribution, freezing the key and leaving stale derived masks. */
+  VectorSet<std::pair<const Mesh *, std::string>> seen_sources;
+  uint64_t sync_key = 0;
+  for (Object *ob : objects) {
+    if (ob == nullptr || ob->type != OB_MESH || ob->data == nullptr) {
+      continue;
+    }
+    const Mesh &mesh = *id_cast<const Mesh *>(ob->data);
+
+    /* Resolve the UV map the paint canvas is sampled through (material slot override first),
+     * matching #image_paint_selection_uv_offsets_get's BMesh-based resolution directly on the
+     * mesh. */
+    const std::optional<std::string> uv_name = image_paint_canvas_mesh_uv_name_get(
+        *scene, *ob, mesh);
+    const std::pair<const Mesh *, std::string> source_key{&mesh,
+                                                          uv_name.value_or(std::string())};
+    if (!seen_sources.add(source_key)) {
+      continue;
+    }
+
+    FaceSelectionSyncSource source;
+    source.mesh = &mesh;
+    source.selection_state = ed::sculpt_paint::face_selection_state(mesh);
+    const bke::AttributeReader<bool> select_poly_reader = mesh.attributes().lookup<bool>(
+        ".select_poly", bke::AttrDomain::Face);
+    source.select_poly_varray = select_poly_reader.varray;
+    bke::AttributeReader<float2> uvs_reader;
+    if (uv_name && !uv_name->empty()) {
+      uvs_reader = mesh.attributes().lookup<float2>(*uv_name, bke::AttrDomain::Corner);
+      source.uvs_varray = uvs_reader.varray;
+      if (source.uvs_varray) {
+        source.uvs = VArraySpan<float2>(source.uvs_varray);
+      }
+    }
+
+    uint64_t poly_hash = 0;
+    uint64_t uv_hash = 0;
+    /* Only an active selection feeds the key: a non-active source draws all its faces regardless
+     * of `.select_poly`, so hashing the selection there would force spurious rebuilds. */
+    if (source.selection_state == ed::sculpt_paint::FaceSelectionState::Active &&
+        source.select_poly_varray)
+    {
+      const VArray<bool> &select_poly = source.select_poly_varray;
+      poly_hash = attribute_key(select_poly_reader.sharing_info, [&]() {
+        return hash_chunks(mesh.faces_num, [&](const int64_t i) {
+          return get_default_hash(uint64_t(i), select_poly[int(i)]);
+        });
+      });
+    }
+    if (source.uvs_varray) {
+      /* Re-unwrapping or editing the active map must invalidate the derived masks even when the
+       * selection itself didn't change. */
+      const VArray<float2> &uvs = source.uvs_varray;
+      uv_hash = attribute_key(uvs_reader.sharing_info, [&]() {
+        return hash_chunks(mesh.corners_num, [&](const int64_t i) {
+          const float2 &uv = uvs[int(i)];
+          return get_default_hash(uint64_t(i), uv.x, uv.y);
+        });
+      });
+    }
+    /* Sequential combine in iteration order: unlike the previous XOR this cannot cancel two
+     * contributions, and the dedup above makes the set of contributions unique. Mesh identity, the
+     * selection state and contents, the UV map name AND contents all feed the key, so any of them
+     * changing forces a rebuild. #get_default_hash takes at most 6 values, so the key is folded
+     * pairwise like #draw::Manager and #BKE_viewer_path do. */
+    sync_key = get_default_hash(sync_key, mesh.id.session_uid);
+    sync_key = get_default_hash(sync_key, mesh.faces_num);
+    sync_key = get_default_hash(sync_key, mesh.corners_num);
+    sync_key = get_default_hash(sync_key, int(source.selection_state));
+    sync_key = get_default_hash(sync_key, poly_hash);
+    sync_key = get_default_hash(sync_key, uv_hash);
+    sync_key = get_default_hash(sync_key, get_default_hash(uv_name.value_or(std::string())));
+    sources.append(std::move(source));
+  }
+
+  /* The image's tile set and resolutions feed the key too: adding or removing a tile, or resizing
+   * the image, must rebuild the derived masks (they are per-tile, per-resolution). The ibufs are
+   * cached, so probing them here is cheap. */
+  for (ImageTile *tile : ListBaseWrapper<ImageTile>(image->tiles)) {
+    ImageUser iuser{};
+    iuser.tile = tile->tile_number;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, nullptr);
+    const int2 size = ibuf ? int2(ibuf->x, ibuf->y) : int2(0);
+    if (ibuf) {
+      BKE_image_release_ibuf(image, ibuf, nullptr);
+    }
+    sync_key ^= get_default_hash(uint(tile->tile_number), size.x, size.y);
+  }
+
+  if (runtime.paint_selection_derived_sync_key == sync_key) {
+    /* The selection and every other key input are unchanged since the derived masks were built:
+     * keep them. No free, no rasterization, no blend-mask invalidation this stroke. */
+    return;
+  }
+
+  /* Rebuild the derived masks from scratch. #BKE_image_paint_selection_face_mask_free resets the
+   * sync key, so set it after the rebuild starts. */
+  BKE_image_paint_selection_face_mask_free(image);
+  runtime.paint_selection_derived_sync_key = sync_key;
+  runtime.paint_selection_derived_active = true;
+  for (const ImplicitSharingInfo *info : sharing_infos) {
+    info->add_weak_user();
+  }
+  runtime.paint_selection_derived_sharing_infos = std::move(sharing_infos);
+
+  /* Bucket selected faces by the UDIM tile(s) their UVs fall on; a face straddling a tile border
+   * is registered with every tile it overlaps (the rasterizer clips per tile). Face indices are
+   * per source. */
+  Map<int, Vector<std::pair<int, int>>> tile_faces;
+  for (const int src_i : sources.index_range()) {
+    const FaceSelectionSyncSource &source = sources[src_i];
+    if (!source.uvs_varray) {
+      /* No UV map to rasterize through: this object contributes nothing to the derived masks. */
+      continue;
+    }
+    /* An active source draws only its selected faces; a disabled or empty one draws all visible
+     * faces, so painting it in 2D matches its unrestricted 3D behavior. */
+    const bool draw_all = source.selection_state != ed::sculpt_paint::FaceSelectionState::Active;
+    const VArraySpan<bool> select_poly(source.select_poly_varray);
+    const OffsetIndices<int> faces = source.mesh->faces();
+    const VArraySpan<bool> hide_poly = *source.mesh->attributes().lookup<bool>(".hide_poly",
+                                                                              bke::AttrDomain::Face);
+    for (const int face : faces.index_range()) {
+      if (!draw_all && (select_poly.is_empty() || !select_poly[face])) {
+        continue;
+      }
+      if (!hide_poly.is_empty() && hide_poly[face]) {
+        continue;
+      }
+      rctf face_uv_bounds;
+      BLI_rctf_init_minmax(&face_uv_bounds);
+      for (const int corner : faces[face]) {
+        BLI_rctf_do_minmax_v(&face_uv_bounds, source.uvs[corner]);
+      }
+      const int tx_min = int(floorf(face_uv_bounds.xmin));
+      const int tx_max = int(floorf(face_uv_bounds.xmax));
+      const int ty_min = int(floorf(face_uv_bounds.ymin));
+      const int ty_max = int(floorf(face_uv_bounds.ymax));
+      for (int ty = ty_min; ty <= ty_max; ty++) {
+        if (ty < 0) {
+          continue;
+        }
+        for (int tx = tx_min; tx <= tx_max; tx++) {
+          /* UDIM tiles span columns 0..9; ignore UVs outside the valid grid. */
+          if (tx < 0 || tx > 9) {
+            continue;
+          }
+          const int tile_number = 1001 + ty * 10 + tx;
+          if (tile_number > IMA_UDIM_MAX) {
+            continue;
+          }
+          tile_faces.lookup_or_add_default(tile_number).append({src_i, face});
+        }
+      }
+    }
+  }
+
+  struct FaceSelectionTileJob {
+    int tile_number;
+    ImBuf *tile_mask = nullptr;
+    Vector<std::pair<int, int>> faces;
+  };
+  Vector<FaceSelectionTileJob> jobs;
+  for (ImageTile *tile : ListBaseWrapper<ImageTile>(image->tiles)) {
+    const Vector<std::pair<int, int>> *faces = tile_faces.lookup_ptr(tile->tile_number);
+    if (faces == nullptr) {
+      continue;
+    }
+    FaceSelectionTileJob job;
+    job.tile_number = tile->tile_number;
+    job.faces = *faces;
+    ImageUser iuser{};
+    iuser.tile = job.tile_number;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, nullptr);
+    if (ibuf) {
+      job.tile_mask = BKE_image_paint_selection_face_mask_get(
+          image, job.tile_number, ibuf->x, ibuf->y);
+      BKE_image_release_ibuf(image, ibuf, nullptr);
+    }
+    jobs.append(std::move(job));
+  }
+
+  const bool any_tile_mask = std::any_of(jobs.begin(), jobs.end(), [](const FaceSelectionTileJob &job) {
+    return job.tile_mask != nullptr;
+  });
+
+  /* Each tile writes its own mask buffer, so tiles fill in parallel; the masks (and the map
+   * holding them) were created serially above. */
+  threading::parallel_for(jobs.index_range(), 1, [&](const IndexRange range) {
+    for (const int j : range) {
+      FaceSelectionTileJob &job = jobs[j];
+      if (job.tile_mask == nullptr) {
+        continue;
+      }
+      float *data = job.tile_mask->float_data_for_write();
+      const int width = job.tile_mask->x;
+      const int height = job.tile_mask->y;
+      const float2 uv_origin = image_select_udim_tile_uv_origin(job.tile_number);
+      for (const auto &[src_i, face] : job.faces) {
+        const FaceSelectionSyncSource &source = sources[src_i];
+        Vector<float2, 8> px_verts;
+        const OffsetIndices<int> faces = source.mesh->faces();
+        for (const int corner : faces[face]) {
+          const float2 uv = source.uvs[corner];
+          px_verts.append(
+              float2((uv.x - uv_origin.x) * width, (uv.y - uv_origin.y) * height));
+        }
+        foreach_uv_polygon_pixel(
+            px_verts, width, height, [&](const int x, const int y, const bool /*strict*/) {
+              data[size_t(y) * width + x] = 1.0f;
+              return true;
+            });
+      }
+    }
+  });
+  /* Nothing could be rasterized (e.g. the image has no tiles): the derived state is inactive. */
+  runtime.paint_selection_derived_active = any_tile_mask;
 }
 
 void image_paint_selection_expand(bContext *C,

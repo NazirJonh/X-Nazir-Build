@@ -32,6 +32,7 @@ class ColorSpace;
 }  // namespace ocio
 using ColorSpace = ocio::ColorSpace;
 
+class ImplicitSharingInfo;
 struct rcti;
 struct Depsgraph;
 struct ID;
@@ -173,11 +174,42 @@ struct ImageRuntime {
 
   /* Per-tile selection masks for 2D image paint (runtime only). */
   Map<int, ImBuf *> paint_selection_masks;
+  /**
+   * Runtime state of the derived masks in #paint_selection_face_masks: Active when they restrict
+   * 2D painting, Inactive when no canvas object has an active face selection (see the
+   * #image_paint_selection_mask_from_face_selection sync). Only meaningful together with a
+   * non-empty #paint_selection_face_masks; the sync frees the masks when it goes Inactive. Never
+   * saved.
+   */
+  bool paint_selection_derived_active = false;
+  /**
+   * Per-tile selection masks derived from the mesh face selection (runtime only). Kept strictly
+   * separate from #paint_selection_masks so the face-selection sync never touches user-authored
+   * masks (no undo loss, no provenance bookkeeping); the two are combined at sampling time inside
+   * #BKE_image_paint_selection_blend_sample. Never saved.
+   */
+  Map<int, ImBuf *> paint_selection_face_masks;
+  /* Cached smooth blend weights derived from #paint_selection_face_masks (runtime only). */
+  Map<int, ImBuf *> paint_selection_face_blend_masks;
+  /**
+   * Cache key of the last derived-mask sync (a hash over every contributing object's mesh UID,
+   * selection contents and active UV map; see #image_paint_selection_mask_from_face_selection).
+   * While it matches, the sync keeps the existing derived masks instead of rebuilding them, so
+   * unchanged selections cost nothing per stroke. Never saved.
+   */
+  uint64_t paint_selection_derived_sync_key = 0;
+  /**
+   * Weak users of the attribute sharing infos (`.select_poly`, UV maps) whose identity and
+   * version feed #paint_selection_derived_sync_key. Holding them keeps the info objects alive,
+   * so a freed attribute's address cannot be reused by another one while the key refers to it.
+   * Released by #BKE_image_paint_selection_face_mask_free. Never saved.
+   */
+  Vector<const ImplicitSharingInfo *> paint_selection_derived_sharing_infos;
   /* Cached smooth blend weights derived from #paint_selection_masks (runtime only). */
   Map<int, ImBuf *> paint_selection_blend_masks;
-  /* Guards #paint_selection_blend_masks: lazily filled from
-   * #BKE_image_paint_selection_blend_sample_bilinear, which multi-threaded rasterizers (e.g. the
-   * gradient tool) call concurrently from worker threads for the same image. */
+  /* Guards #paint_selection_blend_masks and #paint_selection_face_blend_masks: lazily filled
+   * from #BKE_image_paint_selection_blend_sample_bilinear and the face-selection samplers, which
+   * multi-threaded rasterizers (e.g. the gradient tool) call concurrently for the same image. */
   Mutex paint_selection_blend_masks_mutex;
   /** Edge compositing policy for the active selection (box=all hard, lasso/circle=feathered). */
   PaintSelectionEdgePolicy paint_selection_edge_policy;
@@ -198,6 +230,12 @@ struct ImageRuntime {
    */
   Map<int, PaintSelectionBounds> paint_selection_bounds_cache;
   uint64_t paint_selection_bounds_revision = 0;
+  /**
+   * Memoized per-tile results of #BKE_image_paint_selection_face_mask_bounds, valid only while
+   * #paint_selection_face_bounds_sync_key still equals #paint_selection_derived_sync_key.
+   */
+  Map<int, PaintSelectionBounds> paint_selection_face_bounds_cache;
+  uint64_t paint_selection_face_bounds_sync_key = 0;
   /**
    * Opaque handle of the editor holding a live floating selection session (move / transform /
    * warp / gradient) against this image, or null when the canvas is free. The mask is owned by

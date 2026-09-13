@@ -173,6 +173,22 @@ Vector<Object *> image_paint_selection_canvas_objects_get(const bContext *C,
                                                           ImagePaintCanvasPurpose purpose);
 BMUVOffsets image_paint_selection_uv_offsets_get(BMesh *bm, Object *ob, const Scene *scene);
 
+/**
+ * Rebuild the image's runtime face-selection-derived 2D paint masks from the face selection
+ * (#Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL + the `.select_poly` face attribute) of every canvas
+ * object, rasterized through each object's active paint-canvas UV map. Called at 2D painting
+ * session starts so Image Editor strokes respect the same face selection as the 3D viewport.
+ *
+ * The derived state is Active only when at least one canvas object has an active selection; every
+ * other object then rasterizes all its visible faces. With no active selection anywhere the state
+ * is Inactive and the masks are freed. The user-authored 2D masks are never touched, and a cache
+ * key keeps unchanged selections from rebuilding anything. See paint_image_select_mask.cc for the
+ * exact semantics.
+ */
+void image_paint_selection_mask_from_face_selection(const bContext *C,
+                                                    const Scene *scene,
+                                                    Image *image);
+
 /* Gradient floating-state helpers. The gradient rasterization API lives in
  * paint_image_select_gradient.hh; these operate on the runtime floating session. */
 bool image_select_gradient_is_floating(bContext *C);

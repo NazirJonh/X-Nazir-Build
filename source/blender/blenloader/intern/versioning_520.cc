@@ -72,6 +72,8 @@
 #include "SEQ_sequencer.hh"
 
 #include "BLO_read_write.hh"
+#include "DNA_genfile.h"
+
 #include "readfile.hh"
 
 #include "versioning_common.hh"
@@ -1219,7 +1221,7 @@ static void do_versions_structure_tag_category_memory(Main *bmain)
   }
 }
 
-void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
+void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
 {
   /* Category runtime lists in WM are rebuilt by Python on startup and must never be trusted from
    * blend-file contents (older experimental files may contain stale raw pointers here).
@@ -1951,6 +1953,36 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       /* The default fill mode moved from Pixels to Face. Without this, brushes from older
        * files read `fill_expand == 0` and switch to Pixels, changing their behavior. */
       brush.fill_expand = IMAGE_PAINT_SELECT_EXPAND_FACE;
+    }
+  }
+
+  /* The face selection paint overlay settings are new, and a file written before them zero-fills
+   * the opacity and leaves the "show" flag clear. A zero opacity hides the overlay completely --
+   * including the face selection display the 3D Viewport used to draw at a fixed alpha -- so
+   * restore the default that keeps it on.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion so this fork-only change
+   * doesn't claim a subversion number that upstream will use for its own versioning. */
+  const bool v3d_missing_face_selection = !DNA_struct_member_exists_with_alias(
+      fd->filesdna, "View3DOverlay", "float", "paint_face_selection_opacity");
+  const bool sima_missing_face_selection = !DNA_struct_member_exists_with_alias(
+      fd->filesdna, "SpaceImage", "float", "face_selection_opacity");
+  if (v3d_missing_face_selection || sima_missing_face_selection) {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D && v3d_missing_face_selection) {
+            View3D &v3d = reinterpret_cast<View3D &>(sl);
+            v3d.overlay.paint_face_selection_opacity = 0.05f;
+            v3d.overlay.paint_flag |= V3D_OVERLAY_PAINT_FACE_SELECTION;
+          }
+          else if (sl.spacetype == SPACE_IMAGE && sima_missing_face_selection) {
+            SpaceImage &sima = reinterpret_cast<SpaceImage &>(sl);
+            sima.face_selection_opacity = 0.05f;
+            sima.flag |= SI_DRAW_FACE_SELECTION;
+          }
+        }
+      }
     }
   }
 

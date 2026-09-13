@@ -10,12 +10,14 @@
 
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_bvh.hh"
 #include "BKE_scene.hh"
 
 #include "DEG_depsgraph_query.hh"
 
 #include "draw_cache.hh"
 #include "draw_cache_impl.hh"
+#include "draw_sculpt.hh"
 
 #include "overlay_base.hh"
 #include "overlay_symmetry_contour.hh"
@@ -47,9 +49,17 @@ class Paints : Overlay {
   bool show_paint_mask_ = false;
   bool masked_transparency_support_ = false;
   bool show_symmetry_contour_ = false;
+  /* Face selection masking: whether the veil over the faces a masked stroke leaves out is drawn at
+   * all. Toggled per viewport (#V3D_OVERLAY_PAINT_FACE_SELECTION) with a user controlled opacity
+   * (#View3DOverlay::paint_face_selection_opacity); a zero opacity hides it too. */
+  bool show_face_selection_ = false;
   /* Effective paint context mode, falling back to the object mode when the global context mode
    * doesn't match (e.g. during certain mode transitions). */
   int paint_ctx_mode_ = -1;
+  /* Sculpt Mode only: the active tool consumes the face selection mask (a painting tool). The
+   * face-selection display is hidden for mesh-deforming tools, see
+   * #BKE_paint_sculpt_face_selection_mask_supported. */
+  bool sculpt_face_mask_tool_ok_ = false;
   SymmetryContourOverlay symmetry_contour_;
 
  public:
@@ -82,7 +92,15 @@ class Paints : Overlay {
                ELEM(paint_ctx_mode_,
                     CTX_MODE_PAINT_WEIGHT,
                     CTX_MODE_PAINT_VERTEX,
-                    CTX_MODE_PAINT_TEXTURE);
+                    CTX_MODE_PAINT_TEXTURE,
+                    CTX_MODE_SCULPT);
+
+    if (paint_ctx_mode_ == CTX_MODE_SCULPT) {
+      /* The face-selection display is only meaningful for the painting tools that consume the
+       * face selection mask; mesh-deforming tools hide it. The engine resolves this in
+       * #State::sculpt_face_selection_mask_supported. */
+      sculpt_face_mask_tool_ok_ = state.sculpt_face_selection_mask_supported;
+    }
 
     /* Init in any case to release the data. */
     paint_region_ps_.init();
@@ -96,6 +114,8 @@ class Paints : Overlay {
     }
 
     show_wires_ = state.overlay.paint_flag & V3D_OVERLAY_PAINT_WIRE;
+    show_face_selection_ = (state.overlay.paint_flag & V3D_OVERLAY_PAINT_FACE_SELECTION) &&
+                           (state.overlay.paint_face_selection_opacity > 0.0f);
     show_symmetry_contour_ = !state.is_wire() && !state.is_depth_only_drawing &&
                              ((paint_ctx_mode_ == CTX_MODE_PAINT_WEIGHT &&
                                state.show_weight_paint_symmetry_contour()) ||
@@ -115,7 +135,10 @@ class Paints : Overlay {
                           DRW_STATE_BLEND_ALPHA,
                       state.clipping_plane_count);
         sub.shader_set(res.shaders->paint_region_face.get());
-        sub.push_constant("ucolor", float4(1.0, 1.0, 1.0, 0.2));
+        /* The veil covers the faces the face selection mask leaves out; its opacity is exposed as
+         * "Face Selection" in the paint mode overlay panels. */
+        sub.push_constant(
+            "ucolor", float4(1.0, 1.0, 1.0, state.overlay.paint_face_selection_opacity));
         paint_region_face_ps_ = &sub;
       }
       {
@@ -232,6 +255,14 @@ class Paints : Overlay {
           return;
         }
         break;
+      case CTX_MODE_SCULPT:
+        /* Only the face-selection display below is relevant in Sculpt Mode; the mode specific
+         * weight/texture sub-passes do not apply. Tools that don't consume the face selection
+         * mask (mesh-deforming brushes) hide it. */
+        if (ob_ref.object->mode != OB_MODE_SCULPT || !sculpt_face_mask_tool_ok_) {
+          return;
+        }
+        break;
       default:
         return;
     }
@@ -262,6 +293,10 @@ class Paints : Overlay {
         }
         break;
       }
+      case CTX_MODE_SCULPT: {
+        /* Painted color on the surface is handled by the render engine; nothing extra here. */
+        break;
+      }
       default:
         BLI_assert_unreachable();
         return;
@@ -277,15 +312,49 @@ class Paints : Overlay {
       /* Texture paint mode only draws the face selection without wires or vertices as we don't
        * draw on the geometry data directly. */
       const bool in_texture_paint_mode = paint_ctx_mode_ == CTX_MODE_PAINT_TEXTURE;
+      /* The "Face Selection" overlay toggle hides the whole selection display: the veil and the
+       * selection edges alike. The paint mask itself stays active. */
+      const bool draw_face_selection = use_face_selection && show_face_selection_;
 
-      if ((use_face_selection || show_wires_) && !in_texture_paint_mode) {
-        gpu::Batch *geom = DRW_cache_mesh_paint_overlay_edges_get(ob_ref.object);
-        paint_region_edge_ps_->push_constant("use_select", use_face_selection);
-        paint_region_edge_ps_->draw(geom, manager.unique_handle(ob_ref));
+      /* Sculpt Mode skips depsgraph geometry updates while the PBVH draws directly, so the
+       * evaluated mesh batches below can be stale. Draw from the live PBVH buffers instead, like
+       * the sculpt overlays. This covers the paint wireframe too, so it follows the sculpted
+       * surface. Only the mesh PBVH provides face selection data; other cases (e.g. Mask by Color
+       * on multires or dynamic topology) keep the evaluated mesh path. */
+      const bke::pbvh::Tree *sculpt_pbvh = paint_ctx_mode_ == CTX_MODE_SCULPT ?
+                                               bke::object::pbvh_get(*ob_ref.object) :
+                                               nullptr;
+      const bool use_sculpt_pbvh = (draw_face_selection || show_wires_) && sculpt_pbvh &&
+                                   sculpt_pbvh->type() == bke::pbvh::Type::Mesh &&
+                                   BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object,
+                                                                               state.rv3d);
+      if (use_sculpt_pbvh) {
+        ResourceHandleRange handle = manager.unique_handle_for_sculpt(ob_ref);
+        /* The face selection attribute is requested even for the plain wireframe: the edge shader
+         * always reads `paint_overlay_flag`, `use_select` decides whether it matters. */
+        paint_region_edge_ps_->push_constant("use_select", draw_face_selection);
+        for (SculptBatch &batch : sculpt_batches_get(
+                 ob_ref.object, SCULPT_BATCH_WIREFRAME | SCULPT_BATCH_FACE_SELECTION))
+        {
+          paint_region_edge_ps_->draw(batch.batch, handle);
+        }
+        if (draw_face_selection) {
+          for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, SCULPT_BATCH_FACE_SELECTION))
+          {
+            paint_region_face_ps_->draw(batch.batch, handle);
+          }
+        }
       }
-      if (use_face_selection) {
-        gpu::Batch *geom = DRW_cache_mesh_paint_overlay_surface_get(ob_ref.object);
-        paint_region_face_ps_->draw(geom, manager.unique_handle(ob_ref));
+      else {
+        if ((draw_face_selection || show_wires_) && !in_texture_paint_mode) {
+          gpu::Batch *geom = DRW_cache_mesh_paint_overlay_edges_get(ob_ref.object);
+          paint_region_edge_ps_->push_constant("use_select", draw_face_selection);
+          paint_region_edge_ps_->draw(geom, manager.unique_handle(ob_ref));
+        }
+        if (draw_face_selection) {
+          gpu::Batch *geom = DRW_cache_mesh_paint_overlay_surface_get(ob_ref.object);
+          paint_region_face_ps_->draw(geom, manager.unique_handle(ob_ref));
+        }
       }
       if (use_vert_selection && !in_texture_paint_mode) {
         gpu::Batch *geom = DRW_cache_mesh_paint_overlay_verts_get(ob_ref.object);

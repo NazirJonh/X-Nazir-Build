@@ -50,6 +50,7 @@
 
 #include "paint_image_curve_patch.hh"
 #include "paint_image_curve_patch_raster.hh"
+#include "mesh/paint_image_select_intern.hh"
 
 namespace blender {
 
@@ -162,6 +163,11 @@ ImageCurvePatchSession *image_curve_patch_session_begin(bContext *C,
     BKE_report(reports, RPT_ERROR, "Curve Patch requires an Image Editor with an open image");
     return nullptr;
   }
+
+  /* Face selection masking: while enabled on any canvas object, the image's derived 2D selection
+   * masks are rebuilt from the objects' face selections so the 2D patch respects the same faces
+   * as the 3D viewport. */
+  image_paint_selection_mask_from_face_selection(C, CTX_data_scene(C), sima->image);
 
   ImageUser iuser = {};
   iuser.framenr = sima->iuser.framenr;

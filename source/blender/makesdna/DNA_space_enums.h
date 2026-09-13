@@ -792,7 +792,8 @@ enum eSpaceImage_Flag : int {
   SI_FLAG_UNUSED_8 = (1 << 8), /* cleared */
   SI_COORDFLOATS = (1 << 9),
 
-  SI_FLAG_UNUSED_10 = (1 << 10),
+  /** Show the face selection paint overlay (see #SpaceImage::face_selection_opacity). */
+  SI_DRAW_FACE_SELECTION = (1 << 10),
   SI_LIVE_UNWRAP = (1 << 11),
   SI_USE_ALPHA = (1 << 12),
   SI_SHOW_ALPHA = (1 << 13),

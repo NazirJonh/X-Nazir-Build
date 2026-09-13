@@ -2110,6 +2110,10 @@ class VIEW3D_MT_editor_menus(Menu):
                 layout.menu("VIEW3D_MT_select_paint_mask")
             elif mesh.use_paint_mask_vertex and mode_string in {'PAINT_WEIGHT', 'PAINT_VERTEX'}:
                 layout.menu("VIEW3D_MT_select_paint_mask_vertex")
+        elif mode_string == 'SCULPT':
+            # Face selection masking for sculpt painting (color attribute / image canvases).
+            if obj is not None and obj.type == 'MESH' and obj.data.use_paint_mask:
+                layout.menu("VIEW3D_MT_select_paint_mask")
         elif mode_string not in {
                 'SCULPT', 'SCULPT_CURVES', 'PAINT_GREASE_PENCIL', 'SCULPT_GREASE_PENCIL', 'WEIGHT_GREASE_PENCIL',
                 'VERTEX_GREASE_PENCIL',
@@ -8675,6 +8679,51 @@ class VIEW3D_PT_overlay_sculpt(Panel):
         layout.label(text="Sculpt Mode Overlays")
 
 
+def sculpt_face_selection_mask_controls_visible(context):
+    """Mirror of ``ED_paint_sculpt_face_selection_mask_supported()``: the face selection paint
+    mask controls are only offered for the Sculpt tools that consume the mask (Paint, Smear, Blur,
+    Texture Fill and the Mask by Color operator tool), and they stay reachable while the masking
+    is enabled so it can be turned off again. Kept in sync with the Paint Mask button drawn by
+    ``uiTemplatePaintModeSelection()`` in the 3D View header."""
+    ob = context.active_object
+    if ob is None or ob.type != 'MESH':
+        return False
+    if ob.data.use_paint_mask:
+        return True
+    tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
+    if tool is not None and tool.idname == 'builtin.mask_by_color':
+        return True
+    sculpt = context.tool_settings.sculpt
+    brush = sculpt.brush if sculpt is not None else None
+    return (
+        brush is not None and
+        brush.sculpt_brush_type in {'PAINT', 'SMEAR', 'BLUR', 'TEXTURE_FILL'}
+    )
+
+
+class VIEW3D_PT_overlay_sculpt_paint(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_parent_id = "VIEW3D_PT_overlay_sculpt"
+    bl_label = "Paint"
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'SCULPT' and sculpt_face_selection_mask_controls_visible(context)
+
+    def draw(self, context):
+        layout = self.layout
+        overlay = context.space_data.overlay
+
+        # Face selection masking (PBR paint): the veil drawn over the faces a masked stroke leaves
+        # out. The mask itself is the Paint Mask toggle in the header.
+        row = layout.row(align=True)
+        row.prop(overlay, "show_paint_face_selection", text="")
+        sub = row.row()
+        sub.active = overlay.show_paint_face_selection
+        sub.prop(overlay, "paint_face_selection_opacity", text="Face Selection")
+
+
 class VIEW3D_PT_overlay_sculpt_general(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -8955,6 +9004,12 @@ class VIEW3D_PT_overlay_texture_paint(Panel):
         col = layout.column()
         col.active = display_all
         col.prop(overlay, "texture_paint_mode_opacity")
+        # Face selection masking: the veil drawn over the faces a masked stroke leaves out.
+        row = col.row(align=True)
+        row.prop(overlay, "show_paint_face_selection", text="")
+        sub = row.row()
+        sub.active = overlay.show_paint_face_selection
+        sub.prop(overlay, "paint_face_selection_opacity", text="Face Selection")
         row = col.row(align=True)
         row.prop(overlay, "show_texture_paint_symmetry_contour", text="")
         sub = row.row()
@@ -8985,6 +9040,12 @@ class VIEW3D_PT_overlay_vertex_paint(Panel):
 
         col.prop(overlay, "vertex_paint_mode_opacity")
         col.prop(overlay, "show_paint_wire")
+        # Face selection masking: the veil drawn over the faces a masked stroke leaves out.
+        row = col.row(align=True)
+        row.prop(overlay, "show_paint_face_selection", text="")
+        sub = row.row()
+        sub.active = overlay.show_paint_face_selection
+        sub.prop(overlay, "paint_face_selection_opacity", text="Face Selection")
         row = col.row(align=True)
         row.prop(overlay, "show_vertex_paint_symmetry_contour", text="")
         sub = row.row()
@@ -9046,6 +9107,12 @@ class VIEW3D_PT_overlay_weight_paint(Panel):
 
         col.prop(overlay, "show_wpaint_contours")
         col.prop(overlay, "show_paint_wire")
+        # Face selection masking: the veil drawn over the faces a masked stroke leaves out.
+        row = col.row(align=True)
+        row.prop(overlay, "show_paint_face_selection", text="")
+        sub = row.row()
+        sub.active = overlay.show_paint_face_selection
+        sub.prop(overlay, "paint_face_selection_opacity", text="Face Selection")
         row = col.row(align=True)
         row.prop(overlay, "show_weight_paint_symmetry_contour", text="")
         sub = row.row()
@@ -10886,6 +10953,7 @@ classes = (
     VIEW3D_PT_overlay_weight_paint,
     VIEW3D_PT_overlay_bones,
     VIEW3D_PT_overlay_sculpt,
+    VIEW3D_PT_overlay_sculpt_paint,
     VIEW3D_PT_overlay_sculpt_general,
     VIEW3D_PT_overlay_sculpt_layers,
     VIEW3D_PT_overlay_sculpt_symmetry,

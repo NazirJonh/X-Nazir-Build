@@ -39,28 +39,39 @@ void swap_gathered_colors(Span<int> indices,
 /* Stores colors from the elements in indices into colors. */
 void gather_colors(GSpan color_attribute, Span<int> indices, MutableSpan<float4> r_colors);
 
-/* Like gather_colors but handles loop->vert conversion */
+/* Like gather_colors but handles loop->vert conversion. When \a select_poly is non-empty (face
+ * selection masking enabled) corner-domain colors are averaged over the selected faces only. */
 void gather_colors_vert(OffsetIndices<int> faces,
                         Span<int> corner_verts,
                         GroupedSpan<int> vert_to_face_map,
                         GSpan color_attribute,
                         bke::AttrDomain color_domain,
                         Span<int> verts,
-                        MutableSpan<float4> r_colors);
+                        MutableSpan<float4> r_colors,
+                        Span<bool> select_poly = {});
 
+/**
+ * Write the color to all domain elements of \a vert. With a non-empty \a select_poly (face
+ * selection masking enabled) corner-domain writes are restricted to the corners of selected
+ * faces; point-domain writes are unaffected (vertex gating happens through the brush factors).
+ */
 void color_vert_set(OffsetIndices<int> faces,
                     Span<int> corner_verts,
                     GroupedSpan<int> vert_to_face_map,
                     bke::AttrDomain color_domain,
                     int vert,
                     const float4 &color,
-                    GMutableSpan color_attribute);
+                    GMutableSpan color_attribute,
+                    Span<bool> select_poly = {});
+/** Same corner-domain face-selection filtering as #color_vert_set (empty \a select_poly = no
+ * masking; returns zero when the vertex has no selected faces). */
 float4 color_vert_get(OffsetIndices<int> faces,
                       Span<int> corner_verts,
                       GroupedSpan<int> vert_to_face_map,
                       GSpan color_attribute,
                       bke::AttrDomain color_domain,
-                      int vert);
+                      int vert,
+                      Span<bool> select_poly = {});
 
 bke::GAttributeReader active_color_attribute(const Mesh &mesh);
 bke::GSpanAttributeWriter active_color_attribute_for_write(Mesh &mesh);

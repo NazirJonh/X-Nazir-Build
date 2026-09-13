@@ -323,6 +323,14 @@ BMLoop *ED_uvedit_active_edge_loop_get(const ToolSettings *ts, BMesh *bm);
  */
 char ED_uvedit_select_mode_get(const Scene *scene);
 bool ED_uvedit_select_island_check(const ToolSettings *ts);
+
+/** Flags delimiting UV islands by mesh features, matching the UV editor's "Delimit" option. */
+enum class UVDelimitMode : int {
+  Seam = 1 << 0,
+  Sharp = 1 << 1,
+  Material = 1 << 2,
+};
+
 /**
  * Tag all faces belonging to UV island(s) connected to any of \a seed_face_indices.
  * Uses the same flood-fill rules as UV linked island selection (no delimit by default).

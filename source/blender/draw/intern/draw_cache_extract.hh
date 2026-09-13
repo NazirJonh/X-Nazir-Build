@@ -193,6 +193,9 @@ struct MeshBatchList {
   gpu::Batch *surface_viewer_attribute;
   gpu::Batch *paint_overlay_verts;
   gpu::Batch *paint_overlay_surface;
+  /* UV faces of the whole (visible) mesh together with the per-corner paint overlay flag. Used by
+   * the Image Editor to veil the faces the face selection paint mask leaves out. */
+  gpu::Batch *uv_face_selection;
 };
 
 #define MBC_BATCH_LEN (sizeof(MeshBatchList) / sizeof(void *))
@@ -235,6 +238,7 @@ enum DRWBatchFlag : uint64_t {
   MBC_VIEWER_ATTRIBUTE_OVERLAY = (uint64_t(1u) << MBC_BATCH_INDEX(surface_viewer_attribute)),
   MBC_PAINT_OVERLAY_VERTS = (uint64_t(1u) << MBC_BATCH_INDEX(paint_overlay_verts)),
   MBC_PAINT_OVERLAY_SURFACE = (uint64_t(1u) << MBC_BATCH_INDEX(paint_overlay_surface)),
+  MBC_UV_FACE_SELECTION = (uint64_t(1u) << MBC_BATCH_INDEX(uv_face_selection)),
   MBC_SURFACE_PER_MAT = (uint64_t(1u) << MBC_BATCH_LEN),
 };
 ENUM_OPERATORS(DRWBatchFlag);
@@ -330,7 +334,7 @@ struct MeshBatchCache {
 #define MBC_EDITUV \
   (MBC_EDITUV_FACES_STRETCH_AREA | MBC_EDITUV_FACES_STRETCH_ANGLE | MBC_EDITUV_FACES | \
    MBC_EDITUV_EDGES | MBC_EDITUV_VERTS | MBC_EDITUV_FACEDOTS | MBC_UV_FACES | \
-   MBC_WIRE_LOOPS_ALL_UVS | MBC_WIRE_LOOPS_UVS | MBC_WIRE_LOOPS_EDITUVS)
+   MBC_UV_FACE_SELECTION | MBC_WIRE_LOOPS_ALL_UVS | MBC_WIRE_LOOPS_UVS | MBC_WIRE_LOOPS_EDITUVS)
 
 void mesh_buffer_cache_create_requested(TaskGraph &task_graph,
                                         const Scene &scene,

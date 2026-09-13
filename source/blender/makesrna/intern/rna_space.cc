@@ -6229,6 +6229,24 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  prop = RNA_def_property(srna, "show_paint_face_selection", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "overlay.paint_flag", V3D_OVERLAY_PAINT_FACE_SELECTION);
+  RNA_def_property_ui_text(prop,
+                           "Show Face Selection",
+                           "Show the face selection paint overlay over the faces that strokes "
+                           "will not paint");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "paint_face_selection_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "overlay.paint_face_selection_opacity");
+  RNA_def_property_ui_text(prop,
+                           "Face Selection Opacity",
+                           "Opacity of the face selection paint overlay drawn over the faces that "
+                           "strokes will not paint");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   prop = RNA_def_property(srna, "show_sculpt_curves_cage", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "overlay.flag", V3D_OVERLAY_SCULPT_CURVES_CAGE);
   RNA_def_property_ui_text(
@@ -7391,6 +7409,26 @@ static void rna_def_space_image(BlenderRNA *brna)
                            "Light Rotation",
                            "Rotation of the Combined preview's studio light around the canvas "
                            "normal");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  /* Face selection masking (PBR paint): the veil drawn over the faces a masked stroke leaves out,
+   * mirroring the 3D viewport paint overlay. */
+  prop = RNA_def_property(srna, "show_face_selection", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SI_DRAW_FACE_SELECTION);
+  RNA_def_property_ui_text(prop,
+                           "Show Face Selection",
+                           "Show the face selection paint overlay over the faces that strokes "
+                           "will not paint");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "face_selection_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "face_selection_opacity");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop,
+      "Face Selection Opacity",
+      "Opacity of the face selection paint overlay drawn over the faces that strokes "
+      "will not paint");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
   prop = RNA_def_property(srna, "image_user", PROP_POINTER, PROP_NONE);

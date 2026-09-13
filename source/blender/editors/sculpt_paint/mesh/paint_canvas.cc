@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "BLI_string_ref.hh"
+#include "BLI_utildefines.h"
 
 #include "DNA_brush_types.h"
 #include "DNA_material_types.h"
@@ -56,12 +57,11 @@ static bool paint_brush_uses_canvas(bContext *C)
     return false;
   }
 
-  return ELEM(brush->sculpt_brush_type,
-              SCULPT_BRUSH_TYPE_PAINT,
-              SCULPT_BRUSH_TYPE_SMEAR,
-              SCULPT_BRUSH_TYPE_BLUR,
-              SCULPT_BRUSH_TYPE_TEXTURE_FILL,
-              SCULPT_BRUSH_TYPE_CLONE);
+  /* Clone paints into its canvas too, so it uses one
+   * (#BKE_paint_sculpt_brush_type_consumes_face_selection explains why it is nevertheless not
+   * face-selection-masked in 3D). */
+  return BKE_paint_sculpt_brush_type_consumes_face_selection(brush->sculpt_brush_type) ||
+         brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE;
 }
 
 static bool paint_brush_type_shading_color_follows_last_used(StringRef idname)

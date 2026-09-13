@@ -61,10 +61,10 @@
 /* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
 #include "paint_debug.hh"
 
+#include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_bvhutils.hh"
 #include "BKE_colorband.hh"
-#include "BKE_context.hh"
 #include "BKE_customdata.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_editmesh_bvh.hh"
@@ -113,6 +113,7 @@
 #include "UI_view2d.hh"
 
 #include "../paint_intern.hh"
+#include "mesh_brush_common.hh"
 #include "paint_image_select_gradient.hh"
 #include "paint_image_select_intern.hh"
 #include "paint_image_uv_geom.hh"
@@ -124,27 +125,33 @@ namespace blender {
 static float paint_2d_selection_mask_sample(
     const Scene * /*scene*/, const Image *image, int tile_number, int x, int y)
 {
-  if (!BKE_image_paint_selection_mask_has_any(image)) {
-    return 1.0f;
-  }
-
+  /* Combines the user-authored mask with the derived face-selection masks; returns 1.0 when
+   * neither constrains the pixel. */
   return BKE_image_paint_selection_blend_sample(image, tile_number, x, y);
 }
 
 static float paint_2d_selection_blend_sample_bilinear(
     const Scene * /*scene*/, const Image *image, int tile_number, const float fx, const float fy)
 {
-  if (!BKE_image_paint_selection_mask_has_any(image)) {
-    return 1.0f;
-  }
-
+  /* Combines the user-authored mask with the derived face-selection masks; returns 1.0 when
+   * neither constrains the pixel. */
   return BKE_image_paint_selection_blend_sample_bilinear(image, tile_number, fx, fy);
 }
 
 /* Brush constraint: binary inside-test (hard edge, no feather weighting). */
 static bool paint_2d_selection_mask_is_inside(const Image *image, int tile_number, int x, int y)
 {
-  return BKE_image_paint_selection_mask_sample(image, tile_number, x, y) >
+  /* User-authored part: unchanged hard binary test, applied only when an actual user selection
+   * exists. */
+  if (BKE_image_paint_selection_mask_has_any(image) &&
+      BKE_image_paint_selection_mask_sample(image, tile_number, x, y) <=
+          IMAGE_PAINT_SELECTION_MASK_THRESHOLD)
+  {
+    return false;
+  }
+  /* Derived face-selection part: blocks pixels outside the selected faces while the derived state
+   * is active, and is a no-op otherwise. */
+  return BKE_image_paint_selection_face_mask_sample(image, tile_number, x, y) >
          IMAGE_PAINT_SELECTION_MASK_THRESHOLD;
 }
 
@@ -2009,7 +2016,7 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   /* Re-initialize the curve mask. Mask is always recreated due to the change of position.
    * Extra material painters share the primary's rasterized mask when the dab diameter matches. */
-  const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(s->image);
+  const bool has_selection_mask = BKE_image_paint_selection_is_active(s->image);
 #if PBR_PAINT_2D_STROKE_PROFILE
   {
     const StrokePhaseTimer curve_timer(&g_stroke_curve_mask_seconds, &g_stroke_curve_mask_calls);
@@ -2017,7 +2024,8 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     const CurveMaskCache *shared_mask = paint_2d_matching_curve_mask(
         shared_state, tile, diameter, clip_rotation);
     const bool shared_mask_has_selection = shared_state != nullptr &&
-                                           BKE_image_paint_selection_mask_has_any(shared_state->image);
+                                           BKE_image_paint_selection_is_active(
+                                               shared_state->image);
     if (shared_mask != nullptr && !has_selection_mask && !shared_mask_has_selection) {
       paint_curve_mask_cache_copy(&cache->curve_mask_cache, shared_mask);
     }
@@ -3566,25 +3574,19 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
                              PAINT_MATERIAL_CHANNEL_NORMAL);
   const bool apply_color_jitter = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
                                   paint_2d_color_jitter_active(painter);
-  const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(s->image);
+  const bool has_selection_mask = BKE_image_paint_selection_is_active(s->image);
   const int tile_number = tile->iuser.tile;
   /* Coverage is shared between material channels, but selection masks belong to an Image. Keep
    * the filter here, where the destination image and its tile are known, rather than baking it
    * into #AreaPlaneTriCoverage for the first channel. */
-  const ImBuf *selection_mask = has_selection_mask ?
-                                    BKE_image_paint_selection_mask_lookup(
-                                        const_cast<const Image *>(s->image), tile_number) :
-                                    nullptr;
   const auto pixel_strength = [&](const AreaPlaneCoveragePixel &pixel) {
     const ushort strength = paint_2d_area_plane_pixel_strength(pixel, is_alpha_dest);
     if (!has_selection_mask) {
       return strength;
     }
-    if (selection_mask == nullptr) {
-      return ushort(0);
-    }
     const int x = cov.x0 + int(pixel.lx);
     const int y = cov.y0 + int(pixel.ly);
+    /* Combines the user-authored mask with the derived face-selection masks. */
     return ushort(float(strength) *
                   BKE_image_paint_selection_blend_sample(s->image, tile_number, x, y));
   };
@@ -4637,6 +4639,12 @@ static ImagePaintState *paint_2d_new_stroke_for_image(bContext *C,
     return nullptr;
   }
 
+  /* Face selection masking: while enabled on any canvas object, this image's derived 2D selection
+   * masks are rebuilt from the objects' face selections so Image Editor strokes match the 3D
+   * viewport. No-op when the flag is off; a cache key keeps unchanged selections from rebuilding
+   * anything. */
+  image_paint_selection_mask_from_face_selection(C, scene, image);
+
   ImagePaintState *s = MEM_new_zeroed<ImagePaintState>(__func__);
 
   s->sima = sima;
@@ -5273,7 +5281,7 @@ static void paint_2d_fill_add_pixel_byte(const Scene * /*scene*/,
   coordinate = size_t(y_px) * ibuf->x + x_px;
 
   if (!BLI_BITMAP_TEST(touched, coordinate)) {
-    if (BKE_image_paint_selection_mask_has_any(image)) {
+    if (BKE_image_paint_selection_is_active(image)) {
       if (!paint_2d_selection_mask_is_inside(image, tile_number, x_px, y_px)) {
         BLI_BITMAP_SET(touched, coordinate, true);
         return;
@@ -5311,7 +5319,7 @@ static void paint_2d_fill_add_pixel_float(const Scene * /*scene*/,
   coordinate = size_t(y_px) * ibuf->x + x_px;
 
   if (!BLI_BITMAP_TEST(touched, coordinate)) {
-    if (BKE_image_paint_selection_mask_has_any(image)) {
+    if (BKE_image_paint_selection_is_active(image)) {
       if (!paint_2d_selection_mask_is_inside(image, tile_number, x_px, y_px)) {
         BLI_BITMAP_SET(touched, coordinate, true);
         return;
@@ -6132,6 +6140,21 @@ static bool paint_image_proj_geometry_fill_faces_impl(
     paint_2d_geometry_fill_expand(item, scene, br, valid_seed);
     fill_faces.add_multiple(item.faces);
   }
+  /* Face selection masking (#Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL): only an active selection
+   * restricts the fill -- including the UV-island / mesh-connected expansion and the symmetric
+   * mirror seeds -- to the selected faces. Disabled or enabled-but-empty imposes no restriction. */
+  const Mesh &fill_mesh = *id_cast<const Mesh *>(ob->data);
+  VArraySpan<bool> face_select_poly;
+  if (ed::sculpt_paint::face_selection_state(fill_mesh) ==
+      ed::sculpt_paint::FaceSelectionState::Active)
+  {
+    face_select_poly = *fill_mesh.attributes().lookup<bool>(".select_poly",
+                                                            bke::AttrDomain::Face);
+  }
+  if (!face_select_poly.is_empty()) {
+    fill_faces.remove_if(
+        [&](const int face_index) { return !face_select_poly[face_index]; });
+  }
   if (fill_faces.is_empty()) {
     return false;
   }
@@ -6789,6 +6812,11 @@ void paint_2d_bucket_fill(const bContext *C,
   if (!ima) {
     return;
   }
+
+  /* Face selection masking: while enabled on any canvas object, this image's derived 2D selection
+   * masks are rebuilt from the objects' face selections so the fill matches the 3D viewport.
+   * No-op when off. */
+  image_paint_selection_mask_from_face_selection(C, scene, ima);
 
   View2D *v2d = s ? s->v2d : &CTX_wm_region(C)->v2d;
   float uv_abs[2];

@@ -349,6 +349,8 @@ ENUM_OPERATORS(eView3DOverlay_EditFlag)
 /** #View3DOverlay.paint_flag */
 enum eView3DOverlay_PaintFlag : int {
   V3D_OVERLAY_PAINT_WIRE = (1 << 0),
+  /** Show the face selection paint overlay (the veil over the faces a masked stroke leaves out). */
+  V3D_OVERLAY_PAINT_FACE_SELECTION = (1 << 1),
 };
 ENUM_OPERATORS(eView3DOverlay_PaintFlag)
 
@@ -668,7 +670,7 @@ struct View3DOverlay {
   float normals_constant_screen_size = 7.0f;
 
   /** Paint mode settings. */
-  eView3DOverlay_PaintFlag paint_flag = {};
+  eView3DOverlay_PaintFlag paint_flag = V3D_OVERLAY_PAINT_FACE_SELECTION;
 
   /** Weight paint mode settings. */
   eView3DOverlay_WPaintFlag wpaint_flag = {};
@@ -716,7 +718,16 @@ struct View3DOverlay {
 
   /** Curves sculpt mode settings. */
   float sculpt_curves_cage_opacity = 0;
-  char _pad[4] = {};
+  /**
+   * Opacity of the face selection paint overlay: the veil drawn over the faces a stroke restricted
+   * by the face selection mask (#Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL) leaves out. Shared by
+   * Weight, Vertex and Texture Paint and by Sculpt painting.
+   *
+   * Occupies the alignment padding that followed #sculpt_curves_cage_opacity, so the struct keeps
+   * its size and #View3D stays 8-byte aligned. A file written before the field existed zero-fills
+   * it; see the 502.77 block in versioning_520.cc.
+   */
+  float paint_face_selection_opacity = 0.05f;
 
   /** Symmetry overlay settings. */
   eView3DOverlay_SymmetryFlag symmetry_flag = V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR |

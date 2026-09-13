@@ -590,6 +590,10 @@ class MeshUVs : Overlay {
   PassSimple verts_ps_ = {"Verts"};
   PassSimple facedots_ps_ = {"FaceDots"};
 
+  /* Image Editor face selection paint overlay: the veil over the UV faces a stroke restricted by
+   * the face selection mask (#Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL) leaves out. */
+  PassSimple face_selection_ps_ = {"FaceSelection"};
+
   /* TODO(fclem): Should be its own Overlay?. */
   PassSimple image_border_ps_ = {"ImageBorder"};
 
@@ -607,6 +611,13 @@ class MeshUVs : Overlay {
   bool show_face_overlay_ = false;
 
   bool show_uv_edit_ = false;
+
+  /**
+   * Face selection paint overlay (#SpaceImage::face_selection_opacity). Enabled in Image Paint
+   * mode; the per-object half of the condition (the mesh actually carrying the face selection
+   * mask) is evaluated in #edit_object_sync.
+   */
+  bool show_face_selection_ = false;
 
   /** Wireframe Overlay */
   /* Draw final evaluated UVs (modifier stack applied) as grayed out wire-frame. */
@@ -747,6 +758,14 @@ class MeshUVs : Overlay {
     }
 
     {
+      /* Face Selection Overlay. Paint mode only: it mirrors the 3D viewport paint overlay and
+       * shows which faces the strokes of a masked object will reach. Toggled per editor
+       * (#SI_DRAW_FACE_SELECTION); a zero opacity hides it too. */
+      show_face_selection_ = space_mode_is_paint && (space_image->flag & SI_DRAW_FACE_SELECTION) &&
+                             (space_image->face_selection_opacity > 0.0f);
+    }
+
+    {
       /* Brush Stencil Overlay. */
       const ImagePaintSettings &image_paint_settings = tool_setting->imapaint;
       const Brush *brush = BKE_paint_brush_for_read(&image_paint_settings.paint);
@@ -847,6 +866,16 @@ class MeshUVs : Overlay {
       pass.push_constant("uv_opacity", opacity);
     }
 
+    if (show_face_selection_) {
+      auto &pass = face_selection_ps_;
+      pass.init();
+      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_ALWAYS | DRW_STATE_BLEND_ALPHA);
+      pass.shader_set(res.shaders->uv_face_selection.get());
+      pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+      pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+      pass.push_constant("ucolor", float4(1.0f, 1.0f, 1.0f, space_image->face_selection_opacity));
+    }
+
     if (show_mesh_analysis_) {
       auto &pass = analysis_ps_;
       pass.init();
@@ -896,6 +925,15 @@ class MeshUVs : Overlay {
       gpu::Batch *geom = DRW_mesh_batch_cache_get_uv_faces(*ob, mesh);
       faces_ps_.draw(geom, res_handle);
     }
+    /* Face selection paint overlay. Also drawn for objects that are not in a paint mode: the 2D
+     * selection mask the Image Editor strokes are gated by only depends on the mesh's face
+     * selection flag, not on the object's mode. */
+    if (show_face_selection_ && has_active_object_uvmap &&
+        (mesh.editflag & ME_EDIT_PAINT_FACE_SEL))
+    {
+      gpu::Batch *geom = DRW_mesh_batch_cache_get_uv_face_selection(*ob, mesh);
+      face_selection_ps_.draw(geom, res_handle);
+    }
   }
 
   void edit_object_sync(Manager &manager,
@@ -933,6 +971,22 @@ class MeshUVs : Overlay {
                                                              active_uv_map);
 
     ResourceHandleRange res_handle = manager.unique_handle(ob_ref);
+
+    /* Face selection paint overlay. Mirrors the 3D viewport paint overlay by veiling the faces a
+     * stroke restricted by the face selection mask leaves out. Sculpt Mode counts as a painting
+     * mode here because PBR paint restricts its strokes through the same mask; `is_paint_mode`
+     * above deliberately keeps its old meaning so the UV guide below is unaffected.
+     *
+     * The mask flag is read from the drawn (evaluated) mesh, not from #mesh_orig like the UV
+     * overlay above: the batch the pass draws is extracted from the evaluated mesh too, so both
+     * halves of the decision have to read the same flag to stay consistent. */
+    const bool face_selection_paint_mode = is_paint_mode || (state.ctx_mode == CTX_MODE_SCULPT);
+    if (show_face_selection_ && face_selection_paint_mode &&
+        (mesh.editflag & ME_EDIT_PAINT_FACE_SEL) && has_active_object_uvmap)
+    {
+      gpu::Batch *geom = DRW_mesh_batch_cache_get_uv_face_selection(ob, mesh);
+      face_selection_ps_.draw(geom, res_handle);
+    }
 
     /* Fully editable UVs in the UV Editor. */
     if (has_active_edit_uvmap && is_uv_editable) {
@@ -1182,6 +1236,10 @@ class MeshUVs : Overlay {
     GPU_framebuffer_bind(framebuffer);
     if (show_mask_ && (mask_mode_ != MASK_OVERLAY_COMBINED)) {
       manager.submit(paint_mask_ps_, view);
+    }
+    /* Below the UV guide / wireframe passes, so the UV layout stays readable on top of the veil. */
+    if (show_face_selection_) {
+      manager.submit(face_selection_ps_, view);
     }
     if (show_tiled_image_border_) {
       manager.submit(image_border_ps_, view);

@@ -40,6 +40,8 @@ enum SculptBatchFeature {
   SCULPT_BATCH_LAYER_MASK = 1 << 5,
   SCULPT_BATCH_LAYER_PREVIEW = 1 << 6,
   SCULPT_BATCH_MATERIAL_PROPS = 1 << 7,
+  /** Face selection overlay flags (mesh PBVH only), see #pbvh::CustomRequest::FaceSelection. */
+  SCULPT_BATCH_FACE_SELECTION = 1 << 8,
 };
 ENUM_OPERATORS(SculptBatchFeature);
 

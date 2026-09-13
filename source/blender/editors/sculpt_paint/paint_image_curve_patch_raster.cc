@@ -412,7 +412,9 @@ static void blend_tile_region(const TileRegion &region,
   const bool target_masked_by_alpha = target.is_material_channel &&
                                        material::channel_uses_alpha_mask(alpha_masking,
                                                                          target.channel);
-  const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(&image);
+  /* Any gating source (user mask or the derived face-selection masks); the blend sample combines
+   * both and reports zero weight where an *active* face selection doesn't cover. */
+  const bool has_selection_mask = BKE_image_paint_selection_is_active(&image);
   const bool is_float = ibuf.float_data() != nullptr;
   float *float_data = is_float ? ibuf.float_data_for_write() : nullptr;
   uchar *byte_data = is_float ? nullptr : ibuf.byte_data_for_write();

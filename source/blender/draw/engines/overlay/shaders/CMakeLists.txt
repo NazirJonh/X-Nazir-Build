@@ -63,6 +63,7 @@ set(SRC_GLSL_VERT
   overlay_edit_particle_strand_vert.glsl
   overlay_edit_uv_edges_vert.glsl
   overlay_edit_uv_face_dots_vert.glsl
+  overlay_edit_uv_face_selection_vert.glsl
   overlay_edit_uv_faces_vert.glsl
   overlay_edit_uv_image_vert.glsl
   overlay_edit_uv_stretching_vert.glsl

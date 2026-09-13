@@ -390,6 +390,30 @@ ADDITIONAL_INFO(draw_resource_id_varying)
 ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()
 
+/* -------------------------------------------------------------------- */
+/* OVERLAY_shader_edit_uv_face_selection.
+ *
+ * The Image Editor's face selection paint overlay: a veil over the UV faces a stroke restricted by
+ * the face selection mask (#Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL) leaves out. Uses the same
+ * `paint_overlay_flag` attribute as the 3D paint overlay, see `overlay_paint_face`.
+ */
+
+GPU_SHADER_CREATE_INFO(overlay_edit_uv_face_selection)
+DO_STATIC_COMPILATION()
+VERTEX_IN(0, float2, au)
+VERTEX_IN(1, int, paint_overlay_flag)
+PUSH_CONSTANT(float4, ucolor)
+VERTEX_OUT(overlay_edit_flat_color_iface)
+FRAGMENT_OUT(0, float4, frag_color)
+VERTEX_SOURCE("overlay_edit_uv_face_selection_vert.glsl")
+FRAGMENT_SOURCE("overlay_varying_color.glsl")
+ADDITIONAL_INFO(draw_view)
+ADDITIONAL_INFO(draw_modelmat)
+ADDITIONAL_INFO(draw_object_infos)
+ADDITIONAL_INFO(draw_resource_id_varying)
+ADDITIONAL_INFO(draw_globals)
+GPU_SHADER_CREATE_END()
+
 GPU_SHADER_CREATE_INFO(overlay_edit_uv_face_dots)
 DO_STATIC_COMPILATION()
 VERTEX_IN(0, float2, au)

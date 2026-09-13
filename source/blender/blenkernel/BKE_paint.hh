@@ -489,6 +489,54 @@ float3 BKE_paint_randomize_color(const BrushColorJitterSettings &color_jitter,
                                  const float pressure,
                                  const float3 &color);
 
+/**
+ * Applies the brush's Randomize Color (color jitter) to the stroke color \a color.
+ *
+ * The per-stroke seed \a initial_hsv_jitter, \a stroke_distance and \a pressure are the same
+ * inputs the Color Attribute path feeds #BKE_paint_randomize_color with (see
+ * #do_paint_brush_task in sculpt_paint_color.cc). Returns \a color unchanged when the brush has
+ * no jitter configured, when \a initial_hsv_jitter was never seeded (jitter off at stroke init),
+ * or when the stroke erases (\a invert): erasing pulls toward the secondary/neutral color rather
+ * than painting one, the same rule the classic paint paths' invert branches follow (see
+ * #paint_brush_color_get in paint_image.cc).
+ */
+float3 BKE_paint_stroke_color_jitter(const Paint &paint,
+                                     const Brush &brush,
+                                     bool invert,
+                                     const std::optional<float3> &initial_hsv_jitter,
+                                     float stroke_distance,
+                                     float pressure,
+                                     const float3 &color);
+
+/**
+ * The per-dab Randomize Color transform as (additive hue offset, saturation scale, value scale).
+ *
+ * Same inputs and guards as #BKE_paint_stroke_color_jitter; returns the identity (0, 1, 1) when
+ * the jitter is inactive. The transform is independent of the color it applies to - the hue
+ * offset is additive in HSV, saturation and value are scales - so one evaluation per dab
+ * describes every color the dab paints. The source-texture stroke paths evaluate it once and
+ * apply it to every sampled texel, so a texture-driven Base Color stroke is randomized exactly
+ * like a value-driven one (see #BKE_paint_stroke_color_jitter_apply).
+ */
+float3 BKE_paint_stroke_color_jitter_factors_get(const Paint &paint,
+                                                 const Brush &brush,
+                                                 bool invert,
+                                                 const std::optional<float3> &initial_hsv_jitter,
+                                                 float stroke_distance,
+                                                 float pressure);
+
+/**
+ * Applies the #BKE_paint_stroke_color_jitter_factors_get transform to \a color. Returns \a color
+ * unchanged for the identity transform.
+ */
+float3 BKE_paint_stroke_color_jitter_apply_color(const float3 &jitter_factors, const float3 &color);
+
+/**
+ * Applies the #BKE_paint_stroke_color_jitter_factors_get transform to every color in \a colors.
+ * A no-op for the identity transform.
+ */
+void BKE_paint_stroke_color_jitter_apply(const float3 &jitter_factors, MutableSpan<float3> colors);
+
 /* .blend I/O */
 
 void BKE_paint_blend_write(BlendWriter *writer, Paint *paint);
@@ -1511,6 +1559,29 @@ float3 BKE_paint_material_channel_color_get(const BrushMaterialPaint &brush_pain
                                             const Brush &brush,
                                             eMaterialPaintChannel channel,
                                             bool invert);
+
+/**
+ * The RGB a stroke dab writes for color \a channel: #BKE_paint_material_channel_color_get with
+ * the brush's Randomize Color jitter applied, evolved along the stroke the same way the Color
+ * Attribute path jitters (see #BKE_paint_stroke_color_jitter).
+ *
+ * Only Base Color jitters: it is the one channel whose value is a paintable color, so it is the
+ * only one the "Randomize Color" toggle describes; the scalar channels (and the other color
+ * channel, Emission) have no hue to shift. Every PBR stroke engine resolves its dab color through
+ * this (sculpt_paint_image.cc, sculpt_paint_material.cc), so a stroke paints the same randomized
+ * colors whichever canvas drives it. When the channel paints from a source texture the sampled
+ * source color wins downstream and this value is unused, so the jitter naturally does not apply
+ * there either.
+ */
+float3 BKE_paint_material_channel_stroke_color_get(
+    const BrushMaterialPaint &brush_paint,
+    const Paint &paint,
+    const Brush &brush,
+    eMaterialPaintChannel channel,
+    bool invert,
+    const std::optional<float3> &initial_hsv_jitter,
+    float stroke_distance,
+    float pressure);
 
 /**
  * Clears per-material Principled-socket image resolution cache entries.

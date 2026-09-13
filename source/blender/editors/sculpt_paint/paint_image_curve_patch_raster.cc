@@ -395,6 +395,7 @@ static void blend_tile_region(const TileRegion &region,
                               const RasterTarget &target,
                               const material::ChannelUvSampler *channel_sources,
                               const bool alpha_masking,
+                              const float3 &dab_color_jitter,
                               ImagePool &tex_pool,
                               const float2 &tile_uv_origin,
                               const int2 &tile_resolution,
@@ -554,6 +555,15 @@ static void blend_tile_region(const TileRegion &region,
           paint_rgb = target.flat_color;
         }
 
+        /* Randomize Color, applied once to whichever color won above -- the channel's source
+         * texels, the ribbon texture's RGB and the flat color are all pure inputs. The session's
+         * seed (frozen at session begin) keeps every re-stamp of one patch on the same randomized
+         * colors. Base Color only, plus the plain image canvas' brush color -- the same scoping
+         * as the stroke engines. */
+        if (target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR || !target.is_material_channel) {
+          paint_rgb = BKE_paint_stroke_color_jitter_apply_color(dab_color_jitter, paint_rgb);
+        }
+
         if (target.blend == IMB_BLEND_NORMAL_MIX) {
           /* A packed tangent normal is an ENCODED direction, not a linear color. It must not be
            * pre-multiplied by coverage (scaling it toward black unpacks to a direction tilted
@@ -612,6 +622,14 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
    * a channel toward its default rather than painting the slider value, and -- as there -- must
    * not be masked by an Alpha the same restamp is also erasing. */
   const bool invert = (brush->flag & BRUSH_DIR_IN) != 0;
+
+  /* Randomize Color, frozen with the session: distance and pressure have no meaning for a
+   * session-stamped patch, so they are pinned to a fixed (distance=0, pressure=1) point instead of
+   * evolving. That point is otherwise arbitrary, but it is the same one on every call, so every
+   * re-stamp of one session still paints the same randomized colors (see #ImageCurvePatchSession
+   * ::initial_hsv_jitter). */
+  const float3 dab_color_jitter = BKE_paint_stroke_color_jitter_factors_get(
+      *paint, *brush, invert, session.initial_hsv_jitter, 0.0f, 1.0f);
 
   CurvePatchStrokeContext ctx;
   ctx.bstrength = session.params.alpha * (invert ? -1.0f : 1.0f);
@@ -735,6 +753,7 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
                         target,
                         channel_sources ? &*channel_sources : nullptr,
                         alpha_masking,
+                        dab_color_jitter,
                         tex_pool,
                         tile_uv_origin,
                         tile_resolution,

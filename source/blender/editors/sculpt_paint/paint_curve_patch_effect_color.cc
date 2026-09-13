@@ -489,6 +489,12 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
     colors.finish();
     return;
   }
+  /* The patch's flat paint colors stay PURE here: Randomize Color is applied once to the final
+   * paint color in PHASE 2 below, so the flat color and the ribbon texture's RGB (which replaces
+   * it when one is assigned) get exactly one transform each. Same scoping as the stroke engines:
+   * Poly Paint jitters Base Color only, the Color Attribute canvas jitters the brush color,
+   * matching `do_paint_brush_task()`. The stroke cache stays alive for the whole anchor-drag
+   * session, so its per-stroke seed keeps the color stable across the session's re-stamps. */
   const float3 brush_color = material_channel ?
                                  BKE_paint_material_channel_color_get(
                                      *brush.material_paint,
@@ -497,6 +503,13 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
                                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                      cache.toggle_settings.invert) :
                                  BKE_brush_color_get(&paint, &brush);
+  const float3 dab_color_jitter = BKE_paint_stroke_color_jitter_factors_get(
+      paint,
+      brush,
+      cache.toggle_settings.invert,
+      cache.initial_hsv_jitter,
+      cache.stroke_distance,
+      cache.pressure);
   /* The brush's per-channel R/G/B/A toggles. `do_paint_brush_task()` applies them on the Color
    * Attribute canvas (`mesh/sculpt_paint_color.cc`), so a patch on that canvas has to as well or
    * the same brush would honor the toggles for a stroke and ignore them for a patch.
@@ -543,9 +556,11 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
        * Stage 3 invariant). Mix is from the pre-patch original, not from a previous patch's write.
        */
       /* Base Color and the plain color attribute both write a color, so both take the ribbon
-       * texture's RGB when one is assigned. */
-      const float3 paint_rgb = curve_patch_paint_color(
-          brush_color, write.tex_color, write.tex_valid);
+       * texture's RGB when one is assigned. Randomize Color applies once to whichever color won,
+       * so the texture's RGB randomizes the same way the flat color does. */
+      const float3 paint_rgb = BKE_paint_stroke_color_jitter_apply_color(
+          dab_color_jitter,
+          curve_patch_paint_color(brush_color, write.tex_color, write.tex_valid));
       float4 mixed;
       if (blend_mode == IMB_BLEND_MIX) {
         mixed = float4(math::interpolate(float3(write.orig), paint_rgb, factor),

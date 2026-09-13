@@ -831,11 +831,14 @@ static float4 paint_brush_color(const ImagePaintTarget &target,
                                const float4 &brush_color_default)
 {
   if (target.is_color_channel) {
-    return float4(BKE_paint_material_channel_color_get(*brush.material_paint,
-                                                       sd.paint,
-                                                       brush,
-                                                       target.channel,
-                                                       cache.toggle_settings.invert),
+    return float4(BKE_paint_material_channel_stroke_color_get(*brush.material_paint,
+                                                             sd.paint,
+                                                             brush,
+                                                             target.channel,
+                                                             cache.toggle_settings.invert,
+                                                             cache.initial_hsv_jitter,
+                                                             cache.stroke_distance,
+                                                             cache.pressure),
                   1.0f);
   }
   if (target.is_normal_channel) {
@@ -1109,6 +1112,7 @@ static void apply_paint_channel(ImageData &image_data,
                                 const bool is_color_channel,
                                 const bool is_normal_channel,
                                 const bool alpha_masking_active,
+                                const float3 &color_jitter,
                                 const float3 &view_right,
                                 const float3 & /*view_up*/,
                                 const ARegion *region,
@@ -1281,6 +1285,14 @@ static void apply_paint_channel(ImageData &image_data,
                     material::ChannelSourceSampler::decode_linear_batch(
                         tls.sampled_colors, sampler->colorspace(channel));
                   }
+                  /* Randomize Color: a source-driven stroke paints the sampled texels, so the
+                   * dab's transform applies to them - Base Color only, the same scoping as the
+                   * channel-value path. The transform is color-independent, so the whole chunk
+                   * shifts uniformly. */
+                  if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+                    BKE_paint_stroke_color_jitter_apply(color_jitter,
+                                                        tls.sampled_colors.as_mutable_span());
+                  }
                 }
                 else {
                   tls.sampled_scalars.resize(range.size());
@@ -1425,6 +1437,7 @@ static void prepare_channel_samples(PaintLocalData &tls,
                                     const Span<float> factors,
                                     const IMB_BlendMode blend_mode,
                                     const float4 &brush_color,
+                                    const float3 &color_jitter,
                                     const int thread_id)
 {
   if (sampler == nullptr || !sampler->has_usable_source(channel)) {
@@ -1436,12 +1449,20 @@ static void prepare_channel_samples(PaintLocalData &tls,
     sampler->gather_colors(channel, contexts, factors, thread_id, false, tls.raw_source_colors);
     material::ChannelSourceSampler::decode_linear_batch(tls.raw_source_colors,
                                                         sampler->colorspace(channel));
+    /* Randomize Color on the sampled texels - Base Color only, see the matching gate in
+     * #apply_paint_channel. */
+    if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      BKE_paint_stroke_color_jitter_apply(color_jitter, tls.raw_source_colors.as_mutable_span());
+    }
     prepare_sampled_paint_range(tls, factors, tls.raw_source_colors, blend_mode);
     return;
   }
   if (is_color_channel) {
     tls.sampled_colors.resize(contexts.size());
     sampler->gather_colors(channel, contexts, factors, thread_id, true, tls.sampled_colors);
+    if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      BKE_paint_stroke_color_jitter_apply(color_jitter, tls.sampled_colors.as_mutable_span());
+    }
     prepare_sampled_paint_range(tls, factors, tls.sampled_colors, blend_mode);
     return;
   }
@@ -1459,7 +1480,8 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
                                       PixelNode &pixel_node,
                                       Span<RowFactorCache> tile_caches,
                                       const material::ChannelSourceSampler *sampler,
-                                      const bool alpha_masking_active)
+                                      const bool alpha_masking_active,
+                                      const float3 &color_jitter)
 {
   const int dest_num = dests.size();
   if (dest_num < 2 || pixel_node.tiles.is_empty() ||
@@ -1604,6 +1626,7 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
                                       range_factors,
                                       dest.blend_mode,
                                       dest.brush_color,
+                                      color_jitter,
                                       thread_id);
 
               const int slot = tile_i * dest_num + dest_i;
@@ -1830,10 +1853,31 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   const MaterialPaintFilter material_filter = MaterialPaintFilter::from_object(
       ob, material_canvas_mode);
 
-  const float4 brush_color_default = float4(cache.toggle_settings.invert ?
-                                                BKE_brush_secondary_color_get(&sd.paint, brush) :
-                                                BKE_brush_color_get(&sd.paint, brush),
-                                            1.0f);
+  /* The plain Mode=`Image` canvas paints the brush color itself, so its dab color gets the
+   * Randomize Color jitter here - the material channel targets below resolve their own stroke
+   * colors through #BKE_paint_material_channel_stroke_color_get instead. */
+  const float4 brush_color_default = float4(
+      BKE_paint_stroke_color_jitter(sd.paint,
+                                    *brush,
+                                    cache.toggle_settings.invert,
+                                    cache.initial_hsv_jitter,
+                                    cache.stroke_distance,
+                                    cache.pressure,
+                                    cache.toggle_settings.invert ?
+                                        BKE_brush_secondary_color_get(&sd.paint, brush) :
+                                        BKE_brush_color_get(&sd.paint, brush)),
+      1.0f);
+
+  /* One Randomize Color evaluation per dab: the transform is color-independent, so the
+   * source-texture paths below apply it to every sampled texel as well, not only to the channel
+   * value. */
+  const float3 dab_color_jitter = BKE_paint_stroke_color_jitter_factors_get(sd.paint,
+                                                                           *brush,
+                                                                           cache.toggle_settings
+                                                                               .invert,
+                                                                           cache.initial_hsv_jitter,
+                                                                           cache.stroke_distance,
+                                                                           cache.pressure);
 
   /* Erasing pulls the channel back to its neutral value and must not read a source texture. */
   const ed::sculpt_paint::material::ChannelSourceSampler *sampler =
@@ -1929,11 +1973,14 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     MaterialStrokeAccum *stroke_accum = accum_for(material_blend, blend_mode);
     if (target.is_color_channel) {
       BLI_assert(brush->material_paint != nullptr);
-      const float3 rgb = BKE_paint_material_channel_color_get(*brush->material_paint,
-                                                              sd.paint,
-                                                              *brush,
-                                                              target.channel,
-                                                              cache.toggle_settings.invert);
+      const float3 rgb = BKE_paint_material_channel_stroke_color_get(*brush->material_paint,
+                                                                    sd.paint,
+                                                                    *brush,
+                                                                    target.channel,
+                                                                    cache.toggle_settings.invert,
+                                                                    cache.initial_hsv_jitter,
+                                                                    cache.stroke_distance,
+                                                                    cache.pressure);
       brush_color_storage = float4(rgb, 1.0f);
       brush_color_ptr = &brush_color_storage;
     }
@@ -2151,6 +2198,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                   target.is_color_channel,
                                   target.is_normal_channel,
                                   alpha_masking_active,
+                                  dab_color_jitter,
                                   cache.view_right,
                                   cache.view_up,
                                   cache.vc->region,
@@ -2166,7 +2214,8 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                                            pixel_nodes[i],
                                                            node_factor_caches[pos],
                                                            active_sampler,
-                                                           alpha_masking_active);
+                                                           alpha_masking_active,
+                                                           dab_color_jitter);
 #if PBR_PAINT_IMAGE_PROFILE
             (grouped ? g_pair_paint_profile.paired_node_num :
                        g_pair_paint_profile.fallback_node_num)
@@ -2187,6 +2236,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                     dest.is_color_channel,
                                     false,
                                     alpha_masking_active,
+                                    dab_color_jitter,
                                     cache.view_right,
                                     cache.view_up,
                                     cache.vc->region,

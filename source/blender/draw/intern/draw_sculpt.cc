@@ -130,7 +130,7 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
 
   Span<gpu::Batch *> batches;
   if (use_wire) {
-    batches = draw_data.ensure_lines_batches(*ob, {{}, fast_mode}, nodes_to_update);
+    batches = draw_data.ensure_lines_batches(*ob, {attrs, fast_mode}, nodes_to_update);
   }
   else {
     batches = draw_data.ensure_tris_batches(
@@ -174,6 +174,13 @@ Vector<SculptBatch> sculpt_batches_get(const Object *ob, SculptBatchFeature feat
   }
   if (features & SCULPT_BATCH_LAYER_PREVIEW) {
     attrs.append(pbvh::CustomRequest::LayerPreview);
+  }
+  if (features & SCULPT_BATCH_FACE_SELECTION) {
+    /* Only the mesh PBVH has a face selection filler. */
+    const bke::pbvh::Tree *tree = bke::object::pbvh_get(*ob);
+    if (tree && tree->type() == bke::pbvh::Type::Mesh) {
+      attrs.append(pbvh::CustomRequest::FaceSelection);
+    }
   }
 
   const Mesh *mesh = BKE_object_get_original_mesh(ob);

@@ -49,6 +49,7 @@ enum class CustomRequest : int8_t {
   EdgeFac,
   LayerMask,
   LayerPreview,
+  FaceSelection,
 };
 
 using AttributeRequest = std::variant<CustomRequest, GenericRequest>;

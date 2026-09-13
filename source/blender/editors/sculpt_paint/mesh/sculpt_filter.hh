@@ -15,6 +15,8 @@
 
 #include "ED_view3d.hh"
 
+#include "paint_face_selection_mask.hh"
+
 namespace blender {
 
 struct wmOperatorType;
@@ -47,6 +49,10 @@ enum class FilterOrientation {
 struct Cache {
   std::array<bool, 3> enabled_axis;
   int random_seed;
+
+  /** Face selection masking state, built lazily during the filter (see
+   * #face_selection_mask_ensure). */
+  FaceSelectionMask face_selection_mask;
 
   /* Used for alternating between filter operations in filters that need to apply different ones to
    * achieve certain effects. */

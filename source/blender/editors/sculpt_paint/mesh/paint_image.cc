@@ -1043,7 +1043,30 @@ bool image_texture_paint_poll(bContext *C)
 
 bool facemask_paint_poll(bContext *C)
 {
-  return BKE_paint_select_face_test(CTX_data_active_object(C));
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr || ob->type != OB_MESH) {
+    return false;
+  }
+  /* Sculpt Mode is handled explicitly here (it is not part of #BKE_paint_select_face_test, see
+   * the note there): the face selection tools are independent of the active brush, so they are
+   * available whenever the face selection masking is enabled. */
+  if (ob->mode == OB_MODE_SCULPT) {
+    return (id_cast<Mesh *>(ob->data)->editflag & ME_EDIT_PAINT_FACE_SEL) != 0;
+  }
+  return BKE_paint_select_face_test(ob);
+}
+
+bool facemask_hide_paint_poll(bContext *C)
+{
+  /* Sculpt Mode must hide through its own operators (#SCULPT_OT_face_set_hide etc.): they push a
+   * sculpt undo step, tag the PBVH visibility and rebuild the affected nodes. The paint-mode face
+   * hide writes `.hide_poly` directly and would leave the PBVH and the sculpt undo stack out of
+   * sync. */
+  Object *ob = CTX_data_active_object(C);
+  if (ob != nullptr && ob->mode == OB_MODE_SCULPT) {
+    return false;
+  }
+  return facemask_paint_poll(C);
 }
 
 bool vert_paint_poll(bContext *C)

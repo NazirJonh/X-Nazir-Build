@@ -680,6 +680,7 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_edit_uv_edges_frag.glsl
   engines/overlay/shaders/overlay_edit_uv_edges_vert.glsl
   engines/overlay/shaders/overlay_edit_uv_face_dots_vert.glsl
+  engines/overlay/shaders/overlay_edit_uv_face_selection_vert.glsl
   engines/overlay/shaders/overlay_edit_uv_faces_vert.glsl
   engines/overlay/shaders/overlay_edit_uv_image_mask_frag.glsl
   engines/overlay/shaders/overlay_edit_uv_image_vert.glsl

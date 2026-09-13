@@ -67,11 +67,6 @@
 
 namespace blender {
 
-enum class UVDelimitMode : int {
-  Seam = 1 << 0,
-  Sharp = 1 << 1,
-  Material = 1 << 2,
-};
 ENUM_OPERATORS(UVDelimitMode)
 
 static const EnumPropertyItem uv_delimit_mode_items[] = {

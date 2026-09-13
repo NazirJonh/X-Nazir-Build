@@ -1054,6 +1054,14 @@ gpu::Batch *DRW_mesh_batch_cache_get_uv_faces(Object &object, Mesh &mesh)
   return DRW_batch_request(&cache.batch.uv_faces);
 }
 
+gpu::Batch *DRW_mesh_batch_cache_get_uv_face_selection(Object &object, Mesh &mesh)
+{
+  MeshBatchCache &cache = *mesh_batch_cache_get(mesh);
+  edituv_request_active_uv(cache, object, mesh);
+  cache.batch_requested |= MBC_UV_FACE_SELECTION;
+  return DRW_batch_request(&cache.batch.uv_face_selection);
+}
+
 gpu::Batch *DRW_mesh_batch_cache_get_all_uv_wireframe(Object &object, Mesh &mesh)
 {
   MeshBatchCache &cache = *mesh_batch_cache_get(mesh);
@@ -1170,8 +1178,9 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
 
   if (batch_requested &
       (MBC_SURFACE | MBC_SURFACE_PER_MAT | MBC_WIRE_LOOPS_ALL_UVS | MBC_WIRE_LOOPS_UVS |
-       MBC_WIRE_LOOPS_EDITUVS | MBC_UV_FACES | MBC_EDITUV_FACES_STRETCH_AREA |
-       MBC_EDITUV_FACES_STRETCH_ANGLE | MBC_EDITUV_FACES | MBC_EDITUV_EDGES | MBC_EDITUV_VERTS))
+       MBC_WIRE_LOOPS_EDITUVS | MBC_UV_FACES | MBC_UV_FACE_SELECTION |
+       MBC_EDITUV_FACES_STRETCH_AREA | MBC_EDITUV_FACES_STRETCH_ANGLE | MBC_EDITUV_FACES |
+       MBC_EDITUV_EDGES | MBC_EDITUV_VERTS))
   {
     /* Modifiers will only generate an orco layer if the mesh is deformed. */
     if (cache.cd_needed.orco != 0) {
@@ -1252,6 +1261,7 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
       /* We only clear the batches as they may already have been
        * referenced. */
       GPU_BATCH_CLEAR_SAFE(cache.batch.uv_faces);
+      GPU_BATCH_CLEAR_SAFE(cache.batch.uv_face_selection);
       GPU_BATCH_CLEAR_SAFE(cache.batch.wire_loops_all_uvs);
       GPU_BATCH_CLEAR_SAFE(cache.batch.wire_loops_uvs);
       GPU_BATCH_CLEAR_SAFE(cache.batch.wire_loops_edituvs);
@@ -1447,6 +1457,17 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
       if (!cache.cd_used.uv.is_empty()) {
         batch.vbos.append(VBOType::UVs);
       }
+      batch_info.append(std::move(batch));
+    }
+    if (batches_to_create & MBC_UV_FACE_SELECTION) {
+      /* Every visible face is indexed (unlike #MBC_UV_FACES, whose `UVTris` buffer narrows down to
+       * the selected faces) because the overlay veils the faces the face selection mask leaves out.
+       * The per-corner flag comes from the same extractor the 3D paint overlay uses. */
+      BatchCreateData batch{*cache.batch.uv_face_selection,
+                            GPU_PRIM_TRIS,
+                            list,
+                            IBOType::Tris,
+                            {VBOType::UVs, VBOType::PaintOverlayFlag}};
       batch_info.append(std::move(batch));
     }
     if (batches_to_create & MBC_EDIT_MESH_ANALYSIS) {

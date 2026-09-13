@@ -374,6 +374,27 @@ void BKE_paint_palette_set(Paint *paint, Palette *palette);
  */
 bool BKE_paint_select_face_test(const Object *ob);
 /**
+ * Return true when the given sculpt brush type paints color (a color attribute or an image canvas)
+ * and therefore consumes the face selection mask in the 3D viewport. Clone is deliberately excluded:
+ * its 3D path clones the color attribute without consulting the face selection (only Image Editor
+ * 2D strokes are gated through the derived mask).
+ */
+bool BKE_paint_sculpt_brush_type_consumes_face_selection(eBrushSculptType type);
+/**
+ * True when the active Sculpt Mode tool consumes the face selection mask (the painting brushes and
+ * the Mask by Color operator tool). Only those show the face-selection toggle and overlay;
+ * mesh-deforming tools don't. Kept in BKE so the overlay engine can call it without depending on
+ * editor code.
+ *
+ * \param ob: the active object; may be null. Used to hide the toggle on PBVH types that don't
+ * support color painting (multires grids, dynamic topology).
+ * \param active_tool_idname: idname of the active area tool (#bToolRef::idname); may be null
+ * (non-interactive draws), in which case the decision falls back to the active sculpt brush.
+ */
+bool BKE_paint_sculpt_face_selection_mask_supported(const Scene *scene,
+                                                    const Object *ob,
+                                                    const char *active_tool_idname);
+/**
  * Return true when in vertex/weight paint + vertex-select mode?
  */
 bool BKE_paint_select_vert_test(const Object *ob);

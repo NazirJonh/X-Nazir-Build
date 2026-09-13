@@ -166,6 +166,10 @@ struct State {
   bool cursor_mval_valid = false;
   bool cursor_ctrl_pressed = false;
   const char *active_tool_idname = nullptr;
+  /* Sculpt Mode only: the active tool consumes the face selection mask (a painting tool). Resolved
+   * by the engine through #BKE_paint_sculpt_face_selection_mask_supported, so the per-pass code
+   * does not need to depend on the editor-side tool policy. */
+  bool sculpt_face_selection_mask_supported = false;
   bool xray_enabled = false;
   bool xray_enabled_and_not_wire = false;
   /** Can be true even if X-ray Alpha is 1.0. */
@@ -578,6 +582,9 @@ class ShaderModule {
   StaticShader uv_edit_face = {"overlay_edit_uv_faces"};
   StaticShader uv_edit_facedot = {"overlay_edit_uv_face_dots"};
   StaticShader uv_edit_vert = {"overlay_edit_uv_verts"};
+  /* Image Editor face selection paint overlay (the veil over the faces a masked stroke leaves
+   * out). */
+  StaticShader uv_face_selection = {"overlay_edit_uv_face_selection"};
   StaticShader uv_image_borders = {"overlay_edit_uv_tiled_image_borders"};
   StaticShader uv_paint_mask = {"overlay_edit_uv_mask_image"};
   StaticShader uv_wireframe = {"overlay_wireframe_uv"};

@@ -110,10 +110,28 @@ static float4 color_vert_get(const OffsetIndices<int> faces,
                              const GroupedSpan<int> vert_to_face_map,
                              const GSpan color_attribute,
                              const bke::AttrDomain color_domain,
-                             const int vert)
+                             const int vert,
+                             const Span<bool> select_poly)
 {
   const T *colors_typed = static_cast<const T *>(color_attribute.data());
   if (color_domain == bke::AttrDomain::Corner) {
+    if (!select_poly.is_empty()) {
+      /* Face selection masking: average only the corners of selected faces. */
+      float4 r_color(0.0f);
+      int tot_selected = 0;
+      for (const int face : vert_to_face_map[vert]) {
+        if (!select_poly[face]) {
+          continue;
+        }
+        const int corner = bke::mesh::face_find_corner_from_vert(faces[face], corner_verts, vert);
+        r_color += to_float(colors_typed[corner]);
+        tot_selected++;
+      }
+      if (tot_selected == 0) {
+        return float4(0.0f);
+      }
+      return r_color / float(tot_selected);
+    }
     float4 r_color(0.0f);
     for (const int face : vert_to_face_map[vert]) {
       const int corner = bke::mesh::face_find_corner_from_vert(faces[face], corner_verts, vert);
@@ -131,10 +149,15 @@ static void color_vert_set(const OffsetIndices<int> faces,
                            const GMutableSpan color_attribute,
                            const bke::AttrDomain color_domain,
                            const int vert,
-                           const float4 &color)
+                           const float4 &color,
+                           const Span<bool> select_poly)
 {
   if (color_domain == bke::AttrDomain::Corner) {
     for (const int i_face : vert_to_face_map[vert]) {
+      if (!select_poly.is_empty() && !select_poly[i_face]) {
+        /* Face selection masking: leave the corners of unselected faces untouched. */
+        continue;
+      }
       const IndexRange face = faces[i_face];
       MutableSpan<T> colors{static_cast<T *>(color_attribute.data()) + face.start(), face.size()};
       Span<int> face_verts = corner_verts.slice(face);
@@ -156,13 +179,14 @@ float4 color_vert_get(const OffsetIndices<int> faces,
                       const GroupedSpan<int> vert_to_face_map,
                       const GSpan color_attribute,
                       const bke::AttrDomain color_domain,
-                      const int vert)
+                      const int vert,
+                      const Span<bool> select_poly)
 {
   float4 color;
   to_static_color_type(color_attribute.type(), [&](auto dummy) {
     using T = decltype(dummy);
     color = color_vert_get<T>(
-        faces, corner_verts, vert_to_face_map, color_attribute, color_domain, vert);
+        faces, corner_verts, vert_to_face_map, color_attribute, color_domain, vert, select_poly);
   });
   return color;
 }
@@ -173,12 +197,19 @@ void color_vert_set(const OffsetIndices<int> faces,
                     const bke::AttrDomain color_domain,
                     const int vert,
                     const float4 &color,
-                    const GMutableSpan color_attribute)
+                    const GMutableSpan color_attribute,
+                    const Span<bool> select_poly)
 {
   to_static_color_type(color_attribute.type(), [&](auto dummy) {
     using T = decltype(dummy);
-    color_vert_set<T>(
-        faces, corner_verts, vert_to_face_map, color_attribute, color_domain, vert, color);
+    color_vert_set<T>(faces,
+                      corner_verts,
+                      vert_to_face_map,
+                      color_attribute,
+                      color_domain,
+                      vert,
+                      color,
+                      select_poly);
   });
 }
 
@@ -217,7 +248,8 @@ void gather_colors_vert(const OffsetIndices<int> faces,
                         const GSpan color_attribute,
                         const bke::AttrDomain color_domain,
                         const Span<int> verts,
-                        const MutableSpan<float4> r_colors)
+                        const MutableSpan<float4> r_colors,
+                        const Span<bool> select_poly)
 {
   PRF_scope(ProfileCategory::Editor);
   if (color_domain == bke::AttrDomain::Point) {
@@ -227,8 +259,13 @@ void gather_colors_vert(const OffsetIndices<int> faces,
     to_static_color_type(color_attribute.type(), [&](auto dummy) {
       using T = decltype(dummy);
       for (const int i : verts.index_range()) {
-        r_colors[i] = color_vert_get<T>(
-            faces, corner_verts, vert_to_face_map, color_attribute, color_domain, verts[i]);
+        r_colors[i] = color_vert_get<T>(faces,
+                                        corner_verts,
+                                        vert_to_face_map,
+                                        color_attribute,
+                                        color_domain,
+                                        verts[i],
+                                        select_poly);
       }
     });
   }
@@ -356,6 +393,7 @@ static void do_color_smooth_task(const Depsgraph &depsgraph,
                                  const Span<int> corner_verts,
                                  const GroupedSpan<int> vert_to_face_map,
                                  const MeshAttributeData &attribute_data,
+                                 const FaceSelectionMask &face_selection_mask,
                                  const Brush &brush,
                                  const bke::pbvh::MeshNode &node,
                                  ColorPaintLocalData &tls,
@@ -369,6 +407,7 @@ static void do_color_smooth_task(const Depsgraph &depsgraph,
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
+  filter_factors_with_face_selection(face_selection_mask, verts, factors);
   filter_region_clip_factors(ss, vert_positions, verts, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
@@ -395,7 +434,8 @@ static void do_color_smooth_task(const Depsgraph &depsgraph,
                                vert_to_face_map,
                                color_attribute.span,
                                color_attribute.domain,
-                               verts[i]);
+                               verts[i],
+                               face_selection_mask.select_poly);
   }
 
   const GroupedSpan<int> neighbors = calc_vert_neighbors(faces,
@@ -408,11 +448,14 @@ static void do_color_smooth_task(const Depsgraph &depsgraph,
 
   tls.new_colors.resize(verts.size());
   MutableSpan<float4> new_colors = tls.new_colors;
-  smooth::neighbor_color_average(faces,
+  smooth::neighbor_color_average(face_selection_mask.vert_paintable.as_span(),
+                                 face_selection_mask.select_poly,
+                                 faces,
                                  corner_verts,
                                  vert_to_face_map,
                                  color_attribute.span,
                                  color_attribute.domain,
+                                 colors,
                                  neighbors,
                                  new_colors);
 
@@ -427,7 +470,8 @@ static void do_color_smooth_task(const Depsgraph &depsgraph,
                    color_attribute.domain,
                    verts[i],
                    new_colors[i],
-                   color_attribute.span);
+                   color_attribute.span,
+                   face_selection_mask.select_poly);
   }
 }
 
@@ -439,6 +483,7 @@ static void do_paint_brush_task(const Depsgraph &depsgraph,
                                 const Span<int> corner_verts,
                                 const GroupedSpan<int> vert_to_face_map,
                                 const MeshAttributeData &attribute_data,
+                                const FaceSelectionMask &face_selection_mask,
                                 const Paint &paint,
                                 const Brush &brush,
                                 const float4x4 &mat,
@@ -459,6 +504,7 @@ static void do_paint_brush_task(const Depsgraph &depsgraph,
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
+  filter_factors_with_face_selection(face_selection_mask, verts, factors);
   filter_region_clip_factors(ss, vert_positions, verts, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
@@ -558,7 +604,8 @@ static void do_paint_brush_task(const Depsgraph &depsgraph,
                                    vert_to_face_map,
                                    color_attribute.span,
                                    color_attribute.domain,
-                                   verts[i]);
+                                   verts[i],
+                                   face_selection_mask.select_poly);
   }
 
   const blender::ed::sculpt_paint::VPaintChannelMask channel_mask =
@@ -611,7 +658,8 @@ static void do_paint_brush_task(const Depsgraph &depsgraph,
                    color_attribute.domain,
                    verts[i],
                    new_colors[i],
-                   color_attribute.span);
+                   color_attribute.span,
+                   face_selection_mask.select_poly);
   }
 }
 
@@ -628,6 +676,7 @@ static void do_sample_wet_paint_task(const Depsgraph &depsgraph,
                                      const Span<int> corner_verts,
                                      const GroupedSpan<int> vert_to_face_map,
                                      const MeshAttributeData &attribute_data,
+                                     const FaceSelectionMask &face_selection_mask,
                                      const GSpan color_attribute,
                                      const bke::AttrDomain color_domain,
                                      const Brush &brush,
@@ -645,6 +694,7 @@ static void do_sample_wet_paint_task(const Depsgraph &depsgraph,
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
+  filter_factors_with_face_selection(face_selection_mask, verts, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
   }
@@ -659,8 +709,13 @@ static void do_sample_wet_paint_task(const Depsgraph &depsgraph,
   for (const int i : verts.index_range()) {
     if (factors[i] > 0.0f) {
       swptd.color +=
-          color_vert_get(
-              faces, corner_verts, vert_to_face_map, color_attribute, color_domain, verts[i]) *
+          color_vert_get(faces,
+                         corner_verts,
+                         vert_to_face_map,
+                         color_attribute,
+                         color_domain,
+                         verts[i],
+                         face_selection_mask.select_poly) *
           factors[i];
       swptd.tot_samples++;
     }
@@ -701,6 +756,7 @@ static SampleWetPaintData sample_wet_paint_multi_object_mesh(const Depsgraph &de
       continue;
     }
     Mesh &mesh = *id_cast<Mesh *>(ob.data);
+    const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(ob);
     const bke::GAttributeReader color_attribute = active_color_attribute(mesh);
     if (!color_attribute) {
       continue;
@@ -752,6 +808,7 @@ static SampleWetPaintData sample_wet_paint_multi_object_mesh(const Depsgraph &de
             const MutableSpan<float> factors = tls.factors;
             fill_factor_from_hide_and_mask(
                 attribute_data.hide_vert, attribute_data.mask, verts, factors);
+            filter_factors_with_face_selection(face_selection_mask, verts, factors);
             if (brush.flag & BRUSH_FRONTFACE) {
               calc_front_face(obj_view_normal, vert_normals, verts, factors);
             }
@@ -780,7 +837,8 @@ static SampleWetPaintData sample_wet_paint_multi_object_mesh(const Depsgraph &de
                                                   vert_to_face_map,
                                                   colors,
                                                   color_attribute.domain,
-                                                  verts[k]) *
+                                                  verts[k],
+                                                  face_selection_mask.select_poly) *
                                    factors[k];
               swptd_local.tot_samples++;
             }
@@ -808,6 +866,7 @@ void do_paint_brush(const Depsgraph &depsgraph,
                     const IndexMask &node_mask,
                     const IndexMask &texnode_mask)
 {
+  const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(ob);
   if (SCULPT_use_image_paint_brush(paint_mode_settings,
                                    ob,
                                    BKE_paint_brush_for_read(&sd.paint),
@@ -904,6 +963,7 @@ void do_paint_brush(const Depsgraph &depsgraph,
                                        corner_verts,
                                        vert_to_face_map,
                                        attribute_data,
+                                       face_selection_mask,
                                        color_attribute.span,
                                        color_attribute.domain,
                                        brush,
@@ -951,6 +1011,7 @@ void do_paint_brush(const Depsgraph &depsgraph,
                             corner_verts,
                             vert_to_face_map,
                             attribute_data,
+                            face_selection_mask,
                             sd.paint,
                             brush,
                             mat,
@@ -973,6 +1034,7 @@ static void do_smear_brush_task(const Depsgraph &depsgraph,
                                 const Span<int> corner_verts,
                                 const GroupedSpan<int> vert_to_face_map,
                                 const MeshAttributeData &attribute_data,
+                                const FaceSelectionMask &face_selection_mask,
                                 const Brush &brush,
                                 bke::pbvh::MeshNode &node,
                                 ColorPaintLocalData &tls,
@@ -987,6 +1049,7 @@ static void do_smear_brush_task(const Depsgraph &depsgraph,
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
+  filter_factors_with_face_selection(face_selection_mask, verts, factors);
   filter_region_clip_factors(ss, vert_positions, verts, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
@@ -1069,6 +1132,13 @@ static void do_smear_brush_task(const Depsgraph &depsgraph,
         if (neighbor_neighbor == vert) {
           continue;
         }
+        /* Face selection masking: vertices without a selected face read as zero (corner-domain)
+         * and are not paintable; letting them contribute would darken the boundary. */
+        if (face_selection_mask.state == FaceSelectionState::Active &&
+            !face_selection_mask.vert_paintable[neighbor_neighbor])
+        {
+          continue;
+        }
 
         float3 vert_disp = vert_positions[neighbor_neighbor] - vert_positions[vert];
 
@@ -1113,8 +1183,13 @@ static void do_smear_brush_task(const Depsgraph &depsgraph,
       accum /= totw;
     }
 
-    float4 col = color_vert_get(
-        faces, corner_verts, vert_to_face_map, color_attribute.span, color_attribute.domain, vert);
+    float4 col = color_vert_get(faces,
+                                corner_verts,
+                                vert_to_face_map,
+                                color_attribute.span,
+                                color_attribute.domain,
+                                vert,
+                                face_selection_mask.select_poly);
     blend_color_interpolate_float(col, ss.cache->paint_brush.prev_colors[vert], accum, factors[i]);
     color_vert_set(faces,
                    corner_verts,
@@ -1122,7 +1197,8 @@ static void do_smear_brush_task(const Depsgraph &depsgraph,
                    color_attribute.domain,
                    vert,
                    col,
-                   color_attribute.span);
+                   color_attribute.span,
+                   face_selection_mask.select_poly);
   }
 }
 
@@ -1141,6 +1217,7 @@ void do_smear_brush(const Depsgraph &depsgraph,
   if (ss.cache->bstrength == 0.0f) {
     return;
   }
+  const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(ob);
 
   const OffsetIndices<int> faces = mesh.faces();
   const Span<int> corner_verts = mesh.corner_verts();
@@ -1163,7 +1240,8 @@ void do_smear_brush(const Depsgraph &depsgraph,
                                                                  vert_to_face_map,
                                                                  color_attribute.span,
                                                                  color_attribute.domain,
-                                                                 vert);
+                                                                 vert,
+                                                                 face_selection_mask.select_poly);
       }
     });
   }
@@ -1177,7 +1255,8 @@ void do_smear_brush(const Depsgraph &depsgraph,
                                                                    vert_to_face_map,
                                                                    color_attribute.span,
                                                                    color_attribute.domain,
-                                                                   vert);
+                                                                   vert,
+                                                                   face_selection_mask.select_poly);
         }
       },
       exec_mode::grain_size(1));
@@ -1193,6 +1272,7 @@ void do_smear_brush(const Depsgraph &depsgraph,
                             corner_verts,
                             vert_to_face_map,
                             attribute_data,
+                            face_selection_mask,
                             brush,
                             nodes[i],
                             tls,
@@ -1224,6 +1304,8 @@ void do_blur_brush(const Depsgraph &depsgraph,
   }
 
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(ob);
+
   const Span<float3> vert_positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
   const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, ob);
   const OffsetIndices<int> faces = mesh.faces();
@@ -1247,6 +1329,7 @@ void do_blur_brush(const Depsgraph &depsgraph,
                              corner_verts,
                              vert_to_face_map,
                              attribute_data,
+                             face_selection_mask,
                              brush,
                              nodes[i],
                              tls,

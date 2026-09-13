@@ -1066,12 +1066,24 @@ static void mask_by_color_contiguous_mesh(const Depsgraph &depsgraph,
   const VArraySpan colors = *attributes.lookup_or_default<ColorGeometry4f>(
       mesh.active_color_attribute, bke::AttrDomain::Point, {});
 
+  /* Face selection masking: restrict the generated mask to vertices with at least one selected
+   * face; with the masking enabled but nothing selected, the state is treated as disabled. */
+  FaceSelectionMask face_selection;
+  face_selection_mask_build(mesh, face_selection);
+  const bool filter_faces = face_selection.state == FaceSelectionState::Active;
+  const Span<bool> vert_paintable = face_selection.vert_paintable;
+
   Array<float> new_mask(mesh.verts_num, invert ? 1.0f : 0.0f);
 
   flood_fill::FillDataMesh flood(mesh.verts_num);
   flood.add_initial(vert);
 
   flood.execute(object, vert_to_face_map, [&](int /*from_v*/, int to_v) {
+    if (filter_faces && !vert_paintable[to_v]) {
+      /* The face selection masking is active: don't write or expand through vertices without a
+       * selected face. */
+      return false;
+    }
     const float4 current_color = float4(colors[to_v]);
 
     float new_vertex_mask = color_delta_get(
@@ -1107,12 +1119,22 @@ static void mask_by_color_full_mesh(const Depsgraph &depsgraph,
   const VArraySpan colors = *attributes.lookup_or_default<ColorGeometry4f>(
       mesh.active_color_attribute, bke::AttrDomain::Point, {});
 
+  /* Face selection masking: only vertices with at least one selected face are masked; with the
+   * masking enabled but nothing selected, an enabled-but-empty selection imposes no restriction. */
+  FaceSelectionMask face_selection;
+  face_selection_mask_build(mesh, face_selection);
+  const bool filter_faces = face_selection.state == FaceSelectionState::Active;
+  const Span<bool> vert_paintable = face_selection.vert_paintable;
+
   IndexMaskMemory memory;
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
   update_mask_mesh(
       depsgraph, object, node_mask, [&](MutableSpan<float> node_masks, const Span<int> verts) {
         for (const int i : verts.index_range()) {
+          if (filter_faces && !vert_paintable[verts[i]]) {
+            continue;
+          }
           const float4 current_color = float4(colors[verts[i]]);
           const float current_mask = node_masks[i];
           const float new_mask = color_delta_get(
@@ -1131,13 +1153,24 @@ static void mask_by_color_default_mesh(const Depsgraph &depsgraph,
                                        const bool preserve_mask)
 {
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
   IndexMaskMemory memory;
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
   const float new_mask = invert ? 1.0f : 0.0f;
 
+  /* Face selection masking: only vertices with at least one selected face are touched; with the
+   * masking enabled but nothing selected, an enabled-but-empty selection imposes no restriction. */
+  FaceSelectionMask face_selection;
+  face_selection_mask_build(mesh, face_selection);
+  const bool filter_faces = face_selection.state == FaceSelectionState::Active;
+  const Span<bool> vert_paintable = face_selection.vert_paintable;
+
   update_mask_mesh(
       depsgraph, object, node_mask, [&](MutableSpan<float> node_masks, const Span<int> verts) {
         for (const int i : verts.index_range()) {
+          if (filter_faces && !vert_paintable[verts[i]]) {
+            continue;
+          }
           node_masks[i] = final_mask_get(node_masks[i], new_mask, invert, preserve_mask);
         }
       });

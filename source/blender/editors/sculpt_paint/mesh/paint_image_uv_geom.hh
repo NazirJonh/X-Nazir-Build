@@ -187,32 +187,20 @@ inline bool foreach_triangle_pixel(const float2 &p0,
 }
 
 /**
- * Tessellate a face's UV polygon into tile-local pixel space and visit every covered pixel.
- * Coordinates are mapped to pixels via `(uv - uv_origin) * size`; the point-in-triangle test is
- * orientation-preserving under this map, so the same primitive serves both reads and writes.
- * See #foreach_triangle_pixel for the \a fn contract, including the \a strict argument;
- * an early stop propagates across triangles.
+ * Tessellate a UV polygon (given in tile-local pixel space) and visit every covered pixel. See
+ * #foreach_triangle_pixel for the \a fn contract, including the \a strict argument; an early stop
+ * propagates across triangles.
  *
  * The polygon is triangulated with #BLI_polyfill_calc rather than fanned from vertex 0: a face
  * that is convex in 3D can still be concave in UV space, and a fan over a concave polygon emits
  * triangles that cover area outside the face, flooding the mask beyond the UV island.
  */
 template<typename Fn>
-inline void foreach_face_pixel(const BMFace *efa,
-                               const BMUVOffsets &offsets,
-                               const float2 &uv_origin,
-                               const int width,
-                               const int height,
-                               Fn &&fn)
+inline void foreach_uv_polygon_pixel(const Span<float2> px_verts,
+                                     const int width,
+                                     const int height,
+                                     Fn &&fn)
 {
-  Vector<float2, 8> px_verts;
-  BMIter liter;
-  BMLoop *l;
-  BM_ITER_ELEM (l, &liter, const_cast<BMFace *>(efa), BM_LOOPS_OF_FACE) {
-    const float *uv = BM_ELEM_CD_GET_FLOAT_P(l, offsets.uv);
-    px_verts.append(float2((uv[0] - uv_origin.x) * width, (uv[1] - uv_origin.y) * height));
-  }
-
   const int verts_num = px_verts.size();
   if (verts_num < 3) {
     return;
@@ -236,6 +224,31 @@ inline void foreach_face_pixel(const BMFace *efa,
       return;
     }
   }
+}
+
+/**
+ * Tessellate a face's UV polygon into tile-local pixel space and visit every covered pixel.
+ * Coordinates are mapped to pixels via `(uv - uv_origin) * size`; the point-in-triangle test is
+ * orientation-preserving under this map, so the same primitive serves both reads and writes.
+ * See #foreach_uv_polygon_pixel for the tessellation details.
+ */
+template<typename Fn>
+inline void foreach_face_pixel(const BMFace *efa,
+                               const BMUVOffsets &offsets,
+                               const float2 &uv_origin,
+                               const int width,
+                               const int height,
+                               Fn &&fn)
+{
+  Vector<float2, 8> px_verts;
+  BMIter liter;
+  BMLoop *l;
+  BM_ITER_ELEM (l, &liter, const_cast<BMFace *>(efa), BM_LOOPS_OF_FACE) {
+    const float *uv = BM_ELEM_CD_GET_FLOAT_P(l, offsets.uv);
+    px_verts.append(float2((uv[0] - uv_origin.x) * width, (uv[1] - uv_origin.y) * height));
+  }
+
+  foreach_uv_polygon_pixel(px_verts, width, height, fn);
 }
 
 }  // namespace blender

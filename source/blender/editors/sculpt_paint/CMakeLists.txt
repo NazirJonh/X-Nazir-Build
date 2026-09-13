@@ -111,9 +111,11 @@ set(SRC
   mesh/interface_template_sculpt_layer_tree.cc
   mesh/paint_canvas.cc
   mesh/paint_cursor.cc
+  mesh/paint_face_selection_mask.cc
   mesh/paint_hide.cc
   mesh/paint_image.cc
   mesh/paint_image_2d.cc
+  mesh/paint_image_paint_mask_island.cc
   mesh/paint_image_uv_geom.cc
   mesh/paint_image_uv_symmetry.cc
   mesh/paint_image_select_mask.cc
@@ -207,6 +209,7 @@ paint_intern.hh
   grease_pencil/weight_paint.hh
 
   mesh/mesh_brush_common.hh
+  mesh/paint_face_selection_mask.hh
   mesh/paint_hide.hh
   mesh/paint_material_attribute.hh
   mesh/paint_material_blend.hh

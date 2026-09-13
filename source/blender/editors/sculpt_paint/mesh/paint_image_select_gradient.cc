@@ -343,12 +343,39 @@ static void image_paint_gradient_sanitize_region(rcti &region, const int tile_w,
  * Tile-local pixel bounds of the active selection mask, expanded for blend feathering. Returns
  * false and sets \a r_region empty when the tile has no selection. Shared by the backup and
  * work-region computations so the masked-bounds logic lives in one place.
+ *
+ * The pixel weight is the product of the user-authored and the derived face-selection weights
+ * (#BKE_image_paint_selection_blend_sample), so the region is the intersection of the bounds of
+ * every active source. A face-only selection still narrows the region, otherwise the gradient
+ * would rasterize the whole tile for what may be a tiny selected area.
  */
 static bool image_paint_gradient_selection_bounds_region(
     const Image *image, const int tile_number, const int tile_w, const int tile_h, rcti &r_region)
 {
-  int sel_min[2], sel_max[2];
-  if (!BKE_image_paint_selection_mask_bounds(image, tile_number, sel_min, sel_max)) {
+  const bool use_user_mask = BKE_image_paint_selection_mask_has_any(image);
+  const bool use_face_mask = BKE_image_paint_selection_derived_active(image);
+
+  int sel_min[2] = {0, 0}, sel_max[2] = {tile_w, tile_h};
+  bool has_selection = use_user_mask || use_face_mask;
+  if (use_user_mask) {
+    has_selection = BKE_image_paint_selection_mask_bounds(image, tile_number, sel_min, sel_max);
+  }
+  if (has_selection && use_face_mask) {
+    int face_min[2], face_max[2];
+    if (BKE_image_paint_selection_face_mask_bounds(image, tile_number, face_min, face_max)) {
+      sel_min[0] = std::max(sel_min[0], face_min[0]);
+      sel_min[1] = std::max(sel_min[1], face_min[1]);
+      sel_max[0] = std::min(sel_max[0], face_max[0]);
+      sel_max[1] = std::min(sel_max[1], face_max[1]);
+      /* `sel_max` is exclusive. */
+      has_selection = sel_min[0] < sel_max[0] && sel_min[1] < sel_max[1];
+    }
+    else {
+      has_selection = false;
+    }
+  }
+
+  if (!has_selection) {
     BLI_rcti_init(&r_region, 0, 0, 0, 0);
     return false;
   }
@@ -369,7 +396,7 @@ void image_paint_gradient_calc_work_region(const Scene * /*scene*/,
                                            const rcti *region_override,
                                            rcti &r_region)
 {
-  if (BKE_image_paint_selection_mask_has_any(image)) {
+  if (BKE_image_paint_selection_is_active(image)) {
     /* Masked gradient: paint every pixel inside the selection bounds. Per-pixel mask
      * weights discard pixels outside the mask; t is still evaluated from global coords. */
     image_paint_gradient_selection_bounds_region(image, tile_number, tile_w, tile_h, r_region);
@@ -412,7 +439,7 @@ static void image_paint_gradient_calc_work_region_uv(const Scene * /*scene*/,
 {
   BLI_rcti_init(&r_region, 0, 0, 0, 0);
 
-  if (BKE_image_paint_selection_mask_has_any(image)) {
+  if (BKE_image_paint_selection_is_active(image)) {
     if (image_paint_gradient_selection_bounds_region(image, tile_number, tile_w, tile_h, r_region))
     {
       image_paint_gradient_sanitize_region(r_region, tile_w, tile_h);
@@ -644,7 +671,7 @@ void image_paint_gradient_apply_region(const Scene *scene,
   task_data.scene = scene;
   task_data.image = image;
   task_data.tile_number = tile_number;
-  task_data.use_selection_mask = BKE_image_paint_selection_mask_has_any(image);
+  task_data.use_selection_mask = BKE_image_paint_selection_is_active(image);
   task_data.params = params;
   task_data.start_px = start_px;
   task_data.end_px = end_px;
@@ -925,7 +952,12 @@ static void image_select_gradient_collect_affected_tiles(
     return;
   }
 
-  const bool use_selection_mask = BKE_image_paint_selection_mask_has_any(ima);
+  const bool use_selection_mask = BKE_image_paint_selection_is_active(ima);
+  /* Only a user-authored selection has meaningful per-tile bounding boxes. The derived
+   * face-selection mask is per-tile as well but blocks the pixels it doesn't cover per pixel, so
+   * skipping a tile by user-mask bounds would drop tiles that only the derived mask selects. */
+  const bool filter_tiles_by_user_bounds = use_selection_mask &&
+                                           !BKE_image_paint_selection_derived_active(ima);
   /* Without the multi-UDIM option the gradient is confined to the tile where the drag started. The
    * tile is stored in the session rather than derived from start_uv: moving the start handle
    * across a UDIM boundary must not switch the canvas backup or selection mask to another tile. */
@@ -946,7 +978,7 @@ static void image_select_gradient_collect_affected_tiles(
     if (!multi_udim && tile->tile_number != active_tile_number) {
       continue;
     }
-    if (use_selection_mask) {
+    if (filter_tiles_by_user_bounds) {
       int sel_min[2], sel_max[2];
       if (!BKE_image_paint_selection_mask_bounds(ima, tile->tile_number, sel_min, sel_max)) {
         continue;
@@ -1306,6 +1338,10 @@ static void image_select_gradient_begin_session(bContext *C,
   }
 
   Scene *scene = CTX_data_scene(C);
+  /* Refresh the derived face-selection masks before the session collects its tiles and starts
+   * previewing: otherwise a face-selection-only mask would be ignored until the commit, so the
+   * drag preview would neither show nor clip by it. */
+  image_paint_selection_mask_from_face_selection(C, scene, ima);
   const ImagePaintGradientParams params = image_select_gradient_current_params(scene);
   image_select_gradient_sync_tile_backups(C, state, params);
 
@@ -1377,6 +1413,11 @@ static void image_select_gradient_apply_session(bContext *C, ImageSelectGradient
 {
   Image *ima = state->owner_sima->image;
   Scene *scene = CTX_data_scene(C);
+  /* Face selection masking: rebuild the image's derived 2D selection masks from the canvas
+   * objects' face selections before the mask state is read below. The derived state is Active only
+   * when at least one object has an active selection; with no active selection the masks are freed
+   * and painting is unrestricted (a no-op with the flag off). */
+  image_paint_selection_mask_from_face_selection(C, scene, ima);
   const ImagePaintGradientParams params = image_select_gradient_current_params(scene);
 
   image_select_gradient_run_preview(C, state, params, true, /*use_viewport_clip=*/false);

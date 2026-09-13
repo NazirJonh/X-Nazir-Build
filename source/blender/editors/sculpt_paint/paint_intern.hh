@@ -1032,6 +1032,8 @@ void PAINT_OT_image_select_lasso(wmOperatorType *ot);
 void PAINT_OT_image_select_circle(wmOperatorType *ot);
 void PAINT_OT_image_select_polyline(wmOperatorType *ot);
 void PAINT_OT_image_select_invert(wmOperatorType *ot);
+/* paint_image_paint_mask_island.cc */
+void PAINT_OT_paint_mask_island(wmOperatorType *ot);
 void PAINT_OT_image_select_move(wmOperatorType *ot);
 void PAINT_OT_image_select_move_confirm(wmOperatorType *ot);
 void PAINT_OT_image_select_move_cancel(wmOperatorType *ot);
@@ -1189,6 +1191,8 @@ bool mask_paint_poll(bContext *C);
 bool paint_curve_poll(bContext *C);
 
 bool facemask_paint_poll(bContext *C);
+/** Like #facemask_paint_poll but blocked in Sculpt Mode, where hiding has its own operators. */
+bool facemask_hide_paint_poll(bContext *C);
 
 namespace ed::sculpt_paint {
 

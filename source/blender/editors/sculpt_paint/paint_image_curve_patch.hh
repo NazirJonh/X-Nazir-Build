@@ -35,6 +35,7 @@
 #include "paint_curve_patch_session.hh"
 
 #include <memory>
+#include <optional>
 
 struct ImagePool;
 
@@ -95,6 +96,14 @@ struct ImageCurvePatchSession {
 
   /* Frozen brush/paint fields the writer reads directly -- see the struct's own doc comment. */
   ImageCurvePatchFrozenParams params;
+
+  /**
+   * Randomize Color seed, frozen at session begin like the rest of #params. A patch re-stamps on
+   * every live edit, so its randomized colors must come from a seed that does not change between
+   * re-stamps -- a fresh seed per restamp would shift the patch's colors under the user's hands.
+   * Empty when the brush had Randomize Color off at session begin.
+   */
+  std::optional<float3> initial_hsv_jitter;
 
   /* Per-patch fields with a home in `bke::CurvePatchParams` (radius, spacing, falloff, stamp
    * layout, ...), frozen at anchor time and overlaid with live brush state on every rebuild via

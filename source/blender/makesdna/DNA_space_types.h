@@ -739,7 +739,7 @@ struct SpaceImage {
    */
   float material_paint_light_rot_z = 0.0f;
 
-  eSpaceImage_Flag flag = {};
+  eSpaceImage_Flag flag = SI_DRAW_FACE_SELECTION;
 
   float uv_opacity = 0;
   float uv_face_opacity = 0;
@@ -760,7 +760,15 @@ struct SpaceImage {
   /** Per-editor Category Tabs / Tag Bar state (see #CategoryTabsState). */
   CategoryTabsState tabs_state;
 
-  char _pad_tag_filter2[4] = {0};
+  /**
+   * Opacity of the Image Editor's face selection paint overlay: the veil drawn over the UV faces a
+   * stroke restricted by the face selection mask leaves out. Zero hides the overlay.
+   *
+   * Placed at the former alignment padding slot to keep the pointer members (#MaskSpaceInfo,
+   * #runtime) 8-byte aligned. A file written before the field existed zero-fills it; see the 502.77
+   * block in versioning_520.cc.
+   */
+  float face_selection_opacity = 0.2f;
   /* Runtime data, not written to .blend. */
   ed::image::SpaceImage_Runtime *runtime = nullptr;
 };

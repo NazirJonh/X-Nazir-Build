@@ -1018,6 +1018,12 @@ class IMAGE_HT_header(Header):
 
         IMAGE_MT_editor_menus.draw_collapsible(context, layout)
 
+        if image_paint_mask_controls_visible(context):
+            # Face selection paint mask (PBR paint): the same toggle the 3D View header draws, so
+            # the masking can be switched from either editor.
+            mesh = context.active_object.data
+            layout.prop(mesh, "use_paint_mask", icon_only=True)
+
         layout.separator_spacer()
 
         IMAGE_HT_header.draw_xform_template(layout, context)
@@ -2316,6 +2322,62 @@ class IMAGE_PT_overlay_image(Panel):
         layout.prop(uvedit, "show_metadata")
 
 
+def image_paint_mask_controls_visible(context):
+    """Gate shared by the Paint Mask button in this header and #IMAGE_PT_overlay_paint: the face
+    selection mask only applies to a mesh canvas, so the controls follow the Image Editor's paint
+    tools and stay reachable while the masking is enabled so it can be turned off again. Mirrors
+    the ``uiTemplatePaintModeSelection()`` gate the 3D View header uses for the same toggle."""
+    sima = context.space_data
+    if sima is None or sima.mode != 'PAINT':
+        return False
+    ob = context.active_object
+    if ob is None or ob.type != 'MESH':
+        return False
+    if ob.data.use_paint_mask:
+        return True
+    # The mask is rasterized through the object's UVs, so without a UV map it could only block
+    # every stroke.
+    if not ob.data.uv_layers:
+        return False
+    tool = context.workspace.tools.from_space_image_mode('PAINT', create=False)
+    if tool is None:
+        return True
+    # The paint brushes (`builtin.brush`, `builtin_brush.*`), the selection tools that edit the
+    # mask (`builtin.select_*`) and the mask brush. The annotation tools are the only paint mode
+    # tools that neither paint through nor edit the mask.
+    return tool.idname.startswith(
+        ("builtin.brush", "builtin_brush", "builtin.select", "builtin.mask")
+    )
+
+
+class IMAGE_PT_overlay_paint(Panel):
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'HEADER'
+    bl_parent_id = "IMAGE_PT_overlay"
+    bl_label = "Paint"
+
+    @classmethod
+    def poll(cls, context):
+        return image_paint_mask_controls_visible(context)
+
+    def draw(self, context):
+        layout = self.layout
+
+        sima = context.space_data
+        overlay = sima.overlay
+
+        layout.active = overlay.show_overlays
+
+        # Face selection masking (PBR paint): the veil drawn over the faces a masked stroke leaves
+        # out, mirroring the 3D Viewport paint overlay. The mask itself is the Paint Mask toggle
+        # in the header.
+        row = layout.row(align=True)
+        row.prop(sima, "show_face_selection", text="")
+        sub = row.row()
+        sub.active = sima.show_face_selection
+        sub.prop(sima, "face_selection_opacity", text="Face Selection")
+
+
 class IMAGE_PT_overlay_render_guides(Panel):
     bl_space_type = 'IMAGE_EDITOR'
     bl_region_type = 'HEADER'
@@ -2459,6 +2521,7 @@ classes = (
     IMAGE_PT_annotation,
     IMAGE_PT_gizmo_display,
     IMAGE_PT_overlay,
+    IMAGE_PT_overlay_paint,
     IMAGE_PT_overlay_guides,
     IMAGE_PT_overlay_uv_stretch,
     IMAGE_PT_overlay_uv_edit_geometry,

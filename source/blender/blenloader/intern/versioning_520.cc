@@ -1954,6 +1954,29 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 77)) {
+    /* The face selection paint overlay settings are new, and a file written before them zero-fills
+     * the opacity and leaves the "show" flag clear. A zero opacity hides the overlay completely --
+     * including the face selection display the 3D Viewport used to draw at a fixed alpha -- so
+     * restore the default that keeps it on. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D &v3d = reinterpret_cast<View3D &>(sl);
+            v3d.overlay.paint_face_selection_opacity = 0.05f;
+            v3d.overlay.paint_flag |= V3D_OVERLAY_PAINT_FACE_SELECTION;
+          }
+          else if (sl.spacetype == SPACE_IMAGE) {
+            SpaceImage &sima = reinterpret_cast<SpaceImage &>(sl);
+            sima.paint_face_selection_opacity = 0.05f;
+            sima.flag |= SI_DRAW_FACE_SELECTION;
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

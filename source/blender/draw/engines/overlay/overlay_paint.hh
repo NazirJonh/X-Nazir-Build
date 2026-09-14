@@ -51,6 +51,10 @@ class Paints : Overlay {
   bool show_paint_mask_ = false;
   bool masked_transparency_support_ = false;
   bool show_symmetry_contour_ = false;
+  /* Face selection masking: whether the veil over the faces a masked stroke leaves out is drawn at
+   * all. Toggled per viewport (#V3D_OVERLAY_PAINT_FACE_SELECTION) with a user controlled opacity
+   * (#View3DOverlay::paint_face_selection_opacity); a zero opacity hides it too. */
+  bool show_face_selection_ = false;
   /* Effective paint context mode, falling back to the object mode when the global context mode
    * doesn't match (e.g. during certain mode transitions). */
   int paint_ctx_mode_ = -1;
@@ -114,6 +118,8 @@ class Paints : Overlay {
     }
 
     show_wires_ = state.overlay.paint_flag & V3D_OVERLAY_PAINT_WIRE;
+    show_face_selection_ = (state.overlay.paint_flag & V3D_OVERLAY_PAINT_FACE_SELECTION) &&
+                           (state.overlay.paint_face_selection_opacity > 0.0f);
     show_symmetry_contour_ = !state.is_wire() && !state.is_depth_only_drawing &&
                              ((paint_ctx_mode_ == CTX_MODE_PAINT_WEIGHT &&
                                state.show_weight_paint_symmetry_contour()) ||
@@ -133,7 +139,10 @@ class Paints : Overlay {
                           DRW_STATE_BLEND_ALPHA,
                       state.clipping_plane_count);
         sub.shader_set(res.shaders->paint_region_face.get());
-        sub.push_constant("ucolor", float4(1.0, 1.0, 1.0, 0.2));
+        /* The veil covers the faces the face selection mask leaves out; its opacity is exposed as
+         * "Face Selection" in the paint mode overlay panels. */
+        sub.push_constant(
+            "ucolor", float4(1.0, 1.0, 1.0, state.overlay.paint_face_selection_opacity));
         paint_region_face_ps_ = &sub;
       }
       {
@@ -327,9 +336,11 @@ class Paints : Overlay {
         {
           paint_region_edge_ps_->draw(batch.batch, handle);
         }
-        for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, SCULPT_BATCH_FACE_SELECTION))
-        {
-          paint_region_face_ps_->draw(batch.batch, handle);
+        if (show_face_selection_) {
+          for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, SCULPT_BATCH_FACE_SELECTION))
+          {
+            paint_region_face_ps_->draw(batch.batch, handle);
+          }
         }
       }
       else {
@@ -338,7 +349,7 @@ class Paints : Overlay {
           paint_region_edge_ps_->push_constant("use_select", use_face_selection);
           paint_region_edge_ps_->draw(geom, manager.unique_handle(ob_ref));
         }
-        if (use_face_selection) {
+        if (use_face_selection && show_face_selection_) {
           gpu::Batch *geom = DRW_cache_mesh_paint_overlay_surface_get(ob_ref.object);
           paint_region_face_ps_->draw(geom, manager.unique_handle(ob_ref));
         }

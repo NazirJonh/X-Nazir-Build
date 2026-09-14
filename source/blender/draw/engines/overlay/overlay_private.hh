@@ -578,6 +578,9 @@ class ShaderModule {
   StaticShader uv_edit_face = {"overlay_edit_uv_faces"};
   StaticShader uv_edit_facedot = {"overlay_edit_uv_face_dots"};
   StaticShader uv_edit_vert = {"overlay_edit_uv_verts"};
+  /* Image Editor face selection paint overlay (the veil over the faces a masked stroke leaves
+   * out). */
+  StaticShader uv_face_selection = {"overlay_edit_uv_face_selection"};
   StaticShader uv_image_borders = {"overlay_edit_uv_tiled_image_borders"};
   StaticShader uv_paint_mask = {"overlay_edit_uv_mask_image"};
   StaticShader uv_wireframe = {"overlay_wireframe_uv"};

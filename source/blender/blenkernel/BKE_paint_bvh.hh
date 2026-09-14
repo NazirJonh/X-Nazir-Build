@@ -226,6 +226,7 @@ class DrawCache {
   virtual void tag_masks_changed(const IndexMask &node_mask) = 0;
   virtual void tag_layer_masks_changed(const IndexMask &node_mask) = 0;
   virtual void tag_layer_previews_changed(const IndexMask &node_mask) = 0;
+  virtual void tag_face_selection_changed(const IndexMask &node_mask) = 0;
   virtual void tag_attribute_changed(const IndexMask &node_mask, StringRef attribute_name) = 0;
 
   /**
@@ -415,6 +416,13 @@ class Tree {
    * different layer became active, or because a stroke wrote into the current one.
    */
   void tag_layer_previews_changed(const IndexMask &node_mask);
+
+  /**
+   * Tag the face selection draw data of all leaf nodes: selection edits (see
+   * #paintface_flush_flags) don't track which nodes changed. Only refreshes GPU buffers, no
+   * depsgraph update.
+   */
+  void tag_face_selection_changed();
 
   /**
    * Tag nodes where generic attribute data has changed (not positions, masks, or face sets).

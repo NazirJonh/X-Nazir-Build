@@ -8436,15 +8436,6 @@ void flush_update_done(ViewContext &vc,
       bounds_orig_dirty_leaves = dirty_leaves;
       bounds_orig_total_nodes = pbvh.nodes_num();
 #endif
-      /* The PBVH-draw fast path (#tag_mesh_positions_changed) deliberately skips the mesh's GPU
-       * batch cache on every dab -- tagging it per dab would be a major performance regression for
-       * deform brushes. But the Sculpt Mode face-selection overlay (#Paints in overlay_paint.hh)
-       * draws its surface/edge/vert batches from that same #MeshBatchCache, and only while a
-       * painting tool is active, so those batches can go stale relative to the freshly deformed
-       * positions until here. Tagging once per stroke (not per dab) keeps this cheap: nothing
-       * requests these batches while a deforming tool is active, so no extra work happens unless
-       * the overlay is actually visible on the next redraw. */
-      BKE_mesh_batch_cache_dirty_tag(id_cast<Mesh *>(ob.data), BKE_MESH_BATCH_DIRTY_ALL);
     }
     else {
       bke::pbvh::store_bounds_orig(pbvh);

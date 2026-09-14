@@ -721,6 +721,14 @@ void Tree::tag_layer_previews_changed(const IndexMask &node_mask)
   }
 }
 
+void Tree::tag_face_selection_changed()
+{
+  if (this->draw_data) {
+    IndexMaskMemory memory;
+    this->draw_data->tag_face_selection_changed(all_leaf_nodes(*this, memory));
+  }
+}
+
 void Tree::tag_attribute_changed(const IndexMask &node_mask, const StringRef attribute_name)
 {
   if (this->draw_data) {

@@ -10,6 +10,7 @@
 
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_bvh.hh"
 #include "BKE_scene.hh"
 
 #include "DEG_depsgraph_query.hh"
@@ -18,6 +19,7 @@
 
 #include "draw_cache.hh"
 #include "draw_cache_impl.hh"
+#include "draw_sculpt.hh"
 
 #include "overlay_base.hh"
 #include "overlay_symmetry_contour.hh"
@@ -306,14 +308,40 @@ class Paints : Overlay {
        * draw on the geometry data directly. */
       const bool in_texture_paint_mode = paint_ctx_mode_ == CTX_MODE_PAINT_TEXTURE;
 
-      if ((use_face_selection || show_wires_) && !in_texture_paint_mode) {
-        gpu::Batch *geom = DRW_cache_mesh_paint_overlay_edges_get(ob_ref.object);
-        paint_region_edge_ps_->push_constant("use_select", use_face_selection);
-        paint_region_edge_ps_->draw(geom, manager.unique_handle(ob_ref));
+      /* Sculpt Mode skips depsgraph geometry updates while the PBVH draws directly, so the
+       * evaluated mesh batches below can be stale. Draw from the live PBVH buffers instead, like
+       * the sculpt overlays. Only the mesh PBVH provides face selection data; other cases (e.g.
+       * Mask by Color on multires or dynamic topology) keep the evaluated mesh path. */
+      const bke::pbvh::Tree *sculpt_pbvh = paint_ctx_mode_ == CTX_MODE_SCULPT ?
+                                               bke::object::pbvh_get(*ob_ref.object) :
+                                               nullptr;
+      const bool use_sculpt_pbvh = use_face_selection && sculpt_pbvh &&
+                                   sculpt_pbvh->type() == bke::pbvh::Type::Mesh &&
+                                   BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object,
+                                                                               state.rv3d);
+      if (use_sculpt_pbvh) {
+        ResourceHandleRange handle = manager.unique_handle_for_sculpt(ob_ref);
+        paint_region_edge_ps_->push_constant("use_select", true);
+        for (SculptBatch &batch : sculpt_batches_get(
+                 ob_ref.object, SCULPT_BATCH_WIREFRAME | SCULPT_BATCH_FACE_SELECTION))
+        {
+          paint_region_edge_ps_->draw(batch.batch, handle);
+        }
+        for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, SCULPT_BATCH_FACE_SELECTION))
+        {
+          paint_region_face_ps_->draw(batch.batch, handle);
+        }
       }
-      if (use_face_selection) {
-        gpu::Batch *geom = DRW_cache_mesh_paint_overlay_surface_get(ob_ref.object);
-        paint_region_face_ps_->draw(geom, manager.unique_handle(ob_ref));
+      else {
+        if ((use_face_selection || show_wires_) && !in_texture_paint_mode) {
+          gpu::Batch *geom = DRW_cache_mesh_paint_overlay_edges_get(ob_ref.object);
+          paint_region_edge_ps_->push_constant("use_select", use_face_selection);
+          paint_region_edge_ps_->draw(geom, manager.unique_handle(ob_ref));
+        }
+        if (use_face_selection) {
+          gpu::Batch *geom = DRW_cache_mesh_paint_overlay_surface_get(ob_ref.object);
+          paint_region_face_ps_->draw(geom, manager.unique_handle(ob_ref));
+        }
       }
       if (use_vert_selection && !in_texture_paint_mode) {
         gpu::Batch *geom = DRW_cache_mesh_paint_overlay_verts_get(ob_ref.object);

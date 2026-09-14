@@ -160,10 +160,12 @@ class DrawCacheImpl : public DrawCache {
    */
   Map<AttributeRequest, AttributeData> attribute_vbos_;
 
-  /** Batches for drawing wireframe geometry. */
-  Vector<gpu::Batch *> lines_batches_;
-  /** Batches for drawing coarse "fast navigate" wireframe geometry. */
-  Vector<gpu::Batch *> lines_batches_coarse_;
+  /**
+   * Batches for drawing wireframe geometry, stored separately for each request like
+   * #tris_batches_ (which includes coarse-ness), since some requests add attributes, e.g. the
+   * face selection overlay.
+   */
+  Map<ViewportRequest, Vector<gpu::Batch *>> lines_batches_;
   /**
    * Batches for drawing triangles, stored separately for each combination of attributes and
    * coarse-ness. Different viewports might request different sets of attributes, and we don't want
@@ -213,6 +215,7 @@ class DrawCacheImpl : public DrawCache {
   void tag_masks_changed(const IndexMask &node_mask) override;
   void tag_layer_masks_changed(const IndexMask &node_mask) override;
   void tag_layer_previews_changed(const IndexMask &node_mask) override;
+  void tag_face_selection_changed(const IndexMask &node_mask) override;
   void tag_attribute_changed(const IndexMask &node_mask, StringRef attribute_name) override;
 
   bool begin_influence_drag(int layer_uid) override;
@@ -354,6 +357,15 @@ void DrawCacheImpl::tag_layer_previews_changed(const IndexMask &node_mask)
   }
 }
 
+void DrawCacheImpl::tag_face_selection_changed(const IndexMask &node_mask)
+{
+  if (DrawCacheImpl::AttributeData *data = attribute_vbos_.lookup_ptr(
+          CustomRequest::FaceSelection))
+  {
+    data->tag_dirty(node_mask);
+  }
+}
+
 void DrawCacheImpl::tag_attribute_changed(const IndexMask &node_mask, StringRef attribute_name)
 {
   for (const auto &[data_request, data] : attribute_vbos_.items()) {
@@ -443,6 +455,15 @@ static const GPUVertFormat &face_set_format()
 {
   static const GPUVertFormat format = GPU_vertformat_from_attribute(
       "fset", gpu::VertAttrType::UNORM_8_8_8_8);
+  return format;
+}
+
+static const GPUVertFormat &face_selection_format()
+{
+  /* Same name and type as the evaluated mesh `paint_overlay_flag` buffer, so the paint overlay
+   * shaders draw PBVH batches unchanged. */
+  static const GPUVertFormat format = GPU_vertformat_from_attribute("paint_overlay_flag",
+                                                                    gpu::VertAttrType::SINT_32);
   return format;
 }
 
@@ -630,8 +651,9 @@ static int count_visible_tris_bmesh(const Set<BMFace *, 0> &faces)
 
 DrawCacheImpl::~DrawCacheImpl()
 {
-  free_batches(lines_batches_, lines_batches_.index_range());
-  free_batches(lines_batches_coarse_, lines_batches_coarse_.index_range());
+  for (MutableSpan<gpu::Batch *> batches : lines_batches_.values()) {
+    free_batches(batches, batches.index_range());
+  }
   for (MutableSpan<gpu::Batch *> batches : tris_batches_.values()) {
     free_batches(batches, batches.index_range());
   }
@@ -667,8 +689,9 @@ void DrawCacheImpl::free_nodes_with_changed_topology(const bke::pbvh::Tree &pbvh
     }
   }
 
-  free_batches(lines_batches_, nodes_to_free);
-  free_batches(lines_batches_coarse_, nodes_to_free);
+  for (MutableSpan<gpu::Batch *> batches : lines_batches_.values()) {
+    free_batches(batches, nodes_to_free);
+  }
   for (MutableSpan<gpu::Batch *> batches : tris_batches_.values()) {
     free_batches(batches, nodes_to_free);
   }
@@ -1115,6 +1138,37 @@ BLI_NOINLINE static void update_face_sets_mesh(const Object &object,
     node_mask.foreach_index([&](const int i) { vbos[i]->data<uchar4>().fill(uchar4(255)); },
                             exec_mode::grain_size(64));
   }
+}
+
+BLI_NOINLINE static void update_face_selection_mesh(const Object &object,
+                                                    const OrigMeshData &orig_mesh_data,
+                                                    const IndexMask &node_mask,
+                                                    MutableSpan<gpu::VertBufPtr> vbos)
+{
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(object);
+  const OffsetIndices<int> faces = mesh.faces();
+  const VArraySpan select_poly = *orig_mesh_data.attributes.lookup<bool>(".select_poly",
+                                                                         bke::AttrDomain::Face);
+  ensure_vbos_allocated_mesh(object, face_selection_format(), node_mask, vbos);
+  if (select_poly.is_empty()) {
+    node_mask.foreach_index([&](const int i) { vbos[i]->data<int>().fill(0); },
+                            exec_mode::grain_size(64));
+    return;
+  }
+  /* Hidden faces are not encoded (unlike the evaluated mesh buffer): the PBVH index buffers
+   * already skip them. */
+  node_mask.foreach_index(
+      [&](const int i) {
+        int *data = vbos[i]->data<int>().data();
+        for (const int face : nodes[i].faces()) {
+          const int face_size = faces[face].size();
+          std::fill_n(data, face_size, select_poly[face] ? 1 : 0);
+          data += face_size;
+        }
+      },
+      exec_mode::grain_size(1));
 }
 
 BLI_NOINLINE static void update_generic_attribute_mesh(const Object &object,
@@ -2704,6 +2758,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
           case CustomRequest::LayerPreview:
             update_layer_preview_mesh(object, orig_mesh_data, mask, vbos);
             break;
+          case CustomRequest::FaceSelection:
+            update_face_selection_mesh(object, orig_mesh_data, mask, vbos);
+            break;
         }
       }
       else {
@@ -2738,6 +2795,10 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
             break;
           case CustomRequest::LayerPreview:
             fill_layer_preview_grids(object, orig_mesh_data, use_flat_layout_, mask, vbos);
+            break;
+          case CustomRequest::FaceSelection:
+            /* Only requested for the mesh PBVH, see #sculpt_batches_get. */
+            BLI_assert_unreachable();
             break;
         }
       }
@@ -2779,6 +2840,10 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
           case CustomRequest::LayerPreview:
             update_layer_preview_bmesh(object, mask, vbos);
             break;
+          case CustomRequest::FaceSelection:
+            /* Only requested for the mesh PBVH, see #sculpt_batches_get. */
+            BLI_assert_unreachable();
+            break;
         }
       }
       else {
@@ -2813,6 +2878,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
         break;
       case CustomRequest::LayerPreview:
         pdp_attr_name = "LayerPreview";
+        break;
+      case CustomRequest::FaceSelection:
+        pdp_attr_name = "FaceSelection";
         break;
     }
   }
@@ -3106,6 +3174,15 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
     this->ensure_attribute_data(
         object, orig_mesh_data, CustomRequest::SubdivisionLevel, nodes_to_update);
   }
+  /* Only the mesh PBVH has a face selection filler, see #sculpt_batches_get. The other requested
+   * attributes are deliberately not iterated: the wireframe batch layout per PBVH type above
+   * stays unchanged. */
+  const bool use_face_selection = pbvh.type() == bke::pbvh::Type::Mesh &&
+                                  request.attributes.contains(CustomRequest::FaceSelection);
+  if (use_face_selection) {
+    this->ensure_attribute_data(
+        object, orig_mesh_data, CustomRequest::FaceSelection, nodes_to_update);
+  }
   const Span<gpu::IndexBufPtr> lines = this->ensure_lines_indices(
       object, orig_mesh_data, nodes_to_update, request.use_coarse_grids);
 
@@ -3118,11 +3195,14 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
   if (pbvh.type() == bke::pbvh::Type::Grids) {
     subdiv_level = attribute_vbos_.lookup_ptr(CustomRequest::SubdivisionLevel)->vbos;
   }
+  Span<gpu::VertBufPtr> face_selection;
+  if (use_face_selection) {
+    face_selection = attribute_vbos_.lookup_ptr(CustomRequest::FaceSelection)->vbos;
+  }
 
   /* Except for the first iteration of the draw loop, we only need to rebuild batches for nodes
    * with changed topology (visible triangle count). */
-  Vector<gpu::Batch *> &batches = request.use_coarse_grids ? lines_batches_coarse_ :
-                                                             lines_batches_;
+  Vector<gpu::Batch *> &batches = lines_batches_.lookup_or_add_default(request);
   batches.resize(pbvh.nodes_num(), nullptr);
   nodes_to_update.foreach_index(
       [&](const int i) {
@@ -3138,6 +3218,9 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_lines_batches(const Object &object,
           }
           if (!subdiv_level.is_empty() && subdiv_level[i]) {
             GPU_batch_vertbuf_add(batches[i], subdiv_level[i].get(), false);
+          }
+          if (!face_selection.is_empty() && face_selection[i]) {
+            GPU_batch_vertbuf_add(batches[i], face_selection[i].get(), false);
           }
         }
       },

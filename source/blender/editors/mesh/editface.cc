@@ -23,6 +23,8 @@
 #include "BKE_mesh.hh"
 #include "BKE_mesh_mapping.hh"
 #include "BKE_object.hh"
+#include "BKE_paint.hh"
+#include "BKE_paint_bvh.hh"
 
 #include "ED_mesh.hh"
 #include "ED_screen.hh"
@@ -59,6 +61,14 @@ void paintface_flush_flags(bContext *C,
    * since this could become slow for realtime updates (circle-select for eg) */
   if (flush_selection) {
     bke::mesh_select_face_flush(*mesh);
+    /* Sculpt Mode draws the face selection overlay from the PBVH buffers, which a depsgraph
+     * selection update doesn't refresh. Done before the evaluated object early return because the
+     * PBVH belongs to the original object. */
+    if (bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*ob)) {
+      if (pbvh->type() == bke::pbvh::Type::Mesh) {
+        pbvh->tag_face_selection_changed();
+      }
+    }
   }
 
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);

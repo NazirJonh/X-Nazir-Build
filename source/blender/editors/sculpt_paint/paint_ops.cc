@@ -1732,6 +1732,9 @@ void ED_operatortypes_paint()
 
   /* PBR Paint layer material (Layer Material tab) */
   WM_operatortype_append(MATERIAL_OT_paint_layer_channel_toggle);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_channel_value_set);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_channel_unlink);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_use_layer_result);
   WM_operatortype_append(MATERIAL_OT_paint_layer_bake_size_set);
   WM_operatortype_append(MATERIAL_OT_paint_layer_rebake);
 

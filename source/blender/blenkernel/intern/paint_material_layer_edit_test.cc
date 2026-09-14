@@ -20,6 +20,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "paint_material_composite_internal.hh"
+#include "paint_material_layer_edit_intern.hh"
 
 #include <string>
 
@@ -928,6 +929,206 @@ TEST_F(PaintMaterialLayerEditTest, fill_color_preview_bumps_revision_and_invalid
       *bmain, *material, ordinal, preview_color, &error));
   EXPECT_EQ(error, PaintMaterialLayerEditError::None);
   EXPECT_GT(BKE_material_paint_layer_revision_get(*material), revision_before);
+}
+
+TEST_F(PaintMaterialLayerEditTest, channel_value_apply_writes_only_target_channel)
+{
+  build_stack(2);
+  const float color[4] = {0.1f, 0.9f, 0.5f, 1.0f};
+  const int ordinal = add_fill_layer(color, "Filler");
+  ASSERT_EQ(ordinal, 2);
+
+  /* Wire Roughness as a second channel, so there is a channel to write and one to leave alone. */
+  keep_roughness_on(ordinal);
+
+  const float value[4] = {0.75f, 0.75f, 0.75f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channel_value_apply(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, value, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  /* The record is per channel: Roughness has one, Base Color was never given one. */
+  float recorded[4];
+  ASSERT_TRUE(BKE_paint_material_layer_channel_value_get(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, recorded));
+  EXPECT_NEAR(recorded[0], 0.75f, 1e-6f);
+  EXPECT_FALSE(BKE_paint_material_layer_channel_value_get(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_BASE_COLOR, recorded));
+
+  /* Only the Roughness map moved: the scalar rule takes the value's red component, while the
+   * Base Color map keeps the colour the layer was created with. Layer maps are byte buffers, so
+   * the expectation is whatever the generator's own fill writes for the same colour. */
+  auto expect_pixel = [](Image *image, const float expected_color[4]) {
+    uint8_t expected[4];
+    BKE_image_buf_fill_color(expected, nullptr, 1, 1, expected_color);
+    void *lock = nullptr;
+    ImBuf *buffer = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_NE(buffer->byte_buffer.data, nullptr);
+    for (int i = 0; i < 4; i++) {
+      EXPECT_EQ(buffer->byte_buffer.data[i], expected[i]) << "component " << i;
+    }
+    BKE_image_release_ibuf(image, buffer, lock);
+  };
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 3);
+  Image *color_image = entries[2].channel_images.lookup_default(
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr);
+  Image *roughness_map = entries[2].channel_images.lookup_default(
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS, nullptr);
+  ASSERT_NE(color_image, nullptr);
+  ASSERT_NE(roughness_map, nullptr);
+  expect_pixel(roughness_map, value);
+  expect_pixel(color_image, color);
+}
+
+TEST_F(PaintMaterialLayerEditTest, channel_value_preview_does_not_write_the_marker)
+{
+  build_stack(2);
+  const float color[4] = {0.1f, 0.9f, 0.5f, 1.0f};
+  const int ordinal = add_fill_layer(color, "Filler");
+  ASSERT_EQ(ordinal, 2);
+
+  keep_roughness_on(ordinal);
+
+  /* The apply records the value on the row's marker; a preview that follows must not move it. */
+  const float value[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channel_value_apply(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, value, &error));
+
+  const float preview_value[4] = {0.9f, 0.9f, 0.9f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_channel_value_preview(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, preview_value, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  /* The marker still names the applied value: only the bake moves it. */
+  float recorded[4];
+  ASSERT_TRUE(BKE_paint_material_layer_channel_value_get(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, recorded));
+  EXPECT_NEAR(recorded[0], 0.5f, 1e-6f);
+
+  /* The pixels did move, with the scalar rule -- the preview is what the picker shows live. */
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 3);
+  Image *roughness_map = entries[2].channel_images.lookup_default(
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS, nullptr);
+  ASSERT_NE(roughness_map, nullptr);
+  uint8_t expected[4];
+  BKE_image_buf_fill_color(expected, nullptr, 1, 1, preview_value);
+  void *lock = nullptr;
+  ImBuf *buffer = BKE_image_acquire_ibuf(roughness_map, nullptr, &lock);
+  ASSERT_NE(buffer, nullptr);
+  ASSERT_NE(buffer->byte_buffer.data, nullptr);
+  for (int i = 0; i < 4; i++) {
+    EXPECT_EQ(buffer->byte_buffer.data[i], expected[i]) << "component " << i;
+  }
+  BKE_image_release_ibuf(roughness_map, buffer, lock);
+}
+
+TEST_F(PaintMaterialLayerEditTest, channel_unlink_restores_last_applied_value)
+{
+  build_stack(2);
+  const float color[4] = {0.1f, 0.9f, 0.5f, 1.0f};
+  const int ordinal = add_fill_layer(color, "Filler");
+  ASSERT_EQ(ordinal, 2);
+
+  /* Wire Roughness as a second channel and give it a value, so there is one to restore. */
+  keep_roughness_on(ordinal);
+  const float value[4] = {0.3f, 0.3f, 0.3f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_channel_value_apply(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, value, &error));
+
+  /* An image from outside the stack takes the channel over, the way a drop does. */
+  const float blank[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *external = BKE_image_add_generated(
+      bmain, 16, 16, "external", 32, false, IMA_GENTYPE_BLANK, blank, false, false, false);
+  ASSERT_NE(external, nullptr);
+  ASSERT_TRUE(BKE_paint_material_layer_channel_image_set(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, *external, &error));
+
+  ASSERT_TRUE(BKE_paint_material_layer_channel_unlink(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  /* The channel shows a fresh map of its own again; the dropped image is not it. */
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 3);
+  Image *roughness_map = entries[ordinal].channel_images.lookup_default(
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS, nullptr);
+  ASSERT_NE(roughness_map, nullptr);
+  EXPECT_NE(roughness_map, external);
+
+  /* The dropped image's pixels were not touched: the unlink writes only its own maps. */
+  auto expect_pixel = [](Image *image, const float expected_color[4]) {
+    uint8_t expected[4];
+    BKE_image_buf_fill_color(expected, nullptr, 1, 1, expected_color);
+    void *lock = nullptr;
+    ImBuf *buffer = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_NE(buffer->byte_buffer.data, nullptr);
+    for (int i = 0; i < 4; i++) {
+      EXPECT_EQ(buffer->byte_buffer.data[i], expected[i]) << "component " << i;
+    }
+    BKE_image_release_ibuf(image, buffer, lock);
+  };
+  expect_pixel(external, blank);
+  expect_pixel(roughness_map, value);
+
+  /* The record survived the round trip through the external image. */
+  float recorded[4];
+  ASSERT_TRUE(BKE_paint_material_layer_channel_value_get(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, recorded));
+  EXPECT_NEAR(recorded[0], 0.3f, 1e-6f);
+}
+
+TEST_F(PaintMaterialLayerEditTest, channel_unlink_never_applied_uses_channel_default)
+{
+  build_stack(2);
+  const float color[4] = {0.1f, 0.9f, 0.5f, 1.0f};
+  const int ordinal = add_fill_layer(color, "Filler");
+  ASSERT_EQ(ordinal, 2);
+
+  /* Wire Roughness, but never record a value on it. */
+  keep_roughness_on(ordinal);
+  float recorded[4];
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  EXPECT_FALSE(BKE_paint_material_layer_channel_value_get(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, recorded));
+
+  ASSERT_TRUE(BKE_paint_material_layer_channel_unlink(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  /* The neutral colour is recorded like an applied one, so the picker reads back what the map
+   * holds: a fresh map of the channel starts at white mapped through its own rule. */
+  ASSERT_TRUE(BKE_paint_material_layer_channel_value_get(
+      *bmain, *material, ordinal, PAINT_MATERIAL_CHANNEL_ROUGHNESS, recorded));
+  EXPECT_NEAR(recorded[0], 1.0f, 1e-6f);
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 3);
+  Image *roughness_map = entries[ordinal].channel_images.lookup_default(
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS, nullptr);
+  ASSERT_NE(roughness_map, nullptr);
+  const float neutral[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float mapped[4];
+  fill_map_color_for(PAINT_MATERIAL_CHANNEL_ROUGHNESS, neutral, mapped);
+  uint8_t expected[4];
+  BKE_image_buf_fill_color(expected, nullptr, 1, 1, mapped);
+  void *lock = nullptr;
+  ImBuf *buffer = BKE_image_acquire_ibuf(roughness_map, nullptr, &lock);
+  ASSERT_NE(buffer, nullptr);
+  ASSERT_NE(buffer->byte_buffer.data, nullptr);
+  for (int i = 0; i < 4; i++) {
+    EXPECT_EQ(buffer->byte_buffer.data[i], expected[i]) << "component " << i;
+  }
+  BKE_image_release_ibuf(roughness_map, buffer, lock);
 }
 
 TEST_F(PaintMaterialLayerEditTest, layer_kind_survives_reorder_and_duplicate)
@@ -2300,6 +2501,109 @@ TEST(PaintMaterialLayerChannelSelector, defaults_to_base_color)
 {
   PaintModeSettings settings;
   EXPECT_EQ(settings.stack_layer_channel, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Bake endpoint
+ *
+ * What a "Use layer result" bake of one stack row renders: the row's own color output and the
+ * socket its coverage is read from, found by the row's marker in one channel's chain.
+ * \{ */
+
+TEST_F(PaintMaterialLayerEditTest, bake_endpoint_resolve_finds_row_sockets)
+{
+  build_stack(2);
+  const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  const int ordinal = add_fill_layer(color, "Filler");
+  ASSERT_EQ(ordinal, 2);
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 3);
+  const bUUID marker = entries[ordinal].marker;
+  ASSERT_FALSE(BLI_uuid_is_nil(marker));
+
+  bNodeSocket *color_socket = nullptr;
+  bNodeSocket *mask_socket = nullptr;
+  ASSERT_TRUE(BKE_paint_material_layer_bake_endpoint_resolve(
+      *material, marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color_socket, &mask_socket));
+
+  /* The color endpoint is the row's own output: the Mix node the marker lives on. */
+  ASSERT_NE(color_socket, nullptr);
+  EXPECT_TRUE(BLI_uuid_equal(BKE_paint_material_layer_marker_get(color_socket->owner_node()),
+                             marker));
+  /* The mask endpoint is the output feeding the row's Factor input, not the input itself: a bake
+   * attaches output sockets, and the coverage weight a chain reads is what that output stands
+   * for -- for a freshly added Fill row, a coverage Multiply reading the map's Alpha. */
+  ASSERT_NE(mask_socket, nullptr);
+  CompositeMixNode mix;
+  ASSERT_TRUE(composite_mix_node_read(color_socket->owner_node(), mix));
+  ASSERT_NE(mix.factor, nullptr);
+  const bNodeLink *factor_link = sole_link_into(*const_cast<bNodeSocket *>(mix.factor));
+  ASSERT_NE(factor_link, nullptr);
+  EXPECT_EQ(mask_socket, factor_link->fromsock);
+
+  /* A marker no row carries refuses, leaving both outputs null. */
+  const bUUID bogus = BLI_uuid_generate_random();
+  EXPECT_FALSE(BKE_paint_material_layer_bake_endpoint_resolve(
+      *material, bogus, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color_socket, &mask_socket));
+  EXPECT_EQ(color_socket, nullptr);
+  EXPECT_EQ(mask_socket, nullptr);
+}
+
+TEST_F(PaintMaterialLayerEditTest, bake_endpoint_resolve_respects_channel)
+{
+  build_stack(2);
+  const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  const int ordinal = add_fill_layer(color, "Filler");
+  ASSERT_EQ(ordinal, 2);
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  const bUUID marker = entries[ordinal].marker;
+  ASSERT_FALSE(BLI_uuid_is_nil(marker));
+
+  /* Roughness was never wired on this stack, so no chain of its carries the row. */
+  bNodeSocket *color_socket = nullptr;
+  bNodeSocket *mask_socket = nullptr;
+  EXPECT_FALSE(BKE_paint_material_layer_bake_endpoint_resolve(
+      *material, marker, PAINT_MATERIAL_CHANNEL_ROUGHNESS, &color_socket, &mask_socket));
+  EXPECT_EQ(color_socket, nullptr);
+  EXPECT_EQ(mask_socket, nullptr);
+}
+
+TEST_F(PaintMaterialLayerEditTest, bake_endpoint_resolve_refuses_a_row_inside_a_folder)
+{
+  build_stack(3);
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  int group_ordinal = -1;
+  ASSERT_TRUE(
+      BKE_paint_material_layer_group_make(*bmain, *material, 1, 2, &group_ordinal, &error));
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
+  ASSERT_EQ(entries.size(), 4);
+  ASSERT_TRUE(entries[1].is_group);
+  ASSERT_EQ(entries[2].name, "L1");
+  const bUUID nested_marker = entries[2].marker;
+  ASSERT_FALSE(BLI_uuid_is_nil(nested_marker));
+
+  /* The row's sockets live in the folder's own node tree, which a bake attached at the material
+   * tree cannot route to; the resolve refuses it rather than naming an unroutable endpoint. */
+  bNodeSocket *color_socket = nullptr;
+  bNodeSocket *mask_socket = nullptr;
+  EXPECT_FALSE(BKE_paint_material_layer_bake_endpoint_resolve(
+      *material, nested_marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color_socket, &mask_socket));
+  EXPECT_EQ(color_socket, nullptr);
+  EXPECT_EQ(mask_socket, nullptr);
+
+  /* The folder row itself blends in the material's own tree, so its endpoint is routable. */
+  const bUUID group_marker = entries[1].marker;
+  ASSERT_FALSE(BLI_uuid_is_nil(group_marker));
+  EXPECT_TRUE(BKE_paint_material_layer_bake_endpoint_resolve(
+      *material, group_marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color_socket, &mask_socket));
+  EXPECT_NE(color_socket, nullptr);
+  EXPECT_NE(mask_socket, nullptr);
 }
 
 /** \} */

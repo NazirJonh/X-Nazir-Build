@@ -557,9 +557,9 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, correction_rows_are_addressable)
   ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params));
   bUUID c = {}, m = {};
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, material, 1, PaintMaterialCorrectionSection::Content, "C", &c));
+      *bmain, material, 1, PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "C", &c));
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, material, 1, PaintMaterialCorrectionSection::Mask, "M", &m));
+      *bmain, material, 1, PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, "M", &m));
 
   const StackSource &source = *stack_source_get(SO_STACK_SRC_PAINT_MATERIAL);
   StackReadContext ctx;

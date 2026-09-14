@@ -1626,7 +1626,12 @@ struct PaintModeSettings {
    * Not a paint target: strokes still follow #channel_image_bindings.
    */
   int stack_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
-  char _pad_stack_layer_channel[4] = {};
+  /**
+   * The channel the Layer Material tab's per-channel widgets address. RNA exposes only bakeable
+   * channels and normalizes legacy non-bakeable values on read without changing this stored value.
+   * Not a paint target: strokes still follow #channel_image_bindings.
+   */
+  int active_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 
   /**
    * The mask Image currently being painted instead of the material's channels, or an empty

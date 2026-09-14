@@ -101,7 +101,8 @@ static void insert_into_all_channels(Main &bmain,
   ASSERT_TRUE(chains_collect(ma, chains, error));
   for (ChannelChain &chain : chains) {
     ChainCorrection nodes;
-    ASSERT_TRUE(correction_channel_insert(bmain, chain, chain.layers[1], section, marker, nodes));
+    ASSERT_TRUE(correction_channel_insert(
+        bmain, chain, chain.layers[1], section, PaintMaterialCorrectionEffect::Paint, marker, nodes));
     ma.nodetree->ensure_topology_cache();
   }
 }
@@ -137,7 +138,13 @@ TEST_F(PaintMaterialLayerCorrectionTest, channel_insert_builds_absent_content_sh
   const bUUID marker = BLI_uuid_generate_random();
   ChainCorrection nodes;
   ASSERT_TRUE(correction_channel_insert(
-      *bmain, chain, layer, PaintMaterialCorrectionSection::Content, marker, nodes));
+      *bmain,
+      chain,
+      layer,
+      PaintMaterialCorrectionSection::Content,
+      PaintMaterialCorrectionEffect::Paint,
+      marker,
+      nodes));
   material->nodetree->ensure_topology_cache();
 
   EXPECT_TRUE(bke::paint_layer::node_is_correction(*nodes.mix));
@@ -171,6 +178,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, channel_insert_mask_goes_on_coverage_in
                                         chains.first(),
                                         layer,
                                         PaintMaterialCorrectionSection::Mask,
+                                        PaintMaterialCorrectionEffect::Paint,
                                         BLI_uuid_generate_random(),
                                         nodes));
   material->nodetree->ensure_topology_cache();
@@ -218,6 +226,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, disagreeing_channels_are_refused)
                                         chains.first(),
                                         chains.first().layers[1],
                                         PaintMaterialCorrectionSection::Content,
+                                        PaintMaterialCorrectionEffect::Paint,
                                         BLI_uuid_generate_random(),
                                         nodes));
   LayerEditPlan plan;
@@ -294,7 +303,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, add_creates_absent_correction_in_every_
   bUUID marker = {};
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, *material, 1, PaintMaterialCorrectionSection::Content, "Fix", &marker, &error));
+      *bmain, *material, 1, PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "Fix", &marker, &error));
   const Vector<PaintMaterialLayerStackEntry> list = entries();
   ASSERT_EQ(list[1].content_corrections.size(), 1);
   EXPECT_EQ(list[1].content_corrections[0].name, "Fix");
@@ -307,7 +316,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, add_on_bare_bottom_normalizes_first)
   build_two_layer_stack();
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   EXPECT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, *material, 0, PaintMaterialCorrectionSection::Content, nullptr, nullptr, &error));
+      *bmain, *material, 0, PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, nullptr, nullptr, &error));
   EXPECT_FALSE(entries()[0].is_bare_base);
 }
 
@@ -319,10 +328,10 @@ TEST_F(PaintMaterialLayerCorrectionTest, content_correction_refused_on_group)
   ASSERT_TRUE(
       BKE_paint_material_layer_group_make(*bmain, *material, 1, 1, &group_ordinal, &error));
   EXPECT_FALSE(BKE_paint_material_layer_correction_add(*bmain, *material, group_ordinal,
-      PaintMaterialCorrectionSection::Content, nullptr, nullptr, &error));
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, nullptr, nullptr, &error));
   EXPECT_EQ(error, PaintMaterialLayerEditError::CorrectionNotAllowedOnGroup);
   EXPECT_TRUE(BKE_paint_material_layer_correction_add(*bmain, *material, group_ordinal,
-      PaintMaterialCorrectionSection::Mask, nullptr, nullptr, &error));
+      PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, nullptr, nullptr, &error));
 }
 
 TEST_F(PaintMaterialLayerCorrectionTest, mask_correction_on_group_is_listed_and_removable)
@@ -351,7 +360,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, mask_correction_on_group_is_listed_and_
 
   bUUID marker = {};
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain, *material, group_ordinal,
-      PaintMaterialCorrectionSection::Mask, "M", &marker, &error));
+      PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, "M", &marker, &error));
 
   /* The model lists the correction under the folder's row (spec 18 §4.5): the Outliner reads
    * this model, and remove and rename find the row through it. */
@@ -381,11 +390,11 @@ TEST_F(PaintMaterialLayerCorrectionTest, reorder_within_section_only)
   build_two_layer_stack();
   bUUID a = {}, b = {}, m = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "B", &b);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "B", &b);
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Mask, "M", &m);
+      PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, "M", &m);
   ASSERT_TRUE(BKE_paint_material_layer_correction_reorder(*bmain, *material, b, 0));
   const Vector<PaintMaterialLayerStackEntry> list = entries();
   EXPECT_TRUE(BLI_uuid_equal(list[1].content_corrections[0].marker, b));
@@ -399,7 +408,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, remove_set_enabled_rename)
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   EXPECT_TRUE(BKE_paint_material_layer_correction_set_enabled(*bmain, *material, a, false));
   EXPECT_FALSE(entries()[1].content_corrections[0].enabled);
   EXPECT_TRUE(BKE_paint_material_layer_correction_rename(*bmain, *material, a, "Renamed"));
@@ -416,7 +425,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, set_enabled_gates_over_pair_instead_of_
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   BKE_paint_material_layer_correction_channel_enabled_set(
       *bmain, *material, a, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true);
   ASSERT_TRUE(BKE_paint_material_layer_correction_set_enabled(*bmain, *material, a, false));
@@ -517,7 +526,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, enabling_channel_creates_tagged_map_of_
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
       *bmain, *material, a, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
   const PaintMaterialLayerCorrectionEntry &corr = entries()[1].content_corrections[0];
@@ -539,7 +548,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, corrections_scale_resizes_correction_ma
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   BKE_paint_material_layer_correction_channel_enabled_set(
       *bmain, *material, a, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true);
   ASSERT_TRUE(BKE_paint_material_layer_corrections_scale(*bmain, *material, 1, 16, 16));
@@ -557,7 +566,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, absent_parent_channel_contributes_throu
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   ASSERT_EQ(BKE_paint_material_layer_channel_state_get(
                 *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_ROUGHNESS),
             PaintMaterialLayerChannelState::Absent);
@@ -583,7 +592,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, disabled_parent_keeps_corrections_contr
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   BKE_paint_material_layer_correction_channel_enabled_set(
       *bmain, *material, a, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true);
   ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
@@ -600,7 +609,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, ao_only_correction_keeps_params_on_mix_
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
       *bmain, *material, a, PAINT_MATERIAL_CHANNEL_AO, true));
   PaintMaterialLayerCorrectionEntry corr = entries()[1].content_corrections[0];
@@ -617,7 +626,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, corrections_travel_with_move_duplicate_
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   BKE_paint_material_layer_correction_channel_enabled_set(
       *bmain, *material, a, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true);
 
@@ -651,7 +660,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, mask_remove_keeps_mask_corrections_on_c
   ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, nullptr));
   bUUID m = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Mask, "M", &m);
+      PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, "M", &m);
   ASSERT_TRUE(BKE_paint_material_layer_mask_remove(*bmain, *material, 1, nullptr));
   const PaintMaterialLayerStackEntry top = entries()[1];
   EXPECT_FALSE(top.channel_images.contains(PAINT_LAYER_MAP_MASK));
@@ -664,7 +673,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, copy_enables_parent_channel_and_scales)
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   BKE_paint_material_layer_correction_channel_enabled_set(
       *bmain, *material, a, PAINT_MATERIAL_CHANNEL_METALLIC, true);
 
@@ -701,7 +710,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, copy_skips_missing_and_group_content)
   BKE_paint_material_layer_group_make(*bmain, *material, 1, 1, &group_ordinal, nullptr);
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 0,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   const PaintMaterialCorrectionRef refs[] = {
       {material->id.session_uid, a}, {material->id.session_uid, BLI_uuid_generate_random()}};
   Vector<bUUID> created;
@@ -718,7 +727,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, active_layer_resolves_correction_from_b
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   BKE_paint_material_layer_correction_channel_enabled_set(
       *bmain, *material, a, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true);
   Image *map = entries()[1].content_corrections[0].channel_images.lookup(
@@ -742,7 +751,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, active_channelless_correction_survives_
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   PaintModeSettings settings = {};
   BKE_paint_material_active_correction_set(material, a);
   std::optional<PaintMaterialActiveLayer> active = BKE_paint_material_active_layer_get(*bmain,
@@ -759,7 +768,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, realign_restores_missing_correction_nod
   build_two_layer_stack();
   bUUID a = {};
   BKE_paint_material_layer_correction_add(*bmain, *material, 1,
-      PaintMaterialCorrectionSection::Content, "A", &a);
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a);
   /* Damage: take the correction out of the Roughness channel only, links closed properly. */
   Vector<ChannelChain> chains;
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
@@ -796,9 +805,9 @@ TEST_F(PaintMaterialLayerCorrectionTest, switched_off_row_mutes_its_maps)
   bUUID b = {};
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, *material, 1, PaintMaterialCorrectionSection::Content, "A", &a, &error));
+      *bmain, *material, 1, PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "A", &a, &error));
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, *material, 1, PaintMaterialCorrectionSection::Content, "B", &b, &error));
+      *bmain, *material, 1, PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Paint, "B", &b, &error));
   ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
       *bmain, *material, a, PAINT_MATERIAL_CHANNEL_ROUGHNESS, true, &error));
   ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
@@ -845,7 +854,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, mask_correction_follows_what_the_row_pu
   bUUID m = {};
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, *material, 1, PaintMaterialCorrectionSection::Mask, "M", &m, &error));
+      *bmain, *material, 1, PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, "M", &m, &error));
 
   Vector<ChannelChain> chains;
   ASSERT_TRUE(chains_collect(*material, chains, error));
@@ -875,7 +884,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, disabling_base_zeroes_mask_chain_and_re
   bUUID m = {};
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, *material, 1, PaintMaterialCorrectionSection::Mask, "M", &m, &error));
+      *bmain, *material, 1, PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, "M", &m, &error));
   /* A second channel on, so switching Base Color off is not the row's last one. */
   ASSERT_TRUE(BKE_paint_material_layer_channel_enabled_set(
       *bmain, *material, 1, PAINT_MATERIAL_CHANNEL_ROUGHNESS, true, nullptr, &error));
@@ -924,7 +933,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, mask_correction_has_no_channel_switch)
   bUUID m = {};
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, *material, 1, PaintMaterialCorrectionSection::Mask, "M", &m, &error));
+      *bmain, *material, 1, PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, "M", &m, &error));
   EXPECT_FALSE(BKE_paint_material_layer_correction_channel_enabled_set(
       *bmain, *material, m, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false, &error));
   EXPECT_EQ(error, PaintMaterialLayerEditError::CorrectionSectionMismatch);
@@ -938,7 +947,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, folder_with_mask_corrections_refuses_un
   ASSERT_TRUE(
       BKE_paint_material_layer_group_make(*bmain, *material, 1, 1, &group_ordinal, &error));
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, *material, group_ordinal, PaintMaterialCorrectionSection::Mask, "M", nullptr, &error));
+      *bmain, *material, group_ordinal, PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, "M", nullptr, &error));
   EXPECT_FALSE(
       BKE_paint_material_layer_group_ungroup(*bmain, *material, group_ordinal, nullptr, &error));
   EXPECT_EQ(error, PaintMaterialLayerEditError::GroupHasMaskCorrections);
@@ -952,7 +961,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, removing_folder_with_mask_correction_ta
   ASSERT_TRUE(
       BKE_paint_material_layer_group_make(*bmain, *material, 1, 1, &group_ordinal, &error));
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, *material, group_ordinal, PaintMaterialCorrectionSection::Mask, "M", nullptr, &error));
+      *bmain, *material, group_ordinal, PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, "M", nullptr, &error));
   auto instance_num = [&]() {
     int num = 0;
     for (const bNode &node : material->nodetree->nodes) {
@@ -970,7 +979,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, duplicate_counts_one_user_per_mask_map_
   build_two_layer_stack();
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   ASSERT_TRUE(BKE_paint_material_layer_correction_add(
-      *bmain, *material, 1, PaintMaterialCorrectionSection::Mask, "M", nullptr, &error));
+      *bmain, *material, 1, PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, "M", nullptr, &error));
   int copy_ordinal = -1;
   ASSERT_TRUE(BKE_paint_material_layer_duplicate(*bmain, *material, 1, &copy_ordinal, &error));
 
@@ -994,6 +1003,345 @@ TEST_F(PaintMaterialLayerCorrectionTest, duplicate_counts_one_user_per_mask_map_
   /* One shared mask map node per channel in the copy: each one a user of the copied image. */
   EXPECT_EQ(source_map->id.us, node_users(source_map));
   EXPECT_EQ(copy_map->id.us, node_users(copy_map));
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, CorrectionChannelValueApply_RoundTrips)
+{
+  /* A Fill layer with its Base Color map wired: the row the Fill correction hangs under. */
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.kind = PaintMaterialLayerKind::Fill;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+
+  bUUID created = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain, *material, 1,
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Fill, nullptr,
+      &created, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true, &error));
+
+  /* The apply re-fills the correction's own map and records the raw value on its Mix. */
+  const float value[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_value_apply(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, value, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  float recorded[4];
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_value_get(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, recorded));
+  EXPECT_NEAR(recorded[1], 0.4f, 1e-6f);
+
+  /* The pixels moved too: the map takes what a Fill created there would, so the expectation is
+   * whatever the generator's own fill writes for the same colour. */
+  const Vector<PaintMaterialLayerStackEntry> list = entries();
+  ASSERT_EQ(list[1].content_corrections.size(), 1);
+  Image *map = list[1].content_corrections[0].channel_images.lookup_default(
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr);
+  ASSERT_NE(map, nullptr);
+  uint8_t expected[4];
+  BKE_image_buf_fill_color(expected, nullptr, 1, 1, value);
+  void *lock = nullptr;
+  ImBuf *buffer = BKE_image_acquire_ibuf(map, nullptr, &lock);
+  ASSERT_NE(buffer, nullptr);
+  ASSERT_NE(buffer->byte_buffer.data, nullptr);
+  for (int i = 0; i < 4; i++) {
+    EXPECT_EQ(buffer->byte_buffer.data[i], expected[i]) << "component " << i;
+  }
+  BKE_image_release_ibuf(map, buffer, lock);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, CorrectionChannelImageSet_ReplacesMap)
+{
+  /* A Fill layer with its Base Color map wired: the row the Fill correction hangs under. */
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.kind = PaintMaterialLayerKind::Fill;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+
+  bUUID created = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain, *material, 1,
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Fill, nullptr,
+      &created, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true, &error));
+
+  /* An image from outside the stack, carrying the one user a new data-block has. */
+  const float blank[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *first = BKE_image_add_generated(
+      bmain, 64, 64, "external", 32, false, IMA_GENTYPE_BLANK, blank, false, false, false);
+  ASSERT_NE(first, nullptr);
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_image_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, *first, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  /* The map the model lists is the image handed over, tagged the way a map of the correction
+   * is; the map the channel was created with is orphaned by the replacement and freed. */
+  const Vector<PaintMaterialLayerStackEntry> list = entries();
+  ASSERT_EQ(list[1].content_corrections.size(), 1);
+  EXPECT_EQ(list[1].content_corrections[0].channel_images.lookup_default(
+                PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr),
+            first);
+  EXPECT_TRUE(BLI_uuid_equal(first->paint_layer_id, created));
+  EXPECT_EQ(first->paint_layer_channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+
+  /* Assigning again replaces: the lookup answers with the second image, and the first keeps only
+   * the user its holder outside the stack gave it -- the map node's user moved. */
+  Image *second = BKE_image_add_generated(
+      bmain, 64, 64, "external2", 32, false, IMA_GENTYPE_BLANK, blank, false, false, false);
+  ASSERT_NE(second, nullptr);
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_image_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, *second, &error));
+  EXPECT_EQ(entries()[1].content_corrections[0].channel_images.lookup_default(
+                PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr),
+            second);
+  EXPECT_EQ(first->id.us, 1);
+
+  /* A channel the correction is not wired on is refused, leaving it as it was. */
+  EXPECT_FALSE(BKE_paint_material_layer_correction_channel_image_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_ROUGHNESS, *second, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::IndexOutOfRange);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, correction_channel_unlink_restores_last_applied_value)
+{
+  /* A Fill layer with its Base Color map wired: the row the Fill correction hangs under. */
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.kind = PaintMaterialLayerKind::Fill;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+
+  bUUID created = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain, *material, 1,
+      PaintMaterialCorrectionSection::Content, PaintMaterialCorrectionEffect::Fill, nullptr,
+      &created, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true, &error));
+
+  /* Give the correction's map a value, so there is one to restore. */
+  const float value[4] = {0.3f, 0.3f, 0.3f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_value_apply(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, value, &error));
+
+  /* An image from outside the stack takes the map over, the way a drop does. */
+  const float blank[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *external = BKE_image_add_generated(
+      bmain, 16, 16, "external", 32, false, IMA_GENTYPE_BLANK, blank, false, false, false);
+  ASSERT_NE(external, nullptr);
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_image_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, *external, &error));
+
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_unlink(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  /* The channel shows a fresh map of the correction's own again; the dropped image is not it. */
+  const Vector<PaintMaterialLayerStackEntry> list = entries();
+  ASSERT_EQ(list[1].content_corrections.size(), 1);
+  Image *map = list[1].content_corrections[0].channel_images.lookup_default(
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr);
+  ASSERT_NE(map, nullptr);
+  EXPECT_NE(map, external);
+
+  /* The dropped image's pixels were not touched: the unlink writes only its own maps. */
+  auto expect_pixel = [](Image *image, const float expected_color[4]) {
+    uint8_t expected[4];
+    BKE_image_buf_fill_color(expected, nullptr, 1, 1, expected_color);
+    void *lock = nullptr;
+    ImBuf *buffer = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_NE(buffer->byte_buffer.data, nullptr);
+    for (int i = 0; i < 4; i++) {
+      EXPECT_EQ(buffer->byte_buffer.data[i], expected[i]) << "component " << i;
+    }
+    BKE_image_release_ibuf(image, buffer, lock);
+  };
+  expect_pixel(external, blank);
+  expect_pixel(map, value);
+
+  /* The record survived the round trip through the external image. */
+  float recorded[4];
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_value_get(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, recorded));
+  EXPECT_NEAR(recorded[0], 0.3f, 1e-6f);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, FillMaskCorrection_RefusesSecondChannel)
+{
+  /* A Fill layer with its Base Color map wired: the row the Fill mask hangs under. */
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.kind = PaintMaterialLayerKind::Fill;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+
+  bUUID created = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain, *material, 1,
+      PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Fill, nullptr,
+      &created, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  /* Picking the correction's one grayscale channel is allowed. */
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  /* A second channel is the multi-channel attempt the single-channel form refuses, before any
+   * node of it is touched: no Roughness chain is wired by the refusal. */
+  EXPECT_FALSE(BKE_paint_material_layer_correction_channel_enabled_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_ROUGHNESS, true, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::CorrectionSectionMismatch);
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  EXPECT_EQ(chains.size(), 1);
+
+  /* Disabling the picked channel and re-enabling it stay allowed. */
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, FillMaskCorrection_ImageSet_OnTheSingleChannel)
+{
+  /* A Fill layer with its Base Color map wired: the row the Fill mask hangs under. */
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.kind = PaintMaterialLayerKind::Fill;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+
+  bUUID created = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain, *material, 1,
+      PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Fill, nullptr,
+      &created, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true, &error));
+
+  /* An image from outside the stack, carrying the one user a new data-block has. */
+  const float blank[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *external = BKE_image_add_generated(
+      bmain, 16, 16, "external mask", 32, false, IMA_GENTYPE_BLANK, blank, false, false, false);
+  ASSERT_NE(external, nullptr);
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_image_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, *external, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  /* The mask map the model lists is the image handed over, tagged with the correction's marker
+   * and the mask role every reader of a mask map keys on. */
+  const Vector<PaintMaterialLayerStackEntry> list = entries();
+  ASSERT_EQ(list[1].mask_corrections.size(), 1);
+  EXPECT_EQ(list[1].mask_corrections[0].channel_images.lookup_default(PAINT_LAYER_MAP_MASK,
+                                                                      nullptr),
+            external);
+  EXPECT_TRUE(BLI_uuid_equal(external->paint_layer_id, created));
+  EXPECT_EQ(external->paint_layer_channel, PAINT_LAYER_MAP_MASK);
+
+  /* Another channel is still the multi-channel attempt: the assignment is refused. */
+  EXPECT_FALSE(BKE_paint_material_layer_correction_channel_image_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_ROUGHNESS, *external, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::CorrectionSectionMismatch);
+
+  /* A painted mask correction keeps refusing the assignment: its map is synced, not assigned. */
+  bUUID painted = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain, *material, 1,
+      PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Paint, nullptr,
+      &painted, &error));
+  EXPECT_FALSE(BKE_paint_material_layer_correction_channel_image_set(
+      *bmain, *material, painted, PAINT_MATERIAL_CHANNEL_BASE_COLOR, *external, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::CorrectionSectionMismatch);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, FillMaskCorrection_Unlink_NeverWritesTheDroppedImage)
+{
+  /* A Fill layer with its Base Color map wired: the row the Fill mask hangs under. */
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  params.kind = PaintMaterialLayerKind::Fill;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *material, params, nullptr, &error));
+
+  bUUID created = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain, *material, 1,
+      PaintMaterialCorrectionSection::Mask, PaintMaterialCorrectionEffect::Fill, nullptr,
+      &created, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_enabled_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true, &error));
+
+  /* Give the correction's map a value, so there is one to restore. */
+  const float value[4] = {0.3f, 0.3f, 0.3f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_value_apply(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, value, &error));
+
+  /* An image from outside the stack takes the map over, the way a drop does. Its bytes are
+   * grabbed before the unlink runs. */
+  const float blank[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *external = BKE_image_add_generated(
+      bmain, 16, 16, "external mask", 32, false, IMA_GENTYPE_BLANK, blank, false, false, false);
+  ASSERT_NE(external, nullptr);
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_image_set(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, *external, &error));
+  uint8_t before[16 * 16 * 4];
+  {
+    void *lock = nullptr;
+    ImBuf *buffer = BKE_image_acquire_ibuf(external, nullptr, &lock);
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_NE(buffer->byte_buffer.data, nullptr);
+    ASSERT_EQ(buffer->x * buffer->y * 4, int(sizeof(before)));
+    for (int i = 0; i < int(sizeof(before)); i++) {
+      before[i] = buffer->byte_buffer.data[i];
+    }
+    BKE_image_release_ibuf(external, buffer, lock);
+  }
+
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_unlink(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+
+  /* The dropped image's pixels were not touched: the unlink rewired a fresh map of the
+   * correction's own and never wrote to the one the drop handed over. */
+  bool unchanged = true;
+  {
+    void *lock = nullptr;
+    ImBuf *buffer = BKE_image_acquire_ibuf(external, nullptr, &lock);
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_NE(buffer->byte_buffer.data, nullptr);
+    for (int i = 0; i < int(sizeof(before)); i++) {
+      if (buffer->byte_buffer.data[i] != before[i]) {
+        unchanged = false;
+        break;
+      }
+    }
+    BKE_image_release_ibuf(external, buffer, lock);
+  }
+  EXPECT_TRUE(unchanged);
+
+  /* The mask the model lists is a fresh map of the correction's own again, not the dropped
+   * image; the dropped image lost the tag with the node. */
+  const Vector<PaintMaterialLayerStackEntry> list = entries();
+  ASSERT_EQ(list[1].mask_corrections.size(), 1);
+  const PaintMaterialLayerCorrectionEntry &mask_row = list[1].mask_corrections[0];
+  Image *map = mask_row.channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr);
+  ASSERT_NE(map, nullptr);
+  EXPECT_NE(map, external);
+  EXPECT_TRUE(BLI_uuid_is_nil(external->paint_layer_id));
+
+  /* The record survived the round trip through the external image. */
+  float recorded[4];
+  ASSERT_TRUE(BKE_paint_material_layer_correction_channel_value_get(
+      *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, recorded));
+  EXPECT_NEAR(recorded[0], 0.3f, 1e-6f);
 }
 
 }  // namespace blender::bke::tests

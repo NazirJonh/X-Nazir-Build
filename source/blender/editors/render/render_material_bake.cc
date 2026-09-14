@@ -54,6 +54,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_layer_edit.hh"
 #include "BKE_scene.hh"
 
 #include "BLI_assert.h"
@@ -694,12 +695,21 @@ struct BakeSocketRequest {
   /** The socket to read. May live in a group nested anywhere inside the material's own tree. */
   const bNodeSocket *source = nullptr;
   /**
+   * The row's coverage, when the request bakes a layer row: an output feeding the row's Factor
+   * input, delivered under #alpha_name and composed into the buffer's alpha. Null when the whole
+   * channel is baked, whose alpha is opaque by construction. Lives in the same tree as #source,
+   * so #group_path serves both.
+   */
+  const bNodeSocket *alpha_source = nullptr;
+  /**
    * The group instance nodes leading to #source, outermost first; empty when it is in the root
    * tree. Must come from the same walk that found #source -- see #route_socket_to_root.
    */
   Vector<const bNode *> group_path;
   /** Unique within one bake: names the AOV, and the group output routed for it at every level. */
   char name[64] = "";
+  /** The AOV #alpha_source is delivered under, when it is set. */
+  char alpha_name[80] = "";
   /** Delivered as an #AOV_TYPE_COLOR pass rather than an #AOV_TYPE_VALUE one. */
   bool is_color = false;
   /** Encode the signed vector the socket produces into the [0, 1] range a normal map stores. */
@@ -764,6 +774,33 @@ static bool bake_requests_attach(Main &bmain,
                  request.name,
                  int(request.is_color),
                  int(request.encode_vector));
+
+    if (request.alpha_source != nullptr) {
+      /* A layer-row bake renders the row's coverage too, under its own Value AOV: the read-back
+       * composes it into the buffer's alpha instead of the opaque default a whole-channel bake
+       * stands for. */
+      bNode *alpha_aov = bke::node_add_static_node(nullptr, tree, SH_NODE_OUTPUT_AOV);
+      if (alpha_aov == nullptr || alpha_aov->storage == nullptr) {
+        return false;
+      }
+      STRNCPY(static_cast<NodeShaderOutputAOV *>(alpha_aov->storage)->name, request.alpha_name);
+      bNodeSocket *alpha_input = bke::node_find_socket(*alpha_aov, SOCK_IN, "Value"_ustr);
+      if (alpha_input == nullptr) {
+        return false;
+      }
+      if (!route_socket_to_root(bmain,
+                                tree,
+                                *request.alpha_source,
+                                request.group_path,
+                                *alpha_aov,
+                                *alpha_input,
+                                request.alpha_name))
+      {
+        PBR_BAKE_LOG("prepare: AOV='%s' routing to root tree failed\n", request.alpha_name);
+        return false;
+      }
+      PBR_BAKE_LOG("prepare: AOV='%s' routed ok\n", request.alpha_name);
+    }
   }
   return true;
 }
@@ -848,6 +885,11 @@ static bool bake_requests_render(Main &bmain,
     ViewLayerAOV *aov = BKE_view_layer_add_aov(view_layer);
     STRNCPY(aov->name, request.name);
     aov->type = request.is_color ? AOV_TYPE_COLOR : AOV_TYPE_VALUE;
+    if (request.alpha_source != nullptr) {
+      ViewLayerAOV *alpha_aov = BKE_view_layer_add_aov(view_layer);
+      STRNCPY(alpha_aov->name, request.alpha_name);
+      alpha_aov->type = AOV_TYPE_VALUE;
+    }
   }
   BKE_view_layer_synced_ensure(bmain, scene, view_layer);
 
@@ -942,6 +984,30 @@ static bool bake_requests_render(Main &bmain,
           dst[texel * 4 + 1] = value;
           dst[texel * 4 + 2] = value;
           dst[texel * 4 + 3] = 1.0f;
+        }
+      }
+      if (request.alpha_source != nullptr) {
+        const RenderPass *alpha_pass = RE_pass_find_by_name(render_layer, request.alpha_name, "");
+        if (alpha_pass == nullptr || alpha_pass->ibuf == nullptr ||
+            alpha_pass->ibuf->float_data() == nullptr || !ELEM(alpha_pass->channels, 1, 4) ||
+            alpha_pass->ibuf->x != resolution || alpha_pass->ibuf->y != resolution)
+        {
+          PBR_BAKE_LOG("render: alpha AOV='%s' unusable (pass=%p ibuf=%p channels=%d)\n",
+                       request.alpha_name,
+                       (void *)alpha_pass,
+                       alpha_pass != nullptr ? (void *)alpha_pass->ibuf : nullptr,
+                       alpha_pass != nullptr ? alpha_pass->channels : -1);
+          IMB_freeImBuf(ibuf);
+          success = false;
+          break;
+        }
+        const float *alpha_src = alpha_pass->ibuf->float_data();
+        /* The row's coverage replaces the opaque alpha the compose above wrote. A Value AOV is
+         * delivered either as one channel or broadcast to RGB, so channel 0 is the value either
+         * way. */
+        const int64_t alpha_stride = alpha_pass->channels;
+        for (const int64_t texel : IndexRange(texel_num)) {
+          dst[texel * 4 + 3] = alpha_src[texel * alpha_stride];
         }
       }
       r_images[request_index] = ibuf;
@@ -1373,8 +1439,14 @@ struct MaterialBakeImagesJob {
   /** Parallel arrays: the target for #channels[i] is the image with #target_session_uids[i]. */
   Vector<uint32_t> target_session_uids;
   Vector<eMaterialPaintChannel> channels;
+  /** "Use layer result" per target, parallel to #channels; empty for an ordinary target. */
+  Vector<std::optional<BakeSourceOverride>> source_overrides;
   /** Rendered buffers, one per entry of #channels, filled by the worker. Owned. */
   Vector<ImBuf *> rendered;
+  /** Channels whose override failed to resolve in the worker, deduplicated. */
+  Vector<eMaterialPaintChannel> override_failures;
+  /** Targets minted for a channel in #override_failures, freed by the endjob. */
+  Vector<uint32_t> orphan_target_uids;
   int size = 0;
   /** Node-tree hash the targets carry once this bake lands. */
   uint64_t baked_hash = 0;
@@ -1515,6 +1587,79 @@ static void bake_target_image_write_back(Image &image, const ImBuf &rendered)
   WM_main_add_notifier(NC_IMAGE | ND_DISPLAY, &image);
 }
 
+/**
+ * Point requests with a "Use layer result" target at their stack row instead of the whole channel.
+ *
+ * Resolved on the localized copy the worker renders: the job's overrides name the row by marker,
+ * since a socket pointer taken on the calling thread would belong to the original material and not
+ * to this copy. A row's sockets live in the material's root tree -- the resolver refuses rows
+ * inside folder groups -- so the group path the channel's own source may have needed does not
+ * apply to them and is dropped. The AOV's Color/Value choice and any vector encoding stay as the
+ * channel descriptor built them, because the target image's colorspace and layout still describe
+ * the channel, not the row.
+ *
+ * A row that cannot be resolved cannot be baked: its request is dropped, the channel recorded in
+ * #override_failures and its targets' uids in #orphan_target_uids for the endjob to clean up. The
+ * worker itself never frees or creates IDs.
+ */
+static void bake_source_override_apply(MaterialBakeImagesJob &job,
+                                       Material &bake_material,
+                                       Vector<BakeSocketRequest> &requests,
+                                       Vector<int> &request_channels)
+{
+  const bool any_override = std::any_of(
+      job.source_overrides.begin(),
+      job.source_overrides.end(),
+      [](const std::optional<BakeSourceOverride> &override) { return override.has_value(); });
+  if (!any_override) {
+    return;
+  }
+  for (int64_t request_index = requests.size() - 1; request_index >= 0; request_index--) {
+    /* One render per channel: the first target of the channel that carries an override decides
+     * what the channel's single request renders, whatever the other targets of it asked for. */
+    const eMaterialPaintChannel channel = eMaterialPaintChannel(request_channels[request_index]);
+    int64_t channel_index = -1;
+    for (const int64_t target_index : job.channels.index_range()) {
+      if (job.channels[target_index] == channel && job.source_overrides[target_index]) {
+        channel_index = target_index;
+        break;
+      }
+    }
+    if (channel_index < 0) {
+      continue;
+    }
+    const std::optional<BakeSourceOverride> &override = job.source_overrides[channel_index];
+    bNodeSocket *color_socket = nullptr;
+    bNodeSocket *mask_socket = nullptr;
+    if (!BKE_paint_material_layer_bake_endpoint_resolve(bake_material,
+                                                        override->layer_marker,
+                                                        int(override->channel),
+                                                        &color_socket,
+                                                        &mask_socket))
+    {
+      PBR_BAKE_LOG("job: override for channel=%d did not resolve, dropping request\n",
+                   request_channels[request_index]);
+      requests.remove(request_index);
+      request_channels.remove(request_index);
+      job.override_failures.append_non_duplicates(override->channel);
+      /* Every target of the channel stands for a bake that cannot happen. */
+      for (const int64_t target_index : job.channels.index_range()) {
+        if (job.channels[target_index] == override->channel) {
+          job.orphan_target_uids.append_non_duplicates(job.target_session_uids[target_index]);
+        }
+      }
+      continue;
+    }
+    BakeSocketRequest &request = requests[request_index];
+    request.source = color_socket;
+    request.alpha_source = mask_socket;
+    if (mask_socket != nullptr) {
+      SNPRINTF(request.alpha_name, "%s__ALPHA", request.name);
+    }
+    request.group_path.clear();
+  }
+}
+
 static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *worker_status)
 {
   MaterialBakeImagesJob &job = *static_cast<MaterialBakeImagesJob *>(customdata);
@@ -1549,6 +1694,9 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
       request_channels.remove(request_index);
     }
   }
+  /* Applied before the empty and stop checks, so a bake whose requests were all overridden away
+   * short-circuits through either of them. */
+  bake_source_override_apply(job, bake_material, requests, request_channels);
   if (requests.is_empty()) {
     baked = false;
   }
@@ -1611,6 +1759,25 @@ static void material_bake_images_endjob(void *customdata)
   Main *bmain = G_MAIN;
   if (bmain == nullptr) {
     return;
+  }
+  /* An override that failed to resolve worker-side left its targets minted for a bake that cannot
+   * happen, and the worker never frees IDs. Their pixels are never written -- the dropped request
+   * leaves the channel's buffer null -- so they are freed here instead, whatever the bake's own
+   * staleness below. */
+  for (const uint32_t session_uid : job.orphan_target_uids) {
+    Image *orphan = nullptr;
+    for (Image &image : bmain->images) {
+      if (image.id.session_uid == session_uid) {
+        orphan = &image;
+        break;
+      }
+    }
+    if (orphan != nullptr) {
+      BKE_id_free(bmain, &orphan->id);
+    }
+    /* Released again by #material_bake_images_free, which always follows; the count makes that a
+     * no-op, but a later bake must not collide with the claim while the job is still alive. */
+    material_bake_images_pending_remove(session_uid);
   }
   Material *source_material = nullptr;
   for (Material &material : bmain->materials) {
@@ -1715,6 +1882,23 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
       result.skipped_unavailable.append_non_duplicates(target.channel);
       continue;
     }
+    if (target.source_override) {
+      bNodeSocket *color_socket = nullptr;
+      bNodeSocket *mask_socket = nullptr;
+      if (!BKE_paint_material_layer_bake_endpoint_resolve(*params.material,
+                                                          target.source_override->layer_marker,
+                                                          int(target.source_override->channel),
+                                                          &color_socket,
+                                                          &mask_socket))
+      {
+        /* The target #Image is created synchronously on this thread before any worker runs, so an
+         * override that cannot resolve here must not mint one. The worker still re-resolves the
+         * same marker on its own localized copy -- the sockets of the original do not belong to
+         * it -- and a failure there frees what this preflight let through. */
+        result.skipped_unavailable.append_non_duplicates(target.channel);
+        continue;
+      }
+    }
     const bool duplicate = std::any_of(
         to_create.begin(), to_create.end(), [&](const BakeTargetSpec *other) {
           return other->channel == target.channel && other->existing == target.existing;
@@ -1738,6 +1922,7 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 
   Vector<eMaterialPaintChannel> render_channels;
   Vector<uint32_t> render_target_uids;
+  Vector<std::optional<BakeSourceOverride>> render_source_overrides;
   for (const BakeTargetSpec *target : to_create) {
     const eMaterialPaintChannel channel = target->channel;
     Image *image = target->existing != nullptr ? target->existing :
@@ -1766,6 +1951,7 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
     }
     render_channels.append(channel);
     render_target_uids.append(image->id.session_uid);
+    render_source_overrides.append(target->source_override);
   }
 
   result.ok = !result.created.is_empty();
@@ -1785,6 +1971,7 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
                      LIB_ID_CREATE_LOCAL | LIB_ID_COPY_LOCALIZE | LIB_ID_COPY_NO_ANIMDATA));
   job->target_session_uids = std::move(render_target_uids);
   job->channels = std::move(render_channels);
+  job->source_overrides = std::move(render_source_overrides);
   job->rendered.resize(job->channels.size(), nullptr);
   job->size = size;
   job->baked_hash = current_hash;
@@ -1805,6 +1992,24 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
   if (params.blocking) {
     material_bake_images_startjob(job, nullptr);
     material_bake_images_endjob(job);
+    /* Blocking callers get the full outcome: the endjob freed the image of every override that
+     * failed worker-side, so the result must not go on naming it. A non-blocking caller only gets
+     * the endjob-side free, and its result was complete before the worker ran -- there the freed
+     * image has to be recognized by its session UID. */
+    result.failed_overrides = job->override_failures;
+    if (!result.failed_overrides.is_empty()) {
+      Vector<Image *> created;
+      Vector<eMaterialPaintChannel> created_channels;
+      for (const int64_t i : result.created.index_range()) {
+        if (!result.failed_overrides.contains(result.created_channels[i])) {
+          created.append(result.created[i]);
+          created_channels.append(result.created_channels[i]);
+        }
+      }
+      result.created = std::move(created);
+      result.created_channels = std::move(created_channels);
+      result.ok = !result.created.is_empty();
+    }
     material_bake_images_free(job);
     return result;
   }

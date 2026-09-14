@@ -839,6 +839,8 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
   if (kind_info.takes_color) {
     args.color = fill_color;
   }
+  /* Which effect a correction kind applies; kinds that apply no effect ignore it. */
+  args.effect = RNA_enum_get(op->ptr, "effect");
   return outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal, args) >= 0 ?
              OPERATOR_FINISHED :
              OPERATOR_CANCELLED;
@@ -2623,6 +2625,20 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
                                                0.0f,
                                                1.0f);
   RNA_def_property_subtype(fill_prop, PROP_COLOR_GAMMA);
+  /* Which effect a correction kind applies. The values are the paint source's own effect
+   * numbering; the kinds that mean nothing by it leave it at its default. */
+  static const EnumPropertyItem correction_effect_items[] = {
+      {0, "PAINT", 0, "Paint", "Painted with a brush"},
+      {1, "FILL", 0, "Fill", "A flat colour or texture, not painted with a brush"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  PropertyRNA *effect_prop = RNA_def_enum(ot->srna,
+                                          "effect",
+                                          correction_effect_items,
+                                          0,
+                                          "Effect",
+                                          "What a correction row applies");
+  RNA_def_property_flag(effect_prop, PROP_HIDDEN);
   /* #layout.tag_button writes its tag name into every operator it attaches; the Add never reads
    * it, but the property keeps that write from warning on every redraw. */
   PropertyRNA *tag_prop = RNA_def_string(ot->srna,

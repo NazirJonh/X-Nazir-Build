@@ -2317,4 +2317,63 @@ bool layer_edit_plan_build(Main &bmain,
   return false;
 }
 
+bool BKE_paint_material_layer_bake_endpoint_resolve(Material &ma,
+                                                    const bUUID &marker,
+                                                    const int channel,
+                                                    bNodeSocket **r_color_socket,
+                                                    bNodeSocket **r_mask_socket)
+{
+  *r_color_socket = nullptr;
+  *r_mask_socket = nullptr;
+  if (ma.nodetree == nullptr || BLI_uuid_is_nil(marker)) {
+    /* A nil marker would match every unmarked node -- a bare base among them -- and no row the
+     * stack model hands out carries one. */
+    return false;
+  }
+  /* The collection warms the topology cache before it walks, so a caller that just rewrote a link
+   * is safe to read. Not a paint stack refuses here like it refuses every reader. */
+  Vector<Vector<ChannelChain>> per_channel;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  if (!chains_collect_forest(ma, per_channel, error)) {
+    return false;
+  }
+  for (const Vector<ChannelChain> &forest : per_channel) {
+    if (forest.is_empty() || forest.last().channel != channel) {
+      continue;
+    }
+    for (const ChannelChain &chain : forest) {
+      if (chain.tree != ma.nodetree) {
+        /* The rows of a folder live in the group's own tree, and nothing tracks the instance
+         * nodes that route to it: a bake attached at the material tree has no endpoint to reach
+         * them by, so those rows are refused rather than resolved to an unroutable socket. */
+        continue;
+      }
+      for (const ChainLayer &layer : chain.layers) {
+        if (layer.node == nullptr ||
+            !BLI_uuid_equal(marker, BKE_paint_material_layer_marker_get(*layer.node)))
+        {
+          continue;
+        }
+        bNodeSocket *color = mix_output_find(*layer.node);
+        if (color == nullptr) {
+          /* The row is in the chain, but not in a shape a bake can render. */
+          return false;
+        }
+        *r_color_socket = color;
+        /* The coverage a bake renders as the row's alpha is the output feeding the Factor input,
+         * not the input itself: a bake attaches output sockets. An unlinked Factor is a constant,
+         * which no socket renders -- the bake's alpha stays opaque, the shape a full-coverage
+         * constant stands for. */
+        if (layer.factor != nullptr) {
+          if (bNodeLink *factor_link = sole_link_into(*layer.factor)) {
+            *r_mask_socket = factor_link->fromsock;
+          }
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 }  // namespace blender

@@ -59,6 +59,41 @@ int add_from_material(bContext &C,
 bool channel_toggle(bContext &C, ReportList &reports, int channel);
 
 /**
+ * Re-fill \a channel's map of the active paint layer row (#BKE_paint_material_active_layer_get)
+ * with the flat colour \a value stands for there, and record it as the channel's own value so a
+ * later unlink restores it.
+ *
+ * An active correction row takes the value on its own channel set, not the ones of the layer it
+ * hangs on.
+ *
+ * \return whether anything changed. A refusal is reported to \a reports.
+ */
+bool channel_value_set(bContext &C, ReportList &reports, int channel, const float value[4]);
+
+/**
+ * Detach whatever image \a channel of the active paint layer row shows, and give the channel back
+ * a flat map of its own at the value it last recorded. The image it showed is never written to.
+ *
+ * An active correction row unlinks on its own channel set, not the ones of the layer it hangs on.
+ *
+ * \return whether anything changed. A refusal is reported to \a reports.
+ */
+bool channel_unlink(bContext &C, ReportList &reports, int channel);
+
+/**
+ * "Use layer result": bake the stack row at \a source_ordinal of the active row's owner for
+ * \a channel -- the row's own content after its corrections, with its mask as the alpha -- and
+ * wire the fresh map in as the active row's channel texture.
+ *
+ * \a source_ordinal names a row of the owner's stack by its position; a folder-nested or unwired
+ * source has no endpoint a bake can reach and is refused before anything is baked. The bake runs
+ * to completion on the calling thread; a map it minted that nothing took over is freed again.
+ *
+ * \return whether anything changed. A refusal is reported to \a reports.
+ */
+bool use_layer_result(bContext &C, ReportList &reports, int channel, int source_ordinal);
+
+/**
  * Re-bake every map of the active Material paint layer from its source, whether or not it looks
  * current -- for when a map looks wrong although nothing the staleness check sees has changed.
  *

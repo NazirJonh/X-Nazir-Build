@@ -23,10 +23,12 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #include "BLI_function_ref.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BKE_paint_material_resolve.hh"
@@ -199,6 +201,31 @@ bool material_bake_source_is_stale(const Image &image);
 bool material_bake_source_is_baking(const Image &image);
 
 /**
+ * "Use layer result": bake one stack row's channel output instead of the material's whole-channel
+ * output for that row's channel.
+ *
+ * What is baked is the row's own color after its content corrections, with the row's mask (the
+ * output feeding its Factor input -- its blend weight) as the buffer's alpha, so the map holds what
+ * the row paints rather than what the material composites to. The row is resolved by its marker on
+ * the localized copy inside the bake worker, not here: the job copies the material on the calling
+ * thread, and a raw socket pointer into the original would not belong to that copy. The bake is a
+ * one-shot snapshot of the row as it stands when the bake runs; nothing keeps it in sync with the
+ * row afterwards.
+ */
+struct BakeSourceOverride {
+  /** The row to bake, by #PaintMaterialLayerStackEntry::marker. */
+  bUUID layer_marker;
+  /** The channel whose output the row's own nodes replace. */
+  eMaterialPaintChannel channel;
+  /** What of the row the bake renders. */
+  enum class Endpoint : int8_t {
+    /** The row's content after its own corrections, with its mask/coverage as the alpha. */
+    LayerContentWithMask,
+  };
+  Endpoint endpoint = Endpoint::LayerContentWithMask;
+};
+
+/**
  * One channel to bake into its own #Image. v1 carries only the channel; an object, a UV map or a
  * socket override are the documented seam for mesh-space and arbitrary-socket bakes and go here
  * without touching #material_bake_to_images's signature.
@@ -212,6 +239,18 @@ struct BakeTargetSpec {
    * same material.
    */
   Image *existing = nullptr;
+  /**
+   * Bake a stack row's output instead of the whole channel's.
+   *
+   * Preflight-resolved on the original material before any image is created; a resolution that
+   * fails here sends the target to #MaterialBakeToImagesResult.skipped_unavailable like an
+   * unavailable channel, since the target #Image is created synchronously on this thread and an
+   * unresolvable override must not mint one. The worker re-resolves the same marker on its own
+   * localized copy -- the original's sockets do not belong to it -- and a failure there (a narrow
+   * race) frees the created image and reports the channel in
+   * #MaterialBakeToImagesResult.failed_overrides.
+   */
+  std::optional<BakeSourceOverride> source_override;
 };
 
 struct MaterialBakeToImagesResult;
@@ -247,6 +286,13 @@ struct MaterialBakeToImagesResult {
   Vector<Image *> created;
   Vector<eMaterialPaintChannel> created_channels;
   Vector<eMaterialPaintChannel> skipped_unavailable;
+  /**
+   * Channels whose "Use layer result" override failed to resolve in the bake worker. The image
+   * minted for such a channel is freed by the job, so #created must not be trusted for them.
+   * Filled only in blocking mode -- a non-blocking caller's result is complete before the worker
+   * runs, and there the freed image has to be recognized by its session UID.
+   */
+  Vector<eMaterialPaintChannel> failed_overrides;
   bool ok = false;
 };
 

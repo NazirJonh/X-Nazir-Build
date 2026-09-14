@@ -34,6 +34,8 @@
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
 
+#include "DEG_depsgraph.hh"
+
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
@@ -631,6 +633,7 @@ bool correction_channel_insert(Main &bmain,
                                ChannelChain &chain,
                                ChainLayer &layer,
                                PaintMaterialCorrectionSection section,
+                               PaintMaterialCorrectionEffect effect,
                                const bUUID &marker,
                                ChainCorrection &r_nodes)
 {
@@ -777,11 +780,11 @@ bool correction_channel_insert(Main &bmain,
   bke::paint_layer::marker_set(*mix, marker);
   bke::paint_layer::kind_set(*mix, PaintMaterialLayerKind::Correction);
   bke::paint_layer::correction_section_set(*mix, section);
-  bke::paint_layer::correction_effect_set(*mix, PaintMaterialCorrectionEffect::Paint);
+  bke::paint_layer::correction_effect_set(*mix, effect);
 
   r_nodes.marker = marker;
   r_nodes.section = section;
-  r_nodes.effect = PaintMaterialCorrectionEffect::Paint;
+  r_nodes.effect = effect;
   r_nodes.mix = mix;
   r_nodes.factor_multiply = multiply;
   r_nodes.over_invert = over_invert;
@@ -832,13 +835,15 @@ Vector<ChainCorrection> &correction_rows_of(ChainLayer &layer,
  *
  * The model is what the UI shows, so it is also what answers "which row is this correction on";
  * the mutators re-read the graph themselves, and the plan re-checks the channel agreement the
- * model presumes.
+ * model presumes. The section, the position and the effect of the row are handed back through the
+ * optional out-parameters, the same walk answering all three.
  */
 int correction_owner_ordinal_find(const Main &bmain,
                                   const Material &ma,
                                   const bUUID &correction,
                                   PaintMaterialCorrectionSection *r_section,
-                                  int *r_index)
+                                  int *r_index,
+                                  PaintMaterialCorrectionEffect *r_effect = nullptr)
 {
   if (ma.nodetree != nullptr) {
     ma.nodetree->ensure_topology_cache();
@@ -860,6 +865,9 @@ int correction_owner_ordinal_find(const Main &bmain,
           }
           if (r_index != nullptr) {
             *r_index = int(i);
+          }
+          if (r_effect != nullptr) {
+            *r_effect = rows[i].effect;
           }
           return entry.ordinal;
         }
@@ -892,9 +900,10 @@ bool correction_plan_resolve(Main &bmain,
                              PaintMaterialCorrectionSection &r_section,
                              int &r_owner,
                              int *r_index,
-                             PaintMaterialLayerEditError &r_error)
+                             PaintMaterialLayerEditError &r_error,
+                             PaintMaterialCorrectionEffect *r_effect = nullptr)
 {
-  r_owner = correction_owner_ordinal_find(bmain, ma, correction, &r_section, r_index);
+  r_owner = correction_owner_ordinal_find(bmain, ma, correction, &r_section, r_index, r_effect);
   if (r_owner < 0) {
     r_error = PaintMaterialLayerEditError::CorrectionNotFound;
     return false;
@@ -909,6 +918,7 @@ bool BKE_paint_material_layer_correction_add(Main &bmain,
                                              Material &ma,
                                              const int layer_ordinal,
                                              const PaintMaterialCorrectionSection section,
+                                             const PaintMaterialCorrectionEffect effect,
                                              const char *name,
                                              bUUID *r_correction,
                                              PaintMaterialLayerEditError *r_error)
@@ -1038,7 +1048,7 @@ bool BKE_paint_material_layer_correction_add(Main &bmain,
     }
     ChainCorrection nodes;
     if (!correction_channel_insert(
-            bmain, *chain, chain->layers[plan.layer_index], section, marker, nodes))
+            bmain, *chain, chain->layers[plan.layer_index], section, effect, marker, nodes))
     {
       return rollback(PaintMaterialLayerEditError::CreationFailed);
     }
@@ -1051,7 +1061,7 @@ bool BKE_paint_material_layer_correction_add(Main &bmain,
     BKE_ntree_update_after_single_tree_change(bmain, *normal_chain->tree);
     ChainCorrection nodes;
     if (!correction_channel_insert(
-            bmain, *normal_chain, normal_chain->layers[plan.layer_index], section, marker, nodes))
+            bmain, *normal_chain, normal_chain->layers[plan.layer_index], section, effect, marker, nodes))
     {
       return rollback(PaintMaterialLayerEditError::CreationFailed);
     }
@@ -1914,14 +1924,36 @@ bool BKE_paint_material_layer_correction_channel_enabled_set(Main &bmain,
 
   /* 1. Preflight: the correction exists, on the row its plan resolves. */
   PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
-  const int owner = correction_owner_ordinal_find(bmain, ma, correction, &section, nullptr);
+  PaintMaterialCorrectionEffect effect = PaintMaterialCorrectionEffect::Paint;
+  const int owner = correction_owner_ordinal_find(
+      bmain, ma, correction, &section, nullptr, &effect);
   if (owner < 0) {
     return fail(PaintMaterialLayerEditError::CorrectionNotFound);
   }
   if (section == PaintMaterialCorrectionSection::Mask) {
-    /* A mask has no per-channel choice (spec 18 §4.3): its form in each channel follows whether
-     * the row puts anything there (#layer_mask_corrections_sync), not a switch of its own. */
-    return fail(PaintMaterialLayerEditError::CorrectionSectionMismatch);
+    if (effect == PaintMaterialCorrectionEffect::Paint) {
+      /* A painted mask has no per-channel choice (spec 18 §4.3): its form in each channel follows
+       * whether the row puts anything there (#layer_mask_corrections_sync), not a switch of its
+       * own. */
+      return fail(PaintMaterialLayerEditError::CorrectionSectionMismatch);
+    }
+    /* A Fill mask picks its one grayscale channel here -- the first user-picked channel a mask
+     * correction has (spec 18 §4.3). The single-channel form is the invariant: a second channel is
+     * refused while this correction is wired on another one, before the target channel's nodes are
+     * touched. What the pick makes of the mask's own per-channel form stays
+     * #layer_mask_corrections_sync's to say. */
+    if (enable) {
+      for (const int other : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+        if (other == channel) {
+          continue;
+        }
+        if (BKE_paint_material_layer_correction_channel_state_get(bmain, ma, correction, other) !=
+            PaintMaterialLayerChannelState::Absent)
+        {
+          return fail(PaintMaterialLayerEditError::CorrectionSectionMismatch);
+        }
+      }
+    }
   }
 
   /* A channel with no graph of its own (AO) has no nodes to build and no Disabled form to keep
@@ -2072,6 +2104,8 @@ bool BKE_paint_material_layer_correction_channel_enabled_set(Main &bmain,
     char map_name[MAX_ID_NAME - 2];
     SNPRINTF_UTF8(map_name, "%s Correction", info.ui_name);
     const float transparent[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    /* A mask's map is grayscale, non-color data, whatever channel it was reached through. */
+    const bool is_data = (section == PaintMaterialCorrectionSection::Mask) ? true : !info.is_color;
     Image *map = BKE_image_add_generated(&bmain,
                                          width,
                                          height,
@@ -2081,14 +2115,18 @@ bool BKE_paint_material_layer_correction_channel_enabled_set(Main &bmain,
                                          IMA_GENTYPE_BLANK,
                                          transparent,
                                          false,
-                                         !info.is_color,
+                                         is_data,
                                          false);
     if (map == nullptr) {
       return fail(PaintMaterialLayerEditError::CreationFailed);
     }
     map->flag |= IMA_PAINT_CANVAS;
     map->paint_layer_id = correction;
-    map->paint_layer_channel = channel;
+    /* A mask's own map carries the mask role rather than the channel's: the one map every
+     * channel's correction reads is found by it (spec 18 §4.3). */
+    map->paint_layer_channel = (section == PaintMaterialCorrectionSection::Mask) ?
+                                   PAINT_LAYER_MAP_MASK :
+                                   channel;
     bNode *map_node = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
     bNodeSocket *map_color = (map_node != nullptr) ?
                                  bke::node_find_socket(*map_node, SOCK_OUT, "Color"_ustr) :
@@ -2498,6 +2536,7 @@ bool BKE_paint_material_layer_corrections_copy(Main &bmain,
                                                  target,
                                                  target_layer_ordinal,
                                                  section,
+                                                 source_corr->effect,
                                                  name.empty() ? nullptr : name.c_str(),
                                                  &new_marker,
                                                  &error))
@@ -2667,6 +2706,466 @@ bool BKE_paint_material_layer_corrections_scale(Main &bmain,
     /* The pixels moved; what shows them is the stack's composite of the row, rebuilt the way
      * every edit of this module tells its readers. */
     paint_layer_edit_committed(bmain, ma, false);
+  }
+  return true;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Correction per-channel flat value
+ *
+ * The correction-side half of the per-channel value picker: a Fill correction's map in one channel
+ * is re-filled with the flat colour the picker stands for there, and the raw colour is recorded on
+ * the correction's own Mix node -- the record the getter reads back, the way a Fill layer's marker
+ * holds the colour the layer stands for.
+ * \{ */
+
+namespace {
+
+/**
+ * The write half of the per-channel value API: re-fill the map of \a channel on the correction
+ * \a correction with the flat colour \a color stands for there, and -- when \a record_marker --
+ * record the raw \a color on the correction's own Mix for
+ * #BKE_paint_material_layer_correction_channel_value_get to read.
+ *
+ * Shared by the apply and the preview so the two cannot drift; what the preview leaves out is the
+ * recording, nothing else.
+ */
+bool correction_channel_value_write(Main &bmain,
+                                    Material &ma,
+                                    const bUUID &correction,
+                                    const int channel,
+                                    const float color[4],
+                                    const bool record_marker,
+                                    PaintMaterialLayerEditError *r_error)
+{
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  auto fail = [&](const PaintMaterialLayerEditError reason) {
+    if (r_error != nullptr) {
+      *r_error = reason;
+    }
+    return false;
+  };
+
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+
+  /* 1. Preflight: the correction exists, on the row its plan resolves. */
+  LayerEditPlan plan;
+  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+  int owner = -1;
+  if (!correction_plan_resolve(bmain, ma, correction, plan, section, owner, nullptr, error)) {
+    return fail(error);
+  }
+
+  /* 2. The channel addressed: a correction the channel does not show -- no chain carries the row
+   * in it, or the correction has no map of its own there -- behaves as out of range. */
+  ChannelChain *target = nullptr;
+  for (ChannelChain *chain : plan.chains) {
+    if (chain->channel == channel) {
+      target = chain;
+    }
+  }
+  if (target == nullptr) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+  const ChainCorrection *nodes = correction_nodes_find(
+      target->layers[plan.layer_index], section, correction);
+  if (nodes == nullptr || nodes->image == nullptr || nodes->mix == nullptr) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+
+  /* 3. Mutation: re-fill this correction's own map, then record the value on its Mix node. */
+  float map_color[4];
+  fill_map_color_for(channel, color, map_color);
+  image_fill_flat(*nodes->image, map_color);
+  if (record_marker) {
+    bke::paint_layer::channel_value_set(*nodes->mix, channel, color);
+  }
+
+  paint_layer_edit_committed(bmain, ma, false);
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
+  }
+  return true;
+}
+
+}  // namespace
+
+bool BKE_paint_material_layer_correction_channel_value_get(Main &bmain,
+                                                           Material &ma,
+                                                           const bUUID &correction,
+                                                           const int channel,
+                                                           float r_color[4])
+{
+  /* The same plan the writes build: a correction this module cannot resolve has nothing to
+   * read. */
+  LayerEditPlan plan;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+  int owner = -1;
+  if (!correction_plan_resolve(bmain, ma, correction, plan, section, owner, nullptr, error)) {
+    return false;
+  }
+  for (const ChannelChain *chain : plan.chains) {
+    if (chain->channel != channel) {
+      continue;
+    }
+    const ChainCorrection *nodes = correction_nodes_find(
+        chain->layers[plan.layer_index], section, correction);
+    if (nodes == nullptr || nodes->mix == nullptr) {
+      /* Not wired on this channel: no Mix carries the recorded value. */
+      return false;
+    }
+    /* The Mix's own record, not the pixels: a painted-over map cannot be asked what colour it was
+     * filled with. */
+    return bke::paint_layer::channel_value_get(*nodes->mix, channel, r_color);
+  }
+  return false;
+}
+
+bool BKE_paint_material_layer_correction_channel_image_assigned_get(Main &bmain,
+                                                                   Material &ma,
+                                                                   const bUUID &correction,
+                                                                   const int channel)
+{
+  /* The same plan the writes build: a correction this module cannot resolve has nothing to
+   * read. */
+  LayerEditPlan plan;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+  int owner = -1;
+  if (!correction_plan_resolve(bmain, ma, correction, plan, section, owner, nullptr, error)) {
+    return false;
+  }
+  for (const ChannelChain *chain : plan.chains) {
+    if (chain->channel != channel) {
+      continue;
+    }
+    const ChainCorrection *nodes = correction_nodes_find(
+        chain->layers[plan.layer_index], section, correction);
+    if (nodes == nullptr || nodes->mix == nullptr) {
+      /* Not wired on this channel: no Mix carries the record. */
+      return false;
+    }
+    /* The record, not the graph: an assigned image carries the correction's tag like a generated
+     * map. */
+    return bke::paint_layer::channel_image_assigned_get(*nodes->mix, channel);
+  }
+  return false;
+}
+
+bool BKE_paint_material_layer_correction_channel_value_preview(Main &bmain,
+                                                               Material &ma,
+                                                               const bUUID &correction,
+                                                               const int channel,
+                                                               const float color[4],
+                                                               PaintMaterialLayerEditError
+                                                                   *r_error)
+{
+  return correction_channel_value_write(bmain, ma, correction, channel, color, false, r_error);
+}
+
+bool BKE_paint_material_layer_correction_channel_value_apply(Main &bmain,
+                                                             Material &ma,
+                                                             const bUUID &correction,
+                                                             const int channel,
+                                                             const float color[4],
+                                                             PaintMaterialLayerEditError *r_error)
+{
+  return correction_channel_value_write(bmain, ma, correction, channel, color, true, r_error);
+}
+
+bool BKE_paint_material_layer_correction_channel_image_set(Main &bmain,
+                                                           Material &ma,
+                                                           const bUUID &correction,
+                                                           const int channel,
+                                                           Image &image,
+                                                           PaintMaterialLayerEditError *r_error)
+{
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  auto fail = [&](const PaintMaterialLayerEditError reason) {
+    if (r_error != nullptr) {
+      *r_error = reason;
+    }
+    return false;
+  };
+
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+
+  /* 1. Preflight: the correction exists, on the row its plan resolves. */
+  LayerEditPlan plan;
+  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+  PaintMaterialCorrectionEffect effect = PaintMaterialCorrectionEffect::Paint;
+  int owner = -1;
+  if (!correction_plan_resolve(
+          bmain, ma, correction, plan, section, owner, nullptr, error, &effect))
+  {
+    return fail(error);
+  }
+  if (section == PaintMaterialCorrectionSection::Mask) {
+    if (effect == PaintMaterialCorrectionEffect::Paint) {
+      /* A painted mask's map is synced (#layer_mask_corrections_sync), not user-assigned
+       * (spec 18 §4.3). */
+      return fail(PaintMaterialLayerEditError::CorrectionSectionMismatch);
+    }
+    /* A Fill mask shows one grayscale map on its one wired channel (spec 18 §4.3): the channel
+     * asked for must be the one this correction is wired on. An unwired one is the multi-channel
+     * attempt the single-channel form refuses, and so is any channel once several read wired --
+     * neither leaves a second grayscale map for the mask to show. */
+    if (BKE_paint_material_layer_correction_channel_state_get(bmain, ma, correction, channel) ==
+        PaintMaterialLayerChannelState::Absent)
+    {
+      return fail(PaintMaterialLayerEditError::CorrectionSectionMismatch);
+    }
+    for (const int other : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      if (other == channel) {
+        continue;
+      }
+      if (BKE_paint_material_layer_correction_channel_state_get(bmain, ma, correction, other) !=
+          PaintMaterialLayerChannelState::Absent)
+      {
+        return fail(PaintMaterialLayerEditError::CorrectionSectionMismatch);
+      }
+    }
+  }
+
+  /* 2. The channel addressed: a correction the channel does not show -- no chain carries the row
+   * in it, or the correction has no map of its own there -- behaves as out of range. Creating and
+   * wiring channels is #BKE_paint_material_layer_correction_channel_enabled_set's job. */
+  ChannelChain *target = nullptr;
+  for (ChannelChain *chain : plan.chains) {
+    if (chain->channel == channel) {
+      target = chain;
+    }
+  }
+  if (target == nullptr) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+  const ChainCorrection *nodes = correction_nodes_find(
+      target->layers[plan.layer_index], section, correction);
+  if (nodes == nullptr || nodes->map == nullptr) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+
+  /* 3. Mutation: from here, a refusal is impossible. The map node owns exactly one user of the
+   * image it shows: gaining one costs the replacement, and what the replacement orphans -- a
+   * generated blank nobody else holds -- is freed at once instead of lingering in the file until
+   * a purge. */
+  bNodeTree &tree = *target->tree;
+  bNode &map_node = *nodes->map;
+  auto orphan_check = [&bmain](Image *previous) {
+    if (previous != nullptr) {
+      id_us_min(&previous->id);
+      if (previous->id.us == 0 && previous->source == IMA_SRC_GENERATED) {
+        BKE_id_free(&bmain, previous);
+      }
+    }
+  };
+  /* The role the assigned image carries: a mask's one map keeps the mask role every reader of a
+   * mask map keys on, whatever channel it was assigned through (spec 18 §4.3). */
+  const int map_role = (section == PaintMaterialCorrectionSection::Mask) ? PAINT_LAYER_MAP_MASK :
+                                                                           channel;
+
+  Image *previous = (map_node.id != nullptr && GS(map_node.id->name) == ID_IM) ?
+                        id_cast<Image *>(map_node.id) :
+                        nullptr;
+  map_node.id = &image.id;
+  if (previous != &image) {
+    /* The node's user moves from the old image to the new one. */
+    id_us_plus(&image.id);
+    /* What the model lists as the map is read off the tag, so a replaced image that survives --
+     * someone else still holds it -- loses the tag with the node. */
+    if (previous != nullptr && BLI_uuid_equal(previous->paint_layer_id, correction) &&
+        previous->paint_layer_channel == map_role)
+    {
+      previous->paint_layer_id = bUUID{};
+      previous->paint_layer_channel = PAINT_LAYER_MAP_NONE;
+    }
+    orphan_check(previous);
+  }
+  /* The tags every map of a correction carries: the stack model that assembles a correction's
+   * maps reads them back. */
+  image.paint_layer_id = correction;
+  image.paint_layer_channel = map_role;
+  /* The graph cannot tell this assignment from a generated map -- both carry the correction's tag
+   * -- so the record the UI reads is written here and cleared by the unlink. A channel with no
+   * graph of its own (AO) has no Mix to carry the record on. */
+  if (nodes->mix != nullptr) {
+    bke::paint_layer::channel_image_assigned_set(*nodes->mix, channel, true);
+  }
+
+  BKE_ntree_update_after_single_tree_change(bmain, tree);
+  /* The map may sit in a folder's own node tree, whose evaluated copy is separate from the
+   * material's; see #paint_layer_edit_committed for why it has to be refreshed. */
+  if (&tree != ma.nodetree) {
+    DEG_id_tag_update(&tree.id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  paint_layer_edit_committed(bmain, ma, true);
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
+  }
+  return true;
+}
+
+bool BKE_paint_material_layer_correction_channel_unlink(Main &bmain,
+                                                        Material &ma,
+                                                        const bUUID &correction,
+                                                        const int channel,
+                                                        PaintMaterialLayerEditError *r_error)
+{
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  auto fail = [&](const PaintMaterialLayerEditError reason) {
+    if (r_error != nullptr) {
+      *r_error = reason;
+    }
+    return false;
+  };
+
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+
+  /* 1. Preflight: the correction exists, on the row its plan resolves. */
+  LayerEditPlan plan;
+  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
+  PaintMaterialCorrectionEffect effect = PaintMaterialCorrectionEffect::Paint;
+  int owner = -1;
+  if (!correction_plan_resolve(
+          bmain, ma, correction, plan, section, owner, nullptr, error, &effect))
+  {
+    return fail(error);
+  }
+
+  /* 2. The channel addressed: a correction the channel does not show -- no chain carries the row
+   * in it, or the correction has no map of its own there -- behaves as out of range. */
+  ChannelChain *target = nullptr;
+  for (ChannelChain *chain : plan.chains) {
+    if (chain->channel == channel) {
+      target = chain;
+    }
+  }
+  if (target == nullptr) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+  const ChainCorrection *nodes = correction_nodes_find(
+      target->layers[plan.layer_index], section, correction);
+  if (nodes == nullptr || nodes->image == nullptr || nodes->mix == nullptr) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+
+  /* 3. The value the map gets back: the last one recorded on the correction's Mix, or the neutral
+   * one a map of the channel starts at. The neutral value is recorded like an applied one, so the
+   * picker reads back what the map holds. */
+  float value[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  bke::paint_layer::channel_value_get(*nodes->mix, channel, value);
+  float map_color[4];
+  fill_map_color_for(channel, value, map_color);
+
+  /* 4. A painted mask correction owns its one map outright: nothing can have replaced it, so
+   * unlinking re-fills the shared pixels in place and touches no link. */
+  if (section == PaintMaterialCorrectionSection::Mask &&
+      effect == PaintMaterialCorrectionEffect::Paint)
+  {
+    if (!BLI_uuid_equal(nodes->image->paint_layer_id, correction) ||
+        nodes->image->paint_layer_channel != PAINT_LAYER_MAP_MASK)
+    {
+      /* Not the map this correction created: nothing this module builds can wire one. */
+      return fail(PaintMaterialLayerEditError::CorrectionSectionMismatch);
+    }
+    image_fill_flat(*nodes->image, map_color);
+    bke::paint_layer::channel_value_set(*nodes->mix, channel, value);
+    bke::paint_layer::channel_image_assigned_set(*nodes->mix, channel, false);
+    paint_layer_edit_committed(bmain, ma, false);
+    if (r_error != nullptr) {
+      *r_error = PaintMaterialLayerEditError::None;
+    }
+    return true;
+  }
+
+  /* 5. Mutation: a fresh map of the correction's own takes the channel over, created the way the
+   * channel-enable path creates one. Whatever the channel showed is never written to: an image
+   * assigned through #BKE_paint_material_layer_correction_channel_image_set carries the
+   * correction's tag like a generated one, so owning cannot be read back off the graph, and
+   * refilling it in place might destroy a dropped image's pixels. A Fill mask correction takes
+   * the same road -- an assignment can have replaced its one shared grayscale map, tagged as its
+   * own like every map of a correction -- and gives the shared node a fresh grayscale map. */
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  int width = 0;
+  int height = 0;
+  if (!BKE_paint_material_layer_map_size_get(bmain, ma, owner, width, height) || width <= 0 ||
+      height <= 0)
+  {
+    width = 1024;
+    height = 1024;
+  }
+  char map_name[MAX_ID_NAME - 2];
+  SNPRINTF_UTF8(map_name, "%s Correction", info.ui_name);
+  const float transparent[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  /* A mask's map is grayscale, non-color data, whatever channel it was reached through. */
+  const bool is_data = (section == PaintMaterialCorrectionSection::Mask) ? true : !info.is_color;
+  Image *fresh = BKE_image_add_generated(&bmain,
+                                        width,
+                                        height,
+                                        map_name,
+                                        32,
+                                        false,
+                                        IMA_GENTYPE_BLANK,
+                                        transparent,
+                                        false,
+                                        is_data,
+                                        false);
+  if (fresh == nullptr) {
+    return fail(PaintMaterialLayerEditError::CreationFailed);
+  }
+  /* The paint-canvas flag every map the creation paths make carries; the tags are the wiring
+   * below's own to apply. */
+  fresh->flag |= IMA_PAINT_CANVAS;
+  if (!BKE_paint_material_layer_correction_channel_image_set(
+          bmain, ma, correction, channel, *fresh, &error))
+  {
+    /* Never wired: the fresh map is still only the creation's user, this call's to free. */
+    BKE_id_free(&bmain, fresh);
+    return fail(error);
+  }
+  /* The map node's user is the one the image-set took; the one the creation gave is the extra. */
+  id_us_min(&fresh->id);
+
+  /* 6. The wiring replaced the map, so the plan is read again before the pixels and the record
+   * are written -- the pattern every edit that relinks first follows. */
+  plan = LayerEditPlan();
+  if (!correction_plan_resolve(bmain, ma, correction, plan, section, owner, nullptr, error)) {
+    BLI_assert_unreachable();
+    return fail(error);
+  }
+  target = nullptr;
+  for (ChannelChain *chain : plan.chains) {
+    if (chain->channel == channel) {
+      target = chain;
+    }
+  }
+  nodes = nullptr;
+  if (target != nullptr) {
+    nodes = correction_nodes_find(target->layers[plan.layer_index], section, correction);
+  }
+  if (nodes == nullptr || nodes->mix == nullptr) {
+    BLI_assert_unreachable();
+    return fail(PaintMaterialLayerEditError::CreationFailed);
+  }
+  image_fill_flat(*fresh, map_color);
+  bke::paint_layer::channel_value_set(*nodes->mix, channel, value);
+  bke::paint_layer::channel_image_assigned_set(*nodes->mix, channel, false);
+
+  /* The relation edit was #BKE_paint_material_layer_correction_channel_image_set's to commit; the
+   * refill and the record are values inside one tree. */
+  paint_layer_edit_committed(bmain, ma, false);
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
   }
   return true;
 }

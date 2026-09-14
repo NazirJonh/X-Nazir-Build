@@ -81,6 +81,42 @@ static const PaintMaterialLayerCorrectionEntry *paint_layer_correction_find(
   return nullptr;
 }
 
+/**
+ * Point the paint binding \a binding at what the row \a layer shows in \a channel now, read fresh
+ * against the owner's stack: the edit that leads here just rewired the row's nodes, and \a
+ * layer's snapshot predates it. A switched-off channel is not a paint target (spec 6).
+ */
+static void paint_layer_channel_binding_refresh(Main &bmain,
+                                                const PaintMaterialActiveLayer &layer,
+                                                const int channel,
+                                                MaterialPaintChannelImageBinding &binding)
+{
+  Vector<PaintMaterialLayerStackEntry> entries;
+  BKE_paint_material_layer_stack_from_material(bmain, *layer.owner, entries);
+  Image *map = nullptr;
+  bool map_on = false;
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    if (entry.ordinal != layer.ordinal) {
+      continue;
+    }
+    if (!BLI_uuid_is_nil(layer.correction)) {
+      const PaintMaterialLayerCorrectionEntry *correction = paint_layer_correction_find(
+          entry, layer.correction);
+      if (correction != nullptr) {
+        map = correction->channel_images.lookup_default(channel, nullptr);
+        map_on = (map != nullptr) &&
+                 (correction->disabled_channels_mask & (uint32_t(1) << channel)) == 0;
+      }
+    }
+    else {
+      map = entry.channel_images.lookup_default(channel, nullptr);
+      map_on = (map != nullptr) && (entry.disabled_channels_mask & (uint32_t(1) << channel)) == 0;
+    }
+    break;
+  }
+  BKE_paint_material_channel_binding_set(binding, map_on ? map : nullptr);
+}
+
 /** The pixel width \a image currently has, or zero when it has no buffer. */
 static int paint_layer_map_size(Image &image)
 {
@@ -382,6 +418,171 @@ bool channel_toggle(bContext &C, ReportList &reports, const int channel)
   /* A switched-off channel is not a paint target (spec 6). */
   BKE_paint_material_channel_binding_set(
       binding, paint_layer_channel_target(*bmain, *layer->owner, layer->ordinal, channel));
+
+  WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &layer->owner->id);
+  WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  return true;
+}
+
+bool channel_value_set(bContext &C, ReportList &reports, const int channel, const float value[4])
+{
+  Main *bmain = CTX_data_main(&C);
+  Scene *scene = CTX_data_scene(&C);
+  const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
+      *bmain, scene->toolsettings->paint_mode);
+  if (!layer.has_value()) {
+    BKE_report(&reports, RPT_ERROR, "No active paint layer");
+    return false;
+  }
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+
+  /* An active correction row takes the value on its own channels, not the ones of the layer it
+   * hangs on: the Layer Material tab is showing the correction's own channel set then. */
+  const bool applied = !BLI_uuid_is_nil(layer->correction) ?
+                           BKE_paint_material_layer_correction_channel_value_apply(
+                               *bmain, *layer->owner, layer->correction, channel, value, &error) :
+                           BKE_paint_material_layer_channel_value_apply(
+                               *bmain, *layer->owner, layer->ordinal, channel, value, &error);
+  if (!applied) {
+    BKE_report(&reports, RPT_ERROR, BKE_paint_material_layer_edit_error_message(error));
+    return false;
+  }
+
+  WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &layer->owner->id);
+  return true;
+}
+
+bool channel_unlink(bContext &C, ReportList &reports, const int channel)
+{
+  Main *bmain = CTX_data_main(&C);
+  Scene *scene = CTX_data_scene(&C);
+  const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
+      *bmain, scene->toolsettings->paint_mode);
+  if (!layer.has_value()) {
+    BKE_report(&reports, RPT_ERROR, "No active paint layer");
+    return false;
+  }
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+
+  /* An active correction row unlinks on its own channels, not the ones of the layer it hangs on:
+   * the Layer Material tab is showing the correction's own channel set then. */
+  const bool unlinked = !BLI_uuid_is_nil(layer->correction) ?
+                            BKE_paint_material_layer_correction_channel_unlink(
+                                *bmain, *layer->owner, layer->correction, channel, &error) :
+                            BKE_paint_material_layer_channel_unlink(
+                                *bmain, *layer->owner, layer->ordinal, channel, &error);
+  if (!unlinked) {
+    BKE_report(&reports, RPT_ERROR, BKE_paint_material_layer_edit_error_message(error));
+    return false;
+  }
+
+  /* The channel shows a fresh map now; the binding follows it. */
+  paint_layer_channel_binding_refresh(
+      *bmain, *layer, channel, scene->toolsettings->paint_mode.channel_image_bindings[channel]);
+
+  WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &layer->owner->id);
+  WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  return true;
+}
+
+bool use_layer_result(bContext &C, ReportList &reports, const int channel, const int source_ordinal)
+{
+  using namespace ed::material_bake;
+  Main *bmain = CTX_data_main(&C);
+  Scene *scene = CTX_data_scene(&C);
+  const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
+      *bmain, scene->toolsettings->paint_mode);
+  if (!layer.has_value()) {
+    BKE_report(&reports, RPT_ERROR, "No active paint layer");
+    return false;
+  }
+
+  /* The source row, by its place in the owner's stack as it stands now: its marker is what the
+   * bake resolves the row by. */
+  Vector<PaintMaterialLayerStackEntry> entries;
+  BKE_paint_material_layer_stack_from_material(*bmain, *layer->owner, entries);
+  const bUUID *source_marker = nullptr;
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    if (entry.ordinal == source_ordinal) {
+      source_marker = &entry.marker;
+      break;
+    }
+  }
+  if (source_marker == nullptr) {
+    BKE_reportf(&reports, RPT_ERROR, RPT_("No stack row at position %d"), source_ordinal);
+    return false;
+  }
+
+  /* A folder-nested or unwired source has no endpoint a bake attached at the material tree can
+   * route to; refusing here keeps a doomed bake from minting a map. */
+  bNodeSocket *color_socket = nullptr;
+  bNodeSocket *mask_socket = nullptr;
+  if (!BKE_paint_material_layer_bake_endpoint_resolve(
+          *layer->owner, *source_marker, channel, &color_socket, &mask_socket))
+  {
+    BKE_report(&reports, RPT_ERROR, RPT_("The source row has no bakeable endpoint for this channel"));
+    return false;
+  }
+
+  /* The same size the active row's own maps were baked at, or the size the first brush stroke
+   * would have created one at. */
+  const int size = layer->bake_size > 0 ? layer->bake_size :
+                                          scene->toolsettings->paint_mode.new_channel_image_size;
+  BakeTargetSpec target;
+  target.channel = eMaterialPaintChannel(channel);
+  target.source_override = BakeSourceOverride{
+      *source_marker,
+      eMaterialPaintChannel(channel),
+      BakeSourceOverride::Endpoint::LayerContentWithMask};
+
+  /* Rendered to completion here: the map is what the operator's undo step is for, and the row
+   * must show it the moment the exec is done. */
+  MaterialBakeToImagesParams params;
+  params.material = layer->owner;
+  params.targets = Span(&target, 1);
+  params.size = size;
+  params.blocking = true;
+  const MaterialBakeToImagesResult result = material_bake_to_images(
+      *bmain, nullptr, nullptr, params);
+  if (!result.ok || result.created.is_empty()) {
+    /* A failed bake leaves the maps it minted behind as orphans; take them back out. */
+    for (Image *image : result.created) {
+      BKE_id_free(bmain, &image->id);
+    }
+    if (!result.skipped_unavailable.is_empty()) {
+      BKE_report(&reports, RPT_ERROR, RPT_("This channel is not available to bake"));
+    }
+    else if (!result.failed_overrides.is_empty()) {
+      BKE_report(&reports, RPT_ERROR, RPT_("The source row could not be baked for this channel"));
+    }
+    else {
+      BKE_report(&reports, RPT_ERROR, RPT_("Baking the source row failed"));
+    }
+    return false;
+  }
+
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  bool assigned = false;
+  /* The active row takes the baked map over: an active correction row assigns on its own channel
+   * set, not the ones of the layer it hangs on. */
+  if (!BLI_uuid_is_nil(layer->correction)) {
+    assigned = BKE_paint_material_layer_correction_channel_image_set(
+        *bmain, *layer->owner, layer->correction, channel, *result.created[0], &error);
+  }
+  else {
+    assigned = BKE_paint_material_layer_channel_image_set(
+        *bmain, *layer->owner, layer->ordinal, channel, *result.created[0], &error);
+  }
+  if (!assigned) {
+    BKE_report(&reports, RPT_ERROR, BKE_paint_material_layer_edit_error_message(error));
+    /* The map nobody took over is an orphan; take it back out. */
+    BKE_id_free(bmain, &result.created[0]->id);
+    return false;
+  }
+
+  /* The binding follows the assignment. */
+  paint_layer_channel_binding_refresh(
+      *bmain, *layer, channel, scene->toolsettings->paint_mode.channel_image_bindings[channel]);
 
   WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &layer->owner->id);
   WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);

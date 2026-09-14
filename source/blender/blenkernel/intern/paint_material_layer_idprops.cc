@@ -23,7 +23,10 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 
+#include <fmt/format.h>
+
 #include <cstring>
+#include <string>
 
 namespace blender::bke::paint_layer {
 
@@ -205,6 +208,81 @@ void fill_color_set(bNode &node, const float color[4])
   }
   IDP_AddToGroup(properties,
                  bke::idprop::create(LAYER_FILL_COLOR_PROP, Span<float>(color, 4)).release());
+}
+
+std::string channel_value_idprop_name(const int channel)
+{
+  /* A key holds 64 characters; the prefix leaves room for any channel number. */
+  return fmt::format("{}{}", LAYER_CHANNEL_VALUE_PROP_PREFIX, channel);
+}
+
+bool channel_value_get(const bNode &node, const int channel, float r_color[4])
+{
+  if (node.prop == nullptr) {
+    return false;
+  }
+  const std::string name = channel_value_idprop_name(channel);
+  const IDProperty *value = IDP_GetPropertyTypeFromGroup(node.prop, name.c_str(), IDP_ARRAY);
+  if (value == nullptr || value->subtype != IDP_FLOAT || value->len != 4) {
+    return false;
+  }
+  copy_v4_v4(r_color,
+             static_cast<const float *>(IDP_array_voidp_get(const_cast<IDProperty *>(value))));
+  return true;
+}
+
+void channel_value_set(bNode &node, const int channel, const float color[4])
+{
+  IDProperty *properties = node_properties_ensure(node);
+  const std::string name = channel_value_idprop_name(channel);
+  IDProperty *value = IDP_GetPropertyTypeFromGroup(properties, name.c_str(), IDP_ARRAY);
+  if (value != nullptr && value->subtype == IDP_FLOAT && value->len == 4) {
+    copy_v4_v4(static_cast<float *>(IDP_array_voidp_get(value)), color);
+    return;
+  }
+  if (value != nullptr) {
+    /* A stale array of the wrong shape is replaced rather than reused. */
+    IDP_RemoveFromGroup(properties, value);
+    IDP_FreeProperty(value);
+  }
+  IDP_AddToGroup(properties, bke::idprop::create(name, Span<float>(color, 4)).release());
+}
+
+std::string channel_image_assigned_idprop_name(const int channel)
+{
+  /* A key holds 64 characters; the prefix leaves room for any channel number. */
+  return fmt::format("{}{}", LAYER_CHANNEL_IMAGE_ASSIGNED_PROP_PREFIX, channel);
+}
+
+bool channel_image_assigned_get(const bNode &node, const int channel)
+{
+  if (node.prop == nullptr) {
+    return false;
+  }
+  const std::string name = channel_image_assigned_idprop_name(channel);
+  const IDProperty *assigned = IDP_GetPropertyTypeFromGroup(node.prop, name.c_str(), IDP_INT);
+  return (assigned != nullptr) && (IDP_int_get(assigned) != 0);
+}
+
+void channel_image_assigned_set(bNode &node, const int channel, const bool assigned)
+{
+  IDProperty *properties = node_properties_ensure(node);
+  const std::string name = channel_image_assigned_idprop_name(channel);
+  IDProperty *record = IDP_GetPropertyTypeFromGroup(properties, name.c_str(), IDP_INT);
+  if (!assigned) {
+    /* Absence is the not-assigned state, so a clear removes the key instead of storing a zero:
+     * a channel that never showed an image reads the same as one that was unlinked. */
+    if (record != nullptr) {
+      IDP_RemoveFromGroup(properties, record);
+      IDP_FreeProperty(record);
+    }
+    return;
+  }
+  if (record != nullptr) {
+    IDP_int_set(record, 1);
+    return;
+  }
+  IDP_AddToGroup(properties, IDP_NewInt(1, name.c_str()));
 }
 
 void layer_group_tree_marker_set(bNodeTree &group)

@@ -90,7 +90,7 @@ enum class PaintMaterialLayerKind : int8_t {
 enum class PaintMaterialCorrectionSection : int8_t { Content = 0, Mask = 1 };
 
 /** What a correction layer applies to the layer it hangs under. */
-enum class PaintMaterialCorrectionEffect : int8_t { Paint = 0 };
+enum class PaintMaterialCorrectionEffect : int8_t { Paint = 0, Fill };
 
 /** How one channel of one stack row stands; see the spec's invariants I1 and I2. */
 enum class PaintMaterialLayerChannelState : int8_t {

@@ -400,13 +400,7 @@ bool BKE_paint_material_layer_stack_contains_mask(Main &bmain, Material &ma, con
   return false;
 }
 
-/**
- * Overwrite every pixel of \a image with \a color, and tell the readers the pixels moved.
- *
- * \a color is in the same convention #BKE_image_add_generated takes, so a refill and a fresh map
- * agree on what a colour means.
- */
-static void image_fill_flat(Image &image, const float color[4])
+void image_fill_flat(Image &image, const float color[4])
 {
   /* A generated map nobody has painted is rebuilt from its tile's colour whenever its buffer is
    * dropped -- a file reload, a memory purge -- so that colour has to move with the pixels, or the
@@ -548,6 +542,244 @@ bool BKE_paint_material_layer_fill_color_preview(Main &bmain,
     image_fill_flat(*layer.image, map_color);
   }
 
+  paint_layer_edit_committed(bmain, ma, false);
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
+  }
+  return true;
+}
+
+/**
+ * The write half of the per-channel value API: re-fill the map of \a channel on the row at \a
+ * ordinal with the flat colour \a color stands for there, and -- when \a record_marker -- record
+ * the raw \a color on the row's node for #BKE_paint_material_layer_channel_value_get to read.
+ *
+ * Shared by the apply and the preview so the two cannot drift; what the preview leaves out is the
+ * recording, nothing else.
+ */
+static bool layer_channel_value_write(Main &bmain,
+                                      Material &ma,
+                                      const int ordinal,
+                                      const int channel,
+                                      const float color[4],
+                                      const bool record_marker,
+                                      PaintMaterialLayerEditError *r_error)
+{
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  auto fail = [&](const PaintMaterialLayerEditError reason) {
+    if (r_error != nullptr) {
+      *r_error = reason;
+    }
+    return false;
+  };
+
+  /* 1. Preflight: the row exists and the material is writable, without writing a byte. */
+  LayerEditPlan plan;
+  if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::FillColorSet, plan, error)) {
+    return fail(error);
+  }
+  /* 2. The channel addressed: a row the channel does not carry -- no chain of its own, or no map
+   * in it -- behaves as out of range. */
+  ChannelChain *target = nullptr;
+  for (ChannelChain *chain : plan.chains) {
+    if (chain->channel == channel) {
+      target = chain;
+    }
+  }
+  if (target == nullptr) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+  ChainLayer &layer = target->layers[plan.layer_index];
+  if (layer.image == nullptr || layer.node == nullptr) {
+    /* A channel the layer never got a map for behaves as unwired for this layer. */
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+  /* 3. Mutation: re-fill this channel's own map, then record the value on the row's node. */
+  float map_color[4];
+  fill_map_color_for(channel, color, map_color);
+  image_fill_flat(*layer.image, map_color);
+  if (record_marker) {
+    bke::paint_layer::channel_value_set(*layer.node, channel, color);
+  }
+
+  paint_layer_edit_committed(bmain, ma, false);
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
+  }
+  return true;
+}
+
+bool BKE_paint_material_layer_channel_value_get(Main &bmain,
+                                                Material &ma,
+                                                const int ordinal,
+                                                const int channel,
+                                                float r_color[4])
+{
+  /* The same plan the writes build: a row this module cannot resolve has nothing to read. */
+  LayerEditPlan plan;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::FillColorSet, plan, error)) {
+    return false;
+  }
+  for (const ChannelChain *chain : plan.chains) {
+    if (chain->channel != channel) {
+      continue;
+    }
+    const ChainLayer &layer = chain->layers[plan.layer_index];
+    if (layer.node == nullptr) {
+      return false;
+    }
+    /* The marker, not the pixels: a painted-over map cannot be asked what it was filled with. */
+    return bke::paint_layer::channel_value_get(*layer.node, channel, r_color);
+  }
+  return false;
+}
+
+bool BKE_paint_material_layer_channel_image_assigned_get(Main &bmain,
+                                                        Material &ma,
+                                                        const int ordinal,
+                                                        const int channel)
+{
+  /* The same plan the writes build: a row this module cannot resolve has nothing to read. */
+  LayerEditPlan plan;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::FillColorSet, plan, error)) {
+    return false;
+  }
+  for (const ChannelChain *chain : plan.chains) {
+    if (chain->channel != channel) {
+      continue;
+    }
+    const ChainLayer &layer = chain->layers[plan.layer_index];
+    if (layer.node == nullptr) {
+      return false;
+    }
+    /* The record, not the graph: an assigned image carries the row's tag like a generated map. */
+    return bke::paint_layer::channel_image_assigned_get(*layer.node, channel);
+  }
+  return false;
+}
+
+bool BKE_paint_material_layer_channel_value_preview(Main &bmain,
+                                                    Material &ma,
+                                                    const int ordinal,
+                                                    const int channel,
+                                                    const float color[4],
+                                                    PaintMaterialLayerEditError *r_error)
+{
+  return layer_channel_value_write(bmain, ma, ordinal, channel, color, false, r_error);
+}
+
+bool BKE_paint_material_layer_channel_value_apply(Main &bmain,
+                                                  Material &ma,
+                                                  const int ordinal,
+                                                  const int channel,
+                                                  const float color[4],
+                                                  PaintMaterialLayerEditError *r_error)
+{
+  return layer_channel_value_write(bmain, ma, ordinal, channel, color, true, r_error);
+}
+
+bool BKE_paint_material_layer_channel_unlink(Main &bmain,
+                                             Material &ma,
+                                             const int ordinal,
+                                             const int channel,
+                                             PaintMaterialLayerEditError *r_error)
+{
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  auto fail = [&](const PaintMaterialLayerEditError reason) {
+    if (r_error != nullptr) {
+      *r_error = reason;
+    }
+    return false;
+  };
+
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+
+  /* 1. Preflight: the row exists and the material is writable, without writing a byte. */
+  LayerEditPlan plan;
+  if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::FillColorSet, plan, error)) {
+    return fail(error);
+  }
+  /* 2. The channel addressed: a row the channel does not carry -- no chain of its own, or no map
+   * in it -- behaves as out of range. */
+  ChannelChain *target = nullptr;
+  for (ChannelChain *chain : plan.chains) {
+    if (chain->channel == channel) {
+      target = chain;
+    }
+  }
+  if (target == nullptr) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+  ChainLayer &layer = target->layers[plan.layer_index];
+  if (layer.image == nullptr || layer.node == nullptr) {
+    return fail(PaintMaterialLayerEditError::IndexOutOfRange);
+  }
+
+  /* 3. The value the map gets back: the last one recorded on the marker, or the neutral one a map
+   * of the channel starts at. The neutral value is recorded like an applied one, so the picker
+   * reads back what the map holds. */
+  float value[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  bke::paint_layer::channel_value_get(*layer.node, channel, value);
+  float map_color[4];
+  fill_map_color_for(channel, value, map_color);
+
+  /* 4. Mutation: a fresh map of the row's own takes the channel over, created the way the
+   * channel-enable path creates one. Whatever the channel showed is never written to: an image
+   * assigned through #BKE_paint_material_layer_channel_image_set carries the row's tag like a
+   * generated one, so owning cannot be read back off the graph, and refilling it in place might
+   * destroy a dropped image's pixels. */
+  PaintMaterialLayerAddParams params;
+  params.kind = BKE_paint_material_layer_kind_get(*layer.node);
+  BKE_paint_material_layer_fill_color_get(*layer.node, params.fill_color);
+  int size_x = 1024;
+  int size_y = 1024;
+  if (!BKE_paint_material_layer_map_size_get(bmain, ma, ordinal, size_x, size_y) || size_x <= 0 ||
+      size_y <= 0)
+  {
+    size_x = 1024;
+    size_y = 1024;
+  }
+  params.image_size = size_x;
+  Image *fresh = layer_image_create(bmain, channel, params);
+  if (fresh == nullptr) {
+    return fail(PaintMaterialLayerEditError::CreationFailed);
+  }
+  if (!BKE_paint_material_layer_channel_image_set(bmain, ma, ordinal, channel, *fresh, &error)) {
+    /* Never wired: the fresh map is still only the creation's user, this call's to free. */
+    BKE_id_free(&bmain, fresh);
+    return fail(error);
+  }
+  /* The map node's user is the one the image-set took; the one the creation gave is the extra. */
+  id_us_min(&fresh->id);
+
+  /* 5. The wiring re-shaped the channel's chain, so the plan is read again before the pixels and
+   * the record are written -- the pattern every edit that relinks first follows. */
+  plan = LayerEditPlan();
+  if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::FillColorSet, plan, error)) {
+    BLI_assert_unreachable();
+    return fail(error);
+  }
+  target = nullptr;
+  for (ChannelChain *chain : plan.chains) {
+    if (chain->channel == channel) {
+      target = chain;
+    }
+  }
+  if (target == nullptr) {
+    BLI_assert_unreachable();
+    return fail(PaintMaterialLayerEditError::CreationFailed);
+  }
+  image_fill_flat(*fresh, map_color);
+  bke::paint_layer::channel_value_set(*target->layers[plan.layer_index].node, channel, value);
+  bke::paint_layer::channel_image_assigned_set(
+      *target->layers[plan.layer_index].node, channel, false);
+
+  /* The relation edit was #BKE_paint_material_layer_channel_image_set's to commit; the refill and
+   * the record are values inside one tree. */
   paint_layer_edit_committed(bmain, ma, false);
   if (r_error != nullptr) {
     *r_error = PaintMaterialLayerEditError::None;

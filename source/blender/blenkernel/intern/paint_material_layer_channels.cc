@@ -535,7 +535,7 @@ static bool ensure_corrections_mirror(Main &bmain,
         /* The previous insert left the cache stale; this one reads the row's links. */
         tree.ensure_topology_cache();
         ChainCorrection nodes;
-        if (!correction_channel_insert(bmain, built, layer, section, ref.marker, nodes)) {
+        if (!correction_channel_insert(bmain, built, layer, section, ref.effect, ref.marker, nodes)) {
           r_error = PaintMaterialLayerEditError::CreationFailed;
           return false;
         }
@@ -1434,6 +1434,9 @@ bool BKE_paint_material_layer_channel_image_set(Main &bmain,
     image.paint_layer_id = layer_marker;
   }
   image.paint_layer_channel = channel;
+  /* The graph cannot tell this assignment from a generated map -- both carry the row's tag -- so
+   * the record the UI reads is written here and cleared by the unlink. */
+  bke::paint_layer::channel_image_assigned_set(*layer.node, channel, true);
 
   BKE_ntree_update_after_single_tree_change(bmain, tree);
   /* The map may sit in a folder's own node tree, whose evaluated copy is separate from the

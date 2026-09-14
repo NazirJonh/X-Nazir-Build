@@ -9,8 +9,8 @@
  * \ingroup bke
  *
  * The one place that knows the `pbr_*` IDProperty schema of paint layers: every key, and the
- * typed get/set for the marker, kind, fill colour, colour tag, group marker, group material and
- * normal-combine marker that live on layer nodes and group trees.
+ * typed get/set for the marker, kind, fill colour, per-channel fill values, colour tag, group
+ * marker, group material and normal-combine marker that live on layer nodes and group trees.
  *
  * `image.cc` stays the owner of the `ImageMaterialSource` bake link, but reads its keys from here
  * too, so a key is spelled exactly once in the tree. The public `BKE_paint_material_layer_*`
@@ -20,6 +20,8 @@
 #include "BKE_paint_material_layer_model.hh"
 
 #include "BLI_uuid.h"
+
+#include <string>
 
 namespace blender {
 
@@ -90,6 +92,35 @@ bool node_is_correction(const bNode &node);
 
 bool fill_color_get(const bNode &node, float r_color[4]);
 void fill_color_set(bNode &node, const float color[4]);
+
+/** Prefix of the flat value a layer records per channel, suffixed with the channel number. */
+inline constexpr const char *LAYER_CHANNEL_VALUE_PROP_PREFIX = "pbr_paint_channel_value_";
+
+/** The key the flat value of \a channel is recorded under on a layer node. */
+std::string channel_value_idprop_name(int channel);
+/** The flat value \a channel records on the node; false when it never recorded one. */
+bool channel_value_get(const bNode &node, int channel, float r_color[4]);
+/** Record the flat value \a channel stands for, replacing whatever stood there. */
+void channel_value_set(bNode &node, int channel, const float color[4]);
+
+/**
+ * Prefix of the "an external image is assigned" record a layer keeps per channel, suffixed with
+ * the channel number.
+ */
+inline constexpr const char *LAYER_CHANNEL_IMAGE_ASSIGNED_PROP_PREFIX =
+    "pbr_paint_channel_image_assigned_";
+
+/** The key the assigned-image record of \a channel is stored under on a layer node. */
+std::string channel_image_assigned_idprop_name(int channel);
+/**
+ * Whether the channel's map was assigned from outside (the state the unlink button clears): a
+ * record on the node, since the graph cannot tell an assigned image from a generated map -- both
+ * carry the row's tag. False when the record is absent, so a channel that never showed an assigned
+ * image reads the same as an unlinked one.
+ */
+bool channel_image_assigned_get(const bNode &node, int channel);
+/** Record the channel's assigned-from-outside state; clearing removes the key. */
+void channel_image_assigned_set(bNode &node, int channel, bool assigned);
 
 /** Stamp a fresh group tree as a layer-group folder. */
 void layer_group_tree_marker_set(bNodeTree &group);

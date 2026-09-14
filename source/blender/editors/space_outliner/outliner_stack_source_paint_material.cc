@@ -462,6 +462,27 @@ int paint_correction_route_ordinal_get(Main &bmain, Material &material, const bU
   return -1;
 }
 
+std::optional<PaintMaterialCorrectionEffect> paint_correction_effect_get(
+    const Main &bmain, const Material &material, const bUUID &marker)
+{
+  Vector<PaintMaterialLayerStackEntry> entries;
+  if (!BKE_paint_material_layer_stack_from_material(bmain, material, entries)) {
+    return std::nullopt;
+  }
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    for (const Vector<PaintMaterialLayerCorrectionEntry> *corrections :
+         {&entry.content_corrections, &entry.mask_corrections})
+    {
+      for (const PaintMaterialLayerCorrectionEntry &correction : *corrections) {
+        if (BLI_uuid_equal(correction.marker, marker)) {
+          return correction.effect;
+        }
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 /** One correction row: hangs off its parent layer's row, under the parent's section it adjusts. */
 StackRow paint_correction_row_build(const PaintMaterialLayerStackEntry &parent,
                                     const PaintMaterialLayerCorrectionEntry &correction,
@@ -498,7 +519,11 @@ StackRow paint_correction_row_build(const PaintMaterialLayerStackEntry &parent,
    * single shared map is tagged with the mask role, a content correction's map with the channel
    * it paints. A correction with no map there yet shows the empty thumbnail. */
   StackRowPreview slot;
-  slot.section_id = row.parent_section_id;
+  /* Only Paint corrections expose a clickable preview that can switch a brush target. Fill rows
+   * keep the thumbnail as a channel indicator, but do not advertise a paint action. */
+  slot.section_id = (correction.effect == PaintMaterialCorrectionEffect::Paint) ?
+                        row.parent_section_id :
+                        "";
   const int slot_channel = (route.section == PaintMaterialCorrectionSection::Mask) ?
                                int(PAINT_LAYER_MAP_MASK) :
                                shown_channel;
@@ -924,9 +949,10 @@ class PaintMaterialStackSource final : public StackSource,
       ED_paint_material_mask_edit_end_if_active(C);
     }
 
-    /* A correction row points the brush at the correction's own maps (spec D16), which is a
-     * different activation than a layer row's: routed here rather than through the channel
-     * bindings below. */
+    /* A remembered channelless correction stops being the target the moment a row that is not it
+     * activates: whatever this row ends up naming, it is not that correction. */
+    BKE_paint_material_active_correction_set(nullptr, {});
+
     if (Main *bmain = CTX_data_main(&C)) {
       const std::optional<PaintStackRowRoute> route = paint_stack_route_get(*bmain,
                                                                             material,
@@ -935,10 +961,6 @@ class PaintMaterialStackSource final : public StackSource,
         return this->row_correction_activate(C, *bmain, *scene, material, paint_mode, *route);
       }
     }
-
-    /* A remembered channelless correction stops being the target the moment a row that is not it
-     * activates: whatever this row ends up naming, it is not that correction. */
-    BKE_paint_material_active_correction_set(nullptr, {});
 
     /* A row that names no map -- a group -- is not something the brush can write into, and
      * clearing the bindings for it would silently take the paint target away from the user. */
@@ -1024,6 +1046,16 @@ class PaintMaterialStackSource final : public StackSource,
     if (correction == nullptr) {
       return false;
     }
+    if (correction->effect != PaintMaterialCorrectionEffect::Paint) {
+      /* Fill corrections remain selectable rows, but cannot become a brush target. The shared
+       * cleanup in #row_activate has already ended mask editing and cleared the correction memo. */
+      for (MaterialPaintChannelImageBinding &binding : paint_mode.channel_image_bindings) {
+        BKE_paint_material_channel_binding_set(binding, nullptr);
+      }
+      WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+      this->properties_sync(C, material, nullptr);
+      return true;
+    }
 
     if (route.section == PaintMaterialCorrectionSection::Mask) {
       /* Same form as #paint_material_mask_preview_activate: the correction's own map becomes the
@@ -1080,6 +1112,12 @@ class PaintMaterialStackSource final : public StackSource,
   {
     if (!row.supported || ctx.bmain == nullptr || ctx.scene == nullptr ||
         ctx.scene->toolsettings == nullptr)
+    {
+      return false;
+    }
+    if (const std::optional<PaintMaterialCorrectionEffect> effect =
+            paint_correction_effect_get(*ctx.bmain, paint_owner(owner), row.stable_id);
+        effect.has_value() && *effect != PaintMaterialCorrectionEffect::Paint)
     {
       return false;
     }
@@ -1430,13 +1468,19 @@ class PaintMaterialStackSource final : public StackSource,
         section = PaintMaterialCorrectionSection::Mask;
       }
       const int layer_ordinal = anchor->layer_ordinal;
+      /* The Add's `effect` property, numbered as this enum is; anything else reads as the painted
+       * adjustment the Add has always created. */
+      const PaintMaterialCorrectionEffect effect =
+          args.effect == int(PaintMaterialCorrectionEffect::Fill) ?
+              PaintMaterialCorrectionEffect::Fill :
+              PaintMaterialCorrectionEffect::Paint;
       bUUID marker = {};
       const bool added = this->paint_edit(
           C,
           owner,
           [&](Main &route_bmain, Material &material, PaintMaterialLayerEditError &error) {
             return BKE_paint_material_layer_correction_add(
-                route_bmain, material, layer_ordinal, section, nullptr, &marker, &error);
+                route_bmain, material, layer_ordinal, section, effect, nullptr, &marker, &error);
           });
       if (!added) {
         return -1;
@@ -2686,12 +2730,19 @@ bool paint_row_owns_mask_image(const StackRow &row, const Image *mask_image)
 }
 
 bool paint_material_mask_preview_activate(Main &bmain,
-                                          Scene &scene,
-                                          Paint &paint,
-                                          const StackRow &row,
-                                          const StringRef section_id)
+                                           Scene &scene,
+                                           Paint &paint,
+                                           const StackRow &row,
+                                           const StringRef section_id)
 {
   if (scene.toolsettings == nullptr) {
+    return false;
+  }
+  bool has_paint_preview = false;
+  for (const StackRowPreview &slot : row.preview_slots) {
+    has_paint_preview |= slot.section_id == section_id;
+  }
+  if (!has_paint_preview) {
     return false;
   }
   PaintModeSettings &paint_mode = scene.toolsettings->paint_mode;

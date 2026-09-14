@@ -703,6 +703,9 @@ void BRUSH_OT_asset_revert(wmOperatorType *ot);
 /* `paint_material_layer_ops.cc` */
 
 void MATERIAL_OT_paint_layer_channel_toggle(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_channel_value_set(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_channel_unlink(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_use_layer_result(wmOperatorType *ot);
 void MATERIAL_OT_paint_layer_bake_size_set(wmOperatorType *ot);
 void MATERIAL_OT_paint_layer_rebake(wmOperatorType *ot);
 

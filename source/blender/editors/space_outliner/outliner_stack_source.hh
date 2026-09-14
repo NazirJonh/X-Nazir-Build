@@ -348,6 +348,11 @@ struct StackAddArgs {
    * source whose kinds depend on what the user is looking at reads it; others ignore it.
    */
   std::string section_id;
+  /**
+   * Which effect a correction kind applies, numbered as the paint source's own effect enum
+   * (a painted adjustment, then a flat fill). Every other kind ignores it.
+   */
+  int effect = 0;
 };
 
 /** Where a moved row lands relative to the row it was aimed at. */

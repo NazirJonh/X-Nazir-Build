@@ -382,6 +382,14 @@ Image *layer_image_given(const PaintMaterialLayerAddParams &params, const int ch
 
 void fill_map_color_for(const int channel, const float fill_color[4], float r_color[4]);
 
+/**
+ * Overwrite every pixel of \a image with \a color, and tell the readers the pixels moved.
+ *
+ * \a color is in the same convention #BKE_image_add_generated takes, so a refill and a fresh map
+ * agree on what a colour means.
+ */
+void image_fill_flat(Image &image, const float color[4]);
+
 Image *layer_image_create(Main &bmain,
                           const int channel,
                           const PaintMaterialLayerAddParams &params);
@@ -442,6 +450,7 @@ bool correction_channel_insert(Main &bmain,
                                ChannelChain &chain,
                                ChainLayer &layer,
                                PaintMaterialCorrectionSection section,
+                               PaintMaterialCorrectionEffect effect,
                                const bUUID &marker,
                                ChainCorrection &r_nodes);
 

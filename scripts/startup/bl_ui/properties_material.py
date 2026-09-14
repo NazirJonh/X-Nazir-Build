@@ -559,6 +559,72 @@ class LayerMaterialButtonsPanel:
         return mat is not None and not mat.grease_pencil
 
 
+def _draw_fill_channel_panels(layout, context, labels):
+    """Draw one sub-panel per enabled channel of a Fill-shaped active row.
+
+    A Fill row stands for one flat value or image per channel, so every channel the toggle grid
+    above shows enabled gets a sub-panel with the image picker and the flat value. A correction
+    with the Fill effect shares this layout; one hanging on a Mask reports a single enabled
+    channel, so the same loop naturally draws just that one grayscale panel.
+    """
+    paint_mode = context.tool_settings.paint_mode
+    # Only a Fill offers a flat value per channel: a Paint row's channels are painted, a Material
+    # row's are baked, and a correction without the Fill effect edits what it hangs on instead.
+    is_fill = paint_mode.active_layer_kind == 'FILL' or (
+        paint_mode.active_layer_is_correction and
+        paint_mode.active_layer_correction_effect == 'FILL'
+    )
+    if not is_fill:
+        return
+
+    enabled, _disabled = paint_mode.active_layer_channel_states()
+    active_channel = paint_mode.active_layer_channel
+    layout.prop(paint_mode, "active_layer_channel", text="Channel")
+    # Same source the toggle grid reads: the bake function's flag enum. Each item's value is the
+    # bit of its channel index (see rna_material_api.cc), so the single set bit -- not the item's
+    # position -- is the index the per-channel properties and operators expect.
+    channels_param = bpy.types.Material.bl_rna.functions["bake_paint_channels"].parameters[
+        "channels"]
+    for item in channels_param.enum_items:
+        if not item.identifier:
+            continue
+        if item.identifier not in enabled or item.value.bit_length() - 1 != active_channel:
+            continue
+
+        header, panel = layout.panel(
+            "layer_material_fill_%s" % item.identifier.lower(),
+            default_closed=False,
+        )
+        header.label(text=labels.get(item.identifier, item.name))
+        if not panel:
+            continue
+
+        row = panel.row(align=True)
+        # No filter argument: template_ID's filter only acts on objects, and the image filtering
+        # presets belong to template_ID_browser, which this plain picker row does not use.
+        row.template_ID(paint_mode, "active_layer_channel_image", new="image.new", open="image.open")
+        row.operator_menu_enum(
+            "material.paint_layer_use_layer_result",
+            "source_ordinal",
+            text="",
+            icon='RENDER_STILL',
+        ).channel = item.identifier
+
+        if paint_mode.active_layer_channel_has_image:
+            # An image assigned from outside replaces the flat value until it is unlinked again.
+            row = panel.row(align=True)
+            row.operator(
+                "material.paint_layer_channel_unlink", text="Unlink", icon='X',
+            ).channel = item.identifier
+        else:
+            col = panel.column(align=True)
+            if item.identifier in ('BASE_COLOR', 'EMISSION'):
+                # Color channels fill with an RGBA value, the rest with a single scalar.
+                col.prop(paint_mode, "active_layer_channel_value", text="")
+            else:
+                col.prop(paint_mode, "active_layer_channel_value", index=0, text="", slider=True)
+
+
 class LAYER_MATERIAL_PT_context_material(LayerMaterialButtonsPanel, Panel):
     bl_idname = "LAYER_MATERIAL_PT_context_material"
     bl_label = ""
@@ -627,6 +693,10 @@ class LAYER_MATERIAL_PT_context_material(LayerMaterialButtonsPanel, Panel):
                 icon='HIDE_ON' if item.identifier in disabled else 'NONE',
                 depress=item.identifier in enabled,
             ).channel = item.identifier
+
+        # A Fill row (or Fill correction) fills every enabled channel with one value or image;
+        # its per-channel sub-panels follow the toggle grid.
+        _draw_fill_channel_panels(layout, context, self._short_labels)
 
 
 class LAYER_MATERIAL_PT_surface(LayerMaterialButtonsPanel, Panel):

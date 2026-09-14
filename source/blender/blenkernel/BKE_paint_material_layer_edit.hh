@@ -77,6 +77,29 @@ bUUID BKE_paint_material_layer_marker_get(const bNode &node);
 void BKE_paint_material_layer_marker_set(bNode &node, const bUUID &layer_id);
 
 /**
+ * The sockets a "Use layer result" bake of one stack row renders, resolved in the chain of \a
+ * channel: the row's own color output into \a r_color_socket, and the output feeding the row's
+ * Factor input -- its blend weight, its mask or its map's alpha -- into \a r_mask_socket. Both are
+ * output sockets, the shape a bake attaches.
+ *
+ * \a marker is the row's marker from #PaintMaterialLayerStackEntry::marker; corrections never
+ * carry a layer row's marker. \a ma may be a localized copy of the material, as a bake worker's
+ * is: the walk reads markers and sockets only, and never touches #Main or the original.
+ *
+ * Returns false, leaving both outputs null, when the material is not a paint stack, when no row
+ * of \a channel's chain carries \a marker, or when the row has no usable color socket. A row
+ * whose Factor is a constant (unlinked) resolves with a null \a r_mask_socket: the bake's alpha
+ * stays opaque, the shape a full-coverage constant stands for. A row inside a folder group is
+ * refused the same way as an unknown marker: its sockets live in the group's own node tree,
+ * which a bake attached at the material tree cannot route to, so it has no endpoint yet.
+ */
+bool BKE_paint_material_layer_bake_endpoint_resolve(Material &ma,
+                                                    const bUUID &marker,
+                                                    int channel,
+                                                    bNodeSocket **r_color_socket,
+                                                    bNodeSocket **r_mask_socket);
+
+/**
  * Get/set the color tag of a layer group node.
  *
  * Color tags are stored as an IDProperty on the group node, separate from the node's own color.
@@ -413,6 +436,7 @@ bool BKE_paint_material_layer_correction_add(Main &bmain,
                                             Material &ma,
                                             int layer_ordinal,
                                             PaintMaterialCorrectionSection section,
+                                            PaintMaterialCorrectionEffect effect,
                                             const char *name,
                                             bUUID *r_correction = nullptr,
                                             PaintMaterialLayerEditError *r_error = nullptr);
@@ -502,6 +526,12 @@ PaintMaterialLayerChannelState BKE_paint_material_layer_correction_channel_state
  * the row's coverage input wherever nothing owns that input, and disabling takes the link back
  * out once no correction contributes there anymore. A mask owns the coverage input and is never
  * touched.
+ *
+ * A painted mask correction has no per-channel switch of its own: its form in each channel
+ * follows what the row puts there (#layer_mask_corrections_sync), and a direct toggle is refused
+ * (#PaintMaterialLayerEditError::CorrectionSectionMismatch). A Fill mask correction is the one
+ * mask a channel can be picked on -- its single grayscale channel -- and picking a second one is
+ * refused with the same error while the correction is wired on another.
  */
 bool BKE_paint_material_layer_correction_channel_enabled_set(Main &bmain,
                                                             Material &ma,
@@ -510,6 +540,132 @@ bool BKE_paint_material_layer_correction_channel_enabled_set(Main &bmain,
                                                             bool enable,
                                                             PaintMaterialLayerEditError *r_error =
                                                                 nullptr);
+
+/**
+ * The value recorded for \a channel on the correction \a correction: the raw colour
+ * #BKE_paint_material_layer_correction_channel_value_apply recorded on the correction's own Mix
+ * node, not the map's pixels -- a painted-over map cannot be asked what colour it was filled with.
+ *
+ * Returns false, leaving \a r_color untouched, when the channel carries no recorded value yet, and
+ * when the correction is not wired on the channel at all.
+ */
+bool BKE_paint_material_layer_correction_channel_value_get(Main &bmain,
+                                                           Material &ma,
+                                                           const bUUID &correction,
+                                                           int channel,
+                                                           float r_color[4]);
+
+/**
+ * Whether the channel's map was assigned from outside (the state the unlink button clears): a
+ * record on the correction's own Mix node, since the graph cannot tell an assigned image from a
+ * generated map -- both carry the correction's tag.
+ *
+ * False when the correction is not resolvable, when the channel is not wired on it, and when the
+ * record is absent -- a channel that never showed an assigned image reads the same as an unlinked
+ * one.
+ */
+bool BKE_paint_material_layer_correction_channel_image_assigned_get(Main &bmain,
+                                                                   Material &ma,
+                                                                   const bUUID &correction,
+                                                                   int channel);
+
+/**
+ * Live preview for a per-channel value picker on the correction \a correction: re-fill only \a
+ * channel's map with the flat colour \a color stands for there, exactly like
+ * #BKE_paint_material_layer_correction_channel_value_apply, but record nothing on the correction's
+ * Mix node and push no undo step.
+ *
+ * The picker's RNA update calls this per tick; the dialog's exec does the real apply (pixels +
+ * marker + undo) once.
+ *
+ * Refused with #PaintMaterialLayerEditError::IndexOutOfRange when the correction is not wired on
+ * the channel -- no chain carries the row in it, or the correction has no map in that channel --
+ * writing nothing.
+ */
+bool BKE_paint_material_layer_correction_channel_value_preview(Main &bmain,
+                                                               Material &ma,
+                                                               const bUUID &correction,
+                                                               int channel,
+                                                               const float color[4],
+                                                               PaintMaterialLayerEditError
+                                                                   *r_error = nullptr);
+
+/**
+ * Re-fill the map of \a channel on the correction \a correction with the flat colour \a color
+ * stands for there, and record \a color as that channel's own value on the correction's Mix node.
+ *
+ * What the map takes is what a Fill created there would -- a scalar channel takes \a color's red
+ * as its flat value, a color channel takes all of it -- while the Mix records the raw \a color,
+ * which #BKE_paint_material_layer_correction_channel_value_get reads back.
+ *
+ * Refused with #PaintMaterialLayerEditError::IndexOutOfRange when the correction is not wired on
+ * the channel: no chain carries the row in it, or the correction has no map in that channel.
+ */
+bool BKE_paint_material_layer_correction_channel_value_apply(Main &bmain,
+                                                             Material &ma,
+                                                             const bUUID &correction,
+                                                             int channel,
+                                                             const float color[4],
+                                                             PaintMaterialLayerEditError *r_error =
+                                                                 nullptr);
+
+/**
+ * Set \a image as the map of \a channel on the correction \a correction, leaving every other
+ * channel of the correction exactly as it was -- the correction-side counterpart of
+ * #BKE_paint_material_layer_channel_image_set: what a dropped image on a correction's row means.
+ *
+ * \a channel must already be wired on the correction, map included: an unwired one is refused
+ * (#PaintMaterialLayerEditError::IndexOutOfRange) -- creating and wiring channels is
+ * #BKE_paint_material_layer_correction_channel_enabled_set's job. A painted mask correction has
+ * no map to assign to -- its one map is synced, not user-assigned -- and is refused
+ * (#PaintMaterialLayerEditError::CorrectionSectionMismatch). A Fill mask correction shows its one
+ * grayscale map on its one wired channel, and only there: the assignment re-tags \a image with
+ * the mask role, and assigning to any other channel is the multi-channel attempt the
+ * single-channel form refuses, with the same error.
+ *
+ * Transactional like the rest of this file. The image is referenced by the map node's ID field,
+ * and the node tree update recounts node ID users, so a caller that received \a image from a
+ * load helper hands the load's extra user back with #id_us_min before calling -- the way a drop
+ * does.
+ */
+bool BKE_paint_material_layer_correction_channel_image_set(Main &bmain,
+                                                           Material &ma,
+                                                           const bUUID &correction,
+                                                           int channel,
+                                                           Image &image,
+                                                           PaintMaterialLayerEditError *r_error =
+                                                               nullptr);
+
+/**
+ * Detach whatever image \a channel of the correction \a correction currently shows, and give the
+ * channel back a flat map of its own at the value the channel last recorded: the colour
+ * #BKE_paint_material_layer_correction_channel_value_apply left on the correction's Mix, or -- for
+ * a channel that never recorded one -- the neutral colour a map of the channel starts at. The
+ * neutral value is recorded like an applied one, so the value picker reads back what the map
+ * holds.
+ *
+ * The image the channel shows is never written to -- an image assigned through
+ * #BKE_paint_material_layer_correction_channel_image_set is tagged as the correction's own map
+ * just like a generated one, so the only way to never touch a dropped image's pixels is to
+ * rewire: a fresh map, created the way
+ * #BKE_paint_material_layer_correction_channel_enabled_set creates one, is filled with the value
+ * and takes the channel over. A painted mask correction is the exception: its one map is every
+ * channel's and nothing can have replaced it, so unlinking re-fills that shared map in place, and
+ * one that does not carry the correction's tag is refused
+ * (#PaintMaterialLayerEditError::CorrectionSectionMismatch) -- nothing this module builds can
+ * have wired it. A Fill mask correction follows the rewire: an assignment can have replaced its
+ * one shared grayscale map (tagged as its own like every map of a correction), so it is given a
+ * fresh one of its own instead, whatever the channel showed.
+ *
+ * Refused with #PaintMaterialLayerEditError::IndexOutOfRange when the channel is not wired on the
+ * correction -- no chain carries the row in it, or the correction has no map in that channel.
+ */
+bool BKE_paint_material_layer_correction_channel_unlink(Main &bmain,
+                                                        Material &ma,
+                                                        const bUUID &correction,
+                                                        int channel,
+                                                        PaintMaterialLayerEditError *r_error =
+                                                            nullptr);
 
 /**
  * Rename the correction \a correction.
@@ -673,6 +829,96 @@ bool BKE_paint_material_layer_fill_color_preview(Main &bmain,
                                                  int ordinal,
                                                  const float color[4],
                                                  PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * The value recorded for \a channel on the layer at \a ordinal: the raw colour
+ * #BKE_paint_material_layer_channel_value_apply recorded on the row's marker, not the map's
+ * pixels -- a painted-over map cannot be asked what colour it was filled with.
+ *
+ * Returns false, leaving \a r_color untouched, when the channel carries no recorded value yet, and
+ * when the channel is not wired on the layer at all.
+ */
+bool BKE_paint_material_layer_channel_value_get(Main &bmain,
+                                                Material &ma,
+                                                int ordinal,
+                                                int channel,
+                                                float r_color[4]);
+
+/**
+ * Whether the channel's map was assigned from outside (the state the unlink button clears): a
+ * record on the row's node, since the graph cannot tell an assigned image from a generated map --
+ * both carry the row's tag.
+ *
+ * False when the row is not resolvable, when the channel is not wired on it, and when the record
+ * is absent -- a channel that never showed an assigned image reads the same as an unlinked one.
+ */
+bool BKE_paint_material_layer_channel_image_assigned_get(Main &bmain,
+                                                        Material &ma,
+                                                        int ordinal,
+                                                        int channel);
+
+/**
+ * Live preview for a per-channel value picker: re-fill only \a channel's map with the flat colour
+ * \a color stands for there, exactly like #BKE_paint_material_layer_channel_value_apply, but
+ * record nothing on the layer's marker and push no undo step.
+ *
+ * The picker's RNA update calls this per tick; the dialog's exec does the real apply (pixels +
+ * marker + undo) once.
+ *
+ * Refused with #PaintMaterialLayerEditError::IndexOutOfRange when the channel is not wired on the
+ * layer -- no chain carries the row in it, or the row has no map in that channel -- writing
+ * nothing.
+ */
+bool BKE_paint_material_layer_channel_value_preview(Main &bmain,
+                                                    Material &ma,
+                                                    int ordinal,
+                                                    int channel,
+                                                    const float color[4],
+                                                    PaintMaterialLayerEditError *r_error =
+                                                        nullptr);
+
+/**
+ * Re-fill the map of \a channel on the layer at \a ordinal with the flat colour \a color stands
+ * for there, and record \a color as that channel's own value on the layer's marker.
+ *
+ * The per-channel companion of #BKE_paint_material_layer_fill_color_apply, which re-fills every
+ * wired channel from one colour: this addresses one channel alone. What the map takes is what a
+ * Fill created there would -- a scalar channel takes \a color's red as its flat value, a color
+ * channel takes all of it -- while the marker records the raw \a color, which
+ * #BKE_paint_material_layer_channel_value_get reads back.
+ *
+ * Refused with #PaintMaterialLayerEditError::IndexOutOfRange when the channel is not wired on the
+ * layer: no chain carries the row in it, or the row has no map in that channel.
+ */
+bool BKE_paint_material_layer_channel_value_apply(Main &bmain,
+                                                  Material &ma,
+                                                  int ordinal,
+                                                  int channel,
+                                                  const float color[4],
+                                                  PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * Detach whatever image \a channel of the layer at \a ordinal currently shows, and give the
+ * channel back a flat map of its own at the value the channel last recorded: the colour
+ * #BKE_paint_material_layer_channel_value_apply left on the marker, or -- for a channel that
+ * never recorded one -- the neutral colour a map of the channel starts at. The neutral value is
+ * recorded like an applied one, so the value picker reads back what the map holds.
+ *
+ * The image the channel shows is never written to. An image assigned through
+ * #BKE_paint_material_layer_channel_image_set is tagged as the row's own map just like a
+ * generated one, so nothing the graph carries tells a dropped image from a generated one -- the
+ * only way to never touch a dropped image's pixels is to rewire: a fresh map, created the way
+ * #BKE_paint_material_layer_channel_enabled_set creates one, is filled with the value and takes
+ * the channel over. What the channel showed before is left to the usual user-count rules.
+ *
+ * Refused with #PaintMaterialLayerEditError::IndexOutOfRange when the channel is not wired on the
+ * layer -- no chain carries the row in it, or the row has no map in that channel.
+ */
+bool BKE_paint_material_layer_channel_unlink(Main &bmain,
+                                             Material &ma,
+                                             int ordinal,
+                                             int channel,
+                                             PaintMaterialLayerEditError *r_error = nullptr);
 
 /**
  * Record \a kind on the layer at \a ordinal, on its node in every channel at once.

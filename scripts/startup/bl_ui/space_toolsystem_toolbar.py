@@ -2301,6 +2301,26 @@ class _defs_image_paint_select:
         )
 
     @ToolDef.from_fn
+    def paint_mask_island():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("paint.paint_mask_island")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
+
+        return dict(
+            idname="builtin.paint_mask_island",
+            label="Paint Mask Island",
+            # No dedicated icon asset yet: reuse the closest existing "pick to mask" glyph
+            # (`ops.sculpt.mask_by_color`). A dedicated asset needs an SVG in the icons pipeline.
+            icon="ops.sculpt.mask_by_color",
+            widget=None,
+            cursor='EYEDROPPER',
+            keymap="Image Editor Tool: Paint, Paint Mask Island",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def lasso():
         def draw_settings(context, layout, tool):
             props = tool.operator_properties("paint.image_select_lasso")
@@ -3859,6 +3879,9 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_texture_paint.mask,
             None,
             *_tools_image_paint_select,
+            # Standalone tool (not part of the selection group above): it writes the 3D Viewport
+            # face selection paint mask instead of the Image Editor's own 2D selection mask.
+            _defs_image_paint_select.paint_mask_island,
             None,
             *_tools_annotate,
         ],

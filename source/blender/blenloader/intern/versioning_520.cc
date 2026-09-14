@@ -1969,7 +1969,7 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
           }
           else if (sl.spacetype == SPACE_IMAGE) {
             SpaceImage &sima = reinterpret_cast<SpaceImage &>(sl);
-            sima.paint_face_selection_opacity = 0.05f;
+            sima.face_selection_opacity = 0.05f;
             sima.flag |= SI_DRAW_FACE_SELECTION;
           }
         }

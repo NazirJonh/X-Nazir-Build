@@ -115,6 +115,7 @@ set(SRC
   mesh/paint_hide.cc
   mesh/paint_image.cc
   mesh/paint_image_2d.cc
+  mesh/paint_image_paint_mask_island.cc
   mesh/paint_image_uv_geom.cc
   mesh/paint_image_uv_symmetry.cc
   mesh/paint_image_select_mask.cc

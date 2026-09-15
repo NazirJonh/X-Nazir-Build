@@ -812,6 +812,48 @@ static void block_bounds_calc_popup(
   }
 }
 
+static void block_bounds_calc_anchored(wmWindow *window, Block *block)
+{
+  block_bounds_calc(block);
+
+  const rcti &anchor = block->bounds_anchor;
+  const int min_y = UI_SCREEN_MARGIN;
+  const int max_y = WM_window_native_pixel_size(window)[1] - UI_POPUP_MENU_TOP;
+  /* A hair of air between the block and the rectangle it anchors to: close enough to read as
+   * attached, far enough to not touch. */
+  const int gap = max_ii(int(U.pixelsize), 1);
+  const int height = int(BLI_rctf_size_y(&block->rect));
+
+  /* Keep the side chosen at the first placement: a refresh that changes the block height must
+   * not flip the block to the other side of its anchor mid-editing, the same contract
+   * #popup_block_position honors through its own prev_dir fields. */
+  short dir = block->handle ? block->handle->prev_anchor_dir : 0;
+  if (dir == 0) {
+    const bool fits_above = anchor.ymax + gap + height <= max_y;
+    const bool fits_below = anchor.ymin - gap - height >= min_y;
+    if (fits_above) {
+      dir = UI_DIR_UP;
+    }
+    else if (fits_below) {
+      dir = UI_DIR_DOWN;
+    }
+    else {
+      /* Neither side fits whole: take the roomier one, the window clip trims the rest. */
+      dir = (max_y - anchor.ymax >= anchor.ymin - min_y) ? UI_DIR_UP : UI_DIR_DOWN;
+    }
+    if (block->handle) {
+      block->handle->prev_anchor_dir = dir;
+    }
+  }
+
+  /* Left edges aligned, the way a button-anchored popup aligns to its button. */
+  const int target_x = anchor.xmin;
+  const int target_y = (dir == UI_DIR_UP) ? anchor.ymax + gap : anchor.ymin - gap - height;
+
+  block_translate(block, target_x - block->rect.xmin, target_y - block->rect.ymin);
+  block_bounds_calc(block);
+}
+
 void block_bounds_set_normal(Block *block, int addval)
 {
   if (block == nullptr) {
@@ -858,6 +900,13 @@ void block_bounds_set_centered(Block *block, int addval)
 {
   block->bounds = addval;
   block->bounds_type = BLOCK_BOUNDS_POPUP_CENTER;
+}
+
+void block_bounds_set_anchor(Block *block, int addval, const rcti &anchor_rect)
+{
+  block->bounds = addval;
+  block->bounds_type = BLOCK_BOUNDS_POPUP_ANCHOR;
+  block->bounds_anchor = anchor_rect;
 }
 
 void block_bounds_set_explicit(Block *block, int minx, int miny, int maxx, int maxy)
@@ -2353,6 +2402,9 @@ void block_end_ex(const bContext *C,
       break;
     case BLOCK_BOUNDS_PIE_CENTER:
       block_bounds_calc_centered_pie(block);
+      break;
+    case BLOCK_BOUNDS_POPUP_ANCHOR:
+      block_bounds_calc_anchored(window, block);
       break;
 
       /* fallback */
@@ -4114,7 +4166,13 @@ void block_free(const bContext *C, Block *block)
   block_free_active_operator(block);
 
   block->saferct.free_no_destruct();
-  block->color_pickers.list.free_no_destruct();
+  /* #ColorPicker holds a #PointerRNA with a non-trivial destructor (the ancestors vector), so the
+   * pickers are allocated with #MEM_new and must be released with #MEM_delete -- the C-style
+   * #free_no_destruct would trip the allocator's destructor guard. */
+  for (ColorPicker &cpicker : block->color_pickers.list.items_mutable()) {
+    MEM_delete(&cpicker);
+  }
+  block->color_pickers.list.clear_no_delete();
   block->dynamic_listeners.free_no_destruct();
 
   block_free_views(block);

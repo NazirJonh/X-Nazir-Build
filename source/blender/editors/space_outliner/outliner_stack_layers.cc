@@ -2982,9 +2982,11 @@ static wmOperatorStatus stack_row_fill_color_set_invoke(bContext *C,
   /* The dialog starts at the colour the row stands for now, which the source already put in the
    * row's swatch -- a picker that opens at white is a picker that loses the current colour. */
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  /* One resolution of the row for both the starting colour and the dialog anchor: the swatch
+   * click, the context menu and scripts all address it through the same ordinal. */
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
   PropertyRNA *color_prop = RNA_struct_find_property(op->ptr, "color");
   if (!RNA_property_is_set(op->ptr, color_prop)) {
-    const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
     if (const StackRow *row = (ordinal < 0) ?
                                   nullptr :
                                   outliner_stack_row_find(*space_outliner, ordinal))
@@ -3007,7 +3009,27 @@ static wmOperatorStatus stack_row_fill_color_set_invoke(bContext *C,
                               nullptr;
   preview_data->did_preview = false;
   op->customdata = preview_data;
-  return WM_operator_props_dialog_popup(C, op, 260, IFACE_("Fill Color"), IFACE_("Fill"));
+  /* Open beside the row's swatch, not on top of it: the picker must not hide the colour it
+   * edits. Without an anchor -- no region, a tree the draw has not laid out yet, a row the tree
+   * does not name -- keep the old at-the-mouse placement. */
+  std::optional<rcti> anchor_rect;
+  if (ARegion *region = CTX_wm_region(C)) {
+    rcti rect;
+    if (ordinal >= 0 &&
+        outliner_stack_row_fill_swatch_anchor_rect(*space_outliner, *region, ordinal, rect))
+    {
+      anchor_rect = rect;
+    }
+  }
+  return WM_operator_props_dialog_popup(C,
+                                        op,
+                                        260,
+                                        IFACE_("Fill Color"),
+                                        IFACE_("Fill"),
+                                        false,
+                                        std::nullopt,
+                                        false,
+                                        std::move(anchor_rect));
 }
 
 /**
@@ -3091,11 +3113,12 @@ static void stack_row_fill_color_set_cancel(bContext *C, wmOperator *op)
   stack_row_fill_color_preview_data_free(preview_data);
 }
 
-/** The dialog is the picker: the wheel edits the color straight away, without the extra
- * click a color button would need. Every tick flows through the property update below. */
-static void stack_row_fill_color_set_ui(bContext * /*C*/, wmOperator *op)
+/** The dialog is the picker: the full standard picker -- wheel, channel sliders, hex, eyedropper
+ * and the paint palette -- builds right into it, and every edit flows through the property's
+ * update callback below. */
+static void stack_row_fill_color_set_ui(bContext *C, wmOperator *op)
 {
-  template_color_picker(op->layout, op->ptr, "color", true, false, false, false);
+  template_color_picker_full(C, op->layout, op->ptr, "color", true);
 }
 
 void OUTLINER_OT_stack_layer_fill_color_set(wmOperatorType *ot)

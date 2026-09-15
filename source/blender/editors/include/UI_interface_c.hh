@@ -1259,6 +1259,7 @@ enum BlockBoundsCalc {
   BLOCK_BOUNDS_POPUP_MENU,
   BLOCK_BOUNDS_POPUP_CENTER,
   BLOCK_BOUNDS_PIE_CENTER,
+  BLOCK_BOUNDS_POPUP_ANCHOR,
 };
 
 /**
@@ -1281,6 +1282,12 @@ void block_bounds_set_menu(Block *block, int addval, const int bounds_offset[2])
  * Used for centered popups, i.e. splash.
  */
 void block_bounds_set_centered(Block *block, int addval);
+/**
+ * Used for popups anchored to a window-space rectangle: placed beside it -- above when it fits,
+ * else below -- so the rectangle the user is working on stays visible. The anchor travels in
+ * #Block::bounds_anchor; the side chosen at the first placement is kept across refreshes.
+ */
+void block_bounds_set_anchor(Block *block, int addval, const rcti &anchor_rect);
 void block_bounds_set_explicit(Block *block, int minx, int miny, int maxx, int maxy);
 
 int blocklist_min_y_get(ListBaseT<ui::Block> *lb);
@@ -3265,6 +3272,18 @@ void template_color_picker(Layout *layout,
                            bool lock,
                            bool lock_luminosity,
                            bool cubic);
+/**
+ * The full standard color picker -- wheel/square, value slider, RGB/HSV/HSL channel sliders, hex
+ * field, eyedropper and the paint-mode Color Palette -- built into \a layout, bound to the float
+ * color \a propname on \a ptr. Meant for operator dialogs: the property's own RNA update runs for
+ * every edit, so a live preview registered on it ticks without extra wiring. Every change stays
+ * inside the dialog: no nested popup, and the picker never closes its host.
+ */
+void template_color_picker_full(bContext *C,
+                                Layout *layout,
+                                PointerRNA *ptr,
+                                StringRefNull propname,
+                                bool show_eyedropper);
 void template_palette(Layout *layout,
                       PointerRNA *ptr,
                       StringRefNull propname,

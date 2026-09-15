@@ -34,6 +34,7 @@
 #include "outliner_intern.hh"
 #include "tree/tree_display.hh"
 #include "tree/tree_element_rna.hh"
+#include "tree/tree_iterator.hh"
 
 namespace blender {
 
@@ -591,6 +592,82 @@ rctf outliner_stack_slot_preview_rect(const float row_x,
                                       const int slot_index)
 {
   return outliner_stack_preview_rect_impl(row_x, content_y, slot_index, false);
+}
+
+bool outliner_stack_row_fill_swatch_anchor_rect(const SpaceOutliner &space_outliner,
+                                                const ARegion &region,
+                                                const int ordinal,
+                                                rcti &r_window_rect)
+{
+  const StackRow *row = outliner_stack_row_find(space_outliner, ordinal);
+  if (row == nullptr || row->preview_slots.is_empty()) {
+    return false;
+  }
+  /* The swatch is not at a fixed place among the slots: a fill row carries its channel map first,
+   * the color beside it, and further slots may follow. */
+  int swatch_slot_index = -1;
+  for (const int slot_index : row->preview_slots.index_range()) {
+    if (row->preview_slots[slot_index].is_color_swatch) {
+      swatch_slot_index = slot_index;
+      break;
+    }
+  }
+  if (swatch_slot_index == -1) {
+    return false;
+  }
+
+  const TreeElement *te = nullptr;
+  tree_iterator::all_open(space_outliner, [&](const TreeElement *te_iter) {
+    if (te == nullptr) {
+      const TreeStoreElem *tselem = TREESTORE(te_iter);
+      if (tselem->type == TSE_STACK_LAYER && int(tselem->nr) == ordinal) {
+        te = te_iter;
+      }
+    }
+  });
+  if (te == nullptr || !outliner_is_element_visible(te) ||
+      !outliner_is_element_in_view(space_outliner, te, &region.v2d))
+  {
+    return false;
+  }
+  /* Coordinates come from the draw pass; until it has run over the current tree they hold the
+   * previous layout's numbers, or nothing at all (both zero) -- a rect built from those would
+   * anchor the dialog somewhere it does not belong. */
+  if (te->xs == 0.0f && te->ys == 0.0f) {
+    return false;
+  }
+
+  const int row_height = outliner_tree_element_height(space_outliner, *te);
+  /* The one-unit content line a row's content is centered on -- a big row's content does not sit
+   * at its bottom; the same line the draw computes (outliner_draw.cc stack_row_content_offset). */
+  const float content_y = te->ys + (row_height - UI_UNIT_Y) / 2;
+  const rctf swatch_rect = outliner_stack_row_preview_rect(
+      *row, float(te->xs), content_y, swatch_slot_index);
+
+  /* X from the swatch, Y from the whole row: the dialog must hide neither the color being edited
+   * nor the row it belongs to. The view's y runs against the region's, so both row edges are
+   * converted and ordered rather than assumed. */
+  float region_x_swatch_min = 0.0f;
+  float region_x_swatch_max = 0.0f;
+  float region_y_row_a = 0.0f;
+  float region_y_row_b = 0.0f;
+  ui::view2d_view_to_region_fl(
+      &region.v2d, swatch_rect.xmin, te->ys, &region_x_swatch_min, &region_y_row_a);
+  ui::view2d_view_to_region_fl(
+      &region.v2d, swatch_rect.xmax, te->ys + row_height, &region_x_swatch_max, &region_y_row_b);
+
+  rctf window_rect;
+  window_rect.xmin = region.winrct.xmin + region_x_swatch_min;
+  window_rect.xmax = region.winrct.xmin + region_x_swatch_max;
+  window_rect.ymin = region.winrct.ymin + std::min(region_y_row_a, region_y_row_b);
+  window_rect.ymax = region.winrct.ymin + std::max(region_y_row_a, region_y_row_b);
+
+  /* Round outward: not a pixel of the swatch or the row is lost from the anchor. */
+  r_window_rect.xmin = int(floorf(window_rect.xmin));
+  r_window_rect.ymin = int(floorf(window_rect.ymin));
+  r_window_rect.xmax = int(ceilf(window_rect.xmax));
+  r_window_rect.ymax = int(ceilf(window_rect.ymax));
+  return true;
 }
 
 }  // namespace ed::outliner

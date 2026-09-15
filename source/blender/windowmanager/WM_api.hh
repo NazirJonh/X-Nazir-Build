@@ -1066,6 +1066,14 @@ wmOperatorStatus WM_operator_props_popup_confirm_ex(
 wmOperatorStatus WM_operator_props_popup_call(bContext *C, wmOperator *op, const wmEvent *event);
 wmOperatorStatus WM_operator_props_popup(bContext *C, wmOperator *op, const wmEvent *event);
 
+/**
+ * Open a dialog over the operator's properties, closed by its confirm/cancel buttons.
+ *
+ * With \a anchor_rect (window-space) the dialog opens beside it -- above when it fits, else
+ * below, left edge at the anchor's left -- so the rectangle the user is working on stays
+ * visible; the anchor wins over \a message centering. Without one the dialog positions at the
+ * mouse as before.
+ */
 wmOperatorStatus WM_operator_props_dialog_popup(
     bContext *C,
     wmOperator *op,
@@ -1074,7 +1082,8 @@ wmOperatorStatus WM_operator_props_dialog_popup(
     std::optional<std::string> confirm_text = std::nullopt,
     bool cancel_default = false,
     std::optional<std::string> message = std::nullopt,
-    bool show_icon = false);
+    bool show_icon = false,
+    std::optional<rcti> anchor_rect = std::nullopt);
 
 wmOperatorStatus WM_operator_redo_popup(bContext *C, wmOperator *op);
 wmOperatorStatus WM_operator_ui_popup(bContext *C, wmOperator *op, int width);

@@ -748,6 +748,24 @@ rctf outliner_stack_row_preview_rect(const ed::outliner::StackRow &row,
  * the first slot's geometry, without a leading icon. */
 rctf outliner_stack_slot_preview_rect(float row_x, float content_y, int slot_index);
 
+/**
+ * The window-space rectangle to anchor a dialog beside a row's color swatch: X spans the swatch,
+ * Y the whole row, so a dialog placed next to it hides neither the color being edited nor the
+ * row it belongs to.
+ *
+ * Addressed by the row's ordinal, the way the operators address rows: the swatch click, the
+ * context menu and scripts all resolve through the same numbering, where the cursor is wrong for
+ * everything but the click.
+ *
+ * \return false when the rectangle cannot be known reliably -- no row or swatch for \a ordinal,
+ * or a tree element the draw has not laid out yet (its coordinates then belong to the previous
+ * tree, or name nothing at all); the caller falls back to its un-anchored placement.
+ */
+bool outliner_stack_row_fill_swatch_anchor_rect(const SpaceOutliner &space_outliner,
+                                                const ARegion &region,
+                                                int ordinal,
+                                                rcti &r_window_rect);
+
 /** An Image Editor already open in this screen, or null. */
 ScrArea *outliner_image_area_find(const bContext &C);
 

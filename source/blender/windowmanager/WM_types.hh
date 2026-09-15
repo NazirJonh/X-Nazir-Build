@@ -1040,6 +1040,9 @@ enum wmPopupSize {
 enum wmPopupPosition {
   WM_POPUP_POSITION_MOUSE = 0,
   WM_POPUP_POSITION_CENTER,
+  /** Open beside a window-space anchor rectangle, never covering it: above when it fits, else
+   * below. The anchor travels in #wmOpPopUp, not in DNA. */
+  WM_POPUP_POSITION_ANCHOR,
 };
 
 /**

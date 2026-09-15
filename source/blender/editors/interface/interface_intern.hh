@@ -668,40 +668,56 @@ struct ColorPicker {
    * circle and slider widgets. The color picking space is perceptually
    * linear for intuitive editing.
    */
-  float hsv_perceptual[3];
+  float hsv_perceptual[3] = {0.0f, 0.0f, 0.0f};
   /** Initial color data (to detect changes). */
-  float hsv_perceptual_init[3];
-  bool is_init;
+  float hsv_perceptual_init[3] = {0.0f, 0.0f, 0.0f};
+  bool is_init = false;
 
   /**
    * HSV or HSL in color picker space used for number sliders.
    */
-  float hsv_perceptual_slider[3];
-  float hsv_linear_slider[3];
+  float hsv_perceptual_slider[3] = {0.0f, 0.0f, 0.0f};
+  float hsv_linear_slider[3] = {0.0f, 0.0f, 0.0f};
 
   /*
    * RGB in color picker used for number sliders, when the space is not scene linear.
    * When it is linear, the RNA property is used directly so that keyframing works.
    */
-  float rgb_perceptual_slider[3];
+  float rgb_perceptual_slider[3] = {0.0f, 0.0f, 0.0f};
 
   /* Hex Color string */
-  char hexcol[128];
+  char hexcol[128] = "";
 
   /**
    * Buffer for the main area (Circle/Square) tooltip.
    * Used for dynamically formatted tooltips (e.g. "Hue/Saturation").
    */
-  char tooltip_area[128];
+  char tooltip_area[128] = "";
 
   /** Cubic saturation for the color wheel. */
-  bool use_color_cubic;
-  bool use_color_lock;
-  bool use_luminosity_lock;
-  float luminosity_lock_value;
+  bool use_color_cubic = false;
+  bool use_color_lock = false;
+  bool use_luminosity_lock = false;
+  float luminosity_lock_value = 0.0f;
 
   /** Alpha component. */
-  bool has_alpha;
+  bool has_alpha = false;
+
+  /**
+   * The property the picker edits, as a copy of the reference the picker was opened for. Popup
+   * pickers mirror their opening button; a dialog-embedded picker names the operator property
+   * directly. The shared update callbacks read the current color back through it, and the paint
+   * palette keys off its data path.
+   */
+  PointerRNA ptr = {};
+  PropertyRNA *prop = nullptr;
+  /**
+   * Fire the RNA update of #ptr/#prop after the shared sync callbacks, so edits through widgets
+   * that do not write the property directly (HSV sliders, hex) tick its update callback. A popup
+   * picker instead re-applies its opening button via #RETURN_UPDATE, which runs the update; the
+   * dialog's popup handler closes on any return value, so the embedded picker must not set one.
+   */
+  bool fire_rna_update = false;
 };
 
 struct ColorPickerData {
@@ -850,6 +866,8 @@ struct Block {
   BlockBoundsCalc bounds_type = BLOCK_BOUNDS_NONE;
   /** Offset to use when calculating bounds (in pixels). */
   int bounds_offset[2] = {};
+  /** Window-space rectangle #BLOCK_BOUNDS_POPUP_ANCHOR places the block beside. */
+  rcti bounds_anchor = {};
   /** for doing delayed */
   int bounds = 0, minbounds = 0;
   /** Minimum width (px) for the first column of a popup-menu (#BLOCK_BOUNDS_POPUP_MENU). 0 = off.
@@ -1703,6 +1721,10 @@ struct PopupBlockHandle {
   rctf prev_butrct = {};
   short prev_dir1 = 0;
   short prev_dir2 = 0;
+  /** Side of #Block::bounds_anchor the block was placed on, for #BLOCK_BOUNDS_POPUP_ANCHOR
+   * (#UI_DIR_UP / #UI_DIR_DOWN, 0 = not placed yet). Kept across refreshes so a height change
+   * mid-edit does not flip the block to the other side of its anchor. */
+  short prev_anchor_dir = 0;
   int prev_bounds_offset[2] = {0, 0};
 
   /* Maximum estimated size to avoid having to reposition on refresh. */

@@ -363,6 +363,40 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
     BKE_ntree_update_tag_node_removed(entry.first);
     touched_trees.add(entry.first);
   }
+
+  /* A switched-off mask has no link for the loops above to follow (#BKE_paint_material_layer_
+   * mask_set_enabled); its nodes go too, found by tag, so a remove on a switched-off mask leaves
+   * nothing behind either. */
+  {
+    const bUUID remove_marker = BKE_paint_material_layer_marker_get(
+        *plan.chains.first()->layers[layer_index].node);
+    for (ChannelChain *chain_ptr : plan.chains) {
+      ChannelChain &chain = *chain_ptr;
+      bNode *mask_node = layer_mask_node_find(*chain.tree, remove_marker);
+      if (mask_node == nullptr) {
+        continue;
+      }
+      /* The mask may still be linked in a channel this pass skipped (Disabled, I1) -- a reader
+       * besides the row's coverage is not something this remove owns. */
+      bNodeSocket *mask_color = bke::node_find_socket(*mask_node, SOCK_OUT, "Color"_ustr);
+      const bool still_read = mask_color != nullptr &&
+                              !mask_color->directly_linked_links().is_empty();
+      if (still_read) {
+        for (bNodeLink *link : Vector<bNodeLink *>(mask_color->directly_linked_links())) {
+          BKE_ntree_update_tag_link_removed(chain.tree);
+          bke::node_remove_link(chain.tree, *link);
+        }
+      }
+      Image &mask_image = *id_cast<Image *>(mask_node->id);
+      if (mask_image.id.us <= 1 && mask_image.source == IMA_SRC_GENERATED) {
+        mask_images.append_non_duplicates(&mask_image);
+      }
+      bke::node_remove_node(&bmain, chain.tree, *mask_node, true);
+      BKE_ntree_update_tag_node_removed(chain.tree);
+      touched_trees.add(chain.tree);
+    }
+  }
+
   for (Image *image : mask_images) {
     /* The node removal gave the mask's user back; a generated blank nothing reads anymore is
      * freed the way every other exit in this module disposes of its own orphans -- left tagged
@@ -379,6 +413,195 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
   }
 
   BKE_ntree_update_after_single_tree_change(bmain, tree);
+  paint_layer_edit_committed(bmain, ma, true);
+  if (r_error != nullptr) {
+    *r_error = PaintMaterialLayerEditError::None;
+  }
+  return true;
+}
+
+/**
+ * The socket the row's mask feeds when it is on: the base of the lowest mask correction when the
+ * row has any (spec 18 §4.3), the coverage input of the Factor Multiply otherwise. Null when the
+ * row's Factor is not the shape this module builds.
+ */
+static bNodeSocket *layer_mask_base_socket(ChainLayer &layer, CompositeMixNode &r_mix)
+{
+  if (!layer.mask_corrections.is_empty()) {
+    const ChainCorrection &lowest = layer.mask_corrections.first();
+    CompositeMixNode lowest_mix;
+    if (lowest.mix == nullptr || !composite_mix_node_read(*lowest.mix, lowest_mix) ||
+        lowest_mix.bottom == nullptr)
+    {
+      return nullptr;
+    }
+    return const_cast<bNodeSocket *>(lowest_mix.bottom);
+  }
+  if (layer.node == nullptr || !composite_mix_node_read(*layer.node, r_mix) ||
+      r_mix.factor == nullptr)
+  {
+    return nullptr;
+  }
+  if (r_mix.factor_opacity != nullptr) {
+    return const_cast<bNodeSocket *>(r_mix.factor_coverage);
+  }
+  return const_cast<bNodeSocket *>(r_mix.factor);
+}
+
+/**
+ * What covers the row when its mask is off, the order #layer_coverage_restore and
+ * #layer_mask_corrections_sync agree on: what its content corrections accumulate over the map, or
+ * the row's own map's Alpha. A folder reads its top link's Alpha; the row's map node is taken from
+ * #ChainLayer::base_map, which sits below the corrections. Both null when nothing covers the row.
+ */
+static void layer_mask_off_source(ChainLayer &layer, bNode *&r_node, bNodeSocket *&r_socket)
+{
+  r_node = nullptr;
+  r_socket = nullptr;
+  if (!layer.content_corrections.is_empty() &&
+      layer.content_corrections.last().over_combine != nullptr)
+  {
+    r_node = layer.content_corrections.last().over_combine;
+    r_socket = static_cast<bNodeSocket *>(r_node->outputs.first);
+    return;
+  }
+  if (layer.is_group && layer.top != nullptr) {
+    if (bNodeLink *top_link = sole_link_into(*layer.top)) {
+      r_node = top_link->fromnode;
+      r_socket = socket_find_by_name(*r_node, SOCK_OUT, "Alpha");
+      if (r_socket != nullptr) {
+        return;
+      }
+      r_node = nullptr;
+    }
+  }
+  if (layer.base_map != nullptr) {
+    r_node = layer.base_map;
+    r_socket = bke::node_find_socket(*r_node, SOCK_OUT, "Alpha"_ustr);
+  }
+}
+
+bool BKE_paint_material_layer_mask_set_enabled(Main &bmain,
+                                               Material &ma,
+                                               const int ordinal,
+                                               const bool enable,
+                                               PaintMaterialLayerEditError *r_error)
+{
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  auto fail = [&](const PaintMaterialLayerEditError reason) {
+    if (r_error != nullptr) {
+      *r_error = reason;
+    }
+    return false;
+  };
+
+  /* 1. Preflight: the row exists and a bare base is refused, without writing a byte. The
+   * #MaskRemove plan is the right set of checks: a row that can lose its mask can switch it off. */
+  LayerEditPlan plan;
+  if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::MaskRemove, plan, error)) {
+    return fail(error);
+  }
+  const int layer_index = plan.layer_index;
+
+  /* The mask is one image for the whole row, found by tag rather than by link -- a switched-off
+   * mask has none. */
+  const bUUID row_marker = BKE_paint_material_layer_marker_get(
+      *plan.chains.first()->layers[layer_index].node);
+  Image *mask_image = nullptr;
+  for (Image &image : bmain.images) {
+    if (image.paint_layer_channel == PAINT_LAYER_MAP_MASK &&
+        BLI_uuid_equal(image.paint_layer_id, row_marker))
+    {
+      mask_image = &image;
+      break;
+    }
+  }
+  if (mask_image == nullptr) {
+    /* Corrections alone are not a mask to switch: what they shape is the row's coverage either
+     * way, and each of them has its own toggle. */
+    return fail(PaintMaterialLayerEditError::MaskNotFound);
+  }
+  const bool was_enabled = mask_image->paint_layer_mask_disabled == 0;
+  if (was_enabled == enable) {
+    if (r_error != nullptr) {
+      *r_error = PaintMaterialLayerEditError::None;
+    }
+    return true;
+  }
+
+  /* 2. Mutation: from here, a refusal is impossible. The flag is written before the links so the
+   * readers that pick the mask up by tag (#layer_coverage_restore, #layer_mask_corrections_sync)
+   * already see the state the links below express. */
+  mask_image->paint_layer_mask_disabled = enable ? 0 : 1;
+
+  Set<bNodeTree *> touched_trees;
+  for (ChannelChain *chain_ptr : plan.chains) {
+    ChannelChain &chain = *chain_ptr;
+    ChainLayer &layer = chain.layers[layer_index];
+    chain.tree->ensure_topology_cache();
+    CompositeMixNode mix;
+    bNodeSocket *base = layer_mask_base_socket(layer, mix);
+    if (base == nullptr) {
+      continue;
+    }
+    /* The mask's node in this tree, linked or not. */
+    bNode *mask_node = layer_mask_node_find(*chain.tree, row_marker);
+    if (mask_node == nullptr) {
+      continue;
+    }
+    bNodeSocket *mask_color = bke::node_find_socket(*mask_node, SOCK_OUT, "Color"_ustr);
+    if (mask_color == nullptr) {
+      continue;
+    }
+    if (!enable) {
+      bNodeLink *mask_link = sole_link_into(*base);
+      if (mask_link == nullptr || mask_link->fromnode != mask_node) {
+        /* Not this channel's coverage -- a channel switched off (I1) or one that never wired the
+         * mask in; nothing to take out. */
+        continue;
+      }
+      bNode *source_node = nullptr;
+      bNodeSocket *source_socket = nullptr;
+      layer_mask_off_source(layer, source_node, source_socket);
+      if (source_node != nullptr && source_socket != nullptr) {
+        relink_into(*chain.tree, *base, base->owner_node(), *source_node, *source_socket);
+      }
+      else {
+        for (bNodeLink *link : Vector<bNodeLink *>(base->directly_linked_links())) {
+          BKE_ntree_update_tag_link_removed(chain.tree);
+          bke::node_remove_link(chain.tree, *link);
+        }
+      }
+      touched_trees.add(chain.tree);
+      continue;
+    }
+    if (mix.factor_opacity != nullptr && composite_mix_coverage_off(mix)) {
+      /* Absent or Disabled here: the mask must not become this channel's coverage (I1). It is
+       * picked up when the channel is switched on. */
+      continue;
+    }
+    if (mix.factor_opacity != nullptr) {
+      relink_into(*chain.tree, *base, base->owner_node(), *mask_node, *mask_color);
+    }
+    else {
+      /* A bare constant Factor: wrap the mask in a fresh Multiply the way #BKE_paint_material_
+       * layer_mask_add does, so the row keeps an editable opacity. */
+      const float initial_opacity = static_cast<const bNodeSocketValueFloat *>(
+                                        mix.factor->default_value)
+                                        ->value;
+      layer_factor_coverage_link(*chain.tree,
+                                 *layer.node,
+                                 *base,
+                                 *mask_node,
+                                 *mask_color,
+                                 initial_opacity);
+    }
+    touched_trees.add(chain.tree);
+  }
+
+  for (bNodeTree *touched : touched_trees) {
+    BKE_ntree_update_after_single_tree_change(bmain, *touched);
+  }
   paint_layer_edit_committed(bmain, ma, true);
   if (r_error != nullptr) {
     *r_error = PaintMaterialLayerEditError::None;

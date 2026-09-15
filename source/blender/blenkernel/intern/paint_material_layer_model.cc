@@ -927,6 +927,11 @@ bool BKE_paint_material_layer_stack_from_material(
       }
       if (BLI_uuid_equal(map->paint_layer_id, entry.marker)) {
         entry.channel_images.add_overwrite(map->paint_layer_channel, map);
+        if (map->paint_layer_channel == PAINT_LAYER_MAP_MASK) {
+          /* The mask's on/off state travels with the image, not the links: a switched-off mask
+           * has no link to read. */
+          entry.mask_enabled = map->paint_layer_mask_disabled == 0;
+        }
       }
     }
   }

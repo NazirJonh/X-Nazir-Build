@@ -213,6 +213,12 @@ struct StackRow {
   bool is_bare_base = false;
   bool enabled = true;
   /**
+   * Whether the row's mask is switched on. Only meaningful when the row shows a mask (its mask
+   * slot or MASK section): a switched-off mask is kept -- listed and paintable -- but nothing
+   * reads it. Drives the row's mask icon.
+   */
+  bool mask_enabled = true;
+  /**
    * False when the source recognized something it cannot represent. Such a row is still listed --
    * a layer the user cannot see is worse than one it cannot edit -- but carries no controls.
    */
@@ -571,6 +577,19 @@ class StackGroupingEditor {
                             int /*ordinal*/,
                             bool /*add*/,
                             const float /*initial_color*/[4]) const
+  {
+    return false;
+  }
+
+  /**
+   * Switch the row's mask on or off, keeping it: the mask stays listed and paintable, only its
+   * effect on the row's coverage goes. Refused (false) for a row with no mask to switch and for
+   * sources that have no mask notion.
+   */
+  virtual bool row_mask_toggle(bContext & /*C*/,
+                               const StackFocus & /*focus*/,
+                               ID & /*owner*/,
+                               int /*ordinal*/) const
   {
     return false;
   }

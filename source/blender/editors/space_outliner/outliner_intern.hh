@@ -937,6 +937,7 @@ void OUTLINER_OT_stack_layer_merge_down(wmOperatorType *ot);
 void OUTLINER_OT_stack_focus_sub_index(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot);
 
 void OUTLINER_OT_orphans_purge(wmOperatorType *ot);
 void OUTLINER_OT_orphans_manage(wmOperatorType *ot);

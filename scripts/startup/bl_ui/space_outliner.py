@@ -123,6 +123,8 @@ class OUTLINER_MT_stack_layer_context_menu(Menu):
         layout.operator_menu_enum(
             "outliner.stack_layer_mask", "initial_color", text="Add Mask", icon='MOD_MASK')
         layout.operator("outliner.stack_layer_mask", text="Remove Mask", icon='X').add = False
+        layout.operator(
+            "outliner.stack_layer_mask_toggle", text="Toggle Mask", icon='MOD_MASK')
 
         # Only a row that stands for a colour can be re-filled; the operator's poll answers for
         # that, the same way the ungroup entry leans on its own poll.

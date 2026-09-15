@@ -188,6 +188,12 @@ struct PaintMaterialLayerStackEntry {
   float opacity = 1.0f;
   bool enabled = true;
   bool has_mask = false;
+  /**
+   * Whether the row's mask image (#channel_images at #PAINT_LAYER_MAP_MASK) is switched off: the
+   * mask is kept -- still listed, still paintable -- but nothing reads it, and the row's coverage
+   * falls back to what it had without a mask. True for a row whose mask is on or that has none.
+   */
+  bool mask_enabled = true;
   /** Color tag for group folders (0-7), or -1 for no tag. */
   int8_t color_tag = -1;
   /** What the row is; #PaintMaterialLayerKind::Paint for a row that carries no kind marker. */

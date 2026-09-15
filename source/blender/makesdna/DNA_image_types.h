@@ -308,7 +308,14 @@ struct Image {
    * Written from Python as `Image.paint_layer_channel`.
    */
   int paint_layer_channel = -1;
-  char _pad_paint_layer[4] = {};
+  /**
+   * Whether the mask image this image authors (see #paint_layer_channel) is switched off: the row
+   * keeps it -- it still lists in the stack UI and stays paintable -- but nothing reads it, and
+   * the row's coverage falls back to what it had without the mask. Zero for every image that is
+   * not a mask; only the mask toggle writes it.
+   */
+  char paint_layer_mask_disabled = 0;
+  char _pad_paint_layer[3] = {};
 
   bke::ImageRuntime *runtime = nullptr;
 };

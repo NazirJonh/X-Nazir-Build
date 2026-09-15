@@ -1513,6 +1513,11 @@ void layer_coverage_restore(bNodeTree &tree,
   bNodeSocket &coverage = const_cast<bNodeSocket &>(*mix.factor_coverage);
   bNode &multiply = const_cast<bNode &>(coverage.owner_node());
   bNode *mask = layer_mask_node_find(tree, BKE_paint_material_layer_marker_get(*layer.node));
+  /* A mask the user switched off stays off: the coverage comes back to the map's alpha, the same
+   * as for a row without a mask (see #BKE_paint_material_layer_mask_set_enabled). */
+  if (mask != nullptr && id_cast<const Image *>(mask->id)->paint_layer_mask_disabled != 0) {
+    mask = nullptr;
+  }
   bNode &source = (mask != nullptr) ? *mask : map;
   bNodeSocket *output = bke::node_find_socket(
       source, SOCK_OUT, (mask != nullptr) ? "Color"_ustr : "Alpha"_ustr);

@@ -357,11 +357,13 @@ StackRowPreview paint_channels_slot_build(const PaintMaterialLayerStackEntry &en
  * \param keeps_row_icon: for a group, its folder icon stays ahead of the mask thumbnail. The
  * caller knows what the row is; the slot only records it for the draw.
  */
-StackRowPreview paint_mask_slot_build(const bool keeps_row_icon)
+StackRowPreview paint_mask_slot_build(const bool keeps_row_icon, const bool enabled)
 {
   StackRowPreview slot;
   slot.section_id = "MASK";
-  slot.icon = ICON_MOD_MASK;
+  /* A switched-off mask reads as one at a glance: the icon says the row's coverage no longer
+   * comes from it. */
+  slot.icon = enabled ? ICON_MOD_MASK : ICON_MOD_SUBSURF;
   slot.keeps_row_icon = keeps_row_icon;
   /* Whether the mask began black or white is unreadable once it has been painted over, so the
    * label stays neutral rather than guessing from the initial fill color. */
@@ -413,7 +415,9 @@ StackContentSection paint_mask_section_build(const Image &mask_image)
   sub_row.role = PAINT_LAYER_MAP_MASK;
   sub_row.name = mask_image.id.name + 2;
   sub_row.id = const_cast<ID *>(&mask_image.id);
-  sub_row.icon = ICON_MOD_MASK;
+  /* The sub-row icon agrees with the mask slot and the row icon: switched off reads as
+   * switched off everywhere. */
+  sub_row.icon = (mask_image.paint_layer_mask_disabled == 0) ? ICON_MOD_MASK : ICON_MOD_SUBSURF;
   section.sub_rows.append(std::move(sub_row));
   return section;
 }
@@ -760,6 +764,7 @@ class PaintMaterialStackSource final : public StackSource,
       row.has_children = entry.is_group;
       row.is_bare_base = entry.is_bare_base;
       row.enabled = entry.enabled;
+      row.mask_enabled = entry.mask_enabled;
       row.supported = entry.supported;
       row.unsupported_reason = entry.unsupported_reason;
       row.name = std::move(entry.name);
@@ -776,7 +781,7 @@ class PaintMaterialStackSource final : public StackSource,
        * mask keeps its icon priority over all of these. */
       const PaintMaterialLayerKind row_kind = entry.kind;
       row.icon = entry.is_group ? (group_material != nullptr ? ICON_MATERIAL : ICON_FILE_FOLDER) :
-                 entry.has_mask ? ICON_MOD_MASK :
+                 entry.has_mask ? (entry.mask_enabled ? ICON_MOD_MASK : ICON_MOD_SUBSURF) :
                  row_kind == PaintMaterialLayerKind::Material ? ICON_MATERIAL :
                  row_kind == PaintMaterialLayerKind::Fill ? ICON_GP_DRAW_FILL :
                                                             ICON_IMAGE_RGB;
@@ -817,7 +822,7 @@ class PaintMaterialStackSource final : public StackSource,
         /* A group's MASK section lists its mask corrections (D15) even before it has a mask
          * image of its own: the section is what the correction rows hang under. */
         if (has_mask_section) {
-          row.preview_slots.append(paint_mask_slot_build(true));
+          row.preview_slots.append(paint_mask_slot_build(true, entry.mask_enabled));
           row.content_sections.append(mask_image != nullptr ?
                                           paint_mask_section_build(*mask_image) :
                                           paint_mask_section_empty_build());
@@ -843,7 +848,7 @@ class PaintMaterialStackSource final : public StackSource,
           row.preview_slots.append(std::move(material_slot));
         }
         if (has_mask_section) {
-          row.preview_slots.append(paint_mask_slot_build(false));
+          row.preview_slots.append(paint_mask_slot_build(false, entry.mask_enabled));
         }
         row.content_sections.append(paint_channels_section_build(entry));
         if (mask_image != nullptr) {
@@ -1783,6 +1788,46 @@ class PaintMaterialStackSource final : public StackSource,
       paint_mask_edit_begin_for_new_mask(C, owner, owner_material, ordinal);
     }
     return changed;
+  }
+
+  bool row_mask_toggle(bContext &C,
+                       const StackFocus & /*focus*/,
+                       ID &owner,
+                       const int ordinal) const override
+  {
+    if (this->correction_route_get(C, owner, ordinal).has_value()) {
+      /* A correction's MASK section is its parent's mask half, not a mask of its own. */
+      return false;
+    }
+    Material &owner_material = paint_owner(owner);
+    Main *bmain = CTX_data_main(&C);
+    if (bmain == nullptr) {
+      return false;
+    }
+    /* The toggle flips whatever the row's mask is now; the image also carries the state, so the
+     * read and the write cannot disagree. */
+    Image *mask_image = paint_row_mask_image_get(*bmain, owner_material, ordinal);
+    if (mask_image == nullptr) {
+      BKE_report(CTX_wm_reports(&C), RPT_ERROR, RPT_("The layer has no mask"));
+      return false;
+    }
+    const bool enable = mask_image->paint_layer_mask_disabled != 0;
+    if (!enable) {
+      /* Turning the mask back on is safe while editing it; turning it off takes the coverage the
+       * strokes were shaping away, so the editing session ends first, the same as a remove. */
+      Scene *scene = CTX_data_scene(&C);
+      if (scene != nullptr && scene->toolsettings != nullptr) {
+        const Image *edited = scene->toolsettings->paint_mode.mask_image_binding.image;
+        if (edited == mask_image) {
+          ED_paint_material_mask_edit_end_if_active(C);
+        }
+      }
+    }
+    return this->paint_edit(
+        C, owner, [&](Main &bmain, Material &material, PaintMaterialLayerEditError &error) {
+          return BKE_paint_material_layer_mask_set_enabled(
+              bmain, material, ordinal, enable, &error);
+        });
   }
 
   /** The mask Image of the layer at \a ordinal, or null when it has none. */

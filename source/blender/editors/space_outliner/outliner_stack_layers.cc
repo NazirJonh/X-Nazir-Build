@@ -1324,6 +1324,28 @@ bool stack_row_mask_poll(bContext *C)
   return owner != nullptr && stack_source_for_space(*space_outliner)->can_edit(*owner);
 }
 
+wmOperatorStatus stack_row_mask_toggle_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      false,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+           int & /*r_select_ordinal*/) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        return grouping != nullptr && grouping->row_mask_toggle(*C, focus, owner, ordinal);
+      });
+  return ok ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
 bool stack_row_reorder_poll(bContext *C)
 {
   if (!ED_operator_outliner_active(C)) {
@@ -3263,6 +3285,28 @@ void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot)
                0,
                "Initial Color",
                "Initial fill color for a newly added mask");
+  rna_def_stack_row_marker(ot);
+}
+
+void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Stack Layer Mask";
+  ot->idname = "OUTLINER_OT_stack_layer_mask_toggle";
+  ot->description =
+      "Turn a layer's mask on or off, keeping the mask image and its paint content";
+  ot->exec = stack_row_mask_toggle_exec;
+  ot->poll = stack_row_mask_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Layer whose mask to toggle; -1 uses the active one",
+              -1,
+              SHRT_MAX);
   rna_def_stack_row_marker(ot);
 }
 

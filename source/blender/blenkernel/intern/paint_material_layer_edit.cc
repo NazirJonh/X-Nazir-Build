@@ -164,6 +164,8 @@ const char *BKE_paint_material_layer_edit_error_message(const PaintMaterialLayer
       return N_("A correction's nodes are not the shape the paint layer stack builds");
     case PaintMaterialLayerEditError::GroupHasMaskCorrections:
       return N_("Remove the folder's mask corrections before ungrouping it");
+    case PaintMaterialLayerEditError::MaskNotFound:
+      return N_("The layer has no mask");
   }
   return "";
 }

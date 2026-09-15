@@ -68,6 +68,7 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_focus_sub_index);
   WM_operatortype_append(OUTLINER_OT_stack_layer_rename);
   WM_operatortype_append(OUTLINER_OT_stack_layer_mask);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_mask_toggle);
   WM_operatortype_append(OUTLINER_OT_stack_layer_drop);
   WM_operatortype_append(OUTLINER_OT_stack_layer_id_drop);
   WM_operatortype_append(OUTLINER_OT_stack_layer_channel_image_assign);

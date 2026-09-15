@@ -198,6 +198,8 @@ enum class PaintMaterialLayerEditError : int8_t {
    * rows are spliced out there is no result left for them to shape.
    */
   GroupHasMaskCorrections,
+  /** The row names no mask: nothing tagged as its mask image is in the file. */
+  MaskNotFound,
 };
 
 /** A message for #BKE_report, already translated at the call site by the caller if needed. */
@@ -400,6 +402,24 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
                                           Material &ma,
                                           int ordinal,
                                           PaintMaterialLayerEditError *r_error = nullptr);
+
+/**
+ * Switch the mask of the layer at \a ordinal on or off, leaving the mask itself in place.
+ *
+ * Off: the coverage comes back to what the row had without the mask -- its own map's Alpha, or
+ * what its content corrections accumulate -- and the mask's Image Texture node stays in the tree,
+ * unlinked. The row still lists its mask (it is found by tag, not by link), still paints, and the
+ * icon reads as switched off. On: the mask is wired back into the coverage, exactly where adding
+ * it would put it. The state lives in #Image::paint_layer_mask_disabled, so a channel switched
+ * off and back on, or a mask-correction chain re-synced, does not bring a switched-off mask back.
+ *
+ * Fails with #PaintMaterialLayerEditError::MaskNotFound when the row has no mask image at all.
+ */
+bool BKE_paint_material_layer_mask_set_enabled(Main &bmain,
+                                               Material &ma,
+                                               int ordinal,
+                                               bool enable,
+                                               PaintMaterialLayerEditError *r_error = nullptr);
 
 /**
  * Whether \a image is the mask of any layer of \a ma's stack, groups included. A pure reader for

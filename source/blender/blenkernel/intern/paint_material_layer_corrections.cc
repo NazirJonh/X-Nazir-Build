@@ -292,8 +292,12 @@ void layer_mask_corrections_sync(bNodeTree &tree, ChainLayer &layer)
         if (image.paint_layer_channel == PAINT_LAYER_MAP_MASK &&
             BLI_uuid_equal(image.paint_layer_id, row_marker))
         {
-          source_node = &node;
-          source_socket = bke::node_find_socket(node, SOCK_OUT, "Color"_ustr);
+          /* A switched-off mask does not come back as the chain's base; the coverage falls to the
+           * next source down, the same as for a row without a mask. */
+          if (image.paint_layer_mask_disabled == 0) {
+            source_node = &node;
+            source_socket = bke::node_find_socket(node, SOCK_OUT, "Color"_ustr);
+          }
           break;
         }
       }

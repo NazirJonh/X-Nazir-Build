@@ -927,6 +927,56 @@ TEST_F(PaintMaterialLayerCorrectionTest, disabling_base_zeroes_mask_chain_and_re
   EXPECT_TRUE(test_socket_linked(corr.factor_coverage));
 }
 
+TEST_F(PaintMaterialLayerCorrectionTest, mask_toggle_off_zeroes_mask_chain)
+{
+  build_two_layer_stack();
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error));
+  bUUID m = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M",
+      &m,
+      &error));
+
+  auto base_color_mask = [&](CompositeMixNode &r_corr, CompositeMixNode &r_row) {
+    Vector<ChannelChain> chains;
+    ASSERT_TRUE(chains_collect(*material, chains, error));
+    ChannelChain *chain = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    ASSERT_NE(chain, nullptr);
+    ASSERT_EQ(chain->layers[1].mask_corrections.size(), 1);
+    ASSERT_TRUE(composite_mix_node_read(*chain->layers[1].mask_corrections[0].mix, r_corr));
+    ASSERT_TRUE(composite_mix_node_read(*chain->layers[1].node, r_row));
+  };
+
+  CompositeMixNode corr;
+  CompositeMixNode row;
+  base_color_mask(corr, row);
+  EXPECT_TRUE(test_socket_linked(corr.bottom));
+  EXPECT_TRUE(test_socket_linked(corr.factor_coverage));
+
+  /* The correction shapes the mask, so a switched-off mask leaves it nothing to shape: its own
+   * coverage is zeroed, so its Mix passes the row's fallback through unchanged. It comes back when
+   * the mask does. */
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, false, &error))
+      << int(error);
+  base_color_mask(corr, row);
+  EXPECT_FALSE(test_socket_linked(corr.factor_coverage));
+  ASSERT_NE(corr.factor_coverage, nullptr);
+  EXPECT_EQ(corr.factor_coverage->default_value_typed<bNodeSocketValueFloat>()->value, 0.0f);
+
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, true, &error))
+      << int(error);
+  base_color_mask(corr, row);
+  EXPECT_TRUE(test_socket_linked(corr.bottom));
+  EXPECT_TRUE(test_socket_linked(corr.factor_coverage));
+}
+
 TEST_F(PaintMaterialLayerCorrectionTest, mask_correction_has_no_channel_switch)
 {
   build_two_layer_stack();

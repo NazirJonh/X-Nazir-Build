@@ -21,6 +21,7 @@
 
 #include "paint_material_composite_internal.hh"
 #include "paint_material_layer_edit_intern.hh"
+#include "paint_material_layer_mask_intern.hh"
 
 #include <string>
 
@@ -218,6 +219,48 @@ class PaintMaterialLayerEditTest : public bke::BlenderGTestBase {
       socket = mix.bottom;
     }
     return nullptr;
+  }
+
+  /** The mask Image of the row at \a ordinal, or null when it has none. */
+  Image *mask_image_of(const int ordinal)
+  {
+    Vector<PaintMaterialLayerStackEntry> entries;
+    BKE_paint_material_layer_stack_from_material(*bmain, *material, entries);
+    for (const PaintMaterialLayerStackEntry &entry : entries) {
+      if (entry.ordinal == ordinal) {
+        return entry.channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr);
+      }
+    }
+    return nullptr;
+  }
+
+  /** Whether the row at \a ordinal lists its mask as switched on. */
+  bool mask_enabled_of(const int ordinal)
+  {
+    Vector<PaintMaterialLayerStackEntry> entries;
+    BKE_paint_material_layer_stack_from_material(*bmain, *material, entries);
+    for (const PaintMaterialLayerStackEntry &entry : entries) {
+      if (entry.ordinal == ordinal) {
+        return entry.mask_enabled;
+      }
+    }
+    return true;
+  }
+
+  /** The node feeding \a label's Base Color coverage, or null when nothing does. */
+  bNode *coverage_source_of(const char *label)
+  {
+    material->nodetree->ensure_topology_cache();
+    bNode *mix_node = layer_mix_in_channel(label, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    CompositeMixNode mix;
+    if (mix_node == nullptr || !composite_mix_node_read(*mix_node, mix)) {
+      return nullptr;
+    }
+    bNodeSocket *socket = (mix.factor_coverage != nullptr) ? mix.factor_coverage : mix.factor;
+    if (socket == nullptr || socket->directly_linked_links().is_empty()) {
+      return nullptr;
+    }
+    return socket->directly_linked_links().first()->fromnode;
   }
 
   bNode *coverage_multiply_of(bNode &mix_node)
@@ -1666,6 +1709,201 @@ TEST_F(PaintMaterialLayerEditTest, stack_contains_mask_finds_a_group_mask)
   Image *group_mask = group->channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr);
   ASSERT_NE(group_mask, nullptr);
   EXPECT_TRUE(BKE_paint_material_layer_stack_contains_mask(*bmain, *material, *group_mask));
+}
+
+TEST_F(PaintMaterialLayerEditTest, mask_toggle_off_then_on_round_trips_the_coverage)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error));
+
+  Image *mask_image = mask_image_of(1);
+  ASSERT_NE(mask_image, nullptr);
+  bNode *mask_node = coverage_source_of("L2");
+  ASSERT_NE(mask_node, nullptr);
+  ASSERT_EQ(mask_node->id, &mask_image->id);
+  EXPECT_TRUE(mask_enabled_of(1));
+
+  /* Off: the mask node stays in the tree, but the coverage comes back from the row's own map. */
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, false, &error))
+      << int(error);
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+  EXPECT_FALSE(paint_layer_mask_is_enabled(*mask_image));
+  EXPECT_FALSE(mask_enabled_of(1));
+  bNode *fallback = coverage_source_of("L2");
+  ASSERT_NE(fallback, nullptr);
+  EXPECT_NE(fallback, mask_node);
+  EXPECT_EQ(fallback->type_legacy, SH_NODE_TEX_IMAGE);
+
+  /* On: the same mask node is wired back where adding the mask would put it. */
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, true, &error))
+      << int(error);
+  EXPECT_TRUE(paint_layer_mask_is_enabled(*mask_image));
+  EXPECT_TRUE(mask_enabled_of(1));
+  EXPECT_EQ(coverage_source_of("L2"), mask_node);
+}
+
+TEST_F(PaintMaterialLayerEditTest, mask_toggle_without_a_mask_reports_not_found)
+{
+  build_stack(3);
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  EXPECT_FALSE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, false, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::MaskNotFound);
+}
+
+TEST_F(PaintMaterialLayerEditTest, mask_toggle_to_the_current_state_is_a_noop)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, false, &error));
+
+  const GraphShape before = graph_shape();
+  EXPECT_TRUE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, false, &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+  expect_graph_unchanged(before);
+}
+
+TEST_F(PaintMaterialLayerEditTest, mask_remove_after_toggle_off_removes_the_mask)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, false, &error));
+
+  Image *mask_image = mask_image_of(1);
+  ASSERT_NE(mask_image, nullptr);
+  const bUUID marker = mask_image->paint_layer_id;
+
+  /* A remove on a switched-off mask has no link to follow; it still leaves nothing behind. */
+  ASSERT_TRUE(BKE_paint_material_layer_mask_remove(*bmain, *material, 1, &error)) << int(error);
+  EXPECT_EQ(layer_mask_node_find(*material->nodetree, marker), nullptr);
+  EXPECT_EQ(mask_image_of(1), nullptr);
+}
+
+TEST_F(PaintMaterialLayerEditTest, mask_remove_on_an_enabled_mask_drops_the_image)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error));
+
+  Image *mask_image = mask_image_of(1);
+  ASSERT_NE(mask_image, nullptr);
+  const bUUID marker = mask_image->paint_layer_id;
+
+  /* The mask is on and linked: its node is what the relink loop removes, and the image has to go
+   * with it. A tagged image left behind answers as the row's mask to the model's maps-by-tag pass,
+   * so the mask would look like it was never removed. */
+  ASSERT_TRUE(BKE_paint_material_layer_mask_remove(*bmain, *material, 1, &error)) << int(error);
+  EXPECT_EQ(layer_mask_node_find(*material->nodetree, marker), nullptr);
+  EXPECT_EQ(mask_image_of(1), nullptr);
+}
+
+TEST_F(PaintMaterialLayerEditTest, mask_can_be_added_again_after_remove)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error))
+      << int(error);
+  ASSERT_TRUE(BKE_paint_material_layer_mask_remove(*bmain, *material, 1, &error)) << int(error);
+  ASSERT_EQ(mask_image_of(1), nullptr);
+
+  /* Removing a mask has to leave the row exactly as it was before the mask: adding one again
+   * lands a fresh node and image, not a refusal. */
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error))
+      << int(error);
+  EXPECT_NE(mask_image_of(1), nullptr);
+  EXPECT_TRUE(mask_enabled_of(1));
+
+  /* A layer added after the remove takes a mask just as well. */
+  add_fill_layer(red, "L3");
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 2, white, 8, &error))
+      << int(error);
+  EXPECT_NE(mask_image_of(2), nullptr);
+}
+
+TEST_F(PaintMaterialLayerEditTest, mask_toggle_off_above_a_material_row_clears_every_channel)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  add_fill_layer(red, "L1");
+  add_fill_layer(red, "L2");
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  /* The row below stands in for a Material layer: it carries a map in a second channel, so the
+   * toggled row above is wired into more than just Base Color. */
+  ASSERT_TRUE(BKE_paint_material_layer_kind_set(
+      *bmain, *material, 0, PaintMaterialLayerKind::Material, &error));
+  const int rough[1] = {PAINT_MATERIAL_CHANNEL_ROUGHNESS};
+  ASSERT_TRUE(BKE_paint_material_layer_channels_ensure(
+      *bmain, *material, Span<int>(rough, 1), &error));
+  keep_roughness_on(1);
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error));
+  Image *mask_image = mask_image_of(1);
+  ASSERT_NE(mask_image, nullptr);
+  bNode *mask_node = layer_mask_node_find(*material->nodetree, mask_image->paint_layer_id);
+  ASSERT_NE(mask_node, nullptr);
+
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, false, &error))
+      << int(error);
+  EXPECT_FALSE(paint_layer_mask_is_enabled(*mask_image));
+
+  /* Every channel the mask was wired into has to stop sourcing it: a strict base check that
+   * silently skipped one would leave the mask applied there while the row reads as off. */
+  const int channels[2] = {PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_ROUGHNESS};
+  for (const int channel : channels) {
+    bNode *mix_node = layer_mix_in_channel("L2", eMaterialPaintChannel(channel));
+    ASSERT_NE(mix_node, nullptr);
+    material->nodetree->ensure_topology_cache();
+    CompositeMixNode mix;
+    ASSERT_TRUE(composite_mix_node_read(*mix_node, mix));
+    bNodeSocket *socket = (mix.factor_coverage != nullptr) ? mix.factor_coverage : mix.factor;
+    ASSERT_NE(socket, nullptr);
+    for (const bNodeLink *link : socket->directly_linked_links()) {
+      EXPECT_NE(link->fromnode, mask_node);
+    }
+  }
+}
+
+TEST_F(PaintMaterialLayerEditTest, mask_toggle_on_a_group_row_round_trips)
+{
+  build_stack(3);
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  int group_ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_group_make(
+      *bmain, *material, 1, 2, &group_ordinal, &error));
+
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(
+      BKE_paint_material_layer_mask_add(*bmain, *material, group_ordinal, white, 8, &error));
+  Image *mask_image = mask_image_of(group_ordinal);
+  ASSERT_NE(mask_image, nullptr);
+
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(
+      *bmain, *material, group_ordinal, false, &error)) << int(error);
+  EXPECT_FALSE(paint_layer_mask_is_enabled(*mask_image));
+  EXPECT_FALSE(mask_enabled_of(group_ordinal));
+  /* A switched-off mask keeps its image: the toggle only takes its links away. */
+  EXPECT_EQ(mask_image_of(group_ordinal), mask_image);
+
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(
+      *bmain, *material, group_ordinal, true, &error)) << int(error);
+  EXPECT_TRUE(paint_layer_mask_is_enabled(*mask_image));
+  EXPECT_TRUE(mask_enabled_of(group_ordinal));
 }
 
 TEST_F(PaintMaterialLayerEditTest, mask_remove_invalid_ordinal_leaves_the_graph_alone)

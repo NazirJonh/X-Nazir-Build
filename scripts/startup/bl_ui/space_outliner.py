@@ -80,8 +80,7 @@ class OUTLINER_HT_tool_header(Header):
         row.operator("outliner.stack_layer_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
 
         row = layout.row(align=True)
-        row.operator_menu_enum(
-            "outliner.stack_layer_mask", "initial_color", text="", icon='MOD_MASK')
+        row.menu("OUTLINER_MT_stack_layer_mask_add", text="", icon='MOD_MASK')
 
         row = layout.row(align=True)
         row.operator("outliner.stack_layer_group_add", text="", icon='NEWFOLDER')
@@ -104,6 +103,24 @@ class OUTLINER_MT_stack_layer_add_correction(Menu):
         ).type = 'MASK_CORRECTION'
 
 
+class OUTLINER_MT_stack_layer_mask_add(Menu):
+    bl_label = "Add Mask"
+
+    def draw(self, _context):
+        layout = self.layout
+        # `add` is set on the button, not left to the operator's default: the Remove Mask entry
+        # stores `add = False` as the operator's last-used value, and an unset property would come
+        # back as that -- so "Add Mask" would run a remove the next time it is picked.
+        op = layout.operator(
+            "outliner.stack_layer_mask", text="Add White Mask", icon='MOD_MASK')
+        op.add = True
+        op.initial_color = 'WHITE'
+        op = layout.operator(
+            "outliner.stack_layer_mask", text="Add Black Mask", icon='MOD_MASK')
+        op.add = True
+        op.initial_color = 'BLACK'
+
+
 class OUTLINER_MT_stack_layer_context_menu(Menu):
     bl_label = "Stack Layer"
 
@@ -120,8 +137,7 @@ class OUTLINER_MT_stack_layer_context_menu(Menu):
 
         layout.separator()
 
-        layout.operator_menu_enum(
-            "outliner.stack_layer_mask", "initial_color", text="Add Mask", icon='MOD_MASK')
+        layout.menu("OUTLINER_MT_stack_layer_mask_add", text="Add Mask", icon='MOD_MASK')
         layout.operator("outliner.stack_layer_mask", text="Remove Mask", icon='X').add = False
         layout.operator(
             "outliner.stack_layer_mask_toggle", text="Toggle Mask", icon='MOD_MASK')
@@ -790,6 +806,7 @@ classes = (
     OUTLINER_HT_header,
     OUTLINER_MT_stack_layer_context_menu,
     OUTLINER_MT_stack_layer_add_correction,
+    OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,
     OUTLINER_MT_collection,

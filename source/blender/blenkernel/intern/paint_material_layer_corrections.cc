@@ -17,6 +17,7 @@
  */
 
 #include "paint_material_layer_edit_intern.hh"
+#include "paint_material_layer_mask_intern.hh"
 
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
@@ -274,48 +275,25 @@ void layer_mask_corrections_sync(bNodeTree &tree, ChainLayer &layer)
     return;
   }
   bNodeSocket &base = const_cast<bNodeSocket &>(*lowest_mix.bottom);
+  /* A switched-off mask leaves the mask corrections nothing to shape, so they read as off too. */
+  const bUUID row_marker = bke::paint_layer::marker_get(*layer.node);
+  bNode *mask_node = layer_mask_node_find(tree, row_marker);
+  /* No mask image at all means there is nothing to switch off: the corrections apply as always. */
+  const bool mask_on = mask_node == nullptr ||
+                       paint_layer_mask_is_enabled(*id_cast<const Image *>(mask_node->id));
   if (contributes) {
     if (!socket_has_link(base)) {
-      /* The coverage the row has without its mask corrections, the order #layer_coverage_restore
-       * and #layer_mask_base_consumer agree on: the row's mask image, the content corrections'
-       * accumulated coverage, the folder's alpha, the row's own map alpha. */
+      /* The coverage the row has without its mask corrections: its mask image when that is
+       * switched on, the no-mask fallback otherwise (#layer_coverage_source_without_mask, the same
+       * order #layer_mask_base_consumer agrees on). */
       bNode *source_node = nullptr;
       bNodeSocket *source_socket = nullptr;
-      const bUUID row_marker = bke::paint_layer::marker_get(*layer.node);
-      for (bNode &node : tree.nodes) {
-        if (node.type_legacy != SH_NODE_TEX_IMAGE || node.id == nullptr ||
-            GS(node.id->name) != ID_IM)
-        {
-          continue;
-        }
-        const Image &image = *id_cast<const Image *>(node.id);
-        if (image.paint_layer_channel == PAINT_LAYER_MAP_MASK &&
-            BLI_uuid_equal(image.paint_layer_id, row_marker))
-        {
-          /* A switched-off mask does not come back as the chain's base; the coverage falls to the
-           * next source down, the same as for a row without a mask. */
-          if (image.paint_layer_mask_disabled == 0) {
-            source_node = &node;
-            source_socket = bke::node_find_socket(node, SOCK_OUT, "Color"_ustr);
-          }
-          break;
-        }
+      if (mask_on && mask_node != nullptr) {
+        source_node = mask_node;
+        source_socket = bke::node_find_socket(*mask_node, SOCK_OUT, "Color"_ustr);
       }
-      if (source_socket == nullptr && !layer.content_corrections.is_empty() &&
-          layer.content_corrections.last().over_combine != nullptr)
-      {
-        source_node = layer.content_corrections.last().over_combine;
-        source_socket = static_cast<bNodeSocket *>(source_node->outputs.first);
-      }
-      if (source_socket == nullptr && layer.is_group && layer.top != nullptr) {
-        if (bNodeLink *top_link = sole_link_into(*layer.top)) {
-          source_node = top_link->fromnode;
-          source_socket = socket_find_by_name(*source_node, SOCK_OUT, "Alpha");
-        }
-      }
-      if (source_socket == nullptr && layer.base_map != nullptr) {
-        source_node = layer.base_map;
-        source_socket = bke::node_find_socket(*source_node, SOCK_OUT, "Alpha"_ustr);
+      if (source_socket == nullptr) {
+        layer_coverage_source_without_mask(layer, source_node, source_socket);
       }
       if (source_node != nullptr && source_socket != nullptr) {
         relink_into(tree, base, *lowest.mix, *source_node, *source_socket);
@@ -331,6 +309,7 @@ void layer_mask_corrections_sync(bNodeTree &tree, ChainLayer &layer)
     }
   }
 
+  const bool corrections_apply = contributes && mask_on;
   for (const ChainCorrection &nodes : layer.mask_corrections) {
     tree.ensure_topology_cache();
     CompositeMixNode corr;
@@ -340,14 +319,14 @@ void layer_mask_corrections_sync(bNodeTree &tree, ChainLayer &layer)
       continue;
     }
     bNodeSocket &coverage = const_cast<bNodeSocket &>(*corr.factor_coverage);
-    if (contributes && nodes.map != nullptr) {
+    if (corrections_apply && nodes.map != nullptr) {
       if (!socket_has_link(coverage)) {
         if (bNodeSocket *alpha = bke::node_find_socket(*nodes.map, SOCK_OUT, "Alpha"_ustr)) {
           relink_into(tree, coverage, *nodes.factor_multiply, *nodes.map, *alpha);
         }
       }
     }
-    else if (!contributes) {
+    else if (!corrections_apply) {
       /* The same unlinked-and-zero form a Disabled channel keeps (I1): the mask correction's own
        * factor is zero here, and its Mix passes the zero base through. */
       for (bNodeLink *link : Vector<bNodeLink *>(coverage.directly_linked_links())) {

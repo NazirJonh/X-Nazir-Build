@@ -17,6 +17,7 @@
  */
 
 #include "paint_material_layer_edit_intern.hh"
+#include "paint_material_layer_mask_intern.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -1497,7 +1498,7 @@ void layer_coverage_restore(bNodeTree &tree,
   bNode *mask = layer_mask_node_find(tree, BKE_paint_material_layer_marker_get(*layer.node));
   /* A mask the user switched off stays off: the coverage comes back to the map's alpha, the same
    * as for a row without a mask (see #BKE_paint_material_layer_mask_set_enabled). */
-  if (mask != nullptr && id_cast<const Image *>(mask->id)->paint_layer_mask_disabled != 0) {
+  if (mask != nullptr && !paint_layer_mask_is_enabled(*id_cast<const Image *>(mask->id))) {
     mask = nullptr;
   }
   bNode &source = (mask != nullptr) ? *mask : map;
@@ -1552,24 +1553,6 @@ void channel_map_mute_set(bNodeTree &tree, bNode &map, const bool enable)
    * clear -- is what makes the channel contribute nothing (I1). */
   SET_FLAG_FROM_TEST(map.flag, !enable, NODE_MUTED);
   BKE_ntree_update_tag_node_mute(&tree, &map);
-}
-
-/** The mask Image Texture of the layer carrying \a marker, in \a tree, linked or not, or null. */
-bNode *layer_mask_node_find(bNodeTree &tree, const bUUID &marker)
-{
-  for (bNode &node : tree.nodes) {
-    if (node.type_legacy != SH_NODE_TEX_IMAGE || node.id == nullptr || GS(node.id->name) != ID_IM)
-    {
-      continue;
-    }
-    const Image &image = *id_cast<const Image *>(node.id);
-    if (image.paint_layer_channel == PAINT_LAYER_MAP_MASK &&
-        BLI_uuid_equal(image.paint_layer_id, marker))
-    {
-      return &node;
-    }
-  }
-  return nullptr;
 }
 
 Image *correction_tagged_map_find(Main &bmain, const bUUID &marker, const int channel)

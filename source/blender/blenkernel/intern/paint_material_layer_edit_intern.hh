@@ -477,9 +477,6 @@ void correction_channel_remove(Main &bmain,
  */
 void channel_map_mute_set(bNodeTree &tree, bNode &map, bool enable);
 
-/** The mask Image Texture of the layer carrying \a marker, in \a tree, linked or not, or null. */
-bNode *layer_mask_node_find(bNodeTree &tree, const bUUID &marker);
-
 /**
  * The image tagged as \a channel's map of the correction carrying \a marker, found across
  * #Main's images the way the stack model finds a correction's maps -- a correction's map does

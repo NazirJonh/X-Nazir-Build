@@ -352,6 +352,15 @@ StackRowPreview paint_channels_slot_build(const PaintMaterialLayerStackEntry &en
 }
 
 /**
+ * The icon a mask reads as: the mask icon while it is on, and the clip icon while it is off, so a
+ * switched-off mask is told at a glance in the row, its slot and its sub-row alike.
+ */
+static int paint_mask_state_icon(const bool enabled)
+{
+  return enabled ? ICON_MOD_MASK : ICON_CLIPUV_HLT;
+}
+
+/**
  * The mask slot of a row that has one, and the section it opens.
  *
  * \param keeps_row_icon: for a group, its folder icon stays ahead of the mask thumbnail. The
@@ -363,7 +372,7 @@ StackRowPreview paint_mask_slot_build(const bool keeps_row_icon, const bool enab
   slot.section_id = "MASK";
   /* A switched-off mask reads as one at a glance: the icon says the row's coverage no longer
    * comes from it. */
-  slot.icon = enabled ? ICON_MOD_MASK : ICON_MOD_SUBSURF;
+  slot.icon = paint_mask_state_icon(enabled);
   slot.keeps_row_icon = keeps_row_icon;
   /* Whether the mask began black or white is unreadable once it has been painted over, so the
    * label stays neutral rather than guessing from the initial fill color. */
@@ -417,7 +426,7 @@ StackContentSection paint_mask_section_build(const Image &mask_image)
   sub_row.id = const_cast<ID *>(&mask_image.id);
   /* The sub-row icon agrees with the mask slot and the row icon: switched off reads as
    * switched off everywhere. */
-  sub_row.icon = (mask_image.paint_layer_mask_disabled == 0) ? ICON_MOD_MASK : ICON_MOD_SUBSURF;
+  sub_row.icon = paint_mask_state_icon(mask_image.paint_layer_mask_disabled == 0);
   section.sub_rows.append(std::move(sub_row));
   return section;
 }
@@ -781,7 +790,7 @@ class PaintMaterialStackSource final : public StackSource,
        * mask keeps its icon priority over all of these. */
       const PaintMaterialLayerKind row_kind = entry.kind;
       row.icon = entry.is_group ? (group_material != nullptr ? ICON_MATERIAL : ICON_FILE_FOLDER) :
-                 entry.has_mask ? (entry.mask_enabled ? ICON_MOD_MASK : ICON_MOD_SUBSURF) :
+                 entry.has_mask ? paint_mask_state_icon(entry.mask_enabled) :
                  row_kind == PaintMaterialLayerKind::Material ? ICON_MATERIAL :
                  row_kind == PaintMaterialLayerKind::Fill ? ICON_GP_DRAW_FILL :
                                                             ICON_IMAGE_RGB;
@@ -1839,7 +1848,8 @@ class PaintMaterialStackSource final : public StackSource,
     }
     for (const PaintMaterialLayerStackEntry &entry : entries) {
       if (entry.ordinal == ordinal) {
-        return entry.channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr);
+        Image *mask = entry.channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr);
+        return mask;
       }
     }
     return nullptr;

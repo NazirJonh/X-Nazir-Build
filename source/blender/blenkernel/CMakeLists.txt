@@ -265,6 +265,7 @@ set(SRC
   intern/paint_material_layer_corrections.cc
   intern/paint_material_layer_edit.cc
   intern/paint_material_layer_idprops.cc
+  intern/paint_material_layer_mask.cc
   intern/paint_material_layer_model.cc
   intern/paint_material_layer_props.cc
   intern/paint_material_resolve.cc

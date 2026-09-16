@@ -4277,8 +4277,18 @@ void BKE_paint_material_mask_edit_end_ex(Main &bmain,
   if (mode_settings.mask_saved_brush != nullptr) {
     BKE_paint_brush_set_synced(scene, paint, mode_settings.mask_saved_brush);
   }
-  else {
-    BKE_paint_brush_set_default(&bmain, &scene, &paint);
+  else if (!BKE_paint_brush_set_default(&bmain, &scene, &paint)) {
+    /* No brush was saved and the essentials library is unavailable (unit tests, minimal installs),
+     * so #BKE_paint_brush_set_default cleared the active brush and restored nothing. Same fallback
+     * as #BKE_paint_material_mask_edit_begin_ex: a plain local brush, or the paint would be left
+     * with none. */
+    const eObjectMode ob_mode = paint.runtime != nullptr && paint.runtime->ob_mode != 0 ?
+        eObjectMode(paint.runtime->ob_mode) :
+        OB_MODE_TEXTURE_PAINT;
+    if (Brush *fallback = BKE_brush_add(&bmain, "Mask", ob_mode)) {
+      BKE_brush_material_paint_ensure(fallback);
+      BKE_paint_brush_set_synced(scene, paint, fallback);
+    }
   }
   mode_settings.mask_saved_brush = nullptr;
   mode_settings.mask_image_binding.image = nullptr;

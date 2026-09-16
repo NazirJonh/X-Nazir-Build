@@ -92,60 +92,9 @@
 
 #include "outliner_intern.hh"
 #include "outliner_stack_source.hh"
+#include "outliner_stack_source_paint_material_intern.hh"
 
 namespace blender::ed::outliner {
-
-/**
- * The mask-editing half of a preview-slot click, testable without a #bContext (see
- * #PaintMaterialStackSource::preview_activate, which resolves \a scene from context and calls
- * this). \a paint is the Paint whose brush is swapped. \a section_id names which preview was
- * clicked ("MASK" or "CHANNELS", see #outliner_stack_preview_section_from_cursor); any other
- * value is a no-op.
- */
-bool paint_material_mask_preview_activate(Main &bmain,
-                                           Scene &scene,
-                                           Paint &paint,
-                                           const StackRow &row,
-                                           const StringRef section_id);
-
-/**
- * Whether the MASK content section of \a row shows \a mask_image -- or, for a mask correction
- * row, whether the image is the correction's own map (named by its preview slot). Testable
- * without a #bContext like #paint_material_mask_preview_activate above: row activation uses it
- * to decide if the mask being painted survives the switch.
- */
-bool paint_row_owns_mask_image(const StackRow &row, const Image *mask_image);
-
-/**
- * One row of the stack, by the ordinal that addresses it: a layer row itself, or one of the
- * corrections hanging off it.
- *
- * File-local like the two declarations above, and duplicated into the test file for the same
- * reason they are: the routes are what the tests have to check directly.
- */
-struct PaintStackRowRoute {
-  /** False for the row a layer or group itself gets, true for one of its corrections. */
-  bool is_correction = false;
-  /** The ordinal of the layer row the route stands for, or hangs off. */
-  int layer_ordinal = -1;
-  /** The correction's identity; nil for a layer route. */
-  bUUID correction = {};
-  /** The parent's section the correction hangs under; meaningless for a layer route. */
-  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
-};
-
-/**
- * The deterministic ordinal budget the rows are addressed by, shared by #rows_build and every
- * edit that routes an ordinal. Defined below, next to the other test-facing functions.
- */
-
-Map<int, PaintStackRowRoute> paint_stack_routes_build(
-    Span<PaintMaterialLayerStackEntry> entries, int &r_first_unaddressable_index);
-
-/** The per-entry row builder; defined below, next to the other test-facing functions. */
-void paint_stack_rows_from_entries(Span<PaintMaterialLayerStackEntry> entries,
-                                   int shown_channel,
-                                   Vector<StackRow> &r_rows);
 
 /**
  * This source's own color session: the pixel-diff record a live fill-color edit captures the
@@ -1811,7 +1760,7 @@ class PaintMaterialStackSource final : public StackSource,
 
   StackColorSession *color_session_new() const override
   {
-    StackColorSession *session = new StackColorSession();
+    StackColorSession *session = MEM_new<StackColorSession>(__func__);
     session->tiles = ED_image_paint_tile_map_new();
     return session;
   }
@@ -1831,7 +1780,7 @@ class PaintMaterialStackSource final : public StackSource,
     if (session->tiles != nullptr) {
       ED_image_paint_tile_map_free(session->tiles);
     }
-    delete session;
+    MEM_delete(session);
   }
 
   void color_session_push_undo(StackColorSession &session,

@@ -36,37 +36,9 @@
 #include "UI_resources.hh"
 
 #include "outliner_stack_source.hh"
+#include "outliner_stack_source_paint_material_intern.hh"
 
 namespace blender::ed::outliner {
-
-bool paint_material_mask_preview_activate(Main &bmain,
-                                           Scene &scene,
-                                           Paint &paint,
-                                           const StackRow &row,
-                                           StringRef section_id);
-
-bool paint_row_owns_mask_image(const StackRow &row, const Image *mask_image);
-
-/* The route the paint stack source addresses its rows by, file-local in the source and
- * duplicated here -- the same shape, the way the two function declarations above are -- so the
- * tests can call the budget builder directly. */
-struct PaintStackRowRoute {
-  bool is_correction = false;
-  int layer_ordinal = -1;
-  bUUID correction = {};
-  PaintMaterialCorrectionSection section = PaintMaterialCorrectionSection::Content;
-};
-
-Map<int, PaintStackRowRoute> paint_stack_routes_build(
-    Span<PaintMaterialLayerStackEntry> entries, int &r_first_unaddressable_index);
-
-/* The per-entry row builder, declared here for the same reason as the two helpers above: the
- * overflow stub only appears past #STACK_ROW_ORDINAL_MAX, which the graph's own depth bound keeps
- * a real stack far away from. */
-void paint_stack_rows_from_entries(Span<PaintMaterialLayerStackEntry> entries,
-                                   int shown_channel,
-                                   Vector<StackRow> &r_rows);
-
 namespace tests {
 
 class OutlinerStackPaintMaterialSourceTest : public bke::BlenderGTestBase {

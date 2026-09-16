@@ -318,7 +318,9 @@ TEST_F(PaintMaterialCompositeEvalTest, normal_combine_over_a_flat_normal_keeps_t
   bottom.color_ibuf = add_buffer(128, 128, 255, 255);
   stack.layers.append(bottom);
   PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(200, 128, 255, 255);
+  /* A unit-length detail normal: the whiteout renormalizes, so a non-unit encoded normal is not
+   * the identity the test is about. Blue 232 decodes z to sqrt(1 - x^2 - y^2). */
+  top.color_ibuf = add_buffer(200, 128, 232, 255);
   top.blend = CompositeBlend::NormalCombine;
   stack.layers.append(top);
 

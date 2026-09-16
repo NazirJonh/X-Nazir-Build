@@ -10,6 +10,7 @@
 #include "BKE_attribute.h"
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
+#include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
@@ -71,11 +72,16 @@ class PaintMaterialChannelTest : public bke::BlenderGTestBase {
   void SetUp() override
   {
     bmain = BKE_main_new();
+    /* Several paths reachable from here notify through #WM_main_add_notifier, and the save/reload
+     * path swaps the global main. Both read #G_MAIN, so the fixture has to publish it, the way
+     * image_test.cc does. */
+    G_MAIN = bmain;
   }
 
   void TearDown() override
   {
     BKE_main_free(bmain);
+    G_MAIN = nullptr;
   }
 
   Object *add_mesh_object(const char *name)
@@ -994,6 +1000,9 @@ TEST_F(PaintMaterialChannelTest, BaseColorGetRespectsInvert)
   Paint paint{};
   paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
   paint.runtime->ob_mode = OB_MODE_SCULPT;
+  /* The DNA default turns unified colour on, which would answer with the unified secondary colour
+   * rather than the brush's own; the test is about the brush's own value. */
+  paint.unified_paint_settings.flag &= ~UNIFIED_PAINT_COLOR;
 
   Brush brush{};
   copy_v3_fl3(brush.secondary_color, 0.1f, 0.3f, 0.5f);
@@ -1263,6 +1272,20 @@ TEST_F(PaintMaterialChannelTest, principled_image_target_follows_actcol)
   Material *ma_a = add_material_with_principled(*ob, "ActcolMatA");
   Image *image_a = add_image("BaseColorA");
   Material *ma_b = BKE_material_add(bmain, "ActcolMatB");
+  {
+    /* #BKE_material_add leaves the embedded tree empty; the test resolves a Principled input, so
+     * the second material needs one of its own. Built directly rather than through
+     * #add_material_with_principled, which would also claim slot 1 from ma_a. */
+    bNodeTree &ntree = *ma_b->nodetree;
+    bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+    bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+    bke::node_add_link(
+        ntree,
+        *principled,
+        *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+        *output,
+        *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  }
   BKE_object_material_assign(bmain, ob, ma_b, 2, BKE_MAT_ASSIGN_OBJECT);
   Image *image_b = add_image("BaseColorB");
 
@@ -1886,7 +1909,9 @@ TEST_F(PaintMaterialChannelTest, DirectionalBrushSyncCopiesVisibleChannels)
   ts->sculpt->paint.visible_material_channels = (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS);
   ts->imapaint.paint.visible_material_channels = (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR);
 
-  /* The one-shot copy must work while automatic sync is off, and must leave it off. */
+  /* The one-shot copy must work while automatic sync is off, and must leave it off. The DNA
+   * default has the flag on, so the test turns it off explicitly first. */
+  ts->paint_mode.material_paint_flag = ePaintMaterialFlag(0);
   ASSERT_EQ(ts->paint_mode.material_paint_flag & PAINT_MATERIAL_BRUSH_SYNC, 0);
   EXPECT_TRUE(BKE_paint_material_brush_sync_directional(
       scene, &ts->sculpt->paint, &ts->imapaint.paint));
@@ -2029,7 +2054,9 @@ TEST_F(PaintMaterialChannelTest, ApplyThenSnapshotRoundTripsAndDoesNotLeakTexUse
 
   EXPECT_EQ(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].source_mtex.tex,
             tex);
-  EXPECT_EQ(tex->id.us, tex_users_baseline)
+  /* The preset holds exactly one counted reference of its own (see
+   * #PresetRemoveReleasesTexUserCount); repeated apply/snapshot must not drift beyond it. */
+  EXPECT_EQ(tex->id.us, tex_users_baseline + 1)
       << "repeated apply/snapshot must not drift the Tex user count";
 
   BKE_id_free(bmain, scene);

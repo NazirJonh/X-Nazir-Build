@@ -255,6 +255,52 @@ const bNodeSocket *layer_model_group_result_socket(const bNode &group)
 }
 
 /**
+ * The image a row's base socket reads, a switched-off (muted) map node included.
+ *
+ * #composite_image_from_socket goes through the resolver, which treats a muted node as its internal
+ * links -- and a switched-off map node has none, so the resolver reports nothing. A Disabled row
+ * keeps its map (#PaintMaterialLayerStackEntry::channel_images lists Disabled ones), so the link is
+ * followed here without the mute test.
+ */
+bool layer_model_image_from_base_including_muted(const bNodeSocket &base,
+                                                 Image *&r_image,
+                                                 const ImageUser *&r_iuser)
+{
+  const bNodeSocket *current = &base;
+  for (int step = 0; step < 64; step++) {
+    if (current->directly_linked_links().is_empty()) {
+      return false;
+    }
+    const bNodeLink *link = current->directly_linked_links()[0];
+    if (!link->is_available() || link->is_muted()) {
+      return false;
+    }
+    const bNode &node = *link->fromnode;
+    if (node.is_reroute()) {
+      current = static_cast<const bNodeSocket *>(node.inputs.first);
+      continue;
+    }
+    if (node.type_legacy != SH_NODE_TEX_IMAGE || node.id == nullptr ||
+        GS(node.id->name) != ID_IM)
+    {
+      return false;
+    }
+    const NodeTexImage *storage = static_cast<const NodeTexImage *>(node.storage);
+    if (storage == nullptr) {
+      return false;
+    }
+    Image *image = id_cast<Image *>(node.id);
+    if (image->source == IMA_SRC_TILED) {
+      return false;
+    }
+    r_image = image;
+    r_iuser = &storage->iuser;
+    return true;
+  }
+  return false;
+}
+
+/**
  * Walk one channel chain, bottom-up, appending a row per layer.
  *
  * The chain_step argument only bounds the recursion along a chain; nesting and parent_node_id are
@@ -330,11 +376,16 @@ void layer_model_collect(const bNodeSocket &socket,
                                         PaintMaterialCorrectionSection::Mask,
                                         layer.mask_correction_nodes);
       }
-      if (content_base != nullptr && composite_source_node_shallow(*content_base) != nullptr &&
-          !composite_image_from_socket(*content_base, layer.image, iuser))
-      {
-        layer.supported = false;
-        layer.unsupported_reason = "Layer source is not an image";
+      if (content_base != nullptr && composite_source_node_shallow(*content_base) != nullptr) {
+        if (!composite_image_from_socket(*content_base, layer.image, iuser)) {
+          layer.supported = false;
+          layer.unsupported_reason = "Layer source is not an image";
+        }
+      }
+      else if (content_base != nullptr) {
+        /* The resolver found nothing, which is also how a switched-off (muted) map reads. List its
+         * map anyway; a genuinely broken source resolves to no image and stays supported. */
+        layer_model_image_from_base_including_muted(*content_base, layer.image, iuser);
       }
       layer_model_corrections_reverse(layer.content_correction_nodes);
       layer_model_corrections_reverse(layer.mask_correction_nodes);
@@ -457,11 +508,16 @@ void layer_model_collect(const bNodeSocket &socket,
     layer_model_corrections_descend(
         *mix.factor_coverage, PaintMaterialCorrectionSection::Mask, layer.mask_correction_nodes);
   }
-  if (content_base != nullptr && composite_source_node_shallow(*content_base) != nullptr &&
-      !composite_image_from_socket(*content_base, layer.image, iuser))
-  {
-    layer.supported = false;
-    layer.unsupported_reason = "Layer source is not an image";
+  if (content_base != nullptr && composite_source_node_shallow(*content_base) != nullptr) {
+    if (!composite_image_from_socket(*content_base, layer.image, iuser)) {
+      layer.supported = false;
+      layer.unsupported_reason = "Layer source is not an image";
+    }
+  }
+  else if (content_base != nullptr) {
+    /* The resolver found nothing, which is also how a switched-off (muted) map reads. List its map
+     * anyway; a genuinely broken source resolves to no image and stays supported. */
+    layer_model_image_from_base_including_muted(*content_base, layer.image, iuser);
   }
   layer_model_corrections_reverse(layer.content_correction_nodes);
   layer_model_corrections_reverse(layer.mask_correction_nodes);

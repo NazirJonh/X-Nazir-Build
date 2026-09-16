@@ -2051,6 +2051,10 @@ uint64_t BKE_paint_material_composite_stack_hash(
 {
   uint64_t hash = get_default_hash(image_layers.size());
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
+    /* Mix the running hash multiplicatively before each layer: #get_default_hash folds its
+     * arguments with XOR, which is order-independent, so two layers swapped would otherwise hash
+     * the same and a reorder would not invalidate the composite. */
+    hash *= 0x100000001b3ULL;
     /* Session UIDs rather than pointers: a freed image's address can come back as a different
      * one, and the hash is the only thing standing between that and a stale composite. */
     hash = get_default_hash(hash,
@@ -2389,6 +2393,20 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
           break;
         }
       }
+    }
+  }
+
+  /* The partial-update log reports whole tiles, which can reach past a buffer smaller than one
+   * tile. A layer stack cannot be tiled, so clip the report to the buffer: every consumer of the
+   * echoed region -- and the echoed region itself -- must stay within the pixels that exist. */
+  if (!entry.dirty_full && !BLI_rcti_is_empty(&entry.dirty_region)) {
+    const rcti bounds = {0, entry.width, 0, entry.height};
+    rcti clipped;
+    if (BLI_rcti_isect(&bounds, &entry.dirty_region, &clipped)) {
+      entry.dirty_region = clipped;
+    }
+    else {
+      BLI_rcti_init(&entry.dirty_region, 0, 0, 0, 0);
     }
   }
 

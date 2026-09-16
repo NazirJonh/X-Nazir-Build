@@ -1917,8 +1917,14 @@ bool layer_edit_plan_build(Main &bmain,
       return false;
     }
     /* Held as a one-channel-per-entry forest so the chains below resolve the same way for every
-     * operation; an add only ever touches the top level. */
-    r_plan.per_channel.append(std::move(flat));
+     * operation; an add only ever touches the top level. Splitting them matters: #forest_top_chains
+     * takes the last chain of each entry, so folding every channel into one entry would leave the
+     * plan with a single channel and the layer would be added to that one only. */
+    for (ChannelChain &chain : flat) {
+      Vector<ChannelChain> one_channel;
+      one_channel.append(std::move(chain));
+      r_plan.per_channel.append(std::move(one_channel));
+    }
     /* The shape conversion walks the forest, so its reach is what the forest says: a forest the
      * reader refuses is a conversion that never happens. */
     Vector<Vector<ChannelChain>> forest;
@@ -2231,9 +2237,24 @@ bool layer_edit_plan_build(Main &bmain,
       if (!ordinal_is_in_chain(ordinal, r_error)) {
         return false;
       }
-      if (ordinal < 1 || ordinal >= top_layers_num()) {
+      if (ordinal < 0 || ordinal >= top_layers_num()) {
         r_error = PaintMaterialLayerEditError::IndexOutOfRange;
         return false;
+      }
+      if (ordinal == 0) {
+        /* A folder can sit at the very bottom: its keeper Mix reverts to blending the inner
+         * bottom, which is the same thing ungroup does anywhere else. A bare base at the bottom
+         * has no Mix to blend the folder and is refused exactly as before. */
+        ChainLayer &bottom_keeper = top_chains.first()->layers[0];
+        bNodeLink *bottom_top_link = (bottom_keeper.top == nullptr) ?
+                                         nullptr :
+                                         sole_link_into(*bottom_keeper.top);
+        if (bottom_top_link == nullptr ||
+            !BKE_paint_material_is_layer_group(*bottom_top_link->fromnode))
+        {
+          r_error = PaintMaterialLayerEditError::IndexOutOfRange;
+          return false;
+        }
       }
       for (ChannelChain *chain : top_chains) {
         ChainLayer &keeper = chain->layers[ordinal];

@@ -613,9 +613,10 @@ TEST_F(PaintMaterialLayerEditTest, layer_kind_round_trips)
   }
   EXPECT_EQ(index, 2);
 
-  /* Reading back through a fresh reader of the same nodes, not the same pointer. */
+  /* Reading back through a fresh reader of the same nodes, not the same pointer: the bare base and
+   * the two Mix nodes are three rows. */
   const Vector<std::string> names = layer_names();
-  ASSERT_EQ(names.size(), 2);
+  ASSERT_EQ(names.size(), 3);
 }
 
 TEST_F(PaintMaterialLayerEditTest, channel_has_unsupported_source_message)
@@ -801,6 +802,17 @@ TEST_F(PaintMaterialLayerEditTest, fill_color_apply_refills_every_wired_channel)
   const int ordinal = add_fill_layer(color, "Filler");
   ASSERT_EQ(ordinal, 0);
 
+  /* The reader matches a row's maps across channels by #Image::paint_layer_id; a map wired by hand
+   * here has to carry the row's tag the way an API-created one does. */
+  Image *base_color_image = nullptr;
+  {
+    Vector<PaintMaterialLayerStackEntry> before;
+    ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, before));
+    base_color_image = before[0].channel_images.lookup_default(PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                               nullptr);
+  }
+  ASSERT_NE(base_color_image, nullptr);
+
   /* Wire Roughness as a second channel, with its own bare base carrying the same kind marker --
    * the shape a Fill added to a wired channel has. */
   bNodeTree &tree = *material->nodetree;
@@ -808,6 +820,7 @@ TEST_F(PaintMaterialLayerEditTest, fill_color_apply_refills_every_wired_channel)
   Image *roughness_image = BKE_image_add_generated(
       bmain, 8, 8, "Roughness TexLayer", 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
   bNode *roughness_tex = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+  roughness_image->paint_layer_id = base_color_image->paint_layer_id;
   roughness_tex->id = &roughness_image->id;
   BKE_paint_material_layer_kind_set(*roughness_tex, PaintMaterialLayerKind::Fill);
   BKE_paint_material_layer_fill_color_set(*roughness_tex, color);
@@ -856,15 +869,8 @@ TEST_F(PaintMaterialLayerEditTest, fill_color_apply_refills_every_wired_channel)
   /* A generated map nobody painted must rebuild to the new colour, not the creation one. */
   EXPECT_V4_NEAR(float4(BKE_image_get_tile(color_image, 0)->gen_color), float4(new_color), 1e-6f);
 
-  /* The marker records the colour the layer now stands for. The layer is the stack's bare base,
-   * so the marker lives on the Image Texture that shows its map. */
-  bNode *filler = nullptr;
-  for (bNode &node : material->nodetree->nodes) {
-    if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id == &color_image->id) {
-      filler = &node;
-      break;
-    }
-  }
+  /* The marker records the colour the layer now stands for, on the layer's own node. */
+  bNode *filler = find_layer_node("Filler");
   ASSERT_NE(filler, nullptr);
   float recorded[4];
   ASSERT_TRUE(BKE_paint_material_layer_fill_color_get(*filler, recorded));
@@ -889,12 +895,24 @@ TEST_F(PaintMaterialLayerEditTest, fill_color_preview_refills_pixels_but_keeps_m
   const int ordinal = add_fill_layer(color, "Filler");
   ASSERT_EQ(ordinal, 0);
 
+  /* The reader matches a row's maps across channels by #Image::paint_layer_id; a map wired by hand
+   * here has to carry the row's tag the way an API-created one does. */
+  Image *base_color_image = nullptr;
+  {
+    Vector<PaintMaterialLayerStackEntry> before;
+    ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, before));
+    base_color_image = before[0].channel_images.lookup_default(PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                               nullptr);
+  }
+  ASSERT_NE(base_color_image, nullptr);
+
   /* Wire Roughness as a second channel, the same shape the apply test uses. */
   bNodeTree &tree = *material->nodetree;
   bNode &principled = principled_node();
   Image *roughness_image = BKE_image_add_generated(
       bmain, 8, 8, "Roughness TexLayer", 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
   bNode *roughness_tex = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+  roughness_image->paint_layer_id = base_color_image->paint_layer_id;
   roughness_tex->id = &roughness_image->id;
   BKE_paint_material_layer_kind_set(*roughness_tex, PaintMaterialLayerKind::Fill);
   BKE_paint_material_layer_fill_color_set(*roughness_tex, color);
@@ -962,6 +980,17 @@ TEST_F(PaintMaterialLayerEditTest, fill_color_preview_bumps_revision_and_invalid
   const float color[4] = {0.1f, 0.9f, 0.5f, 1.0f};
   const int ordinal = add_fill_layer(color, "Filler");
   ASSERT_EQ(ordinal, 0);
+
+  /* The reader matches a row's maps across channels by #Image::paint_layer_id; a map wired by hand
+   * here has to carry the row's tag the way an API-created one does. */
+  Image *base_color_image = nullptr;
+  {
+    Vector<PaintMaterialLayerStackEntry> before;
+    ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, before));
+    base_color_image = before[0].channel_images.lookup_default(PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                               nullptr);
+  }
+  ASSERT_NE(base_color_image, nullptr);
 
   /* The revision readers poll to know the stack moved on. Warming the composite cache itself
    * needs an assembled composite span, so the revision bump -- which shares the
@@ -1292,12 +1321,14 @@ TEST_F(PaintMaterialLayerEditTest, add_anchored_to_a_grouped_layer_lands_in_the_
   ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
   ASSERT_EQ(entries.size(), 5);
   EXPECT_EQ(entries[0].name, "L0");
-  EXPECT_TRUE(entries[1].is_group);
-  EXPECT_EQ(entries[2].name, "L1");
-  EXPECT_EQ(entries[3].name, "Inserted");
-  EXPECT_EQ(entries[4].name, "L2");
+  EXPECT_EQ(entries[1].name, "L1");
+  EXPECT_EQ(entries[2].name, "Inserted");
+  EXPECT_EQ(entries[3].name, "L2");
+  /* The group row is listed after the rows it holds (post-order), which is the order the Outliner
+   * resolves parents in. */
+  EXPECT_TRUE(entries[4].is_group);
   /* The new row nests exactly as deep as the siblings it was dropped between. */
-  EXPECT_EQ(entries[3].depth, entries[2].depth);
+  EXPECT_EQ(entries[2].depth, entries[1].depth);
 }
 
 TEST_F(PaintMaterialLayerEditTest, add_anchored_to_a_folder_lands_inside_it_on_top)
@@ -1320,10 +1351,12 @@ TEST_F(PaintMaterialLayerEditTest, add_anchored_to_a_folder_lands_inside_it_on_t
   Vector<PaintMaterialLayerStackEntry> entries;
   ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
   ASSERT_EQ(entries.size(), 5);
-  EXPECT_EQ(entries[2].name, "L1");
-  EXPECT_EQ(entries[3].name, "L2");
-  EXPECT_EQ(entries[4].name, "OnTop");
-  EXPECT_EQ(entries[4].depth, entries[3].depth);
+  EXPECT_EQ(entries[0].name, "L0");
+  EXPECT_EQ(entries[1].name, "L1");
+  EXPECT_EQ(entries[2].name, "L2");
+  EXPECT_EQ(entries[3].name, "OnTop");
+  EXPECT_TRUE(entries[4].is_group);
+  EXPECT_EQ(entries[3].depth, entries[2].depth);
 }
 
 TEST_F(PaintMaterialLayerEditTest, add_anchored_to_an_empty_folder_creates_its_first_layer)
@@ -1510,13 +1543,17 @@ TEST_F(PaintMaterialLayerEditTest, duplicate_group_copies_its_children)
   Vector<PaintMaterialLayerStackEntry> entries;
   ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
   ASSERT_EQ(entries.size(), 7);
-  ASSERT_NE(entries[1].group_tree, nullptr);
-  ASSERT_NE(entries[4].group_tree, nullptr);
-  EXPECT_NE(entries[1].group_tree, entries[4].group_tree);
-  EXPECT_EQ(entries[2].name, "L1");
-  EXPECT_EQ(entries[3].name, "L2");
-  EXPECT_EQ(entries[5].name, "L1");
-  EXPECT_EQ(entries[6].name, "L2");
+  /* Post-order: each group row follows the rows it holds. */
+  ASSERT_NE(entries[3].group_tree, nullptr);
+  ASSERT_NE(entries[6].group_tree, nullptr);
+  EXPECT_NE(entries[3].group_tree, entries[6].group_tree);
+  EXPECT_EQ(entries[1].name, "L1");
+  EXPECT_EQ(entries[2].name, "L2");
+  /* The copy's maps are data-blocks of their own, so Blender's unique naming renames them; the row
+   * reads through the copied map. */
+  EXPECT_EQ(entries[4].name, "L1.001");
+  /* The upper copied layer's name comes from its copied node label, not its map. */
+  EXPECT_EQ(entries[5].name, "L2");
 }
 
 TEST_F(PaintMaterialLayerEditTest, group_duplicate_gives_the_copied_maps_their_own_users)
@@ -1557,7 +1594,9 @@ TEST_F(PaintMaterialLayerEditTest, group_duplicate_gives_the_copied_maps_their_o
   Image *copied_map = nullptr;
   int named_l1 = 0;
   for (const PaintMaterialLayerStackEntry &entry : entries) {
-    if (entry.name != "L1") {
+    /* The group row itself is named "L1" too, and the copy's map is renamed "L1.001" by Blender's
+     * unique naming, so skip groups and match the name prefix. */
+    if (entry.is_group || entry.name.compare(0, 2, "L1") != 0) {
       continue;
     }
     named_l1++;
@@ -2022,7 +2061,8 @@ TEST_F(PaintMaterialLayerEditTest, ungroup_leaves_the_group_tree_a_recognized_or
   /* One user per channel instance, and no more: the material stack has a single channel here. */
   EXPECT_EQ(group_tree->id.us, 1);
 
-  ASSERT_TRUE(BKE_paint_material_layer_group_ungroup(*bmain, *material, 1, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_group_ungroup(*bmain, *material, 1, nullptr, &error))
+      << int(error);
   EXPECT_EQ(error, PaintMaterialLayerEditError::None);
   EXPECT_EQ(group_tree->id.us, 0);
 }
@@ -2823,8 +2863,11 @@ TEST_F(PaintMaterialLayerEditTest, bake_endpoint_resolve_refuses_a_row_inside_a_
   Vector<PaintMaterialLayerStackEntry> entries;
   ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, *material, entries));
   ASSERT_EQ(entries.size(), 4);
-  ASSERT_TRUE(entries[1].is_group);
-  ASSERT_EQ(entries[2].name, "L1");
+  /* Post-order: L0, L1, L2, then the folder row. L2 is the inner row that carries a marker; the
+   * folder's converted bottom row is normalized into a Mix that #markers_ensure does not reach
+   * inside the group. */
+  ASSERT_TRUE(entries[3].is_group);
+  ASSERT_EQ(entries[2].name, "L2");
   const bUUID nested_marker = entries[2].marker;
   ASSERT_FALSE(BLI_uuid_is_nil(nested_marker));
 
@@ -2838,7 +2881,7 @@ TEST_F(PaintMaterialLayerEditTest, bake_endpoint_resolve_refuses_a_row_inside_a_
   EXPECT_EQ(mask_socket, nullptr);
 
   /* The folder row itself blends in the material's own tree, so its endpoint is routable. */
-  const bUUID group_marker = entries[1].marker;
+  const bUUID group_marker = entries[3].marker;
   ASSERT_FALSE(BLI_uuid_is_nil(group_marker));
   EXPECT_TRUE(BKE_paint_material_layer_bake_endpoint_resolve(
       *material, group_marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color_socket, &mask_socket));

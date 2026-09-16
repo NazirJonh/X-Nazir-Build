@@ -28,7 +28,6 @@
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
-#include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
 #include "BLI_listbase_wrapper.hh"
@@ -42,7 +41,6 @@
 
 #include "ED_object.hh"
 #include "ED_outliner_stack_automation.hh"
-#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
 

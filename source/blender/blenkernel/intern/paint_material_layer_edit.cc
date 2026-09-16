@@ -483,7 +483,14 @@ bool BKE_paint_material_layer_add(Main &bmain,
        * second commit to count. */
       const bUUID layer_id = image->paint_layer_id;
       for (bNode &node : ma.nodetree->nodes) {
-        if (BLI_uuid_equal(BKE_paint_material_layer_marker_get(node), layer_id)) {
+        /* A bare base (the first layer) carries its identity on the Image, not on a Mix marker, so
+         * the map's own Image Texture node is matched too; the model reads the row's kind and fill
+         * colour from that node. */
+        const bool is_bare_base_map = node.type_legacy == SH_NODE_TEX_IMAGE &&
+                                      node.id == &image->id;
+        if (is_bare_base_map ||
+            BLI_uuid_equal(BKE_paint_material_layer_marker_get(node), layer_id))
+        {
           BKE_paint_material_layer_fill_color_set(node, params.fill_color);
         }
       }
@@ -2299,7 +2306,7 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
 
       const bool has_corrections = !inner_layer.content_corrections.is_empty() ||
                                    !inner_layer.mask_corrections.is_empty();
-      if (index == 0 && has_corrections) {
+      if (index == 0) {
         /* The sub-stack's bottom row is the kept Mix's own content stack -- the folder was made
          * from a corrections-bearing row. Its owned nodes come back out and re-attach to the kept
          * Mix; the Mix the folder held a copy of is not needed, the kept one serves. */
@@ -2664,6 +2671,9 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     bNode *mix = nullptr;
     bNode *tex = nullptr;
     Image *image = nullptr;
+    /** The source row's channel was switched off (coverage unlinked): the copy keeps that shape
+     * instead of being wired live. */
+    bool coverage_off = false;
     /** Filled for an owned set (a row with corrections); empty for the single-node copies. */
     Map<const bNode *, bNode *> node_map;
   };
@@ -2856,8 +2866,17 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
       continue;
     }
 
+    /* A row that is Absent in this channel has a Mix node but nothing feeding its top; it is a
+     * valid row (spec 18 I1), so the duplicate keeps that shape rather than refusing. The Mix is
+     * still copied; only the map copy is skipped. */
     bNodeLink *top_link = sole_link_into(*source.top);
-    if (top_link == nullptr) {
+    {
+      CompositeMixNode source_mix;
+      copy.coverage_off = composite_mix_node_read(*source.node, source_mix) &&
+                          composite_mix_coverage_off(source_mix);
+    }
+    if (top_link == nullptr && source.image != nullptr) {
+      /* A map that exists but is not linked into the top is not a shape this file can read. */
       copies.append(copy);
       discard();
       return fail(PaintMaterialLayerEditError::ChainNotPlain);
@@ -2872,11 +2891,13 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
       }
     }
     Map<const bNodeSocket *, bNodeSocket *> socket_map;
-    copy.tex = bke::node_copy_with_mapping(
-        &tree, *top_link->fromnode, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
+    if (top_link != nullptr) {
+      copy.tex = bke::node_copy_with_mapping(
+          &tree, *top_link->fromnode, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
+    }
     copy.mix = bke::node_copy_with_mapping(
         &tree, *source.node, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
-    if (copy.tex == nullptr || copy.mix == nullptr) {
+    if (copy.mix == nullptr || (top_link != nullptr && copy.tex == nullptr)) {
       copies.append(copy);
       discard();
       return fail(PaintMaterialLayerEditError::CreationFailed);
@@ -2951,18 +2972,28 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     layer.output = output;
     layer.image = copy.image;
 
-    if (copy.node_map.is_empty()) {
-      bke::node_add_link(tree, *copy.tex, *tex_color, *copy.mix, *layer.top);
-      layer_factor_coverage_link(
-          tree, *copy.mix, *const_cast<bNodeSocket *>(mix.factor), *copy.tex, *tex_alpha, 1.0f);
-    }
-    else {
+    if (!copy.node_map.is_empty()) {
       /* The owned set is already wired: the map reads into the corrections and the corrections
          into the Mix, and the coverage Multiply the source row had came along with its opacity. */
       layer.base_map = copy.tex;
     }
+    else if (copy.tex != nullptr) {
+      bke::node_add_link(tree, *copy.tex, *tex_color, *copy.mix, *layer.top);
+      if (copy.coverage_off) {
+        /* A switched-off source channel stays switched off: the coverage Multiply is created, but
+         * the map does not feed it, which is exactly the Disabled shape. */
+        layer_factor_absent_link(
+            tree, *copy.mix, *const_cast<bNodeSocket *>(mix.factor), 1.0f);
+      }
+      else {
+        layer_factor_coverage_link(
+            tree, *copy.mix, *const_cast<bNodeSocket *>(mix.factor), *copy.tex, *tex_alpha, 1.0f);
+      }
+    }
+    /* else: the row was Absent in this channel -- the copied Mix keeps its unlinked top, which is
+     * the shape the channel-state reader reads back as Absent. */
     bke::node_position_relative(*copy.mix, *chain->terminal_node, output, *chain->terminal);
-    if (copy.node_map.is_empty()) {
+    if (copy.tex != nullptr) {
       bke::node_position_relative(*copy.tex, *copy.mix, tex_color, *layer.top);
     }
 

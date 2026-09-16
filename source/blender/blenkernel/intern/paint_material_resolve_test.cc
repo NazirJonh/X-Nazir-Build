@@ -92,9 +92,10 @@ TEST_F(PaintMaterialResolveTest, no_node_tree_reports_no_node_tree)
 
 TEST_F(PaintMaterialResolveTest, emission_shader_on_surface_reports_no_principled)
 {
-  Material *ma = BKE_material_add(bmain, "Emit");
+  /* #BKE_material_add leaves the tree empty, Output included; build the Principled/Output pair
+   * first, then remove the Principled so only Emission drives Surface. */
+  Material *ma = this->add_material_with_principled("Emit");
   bNodeTree &ntree = *ma->nodetree;
-  /* BKE_material_add already seeds a Principled; remove it so only Emission drives Surface. */
   if (bNode *seeded = this->find_node(*ma, SH_NODE_BSDF_PRINCIPLED)) {
     bke::node_remove_node(bmain, ntree, *seeded, false);
   }

@@ -651,7 +651,8 @@ TEST_F(PaintMaterialLayerCorrectionTest, corrections_travel_with_move_duplicate_
       *bmain, *material, 0, 0, &group_ordinal, &error));
   EXPECT_GE(BKE_paint_material_layer_correction_owner_ordinal(*bmain, *material, a),
             PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE);
-  ASSERT_TRUE(BKE_paint_material_layer_group_ungroup(*bmain, *material, group_ordinal, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_group_ungroup(*bmain, *material, group_ordinal, nullptr, &error))
+      << int(error);
   EXPECT_GE(BKE_paint_material_layer_correction_owner_ordinal(*bmain, *material, a), 0);
 }
 

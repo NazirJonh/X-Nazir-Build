@@ -712,16 +712,14 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     &toolsett_old->paint_mode.canvas_image,
                                                     IDWALK_CB_NOP);
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
-                                                     &toolsett->paint_mode
-                                                         .mask_image_binding.image,
+                                                     &toolsett->paint_mode.mask_image_binding.image,
                                                      do_undo_restore,
                                                      SCENE_FOREACH_UNDO_RESTORE,
                                                      reader,
-                                                     &toolsett_old->paint_mode
-                                                         .mask_image_binding.image,
+                                                     &toolsett_old->paint_mode.mask_image_binding.image,
                                                      IDWALK_CB_NOP);
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
-                                                    &toolsett->paint_mode.mask_active_brush,
+                                                     &toolsett->paint_mode.mask_active_brush,
                                                     do_undo_restore,
                                                     SCENE_FOREACH_UNDO_RESTORE,
                                                     reader,

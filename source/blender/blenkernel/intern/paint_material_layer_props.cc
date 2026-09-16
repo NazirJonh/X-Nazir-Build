@@ -391,7 +391,7 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
       if (mask_image.id.us <= 1 && mask_image.source == IMA_SRC_GENERATED) {
         mask_images.append_non_duplicates(&mask_image);
       }
-      bke::node_remove_node(&bmain, chain.tree, *mask_node, true);
+      bke::node_remove_node(&bmain, *chain.tree, *mask_node, true);
       BKE_ntree_update_tag_node_removed(chain.tree);
       touched_trees.add(chain.tree);
     }

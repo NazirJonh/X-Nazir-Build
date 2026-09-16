@@ -1474,24 +1474,6 @@ bool layer_channel_state_read(const ChainLayer &layer,
   return composite_mix_channel_state_get(r_mix, r_state);
 }
 
-/** The mask Image Texture of the layer carrying \a marker, in \a tree, or null. */
-bNode *layer_mask_node_find(bNodeTree &tree, const bUUID &marker)
-{
-  for (bNode &node : tree.nodes) {
-    if (node.type_legacy != SH_NODE_TEX_IMAGE || node.id == nullptr || GS(node.id->name) != ID_IM)
-    {
-      continue;
-    }
-    const Image &image = *id_cast<const Image *>(node.id);
-    if (image.paint_layer_channel == PAINT_LAYER_MAP_MASK &&
-        BLI_uuid_equal(image.paint_layer_id, marker))
-    {
-      return &node;
-    }
-  }
-  return nullptr;
-}
-
 /** Coverage off in one channel (I1): no link, and an explicit zero rather than Math's 0.5. */
 void layer_coverage_clear(bNodeTree &tree, const CompositeMixNode &mix)
 {
@@ -1570,6 +1552,24 @@ void channel_map_mute_set(bNodeTree &tree, bNode &map, const bool enable)
    * clear -- is what makes the channel contribute nothing (I1). */
   SET_FLAG_FROM_TEST(map.flag, !enable, NODE_MUTED);
   BKE_ntree_update_tag_node_mute(&tree, &map);
+}
+
+/** The mask Image Texture of the layer carrying \a marker, in \a tree, linked or not, or null. */
+bNode *layer_mask_node_find(bNodeTree &tree, const bUUID &marker)
+{
+  for (bNode &node : tree.nodes) {
+    if (node.type_legacy != SH_NODE_TEX_IMAGE || node.id == nullptr || GS(node.id->name) != ID_IM)
+    {
+      continue;
+    }
+    const Image &image = *id_cast<const Image *>(node.id);
+    if (image.paint_layer_channel == PAINT_LAYER_MAP_MASK &&
+        BLI_uuid_equal(image.paint_layer_id, marker))
+    {
+      return &node;
+    }
+  }
+  return nullptr;
 }
 
 Image *correction_tagged_map_find(Main &bmain, const bUUID &marker, const int channel)

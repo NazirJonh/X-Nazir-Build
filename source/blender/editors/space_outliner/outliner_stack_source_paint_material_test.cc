@@ -60,6 +60,13 @@ struct PaintStackRowRoute {
 Map<int, PaintStackRowRoute> paint_stack_routes_build(
     Span<PaintMaterialLayerStackEntry> entries, int &r_first_unaddressable_index);
 
+/* The per-entry row builder, declared here for the same reason as the two helpers above: the
+ * overflow stub only appears past #STACK_ROW_ORDINAL_MAX, which the graph's own depth bound keeps
+ * a real stack far away from. */
+void paint_stack_rows_from_entries(Span<PaintMaterialLayerStackEntry> entries,
+                                   int shown_channel,
+                                   Vector<StackRow> &r_rows);
+
 namespace tests {
 
 class OutlinerStackPaintMaterialSourceTest : public bke::BlenderGTestBase {
@@ -221,22 +228,21 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, adding_a_node_changes_state_hash)
 
 TEST_F(OutlinerStackPaintMaterialSourceTest, stack_past_the_addressable_range_shows_a_stub)
 {
-  Material &material = add_material_with_texture(add_image("Base"));
+  /* The graph's layer chain is bounded far below #STACK_ROW_ORDINAL_MAX (the 64-step walk bounds
+   * in `paint_material_layer_chain.cc`), so a real stack can never reach the unaddressable range.
+   * The model that would is handed straight to the row builder instead: the bare base, a row at
+   * the top of the addressable range, and one past it. */
+  Vector<PaintMaterialLayerStackEntry> entries(3);
+  entries[0].ordinal = 0;
+  entries[0].name = "Base";
+  entries[1].ordinal = STACK_ROW_ORDINAL_MAX;
+  entries[1].name = "Top";
+  entries[2].ordinal = STACK_ROW_ORDINAL_MAX + 1;
+  entries[2].name = "Beyond";
 
-  /* Fill the stack just past the addressable range: the bare base at ordinal 0, then added
-   * layers up to one ordinal past #STACK_ROW_ORDINAL_MAX. The images stay tiny so the test does
-   * not pay for real maps. */
-  PaintMaterialLayerAddParams params;
-  params.image_size = 8;
-  for (int i = 0; i < STACK_ROW_ORDINAL_MAX + 1; i++) {
-    ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params));
-  }
-
-  const StackReadContext ctx{bmain, nullptr, nullptr};
-  const StackFocus focus;
   Vector<StackRow> rows;
-  ASSERT_TRUE(paint_source().rows_build(ctx, focus, material.id, rows));
-  ASSERT_FALSE(rows.is_empty());
+  paint_stack_rows_from_entries(entries, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), rows);
+  ASSERT_EQ(rows.size(), 3);
 
   /* Every addressable row is listed as before; the one row above them is the stub. */
   for (const int index : rows.index_range().drop_back(1)) {
@@ -310,15 +316,6 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, material_layer_row_resolves_its_sou
   /* Mark the new layer as baked from another material, and link its map back to it -- the state
    * the material-bake glue leaves behind. */
   Material &source_material = *BKE_material_add(bmain, "BakedFrom");
-  bNode *layer_mix = nullptr;
-  for (bNode &node : material.nodetree->nodes) {
-    if (node.type_legacy == SH_NODE_MIX) {
-      layer_mix = &node;
-      break;
-    }
-  }
-  ASSERT_NE(layer_mix, nullptr);
-  BKE_paint_material_layer_kind_set(*layer_mix, PaintMaterialLayerKind::Material);
 
   Image *layer_map = nullptr;
   for (Image &image : bmain->images) {
@@ -328,6 +325,27 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, material_layer_row_resolves_its_sou
     }
   }
   ASSERT_NE(layer_map, nullptr);
+
+  /* The layer's Mix is the one its own map feeds. The bare base was wrapped in a Mix first, so
+   * the first Mix in the tree is the base row, not this one. */
+  bNode *layer_tex = nullptr;
+  for (bNode &node : material.nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id == &layer_map->id) {
+      layer_tex = &node;
+      break;
+    }
+  }
+  ASSERT_NE(layer_tex, nullptr);
+  bNode *layer_mix = nullptr;
+  for (bNodeLink &link : material.nodetree->links) {
+    if (link.fromnode == layer_tex && link.tonode->type_legacy == SH_NODE_MIX) {
+      layer_mix = link.tonode;
+      break;
+    }
+  }
+  ASSERT_NE(layer_mix, nullptr);
+  BKE_paint_material_layer_kind_set(*layer_mix, PaintMaterialLayerKind::Material);
+
   ImageMaterialSource material_source;
   material_source.material = &source_material;
   material_source.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
@@ -628,6 +646,138 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, routes_allocate_corrections_downwar
   list[0].content_corrections.append(extra);
   routes = paint_stack_routes_build(list, first_unaddressable);
   EXPECT_EQ(first_unaddressable, 1022);
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, mask_toggle_reads_as_disabled_in_the_row)
+{
+  Material &material = add_material_with_texture(add_image("Base6"));
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  int ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params, &ordinal));
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, material, ordinal, white, 8, &error))
+      << int(error);
+
+  Image *mask_image = nullptr;
+  for (Image &image : bmain->images) {
+    if (image.paint_layer_channel == PAINT_LAYER_MAP_MASK) {
+      mask_image = &image;
+      break;
+    }
+  }
+  ASSERT_NE(mask_image, nullptr);
+
+  auto row_of = [&](Vector<StackRow> &rows) -> const StackRow * {
+    for (const StackRow &row : rows) {
+      if (row.ordinal == ordinal) {
+        return &row;
+      }
+    }
+    return nullptr;
+  };
+  const StackFocus focus;
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+
+  /* An on mask reads as the mask icon in the row, its slot and its sub-row alike. */
+  {
+    Vector<StackRow> rows;
+    ASSERT_TRUE(paint_source().rows_build(ctx, focus, material.id, rows));
+    const StackRow *row = row_of(rows);
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->icon, ICON_MOD_MASK);
+  }
+
+  /* Switching it off reads as switched off everywhere, which is the whole point of the state. */
+  mask_image->paint_layer_mask_disabled = 1;
+  {
+    Vector<StackRow> rows;
+    ASSERT_TRUE(paint_source().rows_build(ctx, focus, material.id, rows));
+    const StackRow *row = row_of(rows);
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->icon, ICON_CLIPUV_HLT);
+    bool mask_slot_found = false;
+    for (const StackRowPreview &slot : row->preview_slots) {
+      if (slot.section_id == "MASK") {
+        mask_slot_found = true;
+        EXPECT_EQ(slot.icon, ICON_CLIPUV_HLT);
+      }
+    }
+    EXPECT_TRUE(mask_slot_found);
+    bool mask_sub_row_found = false;
+    for (const StackContentSection &section : row->content_sections) {
+      if (section.identifier != "MASK") {
+        continue;
+      }
+      for (const StackSubRow &sub_row : section.sub_rows) {
+        mask_sub_row_found = true;
+        EXPECT_EQ(sub_row.icon, ICON_CLIPUV_HLT);
+      }
+    }
+    EXPECT_TRUE(mask_sub_row_found);
+  }
+}
+
+TEST_F(OutlinerStackPaintMaterialSourceTest, mask_remove_keeps_the_corrections_section)
+{
+  Material &material = add_material_with_texture(add_image("Base7"));
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  int ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params, &ordinal));
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, material, ordinal, white, 8, &error))
+      << int(error);
+  bUUID marker = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain,
+                                                       material,
+                                                       ordinal,
+                                                       PaintMaterialCorrectionSection::Mask,
+                                                       PaintMaterialCorrectionEffect::Paint,
+                                                       "M",
+                                                       &marker));
+  ASSERT_TRUE(BKE_paint_material_layer_mask_remove(*bmain, material, ordinal, &error))
+      << int(error);
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  const StackFocus focus;
+  Vector<StackRow> rows;
+  ASSERT_TRUE(paint_source().rows_build(ctx, focus, material.id, rows));
+
+  const StackRow *layer_row = nullptr;
+  const StackRow *correction_row = nullptr;
+  for (const StackRow &row : rows) {
+    if (row.ordinal == ordinal) {
+      layer_row = &row;
+    }
+    if (BLI_uuid_equal(row.stable_id, marker)) {
+      correction_row = &row;
+    }
+  }
+  ASSERT_NE(layer_row, nullptr);
+  ASSERT_NE(correction_row, nullptr);
+
+  /* The mask image is gone, so no sub-row names one; the MASK section stays, because the
+   * corrections hanging under it do (spec D15). */
+  bool mask_image_sub_row_found = false;
+  bool mask_section_found = false;
+  for (const StackContentSection &section : layer_row->content_sections) {
+    if (section.identifier != "MASK") {
+      continue;
+    }
+    mask_section_found = true;
+    for (const StackSubRow &sub_row : section.sub_rows) {
+      mask_image_sub_row_found |= sub_row.role == PAINT_LAYER_MAP_MASK;
+    }
+  }
+  EXPECT_TRUE(mask_section_found);
+  EXPECT_FALSE(mask_image_sub_row_found);
+
+  /* The correction is still a row of the MASK section, addressed by its own marker. */
+  EXPECT_EQ(correction_row->parent_section_id, "MASK");
+  EXPECT_EQ(correction_row->parent_ordinal, ordinal);
 }
 
 }  // namespace tests

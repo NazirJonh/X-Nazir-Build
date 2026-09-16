@@ -193,9 +193,13 @@ class StackLayersOutlinerTest(unittest.TestCase):
         with self.outliner_override():
             bpy.ops.ed.undo()
         # The binding survived the undo that wrote it, and the target it names is still alive.
-        self.assertEqual(bpy.context.scene.tool_settings.paint_mode.channel_image_bindings[0].image, image)
+        # The Python handle to the original data-block is not: undo re-allocates it, so the
+        # binding is checked through the data-block it now points at, not the stale handle.
+        binding = bpy.context.scene.tool_settings.paint_mode.channel_image_bindings[0].image
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.name, "StackLayersImage")
         self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=0), image.session_uid)
+        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=0), binding.session_uid)
 
     def test_clear_target_after_undo(self):
         object, _material, _image = self.add_object_with_image_material()
@@ -337,48 +341,55 @@ class StackLayersOutlinerTest(unittest.TestCase):
         # Only the bare base and the empty layer are left; ordinal 2 is no row at all.
         self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=2), 0)
 
-    def test_dropped_material_adds_group(self):
-        # The material drop's handler path, driven directly: a material dropped on the stack --
-        # anywhere on it, the empty-space target here -- becomes a new group on top that stands
-        # for it. Nothing of the stack's own graph changes.
+    def _baked_material_sources(self):
+        """Every map that names the material it was baked from."""
+        return [image.material_source for image in bpy.data.images
+                if image.material_source is not None]
+
+    def test_dropped_material_bakes_a_layer(self):
+        # The material drop's handler path, driven directly: a material dropped on the stack's
+        # empty space is baked into a layer's own maps. This replaced the older "a group that
+        # stands for the material" gesture, so there is no folder and no group-material property.
         object, material, _image = self.add_object_with_image_material()
         self.focus_and_draw_stack(object)
 
-        dropped = bpy.data.materials.new("DroppedGroupMaterial")
+        dropped = bpy.data.materials.new("DroppedBakeMaterial")
+        dropped.use_nodes = True
+        dropped.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
+            1.0, 0.0, 0.0, 1.0)
         with self.outliner_override():
             self.assertTrue(
                 self.space.debug_stack_layer_drop_id(dropped=dropped, target_ordinal=-1))
-        # The group is the top row: it previews the material it stands for.
         self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=1), dropped.session_uid)
-        # The group is a real folder in the stack's graph, referencing the material from its own
-        # node tree; the stack's material gained no map nodes.
-        groups = [node for node in material.node_tree.nodes if node.type == 'GROUP']
-        self.assertEqual(len(groups), 1)
-        self.assertEqual(groups[0].node_tree.get("pbr_paint_layer_material"), dropped)
         self.assertEqual(
-            len([node for node in material.node_tree.nodes if node.type == 'TEX_IMAGE']), 1)
+            len([node for node in material.node_tree.nodes if node.type == 'GROUP']), 0)
+        self.assertIn(dropped, self._baked_material_sources())
 
     def test_dropped_material_on_a_row_lands_on_top(self):
-        # A row target does not change where the group goes: the landing spot is not the point,
-        # the group goes on top and the row it was dropped on keeps its own map.
+        # A row target aims where the baked layer is inserted; the row it was dropped on keeps its
+        # own map.
         object, material, image = self.add_object_with_image_material()
         self.focus_and_draw_stack(object)
 
-        dropped = bpy.data.materials.new("DroppedGroupMaterial")
+        dropped = bpy.data.materials.new("DroppedBakeMaterial")
+        dropped.use_nodes = True
+        dropped.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
+            0.0, 1.0, 0.0, 1.0)
         with self.outliner_override():
             self.assertTrue(
                 self.space.debug_stack_layer_drop_id(dropped=dropped, target_ordinal=0))
         self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=1), dropped.session_uid)
+        self.assertEqual(
+            len([node for node in material.node_tree.nodes if node.type == 'GROUP']), 0)
+        self.assertIn(dropped, self._baked_material_sources())
         maps = [node for node in material.node_tree.nodes
                 if node.type == 'TEX_IMAGE' and node.image == image]
         self.assertEqual(len(maps), 1)
 
-    def test_dropped_linked_material_is_referenced(self):
-        # A linked material is referenced, not changed, so it makes as good a placeholder as a
-        # local one: the group reads as it and points at it.
-        object, material, _image = self.add_object_with_image_material()
+    def test_dropped_linked_material_is_baked_from_a_local_copy(self):
+        # A linked material is made local before it is baked: the layer's maps must never point
+        # into a library, so the source they name is a local data-block.
+        object, _material, _image = self.add_object_with_image_material()
         self.focus_and_draw_stack(object)
 
         filepath = bpy.path.abspath(bpy.app.tempdir + "/stack_layers_material_group_lib.blend")
@@ -396,7 +407,9 @@ class StackLayersOutlinerTest(unittest.TestCase):
             self.assertTrue(
                 self.space.debug_stack_layer_drop_id(dropped=linked, target_ordinal=-1))
         self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=1), linked.session_uid)
+        sources = self._baked_material_sources()
+        self.assertTrue(sources, "the drop should bake the material into a layer's map")
+        self.assertTrue(all(source.library is None for source in sources))
 
     def test_dropped_material_refuses_on_linked_stack(self):
         # The group is created in the stack's own graph, so a linked stack material refuses the
@@ -669,9 +682,10 @@ class StackLayersOutlinerTest(unittest.TestCase):
             group_ordinal += 1
             self.redraw_window()
             self.assertFalse(self.space.debug_stack_layer_row_is_open(ordinal=group_ordinal))
-            # The fresh row the edit made starts open: it did not inherit the group's collapse.
-            self.assertTrue(self.space.debug_stack_layer_row_is_open(ordinal=0))
-            self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=0))
+            # `ordinal=0` names the anchor row, and the Add inserts above it, so the fresh row
+            # lands at 1. It starts open and selected: it did not inherit the group's collapse.
+            self.assertTrue(self.space.debug_stack_layer_row_is_open(ordinal=1))
+            self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=1))
 
             with self.outliner_override():
                 self.assertEqual(bpy.ops.outliner.stack_layer_remove(ordinal=0), {'FINISHED'})

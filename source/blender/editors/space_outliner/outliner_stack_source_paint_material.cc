@@ -138,8 +138,14 @@ struct PaintStackRowRoute {
  * The deterministic ordinal budget the rows are addressed by, shared by #rows_build and every
  * edit that routes an ordinal. Defined below, next to the other test-facing functions.
  */
+
 Map<int, PaintStackRowRoute> paint_stack_routes_build(
     Span<PaintMaterialLayerStackEntry> entries, int &r_first_unaddressable_index);
+
+/** The per-entry row builder; defined below, next to the other test-facing functions. */
+void paint_stack_rows_from_entries(Span<PaintMaterialLayerStackEntry> entries,
+                                   int shown_channel,
+                                   Vector<StackRow> &r_rows);
 
 /**
  * This source's own color session: the pixel-diff record a live fill-color edit captures the
@@ -218,6 +224,12 @@ void paint_topology_hash(const bNodeTree &tree, Set<const bNodeTree *> &visited,
   }
   for (const bNode &node : tree.nodes) {
     r_hash = r_hash * 1000003u ^ uint64_t(node.identifier) * 2654435761u;
+    /* The data-block a node points at is part of the shape the rows read, not a link: a Texture
+     * node swapped to another image, or a group instance retargeted, changes no identifier and no
+     * link end, and a counts-and-links hash would keep the old rows. The session UID is stable per
+     * ID for as long as the rows are cached, which is exactly the span this hash decides over. */
+    r_hash = r_hash * 1000003u ^
+             ((node.id != nullptr) ? uint64_t(node.id->session_uid) * 2246822519u : 0u);
     if (node.is_group() && node.id != nullptr) {
       paint_topology_hash(*id_cast<const bNodeTree *>(node.id), visited, r_hash);
     }
@@ -741,171 +753,7 @@ class PaintMaterialStackSource final : public StackSource,
     const int shown_channel = ctx.scene != nullptr && ctx.scene->toolsettings != nullptr ?
                                   ctx.scene->toolsettings->paint_mode.stack_layer_channel :
                                   int(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    /* The ordinals the layer rows below were actually emitted at: a correction hangs off its
-     * parent's row, so one whose parent is missing has nothing to hang off. */
-    Set<int> shown_layer_ordinals;
-    bool overflow_stub_emitted = false;
-    for (PaintMaterialLayerStackEntry &entry : entries) {
-      if (entry.ordinal > STACK_ROW_ORDINAL_MAX) {
-        /* The tree store keys the sub-rows as `ordinal * STACK_ROW_SUB_ROW_STRIDE + role`, so
-         * past #STACK_ROW_ORDINAL_MAX there is no row the mode can address. The seam's contract
-         * is to still show what cannot be represented: everything above the addressable range
-         * collapses into one stub row with no controls, whose badge speaks for the layers it
-         * stands in for. */
-        StackRow row;
-        row.ordinal = STACK_ROW_ORDINAL_MAX + 1;
-        row.supported = false;
-        row.unsupported_reason = "Stack is too large to display";
-        row.name = std::move(entry.name);
-        row.icon = ICON_IMAGE_RGB;
-        r_rows.append(std::move(row));
-        overflow_stub_emitted = true;
-        break;
-      }
-      StackRow row;
-      row.ordinal = entry.ordinal;
-      row.depth = entry.depth;
-      row.stable_id = entry.marker;
-      /* Filled in below: the model lists a group after the layers it holds, so the enclosing row
-       * is not in `r_rows` yet. */
-      row.parent_ordinal = -1;
-      row.can_hold_children = entry.is_group;
-      row.has_children = entry.is_group;
-      row.is_bare_base = entry.is_bare_base;
-      row.enabled = entry.enabled;
-      row.mask_enabled = entry.mask_enabled;
-      row.supported = entry.supported;
-      row.unsupported_reason = entry.unsupported_reason;
-      row.name = std::move(entry.name);
-      row.name_buffer = entry.label;
-      row.color_tag = entry.color_tag;
-      /* A group that stands for a material reads as that material: its icon and its preview, the
-       * same way a layer reads as its map. A plain group keeps the folder. */
-      Material *group_material = (entry.group_tree != nullptr) ?
-                                     BKE_paint_material_layer_group_material_get(
-                                         entry.group_tree->id) :
-                                     nullptr;
-      /* What the row *is*, read off its kind marker: a baked material reads as its material, a
-       * fill as the flat colour it stands for, and a row with no marker stays a plain layer. A
-       * mask keeps its icon priority over all of these. */
-      const PaintMaterialLayerKind row_kind = entry.kind;
-      row.icon = entry.is_group ? (group_material != nullptr ? ICON_MATERIAL : ICON_FILE_FOLDER) :
-                 entry.has_mask ? paint_mask_state_icon(entry.mask_enabled) :
-                 row_kind == PaintMaterialLayerKind::Material ? ICON_MATERIAL :
-                 row_kind == PaintMaterialLayerKind::Fill ? ICON_GP_DRAW_FILL :
-                                                            ICON_IMAGE_RGB;
-
-      /* The material a Material row was baked from, resolved off its maps: the first one that
-       * still carries the baked-from link speaks for the row. */
-      Material *source_material = nullptr;
-      if (!entry.is_group && row_kind == PaintMaterialLayerKind::Material) {
-        const Image *base_map = entry.channel_images.lookup_default(
-            PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr);
-        ImageMaterialSource material_source;
-        if (base_map != nullptr && BKE_image_material_source_get(*base_map, material_source)) {
-          source_material = material_source.material;
-        }
-        if (source_material == nullptr) {
-          for (const Image *map : entry.channel_images.values()) {
-            if (map != nullptr && BKE_image_material_source_get(*map, material_source)) {
-              source_material = material_source.material;
-              break;
-            }
-          }
-        }
-      }
-
-      /* A row's slots and sections. A group that stands for a material reads as that material:
-       * one material slot, no content to switch. A plain group holds no map of its own -- its
-       * only slot is the mask it may have. A layer gets the channels slot and section, plus the
-       * mask pair when a mask exists. */
-      const Image *mask_image = entry.channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr);
-      const bool has_mask_section = mask_image != nullptr || !entry.mask_corrections.is_empty();
-      if (group_material != nullptr) {
-        StackRowPreview material_slot;
-        material_slot.id_uid = group_material->id.session_uid;
-        material_slot.id_type = ID_MA;
-        row.preview_slots.append(std::move(material_slot));
-      }
-      else if (entry.is_group) {
-        /* A group's MASK section lists its mask corrections (D15) even before it has a mask
-         * image of its own: the section is what the correction rows hang under. */
-        if (has_mask_section) {
-          row.preview_slots.append(paint_mask_slot_build(true, entry.mask_enabled));
-          row.content_sections.append(mask_image != nullptr ?
-                                          paint_mask_section_build(*mask_image) :
-                                          paint_mask_section_empty_build());
-        }
-      }
-      else if (entry.supported) {
-        row.preview_slots.append(paint_channels_slot_build(entry));
-        if (row_kind == PaintMaterialLayerKind::Fill) {
-          /* The colour the layer stands for, beside its map: the map is the fill today, but it is
-           * paintable, and the swatch keeps saying what the layer was filled with. */
-          StackRowPreview fill_swatch;
-          fill_swatch.is_color_swatch = true;
-          copy_v4_v4(fill_swatch.color, entry.fill_color);
-          fill_swatch.label = IFACE_("Fill Color");
-          row.preview_slots.append(std::move(fill_swatch));
-        }
-        if (source_material != nullptr) {
-          /* A baked material row shows its source material's preview, the way a group that stands
-           * for a material does. */
-          StackRowPreview material_slot;
-          material_slot.id_uid = source_material->id.session_uid;
-          material_slot.id_type = ID_MA;
-          row.preview_slots.append(std::move(material_slot));
-        }
-        if (has_mask_section) {
-          row.preview_slots.append(paint_mask_slot_build(false, entry.mask_enabled));
-        }
-        row.content_sections.append(paint_channels_section_build(entry));
-        if (mask_image != nullptr) {
-          row.content_sections.append(paint_mask_section_build(*mask_image));
-        }
-        else if (!entry.mask_corrections.is_empty()) {
-          /* The layer exposes its MASK section although it has no mask image (spec D15): the
-           * corrections limiting where it applies are what the section lists. */
-          row.content_sections.append(paint_mask_section_empty_build());
-        }
-      }
-      if (const PointerRNA *factor = entry.channel_factor_props.lookup_ptr(shown_channel)) {
-        row.value_ptr = *factor;
-        /* #RNA_PaintMaterialLayerOpacity's own "value", always 0-100%; see
-         * #layer_model_entry_from_node. */
-        row.value_prop = "value";
-      }
-      if (const PointerRNA *blend = entry.channel_blend_props.lookup_ptr(shown_channel)) {
-        row.mode_ptr = *blend;
-        row.mode_prop = "blend_type";
-      }
-
-      shown_layer_ordinals.add(entry.ordinal);
-      r_rows.append(std::move(row));
-    }
-
-    paint_correction_rows_append(
-        entries, shown_layer_ordinals, overflow_stub_emitted, shown_channel, r_rows);
-
-    /* A group is listed after the rows it holds -- that is the order the reader walks the graph in
-     * -- so the enclosing row of a nested one is the first row *after* it that sits one level up.
-     * Resolved here, once every row exists. */
-    for (const int64_t index : r_rows.index_range()) {
-      StackRow &row = r_rows[index];
-      if (row.depth == 0) {
-        continue;
-      }
-      for (int64_t next = index + 1; next < r_rows.size(); next++) {
-        if (!r_rows[next].parent_section_id.empty()) {
-          /* A correction row is nobody's parent: it hangs off a layer itself. */
-          continue;
-        }
-        if (r_rows[next].depth == row.depth - 1) {
-          row.parent_ordinal = r_rows[next].ordinal;
-          break;
-        }
-      }
-    }
+    paint_stack_rows_from_entries(entries, shown_channel, r_rows);
     return !r_rows.is_empty();
   }
 
@@ -2712,6 +2560,192 @@ class PaintMaterialStackSource final : public StackSource,
 };
 
 }  // namespace
+
+/**
+ * The rows a model \a entries produces: one per layer or group, plus the correction rows
+ * hanging off them, in the order the Outliner lists them.
+ *
+ * Split out of #PaintMaterialStackSource::rows_build -- and declared to the tests the same way
+ * the other test-facing helpers are -- because the overflow stub only appears for an ordinal
+ * past #STACK_ROW_ORDINAL_MAX, and the layer chain the graph can actually build is bounded
+ * far below that (see the 64-step walk bounds in `paint_material_layer_chain.cc`). A test can
+ * hand this function the model directly, without a stack deep enough to reach the range that
+ * cannot happen.
+ */
+void paint_stack_rows_from_entries(Span<PaintMaterialLayerStackEntry> entries,
+                                   const int shown_channel,
+                                   Vector<StackRow> &r_rows)
+{
+  /* The ordinals the layer rows below were actually emitted at: a correction hangs off its
+   * parent's row, so one whose parent is missing has nothing to hang off. */
+  Set<int> shown_layer_ordinals;
+  bool overflow_stub_emitted = false;
+  for (const PaintMaterialLayerStackEntry &entry : entries) {
+    if (entry.ordinal > STACK_ROW_ORDINAL_MAX) {
+      /* The tree store keys the sub-rows as `ordinal * STACK_ROW_SUB_ROW_STRIDE + role`, so
+       * past #STACK_ROW_ORDINAL_MAX there is no row the mode can address. The seam's contract
+       * is to still show what cannot be represented: everything above the addressable range
+       * collapses into one stub row with no controls, whose badge speaks for the layers it
+       * stands in for. */
+      StackRow row;
+      row.ordinal = STACK_ROW_ORDINAL_MAX + 1;
+      row.supported = false;
+      row.unsupported_reason = "Stack is too large to display";
+      row.name = entry.name;
+      row.icon = ICON_IMAGE_RGB;
+      r_rows.append(std::move(row));
+      overflow_stub_emitted = true;
+      break;
+    }
+    StackRow row;
+    row.ordinal = entry.ordinal;
+    row.depth = entry.depth;
+    row.stable_id = entry.marker;
+    /* Filled in below: the model lists a group after the layers it holds, so the enclosing row
+     * is not in `r_rows` yet. */
+    row.parent_ordinal = -1;
+    row.can_hold_children = entry.is_group;
+    row.has_children = entry.is_group;
+    row.is_bare_base = entry.is_bare_base;
+    row.enabled = entry.enabled;
+    row.mask_enabled = entry.mask_enabled;
+    row.supported = entry.supported;
+    row.unsupported_reason = entry.unsupported_reason;
+    row.name = entry.name;
+    row.name_buffer = entry.label;
+    row.color_tag = entry.color_tag;
+    /* A group that stands for a material reads as that material: its icon and its preview, the
+     * same way a layer reads as its map. A plain group keeps the folder. */
+    Material *group_material = (entry.group_tree != nullptr) ?
+                                   BKE_paint_material_layer_group_material_get(
+                                       entry.group_tree->id) :
+                                   nullptr;
+    /* What the row *is*, read off its kind marker: a baked material reads as its material, a
+     * fill as the flat colour it stands for, and a row with no marker stays a plain layer. A
+     * row that actually has a mask section keeps the mask's icon over all of these. */
+    const PaintMaterialLayerKind row_kind = entry.kind;
+    const Image *mask_image = entry.channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr);
+    /* Whether the row has a mask *section* to show: a mask image, or mask corrections without
+     * one (spec D15). #PaintMaterialLayerStackEntry::has_mask only says the layer carries the
+     * coverage Multiply every layer has, so it is true even with no mask at all and cannot
+     * decide the icon. */
+    const bool has_mask_section = mask_image != nullptr || !entry.mask_corrections.is_empty();
+    row.icon = entry.is_group ? (group_material != nullptr ? ICON_MATERIAL : ICON_FILE_FOLDER) :
+               has_mask_section ? paint_mask_state_icon(entry.mask_enabled) :
+               row_kind == PaintMaterialLayerKind::Material ? ICON_MATERIAL :
+               row_kind == PaintMaterialLayerKind::Fill ? ICON_GP_DRAW_FILL :
+                                                          ICON_IMAGE_RGB;
+
+    /* The material a Material row was baked from, resolved off its maps: the first one that
+     * still carries the baked-from link speaks for the row. */
+    Material *source_material = nullptr;
+    if (!entry.is_group && row_kind == PaintMaterialLayerKind::Material) {
+      const Image *base_map = entry.channel_images.lookup_default(
+          PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr);
+      ImageMaterialSource material_source;
+      if (base_map != nullptr && BKE_image_material_source_get(*base_map, material_source)) {
+        source_material = material_source.material;
+      }
+      if (source_material == nullptr) {
+        for (const Image *map : entry.channel_images.values()) {
+          if (map != nullptr && BKE_image_material_source_get(*map, material_source)) {
+            source_material = material_source.material;
+            break;
+          }
+        }
+      }
+    }
+
+    /* A row's slots and sections. A group that stands for a material reads as that material:
+     * one material slot, no content to switch. A plain group holds no map of its own -- its
+     * only slot is the mask it may have. A layer gets the channels slot and section, plus the
+     * mask pair when a mask exists. */
+    if (group_material != nullptr) {
+      StackRowPreview material_slot;
+      material_slot.id_uid = group_material->id.session_uid;
+      material_slot.id_type = ID_MA;
+      row.preview_slots.append(std::move(material_slot));
+    }
+    else if (entry.is_group) {
+      /* A group's MASK section lists its mask corrections (D15) even before it has a mask
+       * image of its own: the section is what the correction rows hang under. */
+      if (has_mask_section) {
+        row.preview_slots.append(paint_mask_slot_build(true, entry.mask_enabled));
+        row.content_sections.append(mask_image != nullptr ?
+                                        paint_mask_section_build(*mask_image) :
+                                        paint_mask_section_empty_build());
+      }
+    }
+    else if (entry.supported) {
+      row.preview_slots.append(paint_channels_slot_build(entry));
+      if (row_kind == PaintMaterialLayerKind::Fill) {
+        /* The colour the layer stands for, beside its map: the map is the fill today, but it is
+         * paintable, and the swatch keeps saying what the layer was filled with. */
+        StackRowPreview fill_swatch;
+        fill_swatch.is_color_swatch = true;
+        copy_v4_v4(fill_swatch.color, entry.fill_color);
+        fill_swatch.label = IFACE_("Fill Color");
+        row.preview_slots.append(std::move(fill_swatch));
+      }
+      if (source_material != nullptr) {
+        /* A baked material row shows its source material's preview, the way a group that stands
+         * for a material does. */
+        StackRowPreview material_slot;
+        material_slot.id_uid = source_material->id.session_uid;
+        material_slot.id_type = ID_MA;
+        row.preview_slots.append(std::move(material_slot));
+      }
+      if (has_mask_section) {
+        row.preview_slots.append(paint_mask_slot_build(false, entry.mask_enabled));
+      }
+      row.content_sections.append(paint_channels_section_build(entry));
+      if (mask_image != nullptr) {
+        row.content_sections.append(paint_mask_section_build(*mask_image));
+      }
+      else if (!entry.mask_corrections.is_empty()) {
+        /* The layer exposes its MASK section although it has no mask image (spec D15): the
+         * corrections limiting where it applies are what the section lists. */
+        row.content_sections.append(paint_mask_section_empty_build());
+      }
+    }
+    if (const PointerRNA *factor = entry.channel_factor_props.lookup_ptr(shown_channel)) {
+      row.value_ptr = *factor;
+      /* #RNA_PaintMaterialLayerOpacity's own "value", always 0-100%; see
+       * #layer_model_entry_from_node. */
+      row.value_prop = "value";
+    }
+    if (const PointerRNA *blend = entry.channel_blend_props.lookup_ptr(shown_channel)) {
+      row.mode_ptr = *blend;
+      row.mode_prop = "blend_type";
+    }
+
+    shown_layer_ordinals.add(entry.ordinal);
+    r_rows.append(std::move(row));
+  }
+
+  paint_correction_rows_append(
+      entries, shown_layer_ordinals, overflow_stub_emitted, shown_channel, r_rows);
+
+  /* A group is listed after the rows it holds -- that is the order the reader walks the graph in
+   * -- so the enclosing row of a nested one is the first row *after* it that sits one level up.
+   * Resolved here, once every row exists. */
+  for (const int64_t index : r_rows.index_range()) {
+    StackRow &row = r_rows[index];
+    if (row.depth == 0) {
+      continue;
+    }
+    for (int64_t next = index + 1; next < r_rows.size(); next++) {
+      if (!r_rows[next].parent_section_id.empty()) {
+        /* A correction row is nobody's parent: it hangs off a layer itself. */
+        continue;
+      }
+      if (r_rows[next].depth == row.depth - 1) {
+        row.parent_ordinal = r_rows[next].ordinal;
+        break;
+      }
+    }
+  }
+}
 
 Map<int, PaintStackRowRoute> paint_stack_routes_build(
     Span<PaintMaterialLayerStackEntry> entries, int &r_first_unaddressable_index)

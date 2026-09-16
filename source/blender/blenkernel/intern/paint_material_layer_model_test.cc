@@ -9,11 +9,19 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
+#include "BKE_node_runtime.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_layer_edit.hh"
+
+#include "BLI_listbase.h"
+#include "BLI_uuid.h"
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
+#include "DNA_scene_types.h"
 
 namespace blender::bke::tests {
 
@@ -80,6 +88,7 @@ TEST_F(PaintMaterialLayerModelTest, single_image_preserves_node_identity)
   bke::node_add_link(*material.nodetree,
                      texture,
                      *bke::node_find_socket(texture, SOCK_OUT, "Color"_ustr),
+                     bke::node_find_node(*material.nodetree, *base_color),
                      *base_color);
 
   Vector<PaintMaterialLayerStackEntry> entries;
@@ -117,6 +126,7 @@ TEST_F(PaintMaterialLayerModelTest, mix_chain_is_bottom_to_top_with_opacity)
   bke::node_add_link(tree,
                      *mix,
                      *bke::node_find_socket(*mix, SOCK_OUT, "Color"_ustr),
+                     bke::node_find_node(tree, *base_color),
                      *base_color);
   bNodeSocket *factor = bke::node_find_socket(*mix, SOCK_IN, "Fac"_ustr);
   static_cast<bNodeSocketValueFloat *>(factor->default_value)->value = 0.25f;
@@ -157,6 +167,7 @@ TEST_F(PaintMaterialLayerModelTest, unsupported_branch_stays_visible)
   bke::node_add_link(tree,
                      *mix,
                      *bke::node_find_socket(*mix, SOCK_OUT, "Color"_ustr),
+                     bke::node_find_node(tree, *base_color),
                      *base_color);
 
   Vector<PaintMaterialLayerStackEntry> entries;
@@ -165,6 +176,71 @@ TEST_F(PaintMaterialLayerModelTest, unsupported_branch_stays_visible)
   EXPECT_TRUE(entries[0].supported);
   EXPECT_FALSE(entries[1].supported);
   EXPECT_NE(entries[1].unsupported_reason, nullptr);
+}
+
+TEST_F(PaintMaterialLayerModelTest, public_and_baked_roles_are_disjoint)
+{
+  EXPECT_TRUE(paint_layer_channel_is_public_map_role(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_TRUE(paint_layer_channel_is_public_map_role(PAINT_LAYER_MAP_MASK));
+  EXPECT_FALSE(paint_layer_channel_is_public_map_role(PAINT_LAYER_MAP_NONE));
+  EXPECT_FALSE(paint_layer_channel_is_public_map_role(PAINT_LAYER_PASS_COMBINED));
+  EXPECT_FALSE(paint_layer_channel_is_public_map_role(PAINT_LAYER_MAP_MASK_BAKED));
+
+  EXPECT_TRUE(paint_layer_channel_is_internal_bake_role(PAINT_LAYER_MAP_MASK_BAKED));
+  EXPECT_FALSE(paint_layer_channel_is_internal_bake_role(PAINT_LAYER_MAP_MASK));
+  EXPECT_FALSE(paint_layer_channel_is_internal_bake_role(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+}
+
+TEST_F(PaintMaterialLayerModelTest, baked_mask_role_image_is_not_a_correction_map)
+{
+  /* The correction-tag path (paint_material_layer_model.cc's tagged_maps loop) attaches a map to
+   * a correction row by marker alone, with no role guard of its own. It is therefore where a baked
+   * mask -- same marker, internal role -- would leak into the model if the public-role predicate
+   * did not keep it out of tagged_maps. The no-corrections path cannot show this: its later
+   * ELEM(AO, MASK) drops the baked role on its own. */
+  Material &material = add_material();
+
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params, nullptr, &error));
+
+  bUUID correction = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain,
+                                                       material,
+                                                       1,
+                                                       PaintMaterialCorrectionSection::Content,
+                                                       PaintMaterialCorrectionEffect::Paint,
+                                                       nullptr,
+                                                       &correction,
+                                                       &error));
+  EXPECT_EQ(error, PaintMaterialLayerEditError::None);
+  material.nodetree->ensure_topology_cache();
+
+  /* The baked mask carries the correction's marker, so only its role keeps it out. */
+  Image &baked = add_image("Baked Mask");
+  baked.paint_layer_id = correction;
+  baked.paint_layer_channel = PAINT_LAYER_MAP_MASK_BAKED;
+
+  Vector<PaintMaterialLayerStackEntry> entries;
+  ASSERT_TRUE(BKE_paint_material_layer_stack_from_material(*bmain, material, entries));
+  ASSERT_GE(entries.size(), 2);
+  const PaintMaterialLayerStackEntry &top = entries[1];
+  ASSERT_EQ(top.content_corrections.size(), 1);
+  EXPECT_TRUE(BLI_uuid_equal(top.content_corrections[0].marker, correction));
+  EXPECT_EQ(top.content_corrections[0].channel_images.lookup_default(
+                PAINT_LAYER_MAP_MASK_BAKED, nullptr),
+            nullptr);
+  for (const auto item : top.content_corrections[0].channel_images.items()) {
+    EXPECT_NE(item.value, &baked);
+  }
+}
+
+TEST_F(PaintMaterialLayerModelTest, baked_mask_role_is_not_a_pass)
+{
+  EXPECT_FALSE(BKE_paint_material_composite_passes().contains(PAINT_LAYER_MAP_MASK_BAKED));
+  EXPECT_FALSE(BKE_paint_material_display_passes().contains(PAINT_LAYER_MAP_MASK_BAKED));
 }
 
 }  // namespace blender::bke::tests

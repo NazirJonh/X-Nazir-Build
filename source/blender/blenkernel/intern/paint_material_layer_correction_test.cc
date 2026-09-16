@@ -11,6 +11,7 @@
 #include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
+#include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_composite.hh"
@@ -31,6 +32,7 @@
 #include "paint_material_composite_internal.hh"
 #include "paint_material_layer_edit_intern.hh"
 #include "paint_material_layer_idprops.hh"
+#include "paint_material_layer_mask_bake_intern.hh"
 
 namespace blender::bke::tests {
 
@@ -649,7 +651,7 @@ TEST_F(PaintMaterialLayerCorrectionTest, corrections_travel_with_move_duplicate_
       *bmain, *material, 0, 0, &group_ordinal, &error));
   EXPECT_GE(BKE_paint_material_layer_correction_owner_ordinal(*bmain, *material, a),
             PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE);
-  ASSERT_TRUE(BKE_paint_material_layer_group_ungroup(*bmain, *material, group_ordinal, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_group_ungroup(*bmain, *material, group_ordinal, nullptr, &error));
   EXPECT_GE(BKE_paint_material_layer_correction_owner_ordinal(*bmain, *material, a), 0);
 }
 
@@ -796,6 +798,468 @@ static ChannelChain *test_chain_for(Vector<ChannelChain> &chains, const int chan
 static bool test_socket_linked(const bNodeSocket *socket)
 {
   return socket != nullptr && !socket->directly_linked_links().is_empty();
+}
+
+/** How many baked-mask B images the row carrying \a marker owns. */
+static int test_baked_image_count(Main &bmain, const bUUID &marker)
+{
+  int num = 0;
+  for (Image &image : bmain.images) {
+    if (image.paint_layer_channel == PAINT_LAYER_MAP_MASK_BAKED &&
+        BLI_uuid_equal(image.paint_layer_id, marker))
+    {
+      num++;
+    }
+  }
+  return num;
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, model_lists_mask_corrections_under_anchor)
+{
+  build_two_layer_stack();
+  bUUID m = {};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M",
+      &m,
+      &error));
+
+  /* Bake the row's coverage: the row now reads B for the shader, and the live mask chain parks on
+   * the anchor's input. The model must still list the correction -- keeping it is the whole point
+   * of the anchor -- so the chain reader has to start at the anchor's live top, not at B. */
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  ChannelChain *base = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(base, nullptr);
+  CompositeMixNode layer_mix;
+  ASSERT_TRUE(composite_mix_node_read(*base->layers[1].node, layer_mix));
+  ASSERT_NE(layer_mix.factor_coverage, nullptr);
+  material->nodetree->ensure_topology_cache();
+
+  MaskBakeAnchor anchor;
+  ASSERT_TRUE(mask_bake_anchor_create(*bmain,
+                                      *material->nodetree,
+                                      *layer_mix.factor_coverage,
+                                      bke::paint_layer::marker_get(*base->layers[1].node),
+                                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                      8,
+                                      8,
+                                      anchor));
+  material->nodetree->ensure_topology_cache();
+  ASSERT_NE(anchor.live_input, nullptr);
+
+  const Vector<PaintMaterialLayerStackEntry> list = entries();
+  ASSERT_EQ(list[1].mask_corrections.size(), 1);
+  EXPECT_TRUE(BLI_uuid_equal(list[1].mask_corrections[0].marker, m));
+  EXPECT_TRUE(list[1].supported);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, anchored_row_edits_stay_on_the_live_top)
+{
+  build_two_layer_stack();
+  bUUID first = {};
+  bUUID second = {};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M1",
+      &first,
+      &error));
+
+  /* Bake the row's coverage: the shader now reads B, and the live mask chain parks on the
+   * anchor's input. The edits below have to keep working on that live chain, never on the B link
+   * -- otherwise a second insert would land between B and the coverage input. */
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  ChannelChain *base = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(base, nullptr);
+  ChainLayer &row = base->layers[1];
+  CompositeMixNode layer_mix;
+  ASSERT_TRUE(composite_mix_node_read(*row.node, layer_mix));
+  ASSERT_NE(layer_mix.factor_coverage, nullptr);
+  const bUUID marker = bke::paint_layer::marker_get(*row.node);
+  material->nodetree->ensure_topology_cache();
+
+  MaskBakeAnchor anchor;
+  ASSERT_TRUE(mask_bake_anchor_create(*bmain,
+                                      *material->nodetree,
+                                      *layer_mix.factor_coverage,
+                                      marker,
+                                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                      8,
+                                      8,
+                                      anchor));
+  material->nodetree->ensure_topology_cache();
+  ASSERT_NE(anchor.live_input, nullptr);
+  bNode *coverage_texture = anchor.image_node;
+  bNodeLink *live_link = sole_link_into(*anchor.live_input);
+  ASSERT_NE(live_link, nullptr);
+  bNode *first_mix = live_link->fromnode;
+
+  /* A second correction goes above the live top: the anchor's input now reads it, and the coverage
+   * input still reads B. */
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M2",
+      &second,
+      &error));
+  material->nodetree->ensure_topology_cache();
+
+  ASSERT_TRUE(composite_mix_node_read(*row.node, layer_mix));
+  ASSERT_NE(layer_mix.factor_coverage, nullptr);
+  EXPECT_EQ(composite_source_node_shallow(*layer_mix.factor_coverage), coverage_texture);
+  live_link = sole_link_into(*anchor.live_input);
+  ASSERT_NE(live_link, nullptr);
+  EXPECT_NE(live_link->fromnode, first_mix);
+  EXPECT_TRUE(bke::paint_layer::node_is_correction(*live_link->fromnode));
+  EXPECT_TRUE(BLI_uuid_equal(bke::paint_layer::marker_get(*live_link->fromnode), second));
+
+  /* Removing it closes the live chain over the row again, and leaves the anchor and B intact. */
+  ASSERT_TRUE(BKE_paint_material_layer_correction_remove(*bmain, *material, second, &error));
+  material->nodetree->ensure_topology_cache();
+
+  ASSERT_TRUE(composite_mix_node_read(*row.node, layer_mix));
+  ASSERT_NE(layer_mix.factor_coverage, nullptr);
+  EXPECT_EQ(composite_source_node_shallow(*layer_mix.factor_coverage), coverage_texture);
+  MaskBakeAnchor read;
+  ASSERT_TRUE(mask_bake_anchor_read(
+      *material->nodetree, marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, read));
+  EXPECT_EQ(read.node, anchor.node);
+  live_link = sole_link_into(*anchor.live_input);
+  ASSERT_NE(live_link, nullptr);
+  EXPECT_EQ(live_link->fromnode, first_mix);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, sync_creates_anchor_and_bakes_coverage)
+{
+  build_two_layer_stack();
+  bUUID m = {};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M",
+      &m,
+      &error));
+
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  ChannelChain *chain = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(chain, nullptr);
+  const ChainLayer &row = chain->layers[1];
+  const bUUID marker = bke::paint_layer::marker_get(*row.node);
+
+  /* The public add leaves a bake behind: coverage reads B, the live mask chain parks on the
+   * anchor, and a B image exists for the row. */
+  CompositeMixNode row_mix;
+  ASSERT_TRUE(composite_mix_node_read(*row.node, row_mix));
+  ASSERT_NE(row_mix.factor_coverage, nullptr);
+  material->nodetree->ensure_topology_cache();
+  Image *baked = nullptr;
+  bNode *baked_node = nullptr;
+  ASSERT_TRUE(mask_bake_coverage_is_baked(*row_mix.factor_coverage, baked, baked_node));
+  EXPECT_EQ(baked->paint_layer_channel, PAINT_LAYER_MAP_MASK_BAKED);
+  EXPECT_EQ(sole_link_into(*const_cast<bNodeSocket *>(row_mix.factor_coverage))->fromnode, baked_node);
+
+  MaskBakeAnchor anchor;
+  ASSERT_TRUE(mask_bake_anchor_read(
+      *material->nodetree, marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, anchor));
+  ASSERT_NE(anchor.live_input, nullptr);
+  ASSERT_NE(anchor.image, nullptr);
+  ASSERT_NE(sole_link_into(*anchor.live_input), nullptr);
+  EXPECT_NE(sole_link_into(*anchor.live_input)->fromnode, baked_node);
+  EXPECT_GT(test_baked_image_count(*bmain, marker), 0);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, sync_removes_anchor_when_last_correction_removed)
+{
+  build_two_layer_stack();
+  bUUID m = {};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M",
+      &m,
+      &error));
+
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  ChannelChain *chain = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(chain, nullptr);
+  const bUUID marker = bke::paint_layer::marker_get(*chain->layers[1].node);
+  MaskBakeAnchor anchor;
+  ASSERT_TRUE(mask_bake_anchor_read(
+      *material->nodetree, marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, anchor));
+  ASSERT_GT(test_baked_image_count(*bmain, marker), 0);
+
+  /* Taking the last mask correction off leaves nothing to bake: the anchor and B go, and the
+   * coverage reads the live source again. */
+  ASSERT_TRUE(BKE_paint_material_layer_correction_remove(*bmain, *material, m, &error));
+  material->nodetree->ensure_topology_cache();
+
+  MaskBakeAnchor read;
+  EXPECT_FALSE(mask_bake_anchor_read(
+      *material->nodetree, marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, read));
+  EXPECT_EQ(test_baked_image_count(*bmain, marker), 0);
+
+  chains.clear();
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  chain = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(chain, nullptr);
+  CompositeMixNode row_mix;
+  ASSERT_TRUE(composite_mix_node_read(*chain->layers[1].node, row_mix));
+  ASSERT_NE(row_mix.factor_coverage, nullptr);
+  material->nodetree->ensure_topology_cache();
+  Image *baked = nullptr;
+  bNode *baked_node = nullptr;
+  EXPECT_FALSE(mask_bake_coverage_is_baked(*row_mix.factor_coverage, baked, baked_node));
+  EXPECT_TRUE(test_socket_linked(row_mix.factor_coverage));
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, sync_is_idempotent)
+{
+  build_two_layer_stack();
+  bUUID m = {};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M",
+      &m,
+      &error));
+
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  ChannelChain *chain = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(chain, nullptr);
+  const bUUID marker = bke::paint_layer::marker_get(*chain->layers[1].node);
+  const int baked_before = test_baked_image_count(*bmain, marker);
+  ASSERT_GT(baked_before, 0);
+
+  /* Syncing again must not mint a second anchor or B: the existing ones are found and kept. */
+  for (int i = 0; i < 2; i++) {
+    layer_mask_corrections_sync(*bmain, *material, *chain->tree, chain->layers[1], chain->channel);
+    chain->tree->ensure_topology_cache();
+    EXPECT_EQ(test_baked_image_count(*bmain, marker), baked_before);
+    MaskBakeAnchor anchor;
+    EXPECT_TRUE(
+        mask_bake_anchor_read(*chain->tree, marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, anchor));
+    EXPECT_NE(anchor.node, nullptr);
+  }
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, sync_mask_disabled_keeps_anchor)
+{
+  build_two_layer_stack();
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error));
+  bUUID m = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M",
+      &m,
+      &error));
+
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  ChannelChain *chain = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(chain, nullptr);
+  const bUUID marker = bke::paint_layer::marker_get(*chain->layers[1].node);
+  const int baked_before = test_baked_image_count(*bmain, marker);
+  ASSERT_GT(baked_before, 0);
+
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, false, &error))
+      << int(error);
+  material->nodetree->ensure_topology_cache();
+  MaskBakeAnchor read;
+  EXPECT_TRUE(mask_bake_anchor_read(
+      *material->nodetree, marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, read));
+  EXPECT_EQ(test_baked_image_count(*bmain, marker), baked_before);
+
+  ASSERT_TRUE(BKE_paint_material_layer_mask_set_enabled(*bmain, *material, 1, true, &error))
+      << int(error);
+  material->nodetree->ensure_topology_cache();
+  EXPECT_TRUE(mask_bake_anchor_read(
+      *material->nodetree, marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, read));
+  EXPECT_EQ(test_baked_image_count(*bmain, marker), baked_before);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, move_baked_row_preserves_mask_corrections)
+{
+  build_two_layer_stack();
+  bUUID m = {};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M",
+      &m,
+      &error));
+
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  ChannelChain *chain = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(chain, nullptr);
+  const bUUID marker = bke::paint_layer::marker_get(*chain->layers[1].node);
+  ASSERT_GT(test_baked_image_count(*bmain, marker), 0);
+
+  /* A duplicate of a baked row carries the mask correction: the source is unbaked before its
+   * owned set is copied, so coverage travels with the copy. */
+  int copy_ordinal = -1;
+  ASSERT_TRUE(BKE_paint_material_layer_duplicate(*bmain, *material, 1, &copy_ordinal, &error));
+  Vector<PaintMaterialLayerStackEntry> list = entries();
+  ASSERT_LT(copy_ordinal, int(list.size()));
+  ASSERT_EQ(list[copy_ordinal].mask_corrections.size(), 1);
+  EXPECT_FALSE(BLI_uuid_equal(list[copy_ordinal].mask_corrections[0].marker, m));
+  EXPECT_TRUE(list[copy_ordinal].supported);
+
+  /* The group path carries it too: the whole row, coverage included, moves into the folder. */
+  int group_ordinal = -1;
+  ASSERT_TRUE(
+      BKE_paint_material_layer_group_make(*bmain, *material, 1, 1, &group_ordinal, &error));
+  EXPECT_GE(BKE_paint_material_layer_correction_owner_ordinal(*bmain, *material, m),
+            PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE);
+
+  /* And back out again is refused: a folder whose row carries mask corrections shapes its result
+   * as a whole, and nothing would be left for the corrections to shape once the rows were spliced
+   * out. The correction stays inside the folder. */
+  int restored = 0;
+  EXPECT_FALSE(
+      BKE_paint_material_layer_group_ungroup(*bmain, *material, group_ordinal, &restored, &error));
+  EXPECT_GE(BKE_paint_material_layer_correction_owner_ordinal(*bmain, *material, m),
+            PAINT_LAYER_GROUP_CHILD_ORDINAL_BASE);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, remove_baked_row_leaves_no_orphan_anchor_or_image)
+{
+  build_two_layer_stack();
+  bUUID m = {};
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M",
+      &m,
+      &error));
+
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  ChannelChain *chain = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(chain, nullptr);
+  const bUUID marker = bke::paint_layer::marker_get(*chain->layers[1].node);
+  MaskBakeAnchor anchor;
+  ASSERT_TRUE(mask_bake_anchor_read(
+      *material->nodetree, marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, anchor));
+  ASSERT_GT(test_baked_image_count(*bmain, marker), 0);
+
+  /* Removing the row must take its bake with it: no anchor and no B tied to the row's marker may
+   * survive the row. */
+  ASSERT_TRUE(BKE_paint_material_layer_remove(*bmain, *material, 1, &error));
+  material->nodetree->ensure_topology_cache();
+
+  MaskBakeAnchor read;
+  EXPECT_FALSE(mask_bake_anchor_read(
+      *material->nodetree, marker, PAINT_MATERIAL_CHANNEL_BASE_COLOR, read));
+  EXPECT_EQ(test_baked_image_count(*bmain, marker), 0);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, duplicate_folder_with_mask_correction_preserves_corrections)
+{
+  build_two_layer_stack();
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  int group_ordinal = -1;
+  ASSERT_TRUE(
+      BKE_paint_material_layer_group_make(*bmain, *material, 1, 1, &group_ordinal, &error));
+  bUUID m = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      group_ordinal,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M",
+      &m,
+      &error));
+
+  /* A folder whose mask corrections limit the folder as a whole is a shape the CPU composite cannot
+   * flatten, so it is deliberately never baked: its live chain keeps feeding coverage instead. */
+  bUUID source_marker = {};
+  {
+    Vector<ChannelChain> chains;
+    ASSERT_TRUE(chains_collect(*material, chains, error));
+    ChannelChain *chain = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    ASSERT_NE(chain, nullptr);
+    for (ChainLayer &layer : chain->layers) {
+      if (!layer.mask_corrections.is_empty()) {
+        source_marker = bke::paint_layer::marker_get(*layer.node);
+        break;
+      }
+    }
+  }
+  ASSERT_FALSE(BLI_uuid_is_nil(source_marker));
+  EXPECT_EQ(test_baked_image_count(*bmain, source_marker), 0);
+
+  int copy_ordinal = -1;
+  ASSERT_TRUE(
+      BKE_paint_material_layer_duplicate(*bmain, *material, group_ordinal, &copy_ordinal, &error));
+
+  /* The source's ordinal may have shifted when the duplicate's empty folder was inserted above
+   * it, so it is read from the correction's owner rather than assumed. */
+  const int source_ordinal = BKE_paint_material_layer_correction_owner_ordinal(*bmain, *material, m);
+  ASSERT_GE(source_ordinal, 0);
+
+  const Vector<PaintMaterialLayerStackEntry> list = entries();
+  const PaintMaterialLayerStackEntry *source_entry = nullptr;
+  const PaintMaterialLayerStackEntry *copy_entry = nullptr;
+  for (const PaintMaterialLayerStackEntry &entry : list) {
+    if (entry.ordinal == source_ordinal) {
+      source_entry = &entry;
+    }
+    if (entry.ordinal == copy_ordinal) {
+      copy_entry = &entry;
+    }
+  }
+  ASSERT_NE(source_entry, nullptr);
+  ASSERT_NE(copy_entry, nullptr);
+  ASSERT_EQ(source_entry->mask_corrections.size(), 1);
+  ASSERT_EQ(copy_entry->mask_corrections.size(), 1);
+  EXPECT_FALSE(BLI_uuid_equal(copy_entry->mask_corrections[0].marker, m));
+  /* A folder is never baked, source or copy: both keep their live chain. */
+  EXPECT_EQ(test_baked_image_count(*bmain, source_marker), 0);
 }
 
 TEST_F(PaintMaterialLayerCorrectionTest, switched_off_row_mutes_its_maps)
@@ -1392,6 +1856,76 @@ TEST_F(PaintMaterialLayerCorrectionTest, FillMaskCorrection_Unlink_NeverWritesTh
   ASSERT_TRUE(BKE_paint_material_layer_correction_channel_value_get(
       *bmain, *material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR, recorded));
   EXPECT_NEAR(recorded[0], 0.3f, 1e-6f);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest,
+       mask_remove_with_a_content_correction_restores_coverage)
+{
+  build_two_layer_stack();
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error))
+      << int(error);
+  bUUID a = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Content,
+      PaintMaterialCorrectionEffect::Paint,
+      "A",
+      &a,
+      &error))
+      << int(error);
+
+  ASSERT_TRUE(BKE_paint_material_layer_mask_remove(*bmain, *material, 1, &error)) << int(error);
+
+  const Vector<PaintMaterialLayerStackEntry> list = entries();
+  ASSERT_GE(list.size(), 2);
+  EXPECT_EQ(list[1].channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr), nullptr);
+  EXPECT_TRUE(list[1].supported);
+
+  /* Coverage reads a real source again -- the content corrections' accumulated coverage -- and not
+   * nothing, which is what an unlinked coverage would leave behind. */
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*material, chains, error));
+  ChannelChain *chain = test_chain_for(chains, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(chain, nullptr);
+  CompositeMixNode mix;
+  ASSERT_TRUE(composite_mix_node_read(*chain->layers[1].node, mix));
+  bNodeSocket *coverage = const_cast<bNodeSocket *>(
+      (mix.factor_coverage != nullptr) ? mix.factor_coverage : mix.factor);
+  ASSERT_NE(coverage, nullptr);
+  chain->tree->ensure_topology_cache();
+  EXPECT_NE(sole_link_into(*coverage), nullptr);
+}
+
+TEST_F(PaintMaterialLayerCorrectionTest, mask_remove_keeps_mask_corrections)
+{
+  build_two_layer_stack();
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, *material, 1, white, 8, &error))
+      << int(error);
+  bUUID m = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(
+      *bmain,
+      *material,
+      1,
+      PaintMaterialCorrectionSection::Mask,
+      PaintMaterialCorrectionEffect::Paint,
+      "M",
+      &m,
+      &error))
+      << int(error);
+
+  ASSERT_TRUE(BKE_paint_material_layer_mask_remove(*bmain, *material, 1, &error)) << int(error);
+
+  const Vector<PaintMaterialLayerStackEntry> list = entries();
+  ASSERT_GE(list.size(), 2);
+  EXPECT_EQ(list[1].channel_images.lookup_default(PAINT_LAYER_MAP_MASK, nullptr), nullptr);
+  EXPECT_TRUE(list[1].supported);
+  ASSERT_EQ(list[1].mask_corrections.size(), 1);
 }
 
 }  // namespace blender::bke::tests

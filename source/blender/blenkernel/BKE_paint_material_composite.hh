@@ -102,6 +102,15 @@ struct PaintMaterialCompositeImageLayer {
   float mask_influence = 1.0f;
   bool enabled = true;
   /**
+   * The row's identity, read from the marker its Mix node carries.
+   *
+   * Carried separately from #color_image because the image can be tagged with anything the user
+   * chose, while the marker is the stable name a later reader -- the mask baker -- looks the row up
+   * by to find the layer whose coverage it has to compute. Nil for a bare base, which has no Mix
+   * node to carry one.
+   */
+  bUUID marker = {};
+  /**
    * The layer is a bare Image Texture wired straight into the channel, not a blended layer.
    *
    * Such a bottom is copied rather than blended, because it has no Mix node and therefore no blend
@@ -189,6 +198,26 @@ bool BKE_paint_material_composite_eval_images(
     ImBuf *composite_ibuf,
     const rcti *region = nullptr,
     PaintMaterialCompositeEvalStats *r_stats = nullptr);
+
+/**
+ * Compute \a row_marker's mask factor for every pixel of \a region into \a dst_ibuf's RGB
+ * (alpha 1), using the same math as the composite.
+ *
+ * The row is the layer of \a image_layers whose #PaintMaterialCompositeImageLayer::marker equals
+ * \a row_marker. \a dst_ibuf must be byte RGBA of the stack's dimensions. This is what the mask
+ * baker writes into B: the per-pixel coverage the row's mask-correction chain produces, which the
+ * CPU composite applies as the layer's blend factor. Sharing the computation is what keeps B and
+ * the composite from drifting apart.
+ *
+ * \param region: when given, only this rectangle is written and the rest of \a dst_ibuf is left as
+ *                it was. Clipped to the buffer.
+ * \return false when the row is not in the stack, or a buffer is unusable.
+ */
+bool BKE_paint_material_composite_eval_row_mask(
+    Span<PaintMaterialCompositeImageLayer> image_layers,
+    const bUUID &row_marker,
+    ImBuf *dst_ibuf,
+    const rcti *region = nullptr);
 
 /**
  * Dimensions of the composite, taken from the bottom-most enabled layer.

@@ -37,6 +37,7 @@
 
 #include "paint_material_composite_internal.hh"
 #include "paint_material_layer_idprops.hh"
+#include "paint_material_layer_mask_bake_intern.hh"
 
 namespace blender {
 
@@ -154,7 +155,18 @@ const bNodeSocket *layer_model_corrections_descend(
     const PaintMaterialCorrectionSection section,
     Vector<const bNode *> &r_corrections)
 {
-  const bNodeSocket *current = &socket;
+  /* A baked coverage reads the baked texture for the GPU shader, so the mask corrections that
+   * shape it no longer hang on the coverage socket itself; they stay parked on the anchor's live
+   * input. The model has to walk that live chain to list them. Content is untouched: its map input
+   * is never redirected. */
+  const bNodeSocket *current = (section == PaintMaterialCorrectionSection::Mask) ?
+                                   mask_bake_live_top_socket(socket) :
+                                   &socket;
+  MASK_BAKE_TRACE("model_descend section=%d socket=%p start=%p linked=%d\n",
+                  int(section),
+                  static_cast<const void *>(&socket),
+                  static_cast<const void *>(current),
+                  int(current != nullptr && !current->directly_linked_links().is_empty()));
   /* A malformed tree can cycle; bound the walk rather than trust the data. */
   for (int step = 0; step < 64; step++) {
     if (current->directly_linked_links().is_empty()) {
@@ -174,6 +186,10 @@ const bNodeSocket *layer_model_corrections_descend(
     {
       return current;
     }
+    MASK_BAKE_TRACE("model_descend found section=%d node=%p count=%zu\n",
+                    int(section),
+                    static_cast<const void *>(&from_node),
+                    size_t(r_corrections.size() + 1));
     r_corrections.append(&from_node);
     CompositeMixNode below;
     if (!composite_mix_node_read(from_node, below) || below.bottom == nullptr) {
@@ -903,7 +919,7 @@ bool BKE_paint_material_layer_stack_from_material(
    * runs on every tree rebuild. */
   Vector<Image *> tagged_maps;
   for (Image &image : const_cast<Main &>(bmain).images) {
-    if (image.paint_layer_channel < 0 || image.paint_layer_channel > PAINT_LAYER_MAP_MASK ||
+    if (!paint_layer_channel_is_public_map_role(image.paint_layer_channel) ||
         BLI_uuid_is_nil(image.paint_layer_id))
     {
       continue;

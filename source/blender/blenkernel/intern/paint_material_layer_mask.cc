@@ -416,21 +416,24 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
     if (mask_link == nullptr) {
       continue;
     }
-    /* Coverage goes back to the layer's own map, which is where it comes from for a layer that
-     * never had a mask. Resolved before deciding what "the mask" even is: a layer whose coverage
-     * already comes straight from its own map -- the default shape now, not just the masked one --
-     * has no mask to remove, and mistaking its own Image Texture node for one would delete it. */
-    bNodeLink *map_link = (layer.top == nullptr) ? nullptr : sole_link_into(*layer.top);
-    if (map_link != nullptr && mask_link->fromnode == map_link->fromnode) {
+    /* What covers the row without its mask: the content corrections' accumulated coverage, a
+     * folder's alpha, or the row's own map's alpha -- the same order #layer_mask_corrections_sync
+     * and #BKE_paint_material_layer_mask_set_enabled restore. Resolved before deciding what "the
+     * mask" even is: a row whose coverage already comes from this source -- the default shape now,
+     * not just the masked one -- has no mask to remove, and mistaking that source for one would
+     * delete it. */
+    bNode *base_node = nullptr;
+    bNodeSocket *base_socket = nullptr;
+    layer_coverage_source_without_mask(layer, base_node, base_socket);
+    if (base_node != nullptr && mask_link->fromnode == base_node &&
+        mask_link->fromsock == base_socket)
+    {
       continue;
     }
     if (mask_link->fromsock->directly_linked_links().size() == 1) {
       mask_nodes.append_non_duplicates({chain.tree, mask_link->fromnode});
     }
-    bNodeSocket *alpha = (map_link == nullptr) ?
-                             nullptr :
-                             bke::node_find_socket(*map_link->fromnode, SOCK_OUT, "Alpha"_ustr);
-    if (alpha == nullptr) {
+    if (base_node == nullptr || base_socket == nullptr) {
       /* Nothing to restore coverage from; leaving it unlinked is still a layer without a mask. */
       for (bNodeLink *link : Vector<bNodeLink *>(coverage_socket->directly_linked_links())) {
         BKE_ntree_update_tag_link_removed(chain.tree);
@@ -438,16 +441,16 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
       }
       continue;
     }
-    /* The map's node is taken from the link rather than from the socket: relinking the previous
-     * channel already invalidated the topology cache #owner_node asserts on. */
+    /* The base node is taken from the helper rather than from a link read after the previous
+     * channel's relink, which already invalidated the topology cache #owner_node asserts on. */
     if (mix.factor_opacity != nullptr) {
-      relink_into(*chain.tree, *coverage_socket, coverage_owner, *map_link->fromnode, *alpha);
+      relink_into(*chain.tree, *coverage_socket, coverage_owner, *base_node, *base_socket);
     }
     else {
       /* No opacity to preserve here -- wrap the restored coverage in a fresh Multiply so the
        * layer keeps an editable one going forward. */
       layer_factor_coverage_link(
-          *chain.tree, *layer.node, *coverage_socket, *map_link->fromnode, *alpha, 1.0f);
+          *chain.tree, *layer.node, *coverage_socket, *base_node, *base_socket, 1.0f);
     }
   }
 
@@ -521,6 +524,16 @@ bool BKE_paint_material_layer_mask_remove(Main &bmain,
     if (touched != ma.nodetree) {
       BKE_ntree_update_after_single_tree_change(bmain, *touched);
     }
+  }
+
+  /* The mask is gone, so the row's mask corrections read as applying again: the mask-correction
+   * sync re-evaluates what the row puts in and re-links the chain's base and each correction's
+   * coverage, the way #BKE_paint_material_layer_mask_set_enabled does. Without it a row whose mask
+   * was switched off keeps its chain zeroed, and a row that was baked keeps an anchor built for a
+   * mask that no longer exists. */
+  for (ChannelChain *chain : plan.chains) {
+    layer_mask_corrections_sync(
+        bmain, ma, *chain->tree, chain->layers[layer_index], chain->channel);
   }
 
   BKE_ntree_update_after_single_tree_change(bmain, tree);
@@ -630,7 +643,7 @@ bool BKE_paint_material_layer_mask_set_enabled(Main &bmain,
       if (!layer.mask_corrections.is_empty()) {
         /* The corrections shape the mask: a switched-off mask leaves them nothing to shape, so
          * re-sync turns their coverage off (and back on when the mask comes back). */
-        layer_mask_corrections_sync(*chain.tree, layer);
+        layer_mask_corrections_sync(bmain, ma, *chain.tree, layer, chain.channel);
       }
       touched_trees.add(chain.tree);
       continue;
@@ -664,7 +677,7 @@ bool BKE_paint_material_layer_mask_set_enabled(Main &bmain,
     if (!layer.mask_corrections.is_empty()) {
       /* The corrections shape the mask, so a switched-off mask leaves them no pixels to shape:
        * re-sync turns their coverage off (and back on when the mask comes back). */
-      layer_mask_corrections_sync(*chain.tree, layer);
+      layer_mask_corrections_sync(bmain, ma, *chain.tree, layer, chain.channel);
     }
     touched_trees.add(chain.tree);
   }

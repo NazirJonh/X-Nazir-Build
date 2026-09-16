@@ -19,13 +19,13 @@ namespace blender::tests {
 TEST(ImagePaintUVGeom, PointInsideUnitSquare)
 {
   const float2 poly[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(poly, float2(0.5f, 0.5f)));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(poly, 4), float2(0.5f, 0.5f)));
 }
 
 TEST(ImagePaintUVGeom, PointOutsideUnitSquare)
 {
   const float2 poly[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-  EXPECT_FALSE(image_paint_uv_poly_contains_point(poly, float2(1.5f, 0.5f)));
+  EXPECT_FALSE(image_paint_uv_poly_contains_point(Span<float2>(poly, 4), float2(1.5f, 0.5f)));
 }
 
 TEST(ImagePaintUVGeom, NeighborQuadDoesNotContain)
@@ -33,8 +33,8 @@ TEST(ImagePaintUVGeom, NeighborQuadDoesNotContain)
   const float2 a[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
   const float2 b[] = {{2, 0}, {3, 0}, {3, 1}, {2, 1}};
   const float2 p(0.5f, 0.5f);
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(a, p));
-  EXPECT_FALSE(image_paint_uv_poly_contains_point(b, p));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(a, 4), p));
+  EXPECT_FALSE(image_paint_uv_poly_contains_point(Span<float2>(b, 4), p));
 }
 
 TEST(ImagePaintUVGeom, ConcaveQuadInsideVsAabbOnly)
@@ -42,15 +42,15 @@ TEST(ImagePaintUVGeom, ConcaveQuadInsideVsAabbOnly)
   /* C-shape: AABB is [0,2]x[0,2]; hole-ish notch around (1.5, 1.0). */
   const float2 poly[] = {
       {0, 0}, {2, 0}, {2, 0.4f}, {0.6f, 0.4f}, {0.6f, 1.6f}, {2, 1.6f}, {2, 2}, {0, 2}};
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(poly, float2(0.3f, 1.0f)));
-  EXPECT_FALSE(image_paint_uv_poly_contains_point(poly, float2(1.5f, 1.0f)));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(poly, 8), float2(0.3f, 1.0f)));
+  EXPECT_FALSE(image_paint_uv_poly_contains_point(Span<float2>(poly, 8), float2(1.5f, 1.0f)));
 }
 
 TEST(ImagePaintUVGeom, BoundaryInclusiveOnEdgeAndVertex)
 {
   const float2 poly[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(poly, float2(0.0f, 0.0f)));
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(poly, float2(0.5f, 0.0f)));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(poly, 4), float2(0.0f, 0.0f)));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(poly, 4), float2(0.5f, 0.0f)));
 }
 
 TEST(ImagePaintUVGeom, OverlappingQuadsBothContain)
@@ -58,16 +58,16 @@ TEST(ImagePaintUVGeom, OverlappingQuadsBothContain)
   const float2 a[] = {{0, 0}, {2, 0}, {2, 2}, {0, 2}};
   const float2 b[] = {{1, 1}, {3, 1}, {3, 3}, {1, 3}};
   const float2 p(1.5f, 1.5f);
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(a, p));
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(b, p));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(a, 4), p));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(b, 4), p));
 }
 
 TEST(ImagePaintUVGeom, PolygonNotAabbAcrossUdimBoundary)
 {
   const float2 poly[] = {{0.9f, 0.4f}, {1.1f, 0.4f}, {1.1f, 0.6f}, {0.9f, 0.6f}};
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(poly, float2(0.95f, 0.5f)));
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(poly, float2(1.05f, 0.5f)));
-  EXPECT_FALSE(image_paint_uv_poly_contains_point(poly, float2(0.95f, 0.9f)));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(poly, 4), float2(0.95f, 0.5f)));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(poly, 4), float2(1.05f, 0.5f)));
+  EXPECT_FALSE(image_paint_uv_poly_contains_point(Span<float2>(poly, 4), float2(0.95f, 0.9f)));
 }
 
 TEST(ImagePaintUVGeom, SharedEdgeIsBoundaryNotStrictInterior)
@@ -75,11 +75,11 @@ TEST(ImagePaintUVGeom, SharedEdgeIsBoundaryNotStrictInterior)
   const float2 a[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
   const float2 b[] = {{1, 0}, {2, 0}, {2, 1}, {1, 1}};
   const float2 on_edge(1.0f, 0.5f);
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(a, on_edge));
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(b, on_edge));
-  EXPECT_FALSE(image_paint_uv_poly_contains_point(a, on_edge, false));
-  EXPECT_FALSE(image_paint_uv_poly_contains_point(b, on_edge, false));
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(b, float2(1.5f, 0.5f), false));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(a, 4), on_edge));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(b, 4), on_edge));
+  EXPECT_FALSE(image_paint_uv_poly_contains_point(Span<float2>(a, 4), on_edge, false));
+  EXPECT_FALSE(image_paint_uv_poly_contains_point(Span<float2>(b, 4), on_edge, false));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(b, 4), float2(1.5f, 0.5f), false));
 }
 
 TEST(ImagePaintUVGeom, SharedVertexFourQuadrantsIsBoundaryNotStrictInterior)
@@ -91,16 +91,16 @@ TEST(ImagePaintUVGeom, SharedVertexFourQuadrantsIsBoundaryNotStrictInterior)
   const float2 tr[] = {{0.5f, 0.5f}, {1, 0.5f}, {1, 1}, {0.5f, 1}};
   const float2 br[] = {{0.5f, 0}, {1, 0}, {1, 0.5f}, {0.5f, 0.5f}};
   const float2 corner(0.5f, 0.5f);
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(tl, corner, true));
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(bl, corner, true));
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(tr, corner, true));
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(br, corner, true));
-  EXPECT_FALSE(image_paint_uv_poly_contains_point(tl, corner, false));
-  EXPECT_FALSE(image_paint_uv_poly_contains_point(bl, corner, false));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(tl, 4), corner, true));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(bl, 4), corner, true));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(tr, 4), corner, true));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(br, 4), corner, true));
+  EXPECT_FALSE(image_paint_uv_poly_contains_point(Span<float2>(tl, 4), corner, false));
+  EXPECT_FALSE(image_paint_uv_poly_contains_point(Span<float2>(bl, 4), corner, false));
 
   const float2 in_bl(0.5f - 1.0f / 64.0f, 0.5f - 1.0f / 64.0f);
-  EXPECT_FALSE(image_paint_uv_poly_contains_point(tl, in_bl, true));
-  EXPECT_TRUE(image_paint_uv_poly_contains_point(bl, in_bl, true));
+  EXPECT_FALSE(image_paint_uv_poly_contains_point(Span<float2>(tl, 4), in_bl, true));
+  EXPECT_TRUE(image_paint_uv_poly_contains_point(Span<float2>(bl, 4), in_bl, true));
 }
 
 static BMesh *test_bmesh()
@@ -168,7 +168,7 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedSkipsDisconnectedFaces)
   BM_mesh_elem_table_ensure(bm, BM_FACE);
   const int seed[] = {BM_elem_index_get(fa)};
   Array<bool> tags(bm->totface, true);
-  image_paint_tag_mesh_connected_faces(bm, seed, tags);
+  image_paint_tag_mesh_connected_faces(bm, Span<int>(seed, 1), tags);
   EXPECT_TRUE(tags[0]);
   EXPECT_FALSE(tags[1]);
   BM_mesh_free(bm);
@@ -184,7 +184,7 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedFollowsSharedVertex)
   BM_mesh_elem_table_ensure(bm, BM_FACE);
   const int seed[] = {BM_elem_index_get(fa)};
   Array<bool> tags(bm->totface, false);
-  image_paint_tag_mesh_connected_faces(bm, seed, tags);
+  image_paint_tag_mesh_connected_faces(bm, Span<int>(seed, 1), tags);
   EXPECT_TRUE(tags[0]);
   EXPECT_TRUE(tags[1]);
   BM_mesh_free(bm);
@@ -202,7 +202,7 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedSkipsHiddenNeighbor)
   BM_mesh_elem_table_ensure(bm, BM_FACE);
   const int seed[] = {BM_elem_index_get(fa)};
   Array<bool> tags(bm->totface, false);
-  image_paint_tag_mesh_connected_faces(bm, seed, tags);
+  image_paint_tag_mesh_connected_faces(bm, Span<int>(seed, 1), tags);
   EXPECT_TRUE(tags[BM_elem_index_get(fa)]);
   EXPECT_FALSE(tags[BM_elem_index_get(fb)]);
   BM_mesh_free(bm);
@@ -223,7 +223,7 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedIsTransitive)
   BM_mesh_elem_table_ensure(bm, BM_FACE);
   const int seed[] = {BM_elem_index_get(fa)};
   Array<bool> tags(bm->totface, false);
-  image_paint_tag_mesh_connected_faces(bm, seed, tags);
+  image_paint_tag_mesh_connected_faces(bm, Span<int>(seed, 1), tags);
   EXPECT_TRUE(tags[BM_elem_index_get(fa)]);
   EXPECT_TRUE(tags[BM_elem_index_get(fb)]);
   EXPECT_TRUE(tags[BM_elem_index_get(fc)]);
@@ -249,7 +249,7 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedWithDirtyFaceIndices)
   bm->elem_index_dirty |= BM_FACE;
 
   Array<bool> tags(bm->totface, false);
-  image_paint_tag_mesh_connected_faces(bm, seed, tags);
+  image_paint_tag_mesh_connected_faces(bm, Span<int>(seed, 1), tags);
   EXPECT_TRUE(tags[0]);
   EXPECT_TRUE(tags[expect_fb]);
   BM_mesh_free(bm);
@@ -269,7 +269,7 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedEmptySeedAndOutOfRange)
 
   const int bad_seed[] = {-1, 999};
   tags.fill(true);
-  image_paint_tag_mesh_connected_faces(bm, bad_seed, tags);
+  image_paint_tag_mesh_connected_faces(bm, Span<int>(bad_seed, 2), tags);
   EXPECT_FALSE(tags[0]);
   BM_mesh_free(bm);
 }
@@ -334,7 +334,7 @@ TEST_F(ImagePaintUVGeomMeshTest, ClaimBufferCornerNotStrictlyOwned)
 
   const int fill[] = {BM_elem_index_get(bl)};
   Array<uint8_t> claim(2 * 2);
-  image_paint_uv_claim_buffer_build(bm, offsets, fill, float2(0.0f, 0.0f), 2, 2, claim);
+  image_paint_uv_claim_buffer_build(bm, offsets, Span<int>(fill, 1), float2(0.0f, 0.0f), 2, 2, claim);
 
   /* Texel (0,0) center is (0.25, 0.25) — strictly inside the bottom-left quad only. */
   EXPECT_TRUE(claim[0] & UV_CLAIM_FILL_INCLUSIVE);
@@ -362,7 +362,7 @@ TEST_F(ImagePaintUVGeomMeshTest, ClaimBufferSharedEdgeIsNonStrict)
 
   const int fill[] = {BM_elem_index_get(left)};
   Array<uint8_t> claim(4 * 1);
-  image_paint_uv_claim_buffer_build(bm, offsets, fill, float2(0.0f, 0.0f), 4, 1, claim);
+  image_paint_uv_claim_buffer_build(bm, offsets, Span<int>(fill, 1), float2(0.0f, 0.0f), 4, 1, claim);
 
   /* Texel 0 center u = 0.125: strictly inside the left quad. */
   EXPECT_TRUE(claim[0] & UV_CLAIM_FILL_STRICT);
@@ -386,7 +386,7 @@ TEST_F(ImagePaintUVGeomMeshTest, ClaimBufferSkipsFacesOutsideTile)
 
   const int fill[] = {BM_elem_index_get(here)};
   Array<uint8_t> claim(4 * 4);
-  image_paint_uv_claim_buffer_build(bm, offsets, fill, float2(0.0f, 0.0f), 4, 4, claim);
+  image_paint_uv_claim_buffer_build(bm, offsets, Span<int>(fill, 1), float2(0.0f, 0.0f), 4, 4, claim);
 
   for (const int i : IndexRange(16)) {
     EXPECT_FALSE(claim[i] & UV_CLAIM_FOREIGN_INCLUSIVE);
@@ -407,7 +407,7 @@ TEST_F(ImagePaintUVGeomMeshTest, DilationSingleRingFourConnected)
 
   const int fill[] = {BM_elem_index_get(only)};
   Array<uint8_t> claim(5 * 5);
-  image_paint_uv_claim_buffer_build(bm, offsets, fill, float2(0.0f, 0.0f), 5, 5, claim);
+  image_paint_uv_claim_buffer_build(bm, offsets, Span<int>(fill, 1), float2(0.0f, 0.0f), 5, 5, claim);
 
   /* Only texel (2,2) has its centre (0.5, 0.5) inside the quad. */
   EXPECT_TRUE(claim[2 * 5 + 2] & UV_CLAIM_FILL_INCLUSIVE);

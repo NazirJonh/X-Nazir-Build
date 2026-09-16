@@ -22,6 +22,7 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_material_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
@@ -39,6 +40,7 @@
 #include "BKE_main.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
+#include "BKE_paint_material_mask_bake.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
@@ -1063,6 +1065,13 @@ static wmOperatorStatus screen_render_invoke(bContext *C, wmOperator *op, const 
 
     /* Clean memory used by viewport? */
     clean_viewport_memory(rj->main, scene);
+  }
+
+  /* The shader samples each layer's baked mask, and a headless render has no cursor draw to
+   * refresh it, so every material's bake is brought current here, on the main thread, before the
+   * render job starts. The session cache makes this a no-op for materials nothing moved in. */
+  for (Material &ma : bmain->materials) {
+    BKE_paint_material_mask_bake_ensure(*bmain, ma, false);
   }
 
   /* setup job */

@@ -1234,11 +1234,22 @@ enum eMaterialPaintChannel : int8_t {
  * Roles an #Image can have inside a PBR paint layer, stored in #Image.paint_layer_channel.
  *
  * Every #eMaterialPaintChannel keeps its own value, so a role that is a channel compares equal to
- * it and needs no translation. Two roles are not channels: a layer's mask, which has no place in
- * the shader graph at all, and "none" for an image that does not say.
+ * it and needs no translation. Three roles are not channels: a layer's mask, which has no place in
+ * the shader graph at all; a baked mask texture; and "none" for an image that does not say.
  */
 #define PAINT_LAYER_MAP_NONE (-1)
 #define PAINT_LAYER_MAP_MASK PAINT_MATERIAL_CHANNEL_NUM
+
+/**
+ * Internal-only role of a baked mask texture produced by the mask-correction baking feature.
+ *
+ * Never a map role: it must not index a per-channel array, reach the UI as a selectable map role
+ * or slot, appear in #BKE_paint_material_composite_passes or
+ * #BKE_paint_material_display_passes, or resolve a layer map. Code that classifies
+ * #Image.paint_layer_channel must treat it as outside the public role range; see
+ * #paint_layer_channel_is_public_map_role and #paint_layer_channel_is_internal_bake_role.
+ */
+#define PAINT_LAYER_MAP_MASK_BAKED (PAINT_MATERIAL_CHANNEL_NUM + 2)
 
 /**
  * Every shading channel combined into one lit image.

@@ -297,9 +297,11 @@ if(WITH_GTESTS)
     paint_curve_patch_sampler_test.cc
     paint_image_curve_patch_raster_test.cc
     paint_curve_patch_session_test.cc
-    roll_spline_test.cc
+    tests/roll_spline_test.cc
   )
   set(TEST_INC
+    # Tests in subdirectories (tests/, mesh/) include headers from this directory.
+    .
   )
   set(TEST_LIB
     ${LIB}

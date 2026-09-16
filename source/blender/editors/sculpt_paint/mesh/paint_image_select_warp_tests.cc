@@ -2,6 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+#include "paint_image_select_intern.hh"
 #include "paint_image_select_warp_intern.hh"
 
 #include "testing/testing.h"

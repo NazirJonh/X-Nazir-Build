@@ -13,8 +13,11 @@
 #include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
+#include "BKE_node_runtime.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_layer_edit.hh"
 
+#include "BLI_listbase.h"
 #include "BLI_rect.h"
 #include "BLI_uuid.h"
 
@@ -29,6 +32,11 @@
 
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
+
+#include "paint_material_composite_internal.hh"
+#include "paint_material_layer_edit_intern.hh"
+#include "paint_material_layer_idprops.hh"
+#include "paint_material_layer_mask_bake_intern.hh"
 
 namespace blender::bke::tests {
 
@@ -749,6 +757,68 @@ TEST_F(PaintMaterialCompositeStackTest, linked_factor_becomes_the_layer_mask)
       *bmain, *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
   ASSERT_EQ(layers.size(), 2);
   EXPECT_EQ(layers[1].mask_image, id_cast<Image *>(mask->id));
+}
+
+TEST_F(PaintMaterialCompositeStackTest, coverage_anchor_does_not_change_the_composite)
+{
+  Material *ma = add_material_with_principled("Mat");
+  PaintMaterialLayerAddParams params;
+  params.image_size = 8;
+  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *ma, params, nullptr, &error));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, *ma, params, nullptr, &error));
+  bUUID m = {};
+  ASSERT_TRUE(BKE_paint_material_layer_correction_add(*bmain,
+                                                      *ma,
+                                                      1,
+                                                      PaintMaterialCorrectionSection::Mask,
+                                                      PaintMaterialCorrectionEffect::Paint,
+                                                      "M",
+                                                      &m,
+                                                      &error));
+
+  Vector<PaintMaterialCompositeImageLayer> before;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_from_material(
+      *bmain, *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, before));
+  ASSERT_EQ(before.size(), 2);
+  ASSERT_EQ(before[1].mask_corrections.size(), 1);
+  const uint64_t hash_before = BKE_paint_material_composite_stack_hash(before);
+
+  /* Bake the row's coverage: it now reads B and the live mask chain parks on the anchor. The CPU
+   * composite must walk the live chain regardless, so what it collects is exactly what it did. */
+  Vector<ChannelChain> chains;
+  ASSERT_TRUE(chains_collect(*ma, chains, error));
+  ChannelChain *base = nullptr;
+  for (ChannelChain &chain : chains) {
+    if (chain.channel == int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)) {
+      base = &chain;
+    }
+  }
+  ASSERT_NE(base, nullptr);
+  CompositeMixNode layer_mix;
+  ASSERT_TRUE(composite_mix_node_read(*base->layers[1].node, layer_mix));
+  ASSERT_NE(layer_mix.factor_coverage, nullptr);
+  ma->nodetree->ensure_topology_cache();
+
+  MaskBakeAnchor anchor;
+  ASSERT_TRUE(mask_bake_anchor_create(*bmain,
+                                      *ma->nodetree,
+                                      *layer_mix.factor_coverage,
+                                      bke::paint_layer::marker_get(*base->layers[1].node),
+                                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                      8,
+                                      8,
+                                      anchor));
+  ma->nodetree->ensure_topology_cache();
+  ASSERT_NE(anchor.live_input, nullptr);
+
+  Vector<PaintMaterialCompositeImageLayer> after;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_from_material(
+      *bmain, *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, after));
+  ASSERT_EQ(after.size(), before.size());
+  ASSERT_EQ(after[1].mask_corrections.size(), 1);
+  EXPECT_TRUE(BLI_uuid_equal(after[1].mask_corrections[0].marker, m));
+  EXPECT_EQ(BKE_paint_material_composite_stack_hash(after), hash_before);
 }
 
 TEST_F(PaintMaterialCompositeStackTest, unsupported_blend_mode_is_not_a_stack)

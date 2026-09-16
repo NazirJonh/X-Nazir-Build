@@ -758,6 +758,25 @@ CurveMapping *BKE_paint_default_curve();
  * \{ */
 
 /**
+ * Whether \a role is a map role the engine and the UI expose: an #eMaterialPaintChannel or the
+ * layer's mask. Anything outside that range -- "none", the combined pass role and the internal
+ * baked-mask role -- is not a map and must not be treated as one.
+ */
+inline bool paint_layer_channel_is_public_map_role(const int role)
+{
+  return role >= 0 && role <= PAINT_LAYER_MAP_MASK;
+}
+
+/**
+ * Whether \a role is the internal-only role of a baked mask texture. Such an image is part of the
+ * material's data but never a map role: see #PAINT_LAYER_MAP_MASK_BAKED.
+ */
+inline bool paint_layer_channel_is_internal_bake_role(const int role)
+{
+  return role == PAINT_LAYER_MAP_MASK_BAKED;
+}
+
+/**
  * Static description of one material paint channel.
  *
  * \note The scalar range applies to the fixed channels only. #PAINT_MATERIAL_CHANNEL_CUSTOM

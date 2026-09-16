@@ -266,6 +266,7 @@ set(SRC
   intern/paint_material_layer_edit.cc
   intern/paint_material_layer_idprops.cc
   intern/paint_material_layer_mask.cc
+  intern/paint_material_layer_mask_bake.cc
   intern/paint_material_layer_model.cc
   intern/paint_material_layer_props.cc
   intern/paint_material_resolve.cc
@@ -524,6 +525,7 @@ set(SRC
   BKE_paint_types.hh
   BKE_paint_material_combined.hh
   BKE_paint_material_composite.hh
+  BKE_paint_material_mask_bake.hh
   BKE_paint_material_resolve.hh
   BKE_particle.h
   BKE_path_templates.hh
@@ -827,6 +829,7 @@ if(WITH_GTESTS)
     intern/paint_material_composite_test.cc
     intern/paint_material_layer_correction_test.cc
     intern/paint_material_layer_edit_test.cc
+    intern/paint_material_layer_mask_bake_test.cc
     intern/paint_material_layer_model_test.cc
     intern/paint_material_mask_edit_test.cc
     intern/paint_material_resolve_test.cc

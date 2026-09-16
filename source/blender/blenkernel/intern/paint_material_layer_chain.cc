@@ -19,6 +19,7 @@
  */
 
 #include "paint_material_layer_edit_intern.hh"
+#include "paint_material_layer_mask_bake_intern.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -33,6 +34,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_mask_bake.hh"
 #include "BKE_paint_material_resolve.hh"
 #include "BKE_preview_image.hh"
 
@@ -162,6 +164,12 @@ void paint_layer_edit_committed(Main &bmain, Material &ma, const bool relations)
     DEG_relations_tag_update(&bmain);
   }
   BKE_paint_material_composite_cache_invalidate(&ma);
+  /* The baked masks the same edit moved the graph under; an anchor is rebuilt from the same stack
+   * the composite reads, so the two are invalidated together. */
+  BKE_paint_material_mask_bake_cache_invalidate(&ma);
+  /* Bake now, on the main thread this commit runs on: B feeds the shader, and a draw between this
+   * edit and the next ensure would sample a freshly anchored row's still-empty texture. */
+  BKE_paint_material_mask_bake_ensure(bmain, ma, false);
 }
 
 /** The tree the group instance \a node opens, or null when it holds none or not a node tree. */
@@ -341,7 +349,13 @@ bool correction_chain_read(ChainLayer &layer, PaintMaterialLayerEditError &r_err
    * #base_map stays on the content stack's answer. */
   top_down.clear();
   bool coverage_resolved = (layer_mix.factor_coverage == nullptr);
-  socket = layer_mix.factor_coverage;
+  /* A baked coverage reads B, but the corrections that shape it stay on the anchor's live input:
+   * the model has to list those corrections, so the walk starts where they are. With no bake the
+   * helper returns the coverage socket itself, so the reading below is the same as it always was.
+   */
+  socket = (layer_mix.factor_coverage != nullptr) ?
+               mask_bake_live_top_socket(*layer_mix.factor_coverage) :
+               nullptr;
   for (int step = 0; step < 64 && socket != nullptr; step++) {
     if (!socket_has_link(const_cast<bNodeSocket &>(*socket))) {
       coverage_resolved = true;
@@ -384,6 +398,18 @@ bool correction_chain_read(ChainLayer &layer, PaintMaterialLayerEditError &r_err
     return false;
   }
   correction_list_reverse(top_down, layer.mask_corrections);
+  bool coverage_baked = false;
+  if (layer_mix.factor_coverage != nullptr) {
+    Image *baked_image = nullptr;
+    bNode *baked_node = nullptr;
+    coverage_baked = mask_bake_coverage_is_baked(
+        *layer_mix.factor_coverage, baked_image, baked_node);
+  }
+  MASK_BAKE_TRACE("chain_read node=%p content=%zu mask=%zu coverage_baked=%d\n",
+                  static_cast<void *>(layer.node),
+                  size_t(layer.content_corrections.size()),
+                  size_t(layer.mask_corrections.size()),
+                  int(coverage_baked));
   return true;
 }
 
@@ -1302,15 +1328,15 @@ Vector<bNode *> chain_range_map_nodes(ChannelChain &chain,
       continue;
     }
     bNodeLink *link = (layer.top == nullptr) ? nullptr : sole_link_into(*layer.top);
-    if (link == nullptr) {
-      return {};
-    }
-    maps.append(link->fromnode);
+    /* An Absent row has no map. The entry stays as a null so the caller keeps one map per row in
+     * the range; #layer_group_fill_channel builds such a row inside the folder with an
+     * explicit-zero coverage. */
+    maps.append((link != nullptr) ? link->fromnode : nullptr);
   }
   return maps;
 }
 
-bool layer_group_fill_channel(Main & /*bmain*/,
+bool layer_group_fill_channel(Main &bmain,
                               bNodeTree & /*tree*/,
                               bNodeTree &group,
                               ChannelChain &chain,
@@ -1367,6 +1393,9 @@ bool layer_group_fill_channel(Main & /*bmain*/,
     bNode *keeper_instance = (keeper_instance_link != nullptr) ? keeper_instance_link->fromnode :
                                                                  nullptr;
     Vector<bNode *> owned;
+    /* The copy must carry the canonical (unbaked) row: the anchor and its B are outside the owned
+     * set, so a baked keeper would move into the folder without its coverage. */
+    mask_bake_unbake_row(bmain, keeper, chain.channel);
     layer_owned_nodes_collect(keeper, owned);
     Map<const bNode *, bNode *> node_map;
     if (!layer_owned_nodes_copy(group, owned, socket_map, node_map)) {
@@ -1414,19 +1443,28 @@ bool layer_group_fill_channel(Main & /*bmain*/,
     BKE_paint_material_layer_marker_set(*mix_copy, keeper_copy_marker);
     /* The folder's alpha starts from what the kept row covers: its coverage input carries the
      * content corrections' accumulated coverage and its mask chain, which the map's alpha alone
-     * would miss. Unlinked, the row covers nothing here and the alpha starts from nothing. */
+     * would miss. On a baked row that input reads B, which stays outside the group, so the live
+     * top is resolved on the original row and the source mapped through the copy. Unlinked, the
+     * row covers nothing here and the alpha starts from nothing. */
     group.ensure_topology_cache();
-    CompositeMixNode keeper_mix;
-    if (composite_mix_node_read(*mix_copy, keeper_mix) && keeper_mix.factor_coverage != nullptr) {
-      bNodeLink *coverage_link = sole_link_into(
-          *const_cast<bNodeSocket *>(keeper_mix.factor_coverage));
-      alpha_node = (coverage_link != nullptr) ? coverage_link->fromnode : nullptr;
-      alpha_so_far = (coverage_link != nullptr) ? coverage_link->fromsock : nullptr;
+    if (bNodeSocket *live_top = paint_layer_live_coverage_socket(keeper)) {
+      /* A coverage with no feed is the row covering nothing here: the alpha starts from nothing,
+       * the same form the old coverage-input read produced. */
+      bNode *copy_node = nullptr;
+      bNodeSocket *copy_socket = nullptr;
+      if (bNodeLink *coverage_link = sole_link_into(*live_top)) {
+        bNode **found_node = node_map.lookup_ptr(coverage_link->fromnode);
+        bNodeSocket **found_socket = socket_map.lookup_ptr(coverage_link->fromsock);
+        copy_node = (found_node != nullptr) ? *found_node : nullptr;
+        copy_socket = (found_socket != nullptr) ? *found_socket : nullptr;
+      }
+      alpha_node = copy_node;
+      alpha_so_far = copy_socket;
     }
     below = mix_copy;
     below_out = mix_copy_out;
   }
-  else {
+  else if (map_nodes.first() != nullptr) {
     below = bke::node_copy_with_mapping(
         &group, *map_nodes.first(), LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
     if (below == nullptr) {
@@ -1439,6 +1477,15 @@ bool layer_group_fill_channel(Main & /*bmain*/,
       return false;
     }
     alpha_node = below;
+  }
+  else {
+    /* The kept row is Absent in this channel: it has no map to move in, so the folder holds
+     * nothing for it and the outer Mix blends an empty group -- the same coverage the row had
+     * outside. */
+    below = nullptr;
+    below_out = nullptr;
+    alpha_so_far = nullptr;
+    alpha_node = nullptr;
   }
 
   for (const int ordinal : IndexRange(from_ordinal + 1, to_ordinal - from_ordinal)) {
@@ -1461,6 +1508,9 @@ bool layer_group_fill_channel(Main & /*bmain*/,
        * is wired here. A channel that shows no map for the row brings the corrections over
        * nothing, the way the kept row's own Absent form does. */
       Vector<bNode *> owned;
+      /* Same as the kept row above: unbake before collecting so the live chain, coverage and all,
+       * is what moves into the folder. */
+      mask_bake_unbake_row(bmain, layer, chain.channel);
       layer_owned_nodes_collect(layer, owned);
       Map<const bNode *, bNode *> node_map;
       if (!layer_owned_nodes_copy(group, owned, socket_map, node_map)) {
@@ -1492,12 +1542,15 @@ bool layer_group_fill_channel(Main & /*bmain*/,
         return false;
       }
       row_has_corrections = true;
-      if (mix.factor_coverage != nullptr) {
-        if (bNodeLink *coverage_link = sole_link_into(
-                *const_cast<bNodeSocket *>(mix.factor_coverage)))
-        {
-          row_alpha_node = coverage_link->fromnode;
-          row_alpha_socket = coverage_link->fromsock;
+      /* The row's live coverage top, not its coverage input: a baked row reads B there, and B
+       * stays outside the group. Resolve the source on the original row and map it through the
+       * copy that just moved in. */
+      if (bNodeSocket *live_top = paint_layer_live_coverage_socket(layer)) {
+        if (bNodeLink *coverage_link = sole_link_into(*live_top)) {
+          bNode **copy_node = node_map.lookup_ptr(coverage_link->fromnode);
+          bNodeSocket **copy_socket = socket_map.lookup_ptr(coverage_link->fromsock);
+          row_alpha_node = (copy_node != nullptr) ? *copy_node : nullptr;
+          row_alpha_socket = (copy_socket != nullptr) ? *copy_socket : nullptr;
         }
       }
       location_x += 300.0f;
@@ -1510,7 +1563,7 @@ bool layer_group_fill_channel(Main & /*bmain*/,
       below = mix_copy;
       below_out = mix_out;
     }
-    else {
+    else if (map_source != nullptr) {
       map_copy = bke::node_copy_with_mapping(
           &group, *map_source, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
       mix_copy = bke::node_copy_with_mapping(
@@ -1536,12 +1589,43 @@ bool layer_group_fill_channel(Main & /*bmain*/,
       mix_copy->location[0] = location_x;
       map_copy->location[0] = location_x - 200.0f;
 
-      bke::node_add_link(
-          group, *below, *below_out, *mix_copy, *const_cast<bNodeSocket *>(mix.bottom));
+      if (below != nullptr) {
+        bke::node_add_link(
+            group, *below, *below_out, *mix_copy, *const_cast<bNodeSocket *>(mix.bottom));
+      }
       bke::node_add_link(
           group, *map_copy, *map_color, *mix_copy, *const_cast<bNodeSocket *>(mix.top));
       layer_factor_coverage_link(
           group, *mix_copy, *const_cast<bNodeSocket *>(mix.factor), *map_copy, *map_alpha, 1.0f);
+      below = mix_copy;
+      below_out = mix_out;
+    }
+    else {
+      /* The row is Absent in this channel: copy its Mix alone, leave its map input unlinked and its
+       * coverage explicitly zero -- the same form #ensure_mirror_chain builds for a mirrored row,
+       * so the folder's chain reads the row as absent too. */
+      mix_copy = bke::node_copy_with_mapping(
+          &group, *layer.node, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, socket_map);
+      if (mix_copy == nullptr) {
+        return false;
+      }
+      r_nodes_to_remove.append_non_duplicates(layer.node);
+      group.ensure_topology_cache();
+      mix_out = mix_output_find(*mix_copy);
+      if (mix_out == nullptr || !composite_mix_node_read(*mix_copy, mix)) {
+        return false;
+      }
+      if (below != nullptr) {
+        bke::node_add_link(
+            group, *below, *below_out, *mix_copy, *const_cast<bNodeSocket *>(mix.bottom));
+      }
+      if (layer_factor_absent_link(
+              group, *mix_copy, *const_cast<bNodeSocket *>(mix.factor), 1.0f) == nullptr)
+      {
+        return false;
+      }
+      location_x += 300.0f;
+      mix_copy->location[0] = location_x;
       below = mix_copy;
       below_out = mix_out;
     }
@@ -1581,7 +1665,11 @@ bool layer_group_fill_channel(Main & /*bmain*/,
   if (result_in == nullptr) {
     return false;
   }
-  bke::node_add_link(group, *below, *below_out, *output, *result_in);
+  /* An empty group -- every row of the range Absent in this channel -- keeps its Result unlinked,
+   * which the instance reads as transparent: exactly what the range contributed outside. */
+  if (below != nullptr) {
+    bke::node_add_link(group, *below, *below_out, *output, *result_in);
+  }
   if (build_alpha && alpha_node != nullptr && alpha_so_far != nullptr) {
     if (bNodeSocket *alpha_in = socket_find_by_name(*output, SOCK_IN, "Alpha")) {
       bke::node_add_link(group, *alpha_node, *alpha_so_far, *output, *alpha_in);
@@ -2090,14 +2178,10 @@ bool layer_edit_plan_build(Main &bmain,
         r_error = PaintMaterialLayerEditError::IsBottomLayer;
         return false;
       }
-      /* Every map the group will hold, resolved here: a mapless layer in the range is a refusal,
-       * not a half-built group. */
-      for (ChannelChain *chain : top_chains) {
-        if (chain_range_map_nodes(*chain, ordinal, target_ordinal).is_empty()) {
-          r_error = PaintMaterialLayerEditError::ChainNotPlain;
-          return false;
-        }
-      }
+      /* A row absent in a channel has no map there, and a missing map is not a refusal: the fill
+       * builds it inside the folder as an explicit-zero row, the same form the channel already
+       * showed outside it. Only a row that is not a Mix at all is broken, and the plan's shape
+       * checks have already refused that. */
       r_plan.chains = top_chains;
       r_plan.layer_index = ordinal;
       r_plan.target_index = target_ordinal;

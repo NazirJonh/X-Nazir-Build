@@ -17,6 +17,7 @@
  */
 
 #include "paint_material_layer_edit_intern.hh"
+#include "paint_material_layer_mask_bake_intern.hh"
 #include "paint_material_layer_mask_intern.hh"
 
 #include "BKE_image.hh"
@@ -252,9 +253,26 @@ void correction_row_enabled_apply(bNodeTree &tree, const ChainCorrection &nodes,
   channel_map_mute_set(tree, *nodes.map, map_on);
 }
 
-void layer_mask_corrections_sync(bNodeTree &tree, ChainLayer &layer)
+void layer_mask_corrections_sync(Main &bmain,
+                                 Material &ma,
+                                 bNodeTree &tree,
+                                 ChainLayer &layer,
+                                 const int channel)
 {
-  if (layer.node == nullptr || layer.mask_corrections.is_empty()) {
+  if (layer.node == nullptr) {
+    return;
+  }
+  MASK_BAKE_TRACE("sync enter tree=%p channel=%d node=%p n_mask_corr=%zu\n",
+                  static_cast<void *>(&tree),
+                  channel,
+                  static_cast<void *>(layer.node),
+                  size_t(layer.mask_corrections.size()));
+  if (layer.mask_corrections.is_empty()) {
+    /* The last mask correction is gone: nothing shapes the row's coverage any more, so its bake
+     * comes off and the coverage reads the live chain again. */
+    MASK_BAKE_TRACE("sync empty -> unbake_row\n");
+    mask_bake_unbake_row(bmain, layer, channel);
+    MASK_BAKE_TRACE("sync empty -> unbake_row done\n");
     return;
   }
   tree.ensure_topology_cache();
@@ -337,6 +355,60 @@ void layer_mask_corrections_sync(bNodeTree &tree, ChainLayer &layer)
       BKE_ntree_update_tag_socket_property(&tree, &coverage);
     }
   }
+
+  /* The live chain is in its final shape now: bake it so the shader samples B while the chain
+   * parks on the anchor. #mask_bake_anchor_create is idempotent -- on a row already baked it
+   * merely repairs the coverage link -- so a repeated sync keeps exactly one anchor and one B. */
+  CompositeMixNode row_mix;
+  if (!composite_mix_node_read(*layer.node, row_mix)) {
+    return;
+  }
+  bNodeSocket *coverage = const_cast<bNodeSocket *>(
+      (row_mix.factor_coverage != nullptr) ? row_mix.factor_coverage : row_mix.factor);
+  if (coverage == nullptr) {
+    return;
+  }
+
+  /* Bake only what the CPU composite can reproduce in this channel: B is written by the same math,
+   * and for a row it cannot flatten -- a folder whose mask corrections limit the folder as a whole,
+   * a channel carrying an unsupported blend -- a bake would be a transparent texture where the live
+   * chain used to be. A row the stack omits paints nothing here (I1), and its coverage belongs on
+   * the live zero the sync above just wrote, not on a stale B. Either way the live chain stays and
+   * nothing is parked on an anchor. */
+  tree.ensure_topology_cache();
+  bool bakeable = false;
+  {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    MASK_BAKE_TRACE("sync gate -> stack_from_material\n");
+    if (BKE_paint_material_composite_stack_from_material(bmain, ma, channel, layers)) {
+      MASK_BAKE_TRACE("sync gate -> stack ok, layers=%zu\n", size_t(layers.size()));
+      for (const PaintMaterialCompositeImageLayer &candidate : layers) {
+        if (BLI_uuid_equal(candidate.marker, row_marker)) {
+          bakeable = true;
+          break;
+        }
+      }
+    }
+    else {
+      MASK_BAKE_TRACE("sync gate -> stack_from_material false\n");
+    }
+  }
+  MASK_BAKE_TRACE("sync gate -> bakeable=%d\n", int(bakeable));
+  if (!bakeable) {
+    mask_bake_unbake_row(bmain, layer, channel);
+    return;
+  }
+
+  /* A reused anchor keeps its B size unless the row's map moved it, so the size is compared on
+   * every sync; #mask_bake_anchor_create still runs either way, repairing the coverage link. */
+  int width = 0;
+  int height = 0;
+  mask_bake_size_get(tree, layer, row_marker, width, height);
+  MASK_BAKE_TRACE("sync -> anchor_create w=%d h=%d\n", width, height);
+  MaskBakeAnchor anchor;
+  const bool created =
+      mask_bake_anchor_create(bmain, tree, *coverage, row_marker, channel, width, height, anchor);
+  MASK_BAKE_TRACE("sync -> anchor_create done ok=%d\n", int(created));
 }
 
 bNodeSocket *layer_mask_base_consumer(ChainLayer &layer)
@@ -344,18 +416,25 @@ bNodeSocket *layer_mask_base_consumer(ChainLayer &layer)
   if (layer.node == nullptr) {
     return nullptr;
   }
-  CompositeMixNode mix;
-  if (!composite_mix_node_read(*layer.node, mix) || mix.factor_coverage == nullptr) {
+  /* The live chain top, not the coverage input itself: a baked row reads B there, and the mask
+   * base the accumulated coverage feeds sits on the anchor's live side. Resolved first, since it
+   * also makes the topology cache current that the mix read below walks. */
+  bNodeSocket *coverage_socket = paint_layer_live_coverage_socket(layer);
+  if (coverage_socket == nullptr) {
     return nullptr;
   }
-  const bNode *coverage_source = composite_source_node_shallow(*mix.factor_coverage);
+  CompositeMixNode mix;
+  if (!composite_mix_node_read(*layer.node, mix)) {
+    return nullptr;
+  }
+  const bNode *coverage_source = composite_source_node_shallow(*coverage_socket);
   if (coverage_source != nullptr && bke::paint_layer::node_is_correction(*coverage_source)) {
     if (bke::paint_layer::correction_section_get(*coverage_source) !=
         PaintMaterialCorrectionSection::Mask)
     {
       /* A content correction's over output already feeds the base; the next one replaces it
        * there, which is how several content sections stack. */
-      return const_cast<bNodeSocket *>(mix.factor_coverage);
+      return coverage_socket;
     }
     /* A mask correction owns the coverage input: the accumulated coverage feeds its base. */
     CompositeMixNode mask_mix;
@@ -370,7 +449,7 @@ bNodeSocket *layer_mask_base_consumer(ChainLayer &layer)
      * modulates is the layer's own map, not a correction's. */
     return nullptr;
   }
-  return const_cast<bNodeSocket *>(mix.factor_coverage);
+  return coverage_socket;
 }
 
 bool correction_nodes_read(const bNode &node,
@@ -563,6 +642,11 @@ void layer_owned_nodes_collect(const ChainLayer &layer, Vector<bNode *> &r_nodes
       }
     }
   }
+  MASK_BAKE_TRACE("owned_collect node=%p mask_corr=%zu content_corr=%zu owned=%zu\n",
+                  static_cast<void *>(layer.node),
+                  size_t(layer.mask_corrections.size()),
+                  size_t(layer.content_corrections.size()),
+                  size_t(r_nodes.size()));
 }
 
 bool layer_owned_nodes_copy(bNodeTree &dst_tree,
@@ -570,6 +654,12 @@ bool layer_owned_nodes_copy(bNodeTree &dst_tree,
                             Map<const bNodeSocket *, bNodeSocket *> &r_socket_map,
                             Map<const bNode *, bNode *> &r_node_map)
 {
+  /* The link walk below reads each source node's cached links; a caller that just rewrote them --
+   * the mask bake's unbake rebinds a coverage, an edit moved a row -- leaves that cache stale, and
+   * a stale cache silently drops the link it no longer lists. */
+  if (!nodes.is_empty() && nodes.first() != nullptr) {
+    nodes.first()->owner_tree().ensure_topology_cache();
+  }
   for (bNode *node : nodes) {
     bNode *copy = bke::node_copy_with_mapping(
         &dst_tree, *node, LIB_ID_COPY_DEFAULT, std::nullopt, std::nullopt, r_socket_map);
@@ -580,6 +670,8 @@ bool layer_owned_nodes_copy(bNodeTree &dst_tree,
   }
   /* The links inside the set survive the copy; the ones reaching in from outside it -- what the
    * row blends over, mostly -- are the caller's to rebuild or leave off. */
+  int copied_links = 0;
+  int skipped_links = 0;
   for (bNode *node : nodes) {
     for (const bNodeSocket *input : node->input_sockets()) {
       for (const bNodeLink *link : input->directly_linked_links()) {
@@ -590,13 +682,25 @@ bool layer_owned_nodes_copy(bNodeTree &dst_tree,
         bNodeSocket **from_sock = r_socket_map.lookup_ptr(link->fromsock);
         bNodeSocket **to_sock = r_socket_map.lookup_ptr(link->tosock);
         if (from_sock == nullptr || to_sock == nullptr) {
+          MASK_BAKE_TRACE("owned_copy skip from_node=%p from_sock=%p(map=%d) to_sock=%p(map=%d)\n",
+                          static_cast<void *>(link->fromnode),
+                          static_cast<void *>(const_cast<bNodeSocket *>(link->fromsock)),
+                          int(from_sock != nullptr),
+                          static_cast<void *>(const_cast<bNodeSocket *>(link->tosock)),
+                          int(to_sock != nullptr));
+          skipped_links++;
           continue;
         }
         bke::node_add_link(
             dst_tree, **from_copy, **from_sock, *r_node_map.lookup(link->tonode), **to_sock);
+        copied_links++;
       }
     }
   }
+  MASK_BAKE_TRACE("owned_copy nodes=%zu copied_links=%d skipped=%d\n",
+                  size_t(nodes.size()),
+                  copied_links,
+                  skipped_links);
   return true;
 }
 
@@ -639,11 +743,17 @@ bool correction_channel_insert(Main &bmain,
   if (layer.is_group && section == PaintMaterialCorrectionSection::Content) {
     return false;
   }
-  /* A content section sits on the layer's map input; a mask one on the coverage input of the
+  /* A content section sits on the layer's map input; a mask one on the live top of the layer's
+   * coverage chain -- the anchor's input when the row is baked, else the coverage input of the
    * layer's own Multiply, which only the per-channel shape has. */
   bNodeSocket *top_socket = (section == PaintMaterialCorrectionSection::Content) ?
                                 const_cast<bNodeSocket *>(layer_mix.top) :
-                                const_cast<bNodeSocket *>(layer_mix.factor_coverage);
+                                paint_layer_live_coverage_socket(layer);
+  MASK_BAKE_TRACE("corr_insert tree=%p channel=%d section=%d top_socket=%p\n",
+                  static_cast<void *>(&tree),
+                  chain.channel,
+                  int(section),
+                  static_cast<void *>(top_socket));
   if (top_socket == nullptr) {
     return false;
   }
@@ -654,8 +764,9 @@ bool correction_channel_insert(Main &bmain,
   }
   bNode *old_source = (old_link != nullptr) ? old_link->fromnode : nullptr;
   bNodeSocket *old_from_socket = (old_link != nullptr) ? old_link->fromsock : nullptr;
-  /* The Multiply the coverage input belongs to, resolved while the cache is still good: the
-   * nodes created below invalidate it, and the relink asks for the owner afterwards. */
+  /* The node the live top belongs to -- the coverage Multiply, or the anchor on a baked row --
+   * resolved while the cache is still good: the nodes created below invalidate it, and the relink
+   * asks for the owner afterwards. */
   bNode *coverage_owner = (section == PaintMaterialCorrectionSection::Mask) ?
                               &top_socket->owner_node() :
                               nullptr;
@@ -1157,7 +1268,8 @@ bool BKE_paint_material_layer_correction_add(Main &bmain,
                               int(section)))
     {
       for (ChannelChain *chain : fresh.chains) {
-        layer_mask_corrections_sync(*chain->tree, chain->layers[fresh.layer_index]);
+        layer_mask_corrections_sync(
+            bmain, ma, *chain->tree, chain->layers[fresh.layer_index], chain->channel);
       }
     }
   }
@@ -1192,6 +1304,12 @@ void correction_channel_remove(Main &bmain,
     return;
   }
   bNodeSocket *mix_out = mix_output_find(*nodes.mix);
+  MASK_BAKE_TRACE("corr_remove enter tree=%p channel=%d mix=%p mix_out=%p map=%p\n",
+                  static_cast<void *>(&tree),
+                  chain.channel,
+                  static_cast<void *>(nodes.mix),
+                  static_cast<void *>(mix_out),
+                  static_cast<void *>(nodes.map));
 
   /* What the correction blended over -- its base -- and, for a content section, what accumulated
    * coverage under it (`a_below`, read off the Subtract's second input). Both are carried over to
@@ -1250,6 +1368,7 @@ void correction_channel_remove(Main &bmain,
     }
   };
   if (mix_out != nullptr) {
+    MASK_BAKE_TRACE("corr_remove redirect mix_out base=%p\n", static_cast<void *>(base_node));
     redirect(*mix_out, base_node, base_socket);
   }
   if (nodes.section == PaintMaterialCorrectionSection::Content && nodes.over_combine != nullptr) {
@@ -1268,9 +1387,16 @@ void correction_channel_remove(Main &bmain,
     to_remove.append_non_duplicates(nodes.map);
   }
   for (bNode *node : to_remove) {
+    /* A mask correction owns no over pair, so #over_invert/#over_combine are null there; a null
+     * entry is not a node to remove. */
+    if (node == nullptr) {
+      continue;
+    }
+    MASK_BAKE_TRACE("corr_remove removing node %p\n", static_cast<void *>(node));
     bke::node_remove_node(&bmain, tree, *node, true);
     BKE_ntree_update_tag_node_removed(&tree);
   }
+  MASK_BAKE_TRACE("corr_remove done\n");
 }
 
 bool BKE_paint_material_layer_correction_remove(Main &bmain,
@@ -1315,7 +1441,7 @@ bool BKE_paint_material_layer_correction_remove(Main &bmain,
       break;
     }
     /* A content correction that painted here may have been all the row put into the channel. */
-    layer_mask_corrections_sync(*chain->tree, layer);
+    layer_mask_corrections_sync(bmain, ma, *chain->tree, layer, chain->channel);
   }
   /* A channel with no graph of its own (AO) holds the correction's map by its tag and the user
    * its creation gave it: both go, so the map neither reads as the removed row's nor stays saved
@@ -1580,15 +1706,14 @@ bool BKE_paint_material_layer_correction_reorder(Main &bmain,
     }
     else {
       tree.ensure_topology_cache();
-      CompositeMixNode layer_mix;
-      if (!composite_mix_node_read(*layer.node, layer_mix) ||
-          layer_mix.factor_coverage == nullptr)
-      {
+      /* The section's top feeds the row's live coverage top, not its coverage input: a baked row
+       * reads B there, and the live chain hangs on the anchor. */
+      bNodeSocket *coverage = paint_layer_live_coverage_socket(layer);
+      if (coverage == nullptr) {
         return fail(PaintMaterialLayerEditError::CorrectionChainNotPlain);
       }
-      bNodeSocket &coverage = const_cast<bNodeSocket &>(*layer_mix.factor_coverage);
-      bNode &coverage_owner = coverage.owner_node();
-      relink_or_clear(coverage, coverage_owner, top.mix, top_out);
+      bNode &coverage_owner = coverage->owner_node();
+      relink_or_clear(*coverage, coverage_owner, top.mix, top_out);
     }
   }
 
@@ -1639,7 +1764,7 @@ bool BKE_paint_material_layer_correction_set_enabled(Main &bmain,
         *chain->tree, *correction_nodes_find(layer, section, correction), enable);
     if (section == PaintMaterialCorrectionSection::Content) {
       /* A content row going on or off can start or end what the row puts into the channel. */
-      layer_mask_corrections_sync(*chain->tree, layer);
+      layer_mask_corrections_sync(bmain, ma, *chain->tree, layer, chain->channel);
     }
   }
 
@@ -2238,7 +2363,7 @@ bool BKE_paint_material_layer_correction_channel_enabled_set(Main &bmain,
 
   /* What the row puts into this channel may have just started or ended: its mask corrections
    * follow (spec 18 §4.3). */
-  layer_mask_corrections_sync(tree, layer);
+  layer_mask_corrections_sync(bmain, ma, tree, layer, channel);
 
   BKE_ntree_update_after_single_tree_change(bmain, tree);
   if (&tree != ma.nodetree) {

@@ -49,6 +49,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_mask_bake.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_screen.hh"
 
@@ -1531,6 +1532,38 @@ static void paint_cursor_ensure_material_source_bake(const bContext &C,
       C, *brush_paint.source_material, brush_paint.source_bake_size);
 }
 
+/**
+ * Keep the active paint layer's baked mask current.
+ *
+ * The shader samples the baked mask, and its pixels come from images a stroke edits without any
+ * material-graph change of their own, so the per-frame cursor draw is what notices a dab. Unlike
+ * the source-material bake above this one is not skipped mid-stroke: it is CPU work over the
+ * changed region, not a full EEVEE render, and a stale frame is exactly what it exists to avoid.
+ */
+static void paint_cursor_ensure_mask_bake(const bContext &C)
+{
+  Main *bmain = CTX_data_main(&C);
+  Scene *scene = CTX_data_scene(&C);
+  if (bmain == nullptr || scene == nullptr) {
+    return;
+  }
+  const std::optional<PaintMaterialActiveLayer> layer =
+      BKE_paint_material_active_layer_get(*bmain, scene->toolsettings->paint_mode);
+  if (!layer.has_value() || layer->owner == nullptr) {
+    return;
+  }
+  /* Rate limited for the same reason the source-material bake is: the check walks the material's
+   * stack, and a cursor redraws on every mouse move. */
+  constexpr double check_interval_seconds = 0.1;
+  static double last_check_seconds = 0.0;
+  const double now_seconds = BLI_time_now_seconds();
+  if (now_seconds - last_check_seconds < check_interval_seconds) {
+    return;
+  }
+  last_check_seconds = now_seconds;
+  BKE_paint_material_mask_bake_ensure(*bmain, *layer->owner, false);
+}
+
 static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, void * /*unused*/)
 {
   PRF_scope(ProfileCategory::Default);
@@ -1542,6 +1575,8 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
   /* Before the enabled check below: a brush whose cursor the user turned off still paints, so it
    * still needs its source material baked. */
   paint_cursor_ensure_material_source_bake(*C, pcontext);
+  /* The active layer's mask bake is independent of the brush's source material. */
+  paint_cursor_ensure_mask_bake(*C);
 
   if (!paint_cursor_is_brush_cursor_enabled(pcontext)) {
     /* For Grease Pencil draw mode, we want to we only render a small mouse cursor (dot) if the

@@ -12,6 +12,8 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
+#include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_composite.hh"
@@ -26,6 +28,7 @@
 #include <string>
 
 #include "BLI_listbase.h"
+#include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -33,7 +36,6 @@
 
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
-#include "DNA_library_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 
@@ -256,7 +258,7 @@ class PaintMaterialLayerEditTest : public bke::BlenderGTestBase {
     if (mix_node == nullptr || !composite_mix_node_read(*mix_node, mix)) {
       return nullptr;
     }
-    bNodeSocket *socket = (mix.factor_coverage != nullptr) ? mix.factor_coverage : mix.factor;
+    const bNodeSocket *socket = (mix.factor_coverage != nullptr) ? mix.factor_coverage : mix.factor;
     if (socket == nullptr || socket->directly_linked_links().is_empty()) {
       return nullptr;
     }
@@ -741,7 +743,7 @@ TEST_F(PaintMaterialLayerEditTest, material_base_builds_single_normalized_row)
   int ordinal = -1;
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   ASSERT_TRUE(BKE_paint_material_layer_add_material_base(
-      *bmain, *material, Span<PaintMaterialLayerChannelImage>(maps, 2), &ordinal, &error))
+      *bmain, *material, Span<PaintMaterialLayerChannelImage>(maps, 2), PaintMaterialLayerKind::Material, &ordinal, &error))
       << int(error);
   EXPECT_EQ(ordinal, 0);
 
@@ -1542,7 +1544,7 @@ TEST_F(PaintMaterialLayerEditTest, group_duplicate_gives_the_copied_maps_their_o
     }
   }
   ASSERT_NE(original_map, nullptr);
-  const int users_before = original_map->us;
+  const int users_before = original_map->id.us;
 
   int copy_ordinal = -1;
   ASSERT_TRUE(
@@ -1570,8 +1572,8 @@ TEST_F(PaintMaterialLayerEditTest, group_duplicate_gives_the_copied_maps_their_o
   /* The duplicate's maps are its own, and each is counted exactly the way the original is: one
    * texture node, one user -- the one a freshly created data-block already carries. A leftover
    * user on the original would keep it alive for the rest of the session. */
-  EXPECT_EQ(original_map->us, users_before);
-  EXPECT_EQ(copied_map->us, users_before);
+  EXPECT_EQ(original_map->id.us, users_before);
+  EXPECT_EQ(copied_map->id.us, users_before);
 }
 
 TEST_F(PaintMaterialLayerEditTest, mask_add_invalid_ordinal_leaves_the_graph_alone)
@@ -1871,7 +1873,7 @@ TEST_F(PaintMaterialLayerEditTest, mask_toggle_off_above_a_material_row_clears_e
     material->nodetree->ensure_topology_cache();
     CompositeMixNode mix;
     ASSERT_TRUE(composite_mix_node_read(*mix_node, mix));
-    bNodeSocket *socket = (mix.factor_coverage != nullptr) ? mix.factor_coverage : mix.factor;
+    const bNodeSocket *socket = (mix.factor_coverage != nullptr) ? mix.factor_coverage : mix.factor;
     ASSERT_NE(socket, nullptr);
     for (const bNodeLink *link : socket->directly_linked_links()) {
       EXPECT_NE(link->fromnode, mask_node);

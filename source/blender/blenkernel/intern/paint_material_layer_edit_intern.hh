@@ -368,10 +368,23 @@ void correction_row_enabled_apply(bNodeTree &tree, const ChainCorrection &nodes,
  * mask chain sits on the row's coverage and each mask correction reads its map's alpha; where the
  * row puts nothing in, the chain's base and every mask correction's coverage are unlinked and
  * zero, so no mask blend can raise the coverage of a row that paints nothing. A mask has no
- * per-channel switch of its own: this is its whole per-channel state. No-op without mask
- * corrections.
+ * per-channel switch of its own: this is its whole per-channel state.
+ *
+ * This is also what owns the row's mask-bake anchor in \a channel: with mask corrections present
+ * it ensures one exists (B feeds coverage, the live chain parks on the anchor); when the last one
+ * is gone it takes the anchor off and points coverage back at the live chain. A row with no graph
+ * (#ChainLayer::node null) is a no-op, and so is a shape this channel's graph cannot read.
+ *
+ * The anchor is only installed when \a ma's CPU composite can actually reproduce the row in \a
+ * channel; a row it cannot flatten -- a folder whose mask corrections limit the folder as a whole,
+ * a channel with an unsupported blend -- keeps its live chain instead of sampling a B nothing
+ * writes.
  */
-void layer_mask_corrections_sync(bNodeTree &tree, ChainLayer &layer);
+void layer_mask_corrections_sync(Main &bmain,
+                                 Material &ma,
+                                 bNodeTree &tree,
+                                 ChainLayer &layer,
+                                 int channel);
 
 /** Whether a content correction of the row paints in this channel: it owns a map, and neither its
  * Mix nor its map is muted. Drives the I2' coverage link and the last-enabled-channel check; a

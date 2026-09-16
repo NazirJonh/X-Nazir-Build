@@ -70,6 +70,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_mask_bake.hh"
 #include "BKE_paint_material_layer_edit.hh"
 #include "BKE_pointcloud.hh"
 #include "BKE_preview_image.hh"
@@ -164,6 +165,8 @@ static void material_free_data(ID *id)
   /* The composite cache is keyed on #ID.session_uid, so an entry left behind here would never be
    * looked up again and would hold its buffer until the size budget happened to evict it. */
   BKE_paint_material_composite_cache_free_material(*material);
+  /* The baked masks are keyed the same way and hold their own subscriptions. */
+  BKE_paint_material_mask_bake_cache_free_material(*material);
   /* Same reasoning, and legitimate from here because the Combined cache lives in this module too:
    * it is keyed on #ID.session_uid, so an entry left behind would never be looked up again. */
   BKE_paint_material_combined_cache_free_material(*material);

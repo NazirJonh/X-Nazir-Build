@@ -10,6 +10,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_paint_material_layer_edit.hh"
 
 #include "ED_material_bake.hh"

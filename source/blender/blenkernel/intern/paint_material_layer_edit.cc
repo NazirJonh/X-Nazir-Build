@@ -19,6 +19,7 @@
  */
 
 #include "paint_material_layer_edit_intern.hh"
+#include "paint_material_layer_mask_bake_intern.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -878,6 +879,10 @@ static bool layer_move_apply(Main &bmain,
 
     for (ChannelChain *chain : from_chains) {
       ChainLayer &layer = chain->layers[from_index];
+      /* Cross-chain only: a move within one chain rewrites links in place and keeps its bake. The
+       * copy has to carry the canonical (unbaked) row -- an anchor and its B stay behind with the
+       * source, so an unbaked row is the only one whose owned set holds its coverage. */
+      mask_bake_unbake_row(bmain, layer, chain->channel);
       MovingChannelNodes m;
       m.mix_source = layer.node;
       m.image = layer.image;
@@ -1232,6 +1237,9 @@ static bool layer_move_into_empty_group(Main &bmain,
   Vector<MovingChannelNodes> moving_nodes;
   for (ChannelChain *chain : from_chains) {
     ChainLayer &layer = chain->layers[from_index];
+    /* The copy has to carry the canonical (unbaked) row: the anchor and its B stay behind, so
+     * only an unbaked row's owned set holds its coverage. */
+    mask_bake_unbake_row(bmain, layer, chain->channel);
     MovingChannelNodes m;
     m.channel = chain->channel;
     m.mix_source = layer.node;
@@ -1303,6 +1311,8 @@ static bool layer_move_into_empty_group(Main &bmain,
     bNode *mask_copy = nullptr;
     /** Filled for an owned set (a row with corrections); empty for the single-node copies. */
     Map<const bNode *, bNode *> node_map;
+    /** The copied sockets that go with #node_map, so an original socket can be mapped. */
+    Map<const bNodeSocket *, bNodeSocket *> socket_map;
   };
   Vector<CopiedChannelNodes> copies;
   Vector<bNode *> created;
@@ -1331,6 +1341,7 @@ static bool layer_move_into_empty_group(Main &bmain,
       }
       c.mix_copy = node_map.lookup(m.mix_source);
       c.node_map = std::move(node_map);
+      c.socket_map = std::move(socket_map);
       for (bNode *copy : c.node_map.values()) {
         created.append(copy);
       }
@@ -1413,14 +1424,18 @@ static bool layer_move_into_empty_group(Main &bmain,
       bke::node_add_link(*group_tree, *c.mix_copy, *mix_out, *group_output, *result);
       if (i == 0) {
         if (bNodeSocket *alpha_in = socket_find_by_name(*group_output, SOCK_IN, "Alpha")) {
-          if (bNodeLink *coverage_link = sole_link_into(*const_cast<bNodeSocket *>(
-                  (mix.factor_coverage != nullptr) ? mix.factor_coverage : mix.factor)))
-          {
-            bke::node_add_link(*group_tree,
-                               *coverage_link->fromnode,
-                               *coverage_link->fromsock,
-                               *group_output,
-                               *alpha_in);
+          /* The row's live coverage top, not its coverage input: a baked row reads B there, and B
+           * stays outside the folder. Resolve the source on the original row and map it through
+           * the copy that just moved in. */
+          bNodeSocket *live_top = paint_layer_live_coverage_socket(
+              from_chains[0]->layers[from_index]);
+          bNodeLink *coverage_link = (live_top != nullptr) ? sole_link_into(*live_top) : nullptr;
+          if (coverage_link != nullptr) {
+            bNode **from_copy = c.node_map.lookup_ptr(coverage_link->fromnode);
+            bNodeSocket **from_sock = c.socket_map.lookup_ptr(coverage_link->fromsock);
+            if (from_copy != nullptr && from_sock != nullptr) {
+              bke::node_add_link(*group_tree, **from_copy, **from_sock, *group_output, *alpha_in);
+            }
           }
         }
       }
@@ -1705,6 +1720,10 @@ bool BKE_paint_material_layer_group_make(Main &bmain,
   if (!layer_edit_plan_build(
           bmain, ma, from_ordinal, LayerEditOp::GroupMake, plan, error, to_ordinal))
   {
+    MASK_BAKE_TRACE("group_make: plan_build failed err=%d from=%d to=%d\n",
+                    int(error),
+                    from_ordinal,
+                    to_ordinal);
     return fail(error);
   }
   /* 2. Shape: a bottom that is still a bare image is wrapped in a Mix node first, now that the
@@ -1731,6 +1750,7 @@ bool BKE_paint_material_layer_group_make(Main &bmain,
   for (ChannelChain *chain : plan.chains) {
     Vector<bNode *> maps = chain_range_map_nodes(*chain, from, to);
     if (maps.is_empty()) {
+      MASK_BAKE_TRACE("group_make: no maps for channel=%d\n", chain->channel);
       return fail(PaintMaterialLayerEditError::ChainNotPlain);
     }
     map_nodes_per_chain.append(std::move(maps));
@@ -1738,6 +1758,7 @@ bool BKE_paint_material_layer_group_make(Main &bmain,
 
   bNodeTree *group_tree = layer_group_tree_add(bmain, plan.chains, from, to);
   if (group_tree == nullptr) {
+    MASK_BAKE_TRACE("group_make: layer_group_tree_add failed\n");
     return fail(PaintMaterialLayerEditError::CreationFailed);
   }
 
@@ -2137,12 +2158,14 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
    * writing a byte. */
   LayerEditPlan plan;
   if (!layer_edit_plan_build(bmain, ma, ordinal, LayerEditOp::Ungroup, plan, error)) {
+    MASK_BAKE_TRACE("ungroup: plan_build err=%d\n", int(error));
     return fail(error);
   }
   for (ChannelChain *chain : plan.chains) {
     if (!chain->layers[plan.layer_index].mask_corrections.is_empty()) {
       /* A folder's mask corrections shape its result as a whole; spliced out, the rows have no
        * result left for them to shape, and moving them onto one row would draw something else. */
+      MASK_BAKE_TRACE("ungroup: folder has mask corrections channel=%d\n", chain->channel);
       return fail(PaintMaterialLayerEditError::GroupHasMaskCorrections);
     }
   }
@@ -2195,6 +2218,7 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
     ChainLayer &keeper = chain->layers[plan.layer_index];
     bNodeLink *top_link = (keeper.top == nullptr) ? nullptr : sole_link_into(*keeper.top);
     if (top_link == nullptr || !BKE_paint_material_is_layer_group(*top_link->fromnode)) {
+      MASK_BAKE_TRACE("ungroup: keeper top not a group channel=%d\n", chain->channel);
       return fail(PaintMaterialLayerEditError::NotAStack);
     }
     instances.append(top_link->fromnode);
@@ -2229,6 +2253,10 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
     ChannelChain inner;
     inner.channel = chain.channel;
     if (result_in == nullptr || !chain_collect(*group_tree, *result_in, inner, error)) {
+      MASK_BAKE_TRACE("ungroup: chain_collect channel=%d result_in=%p err=%d\n",
+                      chain.channel,
+                      static_cast<void *>(result_in),
+                      int(error));
       discard();
       return fail(error == PaintMaterialLayerEditError::None ?
                       PaintMaterialLayerEditError::ChainNotPlain :
@@ -2276,6 +2304,9 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
          * from a corrections-bearing row. Its owned nodes come back out and re-attach to the kept
          * Mix; the Mix the folder held a copy of is not needed, the kept one serves. */
         Vector<bNode *> owned;
+        /* The inner row comes back out unbaked: the anchor and its B live in the folder tree and
+         * would not be part of the owned set, leaving the re-attached row without its coverage. */
+        mask_bake_unbake_row(bmain, inner_layer, chain.channel);
         layer_owned_nodes_collect(inner_layer, owned);
         owned.remove_first_occurrence_and_reorder(inner_layer.node);
         Map<const bNode *, bNode *> node_map;
@@ -2321,6 +2352,9 @@ bool BKE_paint_material_layer_group_ungroup(Main &bmain,
         /* The row's corrections are spliced out with it (spec 18 §4.5): the owned set comes over
          * with its links, and only what the row blends over is left to the chain's rebuild. */
         Vector<bNode *> owned;
+        /* Splice the row out unbaked, so the owned set carries its coverage instead of leaving B
+         * behind in the folder tree. */
+        mask_bake_unbake_row(bmain, inner_layer, chain.channel);
         layer_owned_nodes_collect(inner_layer, owned);
         Map<const bNode *, bNode *> node_map;
         if (!layer_owned_nodes_copy(tree, owned, socket_map, node_map)) {
@@ -2594,13 +2628,25 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
     BKE_ntree_update_after_single_tree_change(bmain, *group_copy);
     paint_layer_edit_committed(bmain, ma, true);
     if (!mask_refs.is_empty()) {
+      /* The folder's own bake lives on its coverage outside the group tree just copied, so the
+       * copy does not carry it: take the source off its bake so the corrections copy reads the
+       * canonical live graph. The sync after it re-bakes the source; the new row is baked by the
+       * copy's own adds. */
+      for (ChannelChain *chain : plan.chains) {
+        mask_bake_unbake_row(bmain, chain->layers[layer_index], chain->channel);
+      }
       Vector<bUUID> created_corrections;
       if (!BKE_paint_material_layer_corrections_copy(
               bmain, mask_refs, ma, group_ordinal, created_corrections, nullptr, &error))
       {
         /* The duplicate stands; the corrections that could not follow go with it in the caller's
-         * undo step. */
+         * undo step. The source stays unbaked here, which is still a correct live graph. */
         return fail(error);
+      }
+      /* Re-bake the source now that the copy has read it. */
+      for (ChannelChain *chain : plan.chains) {
+        layer_mask_corrections_sync(
+            bmain, ma, *chain->tree, chain->layers[layer_index], chain->channel);
       }
     }
     if (r_ordinal != nullptr) {
@@ -2706,6 +2752,14 @@ bool BKE_paint_material_layer_duplicate(Main &bmain,
        * its links, the maps it shows become new Image data-blocks, and the corrections get new
        * identities. */
       Vector<bNode *> owned;
+      /* Duplicate from the canonical (unbaked) row: the anchor and its B cannot be copied -- they
+       * name the source row -- so the owned set would otherwise lose the row's coverage. The copy
+       * is a normal live row; a later sync bakes it if it is edited. */
+      MASK_BAKE_TRACE("duplicate owned: channel=%d src_node=%p mask_corr=%zu\n",
+                      chain.channel,
+                      static_cast<void *>(source.node),
+                      size_t(source.mask_corrections.size()));
+      mask_bake_unbake_row(bmain, source, chain.channel);
       layer_owned_nodes_collect(source, owned);
       Map<const bNodeSocket *, bNodeSocket *> socket_map;
       Map<const bNode *, bNode *> node_map;
@@ -3008,6 +3062,9 @@ bool BKE_paint_material_layer_remove(Main &bmain,
     /* Read while the topology cache still describes this tree: the rebuild below rewrites links,
      * and the next channel's turn would then ask a socket for links it no longer has. */
     ChainLayer &removed = chain.layers[bare_base ? 1 : layer_index];
+    /* The row's bake is not part of its owned set: take it off first, so its anchor and B are
+     * removed with the row instead of being left behind as orphans. */
+    mask_bake_unbake_row(bmain, removed, chain.channel);
     bNodeLink *top_link = (removed.top == nullptr) ? nullptr : sole_link_into(*removed.top);
     const bool map_is_sole_user = top_link != nullptr &&
                                   top_link->fromsock->directly_linked_links().size() == 1;

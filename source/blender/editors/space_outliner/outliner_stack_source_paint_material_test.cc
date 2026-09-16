@@ -5,7 +5,9 @@
 #include "testing/testing.h"
 
 #include "BLI_assert.h"
+#include "BLI_listbase.h"
 #include "BLI_map.hh"
+#include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
@@ -18,6 +20,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_layer_edit.hh"
 #include "BKE_paint_material_layer_model.hh"
@@ -226,7 +229,7 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, stack_past_the_addressable_range_sh
   PaintMaterialLayerAddParams params;
   params.image_size = 8;
   for (int i = 0; i < STACK_ROW_ORDINAL_MAX + 1; i++) {
-    ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params));
+    ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params));
   }
 
   const StackReadContext ctx{bmain, nullptr, nullptr};
@@ -253,10 +256,10 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, copy_starts_with_a_fresh_paint_revi
   Material &material = add_material_with_texture(add_image("Base"));
   PaintMaterialLayerAddParams params;
   params.image_size = 8;
-  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params));
   EXPECT_GT(BKE_material_paint_layer_revision_get(material), 0);
 
-  Material *copy = static_cast<Material *>(BKE_id_copy(bmain, &material.id));
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &material.id));
   ASSERT_NE(copy, nullptr);
   /* The revision says "the stack I read is still the stack it was"; a copy has not been read by
    * anyone yet, whatever the original has done since. */
@@ -274,7 +277,7 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, stack_rows_report_layer_kind)
   const float fill_color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
   copy_v4_v4(fill_params.fill_color, fill_color);
   fill_params.name = "Filler";
-  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, fill_params));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, fill_params));
 
   const StackReadContext ctx{bmain, nullptr, nullptr};
   const StackFocus focus;
@@ -302,7 +305,7 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, material_layer_row_resolves_its_sou
   params.image_size = 8;
   params.name = "MatLayer";
   int ordinal = -1;
-  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params, &ordinal));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params, &ordinal));
 
   /* Mark the new layer as baked from another material, and link its map back to it -- the state
    * the material-bake glue leaves behind. */
@@ -356,7 +359,7 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, mask_preview_click_enters_mask_mode
   PaintMaterialLayerAddParams params;
   params.image_size = 8;
   int ordinal = -1;
-  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params, &ordinal));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params, &ordinal));
   const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, material, ordinal, white, 8, &error))
@@ -389,7 +392,7 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, channels_preview_click_after_mask_r
   PaintMaterialLayerAddParams params;
   params.image_size = 8;
   int ordinal = -1;
-  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params, &ordinal));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params, &ordinal));
   const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
   ASSERT_TRUE(BKE_paint_material_layer_mask_add(*bmain, material, ordinal, white, 8, &error))
@@ -424,11 +427,11 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, mask_a_to_b_to_channels_uses_the_ri
   PaintMaterialLayerAddParams params_a;
   params_a.image_size = 8;
   int ordinal_a = -1;
-  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params_a, &ordinal_a));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params_a, &ordinal_a));
   PaintMaterialLayerAddParams params_b;
   params_b.image_size = 8;
   int ordinal_b = -1;
-  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params_b, &ordinal_b));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params_b, &ordinal_b));
 
   const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
@@ -477,11 +480,11 @@ TEST_F(OutlinerStackPaintMaterialSourceTest, row_owns_mask_image_matches_the_mas
   PaintMaterialLayerAddParams params_a;
   params_a.image_size = 8;
   int ordinal_a = -1;
-  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params_a, &ordinal_a));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params_a, &ordinal_a));
   PaintMaterialLayerAddParams params_b;
   params_b.image_size = 8;
   int ordinal_b = -1;
-  ASSERT_TRUE(BKE_paint_material_layer_add(bmain, material, params_b, &ordinal_b));
+  ASSERT_TRUE(BKE_paint_material_layer_add(*bmain, material, params_b, &ordinal_b));
 
   const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;

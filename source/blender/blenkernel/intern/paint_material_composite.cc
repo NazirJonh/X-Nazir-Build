@@ -21,6 +21,7 @@
 
 #include "paint_material_composite_internal.hh"
 #include "paint_material_layer_idprops.hh"
+#include "paint_material_layer_mask_bake_intern.hh"
 
 #include "BLI_hash.hh"
 #include "BLI_index_range.hh"
@@ -596,7 +597,12 @@ static bool composite_corrections_walk(const bNodeSocket &socket,
 {
   r_corrections.clear();
   r_any_contributes = false;
-  const bNodeSocket *current = &socket;
+  /* A baked coverage reads B for the GPU shader; the CPU composite must stay on the live sources,
+   * so a preview never depends on B being fresh. Only the mask section sits on coverage -- a
+   * content walk stays on the map input and needs no scan. */
+  const bNodeSocket *current = (section == PaintMaterialCorrectionSection::Mask) ?
+                                   mask_bake_live_top_socket(socket) :
+                                   &socket;
   /* A malformed tree can in principle cycle; bound the walk rather than trust the data. */
   for (int step = 0; step < 64; step++) {
     const Span<const bNodeLink *> links = current->directly_linked_links();
@@ -853,6 +859,9 @@ static bool composite_stack_collect(const bNodeSocket &socket,
 
   PaintMaterialCompositeImageLayer layer;
   layer.blend = mix.blend;
+  /* The row's identity, so the mask baker can find the layer whose coverage it has to compute. A
+   * bare base below returns before this and stays nil: it has no Mix node to carry a marker. */
+  layer.marker = bke::paint_layer::marker_get(*shallow_source);
 
   const bNode *top_source = composite_source_node_shallow(*mix.top);
   if (top_source != nullptr && BKE_paint_material_is_layer_group(*top_source)) {
@@ -1448,35 +1457,25 @@ static float blend_value(const float bottom,
 }
 
 /**
- * Composite one pixel of a layer that carries corrections (spec 18 §5.3).
+ * The factor a layer that carries corrections blends by, at one pixel (spec 18 §5.3), steps A-C.
  *
- * The colour starts at the layer's own map -- or at nothing, for a layer Absent in this channel
- * whose content corrections are what it paints with. Each content correction blends by its own
- * alpha, the way the graph routes a correction's map alpha into its coverage Multiply, and the
- * accumulated coverage grows the way the engine's "over" pair does:
- * `a = a + f * (1 - a)`.
+ * The coverage starts at the layer's mask, its own alpha, or full. Each content correction
+ * accumulates its own coverage the way the engine's "over" pair does -- `a = a + f * (1 - a)` --
+ * and mask corrections then blend onto that factor, after #mask_influence, which the base coverage
+ * already carries: the mask image establishes the coverage, the corrections sit on top of it. A
+ * mask image owns the factor on its own, and what the content corrections accumulate goes to the
+ * layer's alpha instead.
  *
- * What the layer finally blends by is the mask image when it has one -- the graph leaves the
- * corrections' accumulated coverage unwired there -- and the accumulated coverage everywhere else.
- * Mask corrections blend onto that factor after #mask_influence, which the base coverage already
- * carries: the mask image establishes the coverage, the corrections sit on top of it.
+ * Shared by #composite_correction_pixel_apply and the mask baker: B is meant to be exactly the
+ * factor the composite blends by, so the two must read the same expression.
  *
  * \param offset: the pixel's offset into every layer buffer, which all match the stack dimensions.
  */
-static void composite_correction_pixel_apply(const PaintMaterialCompositeLayer &layer,
-                                             const int64_t offset,
-                                             const int x,
-                                             const int y,
-                                             uchar *r_dst)
+static float composite_correction_pixel_mask_factor(const PaintMaterialCompositeLayer &layer,
+                                                    const int64_t offset,
+                                                    const int x,
+                                                    const int y)
 {
-  uchar top[4] = {0, 0, 0, 0};
-  if (layer.color_ibuf != nullptr) {
-    const uchar *base = layer.color_ibuf->byte_data() + offset;
-    top[0] = base[0];
-    top[1] = base[1];
-    top[2] = base[2];
-  }
-
   /* The coverage the layer starts from: its own mask, its own alpha, or full. The mask cases read
    * exactly as the no-correction path reads them; with no mask at all, an alpha-driven layer
    * covers by its own alpha -- where an absent base has none, and the corrections are what bring
@@ -1503,9 +1502,7 @@ static void composite_correction_pixel_apply(const PaintMaterialCompositeLayer &
     }
     const uchar *corr_pixel = correction.ibuf->byte_data() + offset;
     const float corr_alpha = float(corr_pixel[3]) / 255.0f;
-    /* The correction's colour and its coverage ride the same factor, as the graph's own coverage
-     * Multiply does for a layer. */
-    blend_layer_byte(top, corr_pixel, correction.blend, correction.opacity, corr_alpha);
+    /* The correction's coverage reaches the factor by the same Multiply the graph uses. */
     const float fac = clamp_f(correction.opacity * corr_alpha, 0.0f, 1.0f);
     alpha = alpha + fac * (1.0f - alpha);
   }
@@ -1521,8 +1518,67 @@ static void composite_correction_pixel_apply(const PaintMaterialCompositeLayer &
     mask_factor = blend_value(
         mask_factor, gray, correction.blend, correction.opacity * corr_alpha);
   }
+  return mask_factor;
+}
+
+/**
+ * Composite one pixel of a layer that carries corrections (spec 18 §5.3).
+ *
+ * The colour starts at the layer's own map -- or at nothing, for a layer Absent in this channel
+ * whose content corrections are what it paints with. Each content correction blends its colour by
+ * its own alpha, the way the graph routes a correction's map alpha into its coverage Multiply and
+ * accumulates that coverage into the layer's alpha.
+ *
+ * The factor the layer itself blends by -- mask image, accumulated coverage, then the mask
+ * corrections on top -- is what #composite_correction_pixel_mask_factor computes; this keeps the
+ * colour's own alpha accumulation, which the factor does not always share.
+ *
+ * \param offset: the pixel's offset into every layer buffer, which all match the stack dimensions.
+ */
+static void composite_correction_pixel_apply(const PaintMaterialCompositeLayer &layer,
+                                             const int64_t offset,
+                                             const int x,
+                                             const int y,
+                                             uchar *r_dst)
+{
+  uchar top[4] = {0, 0, 0, 0};
+  if (layer.color_ibuf != nullptr) {
+    const uchar *base = layer.color_ibuf->byte_data() + offset;
+    top[0] = base[0];
+    top[1] = base[1];
+    top[2] = base[2];
+  }
+
+  /* The layer's own alpha, grown by the content corrections' accumulated coverage. It is not
+   * always the blend factor -- a mask image replaces that -- but it is what the colour carries. */
+  float alpha;
+  if (layer.mask_ibuf != nullptr) {
+    alpha = mask_factor_at(layer.mask_ibuf, layer.mask_from_alpha, x, y, layer.mask_influence);
+  }
+  else if (layer.mask_from_alpha) {
+    alpha = (layer.color_ibuf != nullptr) ?
+                float(layer.color_ibuf->byte_data()[offset + 3]) / 255.0f :
+                0.0f;
+  }
+  else {
+    alpha = 1.0f;
+  }
+
+  for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
+    if (!correction.enabled || correction.ibuf == nullptr) {
+      continue;
+    }
+    const uchar *corr_pixel = correction.ibuf->byte_data() + offset;
+    const float corr_alpha = float(corr_pixel[3]) / 255.0f;
+    /* The correction's colour and its coverage ride the same factor, as the graph's own coverage
+     * Multiply does for a layer. */
+    blend_layer_byte(top, corr_pixel, correction.blend, correction.opacity, corr_alpha);
+    const float fac = clamp_f(correction.opacity * corr_alpha, 0.0f, 1.0f);
+    alpha = alpha + fac * (1.0f - alpha);
+  }
 
   top[3] = uchar(clamp_i(int(alpha * 255.0f + 0.5f), 0, 255));
+  const float mask_factor = composite_correction_pixel_mask_factor(layer, offset, x, y);
   blend_layer_byte(r_dst, top, layer.blend, layer.opacity, mask_factor);
 }
 
@@ -1736,9 +1792,18 @@ static void composite_images_release(Span<CompositeImageLock> locks)
   }
 }
 
+/**
+ * Acquire the buffers of \a image_layers into \a r_stack, so the evaluator can read them without
+ * touching an image's own cache mid-evaluation.
+ *
+ * \param only_marker: when given, only the layer carrying that identity is built. The mask baker
+ *                     reads one row's coverage and nothing else, and acquiring the rest of the
+ *                     stack would hold locks on images the factor never reads.
+ */
 static bool composite_stack_build(Span<PaintMaterialCompositeImageLayer> image_layers,
                                   Vector<CompositeImageLock> &r_locks,
-                                  PaintMaterialCompositeStack &r_stack)
+                                  PaintMaterialCompositeStack &r_stack,
+                                  const bUUID *only_marker = nullptr)
 {
   if (!BKE_paint_material_composite_stack_dimensions(image_layers, r_stack.width, r_stack.height))
   {
@@ -1746,6 +1811,9 @@ static bool composite_stack_build(Span<PaintMaterialCompositeImageLayer> image_l
   }
   for (const PaintMaterialCompositeImageLayer &image_layer : image_layers) {
     if (!image_layer.enabled) {
+      continue;
+    }
+    if (only_marker != nullptr && !BLI_uuid_equal(image_layer.marker, *only_marker)) {
       continue;
     }
     const bool has_corrections = !image_layer.content_corrections.is_empty() ||
@@ -1811,6 +1879,64 @@ bool BKE_paint_material_composite_eval_images(Span<PaintMaterialCompositeImageLa
   if (ok) {
     ok = BKE_paint_material_composite_eval(stack, composite_ibuf, region, r_stats);
   }
+  composite_images_release(locks);
+  return ok;
+}
+
+bool BKE_paint_material_composite_eval_row_mask(
+    Span<PaintMaterialCompositeImageLayer> image_layers,
+    const bUUID &row_marker,
+    ImBuf *dst_ibuf,
+    const rcti *region)
+{
+  Vector<CompositeImageLock> locks;
+  PaintMaterialCompositeStack stack;
+  /* Only the row is built: its mask factor depends on nothing the other rows composite, and
+   * building them would acquire buffers the factor never reads. The dimensions still come from the
+   * whole stack, so B is validated against the same rectangle the composite uses. */
+  const bool built = composite_stack_build(image_layers, locks, stack, &row_marker);
+
+  bool ok = false;
+  if (built && stack.layers.size() == 1 &&
+      composite_ibuf_is_byte_rgba(dst_ibuf, stack.width, stack.height) &&
+      composite_stack_validate(stack))
+  {
+    const PaintMaterialCompositeLayer &layer = stack.layers.first();
+    rcti area;
+    BLI_rcti_init(&area, 0, stack.width, 0, stack.height);
+    bool have_area = true;
+    if (region != nullptr) {
+      rcti clipped = *region;
+      if (!BLI_rcti_isect(&area, &clipped, &area)) {
+        /* Nothing of the tagged region is inside the buffer; B is already correct. */
+        have_area = false;
+      }
+    }
+    if (have_area) {
+      const int64_t row_stride = int64_t(stack.width) * 4;
+      const int64_t area_width = BLI_rcti_size_x(&area);
+      const IndexRange rows(area.ymin, BLI_rcti_size_y(&area));
+      uchar *dst_pixels = dst_ibuf->byte_data_for_write();
+      threading::parallel_for(rows, 64, [&](const IndexRange range) {
+        for (const int64_t y : range) {
+          const int64_t row_offset = y * row_stride;
+          for (const int64_t x : IndexRange(area.xmin, area_width)) {
+            const int64_t offset = row_offset + x * 4;
+            const float mask_factor = composite_correction_pixel_mask_factor(
+                layer, offset, int(x), int(y));
+            /* A scalar mask: the same value on all three colour channels, opaque. */
+            const uchar gray = uchar(clamp_i(int(mask_factor * 255.0f + 0.5f), 0, 255));
+            dst_pixels[offset + 0] = gray;
+            dst_pixels[offset + 1] = gray;
+            dst_pixels[offset + 2] = gray;
+            dst_pixels[offset + 3] = 255;
+          }
+        }
+      });
+    }
+    ok = true;
+  }
+
   composite_images_release(locks);
   return ok;
 }

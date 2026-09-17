@@ -75,6 +75,12 @@ enum eImage_Flag : int {
   IMA_FLAG_UNUSED_16 = (1 << 16), /* cleared */
   /** Indicates that the image has autosave information */
   IMA_AUTOSAVE_TEMPPACK = (1 << 17),
+  /**
+   * Upload to the GPU as a scene linear float texture with pre-multiplied alpha, whatever the
+   * alpha mode. A transparent straight map (a paint layer correction) otherwise has its
+   * zero-alpha texels' RGB filtered into partly covered neighbors, a dark rim at every soft edge.
+   */
+  IMA_GPU_LINEAR_PREMUL = (1 << 18),
 };
 ENUM_OPERATORS(eImage_Flag)
 
@@ -308,14 +314,7 @@ struct Image {
    * Written from Python as `Image.paint_layer_channel`.
    */
   int paint_layer_channel = -1;
-  /**
-   * Whether the mask image this image authors (see #paint_layer_channel) is switched off: the row
-   * keeps it -- it still lists in the stack UI and stays paintable -- but nothing reads it, and
-   * the row's coverage falls back to what it had without the mask. Zero for every image that is
-   * not a mask; only the mask toggle writes it.
-   */
-  char paint_layer_mask_disabled = 0;
-  char _pad_paint_layer[3] = {};
+  char _pad_paint_layer[4] = {};
 
   bke::ImageRuntime *runtime = nullptr;
 };

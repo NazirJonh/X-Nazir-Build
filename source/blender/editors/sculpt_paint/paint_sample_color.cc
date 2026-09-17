@@ -97,9 +97,13 @@ static float2 imapaint_pick_uv(const Mesh *mesh_eval,
 
   if (mode == PAINT_CANVAS_SOURCE_MATERIAL) {
     const Material *ma = BKE_object_material_get(ob_eval, material_indices[face_i] + 1);
-    const TexPaintSlot *slot = &ma->texpaintslot[ma->paint_active_slot];
-    if (slot && slot->uvname) {
-      uv_map = *attributes.lookup<float2>(slot->uvname, bke::AttrDomain::Corner);
+    if (ma != nullptr && ma->texpaintslot != nullptr && ma->paint_active_slot >= 0 &&
+        ma->paint_active_slot < ma->tot_slots)
+    {
+      const TexPaintSlot &slot = ma->texpaintslot[ma->paint_active_slot];
+      if (slot.uvname != nullptr && slot.uvname[0] != '\0') {
+        uv_map = *attributes.lookup<float2>(slot.uvname, bke::AttrDomain::Corner);
+      }
     }
   }
 
@@ -198,7 +202,9 @@ static std::optional<float3> sample_texture_paint_color(
     /* Force refresh since paint slots are not updated when changing interpolation. */
     BKE_texpaint_slot_refresh_cache(&scene, ma, object);
 
-    if (ma && ma->texpaintslot) {
+    if (ma != nullptr && ma->texpaintslot != nullptr && ma->paint_active_slot >= 0 &&
+        ma->paint_active_slot < ma->tot_slots)
+    {
       image = ma->texpaintslot[ma->paint_active_slot].ima;
       interp = ma->texpaintslot[ma->paint_active_slot].interp;
     }

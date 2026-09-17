@@ -160,7 +160,7 @@ static int node_shader_gpu_tex_image(GPUMaterial *mat,
        * it so that if we blend the color with a transparent shader using alpha as
        * a factor, we don't multiply alpha into the color twice. And if we do
        * not, then there will be no artifacts from zero alpha areas. */
-      if (ima->alpha_mode == IMA_ALPHA_PREMUL) {
+      if (ima->alpha_mode == IMA_ALPHA_PREMUL || (ima->flag & IMA_GPU_LINEAR_PREMUL)) {
         if (out[1].hasoutput) {
           GPU_link(mat, "color_alpha_unpremultiply", out[0].link, &out[0].link);
         }

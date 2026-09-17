@@ -45,35 +45,45 @@ class OUTLINER_HT_tool_header(Header):
 
         layout.operator("outliner.stack_layers_back", text="", icon='BACK')
         if space.stack_source == 'PAINT_MATERIAL':
-            # Which channel's Blending Mode and Opacity the rows below show and edit.
+            # Which channel's blend and opacity the rows below show and edit.
             layout.prop(context.tool_settings.paint_mode, "stack_layer_channel", text="")
 
         layout.separator_spacer()
 
-        row = layout.row(align=True)
-        # Paint Layer and Fill Layer as separate buttons for quick access. The source defines
-        # these kinds via add_kinds; 'PAINT' and 'FILL' are their stable identifiers. The Fill
-        # button is a glyph button -- a Material Symbols paint-bucket -- because the fill is the
-        # one kind whose content is a colour, and the picker it opens on click is the add.
-        row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB').type = 'PAINT'
-        row.tag_button(
-            "outliner.stack_layer_add",
-            tag_name="stack_layer_fill",
-            glyph="\ue997",  # Material Symbols Rounded "format_color_fill"
-            center_glyph=True,
-            tooltip="Add Fill Layer",
-        ).type = 'FILL'
-        sub = row.row(align=True)
-        # The ID browser is driven only by these two context entries; see
-        # id_browser_popover_context_set in interface_template_id_browser.cc. Picking a material
-        # assigns it to WindowManager.stack_layer_material_pick, whose update turns the pick into
-        # an undo-able stack_layer_add call.
-        sub.context_pointer_set("id_browser_ptr", context.window_manager)
-        sub.context_string_set("id_browser_prop", "stack_layer_material_pick")
-        sub.popover("UI_PT_id_browser", text="", icon='MATERIAL')
-        # Corrections hang on the row the Add lands on; the two kinds share one menu rather than
-        # a button each, since neither takes a source or a colour of its own.
-        row.menu("OUTLINER_MT_stack_layer_add_correction", text="", icon='BRUSH_DATA')
+        # The Add controls are built from the source's own kinds, so a source with none grows no
+        # Add and a shape-key stack never shows a paint button (S-5). The generic move/group/remove
+        # verbs below stay whatever the source.
+        kind_ids = {kind.identifier for kind in space.stack_add_kinds}
+        if kind_ids:
+            row = layout.row(align=True)
+            # Paint Layer and Fill Layer are their own buttons for quick access; the Fill button is
+            # a glyph button -- a Material Symbols paint-bucket -- because the fill is the one kind
+            # whose content is a colour, and the picker it opens on click is the add.
+            if 'PAINT' in kind_ids:
+                row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB').type = 'PAINT'
+            if 'FILL' in kind_ids:
+                row.tag_button(
+                    "outliner.stack_layer_add",
+                    tag_name="stack_layer_fill",
+                    glyph="\ue997",  # Material Symbols Rounded "format_color_fill"
+                    center_glyph=True,
+                    tooltip="Add Fill Layer",
+                ).type = 'FILL'
+            if 'MATERIAL' in kind_ids:
+                sub = row.row(align=True)
+                # The ID browser is driven only by these two context entries; see
+                # id_browser_popover_context_set in interface_template_id_browser.cc. Picking a
+                # material assigns it to WindowManager.stack_layer_material_pick, whose update turns
+                # the pick into an undo-able stack_layer_add call.
+                sub.context_pointer_set("id_browser_ptr", context.window_manager)
+                sub.context_string_set("id_browser_prop", "stack_layer_material_pick")
+                sub.popover("UI_PT_id_browser", text="", icon='MATERIAL')
+                # A fresh layered material, its tree generated from a first layer.
+                row.operator("material.new_layered", text="", icon='ADD')
+            if any(i.startswith(('CORRECTION', 'MASK_CORRECTION')) for i in kind_ids):
+                # Corrections hang on the row the Add lands on; the kinds share one menu rather than
+                # a button each, since none takes a source or a colour of its own.
+                row.menu("OUTLINER_MT_stack_layer_add_correction", text="", icon='BRUSH_DATA')
 
         row = layout.row(align=True)
         row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
@@ -94,13 +104,17 @@ class OUTLINER_HT_tool_header(Header):
 class OUTLINER_MT_stack_layer_add_correction(Menu):
     bl_label = "Add Correction"
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
-        layout.operator(
-            "outliner.stack_layer_add", text="Correction", icon='BRUSH_DATA').type = 'CORRECTION'
-        layout.operator(
-            "outliner.stack_layer_add", text="Mask Correction", icon='BRUSH_DATA',
-        ).type = 'MASK_CORRECTION'
+        # Built from the source's own kinds rather than hard-coded: Paint and Fill corrections are
+        # separate kinds, so the seam carries no paint vocabulary (S-1) and a source with none of
+        # them simply lists nothing here.
+        for kind in context.space_data.stack_add_kinds:
+            if kind.identifier.startswith(('CORRECTION', 'MASK_CORRECTION')):
+                # `icon` is the numeric icon id, which only `icon_value` accepts.
+                layout.operator(
+                    "outliner.stack_layer_add", text=kind.name, icon_value=kind.icon,
+                ).type = kind.identifier
 
 
 class OUTLINER_MT_stack_layer_mask_add(Menu):
@@ -158,23 +172,31 @@ class OUTLINER_MT_stack_layer_context_menu(Menu):
             row = layout.row(align=True)
             row.operator_enum("outliner.stack_layer_color_tag_set", "color", icon_only=True)
 
-        layout.separator()
-
-        # The kinds as explicit entries rather than the operator's enum menu: a Material layer is
-        # made from a material the user picks, which is the ID browser's job, not a plain Add.
-        layout.operator(
-            "outliner.stack_layer_add", text="Add Paint Layer", icon='IMAGE_RGB').type = 'PAINT'
-        layout.operator(
-            "outliner.stack_layer_add", text="Add Fill Layer", icon='GP_DRAW_FILL').type = 'FILL'
-        # Anchored to the same row the Add Paint and Fill entries above land on.
-        layout.menu("OUTLINER_MT_stack_layer_add_correction")
-        col = layout.column()
-        # Same hand-off as the header's material button: the pick is assigned to
-        # WindowManager.stack_layer_material_pick, whose update adds the layer.
-        col.context_pointer_set("id_browser_ptr", context.window_manager)
-        col.context_string_set("id_browser_prop", "stack_layer_material_pick")
-        col.popover("UI_PT_id_browser", text="Add Material Layer", icon='MATERIAL')
-        layout.separator()
+        # The Add entries come from the source's own kinds: a Material layer is made from a material
+        # the user picks, which is the ID browser's job, not a plain Add, so it gets a popover
+        # rather than an operator row (S-5).
+        kind_ids = {kind.identifier for kind in context.space_data.stack_add_kinds}
+        if kind_ids:
+            layout.separator()
+            if 'PAINT' in kind_ids:
+                layout.operator(
+                    "outliner.stack_layer_add", text="Add Paint Layer", icon='IMAGE_RGB',
+                ).type = 'PAINT'
+            if 'FILL' in kind_ids:
+                layout.operator(
+                    "outliner.stack_layer_add", text="Add Fill Layer", icon='GP_DRAW_FILL',
+                ).type = 'FILL'
+            if any(i.startswith(('CORRECTION', 'MASK_CORRECTION')) for i in kind_ids):
+                # Anchored to the same row the Add Paint and Fill entries above land on.
+                layout.menu("OUTLINER_MT_stack_layer_add_correction")
+            if 'MATERIAL' in kind_ids:
+                col = layout.column()
+                # Same hand-off as the header's material button: the pick is assigned to
+                # WindowManager.stack_layer_material_pick, whose update adds the layer.
+                col.context_pointer_set("id_browser_ptr", context.window_manager)
+                col.context_string_set("id_browser_prop", "stack_layer_material_pick")
+                col.popover("UI_PT_id_browser", text="Add Material Layer", icon='MATERIAL')
+            layout.separator()
         layout.operator("outliner.stack_layer_copy", text="Copy", icon='COPYDOWN')
         layout.operator("outliner.stack_layer_paste", text="Paste", icon='PASTEDOWN')
         layout.operator("outliner.stack_layer_remove", text="Remove Stack Layer", icon='TRASH')

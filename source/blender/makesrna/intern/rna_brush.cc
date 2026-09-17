@@ -1571,7 +1571,7 @@ static void rna_BrushMaterialPaint_source_update(Main *bmain, Scene *scene, Poin
     return;
   }
   ed::material_bake::material_source_bake_ensure(
-      *bmain, *br->material_paint->source_material, br->material_paint->source_bake_size);
+      *bmain, *br->material_paint->source_material, br->material_paint->source_bake_size, "cursor");
 }
 
 static std::optional<std::string> rna_BrushCurvePatchSettings_path(const PointerRNA * /*ptr*/)

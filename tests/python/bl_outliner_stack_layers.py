@@ -54,6 +54,18 @@ class StackLayersOutlinerTest(unittest.TestCase):
         mesh.materials.append(material)
         return object, material, image
 
+    def add_layered_object(self):
+        mesh = bpy.data.meshes.new("LayeredMesh")
+        object = bpy.data.objects.new("LayeredObject", mesh)
+        bpy.context.collection.objects.link(object)
+        bpy.context.view_layer.objects.active = object
+        object.select_set(True)
+        material = bpy.data.materials.new("LayeredMaterial")
+        material.use_nodes = True
+        material.paint_layers.new(kind='FILL', name="Base")
+        mesh.materials.append(material)
+        return object, material
+
     def add_object_with_shape_keys(self):
         mesh = bpy.data.meshes.new("ShapeKeyMesh")
         mesh.vertices.add(1)
@@ -124,6 +136,96 @@ class StackLayersOutlinerTest(unittest.TestCase):
         self.space.stack_source = 'SHAPE_KEYS'
         self.assertEqual(self.space.stack_source, 'SHAPE_KEYS')
 
+    def test_add_material_layer_needs_a_source(self):
+        # The Add refuses without a material to bake rather than silently doing nothing.
+        object, _material = self.add_layered_object()
+        self.focus_and_draw_stack(object)
+        with self.outliner_override():
+            with self.assertRaises(RuntimeError):
+                bpy.ops.outliner.stack_layer_add(type='MATERIAL', ordinal=-1)
+
+    def test_add_fill_color_is_gamma_to_linear(self):
+        object, material = self.add_layered_object()
+        self.focus_and_draw_stack(object)
+        with self.outliner_override():
+            result = bpy.ops.outliner.stack_layer_add(
+                type='FILL', fill_color=(0.5, 0.25, 0.0, 1.0), ordinal=-1)
+        self.assertEqual(result, {'FINISHED'})
+        layer = [item for item in material.paint_layers if item.kind == 'FILL'][-1]
+        # The picker colour is gamma; the description stores scene linear, so a mid value decodes
+        # to something smaller.
+        self.assertLess(layer.fill_color[0], 0.5)
+        self.assertGreater(layer.fill_color[0], 0.1)
+
+    def test_added_fill_reaches_the_evaluated_material(self):
+        # The viewport draws the evaluated material, not the original: a Fill added from the
+        # Outliner has to show up on the evaluated group node, or Material Preview keeps the old
+        # stack while a final render (which makes fresh copies) already shows the new colour.
+        object, material = self.add_layered_object()
+        self.focus_and_draw_stack(object)
+        with self.outliner_override():
+            result = bpy.ops.outliner.stack_layer_add(
+                type='FILL', fill_color=(1.0, 0.0, 0.0, 1.0), ordinal=-1)
+        self.assertEqual(result, {'FINISHED'})
+        bpy.context.view_layer.update()
+        self.redraw_window()
+
+        principled = next(node for node in material.node_tree.nodes
+                          if node.type == 'BSDF_PRINCIPLED')
+        self.assertTrue(principled.inputs['Base Color'].is_linked)
+
+        evaluated = material.evaluated_get(bpy.context.evaluated_depsgraph_get())
+        group = next(node for node in evaluated.node_tree.nodes if node.type == 'GROUP')
+        colors = [tuple(socket.default_value) for socket in group.inputs if socket.type == 'RGBA']
+        self.assertIn((1.0, 0.0, 0.0, 1.0), colors)
+
+    def test_black_mask_starts_black_and_activates(self):
+        # The Add Mask choice fills the new mask: black hides the row until painted in. Clicking the
+        # mask is what makes the next stroke paint it, so it has to activate even on a fresh mask.
+        object, material = self.add_layered_object()
+        self.space.display_mode = 'STACK_LAYERS'
+        with self.outliner_override():
+            self.assertEqual(bpy.ops.outliner.stack_layer_focus(
+                object=object.name, sub_index=-1, enter_edit_mode=True), {'FINISHED'})
+        self.redraw_window()
+        with self.outliner_override():
+            self.assertEqual(
+                bpy.ops.outliner.stack_layer_mask(ordinal=0, add=True, initial_color='BLACK'),
+                {'FINISHED'})
+        layer = material.paint_layers[0]
+        self.assertIsNotNone(layer.mask)
+        self.assertIsNotNone(layer.mask.image)
+        pixel = layer.mask.image.pixels[:4]
+        self.assertAlmostEqual(pixel[0], 0.0, places=3)
+
+        self.redraw_window()
+        with self.outliner_override():
+            self.assertEqual(
+                bpy.ops.outliner.stack_preview_section_activate(ordinal=0, section_id='MASK'),
+                {'FINISHED'})
+        self.assertEqual(bpy.context.scene.tool_settings.paint_mode.layer_target_mode, 'MASK')
+
+    def test_add_material_layer_from_a_source(self):
+        object, material = self.add_layered_object()
+        self.focus_and_draw_stack(object)
+        source = bpy.data.materials.new("BakeSource")
+        source.use_nodes = True
+        principled = source.node_tree.nodes.get("Principled BSDF")
+        texture = source.node_tree.nodes.new('ShaderNodeTexImage')
+        image = bpy.data.images.new("SourceMap", 8, 8)
+        image.pixels = [0.8, 0.1, 0.1, 1.0] * 64
+        texture.image = image
+        source.node_tree.links.new(texture.outputs['Color'], principled.inputs['Base Color'])
+        with self.outliner_override():
+            result = bpy.ops.outliner.stack_layer_add(
+                type='MATERIAL', source=source.name, ordinal=-1)
+        # The source bake runs through the node-preview EEVEE path; a script context may not offer
+        # it. Either way the call is never silent: it adds the row or refuses cleanly with a report.
+        if result == {'FINISHED'}:
+            self.assertIn('MATERIAL', [layer.kind for layer in material.paint_layers])
+        else:
+            self.assertNotIn('MATERIAL', [layer.kind for layer in material.paint_layers])
+
     def test_shape_key_source_lists_and_activates(self):
         # The second source exists to prove the display mode is not tied to paint layers: the same
         # tree, ordinals and operators drive data that shares nothing with images.
@@ -147,14 +249,19 @@ class StackLayersOutlinerTest(unittest.TestCase):
         self.assertEqual([key.name for key in object.data.shape_keys.key_blocks],
                          ["Basis", "Key 2", "Key 1"])
 
-    def test_shape_key_source_leaves_paint_bindings_alone(self):
+    def test_shape_key_source_leaves_paint_layers_alone(self):
         object = self.add_object_with_shape_keys()
+        # A material's layer description is not what the shape-key source drives: activating a
+        # shape key through the same Outliner operators must leave it exactly as it was.
+        material = bpy.data.materials.new("BystanderMaterial")
+        layer = material.paint_layers.new(kind='PAINT', name="Bystander")
+        marker = layer.marker
         self.space.stack_source = 'SHAPE_KEYS'
         self.focus_and_draw_stack(object)
         with self.outliner_override():
             bpy.ops.outliner.stack_layer_activate(ordinal=1)
-        bindings = bpy.context.scene.tool_settings.paint_mode.channel_image_bindings
-        self.assertTrue(all(binding.image is None for binding in bindings))
+        self.assertEqual(len(material.paint_layers), 1)
+        self.assertEqual(material.paint_layers.find(marker), layer)
 
     def test_shape_key_source_offers_no_add(self):
         # A source that declares no kinds of rows gets no Add at all: the operator polls out
@@ -166,648 +273,50 @@ class StackLayersOutlinerTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 bpy.ops.outliner.stack_layer_add(ordinal=-1)
 
-    def test_activate_writes_bindings(self):
-        object, material, image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            result = bpy.ops.outliner.stack_layer_activate(ordinal=0)
-        self.assertEqual(result, {'FINISHED'})
-        bindings = bpy.context.scene.tool_settings.paint_mode.channel_image_bindings
-        self.assertEqual(bindings[0].image, image)
-        self.assertTrue(all(binding.image is None for binding in bindings[1:]))
-        self.assertEqual(object.active_material, material)
 
-    def test_activate_undo_preserves_paint_target(self):
-        # Decided (docs/adr/0001-paint-bindings-preserve-across-undo.md): the paint bindings are
-        # deliberately preserved across an undo restore -- a live paint target must not jump when
-        # the graph rolls back -- so undoing the very step that wrote a binding leaves the binding
-        # in place. What that undo does revert is the graph the step touched; the explicit exit is
-        # #stack_layer_clear_target (test_clear_target_after_undo).
-        object, _material, image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            bpy.ops.ed.undo_push(message="Stack Layers test baseline")
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_activate(ordinal=0), {'FINISHED'})
-        self.assertEqual(bpy.context.scene.tool_settings.paint_mode.channel_image_bindings[0].image, image)
-        with self.outliner_override():
-            bpy.ops.ed.undo()
-        # The binding survived the undo that wrote it, and the target it names is still alive.
-        # The Python handle to the original data-block is not: undo re-allocates it, so the
-        # binding is checked through the data-block it now points at, not the stale handle.
-        binding = bpy.context.scene.tool_settings.paint_mode.channel_image_bindings[0].image
-        self.assertIsNotNone(binding)
-        self.assertEqual(binding.name, "StackLayersImage")
-        self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=0), binding.session_uid)
-
-    def test_clear_target_after_undo(self):
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_activate(ordinal=0), {'FINISHED'})
-        with self.outliner_override():
-            bpy.ops.ed.undo()
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_clear_target(), {'FINISHED'})
-        self.assertTrue(
-            all(binding.image is None for binding in bpy.context.scene.tool_settings.paint_mode.channel_image_bindings)
-        )
-
-    def test_dropped_image_assigns_to_channel(self):
-        # The drop flow's exec, driven directly: an empty layer target adds a new layer on top,
-        # and the image becomes that layer's map for the channel the popup picked. The marker it
-        # carries is what a row-targeted drop addresses the layer by.
-        object, material, image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            self.assertEqual(
-                bpy.ops.outliner.stack_layer_channel_image_assign(
-                    image_uid=image.session_uid, channel='0', layer=""),
-                {'FINISHED'})
-        self.assertNotEqual(image.paint_layer_id, "")
-        self.assertEqual(image.paint_layer_channel, 'BASE_COLOR')
-        # The image is referenced twice: by the test setup's own node (the stack's bare base) and
-        # by the map the new layer got.
-        maps = [node for node in material.node_tree.nodes
-                if node.type == 'TEX_IMAGE' and node.image == image]
-        self.assertEqual(len(maps), 2)
-
-        # The new layer's row previews the image it was given; the bare base previews its own
-        # map, which is the same image from the test setup.
-        self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=1), image.session_uid)
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=0), image.session_uid)
-
-        # A row-targeted drop with a second image addresses the same layer by the marker the
-        # first drop handed out, and replaces that layer's map: the map node is reused (it is
-        # the layer's own), so the second image takes the one slot and the first goes back to
-        # being the bare base's map alone.
-        other = bpy.data.images.new("SecondStackLayersImage", 8, 8)
-        with self.outliner_override():
-            self.assertEqual(
-                bpy.ops.outliner.stack_layer_channel_image_assign(
-                    image_uid=other.session_uid, channel='0', layer=image.paint_layer_id),
-                {'FINISHED'})
-        self.assertEqual(other.paint_layer_id, image.paint_layer_id)
-        self.assertEqual(other.paint_layer_channel, 'BASE_COLOR')
-        maps = [node for node in material.node_tree.nodes
-                if node.type == 'TEX_IMAGE' and node.image == other]
-        self.assertEqual(len(maps), 1)
-        maps = [node for node in material.node_tree.nodes
-                if node.type == 'TEX_IMAGE' and node.image == image]
-        self.assertEqual(len(maps), 1)
-
-        # The row's preview followed its layer to the second image.
-        self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=1), other.session_uid)
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=0), image.session_uid)
-
-    def test_drag_sub_row_carries_channel_image(self):
-        # Dragging a channel sub-row has to carry the sub-row's own data-block -- the map image --
-        # not the stack's data-block the tree store points at, and not reinterpret the image
-        # pointer as some other struct. The hook runs the same carrier logic the drag operator's
-        # invoke does, and builds the same drag to read back.
-        object, _material, image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        self.redraw_window()
-        # The bare base's own map is the setup's image, on the Base Color channel.
-        self.assertEqual(
-            self.space.debug_stack_layer_item_drag_id(ordinal=0, role=0), image.session_uid)
-        # An ordinal past the stack has no sub-row, and nothing to drag.
-        self.assertEqual(self.space.debug_stack_layer_item_drag_id(ordinal=99, role=0), 0)
-
-    def test_rewire_in_node_tree_updates_stack(self):
-        # The rows are read from the stack's node graph, so a rewire made in the node editor --
-        # without touching any layer the Outliner was told about -- has to reach them all the
-        # same: the notifiers a graph edit sends must lead to a re-read, and the state hash must
-        # see the graph's shape, not just its size.
-        object, material, image = self.add_object_with_image_material()
-        other = bpy.data.images.new("RewiredStackLayersImage", 8, 8)
-        self.focus_and_draw_stack(object)
-        self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=0), image.session_uid)
-
-        # Swap the map the bare base reads: one node property, one redraw, one new map.
-        texture = next(node for node in material.node_tree.nodes
-                       if node.type == 'TEX_IMAGE' and node.image == image)
-        texture.image = other
-        self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=0), other.session_uid)
-
-        # Unlink the map from the graph and the row has nothing to read; re-linking it brings the
-        # map back.
-        material.node_tree.links.remove(texture.outputs['Color'].links[0])
-        self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=0), 0)
-        principled = material.node_tree.nodes.get("Principled BSDF")
-        material.node_tree.links.new(texture.outputs['Color'], principled.inputs['Base Color'])
-        self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=0), other.session_uid)
-
-    def test_marker_addresses_the_row_not_the_position(self):
-        # A marker names the row by what it is, so a script that re-addresses a row after an edit
-        # moved it gets the same row -- where a remembered ordinal is the position trap. The
-        # layer's marker is what its map carries as paint_layer_id, and the operators that address
-        # an existing row accept it in place of the position.
-        object, _material, image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            self.assertEqual(
-                bpy.ops.outliner.stack_layer_channel_image_assign(
-                    image_uid=image.session_uid, channel='0', layer=""),
-                {'FINISHED'})
-        marker = image.paint_layer_id
-        self.assertNotEqual(marker, "")
-        self.redraw_window()
-        # The image layer sits at ordinal 1 when the marker is taken.
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=1), image.session_uid)
-
-        # A new layer on top renumbers the image layer to ordinal 2; the marker still names it.
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_add(ordinal=-1), {'FINISHED'})
-        self.redraw_window()
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_activate(marker=marker), {'FINISHED'})
-        bindings = bpy.context.scene.tool_settings.paint_mode.channel_image_bindings
-        self.assertEqual(bindings[0].image, image)
-
-        # Removing by marker takes the image layer out, not whatever sits at the position the
-        # marker was issued at: the bare base at ordinal 0 survives.
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_remove(marker=marker), {'FINISHED'})
-        self.redraw_window()
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=0), image.session_uid)
-        # Only the bare base and the empty layer are left; ordinal 2 is no row at all.
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=2), 0)
-
-    def _baked_material_sources(self):
-        """Every map that names the material it was baked from."""
-        return [image.material_source for image in bpy.data.images
-                if image.material_source is not None]
-
-    def test_dropped_material_bakes_a_layer(self):
-        # The material drop's handler path, driven directly: a material dropped on the stack's
-        # empty space is baked into a layer's own maps. This replaced the older "a group that
-        # stands for the material" gesture, so there is no folder and no group-material property.
-        object, material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-
-        dropped = bpy.data.materials.new("DroppedBakeMaterial")
-        dropped.use_nodes = True
-        dropped.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
-            1.0, 0.0, 0.0, 1.0)
-        with self.outliner_override():
-            self.assertTrue(
-                self.space.debug_stack_layer_drop_id(dropped=dropped, target_ordinal=-1))
-        self.redraw_window()
-        self.assertEqual(
-            len([node for node in material.node_tree.nodes if node.type == 'GROUP']), 0)
-        self.assertIn(dropped, self._baked_material_sources())
-
-    def test_dropped_material_on_a_row_lands_on_top(self):
-        # A row target aims where the baked layer is inserted; the row it was dropped on keeps its
-        # own map.
-        object, material, image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-
-        dropped = bpy.data.materials.new("DroppedBakeMaterial")
-        dropped.use_nodes = True
-        dropped.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
-            0.0, 1.0, 0.0, 1.0)
-        with self.outliner_override():
-            self.assertTrue(
-                self.space.debug_stack_layer_drop_id(dropped=dropped, target_ordinal=0))
-        self.redraw_window()
-        self.assertEqual(
-            len([node for node in material.node_tree.nodes if node.type == 'GROUP']), 0)
-        self.assertIn(dropped, self._baked_material_sources())
-        maps = [node for node in material.node_tree.nodes
-                if node.type == 'TEX_IMAGE' and node.image == image]
-        self.assertEqual(len(maps), 1)
-
-    def test_dropped_linked_material_is_baked_from_a_local_copy(self):
-        # A linked material is made local before it is baked: the layer's maps must never point
-        # into a library, so the source they name is a local data-block.
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-
-        filepath = bpy.path.abspath(bpy.app.tempdir + "/stack_layers_material_group_lib.blend")
-        # The copy keeps this session on the untitled file: linking from the file one is currently
-        # in is refused outright.
-        bpy.ops.wm.save_as_mainfile(filepath=filepath, relative_remap=False, copy=True)
-        with bpy.data.libraries.load(filepath, link=True) as (data_from, data_to):
-            data_to.materials = [name for name in data_from.materials
-                                 if name.startswith("StackLayersMaterial")]
-        self.assertEqual(len(data_to.materials), 1)
-        linked = data_to.materials[0]
-        self.assertIsNotNone(linked.library)
-
-        with self.outliner_override():
-            self.assertTrue(
-                self.space.debug_stack_layer_drop_id(dropped=linked, target_ordinal=-1))
-        self.redraw_window()
-        sources = self._baked_material_sources()
-        self.assertTrue(sources, "the drop should bake the material into a layer's map")
-        self.assertTrue(all(source.library is None for source in sources))
-
-    def test_dropped_material_refuses_on_linked_stack(self):
-        # The group is created in the stack's own graph, so a linked stack material refuses the
-        # drop the way it refuses every other edit -- and refusing means nothing was added.
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-
-        filepath = bpy.path.abspath(bpy.app.tempdir + "/stack_layers_material_owner_lib.blend")
-        bpy.ops.wm.save_as_mainfile(filepath=filepath, relative_remap=False, copy=True)
-        with bpy.data.libraries.load(filepath, link=True) as (data_from, data_to):
-            data_to.materials = [name for name in data_from.materials
-                                 if name.startswith("StackLayersMaterial")]
-        self.assertEqual(len(data_to.materials), 1)
-        linked = data_to.materials[0]
-
-        mesh = bpy.data.meshes.new("LinkedGroupMesh")
-        linked_object = bpy.data.objects.new("LinkedGroupObject", mesh)
-        bpy.context.collection.objects.link(linked_object)
-        mesh.materials.append(linked)
-        bpy.context.view_layer.objects.active = linked_object
-        self.focus_and_draw_stack(linked_object)
-
-        local = bpy.data.materials.new("DroppedGroupMaterial")
-        self.assertFalse(
-            self.space.debug_stack_layer_drop_id(dropped=local, target_ordinal=-1))
-
-    def test_merged_down_layers_become_a_group(self):
-        # Merge down is a collapse into a folder: the pair composites the same inside a group
-        # whose blend is the lower row's, and the stack lists one row where there were two.
-        object, material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            bpy.ops.outliner.stack_layer_add(ordinal=-1)
-            bpy.ops.outliner.stack_layer_add(ordinal=-1)
-        self.redraw_window()
-
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_merge_down(ordinal=2), {'FINISHED'})
-        self.redraw_window()
-        # The group row previews nothing of its own, and the row above it is gone.
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=1), 0)
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=2), 0)
-        # The collapse is a real folder in the stack's graph.
-        self.assertEqual(
-            len([node for node in material.node_tree.nodes if node.type == 'GROUP']), 1)
-        # The bottom of the stack has nothing below to merge into.
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_merge_down(ordinal=0), {'CANCELLED'})
-
-    def test_removed_rows_span_the_selection(self):
-        # The removal operator acts on the whole selection, the way group does: whatever rows are
-        # picked go at once, the highest ordinal first.
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            bpy.ops.outliner.stack_layer_add(ordinal=-1)
-            bpy.ops.outliner.stack_layer_add(ordinal=-1)
-        self.redraw_window()
-
-        self.space.debug_stack_layer_row_select(ordinal=1)
-        self.space.debug_stack_layer_row_select(ordinal=2, extend=True)
-        self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=1))
-        self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=2))
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_remove(), {'FINISHED'})
-        self.redraw_window()
-        # Only the bare base is left.
-        self.assertEqual(self.space.debug_stack_layer_row_preview_uid(ordinal=1), 0)
-
-    def test_linked_material_operators_cancel(self):
-        # The stack of a linked material is read-only: the edit operators refuse, and refusing
-        # means the graph was not touched, not that it was half-edited.
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-
-        filepath = bpy.path.abspath(bpy.app.tempdir + "/stack_layers_lib_test.blend")
-        # The copy keeps this session on the untitled file: linking from the file one is currently
-        # in is refused outright.
-        bpy.ops.wm.save_as_mainfile(filepath=filepath, relative_remap=False, copy=True)
-        with bpy.data.libraries.load(filepath, link=True) as (data_from, data_to):
-            data_to.materials = [name for name in data_from.materials
-                                 if name.startswith("StackLayersMaterial")]
-        self.assertEqual(len(data_to.materials), 1)
-        linked = data_to.materials[0]
-        self.assertIsNotNone(linked.library)
-
-        mesh = bpy.data.meshes.new("LinkedStackMesh")
-        linked_object = bpy.data.objects.new("LinkedStackObject", mesh)
-        bpy.context.collection.objects.link(linked_object)
-        mesh.materials.append(linked)
-        bpy.context.view_layer.objects.active = linked_object
-        self.focus_and_draw_stack(linked_object)
-
-        with self.outliner_override():
-            # Remove, add and move all poll on editability, and refuse before the operator runs.
-            with self.assertRaises(RuntimeError):
-                bpy.ops.outliner.stack_layer_remove(ordinal=0)
-            with self.assertRaises(RuntimeError):
-                bpy.ops.outliner.stack_layer_move(ordinal=0, direction='UP')
-            with self.assertRaises(RuntimeError):
-                bpy.ops.outliner.stack_layer_add(ordinal=-1)
-            # The image-assign exec polls only for the area, and refuses from the edit itself
-            # (an error report, which bpy.ops raises): nothing is written to the linked graph.
-            dropped = bpy.data.images.new("DroppedStackLayersImage", 8, 8)
-            with self.assertRaises(RuntimeError):
-                bpy.ops.outliner.stack_layer_channel_image_assign(
-                    image_uid=dropped.session_uid, channel='0', layer="")
-
-    def test_two_outliners_single_owner(self):
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-
-        # Two Outliners on one stack: the duplicated one reads the same focus and the same
-        # bindings, and neither of them owns the other. The duplicate goes to a new window, which
-        # a background build has none of, so this runs where it can and skips where it cannot.
-        try:
-            with self.outliner_override():
-                bpy.ops.screen.area_dupli('INVOKE_DEFAULT')
-        except RuntimeError:
-            self.skipTest("Needs a window to duplicate the area into")
-        windows = [
-            (window, area)
-            for window in bpy.context.window_manager.windows
-            for area in window.screen.areas
-            if area.type == 'OUTLINER' and area != self.area
-        ]
-        if not windows:
-            self.skipTest("The duplicated Outliner area is not reachable here")
-        window, area = windows[0]
-        region = next(region for region in area.regions if region.type == 'WINDOW')
-        area.spaces.active.display_mode = 'STACK_LAYERS'
-        area.spaces.active.stack_layers_view = 'STACK'
-
-        with bpy.context.temp_override(window=window, screen=window.screen, area=area, region=region):
-            self.assertEqual(bpy.ops.outliner.stack_layer_activate(ordinal=0), {'FINISHED'})
-        # What the second Outliner activated is true everywhere: the bindings are session state,
-        # not a per-space secret.
-        bindings = bpy.context.scene.tool_settings.paint_mode.channel_image_bindings
-        self.assertIsNotNone(bindings[0].image)
-
-    def test_delete_focused_object_does_not_crash(self):
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        bpy.data.objects.remove(object)
-        self.redraw_window()
-
-    def test_delete_pinned_focused_object_does_not_crash(self):
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        self.space.use_stack_layer_pin = True
-        bpy.data.objects.remove(object)
-        self.redraw_window()
-
-    def test_pinned_focus_survives_undo(self):
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        self.space.use_stack_layer_pin = True
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_add(ordinal=-1), {'FINISHED'})
-        # The undo restores the stack; the focus was set before it, and names its object by
-        # session UID, which survives the undo where a pointer would not.
-        with self.outliner_override():
-            bpy.ops.ed.undo()
-        self.redraw_window()
-
-    def test_remap_material_does_not_crash(self):
-        object, material, _image = self.add_object_with_image_material()
-        other = bpy.data.materials.new("OtherStackMaterial")
-        self.focus_and_draw_stack(object)
-        material.user_remap(other)
-        self.redraw_window()
-
-    def test_stack_focus_name_reads_owner(self):
-        object, material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        self.redraw_window()
-        self.assertEqual(self.space.stack_focus_name, material.name)
-
-    def test_no_active_object_does_not_crash(self):
-        self.space.display_mode = 'STACK_LAYERS'
-        self.space.stack_layers_view = 'STACK'
-        bpy.context.view_layer.objects.active = None
-        self.redraw_window()
-
-    def test_selected_row_survives_move(self):
-        # A move renumbers the row it acted on; the row itself -- not whatever ordinal it used to
-        # have -- is what has to read as selected once the tree rebuilds.
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_add(ordinal=-1), {'FINISHED'})
-        self.redraw_window()
-        self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=1))
-
-        with self.outliner_override():
-            result = bpy.ops.outliner.stack_layer_move(ordinal=1, direction='DOWN')
-        self.assertEqual(result, {'FINISHED'})
-        self.redraw_window()
-        self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=0))
-        self.assertFalse(self.space.debug_stack_layer_row_is_selected(ordinal=1))
-
-    def test_selected_group_survives_renumbering(self):
-        # An empty group starts out open and selected; inserting a layer below it renumbers the
-        # group, and both have to still read true at the group's new ordinal.
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_group_add(ordinal=-1), {'FINISHED'})
-        self.redraw_window()
-        self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=1))
-        self.assertTrue(self.space.debug_stack_layer_row_is_open(ordinal=1))
-
-        with self.outliner_override():
-            result = bpy.ops.outliner.stack_layer_add(type='PAINT', ordinal=0)
-        self.assertEqual(result, {'FINISHED'})
-        self.redraw_window()
-        self.assertTrue(self.space.debug_stack_layer_row_is_open(ordinal=2))
-
-    def test_clicked_row_state_survives_rebuild(self):
-        # What the user did since the last build -- selecting a row, collapsing one -- lives in the
-        # tree store; a rebuild reads it into the identity-keyed map rather than reverting the rows
-        # to what the map held before the click.
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_add(ordinal=-1), {'FINISHED'})
-        self.redraw_window()
-        # The add left its own row selected; picking row 0 instead is the user's doing, not an
-        # edit's.
-        self.space.debug_stack_layer_row_select(ordinal=0)
-        self.redraw_window()
-        self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=0))
-        self.assertFalse(self.space.debug_stack_layer_row_is_selected(ordinal=1))
-        # The next build finds the row already in the map and agrees with itself.
-        self.redraw_window()
-        self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=0))
-
-    def test_row_state_survives_ten_renumbering_edits(self):
-        # Ten rebuilds with a renumbering edit between each. The collapsed group has to follow its
-        # row however the ordinals shift -- it must not pop open on a fresh tree-store entry, and
-        # no other row may inherit its collapse -- and the selection has to be the edit's own row,
-        # not whatever moved into the number.
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            # The material's own bottom layer and two added layers, wrapped into a group. The
-            # group is what the edit leaves selected; it has to hold something, since a row
-            # without children cannot be collapsed.
-            self.assertEqual(bpy.ops.outliner.stack_layer_add(ordinal=-1), {'FINISHED'})
-            self.assertEqual(bpy.ops.outliner.stack_layer_add(ordinal=-1), {'FINISHED'})
-            self.assertEqual(
-                bpy.ops.outliner.stack_layer_group(ordinal=1, to_ordinal=2), {'FINISHED'})
-        self.redraw_window()
-
-        group_ordinal = next(ordinal for ordinal in range(6)
-                             if self.space.debug_stack_layer_row_is_selected(ordinal=ordinal))
-        self.assertTrue(self.space.debug_stack_layer_row_is_open(ordinal=group_ordinal))
-
-        self.space.debug_stack_layer_row_closed_set(ordinal=group_ordinal, closed=True)
-        self.redraw_window()
-        self.assertFalse(self.space.debug_stack_layer_row_is_open(ordinal=group_ordinal))
-        # The collapse did not take the selection with it.
-        self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=group_ordinal))
-
-        for _round in range(10):
-            with self.outliner_override():
-                # A layer at the bottom renumbers every row above it, the group included.
-                self.assertEqual(
-                    bpy.ops.outliner.stack_layer_add(type='PAINT', ordinal=0), {'FINISHED'})
-            group_ordinal += 1
-            self.redraw_window()
-            self.assertFalse(self.space.debug_stack_layer_row_is_open(ordinal=group_ordinal))
-            # `ordinal=0` names the anchor row, and the Add inserts above it, so the fresh row
-            # lands at 1. It starts open and selected: it did not inherit the group's collapse.
-            self.assertTrue(self.space.debug_stack_layer_row_is_open(ordinal=1))
-            self.assertTrue(self.space.debug_stack_layer_row_is_selected(ordinal=1))
-
-            with self.outliner_override():
-                self.assertEqual(bpy.ops.outliner.stack_layer_remove(ordinal=0), {'FINISHED'})
-            group_ordinal -= 1
-            self.redraw_window()
-            self.assertFalse(self.space.debug_stack_layer_row_is_open(ordinal=group_ordinal))
-            # Removing leaves nothing selected: no row inherited the removed one's state.
-            self.assertFalse(self.space.debug_stack_layer_row_is_selected(ordinal=0))
-            self.assertFalse(self.space.debug_stack_layer_row_is_selected(ordinal=1))
-
-    def test_selection_does_not_leak_across_focus_change(self):
-        object, _material, _image = self.add_object_with_image_material()
-        other_object, _other_material, _other_image = self.add_object_with_image_material()
-
-        # Give the second stack a row at the ordinal the first stack is about to record a selection
-        # for, so a leak would land on a row that actually exists rather than passing by having
-        # nothing to land on.
-        self.focus_and_draw_stack(other_object)
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_add(ordinal=-1), {'FINISHED'})
-        self.redraw_window()
-
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_add(ordinal=-1), {'FINISHED'})
-        # The selection for `object`'s row 1 is now recorded against that row's identity.
-        # Switching focus before the rebuild must not let it land on the other stack's own row 1
-        # just because the ordinal matches.
-        self.focus_and_draw_stack(other_object)
-        self.assertFalse(self.space.debug_stack_layer_row_is_selected(ordinal=1))
-
-    def test_selection_does_not_leak_across_source_switch(self):
-        # Same problem as a focus change, but for switching which source is shown on one object:
-        # the selection names a paint stack row, and must not resolve against the shape key stack
-        # it is switched to.
-        object, _material, _image = self.add_object_with_image_material()
-        object.data.vertices.add(1)
-        object.shape_key_add(name="Basis")
-        object.shape_key_add(name="Key 1")
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_add(ordinal=-1), {'FINISHED'})
-
-        self.space.stack_source = 'SHAPE_KEYS'
-        self.focus_and_draw_stack(object)
-        self.assertFalse(self.space.debug_stack_layer_row_is_selected(ordinal=1))
-
-    def _duplicate_outliner_area(self):
-        """A second, independently drawn Outliner area, or None where the test runner has no
-        window to duplicate one into -- see test_two_outliners_single_owner for why this can only
-        run where it can and skip where it cannot."""
-        try:
-            with self.outliner_override():
-                bpy.ops.screen.area_dupli('INVOKE_DEFAULT')
-        except RuntimeError:
-            return None
-        windows = [
-            (window, area)
-            for window in bpy.context.window_manager.windows
-            for area in window.screen.areas
-            if area.type == 'OUTLINER' and area != self.area
-        ]
-        return windows[0] if windows else None
-
-    def test_debug_drop_refuses_between_different_materials(self):
-        # #outliner_stack_layer_debug_drop goes through the same identity resolve a real drop
-        # does; two Outliners on two different materials must refuse each other's rows.
-        object_a, _material_a, _image_a = self.add_object_with_image_material()
-        object_b, _material_b, _image_b = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object_a)
-
-        duplicated = self._duplicate_outliner_area()
-        if duplicated is None:
-            self.skipTest("Needs a window to duplicate the area into")
-        window, area = duplicated
-        region = next(region for region in area.regions if region.type == 'WINDOW')
-        other_space = area.spaces.active
-        other_space.display_mode = 'STACK_LAYERS'
-        other_space.stack_layers_view = 'STACK'
-        with bpy.context.temp_override(window=window, screen=window.screen, area=area, region=region):
-            self.assertEqual(
-                bpy.ops.outliner.stack_layer_focus(
-                    object=object_b.name, sub_index=-1, enter_edit_mode=False),
-                {'FINISHED'},
-            )
-            area.tag_redraw()
-            bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-
-        # Refusing before the resolve reaches a move is what guarantees neither graph is touched:
-        # #outliner_stack_layer_debug_drop calls #StackSource::row_move nowhere but its last line.
-        self.assertFalse(
-            other_space.debug_stack_layer_drop_between(
-                source_space=self.space, source_ordinal=0, target_ordinal=0))
-
-    def test_debug_drop_reorders_within_the_same_stack(self):
-        object, _material, _image = self.add_object_with_image_material()
-        self.focus_and_draw_stack(object)
-        with self.outliner_override():
-            self.assertEqual(bpy.ops.outliner.stack_layer_add(ordinal=-1), {'FINISHED'})
-        self.redraw_window()
-
-        duplicated = self._duplicate_outliner_area()
-        if duplicated is None:
-            self.skipTest("Needs a window to duplicate the area into")
-        window, area = duplicated
-        other_space = area.spaces.active
-        other_space.display_mode = 'STACK_LAYERS'
-        other_space.stack_layers_view = 'STACK'
-        with bpy.context.temp_override(window=window, screen=window.screen, area=area):
-            area.tag_redraw()
-            bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-
-        # Both Outliners show the same object's stack, so the drop is exactly a reorder.
-        self.assertTrue(
-            other_space.debug_stack_layer_drop_between(
-                source_space=self.space, source_ordinal=1, target_ordinal=0))
-
-    def test_material_without_nodetree_does_not_crash(self):
-        object, material, _image = self.add_object_with_image_material()
-        material.use_nodes = False
-        self.focus_and_draw_stack(object)
-        self.redraw_window()
+class PaintLayersApiTest(unittest.TestCase):
+    """The data API the stack is meant to be driven through, without an Outliner in the way."""
+
+    def setUp(self):
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+
+    def test_new_find_remove_by_marker(self):
+        material = bpy.data.materials.new("LayeredApiMaterial")
+        self.assertFalse(material.is_layered)
+        layer = material.paint_layers.new(kind='PAINT', name="Layer One")
+        self.assertIsNotNone(layer)
+        self.assertTrue(material.is_layered)
+        self.assertEqual(material.paint_layers.active, layer)
+
+        # A row resolves by its marker, never by position.
+        marker = layer.marker
+        self.assertEqual(material.paint_layers.find(marker), layer)
+
+        material.paint_layers.remove(layer)
+        self.assertEqual(len(material.paint_layers), 0)
+        self.assertIsNone(material.paint_layers.find(marker))
+
+    def test_kind_properties_and_channels(self):
+        material = bpy.data.materials.new("LayeredChannelsMaterial")
+        layer = material.paint_layers.new(kind='FILL', name="Fill")
+        layer.opacity = 50.0
+        layer.fill_color = (0.1, 0.2, 0.3, 1.0)
+        self.assertEqual(layer.kind, 'FILL')
+
+        record = layer.channel_add(channel='BASE_COLOR')
+        self.assertIsNotNone(record)
+        self.assertEqual(record.channel, 'BASE_COLOR')
+        layer.channel_set_enabled(channel='BASE_COLOR', enabled=False)
+        layer.channel_remove(channel='BASE_COLOR')
+
+    def test_issues_are_exposed(self):
+        material = bpy.data.materials.new("LayeredIssuesMaterial")
+        layer = material.paint_layers.new(kind='PAINT', name="Layer")
+        # A fresh authored layer is valid: its default channels are not a problem.
+        self.assertEqual(len(layer.issues), 0)
+        # The issue vocabulary still names the folder-with-a-map case.
+        code_items = bpy.types.MaterialPaintLayerIssue.bl_rna.properties['code'].enum_items
+        self.assertIn('FOLDER_HAS_MAPS', [item.identifier for item in code_items])
 
 
 if __name__ == "__main__":

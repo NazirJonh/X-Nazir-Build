@@ -30,7 +30,6 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
-#include "BKE_paint_material_mask_bake.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
 #include "BKE_undo_system.hh"
@@ -253,8 +252,6 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
     /* Same reasoning for the composite cache, which owns #ImBuf buffers of its own and is keyed
      * on session UIDs the same way. */
     BKE_paint_material_composite_cache_free_all();
-    /* And the baked masks, keyed the same way. */
-    BKE_paint_material_mask_bake_cache_free_all();
     /* And the Combined preview derived from them, which owns a float buffer of its own. */
     BKE_paint_material_combined_cache_free_all();
   }
@@ -265,7 +262,6 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
      * recomputing a composite is milliseconds, so marking it costs nothing like the full EEVEE
      * re-render that dropping a bake per Ctrl+Z would. */
     BKE_paint_material_composite_cache_invalidate(nullptr);
-    BKE_paint_material_mask_bake_cache_invalidate(nullptr);
     BKE_paint_material_combined_cache_invalidate(nullptr);
   }
 

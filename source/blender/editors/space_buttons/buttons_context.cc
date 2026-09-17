@@ -38,6 +38,7 @@
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_particle.h"
 #include "BKE_screen.hh"
 
@@ -395,24 +396,37 @@ static bool buttons_context_path_brush_material(const bContext *C, ButsContextPa
   return true;
 }
 
-static bool buttons_context_path_layer_material(Main *bmain,
-                                                 const Scene *scene,
-                                                 ButsContextPath *path)
+static bool buttons_context_path_layer_material(const bContext *C, ButsContextPath *path)
 {
   /* Pinning is ignored like for #BCONTEXT_BRUSH_MATERIAL: the tab follows the active paint
    * layer. */
-  if (bmain == nullptr || scene == nullptr || scene->toolsettings == nullptr) {
+  if (C == nullptr) {
     return false;
   }
-  const PaintModeSettings &mode = scene->toolsettings->paint_mode;
-  /* A Material layer edits the material it was baked from; any other row shows its channels on
-   * the material that owns the stack. */
-  const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
-      *bmain, mode);
-  if (!layer.has_value()) {
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  if (view_layer == nullptr) {
     return false;
   }
-  Material *material = layer->is_material() ? layer->source : layer->owner;
+
+  /* A layered material paints through the description: the active row of the active object's
+   * active material slot. A Material row edits the material it was baked from; any other row shows
+   * its channels on the material that owns the stack. */
+  Object *ob = BKE_view_layer_active_object_get(view_layer);
+  Material *owner = BKE_paint_layers_active_material_get(ob);
+  if (owner == nullptr) {
+    return false;
+  }
+  Material *material = owner;
+  if (MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(*owner)) {
+    if (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL && layer->material != nullptr) {
+      material = layer->material;
+    }
+  }
+  /* The object comes first: the panels of this tab reach the material that owns the stack through
+   * `context.object.active_material`, and `context.material` stays the row's source material
+   * because the path holds exactly one Material. */
+  path->ptr[path->len] = RNA_id_pointer_create(&ob->id);
+  path->len++;
   path->ptr[path->len] = RNA_id_pointer_create(&material->id);
   path->len++;
   return true;
@@ -769,7 +783,7 @@ static bool buttons_context_path(
       found = buttons_context_path_brush_material(C, path);
       break;
     case BCONTEXT_LAYER_MATERIAL:
-      found = buttons_context_path_layer_material(CTX_data_main(C), scene, path);
+      found = buttons_context_path_layer_material(C, path);
       break;
     default:
       found = false;

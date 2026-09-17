@@ -7,12 +7,17 @@
  */
 
 #include <cfloat>
+#include <climits>
 #include <cstdlib>
+#include <string>
 
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_scene_types.h"
 
 #include "BLI_math_rotation.h"
+#include "BLI_rect.h"
+#include "BLI_string.h"
 
 #include "BLT_translation.hh"
 
@@ -63,13 +68,19 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
 #  include "MEM_guardedalloc.h"
 
 #  include "DNA_gpencil_legacy_types.h"
+#  include "DNA_image_types.h"
 #  include "DNA_meshdata_types.h"
 #  include "DNA_node_types.h"
 #  include "DNA_object_types.h"
 #  include "DNA_screen_types.h"
 #  include "DNA_space_types.h"
 
+#  include "BLI_listbase.h"
 #  include "BLI_string_utf8.h"
+#  include "BLI_index_range.hh"
+#  include "BLI_math_vector.h"
+#  include "BLI_span.hh"
+#  include "BLI_uuid.h"
 
 #  include "BKE_attribute.h"
 #  include "BKE_attribute.hh"
@@ -85,6 +96,10 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
 #  include "BKE_mesh_types.hh"
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_paint_layers.hh"
+#  include "BKE_paint_layers_composite.hh"
+#  include "BKE_paint_layers_generate.hh"
+#  include "BKE_report.hh"
 #  include "BKE_scene.hh"
 #  include "BKE_texture.h"
 #  include "BKE_workspace.hh"
@@ -169,6 +184,27 @@ static void rna_Material_active_paint_texture_index_update(bContext *C, PointerR
 {
   Main *bmain = CTX_data_main(C);
   Material *ma = id_cast<Material *>(ptr->owner_id);
+
+  if (paint_layers_is_layered(*ma)) {
+    /* The slot index maps to a channel through a fixed table (an empty slot still names its
+     * channel), so the chosen entry drives the stroke's channel. */
+    Scene *scene = CTX_data_scene(C);
+    if (scene != nullptr) {
+      PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+      const int slot_index = ma->paint_active_slot;
+      const int channel = BKE_paint_layers_texpaint_slot_channel(&paint_mode, slot_index);
+      if (channel >= 0) {
+        paint_mode.active_layer_channel = channel;
+      }
+      if (ma->texpaintslot != nullptr && slot_index >= 0 && slot_index < ma->tot_slots) {
+        Image *image = ma->texpaintslot[slot_index].ima;
+        if (image != nullptr) {
+          ED_space_image_sync(bmain, image, false);
+        }
+      }
+    }
+    return;
+  }
 
   if (ma->nodetree) {
     std::pair<bNodeTree *, bNode *> found = BKE_texpaint_slot_material_find_node(
@@ -369,6 +405,40 @@ static void rna_TexPaintSlot_uv_layer_set(PointerRNA *ptr, const char *value)
   }
 }
 
+/**
+ * The name of an empty slot of a *layered* material: the channel the slot will paint, since the
+ * slot table is fixed and an empty slot has no image to name. False for every other case -- a
+ * non-layered material, or a slot that has an image or an attribute to name itself by.
+ */
+static bool rna_TexPaintSlot_layered_empty_name(PointerRNA *ptr, std::string &r_name)
+{
+  TexPaintSlot *data = static_cast<TexPaintSlot *>(ptr->data);
+  if (data->ima != nullptr || data->attribute_name != nullptr) {
+    return false;
+  }
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr || !paint_layers_is_layered(*ma) || ma->texpaintslot == nullptr) {
+    return false;
+  }
+  const int slot_index = int(data - ma->texpaintslot);
+  const char *channel_name = nullptr;
+  if (ma->tot_slots == 1) {
+    /* The single slot a MASK-mode layered material has. */
+    channel_name = IFACE_("Mask");
+  }
+  else {
+    const int channel = BKE_paint_layers_texpaint_slot_channel_content(slot_index);
+    if (channel >= 0) {
+      channel_name = IFACE_(BKE_paint_material_channel_info(eMaterialPaintChannel(channel)).ui_name);
+    }
+  }
+  if (channel_name == nullptr) {
+    return false;
+  }
+  r_name = std::string(channel_name) + " \xe2\x80\x94 no map";
+  return true;
+}
+
 static void rna_TexPaintSlot_name_get(PointerRNA *ptr, char *value)
 {
   TexPaintSlot *data = static_cast<TexPaintSlot *>(ptr->data);
@@ -383,6 +453,12 @@ static void rna_TexPaintSlot_name_get(PointerRNA *ptr, char *value)
     return;
   }
 
+  std::string empty_name;
+  if (rna_TexPaintSlot_layered_empty_name(ptr, empty_name)) {
+    BLI_strncpy(value, empty_name.c_str(), MAX_NAME);
+    return;
+  }
+
   value[0] = '\0';
 }
 
@@ -394,6 +470,11 @@ static int rna_TexPaintSlot_name_length(PointerRNA *ptr)
   }
   if (data->attribute_name != nullptr) {
     return strlen(data->attribute_name);
+  }
+
+  std::string empty_name;
+  if (rna_TexPaintSlot_layered_empty_name(ptr, empty_name)) {
+    return int(empty_name.size());
   }
 
   return 0;
@@ -461,11 +542,1724 @@ static void rna_GpencilColorData_fill_image_set(PointerRNA *ptr,
   pcolor->ima = id_cast<Image *>(id);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Paint Layer
+ * \{ */
+
+/** The collection iterates the top level of the stack; nested folders are reached through find. */
+static void rna_Material_paint_layers_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  Material *ma = static_cast<Material *>(ptr->data);
+  rna_iterator_listbase_begin(iter, ptr, &ma->paint_layers, nullptr);
+}
+
+static PointerRNA rna_Material_paint_layers_active_get(PointerRNA *ptr)
+{
+  Material *ma = static_cast<Material *>(ptr->data);
+  const bUUID marker = BKE_paint_layers_active_get(*ma);
+  if (BLI_uuid_is_nil(marker)) {
+    return PointerRNA_NULL;
+  }
+  MaterialPaintLayer *layer = BKE_paint_layers_find(*ma, marker);
+  if (layer == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_MaterialPaintLayer, layer);
+}
+
+static void rna_Material_paint_layers_active_set(PointerRNA *ptr,
+                                                 PointerRNA value,
+                                                 ReportList *reports)
+{
+  Material *ma = static_cast<Material *>(ptr->data);
+  if (value.data == nullptr) {
+    BKE_paint_layers_active_set(*ma, {});
+    return;
+  }
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(value.data);
+  if (BKE_paint_layers_find(*ma, layer->marker) != layer) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Material '%s' does not contain the given paint layer",
+                ma->id.name + 2);
+    return;
+  }
+  BKE_paint_layers_active_set(*ma, layer->marker);
+}
+
+static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
+                                                         int kind,
+                                                         const char *name)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, eMaterialPaintLayerKind(kind), name, nullptr, PaintLayerPlace::Above);
+  if (layer != nullptr) {
+    /* The default channel set a freshly authored Paint or Fill row takes part in. */
+    BKE_paint_layers_default_channels_apply(*ma, *layer);
+    /* A fresh row becomes the cursor, mirroring what the UI does when it adds one. */
+    BKE_paint_layers_active_set(*ma, layer->marker);
+    /* BKE only tags DEG; the Outliner and the Layer Material tab need the WM notifier too. */
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  }
+  return layer;
+}
+
+static void rna_Material_paint_layers_remove(Material *ma,
+                                             ReportList *reports,
+                                             PointerRNA *layer_ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(layer_ptr->data);
+  if (!BKE_paint_layers_remove(*ma, layer)) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Material '%s' does not contain the given paint layer",
+                ma->id.name + 2);
+    return;
+  }
+  layer_ptr->invalidate();
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
+static MaterialPaintLayer *rna_Material_paint_layers_find(Material *ma, const char *marker)
+{
+  bUUID uuid;
+  if (!BLI_uuid_parse_string(&uuid, marker)) {
+    return nullptr;
+  }
+  return BKE_paint_layers_find(*ma, uuid);
+}
+
+static bool rna_Material_paint_layers_composite(Material *ma,
+                                                ReportList *reports,
+                                                int channel,
+                                                PointerRNA *image_ptr)
+{
+  Image *image = static_cast<Image *>(image_ptr->data);
+  if (image == nullptr) {
+    BKE_report(reports, RPT_ERROR, "No destination image");
+    return false;
+  }
+  return BKE_paint_layers_composite_image(*ma, channel, *image, nullptr, reports);
+}
+
+static void rna_Material_paint_layers_regenerate(Material *ma, Main *bmain)
+{
+  if (bmain == nullptr || ma == nullptr) {
+    return;
+  }
+  BKE_paint_layers_regenerate(*bmain, *ma);
+}
+
+static bool rna_Material_is_layered_get(PointerRNA *ptr)
+{
+  return paint_layers_is_layered(*id_cast<Material *>(ptr->owner_id));
+}
+
+static bool rna_Material_paint_layers_tree_is_stale_get(PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (!paint_layers_is_layered(*ma)) {
+    return false;
+  }
+  /* The generated tree is out of step when it is missing altogether or the description asked for
+   * a rebuild; an unlocked material can sit in this state until the user regenerates. */
+  return ma->paint_layers_tree == nullptr ||
+         (ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0;
+}
+
+static bool rna_Material_paint_layers_locked_get(PointerRNA *ptr)
+{
+  return (id_cast<Material *>(ptr->owner_id)->paint_layers_flag & MA_PAINT_LAYERS_LOCKED) != 0;
+}
+
+static void rna_Material_paint_layers_locked_set(PointerRNA *ptr, bool value)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  SET_FLAG_FROM_TEST(ma->paint_layers_flag, value, MA_PAINT_LAYERS_LOCKED);
+  /* Locking hands the tree back to the generator, which rebuilds it and overwrites whatever manual
+   * edits were made. Unlocking only stops the generator: the tree is left as it is until the user
+   * asks for a Regenerate. */
+  if (value) {
+    ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+  }
+  DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
+}
+
+/** Every layer-pointer setter goes back to the material that owns the row, which the pointer's
+ * #owner_id carries however deep the row is nested. */
+static Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *layer)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr || BKE_paint_layers_find(*ma, layer->marker) != layer) {
+    return nullptr;
+  }
+  return ma;
+}
+
+static void rna_Material_paint_layers_move(Material *ma,
+                                           ReportList *reports,
+                                           PointerRNA *layer_ptr,
+                                           PointerRNA *anchor_ptr,
+                                           int place)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(layer_ptr->data);
+  MaterialPaintLayer *anchor = static_cast<MaterialPaintLayer *>(anchor_ptr->data);
+  if (!BKE_paint_layers_move(*ma, layer, anchor, PaintLayerPlace(place))) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Cannot move paint layer '%s' relative to '%s'",
+                layer->name,
+                anchor != nullptr ? anchor->name : "the top of the stack");
+  }
+}
+
+static void rna_Material_paint_layers_reorder(Material *ma,
+                                              ReportList *reports,
+                                              PointerRNA *layer_ptr,
+                                              int index)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(layer_ptr->data);
+  if (!BKE_paint_layers_reorder(*ma, layer, index)) {
+    BKE_reportf(reports, RPT_ERROR, "Cannot reorder paint layer '%s'", layer->name);
+  }
+}
+
+static MaterialPaintLayer *rna_Material_paint_layers_duplicate(Material *ma,
+                                                               Main *bmain,
+                                                               ReportList *reports,
+                                                               PointerRNA *layer_ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(layer_ptr->data);
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, layer);
+  if (copy == nullptr) {
+    BKE_reportf(reports, RPT_ERROR, "Cannot duplicate paint layer '%s'", layer->name);
+    return nullptr;
+  }
+  return copy;
+}
+
+/**
+ * RNA carries no list arguments, so a group is named by its members pairwise: the first row plus
+ * an optional second. Larger selections are grouped by the UI operator, which calls the BKE API
+ * directly with the full span.
+ */
+static MaterialPaintLayer *rna_Material_paint_layers_group(Material *ma,
+                                                           ReportList *reports,
+                                                           PointerRNA *layer_ptr,
+                                                           PointerRNA *with_ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(layer_ptr->data);
+  MaterialPaintLayer *with = static_cast<MaterialPaintLayer *>(with_ptr->data);
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, with != nullptr ?
+                                                               Span<MaterialPaintLayer *>{layer,
+                                                                                          with} :
+                                                               Span<MaterialPaintLayer *>{layer});
+  if (folder == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Cannot group paint layers of different lists");
+    return nullptr;
+  }
+  return folder;
+}
+
+static void rna_Material_paint_layers_ungroup(Material *ma,
+                                              ReportList *reports,
+                                              PointerRNA *folder_ptr)
+{
+  MaterialPaintLayer *folder = static_cast<MaterialPaintLayer *>(folder_ptr->data);
+  if (!BKE_paint_layers_ungroup(*ma, folder)) {
+    BKE_report(reports, RPT_ERROR, "Cannot ungroup this paint layer");
+    return;
+  }
+  folder_ptr->invalidate();
+}
+
+static void rna_MaterialPaintLayer_name_set(PointerRNA *ptr, const char *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_rename(*ma, layer, value);
+  }
+}
+
+static int rna_MaterialPaintLayer_blend_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->blend;
+}
+
+static void rna_MaterialPaintLayer_blend_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_blend(*ma, layer, eMaterialPaintLayerBlend(value));
+  }
+}
+
+static float rna_MaterialPaintLayer_opacity_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->opacity * 100.0f;
+}
+
+static void rna_MaterialPaintLayer_opacity_set(PointerRNA *ptr, float value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_opacity(*ma, layer, value / 100.0f);
+  }
+}
+
+static void rna_MaterialPaintLayer_fill_color_get(PointerRNA *ptr, float *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  copy_v4_v4(value, layer->fill_color);
+}
+
+static void rna_MaterialPaintLayer_fill_color_set(PointerRNA *ptr, const float *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_fill_color(*ma, layer, value);
+  }
+}
+
+static int rna_MaterialPaintLayer_color_tag_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->color_tag;
+}
+
+static void rna_MaterialPaintLayer_color_tag_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_color_tag(*ma, layer, int8_t(value));
+  }
+}
+
+static bool rna_MaterialPaintLayer_enabled_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer->flag & MA_PAINT_LAYER_ENABLED) != 0;
+}
+
+static void rna_MaterialPaintLayer_enabled_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_enabled(*ma, layer, value);
+  }
+}
+
+static void rna_MaterialPaintLayer_custom_group_set(PointerRNA *ptr,
+                                                    PointerRNA value,
+                                                    ReportList * /*reports*/)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_custom_group(
+        *ma, layer, static_cast<bNodeTree *>(value.data));
+  }
+}
+
+static void rna_MaterialPaintLayer_material_set(PointerRNA *ptr,
+                                               PointerRNA value,
+                                               ReportList * /*reports*/)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_material(*ma, layer, static_cast<Material *>(value.data));
+  }
+}
+
+static int rna_MaterialPaintLayer_section_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->section;
+}
+
+static void rna_MaterialPaintLayer_section_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_correction_set_section(*ma, layer, value);
+  }
+}
+
+static int rna_MaterialPaintLayer_effect_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->effect;
+}
+
+static void rna_MaterialPaintLayer_effect_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_correction_set_effect(*ma, layer, value);
+  }
+}
+
+static Material *rna_MaterialPaintLayer_owner(PointerRNA ptr, MaterialPaintLayer **r_layer);
+
+static MaterialPaintLayer *rna_MaterialPaintLayer_correction_add(PointerRNA ptr,
+                                                                 ReportList *reports,
+                                                                 int section,
+                                                                 int effect,
+                                                                 const char *name)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+        *ma, layer, section, effect, name);
+    if (correction != nullptr) {
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+      return correction;
+    }
+  }
+  BKE_report(reports, RPT_ERROR, "Cannot add a correction to this paint layer");
+  return nullptr;
+}
+
+static void rna_MaterialPaintLayer_children_begin(CollectionPropertyIterator *iter,
+                                                  PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  rna_iterator_listbase_begin(iter, ptr, &layer->children, nullptr);
+}
+
+static void rna_MaterialPaintLayer_effects_begin(CollectionPropertyIterator *iter,
+                                                 PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  rna_iterator_listbase_begin(iter, ptr, &layer->effects, nullptr);
+}
+
+static void rna_MaterialPaintLayer_mask_stack_begin(CollectionPropertyIterator *iter,
+                                                    PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  rna_iterator_listbase_begin(iter, ptr, &layer->mask_stack, nullptr);
+}
+
+/** The owning material of the layer a #FUNC_SELF_AS_RNA callback points at. */
+static Material *rna_MaterialPaintLayer_owner(PointerRNA ptr, MaterialPaintLayer **r_layer)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr.owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr.data);
+  if (ma == nullptr || layer == nullptr || BKE_paint_layers_find(*ma, layer->marker) != layer) {
+    return nullptr;
+  }
+  *r_layer = layer;
+  return ma;
+}
+
+static int rna_MaterialPaintLayer_bake_mode_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_bake_mode_get(
+      *static_cast<const MaterialPaintLayer *>(ptr->data));
+}
+
+static void rna_MaterialPaintLayer_bake_mode_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  if (ma != nullptr && BKE_paint_layers_bake_mode_set(*ma, *layer, value)) {
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  }
+}
+
+static int rna_MaterialPaintLayer_bake_size_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_bake_size_get(
+      *static_cast<const MaterialPaintLayer *>(ptr->data));
+}
+
+static void rna_MaterialPaintLayer_bake_size_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  if (ma != nullptr && BKE_paint_layers_bake_size_set(*ma, *layer, value)) {
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  }
+}
+
+static bool rna_MaterialPaintLayer_bake_is_valid_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  return ma != nullptr && BKE_paint_layers_bake_is_valid(*ma, *layer);
+}
+
+static void rna_MaterialPaintLayer_bake_request(PointerRNA ptr)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (rna_MaterialPaintLayer_owner(ptr, &layer) != nullptr) {
+    BKE_paint_layers_bake_request(*layer);
+  }
+}
+
+static void rna_MaterialPaintLayer_bake_clear(PointerRNA ptr)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    BKE_paint_layers_bake_clear(*ma, *layer);
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  }
+}
+
+static MaterialPaintLayer *rna_MaterialPaintLayer_mask_add(PointerRNA ptr,
+                                                           ReportList *reports,
+                                                           float value)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, value);
+    if (item != nullptr) {
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+      return item;
+    }
+  }
+  BKE_report(reports, RPT_ERROR, "Cannot add a mask to this paint layer");
+  return nullptr;
+}
+
+static MaterialPaintLayerChannel *rna_MaterialPaintLayer_channel_add(PointerRNA ptr,
+                                                                     ReportList *reports,
+                                                                     int channel)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+        *ma, layer, eMaterialPaintChannel(channel));
+    if (record != nullptr) {
+      return record;
+    }
+  }
+  BKE_report(reports, RPT_ERROR, "Cannot add a channel to this paint layer");
+  return nullptr;
+}
+
+static void rna_MaterialPaintLayer_channel_remove(PointerRNA ptr,
+                                                  ReportList *reports,
+                                                  int channel)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    if (BKE_paint_layers_channel_remove(*ma, layer, eMaterialPaintChannel(channel))) {
+      return;
+    }
+  }
+  BKE_report(reports, RPT_ERROR, "This paint layer has no such channel");
+}
+
+static void rna_MaterialPaintLayer_channel_set_enabled(PointerRNA ptr,
+                                                       ReportList *reports,
+                                                       int channel,
+                                                       bool enabled)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    if (BKE_paint_layers_channel_set_enabled(
+            *ma, layer, eMaterialPaintChannel(channel), enabled))
+    {
+      return;
+    }
+  }
+  BKE_report(reports, RPT_ERROR, "This paint layer has no such channel");
+}
+
+static void rna_MaterialPaintLayer_channels_begin(CollectionPropertyIterator *iter,
+                                                  PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           layer->channels,
+                           sizeof(MaterialPaintLayerChannel),
+                           layer->channels_num,
+                           false,
+                           nullptr);
+}
+
+static void rna_MaterialPaintLayer_channel_settings_begin(CollectionPropertyIterator *iter,
+                                                          PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           layer->channel_settings,
+                           sizeof(MaterialPaintLayerChannelSettings),
+                           PAINT_MATERIAL_CHANNEL_NUM,
+                           false,
+                           nullptr);
+}
+
+static int rna_MaterialPaintLayer_channel_settings_length(PointerRNA * /*ptr*/)
+{
+  return PAINT_MATERIAL_CHANNEL_NUM;
+}
+
+/** The layer whose channel record is \a channel, searching the whole stack. */
+static MaterialPaintLayer *rna_paint_layer_by_channel(ListBase &list,
+                                                      const MaterialPaintLayerChannel *channel)
+{
+  for (MaterialPaintLayer &layer : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&list)) {
+    for (const int i : IndexRange(layer.channels_num)) {
+      if (&layer.channels[i] == channel) {
+        return &layer;
+      }
+    }
+    if (MaterialPaintLayer *found = rna_paint_layer_by_channel(layer.children, channel)) {
+      return found;
+    }
+    /* A correction keeps its channel records in `effects`/`mask_stack`, not in `children`; without
+     * this walk a correction's map or state is invisible to its own RNA pointer. */
+    if (MaterialPaintLayer *found = rna_paint_layer_by_channel(layer.effects, channel)) {
+      return found;
+    }
+    if (MaterialPaintLayer *found = rna_paint_layer_by_channel(layer.mask_stack, channel)) {
+      return found;
+    }
+  }
+  return nullptr;
+}
+
+/** The layer whose fixed \a settings array contains \a settings, searching the whole stack. */
+static MaterialPaintLayer *rna_paint_layer_by_settings(
+    ListBase &list, const MaterialPaintLayerChannelSettings *settings)
+{
+  for (MaterialPaintLayer &layer : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&list)) {
+    if (settings >= &layer.channel_settings[0] &&
+        settings < &layer.channel_settings[PAINT_MATERIAL_CHANNEL_NUM])
+    {
+      return &layer;
+    }
+    if (MaterialPaintLayer *found = rna_paint_layer_by_settings(layer.children, settings)) {
+      return found;
+    }
+    /* A correction's per (row, channel) settings live on the correction, which is an element of its
+     * parent's `effects`/`mask_stack`; missing this walk made its opacity and blend sliders no-ops. */
+    if (MaterialPaintLayer *found = rna_paint_layer_by_settings(layer.effects, settings)) {
+      return found;
+    }
+    if (MaterialPaintLayer *found = rna_paint_layer_by_settings(layer.mask_stack, settings)) {
+      return found;
+    }
+  }
+  return nullptr;
+}
+
+/** The owning material of a mask or channel pointer, or null when it is not in its stack. */
+static Material *rna_paint_layer_sub_owner(PointerRNA *ptr, MaterialPaintLayer **r_layer)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr) {
+    return nullptr;
+  }
+  *r_layer = nullptr;
+  /* A channel pointer and a channel-settings pointer are both small structs; the RNA struct type
+   * is the only thing that tells them apart, so each lookup is tried in turn and the first hit
+   * wins. */
+  if (MaterialPaintLayerChannel *channel = static_cast<MaterialPaintLayerChannel *>(ptr->data)) {
+    *r_layer = rna_paint_layer_by_channel(ma->paint_layers, channel);
+  }
+  if (*r_layer == nullptr) {
+    if (MaterialPaintLayerChannelSettings *settings =
+            static_cast<MaterialPaintLayerChannelSettings *>(ptr->data))
+    {
+      *r_layer = rna_paint_layer_by_settings(ma->paint_layers, settings);
+    }
+  }
+  if (*r_layer == nullptr) {
+    return nullptr;
+  }
+  return ma;
+}
+
+static int rna_MaterialPaintLayerChannel_channel_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  return record->channel;
+}
+
+static int rna_MaterialPaintLayerChannel_state_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  return record->state;
+}
+
+static void rna_MaterialPaintLayerChannel_image_set(PointerRNA *ptr,
+                                                    PointerRNA value,
+                                                    ReportList * /*reports*/)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    BKE_paint_layers_channel_set_image(
+        *ma, layer, eMaterialPaintChannel(rna_MaterialPaintLayerChannel_channel_get(ptr)),
+        static_cast<Image *>(value.data));
+  }
+}
+
+static void rna_MaterialPaintLayerChannel_value_get(PointerRNA *ptr, float *value)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  copy_v4_v4(value, record->value);
+}
+
+static void rna_MaterialPaintLayerChannel_value_set(PointerRNA *ptr, const float *value)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    BKE_paint_layers_channel_set_value(
+        *ma, layer, eMaterialPaintChannel(rna_MaterialPaintLayerChannel_channel_get(ptr)),
+        value);
+  }
+}
+
+static int rna_MaterialPaintLayerChannelSettings_channel_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = nullptr;
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  if (rna_paint_layer_sub_owner(ptr, &layer) && layer != nullptr && settings != nullptr) {
+    return int(settings - layer->channel_settings);
+  }
+  return 0;
+}
+
+static int rna_MaterialPaintLayerChannelSettings_blend_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  return settings->blend;
+}
+
+static void rna_MaterialPaintLayerChannelSettings_blend_set(PointerRNA *ptr, int value)
+{
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    BKE_paint_layers_channel_blend_set(*ma, *layer, int(settings - layer->channel_settings), value);
+  }
+}
+
+static float rna_MaterialPaintLayerChannelSettings_opacity_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  return settings->opacity * 100.0f;
+}
+
+static void rna_MaterialPaintLayerChannelSettings_opacity_set(PointerRNA *ptr, float value)
+{
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    BKE_paint_layers_channel_opacity_set(
+        *ma, *layer, int(settings - layer->channel_settings), value / 100.0f);
+  }
+}
+
+static int rna_MaterialPaintLayer_children_length(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BLI_listbase_count(&layer->children);
+}
+
+static int rna_MaterialPaintLayer_effects_length(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BLI_listbase_count(&layer->effects);
+}
+
+static int rna_MaterialPaintLayer_mask_stack_length(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BLI_listbase_count(&layer->mask_stack);
+}
+
+/** One row of the computed `MaterialPaintLayer.issues` collection, a snapshot of a description
+ * problem; the array is built on iteration and owned by the iterator. */
+struct MaterialPaintLayerIssueItem {
+  int code;
+  int channel;
+  char layer_marker[UUID_STRING_SIZE];
+  char correction_marker[UUID_STRING_SIZE];
+  char text[256];
+};
+
+static void rna_MaterialPaintLayer_issues_begin(CollectionPropertyIterator *iter,
+                                                PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayerIssueItem *array = nullptr;
+  int64_t count = 0;
+  if (ma != nullptr && layer != nullptr && BKE_paint_layers_find(*ma, layer->marker) == layer) {
+    Vector<PaintLayersIssue> issues;
+    BKE_paint_layers_issues_get(*ma, issues);
+    for (const PaintLayersIssue &issue : issues) {
+      if (BLI_uuid_equal(issue.layer, layer->marker)) {
+        count++;
+      }
+    }
+    if (count > 0) {
+      array = MEM_new_array_uninitialized<MaterialPaintLayerIssueItem>(count, __func__);
+      int64_t i = 0;
+      for (const PaintLayersIssue &issue : issues) {
+        if (!BLI_uuid_equal(issue.layer, layer->marker)) {
+          continue;
+        }
+        MaterialPaintLayerIssueItem &item = array[i++];
+        item.code = int(issue.code);
+        item.channel = issue.channel;
+        BLI_uuid_format(item.layer_marker, issue.layer);
+        BLI_uuid_format(item.correction_marker, issue.correction);
+        STRNCPY(item.text, issue.text != nullptr ? issue.text : "");
+      }
+    }
+  }
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           array,
+                           sizeof(MaterialPaintLayerIssueItem),
+                           count,
+                           array != nullptr,
+                           nullptr);
+}
+
+static MaterialPaintLayerIssueItem *rna_MaterialPaintLayerIssue(PointerRNA *ptr)
+{
+  return static_cast<MaterialPaintLayerIssueItem *>(ptr->data);
+}
+
+static int rna_MaterialPaintLayerIssue_code_get(PointerRNA *ptr)
+{
+  return rna_MaterialPaintLayerIssue(ptr)->code;
+}
+
+static int rna_MaterialPaintLayerIssue_channel_get(PointerRNA *ptr)
+{
+  return rna_MaterialPaintLayerIssue(ptr)->channel;
+}
+
+static void rna_MaterialPaintLayerIssue_layer_marker_get(PointerRNA *ptr, char *value)
+{
+  BLI_strncpy(value, rna_MaterialPaintLayerIssue(ptr)->layer_marker, UUID_STRING_SIZE);
+}
+
+static int rna_MaterialPaintLayerIssue_layer_marker_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_MaterialPaintLayerIssue(ptr)->layer_marker));
+}
+
+static void rna_MaterialPaintLayerIssue_correction_marker_get(PointerRNA *ptr, char *value)
+{
+  BLI_strncpy(value, rna_MaterialPaintLayerIssue(ptr)->correction_marker, UUID_STRING_SIZE);
+}
+
+static int rna_MaterialPaintLayerIssue_correction_marker_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_MaterialPaintLayerIssue(ptr)->correction_marker));
+}
+
+static void rna_MaterialPaintLayerIssue_text_get(PointerRNA *ptr, char *value)
+{
+  BLI_strncpy(value, rna_MaterialPaintLayerIssue(ptr)->text, sizeof(rna_MaterialPaintLayerIssue(ptr)->text));
+}
+
+static int rna_MaterialPaintLayerIssue_text_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_MaterialPaintLayerIssue(ptr)->text));
+}
+
+/** One row of the computed `MaterialPaintLayer.custom_channels` collection. */
+struct MaterialPaintLayerCustomChannelItem {
+  int channel;
+};
+
+static void rna_MaterialPaintLayer_custom_channels_begin(CollectionPropertyIterator *iter,
+                                                         PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Vector<int> channels;
+  if (layer != nullptr) {
+    BKE_paint_layers_custom_channels_get(*layer, channels);
+  }
+  MaterialPaintLayerCustomChannelItem *array = nullptr;
+  if (!channels.is_empty()) {
+    array = MEM_new_array_uninitialized<MaterialPaintLayerCustomChannelItem>(
+        channels.size(), __func__);
+    for (const int64_t i : channels.index_range()) {
+      array[i].channel = channels[i];
+    }
+  }
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           array,
+                           sizeof(MaterialPaintLayerCustomChannelItem),
+                           channels.size(),
+                           array != nullptr,
+                           nullptr);
+}
+
+static int rna_MaterialPaintLayerCustomChannel_channel_get(PointerRNA *ptr)
+{
+  return static_cast<MaterialPaintLayerCustomChannelItem *>(ptr->data)->channel;
+}
+
+static int rna_MaterialPaintLayer_channels_length(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->channels_num;
+}
+
+static void rna_MaterialPaintLayer_kind_change(PointerRNA ptr, ReportList *reports, int kind)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    if (BKE_paint_layers_kind_change(*ma, layer, eMaterialPaintLayerKind(kind))) {
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+      return;
+    }
+  }
+  BKE_report(reports, RPT_ERROR, "Cannot convert this paint layer to the given kind");
+}
+
+/* The IDProperty group of the layer, exposed as a PropertyGroup like the nodes modifier does. */
+static IDProperty **rna_MaterialPaintLayerProperties_idprops(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  return &layer->properties;
+}
+
+static StructRNA *rna_MaterialPaintLayerProperties_refine(PointerRNA * /*ptr*/)
+{
+  return RNA_PropertyGroup;
+}
+
+static PointerRNA rna_MaterialPaintLayer_properties_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  return RNA_pointer_create_with_parent(*ptr, RNA_MaterialPaintLayerProperties, layer);
+}
+
+static void rna_MaterialPaintLayer_marker_get(PointerRNA *ptr, char *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  BLI_uuid_format(value, layer->marker);
+}
+
+static int rna_MaterialPaintLayer_marker_length(PointerRNA * /*ptr*/)
+{
+  return UUID_STRING_SIZE - 1;
+}
+
+static std::optional<std::string> rna_MaterialPaintLayer_path(const PointerRNA *ptr)
+{
+  const Material *ma = reinterpret_cast<const Material *>(ptr->owner_id);
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  /* Only the top level is addressable by path; nested rows resolve through find(). */
+  const int index = BLI_findindex(&ma->paint_layers, layer);
+  if (index == -1) {
+    return std::nullopt;
+  }
+  return fmt::format("paint_layers[{}]", index);
+}
+
+/**
+ * The path of a #MaterialPaintLayerChannelSettings entry: the row's own path plus the fixed channel
+ * index. Built from the settings pointer arithmetic so a key can address a pair that has no channel
+ * record yet.
+ */
+static std::optional<std::string> rna_MaterialPaintLayerChannelSettings_path(const PointerRNA *ptr)
+{
+  const Material *ma = reinterpret_cast<const Material *>(ptr->owner_id);
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  if (ma == nullptr || settings == nullptr) {
+    return std::nullopt;
+  }
+  MaterialPaintLayer *layer = rna_paint_layer_by_settings(
+      const_cast<ListBase &>(ma->paint_layers), settings);
+  if (layer == nullptr) {
+    return std::nullopt;
+  }
+  const int index = BLI_findindex(&ma->paint_layers, layer);
+  if (index == -1) {
+    return std::nullopt;
+  }
+  return fmt::format(
+      "paint_layers[{}].channel_settings[{}]", index, int(settings - layer->channel_settings));
+}
+
+/** \} */
+
 }  // namespace blender
 
 #else
 
 namespace blender {
+
+static const EnumPropertyItem rna_enum_material_paint_layer_kind_items[] = {
+    {MA_PAINT_LAYER_KIND_PAINT, "PAINT", 0, "Paint", "A painted layer"},
+    {MA_PAINT_LAYER_KIND_FILL, "FILL", 0, "Fill", "A flat fill layer"},
+    {MA_PAINT_LAYER_KIND_MATERIAL,
+     "MATERIAL",
+     0,
+     "Material",
+     "A layer baked from another material"},
+    {MA_PAINT_LAYER_KIND_CORRECTION, "CORRECTION", 0, "Correction", "A correction layer"},
+    {MA_PAINT_LAYER_KIND_FOLDER, "FOLDER", 0, "Folder", "A folder grouping other layers"},
+    {MA_PAINT_LAYER_KIND_CUSTOM,
+     "CUSTOM",
+     0,
+     "Custom",
+     "A custom material layer backed by a node group"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
+    {MA_PAINT_LAYER_BLEND_MIX, "MIX", 0, "Mix", "Mix blend"},
+    {MA_PAINT_LAYER_BLEND_MULTIPLY, "MULTIPLY", 0, "Multiply", "Multiply blend"},
+    {MA_PAINT_LAYER_BLEND_OVERLAY, "OVERLAY", 0, "Overlay", "Overlay blend"},
+    {MA_PAINT_LAYER_BLEND_ADD, "ADD", 0, "Add", "Add blend"},
+    {MA_PAINT_LAYER_BLEND_DARKEN, "DARKEN", 0, "Darken", "Darken blend"},
+    {MA_PAINT_LAYER_BLEND_BURN, "BURN", 0, "Color Burn", "Color burn blend"},
+    {MA_PAINT_LAYER_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", "Lighten blend"},
+    {MA_PAINT_LAYER_BLEND_SCREEN, "SCREEN", 0, "Screen", "Screen blend"},
+    {MA_PAINT_LAYER_BLEND_DODGE, "DODGE", 0, "Color Dodge", "Color dodge blend"},
+    {MA_PAINT_LAYER_BLEND_SUBTRACT, "SUBTRACT", 0, "Subtract", "Subtract blend"},
+    {MA_PAINT_LAYER_BLEND_DIVIDE, "DIVIDE", 0, "Divide", "Divide blend"},
+    {MA_PAINT_LAYER_BLEND_DIFFERENCE, "DIFFERENCE", 0, "Difference", "Difference blend"},
+    {MA_PAINT_LAYER_BLEND_EXCLUSION, "EXCLUSION", 0, "Exclusion", "Exclusion blend"},
+    {MA_PAINT_LAYER_BLEND_SOFT_LIGHT, "SOFT_LIGHT", 0, "Soft Light", "Soft light blend"},
+    {MA_PAINT_LAYER_BLEND_LINEAR_LIGHT,
+     "LINEAR_LIGHT",
+     0,
+     "Linear Light",
+     "Linear light blend"},
+    {MA_PAINT_LAYER_BLEND_HUE, "HUE", 0, "Hue", "Hue blend"},
+    {MA_PAINT_LAYER_BLEND_SATURATION, "SATURATION", 0, "Saturation", "Saturation blend"},
+    {MA_PAINT_LAYER_BLEND_COLOR, "COLOR", 0, "Color", "Color blend"},
+    {MA_PAINT_LAYER_BLEND_VALUE, "VALUE", 0, "Value", "Value blend"},
+    /* MA_PAINT_LAYER_BLEND_NORMAL_COMBINE is internal: the Normal channel forces it, so it is not
+     * offered as a choice, and #BKE_paint_layers_set_blend refuses it. */
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_material_paint_layer_channel_state_items[] = {
+    {MA_PAINT_LAYER_CHANNEL_ABSENT, "ABSENT", 0, "Absent", "No map: the channel carries no map"},
+    {MA_PAINT_LAYER_CHANNEL_ENABLED, "ENABLED", 0, "Enabled", "A map feeds the channel"},
+    {MA_PAINT_LAYER_CHANNEL_DISABLED,
+     "DISABLED",
+     0,
+     "Disabled",
+     "The map is kept but switched off"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* The channel's own blend. Kept apart from #rna_enum_material_paint_layer_blend_items so the row
+ * never offers Inherit, which only a channel override can meaningfully be. */
+static const EnumPropertyItem rna_enum_material_paint_layer_channel_blend_items[] = {
+    {-1, "INHERIT", 0, "Inherit", "Use the row's blend mode"},
+    {MA_PAINT_LAYER_BLEND_MIX, "MIX", 0, "Mix", "Mix blend"},
+    {MA_PAINT_LAYER_BLEND_MULTIPLY, "MULTIPLY", 0, "Multiply", "Multiply blend"},
+    {MA_PAINT_LAYER_BLEND_OVERLAY, "OVERLAY", 0, "Overlay", "Overlay blend"},
+    {MA_PAINT_LAYER_BLEND_ADD, "ADD", 0, "Add", "Add blend"},
+    {MA_PAINT_LAYER_BLEND_DARKEN, "DARKEN", 0, "Darken", "Darken blend"},
+    {MA_PAINT_LAYER_BLEND_BURN, "BURN", 0, "Color Burn", "Color burn blend"},
+    {MA_PAINT_LAYER_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", "Lighten blend"},
+    {MA_PAINT_LAYER_BLEND_SCREEN, "SCREEN", 0, "Screen", "Screen blend"},
+    {MA_PAINT_LAYER_BLEND_DODGE, "DODGE", 0, "Color Dodge", "Color dodge blend"},
+    {MA_PAINT_LAYER_BLEND_SUBTRACT, "SUBTRACT", 0, "Subtract", "Subtract blend"},
+    {MA_PAINT_LAYER_BLEND_DIVIDE, "DIVIDE", 0, "Divide", "Divide blend"},
+    {MA_PAINT_LAYER_BLEND_DIFFERENCE, "DIFFERENCE", 0, "Difference", "Difference blend"},
+    {MA_PAINT_LAYER_BLEND_EXCLUSION, "EXCLUSION", 0, "Exclusion", "Exclusion blend"},
+    {MA_PAINT_LAYER_BLEND_SOFT_LIGHT, "SOFT_LIGHT", 0, "Soft Light", "Soft light blend"},
+    {MA_PAINT_LAYER_BLEND_LINEAR_LIGHT,
+     "LINEAR_LIGHT",
+     0,
+     "Linear Light",
+     "Linear light blend"},
+    {MA_PAINT_LAYER_BLEND_HUE, "HUE", 0, "Hue", "Hue blend"},
+    {MA_PAINT_LAYER_BLEND_SATURATION, "SATURATION", 0, "Saturation", "Saturation blend"},
+    {MA_PAINT_LAYER_BLEND_COLOR, "COLOR", 0, "Color", "Color blend"},
+    {MA_PAINT_LAYER_BLEND_VALUE, "VALUE", 0, "Value", "Value blend"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values must match #PaintLayerPlace (a runtime-only type, unavailable in the definition pass). */
+static const EnumPropertyItem rna_enum_material_paint_layer_place_items[] = {
+    {0, "ABOVE", 0, "Above", "Directly above the anchor"},
+    {1, "BELOW", 0, "Below", "Directly below the anchor"},
+    {2, "INTO", 0, "Into", "Inside the anchor folder"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values must match #PaintLayersIssueCode. */
+static const EnumPropertyItem rna_enum_material_paint_layer_issue_code_items[] = {
+    {0,
+     "FILL_CORRECTION_ON_NORMAL",
+     0,
+     "Fill Correction on Normal",
+     "A constant normal has no meaning, so the correction is skipped in the Normal channel"},
+    {1,
+     "FOLDER_HAS_MAPS",
+     0,
+     "Folder Has Maps",
+     "A folder takes part through its children; a map on the folder itself is ignored"},
+    {2,
+     "NON_FOLDER_HAS_CHILDREN",
+     0,
+     "Non-Folder Has Children",
+     "Only a folder takes part through its children; the stray nesting is ignored"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values match #eMaterialPaintLayerCorrectionSection / #...Effect. */
+static const EnumPropertyItem rna_enum_material_paint_layer_section_items[] = {
+    {0, "CONTENT", 0, "Content", "Adjusts what the row below paints"},
+    {1, "MASK", 0, "Mask", "Limits where the row applies"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_material_paint_layer_effect_items[] = {
+    {0, "PAINT", 0, "Paint", "Painted with a brush"},
+    {1, "FILL", 0, "Fill", "A flat colour, not painted with a brush"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values match #eMaterialPaintLayerBakeMode. */
+static const EnumPropertyItem rna_enum_material_paint_layer_bake_mode_items[] = {
+    {MA_PAINT_LAYER_BAKE_AUTO,
+     "AUTO",
+     0,
+     "Auto",
+     "Bake the heavy inactive subgraphs; the active row is evaluated live"},
+    {MA_PAINT_LAYER_BAKE_ALWAYS,
+     "ALWAYS",
+     0,
+     "Always",
+     "Always bake; show the row as stale until the bake is current"},
+    {MA_PAINT_LAYER_BAKE_NEVER, "NEVER", 0, "Never", "Never bake; evaluate the row live"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static void rna_def_material_paint_layer(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  srna = RNA_def_struct(brna, "MaterialPaintLayer", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialPaintLayer");
+  RNA_def_struct_path_func(srna, "rna_MaterialPaintLayer_path");
+  RNA_def_struct_ui_text(srna, "Paint Layer", "One row of a layered material's stack");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_string_maxlength(prop, MAX_NAME);
+  RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_MaterialPaintLayer_name_set");
+  RNA_def_property_ui_text(prop, "Name", "Name of the paint layer");
+  RNA_def_struct_name_property(srna, prop);
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Read-only: the marker is the row's identity and is assigned when the row is created. */
+  prop = RNA_def_property(srna, "marker", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayer_marker_get",
+                                "rna_MaterialPaintLayer_marker_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Marker", "Stable identity of the paint layer");
+
+  /* Read-only: a kind change is a conversion, done through kind_change() rather than a write. */
+  prop = RNA_def_property(srna, "kind", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "kind");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_kind_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Kind", "Kind of the paint layer");
+
+  prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_blend_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintLayer_blend_get", "rna_MaterialPaintLayer_blend_set", nullptr);
+  RNA_def_property_ui_text(prop, "Blend Type", "How the layer blends over what is below it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "opacity", PROP_FLOAT, PROP_PERCENTAGE);
+  RNA_def_property_float_funcs(
+      prop, "rna_MaterialPaintLayer_opacity_get", "rna_MaterialPaintLayer_opacity_set", nullptr);
+  RNA_def_property_range(prop, 0.0f, 100.0f);
+  RNA_def_property_ui_text(prop, "Opacity", "Opacity of the paint layer, in percent");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayer_enabled_get", "rna_MaterialPaintLayer_enabled_set");
+  RNA_def_property_ui_text(prop, "Enabled", "Whether the layer takes part in the stack");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "color_tag", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop,
+                             "rna_MaterialPaintLayer_color_tag_get",
+                             "rna_MaterialPaintLayer_color_tag_set",
+                             nullptr);
+  RNA_def_property_ui_text(prop, "Color Tag", "Display color tag, interpreted by the UI only");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Meaningful for a Correction row only; harmless to read on any row. */
+  prop = RNA_def_property(srna, "section", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_section_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintLayer_section_get", "rna_MaterialPaintLayer_section_set", nullptr);
+  RNA_def_property_ui_text(prop, "Section", "Which part of the parent a correction adjusts");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "effect", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_effect_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintLayer_effect_get", "rna_MaterialPaintLayer_effect_set", nullptr);
+  RNA_def_property_ui_text(prop, "Effect", "What a correction applies");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "fill_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_fill_color_get",
+                               "rna_MaterialPaintLayer_fill_color_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Fill Color", "Constant color of a Fill layer");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "custom_group", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "custom_group");
+  RNA_def_property_struct_type(prop, "NodeTree");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, "rna_MaterialPaintLayer_custom_group_set", nullptr, nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Custom Group", "Node group backing a Custom kind layer");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "material");
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, "rna_MaterialPaintLayer_material_set", nullptr, nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Source Material", "Material a Material layer is built from");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "properties", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "PropertyGroup");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_MaterialPaintLayer_properties_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Properties", "Custom group input values and add-on data");
+
+  prop = RNA_def_property(srna, "children", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayer");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_children_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    "rna_MaterialPaintLayer_children_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(prop, "Children", "Nested rows of this folder layer");
+
+  prop = RNA_def_property(srna, "effects", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayer");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_effects_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    "rna_MaterialPaintLayer_effects_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(prop, "Effects", "Effects that adjust what this layer paints with");
+
+  prop = RNA_def_property(srna, "mask_stack", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayer");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_mask_stack_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    "rna_MaterialPaintLayer_mask_stack_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(prop, "Mask Stack", "Mask items that limit where this layer applies");
+
+  prop = RNA_def_property(srna, "channels", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerChannel");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_channels_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_MaterialPaintLayer_channels_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(prop, "Channels", "Per-channel maps and values of the layer");
+
+  prop = RNA_def_property(srna, "channel_settings", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerChannelSettings");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_channel_settings_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_MaterialPaintLayer_channel_settings_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Channel Settings",
+                           "Per (row, channel) blend and opacity; exists for every channel, "
+                           "whether or not it has a map");
+
+  prop = RNA_def_property(srna, "issues", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerIssue");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_issues_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_dereference_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Issues", "Description problems on this layer that the stack silently ignores");
+
+  prop = RNA_def_property(srna, "custom_channels", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerCustomChannel");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_custom_channels_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_dereference_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Custom Channels",
+                           "Channels a Custom layer's group declares through its COLOR outputs");
+
+  prop = RNA_def_property(srna, "bake_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_bake_mode_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_bake_mode_get",
+                              "rna_MaterialPaintLayer_bake_mode_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop, "Bake Mode", "When the row's subtree is baked into a cache");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "bake_size", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop,
+                             "rna_MaterialPaintLayer_bake_size_get",
+                             "rna_MaterialPaintLayer_bake_size_set",
+                             nullptr);
+  RNA_def_property_range(prop, 0, 16384);
+  RNA_def_property_ui_text(prop, "Bake Size", "Square side the row's baked maps are created at");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "bake_is_valid", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_bake_is_valid_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Bake Is Valid", "Whether the stored bake still matches the row's description");
+
+  func = RNA_def_function(srna, "bake_request", "rna_MaterialPaintLayer_bake_request");
+  RNA_def_function_ui_description(
+      func, "Mark the row's bake stale so the planner re-bakes it");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA);
+
+  func = RNA_def_function(srna, "bake_clear", "rna_MaterialPaintLayer_bake_clear");
+  RNA_def_function_ui_description(func, "Drop the row's baked cache");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA);
+
+  func = RNA_def_function(srna, "kind_change", "rna_MaterialPaintLayer_kind_change");
+  RNA_def_function_ui_description(
+      func, "Convert the layer between Paint and Fill, converting what the kinds disagree on");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  parm = RNA_def_enum(func,
+                      "kind",
+                      rna_enum_material_paint_layer_kind_items,
+                      MA_PAINT_LAYER_KIND_PAINT,
+                      "Kind",
+                      "The kind to convert to");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "correction_add", "rna_MaterialPaintLayer_correction_add");
+  RNA_def_function_ui_description(func, "Add a correction row under this paint layer");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  parm = RNA_def_enum(func,
+                      "section",
+                      rna_enum_material_paint_layer_section_items,
+                      0,
+                      "Section",
+                      "Which part of the parent the correction adjusts");
+  parm = RNA_def_enum(func,
+                      "effect",
+                      rna_enum_material_paint_layer_effect_items,
+                      0,
+                      "Effect",
+                      "What the correction applies");
+  RNA_def_string(
+      func, "name", "Correction", MAX_NAME, "Name", "Name of the new correction");
+  parm = RNA_def_pointer(
+      func, "correction", "MaterialPaintLayer", "", "The newly created correction");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "mask_add", "rna_MaterialPaintLayer_mask_add");
+  RNA_def_function_ui_description(func, "Add a constant mask item to the bottom of the mask stack");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  RNA_def_float(func, "value", 1.0f, 0.0f, 1.0f, "Value", "Constant mask strength", 0.0f, 1.0f);
+  parm = RNA_def_pointer(func, "mask", "MaterialPaintLayer", "", "The new mask item");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "channel_add", "rna_MaterialPaintLayer_channel_add");
+  RNA_def_function_ui_description(func, "Add a channel record to the layer");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  parm = RNA_def_enum(func,
+                      "channel",
+                      rna_enum_material_paint_channel_items,
+                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                      "Channel",
+                      "The channel to add");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "record", "MaterialPaintLayerChannel", "", "The channel record");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "channel_remove", "rna_MaterialPaintLayer_channel_remove");
+  RNA_def_function_ui_description(func, "Remove a channel record from the layer");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  parm = RNA_def_enum(func,
+                      "channel",
+                      rna_enum_material_paint_channel_items,
+                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                      "Channel",
+                      "The channel to remove");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "channel_set_enabled", "rna_MaterialPaintLayer_channel_set_enabled");
+  RNA_def_function_ui_description(func, "Switch a channel of the layer on or off");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  parm = RNA_def_enum(func,
+                      "channel",
+                      rna_enum_material_paint_channel_items,
+                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                      "Channel",
+                      "The channel to switch");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_boolean(func, "enabled", true, "Enabled", "Whether the channel takes part");
+}
+
+static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "MaterialPaintLayerChannel", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialPaintLayerChannel");
+  RNA_def_struct_ui_text(srna, "Paint Layer Channel", "One channel record of a paint layer");
+
+  /* Read-only: the record is keyed by its channel; the key is set when the record is added. */
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayerChannel_channel_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Channel", "The paint channel the record stands for");
+
+  /* Read-only: the state changes through the owning layer's channel_set_enabled(). */
+  prop = RNA_def_property(srna, "state", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayerChannel_state_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_channel_state_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "State", "Whether the channel's map is live");
+
+  prop = RNA_def_property(srna, "image", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "image");
+  RNA_def_property_struct_type(prop, "Image");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, "rna_MaterialPaintLayerChannel_image_set", nullptr, nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Image", "The channel's map, or none for a constant");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerChannel_value_get",
+                               "rna_MaterialPaintLayerChannel_value_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Value", "Constant value used while the channel has no map");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+}
+
+static void rna_def_material_paint_layer_channel_settings(BlenderRNA *brna)
+{
+  PropertyRNA *prop;
+  StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerChannelSettings", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialPaintLayerChannelSettings");
+  RNA_def_struct_path_func(srna, "rna_MaterialPaintLayerChannelSettings_path");
+  RNA_def_struct_ui_text(
+      srna, "Paint Layer Channel Settings", "Blend and opacity of one (row, channel) pair");
+
+  /* Read-only: the entry is keyed by its position in the layer's fixed array. */
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintLayerChannelSettings_channel_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Channel", "The paint channel the entry stands for");
+
+  prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayerChannelSettings_blend_get",
+                              "rna_MaterialPaintLayerChannelSettings_blend_set",
+                              nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_channel_blend_items);
+  RNA_def_property_ui_text(prop,
+                           "Blend Mode",
+                           "The channel's own blend, or Inherit to use the row's; the Normal "
+                           "channel has no blend of its own");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "opacity", PROP_FLOAT, PROP_PERCENTAGE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerChannelSettings_opacity_get",
+                               "rna_MaterialPaintLayerChannelSettings_opacity_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 100.0f);
+  RNA_def_property_ui_text(prop, "Opacity", "Multiplied by the row's opacity");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+}
+
+static void rna_def_material_paint_layer_custom_channel(BlenderRNA *brna)
+{
+  StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerCustomChannel", nullptr);
+  RNA_def_struct_ui_text(
+      srna, "Paint Layer Custom Channel", "A channel a Custom layer's group declares");
+
+  PropertyRNA *prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintLayerCustomChannel_channel_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Channel", "The paint channel the group declares");
+}
+
+static void rna_def_material_paint_layer_issue(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "MaterialPaintLayerIssue", nullptr);
+  RNA_def_struct_ui_text(
+      srna, "Paint Layer Issue", "A description problem on a paint layer, computed on read");
+
+  prop = RNA_def_property(srna, "code", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayerIssue_code_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_issue_code_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Code", "What kind of problem this is");
+
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayerIssue_channel_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Channel", "Channel the issue is about");
+
+  prop = RNA_def_property(srna, "layer_marker", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayerIssue_layer_marker_get",
+                                "rna_MaterialPaintLayerIssue_layer_marker_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Layer Marker", "Marker of the layer the issue is about");
+
+  prop = RNA_def_property(srna, "correction_marker", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayerIssue_correction_marker_get",
+                                "rna_MaterialPaintLayerIssue_correction_marker_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Correction Marker", "Marker of the correction the issue is about, or empty");
+
+  prop = RNA_def_property(srna, "text", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayerIssue_text_get",
+                                "rna_MaterialPaintLayerIssue_text_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Text", "Human-readable description of the issue");
+}
+
+static void rna_def_material_paint_layer_properties(BlenderRNA *brna)
+{
+  StructRNA *srna;
+
+  srna = RNA_def_struct(brna, "MaterialPaintLayerProperties", nullptr);
+  RNA_def_struct_ui_text(
+      srna, "Paint Layer Properties", "Custom group input values and add-on data of a layer");
+  RNA_def_struct_refine_func(srna, "rna_MaterialPaintLayerProperties_refine");
+  RNA_def_struct_system_idprops_func(srna, "rna_MaterialPaintLayerProperties_idprops");
+}
+
+static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "MaterialPaintLayers");
+  srna = RNA_def_struct(brna, "MaterialPaintLayers", nullptr);
+  RNA_def_struct_sdna(srna, "Material");
+  RNA_def_struct_ui_text(srna, "Paint Layers", "Collection of a material's paint layers");
+
+  /* The functions operate on the owning #Material, so every structural change can go through the
+   * BKE description API rather than writing DNA from RNA. */
+  func = RNA_def_function(srna, "new", "rna_Material_paint_layers_new");
+  RNA_def_function_ui_description(func, "Add a paint layer on top of the stack");
+  parm = RNA_def_enum(func,
+                      "kind",
+                      rna_enum_material_paint_layer_kind_items,
+                      MA_PAINT_LAYER_KIND_PAINT,
+                      "Kind",
+                      "Kind of the new layer");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_string(func, "name", "Layer", MAX_NAME, "Name", "Name of the new layer");
+  parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "", "The newly created paint layer");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_Material_paint_layers_remove");
+  RNA_def_function_ui_description(func, "Remove a paint layer");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "layer", "MaterialPaintLayer", "Paint Layer", "The paint layer to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "find", "rna_Material_paint_layers_find");
+  RNA_def_function_ui_description(func, "Find a paint layer by its marker");
+  parm = RNA_def_string(func, "marker", nullptr, 0, "Marker", "Marker of the layer to find");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(
+      func, "layer", "MaterialPaintLayer", "", "The layer carrying the given marker");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "composite", "rna_Material_paint_layers_composite");
+  RNA_def_function_ui_description(
+      func, "Composite one channel of the stack into an image on the CPU");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_enum(func,
+                      "channel",
+                      rna_enum_material_paint_channel_items,
+                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                      "Channel",
+                      "Channel to composite");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "image", "Image", "Image", "Destination image");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_boolean(func, "result", false, "", "Whether the channel was composited");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "move", "rna_Material_paint_layers_move");
+  RNA_def_function_ui_description(
+      func, "Move a paint layer, with everything nested under it, relative to an anchor");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "Paint Layer", "The layer to move");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(
+      func, "anchor", "MaterialPaintLayer", "", "The anchor, or none for the top of the stack");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_enum(func,
+                      "place",
+                      rna_enum_material_paint_layer_place_items,
+                      0,
+                      "Place",
+                      "Where to put the layer relative to the anchor");
+
+  func = RNA_def_function(srna, "reorder", "rna_Material_paint_layers_reorder");
+  RNA_def_function_ui_description(
+      func, "Move a paint layer within its own list, keeping its nesting");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "layer", "MaterialPaintLayer", "Paint Layer", "The layer to reorder");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  RNA_def_int(func, "index", 0, 0, INT_MAX, "Index", "Sibling position, bottom to top", 0, INT_MAX);
+
+  func = RNA_def_function(srna, "duplicate", "rna_Material_paint_layers_duplicate");
+  RNA_def_function_ui_description(
+      func, "Deep-copy a paint layer branch into a row directly above it");
+  RNA_def_function_flag(func, FUNC_USE_MAIN | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "layer", "MaterialPaintLayer", "Paint Layer", "The layer to duplicate");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(func, "copy", "MaterialPaintLayer", "", "The copy");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "group", "rna_Material_paint_layers_group");
+  RNA_def_function_ui_description(func, "Fold paint layers into a new folder layer");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "Paint Layer", "A layer to group");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(
+      func, "with_layer", "MaterialPaintLayer", "", "A second layer to group, or none");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(func, "folder", "MaterialPaintLayer", "", "The new folder");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "ungroup", "rna_Material_paint_layers_ungroup");
+  RNA_def_function_ui_description(func, "Lift the rows of a folder and free the folder");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(func, "folder", "MaterialPaintLayer", "Paint Layer", "The folder");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "regenerate", "rna_Material_paint_layers_regenerate");
+  RNA_def_function_ui_description(
+      func, "Rebuild the material's generated node tree from its layer description");
+  RNA_def_function_flag(func, FUNC_USE_MAIN);
+
+  prop = RNA_def_property(srna, "active", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayer");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_Material_paint_layers_active_get",
+                                 "rna_Material_paint_layers_active_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Active Layer", "Active paint layer of the material");
+}
 
 static void rna_def_material_display(StructRNA *srna)
 {
@@ -1272,10 +3066,51 @@ void RNA_def_material(BlenderRNA *brna)
                               500,
                               600);
 
+  /* paint layers */
+  prop = RNA_def_property(srna, "paint_layers", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayer");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Material_paint_layers_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop, "Paint Layers", "The material's paint layer stack, bottom to top");
+  rna_def_material_paint_layers(brna, prop);
+
+  prop = RNA_def_property(srna, "is_layered", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Material_is_layered_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Layered Material",
+      "The material's stack is a DNA description and its node tree is generated from it");
+
+  prop = RNA_def_property(srna, "paint_layers_tree_is_stale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Material_paint_layers_tree_is_stale_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Tree Is Stale",
+      "The generated node tree does not match the layer description and needs a Regenerate");
+
+  prop = RNA_def_property(srna, "paint_layers_locked", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_Material_paint_layers_locked_get",
+                                 "rna_Material_paint_layers_locked_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Locked",
+      "The generator owns the node tree and overwrites manual edits; unlock for debugging, then "
+      "Regenerate explicitly");
+
   /* common */
   rna_def_animdata_common(srna);
   rna_def_texpaint_slots(brna, srna);
-
   rna_def_material_display(srna);
 
   /* grease pencil */
@@ -1297,6 +3132,14 @@ void RNA_def_material(BlenderRNA *brna)
 
   rna_def_material_greasepencil(brna);
   rna_def_material_lineart(brna);
+  /* The issue and custom-channel structs are referenced by name from the layer, so define them
+   * first. */
+  rna_def_material_paint_layer_issue(brna);
+  rna_def_material_paint_layer_custom_channel(brna);
+  rna_def_material_paint_layer(brna);
+  rna_def_material_paint_layer_channel(brna);
+  rna_def_material_paint_layer_channel_settings(brna);
+  rna_def_material_paint_layer_properties(brna);
 
   RNA_api_material(srna);
 }

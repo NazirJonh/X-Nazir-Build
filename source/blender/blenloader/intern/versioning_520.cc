@@ -16,6 +16,8 @@
 #include "DNA_brush_types.h"
 #include "DNA_camera_types.h"
 #include "DNA_curve_types.h"
+#include "DNA_genfile.h"
+#include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_node_tree_interface_types.h"
@@ -1169,8 +1171,59 @@ static void do_versions_structure_tag_category_memory(Main *bmain)
   }
 }
 
-void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
+static void do_versions_paint_layer_channel_settings(MaterialPaintLayer &layer,
+                                                     const bool migrate_records)
 {
+  for (MaterialPaintLayerChannelSettings &settings : layer.channel_settings) {
+    settings.blend = -1;
+    settings.opacity = 1.0f;
+  }
+  if (migrate_records) {
+    for (int i = 0; i < layer.channels_num; i++) {
+      const MaterialPaintLayerChannel &record = layer.channels[i];
+      if (record.channel < 0 || record.channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+        continue;
+      }
+      layer.channel_settings[record.channel].blend = record.blend;
+      layer.channel_settings[record.channel].opacity = record.opacity;
+    }
+  }
+  for (MaterialPaintLayer &child :
+       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.children))
+  {
+    do_versions_paint_layer_channel_settings(child, migrate_records);
+  }
+  for (MaterialPaintLayer &effect :
+       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.effects))
+  {
+    do_versions_paint_layer_channel_settings(effect, migrate_records);
+  }
+  for (MaterialPaintLayer &mask_item :
+       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
+  {
+    do_versions_paint_layer_channel_settings(mask_item, migrate_records);
+  }
+}
+
+void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
+{
+  /* Per (row, channel) blend/opacity moved out of the sparse channel record into the row's fixed
+   * #MaterialPaintLayer::channel_settings array. An older file has no array in its SDNA, so the
+   * in-memory one is zeroed: default every entry to inherit. When the record still carried its own
+   * override (a file written between the two layouts), carry its values across. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "MaterialPaintLayer", "MaterialPaintLayerChannelSettings", "channel_settings"))
+  {
+    const bool migrate_records = DNA_struct_member_exists_with_alias(
+        fd->filesdna, "MaterialPaintLayerChannel", "int8_t", "blend");
+    for (Material &ma : bmain->materials) {
+      for (MaterialPaintLayer &layer :
+           *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&ma.paint_layers))
+      {
+        do_versions_paint_layer_channel_settings(layer, migrate_records);
+      }
+    }
+  }
   /* Category runtime lists in WM are rebuilt by Python on startup and must never be trusted from
    * blend-file contents (older experimental files may contain stale raw pointers here).
    * Clear unconditionally for all 5.2 loads before any Python-side sync touches them. */

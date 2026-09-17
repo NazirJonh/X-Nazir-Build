@@ -702,12 +702,10 @@ void BRUSH_OT_asset_revert(wmOperatorType *ot);
 
 /* `paint_material_layer_ops.cc` */
 
-void MATERIAL_OT_paint_layer_channel_toggle(wmOperatorType *ot);
-void MATERIAL_OT_paint_layer_channel_value_set(wmOperatorType *ot);
-void MATERIAL_OT_paint_layer_channel_unlink(wmOperatorType *ot);
-void MATERIAL_OT_paint_layer_use_layer_result(wmOperatorType *ot);
-void MATERIAL_OT_paint_layer_bake_size_set(wmOperatorType *ot);
-void MATERIAL_OT_paint_layer_rebake(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_add_material(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_use_row_result(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_add_custom(wmOperatorType *ot);
+void MATERIAL_OT_paint_layer_custom_channel_add(wmOperatorType *ot);
 
 /**
  * Delete overlay cursor textures to preserve memory and invalidate all overlay flags.
@@ -894,6 +892,7 @@ void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot);
 void PAINT_OT_material_paint_source_mode_set(wmOperatorType *ot);
 void PAINT_OT_material_paint_source_material_set(wmOperatorType *ot);
 void PAINT_OT_material_paint_images_ensure(wmOperatorType *ot);
+void PAINT_OT_layer_target_mode_set(wmOperatorType *ot);
 void PAINT_OT_material_paint_brush_sync(wmOperatorType *ot);
 void PAINT_OT_material_channel_value_invert(wmOperatorType *ot);
 void PAINT_OT_material_channel_source_clear(wmOperatorType *ot);

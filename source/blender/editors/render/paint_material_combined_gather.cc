@@ -17,6 +17,8 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
@@ -351,8 +353,10 @@ ImBuf *combined_preview_ensure(Main &bmain,
   std::array<Vector<PaintMaterialCompositeImageLayer>, combined_shading_channels.size()> stacks;
   std::array<bool, combined_shading_channels.size()> has_stack;
   for (const int i : IndexRange(int64_t(combined_shading_channels.size()))) {
-    has_stack[i] = BKE_paint_material_composite_stack_from_material(
-        bmain, ma, combined_shading_channels[i], stacks[i]);
+    /* The channel's stack comes from the DNA description; a material with no stack for it has none
+     * to shade. */
+    has_stack[i] = BKE_paint_layers_composite_image_layers(
+        ma, int(combined_shading_channels[i]), stacks[i]);
   }
 
   /* The canonical size is the first channel that resolves to a layer stack or to a direct image,
@@ -643,6 +647,22 @@ void combined_preview_bake_ensure(const bContext &C, Material &ma)
    * paint cursor and from RNA updates, neither of which fires for a user who merely opened the
    * Combined preview. Without this the procedural channels of such a material would show their
    * defaults for as long as the editor stays open. */
+  /* While a Material row is live in SourceGroup, the CPU composite deliberately stays on its baked
+   * maps (design 7), so the Combined preview must not re-render them on every edit either. The row
+   * catches up once the active marker leaves it, through the same due signal the editor planner
+   * uses. */
+  if (paint_layers_is_layered(ma)) {
+    Vector<const MaterialPaintLayer *> layers;
+    BKE_paint_layers_flatten(ma, layers);
+    for (const MaterialPaintLayer *layer : layers) {
+      if (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL &&
+          BKE_paint_layers_material_mode(ma, *layer) == PaintLayerMaterialMode::SourceGroup &&
+          BKE_paint_layers_bake_row_is_deferred(ma, *layer))
+      {
+        return;
+      }
+    }
+  }
   const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(&ma);
   bool needs_bake = false;
   for (const eMaterialPaintChannel channel : combined_shading_channels) {
@@ -655,7 +675,7 @@ void combined_preview_bake_ensure(const bContext &C, Material &ma)
     /* A plain layer-stack material must not poke the bake machinery on every redraw. */
     return;
   }
-  material_bake::material_source_bake_ensure(C, ma, combined_bake_resolution);
+  material_bake::material_source_bake_ensure(C, ma, combined_bake_resolution, "combined-preview");
 }
 
 /** \} */

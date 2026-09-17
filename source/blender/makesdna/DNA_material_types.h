@@ -11,6 +11,7 @@
 #include "DNA_ID.h"
 #include "DNA_defs.h"
 #include "DNA_listBase.h"
+#include "DNA_uuid_types.h"
 
 #include "BLI_enum_flags.hh"
 
@@ -22,8 +23,8 @@ namespace blender {
 
 struct AnimData;
 struct Image;
+struct Material;
 struct bNodeTree;
-struct MaterialPaintLayerRuntime;
 
 /* MaterialGPencilStyle->flag */
 enum eMaterialGPencilStyle_Flag : short {
@@ -91,6 +92,41 @@ enum eMaterial_Flag : short {
   MA_DS_SHOW_TEXS = 1 << 2,
 };
 ENUM_OPERATORS(eMaterial_Flag)
+
+/** #Material::paint_layers_flag */
+enum eMaterialPaintLayersFlag : short {
+  /** The material carries a paint layer description; its tree is generated from it. */
+  MA_PAINT_LAYERED = 1 << 0,
+  /**
+   * The generator owns the tree and overwrites manual edits. Cleared for debugging, where the
+   * tree is left untouched until an explicit regenerate.
+   */
+  MA_PAINT_LAYERS_LOCKED = 1 << 1,
+  /** The tree is out of date and will be rebuilt from the description. */
+  MA_PAINT_LAYERS_REGEN = 1 << 2,
+  /**
+   * The cached texture-paint slots (`Material::texpaintslot`) no longer match the description: the
+   * active layer, a channel map, the mask or the target mode changed. Rebuilt on the main thread
+   * at the K-1 regeneration point.
+   */
+  MA_PAINT_LAYERS_SLOTS_STALE = 1 << 3,
+  /**
+   * Some row with a bake had a value-only edit (`opacity`, `fill`, a mask value, `enabled`), or a
+   * pixel edit arrived; the planner at the K-1 point re-bakes the rows whose stored hash no longer
+   * matches. Set by the value-only edit path, which cannot rebuild the tree the way REGEN does.
+   */
+  MA_PAINT_LAYERS_BAKE_STALE = 1 << 4,
+  /**
+   * The active row moved, so the row left behind is due for its deferred bake. Read by the
+   * editor's Material-row planner after the depsgraph update.
+   *
+   * Separate from #MA_PAINT_LAYERS_BAKE_STALE on purpose: that one belongs to the CPU
+   * planner, which clears it at the K-1 point -- before the editor update runs -- and never
+   * counts a Material row as pending, so it cannot carry this signal.
+   */
+  MA_PAINT_LAYERS_MATERIAL_BAKE_DUE = 1 << 5,
+};
+ENUM_OPERATORS(eMaterialPaintLayersFlag)
 
 /* ramps */
 enum eMaterial_RampBlend : int {
@@ -385,6 +421,225 @@ struct MaterialLineArt {
   char _pad = {};
 };
 
+/** #MaterialPaintLayer::kind */
+enum eMaterialPaintLayerKind : int8_t {
+  /** A painted layer; the default for an unknown kind. */
+  MA_PAINT_LAYER_KIND_PAINT = 0,
+  /** A flat fill layer. */
+  MA_PAINT_LAYER_KIND_FILL = 1,
+  /** A layer baked from another material, see #material. Phase 3. */
+  MA_PAINT_LAYER_KIND_MATERIAL = 2,
+  /** A child of a layer that adjusts it. */
+  MA_PAINT_LAYER_KIND_CORRECTION = 3,
+  /**
+   * A folder: a row whose part in a channel is the union of its #children, laid over what is below
+   * as an isolated group. Folder-ness is this kind alone, never a non-empty #children list.
+   */
+  MA_PAINT_LAYER_KIND_FOLDER = 4,
+  /** A custom node-group layer, see #custom_group. Phase 4. */
+  MA_PAINT_LAYER_KIND_CUSTOM = 5,
+};
+
+/** #MaterialPaintLayer::blend */
+enum eMaterialPaintLayerBlend : int8_t {
+  MA_PAINT_LAYER_BLEND_MIX = 0,
+  MA_PAINT_LAYER_BLEND_MULTIPLY = 1,
+  MA_PAINT_LAYER_BLEND_OVERLAY = 2,
+  MA_PAINT_LAYER_BLEND_ADD = 3,
+  /** Internal: the Normal channel forces it. Never offered as a user choice. */
+  MA_PAINT_LAYER_BLEND_NORMAL_COMBINE = 4,
+  MA_PAINT_LAYER_BLEND_DARKEN = 5,
+  MA_PAINT_LAYER_BLEND_BURN = 6,
+  MA_PAINT_LAYER_BLEND_LIGHTEN = 7,
+  MA_PAINT_LAYER_BLEND_SCREEN = 8,
+  MA_PAINT_LAYER_BLEND_DODGE = 9,
+  MA_PAINT_LAYER_BLEND_SUBTRACT = 10,
+  MA_PAINT_LAYER_BLEND_DIVIDE = 11,
+  MA_PAINT_LAYER_BLEND_DIFFERENCE = 12,
+  MA_PAINT_LAYER_BLEND_EXCLUSION = 13,
+  MA_PAINT_LAYER_BLEND_SOFT_LIGHT = 14,
+  MA_PAINT_LAYER_BLEND_LINEAR_LIGHT = 15,
+  MA_PAINT_LAYER_BLEND_HUE = 16,
+  MA_PAINT_LAYER_BLEND_SATURATION = 17,
+  MA_PAINT_LAYER_BLEND_COLOR = 18,
+  MA_PAINT_LAYER_BLEND_VALUE = 19,
+};
+
+/** #MaterialPaintLayer::section, for a correction row. */
+enum eMaterialPaintLayerCorrectionSection : int8_t {
+  /** The correction adjusts what the row below paints. */
+  MA_PAINT_LAYER_SECTION_CONTENT = 0,
+  /** The correction limits where the row applies. */
+  MA_PAINT_LAYER_SECTION_MASK = 1,
+};
+
+/** #MaterialPaintLayer::effect, for a correction row. */
+enum eMaterialPaintLayerCorrectionEffect : int8_t {
+  /** The correction was painted. */
+  MA_PAINT_LAYER_EFFECT_PAINT = 0,
+  /** The correction is a flat fill. */
+  MA_PAINT_LAYER_EFFECT_FILL = 1,
+};
+
+/** #MaterialPaintLayerChannel::state */
+enum eMaterialPaintLayerChannelState : int8_t {
+  /** No map: the channel keeps its row but carries no coverage. */
+  MA_PAINT_LAYER_CHANNEL_ABSENT = 0,
+  /** A map feeds the channel and its coverage is live. */
+  MA_PAINT_LAYER_CHANNEL_ENABLED = 1,
+  /** The map is kept but switched off; coverage is unlinked and zero. */
+  MA_PAINT_LAYER_CHANNEL_DISABLED = 2,
+};
+
+/** #MaterialPaintLayer::flag */
+enum eMaterialPaintLayerFlag : int16_t {
+  /** The layer takes part in the stack. */
+  MA_PAINT_LAYER_ENABLED = 1 << 0,
+};
+ENUM_OPERATORS(eMaterialPaintLayerFlag)
+
+/**
+ * One channel of a #MaterialPaintLayer. A layer owns a `channels` array with one entry per wired
+ * channel; #channel names which #eMaterialPaintChannel the record stands for.
+ */
+struct MaterialPaintLayerChannel {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerChannel)
+
+  /** #eMaterialPaintChannel. */
+  int8_t channel = 0;
+  /** #eMaterialPaintLayerChannelState. */
+  int8_t state = MA_PAINT_LAYER_CHANNEL_ABSENT;
+  char _pad[6] = {};
+  /** The channel's map, or null when it has none. */
+  struct Image *image = nullptr;
+  /** Constant value used when the channel carries no map. */
+  float value[4] = {};
+  /**
+   * Deprecated per-channel blend/opacity override, superseded by
+   * #MaterialPaintLayer::channel_settings. Kept only so a file written between the two layouts can
+   * be migrated; the runtime never reads these.
+   */
+  DNA_DEPRECATED int8_t blend = -1;
+  char _pad_deprecated[3] = {};
+  DNA_DEPRECATED float opacity = 1.0f;
+};
+
+/**
+ * The per (row, channel) blend and opacity override of a #MaterialPaintLayer.
+ *
+ * A fixed array on the row rather than a field of a sparse #MaterialPaintLayerChannel record: the
+ * value exists for every pair, record or not, which gives it one stable RNA path that survives a
+ * record being created, and lets a keyframe address it. The sentinels are the inherit defaults.
+ */
+struct MaterialPaintLayerChannelSettings {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerChannelSettings)
+
+  /** #eMaterialPaintLayerBlend, or -1 to inherit the row's blend. */
+  int8_t blend = -1;
+  char _pad[3] = {};
+  /** Multiplied by the row's opacity; 1.0 when the channel has no override. */
+  float opacity = 1.0f;
+};
+
+/** #MaterialPaintLayerBake::mode */
+enum eMaterialPaintLayerBakeMode : int8_t {
+  /** Bake only the heavy inactive subgraphs; the active node is evaluated live. */
+  MA_PAINT_LAYER_BAKE_AUTO = 0,
+  /** Always bake and show "stale" until the bake is current. */
+  MA_PAINT_LAYER_BAKE_ALWAYS = 1,
+  /** Never bake; the node is evaluated live. */
+  MA_PAINT_LAYER_BAKE_NEVER = 2,
+};
+
+/**
+ * The baked cache of one description row, or null while nothing is baked.
+ *
+ * Cache, not truth: the description plus its live maps are what the row *is*, and these are a
+ * snapshot the generator and the CPU compositor may read instead of evaluating the subtree. The
+ * `hash` is the whole validity test -- there is no separate "valid" flag to save -- and the maps
+ * are owned here as ID references (see the layer's `foreach_id`).
+ */
+struct MaterialPaintLayerBake {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerBake)
+
+  /** One map per #eMaterialPaintChannel index, or null where the channel is not baked.
+   * Sized by #PAINT_MATERIAL_CHANNEL_NUM; `paint_layers.cc` static_asserts the 10 stays honest. */
+  struct Image *images[10] = {};
+  /** The baked coverage map, or null. */
+  struct Image *coverage = nullptr;
+  /** #eMaterialPaintLayerBakeMode. */
+  int8_t mode = MA_PAINT_LAYER_BAKE_AUTO;
+  char _pad[3] = {};
+  /** Square side the maps were baked at. */
+  int size = 0;
+  /**
+   * Description hash at the last successful bake, low word first; see #MaterialPaintLayer's old
+   * note for why two 32-bit words.
+   */
+  uint32_t hash[2] = {};
+};
+
+/**
+ * One row of a layered material's stack, the DNA description the node tree is generated from.
+ *
+ * The list is stored bottom-to-top. Folders nest through #children, which holds the same type.
+ */
+struct MaterialPaintLayer {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayer)
+
+  struct MaterialPaintLayer *next = nullptr, *prev = nullptr;
+  /** Nested folder layers; the same type as the parent list. */
+  ListBase children = {nullptr, nullptr};
+  char name[/*MAX_NAME*/ 64] = "";
+  /** Stable identity of the row, shared by the nodes the generator builds for it. */
+  bUUID marker = {};
+  /** #eMaterialPaintLayerKind. */
+  int8_t kind = MA_PAINT_LAYER_KIND_PAINT;
+  /** #eMaterialPaintLayerBlend. */
+  int8_t blend = MA_PAINT_LAYER_BLEND_MIX;
+  /** #eMaterialPaintLayerFlag. */
+  int16_t flag = MA_PAINT_LAYER_ENABLED;
+  float opacity = 1.0f;
+  float fill_color[4] = {};
+  /** Display color tag, interpreted by the UI only. */
+  int8_t color_tag = 0;
+  /** #eMaterialPaintLayerCorrectionSection, for a #MA_PAINT_LAYER_KIND_CORRECTION row. */
+  int8_t section = MA_PAINT_LAYER_SECTION_CONTENT;
+  /** #eMaterialPaintLayerCorrectionEffect, for a #MA_PAINT_LAYER_KIND_CORRECTION row. */
+  int8_t effect = MA_PAINT_LAYER_EFFECT_PAINT;
+  char _pad[5] = {};
+  /** Node group for a #MA_PAINT_LAYER_KIND_CUSTOM layer. */
+  struct bNodeTree *custom_group = nullptr;
+  /** Source material of a #MA_PAINT_LAYER_KIND_MATERIAL layer. Phase 3. */
+  struct Material *material = nullptr;
+  /**
+   * The row's baked cache, or null while nothing is baked. A snapshot the generator and the CPU
+   * compositor may read instead of evaluating the subtree; the description stays the truth.
+   */
+  struct MaterialPaintLayerBake *bake = nullptr;
+  /** Custom group input values and add-on data; the core never reads structure from here. */
+  IDProperty *properties = nullptr;
+  struct MaterialPaintLayerChannel *channels = nullptr;
+  int channels_num = 0;
+  char _pad2[4] = {};
+  /**
+   * Per (row, channel) blend/opacity overrides, indexed by #eMaterialPaintChannel. A fixed array so
+   * every pair has a value and an RNA path, whether or not it has a #channels record yet. The
+   * literal length is #PAINT_MATERIAL_CHANNEL_NUM; `paint_layers.cc` static_asserts the 10.
+   */
+  MaterialPaintLayerChannelSettings channel_settings[10] = {};
+  /**
+   * Effects that adjust what the row paints with, bottom to top. Same type as a layer, linked by
+   * their own markers.
+   */
+  ListBase effects = {nullptr, nullptr};
+  /**
+   * Mask items that limit where the row applies, bottom to top. A mask is a stack like any other;
+   * its coverage starts at one. Same type as a layer, linked by their own markers.
+   */
+  ListBase mask_stack = {nullptr, nullptr};
+};
+
 struct Material {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(Material)
@@ -474,20 +729,31 @@ struct Material {
    */
   MaterialPaintChannelCache paint_channel_cache[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
 
-  /**
-   * Runtime-only paint layer state: the revision every successful paint layer edit bumps, so a
-   * reader can tell a stack it has already read from one that moved on without walking the node
-   * graph. Defined and owned by BKE (#MaterialPaintLayerRuntime), never part of the file: the
-   * file reader nulls it, a copy starts fresh, and the first edit allocates it.
-   */
-  struct MaterialPaintLayerRuntime *paint_layer_runtime = nullptr;
-
   /** Runtime cache for GLSL materials. */
   ListBaseT<LinkData> gpumaterial = {nullptr, nullptr};
 
   /** Grease pencil color. */
   struct MaterialGPencilStyle *gp_style = nullptr;
   struct MaterialLineArt lineart;
+
+  /**
+   * The DNA description of the paint layer stack, bottom-to-top. When #MA_PAINT_LAYERED is set,
+   * the node tree is generated from this and the description is the source of truth.
+   */
+  ListBase paint_layers = {nullptr, nullptr};
+  /** Marker of the active layer or mask; an index is ambiguous across nesting. */
+  bUUID active_layer_marker = {};
+  /** The generated node group holding the stack, see the paint layer generator. */
+  struct bNodeTree *paint_layers_tree = nullptr;
+  /**
+   * Identity of this material as the owner of #paint_layers_tree, stamped on the generated tree so
+   * a pointer at a tree that belongs to someone else is never overwritten. Assigned the first time
+   * the material becomes layered (or the tree is generated) and regenerated on a copy.
+   */
+  bUUID paint_layers_owner_uid = {};
+  /** #eMaterialPaintLayersFlag. */
+  eMaterialPaintLayersFlag paint_layers_flag = {};
+  char _pad2[6] = {};
 };
 
 }  // namespace blender

@@ -1713,6 +1713,11 @@ if(WITH_UI_TESTS)
     --python ${CMAKE_CURRENT_LIST_DIR}/bl_outliner_stack_layers.py
   )
 
+  add_blender_test_ui(
+    script_paint_layers_ui
+    --python ${CMAKE_CURRENT_LIST_DIR}/bl_paint_layers_ui.py
+  )
+
   # This could be generated with:
   # `"${TEST_PYTHON_EXE}" "${CMAKE_CURRENT_LIST_DIR}/ui_simulate/run.py" --list-tests`
   # list explicitly so changes bisecting/updated are sure to re-run CMake.

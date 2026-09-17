@@ -30,7 +30,6 @@
 #include "BKE_colorband.hh"
 #include "BKE_global.hh"
 #include "BKE_paint.hh"
-#include "BKE_paint_material_layer_edit.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_report.hh"
 
@@ -160,8 +159,6 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
-/** The value of the active-layer correction effect for "not a correction". */
-static constexpr int ACTIVE_LAYER_CORRECTION_EFFECT_NONE = -1;
 
 }  // namespace blender
 
@@ -760,85 +757,6 @@ static int rna_MaterialPaintChannelLayerBinding_channel_get_rna(PointerRNA *ptr)
   return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 }
 
-static void rna_PaintModeSettings_channel_image_bindings_begin(CollectionPropertyIterator *iter,
-                                                               PointerRNA *ptr)
-{
-  PaintModeSettings *settings = static_cast<PaintModeSettings *>(ptr->data);
-  rna_iterator_array_begin(iter,
-                           ptr,
-                           settings->channel_image_bindings,
-                           sizeof(MaterialPaintChannelImageBinding),
-                           ARRAY_SIZE(settings->channel_image_bindings),
-                           0,
-                           nullptr);
-}
-
-/* See #rna_PaintModeSettings_channel_layer_bindings_length. */
-static int rna_PaintModeSettings_channel_image_bindings_length(PointerRNA * /*ptr*/)
-{
-  return PAINT_MATERIAL_CHANNEL_NUM;
-}
-
-/** Mirrors #rna_MaterialPaintChannelLayerBinding_channel_get for the image-binding array. */
-static std::optional<eMaterialPaintChannel> rna_MaterialPaintChannelImageBinding_channel_get(
-    const PointerRNA *ptr)
-{
-  const Scene *scene = reinterpret_cast<const Scene *>(ptr->owner_id);
-  if (scene == nullptr || scene->toolsettings == nullptr) {
-    return std::nullopt;
-  }
-  const MaterialPaintChannelImageBinding *bindings =
-      scene->toolsettings->paint_mode.channel_image_bindings;
-  const MaterialPaintChannelImageBinding *binding =
-      static_cast<const MaterialPaintChannelImageBinding *>(ptr->data);
-  const int index = int(binding - bindings);
-  if (index < 0 || index >= PAINT_MATERIAL_CHANNEL_NUM) {
-    return std::nullopt;
-  }
-  return eMaterialPaintChannel(index);
-}
-
-/** Mirrors #rna_MaterialPaintChannelLayerBinding_path for the image-binding array. */
-static std::optional<std::string> rna_MaterialPaintChannelImageBinding_path(const PointerRNA *ptr)
-{
-  const std::optional<eMaterialPaintChannel> channel =
-      rna_MaterialPaintChannelImageBinding_channel_get(ptr);
-  if (!channel) {
-    return std::nullopt;
-  }
-  return fmt::format("tool_settings.paint_mode.channel_image_bindings[{}]", int(*channel));
-}
-
-static int rna_MaterialPaintChannelImageBinding_channel_get_rna(PointerRNA *ptr)
-{
-  if (const std::optional<eMaterialPaintChannel> channel =
-          rna_MaterialPaintChannelImageBinding_channel_get(ptr))
-  {
-    return int(*channel);
-  }
-  return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
-}
-
-/**
- * Initializes the binding's own #ImageUser the same way #PaintModeSettings.image_user is set up
- * for #canvas_image: a freshly assigned Image must not be left with a zeroed user (frame 0, no
- * ok flag), or the first stroke resolves no buffer at all.
- */
-static void rna_MaterialPaintChannelImageBinding_image_set(PointerRNA *ptr,
-                                                           PointerRNA value,
-                                                           ReportList * /*reports*/)
-{
-  MaterialPaintChannelImageBinding *binding = static_cast<MaterialPaintChannelImageBinding *>(
-      ptr->data);
-  Image *image = static_cast<Image *>(value.data);
-  if (binding->image == image) {
-    return;
-  }
-  id_us_min(reinterpret_cast<ID *>(binding->image));
-  binding->image = image;
-  id_us_plus(reinterpret_cast<ID *>(binding->image));
-  BKE_imageuser_default(&binding->iuser);
-}
 
 static std::optional<std::string> rna_PaintModeSettings_path(const PointerRNA * /*ptr*/)
 {
@@ -995,22 +913,6 @@ static void rna_PaintModeSettings_brush_sync_update(bContext *C, PointerRNA * /*
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
 }
 
-/** The correction \a marker in either section of the stack entry \a entry, or null. */
-static const PaintMaterialLayerCorrectionEntry *paint_material_correction_entry_find(
-    const PaintMaterialLayerStackEntry &entry, const bUUID &marker)
-{
-  for (const PaintMaterialLayerCorrectionEntry &correction : entry.content_corrections) {
-    if (correction.marker == marker) {
-      return &correction;
-    }
-  }
-  for (const PaintMaterialLayerCorrectionEntry &correction : entry.mask_corrections) {
-    if (correction.marker == marker) {
-      return &correction;
-    }
-  }
-  return nullptr;
-}
 
 /* -------------------------------------------------------------------- */
 /** \name Paint mode settings: active row per-channel properties
@@ -1019,61 +921,6 @@ static const PaintMaterialLayerCorrectionEntry *paint_material_correction_entry_
  * #PaintModeSettings::active_layer_channel, which the user selects in the panel. Every read
  * resolves the active Stack Layers row first and dispatches on whether it is a correction row.
  * \{ */
-
-/**
- * The active Stack Layers row for \a mode, and the data-file it was resolved against.
- *
- * A property getter has no context to take the data-file from; the global main is what the
- * active-layer read needs, and the UI that draws this runs with it set.
- */
-static std::optional<PaintMaterialActiveLayer> paint_mode_active_layer_get(
-    const PaintModeSettings &mode, Main **r_bmain)
-{
-  Main *bmain = G.main;
-  *r_bmain = bmain;
-  if (bmain == nullptr) {
-    return std::nullopt;
-  }
-  return BKE_paint_material_active_layer_get(*bmain, mode);
-}
-
-/** The correction entry the active row names in its owner's stack model, or null when the row is
- * a layer or nothing answers. */
-static const PaintMaterialLayerCorrectionEntry *paint_mode_active_correction_entry_find(
-    Main &bmain, const PaintMaterialActiveLayer &layer)
-{
-  Vector<PaintMaterialLayerStackEntry> entries;
-  BKE_paint_material_layer_stack_from_material(bmain, *layer.owner, entries);
-  for (const PaintMaterialLayerStackEntry &entry : entries) {
-    if (entry.ordinal != layer.ordinal) {
-      continue;
-    }
-    return paint_material_correction_entry_find(entry, layer.correction);
-  }
-  return nullptr;
-}
-
-static int rna_PaintModeSettings_active_layer_kind_get(PointerRNA *ptr)
-{
-  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
-  Main *bmain = nullptr;
-  const std::optional<PaintMaterialActiveLayer> layer = paint_mode_active_layer_get(*mode, &bmain);
-  /* No active row reads as the default kind, the way an unstamped node does. */
-  return layer.has_value() ? int(layer->kind) : int(PaintMaterialLayerKind::Paint);
-}
-
-static int rna_PaintModeSettings_active_layer_correction_effect_get(PointerRNA *ptr)
-{
-  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
-  Main *bmain = nullptr;
-  const std::optional<PaintMaterialActiveLayer> layer = paint_mode_active_layer_get(*mode, &bmain);
-  if (!layer.has_value() || bmain == nullptr || BLI_uuid_is_nil(layer->correction)) {
-    return ACTIVE_LAYER_CORRECTION_EFFECT_NONE;
-  }
-  const PaintMaterialLayerCorrectionEntry *correction = paint_mode_active_correction_entry_find(
-      *bmain, *layer);
-  return (correction != nullptr) ? int(correction->effect) : ACTIVE_LAYER_CORRECTION_EFFECT_NONE;
-}
 
 static int paint_mode_active_layer_channel_get(const PaintModeSettings &mode)
 {
@@ -1099,255 +946,7 @@ static void rna_PaintModeSettings_active_layer_channel_set(PointerRNA *ptr, int 
   mode->active_layer_channel = value;
 }
 
-static bool rna_PaintModeSettings_active_layer_channel_has_image_get(PointerRNA *ptr)
-{
-  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
-  Main *bmain = nullptr;
-  const std::optional<PaintMaterialActiveLayer> layer = paint_mode_active_layer_get(*mode, &bmain);
-  if (!layer.has_value() || bmain == nullptr) {
-    return false;
-  }
-  const int channel = paint_mode_active_layer_channel_get(*mode);
-  if (!BLI_uuid_is_nil(layer->correction)) {
-    return BKE_paint_material_layer_correction_channel_image_assigned_get(
-        *bmain, *layer->owner, layer->correction, channel);
-  }
-  return BKE_paint_material_layer_channel_image_assigned_get(
-      *bmain, *layer->owner, layer->ordinal, channel);
-}
-
-static PointerRNA rna_PaintModeSettings_active_layer_channel_image_get(PointerRNA *ptr)
-{
-  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
-  Main *bmain = nullptr;
-  const std::optional<PaintMaterialActiveLayer> layer = paint_mode_active_layer_get(*mode, &bmain);
-  if (!layer.has_value() || bmain == nullptr) {
-    return PointerRNA_NULL;
-  }
-  const int channel = paint_mode_active_layer_channel_get(*mode);
-  Image *image = nullptr;
-  if (!BLI_uuid_is_nil(layer->correction)) {
-    /* An active correction row: its maps live on the correction, not on the layer holding it, so
-     * the map is read out of the model the way the channel states are. */
-    const PaintMaterialLayerCorrectionEntry *correction = paint_mode_active_correction_entry_find(
-        *bmain, *layer);
-    image = (correction != nullptr) ? correction->channel_images.lookup_default(channel, nullptr) :
-                                      nullptr;
-  }
-  else {
-    image = layer->maps.lookup_default(channel, nullptr);
-  }
-  return (image != nullptr) ? RNA_id_pointer_create(&image->id) : PointerRNA_NULL;
-}
-
-static void rna_PaintModeSettings_active_layer_channel_image_set(PointerRNA *ptr,
-                                                                 PointerRNA value,
-                                                                 ReportList *reports)
-{
-  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
-  Image *image = static_cast<Image *>(value.data);
-  if (image == nullptr) {
-    BKE_report(reports, RPT_WARNING, "Unassigning happens through the Unlink button");
-    return;
-  }
-  Main *bmain = nullptr;
-  const std::optional<PaintMaterialActiveLayer> layer = paint_mode_active_layer_get(*mode, &bmain);
-  if (!layer.has_value() || bmain == nullptr) {
-    return;
-  }
-  const int channel = paint_mode_active_layer_channel_get(*mode);
-  PaintMaterialLayerEditError error = PaintMaterialLayerEditError::None;
-  if (!BLI_uuid_is_nil(layer->correction)) {
-    if (!BKE_paint_material_layer_correction_channel_image_set(
-            *bmain, *layer->owner, layer->correction, channel, *image, &error))
-    {
-      BKE_report(reports, RPT_ERROR, BKE_paint_material_layer_edit_error_message(error));
-    }
-    return;
-  }
-  if (!BKE_paint_material_layer_channel_image_set(
-          *bmain, *layer->owner, layer->ordinal, channel, *image, &error))
-  {
-    BKE_report(reports, RPT_ERROR, BKE_paint_material_layer_edit_error_message(error));
-  }
-}
-
-static void rna_PaintModeSettings_active_layer_channel_value_get(PointerRNA *ptr, float *values)
-{
-  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
-  /* White is what a fresh flat map of any channel stands for; a channel with no recorded value
-   * reads as that, for a scalar channel's picker just as for a color one. */
-  values[0] = values[1] = values[2] = values[3] = 1.0f;
-  Main *bmain = nullptr;
-  const std::optional<PaintMaterialActiveLayer> layer = paint_mode_active_layer_get(*mode, &bmain);
-  if (!layer.has_value() || bmain == nullptr) {
-    return;
-  }
-  const int channel = paint_mode_active_layer_channel_get(*mode);
-  if (!BLI_uuid_is_nil(layer->correction)) {
-    BKE_paint_material_layer_correction_channel_value_get(
-        *bmain, *layer->owner, layer->correction, channel, values);
-    return;
-  }
-  BKE_paint_material_layer_channel_value_get(
-      *bmain, *layer->owner, layer->ordinal, channel, values);
-}
-
-/**
- * The Properties slider is a committed edit per Blender's property-edit undo (one undo step per
- * drag on release): the setter applies -- pixels plus the marker record -- so a UI drag writes
- * what it shows. The live-preview/no-record split lives in the kernel pair value_preview/
- * value_apply and the Outliner's picker.
- */
-static void rna_PaintModeSettings_active_layer_channel_value_set(PointerRNA *ptr,
-                                                                 const float *values)
-{
-  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
-  Main *bmain = nullptr;
-  const std::optional<PaintMaterialActiveLayer> layer = paint_mode_active_layer_get(*mode, &bmain);
-  if (!layer.has_value() || bmain == nullptr) {
-    return;
-  }
-  const int channel = paint_mode_active_layer_channel_get(*mode);
-  /* A refusal leaves the graph untouched, and a plain setter has no report channel; the widget's
-   * own state is what reads back. */
-  if (!BLI_uuid_is_nil(layer->correction)) {
-    BKE_paint_material_layer_correction_channel_value_apply(
-        *bmain, *layer->owner, layer->correction, channel, values);
-    return;
-  }
-  BKE_paint_material_layer_channel_value_apply(
-      *bmain, *layer->owner, layer->ordinal, channel, values);
-}
-
 /** \} */
-
-/** The channel states of the correction \a correction, from the stack model the layer path reads
- * the same way: a channel with a map on is enabled, one with a map kept but switched off is
- * disabled, and a channel with no map is neither. */
-static void paint_material_correction_channel_states_get(
-    const PaintMaterialLayerCorrectionEntry &correction, int *r_enabled, int *r_disabled)
-{
-  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
-    if (correction.channel_images.lookup_default(channel, nullptr) == nullptr) {
-      continue;
-    }
-    if ((correction.disabled_channels_mask & (uint32_t(1) << channel)) != 0) {
-      *r_disabled |= 1 << channel;
-    }
-    else {
-      *r_enabled |= 1 << channel;
-    }
-  }
-}
-
-static bool rna_PaintModeSettings_active_layer_is_correction_get(PointerRNA *ptr)
-{
-  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
-  /* A property getter has no context to take the data-file from; the global main is what the
-   * active-layer read needs, and the UI that draws this runs with it set. */
-  Main *bmain = G.main;
-  if (bmain == nullptr) {
-    return false;
-  }
-  const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
-      *bmain, *mode);
-  return layer.has_value() && !BLI_uuid_is_nil(layer->correction);
-}
-
-static void rna_PaintModeSettings_active_layer_channel_states(PaintModeSettings *mode,
-                                                              Main *bmain,
-                                                              int *r_enabled,
-                                                              int *r_disabled)
-{
-  /* One read of the stack for every channel: the Layer Material tab draws all of them at once. */
-  *r_enabled = 0;
-  *r_disabled = 0;
-  const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
-      *bmain, *mode);
-  if (!layer.has_value()) {
-    return;
-  }
-  if (!BLI_uuid_is_nil(layer->correction)) {
-    /* An active correction row: its channels live on the correction, not on the layer holding it,
-     * so the states read the correction's own entries out of the model. */
-    Vector<PaintMaterialLayerStackEntry> entries;
-    BKE_paint_material_layer_stack_from_material(*bmain, *layer->owner, entries);
-    for (const PaintMaterialLayerStackEntry &entry : entries) {
-      if (entry.ordinal != layer->ordinal) {
-        continue;
-      }
-      const PaintMaterialLayerCorrectionEntry *correction = paint_material_correction_entry_find(
-          entry, layer->correction);
-      if (correction != nullptr) {
-        paint_material_correction_channel_states_get(*correction, r_enabled, r_disabled);
-      }
-      break;
-    }
-    return;
-  }
-  PaintMaterialLayerChannelState states[PAINT_MATERIAL_CHANNEL_NUM];
-  BKE_paint_material_layer_channel_states_get(
-      *bmain, *layer->owner, layer->ordinal, MutableSpan(states, PAINT_MATERIAL_CHANNEL_NUM));
-  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
-    if (states[channel] == PaintMaterialLayerChannelState::Enabled) {
-      *r_enabled |= 1 << channel;
-    }
-    else if (states[channel] == PaintMaterialLayerChannelState::Disabled) {
-      *r_disabled |= 1 << channel;
-    }
-  }
-}
-
-static const EnumPropertyItem *rna_PaintModeSettings_stack_layer_channel_itemf(
-    bContext *C, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
-{
-  /* The channels wired by the stack being edited -- the one the channel bindings point into, else
-   * the active object's -- in the order the channel table lists them. With no stack to read every
-   * paintable channel is offered, and the stored channel always stays listed: an enum value
-   * missing
-   * from its items leaves the picker blank. */
-  const PaintModeSettings *mode = static_cast<const PaintModeSettings *>(ptr->data);
-  Main *bmain = (C != nullptr) ? CTX_data_main(C) : nullptr;
-  Material *ma = nullptr;
-  if (bmain != nullptr && mode != nullptr) {
-    const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
-        *bmain, *mode);
-    ma = layer.has_value() ? layer->owner : nullptr;
-  }
-  if (ma == nullptr && C != nullptr) {
-    Object *ob = CTX_data_active_object(C);
-    ma = (ob != nullptr) ? BKE_object_material_get(ob, ob->actcol) : nullptr;
-  }
-  Vector<int> wired;
-  if (ma != nullptr) {
-    BKE_paint_material_layer_channels_wired(*ma, wired);
-  }
-  const int current = (mode != nullptr) ? mode->stack_layer_channel : -1;
-  EnumPropertyItem *items = nullptr;
-  int items_num = 0;
-  for (const EnumPropertyItem *item = rna_enum_material_paint_channel_items;
-       item->identifier != nullptr;
-       item++)
-  {
-    if (item->identifier[0] == '\0') {
-      continue;
-    }
-    const bool has_socket =
-        item->value >= 0 && item->value < PAINT_MATERIAL_CHANNEL_NUM &&
-        BKE_paint_material_channel_info(eMaterialPaintChannel(item->value)).socket_name != nullptr;
-    if (!has_socket) {
-      continue;
-    }
-    if (!wired.is_empty() && !wired.contains(item->value) && item->value != current) {
-      continue;
-    }
-    RNA_enum_item_add(&items, &items_num, item);
-  }
-  RNA_enum_item_end(&items, &items_num);
-  *r_free = true;
-  return items;
-}
 
 static const EnumPropertyItem *rna_PaintModeSettings_active_layer_channel_itemf(
     bContext * /*C*/, PointerRNA * /*ptr*/, PropertyRNA * /*prop*/, bool *r_free)
@@ -1626,71 +1225,12 @@ static std::optional<std::string> rna_UnifiedPaintSettings_path(const PointerRNA
   return std::nullopt;
 }
 
-/**
- * A paint layer's opacity is a node socket's `default_value`, a plain #PROP_FACTOR that Blender
- * shows as 0.0-1.0 or 0-100% depending on the user's own Factor Display preference (`U`).
- * #PaintMaterialLayerOpacity wraps the same float behind a property that is always a percentage,
- * independent of that preference: the layer stack's own convention, not the general node-editor
- * one, and everywhere else in Blender that shows a Factor keeps following the user's choice.
- */
-static float rna_PaintMaterialLayerOpacity_value_get(PointerRNA *ptr)
-{
-  const bNodeSocket *socket = static_cast<const bNodeSocket *>(ptr->data);
-  return socket->default_value_typed<bNodeSocketValueFloat>()->value * 100.0f;
-}
-
-static void rna_PaintMaterialLayerOpacity_value_set(PointerRNA *ptr, const float value)
-{
-  bNodeSocket *socket = static_cast<bNodeSocket *>(ptr->data);
-  socket->default_value_typed<bNodeSocketValueFloat>()->value = value / 100.0f;
-}
-
-static void rna_PaintMaterialLayerOpacity_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
-{
-  if (ptr->owner_id == nullptr || GS(ptr->owner_id->name) != ID_NT) {
-    return;
-  }
-  BKE_paint_material_layer_opacity_changed(*bmain,
-                                           *id_cast<bNodeTree *>(ptr->owner_id),
-                                           *static_cast<bNodeSocket *>(ptr->data));
-  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
-}
-
 }  // namespace blender
 
 #else
 
 namespace blender {
 
-/* The kinds a Stack Layers row can have, in #PaintMaterialLayerKind's order. */
-static const EnumPropertyItem rna_enum_paint_mode_active_layer_kind_items[] = {
-    {int(PaintMaterialLayerKind::Paint), "PAINT", 0, "Paint", "A layer painted by hand"},
-    {int(PaintMaterialLayerKind::Fill), "FILL", 0, "Fill", "A layer standing for one flat color"},
-    {int(PaintMaterialLayerKind::Material),
-     "MATERIAL",
-     0,
-     "Material",
-     "A layer baked from another material"},
-    {int(PaintMaterialLayerKind::Correction),
-     "CORRECTION",
-     0,
-     "Correction",
-     "A correction hanging on a layer"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
-/* What the active correction row applies; #ACTIVE_LAYER_CORRECTION_EFFECT_NONE stands for "the
- * active row is a layer, not a correction". */
-static const EnumPropertyItem rna_enum_paint_mode_active_layer_correction_effect_items[] = {
-    {ACTIVE_LAYER_CORRECTION_EFFECT_NONE,
-     "NONE",
-     0,
-     "None",
-     "The active row is a layer, not a correction"},
-    {int(PaintMaterialCorrectionEffect::Paint), "PAINT", 0, "Paint", "A painted adjustment"},
-    {int(PaintMaterialCorrectionEffect::Fill), "FILL", 0, "Fill", "A flat fill"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
 
 static void rna_def_paint_curve(BlenderRNA *brna)
 {
@@ -2747,33 +2287,15 @@ static void rna_def_vertex_paint(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
-/**
- * A stand-alone wrapper around a paint layer's opacity node socket, so the layer stack's Value
- * column can always read and write it as 0-100%, independent of the user's Factor Display
- * preference. Backed by function pointers rather than `RNA_def_struct_sdna`: `ptr->data` is a
- * `bNodeSocket *`, not a struct of this type's own.
- */
-static void rna_def_paint_material_layer_opacity(BlenderRNA *brna)
-{
-  StructRNA *srna;
-  PropertyRNA *prop;
-
-  srna = RNA_def_struct(brna, "PaintMaterialLayerOpacity", nullptr);
-  RNA_def_struct_ui_text(srna,
-                         "Paint Layer Opacity",
-                         "A paint layer's opacity, always shown as a percentage regardless of "
-                         "the Factor Display preference");
-
-  prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_PERCENTAGE);
-  RNA_def_property_range(prop, 0.0f, 100.0f);
-  RNA_def_property_ui_range(prop, 0.0f, 100.0f, 1, 0);
-  RNA_def_property_float_funcs(prop,
-                               "rna_PaintMaterialLayerOpacity_value_get",
-                               "rna_PaintMaterialLayerOpacity_value_set",
-                               nullptr);
-  RNA_def_property_ui_text(prop, "Opacity", "How much this paint layer covers what is below it");
-  RNA_def_property_update(prop, 0, "rna_PaintMaterialLayerOpacity_update");
-}
+static const EnumPropertyItem rna_enum_material_layer_target_mode_items[] = {
+    {PAINT_LAYER_TARGET_CONTENT,
+     "CONTENT",
+     0,
+     "Content",
+     "Paint the active Stack Layers row's channel content"},
+    {PAINT_LAYER_TARGET_MASK, "MASK", 0, "Mask", "Paint the active Stack Layers row's mask"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
 
 static void rna_def_paint_mode(BlenderRNA *brna)
 {
@@ -2812,42 +2334,6 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       "Name of the mesh attribute this channel paints into. For a fixed channel, empty means "
       "paint its built-in attribute as normal; for Custom, empty means unconfigured. Takes "
       "effect for the next stroke, not necessarily mid-stroke");
-  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
-
-  srna = RNA_def_struct(brna, "MaterialPaintChannelImageBinding", nullptr);
-  RNA_def_struct_sdna(srna, "MaterialPaintChannelImageBinding");
-  RNA_def_struct_path_func(srna, "rna_MaterialPaintChannelImageBinding_path");
-  RNA_def_struct_ui_text(srna,
-                         "Material Paint Channel Image Binding",
-                         "Add-on managed Image a material paint channel writes into on the "
-                         "image/texture canvas, instead of whatever the Principled BSDF socket "
-                         "resolves to");
-  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
-
-  /* Read-only; see #MaterialPaintChannelLayerBinding.channel. */
-  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
-  RNA_def_property_enum_funcs(
-      prop, "rna_MaterialPaintChannelImageBinding_channel_get_rna", nullptr, nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Channel", "Which material paint channel this binding redirects");
-
-  prop = RNA_def_property(srna, "image", PROP_POINTER, PROP_NONE);
-  /* An explicit setter rather than the generic one: the binding owns an #ImageUser that has to be
-   * reset alongside the pointer, and the reference has to be counted so the Image is not freed
-   * while a channel still paints into it. */
-  RNA_def_property_pointer_funcs(prop,
-                                 nullptr,
-                                 "rna_MaterialPaintChannelImageBinding_image_set",
-                                 nullptr,
-                                 "rna_Image_no_renderresult_or_viewer_poll");
-  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
-  RNA_def_property_ui_text(
-      prop,
-      "Image",
-      "Image this channel paints into on the PAINT_CANVAS_SOURCE_MATERIAL canvas; empty to "
-      "resolve it from the active material's node tree as normal. Takes effect for the next "
-      "stroke, not necessarily mid-stroke");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   srna = RNA_def_struct(brna, "PaintModeSettings", nullptr);
@@ -2906,56 +2392,6 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       "Channel Layer Bindings",
       "Per-channel material paint attribute redirect, indexed by material paint channel");
 
-  prop = RNA_def_property(srna, "channel_image_bindings", PROP_COLLECTION, PROP_NONE);
-  /* Empty length name: fixed DNA array (same pattern as channel_layer_bindings above). */
-  RNA_def_property_collection_sdna(prop, nullptr, "channel_image_bindings", "");
-  RNA_def_property_struct_type(prop, "MaterialPaintChannelImageBinding");
-  RNA_def_property_collection_funcs(prop,
-                                    "rna_PaintModeSettings_channel_image_bindings_begin",
-                                    "rna_iterator_array_next",
-                                    "rna_iterator_array_end",
-                                    "rna_iterator_array_get",
-                                    "rna_PaintModeSettings_channel_image_bindings_length",
-                                    nullptr,
-                                    nullptr,
-                                    nullptr);
-  RNA_def_property_ui_text(
-      prop,
-      "Channel Image Bindings",
-      "Per-channel material paint image redirect for the image/texture canvas, indexed by "
-      "material paint channel");
-
-  func = RNA_def_function(
-      srna, "active_layer_channel_states", "rna_PaintModeSettings_active_layer_channel_states");
-  RNA_def_function_flag(func, FUNC_USE_MAIN);
-  RNA_def_function_ui_description(
-      func,
-      "Channels switched on and off on the active Stack Layers row; every other channel is "
-      "absent");
-  parm = RNA_def_enum_flag(func,
-                           "enabled",
-                           rna_enum_visible_material_paint_channel_items,
-                           0,
-                           "Enabled",
-                           "Channels whose map the row shows");
-  RNA_def_function_output(func, parm);
-  parm = RNA_def_enum_flag(func,
-                           "disabled",
-                           rna_enum_visible_material_paint_channel_items,
-                           0,
-                           "Disabled",
-                           "Channels whose map the row keeps but has switched off");
-  RNA_def_function_output(func, parm);
-
-  prop = RNA_def_property(srna, "active_layer_is_correction", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_funcs(
-      prop, "rna_PaintModeSettings_active_layer_is_correction_get", nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop,
-                           "Active Layer Is Correction",
-                           "The Stack Layers row the channel bindings point at is a correction "
-                           "hanging on a layer, not a layer row");
-
   static const EnumPropertyItem new_channel_image_size_items[] = {
       {PAINT_NEW_CHANNEL_IMAGE_SIZE_256, "SIZE_256", 0, "256 (256 x 256)", "256 x 256"},
       {PAINT_NEW_CHANNEL_IMAGE_SIZE_512, "SIZE_512", 0, "512 (512 x 512)", "512 x 512"},
@@ -2976,20 +2412,6 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "are auto-created when a channel is enabled");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
-  /* Display state rather than layer data, but kept in #PaintModeSettings on purpose: one
-   * channel shared by every Outliner showing the stack, undoable and written to the file like
-   * the rest of the paint settings. */
-  prop = RNA_def_property(srna, "stack_layer_channel", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "stack_layer_channel");
-  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
-  RNA_def_property_enum_funcs(
-      prop, nullptr, nullptr, "rna_PaintModeSettings_stack_layer_channel_itemf");
-  RNA_def_property_ui_text(prop,
-                           "Layer Channel",
-                           "Channel whose Blending Mode and Opacity the layer stack shows and "
-                           "edits");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
-
   /* The channel the Layer Material tab's per-channel widgets address. The panel exposes this as a
    * user-selected enum rather than changing it while drawing. Legacy non-bakeable values remain in
    * DNA, but the RNA getter exposes the default bakeable channel instead. */
@@ -3006,61 +2428,15 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "The channel the Layer Material tab's per-channel widgets address");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
-  prop = RNA_def_property(srna, "active_layer_kind", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_paint_mode_active_layer_kind_items);
-  RNA_def_property_enum_funcs(
-      prop, "rna_PaintModeSettings_active_layer_kind_get", nullptr, nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Active Layer Kind", "What the active Stack Layers row is");
-
-  prop = RNA_def_property(srna, "active_layer_correction_effect", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_paint_mode_active_layer_correction_effect_items);
-  RNA_def_property_enum_funcs(
-      prop, "rna_PaintModeSettings_active_layer_correction_effect_get", nullptr, nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(
-      prop,
-      "Active Layer Correction Effect",
-      "What the active correction row applies to the layer under it; NONE when the active row is "
-      "a layer, not a correction");
-
-  prop = RNA_def_property(srna, "active_layer_channel_has_image", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_funcs(
-      prop, "rna_PaintModeSettings_active_layer_channel_has_image_get", nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  /* The channel the Stack Layers header selects: which per (row, channel) blend/opacity the
+   * Outliner's columns show and edit. Distinct from `active_layer_channel`. */
+  prop = RNA_def_property(srna, "stack_layer_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stack_layer_channel");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
   RNA_def_property_ui_text(prop,
-                           "Channel Has Image",
-                           "The channel's map of the active Stack Layers row was assigned from "
-                           "outside, the state the Unlink button clears");
-
-  prop = RNA_def_property(srna, "active_layer_channel_image", PROP_POINTER, PROP_NONE);
-  RNA_def_property_struct_type(prop, "Image");
-  RNA_def_property_pointer_funcs(prop,
-                                 "rna_PaintModeSettings_active_layer_channel_image_get",
-                                 "rna_PaintModeSettings_active_layer_channel_image_set",
-                                 nullptr,
-                                 "rna_Image_no_renderresult_or_viewer_poll");
-  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
-  RNA_def_property_ui_text(
-      prop,
-      "Channel Image",
-      "Image shown by this channel of the active Stack Layers row; the map node's user is the "
-      "one reference it holds, and empty hands nothing back");
-  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
-
-  prop = RNA_def_property(srna, "active_layer_channel_value", PROP_FLOAT, PROP_COLOR);
-  RNA_def_property_array(prop, 4);
-  RNA_def_property_float_funcs(prop,
-                               "rna_PaintModeSettings_active_layer_channel_value_get",
-                               "rna_PaintModeSettings_active_layer_channel_value_set",
-                               nullptr);
-  RNA_def_property_range(prop, 0.0f, 1.0f);
-  RNA_def_property_ui_text(
-      prop,
-      "Channel Value",
-      "Flat value this channel of the active Stack Layers row is filled with; a channel that "
-      "shows an assigned image has none, and dragging this over one would write it");
-  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+                           "Stack Layer Channel",
+                           "The channel whose blend and opacity the Stack Layers columns show");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 
   prop = RNA_def_enum_flag(srna,
                            "material_shader_visible_channels",
@@ -3074,6 +2450,18 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "shown, without either affecting painting");
   RNA_def_property_enum_sdna(prop, nullptr, "material_shader_visible_channels");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* Read-only, like `Object.mode`: switching goes through PAINT_OT_layer_target_mode_set, which
+   * also switches the mask brush. A writable property could not tell a repeat assignment from a
+   * transition and would re-snapshot the brush, losing the user's original one. */
+  prop = RNA_def_property(srna, "layer_target_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "layer_target_mode");
+  RNA_def_property_enum_items(prop, rna_enum_material_layer_target_mode_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Layer Target",
+      "Whether a layered material's stroke paints the active row's channel content or its mask");
 }
 
 static void rna_def_image_paint(BlenderRNA *brna)
@@ -3836,7 +3224,6 @@ void RNA_def_sculpt_paint(BlenderRNA *brna)
   rna_def_gp_sculptpaint(brna);
   rna_def_gp_weightpaint(brna);
   rna_def_vertex_paint(brna);
-  rna_def_paint_material_layer_opacity(brna);
   rna_def_paint_mode(brna);
   rna_def_image_paint(brna);
   rna_def_particle_edit(brna);

@@ -54,6 +54,7 @@
 #include "BKE_main_invariants.hh"
 #include "BKE_material.hh"
 #include "BKE_node.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
@@ -868,6 +869,85 @@ void MATERIAL_OT_new(wmOperatorType *ot)
 
   /* flags */
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+}
+
+/**
+ * Create a fresh layered material and give it its first Paint layer. The material is otherwise an
+ * ordinary one: the stack is the DNA description, the node tree is generated from it, and the
+ * generator owns the tree (Locked) until the user unlocks it.
+ */
+static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator * /*op*/)
+{
+  Main *bmain = CTX_data_main(C);
+  PointerRNA ptr;
+  PropertyRNA *prop;
+  ui::context_active_but_prop_get_templateID(C, &ptr, &prop);
+  Object *ob = static_cast<Object *>((prop && RNA_struct_is_a(ptr.type, RNA_Object)) ? ptr.data :
+                                                                                       nullptr);
+  if (prop == nullptr) {
+    /* Invoked from a plain button (the material dropdown, the Stack Layers header) rather than a
+     * template ID's "new" callback, so no material button is active: the active object is what the
+     * new material goes onto. */
+    ob = ed::object::context_object(C);
+  }
+
+  Material *ma = BKE_material_add(bmain, DATA_("Layered Material"));
+  nodes::node_tree_shader_default(C, bmain, &ma->id);
+  /* A Fill layer of the default grey, so a fresh layered material looks like any other new one. A
+   * Fill is a colour and takes no strokes itself: painting goes into a layer or Correction above it,
+   * or into its mask. */
+  MaterialPaintLayer *base = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FILL, "Base Color", nullptr, PaintLayerPlace::Above);
+  /* The default channel set, so the fresh stack reaches the Principled BSDF immediately. */
+  BKE_paint_layers_default_channels_apply(*ma, *base);
+  const float base_color[4] = {0.8f, 0.8f, 0.8f, 1.0f};
+  BKE_paint_layers_set_fill_color(*ma, base, base_color);
+  BKE_paint_layers_active_set(*ma, base->marker);
+  ma->paint_layers_flag |= MA_PAINT_LAYERS_LOCKED;
+
+  if (prop) {
+    if (ob != nullptr) {
+      if (BKE_object_material_get_p(ob, ob->actcol) == nullptr) {
+        BKE_object_material_slot_add(bmain, ob);
+      }
+    }
+    id_us_min(&ma->id);
+    if (ptr.owner_id) {
+      BKE_id_move_to_same_lib(*bmain, ma->id, *ptr.owner_id);
+    }
+    PointerRNA idptr = RNA_id_pointer_create(&ma->id);
+    RNA_property_pointer_set(&ptr, prop, idptr, nullptr);
+    RNA_property_update(C, &ptr, prop);
+  }
+  else if (ob != nullptr) {
+    /* Invoked outside a material button -- the Stack Layers header, say -- the material still has
+     * to reach the object, so it goes into a slot of its own and that slot is made active, so the
+     * material list shows it immediately rather than leaving the previous material selected. */
+    const int index = BKE_object_material_ensure(bmain, ob, ma);
+    if (index >= 0) {
+      ob->actcol = short(index + 1);
+    }
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+    WM_event_add_notifier(C, NC_OBJECT | ND_OB_SHADING, ob);
+  }
+
+  WM_event_add_notifier(C, NC_MATERIAL | NA_ADDED, ma);
+  return OPERATOR_FINISHED;
+}
+
+void MATERIAL_OT_new_layered(wmOperatorType *ot)
+{
+  /* identifiers */
+  ot->name = "New Layered Material";
+  ot->idname = "MATERIAL_OT_new_layered";
+  ot->description = "Add a new paint-layer stack material, generated from its layer description";
+
+  /* API callbacks. */
+  ot->exec = new_layered_material_exec;
+  ot->poll = object_materials_supported_poll;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
 /** \} */

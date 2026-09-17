@@ -49,10 +49,13 @@
 #include "BKE_image.hh"
 #include "BKE_image_wrappers.hh"
 #include "BKE_mesh.hh"
+#include "BKE_material.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_channel_perf_debug.hh"
 
 #include "mesh_brush_common.hh"
@@ -136,11 +139,15 @@ ImageData::~ImageData()
 
 std::unique_ptr<ImageData> ImageData::from_image(Image *image, ImageUser *image_user)
 {
-  if (image == nullptr || image_user == nullptr) {
+  if (image == nullptr) {
     return nullptr;
   }
   std::unique_ptr<ImageData> image_data = std::make_unique<ImageData>();
   image_data->image = image;
+  if (image_user == nullptr) {
+    BKE_imageuser_default(&image_data->owned_image_user);
+    image_user = &image_data->owned_image_user;
+  }
   image_data->image_user = image_user;
   return image_data;
 }
@@ -168,6 +175,7 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
         target.is_normal_channel = material_target.is_normal_channel;
         target.is_material_channel = true;
         target.is_mask_target = material_target.is_mask_target;
+        target.is_correction_target = material_target.is_correction_target;
         target.channel = material_target.channel;
         target.channel_name = material_target.is_mask_target ?
                                   IFACE_("Mask") :
@@ -184,7 +192,9 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
         }
         else {
           const float v = material_target.value;
-          target.color_override = float4(v, v, v, 1.0f);
+          if (!material_target.is_mask_target) {
+            target.color_override = float4(v, v, v, 1.0f);
+          }
         }
         targets.append(std::move(target));
       }
@@ -382,12 +392,35 @@ static void pack_float_pixels_to_byte(const Span<float4> src, uchar4 *dst)
   }
 }
 
+/**
+ * Byte buffers hold straight alpha while the blend works on pre-multiplied colors (the "over" of
+ * #blend_color_mix_float). Without the conversion a stroke over a transparent pixel stores its
+ * pre-multiplied color as if it were straight, so a soft edge reads darker than painted -- a
+ * visible rim on every stroke over a transparent map. Maps stored pre-multiplied (a mask
+ * correction's coverage, IMA_ALPHA_PREMUL) skip both directions: the blend output is already in
+ * storage encoding.
+ */
+static void straight_to_premul_pixels(MutableSpan<float4> pixels)
+{
+  for (float4 &pixel : pixels) {
+    straight_to_premul_v4(pixel);
+  }
+}
+
+static void premul_to_straight_pixels(MutableSpan<float4> pixels)
+{
+  for (float4 &pixel : pixels) {
+    premul_to_straight_v4(pixel);
+  }
+}
+
 MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
-                                      const TileColorspaceProcessor &processors,
-                                      const PackedPixelRow &pixel_row,
-                                      const IndexRange range,
-                                      const int width,
-                                      Vector<float4> &storage)
+                                       const TileColorspaceProcessor &processors,
+                                       const PackedPixelRow &pixel_row,
+                                       const IndexRange range,
+                                       const int width,
+                                       Vector<float4> &storage,
+                                       const bool premul_storage)
 {
   PRF_scope(ProfileCategory::Editor);
   storage.resize(range.size());
@@ -396,12 +429,18 @@ MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
 
   unpack_byte_pixels_to_float(image_pixels.data() + start_offset, storage);
 
-  if (processors.is_noop) {
-    return storage;
+  if (!processors.is_noop) {
+    /* A pre-multiplied byte buffer (a correction's coverage map) needs the transform applied to
+     * its un-multiplied colour, or a partly-covered texel's already-scaled-down RGB is pushed
+     * through the curve a second time -- #ColormanageProcessor::apply's `predivide` is exactly
+     * this un-multiply/transform/re-multiply, and it is a no-op wherever alpha is 1, which is why
+     * a straight-stored, always-opaque channel map never showed the difference. */
+    processors.buffer_to_linear_processor.apply(
+        reinterpret_cast<float *>(storage.data()), range.size(), 1, 4, premul_storage);
   }
-
-  processors.buffer_to_linear_processor.apply(
-      reinterpret_cast<float *>(storage.data()), range.size(), 1, 4, false);
+  if (!premul_storage) {
+    straight_to_premul_pixels(storage);
+  }
 
   return storage;
 }
@@ -411,12 +450,18 @@ void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
                         const TileColorspaceProcessor &processors,
                         const PackedPixelRow &pixel_row,
                         const IndexRange range,
-                        const int width)
+                        const int width,
+                        const bool premul_storage)
 {
   PRF_scope(ProfileCategory::Editor);
+  if (!premul_storage) {
+    premul_to_straight_pixels(scene_linear_pixels);
+  }
   if (!processors.is_noop) {
+    /* See the matching #read_image_pixels: `predivide` un-multiplies before the transform and
+     * re-multiplies after, which is what a pre-multiplied buffer's partly-covered texels need. */
     processors.linear_to_buffer_processor.apply(
-        reinterpret_cast<float *>(scene_linear_pixels.data()), range.size(), 1, 4, false);
+        reinterpret_cast<float *>(scene_linear_pixels.data()), range.size(), 1, 4, premul_storage);
   }
 
   const int start_offset = int(pixel_row.start_image_coordinate.y) * width +
@@ -457,6 +502,26 @@ static void mix_paint_over_scene(float4 &paint, const float4 &scene, const float
   paint[3] = mt * scene[3] + t;
 }
 
+/**
+ * A single pre-multiplied "over": `scene * (1 - paint.a * brush_alpha) + paint * brush_alpha`.
+ *
+ * #mix_paint_over_scene lays the paint over the scene twice, which the second step only cancels
+ * for an opaque scene. Over a transparent texel it counts the scene alpha twice, so every nearby
+ * dab re-intensifies a soft edge already painted. A pre-multiplied map (a mask correction's
+ * coverage) is transparent by design and takes this form; for an opaque scene both agree.
+ */
+static void mix_paint_over_transparent_scene(float4 &paint,
+                                             const float4 &scene,
+                                             const float brush_alpha)
+{
+  paint *= brush_alpha;
+  const float mt = 1.0f - paint[3];
+  paint[0] = mt * scene[0] + paint[0];
+  paint[1] = mt * scene[1] + paint[1];
+  paint[2] = mt * scene[2] + paint[2];
+  paint[3] = mt * scene[3] + paint[3];
+}
+
 /** Same #IMB_BLEND_NORMAL_MIX body as #blend_colors. */
 static void mix_normal_over_scene(float4 &paint,
                                   const float4 &scene,
@@ -473,15 +538,73 @@ static void mix_normal_over_scene(float4 &paint,
   paint[3] = scene[3];
 }
 
+/**
+ * #mix_normal_over_scene for a correction's own Normal map, whose alpha is its coverage.
+ *
+ * The plain form keeps the scene alpha, which for a map that starts transparent means the stroke
+ * never gains coverage and the correction stays invisible. This one lays the stroke over with the
+ * single "over" (`a' = a + t * (1 - a)`) and mixes the tangent by the share the stroke holds in
+ * the result. \a scene_premul tells whether the scene color is multiplied by its alpha (a straight
+ * byte map is, on read); the result is returned in the same representation.
+ */
+static void mix_normal_over_correction_scene(float4 &paint,
+                                             const float4 &scene,
+                                             const float brush_alpha,
+                                             const bool is_float_storage,
+                                             const bool scene_premul)
+{
+  const float t = math::clamp(paint[3] * brush_alpha, 0.0f, 1.0f);
+  const float scene_alpha = scene[3];
+  const float alpha = scene_alpha + t * (1.0f - scene_alpha);
+  if (alpha <= 1e-6f) {
+    paint = scene;
+    return;
+  }
+
+  const float target_n[3] = {paint[0] * 2.0f - 1.0f, paint[1] * 2.0f - 1.0f, paint[2] * 2.0f - 1.0f};
+  float out[3];
+  if (scene_alpha <= 1e-6f) {
+    /* An untouched texel holds no tangent (its color is meaningless), so the stroke owns it. */
+    BKE_pbr_normal_pack(target_n, is_float_storage, out);
+  }
+  else {
+    float4 straight = scene;
+    if (scene_premul) {
+      straight = float4(scene[0] / scene_alpha, scene[1] / scene_alpha, scene[2] / scene_alpha, 1.0f);
+    }
+    BKE_pbr_normal_blend_mix(straight, target_n, t / alpha, is_float_storage, out);
+  }
+  const float scale = scene_premul ? alpha : 1.0f;
+  paint = float4(out[0] * scale, out[1] * scale, out[2] * scale, alpha);
+}
+
 static void blend_colors(MutableSpan<float4> paint_pixels,
                          Span<float4> scene_linear_pixels,
                          const Brush &brush,
                          const IMB_BlendMode blend_mode,
                          const bool is_float_storage,
-                         const bool material_blend)
+                         const bool material_blend,
+                         const bool single_over = false,
+                         const bool correction_normal = false,
+                         const bool scene_premul = false)
 {
   PRF_scope(ProfileCategory::Editor);
   BLI_assert(paint_pixels.size() == scene_linear_pixels.size());
+
+  if (blend_mode == IMB_BLEND_NORMAL_MIX && correction_normal) {
+    for (const int i : paint_pixels.index_range()) {
+      mix_normal_over_correction_scene(
+          paint_pixels[i], scene_linear_pixels[i], brush.alpha, is_float_storage, scene_premul);
+    }
+    return;
+  }
+
+  if (blend_mode == IMB_BLEND_MIX && single_over) {
+    for (const int i : paint_pixels.index_range()) {
+      mix_paint_over_transparent_scene(paint_pixels[i], scene_linear_pixels[i], brush.alpha);
+    }
+    return;
+  }
 
   if (blend_mode == IMB_BLEND_NORMAL_MIX) {
     for (const int i : paint_pixels.index_range()) {
@@ -577,6 +700,15 @@ struct PaintChannelRangeState {
   MaterialStrokeAccum *accum;
   /** Identifies the tile buffer the accumulator's texel blocks belong to. */
   const ImBuf *accum_buffer;
+  /** The byte map stores pre-multiplied coverage (IMA_ALPHA_PREMUL): skip the straight conversions. */
+  const bool premul_storage;
+  /**
+   * The target is a correction row's own map (#PaintMaterialImageTarget::is_correction_target):
+   * its factor is its own alpha, so it starts transparent and #blend_colors must use the single
+   * pre-multiplied "over" regardless of #premul_storage, which stays tied to the map's own
+   * storage (straight for a colour correction) rather than to this.
+   */
+  const bool correction_target;
 };
 
 /** Prepare paint colors when no source texture is sampled for the channel. */
@@ -632,7 +764,8 @@ static void read_paint_range(PaintChannelRangeState &state,
                                                 pixel_row,
                                                 range,
                                                 state.image_width,
-                                                state.tls.byte_to_float_pixels);
+                                                state.tls.byte_to_float_pixels,
+                                                state.premul_storage);
   }
 }
 
@@ -691,6 +824,21 @@ static void accumulate_material_range(PaintChannelRangeState &state,
   }
 }
 
+/**
+ * Whether Mix uses the single pre-multiplied "over" (#mix_paint_over_transparent_scene).
+ *
+ * Every material channel map is a layer that can be transparent, not only a correction's. The
+ * double "over" raises a partly covered texel's alpha even where the brush factor is zero, so each
+ * dab re-intensifies the soft edges of every PBVH node it gathers and leaves straight cuts along
+ * node boundaries. For an opaque scene both forms agree, so only the plain Image canvas keeps the
+ * stock form. #PaintChannelRangeState::premul_storage is tied to the map's storage rather than to
+ * this choice, so a straight colour map still never divides its low, byte-quantised alpha.
+ */
+static bool use_single_over(const PaintChannelRangeState &state)
+{
+  return state.material_blend || state.premul_storage || state.correction_target;
+}
+
 /** Blend one prepared paint range for a channel. */
 static void blend_paint_range(PaintChannelRangeState &state,
                               const PackedPixelRow &pixel_row,
@@ -705,7 +853,10 @@ static void blend_paint_range(PaintChannelRangeState &state,
                state.brush,
                state.blend_mode,
                !state.float_buffer.is_empty(),
-               state.material_blend);
+               state.material_blend,
+               use_single_over(state),
+               state.correction_target,
+               state.byte_buffer.size() != 0 && !state.premul_storage);
 }
 
 /** Write one blended paint range to a channel image. */
@@ -727,7 +878,8 @@ static void write_paint_range(PaintChannelRangeState &state,
                        state.processors,
                        pixel_row,
                        range,
-                       state.image_width);
+                       state.image_width,
+                       state.premul_storage);
   }
 }
 
@@ -750,13 +902,20 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
                            int(pixel_row.start_image_coordinate.x) + range.start();
   const float brush_alpha = state.brush.alpha;
   const bool normal_mix = state.blend_mode == IMB_BLEND_NORMAL_MIX;
+  const bool single_over = use_single_over(state);
 
   if (!state.float_buffer.is_empty()) {
     float4 *image = state.float_buffer.data() + start_offset;
     for (const int i : paint_pixels.index_range()) {
       const float4 scene = image[i];
-      if (normal_mix) {
+      if (normal_mix && state.correction_target) {
+        mix_normal_over_correction_scene(paint_pixels[i], scene, brush_alpha, true, false);
+      }
+      else if (normal_mix) {
         mix_normal_over_scene(paint_pixels[i], scene, brush_alpha, true);
+      }
+      else if (single_over) {
+        mix_paint_over_transparent_scene(paint_pixels[i], scene, brush_alpha);
       }
       else {
         mix_paint_over_scene(paint_pixels[i], scene, brush_alpha);
@@ -770,11 +929,25 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
     for (const int i : paint_pixels.index_range()) {
       float4 scene;
       rgba_uchar_to_float(scene, image[i]);
-      if (normal_mix) {
+      if (!state.premul_storage) {
+        /* Straight byte storage, pre-multiplied blend: see #straight_to_premul_pixels. */
+        straight_to_premul_v4(scene);
+      }
+      if (normal_mix && state.correction_target) {
+        mix_normal_over_correction_scene(
+            paint_pixels[i], scene, brush_alpha, false, !state.premul_storage);
+      }
+      else if (normal_mix) {
         mix_normal_over_scene(paint_pixels[i], scene, brush_alpha, false);
+      }
+      else if (single_over) {
+        mix_paint_over_transparent_scene(paint_pixels[i], scene, brush_alpha);
       }
       else {
         mix_paint_over_scene(paint_pixels[i], scene, brush_alpha);
+      }
+      if (!state.premul_storage) {
+        premul_to_straight_v4(paint_pixels[i]);
       }
       rgba_float_to_uchar(image[i], paint_pixels[i]);
     }
@@ -835,6 +1008,16 @@ static float4 paint_brush_color(const ImagePaintTarget &target,
                                const ed::sculpt_paint::StrokeCache &cache,
                                const float4 &brush_color_default)
 {
+  if (target.is_mask_target) {
+    /* A mask map is opaque grey: the stroke paints the brush grey itself, primary or secondary
+     * on invert, the way Texture Paint picks the color. A fixed white would change nothing on a
+     * white Multiply map. */
+    const float3 rgb = cache.toggle_settings.invert ?
+                           BKE_brush_secondary_color_get(&sd.paint, &brush) :
+                           BKE_brush_color_get(&sd.paint, &brush);
+    const float grey = (rgb.x + rgb.y + rgb.z) / 3.0f;
+    return float4(grey, grey, grey, 1.0f);
+  }
   if (target.is_color_channel) {
     return float4(BKE_paint_material_channel_color_get(*brush.material_paint,
                                                        sd.paint,
@@ -1088,13 +1271,20 @@ static Array<RowFactorCache> compute_paint_row_factors(
           }
           tile_cache.row_changed[row_i] = true;
           paint_material_channel_perf::add_rows_painted(1);
-
-          const int2 start(pixel_row.start_image_coordinate.x, pixel_row.start_image_coordinate.y);
-          const int2 end = start + int2(pixel_row.num_pixels + 1, 0);
-          tile_cache.dirty_bounds = bounds::merge(tile_cache.dirty_bounds,
-                                                  Bounds<int2>(start, end));
         },
         exec_mode::grain_size(2));
+
+    /* Merged after the parallel loop: merging from the row tasks raced, and the bounds now also
+     * decide which undo tiles #push_undo_bounds saves, where a lost row would lose undo data. */
+    tile_cache.valid_rows.foreach_index([&](const int row_i) {
+      if (!tile_cache.row_changed[row_i]) {
+        return;
+      }
+      const PackedPixelRow &pixel_row = tile_data.pixel_rows[row_i];
+      const int2 start(pixel_row.start_image_coordinate.x, pixel_row.start_image_coordinate.y);
+      const int2 end = start + int2(pixel_row.num_pixels + 1, 0);
+      tile_cache.dirty_bounds = bounds::merge(tile_cache.dirty_bounds, Bounds<int2>(start, end));
+    });
   }
 
   return tile_caches;
@@ -1106,6 +1296,7 @@ static void apply_paint_channel(ImageData &image_data,
                                 const float4 &brush_color,
                                 const IMB_BlendMode blend_mode,
                                 const bool material_blend,
+                                const bool is_correction_target,
                                 MaterialStrokeAccum *stroke_accum,
                                 PixelNode &pixel_node,
                                 Span<RowFactorCache> tile_caches,
@@ -1333,7 +1524,11 @@ static void apply_paint_channel(ImageData &image_data,
                                                blend_mode,
                                                material_blend,
                                                stroke_accum,
-                                               image_buffer};
+                                               image_buffer,
+                                               image_data.image != nullptr &&
+                                                   image_data.image->alpha_mode ==
+                                                       IMA_ALPHA_PREMUL,
+                                               is_correction_target};
             apply_prepared_paint_range(range_state,
                                        pixel_row,
                                        range,
@@ -1414,6 +1609,8 @@ struct PaintChannelWriteDest {
   IMB_BlendMode blend_mode = IMB_BLEND_MIX;
   bool is_color_channel = false;
   bool is_material_channel = false;
+  /** See #PaintMaterialImageTarget::is_correction_target. */
+  bool is_correction_target = false;
   /** See #PaintChannelRangeState::accum. */
   MaterialStrokeAccum *accum = nullptr;
 };
@@ -1613,6 +1810,8 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
 
               const int slot = tile_i * dest_num + dest_i;
               ImBuf *buffer = buffers[slot];
+              const Image *dest_image = (dest.image_data != nullptr) ? dest.image_data->image :
+                                                                       nullptr;
               PaintChannelRangeState state{tls,
                                            tile_float_buffers[dest_i],
                                            tile_byte_buffers[dest_i],
@@ -1622,7 +1821,10 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
                                            dest.blend_mode,
                                            dest.is_material_channel,
                                            dest.accum,
-                                           buffer};
+                                           buffer,
+                                           dest_image != nullptr &&
+                                               dest_image->alpha_mode == IMA_ALPHA_PREMUL,
+                                           dest.is_correction_target};
               apply_prepared_paint_range(state, pixel_row, range);
             }
           });
@@ -1689,6 +1891,54 @@ static void push_undo(const PixelNode &node_data,
       for (int tx = tilex; tx <= tilew; tx++) {
         ED_image_paint_tile_push(
             undo_tiles, &image, &image_buffer, &image_user, tx, ty, nullptr, nullptr, true, true);
+      }
+    }
+  }
+}
+
+/**
+ * Save only the undo tiles this dab's #RowFactorCache::dirty_bounds reach, instead of every tile
+ * under the node's UV region (#push_undo): a coarse node spans most of a 4096 map, which made the
+ * first dab of each stroke copy the whole map once per channel. \a tile_caches is indexed like
+ * #PixelNode::tiles. The bounds grow by the image's seam margin because
+ * #fix_non_manifold_seam_bleeding writes the bleed texels next to painted ones.
+ */
+static void push_undo_bounds(ImageData &image_data,
+                             const PixelNode &pixel_node,
+                             const Span<RowFactorCache> tile_caches)
+{
+  PRF_scope(ProfileCategory::Editor);
+  Image &image = *image_data.image;
+  ImageUser &image_user = *image_data.image_user;
+  const int margin = math::max(int(image.seam_margin), 0);
+  PaintTileMap *undo_tiles = ED_image_paint_tile_map_get();
+  for (const int tile_i : pixel_node.tiles.index_range()) {
+    const Bounds<int2> &bounds = tile_caches[tile_i].dirty_bounds;
+    if (bounds.is_empty()) {
+      continue;
+    }
+    const TileNumber tile_number = pixel_node.tiles[tile_i].tile_number;
+    ImBuf *buffer = image_data.buffers.lookup_default(tile_number, nullptr);
+    if (buffer == nullptr) {
+      continue;
+    }
+    image_user.tile = tile_number;
+    const int xmin = bounds.min.x - margin;
+    const int ymin = bounds.min.y - margin;
+    int tilex, tiley, tilew, tileh;
+    undo_region_tiles(buffer,
+                      xmin,
+                      ymin,
+                      bounds.max.x + margin - xmin + 1,
+                      bounds.max.y + margin - ymin + 1,
+                      &tilex,
+                      &tiley,
+                      &tilew,
+                      &tileh);
+    for (int ty = tiley; ty <= tileh; ty++) {
+      for (int tx = tilex; tx <= tilew; tx++) {
+        ED_image_paint_tile_push(
+            undo_tiles, &image, buffer, &image_user, tx, ty, nullptr, nullptr, true, true);
       }
     }
   }
@@ -1795,6 +2045,16 @@ bool SCULPT_use_image_paint_brush(PaintModeSettings &settings,
   }
   switch (settings.canvas_source) {
     case PAINT_CANVAS_SOURCE_MATERIAL: {
+      /* A layered material is paintable whenever a row is active and not frozen, even before its
+       * first stroke has created the map: the stroke's init grows the description. Requiring an
+       * existing target here would make the first stroke on an empty layer impossible. */
+      Material *layer_material = BKE_object_material_get(&ob, ob.actcol);
+      if (layer_material != nullptr && paint_layers_is_layered(*layer_material)) {
+        PaintLayersTarget target;
+        return BKE_paint_layers_target_get(
+                   ob, -1, settings.active_layer_channel, settings, target) &&
+               !BKE_paint_layers_target_is_frozen(target);
+      }
       /* Multi-channel Principled maps; empty target list is a no-op (no texpaint fallback). */
       const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
       return !BKE_paint_material_image_targets_get(
@@ -1932,7 +2192,17 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
       return cache.material_raster_accum.get();
     };
     MaterialStrokeAccum *stroke_accum = accum_for(material_blend, blend_mode);
-    if (target.is_color_channel) {
+    if (target.is_mask_target) {
+      /* Same grey as #paint_brush_color: the per-dab primary/secondary pick lives here for the
+       * leading target, while grouped candidates resolve through that helper. */
+      const float3 mask_rgb = cache.toggle_settings.invert ?
+                                  BKE_brush_secondary_color_get(&sd.paint, brush) :
+                                  BKE_brush_color_get(&sd.paint, brush);
+      const float mask_grey = (mask_rgb.x + mask_rgb.y + mask_rgb.z) / 3.0f;
+      brush_color_storage = float4(mask_grey, mask_grey, mask_grey, 1.0f);
+      brush_color_ptr = &brush_color_storage;
+    }
+    else if (target.is_color_channel) {
       BLI_assert(brush->material_paint != nullptr);
       const float3 rgb = BKE_paint_material_channel_color_get(*brush->material_paint,
                                                               sd.paint,
@@ -2023,6 +2293,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                   blend_mode,
                   target.is_color_channel,
                   material_blend,
+                  target.is_correction_target,
                   stroke_accum});
     if (is_pairable_channel(target)) {
       for (int candidate_i = target_i + 1; candidate_i < cache.image_paint_targets.size();
@@ -2067,6 +2338,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                       candidate_blend,
                       candidate.is_color_channel,
                       candidate.is_material_channel,
+                      candidate.is_correction_target,
                       accum_for(candidate.is_material_channel, candidate_blend)});
         consumed_targets[candidate_i].set();
       }
@@ -2105,16 +2377,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
         }
       });
     }
-    {
-      PAINT_CHANNEL_PERF_SCOPE(UndoPush);
-      node_mask.foreach_index(
-          [&](const int i) {
-            for (const PaintChannelWriteDest &dest : dests) {
-              do_push_undo_tile(*dest.image_data, nodes[i], pixel_nodes[i]);
-            }
-          },
-          exec_mode::grain_size(1));
-    }
+    /* Factors come before the undo push: their per-tile bounds limit which undo tiles are saved. */
     if (!factor_caches_valid) {
       PAINT_CHANNEL_PERF_SCOPE(PaintFactors);
       node_mask.foreach_index(
@@ -2135,6 +2398,16 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
           exec_mode::grain_size(1));
       factor_caches_valid = true;
     }
+    {
+      PAINT_CHANNEL_PERF_SCOPE(UndoPush);
+      node_mask.foreach_index(
+          [&](const int i, const int pos) {
+            for (const PaintChannelWriteDest &dest : dests) {
+              push_undo_bounds(*dest.image_data, pixel_nodes[i], node_factor_caches[pos]);
+            }
+          },
+          exec_mode::grain_size(1));
+    }
 #if PBR_PAINT_IMAGE_PROFILE
     const double group_pixels_start = group_write ? BLI_time_now_seconds() : 0.0;
 #endif
@@ -2148,6 +2421,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                   brush_color,
                                   blend_mode,
                                   material_blend,
+                                  target.is_correction_target,
                                   stroke_accum,
                                   pixel_nodes[i],
                                   node_factor_caches[pos],
@@ -2184,6 +2458,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                     dest.brush_color,
                                     dest.blend_mode,
                                     dest.is_material_channel,
+                                    dest.is_correction_target,
                                     dest.accum,
                                     pixel_nodes[i],
                                     node_factor_caches[pos],

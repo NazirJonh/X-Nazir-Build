@@ -2019,7 +2019,11 @@ enum eWM_JobType {
    * Separate from #WM_JOB_TYPE_MATERIAL_SOURCE_BAKE although both are keyed on the material: a job
    * slot is shared by owner and type, and the two install different callbacks into it.
    */
-  WM_JOB_TYPE_MATERIAL_IMAGES_BAKE,
+   WM_JOB_TYPE_MATERIAL_IMAGES_BAKE,
+   /** Heavy paint-layer bakes, keyed on the material; see `render_paint_layers_bake.cc`. */
+   WM_JOB_TYPE_PAINT_LAYERS_BAKE,
+   /** A heavy "Use Row Result" render, keyed on the material; see `paint_material_layer_ops.cc`. */
+   WM_JOB_TYPE_PAINT_LAYERS_ROW_RESULT,
   /* Add as needed, bake, seq proxy build
    * if having hard coded values is a problem. */
 };

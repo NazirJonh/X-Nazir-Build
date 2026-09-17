@@ -35,6 +35,7 @@
 
 #include "DNA_brush_enums.h"
 #include "DNA_brush_types.h"
+#include "DNA_image_types.h"
 
 #include "ED_view3d.hh"
 
@@ -180,6 +181,11 @@ struct TileColorspaceProcessor : NonCopyable {
 struct ImageData : NonCopyable {
   Image *image = nullptr;
   ImageUser *image_user = nullptr;
+  /**
+   * Backs #image_user when the target comes without one: a layered material's maps are resolved
+   * from its description, which holds no node and so no #ImageUser to lend.
+   */
+  ImageUser owned_image_user = {};
 
   Map<bke::image::TileNumber, ImBuf *> buffers = {};
   Map<bke::image::TileNumber, TileColorspaceProcessor> processors = {};
@@ -210,6 +216,8 @@ struct ImagePaintTarget {
   bool is_material_channel = false;
   /** True when this target is a Stack Layers row's mask being edited, not a material channel. */
   bool is_mask_target = false;
+  /** See #PaintMaterialImageTarget::is_correction_target. */
+  bool is_correction_target = false;
   eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_METALLIC;
   const char *channel_name = nullptr;
 };
@@ -326,14 +334,16 @@ MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
                                       const bke::pbvh::pixels::PackedPixelRow &pixel_row,
                                       IndexRange range,
                                       int width,
-                                      Vector<float4> &storage);
+                                      Vector<float4> &storage,
+                                      bool premul_storage);
 
 void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
                         MutableSpan<uchar4> image_pixels,
                         const TileColorspaceProcessor &processors,
                         const bke::pbvh::pixels::PackedPixelRow &pixel_row,
                         IndexRange range,
-                        int width);
+                        int width,
+                        bool premul_storage);
 
 void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
                         MutableSpan<float4> image_pixels,

@@ -24,6 +24,7 @@
 #include "BLI_fileops.h"
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
+#include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
@@ -85,6 +86,7 @@
 
 #include "UI_interface.hh"
 #include "UI_interface_icons.hh"
+#include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 #include "UI_view2d.hh"
 
@@ -150,8 +152,9 @@ static void stack_preview_color_draw(const rctf &preview_rect,
                                      const float color[4],
                                      const float alpha_fac)
 {
+  /* The slot carries scene linear; the UI draws display colours. */
   float swatch[4];
-  copy_v4_v4(swatch, color);
+  linearrgb_to_srgb_v4(swatch, color);
   swatch[3] *= alpha_fac;
 
   GPU_blend(GPU_BLEND_ALPHA);
@@ -2575,6 +2578,17 @@ static void outliner_draw_stack_preview_tooltips(ui::Block *block,
   });
 }
 
+/**
+ * Dim a column button whose value is the inherited default rather than an override. The control
+ * stays fully editable; only the text colour changes.
+ */
+static void stack_column_dim(ui::Button *button)
+{
+  const uchar dim[4] = {160, 160, 160, 255};
+  button_drawflag_enable(button, ui::BUT_TEXT_USE_COL);
+  button_color_set(button, dim);
+}
+
 static void outliner_draw_stack_columns(ui::Block *block,
                                         ARegion *region,
                                         SpaceOutliner *space_outliner,
@@ -2668,6 +2682,9 @@ static void outliner_draw_stack_columns(ui::Block *block,
                                  button_height);
         }
       }
+      if (button != nullptr && row->value_inherited) {
+        stack_column_dim(button);
+      }
       if (button != nullptr && !editable) {
         button_disable(button, disabled_hint);
       }
@@ -2690,6 +2707,9 @@ static void outliner_draw_stack_columns(ui::Block *block,
                                  int(this_mode_width),
                                  button_height);
         }
+      }
+      if (button != nullptr && row->mode_inherited) {
+        stack_column_dim(button);
       }
       if (button != nullptr && !editable) {
         button_disable(button, disabled_hint);
@@ -3124,7 +3144,8 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
       }
     }
     case ID_MA:
-      return ICON_MATERIAL_DATA;
+      /* The generic helper already answers a layered material's own icon. */
+      return ui::icon_from_id(id);
     case ID_TE:
       return ICON_TEXTURE_DATA;
     case ID_IM:

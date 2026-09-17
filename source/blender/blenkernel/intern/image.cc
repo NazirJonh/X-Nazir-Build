@@ -116,8 +116,6 @@
 
 #include "BLO_read_write.hh"
 
-#include "paint_material_layer_idprops.hh"
-
 /* for image user iteration */
 #include "DNA_node_types.h"
 #include "DNA_screen_types.h"
@@ -3347,11 +3345,21 @@ void BKE_image_paint_layer_id_ensure(Image *ima)
 /** \name Baked Map to Source Material Link
  * \{ */
 
+namespace {
+
+/**
+ * Keys of the #ImageMaterialSource bake link, on an #Image's system IDProperties. Spelled here,
+ * next to the code that reads and writes them: the link is image-owned state.
+ */
+constexpr const char *BAKE_MATERIAL_PROP = "pbr_bake_material";
+constexpr const char *BAKE_CHANNEL_PROP = "pbr_bake_channel";
+constexpr const char *BAKE_SIZE_PROP = "pbr_bake_size";
+constexpr const char *BAKE_HASH_PROP = "pbr_bake_hash";
+
+}  // namespace
+
 static const char *image_material_source_keys[] = {
-    bke::paint_layer::BAKE_MATERIAL_PROP,
-    bke::paint_layer::BAKE_CHANNEL_PROP,
-    bke::paint_layer::BAKE_SIZE_PROP,
-    bke::paint_layer::BAKE_HASH_PROP};
+    BAKE_MATERIAL_PROP, BAKE_CHANNEL_PROP, BAKE_SIZE_PROP, BAKE_HASH_PROP};
 
 bool BKE_image_material_source_get(const Image &image, ImageMaterialSource &r_source)
 {
@@ -3360,17 +3368,17 @@ bool BKE_image_material_source_get(const Image &image, ImageMaterialSource &r_so
     return false;
   }
   IDProperty *material_prop = IDP_GetPropertyTypeFromGroup(
-      root, bke::paint_layer::BAKE_MATERIAL_PROP, IDP_ID);
+      root, BAKE_MATERIAL_PROP, IDP_ID);
   if (material_prop == nullptr || IDP_ID_get(material_prop) == nullptr) {
     return false;
   }
   r_source.material = reinterpret_cast<Material *>(IDP_ID_get(material_prop));
   const IDProperty *channel_prop = IDP_GetPropertyTypeFromGroup(
-      root, bke::paint_layer::BAKE_CHANNEL_PROP, IDP_INT);
+      root, BAKE_CHANNEL_PROP, IDP_INT);
   const IDProperty *size_prop = IDP_GetPropertyTypeFromGroup(
-      root, bke::paint_layer::BAKE_SIZE_PROP, IDP_INT);
+      root, BAKE_SIZE_PROP, IDP_INT);
   const IDProperty *hash_prop = IDP_GetPropertyTypeFromGroup(
-      root, bke::paint_layer::BAKE_HASH_PROP, IDP_STRING);
+      root, BAKE_HASH_PROP, IDP_STRING);
   r_source.channel = channel_prop != nullptr ? IDP_int_get(channel_prop) : -1;
   r_source.bake_size = size_prop != nullptr ? IDP_int_get(size_prop) : 0;
   /* The hash is stored as hex text: an IDProperty has no 64-bit integer type, and a double would
@@ -3387,19 +3395,19 @@ void BKE_image_material_source_set(Image &image, const ImageMaterialSource &sour
   IDProperty *root = IDP_ID_system_properties_ensure(&image.id);
 
   IDP_ReplaceInGroup(
-      root, bke::idprop::create(bke::paint_layer::BAKE_MATERIAL_PROP, &source.material->id)
+      root, bke::idprop::create(BAKE_MATERIAL_PROP, &source.material->id)
                 .release());
   IDP_ReplaceInGroup(
-      root, bke::idprop::create(bke::paint_layer::BAKE_CHANNEL_PROP, source.channel).release());
+      root, bke::idprop::create(BAKE_CHANNEL_PROP, source.channel).release());
   IDP_ReplaceInGroup(
-      root, bke::idprop::create(bke::paint_layer::BAKE_SIZE_PROP, source.bake_size).release());
+      root, bke::idprop::create(BAKE_SIZE_PROP, source.bake_size).release());
 
   char hash_hex[17];
   const unsigned long long hash_value = source.node_tree_hash;
   BLI_snprintf(hash_hex, sizeof(hash_hex), "%016llx", hash_value);
   IDP_ReplaceInGroup(
       root,
-      bke::idprop::create(bke::paint_layer::BAKE_HASH_PROP, StringRefNull(hash_hex)).release());
+      bke::idprop::create(BAKE_HASH_PROP, StringRefNull(hash_hex)).release());
 }
 
 void BKE_image_material_source_clear(Image &image)

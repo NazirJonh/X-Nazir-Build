@@ -622,6 +622,7 @@ void OUTLINER_OT_material_drop(wmOperatorType *ot);
 void OUTLINER_OT_datastack_drop(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_drop(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_id_drop(wmOperatorType *ot);
+/** Defined by the paint layers stack source; opened by its image drop. */
 void OUTLINER_OT_stack_layer_channel_image_assign(wmOperatorType *ot);
 void OUTLINER_OT_collection_drop(wmOperatorType *ot);
 

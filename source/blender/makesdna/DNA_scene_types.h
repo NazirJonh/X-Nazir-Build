@@ -1234,22 +1234,11 @@ enum eMaterialPaintChannel : int8_t {
  * Roles an #Image can have inside a PBR paint layer, stored in #Image.paint_layer_channel.
  *
  * Every #eMaterialPaintChannel keeps its own value, so a role that is a channel compares equal to
- * it and needs no translation. Three roles are not channels: a layer's mask, which has no place in
- * the shader graph at all; a baked mask texture; and "none" for an image that does not say.
+ * it and needs no translation. Two roles are not channels: a layer's mask, which has no place in
+ * the shader graph at all, and "none" for an image that does not say.
  */
 #define PAINT_LAYER_MAP_NONE (-1)
 #define PAINT_LAYER_MAP_MASK PAINT_MATERIAL_CHANNEL_NUM
-
-/**
- * Internal-only role of a baked mask texture produced by the mask-correction baking feature.
- *
- * Never a map role: it must not index a per-channel array, reach the UI as a selectable map role
- * or slot, appear in #BKE_paint_material_composite_passes or
- * #BKE_paint_material_display_passes, or resolve a layer map. Code that classifies
- * #Image.paint_layer_channel must treat it as outside the public role range; see
- * #paint_layer_channel_is_public_map_role and #paint_layer_channel_is_internal_bake_role.
- */
-#define PAINT_LAYER_MAP_MASK_BAKED (PAINT_MATERIAL_CHANNEL_NUM + 2)
 
 /**
  * Every shading channel combined into one lit image.
@@ -1554,18 +1543,12 @@ struct MaterialPaintChannelLayerBinding {
   char attribute_name[64] = {};
 };
 
-struct MaterialPaintChannelImageBinding {
-  DNA_DEFINE_CXX_METHODS(MaterialPaintChannelImageBinding)
-
-  /** Null = no override; the channel resolves its target Image through the Principled BSDF
-   * socket link as before (see #BKE_paint_principled_channel_image_get). Non-null = an
-   * add-on-managed Image this channel's stroke paints into instead, regardless of what (if
-   * anything) is wired into the shader graph - wiring it up for display is the add-on's
-   * responsibility, same as #MaterialPaintChannelLayerBinding does not touch the mesh's active
-   * color attribute for a redirected color channel. */
-  Image *image = nullptr;
-  /** Owned by this binding, mirroring #PaintModeSettings::image_user for #canvas_image. */
-  ImageUser iuser;
+/** #PaintModeSettings::layer_target_mode: what a layered material's stroke paints. */
+enum ePaintLayerTargetMode : int8_t {
+  /** The active row's channel content. The default, so saved files need no versioning. */
+  PAINT_LAYER_TARGET_CONTENT = 0,
+  /** The active row's mask; it is created on the first stroke when the row has none. */
+  PAINT_LAYER_TARGET_MASK = 1,
 };
 
 struct PaintModeSettings {
@@ -1595,12 +1578,6 @@ struct PaintModeSettings {
    * #MaterialPaintChannelLayerBinding); for #PAINT_MATERIAL_CHANNEL_CUSTOM, which has no built-in
    * name, this slot holds the attribute name Custom paints, configured by the user. */
   MaterialPaintChannelLayerBinding channel_layer_bindings[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
-
-  /** Per-channel target Image override, indexed by #eMaterialPaintChannel, for the
-   * #PAINT_CANVAS_SOURCE_MATERIAL (image/texture) canvas. Lets an add-on's layer stack become a
-   * channel's paint target the same way #channel_layer_bindings does for the attribute canvas.
-   * #PAINT_MATERIAL_CHANNEL_CUSTOM has no Principled socket and is never resolved through this. */
-  MaterialPaintChannelImageBinding channel_image_bindings[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
 
   /** Width/height (in pixels) used for newly auto-created per-channel material paint images.
    * \see ePaintNewChannelImageSize. */
@@ -1632,31 +1609,22 @@ struct PaintModeSettings {
   ListBaseT<PaintMaterialBrushPreset> material_paint_brush_presets = {nullptr, nullptr};
 
   /**
-   * The #eMaterialPaintChannel whose Blending Mode and Opacity the Stack Layers rows show and
-   * edit.
-   * Not a paint target: strokes still follow #channel_image_bindings.
-   */
-  int stack_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
-  /**
    * The channel the Layer Material tab's per-channel widgets address. RNA exposes only bakeable
    * channels and normalizes legacy non-bakeable values on read without changing this stored value.
-   * Not a paint target: strokes still follow #channel_image_bindings.
    */
   int active_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 
   /**
-   * The mask Image currently being painted instead of the material's channels, or an empty
-   * binding (image == nullptr) when no mask is being edited -- the normal #channel_image_bindings
-   * are the paint target then. Deliberately not part of #channel_image_bindings:
-   * #PAINT_LAYER_MAP_MASK is not a valid index into that array.
+   * The channel whose per (row, channel) blend/opacity the Stack Layers header shows and edits.
+   * Distinct from #active_layer_channel: that one is the Layer Material tab's per-channel widgets,
+   * this one is a cursor over the Outliner's columns.
    */
-  MaterialPaintChannelImageBinding mask_image_binding = {};
+  int stack_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 
   /**
    * The brush last used while painting a mask, remembered globally (not per material/object) so
    * returning to mask editing keeps using it. Null before the first time a mask is edited, in
-   * which case a default is picked and assigned here
-   * (see #BKE_paint_material_mask_edit_begin).
+   * which case a default is picked and assigned here.
    */
   Brush *mask_active_brush = nullptr;
 
@@ -1665,6 +1633,14 @@ struct PaintModeSettings {
    * the way back and then cleared. Null when not currently editing a mask.
    */
   Brush *mask_saved_brush = nullptr;
+
+  /**
+   * #ePaintLayerTargetMode: whether a layered material's stroke paints the active row's content
+   * or its mask. Authoritative on its own -- never derived from the mask brushes, which are only
+   * bookkeeping for restoring the brush. 0 is content, so no versioning is needed.
+   */
+  int8_t layer_target_mode = PAINT_LAYER_TARGET_CONTENT;
+  char _pad_layer_target_mode[7] = {};
 };
 
 /** #PaintModeSettings::new_channel_image_size */

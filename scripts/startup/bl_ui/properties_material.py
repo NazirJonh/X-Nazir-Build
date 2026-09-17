@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
-from bpy.types import Menu, Panel, UIList
+from bpy.types import Menu, Operator, Panel, UIList
 from bpy.app.translations import contexts as i18n_contexts
 from rna_prop_ui import PropertyPanel
 from bpy_extras.node_utils import find_node_input
@@ -132,6 +132,7 @@ class EEVEE_MATERIAL_PT_context_material(MaterialButtonsPanel, Panel):
 
         if ob:
             row.template_ID(ob, "active_material", new="material.new")
+            row.operator("material.new_layered", text="", icon='ADD')
 
             if slot:
                 row.prop(slot, "link", icon_only=True)
@@ -551,6 +552,27 @@ class LayerMaterialButtonsPanel:
     bl_region_type = 'WINDOW'
     bl_context = "layer_material"
 
+    @staticmethod
+    def _owner_material(context):
+        """The material that owns the stack, or None.
+
+        In this tab `context.material` can be the active Material layer's *source* material, not the
+        owner: `buttons_context_path_layer_material` points the context at `layer.material` for a
+        Material row. Panels that need the stack or its active row must go through the object's
+        active material slot instead.
+        """
+        ob = context.object
+        mat = ob.active_material if ob is not None else None
+        return mat if (mat is not None and mat.is_layered) else None
+
+    @staticmethod
+    def _active_layer(context):
+        """The active row of the owning material, or `(None, None)` when there is none."""
+        owner = LayerMaterialButtonsPanel._owner_material(context)
+        if owner is None:
+            return None, None
+        return owner, owner.paint_layers.active
+
     @classmethod
     def poll(cls, context):
         # No COMPAT_ENGINES test, for the same reason as the Brush Material tab: the bake goes
@@ -559,171 +581,237 @@ class LayerMaterialButtonsPanel:
         return mat is not None and not mat.grease_pencil
 
 
-def _draw_fill_channel_panels(layout, context, labels):
-    """Draw one sub-panel per enabled channel of a Fill-shaped active row.
+class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
+    """The Layer Material tab for a *layered* material: the active layer read from the description,
+    its channels and values, and the generated tree's state. The binding-driven panel below is for
+    the old graph path and hides itself for a layered material."""
 
-    A Fill row stands for one flat value or image per channel, so every channel the toggle grid
-    above shows enabled gets a sub-panel with the image picker and the flat value. A correction
-    with the Fill effect shares this layout; one hanging on a Mask reports a single enabled
-    channel, so the same loop naturally draws just that one grayscale panel.
-    """
-    paint_mode = context.tool_settings.paint_mode
-    # Only a Fill offers a flat value per channel: a Paint row's channels are painted, a Material
-    # row's are baked, and a correction without the Fill effect edits what it hangs on instead.
-    is_fill = paint_mode.active_layer_kind == 'FILL' or (
-        paint_mode.active_layer_is_correction and
-        paint_mode.active_layer_correction_effect == 'FILL'
-    )
-    if not is_fill:
-        return
+    bl_idname = "LAYER_MATERIAL_PT_layers"
+    bl_label = "Paint Layers"
 
-    enabled, _disabled = paint_mode.active_layer_channel_states()
-    active_channel = paint_mode.active_layer_channel
-    layout.prop(paint_mode, "active_layer_channel", text="Channel")
-    # Same source the toggle grid reads: the bake function's flag enum. Each item's value is the
-    # bit of its channel index (see rna_material_api.cc), so the single set bit -- not the item's
-    # position -- is the index the per-channel properties and operators expect.
-    channels_param = bpy.types.Material.bl_rna.functions["bake_paint_channels"].parameters[
-        "channels"]
-    for item in channels_param.enum_items:
-        if not item.identifier:
-            continue
-        if item.identifier not in enabled or item.value.bit_length() - 1 != active_channel:
-            continue
-
-        header, panel = layout.panel(
-            "layer_material_fill_%s" % item.identifier.lower(),
-            default_closed=False,
-        )
-        header.label(text=labels.get(item.identifier, item.name))
-        if not panel:
-            continue
-
-        row = panel.row(align=True)
-        # No filter argument: template_ID's filter only acts on objects, and the image filtering
-        # presets belong to template_ID_browser, which this plain picker row does not use.
-        row.template_ID(paint_mode, "active_layer_channel_image", new="image.new", open="image.open")
-        row.operator_menu_enum(
-            "material.paint_layer_use_layer_result",
-            "source_ordinal",
-            text="",
-            icon='RENDER_STILL',
-        ).channel = item.identifier
-
-        if paint_mode.active_layer_channel_has_image:
-            # An image assigned from outside replaces the flat value until it is unlinked again.
-            row = panel.row(align=True)
-            row.operator(
-                "material.paint_layer_channel_unlink", text="Unlink", icon='X',
-            ).channel = item.identifier
-        else:
-            col = panel.column(align=True)
-            if item.identifier in ('BASE_COLOR', 'EMISSION'):
-                # Color channels fill with an RGBA value, the rest with a single scalar.
-                col.prop(paint_mode, "active_layer_channel_value", text="")
-            else:
-                col.prop(paint_mode, "active_layer_channel_value", index=0, text="", slider=True)
-
-
-class LAYER_MATERIAL_PT_context_material(LayerMaterialButtonsPanel, Panel):
-    bl_idname = "LAYER_MATERIAL_PT_context_material"
-    bl_label = ""
-    bl_options = {'HIDE_HEADER'}
-
-    # Short toggle labels, display only. The channel set itself comes from RNA in draw()
-    # below, so the two cannot drift apart.
-    _short_labels = {
-        'BASE_COLOR': "Color",
-        'METALLIC': "Metal",
-        'ROUGHNESS': "Rough",
-        'SPECULAR': "Spec",
-        'NORMAL': "Normal",
-        'ALPHA': "Alpha",
-        'EMISSION': "Emit",
-    }
+    @classmethod
+    def poll(cls, context):
+        return cls._owner_material(context) is not None
 
     def draw(self, context):
         layout = self.layout
-        mat = context.material
+        layout.use_property_split = True
+        owner = self._owner_material(context)
+        if owner is None:
+            return
+
+        col = layout.column(align=True)
+        col.prop(owner, "paint_layers_locked", text="Locked")
+        row = col.row()
+        row.enabled = owner.paint_layers_tree_is_stale
+        row.operator("material.paint_layers_regenerate", text="Regenerate", icon='FILE_REFRESH')
+        if owner.paint_layers_tree_is_stale:
+            layout.label(text="Tree out of step with the layers", icon='ERROR')
+
+        row = layout.row(align=True)
+        row.operator_menu_enum("material.paint_layer_add", "kind", text="Add", icon='ADD')
+        row.operator("material.paint_layer_remove", text="", icon='REMOVE')
+        row.operator("material.paint_layer_duplicate", text="", icon='DUPLICATE')
 
         row = layout.row()
-        row.label(text=mat.name, icon='MATERIAL')
-        if mat.library is not None:
-            row.label(text="Linked, not editable", icon='LIBRARY_DATA_DIRECT')
+        row.operator_menu_enum("material.paint_layer_add_material", "source",
+                               text="New Material Layer", icon='MATERIAL')
+        row.operator_menu_enum("material.paint_layer_use_row_result", "source",
+                               text="Use Row Result", icon='RENDER_STILL')
+        layout.operator("material.paint_layer_add_custom", text="New Custom Layer",
+                        icon='NODETREE')
 
-        # The active layer is what the channel bindings point at; its channel states are read from
-        # the stack itself, and the bake link only tells a Material layer's maps apart.
-        paint_mode = context.tool_settings.paint_mode
-        maps = {
-            binding.channel: binding.image
-            for binding in paint_mode.channel_image_bindings
-            if binding.image is not None
-        }
-        baked = [image for image in maps.values() if image.material_source == mat]
+        _, layer = self._active_layer(context)
+        if layer is None:
+            layout.separator()
+            layout.label(text="No active layer", icon='INFO')
+            return
 
-        # Resolution and re-bake only mean something for a layer baked from this material.
-        if baked:
-            row = layout.row(align=True)
-            row.label(text="Resolution")
-            size = max((image.size[0] for image in baked), default=0)
-            row.operator_menu_enum(
-                "material.paint_layer_bake_size_set",
-                "size",
-                text="{:d} px".format(size) if size else "Resolution",
-            )
-            row.operator("material.paint_layer_rebake", text="", icon='FILE_REFRESH')
-            if any(image.material_source_is_baking for image in baked):
-                layout.label(text="Baking...", icon='RENDER_STILL')
+        layout.separator()
+        layout.prop(layer, "name", text="Layer")
+        layout.prop(layer, "blend_type", text="Blend")
+        layout.prop(layer, "opacity", text="Opacity")
+        if layer.kind == 'FILL':
+            layout.prop(layer, "fill_color")
 
-        enabled, disabled = paint_mode.active_layer_channel_states()
-        # An active correction row owns the toggles below: its channels, not the layer's.
-        if paint_mode.active_layer_is_correction:
-            layout.label(text="Correction Channels")
-        flow = layout.grid_flow(row_major=True, columns=0, even_columns=True, align=True)
-        # Channels a Material layer can bake, in the order the PBR Paint channel toggles use:
-        # read off the bake function's flag enum rather than kept as a second list.
-        channels_param = bpy.types.Material.bl_rna.functions["bake_paint_channels"].parameters[
-            "channels"]
-        for item in channels_param.enum_items:
-            if not item.identifier:
-                continue
-            flow.operator(
-                "material.paint_layer_channel_toggle",
-                text=self._short_labels.get(item.identifier, item.name),
-                icon='HIDE_ON' if item.identifier in disabled else 'NONE',
-                depress=item.identifier in enabled,
-            ).channel = item.identifier
+        box = layout.box()
+        box.label(text="Mask", icon='MOD_MASK')
+        for item in layer.mask_stack:
+            row = box.row(align=True)
+            row.operator(
+                "material.paint_layer_mask_toggle",
+                text="",
+                icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT',
+            ).item_marker = item.marker
+            row.label(text=item.name if item.name else "Mask")
+            row.operator("material.paint_layer_mask_remove", text="", icon='X').item_marker = \
+                item.marker
+        box.operator("material.paint_layer_mask_add", text="Add Mask", icon='ADD')
 
-        # A Fill row (or Fill correction) fills every enabled channel with one value or image;
-        # its per-channel sub-panels follow the toggle grid.
-        _draw_fill_channel_panels(layout, context, self._short_labels)
+        box = layout.box()
+        box.label(text="Channels", icon='IMAGE_RGB')
+        for ch in layer.channels:
+            row = box.row(align=True)
+            row.label(text=ch.channel)
+            if ch.image is not None:
+                row.label(text=ch.image.name, icon='IMAGE_DATA')
+            else:
+                row.label(text="No map", icon='INFO')
+            op = row.operator("material.paint_layer_channel_remove", text="", icon='X')
+            op.channel = ch.channel
+        row = box.row(align=True)
+        row.operator_menu_enum("material.paint_layer_channel_add", "channel",
+                               text="Add Channel", icon='ADD')
+        row.operator_menu_enum("material.paint_layer_correction_add", "section",
+                               text="Add Correction", icon='ADD')
+        if layer.kind == 'CUSTOM':
+            layout.operator_menu_enum("material.paint_layer_custom_channel_add", "channel",
+                                      text="Add Custom Channel", icon='ADD')
+
+        if len(layer.issues):
+            box = layout.box()
+            box.label(text="Issues", icon='ERROR')
+            for issue in layer.issues:
+                box.label(text=issue.text)
 
 
-class LAYER_MATERIAL_PT_surface(LayerMaterialButtonsPanel, Panel):
-    bl_idname = "LAYER_MATERIAL_PT_surface"
+class LAYER_MATERIAL_PT_source_material(LayerMaterialButtonsPanel, Panel):
+    """The source material of the active Material layer: the material it bakes its channels from.
+
+    ``layer.material`` is a plain RNA pointer to a Material, not a material slot, so the picker
+    changes what the layer bakes without touching the object's slots.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_source_material"
+    bl_label = "Source Material"
+
+    @classmethod
+    def poll(cls, context):
+        _, layer = cls._active_layer(context)
+        return layer is not None and layer.kind == 'MATERIAL'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        _, layer = self._active_layer(context)
+        if layer is None:
+            return
+
+        row = layout.row()
+        row.prop(layer, "material", text="")
+        if layer.material is not None and layer.material.library is not None:
+            layout.label(text="Linked, not editable", icon='LIBRARY_DATA_DIRECT')
+
+        col = layout.column(align=True)
+        col.prop(layer, "bake_mode", text="Bake")
+        col.prop(layer, "bake_size", text="Resolution")
+        row = col.row()
+        row.enabled = layer.material is not None
+        row.operator("material.paint_layer_rebake", text="Rebake", icon='FILE_REFRESH')
+        if layer.bake_mode != 'NEVER' and not layer.bake_is_valid:
+            layout.label(text="Baking...", icon='RENDER_STILL')
+
+
+class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
+    """The source material's Surface inputs, edited in place.
+
+    Drawing the material's own node tree here is what makes the source editable without leaving the
+    tab; the same ``OUTPUT_MATERIAL`` node the shader editor shows is drawn as a property panel.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_source_surface"
+    bl_parent_id = "LAYER_MATERIAL_PT_source_material"
     bl_label = "Surface"
 
     @classmethod
     def poll(cls, context):
-        if not super().poll(context):
-            return False
-        paint_mode = context.tool_settings.paint_mode
-        mat = context.material
-        return any(
-            binding.image is not None and binding.image.material_source == mat
-            for binding in paint_mode.channel_image_bindings
+        _, layer = cls._active_layer(context)
+        return (
+            layer is not None and
+            layer.kind == 'MATERIAL' and
+            layer.material is not None and
+            layer.material.node_tree is not None
         )
 
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
-        panel_node_draw(layout, context.material.node_tree, 'OUTPUT_MATERIAL', "Surface")
+        _, layer = self._active_layer(context)
+        if layer is None or layer.material is None:
+            return
+        if layer.material.library is not None:
+            layout.label(text="Linked, not editable", icon='LIBRARY_DATA_DIRECT')
+            return
+        panel_node_draw(layout, layer.material.node_tree, 'OUTPUT_MATERIAL', "Surface")
+
+
+class LAYER_MATERIAL_PT_custom_layer(LayerMaterialButtonsPanel, Panel):
+    """The node group of the active Custom layer and its stored input values."""
+
+    bl_idname = "LAYER_MATERIAL_PT_custom_layer"
+    bl_label = "Custom Group"
+
+    @classmethod
+    def poll(cls, context):
+        _, layer = cls._active_layer(context)
+        return layer is not None and layer.kind == 'CUSTOM'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        _, layer = self._active_layer(context)
+        if layer is None:
+            return
+
+        layout.prop(layer, "custom_group", text="Group")
+        props = layer.properties
+        if props is None:
+            return
+        # The group's role-less inputs are stored as IDProperty members; draw each as its own row.
+        keys = getattr(props, "keys", None)
+        if keys is None:
+            return
+        col = layout.column(align=True)
+        for key in keys():
+            if key == "rna_type":
+                continue
+            col.prop(props, '["%s"]' % key, text=key)
 
 
 class LAYER_MATERIAL_PT_custom_props(LayerMaterialButtonsPanel, PropertyPanel, Panel):
     bl_idname = "LAYER_MATERIAL_PT_custom_props"
     _context_path = "material"
     _property_type = bpy.types.Material
+
+
+class MATERIAL_PT_paint_layers(MaterialButtonsPanel, Panel):
+    """Layer-stack controls of a layered material: who owns the generated tree, and whether it is
+    in step with the description."""
+
+    bl_label = "Layered Material"
+    bl_context = "material"
+    COMPAT_ENGINES = {'BLENDER_EEVEE', 'CYCLES'}
+
+    @classmethod
+    def poll(cls, context):
+        mat = context.material
+        return mat is not None and mat.is_layered and not mat.grease_pencil
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        mat = context.material
+
+        col = layout.column(heading="Tree")
+        col.prop(mat, "paint_layers_locked", text="Locked")
+        row = layout.row()
+        row.enabled = mat.paint_layers_tree_is_stale
+        row.operator("material.paint_layers_regenerate", text="Regenerate", icon='FILE_REFRESH')
+        if mat.paint_layers_tree_is_stale:
+            layout.label(
+                text="The node tree is out of step with the layers; Regenerate to rebuild it",
+                icon='ERROR',
+            )
 
 
 classes = (
@@ -743,14 +831,17 @@ classes = (
     EEVEE_MATERIAL_PT_viewport_settings,
     MATERIAL_PT_animation,
     MATERIAL_PT_custom_props,
+    MATERIAL_PT_paint_layers,
     BRUSH_MATERIAL_PT_context_material,
     BRUSH_MATERIAL_PT_surface,
     BRUSH_MATERIAL_PT_settings,
     BRUSH_MATERIAL_PT_settings_surface,
     BRUSH_MATERIAL_PT_viewport,
     BRUSH_MATERIAL_PT_custom_props,
-    LAYER_MATERIAL_PT_context_material,
-    LAYER_MATERIAL_PT_surface,
+    LAYER_MATERIAL_PT_layers,
+    LAYER_MATERIAL_PT_source_material,
+    LAYER_MATERIAL_PT_source_surface,
+    LAYER_MATERIAL_PT_custom_layer,
     LAYER_MATERIAL_PT_custom_props,
 )
 

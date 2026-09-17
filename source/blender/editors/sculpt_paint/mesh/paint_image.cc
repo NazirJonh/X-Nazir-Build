@@ -833,7 +833,7 @@ bool ED_paint_material_mask_edit_end_if_active(Main &bmain,
                                               Paint &paint,
                                               PaintModeSettings &mode_settings)
 {
-  if (mode_settings.mask_image_binding.image == nullptr) {
+  if (mode_settings.layer_target_mode != PAINT_LAYER_TARGET_MASK) {
     return false;
   }
   BKE_paint_material_mask_edit_end_ex(bmain, scene, paint, mode_settings);
@@ -853,7 +853,7 @@ bool ED_paint_material_mask_edit_end_if_active(bContext &C)
     return false;
   }
   PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
-  if (mode_settings.mask_image_binding.image == nullptr) {
+  if (mode_settings.layer_target_mode != PAINT_LAYER_TARGET_MASK) {
     return false;
   }
   BKE_paint_material_mask_edit_end_ex(*bmain, *scene, *paint, mode_settings);
@@ -885,7 +885,7 @@ void ED_object_texture_paint_mode_exit_ex(Main &bmain, Scene &scene, Object &ob)
    * paint and is ended by its own paths. */
   if (scene.toolsettings != nullptr) {
     PaintModeSettings &paint_mode = scene.toolsettings->paint_mode;
-    if (paint_mode.mask_image_binding.image != nullptr) {
+    if (paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
       ED_paint_material_mask_edit_end_if_active(
           bmain, scene, scene.toolsettings->imapaint.paint, paint_mode);
     }

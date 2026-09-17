@@ -26,7 +26,7 @@ set(SRC
   outliner_select.cc
   outliner_stack_layers.cc
   outliner_stack_source.cc
-  outliner_stack_source_paint_material.cc
+  outliner_stack_source_paint_layers.cc
   outliner_stack_source_shape_keys.cc
   outliner_sync.cc
   outliner_tools.cc
@@ -168,7 +168,7 @@ add_dependencies(bf_editor_space_outliner bf_rna)
 
 if(WITH_GTESTS)
   set(TEST_SRC
-    outliner_stack_source_paint_material_test.cc
+    outliner_stack_source_paint_layers_test.cc
   )
   set(TEST_INC
   )

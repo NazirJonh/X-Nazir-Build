@@ -79,6 +79,8 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -6891,6 +6893,32 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
   }
 
   ma = get_or_create_current_material(C, ob);
+
+  if (ma != nullptr && paint_layers_is_layered(*ma)) {
+    /* A layered material grows its description instead of minting graph nodes: the "+" button
+     * ensures the active channel's map on the active layer. */
+    PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+    PaintLayersTarget target;
+    if (!BKE_paint_layers_target_get(
+            *ob, -1, paint_mode.active_layer_channel, paint_mode, target))
+    {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "Add a layer in the Stack Layers panel before adding channel maps");
+      return false;
+    }
+    if (const char *refusal = BKE_paint_layers_target_refusal(target)) {
+      BKE_report(op->reports, RPT_ERROR, RPT_(refusal));
+      return false;
+    }
+    Image *image = BKE_paint_layers_target_image(target);
+    if (image == nullptr) {
+      image = BKE_paint_layers_target_ensure_writable(
+          *CTX_data_main(C), target, paint_mode.new_channel_image_size);
+    }
+    WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &ma->id);
+    return image != nullptr;
+  }
 
   if (ma) {
     Main *bmain = CTX_data_main(C);

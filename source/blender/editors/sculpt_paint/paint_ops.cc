@@ -45,6 +45,8 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
@@ -1115,11 +1117,30 @@ static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
     return OPERATOR_FINISHED;
   }
 
-  if (sima->image != nullptr && !BLI_uuid_is_nil(sima->image->paint_layer_id)) {
+  PaintLayersImageUse image_use;
+  if (sima->image != nullptr && BKE_paint_layers_find_image_use(*ma, *sima->image, image_use)) {
     /* A map of a paint layer: step through that layer's other maps, in the order the selector
      * lists them, skipping the channels the layer does not author. */
     std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM + 1> layer_maps;
-    BKE_paint_material_layer_maps_get(*bmain, *ma, sima->image->paint_layer_id, layer_maps);
+    layer_maps.fill(nullptr);
+    for (int i = 0; i < image_use.layer->channels_num; i++) {
+      const int channel = image_use.layer->channels[i].channel;
+      if (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM) {
+        layer_maps[channel] = image_use.layer->channels[i].image;
+      }
+    }
+    /* The mask is a stack; the mask slot names the first item's map. */
+    for (const MaterialPaintLayer *item : BKE_paint_layers_mask_items(*image_use.layer)) {
+      for (int i = 0; i < item->channels_num; i++) {
+        if (item->channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+          layer_maps[PAINT_LAYER_MAP_MASK] = item->channels[i].image;
+          break;
+        }
+      }
+      if (layer_maps[PAINT_LAYER_MAP_MASK] != nullptr) {
+        break;
+      }
+    }
 
     Vector<Image *> present;
     for (const int role : BKE_paint_material_composite_passes()) {
@@ -1330,6 +1351,57 @@ void PAINT_OT_material_paint_images_ensure(wmOperatorType *ot)
   ot->exec = material_paint_images_ensure_exec;
   ot->poll = ED_operator_object_active_editable;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static const EnumPropertyItem layer_target_mode_set_items[] = {
+    {PAINT_LAYER_TARGET_CONTENT, "CONTENT", 0, "Content", "Paint the active layer's content"},
+    {PAINT_LAYER_TARGET_MASK, "MASK", 0, "Mask", "Paint the active layer's mask"},
+    {2, "TOGGLE", 0, "Toggle", "Switch between content and mask"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static bool layer_target_mode_set_poll(bContext *C)
+{
+  return BKE_paint_get_active_from_context(C) != nullptr;
+}
+
+static wmOperatorStatus layer_target_mode_set_exec(bContext *C, wmOperator *op)
+{
+  Scene *scene = CTX_data_scene(C);
+  Main *bmain = CTX_data_main(C);
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  if (scene == nullptr || scene->toolsettings == nullptr || paint == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
+  const int requested = RNA_enum_get(op->ptr, "mode");
+  const ePaintLayerTargetMode mode = (requested == 2) ?
+                                         ((mode_settings.layer_target_mode ==
+                                           PAINT_LAYER_TARGET_MASK) ?
+                                              PAINT_LAYER_TARGET_CONTENT :
+                                              PAINT_LAYER_TARGET_MASK) :
+                                         ePaintLayerTargetMode(requested);
+  BKE_paint_material_layer_target_mode_set(*bmain, *scene, *paint, mode_settings, mode);
+  WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, scene);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_layer_target_mode_set(wmOperatorType *ot)
+{
+  ot->name = "Set Layer Target";
+  ot->idname = "PAINT_OT_layer_target_mode_set";
+  ot->description =
+      "Choose whether a layered material's stroke paints the active row's content or its mask";
+  ot->exec = layer_target_mode_set_exec;
+  ot->poll = layer_target_mode_set_poll;
+  /* Tool settings and the mask brushes survive undo, so this needs no undo step of its own. */
+  ot->flag = OPTYPE_REGISTER;
+  ot->prop = RNA_def_enum(ot->srna,
+                          "mode",
+                          layer_target_mode_set_items,
+                          PAINT_LAYER_TARGET_CONTENT,
+                          "Mode",
+                          "Target to switch to");
 }
 
 static bool material_paint_brush_sync_poll(bContext *C)
@@ -1668,6 +1740,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_paint_source_mode_set);
   WM_operatortype_append(PAINT_OT_material_paint_source_material_set);
   WM_operatortype_append(PAINT_OT_material_paint_images_ensure);
+  WM_operatortype_append(PAINT_OT_layer_target_mode_set);
   WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);
@@ -1731,12 +1804,10 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_attribute_remove);
 
   /* PBR Paint layer material (Layer Material tab) */
-  WM_operatortype_append(MATERIAL_OT_paint_layer_channel_toggle);
-  WM_operatortype_append(MATERIAL_OT_paint_layer_channel_value_set);
-  WM_operatortype_append(MATERIAL_OT_paint_layer_channel_unlink);
-  WM_operatortype_append(MATERIAL_OT_paint_layer_use_layer_result);
-  WM_operatortype_append(MATERIAL_OT_paint_layer_bake_size_set);
-  WM_operatortype_append(MATERIAL_OT_paint_layer_rebake);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_add_material);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_use_row_result);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_add_custom);
+  WM_operatortype_append(MATERIAL_OT_paint_layer_custom_channel_add);
 
   /* partial visibility */
   WM_operatortype_append(hide::PAINT_OT_hide_show_all);

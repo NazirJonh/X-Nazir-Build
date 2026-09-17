@@ -84,6 +84,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_pointcache.h"
 #include "BKE_preview_image.hh"
 #include "BKE_rigidbody.h"
@@ -696,14 +697,11 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     &toolsett_old->imapaint.canvas,
                                                     IDWALK_CB_USER);
 
-  /* Poly Paint: the canvas Image and the per-channel Image overrides an add-on can bind. Without
-   * these the pointers are never remapped and are left dangling when the Image is deleted - the
-   * next stroke would then paint through freed memory.
+  /* Poly Paint: the canvas Image. Without this the pointer is never remapped and is left dangling
+   * when the Image is deleted - the next stroke would then paint through freed memory.
    *
-   * #canvas_image is #IDWALK_CB_NOP because nothing reference-counts it (its RNA property has no
-   * #PROP_ID_REFCOUNT and it is assigned from C in several places); the bindings are
-   * #IDWALK_CB_USER because their only assignment path,
-   * #rna_MaterialPaintChannelImageBinding_image_set, does count the reference. */
+   * It is #IDWALK_CB_NOP because nothing reference-counts it (its RNA property has no
+   * #PROP_ID_REFCOUNT and it is assigned from C in several places). */
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
                                                     &toolsett->paint_mode.canvas_image,
                                                     do_undo_restore,
@@ -711,13 +709,6 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     reader,
                                                     &toolsett_old->paint_mode.canvas_image,
                                                     IDWALK_CB_NOP);
-  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
-                                                     &toolsett->paint_mode.mask_image_binding.image,
-                                                     do_undo_restore,
-                                                     SCENE_FOREACH_UNDO_RESTORE,
-                                                     reader,
-                                                     &toolsett_old->paint_mode.mask_image_binding.image,
-                                                     IDWALK_CB_NOP);
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
                                                      &toolsett->paint_mode.mask_active_brush,
                                                     do_undo_restore,
@@ -732,24 +723,6 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     reader,
                                                     &toolsett_old->paint_mode.mask_saved_brush,
                                                     IDWALK_CB_NOP);
-  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
-    /* The paint bindings are deliberately preserved across an undo restore (they do not follow
-     * the graph back): a live paint target must not jump when an undo rolls the graph back. The
-     * binding names where the brush writes, not what the graph says, so restoring it would take
-     * the canvas out from under a stroke the user is in the middle of; taking a target away is a
-     * deliberate act instead (#OUTLINER_OT_stack_layer_clear_target). The Outliner suite covers
-     * both halves of the contract -- the binding surviving the undo that wrote it
-     * (#test_activate_undo_preserves_paint_target), and the clear operator as the explicit way
-     * out (#test_clear_target_after_undo). */
-    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(
-        data,
-        &toolsett->paint_mode.channel_image_bindings[i].image,
-        do_undo_restore,
-        SCENE_FOREACH_UNDO_RESTORE,
-        reader,
-        &toolsett_old->paint_mode.channel_image_bindings[i].image,
-        IDWALK_CB_USER);
-  }
 
   /* These two Object pointers should just follow the normal Undo behavior. See #153065. */
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
@@ -1605,14 +1578,8 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
     }
 
     BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.canvas_image);
-    BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.mask_image_binding.image);
     BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.mask_active_brush);
     BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.mask_saved_brush);
-    for (MaterialPaintChannelImageBinding &binding :
-        sce->toolsettings->paint_mode.channel_image_bindings)
-    {
-      BLO_read_raw_address(reader, &binding.image);
-    }
     BLO_read_struct(reader, SequencerToolSettings, &sce->toolsettings->sequencer_tool_settings);
 
     BLO_read_struct_list(reader,
@@ -2979,6 +2946,13 @@ static void scene_graph_update_tagged(Depsgraph *depsgraph, Main *bmain, bool on
     return;
   }
 
+  /* Rebuild the generated trees of layered materials edited since the last update, before the
+   * graph is evaluated. Rule K-1's single scheduling point for the paths that do not run the event
+   * loop -- scripts calling depsgraph.update(), and background renders. Main thread, before eval,
+   * and never from the depsgraph flush callback. */
+  BKE_paint_layers_regenerate_tagged(
+      *bmain, &DEG_get_input_scene(depsgraph)->toolsettings->paint_mode);
+
   Scene *scene = DEG_get_input_scene(depsgraph);
   ViewLayer *view_layer = DEG_get_input_view_layer(depsgraph);
   bool used_multiple_passes = false;
@@ -3066,6 +3040,10 @@ void BKE_scene_graph_update_for_newframe_ex(Depsgraph *depsgraph, const bool cle
   Scene *scene = DEG_get_input_scene(depsgraph);
   Main *bmain = DEG_get_bmain(depsgraph);
   bool used_multiple_passes = false;
+
+  /* K-1 scheduling point for frame changes without the event loop: rebuild the generated trees of
+   * layered materials edited since the last update, before the graph evaluates them. */
+  BKE_paint_layers_regenerate_tagged(*bmain, &scene->toolsettings->paint_mode);
 
   /* Keep this first. */
   BKE_callback_exec_id(bmain, &scene->id, BKE_CB_EVT_FRAME_CHANGE_PRE);

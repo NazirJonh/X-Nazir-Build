@@ -258,17 +258,14 @@ set(SRC
   intern/packedFile.cc
   intern/paint.cc
   intern/paint_canvas.cc
+    intern/paint_layers.cc
+    intern/paint_layers_bake.cc
+    intern/paint_layers_composite.cc
+    intern/paint_layers_generate.cc
+    intern/paint_layers_target.cc
   intern/paint_material_combined.cc
   intern/paint_material_composite.cc
-  intern/paint_material_layer_chain.cc
-  intern/paint_material_layer_channels.cc
-  intern/paint_material_layer_corrections.cc
-  intern/paint_material_layer_edit.cc
-  intern/paint_material_layer_idprops.cc
-  intern/paint_material_layer_mask.cc
-  intern/paint_material_layer_mask_bake.cc
-  intern/paint_material_layer_model.cc
-  intern/paint_material_layer_props.cc
+  intern/paint_material_normal_combine.cc
   intern/paint_material_resolve.cc
   intern/paint_material_sync.cc
   intern/paint_runtime.cc
@@ -522,10 +519,13 @@ set(SRC
   BKE_paint.hh
   BKE_paint_bvh.hh
   BKE_paint_bvh_pixels.hh
+  BKE_paint_layers.hh
+  BKE_paint_layers_composite.hh
+  BKE_paint_layers_generate.hh
   BKE_paint_types.hh
   BKE_paint_material_combined.hh
   BKE_paint_material_composite.hh
-  BKE_paint_material_mask_bake.hh
+  BKE_paint_material_enums.hh
   BKE_paint_material_resolve.hh
   BKE_particle.h
   BKE_path_templates.hh
@@ -823,15 +823,13 @@ if(WITH_GTESTS)
     intern/main_namemap_test.cc
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
-    intern/paint_material_channel_test.cc
+    intern/paint_layers_description_test.cc
+    intern/paint_layers_generate_test.cc
+    intern/paint_layers_graph_eval_test.cc
+    intern/paint_layers_target_test.cc
     intern/paint_material_combined_cache_test.cc
     intern/paint_material_combined_test.cc
     intern/paint_material_composite_test.cc
-    intern/paint_material_layer_correction_test.cc
-    intern/paint_material_layer_edit_test.cc
-    intern/paint_material_layer_mask_bake_test.cc
-    intern/paint_material_layer_model_test.cc
-    intern/paint_material_mask_edit_test.cc
     intern/paint_material_resolve_test.cc
     intern/paint_test.cc
     intern/path_templates_test.cc

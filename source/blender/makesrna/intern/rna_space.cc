@@ -38,6 +38,10 @@ static constexpr bool RNA_SPACE_DEBUG_ENABLED = false;
 #include "BLI_string.h"
 #include "BLI_sys_types.h"
 
+#include "MEM_guardedalloc.h"
+
+#include <cstring>
+
 #include "DNA_action_types.h"
 #include "DNA_camera_types.h"
 #include "DNA_image_types.h"
@@ -764,6 +768,9 @@ static const EnumPropertyItem spreadsheet_table_id_type_items[] = {
 #  include "BKE_nla.hh"
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_paint_layers.hh"
+#  include "BKE_paint_layers_composite.hh"
+#  include "BKE_paint_layers_target.hh"
 #  include "BKE_paint_material_composite.hh"
 #  include "BKE_preferences.h"
 #  include "BKE_scene.hh"
@@ -2634,14 +2641,45 @@ static const char *space_image_canvas_role_name(const int role)
 }
 
 /**
- * The paint layer whose maps the "Layer Texture Pass" section lists.
+ * The description row whose maps the "Layer Texture Pass" section lists.
  *
- * The canvas the editor is showing, since that is the map the user last chose to paint; it carries
- * the layer's UUID like every other map of that layer. Nil when the canvas is not a layer map.
+ * The canvas the editor is showing, since that is the map the user last chose to paint, resolved
+ * through the active material's description. Null when the canvas is not a map of \a ma.
  */
-static bUUID space_image_active_layer_id(const SpaceImage &sima)
+static MaterialPaintLayer *space_image_active_layer(Material &ma, const SpaceImage &sima)
 {
-  return sima.image != nullptr ? sima.image->paint_layer_id : BLI_uuid_nil();
+  if (sima.image == nullptr) {
+    return nullptr;
+  }
+  PaintLayersImageUse use;
+  if (!BKE_paint_layers_find_image_use(ma, *sima.image, use)) {
+    return nullptr;
+  }
+  return use.layer;
+}
+
+/** The maps of \a layer, indexed by #eMaterialPaintChannel and #PAINT_LAYER_MAP_MASK. */
+static void space_image_layer_maps_get(const MaterialPaintLayer &layer,
+                                       MutableSpan<Image *> r_maps)
+{
+  r_maps.fill(nullptr);
+  for (int i = 0; i < layer.channels_num; i++) {
+    const int channel = layer.channels[i].channel;
+    if (r_maps.index_range().contains(channel)) {
+      r_maps[channel] = layer.channels[i].image;
+    }
+  }
+  /* The mask is a stack now; the mask slot names the first item's map. */
+  if (r_maps.index_range().contains(PAINT_LAYER_MAP_MASK)) {
+    for (const MaterialPaintLayer *item : BKE_paint_layers_mask_items(layer)) {
+      for (int i = 0; i < item->channels_num; i++) {
+        if (item->channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+          r_maps[PAINT_LAYER_MAP_MASK] = item->channels[i].image;
+          return;
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -2745,8 +2783,7 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
       continue;
     }
     const bool resolvable = bmain != nullptr &&
-                            BKE_paint_material_composite_stack_from_material(
-                                *bmain, *ma, pass, composite_layers);
+                            BKE_paint_layers_composite_image_layers(*ma, pass, composite_layers);
     EnumPropertyItem pass_item{};
     pass_item.value = space_image_canvas_pass_value(pass);
     pass_item.identifier = identifiers->pass_identifier;
@@ -2758,15 +2795,16 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
   }
 
   /* Section 2: one map of the active layer, which is what a stroke actually writes into. */
-  const bUUID layer_id = space_image_active_layer_id(*static_cast<SpaceImage *>(ptr->data));
-  if (BLI_uuid_is_nil(layer_id) || bmain == nullptr) {
+  const MaterialPaintLayer *active_layer = space_image_active_layer(
+      *ma, *static_cast<SpaceImage *>(ptr->data));
+  if (active_layer == nullptr || bmain == nullptr) {
     RNA_enum_item_end(&item, &totitem);
     *r_free = true;
     return item;
   }
 
   std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM + 1> layer_maps;
-  BKE_paint_material_layer_maps_get(*bmain, *ma, layer_id, layer_maps);
+  space_image_layer_maps_get(*active_layer, layer_maps);
 
   EnumPropertyItem layer_heading{};
   layer_heading.identifier = "";
@@ -4854,6 +4892,78 @@ static const EnumPropertyItem *rna_FileAssetSelectParams_import_method_itemf(
   return items;
 }
 
+/* The Add-kind struct is editor data, not DNA, so its properties read through these rather than an
+ * sdna offset. */
+OutlinerStackAddKind *rna_OutlinerStackAddKind(PointerRNA *ptr)
+{
+  return static_cast<OutlinerStackAddKind *>(ptr->data);
+}
+
+void rna_OutlinerStackAddKind_identifier_get(PointerRNA *ptr, char *value)
+{
+  strcpy(value, rna_OutlinerStackAddKind(ptr)->identifier);
+}
+
+int rna_OutlinerStackAddKind_identifier_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_OutlinerStackAddKind(ptr)->identifier));
+}
+
+void rna_OutlinerStackAddKind_name_get(PointerRNA *ptr, char *value)
+{
+  strcpy(value, rna_OutlinerStackAddKind(ptr)->name);
+}
+
+int rna_OutlinerStackAddKind_name_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_OutlinerStackAddKind(ptr)->name));
+}
+
+void rna_OutlinerStackAddKind_description_get(PointerRNA *ptr, char *value)
+{
+  strcpy(value, rna_OutlinerStackAddKind(ptr)->description);
+}
+
+int rna_OutlinerStackAddKind_description_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_OutlinerStackAddKind(ptr)->description));
+}
+
+int rna_OutlinerStackAddKind_icon_get(PointerRNA *ptr)
+{
+  return rna_OutlinerStackAddKind(ptr)->icon;
+}
+
+bool rna_OutlinerStackAddKind_takes_color_get(PointerRNA *ptr)
+{
+  return rna_OutlinerStackAddKind(ptr)->takes_color;
+}
+
+int rna_OutlinerStackAddKind_source_id_type_get(PointerRNA *ptr)
+{
+  return rna_OutlinerStackAddKind(ptr)->source_id_type;
+}
+
+/**
+ * Iterator over the current stack source's Add kinds: the vector is filled once here, copied into a
+ * heap array the iterator owns and frees, so a script can read the kinds the Add operator offers
+ * without the UI hard-coding them.
+ */
+void rna_iterator_stack_add_kinds_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  blender::Vector<OutlinerStackAddKind> kinds;
+  ed::outliner::outliner_stack_add_kinds_get(*space_outliner, kinds);
+  OutlinerStackAddKind *array = nullptr;
+  if (!kinds.is_empty()) {
+    /* The iterator frees this with #MEM_delete_void, which expects a #MEM_new_array block. */
+    array = MEM_new_array_uninitialized<OutlinerStackAddKind>(kinds.size(), __func__);
+    memcpy(array, kinds.data(), sizeof(OutlinerStackAddKind) * kinds.size());
+  }
+  rna_iterator_array_begin(
+      iter, ptr, array, sizeof(OutlinerStackAddKind), int64_t(kinds.size()), array != nullptr, nullptr);
+}
+
 }  // namespace blender
 
 #else
@@ -5241,6 +5351,53 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   PropertyRNA *prop;
   FunctionRNA *func;
 
+  srna = RNA_def_struct(brna, "OutlinerStackAddKind", nullptr);
+  RNA_def_struct_ui_text(
+      srna, "Stack Add Kind", "A kind of row the current stack source can add");
+
+  prop = RNA_def_property(srna, "identifier", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_OutlinerStackAddKind_identifier_get",
+                                "rna_OutlinerStackAddKind_identifier_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Identifier", "Stable name scripts and the Add read the kind by");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_OutlinerStackAddKind_name_get",
+                                "rna_OutlinerStackAddKind_name_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Name", "Name the user reads");
+
+  prop = RNA_def_property(srna, "description", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_OutlinerStackAddKind_description_get",
+                                "rna_OutlinerStackAddKind_description_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Description", "What the kind means, for tooltips");
+
+  prop = RNA_def_property(srna, "icon", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop, "rna_OutlinerStackAddKind_icon_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Icon", "Icon drawn next to the name");
+
+  prop = RNA_def_property(srna, "takes_color", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_OutlinerStackAddKind_takes_color_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Takes Color", "Whether creating a row of this kind asks for a colour first");
+
+  prop = RNA_def_property(srna, "source_id_type", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(
+      prop, "rna_OutlinerStackAddKind_source_id_type_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Source ID Type", "ID type of the data-block the kind is made from, or 0");
+
   static const EnumPropertyItem display_mode_items[] = {
       {SO_SCENES,
        "SCENES",
@@ -5357,6 +5514,23 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, stack_source_items);
   RNA_def_property_ui_text(prop, "Stack Source", "Which kind of layer stack to display");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  /* The kinds the Add offers, as the source declares them: a script builds the same buttons the
+   * header does without naming a kind of its own. Read-only and computed on iteration. */
+  prop = RNA_def_property(srna, "stack_add_kinds", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "OutlinerStackAddKind");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_iterator_stack_add_kinds_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Stack Add Kinds", "Kinds of rows the current stack source can add");
 
   prop = RNA_def_property(srna, "use_stack_layer_pin", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_PINNED);

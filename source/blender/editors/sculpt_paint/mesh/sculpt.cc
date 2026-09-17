@@ -66,8 +66,11 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_preview_image.hh"
 #include "BKE_report.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_undo_system.hh"
@@ -5445,6 +5448,26 @@ struct SculptPaintStroke final : public PaintStroke {
    * #stroke_undo_end can close the same one. See #stroke_undo_begin. */
   bool undo_uses_image_canvas_ = false;
 
+  /* A layered material's first stroke opened an undo group around the map creation. Closed once,
+   * from #done, so cancel and every early return of the branches above share the one close. */
+  bool layer_undo_group_open_ = false;
+
+  /**
+   * Grow the active layered material's maps before the stroke's own undo step opens, wrapping the
+   * memfile map creation and the stroke in one undo group. Returns false when the target is frozen
+   * (C-1): the caller must refuse the stroke and nothing was opened.
+   */
+  bool ensure_layered_maps(bContext *C, wmOperator *op);
+
+  /** Close the first-stroke group if it is open; safe to call more than once. */
+  void close_layer_undo_group()
+  {
+    if (layer_undo_group_open_) {
+      ED_undo_group_end(this->evil_C);
+      layer_undo_group_open_ = false;
+    }
+  }
+
   SculptPaintStroke(bContext *C, wmOperator *op, const int event_type)
       : PaintStroke(C, op, event_type)
   {
@@ -5467,6 +5490,87 @@ struct SculptPaintStroke final : public PaintStroke {
   void update_step(wmOperator *op, PointerRNA *itemptr) override;
   void done(bool is_cancel, bool stroke_started) override;
 };
+
+bool sculpt_brush_uses_image_canvas(const Brush &brush,
+                                    PaintModeSettings &settings,
+                                    const Paint &paint,
+                                    Object &ob);
+
+bool SculptPaintStroke::ensure_layered_maps(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  Brush *brush = (sculpt_ != nullptr) ? BKE_paint_brush(&sculpt_->paint) : nullptr;
+  if (ob == nullptr || brush == nullptr) {
+    return true;
+  }
+  Material *ma = BKE_object_material_get(ob, ob->actcol);
+  if (ma == nullptr || !paint_layers_is_layered(*ma)) {
+    return true;
+  }
+  /* A geometry brush (Draw, Grab, Mask, Face Sets) never writes an image, so it must not grow the
+   * description or leave an undo step. */
+  if (!sculpt_brush_uses_image_canvas(*brush, *paint_mode_settings_, sculpt_->paint, *ob)) {
+    return true;
+  }
+  if (brush->material_paint == nullptr) {
+    BKE_brush_material_paint_ensure(brush);
+  }
+  if (brush->material_paint == nullptr) {
+    return true;
+  }
+  const BrushMaterialPaint &brush_paint = *brush->material_paint;
+  PaintModeSettings &paint_mode = *paint_mode_settings_;
+  const int visible = sculpt_->paint.visible_material_channels;
+
+  /* C-1 before the group opens: a refused target (frozen, or a Fill's content) refuses the stroke
+   * with nothing created. */
+  const char *refusal = nullptr;
+  if (paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    PaintLayersTarget target;
+    if (BKE_paint_layers_target_get(
+            *ob, -1, paint_mode.active_layer_channel, paint_mode, target))
+    {
+      refusal = BKE_paint_layers_target_refusal(target);
+    }
+  }
+  else {
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      if (!info.supports_image_paint ||
+          !BKE_paint_material_channel_writes_to_target(
+              brush_paint, paint_mode, visible, info.channel))
+      {
+        continue;
+      }
+      PaintLayersTarget target;
+      if (BKE_paint_layers_target_get(*ob, -1, info.channel, paint_mode, target)) {
+        refusal = BKE_paint_layers_target_refusal(target);
+        if (refusal != nullptr) {
+          break;
+        }
+      }
+    }
+  }
+  if (refusal != nullptr) {
+    BKE_report(op->reports, RPT_WARNING, RPT_(refusal));
+    return false;
+  }
+
+  ED_undo_group_begin(C);
+  const PaintMaterialImagesEnsureResult result = BKE_paint_material_images_ensure_writable(
+      *bmain_, *ob, brush_paint, paint_mode, visible);
+  if (result.created > 0) {
+    ED_undo_push(C, RPT_("Add Layer Maps"));
+    layer_undo_group_open_ = true;
+  }
+  else {
+    ED_undo_group_end(C);
+  }
+  /* The canvas is read from the slots, which a row, channel or mask switch only marks stale: rebuild
+   * them for every stroke, or it paints whatever the previous target was (a mask added black
+   * already has its map, so nothing is created to trigger a rebuild). */
+  BKE_texpaint_slots_refresh_object(CTX_data_scene(C), ob);
+  return true;
+}
 
 bool SculptPaintStroke::get_location(float out[3], const float mouse[2], bool force_original)
 {
@@ -5625,35 +5729,46 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
       paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL && ob.type == OB_MESH)
   {
     BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
-    if (brush->material_paint == nullptr && paint_mode_init.mask_image_binding.image != nullptr) {
+    if (brush->material_paint == nullptr &&
+        paint_mode_init.layer_target_mode == PAINT_LAYER_TARGET_MASK)
+    {
       /* #brush above is read-only here; the writable pointer comes from the same #Paint. */
       BKE_brush_material_paint_ensure(BKE_paint_brush(&sd.paint));
     }
     if (brush->material_paint != nullptr) {
       const BrushMaterialPaint &brush_paint = *brush->material_paint;
-      BKE_paint_material_images_ensure_writable(
-          *CTX_data_main(C), ob, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
-      for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-        if (info.socket_name == nullptr) {
-          continue;
-        }
-        if (!BKE_paint_material_channel_writes_to_target(
-                brush_paint,
-                paint_mode_init,
-                sd.paint.visible_material_channels,
-                info.channel))
-        {
-          continue;
-        }
-        Image *image;
-        ImageUser *iuser;
-        if (!BKE_paint_principled_channel_image_get(
-                ob, info.channel, &image, &iuser, &paint_mode_init))
-        {
-          BKE_reportf(op->reports,
-                      RPT_WARNING,
-                      TIP_("%s channel has no paintable image texture on the active material"),
-                      IFACE_(info.ui_name));
+      Material *layer_material = BKE_object_material_get(&ob, ob.actcol);
+      const bool layered = layer_material != nullptr && paint_layers_is_layered(*layer_material);
+      /* A layered material's maps are created by the stroke's own ensure_layered_maps, inside the
+       * first-stroke undo group; the graph-based resolve and its warnings do not apply. */
+      if (!layered) {
+        BKE_paint_material_images_ensure_writable(*CTX_data_main(C),
+                                                  ob,
+                                                  brush_paint,
+                                                  paint_mode_init,
+                                                  sd.paint.visible_material_channels);
+        for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+          if (info.socket_name == nullptr) {
+            continue;
+          }
+          if (!BKE_paint_material_channel_writes_to_target(
+                  brush_paint,
+                  paint_mode_init,
+                  sd.paint.visible_material_channels,
+                  info.channel))
+          {
+            continue;
+          }
+          Image *image;
+          ImageUser *iuser;
+          if (!BKE_paint_principled_channel_image_get(
+                  ob, info.channel, &image, &iuser, &paint_mode_init))
+          {
+            BKE_reportf(op->reports,
+                        RPT_WARNING,
+                        TIP_("%s channel has no paintable image texture on the active material"),
+                        IFACE_(info.ui_name));
+          }
         }
       }
 
@@ -6639,6 +6754,10 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   SculptSession &ss = *ob.runtime->sculpt_session;
   Sculpt &sd = *this->sculpt_;
 
+  /* One close for every path: the branch returns below, cancel and the curve-patch hand-offs all
+   * pass through here. */
+  this->close_layer_undo_group();
+
   /* Finished. */
   if (!ss.cache) {
     brush_exit_tex(sd);
@@ -6745,6 +6864,15 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     }
   }
 
+  /* The maps this PBR image stroke wrote: their Outliner-stack thumbnails have to refresh once the
+   * brush is lifted. Collect them before the stroke cache goes. */
+  Vector<Image *> painted_images;
+  for (const paint::image::ImagePaintTarget &target : ss.cache->image_paint_targets) {
+    if (target.data != nullptr && target.data->image != nullptr) {
+      painted_images.append(target.data->image);
+    }
+  }
+
   MEM_delete(ss.cache);
   ss.cache = nullptr;
 
@@ -6766,6 +6894,19 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   }
 
   WM_event_add_notifier(this->evil_C, NC_OBJECT | ND_DRAW, &ob);
+
+  /* Once per stroke, not per dab: the Outliner stack rebuilds its rows on NC_IMAGE|NA_EDITED, and
+   * each painted map's preview is flagged so its thumbnail re-renders from the new pixels. */
+  for (Image *image : painted_images) {
+    WM_main_add_notifier(NC_IMAGE | NA_EDITED, image);
+    if (PreviewImage *preview = BKE_previewimg_id_get(&image->id)) {
+      /* Mark rather than free: a preview job may be rendering into the rect from a background
+       * thread; the icon draw re-renders on the flag and shows the old image until then. */
+      for (int size = 0; size < NUM_ICON_SIZES; size++) {
+        preview->flag[size] |= PRV_CHANGED;
+      }
+    }
+  }
   brush_exit_tex(sd);
 }
 
@@ -6860,6 +7001,14 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_PASS_THROUGH;
   }
 
+  /* Every refusal is behind us; only now may the first stroke grow the description and open the
+   * undo group -- a click that misses the mesh must leave no maps and no undo step. */
+  if (!stroke->ensure_layered_maps(C, op)) {
+    stroke->cancel(C);
+    MEM_delete(stroke);
+    return OPERATOR_CANCELLED;
+  }
+
   const wmOperatorStatus retval = op->type->modal(C, op, event);
   OPERATOR_RETVAL_CHECK(retval);
 
@@ -6890,6 +7039,12 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
 
   SculptPaintStroke *stroke = MEM_new<SculptPaintStroke>(__func__, C, op, 0);
   op->customdata = stroke;
+
+  if (!stroke->ensure_layered_maps(C, op)) {
+    MEM_delete(stroke);
+    op->customdata = nullptr;
+    return OPERATOR_CANCELLED;
+  }
 
   stroke->exec(C, op);
 

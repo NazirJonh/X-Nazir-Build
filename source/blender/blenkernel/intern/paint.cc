@@ -81,9 +81,10 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_paint_material_composite.hh"
-#include "BKE_paint_material_layer_edit.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -2832,11 +2833,18 @@ static void sculpt_update_object(Depsgraph *depsgraph,
      *
      * The relevant changes are stored/encoded in the paint canvas key.
      * These include the active uv map, and resolutions. */
-    std::string paint_canvas_key = BKE_paint_canvas_key_get(
-        &scene->toolsettings->paint_mode,
-        ob,
-        BKE_paint_brush(&sd->paint),
-        sd->paint.visible_material_channels);
+    PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+    /* A Material canvas's key lists every channel map, and that list comes back empty from some
+     * callers, so the key flipped and each flip re-encoded every pixel (~270 ms at 4096). Its
+     * encodings are cached by #BKE_paint_pixels_layout_key_get, which already covers the maps'
+     * sizes and seam margin, so only the UV map has to be keyed here. */
+    std::string paint_canvas_key =
+        (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) ?
+            "UV_MAP:" + std::string(BKE_paint_canvas_uvmap_name_get(&paint_mode, ob).value_or("")) :
+            BKE_paint_canvas_key_get(&paint_mode,
+                                     ob,
+                                     BKE_paint_brush(&sd->paint),
+                                     sd->paint.visible_material_channels);
     if (!ss.last_paint_canvas_key || paint_canvas_key != ss.last_paint_canvas_key) {
       ss.last_paint_canvas_key = paint_canvas_key;
       BKE_pbvh_mark_rebuild_pixels(pbvh);
@@ -3363,10 +3371,6 @@ static_assert(sizeof(PaintModeSettings::channel_layer_bindings) /
                       sizeof(MaterialPaintChannelLayerBinding) ==
                   PAINT_MATERIAL_CHANNEL_NUM,
               "PaintModeSettings::channel_layer_bindings must have one entry per channel");
-static_assert(sizeof(PaintModeSettings::channel_image_bindings) /
-                      sizeof(MaterialPaintChannelImageBinding) ==
-                  PAINT_MATERIAL_CHANNEL_NUM,
-              "PaintModeSettings::channel_image_bindings must have one entry per channel");
 
 Span<MaterialPaintChannelInfo> BKE_paint_material_channels()
 {
@@ -3927,320 +3931,27 @@ void BKE_paint_material_channel_cache_invalidate(Material *ma)
   }
 }
 
-Material *BKE_paint_material_active_layer_source_get(const PaintModeSettings &mode_settings)
+
+void BKE_paint_material_layer_target_mode_set(Main &bmain,
+                                              Scene &scene,
+                                              Paint &paint,
+                                              PaintModeSettings &mode_settings,
+                                              const ePaintLayerTargetMode mode)
 {
-  for (const MaterialPaintChannelImageBinding &binding : mode_settings.channel_image_bindings) {
-    ImageMaterialSource source;
-    if (binding.image != nullptr && BKE_image_material_source_get(*binding.image, source)) {
-      return source.material;
-    }
-  }
-  return nullptr;
-}
-
-static Set<const Image *> paint_material_bound_images(const PaintModeSettings &mode_settings)
-{
-  Set<const Image *> bound;
-  for (const MaterialPaintChannelImageBinding &binding : mode_settings.channel_image_bindings) {
-    if (binding.image != nullptr) {
-      bound.add(binding.image);
-    }
-  }
-  return bound;
-}
-
-/**
- * Whether \a tree, or a group it nests, has a node showing one of \a images. A cheap walk over the
- * node lists that spares reading the stack of every material that cannot hold the active row.
- */
-static bool paint_material_tree_shows_image(const bNodeTree &tree,
-                                            const Set<const Image *> &images,
-                                            Set<const bNodeTree *> &r_visited)
-{
-  if (!r_visited.add(&tree)) {
-    return false;
-  }
-  for (const bNode &node : tree.nodes) {
-    if (node.id == nullptr) {
-      continue;
-    }
-    if (GS(node.id->name) == ID_IM && images.contains(id_cast<const Image *>(node.id))) {
-      return true;
-    }
-    if (GS(node.id->name) == ID_NT &&
-        paint_material_tree_shows_image(*id_cast<const bNodeTree *>(node.id), images, r_visited))
-    {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * The row of \a material's stack that holds one of \a bound, if one does: its ordinal, and the
- * correction of that row holding the image -- nil when it is the layer's own map that is held.
- * The scan order is the model's own, bottom to top, a row's maps ahead of its corrections'.
- */
-static std::optional<std::pair<int, bUUID>> paint_material_stack_row_holding(
-    const Main &bmain, const Material &material, const Set<const Image *> &bound)
-{
-  if (material.nodetree == nullptr || bound.is_empty()) {
-    return std::nullopt;
-  }
-  Set<const bNodeTree *> visited;
-  if (!paint_material_tree_shows_image(*material.nodetree, bound, visited)) {
-    return std::nullopt;
-  }
-  Vector<PaintMaterialLayerStackEntry> entries;
-  if (!BKE_paint_material_layer_stack_from_material(bmain, material, entries)) {
-    return std::nullopt;
-  }
-  for (const PaintMaterialLayerStackEntry &entry : entries) {
-    for (const Image *image : entry.channel_images.values()) {
-      if (image != nullptr && bound.contains(image)) {
-        return std::make_pair(entry.ordinal, bUUID{});
-      }
-    }
-    for (const Vector<PaintMaterialLayerCorrectionEntry> *corrections :
-         {&entry.content_corrections, &entry.mask_corrections})
-    {
-      for (const PaintMaterialLayerCorrectionEntry &correction : *corrections) {
-        for (const Image *image : correction.channel_images.values()) {
-          if (image != nullptr && bound.contains(image)) {
-            return std::make_pair(entry.ordinal, correction.marker);
-          }
-        }
-      }
-    }
-  }
-  return std::nullopt;
-}
-
-bool PaintMaterialActiveLayer::is_material() const
-{
-  return this->kind == PaintMaterialLayerKind::Material && this->source != nullptr;
-}
-
-namespace {
-
-/**
- * Cache for #BKE_paint_material_active_layer_get, keyed on the exact bindings it was computed
- * from. Only a positive answer (an owner found) is cached; see that function's own comment for
- * why a negative one never is. The owner is kept by session UID rather than by address and
- * re-resolved through #Main on every hit, so a freed-and-reused address can never read back as a
- * hit; #BKE_material_paint_layer_revision_get catches an edit to its stack in between.
- */
-struct ActiveLayerCache {
-  std::array<uint32_t, PAINT_MATERIAL_CHANNEL_NUM> binding_uids = {};
-  uint32_t owner_uid = 0;
-  uint64_t owner_revision = 0;
-  int ordinal = -1;
-  /** The correction the answer names, nil when it names the row's layer itself. */
-  bUUID correction = {};
-};
-
-ActiveLayerCache g_active_layer_cache;
-
-/**
- * The channelless correction the Outliner last activated (see
- * #BKE_paint_material_active_correction_set): with no maps to bind, the channel bindings cannot
- * name it, so it is remembered here instead. By session UID rather than by address, like the
- * cache above, so a freed-and-reused material can never read back as a hit; the model lookup on
- * every read catches a correction that was removed in between.
- */
-struct ActiveCorrectionMemo {
-  uint32_t material_uid = 0;
-  bUUID correction = {};
-};
-
-ActiveCorrectionMemo g_active_correction;
-
-/**
- * Assemble the answer for a correction row: the entry of \a owner's stack whose correction is
- * \a correction, its kind forced to #PaintMaterialLayerKind::Correction, its maps the
- * correction's own. Corrections are not baked from a material, so #source stays null.
- */
-std::optional<PaintMaterialActiveLayer> paint_material_active_correction_build(
-    const Main &bmain, Material &owner, const bUUID &correction)
-{
-  Vector<PaintMaterialLayerStackEntry> entries;
-  if (!BKE_paint_material_layer_stack_from_material(bmain, owner, entries)) {
-    return std::nullopt;
-  }
-  for (const PaintMaterialLayerStackEntry &entry : entries) {
-    for (const Vector<PaintMaterialLayerCorrectionEntry> *corrections :
-         {&entry.content_corrections, &entry.mask_corrections})
-    {
-      for (const PaintMaterialLayerCorrectionEntry &corr : *corrections) {
-        if (!BLI_uuid_equal(corr.marker, correction)) {
-          continue;
-        }
-        PaintMaterialActiveLayer result;
-        result.owner = &owner;
-        result.ordinal = entry.ordinal;
-        result.kind = PaintMaterialLayerKind::Correction;
-        result.correction = corr.marker;
-        result.correction_section = corr.section;
-        for (const auto item : corr.channel_images.items()) {
-          if (item.key < 0 || item.key >= PAINT_MATERIAL_CHANNEL_NUM || item.value == nullptr) {
-            continue;
-          }
-          result.maps.add(item.key, item.value);
-        }
-        return result;
-      }
-    }
-  }
-  return std::nullopt;
-}
-
-}  // namespace
-
-std::optional<PaintMaterialActiveLayer> BKE_paint_material_active_layer_get(
-    Main &bmain, const PaintModeSettings &mode_settings)
-{
-  std::array<uint32_t, PAINT_MATERIAL_CHANNEL_NUM> binding_uids = {};
-  bool any_bound = false;
-  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
-    const Image *image = mode_settings.channel_image_bindings[i].image;
-    if (image != nullptr) {
-      binding_uids[i] = image->id.session_uid;
-      any_bound = true;
-    }
-  }
-  if (!any_bound) {
-    /* Nothing bound: a channelless correction remembered by the Outliner may still be the paint
-     * target, since bindings cannot name a row that has no maps. Re-read through the model every
-     * time, so a correction removed after being remembered stops answering. */
-    if (g_active_correction.material_uid == 0 || BLI_uuid_is_nil(g_active_correction.correction)) {
-      return std::nullopt;
-    }
-    Material *owner = id_cast<Material *>(
-        BKE_libblock_find_session_uid(&bmain, ID_MA, g_active_correction.material_uid));
-    if (owner == nullptr) {
-      return std::nullopt;
-    }
-    return paint_material_active_correction_build(bmain, *owner, g_active_correction.correction);
-  }
-
-  Material *owner = nullptr;
-  int ordinal = -1;
-  bUUID correction = {};
-  if (g_active_layer_cache.owner_uid != 0 && binding_uids == g_active_layer_cache.binding_uids) {
-    Material *cached = id_cast<Material *>(
-        BKE_libblock_find_session_uid(&bmain, ID_MA, g_active_layer_cache.owner_uid));
-    if (cached != nullptr &&
-        BKE_material_paint_layer_revision_get(*cached) == g_active_layer_cache.owner_revision)
-    {
-      owner = cached;
-      ordinal = g_active_layer_cache.ordinal;
-      correction = g_active_layer_cache.correction;
-    }
-  }
-
-  if (owner == nullptr) {
-    /* Cache miss (bindings moved on, or the cached owner's stack did): the one full scan across
-     * every material this whole cache exists to spare repeated redraws from. */
-    const Set<const Image *> bound = paint_material_bound_images(mode_settings);
-    for (Material &material : bmain.materials) {
-      if (const std::optional<std::pair<int, bUUID>> found = paint_material_stack_row_holding(
-              bmain, material, bound))
-      {
-        owner = &material;
-        ordinal = found->first;
-        correction = found->second;
-        break;
-      }
-    }
-    if (owner == nullptr) {
-      return std::nullopt;
-    }
-    g_active_layer_cache.binding_uids = binding_uids;
-    g_active_layer_cache.owner_uid = owner->id.session_uid;
-    g_active_layer_cache.owner_revision = BKE_material_paint_layer_revision_get(*owner);
-    g_active_layer_cache.ordinal = ordinal;
-    g_active_layer_cache.correction = correction;
-  }
-
-  if (!BLI_uuid_is_nil(correction)) {
-    return paint_material_active_correction_build(bmain, *owner, correction);
-  }
-
-  Vector<PaintMaterialLayerStackEntry> entries;
-  if (!BKE_paint_material_layer_stack_from_material(bmain, *owner, entries)) {
-    return std::nullopt;
-  }
-  for (const PaintMaterialLayerStackEntry &entry : entries) {
-    if (entry.ordinal != ordinal) {
-      continue;
-    }
-    PaintMaterialActiveLayer result;
-    result.owner = owner;
-    result.ordinal = entry.ordinal;
-    result.kind = entry.kind;
-    for (const auto item : entry.channel_images.items()) {
-      if (item.key < 0 || item.key >= PAINT_MATERIAL_CHANNEL_NUM || item.value == nullptr) {
-        continue;
-      }
-      result.maps.add(item.key, item.value);
-      ImageMaterialSource source;
-      if (BKE_image_material_source_get(*item.value, source)) {
-        result.source = source.material;
-        result.bake_size = std::max(result.bake_size, source.bake_size);
-      }
-    }
-    return result;
-  }
-  return std::nullopt;
-}
-
-void BKE_paint_material_active_correction_set(const Material *material, const bUUID &correction)
-{
-  if (material == nullptr || BLI_uuid_is_nil(correction)) {
-    g_active_correction = {};
+  const bool want_mask = (mode == PAINT_LAYER_TARGET_MASK);
+  const bool was_mask = (mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK);
+  if (want_mask == was_mask) {
     return;
   }
-  g_active_correction.material_uid = material->id.session_uid;
-  g_active_correction.correction = correction;
-  /* The layer cache may hold a positive answer keyed to bindings that stopped naming the target
-   * the moment this was called: drop it, so the next read re-resolves. */
-  g_active_layer_cache = ActiveLayerCache{};
-}
 
-void BKE_paint_material_channel_binding_set(MaterialPaintChannelImageBinding &binding,
-                                            Image *image)
-{
-  if (binding.image == image) {
-    return;
-  }
-  /* Either end may be null -- an unbound channel, or a binding being cleared -- and taking the
-   * address of a member through a null pointer to let #id_us_min sort it out is undefined even
-   * where it happens to work. */
-  if (binding.image != nullptr) {
-    id_us_min(&binding.image->id);
-  }
-  binding.image = image;
-  if (binding.image != nullptr) {
-    id_us_plus(&binding.image->id);
-  }
-  BKE_imageuser_default(&binding.iuser);
-}
-
-void BKE_paint_material_mask_edit_begin_ex(Main &bmain,
-                                           Scene &scene,
-                                           Paint &paint,
-                                           PaintModeSettings &mode_settings,
-                                           Image &mask_image)
-{
-  const bool already_editing_a_mask = mode_settings.mask_image_binding.image != nullptr;
-  if (!already_editing_a_mask) {
+  if (want_mask) {
     mode_settings.mask_saved_brush = paint.brush;
     if (mode_settings.mask_active_brush == nullptr) {
       /* First mask edit ever: pick the texture-paint default ("Paint Hard", see
        * #paint_brush_default_essentials_name_get) through the paint's own mode. Falls back to a
        * plain local brush when the essentials library is unavailable (unit tests, minimal
        * installs) -- mask strokes never read #BrushMaterialPaint.channels[] (invariant M6), so
-       * any brush paints a mask once #BKE_brush_material_paint_ensure ran on it below. */
+       * any brush paints a mask once #BKE_brush_material_paint_ensure ran on it. */
       const PaintMode paint_mode = paint.runtime != nullptr ? paint.runtime->paint_mode :
                                                               PaintMode::Texture3D;
       mode_settings.mask_active_brush = BKE_paint_brush_from_essentials(
@@ -4257,12 +3968,44 @@ void BKE_paint_material_mask_edit_begin_ex(Main &bmain,
       BKE_paint_brush_set_synced(scene, paint, mode_settings.mask_active_brush);
     }
   }
-  if (mode_settings.mask_image_binding.image != &mask_image) {
-    /* Same contract as the channel bindings: a zeroed #ImageUser is not a valid tile/frame
-     * address, and the first stroke would find no buffer to write into. */
-    BKE_imageuser_default(&mode_settings.mask_image_binding.iuser);
+  else {
+    mode_settings.mask_active_brush = paint.brush;
+    if (mode_settings.mask_saved_brush != nullptr) {
+      BKE_paint_brush_set_synced(scene, paint, mode_settings.mask_saved_brush);
+    }
+    else if (!BKE_paint_brush_set_default(&bmain, &scene, &paint)) {
+      /* No brush was saved and the essentials library is unavailable (unit tests, minimal
+       * installs), so #BKE_paint_brush_set_default cleared the active brush and restored nothing.
+       * A plain local brush, or the paint would be left with none. */
+      const eObjectMode ob_mode = paint.runtime != nullptr && paint.runtime->ob_mode != 0 ?
+          eObjectMode(paint.runtime->ob_mode) :
+          OB_MODE_TEXTURE_PAINT;
+      if (Brush *fallback = BKE_brush_add(&bmain, "Mask", ob_mode)) {
+        BKE_brush_material_paint_ensure(fallback);
+        BKE_paint_brush_set_synced(scene, paint, fallback);
+      }
+    }
+    mode_settings.mask_saved_brush = nullptr;
   }
-  mode_settings.mask_image_binding.image = &mask_image;
+  mode_settings.layer_target_mode = mode;
+  /* The slots read the mode (channels vs mask), so every layered material's cache is stale. */
+  for (Material &ma : bmain.materials) {
+    if (paint_layers_is_layered(ma)) {
+      ma.paint_layers_flag |= MA_PAINT_LAYERS_SLOTS_STALE;
+    }
+  }
+}
+
+void BKE_paint_material_mask_edit_begin_ex(Main &bmain,
+                                           Scene &scene,
+                                           Paint &paint,
+                                           PaintModeSettings &mode_settings,
+                                           Image & /*mask_image*/)
+{
+  /* The painted mask is the active row's mask, resolved from the description by the target
+   * resolver; the mode switch is what puts the mask brush in hand. */
+  BKE_paint_material_layer_target_mode_set(
+      bmain, scene, paint, mode_settings, PAINT_LAYER_TARGET_MASK);
 }
 
 void BKE_paint_material_mask_edit_end_ex(Main &bmain,
@@ -4270,28 +4013,8 @@ void BKE_paint_material_mask_edit_end_ex(Main &bmain,
                                          Paint &paint,
                                          PaintModeSettings &mode_settings)
 {
-  if (mode_settings.mask_image_binding.image == nullptr) {
-    return;
-  }
-  mode_settings.mask_active_brush = paint.brush;
-  if (mode_settings.mask_saved_brush != nullptr) {
-    BKE_paint_brush_set_synced(scene, paint, mode_settings.mask_saved_brush);
-  }
-  else if (!BKE_paint_brush_set_default(&bmain, &scene, &paint)) {
-    /* No brush was saved and the essentials library is unavailable (unit tests, minimal installs),
-     * so #BKE_paint_brush_set_default cleared the active brush and restored nothing. Same fallback
-     * as #BKE_paint_material_mask_edit_begin_ex: a plain local brush, or the paint would be left
-     * with none. */
-    const eObjectMode ob_mode = paint.runtime != nullptr && paint.runtime->ob_mode != 0 ?
-        eObjectMode(paint.runtime->ob_mode) :
-        OB_MODE_TEXTURE_PAINT;
-    if (Brush *fallback = BKE_brush_add(&bmain, "Mask", ob_mode)) {
-      BKE_brush_material_paint_ensure(fallback);
-      BKE_paint_brush_set_synced(scene, paint, fallback);
-    }
-  }
-  mode_settings.mask_saved_brush = nullptr;
-  mode_settings.mask_image_binding.image = nullptr;
+  BKE_paint_material_layer_target_mode_set(
+      bmain, scene, paint, mode_settings, PAINT_LAYER_TARGET_CONTENT);
 }
 
 bool BKE_paint_principled_channel_image_get(Object &ob,
@@ -4302,19 +4025,7 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
 {
   *r_image = nullptr;
   *r_iuser = nullptr;
-
-  if (mode_settings != nullptr) {
-    BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
-    MaterialPaintChannelImageBinding &binding = mode_settings->channel_image_bindings[channel];
-    if (binding.image != nullptr) {
-      /* An add-on-managed layer image takes over this channel's paint target, bypassing the
-       * Principled BSDF socket resolution entirely - the add-on is responsible for any shader
-       * wiring needed to display it, same contract as #channel_layer_bindings for attributes. */
-      *r_image = binding.image;
-      *r_iuser = &binding.iuser;
-      return true;
-    }
-  }
+  UNUSED_VARS(mode_settings);
 
   const char *socket_name = BKE_paint_material_channel_info(channel).socket_name;
   if (socket_name == nullptr) {
@@ -4372,6 +4083,15 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
                                                ImageUser **r_iuser,
                                                PaintModeSettings *mode_settings)
 {
+  /* This is the graph-as-truth writer: it mints Image and Image Texture nodes into Material.nodetree.
+   * A layered material owns its tree through the description, so this must never touch it. */
+  Material *layered = BKE_object_material_get(&ob, ob.actcol);
+  BLI_assert_msg(layered == nullptr || !paint_layers_is_layered(*layered),
+                 "the old graph path must not run for a layered material");
+  if (layered != nullptr && paint_layers_is_layered(*layered)) {
+    return false;
+  }
+
   if (BKE_paint_principled_channel_image_get(ob, channel, r_image, r_iuser, mode_settings)) {
     return true;
   }
@@ -4493,102 +4213,70 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
   BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
 
   PaintMaterialImagesEnsureResult result;
-  if (mode_settings.mask_image_binding.image != nullptr) {
-    /* The one target already exists -- it is the mask itself, created by
-     * #BKE_paint_material_layer_mask_add. Nothing to create, nothing to skip-and-report. */
+
+  /* A layered material grows its description on the first stroke: the active row's channel or mask
+   * gets a record and a map, with no bindings involved. The stroke's invoke owns the undo group. */
+  Material *layered = BKE_object_material_get(&ob, ob.actcol);
+  if (layered != nullptr && paint_layers_is_layered(*layered)) {
+    const int image_size = mode_settings.new_channel_image_size;
+
+    if (mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+      PaintLayersTarget target;
+      if (!BKE_paint_layers_target_get(
+              ob, -1, mode_settings.active_layer_channel, mode_settings, target) ||
+          BKE_paint_layers_target_refusal(target) != nullptr)
+      {
+        return result;
+      }
+      if (BKE_paint_layers_target_image(target) == nullptr &&
+          BKE_paint_layers_target_ensure_writable(bmain, target, image_size) != nullptr)
+      {
+        result.created = 1;
+      }
+      return result;
+    }
+
+    /* The channels the brush writes and that have no map yet. Any frozen target refuses the whole
+     * stroke before anything is created, so C-1 never leaves a half-grown layer. */
+    Vector<int> channels;
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      if (!info.supports_image_paint) {
+        continue;
+      }
+      if (!BKE_paint_material_channel_writes_to_target(
+              brush_paint, mode_settings, visible_material_channels, info.channel))
+      {
+        continue;
+      }
+      PaintLayersTarget target;
+      if (!BKE_paint_layers_target_get(ob, -1, info.channel, mode_settings, target)) {
+        return result;
+      }
+      /* Frozen, or the content of a Fill (a colour, changed only through a Correction). */
+      if (BKE_paint_layers_target_refusal(target) != nullptr) {
+        return result;
+      }
+      if (BKE_paint_layers_target_image(target) == nullptr) {
+        channels.append(info.channel);
+      }
+    }
+    if (channels.is_empty()) {
+      return result;
+    }
+
+    for (const int channel : channels) {
+      PaintLayersTarget target;
+      if (!BKE_paint_layers_target_get(ob, -1, channel, mode_settings, target)) {
+        continue;
+      }
+      if (BKE_paint_layers_target_ensure_writable(bmain, target, image_size) != nullptr) {
+        result.created++;
+      }
+    }
     return result;
   }
 
-  /* A stack row -- a layer's own maps or a correction's -- is the paint target when a channel is
-   * bound to one of its maps; the other channels stay as the user left them instead of growing a
-   * map on the first stroke. Only this object's own stack counts: bindings left over from another
-   * material say nothing about it. */
-  const Material *active_material = BKE_object_material_get(&ob, ob.actcol);
-  const bool stack_row_active = active_material != nullptr &&
-                                paint_material_stack_row_holding(
-                                    bmain,
-                                    *active_material,
-                                    paint_material_bound_images(mode_settings))
-                                    .has_value();
-
-  /* Distinct non-nil layer ids already on the channels we are ensuring, and the maps this call
-   * newly creates. Only maps in `new_images` get tagged; pre-existing images are never touched. */
-  Vector<bUUID> existing_ids;
-  Vector<Image *> new_images;
-
-  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (!info.supports_image_paint) {
-      continue;
-    }
-    if (!BKE_paint_material_channel_writes_to_target(
-            brush_paint, mode_settings, visible_material_channels, info.channel))
-    {
-      continue;
-    }
-    if (stack_row_active && mode_settings.channel_image_bindings[info.channel].image == nullptr) {
-      result.skipped_stack_channels++;
-      continue;
-    }
-    Image *existing = nullptr;
-    ImageUser *existing_iuser = nullptr;
-    const bool already_had = BKE_paint_principled_channel_image_get(
-        ob, info.channel, &existing, &existing_iuser, &mode_settings);
-
-    if (already_had && existing != nullptr && !BLI_uuid_is_nil(existing->paint_layer_id)) {
-      bool seen = false;
-      for (const bUUID &id : existing_ids) {
-        if (BLI_uuid_equal(id, existing->paint_layer_id)) {
-          seen = true;
-          break;
-        }
-      }
-      if (!seen) {
-        existing_ids.append(existing->paint_layer_id);
-      }
-    }
-
-    Image *image = nullptr;
-    ImageUser *iuser = nullptr;
-    if (!BKE_paint_principled_channel_image_ensure(bmain,
-                                                   ob,
-                                                   info.channel,
-                                                   mode_settings.new_channel_image_size,
-                                                   &image,
-                                                   &iuser,
-                                                   &mode_settings))
-    {
-      continue;
-    }
-    if (!already_had) {
-      result.created++;
-      if (image != nullptr) {
-        new_images.append(image);
-      }
-    }
-  }
-
-  /* No-op rule (spec 5.6): created nothing -> write nothing, mint no UUID. */
-  if (new_images.is_empty()) {
-    return result;
-  }
-
-  /* Pick the layer id for the maps created this call. */
-  bUUID layer_id;
-  if (existing_ids.is_empty()) {
-    layer_id = BLI_uuid_generate_random();
-  }
-  else if (existing_ids.size() == 1) {
-    layer_id = existing_ids[0];
-  }
-  else {
-    layer_id = BLI_uuid_generate_random();
-    result.conflicting_layer_ids = true;
-  }
-
-  for (Image *image : new_images) {
-    image->paint_layer_id = layer_id;
-  }
-
+  /* Only a layered material has a paint target: the non-layered graph-truth canvas is gone. */
   return result;
 }
 
@@ -4634,17 +4322,95 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     const float mask_stroke_value)
 {
   Vector<PaintMaterialImageTarget> targets;
-  if (mode_settings.mask_image_binding.image != nullptr) {
-    PaintMaterialImageTarget target;
-    target.image = mode_settings.mask_image_binding.image;
-    target.iuser = &mode_settings.mask_image_binding.iuser;
-    target.value = mask_stroke_value;
-    target.is_color_channel = false;
-    target.is_normal_channel = false;
-    target.is_mask_target = true;
-    targets.append(target);
+
+  /* A layered material reads its targets through the resolver. Its channel bindings are never used
+   * and never written; the mode comes from `layer_target_mode`, not from a binding. The painted
+   * channels are the brush's enabled ones -- `active_layer_channel` is the Layer Material tab's
+   * display channel (D-2) and never decides what a stroke writes. */
+  Material *layered = BKE_object_material_get(&ob, ob.actcol);
+  if (layered != nullptr && paint_layers_is_layered(*layered)) {
+    if (mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+      PaintLayersTarget target;
+      if (!BKE_paint_layers_target_get(
+              ob, -1, mode_settings.active_layer_channel, mode_settings, target))
+      {
+        return targets;
+      }
+      Image *image = BKE_paint_layers_target_image(target);
+      if (image == nullptr) {
+        /* Nothing to paint yet: the invoke's ensure_writable creates the mask first. */
+        return targets;
+      }
+      PaintMaterialImageTarget out;
+      out.image = image;
+      out.iuser = nullptr;
+      out.value = mask_stroke_value;
+      out.is_color_channel = false;
+      out.is_normal_channel = false;
+      out.is_mask_target = true;
+      out.is_correction_target = target.layer != nullptr &&
+                                 BKE_paint_layers_role(*target.layer) != PaintLayerRole::Layer;
+      targets.append(out);
+      return targets;
+    }
+
+    if (brush_paint == nullptr) {
+      return targets;
+    }
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      if (!info.supports_image_paint) {
+        continue;
+      }
+      if (!BKE_paint_material_channel_writes_to_target(
+              *brush_paint, mode_settings, visible_material_channels, info.channel))
+      {
+        continue;
+      }
+      PaintLayersTarget target;
+      if (!BKE_paint_layers_target_get(ob, -1, info.channel, mode_settings, target)) {
+        /* No active row: nothing to paint into. */
+        return targets;
+      }
+      Image *image = BKE_paint_layers_target_image(target);
+      if (image == nullptr) {
+        continue;
+      }
+      PaintMaterialImageTarget out;
+      out.channel = info.channel;
+      out.image = image;
+      out.iuser = nullptr;
+      out.is_color_channel = info.is_color;
+      out.is_normal_channel = (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL);
+      out.is_correction_target = target.layer != nullptr &&
+                                 BKE_paint_layers_role(*target.layer) != PaintLayerRole::Layer;
+      if (info.is_color) {
+        if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+          copy_v3_v3(out.color, brush_paint->base_color);
+        }
+        else {
+          copy_v3_v3(out.color, brush_paint->channels[info.channel].value);
+        }
+        out.value = 0.0f;
+      }
+      else if (out.is_normal_channel) {
+        const float2 range = BKE_paint_material_channel_range(mode_settings, info.channel);
+        out.color[0] = math::clamp(
+            brush_paint->channels[info.channel].value[0], range.x, range.y);
+        out.color[1] = math::clamp(
+            brush_paint->channels[info.channel].value[1], range.x, range.y);
+        out.color[2] = math::clamp(
+            brush_paint->channels[info.channel].value[2], range.x, range.y);
+        normalize_v3(out.color);
+        out.value = 0.0f;
+      }
+      else {
+        out.value = BKE_paint_material_channel_value(*brush_paint, mode_settings, info.channel);
+      }
+      targets.append(out);
+    }
     return targets;
   }
+
   if (brush_paint == nullptr) {
     return targets;
   }

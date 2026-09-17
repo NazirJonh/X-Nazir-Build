@@ -29,7 +29,7 @@ Span<const StackSource *> stack_sources_ensure()
    * exit would only add an order-of-destruction problem to save nothing. */
   static Vector<std::unique_ptr<StackSource>> owned = []() {
     Vector<std::unique_ptr<StackSource>> sources;
-    sources.append(stack_source_paint_material_create());
+    sources.append(stack_source_paint_layers_create());
     sources.append(stack_source_shape_keys_create());
     return sources;
   }();

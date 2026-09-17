@@ -129,7 +129,7 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
                                    const PaintModeSettings &settings,
                                    const int visible_material_channels)
 {
-  if (settings.mask_image_binding.image != nullptr) {
+  if (settings.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
     /* No channel is resolved at all: #is_active() stays false, and nothing below reads
      * brush_paint.channels[] or opens a source image. See the design spec's invariant M6. */
     return;

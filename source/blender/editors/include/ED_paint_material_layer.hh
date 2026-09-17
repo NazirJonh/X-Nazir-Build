@@ -7,105 +7,58 @@
 /** \file
  * \ingroup editors
  *
- * Editing a Material paint layer: one whose maps are not painted by hand but re-baked from
- * another material's Principled BSDF, kept in step with edits to that source
- * (#ed::material_bake::material_bake_images_rebake_stale).
+ * Editing a layered Material's rows that the description alone cannot express: adding a Material
+ * row (whose maps are baked from another material's Principled BSDF) and keeping mask editing in
+ * step with the description when the row being painted is removed or switched off.
  *
- * Every operation here shares the same shape: bake into fresh target #Image data-blocks, hand
- * them over to a #BKE_paint_material_layer_edit.hh call the moment the targets exist -- before
- * the render itself runs, since the bake job's worker touches node trees of its own and a target
- * freed out from under it would be a race -- and only then let the job fill in pixels. This is
- * the one place that sequence is written, shared by the Outliner's Add gesture and the Layer
- * Material tab's operators; neither owns it, so neither may drift from the other.
+ * The old graph-truth edit verbs (channel toggle/value/unlink, rebake, resize) were removed in
+ * phase 6; the description's own verbs live in `BKE_paint_layers.hh` and the Outliner source.
  */
 
-#include "BKE_paint_material_layer_edit.hh"
+#include "BKE_paint_layers.hh"
+
+#include "BLI_uuid.h"
 
 struct bContext;
 struct Material;
-struct ReportList;
 
 namespace blender::ed::sculpt_paint::material_layer {
 
 /**
- * Add a Material layer to \a owner's stack, next to \a anchor_ordinal
- * (#PaintMaterialLayerAddParams::anchor_ordinal terms), baking every Principled channel
- * \a source feeds into fresh maps and taking them over as the new layer's own.
+ * Add a Material row to \a owner's description stack, baked from \a source's Principled channels
+ * through the existing material bake, and store the result as the row's baked maps. The row takes
+ * part through its bake alone: it has no generated subtree, so the generator and the CPU both
+ * substitute the maps.
  *
- * \a place says which side of the anchor the layer lands on: #Above (and #Into, which the
- * add itself reads as "above, inside the anchor") inserts above the anchor the way the
- * #anchor_ordinal terms mean it; #Below inserts below it, at the anchor's own position in the
- * #PaintMaterialLayerAddParams::ordinal terms.
- *
- * A linked \a source (an asset, typically) is made local first: the layer is re-configured by
- * editing its source, which a linked material does not allow. Refusals -- nothing baked, the
- * source could not be made local, the bake failed -- are reported to \a C's window manager.
- *
- * \return the new layer's ordinal, or -1 when nothing was added.
+ * \a anchor and \a place are the same placement rules as #BKE_paint_layers_add. A linked \a source
+ * is made local first. \return the new row, or null when it could not be added.
  */
-int add_from_material(bContext &C,
-                      Material &owner,
-                      int anchor_ordinal,
-                      Material &source,
-                      PaintMaterialLayerMovePlace place = PaintMaterialLayerMovePlace::Above);
+MaterialPaintLayer *add_material_layer_from_material(bContext &C,
+                                                     Material &owner,
+                                                     Material &source,
+                                                     MaterialPaintLayer *anchor,
+                                                     PaintLayerPlace place);
 
 /**
- * Switch \a channel of the active Material paint layer (#BKE_paint_material_active_layer_get) on
- * or off. Switching on a channel the layer does not have yet bakes a fresh map from its source;
- * switching on one it kept but disabled re-bakes it first only if it has fallen behind.
+ * Whether layered material \a ma's mask target would be lost by removing \a removed_marker: the
+ * target mode is #PAINT_LAYER_TARGET_MASK and the active marker is \a removed_marker or nested
+ * under it.
  *
- * \return whether anything changed. A refusal is reported to \a reports.
+ * Context-free, so a unit test can drive it; the mode switch itself is
+ * #mask_edit_end_if_target_removed on top.
  */
-bool channel_toggle(bContext &C, ReportList &reports, int channel);
+bool mask_target_is_removed(const Material &ma, const bUUID &removed_marker, int8_t target_mode);
 
 /**
- * Re-fill \a channel's map of the active paint layer row (#BKE_paint_material_active_layer_get)
- * with the flat colour \a value stands for there, and record it as the channel's own value so a
- * later unlink restores it.
+ * Leave mask editing when the layered material's active row loses the target the mask stroke
+ * writes into: \a removed_marker names a row about to be removed (a layer, a folder, a correction),
+ * or the row whose mask is about to be removed or switched off.
  *
- * An active correction row takes the value on its own channel set, not the ones of the layer it
- * hangs on.
- *
- * \return whether anything changed. A refusal is reported to \a reports.
+ * The check is on the description alone: a layered material's target is
+ * `Material.active_layer_marker` + `PaintModeSettings.layer_target_mode`. When the mode is MASK and
+ * the active marker is \a removed_marker or anywhere under it, the mode returns to CONTENT -- the
+ * same brush restore a mode switch always does. A no-op otherwise.
  */
-bool channel_value_set(bContext &C, ReportList &reports, int channel, const float value[4]);
-
-/**
- * Detach whatever image \a channel of the active paint layer row shows, and give the channel back
- * a flat map of its own at the value it last recorded. The image it showed is never written to.
- *
- * An active correction row unlinks on its own channel set, not the ones of the layer it hangs on.
- *
- * \return whether anything changed. A refusal is reported to \a reports.
- */
-bool channel_unlink(bContext &C, ReportList &reports, int channel);
-
-/**
- * "Use layer result": bake the stack row at \a source_ordinal of the active row's owner for
- * \a channel -- the row's own content after its corrections, with its mask as the alpha -- and
- * wire the fresh map in as the active row's channel texture.
- *
- * \a source_ordinal names a row of the owner's stack by its position; a folder-nested or unwired
- * source has no endpoint a bake can reach and is refused before anything is baked. The bake runs
- * to completion on the calling thread; a map it minted that nothing took over is freed again.
- *
- * \return whether anything changed. A refusal is reported to \a reports.
- */
-bool use_layer_result(bContext &C, ReportList &reports, int channel, int source_ordinal);
-
-/**
- * Re-bake every map of the active Material paint layer from its source, whether or not it looks
- * current -- for when a map looks wrong although nothing the staleness check sees has changed.
- *
- * \return false when there is no active Material layer, or none of its maps carry a bake link.
- */
-bool rebake(bContext &C, ReportList &reports);
-
-/**
- * Resize every map of the active Material paint layer to \a size and re-bake them.
- *
- * \return false when there is no active Material layer, or none of its maps carry a bake link.
- */
-bool resize(bContext &C, ReportList &reports, int size);
+void mask_edit_end_if_target_removed(bContext &C, Material &ma, const bUUID &removed_marker);
 
 }  // namespace blender::ed::sculpt_paint::material_layer

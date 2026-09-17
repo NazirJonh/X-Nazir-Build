@@ -1953,7 +1953,7 @@ static void rna_WindowManager_stack_layer_material_pick_set(PointerRNA *ptr,
 /* The paint stack source's add_kinds declares PAINT, FILL and MATERIAL with those stable
  * identifiers; the kind is set by identifier rather than by its place in the list, so the
  * hand-off survives the source declaring its kinds in another order. See
- * outliner_stack_source_paint_material.cc. */
+ * outliner_stack_source_paint_layers.cc. */
 static void rna_WindowManager_stack_layer_material_pick_update(bContext *C, PointerRNA * /*ptr*/)
 {
   wmWindowManager *wm = CTX_wm_manager(C);

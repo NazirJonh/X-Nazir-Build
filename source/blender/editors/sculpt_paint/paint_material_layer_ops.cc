@@ -13,11 +13,15 @@
 #include <string>
 
 #include "BKE_context.hh"
+#include "BKE_image.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_report.hh"
 
+#include "BLI_listbase.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_uuid.h"
@@ -25,6 +29,7 @@
 #include "BLT_translation.hh"
 
 #include "DNA_ID.h"
+#include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 
@@ -33,6 +38,7 @@
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
+#include "RNA_prototypes.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -41,211 +47,47 @@
 
 namespace blender {
 
-using ed::sculpt_paint::material_layer::channel_toggle;
-using ed::sculpt_paint::material_layer::channel_unlink;
-using ed::sculpt_paint::material_layer::channel_value_set;
-using ed::sculpt_paint::material_layer::rebake;
-using ed::sculpt_paint::material_layer::resize;
-using ed::sculpt_paint::material_layer::use_layer_result;
+using ed::sculpt_paint::material_layer::add_material_layer_from_material;
 
-/* -------------------------------------------------------------------- */
-/** \name Material Paint Layer Settings
- *
- * The Layer Material tab's controls. The active layer is the one the scene's channel bindings
- * point at (#BKE_paint_material_active_layer_get). Its channel states are read from the stack; a
- * Material layer's source and resolution are read back from its maps' bake links.
- * \{ */
+/* Values must match #PaintLayerPlace (a runtime-only type, unavailable in RNA). */
+static const EnumPropertyItem paint_layer_place_items[] = {
+    {0, "ABOVE", 0, "Above", "Directly above the anchor"},
+    {1, "BELOW", 0, "Below", "Directly below the anchor"},
+    {2, "INTO", 0, "Into", "Inside the anchor folder"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
 
-static bool paint_layer_settings_poll(bContext *C)
+static bool paint_layer_add_material_poll(bContext *C)
 {
-  Main *bmain = CTX_data_main(C);
-  Scene *scene = CTX_data_scene(C);
-  if (bmain == nullptr || scene == nullptr || scene->toolsettings == nullptr) {
-    CTX_wm_operator_poll_msg_set(C, "No active paint layer");
+  Material *owner = static_cast<Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  if (owner == nullptr || !paint_layers_is_layered(*owner)) {
+    CTX_wm_operator_poll_msg_set(C, "No layered material");
     return false;
   }
-  const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
-      *bmain, scene->toolsettings->paint_mode);
-  if (!layer.has_value()) {
-    CTX_wm_operator_poll_msg_set(C, "No active paint layer");
-    return false;
-  }
-  if (!ID_IS_EDITABLE(&layer->owner->id) ||
-      (layer->source != nullptr && !ID_IS_EDITABLE(&layer->source->id)))
-  {
-    CTX_wm_operator_poll_msg_set(C, "The layer's material is not editable");
+  if (ID_IS_LINKED(&owner->id) || !ID_IS_EDITABLE(&owner->id)) {
+    CTX_wm_operator_poll_msg_set(C, "The material is not editable");
     return false;
   }
   return true;
 }
 
-static bool paint_layer_material_settings_poll(bContext *C)
-{
-  /* Cheap on the repeat: the resolver caches the previous call's answer for as long as the
-   * bindings and the owner's stack stay put. */
-  if (!paint_layer_settings_poll(C)) {
-    return false;
-  }
-  Main *bmain = CTX_data_main(C);
-  Scene *scene = CTX_data_scene(C);
-  const std::optional<PaintMaterialActiveLayer> layer = BKE_paint_material_active_layer_get(
-      *bmain, scene->toolsettings->paint_mode);
-  if (!layer.has_value() || !layer->is_material()) {
-    CTX_wm_operator_poll_msg_set(C, "The active layer is not a Material layer");
-    return false;
-  }
-  return true;
-}
-
-static wmOperatorStatus paint_layer_channel_toggle_exec(bContext *C, wmOperator *op)
-{
-  const int channel = RNA_enum_get(op->ptr, "channel");
-  if (!channel_toggle(*C, *op->reports, channel)) {
-    return OPERATOR_CANCELLED;
-  }
-  return OPERATOR_FINISHED;
-}
-
-void MATERIAL_OT_paint_layer_channel_toggle(wmOperatorType *ot)
-{
-  ot->name = "Toggle Paint Layer Channel";
-  ot->description =
-      "Switch this channel of the active paint layer on or off. Off keeps the map and leaves the "
-      "channel to the layers below; on restores it, or gives the layer the channel when it has "
-      "none";
-  ot->idname = "MATERIAL_OT_paint_layer_channel_toggle";
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-  ot->exec = paint_layer_channel_toggle_exec;
-  ot->poll = paint_layer_settings_poll;
-
-  PropertyRNA *prop = RNA_def_enum(ot->srna,
-                                   "channel",
-                                   rna_enum_material_paint_channel_items,
-                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                   "Channel",
-                                   "Channel to switch on or off");
-  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
-}
-
-static wmOperatorStatus paint_layer_channel_value_set_exec(bContext *C, wmOperator *op)
-{
-  const int channel = RNA_enum_get(op->ptr, "channel");
-  float value[4];
-  RNA_float_get_array(op->ptr, "value", value);
-  if (!channel_value_set(*C, *op->reports, channel, value)) {
-    return OPERATOR_CANCELLED;
-  }
-  return OPERATOR_FINISHED;
-}
-
-void MATERIAL_OT_paint_layer_channel_value_set(wmOperatorType *ot)
-{
-  ot->name = "Set Paint Layer Channel Value";
-  ot->description = "Fill this channel of the active paint layer with a flat value";
-  ot->idname = "MATERIAL_OT_paint_layer_channel_value_set";
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-  ot->exec = paint_layer_channel_value_set_exec;
-  ot->poll = paint_layer_settings_poll;
-
-  PropertyRNA *prop = RNA_def_enum(ot->srna,
-                                   "channel",
-                                   rna_enum_material_paint_channel_items,
-                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                   "Channel",
-                                   "Channel to set the value of");
-  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
-
-  static const float value_default[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-  prop = RNA_def_float_color(ot->srna,
-                             "value",
-                             4,
-                             value_default,
-                             0.0f,
-                             1.0f,
-                             "Value",
-                             "Flat value to fill the channel's map with",
-                             0.0f,
-                             1.0f);
-  RNA_def_property_subtype(prop, PROP_COLOR);
-}
-
-static wmOperatorStatus paint_layer_channel_unlink_exec(bContext *C, wmOperator *op)
-{
-  const int channel = RNA_enum_get(op->ptr, "channel");
-  if (!channel_unlink(*C, *op->reports, channel)) {
-    return OPERATOR_CANCELLED;
-  }
-  return OPERATOR_FINISHED;
-}
-
-void MATERIAL_OT_paint_layer_channel_unlink(wmOperatorType *ot)
-{
-  ot->name = "Unlink Paint Layer Channel";
-  ot->description = "Detach the image this channel of the active paint layer shows, and give the "
-                    "channel a flat map at its last value instead";
-  ot->idname = "MATERIAL_OT_paint_layer_channel_unlink";
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-  ot->exec = paint_layer_channel_unlink_exec;
-  ot->poll = paint_layer_settings_poll;
-
-  PropertyRNA *prop = RNA_def_enum(ot->srna,
-                                   "channel",
-                                   rna_enum_material_paint_channel_items,
-                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                   "Channel",
-                                   "Channel to unlink");
-  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
-}
-
-/**
- * The rows a "Use Layer Result" bake can take a result from: every row of the active row's stack
- * but the active one itself -- baking the active row into itself is pointless. When the active row
- * is a correction nothing is skipped: it bakes the row it hangs on as readily as any other.
- */
-static const EnumPropertyItem *paint_layer_source_ordinal_itemf(bContext *C,
-                                                               PointerRNA * /*ptr*/,
-                                                               PropertyRNA * /*prop*/,
-                                                               bool *r_free)
+/** Every material in the file, keyed by session UID, so the pick survives a reorder. */
+static const EnumPropertyItem *paint_layer_source_material_itemf(bContext *C,
+                                                                 PointerRNA * /*ptr*/,
+                                                                 PropertyRNA * /*prop*/,
+                                                                 bool *r_free)
 {
   EnumPropertyItem *items = nullptr;
   int items_num = 0;
   Main *bmain = (C != nullptr) ? CTX_data_main(C) : nullptr;
-  Scene *scene = (C != nullptr) ? CTX_data_scene(C) : nullptr;
-  const std::optional<PaintMaterialActiveLayer> active =
-      (bmain != nullptr && scene != nullptr && scene->toolsettings != nullptr) ?
-          BKE_paint_material_active_layer_get(*bmain, scene->toolsettings->paint_mode) :
-          std::nullopt;
-  if (active.has_value()) {
-    const int skip_ordinal = BLI_uuid_is_nil(active->correction) ? active->ordinal : -1;
-    Vector<PaintMaterialLayerStackEntry> entries;
-    BKE_paint_material_layer_stack_from_material(*bmain, *active->owner, entries);
-    for (const PaintMaterialLayerStackEntry &entry : entries) {
-      if (entry.ordinal == skip_ordinal) {
-        continue;
-      }
-      std::string name = entry.name;
-      if (name.empty()) {
-        /* Rows the user never named read as their kind, the way the stack UI labels them. */
-        if (entry.is_group) {
-          name = IFACE_("Layer Group");
-        }
-        else if (entry.kind == PaintMaterialLayerKind::Fill) {
-          name = IFACE_("Fill Layer");
-        }
-        else if (entry.kind == PaintMaterialLayerKind::Material) {
-          name = IFACE_("Material Layer");
-        }
-        else {
-          name = IFACE_("Paint Layer");
-        }
-      }
-      char identifier[8];
-      SNPRINTF_UTF8(identifier, "%d", int(entry.ordinal));
+  if (bmain != nullptr) {
+    for (Material &ma : bmain->materials) {
       EnumPropertyItem item = {};
-      item.value = entry.ordinal;
-      item.identifier = BLI_strdup(identifier);
-      item.name = BLI_strdup(name.c_str());
-      item.description = "Bake this row's result";
+      /* The value is the session UID, not the position: the lookup at exec time is stable. */
+      item.value = int(ma.id.session_uid);
+      item.identifier = BLI_strdup(ma.id.name + 2);
+      item.name = BLI_strdup(ma.id.name + 2);
       RNA_enum_item_add(&items, &items_num, &item);
     }
   }
@@ -254,97 +96,305 @@ static const EnumPropertyItem *paint_layer_source_ordinal_itemf(bContext *C,
   return items;
 }
 
-static wmOperatorStatus paint_layer_use_layer_result_exec(bContext *C, wmOperator *op)
+static wmOperatorStatus paint_layer_add_material_exec(bContext *C, wmOperator *op)
 {
-  const int channel = RNA_enum_get(op->ptr, "channel");
-  const int source_ordinal = RNA_enum_get(op->ptr, "source_ordinal");
-  if (!use_layer_result(*C, *op->reports, channel, source_ordinal)) {
+  Material *owner = static_cast<Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  if (owner == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No layered material");
+    return OPERATOR_CANCELLED;
+  }
+  const int source_uid = RNA_enum_get(op->ptr, "source");
+  Material *source = nullptr;
+  Main *bmain = CTX_data_main(C);
+  for (Material &ma : bmain->materials) {
+    if (int(ma.id.session_uid) == source_uid) {
+      source = &ma;
+      break;
+    }
+  }
+  if (source == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No material to bake from");
+    return OPERATOR_CANCELLED;
+  }
+  /* Placed relative to the active row, like the stack UI's Add; the top of the stack when none. */
+  MaterialPaintLayer *anchor = BKE_paint_layers_find(
+      *owner, BKE_paint_layers_active_get(*owner));
+  const int place = RNA_enum_get(op->ptr, "place");
+  if (add_material_layer_from_material(
+          *C, *owner, *source, anchor, PaintLayerPlace(place)) == nullptr)
+  {
     return OPERATOR_CANCELLED;
   }
   return OPERATOR_FINISHED;
 }
 
-void MATERIAL_OT_paint_layer_use_layer_result(wmOperatorType *ot)
+void MATERIAL_OT_paint_layer_add_material(wmOperatorType *ot)
 {
-  ot->name = "Use Layer Result";
-  ot->description = "Bake another stack row's result for this channel and use it as the channel's "
-                    "texture";
-  ot->idname = "MATERIAL_OT_paint_layer_use_layer_result";
+  ot->name = "Add Material Paint Layer";
+  ot->description = "Add a row on top of the stack, baked from a material's Principled channels";
+  ot->idname = "MATERIAL_OT_paint_layer_add_material";
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-  ot->exec = paint_layer_use_layer_result_exec;
-  ot->poll = paint_layer_settings_poll;
+  ot->exec = paint_layer_add_material_exec;
+  ot->poll = paint_layer_add_material_poll;
+
+  PropertyRNA *prop = RNA_def_enum(ot->srna,
+                                   "source",
+                                   rna_enum_dummy_NULL_items,
+                                   0,
+                                   "Source Material",
+                                   "The material to bake the row from");
+  RNA_def_enum_funcs(prop, paint_layer_source_material_itemf);
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  prop = RNA_def_enum(ot->srna,
+                      "place",
+                      paint_layer_place_items,
+                      0,
+                      "Place",
+                      "Where the new row lands relative to the anchor");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+}
+
+/** The flattened description rows, in the order the operator's enum hands out. */
+static const EnumPropertyItem *paint_layer_use_row_source_itemf(bContext *C,
+                                                                PointerRNA * /*ptr*/,
+                                                                PropertyRNA * /*prop*/,
+                                                                bool *r_free)
+{
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  Material *owner = (C != nullptr) ? static_cast<Material *>(
+                        CTX_data_pointer_get_type(C, "material", RNA_Material).data) :
+                                     nullptr;
+  if (owner != nullptr && paint_layers_is_layered(*owner)) {
+    Vector<const MaterialPaintLayer *> layers;
+    BKE_paint_layers_flatten(*owner, layers);
+    for (const int i : layers.index_range()) {
+      const MaterialPaintLayer &layer = *layers[i];
+      char identifier[16];
+      SNPRINTF(identifier, "%d", i);
+      EnumPropertyItem item = {};
+      item.value = i;
+      item.identifier = BLI_strdup(identifier);
+      item.name = BLI_strdup(layer.name[0] != '\0' ? layer.name : "Layer");
+      item.description = "Bake this row's result into the active row's channel maps";
+      RNA_enum_item_add(&items, &items_num, &item);
+    }
+  }
+  RNA_enum_item_end(&items, &items_num);
+  *r_free = true;
+  return items;
+}
+
+static bool paint_layer_use_row_result_poll(bContext *C)
+{
+  Material *owner = static_cast<Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  if (owner == nullptr || !paint_layers_is_layered(*owner) ||
+      BLI_uuid_is_nil(BKE_paint_layers_active_get(*owner)))
+  {
+    CTX_wm_operator_poll_msg_set(C, "No active paint layer");
+    return false;
+  }
+  return true;
+}
+
+static void paint_layer_row_result_start(void *customdata, wmJobWorkerStatus * /*status*/)
+{
+  BKE_paint_layers_row_result_job_compute(
+      *static_cast<PaintLayersRowResultJob *>(customdata));
+}
+
+static void paint_layer_row_result_end(void *customdata)
+{
+  PaintLayersRowResultJob *job = static_cast<PaintLayersRowResultJob *>(customdata);
+  if (BKE_paint_layers_row_result_job_commit(*job)) {
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
+  }
+}
+
+static void paint_layer_row_result_free(void *customdata)
+{
+  BKE_paint_layers_row_result_job_free(*static_cast<PaintLayersRowResultJob *>(customdata));
+}
+
+static wmOperatorStatus paint_layer_use_row_result_exec(bContext *C, wmOperator *op)
+{
+  Material *owner = static_cast<Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  Main *bmain = CTX_data_main(C);
+  if (owner == nullptr || bmain == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  MaterialPaintLayer *active = BKE_paint_layers_find(
+      *owner, BKE_paint_layers_active_get(*owner));
+  if (active == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint layer");
+    return OPERATOR_CANCELLED;
+  }
+  Vector<const MaterialPaintLayer *> layers;
+  BKE_paint_layers_flatten(*owner, layers);
+  const int source_index = RNA_enum_get(op->ptr, "source");
+  if (source_index < 0 || source_index >= layers.size()) {
+    BKE_report(op->reports, RPT_ERROR, "No row to take the result from");
+    return OPERATOR_CANCELLED;
+  }
+  const MaterialPaintLayer &source = *layers[source_index];
+
+  int size = 1024;
+  Scene *scene = CTX_data_scene(C);
+  if (scene != nullptr && scene->toolsettings != nullptr) {
+    size = scene->toolsettings->paint_mode.new_channel_image_size;
+  }
+  if (size <= 0) {
+    size = 1024;
+  }
+
+  PaintLayersRowResultJob *job = BKE_paint_layers_row_result_job_create(
+      *bmain, *owner, source.marker, active->marker, size);
+  if (job == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No row to take the result from");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* The same threshold the bake planner uses: a heavy row at 2048+ pixels leaves the main thread,
+   * a light one is rendered inline so the operator can report its outcome immediately. */
+  const bool heavy = BKE_paint_layers_bake_is_heavy(*owner, source) ||
+                     size >= PAINT_LAYERS_HEAVY_BAKE_SIZE;
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (heavy && wm != nullptr) {
+    wmWindow *win = CTX_wm_window(C);
+    wmJob *wm_job = WM_jobs_get(wm,
+                                win,
+                                owner,
+                                "Rendering row result...",
+                                WM_JOB_EXCL_RENDER | WM_JOB_PROGRESS,
+                                WM_JOB_TYPE_PAINT_LAYERS_ROW_RESULT);
+    WM_jobs_customdata_set(wm_job, job, paint_layer_row_result_free);
+    WM_jobs_timer(wm_job, 0.2, NC_MATERIAL, NC_MATERIAL);
+    WM_jobs_callbacks(
+        wm_job, paint_layer_row_result_start, nullptr, nullptr, paint_layer_row_result_end);
+    WM_jobs_start(wm, wm_job);
+    return OPERATOR_FINISHED;
+  }
+
+  BKE_paint_layers_row_result_job_compute(*job);
+  const bool any = BKE_paint_layers_row_result_job_commit(*job);
+  BKE_paint_layers_row_result_job_free(*job);
+  if (!any) {
+    BKE_report(op->reports, RPT_ERROR, "The row contributes to no channel here");
+    return OPERATOR_CANCELLED;
+  }
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &owner->id);
+  return OPERATOR_FINISHED;
+}
+
+void MATERIAL_OT_paint_layer_use_row_result(wmOperatorType *ot)
+{
+  ot->name = "Use Row Result";
+  ot->description =
+      "Bake another row's result for every channel it takes part in into this row's channel maps";
+  ot->idname = "MATERIAL_OT_paint_layer_use_row_result";
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->exec = paint_layer_use_row_result_exec;
+  ot->poll = paint_layer_use_row_result_poll;
+
+  PropertyRNA *prop = RNA_def_enum(ot->srna,
+                                   "source",
+                                   rna_enum_dummy_NULL_items,
+                                   0,
+                                   "Source Row",
+                                   "The row whose result is baked");
+  RNA_def_enum_funcs(prop, paint_layer_use_row_source_itemf);
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+}
+
+static bool paint_layer_custom_poll(bContext *C)
+{
+  Material *owner = static_cast<Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  if (owner == nullptr || !paint_layers_is_layered(*owner)) {
+    CTX_wm_operator_poll_msg_set(C, "No layered material");
+    return false;
+  }
+  return true;
+}
+
+static wmOperatorStatus paint_layer_add_custom_exec(bContext *C, wmOperator *op)
+{
+  Material *owner = static_cast<Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  Main *bmain = CTX_data_main(C);
+  if (owner == nullptr || bmain == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  MaterialPaintLayer *anchor = BKE_paint_layers_find(
+      *owner, BKE_paint_layers_active_get(*owner));
+  char name[MAX_NAME];
+  RNA_string_get(op->ptr, "name", name);
+  MaterialPaintLayer *layer = BKE_paint_layers_custom_layer_add(
+      *bmain, *owner, name, anchor, PaintLayerPlace::Above);
+  if (layer == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Could not create a Custom layer");
+    return OPERATOR_CANCELLED;
+  }
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &owner->id);
+  return OPERATOR_FINISHED;
+}
+
+void MATERIAL_OT_paint_layer_add_custom(wmOperatorType *ot)
+{
+  ot->name = "New Custom Layer";
+  ot->description = "Add a Custom layer backed by a new node group template";
+  ot->idname = "MATERIAL_OT_paint_layer_add_custom";
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->exec = paint_layer_add_custom_exec;
+  ot->poll = paint_layer_custom_poll;
+
+  RNA_def_string(ot->srna, "name", "Custom", MAX_NAME, "Name", "Name of the new layer");
+}
+
+static wmOperatorStatus paint_layer_custom_channel_add_exec(bContext *C, wmOperator *op)
+{
+  Material *owner = static_cast<Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  Main *bmain = CTX_data_main(C);
+  if (owner == nullptr || bmain == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  MaterialPaintLayer *layer = BKE_paint_layers_find(
+      *owner, BKE_paint_layers_active_get(*owner));
+  if (layer == nullptr || layer->kind != MA_PAINT_LAYER_KIND_CUSTOM) {
+    BKE_report(op->reports, RPT_ERROR, "No active Custom layer");
+    return OPERATOR_CANCELLED;
+  }
+  const int channel = RNA_enum_get(op->ptr, "channel");
+  if (!BKE_paint_layers_custom_channel_add(
+          *bmain, *owner, *layer, eMaterialPaintChannel(channel)))
+  {
+    BKE_report(op->reports, RPT_ERROR, "The Custom layer already declares this channel");
+    return OPERATOR_CANCELLED;
+  }
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &owner->id);
+  return OPERATOR_FINISHED;
+}
+
+void MATERIAL_OT_paint_layer_custom_channel_add(wmOperatorType *ot)
+{
+  ot->name = "Add Custom Channel";
+  ot->description = "Declare one more BELOW/COLOR channel pair on the active Custom layer";
+  ot->idname = "MATERIAL_OT_paint_layer_custom_channel_add";
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->exec = paint_layer_custom_channel_add_exec;
+  ot->poll = paint_layer_custom_poll;
 
   PropertyRNA *prop = RNA_def_enum(ot->srna,
                                    "channel",
                                    rna_enum_material_paint_channel_items,
                                    PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                    "Channel",
-                                   "Channel to bake the row's result into");
+                                   "Channel to declare");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
-  prop = RNA_def_enum(ot->srna,
-                      "source_ordinal",
-                      rna_enum_dummy_NULL_items,
-                      0,
-                      "Source Row",
-                      "Position in the stack of the row to bake");
-  RNA_def_enum_funcs(prop, paint_layer_source_ordinal_itemf);
-  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
-}
-
-static wmOperatorStatus paint_layer_rebake_exec(bContext *C, wmOperator *op)
-{
-  if (!rebake(*C, *op->reports)) {
-    return OPERATOR_CANCELLED;
-  }
-  return OPERATOR_FINISHED;
-}
-
-void MATERIAL_OT_paint_layer_rebake(wmOperatorType *ot)
-{
-  ot->name = "Re-bake Paint Layer";
-  ot->description = "Bake every map of the active Material paint layer from its source "
-                      "material again";
-  ot->idname = "MATERIAL_OT_paint_layer_rebake";
-  /* No undo step: the maps' pixels are not part of undo, and nothing else changes. */
-  ot->flag = OPTYPE_REGISTER;
-  ot->exec = paint_layer_rebake_exec;
-  ot->poll = paint_layer_material_settings_poll;
-}
-
-static const EnumPropertyItem paint_layer_bake_size_items[] = {
-    {PAINT_NEW_CHANNEL_IMAGE_SIZE_256, "SIZE_256", 0, "256", "256 x 256"},
-    {PAINT_NEW_CHANNEL_IMAGE_SIZE_512, "SIZE_512", 0, "512", "512 x 512"},
-    {PAINT_NEW_CHANNEL_IMAGE_SIZE_1K, "SIZE_1K", 0, "1K", "1024 x 1024"},
-    {PAINT_NEW_CHANNEL_IMAGE_SIZE_2K, "SIZE_2K", 0, "2K", "2048 x 2048"},
-    {PAINT_NEW_CHANNEL_IMAGE_SIZE_4K, "SIZE_4K", 0, "4K", "4096 x 4096"},
-    {PAINT_NEW_CHANNEL_IMAGE_SIZE_8K, "SIZE_8K", 0, "8K", "8192 x 8192"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
-static wmOperatorStatus paint_layer_bake_size_set_exec(bContext *C, wmOperator *op)
-{
-  const int size = RNA_enum_get(op->ptr, "size");
-  if (!resize(*C, *op->reports, size)) {
-    return OPERATOR_CANCELLED;
-  }
-  return OPERATOR_FINISHED;
-}
-
-void MATERIAL_OT_paint_layer_bake_size_set(wmOperatorType *ot)
-{
-  ot->name = "Set Paint Layer Resolution";
-  ot->description = "Resize the maps of the active Material paint layer and bake them again";
-  ot->idname = "MATERIAL_OT_paint_layer_bake_size_set";
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-  ot->exec = paint_layer_bake_size_set_exec;
-  ot->poll = paint_layer_material_settings_poll;
-
-  ot->prop = RNA_def_enum(ot->srna,
-                          "size",
-                          paint_layer_bake_size_items,
-                          PAINT_NEW_CHANNEL_IMAGE_SIZE_2K,
-                          "Resolution",
-                          "Square side of the layer's maps");
 }
 
 /** \} */

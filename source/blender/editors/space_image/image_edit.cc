@@ -26,6 +26,8 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
@@ -219,42 +221,16 @@ void ED_space_image_set_mask(bContext *C, SpaceImage *sima, Mask *mask)
 }
 
 /**
- * Whether any channel of \a ma resolves to a layer stack that \a image is a layer of -- or one of
- * its corrections' maps, which the brush can be painting into just the same.
+ * Whether \a ma's description carries \a image -- as a channel map of one of its rows, a mask map,
+ * or a correction's map, which the brush can be painting into just the same.
  *
- * \param layers: scratch space, so that a caller testing many materials allocates once.
+ * The description is the only source: a map belongs to the row whose `channels`/`mask` hold it, so
+ * there is no stored back-pointer and no composite rebuilt just to answer this.
  */
-static bool space_image_composite_material_contains(
-    Main &bmain,
-    Material &ma,
-    const Image &image,
-    Vector<PaintMaterialCompositeImageLayer> &layers)
+static bool space_image_composite_material_contains(Material &ma, const Image &image)
 {
-  /* Any channel identifies the material, not just the composited one: the canvas the user came
-   * from is as likely to be a Roughness layer as a Base Color one, and switching to the composite
-   * should not depend on which channel they were painting. A correction's map identifies it too
-   * (spec D16): painting into one composites the material it hangs on, like painting a layer. */
-  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (!BKE_paint_material_composite_stack_from_material(bmain, ma, info.channel, layers)) {
-      continue;
-    }
-    for (const PaintMaterialCompositeImageLayer &layer : layers) {
-      if (layer.color_image == &image) {
-        return true;
-      }
-      for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
-        if (correction.image == &image) {
-          return true;
-        }
-      }
-      for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
-        if (correction.image == &image) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
+  PaintLayersImageUse use;
+  return BKE_paint_layers_find_image_use(ma, image, use);
 }
 
 /**
@@ -287,20 +263,16 @@ static uint32_t g_composite_material_memo_material_uid = 0;
  */
 static Material *space_image_composite_material_find(Main &bmain, const Image &image)
 {
-  Vector<PaintMaterialCompositeImageLayer> layers;
-
   if (g_composite_material_memo_image_uid == image.id.session_uid) {
     Material *remembered = id_cast<Material *>(
         BKE_libblock_find_session_uid(&bmain, ID_MA, g_composite_material_memo_material_uid));
-    if (remembered != nullptr &&
-        space_image_composite_material_contains(bmain, *remembered, image, layers))
-    {
+    if (remembered != nullptr && space_image_composite_material_contains(*remembered, image)) {
       return remembered;
     }
   }
 
   for (Material &ma : bmain.materials) {
-    if (!space_image_composite_material_contains(bmain, ma, image, layers)) {
+    if (!space_image_composite_material_contains(ma, image)) {
       continue;
     }
     g_composite_material_memo_image_uid = image.id.session_uid;
@@ -389,7 +361,7 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
   }
 
   Vector<PaintMaterialCompositeImageLayer> layers;
-  if (!BKE_paint_material_composite_stack_from_material(*bmain, *ma, pass, layers)) {
+  if (!BKE_paint_layers_composite_image_layers(*ma, pass, layers)) {
     return nullptr;
   }
   const uint64_t stack_hash = BKE_paint_material_composite_stack_hash(layers);

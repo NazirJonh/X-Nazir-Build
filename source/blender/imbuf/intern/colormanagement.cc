@@ -2103,10 +2103,10 @@ void IMB_colormanagement_imbuf_to_float_texture(float *out_buffer,
     const uchar *in_buffer = ibuf->byte_data();
     const bool use_premultiply = IMB_alpha_affects_rgb(ibuf) && store_premultiplied;
 
+    const ColorSpace *colorspace = ibuf->byte_buffer.colorspace;
+    const bool is_data = colorspace && IMB_colormanagement_space_is_data(colorspace);
     const ocio::CPUProcessor *processor =
-        (ibuf->byte_buffer.colorspace) ?
-            ibuf->byte_buffer.colorspace->get_to_scene_linear_cpu_processor() :
-            nullptr;
+        (colorspace && !is_data) ? colorspace->get_to_scene_linear_cpu_processor() : nullptr;
 
     threading::parallel_for(IndexRange(height), 128, [&](const IndexRange y_range) {
       for (const int y : y_range) {
@@ -2114,20 +2114,34 @@ void IMB_colormanagement_imbuf_to_float_texture(float *out_buffer,
         const size_t out_offset = y * width;
         const uchar *in = in_buffer + in_offset * 4;
         float *out = out_buffer + out_offset * 4;
-        for (int x = 0; x < width; x++, in += 4, out += 4) {
-          /* Convert to scene linear and premultiply. */
-          float pixel[4];
-          rgba_uchar_to_float(pixel, in);
-          if (processor) {
-            processor->apply_rgb(pixel);
+        for (int x = 0; x < width; x++) {
+          rgba_uchar_to_float(out + x * 4, in + x * 4);
+        }
+        /* One OCIO call per row: a call per pixel dominated partial texture updates while
+         * painting. OCIO leaves the alpha channel untouched. */
+        if (is_data) {
+          /* Non-color data is stored as is. */
+        }
+        else if (processor) {
+          const ocio::PackedImage row(out,
+                                      width,
+                                      1,
+                                      4,
+                                      ocio::BitDepth::BIT_DEPTH_F32,
+                                      sizeof(float),
+                                      sizeof(float[4]),
+                                      sizeof(float[4]) * width);
+          processor->apply(row);
+        }
+        else {
+          for (int x = 0; x < width; x++) {
+            srgb_to_linearrgb_v3_v3(out + x * 4, out + x * 4);
           }
-          else {
-            srgb_to_linearrgb_v3_v3(pixel, pixel);
+        }
+        if (use_premultiply) {
+          for (int x = 0; x < width; x++) {
+            mul_v3_fl(out + x * 4, out[x * 4 + 3]);
           }
-          if (use_premultiply) {
-            mul_v3_fl(pixel, pixel[3]);
-          }
-          copy_v4_v4(out, pixel);
         }
       }
     });

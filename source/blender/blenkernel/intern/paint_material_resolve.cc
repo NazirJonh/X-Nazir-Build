@@ -183,6 +183,7 @@ static bool resolve_image_source(const bNodeSocket &source,
   }
   r_image.image = image;
   r_image.iuser = &storage->iuser;
+  r_image.node = &node;
   r_reason = ChannelUnavailableReason::None;
   return true;
 }

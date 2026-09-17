@@ -108,13 +108,19 @@ std::shared_ptr<const MaterialSourceBake> material_source_bake_get(const Materia
  * paint cursor), which is what makes an edit to the source material pick itself up without the
  * user asking.
  */
-void material_source_bake_ensure(const bContext &C, Material &ma, int resolution);
+void material_source_bake_ensure(const bContext &C,
+                                 Material &ma,
+                                 int resolution,
+                                 const char *reason = "source");
 
 /**
  * As above, for callers that have no #bContext -- an RNA update, in particular. Starts nothing
  * when \a bmain has no window manager yet (file read, background mode).
  */
-void material_source_bake_ensure(Main &bmain, Material &ma, int resolution);
+void material_source_bake_ensure(Main &bmain,
+                                 Material &ma,
+                                 int resolution,
+                                 const char *reason = "source");
 
 /**
  * Drop every cached bake of \a ma, or of every material when \a ma is null.
@@ -201,33 +207,8 @@ bool material_bake_source_is_stale(const Image &image);
 bool material_bake_source_is_baking(const Image &image);
 
 /**
- * "Use layer result": bake one stack row's channel output instead of the material's whole-channel
- * output for that row's channel.
- *
- * What is baked is the row's own color after its content corrections, with the row's mask (the
- * output feeding its Factor input -- its blend weight) as the buffer's alpha, so the map holds what
- * the row paints rather than what the material composites to. The row is resolved by its marker on
- * the localized copy inside the bake worker, not here: the job copies the material on the calling
- * thread, and a raw socket pointer into the original would not belong to that copy. The bake is a
- * one-shot snapshot of the row as it stands when the bake runs; nothing keeps it in sync with the
- * row afterwards.
- */
-struct BakeSourceOverride {
-  /** The row to bake, by #PaintMaterialLayerStackEntry::marker. */
-  bUUID layer_marker;
-  /** The channel whose output the row's own nodes replace. */
-  eMaterialPaintChannel channel;
-  /** What of the row the bake renders. */
-  enum class Endpoint : int8_t {
-    /** The row's content after its own corrections, with its mask/coverage as the alpha. */
-    LayerContentWithMask,
-  };
-  Endpoint endpoint = Endpoint::LayerContentWithMask;
-};
-
-/**
  * One channel to bake into its own #Image. v1 carries only the channel; an object, a UV map or a
- * socket override are the documented seam for mesh-space and arbitrary-socket bakes and go here
+ * socket substitution are the documented seam for mesh-space and arbitrary-socket bakes and go here
  * without touching #material_bake_to_images's signature.
  */
 struct BakeTargetSpec {
@@ -239,18 +220,6 @@ struct BakeTargetSpec {
    * same material.
    */
   Image *existing = nullptr;
-  /**
-   * Bake a stack row's output instead of the whole channel's.
-   *
-   * Preflight-resolved on the original material before any image is created; a resolution that
-   * fails here sends the target to #MaterialBakeToImagesResult.skipped_unavailable like an
-   * unavailable channel, since the target #Image is created synchronously on this thread and an
-   * unresolvable override must not mint one. The worker re-resolves the same marker on its own
-   * localized copy -- the original's sockets do not belong to it -- and a failure there (a narrow
-   * race) frees the created image and reports the channel in
-   * #MaterialBakeToImagesResult.failed_overrides.
-   */
-  std::optional<BakeSourceOverride> source_override;
 };
 
 struct MaterialBakeToImagesResult;
@@ -286,13 +255,6 @@ struct MaterialBakeToImagesResult {
   Vector<Image *> created;
   Vector<eMaterialPaintChannel> created_channels;
   Vector<eMaterialPaintChannel> skipped_unavailable;
-  /**
-   * Channels whose "Use layer result" override failed to resolve in the bake worker. The image
-   * minted for such a channel is freed by the job, so #created must not be trusted for them.
-   * Filled only in blocking mode -- a non-blocking caller's result is complete before the worker
-   * runs, and there the freed image has to be recognized by its session UID.
-   */
-  Vector<eMaterialPaintChannel> failed_overrides;
   bool ok = false;
 };
 
@@ -320,6 +282,18 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 void material_bake_images_rebake_stale(Main &bmain, Material &ma);
 
 /**
+ * Bring the bake of every Material-kind row of the layered material \a ma current: a row whose
+ * bake hash no longer matches (its source material's graph was edited) is rendered again into its
+ * own baked maps, through the same job the source-material bake uses.
+ *
+ * The hand-over of the fresh maps to the description happens on the main thread in the bake's
+ * `before_render`, so the generator substitutes as soon as the worker has filled them. A no-op for
+ * a material that is not layered, or a row that is already valid; starts nothing without a window
+ * manager.
+ */
+void material_bake_layered_rows_ensure(Main &bmain, Material &ma);
+
+/**
  * Start re-filling \a images, maps baked from \a ma, whether or not they are stale -- after a
  * resize, or for a map that was just linked to \a ma.
  *
@@ -329,6 +303,43 @@ void material_bake_images_rebake_stale(Main &bmain, Material &ma);
  * \param size: the square side to render at; zero keeps the largest size the maps were baked at.
  */
 void material_bake_images_rebake(Main &bmain, Material &ma, Span<Image *> images, int size);
+
+/**
+ * Bring the bake of every Custom-kind row of the layered material \a ma current.
+ *
+ * A Custom row is a node group the CPU cannot evaluate, so the description stores its result as
+ * baked maps and both the generator and the CPU substitute them. The group's `COLOR:<CHANNEL>`
+ * outputs are rendered through the same EEVEE/AOV core the source material uses, its
+ * `BELOW:<CHANNEL>` inputs are fed from the stack under the row (composited on the calling thread
+ * into an image) and its `COVERAGE` output rides the buffers' alpha. A small bake runs synchronously
+ * on the calling thread; a heavy one is queued in a #wmJob. A no-op for a material that is not
+ * layered, a row without a group, or a row whose bake is already valid.
+ */
+void material_bake_custom_rows_ensure(Main &bmain, Material &ma);
+
+/**
+ * Create a target #Image for (\a material, \a channel) exactly as the bake does, linked back to the
+ * material. Exposed for tests so the colorspace contract of a baked map can be checked without a
+ * render; production reaches it through #material_bake_to_images.
+ */
+Image *bake_target_image_create(Main &bmain,
+                                Material &material,
+                                eMaterialPaintChannel channel,
+                                int size,
+                                const char *layer_id,
+                                uint64_t current_hash);
+
+/**
+ * Write a rendered scene-linear buffer into \a image exactly as the completion callback does.
+ * Exposed for tests alongside #bake_target_image_create.
+ */
+void bake_target_image_write_back(Image &image, const ImBuf &rendered);
+
+/**
+ * Bring a reused map to the colorspace its channel needs, converting the pixels out of a legacy
+ * display space first. Exposed for tests alongside #bake_target_image_create.
+ */
+void bake_target_image_normalize_colorspace(Image &image, eMaterialPaintChannel channel);
 
 /** \} */
 

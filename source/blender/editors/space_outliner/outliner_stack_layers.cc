@@ -32,6 +32,7 @@
 
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_map.hh"
+#include "BLI_math_color.h"
 #include "BLI_mempool.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -832,13 +833,14 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
       args.section_id = outliner_stack_row_active_section_get(*space_outliner, *anchor_row);
     }
   }
-  float fill_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-  RNA_float_get_array(op->ptr, "fill_color", fill_color);
+  float gamma_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float linear_color[4];
+  RNA_float_get_array(op->ptr, "fill_color", gamma_color);
+  /* The operator's colour is a picker colour (gamma); the description stores scene linear. */
+  srgb_to_linearrgb_v4(linear_color, gamma_color);
   if (kind_info.takes_color) {
-    args.color = fill_color;
+    args.color = linear_color;
   }
-  /* Which effect a correction kind applies; kinds that apply no effect ignore it. */
-  args.effect = RNA_enum_get(op->ptr, "effect");
   return outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal, args) >= 0 ?
              OPERATOR_FINISHED :
              OPERATOR_CANCELLED;
@@ -1368,6 +1370,27 @@ const EnumPropertyItem *outliner_stack_focus_sub_index_itemf(bContext *C,
                                                               bool *r_free)
 {
   return stack_sub_index_itemf_impl(C, space_outliner, r_free);
+}
+
+void outliner_stack_add_kinds_get(const SpaceOutliner &space_outliner,
+                                  Vector<OutlinerStackAddKind> &r_kinds)
+{
+  const StackEditor *editor = stack_source_for_space(space_outliner)->editor();
+  if (editor == nullptr) {
+    return;
+  }
+  Vector<StackAddKindInfo> kinds;
+  editor->add_kinds(kinds);
+  for (const StackAddKindInfo &info : kinds) {
+    OutlinerStackAddKind out;
+    SNPRINTF(out.identifier, "%s", info.identifier.c_str());
+    SNPRINTF(out.name, "%s", info.name.c_str());
+    SNPRINTF(out.description, "%s", info.description.c_str());
+    out.icon = info.icon;
+    out.takes_color = info.takes_color;
+    out.source_id_type = info.source_id_type;
+    r_kinds.append(std::move(out));
+  }
 }
 
 StackReadContext outliner_stack_read_context(const bContext &C)
@@ -2645,20 +2668,6 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
                                                0.0f,
                                                1.0f);
   RNA_def_property_subtype(fill_prop, PROP_COLOR_GAMMA);
-  /* Which effect a correction kind applies. The values are the paint source's own effect
-   * numbering; the kinds that mean nothing by it leave it at its default. */
-  static const EnumPropertyItem correction_effect_items[] = {
-      {0, "PAINT", 0, "Paint", "Painted with a brush"},
-      {1, "FILL", 0, "Fill", "A flat colour or texture, not painted with a brush"},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-  PropertyRNA *effect_prop = RNA_def_enum(ot->srna,
-                                          "effect",
-                                          correction_effect_items,
-                                          0,
-                                          "Effect",
-                                          "What a correction row applies");
-  RNA_def_property_flag(effect_prop, PROP_HIDDEN);
   /* #layout.tag_button writes its tag name into every operator it attaches; the Add never reads
    * it, but the property keeps that write from warning on every redraw. */
   PropertyRNA *tag_prop = RNA_def_string(ot->srna,
@@ -2958,8 +2967,10 @@ static wmOperatorStatus stack_row_fill_color_set_exec(bContext *C, wmOperator *o
   const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
   wmOperatorStatus status = OPERATOR_CANCELLED;
   if (ordinal >= 0) {
+    float gamma_color[4];
     float color[4];
-    RNA_float_get_array(op->ptr, "color", color);
+    RNA_float_get_array(op->ptr, "color", gamma_color);
+    srgb_to_linearrgb_v4(color, gamma_color);
     /* Without a dialog around it (a scripted call) there is no session yet: a throwaway one
      * stands in, so the commit below still covers the texture. */
     const StackColorEditor *color_editor = (preview_data != nullptr) ?
@@ -3013,7 +3024,10 @@ static wmOperatorStatus stack_row_fill_color_set_invoke(bContext *C,
     {
       for (const StackRowPreview &slot : row->preview_slots) {
         if (slot.is_color_swatch) {
-          RNA_property_float_set_array(op->ptr, color_prop, slot.color);
+          /* The swatch is scene linear; the picker property is gamma. */
+          float picker_color[4];
+          linearrgb_to_srgb_v4(picker_color, slot.color);
+          RNA_property_float_set_array(op->ptr, color_prop, picker_color);
           break;
         }
       }
@@ -3102,12 +3116,14 @@ static void stack_row_fill_color_preview_update(bContext *C,
   if (ordinal < 0) {
     return;
   }
-  float color[4];
-  RNA_float_get_array(ptr, "color", color);
+  float gamma_color[4];
+  float linear_color[4];
+  RNA_float_get_array(ptr, "color", gamma_color);
+  srgb_to_linearrgb_v4(linear_color, gamma_color);
   /* A refused tick stays silent: this runs per drag motion, and every tick reporting would spam
    * the status bar. */
   if (!outliner_stack_row_fill_color_preview(
-          C, *space_outliner, ordinal, color, preview_data->session))
+          C, *space_outliner, ordinal, linear_color, preview_data->session))
   {
     return;
   }

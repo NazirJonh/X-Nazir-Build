@@ -30,9 +30,11 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "BLI_function_ref.hh"
 #include "BLI_span.hh"
@@ -140,7 +142,7 @@ struct StackRowPreview {
    * fact, and generic code draws exactly what the slot declares.
    */
   bool is_color_swatch = false;
-  /** The colour #is_color_swatch draws; meaningless otherwise. */
+  /** The scene linear colour #is_color_swatch draws; meaningless otherwise. */
   float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 };
 
@@ -269,6 +271,14 @@ struct StackRow {
   const char *mode_prop = nullptr;
 
   /**
+   * Whether the value/mode column shows the row's inherited default rather than an override. The
+   * value is the same effective one either way; the flag only dims the control, so the user can
+   * tell an override from a default at a glance.
+   */
+  bool value_inherited = false;
+  bool mode_inherited = false;
+
+  /**
    * Content sections this row can expand into.
    *
    * Each section groups a subset of the row's content, and only the active section's sub-rows
@@ -354,11 +364,6 @@ struct StackAddArgs {
    * source whose kinds depend on what the user is looking at reads it; others ignore it.
    */
   std::string section_id;
-  /**
-   * Which effect a correction kind applies, numbered as the paint source's own effect enum
-   * (a painted adjustment, then a flat fill). Every other kind ignores it.
-   */
-  int effect = 0;
 };
 
 /** Where a moved row lands relative to the row it was aimed at. */
@@ -1185,7 +1190,11 @@ class StackSource {
 };
 
 /* The built-in sources. Defined in their own files, listed by `outliner_stack_source.cc`. */
-std::unique_ptr<StackSource> stack_source_paint_material_create();
+/**
+ * The paint stack source, built on the DNA description (`Material.paint_layers`). It is the only
+ * paint source: the old graph-truth source was removed in phase 6.
+ */
+std::unique_ptr<StackSource> stack_source_paint_layers_create();
 std::unique_ptr<StackSource> stack_source_shape_keys_create();
 
 /** Every source built into this Blender, in the order they are listed to the user. */

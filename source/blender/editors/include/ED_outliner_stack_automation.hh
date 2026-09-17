@@ -18,11 +18,28 @@
 
 #include <cstdint>
 
+#include "BLI_vector.hh"
+
 struct bContext;
 struct EnumPropertyItem;
 struct ID;
 struct ScrArea;
 struct SpaceOutliner;
+
+/**
+ * One kind of row the displayed stack's source can add, as its #StackEditor declares it.
+ *
+ * A plain, copyable description so RNA can hand it to a script: fixed-size strings, no ownership.
+ * The global name matches what RNA's sdna string expects of a struct it iterates an array of.
+ */
+struct OutlinerStackAddKind {
+  char identifier[64];
+  char name[128];
+  char description[256];
+  int icon;
+  bool takes_color;
+  int source_id_type;
+};
 
 namespace blender::ed::outliner {
 
@@ -45,6 +62,16 @@ void outliner_tool_header_visibility_sync(ScrArea *area, const SpaceOutliner &sp
  * context to resolve a focus with. Empty until the stack has been drawn once.
  */
 const char *outliner_stack_focus_name_get(const SpaceOutliner &space_outliner);
+
+/**
+ * The kinds of rows the displayed stack's source can add, in the order its Add reads them back.
+ *
+ * Empty when the space shows no stack or its source has no editor. The Add UI draws from this
+ * rather than naming kinds of its own, so a source that declares none grows no Add at all and one
+ * with paint kinds grows no second UI to keep in step.
+ */
+void outliner_stack_add_kinds_get(const SpaceOutliner &space_outliner,
+                                  blender::Vector<OutlinerStackAddKind> &r_kinds);
 
 /** Index of the focused stack's source-defined sub-selection, such as a material slot. */
 int outliner_stack_focus_sub_index_get(const SpaceOutliner &space_outliner);

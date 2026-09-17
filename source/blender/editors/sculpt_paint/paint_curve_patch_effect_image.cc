@@ -738,7 +738,7 @@ void write_pixel_run(MutableSpan<float4> values,
     const MutableSpan<uchar4> dst(reinterpret_cast<uchar4 *>(image_buffer.byte_data_for_write()),
                                   buffer_size);
     paint::image::write_image_pixels(
-        values, dst, processors, row, IndexRange(0, values.size()), image_buffer.x);
+        values, dst, processors, row, IndexRange(0, values.size()), image_buffer.x, false);
   }
 }
 
@@ -1723,7 +1723,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
             }
             else {
               scene_linear = paint::image::read_image_pixels(
-                  byte_buffer, *processors, pixel_row, range, image_buffer->x, byte_storage);
+                  byte_buffer, *processors, pixel_row, range, image_buffer->x, byte_storage, false);
             }
 #if CURVE_PATCH_PROFILING
             local.read_time += BLI_time_now_seconds() - prof_read_t0; /* DEBUG-cpatch-image */
@@ -2014,7 +2014,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                          *chunk.processors,
                                          chunk.pixel_row,
                                          chunk.range,
-                                         chunk.image_buffer->x);
+                                         chunk.image_buffer->x,
+                                         false);
       }
 
 #if CURVE_PATCH_PROFILING

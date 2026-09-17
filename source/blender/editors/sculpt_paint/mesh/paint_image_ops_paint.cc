@@ -21,16 +21,23 @@
 #include <cfloat>
 #include <memory>
 
+#include "BLT_translation.hh"
+
 #include "BKE_brush.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_layer.hh"
+#include "BKE_material.hh"
+#include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_undo_system.hh"
 
 #include "ED_paint.hh"
+#include "ED_undo.hh"
 #include "ED_view3d.hh"
 
 #include "GPU_immediate.hh"
@@ -353,6 +360,10 @@ struct PaintOperation : public PaintModeData {
    * dab by dab and acts when the stroke ends -- see #ImageStrokeMethodHook. */
   std::unique_ptr<ImageStrokeMethodHook> method_hook;
 
+  /* A layered material's first-stroke map creation opened an undo group that spans the memfile
+   * step and the stroke's image undo step; closed in #ImagePaintStroke::done. */
+  bool undo_group_open = false;
+
   PaintOperation() = default;
   ~PaintOperation() override
   {
@@ -409,6 +420,96 @@ static void gradient_draw_line(bContext * /*C*/,
   }
 }
 
+/**
+ * Grow a layered material's description for the stroke about to start, wrapped in one undo group:
+ * the map creation is a memfile step and the stroke itself an image undo step, and both must
+ * collapse into one Ctrl+Z. The group is left open for the stroke and closed in
+ * #ImagePaintStroke::done.
+ *
+ * \return false when a target refuses the stroke (C-1: frozen, or a Fill's content) and it must be
+ *         refused before anything, group included, exists; \a r_refusal then says why.
+ */
+static bool texture_paint_prepare_layered_maps(bContext *C,
+                                               PaintOperation &pop,
+                                               Object *ob,
+                                               const bool all_materials,
+                                               PaintModeSettings &paint_mode,
+                                               const char **r_refusal)
+{
+  if (ob == nullptr) {
+    return true;
+  }
+
+  /* The single-target Texture Paint canvas paints the active channel of the active layer. 2D uses
+   * the active material; projection may reach several materials through the object's faces, so it
+   * prepares each layered one. */
+  Vector<int> slots;
+  if (all_materials) {
+    for (int i = 0; i < ob->totcol; i++) {
+      slots.append(i);
+    }
+  }
+  else {
+    slots.append(-1);
+  }
+
+  bool any_layered = false;
+  for (const int slot : slots) {
+    Material *ma = BKE_object_material_get(ob, slot < 0 ? ob->actcol : short(slot + 1));
+    if (ma == nullptr || !paint_layers_is_layered(*ma)) {
+      continue;
+    }
+    any_layered = true;
+    PaintLayersTarget target;
+    if (BKE_paint_layers_target_get(
+            *ob, slot, paint_mode.active_layer_channel, paint_mode, target))
+    {
+      /* C-1: any refusing target refuses the whole stroke, nothing created yet. */
+      if (const char *refusal = BKE_paint_layers_target_refusal(target)) {
+        *r_refusal = refusal;
+        return false;
+      }
+    }
+  }
+  if (!any_layered) {
+    return true;
+  }
+
+  ED_undo_group_begin(C);
+  int created = 0;
+  for (const int slot : slots) {
+    Material *ma = BKE_object_material_get(ob, slot < 0 ? ob->actcol : short(slot + 1));
+    if (ma == nullptr || !paint_layers_is_layered(*ma)) {
+      continue;
+    }
+    PaintLayersTarget target;
+    if (!BKE_paint_layers_target_get(
+            *ob, slot, paint_mode.active_layer_channel, paint_mode, target))
+    {
+      continue;
+    }
+    if (BKE_paint_layers_target_image(target) == nullptr &&
+        BKE_paint_layers_target_ensure_writable(
+            *CTX_data_main(C), target, paint_mode.new_channel_image_size) != nullptr)
+    {
+      created++;
+    }
+  }
+  if (created > 0) {
+    ED_undo_push(C, RPT_("Add Layer Maps"));
+    pop.undo_group_open = true;
+  }
+  else {
+    ED_undo_group_end(C);
+  }
+  /* The slots name what this stroke paints: the active row, its channel or its mask. Switching the
+   * row, the channel or mask editing only marks them stale, and a map that already exists (a mask
+   * added black, say) creates nothing here, so they are rebuilt for every stroke, not only after a
+   * map was created -- otherwise the stroke lands in whatever the previous target was. */
+  BKE_texpaint_slots_refresh_object(CTX_data_scene(C), ob);
+  return true;
+}
+
 static std::unique_ptr<PaintOperation> texture_paint_init(bContext *C,
                                                           wmOperator *op,
                                                           const float mouse[2])
@@ -463,8 +564,20 @@ static std::unique_ptr<PaintOperation> texture_paint_init(bContext *C,
     }
   }
 
+  const char *refusal = nullptr;
+  if (!texture_paint_prepare_layered_maps(
+          C, *pop, ob, CTX_wm_region_view3d(C) != nullptr, settings->paint_mode, &refusal))
+  {
+    BKE_report(op->reports, RPT_WARNING, RPT_(refusal));
+    return nullptr;
+  }
+
   pop->stroke_handle = pop->mode->paint_new_stroke(C, op, ob, mouse, mode, brush_switch_mode);
   if (!pop->stroke_handle) {
+    if (pop->undo_group_open) {
+      ED_undo_group_end(C);
+      pop->undo_group_open = false;
+    }
     return nullptr;
   }
 
@@ -673,6 +786,13 @@ void ImagePaintStroke::done(const bool is_cancel, const bool stroke_started)
 
   if (!undo_step_taken_over && !is_cancel) {
     ED_image_undo_push_end();
+  }
+
+  /* Close the first-stroke group on every exit, cancel included: the stroke's undo step and the
+   * map-creation memfile step become one Ctrl+Z. */
+  if (pop->undo_group_open) {
+    ED_undo_group_end(this->evil_C);
+    pop->undo_group_open = false;
   }
 
 /* duplicate warning, see texpaint_init */

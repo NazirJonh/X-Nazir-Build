@@ -11,8 +11,11 @@
 #include "BLI_boxpack_2d.h"
 #include "BLI_linklist.h"
 #include "BLI_listbase.h"
+#include "BLI_array.hh"
 #include "BLI_math_base.hh"
+#include "BLI_math_half.hh"
 #include "BLI_rect.h"
+#include "BLI_task.hh"
 #include "BLI_threads.h"
 #include "BLI_time.h"
 
@@ -51,6 +54,11 @@ bool BKE_image_has_gpu_texture_premultiplied_alpha(Image *image, ImBuf *ibuf)
   if (image) {
     /* Render result and compositor output are always premultiplied */
     if (ELEM(image->type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) {
+      return true;
+    }
+    /* Ahead of the generated-image rule: paint layer maps are generated images, and the shader
+     * node un-multiplies by this flag alone, so the texture must match it for every image type. */
+    if (image->flag & IMA_GPU_LINEAR_PREMUL) {
       return true;
     }
     /* Generated images use pre multiplied float buffer, but straight alpha for byte buffers. */
@@ -213,6 +221,7 @@ static gpu::Texture *gpu_texture_create_tile_array(Image *ima, ImBuf *main_ibuf)
 
   const bool use_high_bitdepth = (ima->flag & IMA_HIGH_BITDEPTH);
   const bool use_grayscale = all_grayscale;
+  const bool store_linear_float = (ima->flag & IMA_GPU_LINEAR_PREMUL);
   /* Create Texture without content. */
   gpu::Texture *tex = IMB_touch_gpu_texture(ima->id.name + 2,
                                             main_ibuf,
@@ -220,7 +229,8 @@ static gpu::Texture *gpu_texture_create_tile_array(Image *ima, ImBuf *main_ibuf)
                                             arrayheight,
                                             arraylayers,
                                             use_high_bitdepth,
-                                            use_grayscale);
+                                            use_grayscale,
+                                            store_linear_float);
 
   /* Upload each tile one by one. */
   for (ImageTile &tile : ima->tiles) {
@@ -247,7 +257,8 @@ static gpu::Texture *gpu_texture_create_tile_array(Image *ima, ImBuf *main_ibuf)
                                  UNPACK2(tilesize),
                                  use_high_bitdepth,
                                  use_grayscale,
-                                 store_premultiplied);
+                                 store_premultiplied,
+                                 store_linear_float);
     }
 
     BKE_image_release_ibuf(ima, ibuf, nullptr);
@@ -488,8 +499,12 @@ static ImageGPUTextures image_get_gpu_texture(Image *ima,
     const bool use_high_bitdepth = (ima->flag & IMA_HIGH_BITDEPTH);
     const bool store_premultiplied = BKE_image_has_gpu_texture_premultiplied_alpha(ima, ibuf);
 
-    *result.texture = IMB_create_gpu_texture(
-        ima->id.name + 2, ibuf, use_high_bitdepth, store_premultiplied, true);
+    *result.texture = IMB_create_gpu_texture(ima->id.name + 2,
+                                             ibuf,
+                                             use_high_bitdepth,
+                                             store_premultiplied,
+                                             true,
+                                             (ima->flag & IMA_GPU_LINEAR_PREMUL) != 0);
 
     if (*result.texture) {
       GPU_texture_extend_mode(*result.texture, GPU_SAMPLER_EXTEND_MODE_REPEAT);
@@ -769,6 +784,42 @@ static void gpu_texture_update_unscaled(gpu::Texture *tex,
   GPU_texture_update_sub(tex, data_format, data, x, y, math::max(layer, 0), w, h, 1, tex_stride);
 }
 
+/**
+ * Partial update of an #IMA_GPU_LINEAR_PREMUL byte image into its half float texture.
+ *
+ * Converts a band of rows at a time and packs it to half straight away, instead of filling a
+ * float buffer for the whole region that the backend then converts to half in a second pass:
+ * this runs for every correction map on every dab-coalesced update while painting.
+ */
+static void gpu_texture_update_linear_half(gpu::Texture *tex,
+                                           const ImBuf *ibuf,
+                                           ImageTile *tile,
+                                           int x,
+                                           int y,
+                                           const int w,
+                                           const int h,
+                                           const bool store_premultiplied)
+{
+  Array<uint16_t> half_data(4 * int64_t(w) * int64_t(h), NoInitialization());
+  constexpr int band_rows = 16;
+  threading::parallel_for(IndexRange(h), band_rows, [&](const IndexRange rows) {
+    Array<float> band(4 * int64_t(w) * rows.size(), NoInitialization());
+    IMB_colormanagement_imbuf_to_float_texture(
+        band.data(), x, y + int(rows.start()), w, int(rows.size()), ibuf, store_premultiplied);
+    math::float_to_half_make_finite_array(
+        band.data(), half_data.data() + 4 * size_t(w) * size_t(rows.start()), band.size());
+  });
+
+  int layer = 0;
+  if (tile != nullptr && tile->runtime.tilearray_layer > -1) {
+    /* Shift to account for tile packing, as in #gpu_texture_update_unscaled. */
+    x += tile->runtime.tilearray_offset[0];
+    y += tile->runtime.tilearray_offset[1];
+    layer = tile->runtime.tilearray_layer;
+  }
+  GPU_texture_update_sub(tex, GPU_DATA_HALF_FLOAT, half_data.data(), x, y, layer, w, h, 1);
+}
+
 static void gpu_texture_update_from_ibuf(
     gpu::Texture *tex, Image *ima, ImBuf *ibuf, ImageTile *tile, int x, int y, int w, int h)
 {
@@ -818,13 +869,18 @@ static void gpu_texture_update_from_ibuf(
     }
   }
   else {
-    /* Byte image is in original colorspace from the file, and may need conversion. */
-    if (IMB_colormanagement_space_is_data(ibuf->byte_buffer.colorspace) && !scaled) {
+    /* Byte image is in original colorspace from the file, and may need conversion. The texture
+     * of an #IMA_GPU_LINEAR_PREMUL image is scene linear float, like the other color spaces. */
+    const bool store_linear_float = (ima->flag & IMA_GPU_LINEAR_PREMUL);
+    if (!store_linear_float && IMB_colormanagement_space_is_data(ibuf->byte_buffer.colorspace) &&
+        !scaled)
+    {
       /* Not scaled Non-color data, just store buffer as is. */
     }
-    else if (IMB_colormanagement_space_is_scene_linear_srgb(ibuf->byte_buffer.colorspace) ||
-             IMB_colormanagement_space_is_scene_linear(ibuf->byte_buffer.colorspace) ||
-             IMB_colormanagement_space_is_data(ibuf->byte_buffer.colorspace))
+    else if (!store_linear_float &&
+             (IMB_colormanagement_space_is_scene_linear_srgb(ibuf->byte_buffer.colorspace) ||
+              IMB_colormanagement_space_is_scene_linear(ibuf->byte_buffer.colorspace) ||
+              IMB_colormanagement_space_is_data(ibuf->byte_buffer.colorspace)))
     {
       /* scene linear + sRGB transfer function or scene linear or scaled down non-color data,
        * store as byte texture that the GPU can decode directly. */
@@ -839,6 +895,15 @@ static void gpu_texture_update_from_ibuf(
       /* Convert to scene linear with sRGB compression, and premultiplied for
        * correct texture interpolation. */
       IMB_colormanagement_imbuf_to_byte_texture(rect, x, y, w, h, ibuf, store_premultiplied);
+    }
+    else if (store_linear_float && !scaled &&
+             GPU_texture_format(tex) == gpu::TextureFormat::SFLOAT_16_16_16_16)
+    {
+      gpu_texture_update_linear_half(tex, ibuf, tile, x, y, w, h, store_premultiplied);
+      GPU_texture_update_mipmap_chain(tex);
+      ima->runtime->gpuflag |= IMA_GPU_MIPMAP_COMPLETE;
+      GPU_texture_unbind(tex);
+      return;
     }
     else {
       /* Other colorspace, store as float texture to avoid precision loss. */

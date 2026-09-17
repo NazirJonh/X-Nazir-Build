@@ -39,6 +39,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_scene.hh"
 
 #include "RNA_prototypes.hh"
@@ -106,14 +107,18 @@ static void shader_get_from_context(const bContext *C,
     }
   }
   else if (snode->shaderfrom == SNODE_SHADER_PAINT_LAYER) {
-    Scene *scene = CTX_data_scene(C);
-    Material *ma = (scene && scene->toolsettings) ?
-                       BKE_paint_material_active_layer_source_get(
-                           scene->toolsettings->paint_mode) :
-                       nullptr;
-    if (ma) {
-      /* The layer is not an ID of its own: the material is reached through the scene's paint
-       * bindings, the way the World is reached through the scene. */
+    /* The layer is not an ID of its own: the active layered material is reached through the
+     * active object's active slot, and a Material row shows the material it was baked from. */
+    ViewLayer *view_layer = CTX_data_view_layer(C);
+    Object *ob = (view_layer != nullptr) ? BKE_view_layer_active_object_get(view_layer) : nullptr;
+    Material *owner = BKE_paint_layers_active_material_get(ob);
+    if (owner != nullptr) {
+      Material *ma = owner;
+      if (MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(*owner)) {
+        if (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL && layer->material != nullptr) {
+          ma = layer->material;
+        }
+      }
       *r_from = nullptr;
       *r_id = &ma->id;
       *r_ntree = ma->nodetree;

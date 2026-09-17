@@ -82,6 +82,9 @@ struct ChannelSourceImage {
   /** The node's #NodeTexImage::iuser. Copy it before acquiring a buffer: acquisition writes to it
    * and the material is not the stroke's to mutate. */
   const ImageUser *iuser = nullptr;
+  /** The Image Texture node itself: its sampling settings and its Vector input decide whether a
+   * caller may show this map without the node's own graph. Owned by the material. */
+  const bNode *node = nullptr;
 };
 
 /**

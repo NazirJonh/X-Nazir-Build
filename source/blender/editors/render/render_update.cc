@@ -6,6 +6,7 @@
  * \ingroup edrend
  */
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -26,7 +27,9 @@
 #include "DRW_engine.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_set.hh"
 #include "BLI_threads.h"
+#include "BLI_vector.hh"
 
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
@@ -39,7 +42,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
-#include "BKE_paint_material_mask_bake.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_scene.hh"
 
 #include "RE_engine.h"
@@ -51,6 +54,7 @@
 #include "SEQ_sequencer.hh"
 
 #include "ED_material_bake.hh"
+#include "ED_paint_layers_bake.hh"
 #include "ED_node.hh"
 #include "ED_node_preview.hh"
 #include "ED_paint.hh"
@@ -159,6 +163,46 @@ void ED_render_scene_update(const DEGEditorUpdateContext *update_ctx, const bool
 
   update_compositor(update_ctx);
 
+  /* #MA_PAINT_LAYERS_MATERIAL_BAKE_DUE is raised when the active row moves
+   * (#BKE_paint_layers_active_set): the row left behind keeps its live maps until now. The
+   * Material-row planner otherwise runs only on an edit to the layered material itself, so its
+   * deferred rows are caught up here. A localized or evaluated copy shares its description with
+   * the original, so it is skipped like in #BKE_paint_layers_regenerate_tagged. */
+  const int no_regen_tags = ID_TAG_LOCALIZED | ID_TAG_COPIED_ON_EVAL | ID_TAG_NO_MAIN;
+  for (Material &ma : bmain->materials) {
+    if ((ma.id.tag & no_regen_tags) != 0 || !paint_layers_is_layered(ma) ||
+        !BKE_paint_layers_material_bake_due_get(ma))
+    {
+      continue;
+    }
+    ed::material_bake::material_bake_layered_rows_ensure(*bmain, ma);
+    /* The source material of a row that just stopped being live had its automatic re-bakes
+     * skipped while the row was active (#BKE_paint_layers_source_material_is_live); catch it up
+     * now. One source may feed several rows of this material, so each is re-baked once. */
+    {
+      Set<Material *> caught_up;
+      Vector<const MaterialPaintLayer *> layers;
+      BKE_paint_layers_flatten(ma, layers);
+      for (const MaterialPaintLayer *layer : layers) {
+        if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL || layer->material == nullptr) {
+          continue;
+        }
+        if (BKE_paint_layers_source_material_is_live(*bmain, *layer->material)) {
+          continue;
+        }
+        if (caught_up.add(layer->material)) {
+          ed::material_bake::material_bake_images_rebake_stale(*bmain, *layer->material);
+        }
+      }
+    }
+    BKE_paint_layers_material_bake_due_clear(ma);
+  }
+
+  /* The K-1 planner computed the light paint-layer bakes synchronously; anything heavy it left
+   * pending is queued here, on the main thread, right after the depsgraph update. */
+  ed::material_bake::paint_layers_bake_jobs_ensure(
+      *wm, static_cast<wmWindow *>(wm->windows.first), *bmain);
+
   recursive_check = false;
 }
 
@@ -248,12 +292,42 @@ static void material_changed(Main *bmain, Material *ma)
   /* The Combined preview reads every channel of this material, so a node-tree edit can change it
    * in ways no input hash is asked about. */
   BKE_paint_material_combined_cache_invalidate(ma);
-  /* A baked layer mask is sampled by the shader, so a graph edit that reshapes its row's mask
-   * chain has to refresh the pixels the next draw reads. */
-  BKE_paint_material_mask_bake_ensure(*bmain, *ma, false);
   /* A Material paint layer is a bake of this material into maps the user owns; editing the source
    * is how that layer is re-configured, so its maps follow without being asked. */
   ed::material_bake::material_bake_images_rebake_stale(*bmain, *ma);
+  /* The layered description's Material rows keep their baked maps on the row, not on an image's
+   * bake link, so they are re-baked from the same editor update. */
+  ed::material_bake::material_bake_layered_rows_ensure(*bmain, *ma);
+
+  /* A live Material row reads another material's source, so an edit here does not reach the
+   * layered material's generator by itself: tag every layered material with a Material row that
+   * reads \a ma and is currently shown from its source, or the live graph would freeze on the values
+   * of its last build. The row lives from its source even without focus when the channel has no
+   * baked map yet, so the test is the live link, not the active marker. Localized and evaluated
+   * copies share their description with the original, so they are skipped. */
+  const int no_regen_tags = ID_TAG_LOCALIZED | ID_TAG_COPIED_ON_EVAL | ID_TAG_NO_MAIN;
+  for (Material &layered : bmain->materials) {
+    if ((layered.id.tag & no_regen_tags) != 0 || !paint_layers_is_layered(layered)) {
+      continue;
+    }
+    Vector<const MaterialPaintLayer *> layers;
+    BKE_paint_layers_flatten(layered, layers);
+    for (const MaterialPaintLayer *layer : layers) {
+      if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL || layer->material != ma) {
+        continue;
+      }
+      const bool live = BKE_paint_layers_material_lives_from_source(layered, *layer);
+      printf("paint layers: source '%s' edited -> layered '%s' row '%s' live=%d\n",
+             ma->id.name + 2,
+             layered.id.name + 2,
+             layer->name,
+             live ? 1 : 0);
+      if (live) {
+        BKE_paint_layers_tag_edited(layered);
+        break;
+      }
+    }
+  }
 }
 
 static void lamp_changed(Main *bmain, Light *la)

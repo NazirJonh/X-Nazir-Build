@@ -27,12 +27,13 @@
  */
 
 #include <cstdint>
+#include <vector>
 
 #include "BLI_span.hh"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
-#include "BKE_paint_material_layer_model.hh"
+#include "BKE_paint_material_enums.hh"
 
 #include "DNA_scene_types.h"
 
@@ -62,6 +63,10 @@ struct PaintMaterialCompositeCorrection {
    * acquiring a buffer, since acquisition writes to it.
    */
   const ImageUser *iuser = nullptr;
+  /** A Fill-effect correction's flat colour, when it carries no map; see
+   * #PaintMaterialCompositeImageLayer.constant_color. */
+  float constant_color[4] = {};
+  bool has_constant_color = false;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   /** On in this channel: the row is on and its coverage here is not the switched-off form. */
@@ -89,6 +94,15 @@ struct PaintMaterialCompositeImageLayer {
   Image *mask_image = nullptr;
   const ImageUser *mask_iuser = nullptr;
   /**
+   * The flat colour the layer paints with when it has no map, in the channel's own space.
+   *
+   * A Fill layer and a channel with no map both reduce to a constant; carrying it here rather than
+   * manufacturing a one-pixel image keeps the CPU path free of sampling and gives masks and
+   * corrections (phase 2) the same constant layer to stand on.
+   */
+  float constant_color[4] = {};
+  bool has_constant_color = false;
+  /**
    * The mask is the image's alpha rather than its colour.
    *
    * Which output of the Image Texture the factor was taken from, and not a detail: a layer stack
@@ -96,6 +110,37 @@ struct PaintMaterialCompositeImageLayer {
    * modulate every layer by its own brightness.
    */
   bool mask_from_alpha = false;
+  /**
+   * With #mask_from_alpha, read #mask_image's value as its grey (the mean of RGB) rather than its
+   * alpha. Only the value read changes, not how the factor is built: a layer mask is painted black
+   * and white, and a brush writes colour, never alpha.
+   */
+  bool mask_reads_grey = false;
+  /**
+   * The layer's own map alpha multiplies into the factor base, so a texel the map leaves
+   * transparent shows what is below instead of covering it with the map's (black) color. Set for a
+   * plain Paint layer's channel map; a mask or a baked map keeps its own coverage.
+   */
+  bool color_alpha_coverage = false;
+  /**
+   * A second coverage multiplied into the factor base with the mask, read as its grey: a Material
+   * layer's source transparency, baked into a map. Kept apart from #mask_image so the user's own
+   * mask stays live on top of it and editing that mask never re-bakes the source.
+   */
+  Image *coverage_image = nullptr;
+  /** The coverage map's own #ImageUser, or null (the baked coverage and plain maps use null). */
+  const ImageUser *coverage_iuser = nullptr;
+  /**
+   * A flat coverage used instead of #coverage_image when the source's alpha is live: the same
+   * constant the generator builds for the active Material row's factor.
+   */
+  float coverage_constant = 1.0f;
+  bool has_coverage_constant = false;
+  /**
+   * The coverage is read as #coverage_image's alpha rather than its grey. Set for a live source
+   * alpha map: the generator reads that map's Alpha output as the factor.
+   */
+  bool coverage_from_alpha = false;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   /** How much of #mask_image applies; 0 ignores the mask entirely. */
@@ -126,11 +171,31 @@ struct PaintMaterialCompositeImageLayer {
   Vector<PaintMaterialCompositeCorrection> content_corrections;
   /** The corrections blended onto the layer's coverage, bottom to top. */
   Vector<PaintMaterialCompositeCorrection> mask_corrections;
+  /**
+   * A folder: #children are composited in isolation over transparency, and the result is laid over
+   * what is below with the row's own blend, opacity and mask (design §5). A folder carries no maps
+   * of its own; its participation in a channel is the union of its children's.
+   */
+  bool is_folder = false;
+  /* std::vector, not blender::Vector: a self-referential member needs a container that accepts an
+   * incomplete type, which is exactly the case std::vector allows for. */
+  std::vector<PaintMaterialCompositeImageLayer> children;
 };
 
 /** One correction of a layer, as buffers. This is what the evaluator reads. */
 struct PaintMaterialCompositeCorrectionBuffer {
   ImBuf *ibuf = nullptr;
+  /**
+   * Name of #ibuf's buffer colorspace, resolved once at acquisition, or null for scene linear.
+   *
+   * Taken from the buffer the evaluator actually reads -- `byte_buffer.colorspace` for a byte map,
+   * `float_buffer.colorspace` for a float one -- never from the #Image setting, which can disagree
+   * with the buffer that was handed over.
+   */
+  const char *colorspace_name = nullptr;
+  /** See #PaintMaterialCompositeCorrection.constant_color. */
+  float constant_color[4] = {};
+  bool has_constant_color = false;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   bool enabled = true;
@@ -144,8 +209,29 @@ struct PaintMaterialCompositeLayer {
    */
   ImBuf *color_ibuf = nullptr;
   ImBuf *mask_ibuf = nullptr;
+  /** Colorspace names of #color_ibuf / #mask_ibuf's buffers; see
+   * #PaintMaterialCompositeCorrectionBuffer.colorspace_name. */
+  const char *color_colorspace_name = nullptr;
+  const char *mask_colorspace_name = nullptr;
+  /** See #PaintMaterialCompositeImageLayer.constant_color. */
+  float constant_color[4] = {};
+  bool has_constant_color = false;
   /** See #PaintMaterialCompositeImageLayer.mask_from_alpha. */
   bool mask_from_alpha = false;
+  /** See #PaintMaterialCompositeImageLayer.mask_reads_grey. */
+  bool mask_reads_grey = false;
+  /** See #PaintMaterialCompositeImageLayer.color_alpha_coverage. */
+  bool color_alpha_coverage = false;
+  /** See #PaintMaterialCompositeImageLayer.coverage_image; with its buffer's colorspace. */
+  ImBuf *coverage_ibuf = nullptr;
+  const char *coverage_colorspace_name = nullptr;
+  /** See #PaintMaterialCompositeImageLayer.has_coverage_constant / .coverage_constant. */
+  float coverage_constant = 1.0f;
+  bool has_coverage_constant = false;
+  /** See #PaintMaterialCompositeImageLayer.coverage_from_alpha. */
+  bool coverage_from_alpha = false;
+  /** See #PaintMaterialCompositeImageLayer.coverage_iuser. */
+  const ImageUser *coverage_iuser = nullptr;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   float mask_influence = 1.0f;
@@ -157,6 +243,9 @@ struct PaintMaterialCompositeLayer {
   Vector<PaintMaterialCompositeCorrectionBuffer> content_corrections;
   /** The corrections blended onto the coverage, bottom to top. */
   Vector<PaintMaterialCompositeCorrectionBuffer> mask_corrections;
+  /** See #PaintMaterialCompositeImageLayer.is_folder. */
+  bool is_folder = false;
+  std::vector<PaintMaterialCompositeLayer> children;
 };
 
 /** Layers bottom to top: index 0 is composited first and everything else lands on top of it. */
@@ -164,6 +253,13 @@ struct PaintMaterialCompositeStack {
   Vector<PaintMaterialCompositeLayer> layers;
   int width = 0;
   int height = 0;
+  /**
+   * The value the composite starts from, before the first row: #BKE_paint_layers_channel_bottom_color
+   * for a description-driven stack. When #has_bottom_color is false the buffer starts transparent,
+   * the graph-as-truth reading. See #PaintMaterialCompositeImageLayer.constant_color.
+   */
+  float bottom_color[4] = {};
+  bool has_bottom_color = false;
 };
 
 struct PaintMaterialCompositeEvalStats {
@@ -188,6 +284,23 @@ bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
                                        PaintMaterialCompositeEvalStats *r_stats = nullptr);
 
 /**
+ * The one implementation of the stack's formulas: composite \a stack into \a dst as straight
+ * scene-linear float RGBA, `width * height * 4` values.
+ *
+ * Every source sample is first decoded out of its own buffer's colorspace (see the layers'
+ * `*_colorspace_name`), then the rows are mixed in scene linear the way the shader mixes them; a
+ * premultiplied float buffer is straightened before it is read. No encoding happens here -- that is
+ * #BKE_paint_material_composite_eval's job, and the bake's when it writes a map.
+ *
+ * \param region: when given, only this rectangle is written and the rest of \a dst is left as it
+ *                was. Same contract as the byte evaluation.
+ */
+bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack &stack,
+                                              float *dst,
+                                              const rcti *region = nullptr,
+                                              PaintMaterialCompositeEvalStats *r_stats = nullptr);
+
+/**
  * Acquire every layer's buffer, evaluate, and release the locks again.
  *
  * The layer images are acquired for the duration of the evaluation only. Nothing is written back
@@ -197,7 +310,21 @@ bool BKE_paint_material_composite_eval_images(
     Span<PaintMaterialCompositeImageLayer> image_layers,
     ImBuf *composite_ibuf,
     const rcti *region = nullptr,
-    PaintMaterialCompositeEvalStats *r_stats = nullptr);
+    PaintMaterialCompositeEvalStats *r_stats = nullptr,
+    const float bottom_color[4] = nullptr);
+
+/**
+ * Acquire the layer buffers, evaluate through #BKE_paint_material_composite_eval_linear, and
+ * release them: the same call as #BKE_paint_material_composite_eval_images, but leaving the result
+ * as scene-linear floats for a caller that will encode it itself (a bake, an export, a test that
+ * compares against the shader's own linear space).
+ */
+bool BKE_paint_material_composite_eval_images_linear(
+    Span<PaintMaterialCompositeImageLayer> image_layers,
+    float *dst,
+    const rcti *region = nullptr,
+    PaintMaterialCompositeEvalStats *r_stats = nullptr,
+    const float bottom_color[4] = nullptr);
 
 /**
  * Compute \a row_marker's mask factor for every pixel of \a region into \a dst_ibuf's RGB
@@ -220,6 +347,29 @@ bool BKE_paint_material_composite_eval_row_mask(
     const rcti *region = nullptr);
 
 /**
+ * The content and coverage of the row \a row_marker, the pair a bake of that row stores: the
+ * straight scene-linear colour before its own blend over what is below, and the factor its Mix
+ * would take (`opacity x mask x corrections` for a leaf, the folder's own opacity/mask times its
+ * children's accumulated coverage for a folder).
+ *
+ * \a r_color_rgba and \a r_coverage_gray are sized to the evaluated rectangle: the stack's
+ * `width * height * 4` and `width * height` values when \a region is null, otherwise the region's
+ * `w * h * 4` and `w * h` values. This is the one place the isolated-group formula is asked for a
+ * row's content, shared by the bake planner and #BKE_paint_layers_bake_render_node.
+ *
+ * \param region: when given, only this rectangle of the row is rendered and the outputs describe it
+ *                alone, so a partial re-bake does not composite pixels it will not write. The
+ *                region is clipped to the stack; an empty intersection produces no output and
+ *                returns false.
+ */
+bool BKE_paint_material_composite_eval_row_content(
+    Span<PaintMaterialCompositeImageLayer> image_layers,
+    const bUUID &row_marker,
+    float *r_color_rgba,
+    float *r_coverage_gray,
+    const rcti *region = nullptr);
+
+/**
  * Dimensions of the composite, taken from the bottom-most enabled layer.
  *
  * Layers of differing sizes are not composited: a stack whose layers disagree is rejected by the
@@ -230,36 +380,6 @@ bool BKE_paint_material_composite_eval_row_mask(
  */
 bool BKE_paint_material_composite_stack_dimensions(
     Span<PaintMaterialCompositeImageLayer> image_layers, int &r_width, int &r_height);
-
-/**
- * The layer stack \a channel of \a ma is built from, or false when it is not a layer stack.
- *
- * Walks the same graph, through the same reroutes, muted nodes and group instances, as
- * #BKE_paint_material_source_resolve: the chain of Mix nodes feeding the channel's Principled
- * input, each mixing an Image Texture over what is below it. A single Image Texture is a stack of
- * one. Anything the walk does not recognize -- an unsupported blend mode, a factor that is neither
- * a value nor an image, a node that is not a Mix -- makes the whole channel non-compositable, and
- * the caller falls back to the bake.
- *
- * Unlike the bake, this needs no group path: it only reads data-block pointers out of the nodes it
- * finds, and never has to route a socket back out to the root tree.
- *
- * A channel with no graph to walk -- Ambient Occlusion has no Principled input at all, and
- * #PAINT_LAYER_MAP_MASK is not a channel -- is instead assembled from the layers themselves: the
- * order, blending and masking come from the channel that does have a chain, and each layer's map
- * for \a channel is found by #Image.paint_layer_id and #Image.paint_layer_channel. That is the
- * whole reason those two fields exist; a user who bakes an AO map per layer has no node link that
- * could express the same thing. The layers' corrections come along the same way, their maps found
- * by the correction's marker, and stay Absent where no map carries them.
- *
- * Cheap enough for a redraw, like the resolver: it allocates only \a r_layers and touches no
- * pixels.
- */
-bool BKE_paint_material_composite_stack_from_material(
-    const Main &bmain,
-    const Material &ma,
-    int channel,
-    Vector<PaintMaterialCompositeImageLayer> &r_layers);
 
 /**
  * The shader node group that lays one tangent-space normal map over another, created on demand.
@@ -302,22 +422,6 @@ Span<int> BKE_paint_material_composite_passes();
  * The two lists are kept in sync by hand and a test asserts that they agree.
  */
 Span<int> BKE_paint_material_display_passes();
-
-/**
- * The maps of the paint layer \a layer_id, indexed by role (channel, or #PAINT_LAYER_MAP_MASK).
- *
- * A channel wired into \a ma is answered from its stack: the layer is already identified there, so
- * its map for that channel needs no #Image.paint_layer_channel tag and works for any material a
- * stroke can paint. The tag answers the rest -- Ambient Occlusion and the mask, which no node link
- * mentions.
- *
- * Entries the layer has no map for stay null, which is what lets the canvas list show a channel
- * the active layer does not author yet without pretending it is selectable.
- */
-void BKE_paint_material_layer_maps_get(const Main &bmain,
-                                       const Material &ma,
-                                       const bUUID &layer_id,
-                                       MutableSpan<Image *> r_maps);
 
 /**
  * Hash of everything about \a image_layers that changes the composited pixels except the pixels

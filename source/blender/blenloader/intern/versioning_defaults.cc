@@ -520,6 +520,8 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
     ts->sculpt->flags = defaults.flags;
     ts->sculpt->paint_curve_show_radius_handles = defaults.paint_curve_show_radius_handles;
     ts->sculpt->paint_curve_radius_display_mode = defaults.paint_curve_radius_display_mode;
+    ts->sculpt->gradient_opacity = defaults.gradient_opacity;
+    BKE_colorband_init(&ts->sculpt->gradient_colorband, true);
   }
 
   /* Correct default startup UVs. */

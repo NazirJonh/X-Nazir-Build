@@ -860,6 +860,7 @@ void PAINT_OT_vertex_color_brightness_contrast(wmOperatorType *ot);
 void PAINT_OT_vertex_color_hsv(wmOperatorType *ot);
 void PAINT_OT_vertex_color_invert(wmOperatorType *ot);
 void PAINT_OT_vertex_color_levels(wmOperatorType *ot);
+void PAINT_OT_vertex_color_gradient(wmOperatorType *ot);
 
 /* `paint_vertex_weight_ops.cc` */
 

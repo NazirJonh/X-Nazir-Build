@@ -1956,6 +1956,39 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The Sculpt Color Gradient tool settings are new. A file written before them zero-fills the
+   * opacity (fully transparent) and leaves the embedded #ColorBand without stops.
+   *
+   * NOTE: Keyed on the member existence for the same reason as the face selection settings below.
+   */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "Sculpt", "ColorBand", "gradient_colorband"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (Sculpt *sd = scene.toolsettings ? scene.toolsettings->sculpt : nullptr) {
+        const Sculpt defaults = {};
+        sd->gradient_type = defaults.gradient_type;
+        sd->gradient_repeat = defaults.gradient_repeat;
+        sd->gradient_color_source = defaults.gradient_color_source;
+        sd->gradient_blend_mode = defaults.gradient_blend_mode;
+        sd->gradient_opacity = defaults.gradient_opacity;
+        BKE_colorband_init(&sd->gradient_colorband, true);
+      }
+    }
+  }
+
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "Sculpt", "float", "gradient_secondary_color[4]"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (Sculpt *sd = scene.toolsettings ? scene.toolsettings->sculpt : nullptr) {
+        const Sculpt defaults = {};
+        copy_v4_v4(sd->gradient_color, defaults.gradient_color);
+        copy_v4_v4(sd->gradient_secondary_color, defaults.gradient_secondary_color);
+      }
+    }
+  }
+
   /* The face selection paint overlay settings are new, and a file written before them zero-fills
    * the opacity and leaves the "show" flag clear. A zero opacity hides the overlay completely --
    * including the face selection display the 3D Viewport used to draw at a fixed alpha -- so

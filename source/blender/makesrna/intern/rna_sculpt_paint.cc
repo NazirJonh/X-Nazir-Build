@@ -690,6 +690,13 @@ static void rna_ImagePaintSettings_warp_update(Main * /*bmain*/,
   WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
 }
 
+static PointerRNA rna_Sculpt_gradient_color_ramp_get(PointerRNA *ptr)
+{
+  Sculpt *sd = static_cast<Sculpt *>(ptr->data);
+  /* No lazy initialization, see #rna_ImagePaintSettings_gradient_color_ramp_get. */
+  return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, &sd->gradient_colorband);
+}
+
 static PointerRNA rna_ImagePaintSettings_gradient_color_ramp_get(PointerRNA *ptr)
 {
   ImagePaintSettings *imapaint = static_cast<ImagePaintSettings *>(ptr->data);
@@ -2332,6 +2339,100 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_ui_text(prop, "Layer Preview Opacity", "");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  /* Color Gradient tool. */
+  static const EnumPropertyItem gradient_type_items[] = {
+      {SCULPT_GRADIENT_LINEAR,
+       "LINEAR",
+       0,
+       "Linear",
+       "Interpolate along the drag line in screen space"},
+      {SCULPT_GRADIENT_RADIAL,
+       "RADIAL",
+       0,
+       "Radial",
+       "Interpolate outward from the surface point under the cursor, in the plane of its normal"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  static const EnumPropertyItem gradient_color_source_items[] = {
+      {SCULPT_GRADIENT_COLOR_SOURCE_COLORS,
+       "COLORS",
+       0,
+       "Colors",
+       "Blend from the primary color to the secondary color"},
+      {SCULPT_GRADIENT_COLOR_SOURCE_RAMP, "RAMP", 0, "Ramp", "Use the gradient color ramp"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  static const EnumPropertyItem gradient_repeat_items[] = {
+      {IMAGE_PAINT_GRADIENT_REPEAT_NONE, "NONE", 0, "None", ""},
+      {IMAGE_PAINT_GRADIENT_REPEAT_REPEAT, "REPEAT", 0, "Repeat", ""},
+      {IMAGE_PAINT_GRADIENT_REPEAT_REFLECT, "REFLECT", 0, "Reflect", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  static const EnumPropertyItem gradient_blend_items[] = {
+      {IMB_BLEND_MIX, "MIX", 0, "Mix", ""},
+      {IMB_BLEND_MUL, "MUL", 0, "Multiply", ""},
+      {IMB_BLEND_ADD, "ADD", 0, "Add", ""},
+      {IMB_BLEND_SUB, "SUB", 0, "Subtract", ""},
+      {IMB_BLEND_OVERLAY, "OVERLAY", 0, "Overlay", ""},
+      {IMB_BLEND_SCREEN, "SCREEN", 0, "Screen", ""},
+      {IMB_BLEND_DARKEN, "DARKEN", 0, "Darken", ""},
+      {IMB_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "gradient_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_type");
+  RNA_def_property_enum_items(prop, gradient_type_items);
+  RNA_def_property_ui_text(prop, "Gradient Type", "Shape of the color gradient");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_color_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_color_source");
+  RNA_def_property_enum_items(prop, gradient_color_source_items);
+  RNA_def_property_ui_text(prop, "Gradient Colors", "Where the gradient takes its colors from");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_repeat", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_repeat");
+  RNA_def_property_enum_items(prop, gradient_repeat_items);
+  RNA_def_property_ui_text(prop, "Gradient Repeat", "Behavior outside the gradient vector");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_blend_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_blend_mode");
+  RNA_def_property_enum_items(prop, gradient_blend_items);
+  RNA_def_property_ui_text(prop, "Gradient Blend", "Blend mode of the color gradient");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "gradient_opacity");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop, "Gradient Opacity", "Overall opacity of the color gradient");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "gradient_color");
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.001, 3);
+  RNA_def_property_ui_text(prop, "Gradient Color", "Color at the gradient start");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_secondary_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "gradient_secondary_color");
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.001, 3);
+  RNA_def_property_ui_text(prop, "Gradient Secondary Color", "Color at the gradient end");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_color_ramp", PROP_POINTER, PROP_NEVER_NULL);
+  RNA_def_property_struct_type(prop, "ColorRamp");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_Sculpt_gradient_color_ramp_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Gradient Color Ramp", "Colors of the color gradient");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "use_deform_only", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flags", SCULPT_ONLY_DEFORM);

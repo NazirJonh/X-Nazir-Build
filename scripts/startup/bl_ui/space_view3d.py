@@ -8682,7 +8682,7 @@ class VIEW3D_PT_overlay_sculpt(Panel):
 def sculpt_face_selection_mask_controls_visible(context):
     """Mirror of ``ED_paint_sculpt_face_selection_mask_supported()``: the face selection paint
     mask controls are only offered for the Sculpt tools that consume the mask (Paint, Smear, Blur,
-    Texture Fill and the Mask by Color operator tool), and they stay reachable while the masking
+    Texture Fill and the Mask by Color / Color Gradient operator tools), and they stay reachable while the masking
     is enabled so it can be turned off again. Kept in sync with the Paint Mask button drawn by
     ``uiTemplatePaintModeSelection()`` in the 3D View header."""
     ob = context.active_object
@@ -8691,7 +8691,7 @@ def sculpt_face_selection_mask_controls_visible(context):
     if ob.data.use_paint_mask:
         return True
     tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
-    if tool is not None and tool.idname == 'builtin.mask_by_color':
+    if tool is not None and tool.idname in {'builtin.mask_by_color', 'builtin.color_gradient'}:
         return True
     sculpt = context.tool_settings.sculpt
     brush = sculpt.brush if sculpt is not None else None

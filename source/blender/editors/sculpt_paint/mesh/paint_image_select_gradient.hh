@@ -57,6 +57,12 @@ float image_paint_gradient_eval_t(const ImagePaintGradientParams &params,
                                   float px_x,
                                   float px_y);
 
+/**
+ * Bend a `[0, 1]` gradient parameter so that \a midpoint maps to 0.5 (smooth, C1 continuous);
+ * a centered midpoint is a pass-through.
+ */
+float image_paint_gradient_remap_midpoint(float t, float midpoint);
+
 /** Interpolate or colorband-evaluate at \a t into \a r_color (RGBA, straight alpha). */
 void image_paint_gradient_eval_color(const ImagePaintGradientParams &params,
                                      float t,

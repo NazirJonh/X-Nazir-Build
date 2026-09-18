@@ -13,6 +13,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector_types.hh"
 
 #include "DNA_brush_types.h"
 #include "DNA_mesh_types.h"
@@ -52,6 +53,9 @@
 #include "UI_resources.hh"
 
 #include "../paint_intern.hh" /* own include */
+#include "../paint_gradient_core.hh"
+
+#include <memory>
 
 namespace blender {
 
@@ -562,9 +566,9 @@ struct WPGradient_userData {
   VArraySpan<bool> select_vert;
   VArray<bool> hide_vert;
   Brush *brush;
-  const float *sco_start; /* [2] */
-  const float *sco_end;   /* [2] */
-  float sco_line_div;     /* store (1.0f / len_v2v2(sco_start, sco_end)) */
+  /* Unified gradient engine, built per exec from the gesture endpoints. Raw (unclamped)
+   * screen-space factor; the brush falloff curve in gradientVert_update clamps. */
+  const ed::sculpt_paint::gradient::Calculator *calculator;
   int def_nr;
   bool is_init;
   WPGradient_vertStoreBase *vert_cache;
@@ -574,7 +578,6 @@ struct WPGradient_userData {
   /* options */
   bool use_select;
   bool use_vgroup_restrict;
-  short type;
   float weightpaint;
 };
 
@@ -592,13 +595,10 @@ static void gradientVert_update(WPGradient_userData *grad_data, int index)
   }
 
   float alpha;
-  if (grad_data->type == WPAINT_GRADIENT_TYPE_LINEAR) {
-    alpha = line_point_factor_v2(vs->sco, grad_data->sco_start, grad_data->sco_end);
-  }
-  else {
-    BLI_assert(grad_data->type == WPAINT_GRADIENT_TYPE_RADIAL);
-    alpha = len_v2v2(grad_data->sco_start, vs->sco) * grad_data->sco_line_div;
-  }
+  /* Unified gradient engine (`paint_gradient_core`): raw screen-space factor at the cached
+   * vertex position. `clamp_to_range == false` preserves the legacy pipeline where
+   * `BKE_brush_curve_strength_clamped` below performs the clamping. */
+  alpha = grad_data->calculator->evaluate(float3(vs->sco[0], vs->sco[1], 0.0f));
 
   /* adjust weight */
   alpha = BKE_brush_curve_strength_clamped(grad_data->brush, std::max(0.0f, alpha), 1.0f);
@@ -760,8 +760,6 @@ static wmOperatorStatus paint_weight_gradient_exec(bContext *C, wmOperator *op)
   int y_start = RNA_int_get(op->ptr, "ystart");
   int x_end = RNA_int_get(op->ptr, "xend");
   int y_end = RNA_int_get(op->ptr, "yend");
-  const float sco_start[2] = {float(x_start), float(y_start)};
-  const float sco_end[2] = {float(x_end), float(y_end)};
   const bool is_interactive = (gesture != nullptr);
 
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
@@ -808,14 +806,23 @@ static wmOperatorStatus paint_weight_gradient_exec(bContext *C, wmOperator *op)
   data.select_vert = *attributes.lookup<bool>(".select_vert", bke::AttrDomain::Point);
   data.hide_vert = *attributes.lookup_or_default<bool>(
       ".hide_vert", bke::AttrDomain::Point, false);
-  data.sco_start = sco_start;
-  data.sco_end = sco_end;
-  data.sco_line_div = 1.0f / len_v2v2(sco_start, sco_end);
+  /* Unified gradient engine: raw (unclamped) factor preserves the legacy pipeline where
+   * BKE_brush_curve_strength_clamped() in gradientVert_update performs the clamping. */
+  ed::sculpt_paint::gradient::Params gradient_params;
+  gradient_params.type = (RNA_enum_get(op->ptr, "type") == WPAINT_GRADIENT_TYPE_RADIAL) ?
+                             ed::sculpt_paint::gradient::Type::Radial :
+                             ed::sculpt_paint::gradient::Type::Linear;
+  gradient_params.space = ed::sculpt_paint::gradient::Space::Screen;
+  gradient_params.start_ss = float2(float(x_start), float(y_start));
+  gradient_params.end_ss = float2(float(x_end), float(y_end));
+  gradient_params.clamp_to_range = false;
+  const std::unique_ptr<ed::sculpt_paint::gradient::Calculator> gradient_calculator =
+      ed::sculpt_paint::gradient::create(gradient_params);
+  data.calculator = gradient_calculator.get();
   data.def_nr = BKE_object_defgroup_active_index_get(ob) - 1;
   data.use_select = (mesh->editflag & (ME_EDIT_PAINT_FACE_SEL | ME_EDIT_PAINT_VERT_SEL)) != 0;
   data.vert_cache = vert_cache;
   data.vert_visit = nullptr;
-  data.type = RNA_enum_get(op->ptr, "type");
 
   {
     ToolSettings *ts = CTX_data_tool_settings(C);

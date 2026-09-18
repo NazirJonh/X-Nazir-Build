@@ -56,6 +56,7 @@
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_ccg.hh"
+#include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_crazyspace.hh"
@@ -1800,6 +1801,12 @@ bool BKE_paint_sculpt_face_selection_mask_supported(const Scene *scene,
       return false;
     }
   }
+  /* Color Gradient is an operator tool as well; both its color attribute and image canvas paths
+   * paint only the selected faces. */
+  if (active_tool_idname != nullptr && StringRef(active_tool_idname) == "builtin.color_gradient")
+  {
+    return true;
+  }
   const Brush *brush = BKE_paint_brush_for_read(&scene->toolsettings->sculpt->paint);
   return brush != nullptr &&
          BKE_paint_sculpt_brush_type_consumes_face_selection(brush->sculpt_brush_type);
@@ -1939,6 +1946,8 @@ bool BKE_paint_ensure(ToolSettings *ts, Paint **r_paint)
   }
   else if (reinterpret_cast<Sculpt **>(r_paint) == &ts->sculpt) {
     Sculpt *data = MEM_new<Sculpt>(__func__);
+    /* Embedded by value, so the DNA default leaves it without stops. */
+    BKE_colorband_init(&data->gradient_colorband, true);
 
     paint = &data->paint;
     paint_init_data(*paint);

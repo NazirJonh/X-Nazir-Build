@@ -101,7 +101,7 @@ static float image_paint_gradient_sample_t(const float t_raw,
   }
 }
 
-static float image_paint_gradient_remap_midpoint(const float t, const float midpoint)
+float image_paint_gradient_remap_midpoint(const float t, const float midpoint)
 {
   if (t <= 0.0f) {
     return 0.0f;

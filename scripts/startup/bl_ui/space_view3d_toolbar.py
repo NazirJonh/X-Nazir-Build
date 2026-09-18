@@ -354,6 +354,10 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
         ob = context.active_object
         if ob is None or ob.mode != 'SCULPT':
             return False
+        # The Color Gradient tool writes into the same material channels as the Paint brush.
+        tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
+        if tool is not None and tool.idname == "builtin.color_gradient":
+            return True
         # Material Paint channels only work with the Paint brush type; deformation brushes
         # (Grab, Smooth, etc.) have no material-channel sampling/blending behind them.
         brush = context.tool_settings.sculpt.brush
@@ -384,6 +388,32 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
                 context, layout, brush, settings, paint,
                 show_custom=(paint.canvas_source == 'MATERIAL_PAINT'),
             )
+
+
+class VIEW3D_PT_sculpt_color_gradient_ramp_advanced(Panel):
+    # Popover only, shown from the Color Gradient tool's settings. Registered in the topbar header
+    # so it doesn't appear as an extra sidebar panel (same as the Image Editor gradient's one).
+    bl_label = "Color Ramp Advanced"
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    @classmethod
+    def poll(cls, context):
+        return context.tool_settings.sculpt is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False  # No animation.
+
+        coba = context.tool_settings.sculpt.gradient_color_ramp
+
+        layout.prop(coba, "color_mode", text="Color Mode")
+        if coba.color_mode in {'HSV', 'HSL'}:
+            layout.prop(coba, "hue_interpolation", text="Interpolation")
+        else:
+            layout.prop(coba, "interpolation", text="Interpolation")
 
 
 class VIEW3D_PT_tools_brush_settings(Panel, View3DPaintBrushPanel):
@@ -3054,6 +3084,7 @@ classes = (
     VIEW3D_PT_slots_vertex_groups,
     VIEW3D_PT_tools_brush_select,
     VIEW3D_PT_paint_canvas_npanel,
+    VIEW3D_PT_sculpt_color_gradient_ramp_advanced,
     VIEW3D_PT_tools_brush_settings,
     VIEW3D_PT_tools_brush_color,
     VIEW3D_PT_tools_brush_swatches,

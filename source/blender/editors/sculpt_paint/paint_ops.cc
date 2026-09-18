@@ -1796,6 +1796,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_vertex_color_invert);
   WM_operatortype_append(PAINT_OT_vertex_color_levels);
   WM_operatortype_append(PAINT_OT_vertex_color_from_weight);
+  WM_operatortype_append(PAINT_OT_vertex_color_gradient);
 
   /* face-select */
   WM_operatortype_append(PAINT_OT_face_select_linked);

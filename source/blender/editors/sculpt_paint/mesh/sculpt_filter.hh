@@ -124,6 +124,11 @@ struct Cache {
   float start_filter_strength;
   bool has_dragged;
 
+  /* Declared (not defaulted inline) because #cloth_sim and #automasking hold pointers to types
+   * that are only forward-declared here: an implicit constructor/destructor would need those
+   * types complete at every call site (see #MEM_new / #MEM_delete users of this type). Defined
+   * out-of-line in `sculpt_filter_mesh.cc`, which includes both. */
+  Cache();
   ~Cache();
 };
 

@@ -1864,6 +1864,8 @@ void SCULPT_OT_cloth_filter(wmOperatorType *ot);
 
 namespace ed::sculpt_paint::color {
 void SCULPT_OT_color_filter(wmOperatorType *ot);
+void SCULPT_OT_color_gradient(wmOperatorType *ot);
+void SCULPT_OT_color_gradient_colors_flip(wmOperatorType *ot);
 }
 
 namespace ed::sculpt_paint::mask {

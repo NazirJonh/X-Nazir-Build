@@ -8809,6 +8809,17 @@ def km_3d_view_tool_sculpt_color_filter(params):
     )
 
 
+def km_3d_view_tool_sculpt_color_gradient(params):
+    return (
+        "3D View Tool: Sculpt, Color Gradient",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("sculpt.color_gradient", params.tool_maybe_tweak_event, None),
+            ("sculpt.color_gradient_colors_flip", {"type": 'X', "value": 'PRESS'}, None),
+        ]},
+    )
+
+
 def km_3d_view_tool_sculpt_mask_by_color(params):
     return (
         "3D View Tool: Sculpt, Mask by Color",
@@ -8889,6 +8900,16 @@ def km_3d_view_tool_paint_weight_gradient(params):
         {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
         {"items": [
             ("paint.weight_gradient", params.tool_maybe_tweak_event, None),
+        ]},
+    )
+
+
+def km_3d_view_tool_paint_vertex_gradient(params):
+    return (
+        "3D View Tool: Paint Vertex, Gradient",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paint.vertex_color_gradient", params.tool_maybe_tweak_event, None),
         ]},
     )
 
@@ -9665,6 +9686,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_mesh_filter(params),
         km_3d_view_tool_sculpt_cloth_filter(params),
         km_3d_view_tool_sculpt_color_filter(params),
+        km_3d_view_tool_sculpt_color_gradient(params),
         km_3d_view_tool_sculpt_mask_by_color(params),
         km_3d_view_tool_sculpt_mask_by_topology_island(params),
         km_3d_view_tool_sculpt_face_set_edit(params),
@@ -9672,6 +9694,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_paint_weight_sample_weight(params),
         km_3d_view_tool_paint_weight_sample_vertex_group(params),
         km_3d_view_tool_paint_weight_gradient(params),
+        km_3d_view_tool_paint_vertex_gradient(params),
         km_3d_view_tool_paint_grease_pencil_primitive_line(params),
         km_3d_view_tool_paint_grease_pencil_primitive_polyline(params),
         km_3d_view_tool_paint_grease_pencil_primitive_box(params),

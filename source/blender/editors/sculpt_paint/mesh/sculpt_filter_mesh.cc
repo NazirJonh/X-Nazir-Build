@@ -120,6 +120,7 @@ void zero_disabled_axis_components(const filter::Cache &filter_cache,
   }
 }
 
+Cache::Cache() = default;
 Cache::~Cache() = default;
 
 void cache_init(bContext *C,

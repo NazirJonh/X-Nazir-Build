@@ -1812,6 +1812,22 @@ enum eSculptMultiObjectEditScope : int {
   SCULPT_MULTI_OBJECT_EDIT_ACTIVE = 1,
 };
 
+/** #Sculpt::gradient_type */
+enum eSculptGradientType : int8_t {
+  /** Screen-space gradient along the drag line. */
+  SCULPT_GRADIENT_LINEAR = 0,
+  /** Surface gradient around the point under the cursor, in the plane of its normal. */
+  SCULPT_GRADIENT_RADIAL = 1,
+};
+
+/** #Sculpt::gradient_color_source */
+enum eSculptGradientColorSource : int8_t {
+  /** Primary color at the start, secondary color at the end. */
+  SCULPT_GRADIENT_COLOR_SOURCE_COLORS = 0,
+  /** #Sculpt::gradient_colorband. */
+  SCULPT_GRADIENT_COLOR_SOURCE_RAMP = 1,
+};
+
 /** #Sculpt::paint_curve_radius_display_mode */
 enum eSculptPaintCurveRadiusDisplayMode : int8_t {
   /** Show radius handles for all points. */
@@ -1904,6 +1920,33 @@ struct Sculpt {
    */
   float sculpt_layer_preview_threshold = 0.01f;
   float sculpt_layer_preview_opacity = 0.75f;
+
+  /* Color Gradient tool (`SCULPT_OT_color_gradient`). Appended for the same layout reason as the
+   * layer preview members above. */
+  /** #eSculptGradientType */
+  int8_t gradient_type = SCULPT_GRADIENT_LINEAR;
+  /** #eImagePaint_GradientRepeat */
+  int8_t gradient_repeat = 0;
+  /** #eSculptGradientColorSource */
+  int8_t gradient_color_source = SCULPT_GRADIENT_COLOR_SOURCE_COLORS;
+  char _pad_gradient0[1] = {};
+  /** #IMB_BlendMode */
+  short gradient_blend_mode = 0;
+  char _pad_gradient1[2] = {};
+  float gradient_opacity = 1.0f;
+  /** Scene-linear RGBA start / end colors for #SCULPT_GRADIENT_COLOR_SOURCE_COLORS. The tool keeps
+   * its own colors because the unified paint colors have no alpha. */
+  float gradient_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float gradient_secondary_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  /* Pad so the embedded #ColorBand starts on an 8-byte boundary. */
+  char _pad_gradient2[4] = {};
+  /**
+   * Color ramp of the gradient when #gradient_color_source is
+   * #SCULPT_GRADIENT_COLOR_SOURCE_RAMP. Embedded by value, so it needs a runtime
+   * #BKE_colorband_init: see #BKE_paint_ensure, #blo_update_defaults_scene and
+   * #blo_do_versions_520.
+   */
+  struct ColorBand gradient_colorband;
 };
 
 struct CurvesSculpt {

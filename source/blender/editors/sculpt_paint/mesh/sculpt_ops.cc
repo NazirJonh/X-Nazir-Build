@@ -2179,6 +2179,8 @@ void operatortypes_sculpt()
   WM_operatortype_append(asset_drop::SCULPT_OT_mesh_asset_drop);
 
   WM_operatortype_append(color::SCULPT_OT_color_filter);
+  WM_operatortype_append(color::SCULPT_OT_color_gradient);
+  WM_operatortype_append(color::SCULPT_OT_color_gradient_colors_flip);
   WM_operatortype_append(mask::SCULPT_OT_mask_by_color);
   WM_operatortype_append(mask::SCULPT_OT_mask_by_topology_island);
   WM_operatortype_append(dyntopo::SCULPT_OT_dyntopo_detail_size_edit);

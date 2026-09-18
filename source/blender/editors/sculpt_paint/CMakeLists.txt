@@ -55,6 +55,7 @@ set(SRC
   paint_curve_slide.cc
   paint_curve_sync.cc
   paint_curve_undo.cc
+  paint_gradient_core.cc
   paint_ops.cc
   paint_texture_ops.cc
   paint_sample_color.cc
@@ -196,6 +197,7 @@ set(SRC
   paint_curve_patch_sampler.hh
   paint_curve_patch_session.hh
 paint_intern.hh
+  paint_gradient_core.hh
   paint_image_curve_patch.hh
   paint_image_curve_patch_anchor.hh
   paint_image_stroke_hook.hh
@@ -306,6 +308,7 @@ set(LIB
 if(WITH_GTESTS)
   set(TEST_SRC
     mesh/mesh_brush_common_tests.cc
+    mesh/paint_gradient_core_tests.cc
     mesh/paint_test.cc
     mesh/paint_image_select_warp_tests.cc
     mesh/paint_image_uv_geom_tests.cc

@@ -1996,6 +1996,51 @@ class _defs_sculpt:
         )
 
     @ToolDef.from_fn
+    def color_gradient():
+        def draw_settings(context, layout, _tool):
+            settings = context.tool_settings.sculpt
+            region_is_header = context.region.type == 'TOOL_HEADER'
+
+            layout.prop(settings, "gradient_type", text="" if region_is_header else "Type")
+            row = layout.row(align=True)
+            row.prop(settings, "gradient_color_source", expand=True)
+            if settings.gradient_color_source == 'COLORS':
+                row = layout.row(align=True)
+                if region_is_header:
+                    row.ui_units_x = 4
+                row.prop(settings, "gradient_color", text="")
+                row.prop(settings, "gradient_secondary_color", text="")
+                row.operator("sculpt.color_gradient_colors_flip", icon='FILE_REFRESH', text="")
+            else:
+                layout.template_color_ramp(
+                    settings, "gradient_color_ramp", expand=True, compact=region_is_header,
+                )
+                layout.operator("sculpt.color_gradient_colors_flip", icon='ARROW_LEFTRIGHT', text="Flip")
+            # Color Mode / Interpolation live on the ramp but drive the Colors source as well.
+            layout.popover("VIEW3D_PT_sculpt_color_gradient_ramp_advanced", text="Color Ramp Advanced")
+            layout.prop(settings, "gradient_opacity", text="Opacity", slider=True)
+            layout.prop(settings, "gradient_blend_mode", text="Blend")
+            layout.prop(settings, "gradient_repeat", text="Repeat")
+            if (
+                    not region_is_header and
+                    context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}
+            ):
+                from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
+                draw_material_paint_channel_toggles(
+                    layout, settings.brush, settings,
+                    show_custom=(context.tool_settings.paint_mode.canvas_source == 'MATERIAL_PAINT'),
+                )
+
+        return dict(
+            idname="builtin.color_gradient",
+            label="Color Gradient",
+            icon="ops.paint.weight_gradient",
+            widget=None,
+            keymap=(),
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def mask_by_color():
         def draw_settings(_context, layout, tool):
             props = tool.operator_properties("sculpt.mask_by_color")
@@ -2125,6 +2170,22 @@ class _defs_vertex_paint:
             icon="brush.paint_vertex.smear",
             options={'USE_BRUSHES'},
             brush_type='SMEAR',
+        )
+
+    @ToolDef.from_fn
+    def gradient():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("paint.vertex_color_gradient")
+            row = layout.row()
+            row.prop(props, "type", expand=True)
+
+        return dict(
+            idname="builtin.vertex_gradient",
+            label="Gradient",
+            icon="ops.paint.weight_gradient",
+            widget=None,
+            keymap=(),
+            draw_settings=draw_settings,
         )
 
 
@@ -4298,6 +4359,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.clone,
             _defs_sculpt.layer_eraser,
             _defs_sculpt.texture_fill,
+            _defs_sculpt.color_gradient,
             None,
             _defs_transform.translate,
             _defs_transform.rotate,
@@ -4337,6 +4399,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_vertex_paint.blur,
             _defs_vertex_paint.average,
             _defs_vertex_paint.smear,
+            _defs_vertex_paint.gradient,
             None,
             lambda context: (
                 VIEW3D_PT_tools_active._tools_select

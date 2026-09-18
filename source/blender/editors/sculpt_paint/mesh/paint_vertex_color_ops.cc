@@ -6,25 +6,38 @@
  * \ingroup edsculpt
  */
 
+#include "MEM_guardedalloc.h"
+
+#include "DNA_brush_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_types.h"
 
 #include "BLI_array.hh"
+#include "BLI_bitmap.h"
 #include "BLI_color.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_math_color.h"
+#include "BLI_math_vector.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
 #include "BKE_attribute_math.hh"
+#include "BKE_brush.hh"
+#include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_geometry_set.hh"
 #include "BKE_mesh.hh"
+#include "BKE_mesh_iterators.hh"
+#include "BKE_object.hh"
+#include "BKE_paint.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_query.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -33,9 +46,14 @@
 #include "WM_types.hh"
 
 #include "ED_mesh.hh"
+#include "ED_view3d.hh"
 
 #include "../paint_intern.hh" /* own include */
+#include "../paint_gradient_core.hh"
 #include "sculpt_intern.hh"
+
+#include <algorithm>
+#include <memory>
 
 namespace blender {
 
@@ -513,6 +531,425 @@ void PAINT_OT_vertex_color_levels(wmOperatorType *ot)
       ot->srna, "offset", 0.0f, -1.0f, 1.0f, "Offset", "Value to add to colors", -1.0f, 1.0f);
   RNA_def_float(
       ot->srna, "gain", 1.0f, 0.0f, FLT_MAX, "Gain", "Value to multiply colors by", 0.0f, 10.0f);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Vertex Color Gradient Operator
+ *
+ * Straight-line gesture that blends the active brush color over the active color
+ * attribute, built on the shared `gradient::Calculator` engine
+ * (`paint_gradient_core`). Structure and UX mirror `PAINT_OT_weight_gradient`:
+ * - vertex screen positions are cached once on init, so later previews cannot feed
+ *   back on already-modified geometry,
+ * - every preview blends from the init snapshot, making repeated previews idempotent,
+ * - cancelling restores the snapshot (regular undo covers the finished stroke).
+ *
+ * Direction and brush-curve semantics match the weight gradient: the brush color is
+ * strongest at the drag start and falls off toward the original color at the end
+ * (`BKE_brush_curve_strength_clamped` maps the raw factor as a distance).
+ * \{ */
+
+enum {
+  VC_GRADIENT_TYPE_LINEAR = 0,
+  VC_GRADIENT_TYPE_RADIAL = 1,
+};
+
+/* Gesture-owned snapshot (plain MEM allocations: `wmGesture.user_data` bypasses
+ * constructors/destructors, so no `Array`, `VArray` or `std::string` members here). */
+struct VCGradient_State {
+  float *vert_sco;         /* [verts_num * 2] cached screen positions, FLT_MAX == skip. */
+  float *orig_colors;      /* [totelem * 4] decoded snapshot (RGBA floats). */
+  BLI_bitmap *elem_selected; /* [totelem] paintable domain elements. */
+  int verts_num;
+  int totelem;
+  bke::AttrDomain domain;
+};
+
+struct VCGradient_InitData {
+  ARegion *region;
+  VCGradient_State *state;
+  BLI_bitmap *vert_visit;
+};
+
+static void vcgradient_init_mapfunc(void *user_data,
+                                    int index,
+                                    const float co[3],
+                                    const float /*no*/[3])
+{
+  VCGradient_InitData *data = static_cast<VCGradient_InitData *>(user_data);
+  /* Generative modifiers may map several evaluated verts onto one original index: the first
+   * position wins, mirroring the weight gradient. */
+  if (BLI_BITMAP_TEST(data->vert_visit, index)) {
+    return;
+  }
+  float *sco = &data->state->vert_sco[index * 2];
+  if (ED_view3d_project_float_object(
+          data->region, co, sco, V3D_PROJ_TEST_CLIP_BB | V3D_PROJ_TEST_CLIP_NEAR) !=
+      V3D_PROJ_RET_OK)
+  {
+    sco[0] = FLT_MAX;
+    sco[1] = FLT_MAX;
+  }
+  BLI_BITMAP_ENABLE(data->vert_visit, index);
+}
+
+static VCGradient_State *vcgradient_state_create(bContext *C,
+                                                 Object &ob,
+                                                 Mesh &mesh,
+                                                 ARegion *region)
+{
+  if (!ED_mesh_color_ensure(&mesh, nullptr)) {
+    return nullptr;
+  }
+  if (mesh.active_color_attribute == nullptr) {
+    return nullptr;
+  }
+
+  bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+  bke::GAttributeWriter color_attribute = attributes.lookup_for_write(mesh.active_color_attribute);
+  if (!color_attribute) {
+    return nullptr;
+  }
+  const bke::AttrDomain domain = color_attribute.domain;
+  const int totelem = int(color_attribute.varray.size());
+  if (totelem <= 0 || mesh.verts_num <= 0) {
+    return nullptr;
+  }
+
+  VCGradient_State *state = MEM_new<VCGradient_State>(__func__);
+  state->domain = domain;
+  state->verts_num = mesh.verts_num;
+  state->totelem = totelem;
+  state->vert_sco = MEM_new_array<float>(size_t(mesh.verts_num) * 2, "VCGradient sco");
+  state->orig_colors = MEM_new_array<float>(size_t(totelem) * 4, "VCGradient orig");
+  state->elem_selected = BLI_BITMAP_NEW(totelem, "VCGradient selected");
+
+  /* Snapshot originals decoded to float. */
+  color_attribute.varray.type().to_static_type<ColorGeometry4f, ColorGeometry4b>(
+      [&]<typename T>() {
+        for (int i = 0; i < totelem; i++) {
+          ColorGeometry4f c;
+          if constexpr (std::is_same_v<T, ColorGeometry4f>) {
+            c = color_attribute.varray.get<ColorGeometry4f>(i);
+          }
+          else {
+            c = color::decode(color_attribute.varray.get<ColorGeometry4b>(i));
+          }
+          for (int ch = 0; ch < 4; ch++) {
+            state->orig_colors[i * 4 + ch] = c[ch];
+          }
+        }
+      });
+  color_attribute.finish();
+
+  /* Paintable elements: face/vertex selection, minus hidden verts. */
+  IndexMaskMemory sel_memory;
+  const IndexMask selection = get_selected_indices(mesh, domain, sel_memory);
+  selection.foreach_index([&](const int i) { BLI_BITMAP_ENABLE(state->elem_selected, i); });
+  const VArray<bool> hide_vert = *attributes.lookup_or_default<bool>(
+      ".hide_vert", bke::AttrDomain::Point, false);
+  if (domain == bke::AttrDomain::Point) {
+    for (int i = 0; i < totelem; i++) {
+      if (hide_vert[i]) {
+        BLI_BITMAP_DISABLE(state->elem_selected, i);
+      }
+    }
+  }
+  else {
+    const Span<int> corner_verts = mesh.corner_verts();
+    for (int i = 0; i < totelem; i++) {
+      if (hide_vert[corner_verts[i]]) {
+        BLI_BITMAP_DISABLE(state->elem_selected, i);
+      }
+    }
+  }
+
+  /* Cache screen positions from the evaluated mesh (correct under modifiers). */
+  for (int i = 0; i < mesh.verts_num; i++) {
+    state->vert_sco[i * 2] = FLT_MAX;
+    state->vert_sco[i * 2 + 1] = FLT_MAX;
+  }
+  ED_view3d_init_mats_rv3d(&ob, static_cast<RegionView3D *>(region->regiondata));
+  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  const Object *ob_eval = DEG_get_evaluated(depsgraph, &ob);
+  const Mesh *mesh_eval = BKE_object_get_evaluated_mesh(ob_eval);
+  BLI_bitmap *vert_visit = BLI_BITMAP_NEW(mesh.verts_num, __func__);
+  VCGradient_InitData init_data{region, state, vert_visit};
+  BKE_mesh_foreach_mapped_vert(mesh_eval, vcgradient_init_mapfunc, &init_data, MESH_FOREACH_NOP);
+  MEM_delete(vert_visit);
+  return state;
+}
+
+/* Paint (`vert_weight != nullptr`) or restore (`vert_weight == nullptr`) the snapshot. */
+static bool vcgradient_write_colors(Mesh &mesh,
+                                    VCGradient_State *state,
+                                    const float *vert_weight,
+                                    const float3 &brush_color)
+{
+  bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+  if (mesh.active_color_attribute == nullptr) {
+    return false;
+  }
+  bke::GAttributeWriter color_attribute = attributes.lookup_for_write(mesh.active_color_attribute);
+  if (!color_attribute || color_attribute.domain != state->domain ||
+      int(color_attribute.varray.size()) != state->totelem)
+  {
+    return false;
+  }
+  const int totelem = state->totelem;
+  const Span<int> corner_verts = (state->domain == bke::AttrDomain::Corner) ?
+                                     mesh.corner_verts() :
+                                     Span<int>();
+  const float *orig = state->orig_colors;
+  color_attribute.varray.type().to_static_type<ColorGeometry4f, ColorGeometry4b>(
+      [&]<typename T>() {
+        for (int i = 0; i < totelem; i++) {
+          ColorGeometry4f mixed;
+          if (vert_weight == nullptr) {
+            for (int ch = 0; ch < 4; ch++) {
+              mixed[ch] = orig[i * 4 + ch];
+            }
+          }
+          else {
+            if (!BLI_BITMAP_TEST(state->elem_selected, i)) {
+              continue;
+            }
+            const int vert = (state->domain == bke::AttrDomain::Point) ? i : corner_verts[i];
+            const float w = vert_weight[vert];
+            for (int ch = 0; ch < 3; ch++) {
+              mixed[ch] = orig[i * 4 + ch] + (brush_color[ch] - orig[i * 4 + ch]) * w;
+            }
+            mixed[3] = orig[i * 4 + 3];
+          }
+          if constexpr (std::is_same_v<T, ColorGeometry4f>) {
+            color_attribute.varray.set_by_copy(i, &mixed);
+          }
+          else {
+            const ColorGeometry4b encoded = color::encode(mixed);
+            color_attribute.varray.set_by_copy(i, &encoded);
+          }
+        }
+      });
+  color_attribute.finish();
+  return true;
+}
+
+static void vcgradient_state_update(Object &ob,
+                                    Mesh &mesh,
+                                    VCGradient_State *state,
+                                    const ed::sculpt_paint::gradient::Calculator &calculator,
+                                    const Brush &brush,
+                                    const float3 &brush_color,
+                                    const float brush_alpha)
+{
+  /* Positions are cached, so no mesh mapping is needed on update. */
+  Array<float> vert_weight(state->verts_num, 0.0f);
+  const float *sco = state->vert_sco;
+  for (int i = 0; i < state->verts_num; i++) {
+    const float x = sco[i * 2];
+    if (x == FLT_MAX) {
+      continue;
+    }
+    const float t = calculator.evaluate(float3(x, sco[i * 2 + 1], 0.0f));
+    vert_weight[i] = BKE_brush_curve_strength_clamped(&brush, std::max(0.0f, t), 1.0f) *
+                     brush_alpha;
+  }
+  if (vcgradient_write_colors(mesh, state, vert_weight.data(), brush_color)) {
+    tag_object_after_update(ob);
+  }
+}
+
+static void vcgradient_state_restore(Object &ob, Mesh &mesh, VCGradient_State *state)
+{
+  const float3 unused(0.0f);
+  if (vcgradient_write_colors(mesh, state, nullptr, unused)) {
+    tag_object_after_update(ob);
+  }
+}
+
+static void vcgradient_state_free(VCGradient_State *state)
+{
+  if (state == nullptr) {
+    return;
+  }
+  MEM_delete(state->vert_sco);
+  MEM_delete(state->orig_colors);
+  MEM_delete(state->elem_selected);
+  MEM_delete(state);
+}
+
+static wmOperatorStatus paint_vertex_color_gradient_exec(bContext *C, wmOperator *op)
+{
+  wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
+  ARegion *region = CTX_wm_region(C);
+  Object *ob = CTX_data_active_object(C);
+  Mesh *mesh = (ob != nullptr) ? BKE_mesh_from_object(ob) : nullptr;
+  if (mesh == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const bool is_interactive = (gesture != nullptr);
+
+  bool created_here = false;
+  VCGradient_State *state = nullptr;
+  if (is_interactive) {
+    state = static_cast<VCGradient_State *>(gesture->user_data.data);
+    if (state == nullptr) {
+      state = vcgradient_state_create(C, *ob, *mesh, region);
+      if (state == nullptr) {
+        return OPERATOR_CANCELLED;
+      }
+      gesture->user_data.data = state;
+      gesture->user_data.use_free = false;
+      created_here = true;
+    }
+  }
+  else {
+    state = vcgradient_state_create(C, *ob, *mesh, region);
+    if (state == nullptr) {
+      return OPERATOR_CANCELLED;
+    }
+    created_here = true;
+  }
+
+  ToolSettings *ts = CTX_data_tool_settings(C);
+  VPaint *vp = (ts != nullptr) ? ts->vpaint : nullptr;
+  Brush *brush = (vp != nullptr) ? BKE_paint_brush(&vp->paint) : nullptr;
+  if (brush == nullptr) {
+    if (created_here) {
+      vcgradient_state_free(state);
+      if (is_interactive) {
+        gesture->user_data.data = nullptr;
+      }
+    }
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_curvemapping_init(brush->curve_distance_falloff);
+
+  /* Raw (unclamped) factor: the brush falloff curve below performs the clamping, matching the
+   * weight gradient pipeline. */
+  ed::sculpt_paint::gradient::Params params;
+  params.type = (RNA_enum_get(op->ptr, "type") == VC_GRADIENT_TYPE_RADIAL) ?
+                    ed::sculpt_paint::gradient::Type::Radial :
+                    ed::sculpt_paint::gradient::Type::Linear;
+  params.space = ed::sculpt_paint::gradient::Space::Screen;
+  params.start_ss = float2(float(RNA_int_get(op->ptr, "xstart")),
+                           float(RNA_int_get(op->ptr, "ystart")));
+  params.end_ss = float2(float(RNA_int_get(op->ptr, "xend")),
+                         float(RNA_int_get(op->ptr, "yend")));
+  params.clamp_to_range = false;
+  const std::unique_ptr<ed::sculpt_paint::gradient::Calculator> calculator =
+      ed::sculpt_paint::gradient::create(params);
+
+  const float3 brush_color = BKE_brush_color_get(&vp->paint, brush);
+  vcgradient_state_update(*ob, *mesh, state, *calculator, *brush, brush_color, brush->alpha);
+
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  if (!is_interactive) {
+    vcgradient_state_free(state);
+  }
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus paint_vertex_color_gradient_invoke(bContext *C,
+                                                           wmOperator *op,
+                                                           const wmEvent *event)
+{
+  Object *ob = CTX_data_active_object(C);
+  Mesh *mesh = (ob != nullptr) ? BKE_mesh_from_object(ob) : nullptr;
+  if (mesh == nullptr || !ED_mesh_color_ensure(mesh, nullptr)) {
+    return OPERATOR_CANCELLED;
+  }
+  return WM_gesture_straightline_invoke(C, op, event);
+}
+
+static wmOperatorStatus paint_vertex_color_gradient_modal(bContext *C,
+                                                          wmOperator *op,
+                                                          const wmEvent *event)
+{
+  wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
+  VCGradient_State *state = static_cast<VCGradient_State *>(gesture->user_data.data);
+  Object *ob = CTX_data_active_object(C);
+
+  const wmOperatorStatus ret = WM_gesture_straightline_modal(C, op, event);
+  if (ret & OPERATOR_FINISHED) {
+    /* The gesture already ran the final exec (live preview is the final state). */
+    if (state != nullptr) {
+      vcgradient_state_free(state);
+      gesture->user_data.data = nullptr;
+    }
+    if (ob != nullptr) {
+      WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+    }
+    return OPERATOR_FINISHED;
+  }
+  if (ret & OPERATOR_CANCELLED) {
+    if (state != nullptr && ob != nullptr) {
+      Mesh *mesh = BKE_mesh_from_object(ob);
+      if (mesh != nullptr) {
+        vcgradient_state_restore(*ob, *mesh, state);
+      }
+      vcgradient_state_free(state);
+      gesture->user_data.data = nullptr;
+      WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+    }
+    return OPERATOR_CANCELLED;
+  }
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static void paint_vertex_color_gradient_cancel(bContext *C, wmOperator *op)
+{
+  wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
+  VCGradient_State *state = (gesture != nullptr) ?
+                                static_cast<VCGradient_State *>(gesture->user_data.data) :
+                                nullptr;
+  Object *ob = CTX_data_active_object(C);
+  if (state != nullptr && ob != nullptr) {
+    Mesh *mesh = BKE_mesh_from_object(ob);
+    if (mesh != nullptr) {
+      vcgradient_state_restore(*ob, *mesh, state);
+    }
+    vcgradient_state_free(state);
+    if (gesture != nullptr) {
+      gesture->user_data.data = nullptr;
+    }
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  }
+  WM_gesture_straightline_cancel(C, op);
+}
+
+void PAINT_OT_vertex_color_gradient(wmOperatorType *ot)
+{
+  static const EnumPropertyItem gradient_types[] = {
+      {VC_GRADIENT_TYPE_LINEAR, "LINEAR", 0, "Linear", ""},
+      {VC_GRADIENT_TYPE_RADIAL, "RADIAL", 0, "Radial", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  PropertyRNA *prop;
+
+  /* identifiers */
+  ot->name = "Vertex Color Gradient";
+  ot->idname = "PAINT_OT_vertex_color_gradient";
+  ot->description = "Draw a line to apply a color gradient to the active color attribute";
+
+  /* API callbacks. */
+  ot->invoke = paint_vertex_color_gradient_invoke;
+  ot->modal = paint_vertex_color_gradient_modal;
+  ot->exec = paint_vertex_color_gradient_exec;
+  ot->poll = vertex_paint_poll_ignore_tool;
+  ot->cancel = paint_vertex_color_gradient_cancel;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
+
+  prop = RNA_def_enum(ot->srna, "type", gradient_types, 0, "Type", "");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  WM_operator_properties_gesture_straightline(ot, WM_CURSOR_EDIT);
 }
 
 /** \} */

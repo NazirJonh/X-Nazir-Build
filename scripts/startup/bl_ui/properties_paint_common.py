@@ -1600,6 +1600,56 @@ def _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_la
         col.prop(channels[channel_id], "use", text=toggle_labels[channel_id], toggle=True)
 
 
+_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS = {
+    'BASE_COLOR': "Color",
+    'METALLIC': "Metal",
+    'ROUGHNESS': "Rough",
+    'SPECULAR': "Spec",
+    'NORMAL': "Normal",
+    'HEIGHT': "Height",
+    'ALPHA': "Alpha",
+    'AO': "AO",
+    'EMISSION': "Emit",
+    'CUSTOM': "Custom",
+}
+
+
+def _material_paint_toggle_ids(paint, show_custom):
+    """Return ``(visible, toggle_ids)``: the visible channel set and the channels offered as toggles.
+
+    ``show_custom`` is only True for the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas,
+    so it also selects the vertex-storable channel subset.
+    """
+    channel_ids = _MATERIAL_PAINT_CHANNEL_UI_ORDER
+    if show_custom:
+        channel_ids = [
+            channel_id for channel_id in channel_ids if channel_id in _MATERIAL_PAINT_VERTEX_CHANNELS
+        ]
+    # Falling back to every channel keeps the list usable if the panel is drawn for a mode without
+    # its own visibility set; the paint helpers still gate what a stroke writes.
+    visible = set(paint.visible_material_channels) if paint is not None else set(channel_ids)
+    toggle_ids = [channel_id for channel_id in channel_ids if channel_id in visible]
+    if show_custom:
+        toggle_ids.append('CUSTOM')
+    return visible, toggle_ids
+
+
+def draw_material_paint_channel_toggles(layout, brush, paint, *, show_custom):
+    """Draw only the channel enable toggles of the PBR Paint UI (one or more channels).
+
+    For tools that write into the brush's material channels without being a brush themselves,
+    such as the Sculpt Color Gradient tool.
+    """
+    material_paint = brush.material_paint if brush is not None else None
+    if material_paint is None:
+        return
+    channels = {channel.channel: channel for channel in material_paint.channels}
+    _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom)
+    _draw_material_paint_channel_toggles(
+        layout, channels, toggle_ids, _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
+    )
+
+
 def _material_paint_channel_socket_color(channel_id):
     """Socket color matching Principled BSDF socket colors."""
     if channel_id in ('BASE_COLOR', 'EMISSION'):
@@ -2338,29 +2388,8 @@ def draw_material_paint_channels(
     # Labels may be clipped in very tight cells; the short labels below keep controls readable.
     # `show_custom` is only passed True for the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color)
     # canvas, so it also selects the vertex-storable channel subset here.
-    channel_ids = _MATERIAL_PAINT_CHANNEL_UI_ORDER
-    if show_custom:
-        channel_ids = [
-            channel_id for channel_id in channel_ids if channel_id in _MATERIAL_PAINT_VERTEX_CHANNELS
-        ]
-    # Falling back to every channel keeps the list usable if the panel is drawn for a mode without
-    # its own visibility set; the paint helpers still gate what a stroke writes.
-    visible = set(paint.visible_material_channels) if paint is not None else set(channel_ids)
-    toggle_ids = [channel_id for channel_id in channel_ids if channel_id in visible]
-    if show_custom:
-        toggle_ids.append('CUSTOM')
-    toggle_labels = {
-        'BASE_COLOR': "Color",
-        'METALLIC': "Metal",
-        'ROUGHNESS': "Rough",
-        'SPECULAR': "Spec",
-        'NORMAL': "Normal",
-        'HEIGHT': "Height",
-        'ALPHA': "Alpha",
-        'AO': "AO",
-        'EMISSION': "Emit",
-        'CUSTOM': "Custom",
-    }
+    visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom)
+    toggle_labels = _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS
 
     # Shared source-texture mapping is drawn before the channel toggles so it reads as a setup step
     # rather than being buried under whichever channel panels happen to be open.

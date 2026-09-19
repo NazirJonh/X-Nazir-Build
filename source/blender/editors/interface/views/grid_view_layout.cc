@@ -163,6 +163,17 @@ IndexRange BuildOnlyVisibleButtonsHelper::get_visible_range(
   if (force_visible_item && force_visible_item->is_filtered_visible()) {
     if (std::optional<int> item_idx = grid_view_find_filtered_item_index(*force_visible_item)) {
       if (!visible_items.contains(*item_idx)) {
+        /* Embedded windowed grids (e.g. the sculpt image grid) build ONLY the scroll window: the
+         * view's items are the rows starting at the scroll position, laid out from the viewport
+         * top. Shifting the range down to the force-visible item's row would drop every earlier
+         * row of that window and leave the viewport with just that (mostly empty) row. The
+         * force-visible item outside the visible rows is simply not built this frame; it comes
+         * back once scrolling brings its row into range (hosts that must reveal it adjust
+         * #GridSessionState::scroll_px instead). The region-View2D grids below only skip layout
+         * items and pad the skipped rows with spacers, so for them the shift is safe. */
+        if (embedded_v2d_) {
+          return visible_items;
+        }
         /* Move range so the first row contains #force_visible_item. */
         const int aligned_start = *item_idx - (*item_idx % cols_per_row_);
         return IndexRange(aligned_start, max_items_in_view);
@@ -345,15 +356,12 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
                                                                     nullptr);
   }
 
+  /* Region-View2D grids only: reveal the search-highlighted item by shifting the visible range
+   * (see #BuildOnlyVisibleButtonsHelper). Embedded windowed grids deliberately pass no
+   * force-visible item — their items are already limited to the scroll window, and shifting the
+   * range there would drop whole rows of the viewport (see #get_visible_range). */
   const AbstractGridViewItem *force_visible_item = dynamic_cast<const AbstractGridViewItem *>(
       grid_view.search_highlight_item());
-  if (!force_visible_item && embedded_v2d) {
-    grid_view.foreach_filtered_item([&](AbstractGridViewItem &item) {
-      if (item.is_active()) {
-        force_visible_item = &item;
-      }
-    });
-  }
 
   BuildOnlyVisibleButtonsHelper build_visible_helper(
       v2d, grid_view, cols_per_row, force_visible_item, embedded_v2d);

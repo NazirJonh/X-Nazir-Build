@@ -10418,6 +10418,7 @@ static void rna_def_nodes(BlenderRNA *brna)
   define("ShaderNode", "ShaderNodeClamp", def_clamp);
   define("ShaderNode", "ShaderNodeCombineColor", def_sh_combsep_color);
   define("ShaderNode", "ShaderNodeCombineXYZ");
+  define("ShaderNode", "ShaderNodeComposeColorAlpha");
   define("ShaderNode", "ShaderNodeDisplacement", def_sh_displacement);
   define("ShaderNode", "ShaderNodeEeveeSpecular");
   define("ShaderNode", "ShaderNodeEmission");

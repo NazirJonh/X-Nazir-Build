@@ -42,6 +42,7 @@ set(SRC
   nodes/node_shader_camera.cc
   nodes/node_shader_clamp.cc
   nodes/node_shader_color_ramp.cc
+  nodes/node_shader_compose_color_alpha.cc
   nodes/node_shader_common.cc
   nodes/node_shader_curves.cc
   nodes/node_shader_displacement.cc

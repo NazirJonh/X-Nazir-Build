@@ -244,20 +244,27 @@ class ToolSelectPanelHelper:
             assert type(icon_name) is str
             icon_value = _icon_cache.get(icon_name)
             if icon_value is None:
-                dirname = bpy.utils.system_resource('DATAFILES', path="icons")
-                filepath = os.path.join(dirname, icon_name + ".dat")
-                try:
-                    icon_value = bpy.app.icons.new_triangles_from_file(filepath)
-                except Exception as ex:
-                    if not os.path.exists(filepath):
-                        print("Missing icons:", filepath, ex)
-                    else:
-                        print("Corrupt icon:", filepath, ex)
-                    # Use none as a fallback (avoids layout issues).
-                    if icon_name != "none":
-                        icon_value = ToolSelectPanelHelper._icon_value_from_icon_handle("none")
-                    else:
-                        icon_value = 0
+                # Tool icons normally use triangle geometry files, but built-in UI icons are also
+                # valid tool icons and do not have a corresponding file in `datafiles/icons`.
+                icon_item = bpy.types.UILayout.bl_rna.functions["label"].parameters["icon"].enum_items_static.get(
+                    icon_name)
+                if icon_item is not None:
+                    icon_value = icon_item.value
+                else:
+                    dirname = bpy.utils.system_resource('DATAFILES', path="icons")
+                    filepath = os.path.join(dirname, icon_name + ".dat")
+                    try:
+                        icon_value = bpy.app.icons.new_triangles_from_file(filepath)
+                    except Exception as ex:
+                        if not os.path.exists(filepath):
+                            print("Missing icons:", filepath, ex)
+                        else:
+                            print("Corrupt icon:", filepath, ex)
+                        # Use none as a fallback (avoids layout issues).
+                        if icon_name != "none":
+                            icon_value = ToolSelectPanelHelper._icon_value_from_icon_handle("none")
+                        else:
+                            icon_value = 0
                 _icon_cache[icon_name] = icon_value
             return icon_value
         else:

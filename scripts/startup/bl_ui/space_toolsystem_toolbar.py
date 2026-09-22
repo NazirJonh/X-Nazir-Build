@@ -2068,7 +2068,7 @@ class _defs_sculpt:
         return dict(
             idname="builtin.mask_by_topology_island",
             label="Mask Topology Island",
-            icon="ops.sculpt.mask_by_topology_island",
+            icon="EYEDROPPER",
             widget=None,
             cursor='EYEDROPPER',
             keymap=(),
@@ -2123,7 +2123,7 @@ class _defs_sculpt:
         return dict(
             idname="builtin.curves_edit",
             label="Curve Edit",
-            icon="ops.sculpt.face_set_edit",
+            icon="FORCE_CURVE",
             widget=None,
             cursor='CROSSHAIR',
             keymap="3D View Tool: Sculpt, Curves Edit",

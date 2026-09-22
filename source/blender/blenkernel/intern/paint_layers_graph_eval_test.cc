@@ -2872,6 +2872,79 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_computes_and_commits)
   EXPECT_NE(baked, nullptr);
 }
 
+/**
+ * ТЗ-29, test #3: unlike #heavy_bake_job_computes_and_commits, this row is never given an explicit
+ * bake structure -- AUTO mode, #MaterialPaintLayer::bake null. #BKE_paint_layers_bake_job_create is
+ * now the only place allowed to allocate one, and only for a row that passed every gate and is
+ * about to be queued. Before the fix, the job-create gate required `layer->bake != nullptr` up
+ * front, so a freshly authored heavy row with no bake was invisible to the async planner forever;
+ * this test must fail on that old code.
+ */
+TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_allocates_bake_for_a_row_with_none)
+{
+  const int size = 4;
+  ma = BKE_material_add(bmain, "HeavyJobNoBake");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Layer", nullptr, PaintLayerPlace::Above);
+  /* Four channels put the subtree over the AUTO/worker threshold, exactly like the job-create test
+   * above. */
+  for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                              PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+                                              PAINT_MATERIAL_CHANNEL_METALLIC,
+                                              PAINT_MATERIAL_CHANNEL_SPECULAR})
+  {
+    MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
+    ASSERT_NE(record, nullptr);
+    record->image = add_solid_image("Map", size, 128, 64, 32, 255);
+    record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  }
+  ASSERT_EQ(layer->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *layer));
+  ASSERT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *layer));
+  ASSERT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  ASSERT_NE(layer->bake, nullptr)
+      << "job_create must allocate the bake structure for a row it is about to queue";
+  BKE_paint_layers_bake_job_compute(*job);
+  EXPECT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+  EXPECT_NE(layer->bake, nullptr);
+  Image *baked = nullptr;
+  EXPECT_TRUE(
+      BKE_paint_layers_bake_substitute(*ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &baked));
+  EXPECT_NE(baked, nullptr);
+}
+
+/**
+ * ТЗ-29, test #6: #BKE_paint_layers_bake_heavy_pending is a pure predicate -- it must see a row that
+ * is heavy purely by subtree weight and has no bake structure at all, without allocating anything.
+ * Before the fix, its combined gate required `layer->bake != nullptr` before it would even look at
+ * `is_heavy`, so this row was invisible to it; this test must fail on that old code.
+ */
+TEST_F(PaintLayersGraphEvalTest, heavy_pending_sees_a_weight_heavy_row_with_no_bake)
+{
+  ma = BKE_material_add(bmain, "HeavyNoBake");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Layer", nullptr, PaintLayerPlace::Above);
+  for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                              PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+                                              PAINT_MATERIAL_CHANNEL_METALLIC,
+                                              PAINT_MATERIAL_CHANNEL_SPECULAR})
+  {
+    MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
+    ASSERT_NE(record, nullptr);
+    record->image = add_solid_image("Map", 4, 128, 64, 32, 255);
+    record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  }
+  ASSERT_EQ(layer->bake, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
+  EXPECT_EQ(layer->bake, nullptr) << "the predicate is read-only and must not allocate anything";
+}
+
 TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_drops_removed_row)
 {
   const int size = 4;

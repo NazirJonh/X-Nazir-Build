@@ -4482,6 +4482,188 @@ TEST_F(PaintLayersGenerateTest, paint_row_correction_opacity_rna_reaches_its_gra
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name ТЗ-29: no bake, no schedule -- the light-row gate
+ *
+ * A non-folder row's bake structure may only be allocated the instant it is about to render or be
+ * queued, never eagerly. A row light enough to stay live (#PAINT_LAYERS_AUTO_BAKE_NODES) keeps
+ * #MaterialPaintLayer::bake null forever: it is a final state, not a step toward a bake. Folders are
+ * untouched and keep their original gate (#BKE_paint_layers_is_folder).
+ * \{ */
+
+/** Test #1: a light Paint row's bake stays null after the synchronous planner runs. */
+TEST_F(PaintLayersGenerateTest, light_row_bake_ensure_leaves_no_bake_structure)
+{
+  /* One Base Color channel: weight 4 + 1 * 6 == 10, well under the AUTO threshold of 24. */
+  MaterialPaintLayer *light = add_paint_layer("Light", add_image("LightImg"));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *light));
+
+  bool changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(light->bake, nullptr);
+  /* row_is_substituted's own rule for a non-Material row is exactly this. */
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *light));
+}
+
+/**
+ * Test #2, defect A: a light row's opacity is a value edit, routed the way the Outliner's slider
+ * runs it (#rna_set_row_opacity), not the raw C API. #paint_layers_tag_value_edited (untouched by
+ * this task) only tags #MA_PAINT_LAYERS_REGEN when #paint_layer_or_ancestor_has_bake sees a non-null
+ * #MaterialPaintLayer::bake on the edited row or an ancestor. A rejected "allocate up front for
+ * every non-folder row" route would leave this light row's bake non-null (unrendered, invalid) and
+ * make every future opacity edit force a needless topology rebuild; this test fails under that route
+ * by both symptoms it names: the bake pointer itself, and the group/root staying unchanged.
+ */
+TEST_F(PaintLayersGenerateTest, light_row_opacity_edit_does_not_regen_or_rebuild)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *bottom_tree = layer_tree_find(*bmain, "Bottom");
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(bottom_tree, nullptr);
+  ASSERT_TRUE(group_mix_sentinel_set(*bottom_tree, 0.6f));
+
+  bool changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  ASSERT_EQ(bottom->bake, nullptr)
+      << "a naive up-front allocation for every non-folder row would leave a bake structure here";
+  EXPECT_FALSE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0);
+
+  /* The RNA path: MaterialPaintLayer.opacity, exactly the Outliner's slider. */
+  rna_set_row_opacity(*ma, *bottom, 42.0f);
+
+  EXPECT_EQ(bottom->bake, nullptr);
+  EXPECT_FALSE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0)
+      << "an opacity-only edit on a permanently bakeless row must not tag a topology rebuild";
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), bottom_tree);
+  EXPECT_TRUE(group_mix_sentinel_get(*bottom_tree, 0.6f));
+}
+
+/**
+ * Test #4, defect Б: two light rows that never get a bake structure must not stall the
+ * #MA_PAINT_LAYERS_BAKE_STALE drain -- the pending scan (unchanged by this task) already skips a
+ * row with a null bake, so it is blind to them, exactly as it must be. One real candidate (ALWAYS
+ * mode, explicit size) actually bakes and is the only row the drain has to see settle. A rejected
+ * "allocate up front" route would leave the two light rows with a non-null, permanently-invalid
+ * bake, which the pending scan *does* see -- the drain would never clear.
+ */
+TEST_F(PaintLayersGenerateTest, bake_stale_drains_with_permanently_bakeless_light_rows)
+{
+  add_paint_layer("LightA", add_image("LightA"));
+  add_paint_layer("LightB", add_image("LightB"));
+  MaterialPaintLayer *real = add_paint_layer("RealCandidate", add_image("RealCandidateImg"));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *real, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *real, 4));
+
+  ma->paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *real));
+  EXPECT_FALSE(BKE_paint_layers_bake_stale_get(*ma))
+      << "two permanently bakeless light rows must not stall the stale drain";
+}
+
+/**
+ * Test #5: RNA-parity guard. #BKE_paint_layers_bake_mode_get already reads a null bake as AUTO; a
+ * light row's mode must still read AUTO after the planner has seen it once (and left the bake null).
+ */
+TEST_F(PaintLayersGenerateTest, light_row_mode_get_stays_auto_before_and_after_the_planner)
+{
+  MaterialPaintLayer *light = add_paint_layer("ModeLight", add_image("ModeLightImg"));
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*light), MA_PAINT_LAYER_BAKE_AUTO);
+
+  bool changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  ASSERT_EQ(light->bake, nullptr);
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*light), MA_PAINT_LAYER_BAKE_AUTO);
+}
+
+/**
+ * Test #7: regression guard for the existing rule that the active row and its ancestors stay live
+ * regardless of weight -- #BKE_paint_layers_bake_row_is_deferred is checked before the weight gate in
+ * both branches of #BKE_paint_layers_bake_ensure, so an active heavy row is never touched (no
+ * allocation either), the same as before this task.
+ */
+TEST_F(PaintLayersGenerateTest, active_heavy_row_stays_live_and_gets_no_bake)
+{
+  MaterialPaintLayer *paint = add_paint_layer("ActiveHeavy", add_image("ActiveHeavyImg"));
+  MaterialPaintLayer *corr = BKE_paint_layers_correction_add(
+      *ma, paint, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+  ASSERT_NE(corr, nullptr);
+  for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                              PAINT_MATERIAL_CHANNEL_METALLIC,
+                                              PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+                                              PAINT_MATERIAL_CHANNEL_SPECULAR})
+  {
+    ASSERT_NE(BKE_paint_layers_channel_add(*ma, corr, channel), nullptr);
+  }
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *paint));
+
+  BKE_paint_layers_active_set(*ma, paint->marker);
+  ASSERT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *paint));
+
+  bool changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(paint->bake, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma))
+      << "the deferred gate must keep the active row out of the heavy queue too";
+}
+
+/**
+ * Test #9: a baked row's weight later drops under the threshold (its correction removed). This is a
+ * known limitation carried unchanged from before this task: the row's stale bake structure is not
+ * freed and not revalidated by the light-row path -- freeing it or re-deciding its liveness needs a
+ * change in `paint_layers.cc`, out of scope here. Documented and pinned so it is not "fixed" by
+ * accident; must pass on both the pre-task and the post-task code.
+ */
+TEST_F(PaintLayersGenerateTest, baked_row_that_becomes_light_keeps_its_stale_bake)
+{
+  MaterialPaintLayer *paint = add_paint_layer("BecomesLight", add_image("BecomesLightImg"));
+  MaterialPaintLayer *corr = BKE_paint_layers_correction_add(
+      *ma, paint, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+  ASSERT_NE(corr, nullptr);
+  MaterialPaintLayerChannel *corr_channel = BKE_paint_layers_channel_add(
+      *ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(corr_channel, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *paint, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *paint, 4));
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  ASSERT_NE(paint->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *paint));
+
+  /* Switch to AUTO and drop the row under the weight threshold. */
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *paint, MA_PAINT_LAYER_BAKE_AUTO));
+  ASSERT_TRUE(BKE_paint_layers_channel_remove(*ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  BKE_paint_layers_tag_edited(*ma);
+  ASSERT_FALSE(BKE_paint_layers_bake_is_heavy(*ma, *paint));
+  ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *paint))
+      << "the structural edit invalidates the stale hash";
+
+  changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  /* Known limitation: the stale, invalid bake structure is not freed. row_is_substituted's own
+   * rule for a non-Material row is exactly #BKE_paint_layers_bake_is_valid, so the assertion above
+   * already covers it: the row is not substituted. */
+  EXPECT_NE(paint->bake, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *paint));
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Sampler budget
  *
  * The counter reproduces EEVEE's `gpu_node_graph.cc` rules; these tests pin its arithmetic, then

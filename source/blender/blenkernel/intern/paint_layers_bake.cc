@@ -709,46 +709,104 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
       if (BKE_paint_layers_kind_info(layer.kind).needs_external_bake) {
         continue;
       }
-      if (layer.bake == nullptr || layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
-          BKE_paint_layers_bake_is_valid(ma, layer))
-      {
-        continue;
-      }
-      /* The active row and its ancestors stay live for every mode: the user is editing inside
-       * them, and the bake catches up once the active marker leaves the subtree
-       * (#MA_PAINT_LAYERS_MATERIAL_BAKE_DUE). Tested before heavy so a heavy deferred row is not
-       * queued either. */
-      if (BKE_paint_layers_bake_row_is_deferred(ma, layer)) {
-        continue;
-      }
-      /* A heavy row leaves the main thread: the wmJob scheduler picks it up from the same
-       * pending/bake-stale signal this function leaves set. */
-      if (BKE_paint_layers_bake_is_heavy(ma, layer)) {
-        continue;
-      }
-      if (layer.bake->mode == MA_PAINT_LAYER_BAKE_AUTO) {
-        /* A light subtree is cheaper live. */
-        if (paint_layer_subtree_weight(layer) <= PAINT_LAYERS_AUTO_BAKE_NODES) {
+
+      MaterialPaintLayerBake *bake = nullptr;
+      int size = 0;
+
+      if (BKE_paint_layers_is_folder(layer)) {
+        /* Folders are out of scope for this task: kept on their original eligibility gate, which
+         * already requires an existing bake structure. */
+        if (layer.bake == nullptr || layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
+            BKE_paint_layers_bake_is_valid(ma, layer))
+        {
+          continue;
+        }
+        /* The active row and its ancestors stay live for every mode: the user is editing inside
+         * them, and the bake catches up once the active marker leaves the subtree
+         * (#MA_PAINT_LAYERS_MATERIAL_BAKE_DUE). Tested before heavy so a heavy deferred row is not
+         * queued either. */
+        if (BKE_paint_layers_bake_row_is_deferred(ma, layer)) {
+          continue;
+        }
+        /* A heavy row leaves the main thread: the wmJob scheduler picks it up from the same
+         * pending/bake-stale signal this function leaves set. */
+        if (BKE_paint_layers_bake_is_heavy(ma, layer)) {
+          continue;
+        }
+        if (layer.bake->mode == MA_PAINT_LAYER_BAKE_AUTO) {
+          /* A light subtree is cheaper live. */
+          if (paint_layer_subtree_weight(layer) <= PAINT_LAYERS_AUTO_BAKE_NODES) {
+            continue;
+          }
+        }
+        bake = layer.bake;
+        size = bake->size;
+        if (size <= 0) {
+          /* A zero size means "the node's own map size": read it from the content. */
+          int width = 0;
+          int height = 0;
+          for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+            if (BKE_paint_layers_row_dimensions(ma, layer, int(info.channel), width, height) &&
+                width > 0 && height > 0)
+            {
+              size = width;
+              break;
+            }
+          }
+        }
+        if (size <= 0) {
           continue;
         }
       }
-      int size = layer.bake->size;
-      if (size <= 0) {
-        /* A zero size means "the node's own map size": read it from the content. */
-        int width = 0;
-        int height = 0;
-        for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-          if (BKE_paint_layers_row_dimensions(ma, layer, int(info.channel), width, height) &&
-              width > 0 && height > 0)
-          {
-            size = width;
-            break;
+      else {
+        /* A light non-folder row never gets a bake structure: allocating one before it is about
+         * to render would leave a permanently-invalid bake behind for a row nothing ever bakes,
+         * which stalls the #MA_PAINT_LAYERS_BAKE_STALE drain and re-tags #MA_PAINT_LAYERS_REGEN
+         * on every unrelated edit. #BKE_paint_layers_bake_mode_get and #BKE_paint_layers_bake_is_valid
+         * both already read a null bake safely, so the gates below need no allocation either. */
+        const int mode = BKE_paint_layers_bake_mode_get(layer);
+        if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
+          continue;
+        }
+        if (layer.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, layer)) {
+          continue;
+        }
+        if (BKE_paint_layers_bake_row_is_deferred(ma, layer)) {
+          continue;
+        }
+        if (BKE_paint_layers_bake_is_heavy(ma, layer)) {
+          continue;
+        }
+        if (mode == MA_PAINT_LAYER_BAKE_AUTO &&
+            paint_layer_subtree_weight(layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
+        {
+          /* A light subtree is cheaper live, and stays without a bake structure: this is a final
+           * state for it, not a step toward one. */
+          continue;
+        }
+        size = (layer.bake != nullptr) ? layer.bake->size : 0;
+        if (size <= 0) {
+          /* A zero size means "the node's own map size": read it from the content. */
+          int width = 0;
+          int height = 0;
+          for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+            if (BKE_paint_layers_row_dimensions(ma, layer, int(info.channel), width, height) &&
+                width > 0 && height > 0)
+            {
+              size = width;
+              break;
+            }
           }
         }
+        if (size <= 0) {
+          /* No map has known dimensions yet: nothing to allocate a bake structure for. */
+          continue;
+        }
+        /* Every gate has passed and this row renders right now: only here is it safe to
+         * allocate the bake structure. */
+        bake = BKE_paint_layers_bake_ensure(layer);
       }
-      if (size <= 0) {
-        continue;
-      }
+
       PL_DEBUG_PRINTF("paint layers bake: start kind=sync material='%s' row='%s' reason=stale\n",
                       ma.id.name + 2,
                       layer.name);
@@ -756,7 +814,7 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
        * the whole render. */
       int region[4];
       const bool has_region = BKE_paint_layers_bake_changed_region(ma, layer, region);
-      const bool reuse_cache = layer.bake->coverage != nullptr;
+      const bool reuse_cache = bake->coverage != nullptr;
       int src_width = 0;
       int src_height = 0;
       bool have_source_dims = false;
@@ -795,8 +853,9 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
          * a partial write, its untouched region would stay blank. So the changed rectangle is
          * computed and written only for a channel with a live cache; a fresh channel renders
          * whole. */
-        const int *channel_rect =
-            (rect_ptr != nullptr && layer.bake->images[channel] != nullptr) ? rect_ptr : nullptr;
+        const int *channel_rect = (rect_ptr != nullptr && bake->images[channel] != nullptr) ?
+                                       rect_ptr :
+                                       nullptr;
         if (!BKE_paint_layers_bake_render_node(
                 ma, layer, channel, size, color.data(), coverage.data(), channel_rect))
         {
@@ -816,8 +875,8 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
       }
       uint32_t hash[2];
       BKE_paint_layers_bake_hash(layer, hash);
-      layer.bake->hash[0] = hash[0];
-      layer.bake->hash[1] = hash[1];
+      bake->hash[0] = hash[0];
+      bake->hash[1] = hash[1];
       BKE_paint_layers_bake_subscribe(ma, layer);
       changed = true;
     }
@@ -1187,12 +1246,29 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
     if (BKE_paint_layers_bake_row_is_deferred(ma, *layer)) {
       continue;
     }
-    if (layer->bake != nullptr && layer->bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
-        !BKE_paint_layers_bake_is_valid(ma, *layer) &&
-        BKE_paint_layers_bake_is_heavy(ma, *layer))
-    {
-      return true;
+    if (BKE_paint_layers_is_folder(*layer)) {
+      /* Folders are out of scope for this task: kept on their original eligibility gate, which
+       * already requires an existing bake structure. */
+      if (layer->bake != nullptr && layer->bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
+          !BKE_paint_layers_bake_is_valid(ma, *layer) &&
+          BKE_paint_layers_bake_is_heavy(ma, *layer))
+      {
+        return true;
+      }
+      continue;
     }
+    /* is_heavy needs no bake structure, so it is checked first: a heavy-by-weight row with no
+     * explicit bake can now be seen as pending, where the old bake-gated formula never queued it. */
+    if (!BKE_paint_layers_bake_is_heavy(ma, *layer)) {
+      continue;
+    }
+    if (BKE_paint_layers_bake_mode_get(*layer) == MA_PAINT_LAYER_BAKE_NEVER) {
+      continue;
+    }
+    if (layer->bake != nullptr && BKE_paint_layers_bake_is_valid(ma, *layer)) {
+      continue;
+    }
+    return true;
   }
   return false;
 }
@@ -1240,12 +1316,24 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
     if (BKE_paint_layers_bake_row_is_deferred(ma, *layer)) {
       continue;
     }
-    if (layer->bake == nullptr || layer->bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
-        BKE_paint_layers_bake_is_valid(ma, *layer) || !BKE_paint_layers_bake_is_heavy(ma, *layer))
-    {
-      continue;
+    if (BKE_paint_layers_is_folder(*layer)) {
+      /* Folders are out of scope for this task: kept on their original eligibility gate, which
+       * already requires an existing bake structure. */
+      if (layer->bake == nullptr || layer->bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
+          BKE_paint_layers_bake_is_valid(ma, *layer) || !BKE_paint_layers_bake_is_heavy(ma, *layer))
+      {
+        continue;
+      }
     }
-    int size = layer->bake->size;
+    else {
+      if ((layer->bake != nullptr && layer->bake->mode == MA_PAINT_LAYER_BAKE_NEVER) ||
+          (layer->bake != nullptr && BKE_paint_layers_bake_is_valid(ma, *layer)) ||
+          !BKE_paint_layers_bake_is_heavy(ma, *layer))
+      {
+        continue;
+      }
+    }
+    int size = (layer->bake != nullptr) ? layer->bake->size : 0;
     if (size <= 0) {
       int width = 0;
       int height = 0;
@@ -1259,10 +1347,15 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
       }
     }
     if (size <= 0) {
+      /* No map has known dimensions yet: nothing to allocate a bake structure for. */
       continue;
     }
+    /* Every gate has passed and this row is queued right now: only here is it safe to allocate
+     * the bake structure (folders already have one, by the gate above). */
+    MaterialPaintLayer &mutable_layer = *const_cast<MaterialPaintLayer *>(layer);
+    BKE_paint_layers_bake_ensure(mutable_layer);
     PaintLayersBakeJob::RowResult row;
-    row.marker = layer->marker;
+    row.marker = mutable_layer.marker;
     row.size = size;
     job->rows.append(row);
   }

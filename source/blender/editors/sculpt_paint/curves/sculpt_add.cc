@@ -54,18 +54,24 @@ namespace blender::ed::sculpt_paint {
 
 using bke::CurvesGeometry;
 
+struct AddTargetState {
+  /** Used when some data should be interpolated from existing curves. */
+  KDTree<float3> *curve_roots_kdtree = nullptr;
+};
+
 class AddOperation : public CurvesSculptStrokeOperation {
  private:
-  /** Used when some data should be interpolated from existing curves. */
-  KDTree<float3> *curve_roots_kdtree_ = nullptr;
+  CurvesSculptTargetStates<AddTargetState> target_states_;
 
   friend struct AddOperationExecutor;
 
  public:
   ~AddOperation() override
   {
-    if (curve_roots_kdtree_ != nullptr) {
-      kdtree_free<float3>(curve_roots_kdtree_);
+    for (AddTargetState &state : target_states_.values()) {
+      if (state.curve_roots_kdtree != nullptr) {
+        kdtree_free<float3>(state.curve_roots_kdtree);
+      }
     }
   }
 
@@ -104,14 +110,21 @@ struct AddOperationExecutor {
 
   CurvesSurfaceTransforms transforms_;
 
-  AddOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
+  AddTargetState *target_state_ = nullptr;
+  /** Only the active target writes the scene-global stroke position, see #is_active. */
+  bool is_active_target_ = false;
+
+  AddOperationExecutor(const PaintStroke &stroke, const CurvesSculptTarget &target)
+      : ctx_(stroke), curves_ob_orig_(target.object), curves_id_orig_(target.curves_id)
+  {
+  }
 
   void execute(AddOperation &self, const StrokeExtension &stroke_extension)
   {
     self_ = &self;
-    curves_ob_orig_ = ctx_.object;
+    is_active_target_ = stroke_extension.targets->is_active(*curves_ob_orig_);
+    target_state_ = &self_->target_states_.ensure(*curves_id_orig_);
 
-    curves_id_orig_ = id_cast<Curves *>(curves_ob_orig_->data);
     curves_orig_ = &curves_id_orig_->geometry.wrap();
 
     if (curves_id_orig_->surface == nullptr || curves_id_orig_->surface->type != OB_MESH) {
@@ -225,7 +238,7 @@ struct AddOperationExecutor {
         add_inputs.interpolate_resolution)
     {
       this->ensure_curve_roots_kdtree();
-      add_inputs.old_roots_kdtree = self_->curve_roots_kdtree_;
+      add_inputs.old_roots_kdtree = target_state_->curve_roots_kdtree;
     }
 
     const geometry::AddCurvesOnMeshOutputs add_outputs = geometry::add_curves_on_mesh(
@@ -237,7 +250,7 @@ struct AddOperationExecutor {
                                                            add_outputs.new_curves_range));
       selection.finish();
     }
-    if (U.uiflag & USER_ORBIT_SELECTION) {
+    if (is_active_target_ && (U.uiflag & USER_ORBIT_SELECTION)) {
       if (const std::optional<Bounds<float3>> center_cu = bounds::min_max(
               curves_orig_->positions().slice(add_outputs.new_points_range)))
       {
@@ -498,14 +511,14 @@ struct AddOperationExecutor {
 
   void ensure_curve_roots_kdtree()
   {
-    if (self_->curve_roots_kdtree_ == nullptr) {
-      self_->curve_roots_kdtree_ = kdtree_new<float3>(curves_orig_->curves_num());
+    if (target_state_->curve_roots_kdtree == nullptr) {
+      target_state_->curve_roots_kdtree = kdtree_new<float3>(curves_orig_->curves_num());
       const Span<int> offsets = curves_orig_->offsets();
       const Span<float3> positions = curves_orig_->positions();
       for (const int curve_i : curves_orig_->curves_range()) {
-        kdtree_insert<float3>(self_->curve_roots_kdtree_, curve_i, positions[offsets[curve_i]]);
+        kdtree_insert<float3>(target_state_->curve_roots_kdtree, curve_i, positions[offsets[curve_i]]);
       }
-      kdtree_balance<float3>(self_->curve_roots_kdtree_);
+      kdtree_balance<float3>(target_state_->curve_roots_kdtree);
     }
   }
 };
@@ -513,8 +526,10 @@ struct AddOperationExecutor {
 void AddOperation::on_stroke_extended(const PaintStroke &stroke,
                                       const StrokeExtension &stroke_extension)
 {
-  AddOperationExecutor executor{stroke};
-  executor.execute(*this, stroke_extension);
+  for (const CurvesSculptTarget &target : stroke_extension.targets->add_targets) {
+    AddOperationExecutor executor{stroke, target};
+    executor.execute(*this, stroke_extension);
+  }
 }
 
 std::unique_ptr<CurvesSculptStrokeOperation> new_add_operation()

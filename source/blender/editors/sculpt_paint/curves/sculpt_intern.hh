@@ -8,6 +8,8 @@
 
 #include "../paint_intern.hh"
 
+#include "sculpt_multi_object.hh"
+
 #include "BLI_vector.hh"
 
 #include "BKE_attribute.hh"
@@ -44,6 +46,11 @@ struct StrokeExtension {
   float2 mouse_position;
   float pressure;
   ReportList *reports = nullptr;
+  /**
+   * The Curves objects this stroke acts on, resolved once at stroke start. Never null while a
+   * stroke is running.
+   */
+  const CurvesMultiObjectStrokeContext *targets = nullptr;
 };
 
 float brush_radius_factor(const Brush &brush, const StrokeExtension &stroke_extension);
@@ -78,14 +85,7 @@ std::unique_ptr<CurvesSculptStrokeOperation> new_pinch_operation(BrushStrokeMode
                                                                  const Scene &scene);
 std::unique_ptr<CurvesSculptStrokeOperation> new_smooth_operation();
 std::unique_ptr<CurvesSculptStrokeOperation> new_puff_operation();
-std::unique_ptr<CurvesSculptStrokeOperation> new_density_operation(
-    BrushStrokeMode brush_mode,
-    const Scene &scene,
-    const Depsgraph &depsgraph,
-    const ARegion &region,
-    const View3D &v3d,
-    const Object &object,
-    const StrokeExtension &stroke_start);
+std::unique_ptr<CurvesSculptStrokeOperation> new_density_operation(BrushStrokeMode brush_mode);
 std::unique_ptr<CurvesSculptStrokeOperation> new_slide_operation();
 
 struct CurvesBrush3D {
@@ -134,7 +134,6 @@ void move_last_point_and_resample(MoveAndResampleBuffers &buffer,
 
 class CurvesSculptCommonContext {
  public:
-  Object *object = nullptr;
   const Depsgraph *depsgraph = nullptr;
   Scene *scene = nullptr;
   ARegion *region = nullptr;

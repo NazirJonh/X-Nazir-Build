@@ -519,6 +519,7 @@ Map<std::string, float, 1> mode_transfer_overlay_current_state();
  * "this object just became relevant" moments.
  */
 void object_overlay_mode_transfer_animation_start(bContext *C, Object *ob_dst);
+void object_overlay_mode_transfer_animation_start(Object *ob_dst);
 
 /* `object_modifier.cc` */
 

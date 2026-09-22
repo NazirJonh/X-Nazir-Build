@@ -1949,8 +1949,27 @@ struct Sculpt {
   struct ColorBand gradient_colorband;
 };
 
+/** #CurvesSculpt::multi_object_edit_scope */
+enum eCurvesSculptMultiObjectEditScope : int {
+  CURVES_SCULPT_MULTI_OBJECT_EDIT_ALL = 0,
+  CURVES_SCULPT_MULTI_OBJECT_EDIT_ACTIVE = 1,
+};
+
+/** #CurvesSculpt::add_curves_target */
+enum eCurvesSculptAddTarget : int {
+  CURVES_SCULPT_ADD_TARGET_ALL = 0,
+  CURVES_SCULPT_ADD_TARGET_ACTIVE = 1,
+  CURVES_SCULPT_ADD_TARGET_OBJECT = 2,
+};
+
 struct CurvesSculpt {
   Paint paint;
+  /** Object new curves are added to when #add_curves_target is #CURVES_SCULPT_ADD_TARGET_OBJECT. */
+  struct Object *add_curves_object = nullptr;
+  /** Whether brush strokes affect all Curves objects in Sculpt Mode or only the active object. */
+  int multi_object_edit_scope = CURVES_SCULPT_MULTI_OBJECT_EDIT_ALL;
+  /** Which objects the Add and Density brushes create new curves in. */
+  int add_curves_target = CURVES_SCULPT_ADD_TARGET_ALL;
 };
 
 struct UvSculpt {

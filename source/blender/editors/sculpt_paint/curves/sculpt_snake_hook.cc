@@ -48,7 +48,7 @@ class SnakeHookOperation : public CurvesSculptStrokeOperation {
  private:
   float2 last_mouse_position_re_;
 
-  CurvesBrush3D brush_3d_;
+  CurvesSculptTargetStates<CurvesBrush3D> brush_3d_by_curves_;
 
   friend struct SnakeHookOperatorExecutor;
 
@@ -85,14 +85,20 @@ struct SnakeHookOperatorExecutor {
   float2 brush_pos_re_;
   float2 brush_pos_diff_re_;
 
-  SnakeHookOperatorExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
+  CurvesBrush3D *brush_3d_ = nullptr;
+
+  /** Only the active target writes the scene-global stroke position, see #is_active. */
+  bool is_active_target_ = false;
+
+  SnakeHookOperatorExecutor(const PaintStroke &stroke, const CurvesSculptTarget &target)
+      : ctx_(stroke), object_(target.object), curves_id_(target.curves_id)
+  {
+  }
 
   void execute(SnakeHookOperation &self, const StrokeExtension &stroke_extension)
   {
-    BLI_SCOPED_DEFER([&]() { self.last_mouse_position_re_ = stroke_extension.mouse_position; });
-
     self_ = &self;
-    object_ = ctx_.object;
+    is_active_target_ = stroke_extension.targets->is_active(*object_);
 
     curves_sculpt_ = ctx_.scene->toolsettings->curves_sculpt;
     brush_ = BKE_paint_brush_for_read(&curves_sculpt_->paint);
@@ -103,7 +109,7 @@ struct SnakeHookOperatorExecutor {
 
     const eBrushFalloffShape falloff_shape = eBrushFalloffShape(brush_->falloff_shape);
 
-    curves_id_ = id_cast<Curves *>(object_->data);
+    brush_3d_ = &self_->brush_3d_by_curves_.ensure(*curves_id_);
     curves_ = &curves_id_->geometry.wrap();
     if (curves_->is_empty()) {
       return;
@@ -129,10 +135,12 @@ struct SnakeHookOperatorExecutor {
                                                                        brush_pos_re_,
                                                                        brush_radius_base_re_);
         if (brush_3d.has_value()) {
-          self_->brush_3d_ = *brush_3d;
-          remember_stroke_position(
-              *curves_sculpt_,
-              math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu));
+          *brush_3d_ = *brush_3d;
+          if (is_active_target_) {
+            remember_stroke_position(
+                *curves_sculpt_,
+                math::transform_point(transforms_.curves_to_world, brush_3d_->position_cu));
+          }
         }
       }
       return;
@@ -228,20 +236,20 @@ struct SnakeHookOperatorExecutor {
     ED_view3d_win_to_3d(
         ctx_.v3d,
         ctx_.region,
-        math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu),
+        math::transform_point(transforms_.curves_to_world, brush_3d_->position_cu),
         brush_pos_prev_re_,
         brush_start_wo);
     ED_view3d_win_to_3d(
         ctx_.v3d,
         ctx_.region,
-        math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu),
+        math::transform_point(transforms_.curves_to_world, brush_3d_->position_cu),
         brush_pos_re_,
         brush_end_wo);
     const float3 brush_start_cu = math::transform_point(transforms_.world_to_curves,
                                                         brush_start_wo);
     const float3 brush_end_cu = math::transform_point(transforms_.world_to_curves, brush_end_wo);
 
-    const float brush_radius_cu = self_->brush_3d_.radius_cu * brush_radius_factor_;
+    const float brush_radius_cu = brush_3d_->radius_cu * brush_radius_factor_;
 
     const Vector<float4x4> symmetry_brush_transforms = get_symmetry_brush_transforms(
         eCurvesSymmetryType(curves_id_->symmetry));
@@ -300,8 +308,11 @@ struct SnakeHookOperatorExecutor {
 void SnakeHookOperation::on_stroke_extended(const PaintStroke &stroke,
                                             const StrokeExtension &stroke_extension)
 {
-  SnakeHookOperatorExecutor executor{stroke};
-  executor.execute(*this, stroke_extension);
+  for (const CurvesSculptTarget &target : stroke_extension.targets->deform_targets) {
+    SnakeHookOperatorExecutor executor{stroke, target};
+    executor.execute(*this, stroke_extension);
+  }
+  last_mouse_position_re_ = stroke_extension.mouse_position;
 }
 
 std::unique_ptr<CurvesSculptStrokeOperation> new_snake_hook_operation()

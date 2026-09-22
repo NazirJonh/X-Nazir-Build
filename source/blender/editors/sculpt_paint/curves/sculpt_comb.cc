@@ -46,21 +46,21 @@ namespace blender::ed::sculpt_paint {
 
 using bke::CurvesGeometry;
 
+struct CombTargetState {
+  CurvesBrush3D brush_3d;
+  CurvesConstraintSolver constraint_solver;
+  Array<float> curve_lengths;
+};
+
 /**
  * Moves individual points under the brush and does a length preservation step afterwards.
  */
 class CombOperation : public CurvesSculptStrokeOperation {
  private:
-  /** Last mouse position. */
+  /** Last mouse position at the end of the previous stroke step. */
   float2 brush_pos_last_re_;
 
-  /** Only used when a 3D brush is used. */
-  CurvesBrush3D brush_3d_;
-
-  /** Solver for length and collision constraints. */
-  CurvesConstraintSolver constraint_solver_;
-
-  Array<float> curve_lengths_;
+  CurvesSculptTargetStates<CombTargetState> target_states_;
 
   friend struct CombOperationExecutor;
 
@@ -97,16 +97,22 @@ struct CombOperationExecutor {
 
   CurvesSurfaceTransforms transforms_;
 
-  CombOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
+  CombTargetState *target_state_ = nullptr;
+
+  /** Only the active target writes the scene-global stroke position, see #is_active. */
+  bool is_active_target_ = false;
+
+  CombOperationExecutor(const PaintStroke &stroke, const CurvesSculptTarget &target)
+      : ctx_(stroke), curves_ob_orig_(target.object), curves_id_orig_(target.curves_id)
+  {
+  }
 
   void execute(CombOperation &self, const StrokeExtension &stroke_extension)
   {
     self_ = &self;
+    is_active_target_ = stroke_extension.targets->is_active(*curves_ob_orig_);
 
-    BLI_SCOPED_DEFER([&]() { self_->brush_pos_last_re_ = stroke_extension.mouse_position; });
-
-    curves_ob_orig_ = ctx_.object;
-    curves_id_orig_ = id_cast<Curves *>(curves_ob_orig_->data);
+    target_state_ = &self_->target_states_.ensure(*curves_id_orig_);
     curves_orig_ = &curves_id_orig_->geometry.wrap();
     if (curves_orig_->is_empty()) {
       return;
@@ -134,20 +140,21 @@ struct CombOperationExecutor {
       if (falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE || (U.uiflag & USER_ORBIT_SELECTION)) {
         this->initialize_spherical_brush_reference_point();
       }
-      self_->constraint_solver_.initialize(*curves_orig_,
-                                           curve_selection_,
-                                           curves_id_orig_->flag & CV_SCULPT_COLLISION_ENABLED,
-                                           curves_id_orig_->surface_collision_distance);
+      target_state_->constraint_solver.initialize(*curves_orig_,
+                                                  curve_selection_,
+                                                  curves_id_orig_->flag &
+                                                      CV_SCULPT_COLLISION_ENABLED,
+                                                  curves_id_orig_->surface_collision_distance);
 
-      self_->curve_lengths_.reinitialize(curves_orig_->curves_num());
-      const Span<float> segment_lengths = self_->constraint_solver_.segment_lengths();
+      target_state_->curve_lengths.reinitialize(curves_orig_->curves_num());
+      const Span<float> segment_lengths = target_state_->constraint_solver.segment_lengths();
       const OffsetIndices points_by_curve = curves_orig_->points_by_curve();
       curve_selection_.foreach_segment(
           [&](const IndexMaskSegment segment) {
             for (const int curve_i : segment) {
               const IndexRange points = points_by_curve[curve_i];
               const Span<float> lengths = segment_lengths.slice(points.drop_back(1));
-              self_->curve_lengths_[curve_i] = std::accumulate(
+              target_state_->curve_lengths[curve_i] = std::accumulate(
                   lengths.begin(), lengths.end(), 0.0f);
             }
           },
@@ -174,7 +181,8 @@ struct CombOperationExecutor {
 
     IndexMaskMemory memory;
     const IndexMask changed_curves_mask = IndexMask::from_bools(changed_curves, memory);
-    self_->constraint_solver_.solve_step(*curves_orig_, changed_curves_mask, surface, transforms_);
+    target_state_->constraint_solver.solve_step(
+        *curves_orig_, changed_curves_mask, surface, transforms_);
 
     curves_orig_->tag_positions_changed();
     DEG_id_tag_update(&curves_id_orig_->id, ID_RECALC_GEOMETRY);
@@ -212,7 +220,7 @@ struct CombOperationExecutor {
         *brush_->curves_sculpt_settings->curve_parameter_falloff;
     BKE_curvemapping_init(&curve_parameter_falloff_mapping);
 
-    const Span<float> segment_lengths = self_->constraint_solver_.segment_lengths();
+    const Span<float> segment_lengths = target_state_->constraint_solver.segment_lengths();
 
     curve_selection_.foreach_segment(
         [&](const IndexMaskSegment segment) {
@@ -220,7 +228,7 @@ struct CombOperationExecutor {
             bool curve_changed = false;
             const IndexRange points = points_by_curve[curve_i];
 
-            const float total_length = self_->curve_lengths_[curve_i];
+            const float total_length = target_state_->curve_lengths[curve_i];
             const float total_length_inv = math::safe_rcp(total_length);
             float current_length = 0.0f;
             for (const int point_i : points.drop_front(1)) {
@@ -290,20 +298,20 @@ struct CombOperationExecutor {
     ED_view3d_win_to_3d(
         ctx_.v3d,
         ctx_.region,
-        math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu),
+        math::transform_point(transforms_.curves_to_world, target_state_->brush_3d.position_cu),
         brush_pos_prev_re_,
         brush_start_wo);
     ED_view3d_win_to_3d(
         ctx_.v3d,
         ctx_.region,
-        math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu),
+        math::transform_point(transforms_.curves_to_world, target_state_->brush_3d.position_cu),
         brush_pos_re_,
         brush_end_wo);
     const float3 brush_start_cu = math::transform_point(transforms_.world_to_curves,
                                                         brush_start_wo);
     const float3 brush_end_cu = math::transform_point(transforms_.world_to_curves, brush_end_wo);
 
-    const float brush_radius_cu = self_->brush_3d_.radius_cu * brush_radius_factor_;
+    const float brush_radius_cu = target_state_->brush_3d.radius_cu * brush_radius_factor_;
 
     const Vector<float4x4> symmetry_brush_transforms = get_symmetry_brush_transforms(
         eCurvesSymmetryType(curves_id_orig_->symmetry));
@@ -331,7 +339,7 @@ struct CombOperationExecutor {
     const bke::crazyspace::GeometryDeformation deformation =
         bke::crazyspace::get_evaluated_curves_deformation(*ctx_.depsgraph, *curves_ob_orig_);
     const OffsetIndices points_by_curve = curves_orig_->points_by_curve();
-    const Span<float> segment_lengths = self_->constraint_solver_.segment_lengths();
+    const Span<float> segment_lengths = target_state_->constraint_solver.segment_lengths();
 
     curve_selection_.foreach_segment(
         [&](const IndexMaskSegment segment) {
@@ -339,7 +347,7 @@ struct CombOperationExecutor {
             bool curve_changed = false;
             const IndexRange points = points_by_curve[curve_i];
 
-            const float total_length = self_->curve_lengths_[curve_i];
+            const float total_length = target_state_->curve_lengths[curve_i];
             const float total_length_inv = math::safe_rcp(total_length);
             float current_length = 0.0f;
             for (const int point_i : points.drop_front(1)) {
@@ -396,10 +404,12 @@ struct CombOperationExecutor {
                                                                    brush_pos_re_,
                                                                    brush_radius_base_re_);
     if (brush_3d.has_value()) {
-      self_->brush_3d_ = *brush_3d;
-      remember_stroke_position(
-          *curves_sculpt_,
-          math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu));
+      target_state_->brush_3d = *brush_3d;
+      if (is_active_target_) {
+        remember_stroke_position(*curves_sculpt_,
+                                 math::transform_point(transforms_.curves_to_world,
+                                                       target_state_->brush_3d.position_cu));
+      }
     }
   }
 };
@@ -407,8 +417,11 @@ struct CombOperationExecutor {
 void CombOperation::on_stroke_extended(const PaintStroke &stroke,
                                        const StrokeExtension &stroke_extension)
 {
-  CombOperationExecutor executor{stroke};
-  executor.execute(*this, stroke_extension);
+  for (const CurvesSculptTarget &target : stroke_extension.targets->deform_targets) {
+    CombOperationExecutor executor{stroke, target};
+    executor.execute(*this, stroke_extension);
+  }
+  brush_pos_last_re_ = stroke_extension.mouse_position;
 }
 
 std::unique_ptr<CurvesSculptStrokeOperation> new_comb_operation()

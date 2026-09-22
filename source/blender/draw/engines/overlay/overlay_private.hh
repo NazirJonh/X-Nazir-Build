@@ -309,6 +309,10 @@ struct State {
   {
     return (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_CAGE);
   }
+  bool show_sculpt_curves_selection_object_color() const
+  {
+    return (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_SELECTION_OBJECT_COLOR);
+  }
   bool show_sculpt_symmetry_plane() const
   {
     return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_SCULPT_PLANE);

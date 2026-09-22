@@ -8,6 +8,7 @@ VERTEX_SHADER_CREATE_INFO(overlay_sculpt_curves_selection)
 
 #include "draw_curves_lib.glsl"
 #include "draw_model_lib.glsl"
+#include "draw_object_infos_lib.glsl"
 #include "draw_view_clipping_lib.glsl"
 #include "draw_view_lib.glsl"
 
@@ -33,6 +34,10 @@ void main()
   gl_Position = drw_point_world_to_homogenous(world_pos);
 
   mask_weight = 1.0f - (selection_opacity - retrieve_selection(ws_pt) * selection_opacity);
+
+  /* Halved like #overlay_wireframe does: an object left at the default white viewport color would
+   * otherwise wash the curves out worse than the black it replaces. */
+  tint_color = use_object_color ? drw_object_infos().ob_color.rgb * 0.5f : float3(0.0f);
 
   view_clipping_distances(world_pos);
 }

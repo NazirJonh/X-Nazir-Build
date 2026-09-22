@@ -220,6 +220,13 @@ void foreach_selectable_curve_range(const bke::CurvesGeometry &curves,
 
 bool object_has_editable_curves(const Main &bmain, const Object &object);
 bke::CurvesGeometry primitive_random_sphere(int curves_size, int points_per_curve);
+/**
+ * The Curves data-blocks operators act on: the active object plus every selected object in the
+ * same mode, with linked duplicates collapsed to one entry.
+ *
+ * \note In curves sculpt mode this respects #CurvesSculpt.multi_object_edit_scope, so only the
+ * active object is returned while the scope is limited to it.
+ */
 VectorSet<Curves *> get_unique_editable_curves(const bContext &C);
 void ensure_surface_deformation_node_exists(bContext &C, Object &curves_ob);
 

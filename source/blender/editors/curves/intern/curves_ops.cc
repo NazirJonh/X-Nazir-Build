@@ -210,6 +210,105 @@ static bool editable_curves_point_domain_poll(bContext *C)
   return true;
 }
 
+static bool editable_curves_in_edit_mode_point_domain_poll(bContext *C)
+{
+  return editable_curves_in_edit_mode_poll(C) && editable_curves_point_domain_poll(C);
+}
+
+namespace make_segment {
+
+static wmOperatorStatus exec(bContext *C, wmOperator *op)
+{
+  int changed_num = 0;
+  int unselected_num = 0;
+  int error_num = 0;
+  const char *first_error = nullptr;
+
+  const VectorSet<Curves *> unique_curves = get_unique_editable_curves(*C);
+  for (Curves *curves_id : unique_curves) {
+    bke::CurvesGeometry &curves = curves_id->geometry.wrap();
+
+    /* Objects without a selection take no part in the operation rather than counting as a
+     * failure, otherwise every other object in the mode would report an error. */
+    if (!has_anything_selected(curves, bke::AttrDomain::Point)) {
+      unselected_num++;
+      continue;
+    }
+
+    Vector<CurveEndpoint> endpoints;
+    gather_selected_endpoints(curves, endpoints);
+
+    /* Joining two different curves takes precedence over closing a single one, matching
+     * #CURVE_OT_make_segment. */
+    int other_curve_index = -1;
+    for (const int i : endpoints.index_range().drop_front(1)) {
+      if (endpoints[i].curve != endpoints.first().curve) {
+        other_curve_index = i;
+        break;
+      }
+    }
+
+    const char *error = "Cannot make segment";
+    bool changed = false;
+    if (other_curve_index != -1) {
+      changed = join_curves_at_endpoints(
+          curves, endpoints.first(), endpoints[other_curve_index], &error);
+    }
+    else if (endpoints.size() == 2) {
+      /* Both ends of a single curve are selected, so the curve is closed instead. */
+      changed = make_curve_cyclic(curves, endpoints.first().curve);
+    }
+    else {
+      error = "Too few selections to merge";
+    }
+
+    if (!changed) {
+      error_num++;
+      if (first_error == nullptr) {
+        first_error = error;
+      }
+      else if (!STREQ(first_error, error)) {
+        first_error = "Cannot make segment";
+      }
+      continue;
+    }
+
+    changed_num++;
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_DATA, curves_id);
+  }
+
+  if (unselected_num == unique_curves.size()) {
+    BKE_report(op->reports, RPT_ERROR, "No points were selected");
+    return OPERATOR_CANCELLED;
+  }
+  if (error_num > 0) {
+    /* Only explain the failure when nothing at all could be done, otherwise the report would be
+     * about curves the user is not necessarily looking at. */
+    if (changed_num == 0) {
+      BKE_report(op->reports, RPT_ERROR, first_error);
+      return OPERATOR_CANCELLED;
+    }
+    BKE_reportf(op->reports, RPT_INFO, "%d curves could not make segments", error_num);
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+}  // namespace make_segment
+
+static void CURVES_OT_make_segment(wmOperatorType *ot)
+{
+  ot->name = "Make Segment";
+  ot->idname = __func__;
+  ot->description = "Join two selected curve ends, or close a curve with both ends selected";
+
+  ot->exec = make_segment::exec;
+  ot->poll = editable_curves_in_edit_mode_point_domain_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 using bke::CurvesGeometry;
 
 namespace convert_to_particle_system {
@@ -1901,6 +2000,7 @@ void operatortypes_curves()
   WM_operatortype_append(CURVES_OT_add_circle);
   WM_operatortype_append(CURVES_OT_add_bezier);
   WM_operatortype_append(CURVES_OT_handle_type_set);
+  WM_operatortype_append(CURVES_OT_make_segment);
 
   ED_operatortypes_curves_pen();
 }

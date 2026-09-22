@@ -583,6 +583,41 @@ void resize_curves(bke::CurvesGeometry &curves,
  */
 void reorder_curves(bke::CurvesGeometry &curves, Span<int> old_by_new_indices_map);
 
+/** One of the two ends of an open curve. */
+struct CurveEndpoint {
+  enum class Side : int8_t {
+    Start = 0,
+    End = 1,
+  };
+  int curve;
+  Side side;
+};
+
+/**
+ * Collect the selected ends of all open curves, at most one entry per curve end. Cyclic curves and
+ * selected points that are not curve ends are ignored, matching #CURVE_OT_make_segment.
+ */
+void gather_selected_endpoints(const bke::CurvesGeometry &curves,
+                               Vector<CurveEndpoint> &r_endpoints);
+
+/**
+ * Close \a curve by making it cyclic. The selection is left untouched.
+ * \return false when the curve is already cyclic or has less than two points.
+ */
+bool make_curve_cyclic(bke::CurvesGeometry &curves, int curve);
+
+/**
+ * Join the two curves referenced by \a a and \a b into a single curve, reversing one of them when
+ * needed so that the two given ends meet. The joined curve replaces the one with the lower index,
+ * inherits its curve attributes from the curve that ends up first, and is left with only the two
+ * points forming the new segment selected.
+ * \return false and fills \a r_error if the curves cannot be joined.
+ */
+bool join_curves_at_endpoints(bke::CurvesGeometry &curves,
+                              CurveEndpoint a,
+                              CurveEndpoint b,
+                              const char **r_error);
+
 wmOperatorStatus join_objects_exec(bContext *C, wmOperator *op);
 
 enum class SetHandleType : uint8_t {

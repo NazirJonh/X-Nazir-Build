@@ -13,7 +13,9 @@
 
 #include "GPU_shader.hh"
 #include "GPU_vertex_buffer.hh"
+#include "GPU_vertex_format.hh"
 
+#include "BLI_math_vector_types.hh"
 #include "BLI_vector_set.hh"
 
 #include "draw_pass.hh"
@@ -274,6 +276,37 @@ void curves_bind_resources(draw::PassSimple::Sub &sub_ps,
                            GPUMaterial *gpu_material,
                            gpu::VertBufPtr &indirection_buf,
                            std::optional<StringRef> active_uv_name);
+
+/* -------------------------------------------------------------------- */
+/** \name Curve Normals Visualization
+ *
+ * Shared between legacy curves (`draw_cache_impl_curve.cc`) and new curves
+ * (`draw_cache_impl_curves.cc`) for the edit mode normals/tilt overlay. Both build a vertex
+ * buffer in the layout expected by the `overlay_edit_curve_normals` shader.
+ * \{ */
+
+/** Attribute indices inside the curve normals vertex format (see #curves_normals_format_get). */
+struct CurvesNormalsAttrIds {
+  uint pos, rad, nor, tan;
+};
+
+/**
+ * Return the vertex format used by the edit mode curve normals overlay, filling \a r_attr_ids
+ * with the matching attribute indices. The high quality variant uses 16-bit packed normals.
+ */
+const GPUVertFormat &curves_normals_format_get(bool hq_normals, CurvesNormalsAttrIds &r_attr_ids);
+
+/** Write a single normal line origin vertex (position, radius and packed normal/tangent). */
+void curves_normals_set_vertex(gpu::VertBuf &vbo,
+                               const CurvesNormalsAttrIds &attr,
+                               uint index,
+                               const float3 &pos,
+                               const float3 &nor,
+                               const float3 &tan,
+                               float radius,
+                               bool hq_normals);
+
+/** \} */
 
 }  // namespace draw
 }  // namespace blender

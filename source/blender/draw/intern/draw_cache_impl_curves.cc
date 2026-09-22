@@ -12,6 +12,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_array.hh"
 #include "BLI_array_utils.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
@@ -33,6 +34,7 @@
 #include "BKE_customdata.hh"
 #include "BKE_geometry_set.hh"
 
+#include "GPU_attribute_convert.hh"
 #include "GPU_batch.hh"
 #include "GPU_capabilities.hh"
 #include "GPU_context.hh"
@@ -57,6 +59,67 @@ namespace blender::draw {
  * The one between left and right handles. */
 #define EDIT_CURVES_BEZIER_KNOT (1u << 3)
 #define EDIT_CURVES_HANDLE_TYPES_SHIFT (4u)
+
+/* ---------------------------------------------------------------------- */
+/** \name Curve Normals Visualization Utilities
+ * \{ */
+
+const GPUVertFormat &curves_normals_format_get(bool hq_normals, CurvesNormalsAttrIds &r_attr_ids)
+{
+  static CurvesNormalsAttrIds attr_ids;
+  static const GPUVertFormat format = [&]() {
+    GPUVertFormat format{};
+    attr_ids.pos = GPU_vertformat_attr_add(&format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+    attr_ids.rad = GPU_vertformat_attr_add(&format, "rad", gpu::VertAttrType::SFLOAT_32);
+    attr_ids.nor = GPU_vertformat_attr_add(&format, "nor", gpu::VertAttrType::SNORM_10_10_10_2);
+    attr_ids.tan = GPU_vertformat_attr_add(
+        &format, "tangent", gpu::VertAttrType::SNORM_10_10_10_2);
+    return format;
+  }();
+
+  static CurvesNormalsAttrIds attr_ids_hq;
+  static const GPUVertFormat format_hq = [&]() {
+    GPUVertFormat format{};
+    attr_ids_hq.pos = GPU_vertformat_attr_add(&format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+    attr_ids_hq.rad = GPU_vertformat_attr_add(&format, "rad", gpu::VertAttrType::SFLOAT_32);
+    attr_ids_hq.nor = GPU_vertformat_attr_add(
+        &format, "nor", gpu::VertAttrType::SNORM_16_16_16_16);
+    attr_ids_hq.tan = GPU_vertformat_attr_add(
+        &format, "tangent", gpu::VertAttrType::SNORM_16_16_16_16);
+    return format;
+  }();
+
+  r_attr_ids = hq_normals ? attr_ids_hq : attr_ids;
+  return hq_normals ? format_hq : format;
+}
+
+void curves_normals_set_vertex(gpu::VertBuf &vbo,
+                               const CurvesNormalsAttrIds &attr,
+                               uint index,
+                               const float3 &pos,
+                               const float3 &nor,
+                               const float3 &tan,
+                               float radius,
+                               bool hq_normals)
+{
+  GPU_vertbuf_attr_set(&vbo, attr.pos, index, &pos);
+  GPU_vertbuf_attr_set(&vbo, attr.rad, index, &radius);
+
+  if (hq_normals) {
+    const short4 pnor = gpu::convert_normal<short4>(nor);
+    const short4 ptan = gpu::convert_normal<short4>(tan);
+    GPU_vertbuf_attr_set(&vbo, attr.nor, index, &pnor);
+    GPU_vertbuf_attr_set(&vbo, attr.tan, index, &ptan);
+  }
+  else {
+    const gpu::PackedNormal pnor = gpu::convert_normal<gpu::PackedNormal>(nor);
+    const gpu::PackedNormal ptan = gpu::convert_normal<gpu::PackedNormal>(tan);
+    GPU_vertbuf_attr_set(&vbo, attr.nor, index, &pnor);
+    GPU_vertbuf_attr_set(&vbo, attr.tan, index, &ptan);
+  }
+}
+
+/** \} */
 
 /* ---------------------------------------------------------------------- */
 
@@ -94,6 +157,10 @@ struct CurvesBatchCache {
   gpu::Batch *edit_curves_lines;
   gpu::VertBuf *edit_curves_lines_pos;
   gpu::IndexBuf *edit_curves_lines_ibo;
+
+  /* Normals for Edit Mode visualization (Tilt). */
+  gpu::Batch *edit_normals;
+  gpu::VertBuf *edit_normals_data;
 
   /* Whether the cache is invalid. */
   bool is_dirty;
@@ -138,6 +205,10 @@ static void clear_edit_data(CurvesBatchCache *cache)
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_curves_lines_pos);
   GPU_INDEXBUF_DISCARD_SAFE(cache->edit_curves_lines_ibo);
   GPU_BATCH_DISCARD_SAFE(cache->edit_curves_lines);
+
+  /* Normals cleanup. */
+  GPU_VERTBUF_DISCARD_SAFE(cache->edit_normals_data);
+  GPU_BATCH_DISCARD_SAFE(cache->edit_normals);
 }
 
 void CurvesEvalCache::discard_attributes()
@@ -1028,6 +1099,12 @@ gpu::Batch *DRW_curves_batch_cache_get_edit_curves_lines(Curves *curves)
   return DRW_batch_request(&cache.edit_curves_lines);
 }
 
+gpu::Batch *DRW_curves_batch_cache_get_edit_normals(Curves *curves)
+{
+  CurvesBatchCache &cache = get_batch_cache(*curves);
+  return DRW_batch_request(&cache.edit_normals);
+}
+
 gpu::VertBufPtr &DRW_curves_texture_for_evaluated_attribute(Curves *curves,
                                                             const StringRef name,
                                                             bool &r_is_point_domain,
@@ -1078,7 +1155,70 @@ static void create_edit_points_position_vbo(
   cache.edit_curves_lines_pos->data<float3>().copy_from(positions);
 }
 
-void DRW_curves_batch_cache_create_requested(Object *ob)
+/**
+ * Create the VBO for the edit mode curve normals/tilt overlay.
+ *
+ * Normals are shown on evaluated points only, matching the legacy curve behavior.
+ */
+static void curves_create_edit_normals(const bke::CurvesGeometry &curves,
+                                       gpu::VertBuf &vbo_normals,
+                                       const Scene *scene)
+{
+  const bool do_hq_normals = (scene->r.perf_flag & SCE_PERF_HQ_NORMALS) != 0 ||
+                             GPU_use_hq_normals_workaround();
+
+  CurvesNormalsAttrIds attr_ids;
+  const GPUVertFormat &format = curves_normals_format_get(do_hq_normals, attr_ids);
+
+  const Span<float3> positions = curves.evaluated_positions();
+  const Span<float3> normals = curves.evaluated_normals();
+  const Span<float3> tangents = curves.evaluated_tangents();
+
+  /* Not every evaluated point gets a normal, so the buffer is trimmed to the used size below. */
+  const int verts_len_capacity = int(positions.size()) * 2;
+  int vbo_len_used = 0;
+
+  GPU_vertbuf_init_with_format(vbo_normals, format);
+  GPU_vertbuf_data_alloc(vbo_normals, verts_len_capacity);
+
+  const OffsetIndices<int> points_by_curve = curves.evaluated_points_by_curve();
+  const VArray<int> resolutions = curves.resolution();
+
+  for (const int curve_i : curves.curves_range()) {
+    const IndexRange points = points_by_curve[curve_i];
+    /* Sample one normal every `resolution / 16` evaluated points, like the legacy curve overlay
+     * does, so that a high resolution does not turn the overlay into a solid block of lines. */
+    const int step = resolutions[curve_i] / 16 + 1;
+
+    for (int64_t i = 0; i < points.size(); i += step) {
+      const int point_i = points[i];
+
+      /* The legacy overlay scales the line by the point radius because that radius matches the
+       * bevel the normal sits on. New curves are drawn as plain lines in edit mode and their
+       * radius defaults to 0.01, which would shrink the overlay to nothing, so the length is left
+       * entirely to the user controlled "Normals" size. */
+      curves_normals_set_vertex(vbo_normals,
+                                attr_ids,
+                                vbo_len_used,
+                                positions[point_i],
+                                normals[point_i],
+                                tangents[point_i],
+                                1.0f,
+                                do_hq_normals);
+      vbo_len_used++;
+
+      /* The second vertex stays at the base point, only the first one is offset by the shader. */
+      GPU_vertbuf_attr_set(&vbo_normals, attr_ids.pos, vbo_len_used, &positions[point_i]);
+      vbo_len_used++;
+    }
+  }
+
+  if (vbo_len_used < verts_len_capacity) {
+    GPU_vertbuf_data_len_set(vbo_normals, vbo_len_used);
+  }
+}
+
+void DRW_curves_batch_cache_create_requested(Object *ob, const Scene *scene)
 {
   Curves &curves_id = DRW_object_get_data_for_drawing<Curves>(*ob);
   Object *ob_orig = DEG_get_original(ob);
@@ -1118,6 +1258,9 @@ void DRW_curves_batch_cache_create_requested(Object *ob)
     DRW_vbo_request(cache.edit_curves_lines, &cache.edit_curves_lines_pos);
     DRW_ibo_request(cache.edit_curves_lines, &cache.edit_curves_lines_ibo);
   }
+  if (DRW_batch_requested(cache.edit_normals, GPU_PRIM_LINES)) {
+    DRW_vbo_request(cache.edit_normals, &cache.edit_normals_data);
+  }
 
   const OffsetIndices<int> points_by_curve = curves_orig.points_by_curve();
   const VArray<bool> cyclic = curves_orig.cyclic();
@@ -1138,6 +1281,10 @@ void DRW_curves_batch_cache_create_requested(Object *ob)
   if (DRW_ibo_requested(cache.edit_curves_lines_ibo)) {
     create_lines_ibo_with_cyclic(
         curves_orig.evaluated_points_by_curve(), cyclic, *cache.edit_curves_lines_ibo);
+  }
+
+  if (DRW_vbo_requested(cache.edit_normals_data)) {
+    curves_create_edit_normals(curves_orig, *cache.edit_normals_data, scene);
   }
 
   if (!is_edit_data_needed) {

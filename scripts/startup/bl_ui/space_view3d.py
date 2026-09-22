@@ -8685,7 +8685,6 @@ class VIEW3D_PT_overlay_edit_curves(Panel):
         sub.active = overlay.show_curves_symmetry_plane
         sub.prop(overlay, "symmetry_plane_opacity", text="Symmetry Plane")
 
-
 class VIEW3D_PT_overlay_sculpt(Panel):
     bl_space_type = 'VIEW_3D'
     bl_context = ".sculpt_mode"

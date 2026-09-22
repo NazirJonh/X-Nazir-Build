@@ -8306,7 +8306,7 @@ static bool numedit_but_COLORBAND(Button *but, HandleButtonData *data, int mx)
   return changed;
 }
 
-static bool numedit_but_MATERIAL_PAINT_VALUE(Button *but, HandleButtonData *data, const int mx)
+static bool numedit_but_MATERIAL_PAINT_VALUE(Button *but, HandleButtonData *data, const int mx, const bool snap)
 {
   float x1 = 0.0f;
   float sizex = 0.0f;
@@ -8319,7 +8319,11 @@ static bool numedit_but_MATERIAL_PAINT_VALUE(Button *but, HandleButtonData *data
   const float track = max_ff(sizex - 1.0f, 0.0f);
   const float t = (track > 0.0f) ? std::clamp((float(mx) - x1 - 1.0f) / track, 0.0f, 1.0f) :
                                    0.0f;
-  const float value = BKE_paint_material_value_from_t(but->softmin, but->softmax, t);
+  float value = BKE_paint_material_value_from_t(but->softmin, but->softmax, t);
+
+  if (snap) {
+    value = roundf(value * 10.0f) / 10.0f;
+  }
 
   data->draglastx = mx;
 
@@ -8438,6 +8442,8 @@ static int do_but_MATERIAL_PAINT_VALUE(
   int my = event->xy[1];
   window_to_block(data->region, block, &mx, &my);
 
+  const bool snap = (event->modifier & KM_CTRL) != 0;
+
   if (data->state == BUTTON_STATE_HIGHLIGHT) {
     if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
       data->dragstartx = mx;
@@ -8448,7 +8454,7 @@ static int do_but_MATERIAL_PAINT_VALUE(
       button_activate_state(C, but, BUTTON_STATE_NUM_EDITING);
 
       /* Click-to-set, then continue as a drag. */
-      if (numedit_but_MATERIAL_PAINT_VALUE(but, data, mx)) {
+      if (numedit_but_MATERIAL_PAINT_VALUE(but, data, mx, snap)) {
         numedit_apply(C, block, but, data);
       }
 
@@ -8458,7 +8464,7 @@ static int do_but_MATERIAL_PAINT_VALUE(
   else if (data->state == BUTTON_STATE_NUM_EDITING) {
     if (event->type == MOUSEMOVE) {
       if (mx != data->draglastx || my != data->draglasty) {
-        if (numedit_but_MATERIAL_PAINT_VALUE(but, data, mx)) {
+        if (numedit_but_MATERIAL_PAINT_VALUE(but, data, mx, snap)) {
           numedit_apply(C, block, but, data);
         }
       }

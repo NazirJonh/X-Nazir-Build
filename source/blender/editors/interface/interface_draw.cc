@@ -1589,33 +1589,55 @@ void draw_but_MATERIAL_PAINT_VALUE(Button *but, const uiWidgetColors *wcol, cons
 
   const float track = max_ff(sizex - 1.0f, 0.0f);
 
-  /* Reference tick on the same track as the handle, at whichever value is the neutral one for
-   * this range:
-   * - Unipolar (e.g. [0,1] factors): black mark at the minimum, value 0.
-   * - Bipolar (range straddles zero, e.g. [-1,1] height): white mark at value 0, wherever that
-   *   falls in the range (not necessarily the track center). */
+  /* Tick marks every 0.1 across the value range on the same track as the handle, so mid-range
+   * values are readable while dragging:
+   * - All ticks are half-height and colored for contrast against the local gradient.
+   * - Bipolar (range straddles zero, e.g. [-1,1] height): the tick at value 0 keeps full height
+   *   and white color so the neutral position stays prominent. */
   {
     const MaterialPaintValueGradientMode mode = BKE_paint_material_value_gradient_mode(value_min,
                                                                                        value_max);
-    const float t_tick = (mode == MaterialPaintValueGradientMode::Bipolar) ?
-                             BKE_paint_material_t_from_value(value_min, value_max, 0.0f) :
-                             0.0f;
-    const float mid_x = floorf(x1 + t_tick * track + 1.0f);
-    const float tick = (mode == MaterialPaintValueGradientMode::Bipolar) ? 1.0f : 0.0f;
+    const int tick_start = int(ceilf(value_min * 10.0f));
+    const int tick_end = int(floorf(value_max * 10.0f));
 
-    format = immVertexFormat();
-    pos_id = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
-    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-    immUniformColor4f(tick, tick, tick, 1.0f);
-    const float line_width = max_ff(1.0f, float(U.pixelsize));
-    GPU_line_width(line_width);
-    immBegin(GPU_PRIM_LINES, 2);
-    immVertex2f(pos_id, mid_x, y1);
-    immVertex2f(pos_id, mid_x, y1 + sizey);
-    immEnd();
-    immUnbindProgram();
-    /* Restore the default line width; this widget is the only caller that changes it. */
-    GPU_line_width(1.0f);
+    if (tick_start <= tick_end) {
+      format = immVertexFormat();
+      pos_id = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+      immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+      const float line_width = max_ff(1.0f, float(U.pixelsize));
+      GPU_line_width(line_width);
+      immBegin(GPU_PRIM_LINES, (tick_end - tick_start + 1) * 2);
+
+      for (int k = tick_start; k <= tick_end; k++) {
+        const float tick_value = float(k) / 10.0f;
+        const float t_tick = BKE_paint_material_t_from_value(value_min, value_max, tick_value);
+        const float mid_x = floorf(x1 + t_tick * track + 1.0f);
+
+        float tick_r = 1.0f, tick_g = 1.0f, tick_b = 1.0f;
+        float tick_y1 = y1;
+        float tick_y2 = y1 + sizey;
+
+        if (!(mode == MaterialPaintValueGradientMode::Bipolar && k == 0)) {
+          /* Half-height tick, dynamically inverted based on the background gradient. */
+          float bg_rgb[3];
+          BKE_paint_material_value_gradient_color(value_min, value_max, t_tick, bg_rgb);
+          const float luma = 0.2126f * bg_rgb[0] + 0.7152f * bg_rgb[1] + 0.0722f * bg_rgb[2];
+          const float tick_val = (luma > 0.5f) ? 0.0f : 1.0f;
+          tick_r = tick_g = tick_b = tick_val;
+
+          tick_y1 = y1;
+          tick_y2 = y1 + sizey / 3.0f;
+        }
+
+        immVertex2f(pos_id, mid_x, tick_y1);
+        immVertex2f(pos_id, mid_x, tick_y2);
+      }
+
+      immEnd();
+      immUnbindProgram();
+      /* Restore the default line width; this widget is the only caller that changes it. */
+      GPU_line_width(1.0f);
+    }
   }
 
   /* Single handle at current value (same track as click/drag mapping). */

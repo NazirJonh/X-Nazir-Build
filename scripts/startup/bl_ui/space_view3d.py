@@ -10416,8 +10416,9 @@ class VIEW3D_PT_sculpt_context_menu(Panel):
         paint = context.tool_settings.sculpt
         brush = paint.brush
         capabilities = brush.sculpt_capabilities
+        has_color = capabilities.has_color or brush.sculpt_brush_type == 'TEXTURE_FILL'
 
-        if capabilities.has_color:
+        if has_color:
             material_paint = brush.material_paint
             split = layout.split(factor=0.1)
             split.active = (
@@ -10478,7 +10479,7 @@ class VIEW3D_PT_sculpt_context_menu(Panel):
             layout.prop(brush, "height", slider=True, text="Height")
 
         # Color Palette section
-        if capabilities.has_color:
+        if has_color:
             draw_color_palette_section(layout, paint)
 
 

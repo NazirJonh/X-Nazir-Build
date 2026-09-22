@@ -88,6 +88,14 @@ inline Image *paint_layer_material_source_map(const MaterialPaintLayer &layer, c
   {
     return nullptr;
   }
+  /* Alpha has no channel slot of its own: #BKE_paint_layers_material_bake_apply and the bake
+   * planner (`render_material_bake.cc`) both write and read the source's transparency as the
+   * row's #MaterialPaintLayerBake::coverage, not `images[PAINT_MATERIAL_CHANNEL_ALPHA]` -- nothing
+   * ever fills that slot. Reading `images[]` here left every Material row seeing Alpha as
+   * permanently unmapped, so a row could never settle on Baked. */
+  if (channel == PAINT_MATERIAL_CHANNEL_ALPHA) {
+    return layer.bake->coverage;
+  }
   return layer.bake->images[channel];
 }
 

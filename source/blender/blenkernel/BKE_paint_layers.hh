@@ -857,6 +857,8 @@ struct PaintLayersRegenCache {
   bool modes_frozen = false;
   /** Rows' modes, filled lazily and only while #modes_frozen. */
   mutable Map<const MaterialPaintLayer *, PaintLayerMaterialMode> modes;
+  /** #BKE_paint_layers_material_bake_ready per row: hashing the source tree is not free. */
+  mutable Map<const MaterialPaintLayer *, bool> bake_ready;
   /** The Pass Through visibility multiplier of every row, from one walk of the stack. */
   mutable Map<const MaterialPaintLayer *, float> pass_through_scales;
   mutable bool pass_through_scales_valid = false;
@@ -906,6 +908,21 @@ PaintLayerMaterialMode BKE_paint_layers_material_mode(const Material &ma,
  * while this holds, which is what makes the topology hash see the mode change and rebuild once.
  */
 bool BKE_paint_layers_material_forced_bake(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether the bake of a Material row can be shown: its stored hash matches the source and none of
+ * its maps is being rendered right now. The hash alone is not enough, because the hand-over stamps
+ * it before the worker has written any pixel. A row that is not ready stays live, so a stale, blank
+ * or half-written map is never shown; it moves to its maps once, when the last map lands.
+ */
+bool BKE_paint_layers_material_bake_ready(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Runtime claim on a map that a bake job is rendering, keyed by the image's session UID and counted
+ * so an overlapping job on the same map keeps it claimed. The editor's job code owns the calls.
+ */
+void BKE_paint_layers_bake_image_pending_add(uint32_t image_session_uid);
+void BKE_paint_layers_bake_image_pending_remove(uint32_t image_session_uid);
 
 /**
  * Drop the runtime sampler state keyed by \a ma's `session_uid`. Called when the material is freed so
@@ -1112,9 +1129,13 @@ void BKE_paint_layers_bake_finalize(Material &ma, MaterialPaintLayer &layer);
  *
  * An #PAINT_MATERIAL_CHANNEL_ALPHA map becomes the row's coverage -- the source's transparency is
  * what limits it over the stack -- and is not kept as a channel of its own. Without one the
- * coverage is an opaque white map, so a source that does not feed alpha fully covers. The bake is
- * finalised, so #BKE_paint_layers_bake_substitute starts taking the row. The images must already
- * belong to \a bmain.
+ * coverage is an opaque white map, so a source that does not feed alpha fully covers. The images
+ * must already belong to \a bmain.
+ *
+ * This does NOT finalise the bake: a caller handing over target images before their render has
+ * actually landed pixels (the async material-images job pattern) must call
+ * #BKE_paint_layers_bake_finalize itself only once that render is known to have succeeded, or a
+ * cancelled/failed job leaves the row stamped valid over blank or stale maps.
  */
 void BKE_paint_layers_material_bake_apply(Main &bmain,
                                           Material &ma,

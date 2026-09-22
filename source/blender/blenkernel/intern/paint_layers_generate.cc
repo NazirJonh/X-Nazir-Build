@@ -19,6 +19,7 @@
  * (called from the material evaluation too).
  */
 
+#include "BKE_paint_layers_debug.hh"
 #include "BKE_paint_layers_generate.hh"
 
 #include <algorithm>
@@ -140,6 +141,8 @@ constexpr const char *ROLE_FILL = "fill";
 constexpr const char *ROLE_CORRECTION_OPACITY = "correction_opacity";
 /** #INPUT_ROLE_PROP value of a Fill correction's constant colour. */
 constexpr const char *ROLE_CORRECTION_FILL = "correction_fill";
+/** #INPUT_ROLE_PROP value of a Hybrid Material row's live constant (ТЗ-26). */
+constexpr const char *ROLE_LIVE_CONSTANT = "live_constant";
 
 /** \} */
 
@@ -762,11 +765,6 @@ uint64_t paint_layers_source_materials_hash(const Material &ma)
   return hash;
 }
 
-uint64_t topology_hash_float(uint64_t hash, const float value)
-{
-  return topology_hash_mix(hash, std::bit_cast<uint32_t>(value));
-}
-
 void topology_hash_string(uint64_t &hash, const char *text)
 {
   if (text == nullptr) {
@@ -867,35 +865,48 @@ uint64_t topology_hash_layer(uint64_t hash,
   for (const int channel : wired_channels) {
     Image *baked = nullptr;
     const bool substituted = row_channel_substituted(ma, layer, channel, &baked);
+    /* #layer_row_has_group, not the narrower #leaf_participates: for a Material row the latter
+     * only asks whether a bake map exists (#paint_layer_channel_present), so before any bake it
+     * disagreed with the live source the build actually shows -- #layer_row_has_group is the one
+     * predicate the build and the root hash already share (see its own doc comment), and folding a
+     * fresh, still-live hand-over's map into `present` must not flip this bit either. */
     const bool participates = is_folder ? layer_subtree_has_channel(ma, layer, channel, cache) :
-                                          leaf_participates(layer, channel);
+                                          layer_row_has_group(ma, layer, channel, cache);
     hash = topology_hash_mix(hash, uint64_t(channel));
     hash = topology_hash_mix(hash, substituted ? 1 : 0);
     hash = topology_hash_mix(hash, participates ? 1 : 0);
     hash = topology_hash_mix(
         hash, uint64_t(BKE_paint_layers_channel_blend_effective(layer, channel)));
-    hash = topology_hash_mix(hash, topology_hash_map_id(paint_layer_channel_image(layer, channel)));
     float live_value[4];
     const bool live_constant = BKE_paint_layers_material_live_constant(
         ma, layer, channel, live_value, cache);
+    Image *live_map_image_probe = nullptr;
+    const ImageUser *live_map_iuser_probe = nullptr;
+    const bool live_map_probe = BKE_paint_layers_material_live_image(
+        ma, layer, channel, &live_map_image_probe, &live_map_iuser_probe, cache);
+    /* The build reads this row's own channel map (#paint_layer_channel_image -- for a Material
+     * row that is its bake target, #paint_layer_material_source_map) only once the channel is not
+     * shown live from the source: the build's channel loop `continue`s past that map entirely for
+     * a live constant or a live map (see the Hybrid branch there). Hashing the map's identity while
+     * the channel is still live would rebuild this row's group on every hand-over of a fresh bake
+     * target (#BKE_paint_layers_material_bake_apply), even though the graph never references it
+     * until the row actually turns Baked. Non-Material rows have no such live path, so their map
+     * always counts. */
+    const bool image_wired = layer.kind != MA_PAINT_LAYER_KIND_MATERIAL ||
+                             !(live_constant || live_map_probe);
+    hash = topology_hash_mix(
+        hash,
+        image_wired ? topology_hash_map_id(paint_layer_channel_image(layer, channel)) : 0);
+    /* Whether the channel is currently shown live as a constant is topology (it decides whether the
+     * row's group carries a live-constant input at all); the constant's own value is not (ТЗ-26): it
+     * is a group input, filled by #create_value_inputs and kept current by #values_sync_socket via
+     * #BKE_paint_layers_material_live_constant, so a source slider move syncs in place instead of
+     * rebuilding this group. */
     hash = topology_hash_mix(hash, live_constant ? 1 : 0);
-    if (live_constant) {
-      /* The value lives in another material, which #BKE_paint_layers_values_sync cannot see, so it
-       * is hashed here as topology: a slider move rebuilds this one group instead of baking through
-       * EEVEE. The root hash is unaffected, since the group's contract (Below, its outputs) is the
-       * same. */
-      for (const float component : live_value) {
-        hash = topology_hash_float(hash, component);
-      }
-    }
-    Image *live_map_image = nullptr;
-    const ImageUser *live_map_iuser = nullptr;
-    const bool live_map = BKE_paint_layers_material_live_image(
-        ma, layer, channel, &live_map_image, &live_map_iuser, cache);
-    hash = topology_hash_mix(hash, live_map ? 1 : 0);
-    if (live_map) {
+    hash = topology_hash_mix(hash, live_map_probe ? 1 : 0);
+    if (live_map_probe) {
       /* Which map the row shows is topology, like any other map a row reads. */
-      hash = topology_hash_mix(hash, topology_hash_map_id(live_map_image));
+      hash = topology_hash_mix(hash, topology_hash_map_id(live_map_image_probe));
     }
     const PaintLayerMaterialMode material_mode = (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) ?
                                                      BKE_paint_layers_material_mode(ma, layer, cache) :
@@ -1095,6 +1106,10 @@ void paint_layers_tree_build(const Material &ma,
   Map<const MaterialPaintLayerChannel *, bNodeTreeInterfaceSocket *> fill_inputs;
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> correction_opacity_inputs;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> correction_fill_inputs;
+  /* A Hybrid Material row's live constant per channel (ТЗ-26): the source's default value is a
+   * value, not topology, so it travels through a group input like opacity and Fill, instead of
+   * being baked into an RGB node's default. */
+  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> live_constant_inputs;
 
 
   /* One output per wired channel. */
@@ -1171,9 +1186,9 @@ void paint_layers_tree_build(const Material &ma,
       }
     }
     if (instance == nullptr) {
-      printf("paint layers: row '%s': no wrapper instance (%s)\n",
-             layer.name,
-             (failure != nullptr) ? failure : "unknown");
+      PL_DEBUG_PRINTF("paint layers: row '%s': no wrapper instance (%s)\n",
+                      layer.name,
+                      (failure != nullptr) ? failure : "unknown");
     }
     source_group_instances.add(&layer, instance);
     return instance;
@@ -1326,6 +1341,34 @@ void paint_layers_tree_build(const Material &ma,
         copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(socket->socket_data)->value, color);
       }
       fill_inputs.add(paint_layer_channel_find(layer, channel), socket);
+    }
+    /* A Hybrid Material row's live constant (ТЗ-26): the value lives on another material's node
+     * tree, so it cannot travel through #BKE_paint_layers_custom_properties_sync like a row's own
+     * Fill constant. It gets its own group input instead, filled here and kept current by
+     * #values_sync_socket, so a source edit reaches the row without rebuilding its group. */
+    if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) {
+      for (const int channel : wired_channels) {
+        float live_value[4];
+        if (!BKE_paint_layers_material_live_constant(ma, layer, channel, live_value, cache)) {
+          continue;
+        }
+        const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+            eMaterialPaintChannel(channel));
+        char base[200];
+        SNPRINTF(base,
+                 "%s %s Source",
+                 layer.name[0] != '\0' ? layer.name : "Layer",
+                 info.ui_name);
+        bNodeTreeInterfaceSocket *socket = layer_group_value_input(
+            group, base, "NodeSocketColor", ROLE_LIVE_CONSTANT, layer.marker, channel);
+        if (socket == nullptr) {
+          continue;
+        }
+        if (socket->socket_data != nullptr) {
+          copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(socket->socket_data)->value, live_value);
+        }
+        live_constant_inputs.lookup_or_add_default(&layer).add(channel, socket);
+      }
     }
     auto add_correction = [&](const MaterialPaintLayer &correction, const bool mask_item) {
       for (const int channel : wired_channels) {
@@ -1744,21 +1787,25 @@ void paint_layers_tree_build(const Material &ma,
                            nullptr :
                            paint_layer_channel_image(*layer, channel);
         if (live_constant) {
-          /* The active Material row shows its source's live constant rather than its baked map: the
-           * value lives in another material, so it is built into the tree directly. */
-          bNode *constant = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
-          bNodeSocket *constant_out = (constant != nullptr) ? socket_out(*constant, "Color") :
-                                                              nullptr;
-          if (constant == nullptr || constant_out == nullptr ||
-              constant_out->default_value == nullptr)
+          /* The active Material row shows its source's live constant rather than its baked map.
+           * The value lives in another material, so it is not topology (ТЗ-26): it is read from
+           * this row's own group input, filled by #create_value_inputs and kept current by
+           * #values_sync_socket, exactly like a row's own Fill constant. */
+          bNodeTreeInterfaceSocket *live_constant_iface = nullptr;
+          if (Map<int, bNodeTreeInterfaceSocket *> *live_constant_by_channel =
+                  live_constant_inputs.lookup_ptr(layer))
           {
+            if (bNodeTreeInterfaceSocket **found = live_constant_by_channel->lookup_ptr(channel)) {
+              live_constant_iface = *found;
+            }
+          }
+          bNodeSocket *constant_out = (live_constant_iface != nullptr) ?
+                                          group_input_socket(*live_constant_iface) :
+                                          nullptr;
+          if (constant_out == nullptr) {
             return {};
           }
-          constant->location[0] = location_x;
-          constant->location[1] = location_y;
-          copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(constant_out->default_value)->value,
-                     live_value);
-          current.source_node = constant;
+          current.source_node = group_input;
           current.source = constant_out;
         }
         else if (live_map) {
@@ -1798,9 +1845,10 @@ void paint_layers_tree_build(const Material &ma,
           /* The whole source graph goes through the wrapper's COLOR:<CHANNEL> output. No map, so
            * content coverage for this row comes from the wrapper's COVERAGE output below. */
           if (source_group_socket == nullptr) {
-            printf("paint layers: row '%s' channel %d: wrapper has no COLOR output, row dropped\n",
-                   layer->name,
-                   channel);
+            PL_DEBUG_PRINTF(
+                "paint layers: row '%s' channel %d: wrapper has no COLOR output, row dropped\n",
+                layer->name,
+                channel);
             return {};
           }
           current.source_node = source_group_instance;
@@ -3592,6 +3640,8 @@ void refresh_generated_instances(bNodeTree &tree, const bUUID &owner_uid, Set<bN
 
 namespace {
 
+#if PAINT_LAYERS_DEBUG_LOG
+
 const char *material_mode_name(const PaintLayerMaterialMode mode)
 {
   switch (mode) {
@@ -3796,6 +3846,8 @@ void source_group_instances_log(
   }
   previous_source_group_embeds().add_overwrite(ma.id.session_uid, states);
 }
+
+#endif /* PAINT_LAYERS_DEBUG_LOG */
 
 /* -------------------------------------------------------------------- */
 /** \name Sampler budget and counting
@@ -4149,7 +4201,9 @@ bool BKE_paint_layers_regenerate(Main &bmain,
                                  PaintLayersRegenerateReport *r_report)
 {
   PaintLayersRegenerateReport report;
+#if PAINT_LAYERS_DEBUG_LOG
   const double regen_start = BLI_time_now_seconds();
+#endif
   if (!paint_layers_is_layered(ma) || ma.nodetree == nullptr) {
     if (r_report != nullptr) {
       *r_report = report;
@@ -4295,7 +4349,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * and the wired set, every layer group's topology hash and the root hash are computed from the
    * final modes, or a second pass would see a different graph and loop. */
   const int budget = sampler_runtime().budget;
-  int sampler_count = 0;
   int sampler_estimate_value = 0;
   int fallback_rows = 0;
   int removed_hidden = 0;
@@ -4531,7 +4584,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       BKE_paint_layers_flatten(ma, all_layers);
       for (const MaterialPaintLayer *layer : all_layers) {
         if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL || layer->material == nullptr ||
-            layer->bake == nullptr || !BKE_paint_layers_bake_is_valid(ma, *layer) ||
+            layer->bake == nullptr || !BKE_paint_layers_material_bake_ready(ma, *layer) ||
             BKE_paint_layers_material_mode(ma, *layer, &regen_cache) !=
                 PaintLayerMaterialMode::SourceGroup ||
             source_group_lookup(*layer->material) == nullptr ||
@@ -4585,7 +4638,9 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   regen_cache.modes_frozen = true;
   /* The modes may have moved (forced bake, hidden cleanup): refresh the report before building. */
   populate_material_rows();
+#if PAINT_LAYERS_DEBUG_LOG
   material_row_modes_log(ma, report.material_rows);
+#endif
 
   /* The factory hands each layer a tree of its own, reusing an old one by layer marker. It outlives
    * the build, which only holds a non-owning reference to it. A reused tree whose stored topology
@@ -4624,12 +4679,12 @@ bool BKE_paint_layers_regenerate(Main &bmain,
         /* Clear the nodes but keep the interface: a rebuilt group reuses its sockets by name, so
          * their identifiers -- and the parent's links into them -- survive. Unused sockets are
          * pruned at the end of the build. */
-        printf("paint layers regen diff: layer '%s' kind=%d section=%d old=%llx new=%llx\n",
-               layer.name,
-               int(layer.kind),
-               int(layer.section),
-               static_cast<unsigned long long>(stored),
-               static_cast<unsigned long long>(topology));
+        PL_DEBUG_PRINTF("paint layers regen diff: layer '%s' kind=%d section=%d old=%llx new=%llx\n",
+                        layer.name,
+                        int(layer.kind),
+                        int(layer.section),
+                        static_cast<unsigned long long>(stored),
+                        static_cast<unsigned long long>(topology));
         tree_clear_nodes(bmain, *candidate);
         if (!STREQ(candidate->id.name + 2, name)) {
           BKE_id_rename(bmain, candidate->id, name);
@@ -4703,12 +4758,14 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   }
   const bool keep_root = !undo_forces_rebuild && !created_tree && have_stored_root &&
                          stored_root == root_hash;
+#if PAINT_LAYERS_DEBUG_LOG
   if (!keep_root && have_stored_root) {
     printf("paint layers regen diff: root old=%llx new=%llx undo=%d\n",
            static_cast<unsigned long long>(stored_root),
            static_cast<unsigned long long>(root_hash),
            int(undo_forces_rebuild));
   }
+#endif
   if (keep_root) {
     /* The root's nodes, links and interface already match: discard the scratch and leave it. */
     if (scratch != nullptr) {
@@ -4745,6 +4802,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     BKE_ntree_update_tag_all(tree);
     BKE_ntree_update_after_single_tree_change(bmain, *tree);
   }
+#if PAINT_LAYERS_DEBUG_LOG
   printf("paint layers regen: root=%s groups_created=%d groups_deleted=%d source_groups_changed=%d "
          "total=%.2fms\n",
          keep_root ? "kept" : "rebuilt",
@@ -4775,6 +4833,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
         }
       };
   log_layers(ma.paint_layers, "");
+#endif
 
   for (bNodeTree *layer_tree : old_layer_trees) {
     if (used_layer_trees.contains(layer_tree)) {
@@ -4796,7 +4855,9 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   /* Source-group wrappers are pruned by the same rule: no row of this owner reads their source any
    * more, so nothing keeps them. */
   source_groups_prune(bmain, ma);
+#if PAINT_LAYERS_DEBUG_LOG
   source_group_instances_log(ma, layer_trees, source_groups, &regen_cache);
+#endif
 
   /* The instance: found by marker, re-pointed when it names a different tree. */
   bNode *instance = instance_find(ma, ma.paint_layers_owner_uid);
@@ -4848,9 +4909,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * so a caller (and the tests) can compare it with the finished count. */
   sampler_estimate_value = sampler_estimate();
   report.sampler_estimate = sampler_estimate_value;
+#if PAINT_LAYERS_DEBUG_LOG
   if (!keep_root) {
     const int max_textures = sampler_runtime().max_textures;
-    sampler_count = BKE_paint_layers_sampler_count(ma);
+    const int sampler_count = BKE_paint_layers_sampler_count(ma);
     const int estimate = sampler_estimate_value;
     const int over = (budget > 0 && sampler_count > budget) ? sampler_count - budget : 0;
     printf("paint layers samplers: material='%s' count=%d estimate=%d budget=%d max=%d over=%d "
@@ -4865,6 +4927,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
            removed_hidden,
            (sampler_count != estimate) ? " MISMATCH" : "");
   }
+#endif
 
   /* Debug-only: a kept root's interface must still be exactly what a full build would produce, so
    * its value inputs and every group's interface signature hash the same as before. values_sync
@@ -5047,6 +5110,27 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  if (STREQ(role, ROLE_LIVE_CONSTANT)) {
+    const int channel = prop_int_get(iface.properties, INPUT_CHANNEL_PROP, -1);
+    if (channel < 0) {
+      return false;
+    }
+    /* #layer.material is walked by #material_paint_layer_foreach_id, so on the evaluated copy of
+     * `ma` this call (from #BKE_material_eval) already reads the evaluated source, exactly like the
+     * generator reads the original source when it rebuilds from the original `ma`. Either way the
+     * helper decides whether the channel is still live; the socket keeps its last value otherwise,
+     * since a channel that stopped being live rebuilds the row and drops this input entirely. */
+    float value[4];
+    if (!BKE_paint_layers_material_live_constant(ma, *layer, channel, value, cache)) {
+      return false;
+    }
+    if (bNodeSocketValueRGBA *socket_value = static_cast<bNodeSocketValueRGBA *>(
+            socket.default_value))
+    {
+      copy_v4_v4(socket_value->value, value);
+    }
+    return true;
+  }
   return false;
 }
 
@@ -5095,7 +5179,11 @@ void values_sync_instance(Material &ma,
 
 void BKE_paint_layers_values_sync(Material &ma)
 {
-  values_sync_with_cache(ma, nullptr);
+  /* The sync runs on every value edit and asks the Pass Through scale once per opacity socket; the
+   * cache turns those walks of the whole stack into one. It is built from `ma` itself, which on the
+   * evaluated copy is the description being synced. */
+  const PaintLayersRegenCache cache;
+  values_sync_with_cache(ma, &cache);
 }
 
 static void values_sync_with_cache(Material &ma, const PaintLayersRegenCache *cache)
@@ -5938,15 +6026,15 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
       /* Same topology, new values: copy them into the existing copies. No rebuild, so the wrapper
        * keeps its ID, its nodes and its generated interface, and the shader is not recompiled. */
       const Vector<SourceGroupChannel> channels = source_group_channels(*principled);
-      const int synced = source_group_values_sync_tree(
+      [[maybe_unused]] const int synced = source_group_values_sync_tree(
           bmain, *source.nodetree, *existing, principled, channels, true);
       tree_hash_set(
           *existing, TREE_SOURCE_VALUES_LOW_PROP, TREE_SOURCE_VALUES_HIGH_PROP, source_values);
       DEG_id_tag_update(&owner.id, ID_RECALC_SYNC_TO_EVAL);
-      printf("paint layers: source group '%s' for owner '%s' values synced nodes=%d\n",
-             source.id.name + 2,
-             owner.id.name + 2,
-             synced);
+      PL_DEBUG_PRINTF("paint layers: source group '%s' for owner '%s' values synced nodes=%d\n",
+                      source.id.name + 2,
+                      owner.id.name + 2,
+                      synced);
       if (r_values_synced != nullptr) {
         *r_values_synced = true;
       }
@@ -5997,14 +6085,15 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
         break;
       }
     }
-    printf("paint layers: source group '%s' for owner '%s' %s hash=%llx path_depth=%d "
-           "removed_copies=%d\n",
-           source.id.name + 2,
-           owner.id.name + 2,
-           "rebuilt",
-           static_cast<unsigned long long>(source_topology),
-           int(group_path.size()),
-           removed_copies);
+    PL_DEBUG_PRINTF(
+        "paint layers: source group '%s' for owner '%s' %s hash=%llx path_depth=%d "
+        "removed_copies=%d\n",
+        source.id.name + 2,
+        owner.id.name + 2,
+        "rebuilt",
+        static_cast<unsigned long long>(source_topology),
+        int(group_path.size()),
+        removed_copies);
     if (r_changed != nullptr) {
       *r_changed = true;
     }
@@ -6027,14 +6116,15 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
     r_refusal = PaintLayersSourceGroupRefusal::BuildFailed;
     return nullptr;
   }
-  printf("paint layers: source group '%s' for owner '%s' %s hash=%llx path_depth=%d "
-         "removed_copies=%d\n",
-         source.id.name + 2,
-         owner.id.name + 2,
-         "created",
-         static_cast<unsigned long long>(source_topology),
-         int(group_path.size()),
-         0);
+  PL_DEBUG_PRINTF(
+      "paint layers: source group '%s' for owner '%s' %s hash=%llx path_depth=%d "
+      "removed_copies=%d\n",
+      source.id.name + 2,
+      owner.id.name + 2,
+      "created",
+      static_cast<unsigned long long>(source_topology),
+      int(group_path.size()),
+      0);
   if (r_changed != nullptr) {
     *r_changed = true;
   }

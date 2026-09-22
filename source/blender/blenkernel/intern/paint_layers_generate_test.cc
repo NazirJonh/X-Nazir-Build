@@ -1705,7 +1705,15 @@ TEST_F(PaintLayersGenerateTest, value_edit_rebuilds_nothing)
   EXPECT_TRUE(group_mix_sentinel_get(*bottom_tree, 0.25f));
 }
 
-TEST_F(PaintLayersGenerateTest, live_material_constant_builds_a_constant_source)
+/**
+ * TZ-26 note: this test used to assert the live constant was built as an #SH_NODE_RGB node with
+ * the value baked into its default (`EXPECT_GE(count_type(*group, SH_NODE_RGB), 1)`). The value is
+ * now a group input instead (#create_value_inputs, role #ROLE_LIVE_CONSTANT / "live_constant"), so
+ * it travels through #BKE_paint_layers_values_sync like opacity and Fill rather than being baked
+ * into the row's topology -- this is the change TZ-26 asks for, so the assertion is rewritten to
+ * check for the new mechanism (the interface socket and its value) instead of the old one.
+ */
+TEST_F(PaintLayersGenerateTest, live_material_constant_builds_a_group_input)
 {
   Material *source = add_principled_source("LiveSource", 0.42f);
   MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
@@ -1716,14 +1724,25 @@ TEST_F(PaintLayersGenerateTest, live_material_constant_builds_a_constant_source)
   /* A baked map for the row, so the non-live path has something to show. */
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(
       *ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("SourceBake")));
+  BKE_paint_layers_bake_finalize(*ma, *row);
   BKE_paint_layers_active_set(*ma, row->marker);
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   bNodeTree *group = layer_tree_find(*bmain, "Source");
   ASSERT_NE(group, nullptr);
-  /* Live: the source's constant is built in, and the row's baked map is not read. */
+  /* Live: the source's constant is a group input, no RGB node baked into the topology, and the
+   * row's baked map is not read. */
   EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 0);
-  EXPECT_GE(count_type(*group, SH_NODE_RGB), 1);
+  bNodeTreeInterfaceSocket *live_input = group_input_find(*group, "Source Roughness Source");
+  ASSERT_NE(live_input, nullptr);
+  ASSERT_NE(live_input->properties, nullptr);
+  const IDProperty *role = IDP_GetPropertyTypeFromGroup(
+      live_input->properties, "pbr_paint_layers_role", IDP_STRING);
+  ASSERT_NE(role, nullptr);
+  EXPECT_STREQ(IDP_string_get(role), "live_constant");
+  ASSERT_NE(live_input->socket_data, nullptr);
+  const float *value = static_cast<bNodeSocketValueRGBA *>(live_input->socket_data)->value;
+  EXPECT_NEAR(value[0], 0.42f, 1e-4f);
 
   /* Leaving the row rebuilds its group on the baked map. */
   BKE_paint_layers_active_set(*ma, bottom->marker);
@@ -1733,7 +1752,15 @@ TEST_F(PaintLayersGenerateTest, live_material_constant_builds_a_constant_source)
   EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
 }
 
-TEST_F(PaintLayersGenerateTest, live_material_constant_is_topology_but_keeps_the_root)
+/**
+ * TZ-26: this test used to be named `live_material_constant_is_topology_but_keeps_the_root` and
+ * asserted the opposite of what it now checks -- moving the source's constant used to rebuild the
+ * row's own group (the stamp was gone) while leaving the root alone. The live constant is a value
+ * now (#ROLE_LIVE_CONSTANT group input, synced by #values_sync_socket), not topology, so the fix
+ * this TZ asks for is exactly that the row's group must survive the edit too; the name and the body
+ * are rewritten together to match.
+ */
+TEST_F(PaintLayersGenerateTest, live_material_constant_edit_syncs_without_rebuild)
 {
   Material *source = add_principled_source("LiveSource", 0.1f);
   add_paint_layer("Bottom", add_image("Bottom"));
@@ -1743,6 +1770,7 @@ TEST_F(PaintLayersGenerateTest, live_material_constant_is_topology_but_keeps_the
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
 
   bNodeTree *root = ma->paint_layers_tree;
   ASSERT_NE(root, nullptr);
@@ -1751,7 +1779,8 @@ TEST_F(PaintLayersGenerateTest, live_material_constant_is_topology_but_keeps_the
   ASSERT_NE(group, nullptr);
   ASSERT_TRUE(group_mix_sentinel_set(*group, 0.125f));
 
-  /* Move the source's constant: the value is part of the layer group's topology. */
+  /* Move the source's constant: it is now a value the row's group reads through a group input, not
+   * topology, so it must sync in place. */
   bNode *principled = principled_of(*source);
   ASSERT_NE(principled, nullptr);
   bNodeSocket *roughness = bke::node_find_socket(*principled, SOCK_IN, "Roughness"_ustr);
@@ -1759,11 +1788,19 @@ TEST_F(PaintLayersGenerateTest, live_material_constant_is_topology_but_keeps_the
   static_cast<bNodeSocketValueFloat *>(roughness->default_value)->value = 0.9f;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
-  /* The group was rebuilt (the stamp is gone), but the root's signature did not change. */
+  /* Neither the row's group nor the root was rebuilt: the sentinel and the node lists survive. */
   ASSERT_EQ(layer_tree_find(*bmain, "Source"), group);
-  EXPECT_FALSE(group_mix_sentinel_get(*group, 0.125f));
+  EXPECT_TRUE(group_mix_sentinel_get(*group, 0.125f));
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+
+  /* The new value reached the row's group input through the sync at the end of regeneration. */
+  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "Source Roughness Source");
+  ASSERT_NE(iface, nullptr);
+  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *iface);
+  ASSERT_NE(socket, nullptr);
+  const float *value = static_cast<bNodeSocketValueRGBA *>(socket->default_value)->value;
+  EXPECT_NEAR(value[0], 0.9f, 1e-4f);
 }
 
 TEST_F(PaintLayersGenerateTest, material_row_participation_is_stable_across_focus)
@@ -5059,6 +5096,425 @@ TEST_F(PaintLayersGenerateTest, sampler_budget_pinned_active_row_is_bakeable_and
   EXPECT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *child));
   EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *child), PaintLayerMaterialMode::Baked);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Material row stays live until its bake is ready
+ * \{ */
+
+namespace {
+
+/** Map every channel \a source can show onto \a row, plus coverage, and stamp the bake valid. */
+void material_bake_all_channels(PaintLayersGenerateTest &t,
+                                Material &ma,
+                                MaterialPaintLayer &row,
+                                Material &source,
+                                const std::string &tag)
+{
+  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(&source);
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    /* Alpha has no slot of its own in #MaterialPaintLayerBake::images -- no bake pipeline ever
+     * writes there. It is the row's #coverage, passed below, exactly as
+     * #BKE_paint_layers_material_bake_apply diverts it. */
+    if (channel != int(PAINT_MATERIAL_CHANNEL_ALPHA) &&
+        resolve.channels[channel] != ChannelResolution::Unavailable)
+    {
+      maps[channel] = t.add_image((tag + std::to_string(channel)).c_str());
+    }
+  }
+  material_bake_set(t, ma, row, maps, t.add_image((tag + "Cov").c_str()));
+}
+
+/**
+ * Hand every channel \a source can show over to \a row through #BKE_paint_layers_material_bake_apply
+ * -- the real entry point #material_bake_layered_rows_ensure's before_render callback and
+ * #paint_material_layer.cc's hand-over call use, unlike #material_bake_all_channels above (which
+ * goes through the low-level #BKE_paint_layers_bake_set_map + an explicit finalize and so cannot
+ * catch a regression in #BKE_paint_layers_material_bake_apply's own finalize behaviour). Every
+ * available channel is covered so the row can actually reach Baked once claims are released and it
+ * is finalized -- a channel left without a map stays live forever
+ * (#BKE_paint_layers_material_bake_ready), regardless of the bake hash.
+ */
+void material_bake_hand_over_all_channels(Main &bmain,
+                                          Material &ma,
+                                          MaterialPaintLayer &row,
+                                          Material &source,
+                                          PaintLayersGenerateTest &t,
+                                          const std::string &tag)
+{
+  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(&source);
+  Vector<int> channels;
+  Vector<Image *> images;
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    if (channel != int(PAINT_MATERIAL_CHANNEL_ALPHA) &&
+        resolve.channels[channel] != ChannelResolution::Unavailable)
+    {
+      channels.append(channel);
+      images.append(t.add_image((tag + std::to_string(channel)).c_str()));
+    }
+  }
+  channels.append(int(PAINT_MATERIAL_CHANNEL_ALPHA));
+  images.append(t.add_image((tag + "Cov").c_str()));
+  BKE_paint_layers_material_bake_apply(
+      bmain, ma, row, 64, channels.as_span(), images.as_span());
+  /* #BKE_paint_layers_material_bake_apply diverts every #PAINT_MATERIAL_CHANNEL_ALPHA entry into
+   * the row's coverage (its transparency, #layer.bake->coverage) rather than
+   * #MaterialPaintLayerBake::images[PAINT_MATERIAL_CHANNEL_ALPHA], which no bake pipeline ever
+   * fills for a Material row. #paint_layer_material_source_map answers Alpha from `coverage` for
+   * exactly that reason, so the row can settle on Baked once every other channel lands too. */
+}
+
+/** Claim or release every map of \a row the way a running bake job does. */
+void material_bake_claim(const MaterialPaintLayer &row, const bool claim)
+{
+  Vector<uint32_t> uids;
+  for (const Image *image : row.bake->images) {
+    if (image != nullptr) {
+      uids.append(image->id.session_uid);
+    }
+  }
+  if (row.bake->coverage != nullptr) {
+    uids.append(row.bake->coverage->id.session_uid);
+  }
+  for (const uint32_t uid : uids) {
+    if (claim) {
+      BKE_paint_layers_bake_image_pending_add(uid);
+    }
+    else {
+      BKE_paint_layers_bake_image_pending_remove(uid);
+    }
+  }
+}
+
+}  // namespace
+
+/**
+ * A Material row that is not in the active chain stays live while its bake cannot be shown, and goes
+ * to its maps once, when they have landed. Covers the whole edit cycle: a valid bake, an edit to the
+ * source (invalid: the row comes alive, and it is still a candidate for the planner), the hand-over
+ * (hash stamped, maps claimed: still live, and no longer a candidate) and the landing (one rebuild).
+ */
+TEST_F(PaintLayersGenerateTest, inactive_material_row_is_live_until_its_bake_lands)
+{
+  Material *source = add_principled_source("CycleSource", 0.5f);
+  source_set_noise_base_color(*bmain, *source);
+  Material *other = add_principled_source("CycleOther", 0.3f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "CycleX", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *next = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "CycleY", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(next, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, next, other));
+  material_bake_all_channels(*this, *ma, *row, *source, "CycleXMap");
+  material_bake_all_channels(*this, *ma, *next, *other, "CycleYMap");
+
+  /* The planner's own filter for a Material row: neither the mode nor the live state is in it. */
+  const auto is_planner_candidate = [&]() {
+    return row->bake != nullptr && row->bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
+           !BKE_paint_layers_bake_is_valid(*ma, *row) &&
+           !BKE_paint_layers_bake_row_is_deferred(*ma, *row);
+  };
+  const auto stamp = [&]() -> bNodeTree * {
+    bNodeTree *group = layer_tree_find(*bmain, "CycleX");
+    EXPECT_NE(group, nullptr);
+    EXPECT_TRUE(group != nullptr && group_mix_sentinel_set(*group, 0.125f));
+    return group;
+  };
+
+  BKE_paint_layers_active_set(*ma, next->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+  EXPECT_FALSE(is_planner_candidate());
+  bNodeTree *group = stamp();
+  ASSERT_NE(group, nullptr);
+
+  /* The source is edited: the bake is invalid, the row comes alive in one rebuild, and the planner
+   * still sees it. */
+  bNodeSocket *roughness = bke::node_find_socket(
+      *principled_of(*source), SOCK_IN, "Roughness"_ustr);
+  ASSERT_NE(roughness, nullptr);
+  static_cast<bNodeSocketValueFloat *>(roughness->default_value)->value = 0.9f;
+  ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  EXPECT_TRUE(is_planner_candidate());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  EXPECT_TRUE(is_planner_candidate());
+  ASSERT_EQ(layer_tree_find(*bmain, "CycleX"), group);
+  EXPECT_FALSE(group_mix_sentinel_get(*group, 0.125f)) << "the row did not come alive";
+  stamp();
+
+  /* Nothing changed: the planner has not run yet, so there is nothing to rebuild. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(group_mix_sentinel_get(*group, 0.125f));
+
+  /* The hand-over: the hash is stamped and the maps claimed. Still live, and the planner has
+   * nothing more to start, so the bake is started once. */
+  BKE_paint_layers_bake_finalize(*ma, *row);
+  material_bake_claim(*row, true);
+  EXPECT_FALSE(is_planner_candidate());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+  EXPECT_TRUE(group_mix_sentinel_get(*group, 0.125f)) << "the hand-over rebuilt the row";
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(group_mix_sentinel_get(*group, 0.125f));
+
+  /* The maps land: one rebuild, into Baked. */
+  material_bake_claim(*row, false);
+  BKE_paint_layers_tag_edited(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+  ASSERT_EQ(layer_tree_find(*bmain, "CycleX"), group);
+  EXPECT_FALSE(group_mix_sentinel_get(*group, 0.125f)) << "the landing did not rebuild the row";
+  stamp();
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(group_mix_sentinel_get(*group, 0.125f)) << "a second regeneration rebuilt the row";
+  EXPECT_FALSE(is_planner_candidate());
+}
+
+/**
+ * ТЗ-25b, defect 1: a hand-over (#BKE_paint_layers_material_bake_apply's
+ * #BKE_paint_layers_bake_set_map calls, as #material_bake_layered_rows_ensure's before_render does
+ * on the main thread ahead of the job) attaches fresh target images to an inactive row before any
+ * pixel exists behind them. It must not finalise the row on its own any more, so a job cancelled
+ * before it renders anything -- claim released, hash never stamped -- leaves the row live instead of
+ * showing it Baked on blank/stale maps. Regenerating again afterward, with nothing else changed,
+ * must not keep rebuilding the row: the planner re-queues it only by the normal due/stale rules,
+ * covered separately.
+ */
+TEST_F(PaintLayersGenerateTest, cancelled_bake_hand_over_leaves_row_live_not_baked)
+{
+  Material *source = add_principled_source("CancelSource", 0.5f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "CancelRow", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+
+  /* Not the active row: the planner is free to bake it. */
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  /* A plain Principled source with no texture resolves every channel to a constant, so the row is
+   * live in Hybrid (a live value, no sampler), not SourceGroup (a wrapper instance) -- either mode
+   * is "live", which is all this test needs, but the assertion must match reality. */
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+
+  bNodeTree *group = layer_tree_find(*bmain, "CancelRow");
+  ASSERT_NE(group, nullptr);
+  ASSERT_TRUE(group_mix_sentinel_set(*group, 0.25f));
+
+  /* Hand-over through the real entry point a material bake hands its result over with
+   * (#BKE_paint_layers_material_bake_apply -- exactly what #material_bake_layered_rows_ensure's
+   * before_render callback and #paint_material_layer.cc's hand-over call), the way it runs before
+   * any pixel exists behind the images: claimed right after, never finalized. Before the fix this
+   * function finalized on its own, which is the bug this test must catch. Every available channel
+   * is covered so the row can actually reach Baked later. */
+  material_bake_hand_over_all_channels(*bmain, *ma, *row, *source, *this, "CancelMap");
+  material_bake_claim(*row, true);
+  ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row))
+      << "BKE_paint_layers_material_bake_apply must not stamp the bake valid before the render "
+         "lands -- it used to finalize the row itself";
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid)
+      << "still live: the in-flight claim keeps it off its incomplete maps too";
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(group_mix_sentinel_get(*group, 0.25f))
+      << "the hand-over must not have rebuilt the row's group a second time";
+
+  /* Cancellation: #material_bake_images_free always releases the claim, but (the fix) never
+   * stamps the hash since it was never finalized -- the row cannot look valid over pixels that
+   * were never written. */
+  material_bake_claim(*row, false);
+  BKE_paint_layers_tag_edited(*ma);
+  ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid)
+      << "a cancelled bake must not turn the row Baked over pixels that were never written";
+  ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  /* No busy loop: an idle regeneration after the cancel, with nothing else changed, rebuilds
+   * nothing further. */
+  group_mix_sentinel_set(*group, 0.25f);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(group_mix_sentinel_get(*group, 0.25f))
+      << "an idle regeneration after the cancel must not keep rebuilding the row";
+}
+
+/**
+ * ТЗ-25b, defect 2: the row's topology hash used to fold in the identity of its bake-map Image
+ * data-blocks (#paint_layer_channel_image, which for a Material row is
+ * #paint_layer_material_source_map -- #MaterialPaintLayer::bake::images) unconditionally, even for
+ * a channel the generator shows live from the source and never reads that map for (see the build's
+ * Hybrid branch, which `continue`s past #paint_layer_channel_image whenever
+ * #BKE_paint_layers_material_live_constant or #BKE_paint_layers_material_live_image answers). A
+ * first bake's hand-over mints brand-new Image data-blocks for a row that had none, which used to
+ * change the hash and force a rebuild the graph did not need. This is the same hand-over as the
+ * cancellation test above, carried through to a successful landing: at most one rebuild for the
+ * hand-over (none, with the fix) plus exactly one for the landing into Baked.
+ */
+TEST_F(PaintLayersGenerateTest, first_bake_hand_over_does_not_force_an_extra_rebuild)
+{
+  Material *source = add_principled_source("FirstBakeSource", 0.4f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "FirstBakeRow", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+
+  /* Active elsewhere from the start: the row has never been baked (no map yet), so it is live. */
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  /* A plain Principled source with no texture resolves every channel to a constant: Hybrid, not
+   * SourceGroup -- both are "live", which is all this step needs. */
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+
+  bNodeTree *group = layer_tree_find(*bmain, "FirstBakeRow");
+  ASSERT_NE(group, nullptr);
+  ASSERT_TRUE(group_mix_sentinel_set(*group, 0.375f));
+
+  /* First bake's hand-over through the real entry point (#BKE_paint_layers_material_bake_apply):
+   * brand-new Image data-blocks land in the row's bake slots for every available channel. Each
+   * channel stays live (unfinalized, then claimed), so the generator still does not reference these
+   * maps -- the fix must not rebuild the row's group over their mere identity. */
+  material_bake_hand_over_all_channels(*bmain, *ma, *row, *source, *this, "FirstBakeMap");
+  material_bake_claim(*row, true);
+  ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+  EXPECT_TRUE(group_mix_sentinel_get(*group, 0.375f))
+      << "the first bake's hand-over rebuilt the row's group without changing what it reads";
+
+  /* Landing: the claim is released and the render's success finalizes the bake, turning the row
+   * Baked -- the one rebuild the row is owed, now that its group must read the new map. */
+  material_bake_claim(*row, false);
+  BKE_paint_layers_bake_finalize(*ma, *row);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+  ASSERT_EQ(layer_tree_find(*bmain, "FirstBakeRow"), group);
+  EXPECT_FALSE(group_mix_sentinel_get(*group, 0.375f)) << "landing did not rebuild the row";
+  group_mix_sentinel_set(*group, 0.375f);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(group_mix_sentinel_get(*group, 0.375f)) << "a second regeneration rebuilt the row";
+}
+
+/**
+ * A row pinned onto its maps by the sampler budget outranks the new rule: with its bake invalid and
+ * the active row elsewhere it is still Baked, on the maps it has. Lifting the budget lets it live.
+ */
+TEST_F(PaintLayersGenerateTest, sampler_pin_outranks_the_live_rule_for_an_invalid_bake)
+{
+  Material *source = add_principled_source("PinLiveSource", 0.5f);
+  source_set_three_image_base_color(
+      *source, *add_image("PinLiveA"), *add_image("PinLiveB"), *add_image("PinLiveC"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "PinLiveRow", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
+  maps[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("PinLiveBaked");
+  material_bake_set(*this, *ma, *row, maps, nullptr);
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  BKE_paint_layers_sampler_budget_set(2, 4);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *row));
+
+  /* The user leaves the row and the source is edited: invalid, not deferred, still pinned. */
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  bNodeSocket *roughness = bke::node_find_socket(
+      *principled_of(*source), SOCK_IN, "Roughness"_ustr);
+  ASSERT_NE(roughness, nullptr);
+  static_cast<bNodeSocketValueFloat *>(roughness->default_value)->value = 0.8f;
+  ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *row));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+
+  BKE_paint_layers_sampler_budget_set(0, 0);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FALSE(BKE_paint_layers_material_forced_bake(*ma, *row));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+}
+
+/**
+ * A bake still being rendered is not a candidate for the sampler fallback: pinning the row would put
+ * blank maps on screen. Once the maps land the same row is pinned.
+ */
+TEST_F(PaintLayersGenerateTest, sampler_fallback_waits_for_the_bake_to_land)
+{
+  Material *source = add_principled_source("WaitSource", 0.5f);
+  source_set_three_image_base_color(
+      *source, *add_image("WaitA"), *add_image("WaitB"), *add_image("WaitC"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "WaitRow", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
+  maps[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("WaitBaked");
+  material_bake_set(*this, *ma, *row, maps, nullptr);
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  material_bake_claim(*row, true);
+  BKE_paint_layers_sampler_budget_set(2, 4);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_FALSE(BKE_paint_layers_material_forced_bake(*ma, *row));
+  EXPECT_TRUE(report.sampler_budget_exceeded);
+
+  material_bake_claim(*row, false);
+  BKE_paint_layers_tag_edited(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *row));
+  EXPECT_FALSE(report.sampler_budget_exceeded);
+}
+
+/**
+ * Part B (TZ-26): this test used to be named `hybrid_base_color_constant_edit_rebuilds_the_row_group`
+ * and asserted a rebuild -- the old hash folded the live constant's own value into the row's
+ * topology, on the documented grounds that #BKE_paint_layers_values_sync could not see a value
+ * living on another material's node tree. TZ-26 is exactly the fix for that: the constant is now a
+ * #ROLE_LIVE_CONSTANT group input, filled by #create_value_inputs and kept current by
+ * #values_sync_socket via #BKE_paint_layers_material_live_constant, so moving the source's Base
+ * Color must sync in place instead of rebuilding. The name and the body are rewritten together.
+ */
+TEST_F(PaintLayersGenerateTest, hybrid_base_color_constant_edit_syncs_the_row_group)
+{
+  Material *source = add_principled_source("PartBSource", 0.4f);
+  add_paint_layer("PartBBottom", add_image("PartBBottom"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "PartB", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+
+  bNodeTree *root = ma->paint_layers_tree;
+  const Vector<bNode *> root_before = root_nodes(*root);
+  bNodeTree *group = layer_tree_find(*bmain, "PartB");
+  ASSERT_NE(group, nullptr);
+  ASSERT_TRUE(group_mix_sentinel_set(*group, 0.125f));
+
+  bNodeSocket *base = bke::node_find_socket(*principled_of(*source), SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base, nullptr);
+  static_cast<bNodeSocketValueRGBA *>(base->default_value)->value[0] = 0.9f;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(group_mix_sentinel_get(*group, 0.125f)) << "Base Color is a value now, not topology";
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+
+  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "PartB Base Color Source");
+  ASSERT_NE(iface, nullptr);
+  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *iface);
+  ASSERT_NE(socket, nullptr);
+  const float *value = static_cast<bNodeSocketValueRGBA *>(socket->default_value)->value;
+  EXPECT_NEAR(value[0], 0.9f, 1e-4f);
+}
+
+/** \} */
 
 /** Deleting a material drops its sampler runtime state, so a reused uid cannot inherit a pin. */
 TEST_F(PaintLayersGenerateTest, sampler_runtime_state_is_dropped_with_its_material)

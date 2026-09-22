@@ -56,6 +56,7 @@
 #include "BKE_idprop.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_debug.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_resolve.hh"
@@ -390,12 +391,14 @@ bool material_source_bake_cache_contains(const Material &ma, const int resolutio
 
 static void material_bake_images_pending_add(const uint32_t image_session_uid)
 {
+  BKE_paint_layers_bake_image_pending_add(image_session_uid);
   std::lock_guard lock(g_bake_cache_mutex);
   g_image_bake_pending.lookup_or_add(image_session_uid, 0)++;
 }
 
 static void material_bake_images_pending_remove(const uint32_t image_session_uid)
 {
+  BKE_paint_layers_bake_image_pending_remove(image_session_uid);
   std::lock_guard lock(g_bake_cache_mutex);
   int *count = g_image_bake_pending.lookup_ptr(image_session_uid);
   if (count != nullptr && --*count <= 0) {
@@ -863,21 +866,22 @@ static bool bake_requests_render(Main &bmain,
   camera->loc[2] = 1.0f;
   scene->camera = camera;
 
-  printf("material bake color: render engine='%s' res=%d view_transform='%s' look='%s' "
-         "display='%s' exposure=%.2f gamma=%.2f\n",
-         scene->r.engine,
-         resolution,
-         scene->view_settings.view_transform,
-         scene->view_settings.look,
-         scene->display_settings.display_device,
-         scene->view_settings.exposure,
-         scene->view_settings.gamma);
+  PL_DEBUG_PRINTF(
+      "material bake color: render engine='%s' res=%d view_transform='%s' look='%s' "
+      "display='%s' exposure=%.2f gamma=%.2f\n",
+      scene->r.engine,
+      resolution,
+      scene->view_settings.view_transform,
+      scene->view_settings.look,
+      scene->display_settings.display_device,
+      scene->view_settings.exposure,
+      scene->view_settings.gamma);
 
   for (const BakeSocketRequest &request : requests) {
-    printf("material bake color: aov name='%s' type=%s alpha='%s'\n",
-           request.name,
-           request.is_color ? "Color" : "Value",
-           request.alpha_source != nullptr ? request.alpha_name : "-");
+    PL_DEBUG_PRINTF("material bake color: aov name='%s' type=%s alpha='%s'\n",
+                    request.name,
+                    request.is_color ? "Color" : "Value",
+                    request.alpha_source != nullptr ? request.alpha_name : "-");
     ViewLayerAOV *aov = BKE_view_layer_add_aov(view_layer);
     STRNCPY(aov->name, request.name);
     aov->type = request.is_color ? AOV_TYPE_COLOR : AOV_TYPE_VALUE;
@@ -1353,7 +1357,7 @@ static void material_source_bake_ensure_impl(wmWindowManager &wm,
                                              wmWindow *win,
                                              Material &ma,
                                              const int resolution,
-                                             const char *reason)
+                                             [[maybe_unused]] const char *reason)
 {
   if (resolution <= 0 || ma.nodetree == nullptr) {
     return;
@@ -1373,9 +1377,9 @@ static void material_source_bake_ensure_impl(wmWindowManager &wm,
                key.material_session_uid,
                (unsigned long long)key.node_tree_state_hash,
                resolution);
-  printf("paint layers bake: start kind=source material='%s' row='-' reason=%s\n",
-         ma.id.name + 2,
-         reason);
+  PL_DEBUG_PRINTF("paint layers bake: start kind=source material='%s' row='-' reason=%s\n",
+                  ma.id.name + 2,
+                  reason);
 
   wmJob *wm_job = WM_jobs_get(&wm,
                               win,
@@ -1558,6 +1562,7 @@ Image *bake_target_image_create(Main &bmain,
   BLI_uuid_parse_string(&image->paint_layer_id, layer_id);
   image->paint_layer_channel = int(channel);
 
+#if PAINT_LAYERS_DEBUG_LOG
   {
     /* Diagnostic: the colorspace the image declares versus the one the float buffer actually
      * carries. A mismatch is what makes the write below encode pixels the shader path reads raw. */
@@ -1575,6 +1580,7 @@ Image *bake_target_image_create(Main &bmain,
            int((image->flag & IMA_GPU_LINEAR_PREMUL) != 0));
     BKE_image_release_ibuf(image, diag_ibuf, diag_lock);
   }
+#endif
 
   ImageMaterialSource link;
   link.material = &material;
@@ -1601,10 +1607,11 @@ static void bake_target_image_fill_constant(Image &image, const float4 &value)
       dst[texel * 4 + 2] = value.z;
       dst[texel * 4 + 3] = value.w;
     }
-    const float mean_before[3] = {dst[0], dst[1], dst[2]};
     /* The target is scene linear (color) or data, and the constant is already in that space, so
      * there is nothing to convert. The old `scene_linear_to_colorspace` call encoded color into
      * the sRGB the map used to declare, which the shader read raw as linear. */
+#if PAINT_LAYERS_DEBUG_LOG
+    const float mean_before[3] = {dst[0], dst[1], dst[2]};
     printf("material bake color: fill_constant image='%s' settings_cs='%s' float_cs='%s' "
            "is_data=%d gpu_linear_premul=%d mean_before=(%.4f,%.4f,%.4f) "
            "mean_after=(%.4f,%.4f,%.4f)\n",
@@ -1619,6 +1626,7 @@ static void bake_target_image_fill_constant(Image &image, const float4 &value)
            dst[0],
            dst[1],
            dst[2]);
+#endif
     ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
     BKE_image_mark_dirty(&image, ibuf);
   }
@@ -1646,6 +1654,11 @@ void bake_target_image_write_back(Image &image, const ImBuf &rendered)
       float *dst = ibuf->float_data_for_write();
       const int64_t texel_num = int64_t(ibuf->x) * ibuf->y;
       memcpy(dst, source->float_data(), size_t(texel_num) * 4 * sizeof(float));
+      /* The render delivers scene-linear pixels and the target is scene linear (color) or data,
+       * so the pixels go in unchanged. The old `scene_linear_to_colorspace` encoded color maps
+       * into the sRGB they used to declare; a float texture is uploaded raw, so the shader read
+       * those encoded values as linear and every baked color came out too light. */
+#if PAINT_LAYERS_DEBUG_LOG
       double mean_render[3] = {0.0, 0.0, 0.0};
       double mean_stored[3] = {0.0, 0.0, 0.0};
       for (const int64_t texel : IndexRange(texel_num)) {
@@ -1658,10 +1671,6 @@ void bake_target_image_write_back(Image &image, const ImBuf &rendered)
         mean_render[component] /= double(texel_num);
         mean_stored[component] /= double(texel_num);
       }
-      /* The render delivers scene-linear pixels and the target is scene linear (color) or data,
-       * so the pixels go in unchanged. The old `scene_linear_to_colorspace` encoded color maps
-       * into the sRGB they used to declare; a float texture is uploaded raw, so the shader read
-       * those encoded values as linear and every baked color came out too light. */
       printf("material bake color: write image='%s' settings_cs='%s' float_cs='%s' is_data=%d "
              "gpu_linear_premul=%d mean_render=(%.4f,%.4f,%.4f) mean_stored=(%.4f,%.4f,%.4f)\n",
              image.id.name + 2,
@@ -1675,6 +1684,7 @@ void bake_target_image_write_back(Image &image, const ImBuf &rendered)
              mean_stored[0],
              mean_stored[1],
              mean_stored[2]);
+#endif
       ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
       BKE_image_mark_dirty(&image, ibuf);
     }
@@ -1775,6 +1785,57 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
   BKE_main_free(bake_main);
 }
 
+static const MaterialPaintLayer *bake_image_owner_find(Main &bmain,
+                                                       const Image &image,
+                                                       const Material **r_layered);
+
+/**
+ * Settle the bake hash of every Paint Layers row every one of whose bake targets among \a job_targets
+ * landed pixels this round (\a landed, same indices), so #BKE_paint_layers_bake_is_valid trusts them.
+ * #BKE_paint_layers_material_bake_apply (the hand-over that wires a row onto its target images ahead
+ * of the render) deliberately leaves the row unfinalised so a cancelled or failed job cannot leave it
+ * stamped valid over blank/stale maps; a row is only settled here once every target of its this job
+ * touched is confirmed written -- a partial landing (one channel failed, another did not) leaves it
+ * unfinalised too, same as a full cancellation. Images that belong to no row are ignored, so this is
+ * safe to call with a mix of paint-layer and ordinary bake targets.
+ */
+static void material_bake_rows_finalize(Main &bmain,
+                                        const Span<Image *> job_targets,
+                                        const Span<bool> landed)
+{
+  BLI_assert(job_targets.size() == landed.size());
+  Map<const MaterialPaintLayer *, const Material *> rows;
+  Set<const MaterialPaintLayer *> incomplete;
+  for (const int64_t i : job_targets.index_range()) {
+    Image *image = job_targets[i];
+    if (image == nullptr) {
+      continue;
+    }
+    const Material *layered = nullptr;
+    const MaterialPaintLayer *layer = bake_image_owner_find(bmain, *image, &layered);
+    if (layer == nullptr || layered == nullptr) {
+      continue;
+    }
+    if (!landed[i]) {
+      incomplete.add(layer);
+      continue;
+    }
+    rows.add(layer, layered);
+  }
+  for (const auto item : rows.items()) {
+    if (incomplete.contains(item.key)) {
+      continue;
+    }
+    const MaterialPaintLayer *layer = item.key;
+    const Material *layered = item.value;
+    BKE_paint_layers_bake_finalize(*const_cast<Material *>(layered),
+                                   *const_cast<MaterialPaintLayer *>(layer));
+    PL_DEBUG_PRINTF("paint layers bake: row finalized material='%s' row='%s'\n",
+                    layered->id.name + 2,
+                    layer->name);
+  }
+}
+
 /**
  * Publish the rendered buffers into their targets. Runs on the main thread once the worker is
  * done, which is what makes it safe to touch real #Image data-blocks at all.
@@ -1802,6 +1863,8 @@ static void material_bake_images_endjob(void *customdata)
   {
     return;
   }
+  Vector<Image *> job_targets;
+  Vector<bool> landed_flags;
   for (const int i : job.channels.index_range()) {
     /* The worker renders a channel once and stores it at the channel's first entry; later targets
      * of the same channel -- layers baked from one material -- share that buffer. The buffers stay
@@ -1822,14 +1885,20 @@ static void material_bake_images_endjob(void *customdata)
                               source.material != nullptr &&
                               source.material->id.session_uid == job.material_session_uid;
     if (rendered == nullptr || !target_valid) {
-      /* A channel that failed to render keeps its old pixels and its old hash, so it stays stale
-       * and the next re-bake picks it up again. */
+      /* A channel that failed to render (including a cancelled job, whose #job.rendered stays
+       * empty since #bake_requests_render answers for the whole batch at once) keeps its old
+       * pixels and its old hash, so it stays stale and the next re-bake picks it up again. Its
+       * owning row, if any, is recorded as incomplete below and so stays unfinalised too. */
+      if (target != nullptr) {
+        job_targets.append(target);
+        landed_flags.append(false);
+      }
       continue;
     }
-    printf("material bake color: endjob channel=%d target='%s' uid=%u\n",
-           int(job.channels[i]),
-           target->id.name + 2,
-           session_uid);
+    PL_DEBUG_PRINTF("material bake color: endjob channel=%d target='%s' uid=%u\n",
+                    int(job.channels[i]),
+                    target->id.name + 2,
+                    session_uid);
     bake_target_image_write_back(*target, *rendered);
     /* #bake_target_image_write_back only notifies NC_IMAGE, which the Image Editor listens for --
      * the 3D viewport's shading redraw does not, so a layer added with a still-rendering map (the
@@ -1845,6 +1914,32 @@ static void material_bake_images_endjob(void *customdata)
     BKE_image_material_source_set(*target, link);
     material_bake_images_stale_remove(session_uid);
     /* The pending claim is released by #material_bake_images_free, which always follows. */
+    job_targets.append(target);
+    landed_flags.append(true);
+  }
+  /* Only the channels that actually landed pixels this round may settle their row's bake hash; a
+   * row with a channel that failed (cancelled/failed job, or a target reassigned meanwhile) stays
+   * unfinalised and #BKE_paint_layers_bake_is_valid keeps reporting it invalid, so the planner
+   * re-queues it by the normal due/stale rules instead of looping. */
+  material_bake_rows_finalize(*bmain, job_targets, landed_flags);
+}
+
+/** Tag the layered material owning any of the maps \a session_uids for one regeneration. */
+static void material_bake_rows_landed_tag(Main &bmain, const Span<uint32_t> session_uids)
+{
+  Set<const Material *> owners;
+  for (Image &image : bmain.images) {
+    if (!session_uids.contains(image.id.session_uid)) {
+      continue;
+    }
+    const Material *owner = nullptr;
+    if (bake_image_owner_find(bmain, image, &owner) != nullptr && owner != nullptr) {
+      owners.add(owner);
+    }
+  }
+  for (const Material *owner : owners) {
+    BKE_paint_layers_tag_edited(*const_cast<Material *>(owner));
+    PL_DEBUG_PRINTF("paint layers bake: maps landed material='%s'\n", owner->id.name + 2);
   }
 }
 
@@ -1862,6 +1957,11 @@ static void material_bake_images_free(void *customdata)
   }
   for (const uint32_t session_uid : job->target_session_uids) {
     material_bake_images_pending_remove(session_uid);
+  }
+  /* The maps have landed (or the job was dropped): a Material row that held itself live because
+   * they were in flight becomes ready now, and only a regeneration turns that into its Baked mode. */
+  if (Main *bmain = G_MAIN) {
+    material_bake_rows_landed_tag(*bmain, job->target_session_uids);
   }
   MEM_delete(job);
 }
@@ -1953,6 +2053,13 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
   if (render_channels.is_empty()) {
     if (result.ok && params.before_render && !params.before_render(result)) {
       result.ok = false;
+    }
+    if (result.ok) {
+      /* Every created image was filled synchronously above (all-Constant channels): there is no
+       * job and thus no #material_bake_images_endjob to settle the row's bake hash, so this is the
+       * only landing point for this case. All of them landed, so every one is marked true. */
+      Vector<bool> all_landed(result.created.size(), true);
+      material_bake_rows_finalize(bmain, result.created, all_landed);
     }
     return result;
   }
@@ -2075,7 +2182,7 @@ static void bake_orphan_images_free(Main &bmain, const Material &ma)
     orphans.append(&image);
   }
   for (Image *image : orphans) {
-    printf("paint layers bake: orphan map freed image='%s'\n", image->id.name + 2);
+    PL_DEBUG_PRINTF("paint layers bake: orphan map freed image='%s'\n", image->id.name + 2);
     BKE_image_material_source_clear(*image);
     BKE_id_free(&bmain, &image->id);
   }
@@ -2223,9 +2330,9 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
     params.before_render = hand_over;
     wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first);
     wmWindow *win = (wm != nullptr) ? static_cast<wmWindow *>(wm->windows.first) : nullptr;
-    printf("paint layers bake: start kind=images material='%s' row='%s' reason=due\n",
-           ma.id.name + 2,
-           row->name);
+    PL_DEBUG_PRINTF("paint layers bake: start kind=images material='%s' row='%s' reason=due\n",
+                    ma.id.name + 2,
+                    row->name);
     const uint64_t source_hash = material_bake_source_node_tree_hash(*row->material);
     const MaterialBakeToImagesResult due_result = material_bake_to_images(bmain, wm, win, params);
     if (due_result.ok) {
@@ -2289,6 +2396,7 @@ void material_bake_images_rebake_stale(Main &bmain, Material &ma)
       return;
     }
   }
+#if PAINT_LAYERS_DEBUG_LOG
   /* Why this image and not another: name the row that owns it, or say that no row does. */
   for (const BakeTargetSpec &target : targets) {
     Image &image = *target.existing;
@@ -2310,8 +2418,9 @@ void material_bake_images_rebake_stale(Main &bmain, Material &ma)
              int(ID_REAL_USERS(&image.id)));
     }
   }
-  printf("paint layers bake: start kind=images material='%s' row='-' reason=stale\n",
-         ma.id.name + 2);
+#endif
+  PL_DEBUG_PRINTF("paint layers bake: start kind=images material='%s' row='-' reason=stale\n",
+                  ma.id.name + 2);
   rebake_start(bmain, ma, targets, size, *current_hash);
 }
 
@@ -2332,8 +2441,8 @@ void material_bake_images_rebake(Main &bmain,
   /* An explicit re-bake (a resize, a freshly bound map): the user asked for it, so a deferred row
    * is baked like any other. */
   rebake_targets_collect(bmain, ma, is_requested, false, /*owned_only=*/false, targets, max_size, all_pending);
-  printf("paint layers bake: start kind=images material='%s' row='-' reason=explicit\n",
-         ma.id.name + 2);
+  PL_DEBUG_PRINTF("paint layers bake: start kind=images material='%s' row='-' reason=explicit\n",
+                  ma.id.name + 2);
   rebake_start(
       bmain, ma, targets, size > 0 ? size : max_size, material_bake_source_node_tree_hash(ma));
 }
@@ -2698,9 +2807,9 @@ void material_bake_custom_rows_ensure(Main &bmain, Material &ma)
       continue;
     }
     const int size = row->bake->size > 0 ? row->bake->size : 1024;
-    printf("paint layers bake: start kind=custom material='%s' row='%s' reason=due\n",
-           ma.id.name + 2,
-           row->name);
+    PL_DEBUG_PRINTF("paint layers bake: start kind=custom material='%s' row='%s' reason=due\n",
+                    ma.id.name + 2,
+                    row->name);
     CustomBakeJob *job = custom_bake_prepare(bmain, ma, *row, size);
     if (job == nullptr) {
       continue;

@@ -43,6 +43,7 @@
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_debug.hh"
 #include "BKE_scene.hh"
 
 #include "RE_engine.h"
@@ -317,11 +318,11 @@ static void material_changed(Main *bmain, Material *ma)
         continue;
       }
       const bool live = BKE_paint_layers_material_lives_from_source(layered, *layer);
-      printf("paint layers: source '%s' edited -> layered '%s' row '%s' live=%d\n",
-             ma->id.name + 2,
-             layered.id.name + 2,
-             layer->name,
-             live ? 1 : 0);
+      PL_DEBUG_PRINTF("paint layers: source '%s' edited -> layered '%s' row '%s' live=%d\n",
+                      ma->id.name + 2,
+                      layered.id.name + 2,
+                      layer->name,
+                      live ? 1 : 0);
       if (live) {
         BKE_paint_layers_tag_edited(layered);
         break;

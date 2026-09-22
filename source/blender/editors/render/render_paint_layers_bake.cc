@@ -18,6 +18,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_debug.hh"
 
 #include "DNA_material_types.h"
 
@@ -105,8 +106,8 @@ void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bma
     WM_jobs_timer(wm_job, 0.2, NC_MATERIAL, NC_MATERIAL);
     WM_jobs_callbacks(wm_job, paint_layers_bake_start, nullptr, nullptr, paint_layers_bake_end);
     paint_layers_bake_active().add(ma.id.session_uid);
-    printf("paint layers bake: start kind=heavy material='%s' row='-' reason=stale\n",
-           ma.id.name + 2);
+    PL_DEBUG_PRINTF("paint layers bake: start kind=heavy material='%s' row='-' reason=stale\n",
+                    ma.id.name + 2);
     WM_jobs_start(&wm, wm_job);
   }
 }

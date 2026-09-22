@@ -11,8 +11,10 @@
  */
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_debug.hh"
 
 #include <algorithm>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -218,7 +220,12 @@ void BKE_paint_layers_material_bake_apply(Main &bmain,
       BKE_paint_layers_bake_set_map(ma, layer, -1, coverage);
     }
   }
-  BKE_paint_layers_bake_finalize(ma, layer);
+  /* Not finalised here: a material bake hands its target images over before the worker has
+   * rendered anything into them (#material_bake_to_images calls #before_render ahead of the job so
+   * the generator can wire the new images in while the job runs). Stamping the hash at that point
+   * would mark the row valid over pixels that do not exist yet; if the job is then cancelled or
+   * fails, nothing ever rewrites them, and the row would show blank/stale maps as if baked. The
+   * caller finalises once the render actually lands -- see #material_bake_rows_finalize. */
 }
 
 static Image *bake_service_image(Main &bmain,
@@ -394,6 +401,7 @@ void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
   ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
 }
 
+#if PAINT_LAYERS_DEBUG_LOG
 /** The name of the row \a marker belongs to, or a placeholder. For the diagnostic only. */
 static const char *bake_subscription_row_name(const Material &ma, const bUUID &marker)
 {
@@ -406,6 +414,7 @@ static const char *bake_subscription_row_name(const Material &ma, const bUUID &m
   }
   return "<unknown>";
 }
+#endif
 
 void BKE_paint_layers_bake_notice_changes(Material &ma)
 {
@@ -419,9 +428,9 @@ void BKE_paint_layers_bake_notice_changes(Material &ma)
       const auto result = bke::image::partial_update::BKE_image_partial_update_collect_changes(
           src.image, src.user);
       if (result == bke::image::partial_update::ePartialUpdateCollectResult::FullUpdateNeeded) {
-        printf("paint layers bake: subscription changed row='%s' image='%s' result=Full\n",
-               bake_subscription_row_name(ma, entry.marker),
-               src.image->id.name + 2);
+        PL_DEBUG_PRINTF("paint layers bake: subscription changed row='%s' image='%s' result=Full\n",
+                        bake_subscription_row_name(ma, entry.marker),
+                        src.image->id.name + 2);
         /* No rectangle to trust: the planner re-bakes the whole row. */
         entry.changed = true;
         entry.has_region = false;
@@ -430,9 +439,10 @@ void BKE_paint_layers_bake_notice_changes(Material &ma)
       else if (result ==
                bke::image::partial_update::ePartialUpdateCollectResult::PartialChangesDetected)
       {
-        printf("paint layers bake: subscription changed row='%s' image='%s' result=Partial\n",
-               bake_subscription_row_name(ma, entry.marker),
-               src.image->id.name + 2);
+        PL_DEBUG_PRINTF(
+            "paint layers bake: subscription changed row='%s' image='%s' result=Partial\n",
+            bake_subscription_row_name(ma, entry.marker),
+            src.image->id.name + 2);
         entry.changed = true;
         any = true;
         bke::image::partial_update::PartialUpdateRegion region;
@@ -739,9 +749,9 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
       if (size <= 0) {
         continue;
       }
-      printf("paint layers bake: start kind=sync material='%s' row='%s' reason=stale\n",
-             ma.id.name + 2,
-             layer.name);
+      PL_DEBUG_PRINTF("paint layers bake: start kind=sync material='%s' row='%s' reason=stale\n",
+                      ma.id.name + 2,
+                      layer.name);
       /* A changed rectangle may update only that part of an existing cache; a fresh cache needs
        * the whole render. */
       int region[4];
@@ -861,23 +871,96 @@ bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPai
   return BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker);
 }
 
+/* Maps a bake job is rendering right now; the editor's job code fills it. */
+static std::mutex &bake_pending_mutex()
+{
+  static std::mutex mutex;
+  return mutex;
+}
+
+static Map<uint32_t, int> &bake_pending_images()
+{
+  static Map<uint32_t, int> map;
+  return map;
+}
+
+void BKE_paint_layers_bake_image_pending_add(const uint32_t image_session_uid)
+{
+  std::lock_guard lock(bake_pending_mutex());
+  bake_pending_images().lookup_or_add(image_session_uid, 0)++;
+}
+
+void BKE_paint_layers_bake_image_pending_remove(const uint32_t image_session_uid)
+{
+  std::lock_guard lock(bake_pending_mutex());
+  int *count = bake_pending_images().lookup_ptr(image_session_uid);
+  if (count != nullptr && --*count <= 0) {
+    bake_pending_images().remove(image_session_uid);
+  }
+}
+
+static bool material_row_bake_in_flight(const MaterialPaintLayer &layer)
+{
+  if (layer.bake == nullptr) {
+    return false;
+  }
+  std::lock_guard lock(bake_pending_mutex());
+  const Map<uint32_t, int> &pending = bake_pending_images();
+  if (pending.is_empty()) {
+    return false;
+  }
+  if (layer.bake->coverage != nullptr && pending.contains(layer.bake->coverage->id.session_uid)) {
+    return true;
+  }
+  for (const Image *image : layer.bake->images) {
+    if (image != nullptr && pending.contains(image->id.session_uid)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BKE_paint_layers_material_bake_ready(const Material &ma, const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_bake_is_valid(ma, layer) && !material_row_bake_in_flight(layer);
+}
+
 /**
  * The one eligibility rule behind both live helpers: a channel of a Material row lives from its
- * source when the row is deferred, or when this channel has no baked map yet. A row that is not
- * deferred and already has a map for the channel falls back to that map. Keeping this in one place
- * is what makes the row's channel set independent of where the focus is.
+ * source when the row is deferred, when this channel has no baked map yet, or when the row's bake
+ * cannot be shown yet (#BKE_paint_layers_material_bake_ready). Otherwise it falls back to its map.
+ * The last term is what keeps a row that just left the active chain live until its bake lands, so it
+ * changes mode once, when the maps are complete, instead of passing through a mode that shows old
+ * or blank pixels. A row whose bake is switched off never bakes, so it keeps the map it has.
+ * Keeping this in one place is what makes the row's channel set independent of where the focus is.
  */
 static bool material_live_row_eligible(const Material &ma,
                                        const MaterialPaintLayer &layer,
-                                       const int channel)
+                                       const int channel,
+                                       const PaintLayersRegenCache *cache)
 {
   if (layer.kind != MA_PAINT_LAYER_KIND_MATERIAL || layer.material == nullptr || channel < 0 ||
       channel >= PAINT_MATERIAL_CHANNEL_NUM)
   {
     return false;
   }
-  return BKE_paint_layers_bake_row_is_deferred(ma, layer) ||
-         paint_layer_material_source_map(layer, channel) == nullptr;
+  if (BKE_paint_layers_bake_row_is_deferred(ma, layer) ||
+      paint_layer_material_source_map(layer, channel) == nullptr)
+  {
+    return true;
+  }
+  if (layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER) {
+    return false;
+  }
+  if (cache == nullptr || !cache->modes_frozen) {
+    return !BKE_paint_layers_material_bake_ready(ma, layer);
+  }
+  if (const bool *found = cache->bake_ready.lookup_ptr(&layer)) {
+    return !*found;
+  }
+  const bool ready = BKE_paint_layers_material_bake_ready(ma, layer);
+  cache->bake_ready.add(&layer, ready);
+  return !ready;
 }
 
 /**
@@ -910,6 +993,7 @@ const MaterialSourceResolve &PaintLayersRegenCache::resolve(const Material *sour
 void PaintLayersRegenCache::invalidate_for_owner(const Material &owner)
 {
   this->modes.clear();
+  this->bake_ready.clear();
   this->resolves_.remove(&owner);
 }
 
@@ -943,7 +1027,7 @@ static PaintLayerMaterialMode material_mode_compute(const Material &ma,
   const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(layer.material, cache, resolve_local);
   bool any_live = false;
   for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
-    if (!material_live_row_eligible(ma, layer, channel)) {
+    if (!material_live_row_eligible(ma, layer, channel, cache)) {
       continue;
     }
     const ChannelResolution resolution = resolve.channels[channel];
@@ -989,7 +1073,7 @@ bool BKE_paint_layers_material_live_constant(const Material &ma,
   /* The live helpers are the Hybrid path only: in SourceGroup the generator shows the wrapper and
    * the CPU must stay on the baked maps, so nothing here may answer. */
   if (BKE_paint_layers_material_mode(ma, layer, cache) != PaintLayerMaterialMode::Hybrid ||
-      !material_live_row_eligible(ma, layer, channel))
+      !material_live_row_eligible(ma, layer, channel, cache))
   {
     return false;
   }
@@ -1011,7 +1095,7 @@ bool BKE_paint_layers_material_live_image(const Material &ma,
 {
   if (r_image == nullptr || r_iuser == nullptr ||
       BKE_paint_layers_material_mode(ma, layer, cache) != PaintLayerMaterialMode::Hybrid ||
-      !material_live_row_eligible(ma, layer, channel))
+      !material_live_row_eligible(ma, layer, channel, cache))
   {
     return false;
   }
@@ -1666,12 +1750,14 @@ static void source_tree_values_hash_recursive(const bNodeTree &tree,
                                               Set<const bNodeTree *> &visited,
                                               uint64_t &r_hash);
 
+#if PAINT_LAYERS_DEBUG_LOG
+
 /**
  * Remembers the last content hash of a few source materials so the diagnostic below can name the
  * trees whose `previews_refresh_state` moved it. A fixed POD table rather than a `blender::Map`:
  * a lazily allocated global container is reported as a leak at exit by guardedalloc, because its
- * destructor runs after the leak check. The function runs on the main thread (regenerate, editor
- * update, bake completion), so no lock is needed.
+ * destructor runs after the leak check. The hash may be asked from a job thread as well as the main
+ * one, so the table is guarded by #g_source_hash_trace_mutex.
  */
 struct SourceHashTrace {
   uint32_t session_uid = 0;
@@ -1681,12 +1767,14 @@ struct SourceHashTrace {
   uint32_t previews[64] = {};
 };
 static SourceHashTrace g_source_hash_trace[8];
+static std::mutex g_source_hash_trace_mutex;
 
 /** Trace, named in the log, of which nested tree an update came from. */
 static void source_hash_trace(const Material &ma,
                               const uint64_t hash,
                               const Set<const bNodeTree *> &visited)
 {
+  std::lock_guard<std::mutex> lock(g_source_hash_trace_mutex);
   SourceHashTrace *slot = nullptr;
   SourceHashTrace *empty = nullptr;
   for (SourceHashTrace &candidate : g_source_hash_trace) {
@@ -1740,6 +1828,8 @@ static void source_hash_trace(const Material &ma,
   }
 }
 
+#endif /* PAINT_LAYERS_DEBUG_LOG */
+
 /** The content hash of \a ma's node tree, or zero when it has none. */
 uint64_t BKE_paint_layers_source_material_tree_hash(const Material &ma)
 {
@@ -1753,7 +1843,9 @@ uint64_t BKE_paint_layers_source_material_tree_hash(const Material &ma)
   uint64_t hash = bake_hash_mix(0, topology_hash);
   Set<const bNodeTree *> value_visited;
   source_tree_values_hash_recursive(*ma.nodetree, value_visited, hash);
+#if PAINT_LAYERS_DEBUG_LOG
   source_hash_trace(ma, hash, visited);
+#endif
   return hash;
 }
 

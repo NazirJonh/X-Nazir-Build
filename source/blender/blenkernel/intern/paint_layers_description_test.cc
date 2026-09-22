@@ -2220,6 +2220,8 @@ TEST_F(PaintLayersDescription, material_live_constant_reads_the_active_row_sourc
       bmain, 4, 4, "LiveMetallicMap", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
   ASSERT_TRUE(
       BKE_paint_layers_bake_set_map(*ma, *row, PAINT_MATERIAL_CHANNEL_METALLIC, metallic_map));
+  /* A map is only shown once its bake is valid; without the stamp the row would stay live. */
+  BKE_paint_layers_bake_finalize(*ma, *row);
   EXPECT_FALSE(
       BKE_paint_layers_material_live_constant(*ma, *row, PAINT_MATERIAL_CHANNEL_METALLIC, value));
 
@@ -2301,10 +2303,15 @@ TEST_F(PaintLayersDescription, material_mode_picks_hybrid_or_source_group)
                      *bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr));
   EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
 
-  /* Not active and every channel baked: nothing lives from the source. */
+  /* Not active and every channel baked: nothing lives from the source. Alpha has no slot of its
+   * own in #MaterialPaintLayerBake::images -- it reads from #coverage instead (see
+   * #paint_layer_material_source_map), so it must be set too or the channel would still read as
+   * unmapped and keep the row live. */
   for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
     ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, channel, image));
   }
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, -1, image));
+  BKE_paint_layers_bake_finalize(*ma, *row);
   BKE_paint_layers_active_set(*ma, {});
   EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
 }
@@ -2389,6 +2396,7 @@ TEST_F(PaintLayersDescription, material_live_image_requires_a_trivial_flat_textu
       bmain, 4, 4, "LiveImageBake", 32, false, IMA_GENTYPE_BLANK, color2, false, false, false);
   ASSERT_TRUE(
       BKE_paint_layers_bake_set_map(*ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, baked));
+  BKE_paint_layers_bake_finalize(*ma, *row);
   EXPECT_FALSE(BKE_paint_layers_material_live_image(
       *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &out_image, &out_iuser));
 }
@@ -2420,10 +2428,13 @@ TEST_F(PaintLayersDescription, material_lives_from_source_tracks_any_live_channe
   BKE_paint_layers_active_set(*ma, row->marker);
   EXPECT_TRUE(BKE_paint_layers_material_lives_from_source(*ma, *row));
 
-  /* Bake every channel and leave the row: nothing is live any more. */
+  /* Bake every channel and leave the row: nothing is live any more. Alpha reads from #coverage,
+   * not #images[ALPHA] (see #paint_layer_material_source_map), so it must be set too. */
   for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
     ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, channel, image));
   }
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, -1, image));
+  BKE_paint_layers_bake_finalize(*ma, *row);
   BKE_paint_layers_active_set(*ma, {});
   EXPECT_FALSE(BKE_paint_layers_material_lives_from_source(*ma, *row));
 }

@@ -8,6 +8,8 @@
 
 #include "BKE_paint_material_resolve.hh"
 
+#include <atomic>
+
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -304,8 +306,16 @@ static void resolve_normal_channel(const bNodeSocket &normal_socket,
   r_resolve.reasons[channel] = ChannelUnavailableReason::None;
 }
 
+static std::atomic<int64_t> source_resolve_call_count{0};
+
+int64_t BKE_paint_material_source_resolve_call_count()
+{
+  return source_resolve_call_count.load(std::memory_order_relaxed);
+}
+
 MaterialSourceResolve BKE_paint_material_source_resolve(const Material *ma)
 {
+  source_resolve_call_count.fetch_add(1, std::memory_order_relaxed);
   MaterialSourceResolve resolve;
   if (ma == nullptr) {
     resolve_all_unavailable(resolve, ChannelUnavailableReason::NoMaterial);

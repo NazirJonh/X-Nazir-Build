@@ -24,6 +24,7 @@
 
 #include "RNA_access.hh"
 
+#include "BKE_colorband.hh"
 #include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_image.hh"
@@ -46,7 +47,9 @@
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_ustring.hh"
+#include "BLI_uuid.h"
 
+#include "DNA_colorband_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
@@ -353,6 +356,43 @@ class GraphInterpreter {
                   vector.a};
         }
         return vector;
+      }
+      case SH_NODE_VALTORGB: {
+        /* A Color Ramp: the CPU composite never evaluates a source graph, so this only serves the
+         * generated wrapper. #BKE_colorband_evaluate is exactly what the shader side runs. */
+        bNode &mutable_node = const_cast<bNode &>(node);
+        const ColorBand *band = static_cast<const ColorBand *>(node.storage);
+        if (band == nullptr) {
+          return {};
+        }
+        const float fac =
+            eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Fac"_ustr)).r;
+        float result[4];
+        BKE_colorband_evaluate(band, fac, result);
+        if (STREQ(out_identifier, "Alpha")) {
+          return {result[3], result[3], result[3], result[3]};
+        }
+        return {result[0], result[1], result[2], result[3]};
+      }
+      case SH_NODE_NORMAL_MAP: {
+        /* A Normal Map decodes its encoded Color input into a tangent-space vector. The generated
+         * chain only reaches this through the SourceGroup wrapper's `COLOR:Normal` output. */
+        bNode &mutable_node = const_cast<bNode &>(node);
+        const auto &storage = *static_cast<const NodeShaderNormalMap *>(node.storage);
+        const RGBA encoded = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Color"_ustr));
+        const float strength =
+            eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Strength"_ustr)).r;
+        float vector[3] = {encoded.r * 2.0f - 1.0f,
+                           encoded.g * 2.0f - 1.0f,
+                           encoded.b * 2.0f - 1.0f};
+        if (storage.convention == SHD_NORMAL_MAP_CONVENTION_DIRECTX) {
+          vector[1] = -vector[1];
+        }
+        vector[0] *= strength;
+        vector[1] *= strength;
+        normalize_v3(vector);
+        return {vector[0], vector[1], vector[2], 1.0f};
       }
       default:
         return {};
@@ -797,6 +837,1063 @@ static Material *make_specular_source(Main &bmain, const char *name, const bool 
   BKE_ntree_update_tag_all(group);
   BKE_ntree_update_after_single_tree_change(bmain, *group);
   return source;
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Reusable Material sources for the multi-row stack tests
+ *
+ * A and C put the Principled inside a nested group and drive it through the group interface, a
+ * Reroute, an Image Texture and a Color Ramp, so every wired channel resolves to a graph and the
+ * row must use the SourceGroup wrapper. B keeps the Principled at the top level with constant
+ * sockets, a live Alpha and a Normal Map over a flat data texture: every channel is a constant or
+ * a trivial map, so the row uses Hybrid.
+ * \{ */
+
+static RGBA eval_channel_result(const GraphInterpreter &interpreter,
+                                eMaterialPaintChannel channel);
+static Image *make_bake_data_map(Main *bmain, const char *name, const int size, const float rgba[4]);
+
+/** The construction of a grouped source: a constant Base Color mixed with a 2x2 data map, a Color
+ * Ramp over the Roughness input, constant Specular and an instance-default Metallic. */
+struct GroupSourceSpec {
+  const float base_color[3];
+  /** Row-major 2x2 map pixels (r, g, b) in data space. */
+  const float map_pixels[4][3];
+  const float rough_in;
+  /** The Color Ramp's alpha at positions 0 and 1. */
+  const float ramp_alpha0;
+  const float ramp_alpha1;
+  const float specular_in;
+  const float metallic_default;
+};
+
+/** The construction of a top-level source: constants on every scalar/colour channel, a live Alpha
+ * and a flat Normal Map over a 2x2 data texture. */
+struct HybridSourceSpec {
+  const float base_color[3];
+  const float metallic;
+  const float roughness;
+  const float specular;
+  const float alpha;
+  const float emission[3];
+};
+
+static const GroupSourceSpec source_spec_a = {
+    {0.2f, 0.5f, 0.9f},
+    {{0.1f, 0.2f, 0.3f}, {0.4f, 0.5f, 0.6f}, {0.7f, 0.8f, 0.9f}, {0.9f, 0.1f, 0.4f}},
+    0.3f,
+    0.2f,
+    0.9f,
+    0.25f,
+    0.7f,
+};
+
+static const GroupSourceSpec source_spec_c = {
+    {0.3f, 0.1f, 0.7f},
+    {{0.9f, 0.8f, 0.1f}, {0.6f, 0.2f, 0.5f}, {0.1f, 0.6f, 0.2f}, {0.4f, 0.9f, 0.3f}},
+    0.6f,
+    0.7f,
+    0.1f,
+    0.5f,
+    0.2f,
+};
+
+static const HybridSourceSpec source_spec_b = {
+    {0.15f, 0.30f, 0.60f},
+    0.80f,
+    0.42f,
+    0.20f,
+    0.60f,
+    {0.05f, 0.10f, 0.40f},
+};
+
+/** A float data-space image of \a size x \a size from a row-major array of RGB triples, alpha one. */
+static Image *make_data_pattern_map(Main *bmain,
+                                    const char *name,
+                                    const int size,
+                                    const float (*pixels)[3])
+{
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      bmain, size, size, name, 32, /*floatbuf=*/true, IMA_GENTYPE_BLANK, black, false, true, false);
+  if (image == nullptr) {
+    return nullptr;
+  }
+  image->alpha_mode = IMA_ALPHA_STRAIGHT;
+  BLI_strncpy(image->colorspace_settings.name,
+              IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA),
+              sizeof(image->colorspace_settings.name));
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+  if (ibuf == nullptr || ibuf->float_data() == nullptr) {
+    if (ibuf != nullptr) {
+      BKE_image_release_ibuf(image, ibuf, lock);
+    }
+    return image;
+  }
+  float *dst = ibuf->float_data_for_write();
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      const int64_t texel = int64_t(y) * size + x;
+      const float *p = pixels[texel];
+      dst[texel * 4 + 0] = p[0];
+      dst[texel * 4 + 1] = p[1];
+      dst[texel * 4 + 2] = p[2];
+      dst[texel * 4 + 3] = 1.0f;
+    }
+  }
+  BKE_image_release_ibuf(image, ibuf, lock);
+  return image;
+}
+
+/** Configure a Color Ramp node into a two-stop linear ramp whose alpha runs \a a0 -> \a a1. */
+static void configure_color_ramp(bNode &node, const float a0, const float a1)
+{
+  ColorBand *band = static_cast<ColorBand *>(node.storage);
+  if (band == nullptr) {
+    return;
+  }
+  band->tot = 2;
+  band->ipotype = COLBAND_INTERP_LINEAR;
+  band->color_mode = COLBAND_BLEND_RGB;
+  band->data[0].pos = 0.0f;
+  band->data[0].r = 0.0f;
+  band->data[0].g = 0.0f;
+  band->data[0].b = 0.0f;
+  band->data[0].a = a0;
+  band->data[1].pos = 1.0f;
+  band->data[1].r = 1.0f;
+  band->data[1].g = 1.0f;
+  band->data[1].b = 1.0f;
+  band->data[1].a = a1;
+}
+
+/**
+ * Build a grouped source: the Principled sits in a nested group whose interface carries Base Color,
+ * Roughness, Specular and Metallic. Base Color is a Group Input / Image Texture mix through a
+ * Reroute, Roughness runs through a Color Ramp, and an off-path group instance shares the tree.
+ */
+static Material *build_group_source(Main &bmain,
+                                    const char *name,
+                                    const char *group_name,
+                                    const char *map_name,
+                                    const char *shared_name,
+                                    const GroupSourceSpec &spec)
+{
+  bNodeTree *group = bke::node_tree_add_tree(&bmain, group_name, "ShaderNodeTree");
+  bNodeTreeInterface &iface = group->tree_interface;
+  bNodeTreeInterfaceSocket *in_base = iface.add_socket(
+      "Base Color", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  bNodeTreeInterfaceSocket *in_rough = iface.add_socket(
+      "Roughness", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  bNodeTreeInterfaceSocket *in_spec = iface.add_socket(
+      "Specular", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  bNodeTreeInterfaceSocket *in_metal = iface.add_socket(
+      "Metallic", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  bNodeTreeInterfaceSocket *out_bsdf = iface.add_socket(
+      "BSDF", "", "NodeSocketShader", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  iface.tag_items_changed();
+  static_cast<bNodeSocketValueFloat *>(in_metal->socket_data)->value = spec.metallic_default;
+
+  bNode *group_input = bke::node_add_node(nullptr, *group, "NodeGroupInput"_ustr);
+  bNode *group_output = bke::node_add_node(nullptr, *group, "NodeGroupOutput"_ustr);
+  bNode *principled = bke::node_add_static_node(nullptr, *group, SH_NODE_BSDF_PRINCIPLED);
+  bNode *tex_coord = bke::node_add_static_node(nullptr, *group, SH_NODE_TEX_COORD);
+  bNode *tex = bke::node_add_static_node(nullptr, *group, SH_NODE_TEX_IMAGE);
+  bNode *ramp = bke::node_add_static_node(nullptr, *group, SH_NODE_VALTORGB);
+  bNode *reroute = bke::node_add_static_node(nullptr, *group, NODE_REROUTE);
+  bNode *mix = bke::node_add_static_node(nullptr, *group, SH_NODE_MIX);
+  nodes::update_node_declaration_and_sockets(*group, *group_input);
+  nodes::update_node_declaration_and_sockets(*group, *group_output);
+
+  Image *map = make_data_pattern_map(&bmain, map_name, 2, spec.map_pixels);
+  if (map == nullptr) {
+    return nullptr;
+  }
+  tex->id = &map->id;
+  id_us_plus(&map->id);
+  if (NodeTexImage *storage = static_cast<NodeTexImage *>(tex->storage)) {
+    storage->projection = SHD_PROJ_FLAT;
+  }
+  configure_color_ramp(*ramp, spec.ramp_alpha0, spec.ramp_alpha1);
+  if (NodeShaderMix *storage = static_cast<NodeShaderMix *>(mix->storage)) {
+    storage->data_type = SOCK_RGBA;
+    storage->factor_mode = NODE_MIX_MODE_UNIFORM;
+    storage->blend_type = MA_RAMP_BLEND;
+    storage->clamp_factor = true;
+    storage->clamp_result = false;
+  }
+  if (bNodeSocket *fac = bke::node_find_socket(*mix, SOCK_IN, "Factor_Float"_ustr)) {
+    static_cast<bNodeSocketValueFloat *>(fac->default_value)->value = 0.5f;
+  }
+
+  auto link = [&](bNode &from_node, const char *from_name, bNode &to_node, const char *to_name) {
+    bNodeSocket *from = bke::node_find_socket(from_node, SOCK_OUT, UString::from_ptr_noinline(from_name));
+    bNodeSocket *to = bke::node_find_socket(to_node, SOCK_IN, UString::from_ptr_noinline(to_name));
+    ASSERT_NE(from, nullptr);
+    ASSERT_NE(to, nullptr);
+    bke::node_add_link(*group, from_node, *from, to_node, *to);
+  };
+
+  link(*tex_coord, "Generated", *tex, "Vector");
+  link(*tex, "Color", *mix, "B_Color");
+  link(*group_input,
+       in_base->identifier,
+       *reroute,
+       "Input");
+  link(*reroute, "Output", *mix, "A_Color");
+  link(*mix, "Result_Color", *principled, "Base Color");
+  link(*group_input, in_rough->identifier, *ramp, "Fac");
+  link(*ramp, "Alpha", *principled, "Roughness");
+  link(*group_input, in_spec->identifier, *principled, "Specular IOR Level");
+  link(*group_input, in_metal->identifier, *principled, "Metallic");
+  link(*principled, "BSDF", *group_output, out_bsdf->identifier);
+
+  bNode *frame = bke::node_add_static_node(nullptr, *group, NODE_FRAME);
+  for (bNode &node : group->nodes) {
+    if (!node.is_frame()) {
+      node.parent = frame;
+    }
+  }
+  BKE_ntree_update_tag_all(group);
+  BKE_ntree_update_after_single_tree_change(bmain, *group);
+
+  /* A second group on its own, never wired to the Principled: the copy path must carry it too. */
+  bNodeTree *shared = bke::node_tree_add_tree(&bmain, shared_name, "ShaderNodeTree");
+  bke::node_add_static_node(nullptr, *shared, SH_NODE_RGB);
+
+  Material *source = BKE_material_add(&bmain, name);
+  bNodeTree &tree = *source->nodetree;
+  bNode *instance = bke::node_add_node(nullptr, tree, group->typeinfo->group_idname);
+  instance->id = &group->id;
+  id_us_plus(&group->id);
+  bNode *shared_instance = bke::node_add_node(nullptr, tree, shared->typeinfo->group_idname);
+  shared_instance->id = &shared->id;
+  id_us_plus(&shared->id);
+  nodes::update_node_declaration_and_sockets(tree, *instance);
+  nodes::update_node_declaration_and_sockets(tree, *shared_instance);
+  BKE_ntree_update_tag_all(source->nodetree);
+  BKE_ntree_update_after_single_tree_change(bmain, *source->nodetree);
+
+  auto root_link = [&](bNode &from_node, const char *from_name, const char *to_identifier) {
+    bNodeSocket *from = bke::node_find_socket(from_node, SOCK_OUT, UString::from_ptr_noinline(from_name));
+    ASSERT_NE(from, nullptr);
+    bNodeSocket *to = bke::node_find_socket(
+        *instance, SOCK_IN, UString::from_ptr_noinline(to_identifier));
+    ASSERT_NE(to, nullptr);
+    bke::node_add_link(tree, from_node, *from, *instance, *to);
+  };
+
+  bNode *rgb = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
+  bNodeSocket *rgb_out = bke::node_find_socket(*rgb, SOCK_OUT, "Color"_ustr);
+  const float color[4] = {spec.base_color[0], spec.base_color[1], spec.base_color[2], 1.0f};
+  copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(rgb_out->default_value)->value, color);
+  root_link(*rgb, "Color", in_base->identifier);
+
+  bNode *rough_value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+  bNodeSocket *rough_out = bke::node_find_socket(*rough_value, SOCK_OUT, "Value"_ustr);
+  static_cast<bNodeSocketValueFloat *>(rough_out->default_value)->value = spec.rough_in;
+  root_link(*rough_value, "Value", in_rough->identifier);
+
+  bNode *spec_value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+  bNodeSocket *spec_out = bke::node_find_socket(*spec_value, SOCK_OUT, "Value"_ustr);
+  static_cast<bNodeSocketValueFloat *>(spec_out->default_value)->value = spec.specular_in;
+  root_link(*spec_value, "Value", in_spec->identifier);
+
+  bNode *output = bke::node_add_static_node(nullptr, tree, SH_NODE_OUTPUT_MATERIAL);
+  bNodeSocket *bsdf_out = bke::node_find_socket(
+      *instance, SOCK_OUT, UString::from_ptr_noinline(out_bsdf->identifier));
+  if (bsdf_out == nullptr) {
+    return nullptr;
+  }
+  bke::node_add_link(tree,
+                     *instance,
+                     *bsdf_out,
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+
+  BKE_ntree_update_tag_all(source->nodetree);
+  BKE_ntree_update_after_single_tree_change(bmain, *source->nodetree);
+  return source;
+}
+
+/** Build a top-level source with constant sockets and a flat Normal Map over a data texture. */
+static Material *build_hybrid_source(Main &bmain,
+                                     const char *name,
+                                     const char *normal_map_name,
+                                     const HybridSourceSpec &spec)
+{
+  Material *source = BKE_material_add(&bmain, name);
+  bNodeTree &tree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, tree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, tree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(tree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+
+  auto set_color = [&](const char *socket_name, const float rgb[3]) {
+    bNodeSocket *socket = bke::node_find_socket(
+        *principled, SOCK_IN, UString::from_ptr_noinline(socket_name));
+    const float rgba[4] = {rgb[0], rgb[1], rgb[2], 1.0f};
+    copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(socket->default_value)->value, rgba);
+  };
+  auto set_float = [&](const char *socket_name, const float value) {
+    bNodeSocket *socket = bke::node_find_socket(
+        *principled, SOCK_IN, UString::from_ptr_noinline(socket_name));
+    static_cast<bNodeSocketValueFloat *>(socket->default_value)->value = value;
+  };
+  set_color("Base Color", spec.base_color);
+  set_float("Metallic", spec.metallic);
+  set_float("Roughness", spec.roughness);
+  set_float("Specular IOR Level", spec.specular);
+  set_float("Alpha", spec.alpha);
+  set_color("Emission Color", spec.emission);
+
+  /* A flat tangent-space normal map: the encoded map is the constant (0.5, 0.5, 1). */
+  const float flat[4][3] = {{0.5f, 0.5f, 1.0f},
+                            {0.5f, 0.5f, 1.0f},
+                            {0.5f, 0.5f, 1.0f},
+                            {0.5f, 0.5f, 1.0f}};
+  Image *normal_image = make_data_pattern_map(&bmain, normal_map_name, 2, flat);
+  bNode *tex = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+  tex->id = &normal_image->id;
+  id_us_plus(&normal_image->id);
+  bNode *normal_map = bke::node_add_static_node(nullptr, tree, SH_NODE_NORMAL_MAP);
+  if (NodeShaderNormalMap *storage = static_cast<NodeShaderNormalMap *>(normal_map->storage)) {
+    storage->space = SHD_SPACE_TANGENT;
+  }
+  bke::node_add_link(tree,
+                     *tex,
+                     *bke::node_find_socket(*tex, SOCK_OUT, "Color"_ustr),
+                     *normal_map,
+                     *bke::node_find_socket(*normal_map, SOCK_IN, "Color"_ustr));
+  bke::node_add_link(tree,
+                     *normal_map,
+                     *bke::node_find_socket(*normal_map, SOCK_OUT, "Normal"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
+
+  BKE_ntree_update_tag_all(&tree);
+  BKE_ntree_update_after_single_tree_change(bmain, tree);
+  return source;
+}
+
+/** The channel bottom constant the generated chain and the CPU both start from. */
+static RGBA channel_bottom(const int channel)
+{
+  float bottom[4];
+  BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel(channel), bottom);
+  return {bottom[0], bottom[1], bottom[2], bottom[3]};
+}
+
+/** The tangent-space normal combine of #blend_normal_combine (paint_material_composite.cc:225). */
+static RGBA combine_normal(const RGBA &bottom, const RGBA &top, const float fac)
+{
+  const float base[3] = {bottom.r * 2.0f - 1.0f, bottom.g * 2.0f - 1.0f, bottom.b * 2.0f - 1.0f};
+  const float detail[3] = {top.r * 2.0f - 1.0f, top.g * 2.0f - 1.0f, top.b * 2.0f - 1.0f};
+  float combined[3] = {base[0] + detail[0], base[1] + detail[1], base[2] * detail[2]};
+  normalize_v3(combined);
+  RGBA out;
+  out.r = bottom.r * (1.0f - fac) + (combined[0] * 0.5f + 0.5f) * fac;
+  out.g = bottom.g * (1.0f - fac) + (combined[1] * 0.5f + 0.5f) * fac;
+  out.b = bottom.b * (1.0f - fac) + (combined[2] * 0.5f + 0.5f) * fac;
+  out.a = bottom.a;
+  return out;
+}
+
+/** Lay the clean source value \a raw over the channel's bottom, the way a single row is composited
+ * (`ramp_blend` for every channel, the Normal Combine for Normal). */
+static RGBA composite_over(const int channel, const RGBA &raw, const float coverage)
+{
+  const RGBA bottom = channel_bottom(channel);
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return combine_normal(bottom, raw, coverage);
+  }
+  float dst[4] = {bottom.r, bottom.g, bottom.b, bottom.a};
+  const float top[4] = {raw.r, raw.g, raw.b, raw.a};
+  ramp_blend(MA_RAMP_BLEND, dst, coverage, top);
+  return {dst[0], dst[1], dst[2], dst[3]};
+}
+
+/**
+ * The clean value the grouped source supplies to \a channel at pixel (\a x, \a y). Mirrors
+ * #build_group_source: Base Color is the 0.5 mix of the constant and the map pixel (a`ramp_blend`
+ * MIX, material.cc:2544), Roughness the Color Ramp's alpha (`BKE_colorband_evaluate`), the rest
+ * are constants. Normal, Custom, Height and AO have no socket and report false.
+ */
+static bool group_source_expected(const GroupSourceSpec &spec,
+                                   const int channel,
+                                   const int x,
+                                   const int y,
+                                   RGBA &r_out)
+{
+  switch (channel) {
+    case PAINT_MATERIAL_CHANNEL_BASE_COLOR: {
+      const float *p = spec.map_pixels[y * 2 + x];
+      float dst[4] = {spec.base_color[0], spec.base_color[1], spec.base_color[2], 1.0f};
+      const float top[4] = {p[0], p[1], p[2], 1.0f};
+      ramp_blend(MA_RAMP_BLEND, dst, 0.5f, top);
+      r_out = {dst[0], dst[1], dst[2], 1.0f};
+      return true;
+    }
+    case PAINT_MATERIAL_CHANNEL_ROUGHNESS: {
+      ColorBand band{};
+      band.tot = 2;
+      band.ipotype = COLBAND_INTERP_LINEAR;
+      band.color_mode = COLBAND_BLEND_RGB;
+      band.data[0].pos = 0.0f;
+      band.data[0].a = spec.ramp_alpha0;
+      band.data[1].pos = 1.0f;
+      band.data[1].a = spec.ramp_alpha1;
+      float out[4];
+      BKE_colorband_evaluate(&band, spec.rough_in, out);
+      r_out = {out[3], out[3], out[3], 1.0f};
+      return true;
+    }
+    case PAINT_MATERIAL_CHANNEL_SPECULAR:
+      r_out = {spec.specular_in, spec.specular_in, spec.specular_in, 1.0f};
+      return true;
+    case PAINT_MATERIAL_CHANNEL_METALLIC:
+      r_out = {spec.metallic_default, spec.metallic_default, spec.metallic_default, 1.0f};
+      return true;
+    case PAINT_MATERIAL_CHANNEL_EMISSION:
+      r_out = {1.0f, 1.0f, 1.0f, 1.0f};
+      return true;
+    case PAINT_MATERIAL_CHANNEL_ALPHA:
+      r_out = {1.0f, 1.0f, 1.0f, 1.0f};
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** The clean value the top-level source supplies to \a channel; false when it has none. */
+static bool hybrid_source_expected(const HybridSourceSpec &spec,
+                                    const int channel,
+                                    RGBA &r_out)
+{
+  switch (channel) {
+    case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
+      r_out = {spec.base_color[0], spec.base_color[1], spec.base_color[2], 1.0f};
+      return true;
+    case PAINT_MATERIAL_CHANNEL_METALLIC:
+      r_out = {spec.metallic, spec.metallic, spec.metallic, 1.0f};
+      return true;
+    case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
+      r_out = {spec.roughness, spec.roughness, spec.roughness, 1.0f};
+      return true;
+    case PAINT_MATERIAL_CHANNEL_SPECULAR:
+      r_out = {spec.specular, spec.specular, spec.specular, 1.0f};
+      return true;
+    case PAINT_MATERIAL_CHANNEL_ALPHA:
+      r_out = {spec.alpha, spec.alpha, spec.alpha, 1.0f};
+      return true;
+    case PAINT_MATERIAL_CHANNEL_EMISSION:
+      r_out = {spec.emission[0], spec.emission[1], spec.emission[2], 1.0f};
+      return true;
+    case PAINT_MATERIAL_CHANNEL_NORMAL:
+      /* The flat map encodes the tangent-space normal (0.5, 0.5, 1). */
+      r_out = {0.5f, 0.5f, 1.0f, 1.0f};
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** True when the generated group exposes `Result <ui_name>` for \a channel. */
+static bool result_output_exists(const bNodeTree &tree, const int channel)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  char name[64];
+  BLI_snprintf(name, sizeof(name), "Result %s", info.ui_name);
+  for (const bNodeTreeInterfaceSocket *iface : tree.interface_outputs()) {
+    if (iface->name != nullptr && STREQ(iface->name, name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * A single Material row per source, read live. The generated chain must equal the
+ * hand-computed composite of the source's clean channel over the channel bottom, with coverage =
+ * the source alpha. The mode the contract picks (SourceGroup for the grouped graph, Hybrid for the
+ * constant/trivial-map one) is asserted too.
+ */
+TEST_F(PaintLayersGraphEvalTest, multi_source_rows_match_the_reference)
+{
+  struct Case {
+    const char *name;
+    Material *source;
+    PaintLayerMaterialMode expected_mode;
+    float coverage;
+  };
+
+  const int points[3][2] = {{0, 0}, {1, 0}, {1, 1}};
+  const float tolerance = 1e-4f;
+
+  auto run_case = [&](const Case &test_case,
+                      const bool grouped,
+                      const GroupSourceSpec &group_spec,
+                      const HybridSourceSpec &hybrid_spec) {
+    ma = BKE_material_add(bmain, test_case.name);
+    MaterialPaintLayer *row = BKE_paint_layers_add(
+        *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+    ASSERT_NE(row, nullptr);
+    ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, test_case.source));
+    BKE_paint_layers_active_set(*ma, row->marker);
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+    ASSERT_NE(ma->paint_layers_tree, nullptr);
+    EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), test_case.expected_mode);
+
+    GraphInterpreter interpreter;
+    interpreter.instance = find_instance();
+    interpreter.tree = ma->paint_layers_tree;
+    ASSERT_NE(interpreter.instance, nullptr);
+    interpreter.tree->ensure_topology_cache();
+
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      const int channel = int(info.channel);
+      RGBA raw;
+      const bool has_source = grouped ? group_source_expected(group_spec, channel, 0, 0, raw) :
+                                        hybrid_source_expected(hybrid_spec, channel, raw);
+      if (!has_source) {
+        EXPECT_FALSE(result_output_exists(*ma->paint_layers_tree, channel))
+            << info.ui_name << ": no source value, so the channel must not be wired";
+        continue;
+      }
+      ASSERT_TRUE(result_output_exists(*ma->paint_layers_tree, channel)) << info.ui_name;
+      for (const int i : IndexRange(ARRAY_SIZE(points))) {
+        const int x = points[i][0];
+        const int y = points[i][1];
+        if (grouped) {
+          ASSERT_TRUE(group_source_expected(group_spec, channel, x, y, raw));
+        }
+        const RGBA expected = composite_over(channel, raw, test_case.coverage);
+        interpreter.x = x;
+        interpreter.y = y;
+        const RGBA graph = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+        EXPECT_NEAR(graph.r, expected.r, tolerance)
+            << info.ui_name << " point(" << x << "," << y << ")";
+        EXPECT_NEAR(graph.g, expected.g, tolerance)
+            << info.ui_name << " point(" << x << "," << y << ")";
+        EXPECT_NEAR(graph.b, expected.b, tolerance)
+            << info.ui_name << " point(" << x << "," << y << ")";
+      }
+    }
+
+    BKE_id_free(bmain, ma);
+    ma = nullptr;
+  };
+
+  Material *source_a = build_group_source(
+      *bmain, "MultiSourceA", "MultiGroupA", "MultiMapA", "MultiSharedA", source_spec_a);
+  Material *source_b = build_hybrid_source(
+      *bmain, "MultiSourceB", "MultiNormalB", source_spec_b);
+  Material *source_c = build_group_source(
+      *bmain, "MultiSourceC", "MultiGroupC", "MultiMapC", "MultiSharedC", source_spec_c);
+  ASSERT_NE(source_a, nullptr);
+  ASSERT_NE(source_b, nullptr);
+  ASSERT_NE(source_c, nullptr);
+
+  run_case({"MultiRowA", source_a, PaintLayerMaterialMode::SourceGroup, 1.0f},
+           true,
+           source_spec_a,
+           {});
+  run_case({"MultiRowB", source_b, PaintLayerMaterialMode::Hybrid, source_spec_b.alpha},
+           false,
+           source_spec_a,
+           source_spec_b);
+  run_case({"MultiRowC", source_c, PaintLayerMaterialMode::SourceGroup, 1.0f},
+           true,
+           source_spec_c,
+           {});
+}
+
+/**
+ * The same sources, each row shown from deterministic bake maps. Every resolvable
+ * channel gets a 2x2 float data map holding the reference's clean value at each pixel, plus a grey
+ * coverage map holding the source alpha. The row is not deferred, so the contract picks Baked; the
+ * generated graph and the CPU composite must both equal the reference composite. The maps are made
+ * the way the existing bake-substitution tests do: #BKE_paint_layers_bake_set_map for each channel
+ * and `-1` (coverage), then #BKE_paint_layers_bake_finalize, which makes
+ * #BKE_paint_layers_bake_is_valid hold.
+ */
+TEST_F(PaintLayersGraphEvalTest, multi_source_baked_rows_match_the_reference_and_the_cpu)
+{
+  const int size = 2;
+  const int points[3][2] = {{0, 0}, {1, 0}, {1, 1}};
+  const float tolerance = 1e-4f;
+
+  auto run_case = [&](const char *name,
+                      Material *source,
+                      const bool grouped,
+                      const GroupSourceSpec &group_spec,
+                      const HybridSourceSpec &hybrid_spec,
+                      const float coverage) {
+    ma = BKE_material_add(bmain, name);
+    MaterialPaintLayer *row = BKE_paint_layers_add(
+        *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+    ASSERT_NE(row, nullptr);
+    ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+
+    auto raw_at = [&](const int channel, const int x, const int y, RGBA &r_out) -> bool {
+      return grouped ? group_source_expected(group_spec, channel, x, y, r_out) :
+                       hybrid_source_expected(hybrid_spec, channel, r_out);
+    };
+
+    /* A bake map per resolvable bakeable channel, the reference's clean value per pixel. */
+    for (const eMaterialPaintChannel channel : BKE_paint_material_bakeable_channels()) {
+      RGBA probe;
+      if (!raw_at(int(channel), 0, 0, probe)) {
+        continue;
+      }
+      float pixels[4][3];
+      for (const int y : IndexRange(size)) {
+        for (const int x : IndexRange(size)) {
+          RGBA raw;
+          EXPECT_TRUE(raw_at(int(channel), x, y, raw));
+          const int64_t texel = int64_t(y) * size + x;
+          pixels[texel][0] = raw.r;
+          pixels[texel][1] = raw.g;
+          pixels[texel][2] = raw.b;
+        }
+      }
+      char map_name[64];
+      BLI_snprintf(map_name,
+                   sizeof(map_name),
+                   "%s %s",
+                   name,
+                   BKE_paint_material_channel_info(channel).ui_name);
+      Image *map = make_data_pattern_map(bmain, map_name, size, pixels);
+      ASSERT_NE(map, nullptr);
+      ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, int(channel), map));
+    }
+    const float coverage_rgba[4] = {coverage, coverage, coverage, 1.0f};
+    char coverage_name[64];
+    BLI_snprintf(coverage_name, sizeof(coverage_name), "%s Coverage", name);
+    Image *coverage_map = make_bake_data_map(bmain, coverage_name, size, coverage_rgba);
+    ASSERT_NE(coverage_map, nullptr);
+    ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, -1, coverage_map));
+    BKE_paint_layers_bake_finalize(*ma, *row);
+
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+    ASSERT_NE(ma->paint_layers_tree, nullptr);
+    EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+    EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+    GraphInterpreter interpreter;
+    interpreter.instance = find_instance();
+    interpreter.tree = ma->paint_layers_tree;
+    ASSERT_NE(interpreter.instance, nullptr);
+    interpreter.tree->ensure_topology_cache();
+
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      const int channel = int(info.channel);
+      RGBA probe;
+      if (!raw_at(channel, 0, 0, probe)) {
+        continue;
+      }
+      for (const int i : IndexRange(ARRAY_SIZE(points))) {
+        const int x = points[i][0];
+        const int y = points[i][1];
+        RGBA raw;
+        ASSERT_TRUE(raw_at(channel, x, y, raw));
+        const RGBA expected = composite_over(channel, raw, coverage);
+        interpreter.x = x;
+        interpreter.y = y;
+        const RGBA graph = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+        const RGBA cpu = cpu_pixel_at(channel, x, y);
+        EXPECT_NEAR(graph.r, expected.r, tolerance)
+            << info.ui_name << " graph point(" << x << "," << y << ")";
+        EXPECT_NEAR(graph.g, expected.g, tolerance)
+            << info.ui_name << " graph point(" << x << "," << y << ")";
+        EXPECT_NEAR(graph.b, expected.b, tolerance)
+            << info.ui_name << " graph point(" << x << "," << y << ")";
+        EXPECT_NEAR(cpu.r, expected.r, tolerance)
+            << info.ui_name << " cpu point(" << x << "," << y << ")";
+        EXPECT_NEAR(cpu.g, expected.g, tolerance)
+            << info.ui_name << " cpu point(" << x << "," << y << ")";
+        EXPECT_NEAR(cpu.b, expected.b, tolerance)
+            << info.ui_name << " cpu point(" << x << "," << y << ")";
+      }
+    }
+
+    BKE_id_free(bmain, ma);
+    ma = nullptr;
+  };
+
+  Material *source_a = build_group_source(
+      *bmain, "MultiBakedSourceA", "MultiBakedGroupA", "MultiBakedMapA", "MultiBakedSharedA",
+      source_spec_a);
+  Material *source_b = build_hybrid_source(
+      *bmain, "MultiBakedSourceB", "MultiBakedNormalB", source_spec_b);
+  Material *source_c = build_group_source(
+      *bmain, "MultiBakedSourceC", "MultiBakedGroupC", "MultiBakedMapC", "MultiBakedSharedC",
+      source_spec_c);
+  ASSERT_NE(source_a, nullptr);
+  ASSERT_NE(source_b, nullptr);
+  ASSERT_NE(source_c, nullptr);
+
+  run_case("MultiBakedA", source_a, true, source_spec_a, {}, 1.0f);
+  run_case("MultiBakedB", source_b, false, source_spec_a, source_spec_b, source_spec_b.alpha);
+  run_case("MultiBakedC", source_c, true, source_spec_c, {}, 1.0f);
+}
+
+/** Two Paint children of the isolating folder: distinct uniform data maps (alpha stored as one). */
+static const float kIsolatingPaintA[4] = {0.70f, 0.30f, 0.10f, 1.0f};
+static const float kIsolatingPaintB[4] = {0.20f, 0.80f, 0.40f, 1.0f};
+
+static void blend_over_rgba(RGBA &r_dst,
+                            const RGBA &src,
+                            const int blend,
+                            const float factor,
+                            const bool normal_channel)
+{
+  const float fac = clamp_f(factor, 0.0f, 1.0f);
+  if (normal_channel) {
+    r_dst = combine_normal(r_dst, src, fac);
+    return;
+  }
+  float dst[4] = {r_dst.r, r_dst.g, r_dst.b, r_dst.a};
+  const float top[4] = {src.r, src.g, src.b, src.a};
+  ramp_blend(blend, dst, fac, top);
+  r_dst = {dst[0], dst[1], dst[2], dst[3]};
+}
+
+/**
+ * The reference for an isolating folder (opacity 0.5) holding two Paint children of opacity 0.6
+ * and coverage one, laid over the channel bottom: the premultiplied accumulation of
+ * `composite_folder_accumulate` (paint_material_composite.cc:702-775) and the
+ * `opacity * coverage` overlay of `composite_apply_layer_linear` (`:777-804`). With two children
+ * the second one evaluates the over's `(1 - A * op)` against non-zero premultiplied colour, which
+ * is exactly what the `(1 - A)` mutation changes.
+ */
+static RGBA isolating_folder_expected(const int channel)
+{
+  const bool normal_channel = (channel == PAINT_MATERIAL_CHANNEL_NORMAL);
+  RGBA state = channel_bottom(channel);
+
+  float premul[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float coverage = 0.0f;
+  auto accumulate = [&](const RGBA &color) {
+    const float f = 0.6f;
+    const float a = coverage;
+    float straight[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (a > 0.0f) {
+      for (const int k : IndexRange(4)) {
+        straight[k] = premul[k] / a;
+      }
+    }
+    RGBA blended = {straight[0], straight[1], straight[2], straight[3]};
+    blend_over_rgba(blended, color, MA_RAMP_BLEND, 1.0f, normal_channel);
+    const float child[4] = {color.r, color.g, color.b, color.a};
+    const float blended_rgba[4] = {blended.r, blended.g, blended.b, blended.a};
+    float c_eff[4];
+    for (const int k : IndexRange(4)) {
+      c_eff[k] = child[k] + (blended_rgba[k] - child[k]) * a;
+    }
+    for (const int k : IndexRange(4)) {
+      premul[k] = premul[k] * (1.0f - f) + c_eff[k] * f;
+    }
+    coverage = a + f * (1.0f - a);
+  };
+
+  if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    accumulate({kIsolatingPaintA[0], kIsolatingPaintA[1], kIsolatingPaintA[2], 1.0f});
+    accumulate({kIsolatingPaintB[0], kIsolatingPaintB[1], kIsolatingPaintB[2], 1.0f});
+  }
+
+  RGBA folder_src = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (coverage > 0.0f) {
+    folder_src = {premul[0] / coverage,
+                  premul[1] / coverage,
+                  premul[2] / coverage,
+                  premul[3] / coverage};
+  }
+  blend_over_rgba(state, folder_src, MA_RAMP_BLEND, 0.5f * coverage, normal_channel);
+  return state;
+}
+
+/**
+ * An isolating folder with two Paint children of opacity below one: the generated chain, the CPU
+ * composite and the reference must agree. This is the narrow case the premultiplied over's
+ * `(1 - A * op)` needs; the full stack that would also cover it is blocked by the generator crash
+ * the report describes.
+ */
+TEST_F(PaintLayersGraphEvalTest, isolating_folder_partial_coverage_matches_the_cpu)
+{
+  const int size = 2;
+  const int points[3][2] = {{1, 1}, {1, 0}, {0, 1}};
+  const char *point_names[3] = {"center", "edge", "corner"};
+  const float tolerance = 1e-4f;
+
+  ma = BKE_material_add(bmain, "IsolatingFolder");
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Iso", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  BKE_paint_layers_set_opacity(*ma, folder, 0.5f);
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+
+  auto add_paint_child = [&](const char *name, const float color[4]) -> MaterialPaintLayer * {
+    MaterialPaintLayer *child = BKE_paint_layers_add(
+        *ma, MA_PAINT_LAYER_KIND_PAINT, name, folder, PaintLayerPlace::Into);
+    EXPECT_NE(child, nullptr);
+    MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+        *ma, child, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    EXPECT_NE(record, nullptr);
+    Image *map = make_bake_data_map(bmain, name, size, color);
+    EXPECT_NE(map, nullptr);
+    record->image = map;
+    record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+    BKE_paint_layers_set_opacity(*ma, child, 0.6f);
+    return child;
+  };
+  MaterialPaintLayer *child_a = add_paint_child("IsolatingPaintA", kIsolatingPaintA);
+  MaterialPaintLayer *child_b = add_paint_child("IsolatingPaintB", kIsolatingPaintB);
+  ASSERT_NE(child_a, nullptr);
+  ASSERT_NE(child_b, nullptr);
+
+  struct ActiveCase {
+    const char *label;
+    const bUUID marker;
+  };
+  const ActiveCase active_cases[] = {
+      {"none", BLI_uuid_nil()},
+      {"folder", folder->marker},
+      {"paint-a", child_a->marker},
+      {"paint-b", child_b->marker},
+  };
+
+  for (const ActiveCase &active_case : active_cases) {
+    BKE_paint_layers_active_set(*ma, active_case.marker);
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+    ASSERT_NE(ma->paint_layers_tree, nullptr);
+
+    GraphInterpreter interpreter;
+    interpreter.instance = find_instance();
+    interpreter.tree = ma->paint_layers_tree;
+    ASSERT_NE(interpreter.instance, nullptr);
+    interpreter.tree->ensure_topology_cache();
+
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      const int channel = int(info.channel);
+      if (!result_output_exists(*ma->paint_layers_tree, channel)) {
+        continue;
+      }
+      for (const int i : IndexRange(ARRAY_SIZE(points))) {
+        const int x = points[i][0];
+        const int y = points[i][1];
+        const RGBA expected = isolating_folder_expected(channel);
+        interpreter.x = x;
+        interpreter.y = y;
+        const RGBA graph = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+        const RGBA cpu = cpu_pixel_at(channel, x, y);
+        EXPECT_NEAR(graph.r, expected.r, tolerance)
+            << active_case.label << " " << info.ui_name << " " << point_names[i] << " graph";
+        EXPECT_NEAR(graph.g, expected.g, tolerance)
+            << active_case.label << " " << info.ui_name << " " << point_names[i] << " graph";
+        EXPECT_NEAR(graph.b, expected.b, tolerance)
+            << active_case.label << " " << info.ui_name << " " << point_names[i] << " graph";
+        EXPECT_NEAR(cpu.r, expected.r, tolerance)
+            << active_case.label << " " << info.ui_name << " " << point_names[i] << " cpu";
+        EXPECT_NEAR(cpu.g, expected.g, tolerance)
+            << active_case.label << " " << info.ui_name << " " << point_names[i] << " cpu";
+        EXPECT_NEAR(cpu.b, expected.b, tolerance)
+            << active_case.label << " " << info.ui_name << " " << point_names[i] << " cpu";
+      }
+    }
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** The generated root's node pointers, for the "a second rebuild changed nothing" check. */
+static Vector<bNode *> root_node_ptrs(bNodeTree &tree)
+{
+  Vector<bNode *> nodes;
+  for (bNode &node : tree.nodes) {
+    nodes.append(&node);
+  }
+  return nodes;
+}
+
+static bool same_node_ptrs(const Span<bNode *> a, const Span<bNode *> b)
+{
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (const int i : a.index_range()) {
+    if (a[i] != b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Stage 4: a Pass Through folder with a Material child must be byte-identical to moving the child
+ * to the parent, hiding it must be a value edit (same result, same root nodes), and a second
+ * regeneration after an active-row change must rebuild nothing.
+ */
+TEST_F(PaintLayersGraphEvalTest, pass_through_material_child_and_hiding_match_the_flat_stack)
+{
+  const int size = 2;
+  const int points[3][2] = {{1, 1}, {1, 0}, {0, 1}};
+  const float tolerance = 1e-4f;
+  const float base_color[4] = {0.10f, 0.60f, 0.20f, 1.0f};
+
+  Material *source_c = build_hybrid_source(
+      *bmain, "PassThroughSourceC", "PassThroughNormalC", source_spec_b);
+  ASSERT_NE(source_c, nullptr);
+
+  /* \a folded puts Material C in a Pass Through folder; without it C sits on the parent. */
+  auto build_material = [&](const char *suffix, const bool folded, MaterialPaintLayer **r_c) -> Material * {
+    Material *material = BKE_material_add(bmain, suffix);
+    MaterialPaintLayer *base = BKE_paint_layers_add(
+        *material, MA_PAINT_LAYER_KIND_PAINT, "Base", nullptr, PaintLayerPlace::Above);
+    if (base == nullptr) {
+      return nullptr;
+    }
+    MaterialPaintLayerChannel *base_record = BKE_paint_layers_channel_add(
+        *material, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (base_record == nullptr) {
+      return nullptr;
+    }
+    char name[96];
+    BLI_snprintf(name, sizeof(name), "PassThroughBase%s", suffix);
+    Image *base_map = make_bake_data_map(bmain, name, size, base_color);
+    if (base_map == nullptr) {
+      return nullptr;
+    }
+    base_record->image = base_map;
+    base_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+    MaterialPaintLayer *anchor = nullptr;
+    if (folded) {
+      anchor = BKE_paint_layers_add(
+          *material, MA_PAINT_LAYER_KIND_FOLDER, "Pass", nullptr, PaintLayerPlace::Above);
+      if (anchor == nullptr || !BKE_paint_layers_folder_is_pass_through(*material, *anchor)) {
+        return nullptr;
+      }
+    }
+    MaterialPaintLayer *c = BKE_paint_layers_add(*material,
+                                                 MA_PAINT_LAYER_KIND_MATERIAL,
+                                                 "MatC",
+                                                 anchor,
+                                                 folded ? PaintLayerPlace::Into :
+                                                          PaintLayerPlace::Above);
+    if (c == nullptr || !BKE_paint_layers_set_material(*material, c, source_c)) {
+      return nullptr;
+    }
+    for (const eMaterialPaintChannel channel : BKE_paint_material_bakeable_channels()) {
+      RGBA raw;
+      if (!hybrid_source_expected(source_spec_b, int(channel), raw)) {
+        continue;
+      }
+      const float rgba[4] = {raw.r, raw.g, raw.b, 1.0f};
+      BLI_snprintf(name, sizeof(name), "PassThroughBake%s", suffix);
+      Image *map = make_bake_data_map(bmain, name, size, rgba);
+      if (map == nullptr || !BKE_paint_layers_bake_set_map(*material, *c, int(channel), map)) {
+        return nullptr;
+      }
+    }
+    const float coverage_rgba[4] = {
+        source_spec_b.alpha, source_spec_b.alpha, source_spec_b.alpha, 1.0f};
+    BLI_snprintf(name, sizeof(name), "PassThroughCoverage%s", suffix);
+    Image *coverage_map = make_bake_data_map(bmain, name, size, coverage_rgba);
+    if (coverage_map == nullptr ||
+        !BKE_paint_layers_bake_set_map(*material, *c, -1, coverage_map))
+    {
+      return nullptr;
+    }
+    BKE_paint_layers_bake_finalize(*material, *c);
+    *r_c = c;
+    return material;
+  };
+
+  MaterialPaintLayer *folded_c = nullptr;
+  MaterialPaintLayer *plain_c = nullptr;
+  Material *folded = build_material("Folded", true, &folded_c);
+  Material *plain = build_material("Plain", false, &plain_c);
+  ASSERT_NE(folded, nullptr);
+  ASSERT_NE(plain, nullptr);
+
+  /* The generated channels of both stacks must hold the same values at every point. */
+  auto evaluate = [&](Material *material) -> Vector<RGBA> {
+    ma = material;
+    BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+    EXPECT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+    GraphInterpreter interpreter;
+    interpreter.instance = find_instance();
+    interpreter.tree = ma->paint_layers_tree;
+    EXPECT_NE(interpreter.instance, nullptr);
+    interpreter.tree->ensure_topology_cache();
+    Vector<RGBA> values;
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      const int channel = int(info.channel);
+      if (!result_output_exists(*ma->paint_layers_tree, channel)) {
+        continue;
+      }
+      for (const int i : IndexRange(ARRAY_SIZE(points))) {
+        interpreter.x = points[i][0];
+        interpreter.y = points[i][1];
+        values.append(eval_channel_result(interpreter, eMaterialPaintChannel(channel)));
+      }
+    }
+    return values;
+  };
+  const Vector<RGBA> folded_values = evaluate(folded);
+  const Vector<RGBA> plain_values = evaluate(plain);
+  ASSERT_EQ(folded_values.size(), plain_values.size());
+  for (const int i : folded_values.index_range()) {
+    EXPECT_NEAR(folded_values[i].r, plain_values[i].r, tolerance) << "index " << i;
+    EXPECT_NEAR(folded_values[i].g, plain_values[i].g, tolerance) << "index " << i;
+    EXPECT_NEAR(folded_values[i].b, plain_values[i].b, tolerance) << "index " << i;
+  }
+
+  /* An active-row change on the folded stack: the next regen rebuilds, the one after does not. */
+  ma = folded;
+  BKE_paint_layers_active_set(*ma, folded_c->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> nodes = root_node_ptrs(*root);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_node_ptrs(nodes, root_node_ptrs(*root)));
+
+  /* Hiding C is a value edit: the result equals the base alone and the root keeps its nodes. */
+  ma = plain;
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *plain_root = ma->paint_layers_tree;
+  const Vector<bNode *> plain_nodes = root_node_ptrs(*plain_root);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, plain_c, false));
+  BKE_paint_layers_values_sync(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, plain_root);
+  EXPECT_TRUE(same_node_ptrs(plain_nodes, root_node_ptrs(*plain_root)));
+  GraphInterpreter hidden_interpreter;
+  hidden_interpreter.instance = find_instance();
+  hidden_interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(hidden_interpreter.instance, nullptr);
+  hidden_interpreter.tree->ensure_topology_cache();
+  hidden_interpreter.x = 1;
+  hidden_interpreter.y = 1;
+  const RGBA hidden = eval_channel_result(
+      hidden_interpreter, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  /* The base map is fully covering, so hiding C leaves exactly the base colour. */
+  EXPECT_NEAR(hidden.r, base_color[0], tolerance);
+  EXPECT_NEAR(hidden.g, base_color[1], tolerance);
+  EXPECT_NEAR(hidden.b, base_color[2], tolerance);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
 }
 
 TEST_F(PaintLayersGraphEvalTest, generated_tree_topology_matches_cpu_formulas)
@@ -3834,6 +4931,1026 @@ TEST_F(PaintLayersGraphEvalTest, material_correction_fill_opacity_matches_the_fo
 
   BKE_id_free(bmain, ma);
   ma = nullptr;
+}
+
+/** \} */
+
+TEST_F(PaintLayersGraphEvalTest, source_group_material_in_pass_through_and_isolating_folder)
+{
+  Material *source_c = build_group_source(
+      *bmain, "ReproSourceC", "ReproGroupC", "ReproMapC", "ReproSharedC", source_spec_c);
+  Material *source_b = build_hybrid_source(
+      *bmain, "ReproSourceB", "ReproNormalB", source_spec_b);
+  ASSERT_NE(source_c, nullptr);
+  ASSERT_NE(source_b, nullptr);
+  ma = BKE_material_add(bmain, "ReproStack");
+
+  MaterialPaintLayer *iso = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Iso", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(iso, nullptr);
+  BKE_paint_layers_set_opacity(*ma, iso, 0.5f);
+  MaterialPaintLayer *b = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatB", iso, PaintLayerPlace::Into);
+  ASSERT_NE(b, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, b, source_b));
+
+  MaterialPaintLayer *pass = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Pass", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(pass, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *pass));
+  MaterialPaintLayer *c = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatC", pass, PaintLayerPlace::Into);
+  ASSERT_NE(c, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, c, source_c));
+
+  auto find_wrapper = [&]() -> bNodeTree * {
+    for (bNodeTree &tree : bmain->nodetrees) {
+      if (STREQ(tree.id.name + 2, ".PL Source ReproSourceC")) {
+        return &tree;
+      }
+    }
+    return nullptr;
+  };
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *wrapper = find_wrapper();
+  ASSERT_NE(wrapper, nullptr);
+  const int users_after_first = wrapper->id.us;
+  EXPECT_GT(users_after_first, 0);
+
+  /* A second regeneration must reuse the same wrapper instance without another user. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *wrapper_again = find_wrapper();
+  ASSERT_NE(wrapper_again, nullptr);
+  EXPECT_EQ(wrapper_again->id.us, users_after_first);
+
+  /* Removing the row releases the wrapper (or the wrapper is pruned): never a leftover user. */
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, c));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *wrapper_after = find_wrapper();
+  if (wrapper_after != nullptr) {
+    EXPECT_LT(wrapper_after->id.us, users_after_first);
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * The Baked->SourceGroup rebuild of a Material row at the root, next to an isolating folder and a
+ * Pass Through folder whose child is a SourceGroup row. The active change moves row A from Baked to
+ * SourceGroup, which rebuilds A's layer group; the non-supplied Normal channel must not make the
+ * generator link A's wrapper instance into the root tree.
+ */
+TEST_F(PaintLayersGraphEvalTest, material_source_group_transition_next_to_both_folder_kinds)
+{
+  const int size = 2;
+  Material *source_a = build_group_source(
+      *bmain, "ReproTransSourceA", "ReproTransGroupA", "ReproTransMapA", "ReproTransSharedA",
+      source_spec_a);
+  Material *source_b = build_hybrid_source(
+      *bmain, "ReproTransSourceB", "ReproTransNormalB", source_spec_b);
+  Material *source_c = build_group_source(
+      *bmain, "ReproTransSourceC", "ReproTransGroupC", "ReproTransMapC", "ReproTransSharedC",
+      source_spec_c);
+  ASSERT_NE(source_a, nullptr);
+  ASSERT_NE(source_b, nullptr);
+  ASSERT_NE(source_c, nullptr);
+  ma = BKE_material_add(bmain, "ReproTransStack");
+
+  MaterialPaintLayer *a = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatA", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(a, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, a, source_a));
+  for (const eMaterialPaintChannel channel : BKE_paint_material_bakeable_channels()) {
+    RGBA raw;
+    if (!group_source_expected(source_spec_a, int(channel), 0, 0, raw)) {
+      continue;
+    }
+    const float rgba[4] = {raw.r, raw.g, raw.b, 1.0f};
+    Image *map = make_bake_data_map(bmain, "ReproTransBakeA", size, rgba);
+    ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *a, int(channel), map));
+  }
+  const float coverage_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Image *coverage_map = make_bake_data_map(bmain, "ReproTransCoverageA", size, coverage_rgba);
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *a, -1, coverage_map));
+  BKE_paint_layers_bake_finalize(*ma, *a);
+
+  MaterialPaintLayer *iso = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Iso", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(iso, nullptr);
+  BKE_paint_layers_set_opacity(*ma, iso, 0.5f);
+  MaterialPaintLayer *b = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatB", iso, PaintLayerPlace::Into);
+  ASSERT_NE(b, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, b, source_b));
+
+  MaterialPaintLayer *pass = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Pass", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(pass, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *pass));
+  MaterialPaintLayer *c = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatC", pass, PaintLayerPlace::Into);
+  ASSERT_NE(c, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, c, source_c));
+
+  /* First build: A is not deferred, so its valid bakes make it Baked. */
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *a), PaintLayerMaterialMode::Baked);
+
+  /* Move the active row to A: it becomes SourceGroup and its group is rebuilt. */
+  BKE_paint_layers_active_set(*ma, a->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *a), PaintLayerMaterialMode::SourceGroup);
+
+  /* The next regeneration must rebuild nothing. */
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> nodes = root_node_ptrs(*root);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_node_ptrs(nodes, root_node_ptrs(*root)));
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Full parity stack
+ *
+ * One stack with every construct that mattered so far, bottom to top: a Fill, Material A
+ * (SourceGroup) with a mask and a Paint correction, an isolating folder (Material B, Hybrid, and a
+ * Paint row), a Pass Through folder holding Material C (SourceGroup) and a Multiply Paint row on
+ * top. The reference below composites the whole stack in one pass; the generated graph and the CPU
+ * must both equal it for every active row, channel and point.
+ * \{ */
+
+static const int kFsSize = 2;
+/** Mask map grey per texel (row-major 2x2): closed, partial, mostly open, open. Alpha is one. */
+static const uchar kFsMaskBytes[4] = {0, 102, 204, 255};
+/** A's Base Color correction map per texel: straight RGB bytes and a shared alpha of 0.6. */
+static const uchar kFsCorrBytes[4][4] = {
+    {230, 40, 40, 153}, {40, 230, 40, 153}, {40, 40, 230, 153}, {200, 200, 50, 153}};
+static const float kFsMaskOpacity = 0.6f;
+static const float kFsCorrOpacity = 0.5f;
+static const float kFsIsoOpacity = 0.5f;
+static const float kFsInnerPaintOpacity = 0.6f;
+static const float kFsTopOpacity = 0.7f;
+/** Below one, or C would cover everything A's mask and correction do. */
+static const float kFsCOpacity = 0.4f;
+static const float kFsFillColor[4] = {0.30f, 0.45f, 0.20f, 1.0f};
+static const float kFsFillRoughness = 0.75f;
+static const float kFsTopColor[4] = {0.60f, 0.80f, 0.50f, 1.0f};
+static const float kFsTopRoughness[4] = {0.40f, 0.40f, 0.40f, 1.0f};
+
+struct FsPoint {
+  const char *label;
+  int x;
+  int y;
+};
+/* The mask grey is 1.0, 0.4, 0.8 and 0.0 at these texels; Material B's alpha is 0.6 at all. */
+static const FsPoint kFsPoints[] = {
+    {"center", 1, 1}, {"mask-edge", 1, 0}, {"b-partial-alpha", 0, 1}, {"mask-closed", 0, 0}};
+
+/** Which parts of the stack take part in the reference. */
+struct FsShape {
+  bool iso = true;
+  bool c = true;
+};
+
+/** One row's contribution to a channel: its colour and the factor before the row's opacity. */
+struct FsRow {
+  bool part = false;
+  RGBA color;
+  float factor = 0.0f;
+};
+
+static FsRow fs_row_fill(const int channel)
+{
+  FsRow row;
+  if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    row = {true, {kFsFillColor[0], kFsFillColor[1], kFsFillColor[2], 1.0f}, 1.0f};
+  }
+  else if (channel == PAINT_MATERIAL_CHANNEL_ROUGHNESS) {
+    row = {true, {kFsFillRoughness, kFsFillRoughness, kFsFillRoughness, 1.0f}, 1.0f};
+  }
+  return row;
+}
+
+/**
+ * Material A: the source's clean value; on Base Color the Paint correction mixed in with
+ * `opacity * alpha` (`paint_material_composite.cc:628-632`); the factor is the source coverage (one)
+ * with the mask item laid over it as `F * (1 - fac) + C * fac`, `fac = alpha * opacity`
+ * (`paint_material_composite.cc:366-396`, the same expression at `:664-690`). The mask is one for
+ * every channel (`paint_layers_intern.hh:123`).
+ */
+static FsRow fs_row_a(const int channel, const int x, const int y)
+{
+  FsRow row;
+  RGBA raw;
+  if (!group_source_expected(source_spec_a, channel, x, y, raw)) {
+    return row;
+  }
+  const int texel = y * kFsSize + x;
+  if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    const float alpha = float(kFsCorrBytes[texel][3]) / 255.0f;
+    float dst[4] = {raw.r, raw.g, raw.b, 1.0f};
+    const float top[4] = {float(kFsCorrBytes[texel][0]) / 255.0f,
+                          float(kFsCorrBytes[texel][1]) / 255.0f,
+                          float(kFsCorrBytes[texel][2]) / 255.0f,
+                          alpha};
+    ramp_blend(MA_RAMP_BLEND, dst, clamp_f(kFsCorrOpacity * alpha, 0.0f, 1.0f), top);
+    raw = {dst[0], dst[1], dst[2], 1.0f};
+  }
+  const float gray = float(kFsMaskBytes[texel]) / 255.0f;
+  const float fac = clamp_f(kFsMaskOpacity, 0.0f, 1.0f);
+  row.part = true;
+  row.color = raw;
+  row.factor = 1.0f * (1.0f - fac) + gray * fac;
+  return row;
+}
+
+/** Material B: the constants of #source_spec_b, covered by its constant alpha. */
+static FsRow fs_row_b(const int channel)
+{
+  FsRow row;
+  RGBA raw;
+  if (hybrid_source_expected(source_spec_b, channel, raw)) {
+    row = {true, raw, source_spec_b.alpha};
+  }
+  return row;
+}
+
+/** The Paint row inside the isolating folder: Base Color only, fully covering. */
+static FsRow fs_row_inner_paint(const int channel)
+{
+  FsRow row;
+  if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    row = {true, {kIsolatingPaintA[0], kIsolatingPaintA[1], kIsolatingPaintA[2], 1.0f}, 1.0f};
+  }
+  return row;
+}
+
+static FsRow fs_row_c(const int channel, const int x, const int y)
+{
+  FsRow row;
+  RGBA raw;
+  if (group_source_expected(source_spec_c, channel, x, y, raw)) {
+    row = {true, raw, 1.0f};
+  }
+  return row;
+}
+
+/** The top Paint row: Base Color and Roughness maps, fully covering. */
+static FsRow fs_row_top(const int channel)
+{
+  FsRow row;
+  if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    row = {true, {kFsTopColor[0], kFsTopColor[1], kFsTopColor[2], 1.0f}, 1.0f};
+  }
+  else if (channel == PAINT_MATERIAL_CHANNEL_ROUGHNESS) {
+    row = {true, {kFsTopRoughness[0], kFsTopRoughness[1], kFsTopRoughness[2], 1.0f}, 1.0f};
+  }
+  return row;
+}
+
+/**
+ * The whole stack over the channel bottom. A row lays its colour with `opacity * factor`
+ * (`composite_apply_layer_linear`, `paint_material_composite.cc:777-804`, `blend_row_linear`
+ * `:253-277`, `ramp_blend` `material.cc:2539-2549`); the isolating folder accumulates its children
+ * premultiplied first (`composite_folder_accumulate`, `:702-775`) and its own coverage is that
+ * accumulation; the Pass Through folder is transparent to the maths, so C is laid like a root row.
+ * A row a channel does not exist for (Unavailable in the source) does not take part. The result
+ * ends with the Normal decode-normalize-encode of `cpu_pixel_at` and of the chain
+ * (`paint_layers.cc:542-570`).
+ *
+ * \return false when no row takes part in \a channel.
+ */
+static bool full_stack_expected(
+    const int channel, const int x, const int y, const FsShape &shape, RGBA &r_out)
+{
+  const bool normal = (channel == PAINT_MATERIAL_CHANNEL_NORMAL);
+  RGBA state = channel_bottom(channel);
+  bool any = false;
+
+  auto lay = [&](const FsRow &row, const float opacity, const int blend) {
+    if (!row.part) {
+      return;
+    }
+    any = true;
+    blend_over_rgba(state, row.color, blend, opacity * row.factor, normal);
+  };
+
+  lay(fs_row_fill(channel), 1.0f, MA_RAMP_BLEND);
+  lay(fs_row_a(channel, x, y), 1.0f, MA_RAMP_BLEND);
+
+  if (shape.iso) {
+    struct Child {
+      FsRow row;
+      float opacity;
+    };
+    const Child children[2] = {{fs_row_b(channel), 1.0f},
+                               {fs_row_inner_paint(channel), kFsInnerPaintOpacity}};
+    float premul[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float coverage = 0.0f;
+    bool folder_part = false;
+    for (const Child &child : children) {
+      if (!child.row.part) {
+        continue;
+      }
+      folder_part = true;
+      const float f = clamp_f(child.opacity * child.row.factor, 0.0f, 1.0f);
+      const float a = coverage;
+      RGBA blended = {0.0f, 0.0f, 0.0f, 0.0f};
+      if (a > 0.0f) {
+        blended = {premul[0] / a, premul[1] / a, premul[2] / a, premul[3] / a};
+      }
+      blend_over_rgba(blended, child.row.color, MA_RAMP_BLEND, 1.0f, normal);
+      const float c[4] = {
+          child.row.color.r, child.row.color.g, child.row.color.b, child.row.color.a};
+      const float b[4] = {blended.r, blended.g, blended.b, blended.a};
+      for (const int k : IndexRange(4)) {
+        const float c_eff = c[k] + (b[k] - c[k]) * a;
+        premul[k] = premul[k] * (1.0f - f) + c_eff * f;
+      }
+      coverage = a + f * (1.0f - a);
+    }
+    if (folder_part) {
+      any = true;
+      if (coverage > 0.0f) {
+        const RGBA folder_src = {premul[0] / coverage,
+                                 premul[1] / coverage,
+                                 premul[2] / coverage,
+                                 premul[3] / coverage};
+        blend_over_rgba(state, folder_src, MA_RAMP_BLEND, kFsIsoOpacity * coverage, normal);
+      }
+    }
+  }
+
+  if (shape.c) {
+    lay(fs_row_c(channel, x, y), kFsCOpacity, MA_RAMP_BLEND);
+  }
+  lay(fs_row_top(channel), kFsTopOpacity, MA_RAMP_MULT);
+
+  if (normal) {
+    float n[3] = {state.r * 2.0f - 1.0f, state.g * 2.0f - 1.0f, state.b * 2.0f - 1.0f};
+    normalize_v3(n);
+    state.r = n[0] * 0.5f + 0.5f;
+    state.g = n[1] * 0.5f + 0.5f;
+    state.b = n[2] * 0.5f + 0.5f;
+  }
+  r_out = state;
+  return any;
+}
+
+/**
+ * The mode a Material row must report, from the rule of `BKE_paint_layers_material_mode`
+ * (`paint_layers_bake.cc:902-939`) and not from a run. Only the active row (or one of its
+ * corrections or its mask) is live; its channels then decide: A and C map a texture through a Color
+ * Ramp / mix, so SourceGroup; B is all constants and one flat texture, so Hybrid. Every other row
+ * has a valid bake for each channel and reads Baked.
+ * \a row: 0 = A, 1 = B, 2 = C. \a owner: the Material row the active item belongs to, or -1.
+ */
+static PaintLayerMaterialMode fs_expected_mode(const int row, const int owner)
+{
+  if (row != owner) {
+    return PaintLayerMaterialMode::Baked;
+  }
+  return (row == 1) ? PaintLayerMaterialMode::Hybrid : PaintLayerMaterialMode::SourceGroup;
+}
+
+static void fs_expect_rgb(const RGBA &expected,
+                          const RGBA &got,
+                          const char *tag,
+                          const char *channel,
+                          const char *point,
+                          const char *side)
+{
+  const float tolerance = 1e-4f;
+  if (std::fabs(expected.r - got.r) <= tolerance && std::fabs(expected.g - got.g) <= tolerance &&
+      std::fabs(expected.b - got.b) <= tolerance)
+  {
+    return;
+  }
+  ADD_FAILURE() << tag << " | " << channel << " | " << point << " | " << side << ": expected ("
+                << expected.r << ", " << expected.g << ", " << expected.b << ") got (" << got.r
+                << ", " << got.g << ", " << got.b << ")";
+}
+
+struct FsActiveCase {
+  std::string label;
+  bUUID marker;
+  /** The Material row (0 = A, 1 = B, 2 = C) the active item is or belongs to, or -1. */
+  int owner;
+};
+
+class PaintLayersFullStackTest : public PaintLayersGraphEvalTest {
+ public:
+  struct Options {
+    bool iso = true;
+    bool with_c = true;
+    bool c_in_pass_folder = true;
+  };
+
+  struct Stack {
+    Material *ma = nullptr;
+    MaterialPaintLayer *fill = nullptr;
+    MaterialPaintLayer *a = nullptr;
+    MaterialPaintLayer *a_correction = nullptr;
+    MaterialPaintLayer *a_mask = nullptr;
+    MaterialPaintLayer *iso = nullptr;
+    MaterialPaintLayer *b = nullptr;
+    MaterialPaintLayer *inner_paint = nullptr;
+    MaterialPaintLayer *pass = nullptr;
+    MaterialPaintLayer *c = nullptr;
+    MaterialPaintLayer *top = nullptr;
+  };
+
+  /** A 2x2 data-space byte map with straight per-texel RGBA, stored the way every paint map is. */
+  Image *make_byte_map(const std::string &name, const uchar (*texels)[4])
+  {
+    const float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    Image *image = BKE_image_add_generated(bmain,
+                                           kFsSize,
+                                           kFsSize,
+                                           name.c_str(),
+                                           32,
+                                           false,
+                                           IMA_GENTYPE_BLANK,
+                                           color,
+                                           false,
+                                           true,
+                                           false);
+    if (image == nullptr) {
+      return nullptr;
+    }
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    image->flag |= IMA_GPU_LINEAR_PREMUL;
+    make_image_data(image);
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    if (ibuf == nullptr) {
+      return nullptr;
+    }
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int i : IndexRange(kFsSize * kFsSize)) {
+      for (const int k : IndexRange(4)) {
+        pixels[i * 4 + k] = texels[i][k];
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
+  }
+
+  /** Bake \a row from the reference's own values, so the row can read Baked and stay valid. */
+  bool bake_row(MaterialPaintLayer &row,
+                const std::string &name,
+                const bool grouped,
+                const GroupSourceSpec &group_spec,
+                const HybridSourceSpec &hybrid_spec,
+                const float coverage)
+  {
+    auto raw_at = [&](const int channel, const int x, const int y, RGBA &r_out) -> bool {
+      return grouped ? group_source_expected(group_spec, channel, x, y, r_out) :
+                       hybrid_source_expected(hybrid_spec, channel, r_out);
+    };
+    for (const eMaterialPaintChannel channel : BKE_paint_material_bakeable_channels()) {
+      RGBA probe;
+      if (!raw_at(int(channel), 0, 0, probe)) {
+        continue;
+      }
+      float pixels[4][3];
+      for (const int y : IndexRange(kFsSize)) {
+        for (const int x : IndexRange(kFsSize)) {
+          RGBA raw;
+          raw_at(int(channel), x, y, raw);
+          pixels[y * kFsSize + x][0] = raw.r;
+          pixels[y * kFsSize + x][1] = raw.g;
+          pixels[y * kFsSize + x][2] = raw.b;
+        }
+      }
+      const std::string map_name = name + " " + BKE_paint_material_channel_info(channel).ui_name;
+      Image *map = make_data_pattern_map(bmain, map_name.c_str(), kFsSize, pixels);
+      if (map == nullptr || !BKE_paint_layers_bake_set_map(*ma, row, int(channel), map)) {
+        return false;
+      }
+    }
+    const float coverage_rgba[4] = {coverage, coverage, coverage, 1.0f};
+    Image *coverage_map = make_bake_data_map(
+        bmain, (name + " Coverage").c_str(), kFsSize, coverage_rgba);
+    if (coverage_map == nullptr || !BKE_paint_layers_bake_set_map(*ma, row, -1, coverage_map)) {
+      return false;
+    }
+    BKE_paint_layers_bake_finalize(*ma, row);
+    return BKE_paint_layers_bake_is_valid(*ma, row);
+  }
+
+  /** Build the stack; a null `Stack::ma` means a step failed. Leaves `ma` at the new material. */
+  Stack build(const char *tag, const Options &options)
+  {
+    Stack s;
+    const std::string t = tag;
+    auto name = [&](const char *base) { return std::string(base) + t; };
+
+    Material *source_a = build_group_source(*bmain,
+                                            name("FsSrcA").c_str(),
+                                            name("FsGrpA").c_str(),
+                                            name("FsMapA").c_str(),
+                                            name("FsShrA").c_str(),
+                                            source_spec_a);
+    Material *source_b = build_hybrid_source(
+        *bmain, name("FsSrcB").c_str(), name("FsNrmB").c_str(), source_spec_b);
+    Material *source_c = build_group_source(*bmain,
+                                            name("FsSrcC").c_str(),
+                                            name("FsGrpC").c_str(),
+                                            name("FsMapC").c_str(),
+                                            name("FsShrC").c_str(),
+                                            source_spec_c);
+    if (source_a == nullptr || source_b == nullptr || source_c == nullptr) {
+      return s;
+    }
+    ma = BKE_material_add(bmain, name("FsStack").c_str());
+
+    /* 1. Fill: Base Color from the fill colour, Roughness from its record. */
+    s.fill = BKE_paint_layers_add(
+        *ma, MA_PAINT_LAYER_KIND_FILL, "Fill", nullptr, PaintLayerPlace::Above);
+    if (s.fill == nullptr ||
+        BKE_paint_layers_channel_add(*ma, s.fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr ||
+        BKE_paint_layers_channel_add(*ma, s.fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS) == nullptr)
+    {
+      return s;
+    }
+    copy_v4_v4(s.fill->fill_color, kFsFillColor);
+    const float rough[4] = {kFsFillRoughness, kFsFillRoughness, kFsFillRoughness, 1.0f};
+    BKE_paint_layers_channel_set_value(*ma, s.fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough);
+
+    /* 2. Material A with a Paint correction and a mask. */
+    s.a = BKE_paint_layers_add(
+        *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatA", nullptr, PaintLayerPlace::Above);
+    if (s.a == nullptr || !BKE_paint_layers_set_material(*ma, s.a, source_a) ||
+        !bake_row(*s.a, name("FsBakeA"), true, source_spec_a, {}, 1.0f))
+    {
+      return s;
+    }
+    Image *corr_map = make_byte_map(name("FsCorr"), kFsCorrBytes);
+    const uchar mask_texels[4][4] = {{kFsMaskBytes[0], kFsMaskBytes[0], kFsMaskBytes[0], 255},
+                                     {kFsMaskBytes[1], kFsMaskBytes[1], kFsMaskBytes[1], 255},
+                                     {kFsMaskBytes[2], kFsMaskBytes[2], kFsMaskBytes[2], 255},
+                                     {kFsMaskBytes[3], kFsMaskBytes[3], kFsMaskBytes[3], 255}};
+    Image *mask_map = make_byte_map(name("FsMask"), mask_texels);
+    if (corr_map == nullptr || mask_map == nullptr) {
+      return s;
+    }
+    s.a_correction = add_content_correction(*ma, *s.a, corr_map);
+    s.a_mask = set_mask_image(*s.a, mask_map);
+    if (s.a_correction == nullptr || s.a_mask == nullptr) {
+      return s;
+    }
+    BKE_paint_layers_set_opacity(*ma, s.a_correction, kFsCorrOpacity);
+    /* The mask item starts as a Multiply constant; the reference lays it as a Mix. */
+    BKE_paint_layers_set_blend(*ma, s.a_mask, MA_PAINT_LAYER_BLEND_MIX);
+    BKE_paint_layers_set_opacity(*ma, s.a_mask, kFsMaskOpacity);
+
+    /* 3. The isolating folder: Material B (Hybrid) and a Paint row. */
+    if (options.iso) {
+      s.iso = BKE_paint_layers_add(
+          *ma, MA_PAINT_LAYER_KIND_FOLDER, "Iso", nullptr, PaintLayerPlace::Above);
+      if (s.iso == nullptr) {
+        return s;
+      }
+      BKE_paint_layers_set_opacity(*ma, s.iso, kFsIsoOpacity);
+      s.b = BKE_paint_layers_add(
+          *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatB", s.iso, PaintLayerPlace::Into);
+      if (s.b == nullptr || !BKE_paint_layers_set_material(*ma, s.b, source_b) ||
+          !bake_row(*s.b, name("FsBakeB"), false, source_spec_a, source_spec_b, source_spec_b.alpha))
+      {
+        return s;
+      }
+      s.inner_paint = BKE_paint_layers_add(
+          *ma, MA_PAINT_LAYER_KIND_PAINT, "InnerPaint", s.iso, PaintLayerPlace::Into);
+      if (s.inner_paint == nullptr) {
+        return s;
+      }
+      MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+          *ma, s.inner_paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+      Image *inner_map = make_bake_data_map(
+          bmain, name("FsInner").c_str(), kFsSize, kIsolatingPaintA);
+      if (record == nullptr || inner_map == nullptr) {
+        return s;
+      }
+      record->image = inner_map;
+      record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+      BKE_paint_layers_set_opacity(*ma, s.inner_paint, kFsInnerPaintOpacity);
+    }
+
+    /* 4. Material C, in a Pass Through folder or straight in the root. */
+    if (options.with_c) {
+      if (options.c_in_pass_folder) {
+        s.pass = BKE_paint_layers_add(
+            *ma, MA_PAINT_LAYER_KIND_FOLDER, "Pass", nullptr, PaintLayerPlace::Above);
+        if (s.pass == nullptr || !BKE_paint_layers_folder_is_pass_through(*ma, *s.pass)) {
+          return s;
+        }
+      }
+      s.c = BKE_paint_layers_add(*ma,
+                                 MA_PAINT_LAYER_KIND_MATERIAL,
+                                 "MatC",
+                                 s.pass,
+                                 s.pass != nullptr ? PaintLayerPlace::Into : PaintLayerPlace::Above);
+      if (s.c == nullptr || !BKE_paint_layers_set_material(*ma, s.c, source_c) ||
+          !bake_row(*s.c, name("FsBakeC"), true, source_spec_c, {}, 1.0f))
+      {
+        return s;
+      }
+      BKE_paint_layers_set_opacity(*ma, s.c, kFsCOpacity);
+    }
+
+    /* 5. The top Paint row: Multiply, opacity below one, Base Color and Roughness maps. */
+    Image *top_color = make_bake_data_map(bmain, name("FsTopColor").c_str(), kFsSize, kFsTopColor);
+    Image *top_rough = make_bake_data_map(
+        bmain, name("FsTopRough").c_str(), kFsSize, kFsTopRoughness);
+    if (top_color == nullptr || top_rough == nullptr) {
+      return s;
+    }
+    s.top = add_layer("Top", MA_PAINT_LAYER_KIND_PAINT, top_color);
+    MaterialPaintLayerChannel *top_rough_record = BKE_paint_layers_channel_add(
+        *ma, s.top, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+    if (s.top == nullptr || top_rough_record == nullptr) {
+      return s;
+    }
+    top_rough_record->image = top_rough;
+    top_rough_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+    BKE_paint_layers_set_blend(*ma, s.top, MA_PAINT_LAYER_BLEND_MULTIPLY);
+    BKE_paint_layers_set_opacity(*ma, s.top, kFsTopOpacity);
+
+    s.ma = ma;
+    return s;
+  }
+
+  Vector<FsActiveCase> active_cases(const Stack &s)
+  {
+    Vector<FsActiveCase> cases;
+    cases.append({"none", BLI_uuid_nil(), -1});
+    cases.append({"fill", s.fill->marker, -1});
+    cases.append({"mat-a", s.a->marker, 0});
+    cases.append({"a-correction", s.a_correction->marker, 0});
+    cases.append({"a-mask", s.a_mask->marker, 0});
+    if (s.iso != nullptr) {
+      cases.append({"iso-folder", s.iso->marker, -1});
+      cases.append({"mat-b", s.b->marker, 1});
+      cases.append({"inner-paint", s.inner_paint->marker, -1});
+    }
+    if (s.pass != nullptr) {
+      cases.append({"pass-folder", s.pass->marker, -1});
+    }
+    if (s.c != nullptr) {
+      cases.append({"mat-c", s.c->marker, 2});
+    }
+    cases.append({"top", s.top->marker, -1});
+    return cases;
+  }
+
+  /**
+   * Compare the current `ma`'s generated graph and CPU composite with #full_stack_expected at every
+   * channel and point. \a strict_wiring: a channel is wired exactly when a row takes part; off for a
+   * stack whose hidden rows still wire their channels.
+   */
+  void check_values(const char *tag, const FsShape &shape, const bool strict_wiring)
+  {
+    GraphInterpreter interpreter;
+    interpreter.instance = find_instance();
+    interpreter.tree = ma->paint_layers_tree;
+    ASSERT_NE(interpreter.instance, nullptr) << tag;
+    interpreter.tree->ensure_topology_cache();
+
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      const int channel = int(info.channel);
+      RGBA probe;
+      const bool part = full_stack_expected(channel, 0, 0, shape, probe);
+      const bool exists = result_output_exists(*ma->paint_layers_tree, channel);
+      if ((strict_wiring && exists != part) || (part && !exists)) {
+        ADD_FAILURE() << tag << " | " << info.ui_name << ": wired=" << exists
+                      << " but a row takes part=" << part;
+        continue;
+      }
+      if (!exists) {
+        continue;
+      }
+      for (const FsPoint &point : kFsPoints) {
+        RGBA expected;
+        full_stack_expected(channel, point.x, point.y, shape, expected);
+        interpreter.x = point.x;
+        interpreter.y = point.y;
+        fs_expect_rgb(expected,
+                      eval_channel_result(interpreter, eMaterialPaintChannel(channel)),
+                      tag,
+                      info.ui_name,
+                      point.label,
+                      "graph");
+        if (part) {
+          fs_expect_rgb(expected,
+                        cpu_pixel_at(channel, point.x, point.y),
+                        tag,
+                        info.ui_name,
+                        point.label,
+                        "cpu");
+        }
+      }
+    }
+  }
+};
+
+/**
+ * Every active row, folder, correction and mask: the graph and the CPU equal the reference at every
+ * channel and point, the report carries the mode and `deferred` the rule gives, and a second
+ * regeneration rebuilds nothing.
+ */
+TEST_F(PaintLayersFullStackTest, every_active_row_matches_the_reference_and_the_cpu)
+{
+  const Stack s = build("All", {});
+  ASSERT_NE(s.ma, nullptr);
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *s.iso));
+
+  const MaterialPaintLayer *material_rows[3] = {s.a, s.b, s.c};
+  for (const FsActiveCase &active : active_cases(s)) {
+    const char *tag = active.label.c_str();
+    BKE_paint_layers_active_set(*ma, active.marker);
+    PaintLayersRegenerateReport report;
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report)) << tag;
+    ASSERT_NE(ma->paint_layers_tree, nullptr) << tag;
+
+    EXPECT_EQ(report.material_rows.size(), 3) << tag;
+    for (const int row_index : IndexRange(3)) {
+      const PaintLayersRegenerateReport::MaterialRowModeReport *found = nullptr;
+      for (const auto &row : report.material_rows) {
+        if (BLI_uuid_equal(row.marker, material_rows[row_index]->marker)) {
+          found = &row;
+        }
+      }
+      ASSERT_NE(found, nullptr) << tag << " row " << row_index;
+      EXPECT_EQ(found->mode, fs_expected_mode(row_index, active.owner))
+          << tag << " row " << row_index << " mode";
+      EXPECT_EQ(found->deferred, row_index == active.owner)
+          << tag << " row " << row_index << " deferred";
+      EXPECT_EQ(found->refusal, PaintLayersSourceGroupRefusal::None) << tag << " row " << row_index;
+    }
+
+    check_values(tag, {}, true);
+
+    /* The next regeneration, without an edit, must rebuild nothing. */
+    bNodeTree *root = ma->paint_layers_tree;
+    const Vector<bNode *> nodes = root_node_ptrs(*root);
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma)) << tag;
+    EXPECT_EQ(ma->paint_layers_tree, root) << tag;
+    EXPECT_TRUE(same_node_ptrs(nodes, root_node_ptrs(*root))) << tag << ": second regen rebuilt";
+  }
+}
+
+/**
+ * A second regeneration without edits rebuilds nothing, whichever row is active. The active row can
+ * be inside the isolating folder: the root hash must not depend on whether that folder's group was
+ * rebuilt in the same pass (paint_layers_root_topology_hash).
+ */
+TEST_F(PaintLayersFullStackTest, second_regen_after_an_active_change_rebuilds_nothing)
+{
+  const Stack s = build("Stable", {});
+  ASSERT_NE(s.ma, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  for (const FsActiveCase &active : active_cases(s)) {
+    const char *tag = active.label.c_str();
+    BKE_paint_layers_active_set(*ma, active.marker);
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma)) << tag;
+    bNodeTree *root = ma->paint_layers_tree;
+    const Vector<bNode *> nodes = root_node_ptrs(*root);
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma)) << tag;
+    EXPECT_EQ(ma->paint_layers_tree, root) << tag;
+    EXPECT_TRUE(same_node_ptrs(nodes, root_node_ptrs(*root))) << tag << ": second regen rebuilt";
+  }
+}
+
+/** The first regeneration of a fresh stack settles: the second one keeps the root. */
+TEST_F(PaintLayersFullStackTest, initial_build_settles_in_one_regen)
+{
+  const Stack s = build("Initial", {});
+  ASSERT_NE(s.ma, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *root = ma->paint_layers_tree;
+  const Vector<bNode *> nodes = root_node_ptrs(*root);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_node_ptrs(nodes, root_node_ptrs(*root))) << "second regen rebuilt";
+}
+
+/**
+ * Hiding C and the isolating folder is a value edit (the root keeps its nodes) and gives the stack
+ * without them; a stack built without them gives the same.
+ */
+TEST_F(PaintLayersFullStackTest, hiding_c_and_the_isolating_folder_equals_the_stack_without_them)
+{
+  const Stack full = build("Hide", {});
+  ASSERT_NE(full.ma, nullptr);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> nodes = root_node_ptrs(*root);
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, full.c, false));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, full.iso, false));
+  BKE_paint_layers_values_sync(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_node_ptrs(nodes, root_node_ptrs(*root))) << "hiding rebuilt the root";
+  FsShape hidden;
+  hidden.iso = false;
+  hidden.c = false;
+  check_values("hidden", hidden, false);
+
+  Options bare_options;
+  bare_options.iso = false;
+  bare_options.with_c = false;
+  const Stack bare = build("HideBare", bare_options);
+  ASSERT_NE(bare.ma, nullptr);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  check_values("built-without", hidden, true);
+}
+
+/**
+ * Hiding the Pass Through folder hides C through the folder's visibility scale, a value edit: the
+ * root keeps its nodes and the result is the stack without C, on the graph and on the CPU.
+ */
+TEST_F(PaintLayersFullStackTest, hiding_the_pass_through_folder_hides_c_as_a_value_edit)
+{
+  const Stack s = build("HidePass", {});
+  ASSERT_NE(s.ma, nullptr);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> nodes = root_node_ptrs(*root);
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, s.pass, false));
+  BKE_paint_layers_values_sync(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_node_ptrs(nodes, root_node_ptrs(*root))) << "hiding the folder rebuilt the root";
+  FsShape without_c;
+  without_c.c = false;
+  check_values("pass-hidden", without_c, true);
+}
+/**
+ * The other direction: a real structural edit still rebuilds what it must. A blend change shows in
+ * the values, a new top-level row and a move into the isolating folder change the root's nodes.
+ */
+TEST_F(PaintLayersFullStackTest, real_structure_edits_still_rebuild)
+{
+  const Stack s = build("Edits", {});
+  ASSERT_NE(s.ma, nullptr);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  auto base_color = [&]() {
+    GraphInterpreter interpreter;
+    interpreter.instance = find_instance();
+    interpreter.tree = ma->paint_layers_tree;
+    interpreter.x = 1;
+    interpreter.y = 1;
+    EXPECT_NE(interpreter.instance, nullptr);
+    interpreter.tree->ensure_topology_cache();
+    return eval_channel_result(interpreter, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  };
+
+  /* A blend change rebuilds the row's group: the result moves. */
+  const RGBA before_blend = base_color();
+  ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, s.top, MA_PAINT_LAYER_BLEND_ADD));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const RGBA after_blend = base_color();
+  EXPECT_GT(std::fabs(after_blend.r - before_blend.r) + std::fabs(after_blend.g - before_blend.g) +
+                std::fabs(after_blend.b - before_blend.b),
+            1e-3f);
+
+  /* A new top-level row changes the root's nodes. */
+  bNodeTree *root = ma->paint_layers_tree;
+  Vector<bNode *> nodes = root_node_ptrs(*root);
+  MaterialPaintLayer *extra = add_layer("Extra", MA_PAINT_LAYER_KIND_PAINT,
+                                        make_bake_data_map(bmain, "FsExtra", kFsSize, kFsTopColor));
+  ASSERT_NE(extra, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FALSE(same_node_ptrs(nodes, root_node_ptrs(*ma->paint_layers_tree))) << "new row";
+
+  /* Moving a root row into the isolating folder removes its instance from the root. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  nodes = root_node_ptrs(*ma->paint_layers_tree);
+  ASSERT_TRUE(BKE_paint_layers_move(*ma, extra, s.iso, PaintLayerPlace::Into));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FALSE(same_node_ptrs(nodes, root_node_ptrs(*ma->paint_layers_tree))) << "move into folder";
+}
+/** The Pass Through folder is transparent: C directly in the root gives the same stack. */
+TEST_F(PaintLayersFullStackTest, pass_through_folder_equals_c_in_the_root)
+{
+  Options flat_options;
+  flat_options.c_in_pass_folder = false;
+  const Stack folded = build("PassIn", {});
+  const Stack flat = build("PassOut", flat_options);
+  ASSERT_NE(folded.ma, nullptr);
+  ASSERT_NE(flat.ma, nullptr);
+
+  for (const Stack *stack : {&folded, &flat}) {
+    ma = stack->ma;
+    for (const bUUID &marker : {BLI_uuid_nil(), stack->c->marker}) {
+      BKE_paint_layers_active_set(*ma, marker);
+      ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+      check_values(stack == &folded ? "folded" : "flat", {}, true);
+    }
+  }
+}
+
+/**
+ * One regeneration resolves each distinct source at most once, however many rows read it and however
+ * many times the topology hashes, the wired set and the build ask about it. The resolver walks the
+ * source's tree with its groups, so before the per-call cache one Material row cost dozens of walks.
+ * The counter is a test hook: nothing else can tell "resolved once" from "resolved fast".
+ */
+TEST_F(PaintLayersFullStackTest, one_regeneration_resolves_each_source_at_most_once)
+{
+  const Stack s = build("Resolves", {});
+  ASSERT_NE(s.ma, nullptr);
+  /* A, B and C read three different sources. */
+  const int64_t distinct_sources = 3;
+
+  const int64_t first_before = BKE_paint_material_source_resolve_call_count();
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_LE(BKE_paint_material_source_resolve_call_count() - first_before, distinct_sources)
+      << "initial build";
+
+  for (const FsActiveCase &active : active_cases(s)) {
+    const char *tag = active.label.c_str();
+    BKE_paint_layers_active_set(*ma, active.marker);
+    for (const int pass : IndexRange(2)) {
+      const int64_t before = BKE_paint_material_source_resolve_call_count();
+      ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma)) << tag;
+      EXPECT_LE(BKE_paint_material_source_resolve_call_count() - before, distinct_sources)
+          << tag << " pass " << pass;
+    }
+  }
+}
+
+/** Every row's own group (`.PL Layer` / `.PL Folder`) with the nodes it holds, keyed by the tree. */
+static Map<const bNodeTree *, Vector<bNode *>> row_group_snapshot(Main &bmain)
+{
+  Map<const bNodeTree *, Vector<bNode *>> snapshot;
+  for (bNodeTree &group : bmain.nodetrees) {
+    const char *name = group.id.name + 2;
+    if (STRPREFIX(name, ".PL Layer") || STRPREFIX(name, ".PL Folder")) {
+      snapshot.add(&group, root_node_ptrs(group));
+    }
+  }
+  return snapshot;
+}
+
+/**
+ * A regeneration without an edit rebuilds neither the root nor any row's group: the same trees
+ * survive and each keeps its exact node list. The root-only check of the neighbouring tests would
+ * miss a group whose hash drifted between two passes.
+ */
+TEST_F(PaintLayersFullStackTest, second_regen_rebuilds_no_row_group)
+{
+  const Stack s = build("Groups", {});
+  ASSERT_NE(s.ma, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  for (const FsActiveCase &active : active_cases(s)) {
+    const char *tag = active.label.c_str();
+    BKE_paint_layers_active_set(*ma, active.marker);
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma)) << tag;
+    bNodeTree *root = ma->paint_layers_tree;
+    const Vector<bNode *> root_nodes = root_node_ptrs(*root);
+    const Map<const bNodeTree *, Vector<bNode *>> before = row_group_snapshot(*bmain);
+    ASSERT_FALSE(before.is_empty()) << tag;
+
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma)) << tag;
+    EXPECT_EQ(ma->paint_layers_tree, root) << tag;
+    EXPECT_TRUE(same_node_ptrs(root_nodes, root_node_ptrs(*root))) << tag << ": root rebuilt";
+    const Map<const bNodeTree *, Vector<bNode *>> after = row_group_snapshot(*bmain);
+    EXPECT_EQ(before.size(), after.size()) << tag << ": a row group appeared or vanished";
+    for (const auto item : before.items()) {
+      const Vector<bNode *> *nodes = after.lookup_ptr(item.key);
+      if (nodes == nullptr) {
+        ADD_FAILURE() << tag << ": row group " << item.key->id.name + 2 << " was replaced";
+        continue;
+      }
+      EXPECT_TRUE(same_node_ptrs(item.value, *nodes))
+          << tag << ": row group " << item.key->id.name + 2 << " was rebuilt";
+    }
+  }
 }
 
 /** \} */

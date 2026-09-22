@@ -143,4 +143,10 @@ struct MaterialSourceResolve {
  */
 MaterialSourceResolve BKE_paint_material_source_resolve(const Material *ma);
 
+/**
+ * How many times #BKE_paint_material_source_resolve has run in this process. Test hook only: the
+ * generator promises one resolve per source per regeneration, and only a counter can hold it to that.
+ */
+int64_t BKE_paint_material_source_resolve_call_count();
+
 }  // namespace blender

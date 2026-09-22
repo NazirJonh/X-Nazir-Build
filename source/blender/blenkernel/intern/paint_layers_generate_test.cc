@@ -39,6 +39,7 @@
 #include "BLI_uuid.h"
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <thread>
 
@@ -62,6 +63,8 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
     G_MAIN = bmain;
     ma = BKE_material_add(bmain, "Layered");
     ma->paint_layers_flag |= MA_PAINT_LAYERED;
+    /* The sampler budget is runtime global state; start every test with the check off. */
+    BKE_paint_layers_sampler_budget_set(0, 0);
   }
 
   void TearDown() override
@@ -4437,6 +4440,661 @@ TEST_F(PaintLayersGenerateTest, paint_row_correction_opacity_rna_reaches_its_gra
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.3f);
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_EQ(layer_tree_find(*bmain, "Paint"), group);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Sampler budget
+ *
+ * The counter reproduces EEVEE's `gpu_node_graph.cc` rules; these tests pin its arithmetic, then
+ * exercise the fallback: hidden rows are dropped first, then live rows are pinned to their bakes.
+ * \{ */
+
+namespace {
+
+/** An Image Texture node reading \a image with the given sampling, linked by the caller. */
+bNode *add_tex_image_node(bNodeTree &tree,
+                          Image &image,
+                          const int interpolation,
+                          const int projection)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+  if (node == nullptr) {
+    return nullptr;
+  }
+  node->id = &image.id;
+  id_us_plus(&image.id);
+  NodeTexImage *storage = static_cast<NodeTexImage *>(node->storage);
+  storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
+  storage->interpolation = interpolation;
+  storage->projection = projection;
+  return node;
+}
+
+bNodeSocket *out_socket(bNode &node, const char *name)
+{
+  return bke::node_find_socket(node, SOCK_OUT, UString::from_ptr_noinline(name));
+}
+
+bNodeSocket *in_socket(bNode &node, const char *name)
+{
+  return bke::node_find_socket(node, SOCK_IN, UString::from_ptr_noinline(name));
+}
+
+/** Three distinct image samplers feeding a Principled's Base Color: a live-worthy source. */
+void source_set_three_image_base_color(Material &source,
+                                       Image &a,
+                                       Image &b,
+                                       Image &c)
+{
+  bNodeTree &tree = *source.nodetree;
+  bNode *principled = nullptr;
+  for (bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+      principled = &node;
+      break;
+    }
+  }
+  bNodeSocket *base = in_socket(*principled, "Base Color");
+  bNode *na = add_tex_image_node(tree, a, SHD_INTERP_LINEAR, SHD_PROJ_BOX);
+  bNode *nb = add_tex_image_node(tree, b, SHD_INTERP_LINEAR, SHD_PROJ_BOX);
+  bNode *nc = add_tex_image_node(tree, c, SHD_INTERP_LINEAR, SHD_PROJ_BOX);
+  bke::node_add_link(tree, *na, *out_socket(*na, "Color"), *principled, *base);
+  bke::node_add_link(tree, *nb, *out_socket(*nb, "Color"), *na, *in_socket(*na, "Vector"));
+  bke::node_add_link(tree, *nc, *out_socket(*nc, "Color"), *nb, *in_socket(*nb, "Vector"));
+}
+
+}  // namespace
+
+TEST_F(PaintLayersGenerateTest, sampler_count_follows_the_eevee_rules)
+{
+  Material *source = add_principled_source("CountSource", 0.3f);
+  bNodeTree &tree = *source->nodetree;
+  bNode *principled = principled_of(*source);
+  bNodeSocket *base = in_socket(*principled, "Base Color");
+  Image *shared = add_image("Shared");
+  const int baseline = BKE_paint_layers_sampler_count(*source);
+
+  /* One image in two nodes with the same sampler state -- the second reachable through the first's
+   * Vector input -- is one sampler (`gpu_node_graph.cc:507-514` dedups by image and state). */
+  bNode *a = add_tex_image_node(tree, *shared, SHD_INTERP_LINEAR, SHD_PROJ_FLAT);
+  bNode *b = add_tex_image_node(tree, *shared, SHD_INTERP_LINEAR, SHD_PROJ_FLAT);
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  bke::node_add_link(tree, *a, *out_socket(*a, "Color"), *principled, *base);
+  bke::node_add_link(tree, *b, *out_socket(*b, "Color"), *a, *in_socket(*a, "Vector"));
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*source), baseline + 1);
+
+  /* Closest changes the filtering, so the same image becomes a second sampler. */
+  static_cast<NodeTexImage *>(b->storage)->interpolation = SHD_INTERP_CLOSEST;
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*source), baseline + 2);
+}
+
+TEST_F(PaintLayersGenerateTest, sampler_count_udim_is_two)
+{
+  Material *source = add_principled_source("UdimSource", 0.3f);
+  bNodeTree &tree = *source->nodetree;
+  bNode *principled = principled_of(*source);
+  Image *udim = add_image("Udim");
+  udim->source = IMA_SRC_TILED;
+  const int baseline = BKE_paint_layers_sampler_count(*source);
+  bNode *node = add_tex_image_node(tree, *udim, SHD_INTERP_LINEAR, SHD_PROJ_FLAT);
+  ASSERT_NE(node, nullptr);
+  bke::node_add_link(
+      tree, *node, *out_socket(*node, "Color"), *principled, *in_socket(*principled, "Base Color"));
+  /* A tiled image needs its tile mapping array: one image sampler plus one mapping sampler. */
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*source), baseline + 2);
+}
+
+TEST_F(PaintLayersGenerateTest, sampler_count_colorband_nodes_share_one)
+{
+  Material *source = add_principled_source("BandSource", 0.3f);
+  bNodeTree &tree = *source->nodetree;
+  bNode *principled = principled_of(*source);
+  bNodeSocket *base = in_socket(*principled, "Base Color");
+  const int baseline = BKE_paint_layers_sampler_count(*source);
+
+  bNode *value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+  bNode *ramp = bke::node_add_static_node(nullptr, tree, SH_NODE_VALTORGB);
+  bNode *curves = bke::node_add_static_node(nullptr, tree, SH_NODE_CURVE_RGB);
+  ASSERT_NE(value, nullptr);
+  ASSERT_NE(ramp, nullptr);
+  ASSERT_NE(curves, nullptr);
+  bke::node_add_link(tree, *value, *out_socket(*value, "Value"), *ramp, *in_socket(*ramp, "Fac"));
+  bke::node_add_link(tree, *ramp, *out_socket(*ramp, "Color"), *curves, *in_socket(*curves, "Color"));
+  bke::node_add_link(tree, *curves, *out_socket(*curves, "Color"), *principled, *base);
+  /* Every colorband node shares the single per-material ramp texture: one sampler, not two. */
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*source), baseline + 1);
+}
+
+TEST_F(PaintLayersGenerateTest, sampler_count_ignores_muted_and_unconnected)
+{
+  Material *source = add_principled_source("ReachSource", 0.3f);
+  bNodeTree &tree = *source->nodetree;
+  bNode *principled = principled_of(*source);
+  bNodeSocket *base = in_socket(*principled, "Base Color");
+  const int baseline = BKE_paint_layers_sampler_count(*source);
+  Image *image = add_image("Reach");
+  bNode *node = add_tex_image_node(tree, *image, SHD_INTERP_LINEAR, SHD_PROJ_FLAT);
+  bke::node_add_link(
+      tree, *node, *out_socket(*node, "Color"), *principled, *base);
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*source), baseline + 1);
+
+  /* A muted node is not compiled. */
+  node->flag |= NODE_MUTED;
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*source), baseline);
+  node->flag &= ~NODE_MUTED;
+
+  /* A branch that reaches no output is not compiled either. */
+  add_tex_image_node(tree, *add_image("Unlinked"), SHD_INTERP_LINEAR, SHD_PROJ_FLAT);
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*source), baseline + 1);
+}
+
+TEST_F(PaintLayersGenerateTest, sampler_budget_under_limit_leaves_modes_untouched)
+{
+  Material *source = add_principled_source("NoOverSource", 0.5f);
+  source_set_three_image_base_color(
+      *source, *add_image("NoOverA"), *add_image("NoOverB"), *add_image("NoOverC"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("NoOverBaked")));
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  BKE_paint_layers_sampler_budget_set(1000, 1000);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_FALSE(report.sampler_budget_exceeded);
+  EXPECT_FALSE(BKE_paint_layers_material_forced_bake(*ma, *row));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+  ASSERT_EQ(report.material_rows.size(), 1u);
+  EXPECT_EQ(report.material_rows[0].refusal, PaintLayersSourceGroupRefusal::None);
+}
+
+TEST_F(PaintLayersGenerateTest, sampler_budget_cleanup_drops_hidden_pass_through)
+{
+  add_paint_layer("A", add_image("CleanupA"));
+  MaterialPaintLayer *b = add_paint_layer("B", add_image("CleanupB"));
+  MaterialPaintLayer *folder = group_one(*ma, b);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, folder, false));
+
+  /* Without a budget the hidden folder stays: it is a value edit. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(layer_tree_find(*bmain, "B"), nullptr);
+
+  /* With a budget that only the visible row fits, the hidden folder and its child are dropped
+   * instead of refusing the visible material. */
+  BKE_paint_layers_sampler_budget_set(1, 1);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_FALSE(report.sampler_budget_exceeded);
+  EXPECT_EQ(layer_tree_find(*bmain, "B"), nullptr);
+  EXPECT_EQ(folder_tree_find(*bmain, "Folder"), nullptr);
+  EXPECT_NE(layer_tree_find(*bmain, "A"), nullptr);
+}
+
+TEST_F(PaintLayersGenerateTest, sampler_budget_falls_back_a_live_row_to_its_bake)
+{
+  Material *source = add_principled_source("FallbackSource", 0.5f);
+  source_set_three_image_base_color(
+      *source, *add_image("FallbackA"), *add_image("FallbackB"), *add_image("FallbackC"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  ASSERT_NE(BKE_paint_layers_bake_ensure(*row), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("FallbackBaked")));
+  BKE_paint_layers_bake_finalize(*ma, *row);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+  const int live_count = BKE_paint_layers_sampler_count(*ma);
+  ASSERT_GT(live_count, 2);
+
+  BKE_paint_layers_sampler_budget_set(live_count - 1, live_count);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+
+  EXPECT_FALSE(report.sampler_budget_exceeded);
+  EXPECT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *row));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+  ASSERT_EQ(report.material_rows.size(), 1u);
+  EXPECT_EQ(report.material_rows[0].refusal, PaintLayersSourceGroupRefusal::TooManyTextures);
+  EXPECT_LE(BKE_paint_layers_sampler_count(*ma), live_count - 1);
+
+  /* Re-running without edits must not rebuild again: the forced set is re-derived identically. */
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> before = root_nodes(*root);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_nodes(before, root_nodes(*root)));
+
+  /* Raising the budget lifts the pin and the row goes live again. */
+  BKE_paint_layers_sampler_budget_set(1000, 1000);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FALSE(BKE_paint_layers_material_forced_bake(*ma, *row));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+}
+
+TEST_F(PaintLayersGenerateTest, sampler_budget_without_a_bake_keeps_the_graph)
+{
+  Material *source = add_principled_source("NoBakeSource", 0.5f);
+  source_set_three_image_base_color(
+      *source, *add_image("NoBakeA"), *add_image("NoBakeB"), *add_image("NoBakeC"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  BKE_paint_layers_sampler_budget_set(1, 1);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+
+  /* Nothing to fall back to: the graph is built as-is and the report carries the warning. */
+  EXPECT_TRUE(report.sampler_budget_exceeded);
+  EXPECT_FALSE(BKE_paint_layers_material_forced_bake(*ma, *row));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  ASSERT_NE(instance_find(), nullptr);
+  EXPECT_NE(layer_tree_find(*bmain, "Source"), nullptr);
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Sampler estimate completeness, gain fallback, loop safety
+ * \{ */
+
+namespace {
+
+/** Give \a row a Material bake with \a maps as per-channel images and \a coverage, then finalize. */
+void material_bake_set(PaintLayersGenerateTest &t,
+                       Material &ma,
+                       MaterialPaintLayer &row,
+                       const Span<Image *> maps,
+                       Image *coverage)
+{
+  EXPECT_NE(BKE_paint_layers_bake_ensure(row), nullptr);
+  for (const int channel : maps.index_range()) {
+    if (maps[channel] != nullptr) {
+      EXPECT_TRUE(BKE_paint_layers_bake_set_map(ma, row, channel, maps[channel]));
+    }
+  }
+  if (coverage != nullptr) {
+    EXPECT_TRUE(BKE_paint_layers_bake_set_map(ma, row, -1, coverage));
+  }
+  BKE_paint_layers_bake_finalize(ma, row);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(ma, row));
+}
+
+}  // namespace
+
+/**
+ * The estimate must equal the finished count for a Material row, and the row's mask and correction
+ * maps must be part of it in every mode. Arithmetic: the live SourceGroup row embeds a wrapper of
+ * three image textures (its default alpha is a constant, so the wrapper coverage adds no sampler),
+ * plus its Paint-correction map and its Paint-mask map = 5. Pinned to Baked it becomes the baked
+ * Base Color map, the baked coverage and the same two correction maps = 4.
+ */
+TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_a_material_row_with_mask_and_correction)
+{
+  Material *source = add_principled_source("MCSource", 0.3f);
+  source_set_three_image_base_color(
+      *source, *add_image("MC_A"), *add_image("MC_B"), *add_image("MC_C"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  material_bake_set(*this,
+                    *ma,
+                    *row,
+                    Span<Image *>(std::array<Image *, 1>{add_image("MC_Base")}.data(), 1),
+                    add_image("MC_Coverage"));
+
+  MaterialPaintLayer *corr = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+  ASSERT_NE(corr, nullptr);
+  MaterialPaintLayerChannel *corr_rec = BKE_paint_layers_channel_add(
+      *ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(corr_rec, nullptr);
+  corr_rec->image = add_image("MC_Corr");
+  corr_rec->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  ASSERT_TRUE(BKE_paint_layers_correction_set_effect(*ma, corr, MA_PAINT_LAYER_EFFECT_PAINT));
+
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, row, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  MaterialPaintLayerChannel *mask_rec = BKE_paint_layers_channel_add(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(mask_rec, nullptr);
+  mask_rec->image = add_image("MC_Mask");
+  mask_rec->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  /* A map mask is Paint, not the constant Fill that #BKE_paint_layers_mask_add creates. */
+  ASSERT_TRUE(BKE_paint_layers_correction_set_effect(*ma, mask, MA_PAINT_LAYER_EFFECT_PAINT));
+
+  BKE_paint_layers_active_set(*ma, row->marker);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
+  const int live_count = BKE_paint_layers_sampler_count(*ma);
+  EXPECT_EQ(live_count, 5);
+
+  /* A budget of live-1 forces the pin; the count becomes the four baked/correction maps and the
+   * estimate follows it. */
+  BKE_paint_layers_sampler_budget_set(live_count - 1, live_count);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 4);
+}
+
+/** An isolating folder with a valid bake is its maps: one baked color plus one coverage = 2. */
+TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_an_isolating_folder_bake)
+{
+  MaterialPaintLayer *child = add_paint_layer("IsChild", add_image("IsChildMap"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*folder);
+  ASSERT_NE(bake, nullptr);
+  bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("IsBakedColor");
+  bake->coverage = add_image("IsBakedCoverage");
+  uint32_t hash[2];
+  BKE_paint_layers_bake_hash(*folder, hash);
+  bake->hash[0] = hash[0];
+  bake->hash[1] = hash[1];
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 2);
+}
+
+/** A Pass Through folder is inlined: only its child's map counts, one sampler. */
+TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_a_pass_through_folder)
+{
+  MaterialPaintLayer *child = add_paint_layer("PtChild", add_image("PtChildMap"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
+}
+
+/**
+ * Hybrid: the live part is counted instead of the baked map it shadows. The source's Roughness is a
+ * live constant and its Alpha is a constant too, so the row's baked Roughness map and the coverage
+ * fallback are both not built: the row contributes no sampler. (The pre-fix estimate counted the
+ * baked maps regardless, so it disagreed with the graph.)
+ */
+TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_a_hybrid_row)
+{
+  Material *source = add_principled_source("HybridSource", 0.3f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Hybrid", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
+  maps[PAINT_MATERIAL_CHANNEL_ROUGHNESS] = add_image("HybridBaked");
+  material_bake_set(*this, *ma, *row, maps, add_image("HybridCoverage"));
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 0);
+}
+
+/**
+ * One image read by the stack and by a node in the user tree is one sampler: the keys must agree.
+ */
+TEST_F(PaintLayersGenerateTest, sampler_estimate_dedups_a_map_shared_with_the_user_tree)
+{
+  Image *shared = add_image("SharedMap");
+  add_paint_layer("SharedRow", shared);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
+
+  bNode *principled = nullptr;
+  for (bNode &node : ma->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+      principled = &node;
+      break;
+    }
+  }
+  ASSERT_NE(principled, nullptr);
+  bNode *user_tex = add_tex_image_node(*ma->nodetree, *shared, SHD_INTERP_LINEAR, SHD_PROJ_FLAT);
+  ASSERT_NE(user_tex, nullptr);
+  bke::node_add_link(*ma->nodetree,
+                     *user_tex,
+                     *out_socket(*user_tex, "Color"),
+                     *principled,
+                     *in_socket(*principled, "Metallic"));
+
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
+}
+
+/**
+ * A pin that does not lower the count is not taken: here the live wrapper is one sampler while the
+ * baked maps are four, so forcing would raise the count. The row stays live and the report warns.
+ */
+TEST_F(PaintLayersGenerateTest, sampler_budget_keeps_a_row_when_a_pin_would_not_win)
+{
+  Material *source = add_principled_source("NoWinSource", 0.3f);
+  source_set_three_image_base_color(
+      *source, *add_image("NoWinA"), *add_image("NoWinB"), *add_image("NoWinC"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "NoWin", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  /* Four baked maps plus coverage (5) cost more than the three-sampler live graph. */
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
+  maps[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("NoWinB0");
+  maps[PAINT_MATERIAL_CHANNEL_ROUGHNESS] = add_image("NoWinB1");
+  maps[PAINT_MATERIAL_CHANNEL_METALLIC] = add_image("NoWinB2");
+  maps[PAINT_MATERIAL_CHANNEL_ALPHA] = add_image("NoWinB3");
+  material_bake_set(*this, *ma, *row, maps, add_image("NoWinCov"));
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  BKE_paint_layers_sampler_budget_set(2, 4);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_FALSE(BKE_paint_layers_material_forced_bake(*ma, *row));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+  EXPECT_TRUE(report.sampler_budget_exceeded);
+}
+
+/**
+ * The fallback picks the row with the largest saving. Both live wrappers are three samplers; row A's
+ * bake is one Base Color map (forcing leaves 1) and row B's is a Base Color map plus coverage (2).
+ * So A gains 2 and B gains 1; with a budget of four, the single pin that fits is A.
+ */
+TEST_F(PaintLayersGenerateTest, sampler_budget_pins_the_largest_gain_first)
+{
+  /* Both sources are a four-sampler wrapper: a three-image Base Color chain plus a Metallic map.
+   * The Metallic map keeps each row in SourceGroup even when it also has a baked Base Color map,
+   * because Metallic has no baked map and so stays live-eligible. */
+  auto make_source = [&](const char *name) -> Material * {
+    Material *source = add_principled_source(name, 0.3f);
+    char map_name[64];
+    BLI_snprintf(map_name, sizeof(map_name), "%sBC0", name);
+    Image *i0 = add_image(map_name);
+    BLI_snprintf(map_name, sizeof(map_name), "%sBC1", name);
+    Image *i1 = add_image(map_name);
+    BLI_snprintf(map_name, sizeof(map_name), "%sBC2", name);
+    Image *i2 = add_image(map_name);
+    source_set_three_image_base_color(*source, *i0, *i1, *i2);
+    bNodeTree &tree = *source->nodetree;
+    bNode *principled = principled_of(*source);
+    BLI_snprintf(map_name, sizeof(map_name), "%sMet", name);
+    bNode *metallic = add_tex_image_node(tree, *add_image(map_name), SHD_INTERP_LINEAR, SHD_PROJ_BOX);
+    bke::node_add_link(tree,
+                       *metallic,
+                       *out_socket(*metallic, "Color"),
+                       *principled,
+                       *in_socket(*principled, "Metallic"));
+    return source;
+  };
+  auto add_row = [&](const char *name, Material *source) -> MaterialPaintLayer * {
+    MaterialPaintLayer *row = BKE_paint_layers_add(
+        *ma, MA_PAINT_LAYER_KIND_MATERIAL, name, nullptr, PaintLayerPlace::Above);
+    EXPECT_NE(row, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+    return row;
+  };
+
+  MaterialPaintLayer *row_a = add_row("GainA", make_source("GainA"));
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps_a{};
+  maps_a[PAINT_MATERIAL_CHANNEL_METALLIC] = add_image("GainAMetBaked");
+  material_bake_set(*this, *ma, *row_a, maps_a, nullptr);
+
+  MaterialPaintLayer *row_b = add_row("GainB", make_source("GainB"));
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps_b{};
+  maps_b[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("GainBBCBaked");
+  maps_b[PAINT_MATERIAL_CHANNEL_METALLIC] = add_image("GainBMetBaked");
+  material_bake_set(*this, *ma, *row_b, maps_b, nullptr);
+
+  /* Live is 8 (4 + 4). A pinned leaves 1 + 4 = 5, B pinned leaves 4 + 2 = 6. Budget 5 pins A. */
+  BKE_paint_layers_sampler_budget_set(5, 8);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *row_a));
+  EXPECT_FALSE(BKE_paint_layers_material_forced_bake(*ma, *row_b));
+  EXPECT_FALSE(report.sampler_budget_exceeded);
+}
+
+/**
+ * The whole point of doing the fallback before the wired set: with a budget exceeded, a hidden Pass
+ * Through folder and a pinned row, a second regeneration without edits must keep the root.
+ */
+TEST_F(PaintLayersGenerateTest, sampler_budget_settles_without_a_rebuild_loop)
+{
+  Material *source = add_principled_source("LoopSource", 0.5f);
+  source_set_three_image_base_color(
+      *source, *add_image("LoopA"), *add_image("LoopB"), *add_image("LoopC"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "LoopRow", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
+  maps[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("LoopBaked");
+  material_bake_set(*this, *ma, *row, maps, nullptr);
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  MaterialPaintLayer *hidden_child = add_paint_layer("LoopHidden", add_image("LoopHiddenMap"));
+  MaterialPaintLayer *hidden_folder = group_one(*ma, hidden_child);
+  ASSERT_NE(hidden_folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *hidden_folder));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, hidden_folder, false));
+
+  /* The live estimate is the wrapper (3) plus the inlined hidden map (1); after the cleanup and the
+   * pin it is the single baked Base Color map. */
+  BKE_paint_layers_sampler_budget_set(2, 4);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *row));
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
+
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> before = root_nodes(*root);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_nodes(before, root_nodes(*root)));
+  EXPECT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *row));
+}
+
+/**
+ * A pinned row is bakeable even while it is the active row; its ancestors stay live. When the source
+ * is edited the row does not revive -- it stays on its stale maps until a fresh bake lands.
+ */
+TEST_F(PaintLayersGenerateTest, sampler_budget_pinned_active_row_is_bakeable_and_does_not_revive)
+{
+  Material *source = add_principled_source("PinnedSource", 0.5f);
+  source_set_three_image_base_color(
+      *source, *add_image("PinA"), *add_image("PinB"), *add_image("PinC"));
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "PinFolder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "PinChild", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, child, source));
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
+  maps[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("PinBaked");
+  material_bake_set(*this, *ma, *child, maps, nullptr);
+  BKE_paint_layers_active_set(*ma, child->marker);
+
+  BKE_paint_layers_sampler_budget_set(2, 4);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  ASSERT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *child));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *child), PaintLayerMaterialMode::Baked);
+
+  /* The pinned row is not shown live, so the planner may bake it even in the active chain. Its
+   * ancestor (also a subtree of the active marker) stays deferred and live. */
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *child));
+  EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *folder));
+
+  /* Edit the source: the bake hash no longer matches, yet the row stays Baked on the stale maps. */
+  BKE_paint_layers_bake_ensure(*child)->hash[0] = 0;
+  BKE_paint_layers_bake_ensure(*child)->hash[1] = 0;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *child));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *child), PaintLayerMaterialMode::Baked);
+}
+
+/** Deleting a material drops its sampler runtime state, so a reused uid cannot inherit a pin. */
+TEST_F(PaintLayersGenerateTest, sampler_runtime_state_is_dropped_with_its_material)
+{
+  Material *source = add_principled_source("CleanupSource", 0.5f);
+  source_set_three_image_base_color(
+      *source, *add_image("ClnA"), *add_image("ClnB"), *add_image("ClnC"));
+  Material *other = BKE_material_add(bmain, "OtherLayered");
+  other->paint_layers_flag |= MA_PAINT_LAYERED;
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *other, MA_PAINT_LAYER_KIND_MATERIAL, "ClnRow", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*other, row, source));
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
+  maps[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("ClnBaked");
+  material_bake_set(*this, *other, *row, maps, nullptr);
+  BKE_paint_layers_active_set(*other, row->marker);
+
+  BKE_paint_layers_sampler_budget_set(2, 4);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *other));
+  ASSERT_TRUE(BKE_paint_layers_material_forced_bake(*other, *row));
+
+  const uint32_t reused_uid = other->id.session_uid;
+  const bUUID reused_marker = row->marker;
+  BKE_id_delete(bmain, other);
+
+  /* A fresh material with the same session uid and a row with the same marker must not report the
+   * old pin: the runtime state was keyed by uid and has to have been dropped on free. */
+  Material *revived = BKE_material_add(bmain, "RevivedLayered");
+  revived->paint_layers_flag |= MA_PAINT_LAYERED;
+  revived->id.session_uid = reused_uid;
+  MaterialPaintLayer *revived_row = BKE_paint_layers_add(
+      *revived, MA_PAINT_LAYER_KIND_MATERIAL, "ClnRow", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(revived_row, nullptr);
+  revived_row->marker = reused_marker;
+  EXPECT_FALSE(BKE_paint_layers_material_forced_bake(*revived, *revived_row));
 }
 
 /** \} */

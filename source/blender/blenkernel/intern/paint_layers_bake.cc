@@ -852,6 +852,12 @@ bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer
 
 bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPaintLayer &layer)
 {
+  /* A row the sampler budget pinned onto its baked maps is never shown live, so the planner must be
+   * free to bake it even when it is the active row or sits in the active chain: leaving it on a stale
+   * bake would show the user the wrong picture. Its ancestors are unaffected and stay live. */
+  if (BKE_paint_layers_material_forced_bake(ma, layer)) {
+    return false;
+  }
   return BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker);
 }
 
@@ -893,16 +899,48 @@ static bool material_image_is_trivial(const ChannelSourceImage &source)
   return vector == nullptr || !vector->is_directly_linked();
 }
 
-PaintLayerMaterialMode BKE_paint_layers_material_mode(const Material &ma,
-                                                      const MaterialPaintLayer &layer)
+const MaterialSourceResolve &PaintLayersRegenCache::resolve(const Material *source) const
+{
+  std::unique_ptr<MaterialSourceResolve> &entry = this->resolves_.lookup_or_add_cb(source, [&]() {
+    return std::make_unique<MaterialSourceResolve>(BKE_paint_material_source_resolve(source));
+  });
+  return *entry;
+}
+
+void PaintLayersRegenCache::invalidate_for_owner(const Material &owner)
+{
+  this->modes.clear();
+  this->resolves_.remove(&owner);
+}
+
+const MaterialSourceResolve &PaintLayersRegenCache::resolve_get(const Material *source,
+                                                                const PaintLayersRegenCache *cache,
+                                                                MaterialSourceResolve &r_local)
+{
+  if (cache != nullptr) {
+    return cache->resolve(source);
+  }
+  r_local = BKE_paint_material_source_resolve(source);
+  return r_local;
+}
+
+static PaintLayerMaterialMode material_mode_compute(const Material &ma,
+                                                    const MaterialPaintLayer &layer,
+                                                    const PaintLayersRegenCache *cache)
 {
   if (layer.kind != MA_PAINT_LAYER_KIND_MATERIAL || layer.material == nullptr ||
       layer.material->nodetree == nullptr)
   {
     return PaintLayerMaterialMode::Baked;
   }
+  /* A sampler-budget fallback pins the row onto its baked maps for this session. Routing it through
+   * here is what the topology hash reads, so the rebuild sees the mode change once. */
+  if (BKE_paint_layers_material_forced_bake(ma, layer)) {
+    return PaintLayerMaterialMode::Baked;
+  }
   /* One resolver pass for the whole row; the live helpers then answer a specific channel. */
-  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(layer.material);
+  MaterialSourceResolve resolve_local;
+  const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(layer.material, cache, resolve_local);
   bool any_live = false;
   for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
     if (!material_live_row_eligible(ma, layer, channel)) {
@@ -927,19 +965,36 @@ PaintLayerMaterialMode BKE_paint_layers_material_mode(const Material &ma,
   return any_live ? PaintLayerMaterialMode::Hybrid : PaintLayerMaterialMode::Baked;
 }
 
+PaintLayerMaterialMode BKE_paint_layers_material_mode(const Material &ma,
+                                                      const MaterialPaintLayer &layer,
+                                                      const PaintLayersRegenCache *cache)
+{
+  if (cache == nullptr || !cache->modes_frozen) {
+    return material_mode_compute(ma, layer, cache);
+  }
+  if (const PaintLayerMaterialMode *found = cache->modes.lookup_ptr(&layer)) {
+    return *found;
+  }
+  const PaintLayerMaterialMode mode = material_mode_compute(ma, layer, cache);
+  cache->modes.add(&layer, mode);
+  return mode;
+}
+
 bool BKE_paint_layers_material_live_constant(const Material &ma,
                                              const MaterialPaintLayer &layer,
                                              const int channel,
-                                             float r_value[4])
+                                             float r_value[4],
+                                             const PaintLayersRegenCache *cache)
 {
   /* The live helpers are the Hybrid path only: in SourceGroup the generator shows the wrapper and
    * the CPU must stay on the baked maps, so nothing here may answer. */
-  if (BKE_paint_layers_material_mode(ma, layer) != PaintLayerMaterialMode::Hybrid ||
+  if (BKE_paint_layers_material_mode(ma, layer, cache) != PaintLayerMaterialMode::Hybrid ||
       !material_live_row_eligible(ma, layer, channel))
   {
     return false;
   }
-  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(layer.material);
+  MaterialSourceResolve resolve_local;
+  const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(layer.material, cache, resolve_local);
   if (resolve.channels[channel] != ChannelResolution::Constant) {
     return false;
   }
@@ -951,15 +1006,17 @@ bool BKE_paint_layers_material_live_image(const Material &ma,
                                           const MaterialPaintLayer &layer,
                                           const int channel,
                                           Image **r_image,
-                                          const ImageUser **r_iuser)
+                                          const ImageUser **r_iuser,
+                                          const PaintLayersRegenCache *cache)
 {
   if (r_image == nullptr || r_iuser == nullptr ||
-      BKE_paint_layers_material_mode(ma, layer) != PaintLayerMaterialMode::Hybrid ||
+      BKE_paint_layers_material_mode(ma, layer, cache) != PaintLayerMaterialMode::Hybrid ||
       !material_live_row_eligible(ma, layer, channel))
   {
     return false;
   }
-  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(layer.material);
+  MaterialSourceResolve resolve_local;
+  const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(layer.material, cache, resolve_local);
   if (resolve.channels[channel] != ChannelResolution::Image) {
     return false;
   }

@@ -22,7 +22,11 @@
  */
 
 #include <cstdint>
+#include <memory>
 
+#include "BKE_paint_material_resolve.hh"
+
+#include "BLI_map.hh"
 #include "BLI_vector.hh"
 #include "DNA_uuid_types.h"
 
@@ -36,6 +40,7 @@ struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerBake;
 struct MaterialPaintLayerChannel;
+struct PaintLayersRegenCache;
 struct bNodeTree;
 enum eMaterialPaintChannel : int8_t;
 enum eMaterialPaintLayerKind : int8_t;
@@ -798,7 +803,8 @@ bool BKE_paint_layers_bake_row_is_deferred(const Material &ma,
 bool BKE_paint_layers_material_live_constant(const Material &ma,
                                              const MaterialPaintLayer &layer,
                                              int channel,
-                                             float r_value[4]);
+                                             float r_value[4],
+                                             const PaintLayersRegenCache *cache = nullptr);
 
 /**
  * The live map an active Material row's \a channel takes from its source right now.
@@ -815,7 +821,8 @@ bool BKE_paint_layers_material_live_image(const Material &ma,
                                           const MaterialPaintLayer &layer,
                                           int channel,
                                           Image **r_image,
-                                          const ImageUser **r_iuser);
+                                          const ImageUser **r_iuser,
+                                          const PaintLayersRegenCache *cache = nullptr);
 
 /**
  * Whether any channel of \a layer is currently shown from its source rather than from a
@@ -836,6 +843,50 @@ enum class PaintLayerMaterialMode : int8_t {
 };
 
 /**
+ * What one #BKE_paint_layers_regenerate call learns once and reuses: it lives on that call's stack
+ * and is handed down, never kept between calls, so nothing outside a regeneration can read a stale
+ * answer. Every reader takes it as an optional pointer; without one the answer is recomputed, which
+ * is what bake, the CPU composite, RNA and the editors do.
+ */
+struct PaintLayersRegenCache {
+  /**
+   * Whether #modes may be filled. The sampler-budget fallback moves rows' modes (a forced bake), so
+   * a mode cached before it is done would outlive the change; the regeneration raises this once the
+   * final forced set is known.
+   */
+  bool modes_frozen = false;
+  /** Rows' modes, filled lazily and only while #modes_frozen. */
+  mutable Map<const MaterialPaintLayer *, PaintLayerMaterialMode> modes;
+  /** The Pass Through visibility multiplier of every row, from one walk of the stack. */
+  mutable Map<const MaterialPaintLayer *, float> pass_through_scales;
+  mutable bool pass_through_scales_valid = false;
+
+  /**
+   * The resolve of \a source, computed on first ask. A source's node tree is not written while a
+   * stack is regenerated (only the owner's is), so the answer holds for the whole call. The entry is
+   * heap-allocated, so the returned reference stays valid when later ones are added.
+   */
+  const MaterialSourceResolve &resolve(const Material *source) const;
+
+  /**
+   * #resolve through \a cache when there is one, else a fresh resolve held in \a r_local. Either way
+   * the caller reads the returned reference and never copies the resolve.
+   */
+  static const MaterialSourceResolve &resolve_get(const Material *source,
+                                                  const PaintLayersRegenCache *cache,
+                                                  MaterialSourceResolve &r_local);
+
+  /**
+   * Drop what depends on the owner's own node tree, for a caller about to rewrite it: a row that
+   * reads its owner as its source would otherwise keep the answer from before the rewrite.
+   */
+  void invalidate_for_owner(const Material &owner);
+
+ private:
+  mutable Map<const Material *, std::unique_ptr<MaterialSourceResolve>> resolves_;
+};
+
+/**
  * The mode \a layer is in right now. One answer for the generator and the CPU compositor:
  * they must never disagree about what a row shows.
  *
@@ -845,7 +896,22 @@ enum class PaintLayerMaterialMode : int8_t {
  * evaluate -- there the Image Editor keeps showing the last bake.
  */
 PaintLayerMaterialMode BKE_paint_layers_material_mode(const Material &ma,
-                                                      const MaterialPaintLayer &layer);
+                                                      const MaterialPaintLayer &layer,
+                                                      const PaintLayersRegenCache *cache = nullptr);
+
+/**
+ * Whether a sampler-budget fallback pinned \a layer onto its baked maps for this session. Runtime
+ * state only: it is recomputed from the budget on every regeneration, lifted as soon as the budget
+ * allows, and never saved. #BKE_paint_layers_material_mode reports #PaintLayerMaterialMode::Baked
+ * while this holds, which is what makes the topology hash see the mode change and rebuild once.
+ */
+bool BKE_paint_layers_material_forced_bake(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Drop the runtime sampler state keyed by \a ma's `session_uid`. Called when the material is freed so
+ * a reused uid cannot inherit another material's forced set, and no entry outlives its owner.
+ */
+void BKE_paint_layers_sampler_state_free(const Material &ma);
 
 /**
  * Whether \a image is a baked map of a row that must stay live right now: the active row of

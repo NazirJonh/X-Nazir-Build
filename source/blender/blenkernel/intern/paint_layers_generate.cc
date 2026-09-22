@@ -87,6 +87,9 @@ namespace {
 /** Defined below; declared here for #BKE_paint_layers_root_hash_invalidate. */
 void tree_root_hash_set(bNodeTree &tree, uint64_t hash);
 
+/** Defined below with the sampler budget; declared here because row_is_removed reads it. */
+static bool budget_cleanup_active(const Material &ma);
+
 /* -------------------------------------------------------------------- */
 /** \name Markers the generator stamps its own data with
  *
@@ -273,14 +276,16 @@ bNode *mix_node_add(bNodeTree &tree, const int ramp_blend, const float location_
  */
 bool material_source_group_channel(const Material &ma,
                                    const MaterialPaintLayer &layer,
-                                   const int channel)
+                                   const int channel,
+                                   const PaintLayersRegenCache *cache)
 {
   if (layer.kind != MA_PAINT_LAYER_KIND_MATERIAL || layer.material == nullptr ||
-      BKE_paint_layers_material_mode(ma, layer) != PaintLayerMaterialMode::SourceGroup)
+      BKE_paint_layers_material_mode(ma, layer, cache) != PaintLayerMaterialMode::SourceGroup)
   {
     return false;
   }
-  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(layer.material);
+  MaterialSourceResolve resolve_local;
+  const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(layer.material, cache, resolve_local);
   /* The resolver is the one authority on whether the channel can be shown at all; a channel it
    * calls Unavailable (Normal not through a Normal Map, say) takes no part in either mode, so the
    * wired set cannot change when the row moves between Hybrid and SourceGroup. */
@@ -352,8 +357,9 @@ static bool row_is_removed(const Material &ma, const MaterialPaintLayer &layer)
 {
   /* A Pass Through folder is never dropped when hidden: its children stay in the graph and their
    * factor goes to zero, so hiding it is a value edit rather than a rebuild. A stale marker from
-   * before the mode became Pass Through is ignored for the same reason. */
-  if (BKE_paint_layers_folder_is_pass_through(ma, layer)) {
+   * before the mode became Pass Through is ignored for the same reason. Only the over-budget pass
+   * may drop one, and then budget_cleanup_active is set. */
+  if (BKE_paint_layers_folder_is_pass_through(ma, layer) && !budget_cleanup_active(ma)) {
     return false;
   }
   return (layer.flag & MA_PAINT_LAYER_ENABLED) == 0 && removed_rows_contains(ma, layer.marker);
@@ -367,9 +373,9 @@ static void removed_rows_reconcile(const Material &ma)
   BKE_paint_layers_flatten(ma, layers);
   for (const MaterialPaintLayer *layer : layers) {
     /* A hidden Pass Through folder keeps its subtree in the graph with a zero factor, so it is
-     * never written to the removed set. */
+     * never written to the removed set -- unless the over-budget pass is dropping hidden rows. */
     if ((layer->flag & MA_PAINT_LAYER_ENABLED) == 0 &&
-        !BKE_paint_layers_folder_is_pass_through(ma, *layer))
+        (!BKE_paint_layers_folder_is_pass_through(ma, *layer) || budget_cleanup_active(ma)))
     {
       markers.append(layer->marker);
     }
@@ -412,10 +418,42 @@ static bool pass_through_scale_find(const Material &ma,
   return false;
 }
 
-/** The Pass Through visibility multiplier for \a target; one when no Pass Through folder encloses
- * it. It scales the row's factor value so hiding a Pass Through folder stays a value edit. */
-static float pass_through_scale_of(const Material &ma, const MaterialPaintLayer &target)
+/** Record the scale of every row of \a list's subtree, by the same rule #pass_through_scale_find
+ * applies to one target. */
+static void pass_through_scales_fill(const Material &ma,
+                                     const ListBase &list,
+                                     const float scale,
+                                     Map<const MaterialPaintLayer *, float> &r_scales)
 {
+  for (const MaterialPaintLayer &layer :
+       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
+  {
+    r_scales.add(&layer, scale);
+    if (!BKE_paint_layers_is_folder(layer)) {
+      continue;
+    }
+    float child_scale = scale;
+    if (BKE_paint_layers_folder_is_pass_through(ma, layer)) {
+      child_scale = ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0) ? scale : 0.0f;
+    }
+    pass_through_scales_fill(ma, layer.children, child_scale, r_scales);
+  }
+}
+
+/** The Pass Through visibility multiplier for \a target; one when no Pass Through folder encloses
+ * it. It scales the row's factor value so hiding a Pass Through folder stays a value edit. With a
+ * \a cache the whole stack is walked once and every later row is a lookup. */
+static float pass_through_scale_of(const Material &ma,
+                                   const MaterialPaintLayer &target,
+                                   const PaintLayersRegenCache *cache = nullptr)
+{
+  if (cache != nullptr) {
+    if (!cache->pass_through_scales_valid) {
+      pass_through_scales_fill(ma, ma.paint_layers, 1.0f, cache->pass_through_scales);
+      cache->pass_through_scales_valid = true;
+    }
+    return cache->pass_through_scales.lookup_default(&target, 1.0f);
+  }
   float scale = 1.0f;
   pass_through_scale_find(ma, target, ma.paint_layers, 1.0f, scale);
   return scale;
@@ -431,7 +469,8 @@ static float pass_through_scale_of(const Material &ma, const MaterialPaintLayer 
  */
 bool layer_subtree_has_channel(const Material &ma,
                                const MaterialPaintLayer &layer,
-                               const int channel)
+                               const int channel,
+                               const PaintLayersRegenCache *cache)
 {
   if (row_is_removed(ma, layer)) {
     return false;
@@ -448,9 +487,9 @@ bool layer_subtree_has_channel(const Material &ma,
   float live_value[4];
   Image *live_image = nullptr;
   const ImageUser *live_iuser = nullptr;
-  if (BKE_paint_layers_material_live_constant(ma, layer, channel, live_value) ||
-      BKE_paint_layers_material_live_image(ma, layer, channel, &live_image, &live_iuser) ||
-      material_source_group_channel(ma, layer, channel))
+  if (BKE_paint_layers_material_live_constant(ma, layer, channel, live_value, cache) ||
+      BKE_paint_layers_material_live_image(ma, layer, channel, &live_image, &live_iuser, cache) ||
+      material_source_group_channel(ma, layer, channel, cache))
   {
     return true;
   }
@@ -463,7 +502,7 @@ bool layer_subtree_has_channel(const Material &ma,
   for (const MaterialPaintLayer &child :
        *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
   {
-    if (layer_subtree_has_channel(ma, child, channel)) {
+    if (layer_subtree_has_channel(ma, child, channel, cache)) {
       return true;
     }
   }
@@ -628,7 +667,10 @@ bool leaf_participates(const MaterialPaintLayer &layer, const int channel)
  * folder whose subtree takes part, or a leaf that paints something here. One helper for the build's
  * `group_this` and the root hash, so the two can never disagree about which instances the root has.
  */
-bool layer_row_has_group(const Material &ma, const MaterialPaintLayer &layer, const int channel)
+bool layer_row_has_group(const Material &ma,
+                         const MaterialPaintLayer &layer,
+                         const int channel,
+                         const PaintLayersRegenCache *cache)
 {
   if (row_is_removed(ma, layer)) {
     return false;
@@ -643,14 +685,14 @@ bool layer_row_has_group(const Material &ma, const MaterialPaintLayer &layer, co
     if (BKE_paint_layers_folder_is_pass_through(ma, layer)) {
       return false;
     }
-    return layer_subtree_has_channel(ma, layer, channel);
+    return layer_subtree_has_channel(ma, layer, channel, cache);
   }
   float live_value[4];
   Image *live_image = nullptr;
   const ImageUser *live_iuser = nullptr;
-  if (BKE_paint_layers_material_live_constant(ma, layer, channel, live_value) ||
-      BKE_paint_layers_material_live_image(ma, layer, channel, &live_image, &live_iuser) ||
-      material_source_group_channel(ma, layer, channel))
+  if (BKE_paint_layers_material_live_constant(ma, layer, channel, live_value, cache) ||
+      BKE_paint_layers_material_live_image(ma, layer, channel, &live_image, &live_iuser, cache) ||
+      material_source_group_channel(ma, layer, channel, cache))
   {
     return true;
   }
@@ -662,14 +704,14 @@ bool layer_row_has_group(const Material &ma, const MaterialPaintLayer &layer, co
  * output, so the material keeps whatever the user had on that Principled input. One helper for the
  * build and the topology hash, so the two can never disagree about which channels exist.
  */
-Vector<int> paint_layers_wired_channels(const Material &ma)
+Vector<int> paint_layers_wired_channels(const Material &ma, const PaintLayersRegenCache *cache)
 {
   Vector<const MaterialPaintLayer *> layers;
   BKE_paint_layers_flatten(ma, layers);
   Vector<int> wired;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     for (const MaterialPaintLayer *layer : layers) {
-      if (layer_subtree_has_channel(ma, *layer, int(info.channel))) {
+      if (layer_subtree_has_channel(ma, *layer, int(info.channel), cache)) {
         wired.append(int(info.channel));
         break;
       }
@@ -806,7 +848,8 @@ uint64_t topology_hash_correction(uint64_t hash,
 uint64_t topology_hash_layer(uint64_t hash,
                              const Material &ma,
                              const MaterialPaintLayer &layer,
-                             const Span<int> wired_channels)
+                             const Span<int> wired_channels,
+                             const PaintLayersRegenCache *cache)
 {
   const bool is_folder = BKE_paint_layers_is_folder(layer);
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.kind)));
@@ -824,7 +867,7 @@ uint64_t topology_hash_layer(uint64_t hash,
   for (const int channel : wired_channels) {
     Image *baked = nullptr;
     const bool substituted = row_channel_substituted(ma, layer, channel, &baked);
-    const bool participates = is_folder ? layer_subtree_has_channel(ma, layer, channel) :
+    const bool participates = is_folder ? layer_subtree_has_channel(ma, layer, channel, cache) :
                                           leaf_participates(layer, channel);
     hash = topology_hash_mix(hash, uint64_t(channel));
     hash = topology_hash_mix(hash, substituted ? 1 : 0);
@@ -834,7 +877,7 @@ uint64_t topology_hash_layer(uint64_t hash,
     hash = topology_hash_mix(hash, topology_hash_map_id(paint_layer_channel_image(layer, channel)));
     float live_value[4];
     const bool live_constant = BKE_paint_layers_material_live_constant(
-        ma, layer, channel, live_value);
+        ma, layer, channel, live_value, cache);
     hash = topology_hash_mix(hash, live_constant ? 1 : 0);
     if (live_constant) {
       /* The value lives in another material, which #BKE_paint_layers_values_sync cannot see, so it
@@ -848,14 +891,14 @@ uint64_t topology_hash_layer(uint64_t hash,
     Image *live_map_image = nullptr;
     const ImageUser *live_map_iuser = nullptr;
     const bool live_map = BKE_paint_layers_material_live_image(
-        ma, layer, channel, &live_map_image, &live_map_iuser);
+        ma, layer, channel, &live_map_image, &live_map_iuser, cache);
     hash = topology_hash_mix(hash, live_map ? 1 : 0);
     if (live_map) {
       /* Which map the row shows is topology, like any other map a row reads. */
       hash = topology_hash_mix(hash, topology_hash_map_id(live_map_image));
     }
     const PaintLayerMaterialMode material_mode = (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) ?
-                                                     BKE_paint_layers_material_mode(ma, layer) :
+                                                     BKE_paint_layers_material_mode(ma, layer, cache) :
                                                      PaintLayerMaterialMode::Baked;
     hash = topology_hash_mix(hash, uint64_t(material_mode));
     if (material_mode == PaintLayerMaterialMode::SourceGroup && layer.material != nullptr) {
@@ -880,7 +923,7 @@ uint64_t topology_hash_layer(uint64_t hash,
   for (const MaterialPaintLayer &child :
        *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
   {
-    hash = topology_hash_layer(hash, ma, child, wired_channels);
+    hash = topology_hash_layer(hash, ma, child, wired_channels, cache);
   }
   return hash;
 }
@@ -911,9 +954,10 @@ void BKE_paint_layers_root_hash_invalidate(Material &ma)
 
 uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const MaterialPaintLayer &layer,
-                                          const Span<int> wired_channels)
+                                          const Span<int> wired_channels,
+                                          const PaintLayersRegenCache *cache)
 {
-  return topology_hash_layer(1469598103934665603ull, ma, layer, wired_channels);
+  return topology_hash_layer(1469598103934665603ull, ma, layer, wired_channels, cache);
 }
 
 /**
@@ -927,7 +971,8 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
 uint64_t paint_layers_root_topology_hash(
     const Material &ma,
     const Span<int> wired_channels,
-    const Map<const MaterialPaintLayer *, bNodeTree *> &layer_trees)
+    const Map<const MaterialPaintLayer *, bNodeTree *> &layer_trees,
+    const PaintLayersRegenCache *cache)
 {
   uint64_t hash = 1469598103934665603ull;
   for (const int channel : wired_channels) {
@@ -941,12 +986,14 @@ uint64_t paint_layers_root_topology_hash(
          *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
     {
       if (BKE_paint_layers_folder_is_pass_through(ma, layer)) {
-        self(self, layer.children);
+        if (!row_is_removed(ma, layer)) {
+          self(self, layer.children);
+        }
         continue;
       }
       topology_hash_uid(hash, layer.marker);
       for (const int channel : wired_channels) {
-        const bool has_group = layer_row_has_group(ma, layer, channel);
+        const bool has_group = layer_row_has_group(ma, layer, channel, cache);
         hash = topology_hash_mix(hash, has_group ? 1 : 0);
       }
     }
@@ -954,8 +1001,28 @@ uint64_t paint_layers_root_topology_hash(
   hash_row_list(hash_row_list, ma.paint_layers);
   /* Every layer group's interface: names and types in creation order. It decides the root's
    * instance sockets and the links between them. */
+  /* Only the groups the root instantiates count: the top-level rows, seen through Pass Through
+   * folders exactly as in the walk above. The children of an isolating folder live inside that
+   * folder's group, whose own interface is hashed here and whose topology hash already covers its
+   * children. They are also present in \a layer_trees only when the folder's group was rebuilt in
+   * this pass -- an untouched folder is reused without asking for its children -- so hashing them
+   * made the value depend on whether the folder happened to rebuild, and the next pass rebuilt the
+   * root again. */
   Vector<const MaterialPaintLayer *> layers;
-  BKE_paint_layers_flatten(ma, layers);
+  auto collect_root_layers = [&](auto &&self, const ListBase &list) -> void {
+    for (const MaterialPaintLayer &layer :
+         *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
+    {
+      if (BKE_paint_layers_folder_is_pass_through(ma, layer)) {
+        if (!row_is_removed(ma, layer)) {
+          self(self, layer.children);
+        }
+        continue;
+      }
+      layers.append(&layer);
+    }
+  };
+  collect_root_layers(collect_root_layers, ma.paint_layers);
   for (const MaterialPaintLayer *layer : layers) {
     bNodeTree *const *tree_ptr = layer_trees.lookup_ptr(layer);
     if (tree_ptr == nullptr || *tree_ptr == nullptr) {
@@ -983,6 +1050,18 @@ uint64_t paint_layers_root_topology_hash(
   return hash;
 }
 
+/** Whether \a node belongs to \a tree. Used to hold the "wrapper instance lives in the tree it is
+ * linked into" invariant; a node only ever belongs to one tree. */
+static bool node_belongs_to_tree(const bNodeTree &tree, const bNode &node)
+{
+  for (const bNode &candidate : tree.nodes) {
+    if (&candidate == &node) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void paint_layers_tree_build(const Material &ma,
                              bNodeTree &tree,
                              const PaintLayersBuildContext &ctx)
@@ -998,7 +1077,8 @@ void paint_layers_tree_build(const Material &ma,
   BKE_paint_layers_assert_consistent(ma);
   /* Which channels the description wires at all. A channel nothing participates in gets no output,
    * so the material keeps whatever the user had on that Principled input. */
-  const Vector<int> wired_channels = paint_layers_wired_channels(ma);
+  const PaintLayersRegenCache *const cache = ctx.regen_cache;
+  const Vector<int> wired_channels = paint_layers_wired_channels(ma, cache);
   if (wired_channels.is_empty()) {
     return;
   }
@@ -1194,7 +1274,7 @@ void paint_layers_tree_build(const Material &ma,
       return;
     }
     for (const int channel : wired_channels) {
-      if (!layer_subtree_has_channel(ma, layer, channel)) {
+      if (!layer_subtree_has_channel(ma, layer, channel, cache)) {
         continue;
       }
       const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
@@ -1212,7 +1292,7 @@ void paint_layers_tree_build(const Material &ma,
       if (socket->socket_data != nullptr) {
         static_cast<bNodeSocketValueFloat *>(socket->socket_data)->value =
             BKE_paint_layers_channel_opacity_effective(layer, channel) *
-            pass_through_scale_of(ma, layer);
+            pass_through_scale_of(ma, layer, cache);
       }
       opacity_inputs.lookup_or_add_default(&layer).add(channel, socket);
     }
@@ -1489,23 +1569,45 @@ void paint_layers_tree_build(const Material &ma,
         folder_source = nullptr;
         folder_coverage_node = nullptr;
         folder_coverage = nullptr;
-        /* The active Material row's source constant for this channel, when it has one. */
+        /* The active Material row's live value for this channel, when it has one. A live constant
+         * needs no sampler; a live map is the source's own texture. Both count as the row taking
+         * part even without a channel record, so the early drop below must see them. */
         float live_value[4];
+        Image *live_map_image = nullptr;
+        const ImageUser *live_map_iuser = nullptr;
+        const bool live_constant = BKE_paint_layers_material_live_constant(
+            ma, *layer, channel, live_value, cache);
+        const bool live_map = !live_constant &&
+                              BKE_paint_layers_material_live_image(
+                                  ma, *layer, channel, &live_map_image, &live_map_iuser, cache);
         /* A Material row whose whole source graph goes through the wrapper group. Its instance is
          * created once per row and reused for every channel. */
         const PaintLayerMaterialMode material_mode = (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL) ?
-                                                         BKE_paint_layers_material_mode(ma, *layer) :
+                                                         BKE_paint_layers_material_mode(
+                                                             ma, *layer, cache) :
                                                          PaintLayerMaterialMode::Baked;
         bNode *source_group_instance = nullptr;
         bNodeTree *source_group_tree = nullptr;
         bNodeSocket *source_group_socket = nullptr;
-        if (!substituted && material_mode == PaintLayerMaterialMode::SourceGroup) {
+        /* A Material row only takes part in a channel the resolver can supply. Without this gate
+         * the wrapper's own `COLOR:Normal` output (the socket exists even when the resolver calls
+         * the channel Unavailable) would make the row look live there; and because an unavailable
+         * channel gives the row no layer group, `target.tree` is the parent tree, while the wrapper
+         * instance cached from the row's own group tree would then be linked into it -- a link
+         * between two trees, which crashed the rebuild. */
+        if (!substituted && material_mode == PaintLayerMaterialMode::SourceGroup &&
+            material_source_group_channel(ma, *layer, channel, cache))
+        {
           source_group_instance = source_group_instance_get(*layer, tree);
           source_group_tree = source_group_trees.lookup_default(layer, nullptr);
           if (source_group_instance != nullptr && source_group_tree != nullptr) {
             source_group_socket = source_group_output(
                 *source_group_tree, *source_group_instance, channel, false);
           }
+          /* The instance is cached once per row and reused across that row's channels, which all
+           * build in the row's own group tree; it must never come from another tree. */
+          BLI_assert(source_group_instance == nullptr ||
+                     node_belongs_to_tree(tree, *source_group_instance));
         }
 
         if (!substituted && BKE_paint_layers_is_folder(*layer)) {
@@ -1547,8 +1649,7 @@ void paint_layers_tree_build(const Material &ma,
           folder_coverage = sub.coverage;
         }
         else if (!substituted && !BKE_paint_layers_is_folder(*layer) &&
-                 !leaf_participates(*layer, channel) &&
-                 !BKE_paint_layers_material_live_constant(ma, *layer, channel, live_value) &&
+                 !leaf_participates(*layer, channel) && !live_constant &&
                  source_group_instance == nullptr)
         {
           if (!paint_layer_channel_present(*layer, channel) &&
@@ -1637,18 +1738,12 @@ void paint_layers_tree_build(const Material &ma,
         }
       }
       else {
-        const bool live = BKE_paint_layers_material_live_constant(
-            ma, *layer, channel, live_value);
-        Image *live_map_image = nullptr;
-        const ImageUser *live_map_iuser = nullptr;
         /* A constant answers first: it needs no sampler, so a channel the resolver calls Constant
          * never falls through to an Image result. */
-        const bool live_map = !live && BKE_paint_layers_material_live_image(
-                                           ma, *layer, channel, &live_map_image, &live_map_iuser);
-        Image *image = (live || live_map || source_group_instance != nullptr) ?
+        Image *image = (live_constant || live_map || source_group_instance != nullptr) ?
                            nullptr :
                            paint_layer_channel_image(*layer, channel);
-        if (live) {
+        if (live_constant) {
           /* The active Material row shows its source's live constant rather than its baked map: the
            * value lives in another material, so it is built into the tree directly. */
           bNode *constant = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
@@ -1682,7 +1777,9 @@ void paint_layers_tree_build(const Material &ma,
             if (live_map_iuser != nullptr) {
               dst->iuser = *live_map_iuser;
             }
-            const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(layer->material);
+            MaterialSourceResolve resolve_local;
+            const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(
+                layer->material, cache, resolve_local);
             const bNode *src_node = resolve.images[channel].node;
             if (const NodeTexImage *src_storage =
                     (src_node != nullptr) ? static_cast<const NodeTexImage *>(src_node->storage) :
@@ -1800,7 +1897,7 @@ void paint_layers_tree_build(const Material &ma,
       Image *live_alpha_image = nullptr;
       const ImageUser *live_alpha_iuser = nullptr;
       if (!substituted && BKE_paint_layers_material_live_constant(
-                              ma, *layer, PAINT_MATERIAL_CHANNEL_ALPHA, live_alpha))
+                              ma, *layer, PAINT_MATERIAL_CHANNEL_ALPHA, live_alpha, cache))
       {
         /* The source's alpha is a constant too, so the coverage stays live with it. When the
          * source's alpha is not constant while its other channels are, the coverage keeps its last
@@ -1820,7 +1917,8 @@ void paint_layers_tree_build(const Material &ma,
                                                     *layer,
                                                     PAINT_MATERIAL_CHANNEL_ALPHA,
                                                     &live_alpha_image,
-                                                    &live_alpha_iuser))
+                                                    &live_alpha_iuser,
+                                                    cache))
       {
         /* The source's alpha is a live texture: the factor is that map's Alpha output, the same
          * output the CPU reads as its coverage. */
@@ -1835,7 +1933,9 @@ void paint_layers_tree_build(const Material &ma,
             if (live_alpha_iuser != nullptr) {
               dst->iuser = *live_alpha_iuser;
             }
-            const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(layer->material);
+            MaterialSourceResolve resolve_local;
+            const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(
+                layer->material, cache, resolve_local);
             const bNode *src_node = resolve.images[PAINT_MATERIAL_CHANNEL_ALPHA].node;
             if (const NodeTexImage *src_storage =
                     (src_node != nullptr) ? static_cast<const NodeTexImage *>(src_node->storage) :
@@ -2672,6 +2772,10 @@ void paint_layers_tree_build(const Material &ma,
         const MaterialPaintLayer *layer = &layer_ref;
         if (BKE_paint_layers_folder_is_pass_through(ma, *layer))
         {
+          if (row_is_removed(ma, *layer)) {
+            /* The over-budget pass dropped this hidden folder; its inlined subtree goes with it. */
+            continue;
+          }
           /* A Pass Through folder is expanded in place: its children are built straight into the
            * parent's chain with the parent's own premul mode, exactly as if the folder were not
            * there. This is what keeps the generated shader identical when a row is moved into or
@@ -2715,7 +2819,7 @@ void paint_layers_tree_build(const Material &ma,
         /* Every row gets its own group: a bake-substituted row, a folder that takes part, or a leaf
          * that paints something here. The same helper feeds the root hash, so the root and the build
          * never disagree about which instances exist. */
-        const bool group_this = layer_row_has_group(ma, *layer, channel);
+        const bool group_this = layer_row_has_group(ma, *layer, channel, cache);
         if (group_this) {
           layer_group = layer_group_ensure(*layer, *parent_target.tree);
         }
@@ -3516,6 +3620,8 @@ const char *source_group_refusal_name(const PaintLayersSourceGroupRefusal refusa
       return "self-reference";
     case PaintLayersSourceGroupRefusal::BuildFailed:
       return "build-failed";
+    case PaintLayersSourceGroupRefusal::TooManyTextures:
+      return "too-many-textures";
   }
   return "unknown";
 }
@@ -3615,14 +3721,15 @@ const SourceGroupEmbedState *find_previous_embed(const Vector<SourceGroupEmbedSt
 void source_group_instances_log(
     const Material &ma,
     const Map<const MaterialPaintLayer *, bNodeTree *> &layer_trees,
-    const Map<const Material *, bNodeTree *> &source_groups)
+    const Map<const Material *, bNodeTree *> &source_groups,
+    const PaintLayersRegenCache *cache)
 {
   Vector<const MaterialPaintLayer *> layers;
   BKE_paint_layers_flatten(ma, layers);
   Vector<SourceGroupEmbedState> states;
   for (const MaterialPaintLayer *layer : layers) {
     if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL ||
-        BKE_paint_layers_material_mode(ma, *layer) != PaintLayerMaterialMode::SourceGroup)
+        BKE_paint_layers_material_mode(ma, *layer, cache) != PaintLayerMaterialMode::SourceGroup)
     {
       continue;
     }
@@ -3690,7 +3797,352 @@ void source_group_instances_log(
   previous_source_group_embeds().add_overwrite(ma.id.session_uid, states);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Sampler budget and counting
+ * \{ */
+
+/**
+ * The runtime sampler budget and the fallback state it drives. Not DNA: it is derived from the
+ * budget on every regeneration and cleared when the budget grows, so it must never be saved.
+ */
+struct SamplerRuntimeState {
+  /** Material-texture sampler allowance; zero disables the check. */
+  int budget = 0;
+  /** `GPU_max_textures()` as reported to #BKE_paint_layers_sampler_budget_set, for the log only. */
+  int max_textures = 0;
+  /** Owners whose disabled rows the last over-budget pass dropped, by material `session_uid`. */
+  Set<uint32_t> cleanup_owners;
+  /** The markers of rows forced onto their baked maps, per owner `session_uid`. */
+  Map<uint32_t, Vector<bUUID>> forced_bake;
+};
+
+static SamplerRuntimeState &sampler_runtime()
+{
+  static SamplerRuntimeState state;
+  return state;
+}
+
+/** Whether the last over-budget pass is dropping this owner's hidden rows. */
+static bool budget_cleanup_active(const Material &ma)
+{
+  return sampler_runtime().cleanup_owners.contains(ma.id.session_uid);
+}
+
+static bool forced_bake_contains(const Material &ma, const bUUID &marker)
+{
+  const Vector<bUUID> *markers = sampler_runtime().forced_bake.lookup_ptr(ma.id.session_uid);
+  if (markers == nullptr) {
+    return false;
+  }
+  for (const bUUID &other : *markers) {
+    if (BLI_uuid_equal(other, marker)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The sampler state EEVEE derives from an image node's extension, interpolation and projection. */
+static uint32_t image_sampler_state_key(const int extension,
+                                        const int interpolation,
+                                        const int projection)
+{
+  /* `node_shader_tex_image.cc:67-95` maps `extension` onto the extend mode and lumps every
+   * interpolation other than Closest into one filtering; Sphere/Tube additionally drop mipmapping
+   * (`:131,:141`), which is the only place `projection` reaches the sampler state. Encoding the
+   * resulting filtering class, not the raw interpolation, keeps Smoother and Linear as one key. */
+  const bool closest = interpolation == SHD_INTERP_CLOSEST;
+  const bool no_mipmap = ELEM(projection, SHD_PROJ_SPHERE, SHD_PROJ_TUBE);
+  const uint32_t filtering = closest ? 1u : (no_mipmap ? 2u : 3u);
+  return (uint32_t(extension) & 0xFFu) | (filtering << 8);
+}
+
+/** The state EEVEE derives from \a tex's storage, the key the generator's Image Texture nodes use. */
+static uint32_t image_sampler_state_key(const NodeTexImage &tex)
+{
+  return image_sampler_state_key(tex.extension, tex.interpolation, tex.projection);
+}
+
+/**
+ * The sampler state of the Image Texture nodes the generator creates for a row's own map, a
+ * correction map or a baked map: all of them are added with the node type's default storage, which
+ * is Repeat/Linear/Flat. Using this as #SamplerCounter::add_image's default is what lets a map that
+ * appears both in the stack and in the user's tree dedup to one sampler.
+ */
+static uint32_t default_image_sampler_state()
+{
+  return image_sampler_state_key(
+      SHD_IMAGE_EXTENSION_REPEAT, SHD_INTERP_LINEAR, SHD_PROJ_FLAT);
+}
+
+/** The sampler state EEVEE derives from an environment node's projection and interpolation. */
+static uint32_t environment_sampler_state_key(const NodeTexImage &tex)
+{
+  const bool closest = tex.interpolation == SHD_INTERP_CLOSEST;
+  return 0x10000u | (uint32_t(tex.projection) << 8) | (closest ? 1u : 0u);
+}
+
+/**
+ * A reachability walk over a node tree that counts the samplers EEVEE would allocate, following
+ * `gpu_node_graph.cc`. Only nodes reachable from an output are visited, muted nodes are treated as
+ * absent, and every image/colorband/sky sampler is deduplicated the way `gpu_node_graph_add_texture`
+ * does. Nested groups are entered once each.
+ */
+class SamplerCounter {
+  Map<const Image *, Set<uint32_t>> image_states_;
+  /** Tiled uses keyed the same way, so the extra mapping sampler is added per unique entry. */
+  Map<const Image *, Set<uint32_t>> tiled_states_;
+  Set<const bNode *> visited_nodes_;
+  Set<const bNodeTree *> visited_groups_;
+  const bNodeTree *skip_group_ = nullptr;
+  bool has_colorband_ = false;
+  bool has_sky_ = false;
+
+  static bool node_is_output(const bNode &node)
+  {
+    return node.type_legacy == SH_NODE_OUTPUT_MATERIAL || node.type_legacy == SH_NODE_OUTPUT_WORLD ||
+           node.type_legacy == SH_NODE_OUTPUT_LIGHT || node.is_group_output();
+  }
+
+  void visit_node(const bNode &node)
+  {
+    if ((node.flag & NODE_MUTED) != 0) {
+      return;
+    }
+    if (!visited_nodes_.add(&node)) {
+      return;
+    }
+    if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT) {
+      const bNodeTree &group = *reinterpret_cast<const bNodeTree *>(node.id);
+      if (&group != skip_group_ && visited_groups_.add(&group)) {
+        visit_tree(group);
+      }
+    }
+    else {
+      collect_node(node);
+    }
+    for (const bNodeSocket &input : node.inputs) {
+      for (const bNodeLink *link : input.directly_linked_links()) {
+        if (link->fromnode != nullptr) {
+          visit_node(*link->fromnode);
+        }
+      }
+    }
+  }
+
+  void collect_node(const bNode &node)
+  {
+    switch (node.type_legacy) {
+      case SH_NODE_TEX_IMAGE: {
+        collect_image(node, false);
+        break;
+      }
+      case SH_NODE_TEX_ENVIRONMENT: {
+        collect_image(node, true);
+        break;
+      }
+      case SH_NODE_TEX_SKY: {
+        const NodeTexSky *storage = static_cast<const NodeTexSky *>(node.storage);
+        if (storage != nullptr && ELEM(storage->sky_model,
+                                       SHD_SKY_SINGLE_SCATTERING,
+                                       SHD_SKY_MULTIPLE_SCATTERING))
+        {
+          has_sky_ = true;
+        }
+        break;
+      }
+      case SH_NODE_VALTORGB:
+      case SH_NODE_CURVE_RGB:
+      case SH_NODE_CURVE_VEC:
+      case SH_NODE_CURVE_FLOAT:
+      case SH_NODE_BLACKBODY:
+      case SH_NODE_WAVELENGTH:
+      case SH_NODE_VOLUME_PRINCIPLED: {
+        /* All of these sample the single per-material colorband texture
+         * (`gpu_node_graph.cc:730-741`, `gpu_material.cc`). */
+        has_colorband_ = true;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  void collect_image(const bNode &node, const bool environment)
+  {
+    if (node.id == nullptr || GS(node.id->name) != ID_IM) {
+      return;
+    }
+    const Image *image = reinterpret_cast<const Image *>(node.id);
+    const NodeTexImage *storage = static_cast<const NodeTexImage *>(node.storage);
+    if (storage == nullptr) {
+      return;
+    }
+    if (environment) {
+      image_states_.lookup_or_add_default(image).add(
+          environment_sampler_state_key(*storage));
+      return;
+    }
+    uint32_t state = image_sampler_state_key(*storage);
+    image_states_.lookup_or_add_default(image).add(state);
+    /* `node_shader_tex_image.cc:100`: UDIM only for a tiled image with a flat projection, and the
+     * mapping array adds a second sampler (`gpu_codegen.cc:238-239`). */
+    if (image->source == IMA_SRC_TILED && storage->projection == SHD_PROJ_FLAT) {
+      tiled_states_.lookup_or_add_default(image).add(state);
+    }
+  }
+
+  public:
+  void visit_tree(const bNodeTree &tree)
+  {
+    /* `directly_linked_links` reads the topology cache, so build it before walking backwards. */
+    tree.ensure_topology_cache();
+    for (const bNode &node : tree.nodes) {
+      if (node_is_output(node)) {
+        visit_node(node);
+      }
+    }
+  }
+
+  /** Visit \a tree but do not descend into \a skip_group, whose rows are counted separately. */
+  void visit_tree_skipping(const bNodeTree &tree, const bNodeTree *skip_group)
+  {
+    skip_group_ = skip_group;
+    visit_tree(tree);
+    skip_group_ = nullptr;
+  }
+
+  /** Add one image sampler for \a image, in \a state (the generator's default by default). */
+  void add_image(const Image &image, const uint32_t state = default_image_sampler_state())
+  {
+    image_states_.lookup_or_add_default(&image).add(state);
+  }
+
+  /** Add every baked map of \a layer: each is an Image Texture with the default sampler state. */
+  void add_baked_maps(const MaterialPaintLayer &layer)
+  {
+    if (layer.bake == nullptr) {
+      return;
+    }
+    for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      if (layer.bake->images[i] != nullptr) {
+        add_image(*layer.bake->images[i]);
+      }
+    }
+    if (layer.bake->coverage != nullptr) {
+      add_image(*layer.bake->coverage);
+    }
+  }
+
+  void add_tree(const bNodeTree &tree)
+  {
+    visit_tree(tree);
+  }
+
+  int total() const
+  {
+    int count = 0;
+    for (const auto &item : image_states_.items()) {
+      count += item.value.size();
+      const Set<uint32_t> *tiled = tiled_states_.lookup_ptr(item.key);
+      if (tiled != nullptr) {
+        for (const uint32_t state : *tiled) {
+          if (item.value.contains(state)) {
+            count += 1;
+          }
+        }
+      }
+    }
+    if (has_colorband_) {
+      count += 1;
+    }
+    if (has_sky_) {
+      count += 1;
+    }
+    return count;
+  }
+};
+
+/** Count the samplers reachable from \a tree's own output nodes. */
+static int sampler_count_tree(const bNodeTree &tree)
+{
+  SamplerCounter counter;
+  counter.visit_tree(tree);
+  return counter.total();
+}
+
+/** Remove any forced-bake marker of \a ma; used before recomputing the fallback from scratch. */
+static void forced_bake_clear(const Material &ma)
+{
+  sampler_runtime().forced_bake.remove(ma.id.session_uid);
+}
+
+/** The markers \a ma's last pass pinned, before #forced_bake_clear drops them for this pass. */
+static Vector<bUUID> forced_bake_markers(const Material &ma)
+{
+  const Vector<bUUID> *markers = sampler_runtime().forced_bake.lookup_ptr(ma.id.session_uid);
+  return (markers != nullptr) ? *markers : Vector<bUUID>();
+}
+
+static void forced_bake_add(const Material &ma, const bUUID &marker)
+{
+  sampler_runtime().forced_bake.lookup_or_add_default(ma.id.session_uid).append(marker);
+}
+
+static void forced_bake_remove(const Material &ma, const bUUID &marker)
+{
+  Vector<bUUID> *markers = sampler_runtime().forced_bake.lookup_ptr(ma.id.session_uid);
+  if (markers == nullptr) {
+    return;
+  }
+  for (int i = 0; i < markers->size(); i++) {
+    if (BLI_uuid_equal((*markers)[i], marker)) {
+      markers->remove(i);
+      return;
+    }
+  }
+}
+
+/** \} */
+
 }  // namespace
+
+int BKE_paint_layers_sampler_count(const Material &ma)
+{
+  if (ma.nodetree == nullptr) {
+    return 0;
+  }
+  return sampler_count_tree(*ma.nodetree);
+}
+
+bool BKE_paint_layers_material_forced_bake(const Material &ma, const MaterialPaintLayer &layer)
+{
+  return forced_bake_contains(ma, layer.marker);
+}
+
+void BKE_paint_layers_sampler_state_free(const Material &ma)
+{
+  sampler_runtime().forced_bake.remove(ma.id.session_uid);
+  sampler_runtime().cleanup_owners.remove(ma.id.session_uid);
+}
+
+void BKE_paint_layers_sampler_budget_set(const int budget, const int max_textures)
+{
+  sampler_runtime().budget = budget;
+  sampler_runtime().max_textures = max_textures;
+}
+
+int BKE_paint_layers_sampler_budget_get()
+{
+  return sampler_runtime().budget;
+}
+
+int BKE_paint_layers_sampler_max_get()
+{
+  return sampler_runtime().max_textures;
+}
+
+static void values_sync_with_cache(Material &ma, const PaintLayersRegenCache *cache);
 
 bool BKE_paint_layers_regenerate(Main &bmain,
                                  Material &ma,
@@ -3741,7 +4193,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
 
   /* The Normal chain needs the shared combine group; create it only when a Normal row exists. */
   PaintLayersBuildContext ctx;
-  {
+  /* What this call learns once (a source's resolve, a row's mode, the Pass Through scales) and hands
+   * to every reader below. It lives and dies with this call; nothing keeps it between two. */
+  PaintLayersRegenCache regen_cache;
+  ctx.regen_cache = &regen_cache;  {
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
@@ -3751,11 +4206,393 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       }
     }
   }
+  /* Capture the previous pass's forced set, then drop it before anything reads a mode so the
+   * fallback re-derives it from scratch and lifts as soon as the budget allows. A row that was pinned
+   * and whose bake has since gone invalid is carried forward below: it stays on its stale maps until
+   * a fresh bake lands, instead of reviving live and forcing a rebuild loop. */
+  const Vector<bUUID> previously_forced = forced_bake_markers(ma);
+  forced_bake_clear(ma);
+  sampler_runtime().cleanup_owners.remove(ma.id.session_uid);
+
+  /* Wrapper groups for Material rows that show their whole source graph. The factory needs #Main
+   * and runs on the main thread, so it is prepared here, like the Normal combine group, and handed
+   * to the pure build. Each row's mode and, for SourceGroup, whether the wrapper was built are
+   * recorded for the report; a refused source keeps its row on the baked maps. */
+  Map<const Material *, bNodeTree *> source_groups;
+  Map<const Material *, PaintLayersSourceGroupRefusal> source_group_refusals;
+  bool source_groups_changed = false;
+  /* Re-runnable: the sampler fallback changes some rows' modes, so the report is rebuilt once the
+   * final forced set is known. Wrappers are cached, so a second call does not rebuild them. */
+  auto populate_material_rows = [&]() {
+    report.material_rows.clear();
+    Vector<const MaterialPaintLayer *> layers;
+    BKE_paint_layers_flatten(ma, layers);
+    for (const MaterialPaintLayer *layer : layers) {
+      if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL) {
+        continue;
+      }
+      const PaintLayerMaterialMode mode = BKE_paint_layers_material_mode(ma, *layer, &regen_cache);
+      PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
+      bool wrapper_built = false;
+      int group_depth = 0;
+      if (mode == PaintLayerMaterialMode::SourceGroup && layer->material != nullptr) {
+        ChannelUnavailableReason path_reason = ChannelUnavailableReason::None;
+        Vector<const bNode *> path;
+        if (BKE_paint_material_principled_find(*layer->material, path_reason, &path) != nullptr) {
+          group_depth = int(path.size());
+        }
+        bNodeTree *wrapper = nullptr;
+        if (bNodeTree *const *found = source_groups.lookup_ptr(layer->material)) {
+          wrapper = *found;
+          refusal = source_group_refusals.lookup_default(layer->material,
+                                                         PaintLayersSourceGroupRefusal::None);
+        }
+        else {
+          bool wrapper_changed = false;
+          wrapper = BKE_paint_layers_source_group_ensure(
+              bmain, ma, *layer->material, refusal, &wrapper_changed);
+          source_groups_changed |= wrapper_changed;
+          source_groups.add(layer->material, wrapper);
+          source_group_refusals.add(layer->material, refusal);
+          if (wrapper == nullptr &&
+              report.source_group_refusal == PaintLayersSourceGroupRefusal::None)
+          {
+            report.source_group_refusal = refusal;
+          }
+        }
+        wrapper_built = wrapper != nullptr;
+      }
+      PaintLayersRegenerateReport::MaterialRowModeReport row;
+      row.marker = layer->marker;
+      STRNCPY(row.name, layer->name);
+      row.mode = mode;
+      row.refusal = refusal;
+      row.wrapper_built = wrapper_built;
+      row.group_depth = group_depth;
+      row.source_name[0] = '\0';
+      row.source_uid = 0;
+      if (layer->material != nullptr) {
+        STRNCPY(row.source_name, layer->material->id.name + 2);
+        row.source_uid = layer->material->id.session_uid;
+      }
+      row.deferred = BKE_paint_layers_bake_row_is_deferred(ma, *layer);
+      if (BKE_paint_layers_material_forced_bake(ma, *layer)) {
+        row.refusal = PaintLayersSourceGroupRefusal::TooManyTextures;
+      }
+      report.material_rows.append(row);
+    }
+  };
+  populate_material_rows();
+  /* Named: #FunctionRef does not own the callable, so a temporary lambda would dangle. */
+  const auto source_group_lookup = [&source_groups](const Material &source) -> bNodeTree * {
+    return source_groups.lookup_default(&source, nullptr);
+  };
+  ctx.source_group_get = source_group_lookup;
+
+  /* The sampler budget is runtime state; zero disables the check. The decision is made from an
+   * estimate over the description -- never by building a preview -- so it does not mutate the layer
+   * groups. It must run before `paint_layers_wired_channels`: the fallback moves some rows' modes,
+   * and the wired set, every layer group's topology hash and the root hash are computed from the
+   * final modes, or a second pass would see a different graph and loop. */
+  const int budget = sampler_runtime().budget;
+  int sampler_count = 0;
+  int sampler_estimate_value = 0;
+  int fallback_rows = 0;
+  int removed_hidden = 0;
+
+  /* A non-mutating estimate of the samplers the built graph would use: user nodes outside the stack
+   * plus the rows' own sources, maps, corrections and baked maps. Shared images dedup by
+   * `(Image, sampler state)` exactly as the counter and EEVEE do, and the parity rules -- which rows
+   * a mode substitutes, which children an isolating folder expands -- come from the same predicates
+   * the build uses, so the estimate tracks the graph rather than a copy of the rules. */
+  auto sampler_estimate = [&]() -> int {
+    SamplerCounter counter;
+    if (ma.nodetree != nullptr) {
+      counter.visit_tree_skipping(*ma.nodetree, ma.paint_layers_tree);
+    }
+
+    /* A correction's maps are built at most once per row, so adding each one once is enough. A
+     * Constant (Fill) correction builds a group input, not a map: a stale image on it is ignored by
+     * the build and must not be counted. */
+    auto add_corrections = [&](const MaterialPaintLayer &layer) {
+      for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(layer)) {
+        if (BKE_paint_layers_source_type(*effect) == PaintLayerSourceType::Constant) {
+          continue;
+        }
+        for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+          if (Image *image = paint_layer_channel_image(*effect, channel)) {
+            counter.add_image(*image);
+          }
+        }
+      }
+      for (const MaterialPaintLayer *mask_item : BKE_paint_layers_mask_items(layer)) {
+        if (BKE_paint_layers_source_type(*mask_item) == PaintLayerSourceType::Constant) {
+          continue;
+        }
+        if (Image *image = paint_layer_mask_correction_image(*mask_item, 0)) {
+          counter.add_image(*image);
+        }
+      }
+    };
+
+    /* The state a Hybrid live map is shown with: the generator copies the source node's storage, so
+     * the key has to come from that node, not from the default. */
+    auto live_image_state = [&](const MaterialPaintLayer &layer, const int channel) {
+      const MaterialSourceResolve &resolve = regen_cache.resolve(layer.material);
+      if (const bNode *source_node = resolve.images[channel].node) {
+        if (const NodeTexImage *storage = static_cast<const NodeTexImage *>(source_node->storage)) {
+          return image_sampler_state_key(*storage);
+        }
+      }
+      return default_image_sampler_state();
+    };
+
+    /* Whether the wrapper exposes a COVERAGE output: when it does, the build reads the row's factor
+     * from the wrapper and never builds the baked coverage map. */
+    auto wrapper_has_coverage = [&](const Material *source) -> bool {
+      bNodeTree *wrapper = (source != nullptr) ? source_group_lookup(*source) : nullptr;
+      if (wrapper == nullptr) {
+        return false;
+      }
+      wrapper->ensure_interface_cache();
+      for (bNodeTreeInterfaceSocket *iface : wrapper->interface_outputs()) {
+        const char *role = custom_role_get(iface->properties);
+        if (role != nullptr && STREQ(role, "COVERAGE")) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    /* Walk the stack so a dropped Pass Through folder takes its whole inlined subtree with it; a
+     * flat list cannot tell that an enabled child sits under a removed folder. Returns whether
+     * anything under \a list contributes a sampler: the build drops a row with no channel, no live
+     * value and no wrapper, and then builds neither its coverage nor its corrections, so the
+     * estimate must not count them either. */
+    std::function<bool(const ListBase &)> walk = [&](const ListBase &list) -> bool {
+      bool any = false;
+      for (const MaterialPaintLayer &layer :
+           *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
+      {
+        if (row_is_removed(ma, layer)) {
+          continue;
+        }
+        if (BKE_paint_layers_folder_is_pass_through(ma, layer)) {
+          /* Inlined: the folder's own corrections are not built, only its children's. */
+          any |= walk(layer.children);
+          continue;
+        }
+        const bool is_folder = BKE_paint_layers_is_folder(layer);
+        if (row_is_substituted(ma, layer)) {
+          /* The generator replaces the whole row with its bake (`row_is_substituted`), so the build
+           * expands no children and builds no corrections. This is the same predicate the build's
+           * value-input path uses. */
+          counter.add_baked_maps(layer);
+          any = true;
+          continue;
+        }
+        const PaintLayerMaterialMode mode = (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) ?
+                                                BKE_paint_layers_material_mode(
+                                                    ma, layer, &regen_cache) :
+                                                PaintLayerMaterialMode::Baked;
+        bool participates = false;
+        bool any_substituted = false;
+        for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+          Image *baked = nullptr;
+          if (row_channel_substituted(ma, layer, channel, &baked) && baked != nullptr) {
+            /* A per-channel cache (a Custom row's stale bake) replaces just this channel. */
+            counter.add_image(*baked);
+            any_substituted = true;
+            participates = true;
+            continue;
+          }
+          if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL && layer.material != nullptr) {
+            if (mode == PaintLayerMaterialMode::SourceGroup) {
+              /* One wrapper instance serves every channel; the visitor dedups its tree. */
+              if (bNodeTree *wrapper = source_group_lookup(*layer.material)) {
+                counter.add_tree(*wrapper);
+                participates = true;
+              }
+              /* No wrapper (refused): the build falls back to the row's own maps. */
+              else if (Image *image = paint_layer_channel_image(layer, channel)) {
+                counter.add_image(*image);
+                participates = true;
+              }
+              continue;
+            }
+            /* Hybrid shows a live constant (no sampler), a live map, or the row's baked map. */
+            float live_value[4];
+            Image *live_image = nullptr;
+            const ImageUser *live_iuser = nullptr;
+            if (BKE_paint_layers_material_live_constant(
+                    ma, layer, channel, live_value, &regen_cache))
+            {
+              participates = true;
+              continue;
+            }
+            if (BKE_paint_layers_material_live_image(
+                    ma, layer, channel, &live_image, &live_iuser, &regen_cache))
+            {
+              counter.add_image(*live_image, live_image_state(layer, channel));
+              participates = true;
+              continue;
+            }
+          }
+          if (Image *image = paint_layer_channel_image(layer, channel)) {
+            counter.add_image(*image);
+            participates = true;
+          }
+        }
+        if (is_folder) {
+          participates |= walk(layer.children);
+        }
+        if (participates) {
+          if (any_substituted && layer.bake != nullptr && layer.bake->coverage != nullptr) {
+            counter.add_image(*layer.bake->coverage);
+          }
+          if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL && layer.bake != nullptr &&
+              layer.bake->coverage != nullptr &&
+              !(mode == PaintLayerMaterialMode::SourceGroup &&
+                wrapper_has_coverage(layer.material)))
+          {
+            /* The row's factor falls back to the baked coverage when the source's alpha is not
+             * shown live and the wrapper has no COVERAGE output: a live constant needs no sampler, a
+             * live image is counted in its own channel, and a wrapper coverage is in the wrapper. */
+            float live_alpha_value[4];
+            Image *live_alpha_image = nullptr;
+            const ImageUser *live_alpha_iuser = nullptr;
+            const bool live_alpha =
+                BKE_paint_layers_material_live_constant(
+                    ma, layer, PAINT_MATERIAL_CHANNEL_ALPHA, live_alpha_value, &regen_cache) ||
+                BKE_paint_layers_material_live_image(ma,
+                                                     layer,
+                                                     PAINT_MATERIAL_CHANNEL_ALPHA,
+                                                     &live_alpha_image,
+                                                     &live_alpha_iuser,
+                                                     &regen_cache);
+            if (!live_alpha) {
+              counter.add_image(*layer.bake->coverage);
+            }
+          }
+          add_corrections(layer);
+        }
+        any |= participates;
+      }
+      return any;
+    };
+    walk(ma.paint_layers);
+    return counter.total();
+  };
+
+  sampler_estimate_value = sampler_estimate();
+  if (budget > 0 && sampler_estimate_value > budget) {
+    /* 1. Drop disabled rows. A hidden Pass Through folder only leaves under pressure: without it
+     *    its children stay in the graph with factor zero, which is the value-edit behavior. */
+    bool any_disabled = false;
+    {
+      Vector<const MaterialPaintLayer *> all_layers;
+      BKE_paint_layers_flatten(ma, all_layers);
+      for (const MaterialPaintLayer *layer : all_layers) {
+        if ((layer->flag & MA_PAINT_LAYER_ENABLED) == 0) {
+          any_disabled = true;
+          break;
+        }
+      }
+    }
+    if (any_disabled) {
+      sampler_runtime().cleanup_owners.add(ma.id.session_uid);
+      removed_rows_reconcile(ma);
+      sampler_estimate_value = sampler_estimate();
+    }
+    /* 2. Keep a row pinned last pass on its stale maps while its bake is rebuilt. It must not revive
+     *    live: that would rebuild the root on every source edit and re-enter the bake on the next
+     *    pass -- the bake -> hash -> regeneration -> bake loop this state exists to break. */
+    for (const bUUID &marker : previously_forced) {
+      MaterialPaintLayer *layer = BKE_paint_layers_find(ma, marker);
+      if (layer == nullptr || layer->kind != MA_PAINT_LAYER_KIND_MATERIAL ||
+          layer->bake == nullptr || BKE_paint_layers_bake_is_valid(ma, *layer) ||
+          forced_bake_contains(ma, marker))
+      {
+        continue;
+      }
+      forced_bake_add(ma, marker);
+      sampler_estimate_value = sampler_estimate();
+    }
+    /* 3. Pin live SourceGroup rows onto their maps, largest sampler saving first. Only a pin that
+     *    lowers the count is taken: pinning a row whose baked maps cost more than its live graph
+     *    would raise the count instead. Ties break on the marker so the choice is deterministic. */
+    if (sampler_estimate_value > budget) {
+      struct FallbackCandidate {
+        int gain = 0;
+        bUUID marker = {};
+      };
+      Vector<FallbackCandidate> candidates;
+      Vector<const MaterialPaintLayer *> all_layers;
+      BKE_paint_layers_flatten(ma, all_layers);
+      for (const MaterialPaintLayer *layer : all_layers) {
+        if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL || layer->material == nullptr ||
+            layer->bake == nullptr || !BKE_paint_layers_bake_is_valid(ma, *layer) ||
+            BKE_paint_layers_material_mode(ma, *layer, &regen_cache) !=
+                PaintLayerMaterialMode::SourceGroup ||
+            source_group_lookup(*layer->material) == nullptr ||
+            forced_bake_contains(ma, layer->marker))
+        {
+          continue;
+        }
+        /* Probe the row: measure the count with it pinned, then undo the pin. */
+        const int before = sampler_estimate_value;
+        forced_bake_add(ma, layer->marker);
+        const int after = sampler_estimate();
+        forced_bake_remove(ma, layer->marker);
+        if (before > after) {
+          candidates.append({before - after, layer->marker});
+        }
+      }
+      std::sort(candidates.begin(),
+                candidates.end(),
+                [](const FallbackCandidate &a, const FallbackCandidate &b) {
+                  if (a.gain != b.gain) {
+                    return a.gain > b.gain;
+                  }
+                  char a_text[UUID_STRING_SIZE];
+                  char b_text[UUID_STRING_SIZE];
+                  BLI_uuid_format(a_text, a.marker);
+                  BLI_uuid_format(b_text, b.marker);
+                  return strcmp(a_text, b_text) < 0;
+                });
+      for (const FallbackCandidate &candidate : candidates) {
+        if (sampler_estimate_value <= budget) {
+          break;
+        }
+        forced_bake_add(ma, candidate.marker);
+        fallback_rows++;
+        /* The baked maps add samplers back, so re-estimate after every pin. */
+        sampler_estimate_value = sampler_estimate();
+      }
+    }
+    report.sampler_budget_exceeded = sampler_estimate_value > budget;
+    Vector<const MaterialPaintLayer *> all_layers;
+    BKE_paint_layers_flatten(ma, all_layers);
+    for (const MaterialPaintLayer *layer : all_layers) {
+      if ((layer->flag & MA_PAINT_LAYER_ENABLED) == 0 && row_is_removed(ma, *layer)) {
+        removed_hidden++;
+      }
+    }
+  }
+  /* From here the forced set is final, so a row's mode can be remembered: every reader below asks it
+   * many times per row (the wired set, each layer's hash, the build, the report). Before this point
+   * the fallback was still moving modes, and a remembered one would have outlived the move. */
+  regen_cache.modes_frozen = true;
+  /* The modes may have moved (forced bake, hidden cleanup): refresh the report before building. */
+  populate_material_rows();
+  material_row_modes_log(ma, report.material_rows);
+
   /* The factory hands each layer a tree of its own, reusing an old one by layer marker. It outlives
    * the build, which only holds a non-owning reference to it. A reused tree whose stored topology
    * hash matches the description is handed back untouched and reported as unchanged, so the build
-   * only restores the parent-side links and never re-creates its nodes. */
-  const Vector<int> wired_channels = paint_layers_wired_channels(ma);
+   * only restores the parent-side links and never re-creates its nodes. Wired channels and the layer
+   * tree hashes are read here, after the fallback fixed every row's mode. */
+  const Vector<int> wired_channels = paint_layers_wired_channels(ma, &regen_cache);
   Set<const MaterialPaintLayer *> unchanged_layers;
   Vector<bNodeTree *> used_layer_trees;
   Map<const MaterialPaintLayer *, bNodeTree *> layer_trees;
@@ -3764,16 +4601,13 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   auto layer_tree_get = [&](const MaterialPaintLayer &layer) -> bNodeTree * {
     char name[MAX_ID_NAME - 2];
     if (BKE_paint_layers_is_folder(layer)) {
-      SNPRINTF(name,
-               ".PL Folder %s",
-               layer.name[0] != '\0' ? layer.name : "Folder");
+      SNPRINTF(name, ".PL Folder %s", layer.name[0] != '\0' ? layer.name : "Folder");
     }
     else {
-      SNPRINTF(name,
-               ".PL Layer %s",
-               layer.name[0] != '\0' ? layer.name : "Layer");
+      SNPRINTF(name, ".PL Layer %s", layer.name[0] != '\0' ? layer.name : "Layer");
     }
-    const uint64_t topology = paint_layers_layer_topology_hash(ma, layer, wired_channels);
+    const uint64_t topology = paint_layers_layer_topology_hash(
+        ma, layer, wired_channels, &regen_cache);
     for (bNodeTree *candidate : old_layer_trees) {
       if (used_layer_trees.contains(candidate)) {
         continue;
@@ -3826,85 +4660,15 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   ctx.layer_tree_get = layer_tree_get;
   ctx.layer_tree_unchanged = layer_tree_unchanged;
 
-  /* Wrapper groups for Material rows that show their whole source graph. The factory needs #Main
-   * and runs on the main thread, so it is prepared here, like the Normal combine group, and handed
-   * to the pure build. Each row's mode and, for SourceGroup, whether the wrapper was built are
-   * recorded for the report; a refused source keeps its row on the baked maps. */
-  Map<const Material *, bNodeTree *> source_groups;
-  Map<const Material *, PaintLayersSourceGroupRefusal> source_group_refusals;
-  bool source_groups_changed = false;
-  {
-    Vector<const MaterialPaintLayer *> layers;
-    BKE_paint_layers_flatten(ma, layers);
-    for (const MaterialPaintLayer *layer : layers) {
-      if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL) {
-        continue;
-      }
-      const PaintLayerMaterialMode mode = BKE_paint_layers_material_mode(ma, *layer);
-      PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
-      bool wrapper_built = false;
-      int group_depth = 0;
-      if (mode == PaintLayerMaterialMode::SourceGroup && layer->material != nullptr) {
-        ChannelUnavailableReason path_reason = ChannelUnavailableReason::None;
-        Vector<const bNode *> path;
-        if (BKE_paint_material_principled_find(*layer->material, path_reason, &path) != nullptr) {
-          group_depth = int(path.size());
-        }
-        bNodeTree *wrapper = nullptr;
-        if (bNodeTree *const *found = source_groups.lookup_ptr(layer->material)) {
-          wrapper = *found;
-          refusal = source_group_refusals.lookup_default(layer->material,
-                                                         PaintLayersSourceGroupRefusal::None);
-        }
-        else {
-          bool wrapper_changed = false;
-          wrapper = BKE_paint_layers_source_group_ensure(
-              bmain, ma, *layer->material, refusal, &wrapper_changed);
-          source_groups_changed |= wrapper_changed;
-          source_groups.add(layer->material, wrapper);
-          source_group_refusals.add(layer->material, refusal);
-          if (wrapper == nullptr &&
-              report.source_group_refusal == PaintLayersSourceGroupRefusal::None)
-          {
-            report.source_group_refusal = refusal;
-          }
-        }
-        wrapper_built = wrapper != nullptr;
-      }
-      PaintLayersRegenerateReport::MaterialRowModeReport row;
-      row.marker = layer->marker;
-      STRNCPY(row.name, layer->name);
-      row.mode = mode;
-      row.refusal = refusal;
-      row.wrapper_built = wrapper_built;
-      row.group_depth = group_depth;
-      row.source_name[0] = '\0';
-      row.source_uid = 0;
-      if (layer->material != nullptr) {
-        STRNCPY(row.source_name, layer->material->id.name + 2);
-        row.source_uid = layer->material->id.session_uid;
-      }
-      row.deferred = BKE_paint_layers_bake_row_is_deferred(ma, *layer);
-      report.material_rows.append(row);
-    }
-  }
-  material_row_modes_log(ma, report.material_rows);
-  /* Named: #FunctionRef does not own the callable, so a temporary lambda would dangle. */
-  const auto source_group_lookup = [&source_groups](const Material &source) -> bNodeTree * {
-    return source_groups.lookup_default(&source, nullptr);
-  };
-  ctx.source_group_get = source_group_lookup;
-
-  /* Build into a scratch tree first: this rebuilds the groups whose hash changed (in place) and
-   * gives us their final interfaces, without touching the real root. The root is kept if its
-   * content hash still matches; then the scratch is simply discarded. */
+  /* Build once with the final modes and cleanup. This rebuilds the groups whose hash moved (in
+   * place) and gives their final interfaces without touching the real root. */
   bNodeTree *scratch = bke::node_tree_add_tree(&bmain, "PBR Layers Scratch", "ShaderNodeTree");
   bNodeTree &build_target = (scratch != nullptr) ? *scratch : *tree;
   paint_layers_tree_build(ma, build_target, ctx);
-  /* The scratch build may have grown a group's interface (a new effect or mask). Every instance of
-   * that group, in the real root included, must have matching sockets before any tree update: an
-   * update of a layer tree also visits the trees that use it, and the node tree update's interface
-   * pass assumes an instance's inputs line up with its group's interface. */
+  /* The build may have grown a group's interface (a new effect or mask). Every instance of that
+   * group, in the real root included, must have matching sockets before any tree update: an update
+   * of a layer tree also visits the trees that use it, and the node tree update's interface pass
+   * assumes an instance's inputs line up with its group's interface. */
   {
     Set<bNodeTree *> refreshed;
     refresh_generated_instances(*tree, ma.paint_layers_owner_uid, refreshed);
@@ -3916,7 +4680,9 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     BKE_ntree_update_after_single_tree_change(bmain, *layer_tree);
     DEG_id_tag_update(&layer_tree->id, ID_RECALC_SYNC_TO_EVAL);
   }
-  const uint64_t root_hash = paint_layers_root_topology_hash(ma, wired_channels, layer_trees);
+
+  const uint64_t root_hash = paint_layers_root_topology_hash(
+      ma, wired_channels, layer_trees, &regen_cache);
   uint64_t stored_root = 0;
   const bool have_stored_root = !created_tree && tree_root_hash_get(*tree, stored_root);
   /* Undo safety net: a row recorded as removed but enabled again (memfile undo preserves the row
@@ -4030,7 +4796,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   /* Source-group wrappers are pruned by the same rule: no row of this owner reads their source any
    * more, so nothing keeps them. */
   source_groups_prune(bmain, ma);
-  source_group_instances_log(ma, layer_trees, source_groups);
+  source_group_instances_log(ma, layer_trees, source_groups, &regen_cache);
 
   /* The instance: found by marker, re-pointed when it names a different tree. */
   bNode *instance = instance_find(ma, ma.paint_layers_owner_uid);
@@ -4062,17 +4828,50 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   }
   BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
 
+  /* The owner's own node tree is rewritten from here. Only a row that reads its owner as its source
+   * could have cached an answer about it, but dropping it costs one resolve and is always right. */
+  regen_cache.invalidate_for_owner(ma);
   principled_ensure(ma, report);
   wire_instance_to_material(ma, *tree, *instance, report);
-  BKE_paint_layers_values_sync(ma);
+  values_sync_with_cache(ma, &regen_cache);
 
   BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
+
+  /* One calibration line per structural rebuild: it tells the user what to set the reserved sampler
+   * budget from. `over` is the count above the budget, or zero when the check is off. The count is
+   * taken only now, after the stack instance is wired to the Principled: only then is the generated
+   * graph reachable from a Material Output, so the count sees the user's own nodes, the stack, every
+   * layer group and the wrappers -- exactly what EEVEE will allocate. Comparing it with the
+   * description estimate is the calibration check for the counter and the estimate. */
+  /* Re-derive the estimate now that the build reconciled the removed rows: the fallback may have
+   * dropped disabled rows, and only the post-build removed set knows them. Reported unconditionally
+   * so a caller (and the tests) can compare it with the finished count. */
+  sampler_estimate_value = sampler_estimate();
+  report.sampler_estimate = sampler_estimate_value;
+  if (!keep_root) {
+    const int max_textures = sampler_runtime().max_textures;
+    sampler_count = BKE_paint_layers_sampler_count(ma);
+    const int estimate = sampler_estimate_value;
+    const int over = (budget > 0 && sampler_count > budget) ? sampler_count - budget : 0;
+    printf("paint layers samplers: material='%s' count=%d estimate=%d budget=%d max=%d over=%d "
+           "fallback_rows=%d removed_hidden=%d%s.\n",
+           ma.id.name + 2,
+           sampler_count,
+           estimate,
+           budget,
+           max_textures,
+           over,
+           fallback_rows,
+           removed_hidden,
+           (sampler_count != estimate) ? " MISMATCH" : "");
+  }
 
   /* Debug-only: a kept root's interface must still be exactly what a full build would produce, so
    * its value inputs and every group's interface signature hash the same as before. values_sync
    * only writes socket values, never topology. */
   if (keep_root) {
-    const uint64_t recheck = paint_layers_root_topology_hash(ma, wired_channels, layer_trees);
+    const uint64_t recheck = paint_layers_root_topology_hash(
+        ma, wired_channels, layer_trees, &regen_cache);
     BLI_assert_msg(recheck == stored_root, "a kept root's interface drifted");
     UNUSED_VARS(recheck);
   }
@@ -4191,7 +4990,8 @@ namespace {
 bool values_sync_socket(Material &ma,
                         bNode &instance,
                         const bNodeTreeInterfaceSocket &iface,
-                        bNodeSocket &socket)
+                        bNodeSocket &socket,
+                        const PaintLayersRegenCache *cache)
 {
   const char *role = prop_string_get(iface.properties, INPUT_ROLE_PROP);
   if (role == nullptr) {
@@ -4212,7 +5012,7 @@ bool values_sync_socket(Material &ma,
     }
     static_cast<bNodeSocketValueFloat *>(socket.default_value)->value =
         BKE_paint_layers_channel_opacity_effective(*layer, channel) *
-        pass_through_scale_of(ma, *layer);
+        pass_through_scale_of(ma, *layer, cache);
     return true;
   }
   if (STREQ(role, ROLE_FILL)) {
@@ -4258,7 +5058,8 @@ bool values_sync_socket(Material &ma,
 void values_sync_instance(Material &ma,
                           bNodeTree &parent_tree,
                           bNode &instance,
-                          Set<bNodeTree *> &r_written)
+                          Set<bNodeTree *> &r_written,
+                          const PaintLayersRegenCache *cache)
 {
   bNodeTree *group_tree = id_cast<bNodeTree *>(instance.id);
   if (group_tree == nullptr) {
@@ -4275,7 +5076,7 @@ void values_sync_instance(Material &ma,
     if (socket == nullptr) {
       continue;
     }
-    wrote |= values_sync_socket(ma, instance, *iface, *socket);
+    wrote |= values_sync_socket(ma, instance, *iface, *socket, cache);
   }
   if (wrote) {
     r_written.add(&parent_tree);
@@ -4286,13 +5087,18 @@ void values_sync_instance(Material &ma,
     {
       continue;
     }
-    values_sync_instance(ma, *group_tree, node, r_written);
+    values_sync_instance(ma, *group_tree, node, r_written, cache);
   }
 }
 
 }  // namespace
 
 void BKE_paint_layers_values_sync(Material &ma)
+{
+  values_sync_with_cache(ma, nullptr);
+}
+
+static void values_sync_with_cache(Material &ma, const PaintLayersRegenCache *cache)
 {
   /* Custom parameters live on the description, not in the generated tree (a Custom layer has no
    * instance there); give missing ones their socket defaults before syncing the rest. */
@@ -4305,7 +5111,7 @@ void BKE_paint_layers_values_sync(Material &ma)
   /* The values live on each layer group's instance, in the root generated tree or a folder's tree,
    * never in the material's embedded tree any more (session 10e). */
   Set<bNodeTree *> written;
-  values_sync_instance(ma, *ma.nodetree, *instance, written);
+  values_sync_instance(ma, *ma.nodetree, *instance, written, cache);
   for (bNodeTree *tree : written) {
     DEG_id_tag_update(&tree->id, ID_RECALC_SYNC_TO_EVAL);
   }

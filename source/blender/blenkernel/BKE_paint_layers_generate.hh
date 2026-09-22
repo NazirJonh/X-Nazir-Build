@@ -16,6 +16,7 @@ namespace blender {
 struct Main;
 struct Material;
 struct MaterialPaintLayer;
+struct PaintLayersRegenCache;
 struct PaintModeSettings;
 struct bNode;
 struct bNodeTree;
@@ -66,6 +67,12 @@ struct PaintLayersBuildContext {
    * #PaintLayerMaterialMode::SourceGroup falls back to its baked maps.
    */
   FunctionRef<bNodeTree *(const Material &source)> source_group_get;
+  /**
+   * Optional: what the regeneration that runs this build has already learned (a source's resolve, a
+   * row's mode, the Pass Through scales). A caller that is not a regeneration leaves it null and
+   * every question is answered afresh.
+   */
+  const PaintLayersRegenCache *regen_cache = nullptr;
 };
 
 /**
@@ -78,7 +85,8 @@ struct PaintLayersBuildContext {
  */
 uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const MaterialPaintLayer &layer,
-                                          Span<int> wired_channels);
+                                          Span<int> wired_channels,
+                                          const PaintLayersRegenCache *cache = nullptr);
 
 /**
  * Fill an empty \a tree with the stack \a ma's description stands for, bottom to top, one output
@@ -112,6 +120,8 @@ enum class PaintLayersSourceGroupRefusal : int8_t {
   SelfReference,
   /** The wrapper could not be assembled (an internal build failure). */
   BuildFailed,
+  /** The row was live but the material's sampler budget forced it onto its baked maps. */
+  TooManyTextures,
 };
 
 /** Non-fatal notes the generator produced while regenerating a material. */
@@ -134,6 +144,17 @@ struct PaintLayersRegenerateReport {
   /** The depsgraph relations had to be rebuilt: a generated group or a Material row's source
    * material appeared or disappeared since the last regeneration. */
   bool relations_changed = false;
+  /**
+   * The sampler count is still above the runtime budget after every fallback, so EEVEE will likely
+   * refuse the material. The graph is left as it is -- dropping rows would change the picture
+   * silently -- and the caller is expected to warn.
+   */
+  bool sampler_budget_exceeded = false;
+  /**
+   * The sampler count the description estimates for the built graph, before any fallback. Tests and
+   * the calibration line compare it with #BKE_paint_layers_sampler_count of the finished material.
+   */
+  int sampler_estimate = 0;
 
   /** Per Material row: its marker, the mode it was built in and, for SourceGroup, why the
    * wrapper was refused. Diagnostic: the mode is otherwise invisible from outside. */
@@ -258,5 +279,50 @@ bool BKE_paint_layers_row_removed_clear(Material &ma, const bUUID &marker);
 
 /** Force the next regenerate to rebuild the root even if its topology hash still matches. */
 void BKE_paint_layers_root_hash_invalidate(Material &ma);
+
+/* -------------------------------------------------------------------- */
+/** \name Sampler budget
+ *
+ * EEVEE draws a whole material with one shader whose sampler count is bounded by
+ * `GPU_max_textures()`. Blenkernel never calls the GPU, so the budget is a runtime value the
+ * editor sets once the GPU is initialized; zero means "do not check" (background mode, tests).
+ * \{ */
+
+/**
+ * Sampler slots EEVEE reserves for its own textures before it hands the rest to material textures.
+ *
+ * #eevee::SlotAllocator counts the *occupied* bits of the engine's create-infos, so the budget must
+ * subtract a count, not the highest slot index. The generator can run under any material pipeline,
+ * so the number is the most any surface pipeline can reserve. The EEVEE slot table
+ * (`eevee_defines.hh`: `RBUFS_UTILITY_TEX_SLOT`=2 .. `GBUF_HEADER_TEX_SLOT`=19) declares 18 texture
+ * slots; slots 0 and 1 belong to `draw_gpencil` and are never reserved by a material. The worst-case
+ * deferred material fills all of them, so 18 is both the maximum a pipeline can occupy and the safe
+ * (slightly conservative) value for a lighter forward pass. The `over=` field of the
+ * `paint layers samplers:` line is the calibration signal when a driver reports a smaller value.
+ */
+constexpr int PAINT_LAYERS_EEVEE_RESERVED_SAMPLERS = 18;
+
+/**
+ * Set the runtime sampler budget. `budget` is the number of samplers material textures may use
+ * (`GPU_max_textures() - PAINT_LAYERS_EEVEE_RESERVED_SAMPLERS`); zero disables the check. `max` is
+ * `GPU_max_textures()`, carried only so the regeneration line can print it.
+ */
+void BKE_paint_layers_sampler_budget_set(int budget, int max_textures);
+
+/** The current budget; zero means the check is off. */
+int BKE_paint_layers_sampler_budget_get();
+
+/** The `GPU_max_textures()` value reported with the budget, or zero when never set. */
+int BKE_paint_layers_sampler_max_get();
+
+/**
+ * The number of unique GPU samplers EEVEE would allocate for \a ma's node graph, following only
+ * nodes reachable from a Material Output. Mirrors `gpu_node_graph.cc`: image textures dedup by
+ * `(Image, sampler state)`, tiled images add a mapping sampler, every colorband node shares one
+ * texture, Nishita sky shares one, and IES contributes none.
+ */
+int BKE_paint_layers_sampler_count(const Material &ma);
+
+/** \} */
 
 }  // namespace blender

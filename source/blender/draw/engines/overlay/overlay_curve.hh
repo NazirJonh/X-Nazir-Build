@@ -69,7 +69,7 @@ class Curves : Overlay {
 
     symmetry_plane_.begin_sync(res,
                                state,
-                               state.ctx_mode == CTX_MODE_EDIT_CURVES &&
+                               !res.is_selection() && state.ctx_mode == CTX_MODE_EDIT_CURVES &&
                                    state.show_curves_symmetry_plane(),
                                state.overlay.sculpt_symmetry_plane_opacity);
 

@@ -966,8 +966,12 @@ void Instance::draw_v3d(Manager &manager, View &view)
     layer.grease_pencil.draw_color_only(framebuffer, manager, view);
   };
 
-  {
-    /* Render pass. Draws directly on render result (instead of overlay result). */
+  if (!resources.is_selection()) {
+    /* Render pass. Draws directly on render result (instead of overlay result).
+     * Skipped during selection: there is no render color target in the select loop
+     * (Resources::render_fb / render_in_front_fb stay nullptr by design, only a depth-only
+     * select framebuffer exists), so any draw_on_render() here would bind a null framebuffer.
+     * Selection uses the overlay line / prepass paths with select IDs instead. */
     /* TODO(fclem): Split overlay and rename draw functions. */
     regular.cameras.draw_scene_background_images(resources.render_fb, manager, view);
     infront.cameras.draw_scene_background_images(resources.render_in_front_fb, manager, view);

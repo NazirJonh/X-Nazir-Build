@@ -59,6 +59,8 @@ namespace blender::draw {
  * The one between left and right handles. */
 #define EDIT_CURVES_BEZIER_KNOT (1u << 3)
 #define EDIT_CURVES_HANDLE_TYPES_SHIFT (4u)
+/* Set above the handle type bits, for points and handles of hidden elements. */
+#define EDIT_CURVES_HIDDEN (1u << 8)
 
 /* ---------------------------------------------------------------------- */
 /** \name Curve Normals Visualization Utilities
@@ -367,6 +369,42 @@ static void create_edit_points_data(const OffsetIndices<int> points_by_curve,
 
   extract_edit_data(
       points_by_curve, nurbs_curves, selection, true, EDIT_CURVES_NURBS_CONTROL_POINT, data);
+
+  /* Hidden state is folded into the same flags so that the overlay needs no extra vertex buffer.
+   * Curve visibility is already flushed to the point domain by #bke::curves::hide_curve_flush. */
+  const VArray<bool> hide_point_varray = *attributes.lookup<bool>(".hide_point",
+                                                                  bke::AttrDomain::Point);
+  if (hide_point_varray.is_empty()) {
+    return;
+  }
+  const VArraySpan<bool> hide_point(hide_point_varray);
+
+  threading::parallel_for(IndexRange(points_num), 4096, [&](const IndexRange range) {
+    for (const int point : range) {
+      if (hide_point[point]) {
+        data[point] |= EDIT_CURVES_HIDDEN;
+      }
+    }
+  });
+
+  if (!bezier_curves.is_empty()) {
+    MutableSpan data_left = data.slice(handle_range_left(points_num, bezier_offsets));
+    MutableSpan data_right = data.slice(handle_range_right(points_num, bezier_offsets));
+
+    bezier_curves.foreach_index(
+        [&](const int curve, const int64_t pos) {
+          const IndexRange points = points_by_curve[curve];
+          const IndexRange bezier_range = bezier_offsets[pos];
+          for (const int i : points.index_range()) {
+            if (hide_point[points[i]]) {
+              const int bezier_point = bezier_range[i];
+              data_left[bezier_point] |= EDIT_CURVES_HIDDEN;
+              data_right[bezier_point] |= EDIT_CURVES_HIDDEN;
+            }
+          }
+        },
+        exec_mode::grain_size(256));
+  }
 }
 
 static void create_edit_points_position(const bke::CurvesGeometry &curves,

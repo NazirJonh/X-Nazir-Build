@@ -991,6 +991,42 @@ static bool rna_MaterialPaintLayer_bake_is_valid_get(PointerRNA *ptr)
   return ma != nullptr && BKE_paint_layers_bake_is_valid(*ma, *layer);
 }
 
+/* Read-only observation of #BKE_paint_layers_material_live_status: the panel and the Outliner
+ * share this one answer instead of reimplementing the mode and bake predicates. */
+static int rna_MaterialPaintLayer_live_status_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  if (ma == nullptr) {
+    return int(PaintLayerMaterialLiveStatus::Baked);
+  }
+  return int(BKE_paint_layers_material_live_status(*ma, *layer));
+}
+
+static void rna_MaterialPaintLayer_live_status_refusal_reason_get(PointerRNA *ptr, char *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
+  if (ma != nullptr) {
+    BKE_paint_layers_material_live_status(*ma, *layer, &refusal);
+  }
+  if (refusal == PaintLayersSourceGroupRefusal::None) {
+    value[0] = '\0';
+    return;
+  }
+  BLI_strncpy(value,
+              BKE_paint_layers_source_group_refusal_name(refusal),
+              sizeof(char) * 64);
+}
+
+static int rna_MaterialPaintLayer_live_status_refusal_reason_length(PointerRNA *ptr)
+{
+  char value[64];
+  rna_MaterialPaintLayer_live_status_refusal_reason_get(ptr, value);
+  return int(strlen(value));
+}
+
 static void rna_MaterialPaintLayer_bake_request(PointerRNA ptr)
 {
   MaterialPaintLayer *layer = nullptr;
@@ -1636,6 +1672,19 @@ static const EnumPropertyItem rna_enum_material_paint_layer_effect_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Values match #PaintLayerMaterialLiveStatus. */
+static const EnumPropertyItem rna_enum_material_paint_layer_live_status_items[] = {
+    {0, "LIVE", 0, "Live", "The row shows its source material live"},
+    {1, "BAKING", 0, "Baking", "The row is live while its bake is being rendered"},
+    {2, "BAKED", 0, "Baked", "The row shows its baked maps"},
+    {3,
+     "REFUSED",
+     0,
+     "Refused",
+     "The live source could not be wrapped; the row shows its baked maps instead"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* Values match #eMaterialPaintLayerBakeMode. */
 static const EnumPropertyItem rna_enum_material_paint_layer_bake_mode_items[] = {
     {MA_PAINT_LAYER_BAKE_AUTO,
@@ -1886,6 +1935,28 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Bake Is Valid", "Whether the stored bake still matches the row's description");
+
+  /* Read-only: computed from the row's mode, bake readiness and wrapper refusal. */
+  prop = RNA_def_property(srna, "live_status", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_live_status_items);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayer_live_status_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Live Status",
+      "Whether a Material row shows its source live, is waiting for its bake, "
+      "shows its baked maps, or was refused a live wrapper");
+
+  prop = RNA_def_property(srna, "live_status_refusal_reason", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayer_live_status_refusal_reason_get",
+                                "rna_MaterialPaintLayer_live_status_refusal_reason_length",
+                                nullptr);
+  RNA_def_property_string_maxlength(prop, 64);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Live Status Refusal Reason",
+                           "Why a Refused Material row shows its baked maps instead of its source");
 
   func = RNA_def_function(srna, "bake_request", "rna_MaterialPaintLayer_bake_request");
   RNA_def_function_ui_description(

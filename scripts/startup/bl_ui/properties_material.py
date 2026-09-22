@@ -708,8 +708,17 @@ class LAYER_MATERIAL_PT_source_material(LayerMaterialButtonsPanel, Panel):
         row = col.row()
         row.enabled = layer.material is not None
         row.operator("material.paint_layer_rebake", text="Rebake", icon='FILE_REFRESH')
-        if layer.bake_mode != 'NEVER' and not layer.bake_is_valid:
-            layout.label(text="Baking...", icon='RENDER_STILL')
+        # One RNA answer for the row's state; the Outliner stack shows the same property.
+        status = layer.live_status
+        if status == 'REFUSED':
+            reason = layer.live_status_refusal_reason
+            layout.label(text="Refused: " + (reason if reason else "unknown"), icon='ERROR')
+        elif status == 'BAKING':
+            layout.label(text="Baking...", icon='FILE_REFRESH')
+        elif status == 'BAKED':
+            layout.label(text="Baked", icon='IMAGE_DATA')
+        else:
+            layout.label(text="Live", icon='HIDE_OFF')
 
 
 class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):

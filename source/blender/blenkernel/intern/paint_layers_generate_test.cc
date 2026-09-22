@@ -5553,6 +5553,123 @@ TEST_F(PaintLayersGenerateTest, sampler_runtime_state_is_dropped_with_its_materi
   EXPECT_FALSE(BKE_paint_layers_material_forced_bake(*revived, *revived_row));
 }
 
+/**
+ * ТЗ-23: #BKE_paint_layers_material_live_status answers what the UI shows for a Material row --
+ * the same function the RNA getter calls. Live while the row shows its source (SourceGroup and
+ * Hybrid), Baking while it stays live only because its bake cannot be shown yet, Baked on valid
+ * maps, and Refused with the wrapper refusal when the source cannot be wrapped. Every status is
+ * reached through the real mode and bake predicates on real rows, not fabricated inputs.
+ */
+TEST_F(PaintLayersGenerateTest, material_row_live_status)
+{
+  /* The refusal names the UI prints after "Refused: ". */
+  EXPECT_STREQ(BKE_paint_layers_source_group_refusal_name(
+                   PaintLayersSourceGroupRefusal::NoPrincipled),
+               "no-principled");
+  EXPECT_STREQ(BKE_paint_layers_source_group_refusal_name(
+                   PaintLayersSourceGroupRefusal::TooManyTextures),
+               "too-many-textures");
+
+  /* Live in SourceGroup: a Noise graph the CPU cannot reproduce, shown from the wrapper. */
+  Material *noise_source = add_principled_source("StatusNoiseSource", 0.5f);
+  source_set_noise_base_color(*bmain, *noise_source);
+  MaterialPaintLayer *live_row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "StatusLive", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(live_row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, live_row, noise_source));
+  BKE_paint_layers_active_set(*ma, live_row->marker);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *live_row),
+            PaintLayerMaterialMode::SourceGroup);
+  PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::BuildFailed;
+  EXPECT_EQ(BKE_paint_layers_material_live_status(*ma, *live_row, &refusal),
+            PaintLayerMaterialLiveStatus::Live);
+  EXPECT_EQ(refusal, PaintLayersSourceGroupRefusal::None);
+
+  /* Live in Hybrid: a plain Principled resolves every channel to a constant. */
+  Material *const_source = add_principled_source("StatusConstSource", 0.3f);
+  MaterialPaintLayer *hybrid_row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "StatusHybrid", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(hybrid_row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, hybrid_row, const_source));
+  BKE_paint_layers_active_set(*ma, hybrid_row->marker);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *hybrid_row), PaintLayerMaterialMode::Hybrid);
+  EXPECT_EQ(BKE_paint_layers_material_live_status(*ma, *hybrid_row, &refusal),
+            PaintLayerMaterialLiveStatus::Live);
+  EXPECT_EQ(refusal, PaintLayersSourceGroupRefusal::None);
+
+  /* Baking: out of the active chain, handed over but still claimed by the job. */
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  material_bake_hand_over_all_channels(
+      *bmain, *ma, *live_row, *noise_source, *this, "StatusMap");
+  material_bake_claim(*live_row, true);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *live_row),
+            PaintLayerMaterialMode::SourceGroup);
+  ASSERT_FALSE(BKE_paint_layers_material_bake_ready(*ma, *live_row));
+  EXPECT_EQ(BKE_paint_layers_material_live_status(*ma, *live_row, &refusal),
+            PaintLayerMaterialLiveStatus::Baking);
+  EXPECT_EQ(refusal, PaintLayersSourceGroupRefusal::None);
+
+  /* Baked: the claim is released and the render finalizes the bake. */
+  material_bake_claim(*live_row, false);
+  BKE_paint_layers_bake_finalize(*ma, *live_row);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *live_row));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *live_row), PaintLayerMaterialMode::Baked);
+  EXPECT_EQ(BKE_paint_layers_material_live_status(*ma, *live_row, &refusal),
+            PaintLayerMaterialLiveStatus::Baked);
+  EXPECT_EQ(refusal, PaintLayersSourceGroupRefusal::None);
+
+  /* Refused: a source with no Principled cannot be wrapped, so the row keeps its maps. */
+  Material *empty_source = BKE_material_add(bmain, "StatusEmptySource");
+  MaterialPaintLayer *refused_row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "StatusRefused", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(refused_row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, refused_row, empty_source));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *refused_row), PaintLayerMaterialMode::Baked);
+  EXPECT_EQ(BKE_paint_layers_material_live_status(*ma, *refused_row, &refusal),
+            PaintLayerMaterialLiveStatus::Refused);
+  EXPECT_EQ(refusal, PaintLayersSourceGroupRefusal::NoPrincipled);
+}
+
+/**
+ * ТЗ-27: freeing a material drops the generator's runtime state keyed by its `session_uid`, so a
+ * reused uid cannot inherit the removed-rows set. The per-marker clear is the observable probe: it
+ * reports whether the marker is still recorded.
+ */
+TEST_F(PaintLayersGenerateTest, removed_rows_state_is_dropped_with_its_material)
+{
+  /* Two disabled rows: the witness proves the reconcile recorded, the probe survives the delete.
+   * Clearing consumes the marker it finds, so one marker cannot serve both roles -- and a second
+   * regeneration is not guaranteed to reconcile again, so the probe must stay untouched. */
+  MaterialPaintLayer *probe = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "GoneProbe", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *witness = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "GoneWitness", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(probe, nullptr);
+  ASSERT_NE(witness, nullptr);
+  const bUUID marker = probe->marker;
+  const uint32_t uid = ma->id.session_uid;
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, probe, false));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, witness, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The disables were recorded. */
+  EXPECT_TRUE(BKE_paint_layers_row_removed_clear(*ma, witness->marker));
+
+  BKE_id_delete(bmain, ma);
+  ma = nullptr;
+
+  /* A fresh material reusing the uid must not inherit the probe's entry. */
+  Material *revived = BKE_material_add(bmain, "RevivedLayered");
+  revived->paint_layers_flag |= MA_PAINT_LAYERED;
+  revived->id.session_uid = uid;
+  MaterialPaintLayer *revived_row = BKE_paint_layers_add(
+      *revived, MA_PAINT_LAYER_KIND_PAINT, "GoneProbe", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(revived_row, nullptr);
+  revived_row->marker = marker;
+  EXPECT_FALSE(BKE_paint_layers_row_removed_clear(*revived, marker))
+      << "a reused session_uid inherited the freed material's removed-rows entry";
+}
+
 /** \} */
 
 }  // namespace blender::bke::tests

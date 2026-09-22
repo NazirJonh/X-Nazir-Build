@@ -41,6 +41,7 @@
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -512,6 +513,36 @@ void paint_stack_rows_from_description_impl(const Material &material,
               copy_v4_v4(fill_swatch.color, layer.fill_color);
               fill_swatch.label = IFACE_("Fill Color");
               row.preview_slots.append(std::move(fill_swatch));
+            }
+            if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) {
+              /* The row's live state: one BKE answer the Source Material panel reads too, through
+               * RNA. Compact: an icon with the full status in its tooltip. */
+              StackRowPreview live_slot;
+              PaintLayersSourceGroupRefusal live_refusal =
+                  PaintLayersSourceGroupRefusal::None;
+              const PaintLayerMaterialLiveStatus live_status =
+                  BKE_paint_layers_material_live_status(material, layer, &live_refusal);
+              switch (live_status) {
+                case PaintLayerMaterialLiveStatus::Live:
+                  live_slot.icon = ICON_HIDE_OFF;
+                  live_slot.label = IFACE_("Live");
+                  break;
+                case PaintLayerMaterialLiveStatus::Baking:
+                  live_slot.icon = ICON_FILE_REFRESH;
+                  live_slot.label = IFACE_("Baking...");
+                  break;
+                case PaintLayerMaterialLiveStatus::Baked:
+                  live_slot.icon = ICON_IMAGE_DATA;
+                  live_slot.label = IFACE_("Baked");
+                  break;
+                case PaintLayerMaterialLiveStatus::Refused:
+                  live_slot.icon = ICON_ERROR;
+                  live_slot.label = "Refused: " +
+                                    std::string(BKE_paint_layers_source_group_refusal_name(
+                                        live_refusal));
+                  break;
+              }
+              row.preview_slots.append(std::move(live_slot));
             }
 
             StackContentSection channels;

@@ -124,6 +124,39 @@ enum class PaintLayersSourceGroupRefusal : int8_t {
   TooManyTextures,
 };
 
+/** What the user sees for a Material row: its mode, refined by whether the bake is still in
+ * flight and why the live source was refused. Computed from the existing mode and bake
+ * predicates, never stored. */
+enum class PaintLayerMaterialLiveStatus : int8_t {
+  /** SourceGroup or Hybrid, and no bake is running: what is shown is the source. */
+  Live = 0,
+  /** SourceGroup or Hybrid only because the bake cannot be shown yet: a map is being rendered. */
+  Baking = 1,
+  /** Baked, and the bake is what is shown. */
+  Baked = 2,
+  /** The live source could not be wrapped, so the row shows its baked maps instead. */
+  Refused = 3,
+};
+
+/** Human-readable name of a #PaintLayersSourceGroupRefusal (`none`, `no-node-tree`, ...). */
+const char *BKE_paint_layers_source_group_refusal_name(
+    const PaintLayersSourceGroupRefusal refusal);
+
+/**
+ * The status of \a layer for the UI: #BKE_paint_layers_material_mode refined by
+ * #BKE_paint_layers_material_bake_ready, #BKE_paint_layers_bake_row_is_deferred and the
+ * Main-free refusal checks of #BKE_paint_layers_source_group_ensure. Read-only observation:
+ * it never changes what the generator or the bake would do.
+ *
+ * \param r_refusal: the refusal behind a #PaintLayerMaterialLiveStatus::Refused answer,
+ *                   #PaintLayersSourceGroupRefusal::None otherwise. May be null.
+ */
+PaintLayerMaterialLiveStatus BKE_paint_layers_material_live_status(
+    const Material &ma,
+    const MaterialPaintLayer &layer,
+    PaintLayersSourceGroupRefusal *r_refusal = nullptr,
+    const PaintLayersRegenCache *cache = nullptr);
+
 /** Non-fatal notes the generator produced while regenerating a material. */
 struct PaintLayersRegenerateReport {
   /** A group input the generator owns had been detached and was linked again. */
@@ -279,6 +312,14 @@ bool BKE_paint_layers_row_removed_clear(Material &ma, const bUUID &marker);
 
 /** Force the next regenerate to rebuild the root even if its topology hash still matches. */
 void BKE_paint_layers_root_hash_invalidate(Material &ma);
+
+/**
+ * Drop the generator's runtime state keyed by \a ma's `session_uid`: the removed-rows set and the
+ * mode/embed diagnostic maps. Called when the material is freed so a reused uid cannot inherit
+ * another material's entries; the reconcile rebuilds what a live material needs on its next
+ * regeneration. Mirrors #BKE_paint_layers_bake_runtime_free and #BKE_paint_layers_sampler_state_free.
+ */
+void BKE_paint_layers_generate_runtime_free(const Material &ma);
 
 /* -------------------------------------------------------------------- */
 /** \name Sampler budget

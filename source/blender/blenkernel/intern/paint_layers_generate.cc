@@ -3657,23 +3657,7 @@ const char *material_mode_name(const PaintLayerMaterialMode mode)
 
 const char *source_group_refusal_name(const PaintLayersSourceGroupRefusal refusal)
 {
-  switch (refusal) {
-    case PaintLayersSourceGroupRefusal::None:
-      return "none";
-    case PaintLayersSourceGroupRefusal::NoNodeTree:
-      return "no-node-tree";
-    case PaintLayersSourceGroupRefusal::NoPrincipled:
-      return "no-principled";
-    case PaintLayersSourceGroupRefusal::PrincipledInGroup:
-      return "principled-in-group";
-    case PaintLayersSourceGroupRefusal::SelfReference:
-      return "self-reference";
-    case PaintLayersSourceGroupRefusal::BuildFailed:
-      return "build-failed";
-    case PaintLayersSourceGroupRefusal::TooManyTextures:
-      return "too-many-textures";
-  }
-  return "unknown";
+  return BKE_paint_layers_source_group_refusal_name(refusal);
 }
 
 /**
@@ -4176,6 +4160,16 @@ void BKE_paint_layers_sampler_state_free(const Material &ma)
 {
   sampler_runtime().forced_bake.remove(ma.id.session_uid);
   sampler_runtime().cleanup_owners.remove(ma.id.session_uid);
+}
+
+void BKE_paint_layers_generate_runtime_free(const Material &ma)
+{
+  removed_rows_state().remove(ma.id.session_uid);
+#if PAINT_LAYERS_DEBUG_LOG
+  /* The diagnostic maps only exist with the log on; in a quiet build there is nothing to drop. */
+  previous_row_modes().remove(ma.id.session_uid);
+  previous_source_group_embeds().remove(ma.id.session_uid);
+#endif
 }
 
 void BKE_paint_layers_sampler_budget_set(const int budget, const int max_textures)
@@ -5957,12 +5951,101 @@ static int source_group_values_sync_tree(Main &bmain,
 
 /** \} */
 
+const char *BKE_paint_layers_source_group_refusal_name(
+    const PaintLayersSourceGroupRefusal refusal)
+{
+  switch (refusal) {
+    case PaintLayersSourceGroupRefusal::None:
+      return "none";
+    case PaintLayersSourceGroupRefusal::NoNodeTree:
+      return "no-node-tree";
+    case PaintLayersSourceGroupRefusal::NoPrincipled:
+      return "no-principled";
+    case PaintLayersSourceGroupRefusal::PrincipledInGroup:
+      return "principled-in-group";
+    case PaintLayersSourceGroupRefusal::SelfReference:
+      return "self-reference";
+    case PaintLayersSourceGroupRefusal::BuildFailed:
+      return "build-failed";
+    case PaintLayersSourceGroupRefusal::TooManyTextures:
+      return "too-many-textures";
+  }
+  return "unknown";
+}
+
+/**
+ * The Main-free refusal behind a Baked row: the same checks #BKE_paint_layers_source_group_ensure
+ * runs before it touches #Main, so the UI names the same reason the regeneration reports. A live
+ * row needs no probe: its wrapper was built or is not needed, and the sampler fallback already
+ * reports Baked through #BKE_paint_layers_material_mode.
+ */
+static PaintLayersSourceGroupRefusal material_row_refusal_probe(const Material &ma,
+                                                                const MaterialPaintLayer &layer)
+{
+  if (layer.kind != MA_PAINT_LAYER_KIND_MATERIAL) {
+    return PaintLayersSourceGroupRefusal::None;
+  }
+  if (BKE_paint_layers_material_forced_bake(ma, layer)) {
+    return PaintLayersSourceGroupRefusal::TooManyTextures;
+  }
+  const Material *source = layer.material;
+  if (source == nullptr) {
+    return PaintLayersSourceGroupRefusal::None;
+  }
+  if (source == &ma) {
+    return PaintLayersSourceGroupRefusal::SelfReference;
+  }
+  if (source->nodetree == nullptr) {
+    return PaintLayersSourceGroupRefusal::NoNodeTree;
+  }
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  Vector<const bNode *> group_path;
+  if (BKE_paint_material_principled_find(*source, reason, &group_path) == nullptr) {
+    return PaintLayersSourceGroupRefusal::NoPrincipled;
+  }
+  if (int(group_path.size()) > PAINT_LAYERS_SOURCE_GROUP_MAX_DEPTH) {
+    return PaintLayersSourceGroupRefusal::PrincipledInGroup;
+  }
+  return PaintLayersSourceGroupRefusal::None;
+}
+
+PaintLayerMaterialLiveStatus BKE_paint_layers_material_live_status(
+    const Material &ma,
+    const MaterialPaintLayer &layer,
+    PaintLayersSourceGroupRefusal *r_refusal,
+    const PaintLayersRegenCache *cache)
+{
+  const PaintLayerMaterialMode mode = BKE_paint_layers_material_mode(ma, layer, cache);
+  PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
+  if (mode == PaintLayerMaterialMode::Baked) {
+    refusal = material_row_refusal_probe(ma, layer);
+  }
+  if (r_refusal != nullptr) {
+    *r_refusal = refusal;
+  }
+  if (refusal != PaintLayersSourceGroupRefusal::None) {
+    return PaintLayerMaterialLiveStatus::Refused;
+  }
+  if (mode == PaintLayerMaterialMode::Baked) {
+    return PaintLayerMaterialLiveStatus::Baked;
+  }
+  /* Live because the bake cannot be shown yet, while the row is out of the active chain: the maps
+   * are still being rendered (or stale), so what is shown is the source until they land. */
+  if (layer.bake != nullptr && layer.bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
+      !BKE_paint_layers_bake_row_is_deferred(ma, layer) &&
+      !BKE_paint_layers_material_bake_ready(ma, layer))
+  {
+    return PaintLayerMaterialLiveStatus::Baking;
+  }
+  return PaintLayerMaterialLiveStatus::Live;
+}
+
 bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
-                                                Material &owner,
-                                                Material &source,
-                                                PaintLayersSourceGroupRefusal &r_refusal,
-                                                bool *r_changed,
-                                                bool *r_values_synced)
+                                                 Material &owner,
+                                                 Material &source,
+                                                 PaintLayersSourceGroupRefusal &r_refusal,
+                                                 bool *r_changed,
+                                                 bool *r_values_synced)
 {
   if (r_changed != nullptr) {
     *r_changed = false;

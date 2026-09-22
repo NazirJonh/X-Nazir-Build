@@ -151,6 +151,7 @@ static void material_paint_layers_free(Material &material)
 {
   BKE_paint_layers_bake_runtime_free(material);
   BKE_paint_layers_sampler_state_free(material);
+  BKE_paint_layers_generate_runtime_free(material);
   for (MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(material.paint_layers.first);
        layer != nullptr;)
   {

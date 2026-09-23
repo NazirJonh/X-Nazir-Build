@@ -1287,10 +1287,14 @@ TEST_F(PaintLayersGenerateTest, root_holds_only_instances_and_chain_ends)
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   /* Base Color only: the root keeps the group I/O, the channel's bottom constant and the group
-   * instances. A Normal channel would add its decode-normalize-encode Vector Math at the end. */
+   * instances. A Normal channel would add its decode-normalize-encode Vector Math at the end.
+   * F2-B adds the Base Color content-alpha chain (Value/Math) and its final Compose Color Alpha
+   * before the Result output. */
   for (bNode &node : ma->paint_layers_tree->nodes) {
     const bool allowed = node.is_group_input() || node.is_group_output() || node.is_group() ||
-                         node.type_legacy == SH_NODE_RGB;
+                         node.type_legacy == SH_NODE_RGB || node.type_legacy == SH_NODE_VALUE ||
+                         node.type_legacy == SH_NODE_MATH ||
+                         node.type_legacy == SH_NODE_COMPOSE_COLOR_ALPHA;
     EXPECT_TRUE(allowed) << node.idname;
   }
 }

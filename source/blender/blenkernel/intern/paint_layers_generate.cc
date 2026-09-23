@@ -561,6 +561,9 @@ struct ChainLayer {
   /** What the Mix/Combine factor links from: the opacity, or opacity times a mask map's alpha. */
   bNode *factor_node = nullptr;
   bNodeSocket *factor = nullptr;
+  /** Float chain for content alpha (Base Color only). Null when not tracked (treat as 1.0). */
+  bNode *content_alpha_node = nullptr;
+  bNodeSocket *content_alpha = nullptr;
 };
 
 /** A chain's result plus, for a folder's contents, the coverage it accumulated. */
@@ -569,6 +572,9 @@ struct ChainResult {
   /** The node owning #coverage; null for the root chain, which carries no coverage. */
   bNode *coverage_node = nullptr;
   bNodeSocket *coverage = nullptr;
+  /** Scalar content alpha, parallel to coverage. Null when no Paint leaf contributes alpha. */
+  bNode *content_alpha_node = nullptr;
+  bNodeSocket *content_alpha = nullptr;
 };
 
 /**
@@ -590,6 +596,9 @@ struct RowResult {
   /** For a folder row, the coverage its contents accumulated; null otherwise. */
   bNode *folder_coverage_node = nullptr;
   bNodeSocket *folder_coverage = nullptr;
+  /** For a folder row, the content alpha its contents accumulated; null otherwise. */
+  bNode *folder_content_alpha_node = nullptr;
+  bNodeSocket *folder_content_alpha = nullptr;
   /** True when the row was built inside its own layer group, not in the parent. */
   bool grouped = false;
   bNode *group_instance = nullptr;
@@ -597,6 +606,7 @@ struct RowResult {
   bNodeSocket *group_below = nullptr;
   bNodeSocket *group_color = nullptr;
   bNodeSocket *group_coverage = nullptr;
+  bNodeSocket *group_content_alpha = nullptr;
   bNodeSocket *group_blend = nullptr;
   bNodeSocket *group_result = nullptr;
 };
@@ -1508,6 +1518,8 @@ void paint_layers_tree_build(const Material &ma,
     result.group_coverage = instance_socket("Coverage", true);
     result.group_blend = instance_socket("Blend", true);
     result.group_result = instance_socket("Result", true);
+    /* Optional: only present when the group tracked a content alpha (Base Color Paint content). */
+    result.group_content_alpha = instance_socket("Content Alpha", true);
     result.current.layer = &layer;
     result.grouped = true;
     result.valid = result.group_instance != nullptr && result.group_below != nullptr &&
@@ -1560,6 +1572,13 @@ void paint_layers_tree_build(const Material &ma,
     bNodeSocket *folder_source = nullptr;
     bNode *folder_coverage_node = nullptr;
     bNodeSocket *folder_coverage = nullptr;
+    bNode *folder_content_alpha_node = nullptr;
+    bNodeSocket *folder_content_alpha = nullptr;
+
+    /* Content alpha is tracked only for Base Color (F2-B): the leaf supplies it, the isolating
+     * folder divides the premultiplied accumulation by coverage, and the final Result composes it
+     * back. Every other channel leaves the chain null, so nothing is built and nothing changes. */
+    const bool track_content_alpha = (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR);
 
     std::function<ChainResult(const ListBase &, ChainLayer, bool, const RowTarget &)> build_list =
         [&](const ListBase &list,
@@ -1570,6 +1589,8 @@ void paint_layers_tree_build(const Material &ma,
       bNodeTree &tree = *parent_target.tree;
       bNode *coverage_node = nullptr;
       bNodeSocket *coverage = nullptr;
+      bNode *content_alpha_node = nullptr;
+      bNodeSocket *content_alpha = nullptr;
       if (premul) {
         bNode *zero = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
         if (zero != nullptr) {
@@ -1690,6 +1711,30 @@ void paint_layers_tree_build(const Material &ma,
           folder_source = div_out;
           folder_coverage_node = sub.coverage_node;
           folder_coverage = sub.coverage;
+          /* The content alpha is accumulated beside the premultiplied colour, so it is straightened
+           * the same way: S_alpha = P_alpha / a. A null accumulation means no Paint leaf tracked an
+           * alpha here, so the chain stays null and no Content Alpha socket is built. */
+          folder_content_alpha_node = nullptr;
+          folder_content_alpha = nullptr;
+          if (track_content_alpha && sub.content_alpha != nullptr) {
+            bNode *alpha_divide = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+            bNodeSocket *ad_a = (alpha_divide != nullptr) ? socket_in(*alpha_divide, "Value") :
+                                                            nullptr;
+            bNodeSocket *ad_b = (alpha_divide != nullptr) ? socket_in(*alpha_divide, "Value_001") :
+                                                            nullptr;
+            bNodeSocket *ad_out = (alpha_divide != nullptr) ? socket_out(*alpha_divide, "Value") :
+                                                              nullptr;
+            if (ad_out != nullptr) {
+              alpha_divide->custom1 = NODE_MATH_DIVIDE;
+              alpha_divide->location[0] = location_x;
+              alpha_divide->location[1] = location_y - 400.0f;
+              bke::node_add_link(
+                  tree, *sub.content_alpha_node, *sub.content_alpha, *alpha_divide, *ad_a);
+              bke::node_add_link(tree, *sub.coverage_node, *sub.coverage, *alpha_divide, *ad_b);
+              folder_content_alpha_node = alpha_divide;
+              folder_content_alpha = ad_out;
+            }
+          }
         }
         else if (!substituted && !BKE_paint_layers_is_folder(*layer) &&
                  !leaf_participates(*layer, channel) && !live_constant &&
@@ -1858,6 +1903,8 @@ void paint_layers_tree_build(const Material &ma,
           /* The folder's own row: its source is the isolated sub-chain, not a map. */
           current.source_node = folder_source_node;
           current.source = folder_source;
+          current.content_alpha_node = folder_content_alpha_node;
+          current.content_alpha = folder_content_alpha;
         }
         else if (image != nullptr) {
           bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
@@ -1871,6 +1918,12 @@ void paint_layers_tree_build(const Material &ma,
           current.source_node = map;
           current.source = socket_out(*map, "Color");
           leaf_map_node = map;
+          /* A Paint map carries its content alpha in the Image Texture Alpha output; it starts the
+           * content-alpha chain here rather than being read back out of the Color's own alpha. */
+          if (track_content_alpha && layer->kind == MA_PAINT_LAYER_KIND_PAINT) {
+            current.content_alpha_node = map;
+            current.content_alpha = socket_out(*map, "Alpha");
+          }
         }
         else {
           const MaterialPaintLayerChannel *entry = paint_layer_channel_find(*layer, channel);
@@ -1878,6 +1931,26 @@ void paint_layers_tree_build(const Material &ma,
             current.opacity_node = group_input;
             current.source_node = group_input;
             current.source = group_input_socket(**fill_iface);
+          }
+          /* A Paint constant's alpha is the constant colour's `.a`, the same number the RGB Fill
+           * input carries; it is frozen into a Value so the content-alpha chain has a scalar leaf. */
+          if (track_content_alpha && layer->kind == MA_PAINT_LAYER_KIND_PAINT &&
+              current.source != nullptr)
+          {
+            float constant[4];
+            paint_layer_channel_constant(*layer, channel, constant);
+            bNode *alpha_value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+            bNodeSocket *alpha_out = (alpha_value != nullptr) ? socket_out(*alpha_value, "Value") :
+                                                                nullptr;
+            if (alpha_value != nullptr && alpha_out != nullptr &&
+                alpha_out->default_value != nullptr)
+            {
+              alpha_value->location[0] = location_x - 90.0f;
+              alpha_value->location[1] = location_y - 40.0f;
+              static_cast<bNodeSocketValueFloat *>(alpha_out->default_value)->value = constant[3];
+              current.content_alpha_node = alpha_value;
+              current.content_alpha = alpha_out;
+            }
           }
         }
       }
@@ -2676,6 +2749,17 @@ void paint_layers_tree_build(const Material &ma,
               "Blend", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT);
           bNodeTreeInterfaceSocket *result_iface = add_group_socket(
               "Result", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT);
+          /* A private scalar output for the content alpha. Only when this row tracks one (a Base
+           * Color Paint leaf or a folder with tracked content); absent otherwise, so groups for
+           * untracked rows keep the exact contract they had. */
+          bNodeTreeInterfaceSocket *content_alpha_iface = nullptr;
+          if (current.content_alpha != nullptr) {
+            content_alpha_iface = add_group_socket(
+                "Content Alpha", "NodeSocketFloat", NODE_INTERFACE_SOCKET_OUTPUT);
+            if (content_alpha_iface == nullptr) {
+              return {};
+            }
+          }
           if (below_iface == nullptr || color_iface == nullptr || coverage_iface == nullptr ||
               blend_iface == nullptr || result_iface == nullptr)
           {
@@ -2699,8 +2783,16 @@ void paint_layers_tree_build(const Material &ma,
               *layer_group->group_output,
               SOCK_IN,
               UString::from_ptr_noinline(result_iface->identifier));
+          bNodeSocket *content_alpha_out = nullptr;
+          if (content_alpha_iface != nullptr) {
+            content_alpha_out = bke::node_find_socket(
+                *layer_group->group_output,
+                SOCK_IN,
+                UString::from_ptr_noinline(content_alpha_iface->identifier));
+          }
           if (below == nullptr || color_out == nullptr || coverage_out == nullptr ||
-              blend_out == nullptr || result_out == nullptr)
+              blend_out == nullptr || result_out == nullptr ||
+              (content_alpha_iface != nullptr && content_alpha_out == nullptr))
           {
             return {};
           }
@@ -2712,6 +2804,13 @@ void paint_layers_tree_build(const Material &ma,
           }
           else if (coverage_out->default_value != nullptr) {
             static_cast<bNodeSocketValueFloat *>(coverage_out->default_value)->value = 1.0f;
+          }
+          if (content_alpha_out != nullptr) {
+            bke::node_add_link(tree,
+                               *current.content_alpha_node,
+                               *current.content_alpha,
+                               *layer_group->group_output,
+                               *content_alpha_out);
           }
 
           /* blend(Below, Color) at factor one; the parent feeds Below from its own chain. */
@@ -2806,12 +2905,20 @@ void paint_layers_tree_build(const Material &ma,
               *layer_group->instance, SOCK_OUT, UString::from_ptr_noinline(blend_iface->identifier));
           result.group_result = bke::node_find_socket(
               *layer_group->instance, SOCK_OUT, UString::from_ptr_noinline(result_iface->identifier));
+          if (content_alpha_iface != nullptr) {
+            result.group_content_alpha = bke::node_find_socket(
+                *layer_group->instance,
+                SOCK_OUT,
+                UString::from_ptr_noinline(content_alpha_iface->identifier));
+          }
         }
 
         result.valid = true;
         result.current = current;
         result.folder_coverage_node = folder_coverage_node;
         result.folder_coverage = folder_coverage;
+        result.folder_content_alpha_node = folder_content_alpha_node;
+        result.folder_content_alpha = folder_content_alpha;
         return result;
       };
       for (const MaterialPaintLayer &layer_ref :
@@ -2854,6 +2961,8 @@ void paint_layers_tree_build(const Material &ma,
           previous = sub.chain;
           coverage_node = sub.coverage_node;
           coverage = sub.coverage;
+          content_alpha_node = sub.content_alpha_node;
+          content_alpha = sub.content_alpha;
           continue;
         }
         Image *baked_color = nullptr;
@@ -2897,6 +3006,12 @@ void paint_layers_tree_build(const Material &ma,
           current.source = row.group_color;
           current.factor_node = row.group_instance;
           current.factor = row.group_coverage;
+          /* The row's straight content alpha comes from the instance's Content Alpha output when
+           * the group tracked one; an absent output leaves the chain untracked (treat as 1.0).
+           * The inner-tree socket is never kept here, it lives in another tree. */
+          current.content_alpha_node = (row.group_content_alpha != nullptr) ? row.group_instance :
+                                                                              nullptr;
+          current.content_alpha = row.group_content_alpha;
         }
 
       if (premul) {
@@ -3008,7 +3123,130 @@ void paint_layers_tree_build(const Material &ma,
         if (current.factor != nullptr && current.factor_node != nullptr) {
           bke::node_add_link(tree, *current.factor_node, *current.factor, *p_mix, *pm_f);
         }
-        previous = {current.layer, p_mix, pm_out, nullptr, nullptr, nullptr, nullptr};
+        /* The content alpha beside the colour's own alpha: S_a = P_a / a through a Math divide
+         * (safe on zero, next to the Vector divide above), then c_eff_a and P_a like the colour
+         * path: c_eff_a = c_a at Mix, folded with the straight alpha below otherwise, and
+         * P_a = P_a + (c_eff_a - P_a) * f. An untracked row counts as opaque; with no tracked
+         * alpha anywhere nothing is built and the chain stays null. */
+        bNode *content_pa_node = previous.content_alpha_node;
+        bNodeSocket *content_pa = previous.content_alpha;
+        if (track_content_alpha &&
+            (previous.content_alpha != nullptr || current.content_alpha != nullptr))
+        {
+          bNode *below_node = previous.content_alpha_node;
+          bNodeSocket *below = previous.content_alpha;
+          if (below == nullptr) {
+            below_node = coverage_node;
+            below = coverage;
+          }
+          bNode *row_alpha_node = current.content_alpha_node;
+          bNodeSocket *row_a = current.content_alpha;
+          bNode *row_one = nullptr;
+          if (row_a == nullptr) {
+            row_one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+            row_a = (row_one != nullptr) ? socket_out(*row_one, "Value") : nullptr;
+            if (row_a != nullptr && row_a->default_value != nullptr) {
+              static_cast<bNodeSocketValueFloat *>(row_a->default_value)->value = 1.0f;
+            }
+            row_alpha_node = row_one;
+          }
+          bNode *factor_one = nullptr;
+          bNode *factor_node = current.factor_node;
+          bNodeSocket *factor = current.factor;
+          if (factor == nullptr) {
+            factor_one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+            factor = (factor_one != nullptr) ? socket_out(*factor_one, "Value") : nullptr;
+            if (factor != nullptr && factor->default_value != nullptr) {
+              static_cast<bNodeSocketValueFloat *>(factor->default_value)->value = 1.0f;
+            }
+            factor_node = factor_one;
+          }
+          bNode *alpha_div = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+          bNodeSocket *ad_a = (alpha_div != nullptr) ? socket_in(*alpha_div, "Value") : nullptr;
+          bNodeSocket *ad_b = (alpha_div != nullptr) ? socket_in(*alpha_div, "Value_001") :
+                                                       nullptr;
+          bNodeSocket *ad_out = (alpha_div != nullptr) ? socket_out(*alpha_div, "Value") : nullptr;
+          const int row_ramp = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(
+              BKE_paint_layers_channel_blend_effective(*current.layer, channel)));
+          if (below != nullptr && below_node != nullptr && row_a != nullptr &&
+              row_alpha_node != nullptr && factor != nullptr && factor_node != nullptr &&
+              ad_out != nullptr)
+          {
+            alpha_div->custom1 = NODE_MATH_DIVIDE;
+            alpha_div->location[0] = location_x + 240.0f;
+            alpha_div->location[1] = location_y - 520.0f;
+            bke::node_add_link(tree, *below_node, *below, *alpha_div, *ad_a);
+            bke::node_add_link(tree, *coverage_node, *coverage, *alpha_div, *ad_b);
+            /* c_eff_a: the row's own alpha at Mix, folded with the straight alpha below when the
+             * row's blend leaves alpha (every mode but Mix). */
+            bNode *ceff_node = row_alpha_node;
+            bNodeSocket *ceff = row_a;
+            if (row_ramp != MA_RAMP_BLEND) {
+              bNode *csub = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+              bNode *cmul = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+              bNode *cadd = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+              bNodeSocket *cs_a = (csub != nullptr) ? socket_in(*csub, "Value") : nullptr;
+              bNodeSocket *cs_b = (csub != nullptr) ? socket_in(*csub, "Value_001") : nullptr;
+              bNodeSocket *cm_a = (cmul != nullptr) ? socket_in(*cmul, "Value") : nullptr;
+              bNodeSocket *cm_b = (cmul != nullptr) ? socket_in(*cmul, "Value_001") : nullptr;
+              bNodeSocket *ca_a = (cadd != nullptr) ? socket_in(*cadd, "Value") : nullptr;
+              bNodeSocket *ca_b = (cadd != nullptr) ? socket_in(*cadd, "Value_001") : nullptr;
+              bNodeSocket *cs_out = (csub != nullptr) ? socket_out(*csub, "Value") : nullptr;
+              bNodeSocket *cm_out = (cmul != nullptr) ? socket_out(*cmul, "Value") : nullptr;
+              bNodeSocket *ca_out = (cadd != nullptr) ? socket_out(*cadd, "Value") : nullptr;
+              if (cs_out != nullptr && cm_out != nullptr && ca_out != nullptr) {
+                csub->custom1 = NODE_MATH_SUBTRACT;
+                cmul->custom1 = NODE_MATH_MULTIPLY;
+                cadd->custom1 = NODE_MATH_ADD;
+                bke::node_add_link(tree, *alpha_div, *ad_out, *csub, *cs_a);
+                bke::node_add_link(tree, *row_alpha_node, *row_a, *csub, *cs_b);
+                bke::node_add_link(tree, *csub, *cs_out, *cmul, *cm_a);
+                bke::node_add_link(tree, *coverage_node, *coverage, *cmul, *cm_b);
+                bke::node_add_link(tree, *row_alpha_node, *row_a, *cadd, *ca_a);
+                bke::node_add_link(tree, *cmul, *cm_out, *cadd, *ca_b);
+                ceff_node = cadd;
+                ceff = ca_out;
+              }
+            }
+            /* P_a = P_a + (c_eff_a - P_a) * f. */
+            bNode *psub = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+            bNode *pmul = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+            bNode *padd = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+            bNodeSocket *ps_a = (psub != nullptr) ? socket_in(*psub, "Value") : nullptr;
+            bNodeSocket *ps_b = (psub != nullptr) ? socket_in(*psub, "Value_001") : nullptr;
+            bNodeSocket *pm_a2 = (pmul != nullptr) ? socket_in(*pmul, "Value") : nullptr;
+            bNodeSocket *pm_b2 = (pmul != nullptr) ? socket_in(*pmul, "Value_001") : nullptr;
+            bNodeSocket *pa_a = (padd != nullptr) ? socket_in(*padd, "Value") : nullptr;
+            bNodeSocket *pa_b = (padd != nullptr) ? socket_in(*padd, "Value_001") : nullptr;
+            bNodeSocket *ps_out = (psub != nullptr) ? socket_out(*psub, "Value") : nullptr;
+            bNodeSocket *pm_out2 = (pmul != nullptr) ? socket_out(*pmul, "Value") : nullptr;
+            bNodeSocket *pa_out = (padd != nullptr) ? socket_out(*padd, "Value") : nullptr;
+            if (ps_out != nullptr && pm_out2 != nullptr && pa_out != nullptr) {
+              psub->custom1 = NODE_MATH_SUBTRACT;
+              pmul->custom1 = NODE_MATH_MULTIPLY;
+              padd->custom1 = NODE_MATH_ADD;
+              bke::node_add_link(tree, *ceff_node, *ceff, *psub, *ps_a);
+              bke::node_add_link(tree, *below_node, *below, *psub, *ps_b);
+              bke::node_add_link(tree, *psub, *ps_out, *pmul, *pm_a2);
+              bke::node_add_link(tree, *factor_node, *factor, *pmul, *pm_b2);
+              bke::node_add_link(tree, *below_node, *below, *padd, *pa_a);
+              bke::node_add_link(tree, *pmul, *pm_out2, *padd, *pa_b);
+              content_pa_node = padd;
+              content_pa = pa_out;
+            }
+          }
+        }
+        previous = {current.layer,
+                    p_mix,
+                    pm_out,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    content_pa_node,
+                    content_pa};
+        content_alpha_node = content_pa_node;
+        content_alpha = content_pa;
 
         /* a = a + f*(1-a). */
         bNode *one_minus = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
@@ -3055,8 +3293,69 @@ void paint_layers_tree_build(const Material &ma,
                              *row.group_instance,
                              *row.group_below);
         }
-        previous = {
-            current.layer, row.group_instance, row.group_result, nullptr, nullptr, nullptr, nullptr};
+        /* The parent's own content chain lays the group's straight alpha over the alpha below,
+         * at Mix; any other blend leaves the alpha below alone, like the colour path. */
+        bNode *below_content_node = previous.content_alpha_node;
+        bNodeSocket *below_content = previous.content_alpha;
+        if (track_content_alpha && current.content_alpha != nullptr &&
+            current.content_alpha_node != nullptr)
+        {
+          if (below_content == nullptr) {
+            bNode *bottom_one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+            below_content = (bottom_one != nullptr) ? socket_out(*bottom_one, "Value") : nullptr;
+            if (below_content != nullptr && below_content->default_value != nullptr) {
+              static_cast<bNodeSocketValueFloat *>(below_content->default_value)->value = 1.0f;
+            }
+            below_content_node = bottom_one;
+          }
+          const int group_ramp = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(
+              BKE_paint_layers_channel_blend_effective(*current.layer, channel)));
+          if (below_content != nullptr && group_ramp == MA_RAMP_BLEND) {
+            bNode *gsub = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+            bNode *gmul = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+            bNode *gadd = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+            bNodeSocket *gs_a = (gsub != nullptr) ? socket_in(*gsub, "Value") : nullptr;
+            bNodeSocket *gs_b = (gsub != nullptr) ? socket_in(*gsub, "Value_001") : nullptr;
+            bNodeSocket *gm_a = (gmul != nullptr) ? socket_in(*gmul, "Value") : nullptr;
+            bNodeSocket *gm_b = (gmul != nullptr) ? socket_in(*gmul, "Value_001") : nullptr;
+            bNodeSocket *ga_a = (gadd != nullptr) ? socket_in(*gadd, "Value") : nullptr;
+            bNodeSocket *ga_b = (gadd != nullptr) ? socket_in(*gadd, "Value_001") : nullptr;
+            bNodeSocket *gs_out = (gsub != nullptr) ? socket_out(*gsub, "Value") : nullptr;
+            bNodeSocket *gm_out = (gmul != nullptr) ? socket_out(*gmul, "Value") : nullptr;
+            bNodeSocket *ga_out = (gadd != nullptr) ? socket_out(*gadd, "Value") : nullptr;
+            if (gs_out != nullptr && gm_out != nullptr && ga_out != nullptr) {
+              gsub->custom1 = NODE_MATH_SUBTRACT;
+              gmul->custom1 = NODE_MATH_MULTIPLY;
+              gadd->custom1 = NODE_MATH_ADD;
+              bke::node_add_link(
+                  tree, *current.content_alpha_node, *current.content_alpha, *gsub, *gs_a);
+              bke::node_add_link(tree, *below_content_node, *below_content, *gsub, *gs_b);
+              bke::node_add_link(tree, *gsub, *gs_out, *gmul, *gm_a);
+              if (current.factor != nullptr && current.factor_node != nullptr) {
+                bke::node_add_link(
+                    tree, *current.factor_node, *current.factor, *gmul, *gm_b);
+              }
+              else if (gm_b != nullptr && gm_b->default_value != nullptr) {
+                static_cast<bNodeSocketValueFloat *>(gm_b->default_value)->value = 1.0f;
+              }
+              bke::node_add_link(tree, *below_content_node, *below_content, *gadd, *ga_a);
+              bke::node_add_link(tree, *gmul, *gm_out, *gadd, *ga_b);
+              below_content_node = gadd;
+              below_content = ga_out;
+            }
+          }
+        }
+        previous = {current.layer,
+                    row.group_instance,
+                    row.group_result,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    below_content_node,
+                    below_content};
+        content_alpha_node = below_content_node;
+        content_alpha = below_content;
       }
       else {
         bool combined = false;
@@ -3096,7 +3395,15 @@ void paint_layers_tree_build(const Material &ma,
             if (current.factor != nullptr && current.factor_node != nullptr) {
               bke::node_add_link(tree, *current.factor_node, *current.factor, *combine, *factor);
             }
-            previous = {current.layer, combine, result, nullptr, nullptr, nullptr, nullptr};
+            previous = {current.layer,
+                        combine,
+                        result,
+                        nullptr,
+                        nullptr,
+                        nullptr,
+                        nullptr,
+                        previous.content_alpha_node,
+                        previous.content_alpha};
             combined = true;
           }
         }
@@ -3118,14 +3425,78 @@ void paint_layers_tree_build(const Material &ma,
               if (current.factor != nullptr && current.factor_node != nullptr) {
                 bke::node_add_link(tree, *current.factor_node, *current.factor, *mix, *fac);
               }
-              previous = {current.layer, mix, color_out, nullptr, nullptr, nullptr, nullptr};
+              /* The straight content chain mirrors the Mix: lay the row's alpha over the alpha
+               * below at Mix, keep the alpha below for any other blend. */
+              bNode *mix_below_node = previous.content_alpha_node;
+              bNodeSocket *mix_below = previous.content_alpha;
+              previous = {current.layer,
+                          mix,
+                          color_out,
+                          nullptr,
+                          nullptr,
+                          nullptr,
+                          nullptr,
+                          mix_below_node,
+                          mix_below};
+              if (track_content_alpha && current.content_alpha != nullptr &&
+                  current.content_alpha_node != nullptr)
+              {
+                const int mix_ramp = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(
+                    BKE_paint_layers_channel_blend_effective(*current.layer, channel)));
+                if (mix_below == nullptr) {
+                  bNode *mix_one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+                  mix_below = (mix_one != nullptr) ? socket_out(*mix_one, "Value") : nullptr;
+                  if (mix_below != nullptr && mix_below->default_value != nullptr) {
+                    static_cast<bNodeSocketValueFloat *>(mix_below->default_value)->value = 1.0f;
+                  }
+                  mix_below_node = mix_one;
+                }
+                if (mix_below != nullptr && mix_ramp == MA_RAMP_BLEND) {
+                  bNode *msub = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+                  bNode *mmul = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+                  bNode *madd = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+                  bNodeSocket *ms_a = (msub != nullptr) ? socket_in(*msub, "Value") : nullptr;
+                  bNodeSocket *ms_b = (msub != nullptr) ? socket_in(*msub, "Value_001") : nullptr;
+                  bNodeSocket *mm_a = (mmul != nullptr) ? socket_in(*mmul, "Value") : nullptr;
+                  bNodeSocket *mm_b = (mmul != nullptr) ? socket_in(*mmul, "Value_001") : nullptr;
+                  bNodeSocket *ma_a = (madd != nullptr) ? socket_in(*madd, "Value") : nullptr;
+                  bNodeSocket *ma_b = (madd != nullptr) ? socket_in(*madd, "Value_001") : nullptr;
+                  bNodeSocket *ms_out = (msub != nullptr) ? socket_out(*msub, "Value") : nullptr;
+                  bNodeSocket *mm_out = (mmul != nullptr) ? socket_out(*mmul, "Value") : nullptr;
+                  bNodeSocket *ma_out = (madd != nullptr) ? socket_out(*madd, "Value") : nullptr;
+                  if (ms_out != nullptr && mm_out != nullptr && ma_out != nullptr) {
+                    msub->custom1 = NODE_MATH_SUBTRACT;
+                    mmul->custom1 = NODE_MATH_MULTIPLY;
+                    madd->custom1 = NODE_MATH_ADD;
+                    bke::node_add_link(
+                        tree, *current.content_alpha_node, *current.content_alpha, *msub, *ms_a);
+                    bke::node_add_link(tree, *mix_below_node, *mix_below, *msub, *ms_b);
+                    bke::node_add_link(tree, *msub, *ms_out, *mmul, *mm_a);
+                    if (current.factor != nullptr && current.factor_node != nullptr) {
+                      bke::node_add_link(
+                          tree, *current.factor_node, *current.factor, *mmul, *mm_b);
+                    }
+                    else if (mm_b != nullptr && mm_b->default_value != nullptr) {
+                      static_cast<bNodeSocketValueFloat *>(mm_b->default_value)->value = 1.0f;
+                    }
+                    bke::node_add_link(tree, *mix_below_node, *mix_below, *madd, *ma_a);
+                    bke::node_add_link(tree, *mmul, *mm_out, *madd, *ma_b);
+                    mix_below_node = madd;
+                    mix_below = ma_out;
+                  }
+                }
+                previous.content_alpha_node = mix_below_node;
+                previous.content_alpha = mix_below;
+                content_alpha_node = mix_below_node;
+                content_alpha = mix_below;
+              }
             }
           }
         }
       }
       location_x += 180.0f;
       }
-      return {previous, coverage_node, coverage};
+      return {previous, coverage_node, coverage, content_alpha_node, content_alpha};
     };
     ChainResult built = build_list(ma.paint_layers, previous, false, target);
     previous = built.chain;
@@ -3172,6 +3543,26 @@ void paint_layers_tree_build(const Material &ma,
           previous.source_node = encode;
           previous.source = encode_out;
         }
+      }
+    }
+
+    /* The Result's alpha is the tracked content alpha, composed over the chain's colour once: the
+     * colour's own alpha was cut by the Vector divides, and stays cut. Without a tracked alpha
+     * the source links directly as before. */
+    if (track_content_alpha && previous.content_alpha != nullptr && previous.source != nullptr) {
+      bNode *compose = bke::node_add_static_node(nullptr, tree, SH_NODE_COMPOSE_COLOR_ALPHA);
+      bNodeSocket *comp_color = (compose != nullptr) ? socket_in(*compose, "Color") : nullptr;
+      bNodeSocket *comp_alpha = (compose != nullptr) ? socket_in(*compose, "Alpha") : nullptr;
+      bNodeSocket *comp_out = (compose != nullptr) ? socket_out(*compose, "Color") : nullptr;
+      if (comp_out != nullptr) {
+        compose->location[0] = 420.0f;
+        compose->location[1] = location_y;
+        bke::node_add_link(
+            tree, *previous.source_node, *previous.source, *compose, *comp_color);
+        bke::node_add_link(
+            tree, *previous.content_alpha_node, *previous.content_alpha, *compose, *comp_alpha);
+        previous.source_node = compose;
+        previous.source = comp_out;
       }
     }
 

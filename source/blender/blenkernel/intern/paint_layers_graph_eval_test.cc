@@ -2059,6 +2059,517 @@ TEST_F(PaintLayersGraphEvalTest, nested_isolating_folders_partial_alpha_matches_
   ma = nullptr;
 }
 
+/* Whether the group's interface carries an output socket named \a socket_name. */
+static bool folder_interface_has_socket(bNodeTree &tree, const char *socket_name)
+{
+  tree.ensure_interface_cache();
+  for (bNodeTreeInterfaceSocket *iface : tree.interface_outputs()) {
+    if (iface->name != nullptr && STREQ(iface->name, socket_name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Evaluate a folder instance's `Content Alpha Base Color` output in its parent's context, or
+ * -1 when the group carries no such socket (the untracked rows leave none). */
+static float nested_folder_content_alpha_eval(const GraphInterpreter &parent,
+                                              bNodeTree &folder_tree,
+                                              bNode &folder_instance)
+{
+  folder_tree.ensure_interface_cache();
+  const char *identifier = nullptr;
+  for (bNodeTreeInterfaceSocket *iface : folder_tree.interface_outputs()) {
+    if (iface->name != nullptr && STREQ(iface->name, "Content Alpha Base Color") &&
+        iface->identifier != nullptr)
+    {
+      identifier = iface->identifier;
+      break;
+    }
+  }
+  if (identifier == nullptr) {
+    return -1.0f;
+  }
+  return parent.eval_output(folder_instance, identifier).r;
+}
+
+/**
+ * F2-B: one isolating folder over opaque red, holding a soft-edge Paint map below and a Paint
+ * constant (blue, alpha 0.6) above. The map exercises the Image Texture Alpha leaf path, the
+ * constant the Value leaf path; graph, CPU and the closed-form reference must agree on all four
+ * components. The constant covers fully, so the folder ends fully covered with its alpha.
+ */
+TEST_F(PaintLayersGraphEvalTest, single_isolating_folder_partial_alpha_matches_cpu)
+{
+  const int size = 4;
+  const float folder_opacity = 0.5f;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float const_alpha = 0.6f;
+
+  ma = BKE_material_add(bmain, "SingleIsoAlpha");
+  ASSERT_NE(ma, nullptr);
+
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
+  ASSERT_NE(bottom_record, nullptr);
+  bottom_record->image = add_solid_image("SingleBottom", size, 255, 0, 0, 255);
+  ASSERT_NE(bottom_record->image, nullptr);
+  bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Single", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *leaf_image = BKE_image_add_generated(
+      bmain, size, size, "SingleLeaf", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(leaf_image, nullptr);
+  fill_nested_leaf_soft_edge(leaf_image, size, 0, 255, 0);
+  MaterialPaintLayer *leaf_a = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "LeafA", folder, PaintLayerPlace::Into);
+  ASSERT_NE(leaf_a, nullptr);
+  MaterialPaintLayerChannel *record_a = BKE_paint_layers_channel_add(*ma, leaf_a, channel);
+  ASSERT_NE(record_a, nullptr);
+  record_a->image = leaf_image;
+  record_a->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *leaf_b = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "LeafB", folder, PaintLayerPlace::Into);
+  ASSERT_NE(leaf_b, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, leaf_b, channel), nullptr);
+  const float const_blue[4] = {0.0f, 0.0f, 1.0f, const_alpha};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(*ma, leaf_b, channel, const_blue));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+
+  bNodeTree *folder_tree = nested_folder_tree_find(*bmain, "Single");
+  ASSERT_NE(folder_tree, nullptr);
+  bNode *folder_instance = nested_group_instance_find(*ma->paint_layers_tree, *folder_tree);
+  ASSERT_NE(folder_instance, nullptr);
+  EXPECT_TRUE(folder_interface_has_socket(*folder_tree, "Content Alpha Base Color"));
+
+  Vector<float> folder_color(int64_t(size) * size * 4);
+  Vector<float> folder_coverage(int64_t(size) * size);
+  ASSERT_TRUE(BKE_paint_layers_bake_render_node(
+      *ma, *folder, channel, size, folder_color.data(), folder_coverage.data()));
+
+  GraphInterpreter root_interpreter;
+  root_interpreter.instance = find_instance();
+  root_interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(root_interpreter.instance, nullptr);
+  root_interpreter.tree->ensure_topology_cache();
+  folder_tree->ensure_topology_cache();
+
+  for (int x = 0; x < size; x++) {
+    const int y = 0;
+    const float alpha_ideal = 0.25f * float(x + 1);
+    const float alpha_q = float(uchar(clamp_f(alpha_ideal, 0.0f, 1.0f) * 255.0f + 0.5f)) / 255.0f;
+    const float f1 = alpha_q;
+    const float f2 = 1.0f;
+    const float a1 = f1;
+    const float a2 = a1 + f2 * (1.0f - a1);
+    const float premul1_a = alpha_q * f1;
+    const float straight_a = (premul1_a * (1.0f - f2) + const_alpha * f2) / a2;
+    const float factor = folder_opacity * a2;
+    RGBA expected;
+    expected.r = 1.0f * (1.0f - factor) + 0.0f * factor;
+    expected.g = 0.0f * (1.0f - factor) + 0.0f * factor;
+    expected.b = 0.0f * (1.0f - factor) + 1.0f * factor;
+    expected.a = 1.0f * (1.0f - factor) + straight_a * factor;
+
+    root_interpreter.x = x;
+    root_interpreter.y = y;
+    const RGBA graph = eval_channel_result(root_interpreter, channel);
+    const RGBA cpu = cpu_pixel_at(channel, x, y);
+    const float graph_cov = nested_folder_coverage_eval(
+        root_interpreter, *folder_tree, *folder_instance);
+    const float graph_content_a = nested_folder_content_alpha_eval(
+        root_interpreter, *folder_tree, *folder_instance);
+    const float cpu_cov = folder_coverage[int64_t(y) * size + x];
+
+    EXPECT_NEAR(graph.r, expected.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, expected.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, expected.b, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.a, expected.a, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.r, expected.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.g, expected.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.b, expected.b, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.a, expected.a, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_cov, folder_opacity * a2, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu_cov, folder_opacity * a2, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_content_a, straight_a, tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-B: three nested isolating folders with the partial alpha on the innermost leaves. A single
+ * child passes its straight result through unchanged, so every level shares the same straight
+ * colour and alpha while the coverages multiply; the fix must hold at every depth, not just one.
+ */
+TEST_F(PaintLayersGraphEvalTest, three_nested_isolating_folders_partial_alpha_matches_cpu)
+{
+  const int size = 4;
+  const float op1 = 0.6f;
+  const float op2 = 0.7f;
+  const float op3 = 0.8f;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "TripleIsoAlpha");
+  ASSERT_NE(ma, nullptr);
+
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
+  ASSERT_NE(bottom_record, nullptr);
+  bottom_record->image = add_solid_image("TripleBottom", size, 255, 0, 0, 255);
+  ASSERT_NE(bottom_record->image, nullptr);
+  bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *outer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Outer", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(outer, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, outer, op1));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *outer));
+  MaterialPaintLayer *middle = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Middle", outer, PaintLayerPlace::Into);
+  ASSERT_NE(middle, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, middle, op2));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *middle));
+  MaterialPaintLayer *inner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Inner", middle, PaintLayerPlace::Into);
+  ASSERT_NE(inner, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, inner, op3));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *inner));
+
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *leaf_a_image = BKE_image_add_generated(
+      bmain, size, size, "TripleLeafA", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(leaf_a_image, nullptr);
+  fill_nested_leaf_soft_edge(leaf_a_image, size, 0, 255, 0);
+  MaterialPaintLayer *leaf_a = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "LeafA", inner, PaintLayerPlace::Into);
+  ASSERT_NE(leaf_a, nullptr);
+  MaterialPaintLayerChannel *record_a = BKE_paint_layers_channel_add(*ma, leaf_a, channel);
+  ASSERT_NE(record_a, nullptr);
+  record_a->image = leaf_a_image;
+  record_a->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  Image *leaf_b_image = BKE_image_add_generated(
+      bmain, size, size, "TripleLeafB", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(leaf_b_image, nullptr);
+  fill_nested_leaf_soft_edge(leaf_b_image, size, 0, 0, 255);
+  MaterialPaintLayer *leaf_b = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "LeafB", inner, PaintLayerPlace::Into);
+  ASSERT_NE(leaf_b, nullptr);
+  MaterialPaintLayerChannel *record_b = BKE_paint_layers_channel_add(*ma, leaf_b, channel);
+  ASSERT_NE(record_b, nullptr);
+  record_b->image = leaf_b_image;
+  record_b->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+
+  bNodeTree *outer_tree = nested_folder_tree_find(*bmain, "Outer");
+  bNodeTree *middle_tree = nested_folder_tree_find(*bmain, "Middle");
+  bNodeTree *inner_tree = nested_folder_tree_find(*bmain, "Inner");
+  ASSERT_NE(outer_tree, nullptr);
+  ASSERT_NE(middle_tree, nullptr);
+  ASSERT_NE(inner_tree, nullptr);
+  bNode *outer_instance = nested_group_instance_find(*ma->paint_layers_tree, *outer_tree);
+  bNode *middle_instance = nested_group_instance_find(*outer_tree, *middle_tree);
+  bNode *inner_instance = nested_group_instance_find(*middle_tree, *inner_tree);
+  ASSERT_NE(outer_instance, nullptr);
+  ASSERT_NE(middle_instance, nullptr);
+  ASSERT_NE(inner_instance, nullptr);
+  EXPECT_TRUE(folder_interface_has_socket(*inner_tree, "Content Alpha Base Color"));
+
+  Vector<float> inner_color(int64_t(size) * size * 4);
+  Vector<float> inner_coverage(int64_t(size) * size);
+  ASSERT_TRUE(BKE_paint_layers_bake_render_node(
+      *ma, *inner, channel, size, inner_color.data(), inner_coverage.data()));
+
+  GraphInterpreter root_interpreter;
+  root_interpreter.instance = find_instance();
+  root_interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(root_interpreter.instance, nullptr);
+  root_interpreter.tree->ensure_topology_cache();
+  outer_tree->ensure_topology_cache();
+  middle_tree->ensure_topology_cache();
+  inner_tree->ensure_topology_cache();
+
+  for (int x = 0; x < size; x++) {
+    const int y = 0;
+    const float alpha_ideal = 0.25f * float(x + 1);
+    const float alpha_q = float(uchar(clamp_f(alpha_ideal, 0.0f, 1.0f) * 255.0f + 0.5f)) / 255.0f;
+    const float leaf_a_alpha = alpha_q;
+    const float leaf_b_alpha = alpha_q;
+    const float leaf_a_color[3] = {0.0f, 1.0f, 0.0f};
+    const float leaf_b_color[3] = {0.0f, 0.0f, 1.0f};
+    const float f1 = leaf_a_alpha;
+    const float f2 = leaf_b_alpha;
+    const float a1 = f1;
+    const float premul1_a = leaf_a_alpha * f1;
+    const float a_inner = a1 + f2 * (1.0f - a1);
+    float straight[3] = {0.0f, 0.0f, 0.0f};
+    float straight_a = 0.0f;
+    if (a_inner > 0.0f) {
+      const float premul2[3] = {leaf_a_color[0] * f1 * (1.0f - f2) + leaf_b_color[0] * f2,
+                                leaf_a_color[1] * f1 * (1.0f - f2) + leaf_b_color[1] * f2,
+                                leaf_a_color[2] * f1 * (1.0f - f2) + leaf_b_color[2] * f2};
+      const float premul2_a = premul1_a * (1.0f - f2) + leaf_b_alpha * f2;
+      straight[0] = premul2[0] / a_inner;
+      straight[1] = premul2[1] / a_inner;
+      straight[2] = premul2[2] / a_inner;
+      straight_a = premul2_a / a_inner;
+    }
+    const float cov_inner = op3 * a_inner;
+    const float cov_middle = op2 * cov_inner;
+    const float cov_outer = op1 * cov_middle;
+    const float factor = cov_outer;
+    RGBA expected;
+    expected.r = 1.0f * (1.0f - factor) + straight[0] * factor;
+    expected.g = 0.0f * (1.0f - factor) + straight[1] * factor;
+    expected.b = 0.0f * (1.0f - factor) + straight[2] * factor;
+    expected.a = 1.0f * (1.0f - factor) + straight_a * factor;
+
+    root_interpreter.x = x;
+    root_interpreter.y = y;
+    const RGBA graph = eval_channel_result(root_interpreter, channel);
+    const RGBA cpu = cpu_pixel_at(channel, x, y);
+
+    GraphInterpreter outer_interpreter;
+    outer_interpreter.instance = outer_instance;
+    outer_interpreter.tree = outer_tree;
+    outer_interpreter.x = x;
+    outer_interpreter.y = y;
+    outer_interpreter.parent = &root_interpreter;
+    GraphInterpreter middle_interpreter;
+    middle_interpreter.instance = middle_instance;
+    middle_interpreter.tree = middle_tree;
+    middle_interpreter.x = x;
+    middle_interpreter.y = y;
+    middle_interpreter.parent = &outer_interpreter;
+    const float graph_outer_cov = nested_folder_coverage_eval(
+        root_interpreter, *outer_tree, *outer_instance);
+    const float graph_middle_cov = nested_folder_coverage_eval(
+        outer_interpreter, *middle_tree, *middle_instance);
+    const float graph_inner_cov = nested_folder_coverage_eval(
+        middle_interpreter, *inner_tree, *inner_instance);
+    const float graph_inner_a = nested_folder_content_alpha_eval(
+        middle_interpreter, *inner_tree, *inner_instance);
+    const float cpu_inner_cov = inner_coverage[int64_t(y) * size + x];
+
+    EXPECT_NEAR(graph.r, expected.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, expected.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, expected.b, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.a, expected.a, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.r, expected.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.g, expected.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.b, expected.b, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.a, expected.a, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_outer_cov, cov_outer, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_middle_cov, cov_middle, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_inner_cov, cov_inner, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu_inner_cov, cov_inner, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_inner_a, straight_a, tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-B: an isolating folder whose leaf is fully transparent (zero coverage) next to an empty
+ * isolating folder. Both divides see a zero divisor, so the whole path -- including the new
+ * content-alpha Math divide -- must stay finite, and the opaque bottom must show through
+ * unchanged on both sides.
+ */
+TEST_F(PaintLayersGraphEvalTest, zero_coverage_isolating_folder_stays_finite)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "ZeroCoverage");
+  ASSERT_NE(ma, nullptr);
+
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
+  ASSERT_NE(bottom_record, nullptr);
+  bottom_record->image = add_solid_image("ZeroBottom", size, 255, 0, 0, 255);
+  ASSERT_NE(bottom_record->image, nullptr);
+  bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *zero = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Zero", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(zero, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, zero, 0.5f));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *zero));
+
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *leaf_image = BKE_image_add_generated(
+      bmain, size, size, "ZeroLeaf", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(leaf_image, nullptr);
+  leaf_image->alpha_mode = IMA_ALPHA_STRAIGHT;
+  leaf_image->flag |= IMA_GPU_LINEAR_PREMUL;
+  MaterialPaintLayer *leaf = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Leaf", zero, PaintLayerPlace::Into);
+  ASSERT_NE(leaf, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, leaf, channel);
+  ASSERT_NE(record, nullptr);
+  record->image = leaf_image;
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *empty = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Empty", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(empty, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, empty, 0.5f));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+
+  bNodeTree *zero_tree = nested_folder_tree_find(*bmain, "Zero");
+  ASSERT_NE(zero_tree, nullptr);
+  bNode *zero_instance = nested_group_instance_find(*ma->paint_layers_tree, *zero_tree);
+  ASSERT_NE(zero_instance, nullptr);
+  EXPECT_TRUE(folder_interface_has_socket(*zero_tree, "Content Alpha Base Color"));
+
+  GraphInterpreter root_interpreter;
+  root_interpreter.instance = find_instance();
+  root_interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(root_interpreter.instance, nullptr);
+  root_interpreter.tree->ensure_topology_cache();
+  zero_tree->ensure_topology_cache();
+
+  for (int x = 0; x < size; x++) {
+    const int y = 0;
+    root_interpreter.x = x;
+    root_interpreter.y = y;
+    const RGBA graph = eval_channel_result(root_interpreter, channel);
+    const RGBA cpu = cpu_pixel_at(channel, x, y);
+    const float graph_cov = nested_folder_coverage_eval(
+        root_interpreter, *zero_tree, *zero_instance);
+    const float graph_content_a = nested_folder_content_alpha_eval(
+        root_interpreter, *zero_tree, *zero_instance);
+
+    EXPECT_TRUE(std::isfinite(graph.r));
+    EXPECT_TRUE(std::isfinite(graph.g));
+    EXPECT_TRUE(std::isfinite(graph.b));
+    EXPECT_TRUE(std::isfinite(graph.a));
+    EXPECT_TRUE(std::isfinite(graph_cov));
+    EXPECT_TRUE(std::isfinite(graph_content_a));
+    EXPECT_NEAR(graph.r, 1.0f, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, 0.0f, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, 0.0f, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.a, 1.0f, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.r, 1.0f, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.g, 0.0f, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.b, 0.0f, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.a, 1.0f, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_cov, 0.0f, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_content_a, 0.0f, tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-B regression guard: an isolating folder on Roughness, a channel with no content-alpha
+ * tracking, must keep matching the CPU on RGB exactly and must grow no Content Alpha socket.
+ * The nullptr path leaves these groups byte-identical to before.
+ *
+ * NOTE: the result alpha is deliberately not compared here. It diverges on every channel's
+ * isolating folder (here graph.a is 0.927 against cpu.a 0.985), identically before and after
+ * F2-B: the same Vector Math truncation drops the fourth component for all channels, and F2-B
+ * repairs only Base Color. Repairing the remaining channels is F2-C work. The existing
+ * `isolating_folder_partial_coverage_matches_the_cpu` precedent likewise compares RGB only.
+ */
+TEST_F(PaintLayersGraphEvalTest, roughness_isolating_folder_matches_cpu_without_content_alpha)
+{
+  const int size = 4;
+  const float folder_opacity = 0.5f;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_ROUGHNESS;
+
+  ma = BKE_material_add(bmain, "RoughIso");
+  ASSERT_NE(ma, nullptr);
+
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
+  ASSERT_NE(bottom_record, nullptr);
+  bottom_record->image = add_solid_image("RoughBottom", size, 128, 128, 128, 255);
+  ASSERT_NE(bottom_record->image, nullptr);
+  bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "RoughFolder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+
+  auto add_rough_child = [&](const char *name, const uchar v, const uchar a, float opacity) {
+    MaterialPaintLayer *child = BKE_paint_layers_add(
+        *ma, MA_PAINT_LAYER_KIND_PAINT, name, folder, PaintLayerPlace::Into);
+    EXPECT_NE(child, nullptr);
+    MaterialPaintLayerChannel *child_record = BKE_paint_layers_channel_add(*ma, child, channel);
+    EXPECT_NE(child_record, nullptr);
+    child_record->image = add_solid_image(name, size, v, v, v, a);
+    EXPECT_NE(child_record->image, nullptr);
+    child_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, child, opacity));
+  };
+  add_rough_child("RoughLeafA", 200, 128, 0.6f);
+  add_rough_child("RoughLeafB", 60, 255, 0.8f);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+
+  bNodeTree *folder_tree = nested_folder_tree_find(*bmain, "RoughFolder");
+  ASSERT_NE(folder_tree, nullptr);
+  EXPECT_FALSE(folder_interface_has_socket(*folder_tree, "Content Alpha Base Color"));
+  EXPECT_FALSE(folder_interface_has_socket(*folder_tree, "Content Alpha Roughness"));
+
+  GraphInterpreter root_interpreter;
+  root_interpreter.instance = find_instance();
+  root_interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(root_interpreter.instance, nullptr);
+  root_interpreter.tree->ensure_topology_cache();
+
+  for (int x = 0; x < size; x++) {
+    const int y = 0;
+    root_interpreter.x = x;
+    root_interpreter.y = y;
+    const RGBA graph = eval_channel_result(root_interpreter, channel);
+    const RGBA cpu = cpu_pixel_at(channel, x, y);
+    EXPECT_TRUE(std::isfinite(graph.r));
+    EXPECT_TRUE(std::isfinite(graph.g));
+    EXPECT_TRUE(std::isfinite(graph.b));
+    EXPECT_TRUE(std::isfinite(graph.a));
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
 /** The generated root's node pointers, for the "a second rebuild changed nothing" check. */
 static Vector<bNode *> root_node_ptrs(bNodeTree &tree)
 {

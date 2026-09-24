@@ -332,6 +332,8 @@ typedef struct ThemeSpace {
   /** Solid faces. */
   unsigned char face[4], face_select[4], face_mode_select[4], face_retopology[4];
   unsigned char sculpt_symmetry_contour[4];
+  /** Attribute text overlay colors for boolean values. */
+  unsigned char viewer_text_true[4], viewer_text_false[4];
   unsigned char face_back[4], face_front[4];
   /** Selected color. */
   unsigned char extra_edge_len[4], extra_edge_angle[4], extra_face_angle[4], extra_face_area[4];

@@ -455,6 +455,20 @@ static void do_versions_theme(const UserDef *userdef, bTheme *btheme)
     FROM_DEFAULT_V4_UCHAR(space_view3d.sculpt_symmetry_contour);
   }
 
+  if (!USER_VERSION_ATLEAST(502, 77)) {
+    FROM_DEFAULT_V4_UCHAR(space_view3d.viewer_text_true);
+    FROM_DEFAULT_V4_UCHAR(space_view3d.viewer_text_false);
+  }
+
+  /* Preferences saved by a build that already had this subversion but not these fields carry
+   * zeroes, which would draw the text invisible. Fully transparent is never a valid value. */
+  if (btheme->space_view3d.viewer_text_true[3] == 0) {
+    FROM_DEFAULT_V4_UCHAR(space_view3d.viewer_text_true);
+  }
+  if (btheme->space_view3d.viewer_text_false[3] == 0) {
+    FROM_DEFAULT_V4_UCHAR(space_view3d.viewer_text_false);
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a USER_VERSION_ATLEAST check.

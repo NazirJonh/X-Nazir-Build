@@ -481,6 +481,12 @@ const uchar *get_color_ptr(bTheme *btheme, int spacetype, int colorid)
         case TH_FACE_RETOPOLOGY:
           cp = ts->face_retopology;
           break;
+        case TH_VIEWER_TEXT_TRUE:
+          cp = ts->viewer_text_true;
+          break;
+        case TH_VIEWER_TEXT_FALSE:
+          cp = ts->viewer_text_false;
+          break;
         case TH_SCULPT_SYMMETRY_CONTOUR:
           cp = ts->sculpt_symmetry_contour;
           break;

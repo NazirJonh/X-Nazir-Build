@@ -236,6 +236,9 @@ class AttributeTexts : Overlay {
   {
     uchar col[4];
     ui::theme::get_color_4ubv(TH_TEXT_HI, col);
+    uchar col_true[4], col_false[4];
+    ui::theme::get_color_4ubv(TH_VIEWER_TEXT_TRUE, col_true);
+    ui::theme::get_color_4ubv(TH_VIEWER_TEXT_FALSE, col_false);
 
     bke::attribute_math::to_static_type(values.type(), [&]<typename T>() {
       const VArray<T> &values_typed = values.typed<T>();
@@ -246,7 +249,8 @@ class AttributeTexts : Overlay {
         if constexpr (std::is_same_v<T, bool>) {
           char numstr[64];
           const size_t numstr_len = STRNCPY_UTF8_RLEN(numstr, value ? "True" : "False");
-          add_text_to_cache(dt, position, StringRef(numstr, numstr_len), col);
+          add_text_to_cache(
+              dt, position, StringRef(numstr, numstr_len), value ? col_true : col_false);
         }
         else if constexpr (std::is_same_v<T, int8_t>) {
           char numstr[64];

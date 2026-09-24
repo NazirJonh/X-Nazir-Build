@@ -1505,6 +1505,10 @@ class VIEW3D_PT_sculpt_symmetry(Panel, View3DPaintPanel):
         row = layout.row(align=True, heading="Symmetry Space")
         row.prop(sculpt, "symmetry_space", expand=True)
 
+        if sculpt.symmetry_space == 'GLOBAL_CURSOR':
+            row = layout.row(align=True, heading="Cursor Source")
+            row.prop(sculpt, "symmetry_cursor_source", expand=True)
+
         layout.prop(sculpt, "use_mirror_surface_snap")
         sub = layout.column()
         sub.active = sculpt.use_mirror_surface_snap

@@ -532,6 +532,11 @@ static void view3d_widgets()
 
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_navigate);
   WM_gizmotype_append(VIEW3D_GT_navigate_rotate);
+
+  /* Linked after the navigation gizmo: groups linked later are drawn earlier and tested for
+   * selection later, so the cursor's viewport buttons stay underneath the navigation widgets. */
+  WM_gizmogrouptype_append_and_link(gzmap_type, ed::view3d::VIEW3D_GGT_sculpt_cursor);
+  WM_gizmogrouptype_append_and_link(gzmap_type, ed::view3d::VIEW3D_GGT_sculpt_cursor_buttons);
 }
 
 /* type callback, not region itself */

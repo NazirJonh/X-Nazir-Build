@@ -46,6 +46,51 @@ enum class FilterOrientation {
   View = 2,
 };
 
+/**
+ * Proportional-edit falloff parameters for the Transform tool's cursor deform, copied from the
+ * generic Transform system (#TransInfo::prop_size/#prop_mode) every modal step. Kept here so the
+ * sculpt vertex math does not have to include the transform headers.
+ */
+struct TransformProportional {
+  bool enabled = false;
+  /** Falloff radius, in world units. */
+  float radius = 1.0f;
+  /** #eProportionalFalloff. */
+  int falloff = 0;
+  /** Measure distance in the view plane instead of in world space. */
+  bool projected = false;
+  /** World-space view direction, used when #projected is set. */
+  float3 view_normal = float3(0.0f, 0.0f, 1.0f);
+
+  /**
+   * Per-vertex falloff distances, computed once from the original positions on the first
+   * proportional step and reused for every later one: they only depend on the mask, the pivot and
+   * (for #projected) the view, none of which change during a drag, while the radius and falloff
+   * type are applied per step. Rebuilt when #projected or #view_normal change.
+   */
+  bool distances_valid = false;
+  bool distances_projected = false;
+  float3 distances_view_normal = float3(0.0f);
+  /**
+   * World-space distance from the pivot per vertex (#vertex_count_get indexing), `FLT_MAX` for
+   * fully masked or hidden vertices.
+   */
+  Array<float> vert_dist;
+  /**
+   * World-space distance to the nearest fully masked or hidden vertex, used to fade the mask weight
+   * out before the mask border. Empty when nothing is masked or hidden.
+   */
+  Array<float> vert_mask_dist;
+  /** Per PBVH node: the smallest distance at which any vertex of the node can still move. */
+  Array<float> node_min_dist;
+  /**
+   * Nodes deformed on the previous step. They have to be processed once more after leaving the
+   * radius, since the undo restore moves them back without updating their bounds or draw data.
+   * Empty means every node was deformed (proportional editing was off on the previous step).
+   */
+  Array<bool> prev_nodes;
+};
+
 struct Cache {
   std::array<bool, 3> enabled_axis;
   int random_seed;
@@ -112,6 +157,7 @@ struct Cache {
   int active_face_set;
 
   TransformDisplacementMode transform_displacement_mode;
+  TransformProportional proportional;
 
   std::unique_ptr<auto_mask::Cache> automasking;
   float3 initial_normal;

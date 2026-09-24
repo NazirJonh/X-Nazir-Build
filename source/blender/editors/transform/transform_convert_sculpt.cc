@@ -98,12 +98,30 @@ static void createTransSculpt(bContext *C, TransInfo *t)
   t->data_container_len = objects.size();
 
   SculptSession &active_ss = *active_ob.runtime->sculpt_session;
+  /* The shared world-space pivot is the sculpt cursor when the cursor is enabled, otherwise the
+   * regular sculpt pivot. Resolve it HERE, before the per-object loop seeds
+   * #SculptSession::transform_pivot_pos_world: #init_transform_common applies the cursor to the
+   * LOCAL pivot only later (inside the loop), which would be too late for the shared world value
+   * read below and would leave the first modal step pivoting around the stale pivot. */
+  const bool use_cursor = sculpt_paint::cursor::is_enabled(*scene);
+  const sculpt_paint::cursor::CursorState cursor_state =
+      sculpt_paint::cursor::state_get(*scene, active_ob);
   float world_pivot_pos[3];
-  copy_v3_v3(world_pivot_pos, active_ss.pivot_pos);
+  if (use_cursor) {
+    copy_v3_v3(world_pivot_pos, cursor_state.location);
+  }
+  else {
+    copy_v3_v3(world_pivot_pos, active_ss.pivot_pos);
+  }
   mul_m4_v3(active_ob.object_to_world().ptr(), world_pivot_pos);
 
   float world_pivot_rot[4];
-  sculpt_paint::local_pivot_rot_to_world(active_ob, active_ss.pivot_rot, world_pivot_rot);
+  if (use_cursor) {
+    sculpt_paint::local_pivot_rot_to_world(active_ob, cursor_state.rotation, world_pivot_rot);
+  }
+  else {
+    sculpt_paint::local_pivot_rot_to_world(active_ob, active_ss.pivot_rot, world_pivot_rot);
+  }
 
   BLI_assert(!(t->options & CTX_PAINT_CURVE));
   for (const int i : objects.index_range()) {
@@ -127,7 +145,14 @@ static void createTransSculpt(bContext *C, TransInfo *t)
     TransData *td = tc->data = MEM_new_zeroed<TransData>(__func__);
     TransDataExtension *td_ext = tc->data_ext = MEM_new_zeroed<TransDataExtension>(__func__);
 
+    /* This #TransData is the shared pivot, not a deformable element: it is always "selected" and
+     * has no meaningful distance. Seeding the proportional fields keeps #calculatePropRatio (which
+     * runs whenever the radius changes) from reading uninitialized values; the real per-vertex
+     * falloff is computed later from `t->prop_size`/`t->prop_mode`. */
     td->flag = TD_SELECTED;
+    td->dist = 0.0f;
+    td->rdist = 0.0f;
+    td->factor = 1.0f;
 
     /* #td->loc/#td->center and #td_ext->quat point at the SHARED world-space pivot fields above
      * (identity #td->mtx/#td->smtx below), NOT this object's own local space. Blender's generic
@@ -188,8 +213,24 @@ static void recalcData_sculpt(TransInfo *t)
   Object &active_ob = *BKE_view_layer_active_object_get(t->view_layer);
 
   const Vector<Object *> objects = sculpt_transform_objects(t->context, active_ob);
+
+  /* Pass the generic Transform system's proportional parameters down to the sculpt vertex math.
+   * Done for every object in the session before the loop, so a multi-object drag applies one
+   * shared radius/falloff. */
+  const bool proportional_enabled = (t->flag & T_PROP_EDIT) != 0;
+  const bool projected = (t->flag & T_PROP_PROJECTED) != 0;
+  float view_normal[3] = {0.0f, 0.0f, 1.0f};
+  if (projected) {
+    /* Sculpt transforms always run in a 3D viewport, where #TransInfo::viewinv holds the view
+     * matrix. */
+    copy_v3_v3(view_normal, t->viewinv[2]);
+    normalize_v3(view_normal);
+  }
+
   for (Object *ob : objects) {
     const bool is_active = (ob == &active_ob);
+    sculpt_paint::transform_set_proportional_params(
+        *ob, proportional_enabled, t->prop_size, t->prop_mode, projected, view_normal);
     if (t->state == TRANS_CANCEL) {
       sculpt_paint::cancel_modal_transform(t->context, *ob, is_active);
     }

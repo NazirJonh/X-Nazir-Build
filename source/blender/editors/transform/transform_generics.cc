@@ -39,6 +39,7 @@
 #include "ED_image.hh"
 #include "ED_object.hh"
 #include "ED_paint.hh"
+#include "ED_sculpt.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_uvedit.hh"
@@ -626,6 +627,11 @@ void initTransInfo(bContext *C, TransInfo *t, wmOperator *op, const wmEvent *eve
       if (t->flag & T_MODAL) {
         if ((t->options & CTX_NO_PET) == 0) {
           bool use_prop_edit = false;
+          /* Read from the shared tool settings by default: the mask/action/graph/object modes all
+           * take their connected/projected bits from `ts->proportional_edit`, as before. Sculpt
+           * overrides them below. */
+          bool use_prop_connected = (ts->proportional_edit & PROP_EDIT_CONNECTED) != 0;
+          bool use_prop_projected = (ts->proportional_edit & PROP_EDIT_PROJECTED) != 0;
           if (t->spacetype == SPACE_GRAPH) {
             use_prop_edit = ts->proportional_fcurve;
           }
@@ -640,16 +646,28 @@ void initTransInfo(bContext *C, TransInfo *t, wmOperator *op, const wmEvent *eve
              * tool-setting for *object*. */
             use_prop_edit = ts->proportional_objects;
           }
+          else if (object_mode == OB_MODE_SCULPT) {
+            /* Sculpt keeps its own proportional enable/projected bits instead of sharing
+             * `proportional_edit` with Edit Mode, so toggling one mode cannot leak into the
+             * other. Radius and falloff stay shared (like Object Mode's `proportional_objects`),
+             * so only these two bits are read from the Sculpt tool state. Connected is
+             * deliberately never set: geodesic distance is not supported for sculpt yet. */
+            const Sculpt &sd = *ts->sculpt;
+            use_prop_edit = (sd.sculpt_cursor_flag & SCULPT_CURSOR_PROPORTIONAL) != 0 &&
+                            sculpt_paint::cursor::is_enabled(*t->scene);
+            use_prop_connected = false;
+            use_prop_projected = (sd.sculpt_cursor_flag & SCULPT_CURSOR_PROJECTED) != 0;
+          }
           else {
             use_prop_edit = (ts->proportional_edit & PROP_EDIT_USE) != 0;
           }
 
           if (use_prop_edit) {
             t->flag |= T_PROP_EDIT;
-            if (ts->proportional_edit & PROP_EDIT_CONNECTED) {
+            if (use_prop_connected) {
               t->flag |= T_PROP_CONNECTED;
             }
-            if (ts->proportional_edit & PROP_EDIT_PROJECTED) {
+            if (use_prop_projected) {
               t->flag |= T_PROP_PROJECTED;
             }
           }

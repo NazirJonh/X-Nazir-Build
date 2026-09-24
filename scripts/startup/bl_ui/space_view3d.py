@@ -1219,6 +1219,32 @@ class VIEW3D_HT_header(Header):
                 icon=VIEW3D_HT_header._mesh_paint_automasking_icon(tool_settings.sculpt),
             )
 
+            # Proportional editing for the sculpt cursor deform is a setting of the 3D Cursor tool
+            # itself, so only show the header button while that tool is active. It uses its own
+            # toggle (see `Sculpt::sculpt_cursor_flag`) so it cannot leak into Edit Mode, but reuses
+            # the shared falloff and radius tool settings.
+            if tool and tool.idname == "builtin.sculpt_cursor":
+                sculpt = tool_settings.sculpt
+                row = layout.row(align=True)
+                # Elastic mode has its own brush-radius falloff, so proportional editing does not
+                # apply there.
+                row.active = sculpt.transform_mode == 'ALL_VERTICES'
+                kw = {}
+                if sculpt.use_sculpt_cursor_proportional:
+                    kw["icon"] = 'PROP_PROJECTED' if sculpt.use_sculpt_cursor_projected else 'PROP_ON'
+                else:
+                    kw["icon"] = 'PROP_OFF'
+                row.prop(sculpt, "use_sculpt_cursor_proportional", icon_only=True, **kw)
+                sub = row.row(align=True)
+                sub.active = sculpt.use_sculpt_cursor_proportional
+                sub.prop_with_popover(
+                    tool_settings,
+                    "proportional_edit_falloff",
+                    text="",
+                    icon_only=True,
+                    panel="VIEW3D_PT_sculpt_cursor_proportional",
+                )
+
         elif object_mode == 'VERTEX_PAINT':
             row = layout.row()
             row.popover(panel="VIEW3D_PT_slots_color_attributes", icon='GROUP_VCOL')
@@ -4678,6 +4704,10 @@ class VIEW3D_MT_sculpt(Menu):
         layout = self.layout
 
         layout.menu("VIEW3D_MT_sculpt_transform", text="Transform")
+
+        # A boolean (unlike the tool header's On/Off enum) can be added to Quick Favorites.
+        layout.prop(context.tool_settings.sculpt, "use_sculpt_cursor")
+        layout.prop(context.tool_settings.sculpt, "use_sculpt_cursor_proportional")
 
         layout.separator()
 
@@ -9301,6 +9331,26 @@ class VIEW3D_PT_proportional_edit(Panel):
         col.prop(tool_settings, "proportional_distance")
 
 
+class VIEW3D_PT_sculpt_cursor_proportional(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_label = "Proportional Editing"
+    bl_ui_units_x = 8
+
+    def draw(self, context):
+        layout = self.layout
+        tool_settings = context.tool_settings
+        sculpt = tool_settings.sculpt
+        col = layout.column()
+        col.active = (sculpt.use_sculpt_cursor_proportional and
+                      sculpt.transform_mode == 'ALL_VERTICES')
+
+        col.prop(sculpt, "use_sculpt_cursor_projected")
+        col.separator()
+        col.prop(tool_settings, "proportional_edit_falloff", expand=True)
+        col.prop(tool_settings, "proportional_distance")
+
+
 class VIEW3D_PT_transform_orientations(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -11004,6 +11054,7 @@ classes = (
     VIEW3D_PT_snapping,
     VIEW3D_PT_sculpt_snapping,
     VIEW3D_PT_proportional_edit,
+    VIEW3D_PT_sculpt_cursor_proportional,
     VIEW3D_PT_grease_pencil_origin,
     VIEW3D_PT_grease_pencil_lock,
     VIEW3D_PT_grease_pencil_guide,

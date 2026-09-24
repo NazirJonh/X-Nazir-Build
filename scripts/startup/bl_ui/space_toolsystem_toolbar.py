@@ -2129,6 +2129,39 @@ class _defs_sculpt:
             keymap="3D View Tool: Sculpt, Curves Edit",
         )
 
+    @ToolDef.from_fn
+    def sculpt_cursor():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("sculpt.cursor_set")
+            sculpt = context.tool_settings.sculpt
+
+            layout.prop(sculpt, "sculpt_cursor_gizmo", expand=True)
+
+            layout.prop(sculpt, "sculpt_cursor_mode")
+            layout.prop(props, "orientation")
+
+            layout.prop(sculpt, "pin_sculpt_cursor",
+                        icon='PINNED' if sculpt.pin_sculpt_cursor else 'UNPINNED')
+            layout.prop(sculpt, "use_shared_sculpt_cursor",
+                        icon='GHOST_ENABLED' if sculpt.use_shared_sculpt_cursor else 'GHOST_DISABLED')
+            layout.prop(props, "use_depth")
+
+            layout.separator()
+            layout.prop(sculpt, "transform_all_objects", text="Affect All Objects")
+            layout.prop(sculpt, "transform_origin_correct", text="Correct Origin")
+
+        return dict(
+            idname="builtin.sculpt_cursor",
+            label="3D Cursor",
+            description=(
+                "Set and transform an independent sculpt cursor that keeps its position "
+                "for sculpting operations"
+            ),
+            icon="ops.generic.cursor",
+            keymap="3D View Tool: Sculpt, 3D Cursor",
+            draw_settings=draw_settings,
+        )
+
 
 class _defs_vertex_paint:
 
@@ -4365,6 +4398,8 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_transform.rotate,
             _defs_transform.scale,
             _defs_transform.transform,
+            None,
+            _defs_sculpt.sculpt_cursor,
             None,
             *_tools_annotate,
         ],

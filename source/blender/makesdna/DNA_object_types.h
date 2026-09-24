@@ -689,6 +689,15 @@ struct Object {
   /** Irradiance caches baked for this object (light-probes only). */
   struct LightProbeObjectCache *lightprobe_cache = nullptr;
 
+  /** Sculpt mode 3D cursor (persistent per object, object-space). */
+  float sculpt_cursor_location[3] = {};
+  float sculpt_cursor_rotation[4] = _DNA_DEFAULT_UNIT_QT;
+  char sculpt_cursor_initialized = 0;
+  /* The removed `sculpt_cursor_scale` and `sculpt_cursor_global` (now a ToolSettings flag) left
+   * these bytes as padding so every following member keeps its offset and old files still read
+   * correctly. */
+  char _pad_sculpt_cursor[19] = {};
+
   bke::ObjectRuntime *runtime = nullptr;
 
 #ifdef __cplusplus

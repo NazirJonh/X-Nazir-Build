@@ -3969,6 +3969,25 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_update(
       prop, NC_OBJECT | ND_DRAW, "rna_Object_sculpt_layer_sync_group_name_update");
 
+  /* Sculpt mode 3D cursor (persistent per object). */
+  prop = RNA_def_property(srna, "sculpt_cursor_location", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_cursor_location");
+  RNA_def_property_ui_text(prop, "Sculpt Cursor Location", "Object-space location of the sculpt 3D cursor");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_cursor_rotation", PROP_FLOAT, PROP_QUATERNION);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_cursor_rotation");
+  RNA_def_property_ui_text(
+      prop, "Sculpt Cursor Rotation", "Object-space rotation of the sculpt 3D cursor");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_cursor_initialized", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_initialized", 1);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Sculpt Cursor Initialized", "Whether the sculpt 3D cursor has been positioned");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
   /* Shadow terminator. */
   prop = RNA_def_property(srna, "shadow_terminator_normal_offset", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_range(prop, 0.0f, FLT_MAX);

@@ -1968,6 +1968,8 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
       paint_cursor_setup_3D_drawing(pcontext);
       paint_cursor_draw_3D_view_brush_cursor(pcontext);
       paint_cursor_restore_drawing_state();
+
+      sculpt_cursor_3d_overlay_draw(pcontext);
       break;
     default:
       BLI_assert_unreachable();

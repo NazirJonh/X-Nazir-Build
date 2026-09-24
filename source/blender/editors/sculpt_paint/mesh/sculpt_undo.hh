@@ -609,6 +609,14 @@ bool has_bmesh_log_entry(const Object &ob);
 
 void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object);
 /**
+ * Same as above, but only for the leaf nodes in \a node_mask. For callers that know the other
+ * nodes still hold their undo positions, so they are neither rewritten nor tagged for a normals and
+ * draw update.
+ */
+void restore_position_from_undo_step(const Depsgraph &depsgraph,
+                                     Object &object,
+                                     const IndexMask &node_mask);
+/**
  * Take the sculpt mask back to what the open undo step recorded. The mask counterpart of
  * #restore_position_from_undo_step; both exist so a caller that knows which TARGET a stroke wrote
  * can revert exactly that one, the way `restore_from_undo_step()` dispatches internally.

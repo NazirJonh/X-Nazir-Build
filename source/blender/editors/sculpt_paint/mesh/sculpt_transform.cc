@@ -10,6 +10,8 @@
 
 #include "BLI_array_utils.hh"
 #include "BLI_enumerable_thread_specific.hh"
+#include "BLI_hash.h"
+#include "BLI_kdtree.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_rotation.h"
@@ -32,6 +34,7 @@
 #include "BKE_subdiv_ccg.hh"
 
 #include "DNA_object_types.h"
+#include "DNA_scene_types.h"
 
 #include "DEG_depsgraph.hh"
 
@@ -56,6 +59,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <optional>
 
 namespace blender::ed::sculpt_paint {
 
@@ -73,11 +77,26 @@ static bool origin_correct_active_for_secondary(const Sculpt &sd)
          sd.transform_mode == SCULPT_TRANSFORM_MODE_ALL_VERTICES;
 }
 
+static void sculpt_cursor_store_from_transform_pivot(bContext *C, Object &ob, SculptSession &ss)
+{
+  Scene *scene = CTX_data_scene(C);
+  if (!scene || !cursor::is_enabled(*scene)) {
+    return;
+  }
+  cursor::CursorState state;
+  state.location = ss.pivot_pos;
+  state.rotation = ss.pivot_rot;
+  cursor::state_set(*scene, ob, state);
+}
+
 static void init_transform_common(bContext *C, Object &ob, const float mval_fl[2])
 {
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   SculptSession &ss = *ob.runtime->sculpt_session;
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+
+  /* The transform pivot (and, in multi-object sculpt, the shared cursor position for every
+   * target object) is established by #createTransSculpt before this runs, so it is used as-is. */
 
   ss.init_pivot_pos = ss.pivot_pos;
   ss.init_pivot_rot = ss.pivot_rot;
@@ -246,18 +265,28 @@ void sync_local_pivot_from_world(Object &ob)
   sync_local_pivot_from_matrix(ss, ob.object_to_world());
 }
 
-static std::array<float4x4, 8> transform_matrices_init(const float4x4 &object_to_world,
-                                                       const SculptSession &ss,
-                                                       const ePaintSymmetryFlags symm,
-                                                       const TransformDisplacementMode t_mode)
+/**
+ * Per-symmetry-area components of one modal Transform step. Split out of the matrix assembly so
+ * the proportional path can interpolate the transform towards identity per vertex, instead of
+ * applying the full matrix and scaling the resulting displacement -- which pulls a rotated vertex
+ * along the chord and visibly pinches the mesh at the edge of the falloff.
+ */
+struct TransformComponents {
+  /** Translation delta (`pivot_pos - start pivot`), symmetry-flipped. */
+  float3 translation;
+  /** Local rotation delta quaternion, symmetry-flipped. */
+  float rotation[4];
+  /** Scale factor (`pivot_scale - start scale + 1`), shared across symmetry areas. */
+  float3 scale;
+  /** Symmetry-flipped final pivot position. */
+  float3 pivot;
+};
+
+static std::array<TransformComponents, PAINT_SYMM_AREAS> transform_components_init(
+    const SculptSession &ss,
+    const ePaintSymmetryFlags symm,
+    const TransformDisplacementMode t_mode)
 {
-  std::array<float4x4, 8> mats;
-
-  float3 final_pivot_pos, d_t, d_s;
-  float d_r[4];
-  float t_mat[4][4], r_mat[4][4], s_mat[4][4], pivot_mat[4][4], pivot_imat[4][4],
-      transform_mat[4][4];
-
   float start_pivot_pos[3], start_pivot_rot[4], start_pivot_scale[3];
   switch (t_mode) {
     case TransformDisplacementMode::Original:
@@ -272,76 +301,109 @@ static std::array<float4x4, 8> transform_matrices_init(const float4x4 &object_to
       break;
   }
 
-  /* The object's orientation/scale split (used by the rotation matrix below) is invariant across
-   * all 8 symmetry areas in the loop below -- the object doesn't move mid-step -- so compute it
-   * once here instead of on every iteration. \a object_to_world is passed in explicitly (rather
-   * than read from an `Object &`) so a rigid-body Origin Correct secondary can pass its FIXED
-   * session-start matrix instead of its live, per-step-mutated one. */
+  std::array<TransformComponents, PAINT_SYMM_AREAS> components;
+  for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
+    ePaintSymmetryAreas v_symm = ePaintSymmetryAreas(i);
+    TransformComponents &comp = components[i];
+
+    sub_v3_v3v3(comp.translation, ss.pivot_pos, start_pivot_pos);
+    comp.translation = flip_v3_by_symm_area(comp.translation, symm, v_symm, ss.init_pivot_pos);
+
+    sub_qt_qtqt(comp.rotation, ss.pivot_rot, start_pivot_rot);
+    normalize_qt(comp.rotation);
+    flip_quat_by_symm_area(comp.rotation, symm, v_symm, ss.init_pivot_pos);
+
+    sub_v3_v3v3(comp.scale, ss.pivot_scale, start_pivot_scale);
+    add_v3_fl(comp.scale, 1.0f);
+
+    comp.pivot = flip_v3_by_symm_area(ss.pivot_pos, symm, v_symm, start_pivot_pos);
+  }
+
+  return components;
+}
+
+/**
+ * Assemble the full affine transform for one symmetry area from \a components. The rotation is
+ * built via full conjugation (object orientation AND scale) instead of a naive local quaternion,
+ * so a non-uniformly-scaled object rotates rigidly around the shared world pivot instead of
+ * shearing. For a uniformly-scaled or unscaled object this is bit-exact with `quat_to_mat4`
+ * (scale cancels out of the conjugation when it is a multiple of the identity).
+ */
+static void build_symm_area_transform_matrix(const TransformComponents &components,
+                                             const float orientation[3][3],
+                                             const float orientation_inv[3][3],
+                                             const float scale_mat[3][3],
+                                             const float scale_inv_mat[3][3],
+                                             float r_mat[4][4])
+{
+  float t_mat[4][4], r_mat_local[4][4], s_mat[4][4], pivot_mat[4][4], pivot_imat[4][4],
+      transform_mat[4][4];
+
+  unit_m4(t_mat);
+  unit_m4(r_mat_local);
+  unit_m4(s_mat);
+  unit_m4(pivot_mat);
+
+  translate_m4(
+      t_mat, components.translation[0], components.translation[1], components.translation[2]);
+
+  float world_d_r[4];
+  conjugate_quat_m3(orientation, orientation_inv, components.rotation, world_d_r);
+  float world_rot_mat[3][3];
+  quat_to_mat3(world_rot_mat, world_d_r);
+
+  float ortho_scale[3][3], world_ortho_scale[3][3], conjugated[3][3], r_mat3[3][3];
+  mul_m3_m3m3(ortho_scale, orientation, scale_mat);            /* O * S. */
+  mul_m3_m3m3(world_ortho_scale, world_rot_mat, ortho_scale);  /* Rw * O * S. */
+  mul_m3_m3m3(conjugated, orientation_inv, world_ortho_scale); /* O^-1 * Rw * O * S. */
+  mul_m3_m3m3(r_mat3, scale_inv_mat, conjugated);              /* S^-1 * O^-1 * Rw * O * S. */
+  copy_m4_m3(r_mat_local, r_mat3);
+
+  size_to_mat4(s_mat, components.scale);
+
+  translate_m4(pivot_mat, components.pivot[0], components.pivot[1], components.pivot[2]);
+  invert_m4_m4(pivot_imat, pivot_mat);
+
+  mul_m4_m4m4(transform_mat, r_mat_local, t_mat);
+  mul_m4_m4m4(transform_mat, transform_mat, s_mat);
+  mul_m4_m4m4(r_mat, transform_mat, pivot_imat);
+  mul_m4_m4m4(r_mat, pivot_mat, r_mat);
+}
+
+static std::array<float4x4, PAINT_SYMM_AREAS> transform_matrices_from_components(
+    const std::array<TransformComponents, PAINT_SYMM_AREAS> &components,
+    const float orientation[3][3],
+    const float orientation_inv[3][3],
+    const float scale_mat[3][3],
+    const float scale_inv_mat[3][3])
+{
+  std::array<float4x4, PAINT_SYMM_AREAS> mats;
+  for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
+    build_symm_area_transform_matrix(
+        components[i], orientation, orientation_inv, scale_mat, scale_inv_mat, mats[i].ptr());
+  }
+  return mats;
+}
+
+static std::array<float4x4, 8> transform_matrices_init(const float4x4 &object_to_world,
+                                                       const SculptSession &ss,
+                                                       const ePaintSymmetryFlags symm,
+                                                       const TransformDisplacementMode t_mode)
+{
+  const std::array<TransformComponents, PAINT_SYMM_AREAS> components =
+      transform_components_init(ss, symm, t_mode);
+
+  /* The object's orientation/scale split (used by the rotation matrix) is invariant across all 8
+   * symmetry areas -- the object doesn't move mid-step -- so compute it once here. \a
+   * object_to_world is passed in explicitly (rather than read from an `Object &`) so a rigid-body
+   * Origin Correct secondary can pass its FIXED session-start matrix instead of its live,
+   * per-step-mutated one. */
   float orientation[3][3], orientation_inv[3][3], scale_mat[3][3], scale_inv_mat[3][3];
   object_orientation_and_scale(
       object_to_world, orientation, orientation_inv, scale_mat, scale_inv_mat);
 
-  for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
-    ePaintSymmetryAreas v_symm = ePaintSymmetryAreas(i);
-
-    copy_v3_v3(final_pivot_pos, ss.pivot_pos);
-
-    unit_m4(pivot_mat);
-
-    unit_m4(t_mat);
-    unit_m4(r_mat);
-    unit_m4(s_mat);
-
-    /* Translation matrix. */
-    sub_v3_v3v3(d_t, ss.pivot_pos, start_pivot_pos);
-    d_t = flip_v3_by_symm_area(d_t, symm, v_symm, ss.init_pivot_pos);
-    translate_m4(t_mat, d_t[0], d_t[1], d_t[2]);
-
-    /* Rotation matrix -- built via full conjugation (object orientation AND scale) instead of a
-     * naive local quaternion, so a non-uniformly-scaled object rotates rigidly around the
-     * shared world pivot instead of shearing. #sync_local_pivot_from_world's orientation-only
-     * conjugation (used to derive `d_r` just below, unchanged) is exactly right for keeping
-     * #pivot_rot itself a valid rotation, but it deliberately drops the object's own scale --
-     * reintroduce it here by converting the (symmetry-flipped) LOCAL delta back to world space,
-     * then conjugating by BOTH orientation and scale. For a uniformly-scaled or unscaled object
-     * this is bit-exact with the previous `quat_to_mat4(d_r)` (scale cancels out of the
-     * conjugation when it is a multiple of the identity). */
-    sub_qt_qtqt(d_r, ss.pivot_rot, start_pivot_rot);
-    normalize_qt(d_r);
-    flip_quat_by_symm_area(d_r, symm, v_symm, ss.init_pivot_pos);
-
-    float world_d_r[4];
-    conjugate_quat_m3(orientation, orientation_inv, d_r, world_d_r);
-    float world_rot_mat[3][3];
-    quat_to_mat3(world_rot_mat, world_d_r);
-
-    float ortho_scale[3][3], world_ortho_scale[3][3], conjugated[3][3], r_mat3[3][3];
-    mul_m3_m3m3(ortho_scale, orientation, scale_mat);            /* O * S. */
-    mul_m3_m3m3(world_ortho_scale, world_rot_mat, ortho_scale);  /* Rw * O * S. */
-    mul_m3_m3m3(conjugated, orientation_inv, world_ortho_scale); /* O^-1 * Rw * O * S. */
-    mul_m3_m3m3(r_mat3, scale_inv_mat, conjugated);              /* S^-1 * O^-1 * Rw * O * S. */
-
-    unit_m4(r_mat);
-    copy_m4_m3(r_mat, r_mat3);
-
-    /* Scale matrix. */
-    sub_v3_v3v3(d_s, ss.pivot_scale, start_pivot_scale);
-    add_v3_fl(d_s, 1.0f);
-    size_to_mat4(s_mat, d_s);
-
-    /* Pivot matrix. */
-    final_pivot_pos = flip_v3_by_symm_area(final_pivot_pos, symm, v_symm, start_pivot_pos);
-    translate_m4(pivot_mat, final_pivot_pos[0], final_pivot_pos[1], final_pivot_pos[2]);
-    invert_m4_m4(pivot_imat, pivot_mat);
-
-    /* Final transform matrix. */
-    mul_m4_m4m4(transform_mat, r_mat, t_mat);
-    mul_m4_m4m4(transform_mat, transform_mat, s_mat);
-    mul_m4_m4m4(mats[i].ptr(), transform_mat, pivot_imat);
-    mul_m4_m4m4(mats[i].ptr(), pivot_mat, mats[i].ptr());
-  }
-
-  return mats;
+  return transform_matrices_from_components(
+      components, orientation, orientation_inv, scale_mat, scale_inv_mat);
 }
 
 static constexpr float transform_mirror_max_distance_eps = 0.00002f;
@@ -350,6 +412,7 @@ struct TransformLocalData {
   Vector<float3> positions;
   Vector<float> factors;
   Vector<float3> translations;
+  Vector<int> vert_indices;
 };
 
 BLI_NOINLINE static void calc_symm_area_transform_translations(
@@ -384,8 +447,260 @@ BLI_NOINLINE static void filter_translations_with_symmetry(const Span<float3> po
   }
 }
 
+/**
+ * Per-vertex proportional falloff weight. Mirrors the formulas in #calculatePropRatio
+ * (`transform_generics.cc`) so the sculpt falloff profiles match Edit Mode. Unlike the original,
+ * #PROP_RANDOM is hashed from a stable per-vertex seed instead of a running RNG, so the profile
+ * does not flicker between modal steps.
+ *
+ * \param dist: 1 at the pivot, 0 at the falloff radius.
+ */
+static float proportional_falloff(const int mode, const float dist, const uint32_t seed)
+{
+  switch (mode) {
+    case PROP_SHARP:
+      return dist * dist;
+    case PROP_SMOOTH:
+      return min_ff(1.0f, 3.0f * dist * dist - 2.0f * dist * dist * dist);
+    case PROP_ROOT:
+      return sqrtf(dist);
+    case PROP_LIN:
+      return dist;
+    case PROP_CONST:
+      return 1.0f;
+    case PROP_SPHERE:
+      return sqrtf(2.0f * dist - dist * dist);
+    case PROP_RANDOM:
+      return BLI_hash_int_01(seed) * dist;
+    case PROP_INVSQUARE:
+      return dist * (2.0f - dist);
+    default:
+      return 1.0f;
+  }
+}
+
+/**
+ * Per-symmetry-area data for the proportional path. The partial rotation uses Rodrigues' formula
+ * `R(a) = I + sin(a) K + (1 - cos(a)) K^2`, with `K` and `K^2` conjugated into object space once
+ * per step, so each vertex only costs one `sin`/`cos` pair instead of assembling a matrix. Scaling
+ * the angle (like #ElementRotation in Edit Mode) instead of slerping also keeps rotations past 180
+ * degrees continuous, where a shortest-path slerp would flip direction.
+ */
+struct ProportionalAreaTransform {
+  float3 pivot;
+  float3 translation;
+  float3 scale;
+  float angle;
+  /** `S^-1 * O^-1 * K * O * S`, see #build_symm_area_transform_matrix. */
+  float rot_k[3][3];
+  /** `S^-1 * O^-1 * K^2 * O * S`. */
+  float rot_k2[3][3];
+};
+
+/**
+ * Everything the per-vertex transform math needs for one modal step: the assembled matrices when
+ * proportional editing is off, or the interpolatable per-area components when it is on.
+ */
+struct TransformStepData {
+  std::array<float4x4, PAINT_SYMM_AREAS> mats;
+  std::array<ProportionalAreaTransform, PAINT_SYMM_AREAS> areas;
+};
+
+/** `S^-1 * O^-1 * m * O * S`, the same conjugation #build_symm_area_transform_matrix applies. */
+static void conjugate_m3_by_object(const float m[3][3],
+                                   const float orientation[3][3],
+                                   const float orientation_inv[3][3],
+                                   const float scale_mat[3][3],
+                                   const float scale_inv_mat[3][3],
+                                   float r_m[3][3])
+{
+  float ortho_scale[3][3], tmp[3][3], tmp2[3][3];
+  mul_m3_m3m3(ortho_scale, orientation, scale_mat);
+  mul_m3_m3m3(tmp, m, ortho_scale);
+  mul_m3_m3m3(tmp2, orientation_inv, tmp);
+  mul_m3_m3m3(r_m, scale_inv_mat, tmp2);
+}
+
+static ProportionalAreaTransform proportional_area_transform_init(
+    const TransformComponents &components,
+    const float orientation[3][3],
+    const float orientation_inv[3][3],
+    const float scale_mat[3][3],
+    const float scale_inv_mat[3][3])
+{
+  ProportionalAreaTransform area;
+  area.pivot = components.pivot;
+  area.translation = components.translation;
+  area.scale = components.scale;
+  zero_m3(area.rot_k);
+  zero_m3(area.rot_k2);
+
+  float local_rot[4], world_rot[4];
+  normalize_qt_qt(local_rot, components.rotation);
+  conjugate_quat_m3(orientation, orientation_inv, local_rot, world_rot);
+  normalize_qt(world_rot);
+
+  float axis[3];
+  quat_to_axis_angle(axis, &area.angle, world_rot);
+  if (std::abs(area.angle) < 1e-7f || normalize_v3(axis) == 0.0f) {
+    area.angle = 0.0f;
+    return area;
+  }
+
+  /* Derive `K` and `K^2` from rotation matrices built by the same routine that builds the full
+   * rotation, so they follow its axis and matrix conventions exactly:
+   * `R(pi) = I + 2 K^2` and `R(pi/2) = I + K + K^2`. */
+  float r90[3][3], r180[3][3], k[3][3], k2[3][3];
+  axis_angle_normalized_to_mat3(r90, axis, float(M_PI_2));
+  axis_angle_normalized_to_mat3(r180, axis, float(M_PI));
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      const float identity = (i == j) ? 1.0f : 0.0f;
+      k2[i][j] = (r180[i][j] - identity) * 0.5f;
+      k[i][j] = r90[i][j] - identity - k2[i][j];
+    }
+  }
+  conjugate_m3_by_object(k, orientation, orientation_inv, scale_mat, scale_inv_mat, area.rot_k);
+  conjugate_m3_by_object(k2, orientation, orientation_inv, scale_mat, scale_inv_mat, area.rot_k2);
+  return area;
+}
+
+static TransformStepData transform_step_data_init(const float4x4 &object_to_world,
+                                                  const SculptSession &ss,
+                                                  const ePaintSymmetryFlags symm,
+                                                  const TransformDisplacementMode t_mode,
+                                                  const bool proportional)
+{
+  const std::array<TransformComponents, PAINT_SYMM_AREAS> components =
+      transform_components_init(ss, symm, t_mode);
+  float orientation[3][3], orientation_inv[3][3], scale_mat[3][3], scale_inv_mat[3][3];
+  object_orientation_and_scale(
+      object_to_world, orientation, orientation_inv, scale_mat, scale_inv_mat);
+
+  TransformStepData step;
+  if (proportional) {
+    for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
+      step.areas[i] = proportional_area_transform_init(
+          components[i], orientation, orientation_inv, scale_mat, scale_inv_mat);
+    }
+  }
+  else {
+    step.mats = transform_matrices_from_components(
+        components, orientation, orientation_inv, scale_mat, scale_inv_mat);
+  }
+  return step;
+}
+
+/**
+ * Apply the transform of \a area interpolated from identity by \a factor:
+ * `pivot + R(f * angle) * (lerp(1, s, f) * (p - pivot) + f * t)`, which at `factor == 1` matches
+ * the full matrix `P * R * T * S * P^-1`.
+ */
+static float3 proportional_transform_point(const ProportionalAreaTransform &area,
+                                           const float3 &position,
+                                           const float factor)
+{
+  const float3 scale = float3(1.0f) + (area.scale - float3(1.0f)) * factor;
+  float3 co = (position - area.pivot) * scale + area.translation * factor;
+  if (area.angle != 0.0f) {
+    const float angle = area.angle * factor;
+    float3 k_co, k2_co;
+    mul_v3_m3v3(k_co, area.rot_k, co);
+    mul_v3_m3v3(k2_co, area.rot_k2, co);
+    co += k_co * std::sin(angle) + k2_co * (1.0f - std::cos(angle));
+  }
+  return area.pivot + co;
+}
+
+/**
+ * Combine the mask/visibility factor of a vertex with its proportional falloff from the pivot.
+ *
+ * The radius alone limits the affected region; the mask only protects. Multiplying a hard mask
+ * into the falloff would still tear the mesh wherever the radius crosses the mask border, so the
+ * mask weight is additionally faded to zero over one radius towards the nearest fully masked or
+ * hidden vertex (#TransformProportional::vert_mask_dist). Masked vertices never move.
+ */
+static float proportional_vert_factor(const filter::TransformProportional &prop,
+                                      const float mask_factor,
+                                      const int vert)
+{
+  const float dist = prop.vert_dist[vert];
+  if (mask_factor <= 0.0f || dist >= prop.radius) {
+    return 0.0f;
+  }
+  float factor = mask_factor * proportional_falloff(
+                                   prop.falloff, 1.0f - dist / prop.radius, uint32_t(vert));
+  if (!prop.vert_mask_dist.is_empty()) {
+    const float t = std::min(prop.vert_mask_dist[vert] / prop.radius, 1.0f);
+    factor *= t * t * (3.0f - 2.0f * t);
+  }
+  return factor;
+}
+
+BLI_NOINLINE static void calc_symm_area_transform_translations_proportional(
+    const Span<float3> positions,
+    const TransformStepData &step,
+    const filter::TransformProportional &prop,
+    const Span<int> vert_indices,
+    const Span<float> factors,
+    const MutableSpan<float3> translations)
+{
+  for (const int i : positions.index_range()) {
+    const int vert = vert_indices[i];
+    const float factor = proportional_vert_factor(prop, factors[i], vert);
+    if (factor <= 0.0f) {
+      translations[i] = float3(0.0f);
+      continue;
+    }
+    const ePaintSymmetryAreas symm_area = get_vertex_symm_area(positions[i]);
+    translations[i] = proportional_transform_point(step.areas[symm_area], positions[i], factor) -
+                      positions[i];
+  }
+}
+
+void transform_set_proportional_params(Object &ob,
+                                       const bool enabled,
+                                       const float radius,
+                                       const int falloff,
+                                       const bool projected,
+                                       const float view_normal[3])
+{
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  BLI_assert(ss.filter_cache != nullptr);
+  filter::TransformProportional &prop = ss.filter_cache->proportional;
+  prop.enabled = enabled;
+  prop.radius = radius;
+  prop.falloff = falloff;
+  prop.projected = projected;
+  prop.view_normal = float3(view_normal);
+}
+
+/** Global vertex indices of a grids node, in the order of its gathered data. */
+static Span<int> grids_node_vert_indices(const Span<int> grids,
+                                         const int grid_area,
+                                         Vector<int> &r_indices)
+{
+  r_indices.resize(grids.size() * grid_area);
+  for (const int i : grids.index_range()) {
+    array_utils::fill_index_range(r_indices.as_mutable_span().slice(i * grid_area, grid_area),
+                                  grids[i] * grid_area);
+  }
+  return r_indices;
+}
+
+static Span<int> bmesh_node_vert_indices(const Set<BMVert *, 0> &verts, Vector<int> &r_indices)
+{
+  r_indices.resize(verts.size());
+  int i = 0;
+  for (const BMVert *vert : verts) {
+    r_indices[i++] = BM_elem_index_get(vert);
+  }
+  return r_indices;
+}
+
 static void transform_node_mesh(const Sculpt &sd,
-                                const std::array<float4x4, 8> &transform_mats,
+                                const TransformStepData &step,
+                                const filter::TransformProportional &prop,
                                 const MeshAttributeData &attribute_data,
                                 const bke::pbvh::MeshNode &node,
                                 Object &object,
@@ -403,8 +718,14 @@ static void transform_node_mesh(const Sculpt &sd,
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
-  calc_symm_area_transform_translations(orig_data.positions, transform_mats, translations);
-  scale_translations(translations, factors);
+  if (prop.enabled) {
+    calc_symm_area_transform_translations_proportional(
+        orig_data.positions, step, prop, verts, factors, translations);
+  }
+  else {
+    calc_symm_area_transform_translations(orig_data.positions, step.mats, translations);
+    scale_translations(translations, factors);
+  }
 
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
   filter_translations_with_symmetry(orig_data.positions, symm, translations);
@@ -414,7 +735,8 @@ static void transform_node_mesh(const Sculpt &sd,
 }
 
 static void transform_node_grids(const Sculpt &sd,
-                                 const std::array<float4x4, 8> &transform_mats,
+                                 const TransformStepData &step,
+                                 const filter::TransformProportional &prop,
                                  const bke::pbvh::GridsNode &node,
                                  Object &object,
                                  TransformLocalData &tls)
@@ -434,9 +756,15 @@ static void transform_node_grids(const Sculpt &sd,
 
   tls.translations.resize(grid_verts_num);
   const MutableSpan<float3> translations = tls.translations;
-  calc_symm_area_transform_translations(orig_data.positions, transform_mats, translations);
-
-  scale_translations(translations, factors);
+  if (prop.enabled) {
+    const Span<int> vert_indices = grids_node_vert_indices(grids, key.grid_area, tls.vert_indices);
+    calc_symm_area_transform_translations_proportional(
+        orig_data.positions, step, prop, vert_indices, factors, translations);
+  }
+  else {
+    calc_symm_area_transform_translations(orig_data.positions, step.mats, translations);
+    scale_translations(translations, factors);
+  }
 
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
   filter_translations_with_symmetry(orig_data.positions, symm, translations);
@@ -446,7 +774,8 @@ static void transform_node_grids(const Sculpt &sd,
 }
 
 static void transform_node_bmesh(const Sculpt &sd,
-                                 const std::array<float4x4, 8> &transform_mats,
+                                 const TransformStepData &step,
+                                 const filter::TransformProportional &prop,
                                  bke::pbvh::BMeshNode &node,
                                  Object &object,
                                  TransformLocalData &tls)
@@ -465,9 +794,15 @@ static void transform_node_bmesh(const Sculpt &sd,
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
-  calc_symm_area_transform_translations(orig_positions, transform_mats, translations);
-
-  scale_translations(translations, factors);
+  if (prop.enabled) {
+    const Span<int> vert_indices = bmesh_node_vert_indices(verts, tls.vert_indices);
+    calc_symm_area_transform_translations_proportional(
+        orig_positions, step, prop, vert_indices, factors, translations);
+  }
+  else {
+    calc_symm_area_transform_translations(orig_positions, step.mats, translations);
+    scale_translations(translations, factors);
+  }
 
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
   filter_translations_with_symmetry(orig_positions, symm, translations);
@@ -476,20 +811,377 @@ static void transform_node_bmesh(const Sculpt &sd,
   apply_translations(translations, verts);
 }
 
+/**
+ * Original positions, global vertex indices and mask/visibility factors of one PBVH node, as
+ * used by the proportional distance precomputation.
+ */
+struct ProportionalNodeData {
+  Vector<float3> positions;
+  Vector<int> vert_indices;
+  Vector<float> factors;
+};
+
+static void proportional_node_data_gather(Object &object,
+                                          const bke::pbvh::Tree &pbvh,
+                                          const MeshAttributeData *attribute_data,
+                                          const int node_i,
+                                          ProportionalNodeData &r_data)
+{
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  switch (pbvh.type()) {
+    case bke::pbvh::Type::Mesh: {
+      const bke::pbvh::MeshNode &node = pbvh.nodes<bke::pbvh::MeshNode>()[node_i];
+      const Span<int> verts = node.verts();
+      r_data.positions.clear();
+      r_data.positions.extend(orig_position_data_get_mesh(object, node).positions);
+      r_data.vert_indices.clear();
+      r_data.vert_indices.extend(verts);
+      r_data.factors.resize(verts.size());
+      fill_factor_from_hide_and_mask(
+          attribute_data->hide_vert, attribute_data->mask, verts, r_data.factors);
+      break;
+    }
+    case bke::pbvh::Type::Grids: {
+      const bke::pbvh::GridsNode &node = pbvh.nodes<bke::pbvh::GridsNode>()[node_i];
+      const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+      const Span<int> grids = node.grids();
+      r_data.positions.clear();
+      r_data.positions.extend(orig_position_data_get_grids(object, node).positions);
+      grids_node_vert_indices(grids, subdiv_ccg.grid_area, r_data.vert_indices);
+      r_data.factors.resize(r_data.positions.size());
+      fill_factor_from_hide_and_mask(subdiv_ccg, grids, r_data.factors);
+      break;
+    }
+    case bke::pbvh::Type::BMesh: {
+      bke::pbvh::BMeshNode &node = const_cast<bke::pbvh::BMeshNode &>(
+          pbvh.nodes<bke::pbvh::BMeshNode>()[node_i]);
+      const Set<BMVert *, 0> &verts = BKE_pbvh_bmesh_node_unique_verts(&node);
+      r_data.positions.resize(verts.size());
+      Array<float3> orig_normals(verts.size());
+      orig_position_data_gather_bmesh(*ss.bm_log, verts, r_data.positions, orig_normals);
+      bmesh_node_vert_indices(verts, r_data.vert_indices);
+      r_data.factors.resize(verts.size());
+      fill_factor_from_hide_and_mask(*ss.bm, verts, r_data.factors);
+      break;
+    }
+  }
+}
+
+/**
+ * World-space positions of the fixed (fully masked or hidden) vertices that share an edge with a
+ * vertex that can move, i.e. the mask border. Only edges between a moving and a fixed vertex can
+ * tear, so fading towards this border is enough, and it is usually orders of magnitude smaller than
+ * the whole masked region, which keeps the KD-tree cheap to build on the first step of a drag.
+ *
+ * Reads the current positions: this runs right after the undo restore, when they are original.
+ * A fixed vertex shared by several moving neighbors can be added more than once, which only makes
+ * the tree slightly bigger.
+ */
+static Vector<float3> proportional_mask_border_positions(const Depsgraph &depsgraph,
+                                                         Object &object,
+                                                         const bke::pbvh::Tree &pbvh,
+                                                         const IndexMask &node_mask,
+                                                         const MeshAttributeData *attribute_data,
+                                                         const filter::TransformProportional &prop)
+{
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const float4x4 &object_to_world = object.object_to_world();
+  const Span<float> vert_dist = prop.vert_dist;
+  const auto is_fixed = [&](const int vert) { return vert_dist[vert] == FLT_MAX; };
+
+  struct LocalData {
+    ProportionalNodeData node_data;
+    Vector<float3> border;
+    Vector<int> mesh_neighbors;
+    BMeshNeighborVerts bmesh_neighbors;
+    SubdivCCGNeighbors grids_neighbors;
+  };
+  threading::EnumerableThreadSpecific<LocalData> all_tls;
+
+  const Mesh *mesh = pbvh.type() == bke::pbvh::Type::Mesh ?
+                         id_cast<const Mesh *>(object.data) :
+                         nullptr;
+  const Span<float3> mesh_positions = mesh ? bke::pbvh::vert_positions_eval(depsgraph, object) :
+                                             Span<float3>();
+  struct MeshTopology {
+    OffsetIndices<int> faces;
+    Span<int> corner_verts;
+    GroupedSpan<int> vert_to_face_map;
+  };
+  std::optional<MeshTopology> mesh_topology;
+  if (mesh) {
+    mesh_topology.emplace(
+        MeshTopology{mesh->faces(), mesh->corner_verts(), mesh->vert_to_face_map()});
+  }
+
+  node_mask.foreach_index(
+      [&](const int i) {
+        if (prop.node_min_dist[i] == FLT_MAX) {
+          /* No vertex of this node can move. */
+          return;
+        }
+        LocalData &tls = all_tls.local();
+        ProportionalNodeData &data = tls.node_data;
+        proportional_node_data_gather(object, pbvh, attribute_data, i, data);
+        for (const int j : data.vert_indices.index_range()) {
+          const int vert = data.vert_indices[j];
+          if (is_fixed(vert)) {
+            continue;
+          }
+          switch (pbvh.type()) {
+            case bke::pbvh::Type::Mesh: {
+              for (const int neighbor : vert_neighbors_get_mesh(mesh_topology->faces,
+                                                                mesh_topology->corner_verts,
+                                                                mesh_topology->vert_to_face_map,
+                                                                attribute_data->hide_poly,
+                                                                vert,
+                                                                tls.mesh_neighbors))
+              {
+                if (is_fixed(neighbor)) {
+                  tls.border.append(
+                      math::transform_point(object_to_world, mesh_positions[neighbor]));
+                }
+              }
+              break;
+            }
+            case bke::pbvh::Type::Grids: {
+              const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+              const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+              BKE_subdiv_ccg_neighbor_coords_get(
+                  subdiv_ccg, SubdivCCGCoord::from_index(key, vert), false, tls.grids_neighbors);
+              for (const SubdivCCGCoord neighbor : tls.grids_neighbors.unique()) {
+                const int neighbor_index = neighbor.to_index(key);
+                if (is_fixed(neighbor_index)) {
+                  tls.border.append(math::transform_point(
+                      object_to_world, subdiv_ccg.positions[neighbor_index]));
+                }
+              }
+              break;
+            }
+            case bke::pbvh::Type::BMesh: {
+              BMVert *bm_vert = BM_vert_at_index(ss.bm, vert);
+              for (BMVert *neighbor : vert_neighbors_get_bmesh(*bm_vert, tls.bmesh_neighbors)) {
+                if (is_fixed(BM_elem_index_get(neighbor))) {
+                  tls.border.append(math::transform_point(object_to_world, float3(neighbor->co)));
+                }
+              }
+              break;
+            }
+          }
+        }
+      },
+      exec_mode::grain_size(1));
+
+  Vector<float3> border;
+  for (LocalData &tls : all_tls) {
+    border.extend(tls.border);
+  }
+  return border;
+}
+
+/**
+ * Compute #TransformProportional::vert_dist, #vert_mask_dist and #node_min_dist from the original
+ * positions.
+ *
+ * The distances only depend on data that is fixed for the whole drag, so this runs once instead
+ * of on every modal step; a step then only reads per-vertex floats, and the per-node minimum gives
+ * an exact node culling test without refreshing any bounds.
+ */
+static void proportional_distances_build(const Depsgraph &depsgraph,
+                                         Object &object,
+                                         const ePaintSymmetryFlags symm,
+                                         filter::TransformProportional &prop)
+{
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const IndexMask &node_mask = ss.filter_cache->node_mask;
+  const float4x4 &object_to_world = object.object_to_world();
+
+  std::optional<MeshAttributeData> attribute_data;
+  if (pbvh.type() == bke::pbvh::Type::Mesh) {
+    attribute_data.emplace(*id_cast<const Mesh *>(object.data));
+  }
+  const MeshAttributeData *attribute_data_ptr = attribute_data ? &*attribute_data : nullptr;
+
+  const bool projected = prop.projected;
+  const float3 view_normal = prop.view_normal;
+
+  float3 world_pivots[PAINT_SYMM_AREAS];
+  for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
+    /* Mirror the initial pivot the same way the per-area transform does, so a vertex in a mirrored
+     * symmetry area measures its falloff from the mirrored pivot. */
+    world_pivots[i] = math::transform_point(
+        object_to_world,
+        flip_v3_by_symm_area(ss.init_pivot_pos, symm, ePaintSymmetryAreas(i), ss.init_pivot_pos));
+  }
+
+  const int verts_num = vertex_count_get(object);
+  prop.vert_dist.reinitialize(verts_num);
+  prop.vert_dist.fill(FLT_MAX);
+  prop.node_min_dist.reinitialize(pbvh.nodes_num());
+  prop.node_min_dist.fill(FLT_MAX);
+
+  /* First pass: falloff distance from the pivot and the per-node culling distance. */
+  struct BuildLocalData {
+    ProportionalNodeData node_data;
+    bool has_fixed = false;
+    bool has_moving = false;
+  };
+  threading::EnumerableThreadSpecific<BuildLocalData> all_tls;
+  node_mask.foreach_index(
+      [&](const int i) {
+        BuildLocalData &tls = all_tls.local();
+        ProportionalNodeData &data = tls.node_data;
+        proportional_node_data_gather(object, pbvh, attribute_data_ptr, i, data);
+        float node_min_dist = FLT_MAX;
+        for (const int j : data.positions.index_range()) {
+          if (data.factors[j] <= 0.0f) {
+            tls.has_fixed = true;
+            continue;
+          }
+          const float3 world_co = math::transform_point(object_to_world, data.positions[j]);
+          const ePaintSymmetryAreas area = get_vertex_symm_area(data.positions[j]);
+          float3 delta = world_co - world_pivots[area];
+          if (projected) {
+            delta -= view_normal * math::dot(delta, view_normal);
+          }
+          const float dist = math::length(delta);
+          prop.vert_dist[data.vert_indices[j]] = dist;
+          node_min_dist = std::min(node_min_dist, dist);
+          tls.has_moving = true;
+        }
+        prop.node_min_dist[i] = node_min_dist;
+      },
+      exec_mode::grain_size(1));
+
+  bool has_fixed = false;
+  bool has_moving = false;
+  for (const BuildLocalData &tls : all_tls) {
+    has_fixed |= tls.has_fixed;
+    has_moving |= tls.has_moving;
+  }
+
+  prop.vert_mask_dist = Array<float>();
+  const Vector<float3> border = (has_fixed && has_moving) ?
+                                    proportional_mask_border_positions(depsgraph,
+                                                                       object,
+                                                                       pbvh,
+                                                                       node_mask,
+                                                                       attribute_data_ptr,
+                                                                       prop) :
+                                    Vector<float3>();
+  if (!border.is_empty()) {
+    KDTree<float3> *tree = kdtree_new<float3>(uint(border.size()));
+    for (const int i : border.index_range()) {
+      kdtree_insert(tree, i, border[i]);
+    }
+    kdtree_balance(tree);
+
+    /* Second pass, only for vertices that can move: the world-space distance to the nearest fixed
+     * vertex. Not projected, since the fade follows the mask on the surface rather than the view. */
+    prop.vert_mask_dist.reinitialize(verts_num);
+    threading::EnumerableThreadSpecific<ProportionalNodeData> all_node_tls;
+    node_mask.foreach_index(
+        [&](const int i) {
+          if (prop.node_min_dist[i] == FLT_MAX) {
+            return;
+          }
+          ProportionalNodeData &data = all_node_tls.local();
+          proportional_node_data_gather(object, pbvh, attribute_data_ptr, i, data);
+          for (const int j : data.positions.index_range()) {
+            float &mask_dist = prop.vert_mask_dist[data.vert_indices[j]];
+            if (data.factors[j] <= 0.0f) {
+              mask_dist = 0.0f;
+              continue;
+            }
+            KDTreeNearest<float3> nearest;
+            const float3 world_co = math::transform_point(object_to_world, data.positions[j]);
+            mask_dist = (kdtree_find_nearest(tree, world_co, &nearest) != -1) ? nearest.dist :
+                                                                                  FLT_MAX;
+          }
+        },
+        exec_mode::grain_size(1));
+    kdtree_free(tree);
+  }
+
+  prop.distances_valid = true;
+  prop.distances_projected = projected;
+  prop.distances_view_normal = view_normal;
+}
+
+static void proportional_distances_ensure(const Depsgraph &depsgraph,
+                                          Object &object,
+                                          const ePaintSymmetryFlags symm,
+                                          filter::TransformProportional &prop)
+{
+  if (prop.distances_valid && prop.distances_projected == prop.projected &&
+      (!prop.projected || prop.distances_view_normal == prop.view_normal))
+  {
+    return;
+  }
+  proportional_distances_build(depsgraph, object, symm, prop);
+}
+
+/**
+ * Nodes to deform this step: those with a vertex inside the radius, plus the ones deformed on the
+ * previous step, which were moved back by the undo restore and still need their bounds and draw
+ * data refreshed.
+ */
+static IndexMask proportional_deform_nodes(const IndexMask &node_mask,
+                                           filter::TransformProportional &prop,
+                                           IndexMaskMemory &memory)
+{
+  const Span<float> node_min_dist = prop.node_min_dist;
+  const Span<bool> prev_nodes = prop.prev_nodes;
+  const IndexMask deform_mask = IndexMask::from_predicate(
+      node_mask,
+      memory,
+      [&](const int i) {
+        return node_min_dist[i] < prop.radius || prev_nodes.is_empty() || prev_nodes[i];
+      },
+      exec_mode::grain_size(1024));
+
+  Array<bool> in_radius(node_min_dist.size(), false);
+  deform_mask.foreach_index([&](const int i) { in_radius[i] = node_min_dist[i] < prop.radius; });
+  prop.prev_nodes = std::move(in_radius);
+  return deform_mask;
+}
+
 static void sculpt_transform_all_vertices(const Depsgraph &depsgraph, const Sculpt &sd, Object &ob)
 {
-  undo::restore_position_from_undo_step(depsgraph, ob);
-
   SculptSession &ss = *ob.runtime->sculpt_session;
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
+  filter::TransformProportional &prop = ss.filter_cache->proportional;
 
-  std::array<float4x4, 8> transform_mats = transform_matrices_init(
-      ob.object_to_world(), ss, symm, ss.filter_cache->transform_displacement_mode);
+  if (prop.enabled && !prop.prev_nodes.is_empty()) {
+    /* Only the nodes moved on the previous step differ from the undo positions. Restoring (and so
+     * tagging) every node would recompute normals and draw data for the whole mesh each step. */
+    IndexMaskMemory restore_memory;
+    undo::restore_position_from_undo_step(
+        depsgraph, ob, IndexMask::from_bools(prop.prev_nodes, restore_memory));
+  }
+  else {
+    undo::restore_position_from_undo_step(depsgraph, ob);
+  }
+
+  const TransformStepData step = transform_step_data_init(
+      ob.object_to_world(), ss, symm, ss.filter_cache->transform_displacement_mode, prop.enabled);
 
   /* Regular transform applies all symmetry passes at once as it is split by symmetry areas
    * (each vertex can only be transformed once by the transform matrix of its area). */
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   const IndexMask &node_mask = ss.filter_cache->node_mask;
+
+  IndexMaskMemory mask_memory;
+  IndexMask deform_mask = node_mask;
+  if (prop.enabled) {
+    proportional_distances_ensure(depsgraph, ob, symm, prop);
+    deform_mask = proportional_deform_nodes(node_mask, prop, mask_memory);
+  }
+  else {
+    /* Every node gets deformed, so a later proportional step has to refresh all of them. */
+    prop.prev_nodes = Array<bool>();
+  }
 
   threading::EnumerableThreadSpecific<TransformLocalData> all_tls;
   switch (pbvh.type()) {
@@ -498,11 +1190,10 @@ static void sculpt_transform_all_vertices(const Depsgraph &depsgraph, const Scul
       const MeshAttributeData attribute_data(mesh);
       MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
       const PositionDeformData position_data(depsgraph, ob);
-      node_mask.foreach_index(
+      deform_mask.foreach_index(
           [&](const int i) {
             TransformLocalData &tls = all_tls.local();
-            transform_node_mesh(
-                sd, transform_mats, attribute_data, nodes[i], ob, tls, position_data);
+            transform_node_mesh(sd, step, prop, attribute_data, nodes[i], ob, tls, position_data);
             bke::pbvh::update_node_bounds_mesh(position_data.eval, nodes[i]);
           },
           exec_mode::grain_size(1));
@@ -512,10 +1203,10 @@ static void sculpt_transform_all_vertices(const Depsgraph &depsgraph, const Scul
       SubdivCCG &subdiv_ccg = *ob.runtime->sculpt_session->subdiv_ccg;
       MutableSpan<float3> positions = subdiv_ccg.positions;
       MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
-      node_mask.foreach_index(
+      deform_mask.foreach_index(
           [&](const int i) {
             TransformLocalData &tls = all_tls.local();
-            transform_node_grids(sd, transform_mats, nodes[i], ob, tls);
+            transform_node_grids(sd, step, prop, nodes[i], ob, tls);
             bke::pbvh::update_node_bounds_grids(subdiv_ccg.grid_area, positions, nodes[i]);
           },
           exec_mode::grain_size(1));
@@ -523,17 +1214,17 @@ static void sculpt_transform_all_vertices(const Depsgraph &depsgraph, const Scul
     }
     case bke::pbvh::Type::BMesh: {
       MutableSpan<bke::pbvh::BMeshNode> nodes = pbvh.nodes<bke::pbvh::BMeshNode>();
-      node_mask.foreach_index(
+      deform_mask.foreach_index(
           [&](const int i) {
             TransformLocalData &tls = all_tls.local();
-            transform_node_bmesh(sd, transform_mats, nodes[i], ob, tls);
+            transform_node_bmesh(sd, step, prop, nodes[i], ob, tls);
             bke::pbvh::update_node_bounds_bmesh(nodes[i]);
           },
           exec_mode::grain_size(1));
       break;
     }
   }
-  pbvh.tag_positions_changed(node_mask);
+  pbvh.tag_positions_changed(deform_mask);
   pbvh.flush_bounds_to_parents();
 }
 
@@ -862,7 +1553,13 @@ void cancel_modal_transform(bContext *C, Object &ob, bool is_active)
    * requires restoring positions from undo. For "All Vertices" there is no benefit in using the
    * transform system to update to original positions either. */
   Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
+  SculptSession &ss = *ob.runtime->sculpt_session;
   undo::restore_position_from_undo_step(depsgraph, ob);
+
+  copy_v3_v3(ss.pivot_pos, ss.init_pivot_pos);
+  copy_qt_qt(ss.pivot_rot, ss.init_pivot_rot);
+  copy_v3_v3(ss.pivot_scale, ss.init_pivot_scale);
+  sculpt_cursor_store_from_transform_pivot(C, ob, ss);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   bke::pbvh::update_normals(depsgraph, ob, pbvh);
@@ -872,6 +1569,12 @@ void cancel_modal_transform(bContext *C, Object &ob, bool is_active)
 void end_transform(bContext *C, Object &ob)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
+  /* `pin_cursor` keeps the sculpt cursor fixed; otherwise it follows the transform pivot, the way
+   * the regular sculpt pivot does. */
+  const Scene *scene = CTX_data_scene(C);
+  if (scene && !cursor::pin_get(*scene)) {
+    sculpt_cursor_store_from_transform_pivot(C, ob, ss);
+  }
   MEM_delete(ss.filter_cache);
   ss.filter_cache = nullptr;
   undo::push_end(ob);

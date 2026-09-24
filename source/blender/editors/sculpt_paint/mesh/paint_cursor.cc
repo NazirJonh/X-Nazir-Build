@@ -12,6 +12,7 @@
 #include "editors/sculpt_paint/paint_clone_source.hh"
 
 #include "DNA_mesh_types.h"
+#include "DNA_view3d_types.h"
 
 #include "BKE_brush.hh"
 #include "BKE_object.hh"
@@ -22,6 +23,7 @@
 #include "BLI_math_axis_angle.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 
 #include "ED_view3d.hh"
@@ -39,6 +41,7 @@
 #include "sculpt_cloth.hh"
 #include "sculpt_expand.hh"
 #include "sculpt_intern.hh"
+#include "ED_sculpt.hh"
 #include "sculpt_multi_object.hh"
 #include "sculpt_pose.hh"
 
@@ -260,6 +263,8 @@ static void geometry_preview_lines_draw(const Depsgraph &depsgraph,
     GPU_depth_test(GPU_DEPTH_NONE);
   }
 }
+
+static void sculpt_cursor_overlay_draw(const PaintCursorContext &pcontext);
 
 void mesh_cursor_active_draw(PaintCursorContext &pcontext)
 {
@@ -577,6 +582,68 @@ static void boundary_preview_pivot_draw(const PaintCursorContext &pcontext)
                           3);
 }
 
+static void sculpt_cursor_overlay_draw(const PaintCursorContext &pcontext)
+{
+  if (pcontext.mode != PaintMode::Sculpt || pcontext.ss == nullptr ||
+      pcontext.scene == nullptr || pcontext.vc.obact == nullptr)
+  {
+    return;
+  }
+
+  Object &ob = *pcontext.vc.obact;
+  if (!cursor::is_enabled(*pcontext.scene)) {
+    return;
+  }
+
+  const RegionView3D *rv3d = pcontext.vc.rv3d;
+  if (rv3d == nullptr) {
+    return;
+  }
+
+  const cursor::CursorState state = cursor::state_get(*pcontext.scene, ob);
+  const float3 pos = state.location;
+  float rot_mat[3][3];
+  quat_to_mat3(rot_mat, state.rotation);
+
+  const float axis_len = ED_view3d_pixel_size(rv3d, float3(pos)) * 12.0f;
+  const float radius = axis_len * 0.45f;
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPU_line_width(2.0f);
+
+  uint pos_id = GPU_vertformat_attr_add(
+      immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  const float axis_colors[3][4] = {
+      {1.0f, 0.25f, 0.25f, 0.9f},
+      {0.25f, 1.0f, 0.25f, 0.9f},
+      {0.25f, 0.45f, 1.0f, 0.9f},
+  };
+
+  for (int axis = 0; axis < 3; axis++) {
+    float dir[3] = {0};
+    dir[axis] = axis_len;
+    float end[3];
+    copy_v3_v3(end, dir);
+    mul_m3_v3(rot_mat, end);
+    add_v3_v3(end, pos);
+
+    immUniformColor4fv(axis_colors[axis]);
+    immBegin(GPU_PRIM_LINES, 2);
+    immVertex3fv(pos_id, pos);
+    immVertex3fv(pos_id, end);
+    immEnd();
+  }
+
+  immUniformColor4f(1.0f, 0.85f, 0.15f, 0.85f);
+  imm_drawcircball(pos, radius, rv3d->viewinv, pos_id);
+
+  immUnbindProgram();
+  GPU_blend(GPU_BLEND_NONE);
+}
+
 static void boundary_preview_update(const PaintCursorContext &pcontext)
 {
   SculptSession &ss = *pcontext.ss;
@@ -642,7 +709,7 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
                              *symm_reference_ob,
                              pcontext.radius,
                              ePaintSymmetrySpace(pcontext.paint->symmetry_space),
-                             pcontext.scene->cursor.matrix<float4x4>());
+                             cursor::symmetry_cursor_to_world(*pcontext.scene, *symm_reference_ob));
   }
 
   if (pcontext.mode != PaintMode::Sculpt) {
@@ -1075,6 +1142,45 @@ void mesh_cursor_inactive_draw(PaintCursorContext &pcontext)
   GPU_matrix_pop();
 
   /* Reset drawing. */
+  GPU_matrix_pop_projection();
+  wmWindowViewport(pcontext.win);
+}
+
+void sculpt_cursor_3d_overlay_draw(PaintCursorContext &pcontext)
+{
+  if (pcontext.mode != PaintMode::Sculpt || pcontext.ss == nullptr ||
+      pcontext.vc.obact == nullptr || pcontext.scene == nullptr)
+  {
+    return;
+  }
+
+  if (!cursor::is_enabled(*pcontext.scene)) {
+    return;
+  }
+
+  /* Respect the viewport "3D Cursor" overlay toggle (and the master overlay switch). */
+  const View3D *v3d = pcontext.vc.v3d;
+  if (v3d == nullptr || (v3d->flag2 & V3D_HIDE_OVERLAYS) ||
+      (v3d->overlay.flag & V3D_OVERLAY_HIDE_CURSOR))
+  {
+    return;
+  }
+
+  wmViewport(&pcontext.region->winrct);
+  GPU_matrix_push_projection();
+  ED_view3d_draw_setup_view(pcontext.wm,
+                            pcontext.win,
+                            pcontext.depsgraph,
+                            pcontext.scene,
+                            pcontext.region,
+                            pcontext.vc.v3d,
+                            nullptr,
+                            nullptr,
+                            nullptr);
+  GPU_matrix_push();
+  GPU_matrix_mul(pcontext.vc.obact->object_to_world().ptr());
+  sculpt_cursor_overlay_draw(pcontext);
+  GPU_matrix_pop();
   GPU_matrix_pop_projection();
   wmWindowViewport(pcontext.win);
 }

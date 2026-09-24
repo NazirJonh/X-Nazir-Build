@@ -5568,14 +5568,19 @@ def km_sculpt(params):
          {"properties": [("mode", 'SCALE'), ("texmode", 'SECONDARY')]}),
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True, "alt": True},
          {"properties": [("mode", 'ROTATION'), ("texmode", 'SECONDARY')]}),
-        # Sculpt Session Pivot Point
-        ("sculpt.set_pivot_position", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True},
-         {"properties": [("mode", 'SURFACE')]}),
+        # Sculpt Cursor: place the sculpt 3D cursor on the surface from any tool.
+        ("sculpt.cursor_set", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True}, None),
         # Menus
         ("wm.context_menu_enum", {"type": 'E', "value": 'PRESS', "alt": True},
          {"properties": [("data_path", "tool_settings.sculpt.brush.stroke_method")]}),
         ("wm.context_toggle", {"type": 'S', "value": 'PRESS', "shift": True},
          {"properties": [("data_path", "tool_settings.sculpt.brush.use_smooth_stroke")]}),
+        # Sculpt cursor proportional editing. Kept separate from Edit Mode's
+        # `use_proportional_edit` (see `Sculpt::sculpt_cursor_flag`), but reuses the shared
+        # falloff and radius tool settings.
+        *_template_items_proportional_editing(
+            params, connected=False,
+            toggle_data_path="tool_settings.sculpt.use_sculpt_cursor_proportional"),
         op_menu_pie("VIEW3D_MT_sculpt_mask_edit_pie", {"type": 'A', "value": 'PRESS'}),
         op_menu_pie("VIEW3D_MT_sculpt_automasking_pie", {"type": 'A', "alt": True, "value": 'PRESS'}),
         op_menu_pie("VIEW3D_MT_sculpt_face_sets_edit_pie", {"type": 'W', "value": 'PRESS', "alt": True}),
@@ -8873,6 +8878,19 @@ def km_3d_view_tool_sculpt_curves_edit(params):
     )
 
 
+def km_3d_view_tool_sculpt_cursor(params):
+    # Shift+RMB placement comes from the global sculpt keymap, so it works in every tool.
+    items = [
+        ("sculpt.cursor_set", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+    ]
+
+    return (
+        "3D View Tool: Sculpt, 3D Cursor",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": items},
+    )
+
+
 # ------------------------------------------------------------------------------
 # Tool System (3D View, Weight Paint)
 
@@ -9694,6 +9712,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_mask_by_topology_island(params),
         km_3d_view_tool_sculpt_face_set_edit(params),
         km_3d_view_tool_sculpt_curves_edit(params),
+        km_3d_view_tool_sculpt_cursor(params),
         km_3d_view_tool_paint_weight_sample_weight(params),
         km_3d_view_tool_paint_weight_sample_vertex_group(params),
         km_3d_view_tool_paint_weight_gradient(params),

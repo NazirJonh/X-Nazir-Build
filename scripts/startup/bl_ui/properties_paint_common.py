@@ -356,7 +356,15 @@ class UnifiedPaintPanel:
         if unified_paint_settings_override:
             ups = unified_paint_settings_override
         else:
-            ups = UnifiedPaintPanel.paint_settings(context).unified_paint_settings
+            paint = UnifiedPaintPanel.paint_settings(context)
+            # A non-brush tool (e.g. the sculpt 3D Cursor) has no unified paint settings object;
+            # draw the brush property on its own instead of crashing.
+            if paint is None:
+                row.prop(brush, prop_name, icon='NONE', text=text, slider=slider)
+                if pressure_name:
+                    row.prop(brush, pressure_name, text="")
+                return row
+            ups = paint.unified_paint_settings
         prop_owner = brush
         if unified_name and getattr(ups, unified_name):
             prop_owner = ups
@@ -400,14 +408,16 @@ class UnifiedPaintPanel:
 
     @staticmethod
     def prop_unified_color(parent, context, brush, prop_name, *, text=None):
-        ups = UnifiedPaintPanel.paint_settings(context).unified_paint_settings
-        prop_owner = ups if ups.use_unified_color else brush
+        paint = UnifiedPaintPanel.paint_settings(context)
+        ups = None if paint is None else paint.unified_paint_settings
+        prop_owner = ups if ups and ups.use_unified_color else brush
         parent.prop(prop_owner, prop_name, text=text)
 
     @staticmethod
     def prop_unified_color_picker(parent, context, brush, prop_name, value_slider=True):
-        ups = UnifiedPaintPanel.paint_settings(context).unified_paint_settings
-        prop_owner = ups if ups.use_unified_color else brush
+        paint = UnifiedPaintPanel.paint_settings(context)
+        ups = None if paint is None else paint.unified_paint_settings
+        prop_owner = ups if ups and ups.use_unified_color else brush
         parent.template_color_picker(prop_owner, prop_name, value_slider=value_slider)
 
 

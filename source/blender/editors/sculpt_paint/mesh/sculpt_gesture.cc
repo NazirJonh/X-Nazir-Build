@@ -28,6 +28,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 
+#include "ED_sculpt.hh"
 #include "ED_view3d.hh"
 
 #include "RNA_access.hh"
@@ -613,7 +614,8 @@ void apply(bContext &C, GestureData &gesture_data, wmOperator &op)
   gesture_data.use_shared_symmetry_frame = gesture_data.objects.size() > 1 &&
                                            symmetry_space != PAINT_SYMM_SPACE_ACTIVE_OBJECT;
   if (gesture_data.use_shared_symmetry_frame) {
-    const float4x4 cursor_to_world = gesture_data.vc.scene->cursor.matrix<float4x4>();
+    const float4x4 cursor_to_world = cursor::symmetry_cursor_to_world(
+        *gesture_data.vc.scene, *gesture_data.objects.first());
     gesture_data.world_to_symm_space = symmetry_space_frame(
         symmetry_space, gesture_data.objects.first()->world_to_object(), cursor_to_world);
     gesture_data.symm_space_to_world = math::invert(gesture_data.world_to_symm_space);

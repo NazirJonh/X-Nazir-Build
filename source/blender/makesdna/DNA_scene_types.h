@@ -1838,6 +1838,37 @@ enum eSculptPaintCurveRadiusDisplayMode : int8_t {
   SCULPT_PAINT_CURVE_RADIUS_TIPS = 2,
 };
 
+/** #Sculpt::sculpt_cursor_flag */
+enum eSculptCursorFlag : int8_t {
+  /** The sculpt 3D cursor is enabled and drives pivots, filters and the Transform tool. */
+  SCULPT_CURSOR_ENABLED = (1 << 0),
+  /** Keep the cursor in place after a Deform-mode drag instead of letting it follow the drag. */
+  SCULPT_CURSOR_PIN = (1 << 1),
+  /** Follow the shared scene 3D cursor instead of the object's own sculpt cursor. */
+  SCULPT_CURSOR_SHARED = (1 << 2),
+  /** Apply a proportional falloff around the cursor when deforming through the Transform tool. */
+  SCULPT_CURSOR_PROPORTIONAL = (1 << 3),
+  /** Measure the proportional falloff in the view plane instead of in world space. */
+  SCULPT_CURSOR_PROJECTED = (1 << 4),
+};
+ENUM_OPERATORS(eSculptCursorFlag)
+
+/** #Sculpt::sculpt_cursor_mode */
+enum eSculptCursorMode : int8_t {
+  /** Dragging the cursor gizmo moves the cursor itself. */
+  SCULPT_CURSOR_MODE_SET = 0,
+  /** Dragging the cursor gizmo deforms the mesh around the cursor, used as the transform pivot. */
+  SCULPT_CURSOR_MODE_DEFORM = 1,
+};
+
+/** #Sculpt::symmetry_cursor_source */
+enum eSculptSymmetryCursorSource : int8_t {
+  /** Symmetry Cursor space follows the scene 3D cursor (Object Mode). */
+  SCULPT_SYMM_CURSOR_OBJECT = 0,
+  /** Symmetry Cursor space follows the sculpt 3D cursor gizmo. */
+  SCULPT_SYMM_CURSOR_SCULPT = 1,
+};
+
 /** Sculpt. */
 struct Sculpt {
   DNA_DEFINE_CXX_METHODS(Sculpt)
@@ -1947,6 +1978,19 @@ struct Sculpt {
    * #blo_do_versions_520.
    */
   struct ColorBand gradient_colorband;
+
+  /**
+   * Sculpt 3D cursor tool state. Appended at the end so a file predating these members reads the
+   * defaults below: the cursor starts disabled, which keeps the whole feature inert -- and every
+   * existing pivot/filter behavior unchanged -- until the user turns it on. No versioning needed.
+   */
+  /** #eSculptCursorFlag */
+  int8_t sculpt_cursor_flag = SCULPT_CURSOR_PIN;
+  /** #eSculptCursorMode */
+  int8_t sculpt_cursor_mode = SCULPT_CURSOR_MODE_SET;
+  /** #eSculptSymmetryCursorSource */
+  int8_t symmetry_cursor_source = SCULPT_SYMM_CURSOR_OBJECT;
+  char _pad_sculpt_cursor[5] = {};
 };
 
 /** #CurvesSculpt::multi_object_edit_scope */

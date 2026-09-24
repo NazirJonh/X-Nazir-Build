@@ -51,6 +51,7 @@
 #include "ED_grease_pencil.hh"
 #include "ED_object.hh"
 #include "ED_particle.hh"
+#include "ED_sculpt.hh"
 #include "ED_screen.hh"
 
 #include "UI_resources.hh"
@@ -896,8 +897,11 @@ static int gizmo_3d_foreach_selected(const bContext *C,
   else if (ob && (ob->mode & OB_MODE_ALL_PAINT)) {
     if (ob->mode & OB_MODE_SCULPT) {
       totsel = 1;
-      run_coord_with_matrix(
-          ob->runtime->sculpt_session->pivot_pos, false, ob->object_to_world().ptr());
+      const SculptSession *ss = ob->runtime->sculpt_session;
+      const float3 pivot = sculpt_paint::cursor::is_enabled(*scene) ?
+                               sculpt_paint::cursor::state_get(*scene, *ob).location :
+                               ss->pivot_pos;
+      run_coord_with_matrix(pivot, false, ob->object_to_world().ptr());
     }
   }
   else if (ob && ob->mode & OB_MODE_PARTICLE_EDIT) {
@@ -1105,7 +1109,13 @@ static bool gizmo_3d_calc_pos(const bContext *C,
       if (ob != nullptr) {
         if ((ob->mode & OB_MODE_ALL_SCULPT) && ob->runtime->sculpt_session) {
           SculptSession *ss = ob->runtime->sculpt_session;
-          copy_v3_v3(r_pivot_pos, ss->pivot_pos);
+          if (sculpt_paint::cursor::is_enabled(*scene)) {
+            copy_v3_v3(r_pivot_pos, sculpt_paint::cursor::state_get(*scene, *ob).location);
+          }
+          else {
+            copy_v3_v3(r_pivot_pos, ss->pivot_pos);
+          }
+          mul_m4_v3(ob->object_to_world().ptr(), r_pivot_pos);
           return true;
         }
         if (object::calc_active_center(ob, false, r_pivot_pos)) {
@@ -2233,11 +2243,25 @@ static bool WIDGETGROUP_gizmo_poll_generic(View3D *v3d)
   return true;
 }
 
+/**
+ * In sculpt mode with the sculpt 3D cursor enabled, the cursor gizmo (`VIEW3D_GGT_sculpt_cursor`)
+ * takes over the transform tools, so this gizmo would only duplicate it at the same pivot.
+ */
+static bool gizmo_replaced_by_sculpt_cursor(const bContext *C)
+{
+  const Object *ob = CTX_data_active_object(C);
+  const Scene *scene = CTX_data_scene(C);
+  return ob && scene && (ob->mode & OB_MODE_SCULPT) && sculpt_paint::cursor::is_enabled(*scene);
+}
+
 static bool WIDGETGROUP_gizmo_poll_context(const bContext *C, wmGizmoGroupType * /*gzgt*/)
 {
   ScrArea *area = CTX_wm_area(C);
   View3D *v3d = static_cast<View3D *>(area->spacedata.first);
   if (!WIDGETGROUP_gizmo_poll_generic(v3d)) {
+    return false;
+  }
+  if (gizmo_replaced_by_sculpt_cursor(C)) {
     return false;
   }
 
@@ -2271,6 +2295,9 @@ static bool WIDGETGROUP_gizmo_poll_tool(const bContext *C, wmGizmoGroupType *gzg
   }
 
   if (v3d->gizmo_flag & V3D_GIZMO_HIDE_TOOL) {
+    return false;
+  }
+  if (gizmo_replaced_by_sculpt_cursor(C)) {
     return false;
   }
 

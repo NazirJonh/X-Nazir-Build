@@ -192,6 +192,7 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 #  include "ED_object.hh"
 #  include "ED_paint.hh"
 #  include "ED_particle.hh"
+#  include "ED_sculpt.hh"
 
 namespace blender {
 
@@ -410,6 +411,33 @@ static void rna_Sculpt_multi_object_edit_scope_update(bContext *C, PointerRNA *p
   for (Object *ob : objects) {
     ed::object::object_overlay_mode_transfer_animation_start(C, ob);
   }
+}
+
+static void rna_Sculpt_use_shared_sculpt_cursor_update(bContext *C, PointerRNA *ptr)
+{
+  const Sculpt *sd = static_cast<const Sculpt *>(ptr->data);
+  if (!(sd->sculpt_cursor_flag & SCULPT_CURSOR_SHARED)) {
+    return;
+  }
+
+  const Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  if (!bmain || !scene || !view_layer) {
+    return;
+  }
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  Object *ob = BKE_view_layer_active_object_get(view_layer);
+  if (!ob || (ob->mode & OB_MODE_SCULPT) == 0) {
+    return;
+  }
+
+  /* Adopt the active object's own sculpt cursor as the shared scene 3D cursor. This runs right
+   * after the flag is turned on, so the cursor does not jump to the scene cursor's default
+   * location (the world origin) on the next action. */
+  ed::sculpt_paint::cursor::shared_cursor_sync_to_scene(*scene, *ob);
+
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 static void rna_Sculpt_paint_curve_source_object_update(bContext *C, PointerRNA *ptr)
@@ -1355,6 +1383,18 @@ static void rna_Paint_use_override_falloff_set(PointerRNA *ptr, bool value)
   if (paint->runtime != nullptr) {
     paint->runtime->override_falloff = value;
   }
+}
+
+static int rna_Sculpt_sculpt_cursor_gizmo_get(PointerRNA *ptr)
+{
+  const Sculpt *sd = static_cast<const Sculpt *>(ptr->data);
+  return (sd->sculpt_cursor_flag & SCULPT_CURSOR_ENABLED) ? 1 : 0;
+}
+
+static void rna_Sculpt_sculpt_cursor_gizmo_set(PointerRNA *ptr, int value)
+{
+  Sculpt *sd = static_cast<Sculpt *>(ptr->data);
+  SET_FLAG_FROM_TEST(sd->sculpt_cursor_flag, value != 0, SCULPT_CURSOR_ENABLED);
 }
 
 }  // namespace blender
@@ -2546,6 +2586,101 @@ static void rna_def_sculpt(BlenderRNA *brna)
       "transform, instead of leaving it in place. Only applies with \"Affect All Objects\" "
       "enabled and Transform Mode set to \"All Vertices\"");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  static const EnumPropertyItem sculpt_cursor_mode_items[] = {
+      {SCULPT_CURSOR_MODE_SET, "SET", 0, "Set", "Dragging the gizmo moves the sculpt cursor"},
+      {SCULPT_CURSOR_MODE_DEFORM,
+       "DEFORM",
+       0,
+       "Deform",
+       "Dragging the gizmo deforms the mesh around the sculpt cursor"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "use_sculpt_cursor", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_ENABLED);
+  RNA_def_property_ui_text(prop,
+                           "3D Cursor Gizmo",
+                           "Enable the sculpt 3D cursor and let it drive pivots, filters and the "
+                           "Transform tool");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* Same state as `use_sculpt_cursor`, exposed as an Off/On enum: it draws as two buttons that
+   * cannot flip the state when the active one is clicked again, and when added to Quick Favorites
+   * it reads as "3D Cursor Gizmo: On/Off" instead of a bare "On"/"Off" label. */
+  static const EnumPropertyItem sculpt_cursor_gizmo_items[] = {
+      {1, "ON", 0, "On", "The sculpt 3D cursor drives pivots, filters and the Transform tool"},
+      {0, "OFF", 0, "Off", "The sculpt 3D cursor is hidden outside its tool and has no effect"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_cursor_gizmo", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, sculpt_cursor_gizmo_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_Sculpt_sculpt_cursor_gizmo_get", "rna_Sculpt_sculpt_cursor_gizmo_set", nullptr);
+  RNA_def_property_ui_text(prop, "3D Cursor Gizmo", "Enable the sculpt 3D cursor");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "pin_sculpt_cursor", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_PIN);
+  RNA_def_property_ui_text(
+      prop, "Pin Cursor", "Keep the sculpt cursor in place after deforming the mesh");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_sculpt_cursor_proportional", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_PROPORTIONAL);
+  RNA_def_property_ui_text(
+      prop,
+      "Proportional Editing",
+      "Apply a smooth falloff around the cursor when deforming the mesh through the Transform "
+      "tool, instead of moving every vertex by the same amount");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_sculpt_cursor_projected", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_PROJECTED);
+  RNA_def_property_ui_text(prop,
+                           "Projected",
+                           "Measure the proportional falloff in the view plane instead of in "
+                           "world space");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_cursor_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_cursor_mode");
+  RNA_def_property_enum_items(prop, sculpt_cursor_mode_items);
+  RNA_def_property_ui_text(prop, "Cursor Mode", "What dragging the sculpt cursor gizmo does");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  static const EnumPropertyItem symmetry_cursor_source_items[] = {
+      {SCULPT_SYMM_CURSOR_OBJECT,
+       "OBJECT",
+       0,
+       "Object",
+       "Symmetry Cursor space follows the scene 3D cursor"},
+      {SCULPT_SYMM_CURSOR_SCULPT,
+       "SCULPT",
+       0,
+       "Sculpt",
+       "Symmetry Cursor space follows the sculpt 3D cursor gizmo"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "symmetry_cursor_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "symmetry_cursor_source");
+  RNA_def_property_enum_items(prop, symmetry_cursor_source_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Symmetry Cursor Source",
+      "Which 3D cursor defines the symmetry plane when Symmetry Space is set to Cursor");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_shared_sculpt_cursor", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_SHARED);
+  RNA_def_property_ui_text(prop,
+                           "Shared Cursor",
+                           "Follow the shared scene 3D cursor instead of the object's own sculpt "
+                           "cursor");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Sculpt_use_shared_sculpt_cursor_update");
 
   prop = RNA_def_property(srna, "gravity_object", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_EDITABLE);

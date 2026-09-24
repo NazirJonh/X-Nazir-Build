@@ -1131,6 +1131,7 @@ struct SculptSession : NonCopyable, NonMovable {
 void BKE_sculptsession_free(Object *ob);
 void BKE_sculptsession_free_deformMats(SculptSession *ss);
 void BKE_sculptsession_free_pbvh(Object &object);
+
 void BKE_sculptsession_bm_to_me(Object *ob);
 void BKE_sculptsession_bm_to_me_for_render(Object *object);
 

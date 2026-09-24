@@ -2487,6 +2487,14 @@ void SCULPT_OT_layer_group_color_tag(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::layers
 
+namespace ed::sculpt_paint::cursor {
+
+void ED_operatortypes_sculpt_cursor();
+void SCULPT_OT_cursor_set(wmOperatorType *ot);
+void SCULPT_OT_cursor_transform(wmOperatorType *ot);
+
+}  // namespace ed::sculpt_paint::cursor
+
 /** \} */
 
 }  // namespace blender

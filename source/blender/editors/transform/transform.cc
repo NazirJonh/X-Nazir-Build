@@ -1820,6 +1820,16 @@ void saveTransform(bContext *C, TransInfo *t, wmOperator *op)
            * so use tool-setting for *object*. */
           ts->proportional_objects = use_prop_edit;
         }
+        else if (object_mode == OB_MODE_SCULPT) {
+          /* Sculpt keeps its own proportional enable/projected bits; writing
+           * `ts->proportional_edit` here would silently enable Proportional Editing in Edit
+           * Mode. The radius and falloff saved below stay shared, like Object Mode. */
+          Sculpt &sd = *ts->sculpt;
+          SET_FLAG_FROM_TEST(sd.sculpt_cursor_flag, use_prop_edit, SCULPT_CURSOR_PROPORTIONAL);
+          SET_FLAG_FROM_TEST(sd.sculpt_cursor_flag,
+                             prop_edit_flag & PROP_EDIT_PROJECTED,
+                             SCULPT_CURSOR_PROJECTED);
+        }
         else {
           if (use_prop_edit) {
             ts->proportional_edit |= PROP_EDIT_USE;

@@ -88,6 +88,8 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "BLI_math_vector.h"
+
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -337,6 +339,11 @@ struct StepData {
 
   float3 pivot_pos;
   float4 pivot_rot;
+
+  /** The sculpt 3D cursor lives in #Object DNA, outside the mesh data this step restores, and an
+   * unpinned cursor follows a Transform drag (see #end_transform); stored like the pivot above so
+   * undo returns the cursor together with the deformation. */
+  sculpt_paint::cursor::CursorState sculpt_cursor;
 
   /** Origin Correct: snapshot of a rigid-body secondary object's #Object::object_to_world() at
    * session start, used for both mid-session cancel (#restore_object_transform_from_undo_step,
@@ -2976,6 +2983,15 @@ static void restore_list_object(bContext *C,
   ss.pivot_pos = step_data.pivot_pos;
   ss.pivot_rot = step_data.pivot_rot;
 
+  /* Restore the sculpt cursor, only when it differs so an unrelated step does not tag the object
+   * and the scene for an update. */
+  if (!equals_v3v3(object.sculpt_cursor_location, step_data.sculpt_cursor.location) ||
+      !equals_v4v4(object.sculpt_cursor_rotation, step_data.sculpt_cursor.rotation))
+  {
+    sculpt_paint::cursor::state_set(*scene, object, step_data.sculpt_cursor);
+    WM_main_add_notifier(NC_OBJECT | ND_DRAW, &object);
+  }
+
   /* Origin Correct: swap the rigid-body secondary's object matrix with the snapshot, same pattern
    * as the position swap below (#restore_position_mesh's #swap_indexed_data) -- applying the
    * stored matrix and storing the object's pre-restore matrix back means the NEXT call (the
@@ -4404,6 +4420,10 @@ static void save_common_data(Object &ob, SculptUndoStep *us)
 
   step_data->pivot_pos = ss.pivot_pos;
   step_data->pivot_rot = ss.pivot_rot;
+
+  /* The object's own cursor; in shared mode #restore_list_object writes it back to the scene. */
+  copy_v3_v3(step_data->sculpt_cursor.location, ob.sculpt_cursor_location);
+  copy_v4_v4(step_data->sculpt_cursor.rotation, ob.sculpt_cursor_rotation);
 
   if (const KeyBlock *key = BKE_keyblock_from_object(&ob)) {
     step_data->active_shape_key_name = key->name;

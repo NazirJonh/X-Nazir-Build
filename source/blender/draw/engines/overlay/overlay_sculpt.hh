@@ -21,7 +21,9 @@
 
 #include "DEG_depsgraph_query.hh"
 
+#include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_vector.hh"
 
 #include "DNA_scene_enums.h"
@@ -165,12 +167,35 @@ class Sculpts : Overlay {
     switch (ePaintSymmetrySpace(sculpt->paint.symmetry_space)) {
       case PAINT_SYMM_SPACE_GLOBAL_WORLD:
         return ob->world_to_object();
-      case PAINT_SYMM_SPACE_GLOBAL_CURSOR:
+      case PAINT_SYMM_SPACE_GLOBAL_CURSOR: {
         /* `symm_cur_from_ref` = `ob->world_to_object() * S_inv`, and for the cursor frame
          * `S = invert(cursor_to_world)`, so `S_inv` is the cursor matrix itself. Using its full
          * transform (location AND orientation) makes the overlay follow a rotated 3D cursor,
          * exactly as the stroke does (see #symmetry_space_frame). */
-        return ob->world_to_object() * state.scene->cursor.matrix<float4x4>();
+        float4x4 cursor_to_world = state.scene->cursor.matrix<float4x4>();
+        /* Sculpt cursor source (see `cursor::symmetry_cursor_to_world` in editors): duplicated
+         * rather than shared because the draw module must not depend on editors/. The shared
+         * sculpt cursor lives on the scene cursor, so it matches the Object source. */
+        if (sculpt->symmetry_cursor_source == SCULPT_SYMM_CURSOR_SCULPT &&
+            (sculpt->sculpt_cursor_flag & SCULPT_CURSOR_SHARED) == 0)
+        {
+          const Object *ref = (multi_object_sculpt_ && symmetry_reference_ob_ != nullptr) ?
+                                  symmetry_reference_ob_ :
+                                  ob;
+          float local_rot[3][3];
+          quat_to_mat3(local_rot, ref->sculpt_cursor_rotation);
+          float ob_rot[3][3];
+          copy_m3_m4(ob_rot, ref->object_to_world().ptr());
+          normalize_m3(ob_rot);
+          float world_rot[3][3];
+          mul_m3_m3m3(world_rot, ob_rot, local_rot);
+          normalize_m3(world_rot);
+          copy_m4_m3(cursor_to_world.ptr(), world_rot);
+          cursor_to_world.location() = math::transform_point(ref->object_to_world(),
+                                                             float3(ref->sculpt_cursor_location));
+        }
+        return ob->world_to_object() * cursor_to_world;
+      }
       case PAINT_SYMM_SPACE_ACTIVE_OBJECT:
         /* The reference object's local axes. Only meaningful across more than one object; a single
          * object mirrors in its own local space, so the plane is drawn in local axes (nullopt). */

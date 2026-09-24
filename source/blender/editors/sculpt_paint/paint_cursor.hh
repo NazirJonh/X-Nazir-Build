@@ -156,4 +156,5 @@ void mesh_cursor_clone_source_draw(PaintCursorContext &pcontext);
 void mesh_cursor_inactive_draw(PaintCursorContext &pcontext);
 
 void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext);
+void sculpt_cursor_3d_overlay_draw(PaintCursorContext &pcontext);
 }  // namespace blender::ed::sculpt_paint

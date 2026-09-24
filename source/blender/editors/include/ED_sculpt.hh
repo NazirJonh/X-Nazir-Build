@@ -9,7 +9,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
+#include "BLI_math_matrix_types.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
@@ -25,6 +28,7 @@ struct Scene;
 struct SculptLayer;
 struct SculptLayerGroup;
 struct SculptLayerTreeNode;
+struct SculptSession;
 struct UndoType;
 struct UndoStep;
 struct WorkSpace;
@@ -61,6 +65,81 @@ void operatormacros_sculpt();
 
 void keymap_sculpt(wmKeyConfig *keyconf);
 
+/* `mesh/sculpt_cursor.cc` */
+
+namespace cursor {
+
+/**
+ * What dragging the sculpt 3D cursor gizmo does.
+ *
+ * Stored in the scene's ToolSettings (#Sculpt::sculpt_cursor_mode) so the tool's top-bar settings,
+ * its keymap and the viewport buttons all read and write the same value.
+ */
+enum class SculptCursorMode : int8_t {
+  /** Dragging the gizmo moves the sculpt cursor itself. */
+  Set = 0,
+  /** Dragging the gizmo deforms the mesh around the sculpt cursor used as the transform pivot. */
+  Deform = 1,
+};
+
+/**
+ * Object-space state of the sculpt 3D cursor.
+ */
+struct CursorState {
+  /** Object-space cursor location. */
+  float3 location = {};
+  /** Object-space cursor rotation, as an `(x, y, z, w)` quaternion. */
+  float4 rotation = float4(0.0f, 0.0f, 0.0f, 1.0f);
+};
+
+/** True when the sculpt 3D cursor is enabled in \a scene's ToolSettings. */
+bool is_enabled(const Scene &scene);
+
+/** Cursor mode stored in \a scene's ToolSettings. */
+SculptCursorMode mode_get(const Scene &scene);
+
+/** True when the cursor stays in place after a Deform-mode drag. */
+bool pin_get(const Scene &scene);
+
+/** True when the cursor follows the shared scene 3D cursor instead of the object's own. */
+bool is_shared(const Scene &scene);
+
+/**
+ * Read \a ob's sculpt cursor in object space. When the ToolSettings "shared cursor" flag is set,
+ * both the location and the rotation follow the shared scene 3D cursor (#Scene::cursor) instead of
+ * the object's own, so every object resolves the same world transform.
+ */
+CursorState state_get(const Scene &scene, const Object &ob);
+
+/**
+ * Write \a state (object space) to \a ob's DNA. In shared mode the full transform (location and
+ * rotation) is also written back to the scene 3D cursor. Tags the object (and, in shared mode, the
+ * scene) for a depsgraph update.
+ */
+void state_set(Scene &scene, Object &ob, const CursorState &state);
+
+/**
+ * Copy \a ob's own sculpt cursor into the shared scene 3D cursor (#Scene::cursor), converting the
+ * object-space transform to world space. Used when "shared cursor" is turned on so it adopts the
+ * current cursor instead of jumping to the scene cursor's default location (the world origin).
+ */
+void shared_cursor_sync_to_scene(Scene &scene, const Object &ob);
+
+/**
+ * Orthonormal world-space transform of \a ob's sculpt cursor, without scale.
+ */
+float4x4 world_matrix_get(const Scene &scene, const Object &ob);
+
+/**
+ * World matrix of the cursor used by the `Cursor` symmetry space: either the scene 3D cursor
+ * (Object Mode) or \a symm_reference_ob's sculpt cursor gizmo, depending on
+ * #Sculpt::symmetry_cursor_source. The reference (active) object keeps the plane stable across
+ * a multi-object session. Valid even when the sculpt cursor is disabled or uninitialized.
+ */
+float4x4 symmetry_cursor_to_world(const Scene &scene, const Object &symm_reference_ob);
+
+}  // namespace cursor
+
 /* `paint_curve_patch_edit.cc` */
 
 /**
@@ -86,6 +165,23 @@ bool curve_patch_defer_workspace_change(bContext *C, WorkSpace *workspace_new);
 
 void update_modal_transform(bContext *C, Object &ob, bool is_active);
 void cancel_modal_transform(bContext *C, Object &ob, bool is_active);
+
+/**
+ * Copy the generic Transform system's proportional-edit parameters into \a ob's sculpt filter
+ * cache, where the per-vertex falloff is computed. Called once per object on every modal step.
+ *
+ * \param enabled: whether proportional editing is active this session.
+ * \param radius: falloff radius, in world units.
+ * \param falloff: #eProportionalFalloff value.
+ * \param projected: measure distance in the view plane rather than in world space.
+ * \param view_normal: world-space view direction, used when \a projected is set.
+ */
+void transform_set_proportional_params(Object &ob,
+                                       bool enabled,
+                                       float radius,
+                                       int falloff,
+                                       bool projected,
+                                       const float view_normal[3]);
 void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name);
 /** Like #init_transform, but adds \a ob to an already-open multi-object undo step (see
  * #undo::push_begin_add_object) instead of opening a new one. */

@@ -1260,6 +1260,15 @@ static void restore_face_set_from_undo_step(Object &object)
 
 void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object)
 {
+  IndexMaskMemory memory;
+  restore_position_from_undo_step(
+      depsgraph, object, bke::pbvh::all_leaf_nodes(*bke::object::pbvh_get(object), memory));
+}
+
+void restore_position_from_undo_step(const Depsgraph &depsgraph,
+                                     Object &object,
+                                     const IndexMask &node_mask_in)
+{
   SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   IndexMaskMemory memory;
@@ -1272,7 +1281,7 @@ void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object)
       MutableSpan positions_orig = mesh.vert_positions_for_write();
 
       const IndexMask node_mask = IndexMask::from_predicate(
-          nodes.index_range(),
+          node_mask_in,
           memory,
           [&](const int i) {
             return orig_position_data_lookup_mesh(object, nodes[i]).has_value();
@@ -1337,7 +1346,7 @@ void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object)
       if (!undo::has_bmesh_log_entry(object)) {
         return;
       }
-      const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+      const IndexMask &node_mask = node_mask_in;
       node_mask.foreach_index(
           [&](const int i) {
             for (BMVert *vert : BKE_pbvh_bmesh_node_unique_verts(&nodes[i])) {
@@ -1354,7 +1363,7 @@ void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object)
       const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
 
       const IndexMask node_mask = IndexMask::from_predicate(
-          nodes.index_range(),
+          node_mask_in,
           memory,
           [&](const int i) {
             return orig_position_data_lookup_grids(object, nodes[i]).has_value();
@@ -8097,6 +8106,13 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
     ss.cache->brush = brush;
   }
 
+  const Scene *scene = CTX_data_scene(C);
+  if (scene && cursor::is_enabled(*scene)) {
+    const cursor::CursorState cursor_state = cursor::state_get(*scene, ob);
+    ss.pivot_pos = cursor_state.location;
+    ss.pivot_rot = cursor_state.rotation;
+  }
+
   brush_init_tex(sd, ss);
 
   PaintModeSettings &paint_mode_init = tool_settings->paint_mode;
@@ -9824,8 +9840,14 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
    * reference-space transforms onto every object's cache. Disabled (identity/empty) for
    * single-object strokes, keeping that path bit-exact. See
    * #MultiObjectStrokeContext::propagate_shared_state. */
+  const Object *symm_ref_for_cursor = this->multi_.mode_objects.is_empty() ?
+                                          primary_ob :
+                                          this->multi_.mode_objects[0];
+  const float4x4 symmetry_cursor = (symm_ref_for_cursor != nullptr) ?
+                                       cursor::symmetry_cursor_to_world(scene, *symm_ref_for_cursor) :
+                                       scene.cursor.matrix<float4x4>();
   this->multi_.propagate_shared_state(ePaintSymmetrySpace(sd.paint.symmetry_space),
-                                      scene.cursor.matrix<float4x4>());
+                                      symmetry_cursor);
   Object *const symm_reference_ob = this->multi_.symm_reference_object;
   const bool shared_symmetry_active = this->multi_.shared_symmetry_active;
 
@@ -9945,7 +9967,8 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
                                                  primary_world_center,
                                                  primary_world_view_direction,
                                                  ePaintSymmetrySpace(sd.paint.symmetry_space),
-                                                 scene.cursor.matrix<float4x4>());
+                                                 cursor::symmetry_cursor_to_world(scene,
+                                                                                  *symm_reference_ob));
       }
     }
     else {

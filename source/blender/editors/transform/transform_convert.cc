@@ -726,7 +726,7 @@ static void init_proportional_edit(TransInfo *t)
              &TransConvertType_Node,
              &TransConvertType_Object,
              &pointcloud::TransConvertType_PointCloud) ||
-        ELEM(t->data_type, &TransConvertType_Particle)))
+        ELEM(t->data_type, &TransConvertType_Particle, &TransConvertType_Sculpt)))
   {
     /* Disable proportional editing. */
     t->options |= CTX_NO_PET;
@@ -744,6 +744,11 @@ static void init_proportional_edit(TransInfo *t)
 
     if (ELEM(t->data_type, &TransConvertType_Action, &TransConvertType_Graph)) {
       /* Distance has already been set. */
+    }
+    else if (t->data_type == &TransConvertType_Sculpt) {
+      /* The single sculpt #TransData is the transform pivot, not a deformable element: the
+       * per-vertex falloff is computed in `sculpt_transform.cc` from `t->prop_size`/`t->prop_mode`
+       * directly, so there is no distance to sort here. */
     }
     else if (ELEM(t->data_type,
                   &TransConvertType_Mesh,

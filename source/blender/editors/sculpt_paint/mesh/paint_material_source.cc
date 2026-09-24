@@ -924,6 +924,14 @@ void ChannelSourceSampler::update_area_local_mats(const Object &ob)
   if (!sources_.is_active()) {
     return;
   }
+  /* Match the plane normal the brush's own Area frame is built from in #update_brush_local_mat:
+   * a rectangle texture clip bounds the stamp in the surface-aligned #texture_plane_normal_symm
+   * plane, everything else in the #Brush.sculpt_plane driven #sculpt_normal_symm. Using the wrong
+   * one projected the source through a plane that did not match the cursor's rectangle, shearing
+   * the stamp. */
+  const float3 &plane_normal = (brush_.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) ?
+                                   ss_.cache->texture_plane_normal_symm :
+                                   ss_.cache->sculpt_normal_symm;
   for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     const ChannelSource &source = sources_.source(i);
     if (!source.usable || !channel_source_kind_has_placement(source.kind) ||
@@ -931,7 +939,7 @@ void ChannelSourceSampler::update_area_local_mats(const Object &ob)
     {
       continue;
     }
-    area_local_mats_[i] = calc_area_local_mat(ob, source.mtex->rot);
+    area_local_mats_[i] = calc_area_local_mat(ob, source.mtex->rot, plane_normal);
   }
 }
 
@@ -1559,6 +1567,25 @@ void ChannelSourceSampler::gather_tangent_normals_packed(const eMaterialPaintCha
 
   const float3 fallback = color_channel_fallback(channel, brush_paint_, this->paint(), brush_);
   const ChannelSource &source = sources_.source(channel);
+
+  /* The sampled Normal is expressed in the decal's own tangent basis, which is the screen basis
+   * only for screen-mapped sources. Under Area Plane mapping the source lies in the flat plane
+   * #area_local_mat defines, so the decal's X/Y must be that frame's in-plane axes -- otherwise the
+   * remapped normal turns with the camera relative to the surface. The rows of the object->area
+   * matrix are the object-space gradients of the area-x/y coordinates; normalized, they are those
+   * axes. Falls back to the screen basis when the source is not Area-mapped. */
+  const float4x4 *area_local_mat = area_local_mat_for(channel, source);
+  float3 t_decal = t_screen;
+  float3 b_decal = b_screen;
+  if (area_local_mat != nullptr) {
+    t_decal = math::normalize(float3((*area_local_mat)[0][0],
+                                     (*area_local_mat)[1][0],
+                                     (*area_local_mat)[2][0]));
+    b_decal = math::normalize(float3((*area_local_mat)[0][1],
+                                     (*area_local_mat)[1][1],
+                                     (*area_local_mat)[2][1]));
+  }
+
   if (!source.usable) {
     for (const int i : contexts.index_range()) {
       if (factors[i] == 0.0f) {
@@ -1566,12 +1593,11 @@ void ChannelSourceSampler::gather_tangent_normals_packed(const eMaterialPaintCha
         continue;
       }
       r_packed[i] = remap_decal_normal_to_packed_tangent(
-          fallback, t_screen, b_screen, n_m, t_m, b_m);
+          fallback, t_decal, b_decal, n_m, t_m, b_m);
     }
     return;
   }
 
-  const float4x4 *area_local_mat = area_local_mat_for(channel, source);
   const DirectSampleLayout layout = make_direct_sample_layout_sculpt(
       source, ss_, brush_, area_local_mat);
 
@@ -1599,7 +1625,7 @@ void ChannelSourceSampler::gather_tangent_normals_packed(const eMaterialPaintCha
                                            true,
                                            source.flip_green_channel);
     r_packed[i] = remap_decal_normal_to_packed_tangent(
-        n_d, t_screen, b_screen, n_m, t_m, b_m);
+        n_d, t_decal, b_decal, n_m, t_m, b_m);
   }
 }
 

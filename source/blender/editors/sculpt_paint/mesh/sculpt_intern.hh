@@ -1417,12 +1417,15 @@ TexelSampleContext sculpt_texel_sample_context(const SculptSession &ss,
                                                const float brush_point[3]);
 
 /**
- * The #MTEX_MAP_MODE_AREA local-space matrix for \a rotation, i.e. #StrokeCache.brush_local_mat
- * built for a texture rotation other than the brush's own #MTex.rot. Depends on the current
- * dab's location and motion direction, so must be recomputed every dab the same as
- * #StrokeCache.brush_local_mat itself — never cache this across dabs.
+ * The #MTEX_MAP_MODE_AREA local-space matrix for \a rotation and \a plane_normal, i.e.
+ * #StrokeCache.brush_local_mat built for a texture rotation/normal other than the brush's own.
+ * \a plane_normal is the symmetry-pass normal the frame's Z axis is built from: pass
+ * `cache.sculpt_normal_symm`, or `cache.texture_plane_normal_symm` when a rectangle texture clip
+ * bounds the stamp. Depends on the current dab's location and motion direction, so must be
+ * recomputed every dab the same as #StrokeCache.brush_local_mat itself — never cache this across
+ * dabs.
  */
-float4x4 calc_area_local_mat(const Object &ob, float rotation);
+float4x4 calc_area_local_mat(const Object &ob, float rotation, const float3 &plane_normal);
 
 }  // namespace material
 

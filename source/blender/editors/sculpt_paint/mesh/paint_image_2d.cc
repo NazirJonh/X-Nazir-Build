@@ -2972,6 +2972,13 @@ static ed::sculpt_paint::AreaPlaneFrame paint_2d_area_channel_frame(
       rotation = source.mtex->rot;
     }
   }
+  /* Anchored strokes rotate the brush by the drag direction; the cursor overlay draws that as
+   * `brush_rotation + mtex.rot` (see #paint_draw_2D_view_brush_cursor_outline) and the View/Tiled
+   * samplers include it through #make_direct_sample_layout / #BKE_brush_sample_tex_3d. The Area
+   * Plane raster must add the same term next to #MTex.rot, otherwise the final stamp keeps the
+   * brush's static angle instead of the one the preview showed. Mirrors 3D sculpt, where
+   * #material::calc_area_local_mat folds #StrokeCache.special_rotation in alongside the mtex angle. */
+  rotation += painter->paint->runtime->brush_rotation;
   /* The Area Plane axes follow the triangle's UV (`dpdu`/`dpdv`), which the canvas rotation then
    * turns by `-canvas_rotation` on screen. Adding it back keeps the stamp locked to the view, so
    * what the brush cursor shows is what lands on the canvas: the same guarantee the View and Tiled
@@ -2989,8 +2996,12 @@ static ed::sculpt_paint::AreaPlaneFrame paint_2d_area_channel_frame(
 static float paint_2d_area_footprint_rotation(const BrushPainter *painter)
 {
   const Brush *brush = painter->brush;
-  return (brush->material_paint != nullptr) ? brush->material_paint->shared_source_mapping.rot :
-                                              brush->mtex.rot;
+  const float placement_rotation = (brush->material_paint != nullptr) ?
+                                       brush->material_paint->shared_source_mapping.rot :
+                                       brush->mtex.rot;
+  /* Same anchored term as #paint_2d_area_channel_frame: the rectangle outline must turn with the
+   * angle the cursor overlay shows, not the brush's static one. */
+  return placement_rotation + painter->paint->runtime->brush_rotation;
 }
 
 static void paint_2d_area_sample_channel_color(const BrushPainter *painter,

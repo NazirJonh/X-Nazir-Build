@@ -3895,6 +3895,64 @@ static IndexMask pbvh_gather_texpaint(Object &ob,
   return pbvh_gather_generic(ob, brush, use_original, radius_scale, memory);
 }
 
+/**
+ * Normal of the face nearest to the brush center, for when #calc_area_normal finds no vertex in
+ * range. The area normal only samples vertices within `radius * normal_radius_factor`, so on a
+ * low-poly surface (e.g. a large quad painted into an image) it finds none, and the caller would
+ * otherwise fall back to the camera direction, projecting the texture onto a view-aligned plane.
+ * Faces are used rather than vertex normals so sharp edges keep their true orientation. Mesh
+ * sculpting only, other PBVH types have no cheap face access here.
+ */
+static std::optional<float3> calc_nearest_face_normal(const Depsgraph &depsgraph,
+                                                      const Object &ob,
+                                                      const IndexMask &node_mask)
+{
+  const SculptSession &ss = *ob.runtime->sculpt_session;
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  if (ss.cache == nullptr || pbvh.type() != bke::pbvh::Type::Mesh) {
+    return std::nullopt;
+  }
+
+  const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+  const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  const float3 &location = ss.cache->location_symm;
+
+  float best_dist_sq = FLT_MAX;
+  int best_face = -1;
+  node_mask.foreach_index([&](const int node_i) {
+    for (const int face : nodes[node_i].faces()) {
+      const Span<int> face_verts = corner_verts.slice(faces[face]);
+      /* Triangle fan: exact for the planar polygons this fallback is meant for. */
+      for (const int i : IndexRange(face_verts.size() - 2)) {
+        float3 closest;
+        closest_on_tri_to_point_v3(closest,
+                                   location,
+                                   positions[face_verts[0]],
+                                   positions[face_verts[i + 1]],
+                                   positions[face_verts[i + 2]]);
+        const float dist_sq = math::distance_squared(closest, location);
+        if (dist_sq < best_dist_sq) {
+          best_dist_sq = dist_sq;
+          best_face = face;
+        }
+      }
+    }
+  });
+  if (best_face == -1) {
+    return std::nullopt;
+  }
+
+  const float3 normal = bke::mesh::face_normal_calc(positions,
+                                                    corner_verts.slice(faces[best_face]));
+  if (math::is_zero(normal)) {
+    return std::nullopt;
+  }
+  return math::normalize(normal);
+}
+
 /* Calculate primary direction of movement for many brushes. */
 static float3 calc_sculpt_normal(const Depsgraph &depsgraph,
                                  const Sculpt &sd,
@@ -3904,14 +3962,19 @@ static float3 calc_sculpt_normal(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   const SculptSession &ss = *ob.runtime->sculpt_session;
   switch (brush.sculpt_plane) {
-    case SCULPT_DISP_DIR_AREA:
-      /* WORKAROUND: `calc_area_normal` returns nullopt when this dab's vertices don't accumulate
-       * a usable normal (e.g. the view-facing filter in #calc_area_normal_and_center_node_mesh
-       * rejects all of them). Falling back to a zero vector here used to leave
+    case SCULPT_DISP_DIR_AREA: {
+      /* Sparse geometry can leave no vertex inside the area normal radius, so try the nearest
+       * face before giving up on the surface orientation. */
+      std::optional<float3> area_normal = calc_area_normal(depsgraph, brush, ob, node_mask);
+      if (!area_normal) {
+        area_normal = calc_nearest_face_normal(depsgraph, ob, node_mask);
+      }
+      /* WORKAROUND: Falling back to a zero vector here used to leave
        * #StrokeCache.sculpt_normal zeroed, which made #calc_brush_local_mat's Area Plane frame
        * (used by material paint channel sources) collapse to a singular matrix. #view_normal is
        * always a valid unit vector and is the same fallback #SCULPT_DISP_DIR_VIEW uses below. */
-      return calc_area_normal(depsgraph, brush, ob, node_mask).value_or(ss.cache->view_normal);
+      return area_normal.value_or(ss.cache->view_normal);
+    }
     case SCULPT_DISP_DIR_VIEW:
       return ss.cache->view_normal;
     case SCULPT_DISP_DIR_X:
@@ -4028,8 +4091,11 @@ static void update_sculpt_normal(const Depsgraph &depsgraph,
     else {
       /* Fall back to an area-normal sample so the rectangle is always aligned to the mesh
        * surface rather than to the sculpt_plane setting or the camera. */
-      const std::optional<float3> area_normal = calc_area_normal(
+      std::optional<float3> area_normal = calc_area_normal(
           depsgraph, brush, ob, cursor_sample_result.node_mask);
+      if (!area_normal) {
+        area_normal = calc_nearest_face_normal(depsgraph, ob, cursor_sample_result.node_mask);
+      }
       cache.texture_plane_normal = area_normal.value_or(cache.sculpt_normal);
     }
     cache.texture_plane_normal_symm = tilt_apply_to_normal(
@@ -4122,18 +4188,39 @@ static void calc_brush_local_mat(const float rotation,
   invert_m4_m4(local_mat, tmat);
 }
 
+static float4x4 build_area_texture_world_frame(float rotation,
+                                               const Object &ob,
+                                               const StrokeCache &cache,
+                                               const float3 &world_normal);
+
 namespace material {
 
-float4x4 calc_area_local_mat(const Object &ob, const float rotation)
+float4x4 calc_area_local_mat(const Object &ob, const float rotation, const float3 &plane_normal)
 {
+  const StrokeCache &cache = *ob.runtime->sculpt_session->cache;
   float4x4 local_mat;
   float4x4 local_mat_inv_unused;
-  /* Multi-object sculpt made the frame's plane normal explicit rather than reading
-   * #StrokeCache.sculpt_normal inside: the same convention as the brush's own matrix. */
-  const StrokeCache &cache = *ob.runtime->sculpt_session->cache;
-  calc_brush_local_mat(
-      rotation, ob, cache.sculpt_normal, local_mat.ptr(), local_mat_inv_unused.ptr());
-  return local_mat;
+
+  if (!cache.non_uniform_scale_active) {
+    /* Single uniformly-scaled object: the local-space frame is orthonormal in world space and
+     * bit-exact with the brush's own Area matrix when given the same plane normal. */
+    calc_brush_local_mat(rotation, ob, plane_normal, local_mat.ptr(), local_mat_inv_unused.ptr());
+    return local_mat;
+  }
+
+  /* Anisotropic object scale, or any multi-object stroke (#StrokeCache.non_uniform_scale_active):
+   * a frame built directly in local space is not orthonormal in world space, so projecting through
+   * it stretches the source anisotropically. Build the frame in world space from the actual
+   * world-space surface normal, matching the classic brush/mask Area path
+   * (#calc_brush_area_texture_mat). Each material channel may carry its own rotation, so the frame
+   * is built per call instead of reusing/publishing #StrokeCache.area_texture_frame_to_world,
+   * which belongs to the shared brush-texture frame. */
+  ob.runtime->world_to_object = math::invert(ob.object_to_world());
+  const float3x3 to_world_normal = math::transpose(float3x3(ob.world_to_object()));
+  const float3 world_normal = math::normalize(to_world_normal * plane_normal);
+  const float4x4 frame_to_world = build_area_texture_world_frame(
+      rotation, ob, cache, world_normal);
+  return math::invert(frame_to_world) * ob.object_to_world();
 }
 
 }  // namespace material
@@ -8236,6 +8323,17 @@ void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph, const Sculp
     layers::cancel_recorded_offsets(depsgraph, ob);
     undo::restore_from_undo_step(depsgraph, sd, ob);
 
+    /* Raster image canvases (Material maps / Image): unlike geometry and mesh attributes, the
+     * pixels live in the image undo system, which has no per-step rollback of its own --
+     * #undo::restore_from_undo_step above only reaches sculpt data. Roll the stroke's tiles back to
+     * the pristine pixels they held before the stroke, so the next anchored dab starts from a clean
+     * canvas. Without this every intermediate anchor position bakes into the texture and compounds
+     * into the corruption seen when the anchor is resized. Same mechanism as the sculpt-filter and
+     * stroke-cancel paths. */
+    if (ED_image_undo_is_step_active()) {
+      ED_image_paint_tile_map_restore(ED_image_paint_tile_map_get());
+    }
+
     if (ss.cache) {
       /* Temporary data within the StrokeCache that is usually cleared at the end of the stroke
        * needs to be invalidated here so that the brushes do not accumulate and apply extra data.
@@ -8249,6 +8347,11 @@ void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph, const Sculp
       for (Array<float2> &mix_scalars : ss.cache->material_mix_scalars) {
         mix_scalars = {};
       }
+      /* Raster Material canvas: the block accumulator captures each texel's pre-stroke color on
+       * first touch and accumulates stroke coverage for non-Mix blend modes. It is keyed by texel
+       * and is not rebuilt by the tile restore above, so drop it too -- otherwise the coverage
+       * built at the previous anchor position would composite onto the freshly restored pixels. */
+      ss.cache->material_raster_accum.reset();
     }
   }
 }

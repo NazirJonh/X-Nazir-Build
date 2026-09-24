@@ -62,7 +62,7 @@ class StackLayersOutlinerTest(unittest.TestCase):
         object.select_set(True)
         material = bpy.data.materials.new("LayeredMaterial")
         material.use_nodes = True
-        material.paint_layers.new(kind='FILL', name="Base")
+        material.paint_layers.new(source='CONSTANT', name="Base")
         mesh.materials.append(material)
         return object, material
 
@@ -151,7 +151,7 @@ class StackLayersOutlinerTest(unittest.TestCase):
             result = bpy.ops.outliner.stack_layer_add(
                 type='FILL', fill_color=(0.5, 0.25, 0.0, 1.0), ordinal=-1)
         self.assertEqual(result, {'FINISHED'})
-        layer = [item for item in material.paint_layers if item.kind == 'FILL'][-1]
+        layer = [item for item in material.paint_layers if item.source == 'CONSTANT'][-1]
         # The picker colour is gamma; the description stores scene linear, so a mid value decodes
         # to something smaller.
         self.assertLess(layer.fill_color[0], 0.5)
@@ -222,9 +222,9 @@ class StackLayersOutlinerTest(unittest.TestCase):
         # The source bake runs through the node-preview EEVEE path; a script context may not offer
         # it. Either way the call is never silent: it adds the row or refuses cleanly with a report.
         if result == {'FINISHED'}:
-            self.assertIn('MATERIAL', [layer.kind for layer in material.paint_layers])
+            self.assertIn('MATERIAL', [layer.source for layer in material.paint_layers])
         else:
-            self.assertNotIn('MATERIAL', [layer.kind for layer in material.paint_layers])
+            self.assertNotIn('MATERIAL', [layer.source for layer in material.paint_layers])
 
     def test_shape_key_source_lists_and_activates(self):
         # The second source exists to prove the display mode is not tied to paint layers: the same
@@ -254,7 +254,7 @@ class StackLayersOutlinerTest(unittest.TestCase):
         # A material's layer description is not what the shape-key source drives: activating a
         # shape key through the same Outliner operators must leave it exactly as it was.
         material = bpy.data.materials.new("BystanderMaterial")
-        layer = material.paint_layers.new(kind='PAINT', name="Bystander")
+        layer = material.paint_layers.new(source='IMAGE', name="Bystander")
         marker = layer.marker
         self.space.stack_source = 'SHAPE_KEYS'
         self.focus_and_draw_stack(object)
@@ -283,7 +283,7 @@ class PaintLayersApiTest(unittest.TestCase):
     def test_new_find_remove_by_marker(self):
         material = bpy.data.materials.new("LayeredApiMaterial")
         self.assertFalse(material.is_layered)
-        layer = material.paint_layers.new(kind='PAINT', name="Layer One")
+        layer = material.paint_layers.new(source='IMAGE', name="Layer One")
         self.assertIsNotNone(layer)
         self.assertTrue(material.is_layered)
         self.assertEqual(material.paint_layers.active, layer)
@@ -298,10 +298,10 @@ class PaintLayersApiTest(unittest.TestCase):
 
     def test_kind_properties_and_channels(self):
         material = bpy.data.materials.new("LayeredChannelsMaterial")
-        layer = material.paint_layers.new(kind='FILL', name="Fill")
+        layer = material.paint_layers.new(source='CONSTANT', name="Fill")
         layer.opacity = 50.0
         layer.fill_color = (0.1, 0.2, 0.3, 1.0)
-        self.assertEqual(layer.kind, 'FILL')
+        self.assertEqual(layer.source, 'CONSTANT')
 
         record = layer.channel_add(channel='BASE_COLOR')
         self.assertIsNotNone(record)
@@ -311,7 +311,7 @@ class PaintLayersApiTest(unittest.TestCase):
 
     def test_issues_are_exposed(self):
         material = bpy.data.materials.new("LayeredIssuesMaterial")
-        layer = material.paint_layers.new(kind='PAINT', name="Layer")
+        layer = material.paint_layers.new(source='IMAGE', name="Layer")
         # A fresh authored layer is valid: its default channels are not a problem.
         self.assertEqual(len(layer.issues), 0)
         # The issue vocabulary still names the folder-with-a-map case.

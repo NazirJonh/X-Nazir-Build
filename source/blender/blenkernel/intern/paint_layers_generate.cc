@@ -282,7 +282,7 @@ bool material_source_group_channel(const Material &ma,
                                    const int channel,
                                    const PaintLayersRegenCache *cache)
 {
-  if (layer.kind != MA_PAINT_LAYER_KIND_MATERIAL || layer.material == nullptr ||
+  if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer.material == nullptr ||
       BKE_paint_layers_material_mode(ma, layer, cache) != PaintLayerMaterialMode::SourceGroup)
   {
     return false;
@@ -647,7 +647,7 @@ struct LayerGroup {
  */
 bool row_is_substituted(const Material &ma, const MaterialPaintLayer &layer)
 {
-  return layer.kind != MA_PAINT_LAYER_KIND_MATERIAL && BKE_paint_layers_bake_is_valid(ma, layer);
+  return layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL && BKE_paint_layers_bake_is_valid(ma, layer);
 }
 
 /**
@@ -680,7 +680,9 @@ bool leaf_participates(const MaterialPaintLayer &layer, const int channel)
   if (paint_layer_channel_image(layer, channel) != nullptr) {
     return true;
   }
-  if (BKE_paint_layers_kind_info(layer.kind).uses_fill_color) {
+  if (BKE_paint_layers_role(layer) == PaintLayerRole::Layer &&
+      BKE_paint_layers_kind_info(layer.source).uses_fill_color)
+  {
     return true;
   }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
@@ -765,7 +767,7 @@ uint64_t paint_layers_source_materials_hash(const Material &ma)
   BKE_paint_layers_flatten(ma, layers);
   Vector<uint32_t> source_uids;
   for (const MaterialPaintLayer *layer : layers) {
-    if (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL && layer->material != nullptr) {
+    if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->material != nullptr) {
       source_uids.append(layer->material->id.session_uid);
     }
   }
@@ -823,8 +825,8 @@ uint64_t topology_hash_correction(uint64_t hash,
   topology_hash_uid(hash, correction.marker);
   /* The correction's name reaches the group's mirror input names for its value inputs. */
   topology_hash_string(hash, correction.name);
-  hash = topology_hash_mix(hash, uint64_t(uint8_t(correction.section)));
-  hash = topology_hash_mix(hash, uint64_t(uint8_t(correction.effect)));
+  hash = topology_hash_mix(hash, uint64_t(uint8_t(correction.role)));
+  hash = topology_hash_mix(hash, uint64_t(uint8_t(correction.source)));
   hash = topology_hash_mix(hash, uint64_t(uint8_t(correction.blend)));
   /* Visibility is a value: a disabled effect or mask item stays in the chain with opacity zero
    * (#BKE_paint_layers_effective_opacity), so it must not move this hash. */
@@ -872,10 +874,9 @@ uint64_t topology_hash_layer(uint64_t hash,
                              const PaintLayersRegenCache *cache)
 {
   const bool is_folder = BKE_paint_layers_is_folder(layer);
-  hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.kind)));
+  hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.source)));
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.blend)));
-  hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.section)));
-  hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.effect)));
+  hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.role)));
   /* Visibility is a value: disabling leaves the row in the graph with factor zero, so the flag is
    * not part of topology. A rebuild for another reason may drop the row (see the removed-rows set),
    * and enabling it back force-invalidates the stored root hash and rebuilds it in. */
@@ -914,7 +915,7 @@ uint64_t topology_hash_layer(uint64_t hash,
      * target (#BKE_paint_layers_material_bake_apply), even though the graph never references it
      * until the row actually turns Baked. Non-Material rows have no such live path, so their map
      * always counts. */
-    const bool image_wired = layer.kind != MA_PAINT_LAYER_KIND_MATERIAL ||
+    const bool image_wired = layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL ||
                              !(live_constant || live_map_probe);
     hash = topology_hash_mix(
         hash,
@@ -930,7 +931,7 @@ uint64_t topology_hash_layer(uint64_t hash,
       /* Which map the row shows is topology, like any other map a row reads. */
       hash = topology_hash_mix(hash, topology_hash_map_id(live_map_image_probe));
     }
-    const PaintLayerMaterialMode material_mode = (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) ?
+    const PaintLayerMaterialMode material_mode = (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) ?
                                                      BKE_paint_layers_material_mode(ma, layer, cache) :
                                                      PaintLayerMaterialMode::Baked;
     hash = topology_hash_mix(hash, uint64_t(material_mode));
@@ -1341,7 +1342,9 @@ void paint_layers_tree_build(const Material &ma,
       {
         continue;
       }
-      if (!BKE_paint_layers_kind_info(layer.kind).uses_fill_color) {
+      if (!(BKE_paint_layers_role(layer) == PaintLayerRole::Layer &&
+            BKE_paint_layers_kind_info(layer.source).uses_fill_color))
+      {
         const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
         if (record == nullptr || record->value[3] <= 0.0f) {
           continue;
@@ -1368,7 +1371,7 @@ void paint_layers_tree_build(const Material &ma,
      * tree, so it cannot travel through #BKE_paint_layers_custom_properties_sync like a row's own
      * Fill constant. It gets its own group input instead, filled here and kept current by
      * #values_sync_socket, so a source edit reaches the row without rebuilding its group. */
-    if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) {
+    if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
       for (const int channel : wired_channels) {
         float live_value[4];
         if (!BKE_paint_layers_material_live_constant(ma, layer, channel, live_value, cache)) {
@@ -1660,7 +1663,7 @@ void paint_layers_tree_build(const Material &ma,
                                   ma, *layer, channel, &live_map_image, &live_map_iuser, cache);
         /* A Material row whose whole source graph goes through the wrapper group. Its instance is
          * created once per row and reused for every channel. */
-        const PaintLayerMaterialMode material_mode = (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL) ?
+        const PaintLayerMaterialMode material_mode = (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL) ?
                                                          BKE_paint_layers_material_mode(
                                                              ma, *layer, cache) :
                                                          PaintLayerMaterialMode::Baked;
@@ -1755,7 +1758,7 @@ void paint_layers_tree_build(const Material &ma,
                  source_group_instance == nullptr)
         {
           if (!paint_layer_channel_present(*layer, channel) &&
-              layer->kind == MA_PAINT_LAYER_KIND_CUSTOM &&
+              layer->source == MA_PAINT_LAYER_SOURCE_NODE_GROUP &&
               custom_bake_missing_warn_once(ma, *layer))
           {
             fprintf(stderr,
@@ -1958,7 +1961,8 @@ void paint_layers_tree_build(const Material &ma,
            * transparency is the Alpha input, and a real bake map is opaque. It tracks no content
            * alpha at all, so the Result alpha stays the chain's blended value like the CPU's. */
           if (track_content_alpha &&
-              ELEM(layer->kind, MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_KIND_FILL))
+              (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
+              ELEM(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)))
           {
             current.content_alpha_node = map;
             current.content_alpha = socket_out(*map, "Alpha");
@@ -1975,7 +1979,8 @@ void paint_layers_tree_build(const Material &ma,
            * Fill input carries; it is frozen into a Value so the content-alpha chain has a scalar
            * leaf. Custom and Material leaves (F2-C3/C4) supply no such constant. */
           if (track_content_alpha &&
-              ELEM(layer->kind, MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_KIND_FILL) &&
+              (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
+              ELEM(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) &&
               current.source != nullptr)
           {
             float constant[4];
@@ -2121,14 +2126,14 @@ void paint_layers_tree_build(const Material &ma,
           layer_factor_node = source_group_instance;
           layer_factor_socket = coverage_out;
         }
-        else if (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL && layer->bake != nullptr &&
+        else if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->bake != nullptr &&
                  layer->bake->coverage != nullptr)
         {
           std::tie(layer_factor_node, layer_factor_socket) = grey_of_map(*layer->bake->coverage,
                                                                          -320.0f);
         }
       }
-      else if (!substituted && layer->kind == MA_PAINT_LAYER_KIND_MATERIAL &&
+      else if (!substituted && layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
                layer->bake != nullptr && layer->bake->coverage != nullptr)
       {
         std::tie(layer_factor_node, layer_factor_socket) = grey_of_map(*layer->bake->coverage,
@@ -2143,7 +2148,7 @@ void paint_layers_tree_build(const Material &ma,
        * material's transparency already arrived as `layer_factor` from the Alpha input. */
       bNode *content_cov_node = nullptr;
       bNodeSocket *content_cov = nullptr;
-      if (leaf_map_node != nullptr && layer->kind != MA_PAINT_LAYER_KIND_MATERIAL) {
+      if (leaf_map_node != nullptr && layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
         content_cov = socket_out(*leaf_map_node, "Alpha");
         content_cov_node = (content_cov != nullptr) ? leaf_map_node : nullptr;
       }
@@ -2178,8 +2183,8 @@ void paint_layers_tree_build(const Material &ma,
         const bool normal_channel = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
         for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(*layer)) {
           const MaterialPaintLayer &correction = *effect;
-          if (correction.effect != MA_PAINT_LAYER_EFFECT_PAINT &&
-              correction.effect != MA_PAINT_LAYER_EFFECT_FILL)
+          if (correction.source != MA_PAINT_LAYER_SOURCE_IMAGE &&
+              correction.source != MA_PAINT_LAYER_SOURCE_CONSTANT)
           {
             continue;
           }
@@ -4262,7 +4267,7 @@ void source_group_instances_log(
   BKE_paint_layers_flatten(ma, layers);
   Vector<SourceGroupEmbedState> states;
   for (const MaterialPaintLayer *layer : layers) {
-    if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL ||
+    if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL ||
         BKE_paint_layers_material_mode(ma, *layer, cache) != PaintLayerMaterialMode::SourceGroup)
     {
       continue;
@@ -4777,7 +4782,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
-      if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL) {
+      if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
         continue;
       }
       const PaintLayerMaterialMode mode = BKE_paint_layers_material_mode(ma, *layer, &regen_cache);
@@ -4943,7 +4948,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
           any = true;
           continue;
         }
-        const PaintLayerMaterialMode mode = (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) ?
+        const PaintLayerMaterialMode mode = (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) ?
                                                 BKE_paint_layers_material_mode(
                                                     ma, layer, &regen_cache) :
                                                 PaintLayerMaterialMode::Baked;
@@ -4958,7 +4963,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
             participates = true;
             continue;
           }
-          if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL && layer.material != nullptr) {
+          if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr) {
             if (mode == PaintLayerMaterialMode::SourceGroup) {
               /* One wrapper instance serves every channel; the visitor dedups its tree. */
               if (bNodeTree *wrapper = source_group_lookup(*layer.material)) {
@@ -5002,7 +5007,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
           if (any_substituted && layer.bake != nullptr && layer.bake->coverage != nullptr) {
             counter.add_image(*layer.bake->coverage);
           }
-          if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL && layer.bake != nullptr &&
+          if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.bake != nullptr &&
               layer.bake->coverage != nullptr &&
               !(mode == PaintLayerMaterialMode::SourceGroup &&
                 wrapper_has_coverage(layer.material)))
@@ -5061,7 +5066,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
      *    pass -- the bake -> hash -> regeneration -> bake loop this state exists to break. */
     for (const bUUID &marker : previously_forced) {
       MaterialPaintLayer *layer = BKE_paint_layers_find(ma, marker);
-      if (layer == nullptr || layer->kind != MA_PAINT_LAYER_KIND_MATERIAL ||
+      if (layer == nullptr || layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL ||
           layer->bake == nullptr || BKE_paint_layers_bake_is_valid(ma, *layer) ||
           forced_bake_contains(ma, marker))
       {
@@ -5082,7 +5087,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       Vector<const MaterialPaintLayer *> all_layers;
       BKE_paint_layers_flatten(ma, all_layers);
       for (const MaterialPaintLayer *layer : all_layers) {
-        if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL || layer->material == nullptr ||
+        if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material == nullptr ||
             layer->bake == nullptr || !BKE_paint_layers_material_bake_ready(ma, *layer) ||
             BKE_paint_layers_material_mode(ma, *layer, &regen_cache) !=
                 PaintLayerMaterialMode::SourceGroup ||
@@ -5178,10 +5183,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
         /* Clear the nodes but keep the interface: a rebuilt group reuses its sockets by name, so
          * their identifiers -- and the parent's links into them -- survive. Unused sockets are
          * pruned at the end of the build. */
-        PL_DEBUG_PRINTF("paint layers regen diff: layer '%s' kind=%d section=%d old=%llx new=%llx\n",
+        PL_DEBUG_PRINTF("paint layers regen diff: layer '%s' source=%d role=%d old=%llx new=%llx\n",
                         layer.name,
-                        int(layer.kind),
-                        int(layer.section),
+                        int(layer.source),
+                        int(layer.role),
                         static_cast<unsigned long long>(stored),
                         static_cast<unsigned long long>(topology));
         tree_clear_nodes(bmain, *candidate);
@@ -6238,7 +6243,7 @@ void source_groups_prune(Main &bmain, const Material &owner)
   Vector<const MaterialPaintLayer *> layers;
   BKE_paint_layers_flatten(owner, layers);
   for (const MaterialPaintLayer *layer : layers) {
-    if (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL && layer->material != nullptr) {
+    if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->material != nullptr) {
       referenced.add(layer->material->id.session_uid);
     }
   }
@@ -6660,7 +6665,7 @@ void BKE_paint_layers_source_group_build_failed_set(const Material &owner,
 static PaintLayersSourceGroupRefusal material_row_refusal_probe(const Material &ma,
                                                                 const MaterialPaintLayer &layer)
 {
-  if (layer.kind != MA_PAINT_LAYER_KIND_MATERIAL) {
+  if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return PaintLayersSourceGroupRefusal::None;
   }
   if (BKE_paint_layers_material_forced_bake(ma, layer)) {

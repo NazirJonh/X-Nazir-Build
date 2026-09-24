@@ -115,7 +115,7 @@ static void shader_get_from_context(const bContext *C,
     if (owner != nullptr) {
       Material *ma = owner;
       if (MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(*owner)) {
-        if (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL && layer->material != nullptr) {
+        if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->material != nullptr) {
           ma = layer->material;
         }
       }

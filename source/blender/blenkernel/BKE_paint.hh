@@ -11,7 +11,7 @@
 #include <optional>
 #include <variant>
 
-/* For #PaintMaterialCorrectionSection, named by the active-layer answer. */
+/* For #PaintMaterialLayerKind, named by the active-layer answer. */
 #include "BKE_paint_material_enums.hh"
 
 #include "BLI_array.hh"

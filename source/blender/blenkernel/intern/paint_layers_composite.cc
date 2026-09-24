@@ -182,7 +182,7 @@ bool composite_image_layers_build(const Material &material,
     if (stop_at != nullptr && BLI_uuid_equal(layer->marker, stop_at->marker)) {
       return true;
     }
-    if (layer->kind == MA_PAINT_LAYER_KIND_CORRECTION) {
+    if (BKE_paint_layers_role(*layer) != PaintLayerRole::Layer) {
       /* A correction row is not composited here; a Custom and a Material layer are, either
        * through their bake below or, without one, by dropping out with no channel records. */
       continue;
@@ -203,7 +203,7 @@ bool composite_image_layers_build(const Material &material,
       PaintMaterialCompositeImageLayer out;
       out.tracks_content_alpha =
           BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel)) &&
-          layer->kind != MA_PAINT_LAYER_KIND_MATERIAL;
+          layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL;
       out.color_image = baked_color;
       out.color_iuser = nullptr;
       out.mask_image = layer->bake->coverage;
@@ -242,7 +242,7 @@ bool composite_image_layers_build(const Material &material,
       continue;
     }
     else if (!live && !live_map && paint_layer_channel_image(*layer, channel) == nullptr &&
-             !BKE_paint_layers_kind_info(layer->kind).uses_fill_color)
+             !BKE_paint_layers_kind_info(layer->source).uses_fill_color)
     {
       /* Mirrors the generator: a non-Fill row with no map covers nothing unless its flat value is
        * set (a Fill converted to Paint keeps its colour there until the first stroke). */
@@ -278,7 +278,7 @@ bool composite_image_layers_build(const Material &material,
       if ((correction.flag & MA_PAINT_LAYER_ENABLED) == 0) {
         return;
       }
-      if (!ELEM(correction.effect, MA_PAINT_LAYER_EFFECT_PAINT, MA_PAINT_LAYER_EFFECT_FILL)) {
+      if (!ELEM(correction.source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
         return;
       }
       const bool fill = BKE_paint_layers_source_type(correction) ==
@@ -343,7 +343,7 @@ bool composite_image_layers_build(const Material &material,
      * generator's own gate at #channel_tracks_content_alpha. */
     out.tracks_content_alpha =
         BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel)) &&
-        layer->kind != MA_PAINT_LAYER_KIND_MATERIAL;
+        layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL;
     /* Set when the row being collected sits inside this folder: the folder is still emitted, but
      * with only the part of its contents that lies below the row, and the walk stops after it. */
     bool stop_found_inside = false;
@@ -368,7 +368,7 @@ bool composite_image_layers_build(const Material &material,
          * its content coverage stays 1; the map alpha kept its Paint/Fill meaning. */
         out.color_image = live_map_image;
         out.color_iuser = live_map_iuser;
-        out.color_alpha_coverage = layer->kind != MA_PAINT_LAYER_KIND_MATERIAL;
+        out.color_alpha_coverage = layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL;
       }
       else {
         Image *image = paint_layer_channel_image(*layer, channel);
@@ -381,7 +381,7 @@ bool composite_image_layers_build(const Material &material,
            * below rather than cover them with the map's black, as the generated chain does. A
            * Material row is the exception: its channel map (a real bake is opaque) never carries
            * the row's coverage, so its content coverage stays 1. */
-          out.color_alpha_coverage = layer->kind != MA_PAINT_LAYER_KIND_MATERIAL;
+          out.color_alpha_coverage = layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL;
         }
         else {
           /* A constant row: a Fill's colour, or a channel with no map. */
@@ -417,7 +417,7 @@ bool composite_image_layers_build(const Material &material,
       out.coverage_iuser = live_alpha_iuser;
       out.coverage_from_alpha = true;
     }
-    else if (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL && layer->bake != nullptr &&
+    else if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->bake != nullptr &&
              layer->bake->coverage != nullptr)
     {
       /* A Material layer's source transparency, baked; the row's own mask items stay live on top. */

@@ -79,15 +79,6 @@ enum class PaintMaterialLayerKind : int8_t {
   /* The enum stays open: a kind this build does not know reads back as #Paint. */
 };
 
-/**
- * Which part of a correction layer the row's UI shows: the adjustment it applies, or the mask
- * that limits where it applies. Stored next to the kind on the correction's own Mix nodes.
- */
-enum class PaintMaterialCorrectionSection : int8_t { Content = 0, Mask = 1 };
-
-/** What a correction layer applies to the layer it hangs under. */
-enum class PaintMaterialCorrectionEffect : int8_t { Paint = 0, Fill };
-
 /** How one channel of one stack row stands; see the spec's invariants I1 and I2. */
 enum class PaintMaterialLayerChannelState : int8_t {
   /** No map: the row keeps its Mix and Multiply, its coverage is unlinked and zero. */

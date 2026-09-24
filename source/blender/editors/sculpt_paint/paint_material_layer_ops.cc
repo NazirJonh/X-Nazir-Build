@@ -364,7 +364,7 @@ static wmOperatorStatus paint_layer_custom_channel_add_exec(bContext *C, wmOpera
   }
   MaterialPaintLayer *layer = BKE_paint_layers_find(
       *owner, BKE_paint_layers_active_get(*owner));
-  if (layer == nullptr || layer->kind != MA_PAINT_LAYER_KIND_CUSTOM) {
+  if (layer == nullptr || layer->source != MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
     BKE_report(op->reports, RPT_ERROR, "No active Custom layer");
     return OPERATOR_CANCELLED;
   }

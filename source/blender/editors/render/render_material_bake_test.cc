@@ -154,7 +154,7 @@ TEST_F(MaterialBakeTest, rebake_stale_skips_a_live_source)
   Material *layered = BKE_material_add(bmain, "LayeredLive");
   Material *source = add_material_with_principled("LiveSourceBake");
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *layered, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *layered, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*layered, row, source));
   BKE_paint_layers_active_set(*layered, row->marker);

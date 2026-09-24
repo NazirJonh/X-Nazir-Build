@@ -63,10 +63,10 @@ TEST_F(OutlinerStackPaintLayersSourceTest, layered_material_rows_come_from_the_d
 {
   Material *ma = BKE_material_add(bmain, "Layered");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
 
   const StackReadContext ctx{bmain, nullptr, nullptr};
@@ -89,7 +89,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, fresh_mask_is_a_listed_item)
    * arrives with the first stroke. */
   Material *ma = BKE_material_add(bmain, "Layered");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Layer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
   MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
   ASSERT_NE(item, nullptr);
@@ -114,7 +114,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_section_appears_with_the_first_i
    * it has to exist as soon as the row has a mask item -- even a constant one with no map. */
   Material *ma = BKE_material_add(bmain, "MaskSection");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Layer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
 
   const StackReadContext ctx{bmain, nullptr, nullptr};
@@ -161,7 +161,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_section_lists_item_maps)
 {
   Material *ma = BKE_material_add(bmain, "MaskMaps");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Layer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
   ASSERT_NE(item, nullptr);
   Image *map = &add_image(*bmain, "MaskMap");
@@ -194,7 +194,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, layered_state_hash_moves_with_a_renam
 {
   Material *ma = BKE_material_add(bmain, "HashLayered");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
 
   const StackReadContext ctx{bmain, nullptr, nullptr};
@@ -208,7 +208,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, layered_active_row_reads_the_active_m
 {
   Material *ma = BKE_material_add(bmain, "ActiveLayered");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
 
   const StackReadContext ctx{bmain, nullptr, nullptr};
@@ -224,7 +224,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, layered_active_row_reads_the_active_m
 TEST_F(OutlinerStackPaintLayersSourceTest, layered_material_is_editable)
 {
   Material *ma = BKE_material_add(bmain, "EditableLayered");
-  BKE_paint_layers_add(*ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+  BKE_paint_layers_add(*ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   EXPECT_TRUE(source().is_editable(ma->id));
 }
 
@@ -232,7 +232,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, layered_folder_is_not_a_paint_target)
 {
   Material *ma = BKE_material_add(bmain, "FolderTarget");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   BKE_paint_layers_active_set(*ma, folder->marker);
 
@@ -245,7 +245,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, layered_folder_is_not_a_paint_target)
 TEST_F(OutlinerStackPaintLayersSourceTest, empty_channel_row_has_no_preview_id)
 {
   Material *ma = BKE_material_add(bmain, "EmptyChannel");
-  BKE_paint_layers_add(*ma, MA_PAINT_LAYER_KIND_PAINT, "Empty", nullptr, PaintLayerPlace::Above);
+  BKE_paint_layers_add(*ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Empty", nullptr, PaintLayerPlace::Above);
 
   const StackReadContext ctx{bmain, nullptr, nullptr};
   Vector<StackRow> rows;
@@ -267,7 +267,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_add_material_creates_a_row_with_
   ASSERT_GE(ordinal, 0);
   MaterialPaintLayer *layer = paint_description_row_for_ordinal(*ma, ordinal);
   ASSERT_NE(layer, nullptr);
-  EXPECT_EQ(layer->kind, MA_PAINT_LAYER_KIND_MATERIAL);
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_MATERIAL);
   EXPECT_EQ(layer->material, source);
   /* A bake source is a map, not a channel of the layer's own. */
   EXPECT_EQ(layer->channels_num, 0);
@@ -283,7 +283,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_add_makes_paint_fill_folder_and_
   const int paint = paint_layers_edit_add(*ma, PAINT_STACK_ADD_PAINT, -1, {});
   ASSERT_GE(paint, 0);
   MaterialPaintLayer *paint_layer = paint_description_row_for_ordinal(*ma, paint);
-  EXPECT_EQ(paint_layer->kind, MA_PAINT_LAYER_KIND_PAINT);
+  EXPECT_EQ(paint_layer->source, MA_PAINT_LAYER_SOURCE_IMAGE);
   /* The Add gives a Paint or Fill row the default channel set, so it is not inert. */
   EXPECT_EQ(paint_layer->channels_num, 3);
 
@@ -294,7 +294,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_add_makes_paint_fill_folder_and_
   ASSERT_GE(fill, 0);
   MaterialPaintLayer *fill_layer = paint_description_row_for_ordinal(*ma, fill);
   ASSERT_NE(fill_layer, nullptr);
-  EXPECT_EQ(fill_layer->kind, MA_PAINT_LAYER_KIND_FILL);
+  EXPECT_EQ(fill_layer->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
   EXPECT_NEAR(fill_layer->fill_color[0], 0.25f, 1e-6f);
   EXPECT_EQ(fill_layer->channels_num, 3);
 
@@ -309,18 +309,18 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_add_makes_paint_fill_folder_and_
   ASSERT_GE(correction, 0);
   MaterialPaintLayer *corr = paint_description_row_for_ordinal(*ma, correction);
   ASSERT_NE(corr, nullptr);
-  EXPECT_EQ(corr->kind, MA_PAINT_LAYER_KIND_CORRECTION);
-  EXPECT_EQ(corr->effect, MA_PAINT_LAYER_EFFECT_PAINT);
-  EXPECT_EQ(corr->section, MA_PAINT_LAYER_SECTION_CONTENT);
+  EXPECT_NE(BKE_paint_layers_role(*corr), PaintLayerRole::Layer);
+  EXPECT_EQ(corr->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(corr->role, MA_PAINT_LAYER_ROLE_EFFECT);
 
-  /* A mask Fill correction: one kind, not a kind plus an effect argument (S-1). */
+  /* A mask Fill correction: one source, not a role plus a source argument (S-1). */
   const int mask_correction = paint_layers_edit_add(
       *ma, PAINT_STACK_ADD_MASK_CORRECTION_FILL, paint, {});
   ASSERT_GE(mask_correction, 0);
   MaterialPaintLayer *mcorr = paint_description_row_for_ordinal(*ma, mask_correction);
   ASSERT_NE(mcorr, nullptr);
-  EXPECT_EQ(mcorr->section, MA_PAINT_LAYER_SECTION_MASK);
-  EXPECT_EQ(mcorr->effect, MA_PAINT_LAYER_EFFECT_FILL);
+  EXPECT_EQ(mcorr->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(mcorr->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, edit_add_into_folder_nests_and_into_non_folder_groups)
@@ -485,11 +485,11 @@ TEST_F(OutlinerStackPaintLayersSourceTest, description_issues_show_on_the_row_th
 {
   Material *ma = BKE_material_add(bmain, "Issues");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, layer, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_FILL, "Fill");
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill");
   ASSERT_NE(correction, nullptr);
 
   Vector<StackRow> rows;
@@ -517,11 +517,11 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_target_is_removed_only_for_the_a
 {
   Material *ma = BKE_material_add(bmain, "MaskTarget");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *active = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Active", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Active", folder, PaintLayerPlace::Into);
   MaterialPaintLayer *other = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Other", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Other", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_NE(active, nullptr);
   ASSERT_NE(other, nullptr);
@@ -546,9 +546,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, rows_edit_the_selected_channel_and_ne
 {
   Material *ma = BKE_material_add(bmain, "PerChannelRows");
   MaterialPaintLayer *with_record = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "With", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "With", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *without = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Without", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Without", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(with_record, nullptr);
   ASSERT_NE(without, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, with_record, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
@@ -613,9 +613,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, folder_rows_offer_channel_overrides_w
 {
   Material *ma = BKE_material_add(bmain, "FolderChannelRows");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(folder, nullptr);
   ASSERT_NE(child, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
@@ -655,7 +655,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, normal_channel_has_opacity_but_no_ble
 {
   Material *ma = BKE_material_add(bmain, "NormalColumns");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Normal", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Normal", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
 
@@ -672,10 +672,10 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_correction_columns_point_at_the_
 {
   Material *ma = BKE_material_add(bmain, "MaskCorrColumns");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, layer, MA_PAINT_LAYER_SECTION_MASK, MA_PAINT_LAYER_EFFECT_PAINT, "M");
+      *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "M");
   ASSERT_NE(correction, nullptr);
 
   /* A mask correction lays coverage with the over formula: its blend plays no part, so only the
@@ -728,7 +728,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_tracks_a_blank_map_becomin
 {
   Material *ma = BKE_material_add(bmain, "BlankHash");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   /* A generated blank map starts transparent: the row shows a placeholder thumbnail. */
   const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   Image *image = BKE_image_add_generated(

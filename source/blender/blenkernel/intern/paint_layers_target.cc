@@ -345,14 +345,14 @@ const char *BKE_paint_layers_target_refusal(const PaintLayersTarget &target)
     return "The layer is frozen (bake); unfreeze it to paint";
   }
   if (target.layer != nullptr && target.mode == PaintLayersTargetMode::Content &&
-      target.layer->kind == MA_PAINT_LAYER_KIND_FILL)
+      target.layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT)
   {
     return "A Fill layer is a color: add a Correction to paint on it, or paint its mask";
   }
   /* A Material layer's content is its source baked into maps, which a re-bake rewrites: strokes
    * there would be lost, so like a Fill it is changed through a Correction or its mask. */
   if (target.layer != nullptr && target.mode == PaintLayersTargetMode::Content &&
-      target.layer->kind == MA_PAINT_LAYER_KIND_MATERIAL)
+      target.layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL)
   {
     return "A Material layer shows its source material: add a Correction to paint on it, or "
            "paint its mask";
@@ -429,7 +429,7 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
     }
     /* A constant item now reads its map; switch the effect so the generator uses it. */
     if (fill_effect) {
-      BKE_paint_layers_correction_set_effect(*target.material, item, MA_PAINT_LAYER_EFFECT_PAINT);
+      BKE_paint_layers_correction_source_set(*target.material, item, MA_PAINT_LAYER_SOURCE_IMAGE);
     }
     return paint_layer_mask_correction_image(*item, target.channel);
   }
@@ -437,7 +437,7 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
   /* Content. A Fill row is a colour and never grows a map: it is changed through a Correction or
    * its mask (#BKE_paint_layers_target_refusal). The entry points refuse before getting here; this
    * keeps any other caller from converting the row behind the user's back. */
-  if (ELEM(target.layer->kind, MA_PAINT_LAYER_KIND_FILL, MA_PAINT_LAYER_KIND_MATERIAL)) {
+  if (ELEM(target.layer->source, MA_PAINT_LAYER_SOURCE_CONSTANT, MA_PAINT_LAYER_SOURCE_MATERIAL)) {
     return nullptr;
   }
   MaterialPaintLayerChannel *record = paint_layer_channel_find(*target.layer, target.channel);

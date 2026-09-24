@@ -64,20 +64,20 @@ class MATERIAL_OT_paint_layer_add(_PaintLayerOperator):
     bl_label = "Add Paint Layer"
     bl_description = "Add a row on top of the stack"
 
-    kind: bpy.props.EnumProperty(
-        name="Kind",
+    source: bpy.props.EnumProperty(
+        name="Source",
         items=(
-            ('PAINT', "Paint", "A painted layer"),
-            ('FILL', "Fill", "A flat fill layer"),
-            ('FOLDER', "Folder", "A folder grouping other layers"),
+            ('IMAGE', "Paint", "A painted layer"),
+            ('CONSTANT', "Fill", "A flat fill layer"),
+            ('STACK', "Folder", "A folder grouping other layers"),
         ),
-        default='PAINT',
+        default='IMAGE',
     )
     name: bpy.props.StringProperty(name="Name")
 
     def execute(self, context):
         layers = context.material.paint_layers
-        layer = layers.new(kind=self.kind, name=self.name)
+        layer = layers.new(source=self.source, name=self.name)
         if layer is not None:
             layers.active = layer
         return {'FINISHED'}
@@ -302,20 +302,23 @@ class MATERIAL_OT_paint_layer_correction_add(_PaintLayerOperator):
     bl_idname = "material.paint_layer_correction_add"
     bl_label = "Add Paint Layer Correction"
 
-    section: bpy.props.EnumProperty(
-        name="Section",
+    role: bpy.props.EnumProperty(
+        name="Role",
         items=lambda self, context: [
             (item.identifier, item.name, "")
-            for item in bpy.types.MaterialPaintLayer.bl_rna.properties["section"].enum_items
-            if item.identifier
+            for item in bpy.types.MaterialPaintLayer.bl_rna.properties["role"].enum_items
+            # A correction is Effect or Mask Item; Layer is a stack row, not something this
+            # operator ever creates.
+            if item.identifier in ('EFFECT', 'MASK_ITEM')
         ],
     )
-    effect: bpy.props.EnumProperty(
-        name="Effect",
+    source: bpy.props.EnumProperty(
+        name="Source",
         items=lambda self, context: [
             (item.identifier, item.name, "")
-            for item in bpy.types.MaterialPaintLayer.bl_rna.properties["effect"].enum_items
-            if item.identifier
+            for item in bpy.types.MaterialPaintLayer.bl_rna.properties["source"].enum_items
+            # A correction only ever paints (Image) or fills (Constant).
+            if item.identifier in ('IMAGE', 'CONSTANT')
         ],
     )
     name: bpy.props.StringProperty(name="Name")
@@ -324,7 +327,7 @@ class MATERIAL_OT_paint_layer_correction_add(_PaintLayerOperator):
         layer = self._layer(context)
         if layer is None:
             return {'CANCELLED'}
-        layer.correction_add(section=self.section, effect=self.effect, name=self.name)
+        layer.correction_add(role=self.role, source=self.source, name=self.name)
         return {'FINISHED'}
 
 

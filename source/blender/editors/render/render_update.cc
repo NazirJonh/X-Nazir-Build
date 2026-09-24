@@ -185,7 +185,7 @@ void ED_render_scene_update(const DEGEditorUpdateContext *update_ctx, const bool
       Vector<const MaterialPaintLayer *> layers;
       BKE_paint_layers_flatten(ma, layers);
       for (const MaterialPaintLayer *layer : layers) {
-        if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL || layer->material == nullptr) {
+        if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material == nullptr) {
           continue;
         }
         if (BKE_paint_layers_source_material_is_live(*bmain, *layer->material)) {
@@ -314,7 +314,7 @@ static void material_changed(Main *bmain, Material *ma)
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten(layered, layers);
     for (const MaterialPaintLayer *layer : layers) {
-      if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL || layer->material != ma) {
+      if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material != ma) {
         continue;
       }
       const bool live = BKE_paint_layers_material_lives_from_source(layered, *layer);

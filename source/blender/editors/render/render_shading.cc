@@ -897,7 +897,7 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator * /*op
    * Fill is a colour and takes no strokes itself: painting goes into a layer or Correction above it,
    * or into its mask. */
   MaterialPaintLayer *base = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FILL, "Base Color", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Base Color", nullptr, PaintLayerPlace::Above);
   /* The default channel set, so the fresh stack reaches the Principled BSDF immediately. */
   BKE_paint_layers_default_channels_apply(*ma, *base);
   const float base_color[4] = {0.8f, 0.8f, 0.8f, 1.0f};

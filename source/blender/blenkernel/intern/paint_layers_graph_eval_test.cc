@@ -576,13 +576,13 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
   }
 
   MaterialPaintLayer *add_layer(const char *name,
-                                const eMaterialPaintLayerKind kind,
+                                const eMaterialPaintLayerSource source,
                                 Image *image,
                                 const eMaterialPaintChannel channel =
                                     PAINT_MATERIAL_CHANNEL_BASE_COLOR)
   {
     MaterialPaintLayer *layer = BKE_paint_layers_add(
-        *ma, kind, name, nullptr, PaintLayerPlace::Above);
+        *ma, source, name, nullptr, PaintLayerPlace::Above);
     EXPECT_NE(layer, nullptr);
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
     EXPECT_NE(record, nullptr);
@@ -605,7 +605,7 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
     image->flag |= IMA_GPU_LINEAR_PREMUL;
     record->image = image;
     record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
-    BKE_paint_layers_correction_set_effect(*ma, item, MA_PAINT_LAYER_EFFECT_PAINT);
+    BKE_paint_layers_correction_source_set(*ma, item, MA_PAINT_LAYER_SOURCE_IMAGE);
     return item;
   }
 
@@ -1399,7 +1399,7 @@ TEST_F(PaintLayersGraphEvalTest, multi_source_rows_match_the_reference)
                       const HybridSourceSpec &hybrid_spec) {
     ma = BKE_material_add(bmain, test_case.name);
     MaterialPaintLayer *row = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+        *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
     ASSERT_NE(row, nullptr);
     ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, test_case.source));
     BKE_paint_layers_active_set(*ma, row->marker);
@@ -1494,7 +1494,7 @@ TEST_F(PaintLayersGraphEvalTest, multi_source_baked_rows_match_the_reference_and
                       const float coverage) {
     ma = BKE_material_add(bmain, name);
     MaterialPaintLayer *row = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+        *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
     ASSERT_NE(row, nullptr);
     ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
 
@@ -1691,14 +1691,14 @@ TEST_F(PaintLayersGraphEvalTest, isolating_folder_partial_coverage_matches_the_c
 
   ma = BKE_material_add(bmain, "IsolatingFolder");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Iso", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Iso", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   BKE_paint_layers_set_opacity(*ma, folder, 0.5f);
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
 
   auto add_paint_child = [&](const char *name, const float color[4]) -> MaterialPaintLayer * {
     MaterialPaintLayer *child = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_PAINT, name, folder, PaintLayerPlace::Into);
+        *ma, MA_PAINT_LAYER_SOURCE_IMAGE, name, folder, PaintLayerPlace::Into);
     EXPECT_NE(child, nullptr);
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
         *ma, child, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
@@ -1879,7 +1879,7 @@ TEST_F(PaintLayersGraphEvalTest, nested_isolating_folders_partial_alpha_matches_
 
   /* Opaque contrasting bottom: red. */
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -1889,14 +1889,14 @@ TEST_F(PaintLayersGraphEvalTest, nested_isolating_folders_partial_alpha_matches_
 
   /* Outer isolating folder. */
   MaterialPaintLayer *outer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Outer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Outer", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(outer, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, outer, outer_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *outer));
 
   /* Inner isolating folder inside the outer one. */
   MaterialPaintLayer *inner = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Inner", outer, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Inner", outer, PaintLayerPlace::Into);
   ASSERT_NE(inner, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, inner, inner_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *inner));
@@ -1908,7 +1908,7 @@ TEST_F(PaintLayersGraphEvalTest, nested_isolating_folders_partial_alpha_matches_
   ASSERT_NE(leaf_a_image, nullptr);
   fill_nested_leaf_soft_edge(leaf_a_image, size, 0, 255, 0);
   MaterialPaintLayer *leaf_a = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "LeafA", inner, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "LeafA", inner, PaintLayerPlace::Into);
   ASSERT_NE(leaf_a, nullptr);
   MaterialPaintLayerChannel *record_a = BKE_paint_layers_channel_add(*ma, leaf_a, channel);
   ASSERT_NE(record_a, nullptr);
@@ -1920,7 +1920,7 @@ TEST_F(PaintLayersGraphEvalTest, nested_isolating_folders_partial_alpha_matches_
   ASSERT_NE(leaf_b_image, nullptr);
   fill_nested_leaf_soft_edge(leaf_b_image, size, 0, 0, 255);
   MaterialPaintLayer *leaf_b = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "LeafB", inner, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "LeafB", inner, PaintLayerPlace::Into);
   ASSERT_NE(leaf_b, nullptr);
   MaterialPaintLayerChannel *record_b = BKE_paint_layers_channel_add(*ma, leaf_b, channel);
   ASSERT_NE(record_b, nullptr);
@@ -2156,7 +2156,7 @@ void PaintLayersGraphEvalTest::check_iso_folder_two_map_channel(
   ASSERT_NE(ma, nullptr) << info.ui_name;
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -2165,7 +2165,7 @@ void PaintLayersGraphEvalTest::check_iso_folder_two_map_channel(
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, folder_name, nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, folder_name, nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
@@ -2177,7 +2177,7 @@ void PaintLayersGraphEvalTest::check_iso_folder_two_map_channel(
     EXPECT_NE(image, nullptr);
     fill_nested_leaf_soft_edge(image, size, r, g, b);
     MaterialPaintLayer *leaf = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_PAINT, name, folder, PaintLayerPlace::Into);
+        *ma, MA_PAINT_LAYER_SOURCE_IMAGE, name, folder, PaintLayerPlace::Into);
     EXPECT_NE(leaf, nullptr);
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, leaf, channel);
     EXPECT_NE(record, nullptr);
@@ -2330,7 +2330,7 @@ TEST_F(PaintLayersGraphEvalTest, single_isolating_folder_partial_alpha_matches_c
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -2339,7 +2339,7 @@ TEST_F(PaintLayersGraphEvalTest, single_isolating_folder_partial_alpha_matches_c
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Single", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Single", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
@@ -2350,7 +2350,7 @@ TEST_F(PaintLayersGraphEvalTest, single_isolating_folder_partial_alpha_matches_c
   ASSERT_NE(leaf_image, nullptr);
   fill_nested_leaf_soft_edge(leaf_image, size, 0, 255, 0);
   MaterialPaintLayer *leaf_a = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "LeafA", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "LeafA", folder, PaintLayerPlace::Into);
   ASSERT_NE(leaf_a, nullptr);
   MaterialPaintLayerChannel *record_a = BKE_paint_layers_channel_add(*ma, leaf_a, channel);
   ASSERT_NE(record_a, nullptr);
@@ -2358,7 +2358,7 @@ TEST_F(PaintLayersGraphEvalTest, single_isolating_folder_partial_alpha_matches_c
   record_a->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *leaf_b = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "LeafB", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "LeafB", folder, PaintLayerPlace::Into);
   ASSERT_NE(leaf_b, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, leaf_b, channel), nullptr);
   const float const_blue[4] = {0.0f, 0.0f, 1.0f, const_alpha};
@@ -2447,7 +2447,7 @@ TEST_F(PaintLayersGraphEvalTest, three_nested_isolating_folders_partial_alpha_ma
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -2456,17 +2456,17 @@ TEST_F(PaintLayersGraphEvalTest, three_nested_isolating_folders_partial_alpha_ma
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *outer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Outer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Outer", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(outer, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, outer, op1));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *outer));
   MaterialPaintLayer *middle = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Middle", outer, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Middle", outer, PaintLayerPlace::Into);
   ASSERT_NE(middle, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, middle, op2));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *middle));
   MaterialPaintLayer *inner = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Inner", middle, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Inner", middle, PaintLayerPlace::Into);
   ASSERT_NE(inner, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, inner, op3));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *inner));
@@ -2477,7 +2477,7 @@ TEST_F(PaintLayersGraphEvalTest, three_nested_isolating_folders_partial_alpha_ma
   ASSERT_NE(leaf_a_image, nullptr);
   fill_nested_leaf_soft_edge(leaf_a_image, size, 0, 255, 0);
   MaterialPaintLayer *leaf_a = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "LeafA", inner, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "LeafA", inner, PaintLayerPlace::Into);
   ASSERT_NE(leaf_a, nullptr);
   MaterialPaintLayerChannel *record_a = BKE_paint_layers_channel_add(*ma, leaf_a, channel);
   ASSERT_NE(record_a, nullptr);
@@ -2489,7 +2489,7 @@ TEST_F(PaintLayersGraphEvalTest, three_nested_isolating_folders_partial_alpha_ma
   ASSERT_NE(leaf_b_image, nullptr);
   fill_nested_leaf_soft_edge(leaf_b_image, size, 0, 0, 255);
   MaterialPaintLayer *leaf_b = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "LeafB", inner, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "LeafB", inner, PaintLayerPlace::Into);
   ASSERT_NE(leaf_b, nullptr);
   MaterialPaintLayerChannel *record_b = BKE_paint_layers_channel_add(*ma, leaf_b, channel);
   ASSERT_NE(record_b, nullptr);
@@ -2624,7 +2624,7 @@ TEST_F(PaintLayersGraphEvalTest, zero_coverage_isolating_folder_stays_finite)
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -2633,7 +2633,7 @@ TEST_F(PaintLayersGraphEvalTest, zero_coverage_isolating_folder_stays_finite)
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *zero = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Zero", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Zero", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(zero, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, zero, 0.5f));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *zero));
@@ -2645,7 +2645,7 @@ TEST_F(PaintLayersGraphEvalTest, zero_coverage_isolating_folder_stays_finite)
   leaf_image->alpha_mode = IMA_ALPHA_STRAIGHT;
   leaf_image->flag |= IMA_GPU_LINEAR_PREMUL;
   MaterialPaintLayer *leaf = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Leaf", zero, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Leaf", zero, PaintLayerPlace::Into);
   ASSERT_NE(leaf, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, leaf, channel);
   ASSERT_NE(record, nullptr);
@@ -2653,7 +2653,7 @@ TEST_F(PaintLayersGraphEvalTest, zero_coverage_isolating_folder_stays_finite)
   record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *empty = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Empty", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Empty", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(empty, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, empty, 0.5f));
 
@@ -2741,7 +2741,7 @@ TEST_F(PaintLayersGraphEvalTest, fill_isolating_folder_partial_alpha_matches_cpu
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -2750,13 +2750,13 @@ TEST_F(PaintLayersGraphEvalTest, fill_isolating_folder_partial_alpha_matches_cpu
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "FillFolder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "FillFolder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
 
   MaterialPaintLayer *fill = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FILL, "FillChild", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "FillChild", folder, PaintLayerPlace::Into);
   ASSERT_NE(fill, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, channel), nullptr);
   const float fill_color[4] = {0.0f, 0.0f, 1.0f, fill_alpha};
@@ -2830,7 +2830,7 @@ TEST_F(PaintLayersGraphEvalTest, mixed_paint_and_fill_isolating_folder_partial_a
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -2839,7 +2839,7 @@ TEST_F(PaintLayersGraphEvalTest, mixed_paint_and_fill_isolating_folder_partial_a
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "MixedFolder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "MixedFolder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
@@ -2850,7 +2850,7 @@ TEST_F(PaintLayersGraphEvalTest, mixed_paint_and_fill_isolating_folder_partial_a
   ASSERT_NE(leaf_image, nullptr);
   fill_nested_leaf_soft_edge(leaf_image, size, 0, 255, 0);
   MaterialPaintLayer *leaf = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "MixedLeaf", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "MixedLeaf", folder, PaintLayerPlace::Into);
   ASSERT_NE(leaf, nullptr);
   MaterialPaintLayerChannel *leaf_record = BKE_paint_layers_channel_add(*ma, leaf, channel);
   ASSERT_NE(leaf_record, nullptr);
@@ -2858,7 +2858,7 @@ TEST_F(PaintLayersGraphEvalTest, mixed_paint_and_fill_isolating_folder_partial_a
   leaf_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *fill = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FILL, "MixedFill", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "MixedFill", folder, PaintLayerPlace::Into);
   ASSERT_NE(fill, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, channel), nullptr);
   const float fill_color[4] = {0.0f, 0.0f, 1.0f, fill_alpha};
@@ -2947,13 +2947,13 @@ TEST_F(PaintLayersGraphEvalTest, untracked_material_child_inside_folder_adds_no_
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "NoContentFolder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "NoContentFolder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
 
   MaterialPaintLayer *mat = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "NoContentMat", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "NoContentMat", folder, PaintLayerPlace::Into);
   ASSERT_NE(mat, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mat, source));
 
@@ -3013,7 +3013,7 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_material_child_and_hiding_match_th
   auto build_material = [&](const char *suffix, const bool folded, MaterialPaintLayer **r_c) -> Material * {
     Material *material = BKE_material_add(bmain, suffix);
     MaterialPaintLayer *base = BKE_paint_layers_add(
-        *material, MA_PAINT_LAYER_KIND_PAINT, "Base", nullptr, PaintLayerPlace::Above);
+        *material, MA_PAINT_LAYER_SOURCE_IMAGE, "Base", nullptr, PaintLayerPlace::Above);
     if (base == nullptr) {
       return nullptr;
     }
@@ -3034,13 +3034,13 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_material_child_and_hiding_match_th
     MaterialPaintLayer *anchor = nullptr;
     if (folded) {
       anchor = BKE_paint_layers_add(
-          *material, MA_PAINT_LAYER_KIND_FOLDER, "Pass", nullptr, PaintLayerPlace::Above);
+          *material, MA_PAINT_LAYER_SOURCE_STACK, "Pass", nullptr, PaintLayerPlace::Above);
       if (anchor == nullptr || !BKE_paint_layers_folder_is_pass_through(*material, *anchor)) {
         return nullptr;
       }
     }
     MaterialPaintLayer *c = BKE_paint_layers_add(*material,
-                                                 MA_PAINT_LAYER_KIND_MATERIAL,
+                                                 MA_PAINT_LAYER_SOURCE_MATERIAL,
                                                  "MatC",
                                                  anchor,
                                                  folded ? PaintLayerPlace::Into :
@@ -3160,7 +3160,7 @@ TEST_F(PaintLayersGraphEvalTest, generated_tree_topology_matches_cpu_formulas)
 
   struct Variant {
     const char *name;
-    eMaterialPaintLayerKind kind;
+    eMaterialPaintLayerSource source;
     eMaterialPaintLayerBlend blend;
     float opacity;
     /* 0 none, 1 mask const, 2 mask image, 3 content image, 4 content fill, 5 mask corr. */
@@ -3168,62 +3168,62 @@ TEST_F(PaintLayersGraphEvalTest, generated_tree_topology_matches_cpu_formulas)
     eMaterialPaintChannel channel;
   };
   const Variant variants[] = {
-      {"mix", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 0,
+      {"mix", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 0,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"mul", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MULTIPLY, 0.5f, 0,
+      {"mul", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MULTIPLY, 0.5f, 0,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"overlay", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_OVERLAY, 0.5f, 0,
+      {"overlay", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_OVERLAY, 0.5f, 0,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"add", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_ADD, 0.5f, 0,
+      {"add", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_ADD, 0.5f, 0,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"fill", MA_PAINT_LAYER_KIND_FILL, MA_PAINT_LAYER_BLEND_MIX, 0.5f, 0,
+      {"fill", MA_PAINT_LAYER_SOURCE_CONSTANT, MA_PAINT_LAYER_BLEND_MIX, 0.5f, 0,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"mask_const", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 1,
+      {"mask_const", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 1,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"mask_image", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 2,
+      {"mask_image", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 2,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"content_image", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 3,
+      {"content_image", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 3,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"content_fill", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 4,
+      {"content_fill", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 4,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"mask_corr", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 5,
+      {"mask_corr", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 5,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"mask_map_two_corr", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 6,
+      {"mask_map_two_corr", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 6,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"disabled_layer", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 7,
+      {"disabled_layer", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 7,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"disabled_content_corr", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 8,
+      {"disabled_content_corr", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 8,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"disabled_mask_corr", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 9,
+      {"disabled_mask_corr", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 9,
        PAINT_MATERIAL_CHANNEL_BASE_COLOR},
-      {"normal_mask_corr", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 5,
+      {"normal_mask_corr", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 5,
        PAINT_MATERIAL_CHANNEL_NORMAL},
-      {"normal_content_image", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 3,
+      {"normal_content_image", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 3,
        PAINT_MATERIAL_CHANNEL_NORMAL},
-      {"normal_content_fill_ignored", MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 4,
+      {"normal_content_fill_ignored", MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_BLEND_MIX, 1.0f, 4,
        PAINT_MATERIAL_CHANNEL_NORMAL},
   };
 
   for (const Variant &variant : variants) {
     ma = BKE_material_add(bmain, "GraphEval");
     add_layer("Bottom",
-              MA_PAINT_LAYER_KIND_PAINT,
+              MA_PAINT_LAYER_SOURCE_IMAGE,
               add_solid_image("Bottom", size, 255, 0, 0, 255),
               variant.channel);
     if (variant.extra == 7) {
       /* A disabled row stays in the topology with factor zero; it must not change the result. */
       MaterialPaintLayer *middle = add_layer(
           "Middle",
-          MA_PAINT_LAYER_KIND_PAINT,
+          MA_PAINT_LAYER_SOURCE_IMAGE,
           add_solid_image("Middle", size, 255, 255, 0, 255),
           variant.channel);
       BKE_paint_layers_set_enabled(*ma, middle, false);
     }
     MaterialPaintLayer *top = add_layer(
-        "Top", variant.kind, add_solid_image("Top", size, 0, 0, 255, 255), variant.channel);
+        "Top", variant.source, add_solid_image("Top", size, 0, 0, 255, 255), variant.channel);
     BKE_paint_layers_set_blend(*ma, top, variant.blend);
     BKE_paint_layers_set_opacity(*ma, top, variant.opacity);
-    if (variant.kind == MA_PAINT_LAYER_KIND_FILL) {
+    if (variant.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
       const float blue[4] = {0.0f, 0.0f, 1.0f, 1.0f};
       BKE_paint_layers_set_fill_color(*ma, top, blue);
       /* A Fill has no map in the channel; the record is only for presence. */
@@ -3239,7 +3239,7 @@ TEST_F(PaintLayersGraphEvalTest, generated_tree_topology_matches_cpu_formulas)
       }
       case 3: {
         MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-            *ma, top, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+            *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
         MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
             *ma, correction, variant.channel);
         record->image = add_solid_image("Correction", size, 0, 255, 0, 255);
@@ -3248,14 +3248,14 @@ TEST_F(PaintLayersGraphEvalTest, generated_tree_topology_matches_cpu_formulas)
       }
       case 4: {
         MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-            *ma, top, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_FILL, "C");
+            *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "C");
         const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
         BKE_paint_layers_set_fill_color(*ma, correction, green);
         break;
       }
       case 5: {
         MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-            *ma, top, MA_PAINT_LAYER_SECTION_MASK, MA_PAINT_LAYER_EFFECT_PAINT, "M");
+            *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "M");
         MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
             *ma, correction, variant.channel);
         record->image = add_solid_image("MaskCorr", size, 128, 128, 128, 255);
@@ -3264,7 +3264,7 @@ TEST_F(PaintLayersGraphEvalTest, generated_tree_topology_matches_cpu_formulas)
       }
       case 8: {
         MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-            *ma, top, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+            *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
         MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
             *ma, correction, variant.channel);
         record->image = add_solid_image("C", size, 0, 255, 0, 255);
@@ -3274,7 +3274,7 @@ TEST_F(PaintLayersGraphEvalTest, generated_tree_topology_matches_cpu_formulas)
       }
       case 9: {
         MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-            *ma, top, MA_PAINT_LAYER_SECTION_MASK, MA_PAINT_LAYER_EFFECT_PAINT, "M");
+            *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "M");
         MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
             *ma, correction, variant.channel);
         record->image = add_solid_image("M", size, 128, 128, 128, 255);
@@ -3287,14 +3287,14 @@ TEST_F(PaintLayersGraphEvalTest, generated_tree_topology_matches_cpu_formulas)
          * the "over" accumulation shows: a wrong order still passes with a single correction. */
         set_mask_image(*top, add_solid_image("Mask", size, 128, 128, 128, 255));
         MaterialPaintLayer *first = BKE_paint_layers_correction_add(
-            *ma, top, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C1");
+            *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C1");
         MaterialPaintLayerChannel *first_record = BKE_paint_layers_channel_add(
             *ma, first, variant.channel);
         first_record->image = add_solid_image("C1", size, 0, 255, 0, 255);
         first_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
         BKE_paint_layers_set_opacity(*ma, first, 0.3f);
         MaterialPaintLayer *second = BKE_paint_layers_correction_add(
-            *ma, top, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C2");
+            *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C2");
         MaterialPaintLayerChannel *second_record = BKE_paint_layers_channel_add(
             *ma, second, variant.channel);
         second_record->image = add_solid_image("C2", size, 255, 255, 0, 255);
@@ -3342,16 +3342,16 @@ TEST_F(PaintLayersGraphEvalTest, mask_item_multiply_matches_the_cpu)
 {
   const int size = 4;
   ma = BKE_material_add(bmain, "MaskItemMultiply");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
   MaterialPaintLayer *top = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 0, 0, 255, 255));
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255));
   Image *mask_image = add_solid_image("Mask", size, 204, 204, 204, 255);
   make_image_data(mask_image);
   set_mask_image(*top, mask_image);
 
   /* A Paint item with a semi-transparent map, MULTIPLY. */
   MaterialPaintLayer *paint_item = BKE_paint_layers_correction_add(
-      *ma, top, MA_PAINT_LAYER_SECTION_MASK, MA_PAINT_LAYER_EFFECT_PAINT, "P");
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "P");
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
       *ma, paint_item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   Image *item_image = add_solid_image("ItemMap", size, 64, 64, 64, 128);
@@ -3364,7 +3364,7 @@ TEST_F(PaintLayersGraphEvalTest, mask_item_multiply_matches_the_cpu)
 
   /* A Fill item with a 0.5 constant, MULTIPLY. */
   MaterialPaintLayer *fill_item = BKE_paint_layers_correction_add(
-      *ma, top, MA_PAINT_LAYER_SECTION_MASK, MA_PAINT_LAYER_EFFECT_FILL, "F");
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, "F");
   const float half[4] = {0.5f, 0.5f, 0.5f, 1.0f};
   BKE_paint_layers_set_fill_color(*ma, fill_item, half);
   BKE_paint_layers_set_blend(*ma, fill_item, MA_PAINT_LAYER_BLEND_MULTIPLY);
@@ -3419,9 +3419,9 @@ TEST_F(PaintLayersGraphEvalTest, mask_item_partial_alpha_matches_the_cpu)
 {
   const int size = 4;
   ma = BKE_material_add(bmain, "MaskPartialAlpha");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
   MaterialPaintLayer *top = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 0, 0, 255, 255));
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255));
 
   const float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   Image *mask = BKE_image_add_generated(
@@ -3463,9 +3463,9 @@ TEST_F(PaintLayersGraphEvalTest, mask_item_color_space_partial_alpha_matches_the
 {
   const int size = 4;
   ma = BKE_material_add(bmain, "MaskColorSpace");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
   MaterialPaintLayer *top = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 0, 0, 255, 255));
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255));
 
   const float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   Image *mask = BKE_image_add_generated(
@@ -3512,11 +3512,11 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_data_channel_partial_alpha_m
   };
 
   ma = BKE_material_add(bmain, "ContentData");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 128, 128, 128, 255), channel);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 128, 128, 128, 255), channel);
   MaterialPaintLayer *top = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 200, 200, 200, 255), channel);
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 200, 200, 200, 255), channel);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, top, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+      *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
   ASSERT_NE(correction, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, channel);
   ASSERT_NE(record, nullptr);
@@ -3564,11 +3564,11 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_color_channel_partial_alpha_
   };
 
   ma = BKE_material_add(bmain, "ContentColor");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255), channel);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255), channel);
   MaterialPaintLayer *top = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, top, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+      *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
   ASSERT_NE(correction, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, channel);
   ASSERT_NE(record, nullptr);
@@ -3638,7 +3638,7 @@ TEST_F(PaintLayersGraphEvalTest, every_blend_mode_matches_the_cpu)
   for (const BlendCase &blend_case : cases) {
     ma = BKE_material_add(bmain, "BlendEval");
     add_layer("Bottom",
-              MA_PAINT_LAYER_KIND_PAINT,
+              MA_PAINT_LAYER_SOURCE_IMAGE,
               add_solid_image("Bottom",
                               size,
                               blend_case.bottom[0],
@@ -3646,7 +3646,7 @@ TEST_F(PaintLayersGraphEvalTest, every_blend_mode_matches_the_cpu)
                               blend_case.bottom[2],
                               255));
     MaterialPaintLayer *top = add_layer("Top",
-                                        MA_PAINT_LAYER_KIND_PAINT,
+                                        MA_PAINT_LAYER_SOURCE_IMAGE,
                                         add_solid_image("Top",
                                                         size,
                                                         blend_case.top[0],
@@ -3711,7 +3711,7 @@ TEST_F(PaintLayersGraphEvalTest, folders_match_the_cpu)
                        MaterialPaintLayer *anchor = nullptr,
                        const PaintLayerPlace place = PaintLayerPlace::Above) {
     MaterialPaintLayer *layer = BKE_paint_layers_add(*ma,
-                                                     MA_PAINT_LAYER_KIND_PAINT,
+                                                     MA_PAINT_LAYER_SOURCE_IMAGE,
                                                      layer_name,
                                                      anchor,
                                                      place);
@@ -3722,7 +3722,7 @@ TEST_F(PaintLayersGraphEvalTest, folders_match_the_cpu)
   };
   auto add_folder = [&](const char *folder_name) {
     return BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_FOLDER, folder_name, nullptr, PaintLayerPlace::Above);
+        *ma, MA_PAINT_LAYER_SOURCE_STACK, folder_name, nullptr, PaintLayerPlace::Above);
   };
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 
@@ -3766,7 +3766,7 @@ TEST_F(PaintLayersGraphEvalTest, folders_match_the_cpu)
     MaterialPaintLayer *folder = add_folder("Folder");
     add_layer("Child", add_solid_image("Child", size, 0, 0, 255, 255), bc, folder, PaintLayerPlace::Into);
     MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-        *ma, folder, MA_PAINT_LAYER_SECTION_MASK, MA_PAINT_LAYER_EFFECT_PAINT, "M");
+        *ma, folder, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "M");
     ASSERT_NE(correction, nullptr);
     MaterialPaintLayerChannel *mask_record = BKE_paint_layers_channel_add(
         *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
@@ -3779,7 +3779,7 @@ TEST_F(PaintLayersGraphEvalTest, folders_match_the_cpu)
     add_layer("Bottom", add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
     MaterialPaintLayer *outer = add_folder("Outer");
     MaterialPaintLayer *inner = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_FOLDER, "Inner", outer, PaintLayerPlace::Into);
+        *ma, MA_PAINT_LAYER_SOURCE_STACK, "Inner", outer, PaintLayerPlace::Into);
     add_layer("Leaf", add_solid_image("Leaf", size, 0, 0, 255, 255), bc, inner, PaintLayerPlace::Into);
     BKE_paint_layers_set_opacity(*ma, inner, 0.5f);
     BKE_paint_layers_set_opacity(*ma, outer, 0.5f);
@@ -3815,11 +3815,11 @@ TEST_F(PaintLayersGraphEvalTest, nested_values_reach_the_grandchild)
   ma = BKE_material_add(bmain, "NestedValues");
 
   MaterialPaintLayer *outer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Outer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Outer", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *inner = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Inner", outer, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Inner", outer, PaintLayerPlace::Into);
   MaterialPaintLayer *leaf = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Leaf", inner, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Leaf", inner, PaintLayerPlace::Into);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, leaf, bc);
   record->image = add_solid_image("Leaf", size, 0, 0, 255, 255);
   record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
@@ -3857,9 +3857,9 @@ TEST_F(PaintLayersGraphEvalTest, folder_content_correction_folds_into_coverage)
 
   Image *child_image = add_solid_image("Child", size, 200, 100, 50, 255);
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
   MaterialPaintLayerChannel *child_record = BKE_paint_layers_channel_add(*ma, child, bc);
   child_record->image = child_image;
@@ -3868,7 +3868,7 @@ TEST_F(PaintLayersGraphEvalTest, folder_content_correction_folds_into_coverage)
 
   const float correction_color[4] = {0.0f, 0.0f, 1.0f, 1.0f};
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, folder, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_FILL, "Corr");
+      *ma, folder, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "Corr");
   ASSERT_NE(correction, nullptr);
   BKE_paint_layers_set_fill_color(*ma, correction, correction_color);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 0.5f));
@@ -3922,7 +3922,7 @@ TEST_F(PaintLayersGraphEvalTest, folder_single_child_equals_the_child_alone)
 
   auto add_child_layer = [&](const char *name, Image *image, MaterialPaintLayer *anchor) {
     MaterialPaintLayer *layer = BKE_paint_layers_add(*ma,
-                                                     MA_PAINT_LAYER_KIND_PAINT,
+                                                     MA_PAINT_LAYER_SOURCE_IMAGE,
                                                      name,
                                                      anchor,
                                                      anchor != nullptr ? PaintLayerPlace::Into :
@@ -3938,7 +3938,7 @@ TEST_F(PaintLayersGraphEvalTest, folder_single_child_equals_the_child_alone)
   ma = BKE_material_add(bmain, "FolderEquiv");
   add_child_layer("Bottom", add_solid_image("Bottom", size, 255, 0, 0, 255), nullptr);
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = add_child_layer(
       "Child", add_solid_image("Child", size, 0, 0, 255, 255), folder);
   BKE_paint_layers_set_opacity(*ma, child, 0.5f);
@@ -3968,9 +3968,9 @@ TEST_F(PaintLayersGraphEvalTest, bake_render_node_folder_minimal)
   const int size = 4;
   ma = BKE_material_add(bmain, "FolderRender");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
       *ma, child, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   record->image = add_solid_image("Child", size, 0, 0, 255, 255);
@@ -4015,7 +4015,7 @@ TEST_F(PaintLayersGraphEvalTest, bake_render_node_region_matches_full)
   const int size = 8;
   ma = BKE_material_add(bmain, "RegionRender");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Layer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
       *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   Image *image = add_solid_image("Gradient", size, 0, 0, 0, 255);
@@ -4073,7 +4073,7 @@ TEST_F(PaintLayersGraphEvalTest, bake_row_to_image_writes_row_content)
   const int size = 4;
   ma = BKE_material_add(bmain, "RowToImage");
   MaterialPaintLayer *layer = add_layer(
-      "Source", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Source", size, 0, 255, 0, 255));
+      "Source", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Source", size, 0, 255, 0, 255));
 
   const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   Image *dst = BKE_image_add_generated(
@@ -4098,7 +4098,7 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_computes_and_commits)
   const int size = 4;
   ma = BKE_material_add(bmain, "HeavyJob");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Layer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
   /* Four channels put the subtree over the AUTO/worker threshold. */
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                               PAINT_MATERIAL_CHANNEL_ROUGHNESS,
@@ -4142,7 +4142,7 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_allocates_bake_for_a_row_with_no
   const int size = 4;
   ma = BKE_material_add(bmain, "HeavyJobNoBake");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Layer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
   /* Four channels put the subtree over the AUTO/worker threshold, exactly like the job-create test
    * above. */
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
@@ -4186,7 +4186,7 @@ TEST_F(PaintLayersGraphEvalTest, heavy_pending_sees_a_weight_heavy_row_with_no_b
 {
   ma = BKE_material_add(bmain, "HeavyNoBake");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Layer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                               PAINT_MATERIAL_CHANNEL_ROUGHNESS,
                                               PAINT_MATERIAL_CHANNEL_METALLIC,
@@ -4207,7 +4207,7 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_drops_removed_row)
   const int size = 4;
   ma = BKE_material_add(bmain, "HeavyJobGone");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Layer", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                               PAINT_MATERIAL_CHANNEL_ROUGHNESS,
                                               PAINT_MATERIAL_CHANNEL_METALLIC,
@@ -4234,11 +4234,11 @@ TEST_F(PaintLayersGraphEvalTest, height_uses_mix_and_bump)
   const int size = 4;
   ma = BKE_material_add(bmain, "HeightEval");
   add_layer("Bottom",
-            MA_PAINT_LAYER_KIND_PAINT,
+            MA_PAINT_LAYER_SOURCE_IMAGE,
             add_solid_image("Bottom", size, 192, 64, 32, 255),
             PAINT_MATERIAL_CHANNEL_HEIGHT);
   MaterialPaintLayer *top = add_layer("Top",
-                                      MA_PAINT_LAYER_KIND_PAINT,
+                                      MA_PAINT_LAYER_SOURCE_IMAGE,
                                       add_solid_image("Top", size, 64, 192, 224, 255),
                                       PAINT_MATERIAL_CHANNEL_HEIGHT);
   /* Height is a scalar stack like any other: a plain Mix, never the Normal combine. */
@@ -4275,9 +4275,9 @@ TEST_F(PaintLayersGraphEvalTest, bake_planner_writes_maps_and_substitutes)
 {
   const int size = 4;
   ma = BKE_material_add(bmain, "BakePlanner");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 192, 64, 32, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 192, 64, 32, 255));
   MaterialPaintLayer *top = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 64, 192, 224, 255));
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 64, 192, 224, 255));
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   GraphInterpreter interpreter;
@@ -4354,7 +4354,7 @@ TEST_F(PaintLayersGraphEvalTest, baked_node_equals_the_live_node)
 
   auto add_paint = [&](const char *name, Image *image, MaterialPaintLayer *anchor) {
     MaterialPaintLayer *layer = BKE_paint_layers_add(*ma,
-                                                     MA_PAINT_LAYER_KIND_PAINT,
+                                                     MA_PAINT_LAYER_SOURCE_IMAGE,
                                                      name,
                                                      anchor,
                                                      anchor != nullptr ? PaintLayerPlace::Into :
@@ -4385,7 +4385,7 @@ TEST_F(PaintLayersGraphEvalTest, baked_node_equals_the_live_node)
       case Variant::Correction: {
         baked_node = add_paint("Top", add_solid_image("Top", size, 64, 192, 224, 255), nullptr);
         MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-            *ma, baked_node, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_FILL, "C");
+            *ma, baked_node, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "C");
         const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
         BKE_paint_layers_set_fill_color(*ma, correction, green);
         BKE_paint_layers_set_opacity(*ma, correction, 0.4f);
@@ -4393,7 +4393,7 @@ TEST_F(PaintLayersGraphEvalTest, baked_node_equals_the_live_node)
       }
       case Variant::Folder: {
         MaterialPaintLayer *folder = BKE_paint_layers_add(
-            *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+            *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
         add_paint("Child", add_solid_image("Child", size, 0, 0, 255, 255), folder);
         BKE_paint_layers_set_opacity(*ma, folder, 0.7f);
         baked_node = folder;
@@ -4401,9 +4401,9 @@ TEST_F(PaintLayersGraphEvalTest, baked_node_equals_the_live_node)
       }
       case Variant::NestedFolder: {
         MaterialPaintLayer *outer = BKE_paint_layers_add(
-            *ma, MA_PAINT_LAYER_KIND_FOLDER, "Outer", nullptr, PaintLayerPlace::Above);
+            *ma, MA_PAINT_LAYER_SOURCE_STACK, "Outer", nullptr, PaintLayerPlace::Above);
         MaterialPaintLayer *inner = BKE_paint_layers_add(
-            *ma, MA_PAINT_LAYER_KIND_FOLDER, "Inner", outer, PaintLayerPlace::Into);
+            *ma, MA_PAINT_LAYER_SOURCE_STACK, "Inner", outer, PaintLayerPlace::Into);
         add_paint("Child", add_solid_image("Child", size, 0, 255, 0, 255), inner);
         BKE_paint_layers_set_opacity(*ma, inner, 0.6f);
         BKE_paint_layers_set_opacity(*ma, outer, 0.8f);
@@ -4471,7 +4471,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_bake_is_its_content_in_graph_and
   Material *source = BKE_material_add(bmain, "MaterialSource");
 
   MaterialPaintLayer *material = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
   material->material = source;
   MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*material);
   bake->size = size;
@@ -4622,7 +4622,7 @@ TEST_F(PaintLayersGraphEvalTest, custom_layer_isolating_folder_partial_alpha_mat
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -4631,7 +4631,7 @@ TEST_F(PaintLayersGraphEvalTest, custom_layer_isolating_folder_partial_alpha_mat
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "CustomFolder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "CustomFolder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
@@ -4723,7 +4723,7 @@ TEST_F(PaintLayersGraphEvalTest, substituted_paint_row_isolating_folder_partial_
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -4732,13 +4732,13 @@ TEST_F(PaintLayersGraphEvalTest, substituted_paint_row_isolating_folder_partial_
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "SubPaintFolder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "SubPaintFolder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
 
   MaterialPaintLayer *paint = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "PaintChild", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "PaintChild", folder, PaintLayerPlace::Into);
   ASSERT_NE(paint, nullptr);
   MaterialPaintLayerChannel *paint_record = BKE_paint_layers_channel_add(*ma, paint, channel);
   ASSERT_NE(paint_record, nullptr);
@@ -4823,9 +4823,9 @@ TEST_F(PaintLayersGraphEvalTest, row_result_job_bakes_source_into_target_channel
   ma = BKE_material_add(bmain, "RowResult");
 
   MaterialPaintLayer *source = add_layer(
-      "Source", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("SourceImg", size, 0, 255, 0, 255));
+      "Source", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("SourceImg", size, 0, 255, 0, 255));
   MaterialPaintLayer *target = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Target", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Target", nullptr, PaintLayerPlace::Above);
 
   PaintLayersRowResultJob *job = BKE_paint_layers_row_result_job_create(
       *bmain, *ma, source->marker, target->marker, size);
@@ -4873,7 +4873,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_semi_transparent_bake_matches_cp
   Material *source = BKE_material_add(bmain, "MaterialSemiSource");
 
   MaterialPaintLayer *material = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
   material->material = source;
   MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*material);
   bake->size = size;
@@ -4920,7 +4920,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_constant_alpha_bake_settles_on_b
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "MatAlphaBaked");
   Image *bottom_image = add_solid_image("Bottom", size, 255, 0, 0, 255);
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_image, bc);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_image, bc);
 
   const float row_color[4] = {0.0f, 1.0f, 0.0f, 1.0f};
   const float alpha_value = 0.5f;
@@ -4943,7 +4943,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_constant_alpha_bake_settles_on_b
   BKE_ntree_update_after_single_tree_change(*bmain, tree);
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
 
@@ -5022,9 +5022,9 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_mask_is_live_and_keeps_the_bake)
   ma = BKE_material_add(bmain, "MaterialMasked");
   Material *source = BKE_material_add(bmain, "MaterialMaskedSource");
 
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
   MaterialPaintLayer *material = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
   material->material = source;
   MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*material);
   bake->size = size;
@@ -5070,7 +5070,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_paint_correction_opacity_is_live
   Material *source = BKE_material_add(bmain, "MaterialCorrOpacitySource");
 
   MaterialPaintLayer *material = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
   material->material = source;
   MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*material);
   bake->size = size;
@@ -5083,7 +5083,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_paint_correction_opacity_is_live
   ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *material), PaintLayerMaterialMode::Baked);
 
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, material, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+      *ma, material, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
   ASSERT_NE(correction, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, channel);
   ASSERT_NE(record, nullptr);
@@ -5130,14 +5130,14 @@ TEST_F(PaintLayersGraphEvalTest, below_image_composites_only_rows_under_the_cust
   const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "BelowImage");
 
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
   add_layer(
-      "Middle", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Middle", size, 255, 255, 0, 255));
+      "Middle", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Middle", size, 255, 255, 0, 255));
   MaterialPaintLayer *custom = BKE_paint_layers_custom_layer_add(
       *bmain, *ma, "Custom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(custom, nullptr);
   /* A row above the custom one must not leak into its "below". */
-  add_layer("Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 0, 0, 255, 255));
+  add_layer("Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255));
 
   Image *below = BKE_paint_layers_below_image(*bmain, *ma, *custom, channel, size);
   ASSERT_NE(below, nullptr);
@@ -5233,7 +5233,7 @@ TEST_F(PaintLayersGraphEvalTest, per_channel_blend_opacity_matches_the_cpu)
                                        const eMaterialPaintChannel channel)
       -> MaterialPaintLayer * {
     MaterialPaintLayer *layer = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_PAINT, name, anchor, place);
+        *ma, MA_PAINT_LAYER_SOURCE_IMAGE, name, anchor, place);
     EXPECT_NE(layer, nullptr);
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
     EXPECT_NE(record, nullptr);
@@ -5248,7 +5248,7 @@ TEST_F(PaintLayersGraphEvalTest, per_channel_blend_opacity_matches_the_cpu)
                                    MaterialPaintLayer *anchor,
                                    const PaintLayerPlace place) -> MaterialPaintLayer * {
     MaterialPaintLayer *layer = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_PAINT, name, anchor, place);
+        *ma, MA_PAINT_LAYER_SOURCE_IMAGE, name, anchor, place);
     EXPECT_NE(layer, nullptr);
     MaterialPaintLayerChannel *b = BKE_paint_layers_channel_add(*ma, layer, bc);
     EXPECT_NE(b, nullptr);
@@ -5278,9 +5278,9 @@ TEST_F(PaintLayersGraphEvalTest, per_channel_blend_opacity_matches_the_cpu)
   /* A leaf: the row's opacity times the channel's own multiplier, and a per-channel blend. */
   {
     ma = BKE_material_add(bmain, "PerChannelLeaf");
-    add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
+    add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
     MaterialPaintLayer *top = add_layer(
-        "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 0, 0, 255, 255), bc);
+        "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), bc);
     BKE_paint_layers_set_opacity(*ma, top, 0.5f);
     ASSERT_TRUE(BKE_paint_layers_channel_opacity_set(*ma, *top, bc, 0.5f));
     ASSERT_TRUE(BKE_paint_layers_channel_blend_set(*ma, *top, bc, MA_PAINT_LAYER_BLEND_MULTIPLY));
@@ -5299,7 +5299,7 @@ TEST_F(PaintLayersGraphEvalTest, per_channel_blend_opacity_matches_the_cpu)
                           nullptr,
                           PaintLayerPlace::Above);
     MaterialPaintLayer *folder = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+        *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
     ASSERT_NE(folder, nullptr);
     add_two_channel_layer("Child",
                           add_solid_image("ChildBC", size, 0, 0, 255, 255),
@@ -5320,12 +5320,12 @@ TEST_F(PaintLayersGraphEvalTest, per_channel_blend_opacity_matches_the_cpu)
   /* A nested folder: opacity at two levels, each channel its own multiplier. */
   {
     ma = BKE_material_add(bmain, "PerChannelNested");
-    add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
+    add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
     MaterialPaintLayer *outer = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_FOLDER, "Outer", nullptr, PaintLayerPlace::Above);
+        *ma, MA_PAINT_LAYER_SOURCE_STACK, "Outer", nullptr, PaintLayerPlace::Above);
     ASSERT_NE(outer, nullptr);
     MaterialPaintLayer *inner = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_FOLDER, "Inner", outer, PaintLayerPlace::Into);
+        *ma, MA_PAINT_LAYER_SOURCE_STACK, "Inner", outer, PaintLayerPlace::Into);
     ASSERT_NE(inner, nullptr);
     add_single_channel_layer("Leaf",
                              add_solid_image("Leaf", size, 0, 0, 255, 255),
@@ -5346,9 +5346,9 @@ TEST_F(PaintLayersGraphEvalTest, authored_paint_without_a_map_matches_the_cpu)
 {
   const int size = 4;
   ma = BKE_material_add(bmain, "AuthoredPaint");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
   MaterialPaintLayer *paint = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Paint", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Paint", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(paint, nullptr);
   BKE_paint_layers_default_channels_apply(*ma, *paint);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -5377,14 +5377,14 @@ TEST_F(PaintLayersGraphEvalTest, fill_has_a_value_per_channel)
 {
   const int size = 4;
   ma = BKE_material_add(bmain, "FillPerChannel");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 255, 255, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 255, 255, 255));
   /* A Roughness map too, so that channel has a pixel size to composite into. */
   add_layer("BottomR",
-            MA_PAINT_LAYER_KIND_PAINT,
+            MA_PAINT_LAYER_SOURCE_IMAGE,
             add_solid_image("BottomR", size, 128, 128, 128, 255),
             PAINT_MATERIAL_CHANNEL_ROUGHNESS);
   MaterialPaintLayer *fill = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FILL, "Fill", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(fill, nullptr);
   BKE_paint_layers_default_channels_apply(*ma, *fill);
   const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
@@ -5429,7 +5429,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_constant_matches_the_cpu)
   const int size = 4;
   const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "LiveMaterial");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
 
   Material *source = BKE_material_add(bmain, "LiveSource");
   bNodeTree &ntree = *source->nodetree;
@@ -5449,7 +5449,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_constant_matches_the_cpu)
   static_cast<bNodeSocketValueFloat *>(alpha->default_value)->value = 0.75f;
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, 0.5f));
@@ -5493,7 +5493,7 @@ TEST_F(PaintLayersGraphEvalTest, inactive_material_constant_matches_the_cpu)
   const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "InactiveLiveMaterial");
   MaterialPaintLayer *bottom = add_layer(
-      "Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+      "Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
 
   Material *source = BKE_material_add(bmain, "InactiveLiveSource");
   bNodeTree &ntree = *source->nodetree;
@@ -5513,7 +5513,7 @@ TEST_F(PaintLayersGraphEvalTest, inactive_material_constant_matches_the_cpu)
   static_cast<bNodeSocketValueFloat *>(alpha->default_value)->value = 0.75f;
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, 0.5f));
@@ -5557,7 +5557,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_constant_edit_syncs_without_rebui
   const int size = 4;
   const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "LiveSyncMaterial");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
 
   Material *source = BKE_material_add(bmain, "LiveSyncSource");
   bNodeTree &ntree = *source->nodetree;
@@ -5580,7 +5580,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_constant_edit_syncs_without_rebui
   static_cast<bNodeSocketValueFloat *>(alpha->default_value)->value = 0.75f;
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, 0.5f));
@@ -5660,7 +5660,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_view_change_rebuilds_the_row_grou
 {
   const int size = 4;
   ma = BKE_material_add(bmain, "LiveViewChangeMaterial");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
 
   Material *source = BKE_material_add(bmain, "LiveViewChangeSource");
   bNodeTree &ntree = *source->nodetree;
@@ -5677,7 +5677,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_view_change_rebuilds_the_row_grou
   copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(base_color->default_value)->value, source_color);
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -5741,7 +5741,7 @@ TEST_F(PaintLayersGraphEvalTest, live_constant_values_sync_reads_whatever_materi
 {
   const int size = 4;
   ma = BKE_material_add(bmain, "EvalPathMaterial");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
 
   Material *source = BKE_material_add(bmain, "EvalPathSource");
   bNodeTree &ntree = *source->nodetree;
@@ -5758,7 +5758,7 @@ TEST_F(PaintLayersGraphEvalTest, live_constant_values_sync_reads_whatever_materi
   copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(base_color->default_value)->value, source_color);
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -5836,7 +5836,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_matches_the_cpu)
   const int size = 4;
   const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "LiveImageMaterial");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
 
   Material *source = BKE_material_add(bmain, "LiveImageSource");
   bNodeTree &ntree = *source->nodetree;
@@ -5864,7 +5864,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_matches_the_cpu)
   static_cast<NodeTexImage *>(texture->storage)->projection = SHD_PROJ_FLAT;
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, 0.5f));
@@ -5944,11 +5944,11 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_row_participates_at_top_lev
 
   ma = BKE_material_add(bmain, "LiveImageTop");
   add_layer(
-      "Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("LiveImageTopBottom", size, 255, 0, 0, 255));
+      "Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("LiveImageTopBottom", size, 255, 0, 0, 255));
   Image *source_map = add_solid_image("LiveImageTopMap", size, 128, 128, 128, 128);
   Material *source = make_live_image_source(bmain, "LiveImageTopSource", source_map, false);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, row_opacity));
@@ -6011,7 +6011,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_in_isolating_folder_content
 
   ma = BKE_material_add(bmain, "LiveImageIso");
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -6019,7 +6019,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_in_isolating_folder_content
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "LiveImageIsoFolder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "LiveImageIsoFolder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
@@ -6032,7 +6032,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_in_isolating_folder_content
 
   Material *source = make_live_image_source(bmain, "LiveImageIsoSource", source_map, false);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
 
@@ -6101,7 +6101,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_on_normal_channel_participa
   ma = BKE_material_add(bmain, "LiveImageNormal");
   Image *bottom_map = add_solid_image("LiveImageNormalBottom", size, 128, 128, 255, 255);
   make_image_data(bottom_map);
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_map, channel);
 
   Image *normal_map = add_solid_image("LiveImageNormalMap", size, 255, 128, 128, 200);
   make_image_data(normal_map);
@@ -6133,7 +6133,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_on_normal_channel_participa
                      *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -6210,13 +6210,13 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_alpha_input_matches_baked)
 
   ma = BKE_material_add(bmain, "LiveImageParity");
   add_layer("Bottom",
-            MA_PAINT_LAYER_KIND_PAINT,
+            MA_PAINT_LAYER_SOURCE_IMAGE,
             add_solid_image("LiveImageParityBottom", size, 255, 0, 0, 255));
   /* One texture, grey 0.5 with alpha 64/255, feeding Base Color and Alpha alike. */
   Image *source_map = add_solid_image("LiveImageParityMap", size, 128, 128, 128, 64);
   Material *source = make_live_image_source(bmain, "LiveImageParitySource", source_map, true);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, row_opacity));
@@ -6298,7 +6298,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_normal_map_alpha_is_ignored
   ma = BKE_material_add(bmain, "LiveImageNormalAlpha");
   Image *bottom_map = add_solid_image("LiveImageNormalAlphaBottom", size, 128, 128, 255, 255);
   make_image_data(bottom_map);
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_map, channel);
 
   Image *normal_map = add_solid_image("LiveImageNormalAlphaMap", size, 255, 128, 128, 200);
   make_image_data(normal_map);
@@ -6330,7 +6330,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_normal_map_alpha_is_ignored
                      *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -6457,7 +6457,7 @@ TEST_F(PaintLayersGraphEvalTest, source_group_normal_computed_is_encoded)
   ma = BKE_material_add(bmain, "SGNormalComputed");
   Image *bottom_map = add_solid_image("SGNormalComputedBottom", size, 128, 128, 255, 255);
   make_image_data(bottom_map);
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_map, channel);
 
   bNode *principled = nullptr;
   Material *source = make_wrapper_forced_source(*bmain, "SGNormalComputedSource", &principled);
@@ -6474,7 +6474,7 @@ TEST_F(PaintLayersGraphEvalTest, source_group_normal_computed_is_encoded)
                      *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -6517,7 +6517,7 @@ TEST_F(PaintLayersGraphEvalTest, source_group_normal_rgb_source_is_encoded)
   ma = BKE_material_add(bmain, "SGNormalRgb");
   Image *bottom_map = add_solid_image("SGNormalRgbBottom", size, 100, 160, 220, 255);
   make_image_data(bottom_map);
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_map, channel);
 
   bNode *principled = nullptr;
   Material *source = make_wrapper_forced_source(*bmain, "SGNormalRgbSource", &principled);
@@ -6534,7 +6534,7 @@ TEST_F(PaintLayersGraphEvalTest, source_group_normal_rgb_source_is_encoded)
                      *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -6577,7 +6577,7 @@ TEST_F(PaintLayersGraphEvalTest, source_group_normal_map_color_is_not_reencoded)
   ma = BKE_material_add(bmain, "SGNormalMap");
   Image *bottom_map = add_solid_image("SGNormalMapBottom", size, 128, 128, 255, 255);
   make_image_data(bottom_map);
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_map, channel);
 
   Image *source_normal = add_solid_image("SGNormalMapTexture", size, 255, 128, 128, 255);
   make_image_data(source_normal);
@@ -6604,7 +6604,7 @@ TEST_F(PaintLayersGraphEvalTest, source_group_normal_map_color_is_not_reencoded)
                      *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -6651,7 +6651,7 @@ TEST_F(PaintLayersGraphEvalTest, source_group_normal_value_edit_keeps_the_interf
   ma = BKE_material_add(bmain, "SGNormalValue");
   Image *bottom_map = add_solid_image("SGNormalValueBottom", size, 128, 128, 255, 255);
   make_image_data(bottom_map);
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_map, channel);
 
   bNode *principled = nullptr;
   Material *source = make_wrapper_forced_source(*bmain, "SGNormalValueSource", &principled);
@@ -6668,7 +6668,7 @@ TEST_F(PaintLayersGraphEvalTest, source_group_normal_value_edit_keeps_the_interf
                      *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -6731,7 +6731,7 @@ TEST_F(PaintLayersGraphEvalTest, source_group_live_wired_reads_the_source_values
   ma = BKE_material_add(bmain, "WiredLive");
   Material *source = make_interface_wired_source(*bmain, "WiredLiveSource");
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
@@ -6863,13 +6863,13 @@ TEST_F(PaintLayersGraphEvalTest, material_row_source_group_matches_its_baked_map
   Material *source = make_specular_source(*bmain, "ParitySource", false);
 
   BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   MaterialPaintLayer *top = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Top", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Top", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(top, nullptr);
 
   const eMaterialPaintChannel channels[] = {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
@@ -7024,7 +7024,7 @@ TEST_F(PaintLayersGraphEvalTest, material_row_source_group_keeps_specular)
         *bmain, linked ? "SpecLinkedSource" : "SpecUnlinkedSource", linked);
 
     MaterialPaintLayer *row = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+        *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
     ASSERT_NE(row, nullptr);
     ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
     BKE_paint_layers_active_set(*ma, row->marker);
@@ -7090,11 +7090,11 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_folder_equals_the_ungrouped_stack)
 
   auto add_child = [&](MaterialPaintLayer *anchor,
                        const char *name,
-                       const eMaterialPaintLayerKind kind,
+                       const eMaterialPaintLayerSource source,
                        Image *image,
                        const eMaterialPaintChannel channel) -> MaterialPaintLayer * {
     MaterialPaintLayer *layer = BKE_paint_layers_add(*ma,
-                                                     kind,
+                                                     source,
                                                      name,
                                                      anchor,
                                                      anchor != nullptr ? PaintLayerPlace::Into :
@@ -7103,7 +7103,7 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_folder_equals_the_ungrouped_stack)
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
     EXPECT_NE(record, nullptr);
     record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
-    if (kind == MA_PAINT_LAYER_KIND_FILL) {
+    if (source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
       const float fill[4] = {0.1f, 0.6f, 0.2f, 1.0f};
       BKE_paint_layers_set_fill_color(*ma, layer, fill);
       record->image = nullptr;
@@ -7118,26 +7118,26 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_folder_equals_the_ungrouped_stack)
     ma = BKE_material_add(bmain, material_name);
     add_child(nullptr,
               "Bottom",
-              MA_PAINT_LAYER_KIND_PAINT,
+              MA_PAINT_LAYER_SOURCE_IMAGE,
               add_solid_image("Bottom", size, 220, 40, 40, 255),
               channels[0]);
     MaterialPaintLayer *folder = nullptr;
     if (folded) {
       folder = BKE_paint_layers_add(
-          *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+          *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
       ASSERT_NE(folder, nullptr);
       ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
     }
     MaterialPaintLayer *child = add_child(folder,
                                           "Child",
-                                          MA_PAINT_LAYER_KIND_PAINT,
+                                          MA_PAINT_LAYER_SOURCE_IMAGE,
                                           add_solid_image("Child", size, 0, 0, 255, 140),
                                           channels[0]);
     BKE_paint_layers_set_opacity(*ma, child, 0.5f);
-    add_child(folder, "Fill", MA_PAINT_LAYER_KIND_FILL, nullptr, channels[1]);
+    add_child(folder, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT, nullptr, channels[1]);
     add_child(folder,
               "Top",
-              MA_PAINT_LAYER_KIND_PAINT,
+              MA_PAINT_LAYER_SOURCE_IMAGE,
               add_solid_image("Top", size, 10, 10, 10, 110),
               channels[1]);
 
@@ -7184,7 +7184,7 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_folder_with_a_material_child_match
 
   ma = BKE_material_add(bmain, "PassThroughMaterial");
   MaterialPaintLayer *bottom = add_layer("Bottom",
-                                         MA_PAINT_LAYER_KIND_PAINT,
+                                         MA_PAINT_LAYER_SOURCE_IMAGE,
                                          add_solid_image("Bottom", size, 200, 30, 30, 255),
                                          channels[0]);
   /* A Roughness map on the bottom row gives the Roughness channel a size; without one the CPU has
@@ -7214,12 +7214,12 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_folder_with_a_material_child_match
   BKE_ntree_update_after_single_tree_change(*bmain, source_tree);
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
 
   MaterialPaintLayer *mat_row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
   ASSERT_NE(mat_row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mat_row, source));
   for (const eMaterialPaintChannel channel : channels) {
@@ -7227,7 +7227,7 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_folder_with_a_material_child_match
   }
 
   MaterialPaintLayer *paint = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Paint", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Paint", folder, PaintLayerPlace::Into);
   ASSERT_NE(paint, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, paint, channels[0]);
   ASSERT_NE(record, nullptr);
@@ -7269,7 +7269,7 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_folder_visibility_matches_the_miss
 
   /* The reference: only the bottom row. */
   ma = BKE_material_add(bmain, "PassVisibleBottom");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 200, 30, 30, 255), bc);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 200, 30, 30, 255), bc);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   GraphInterpreter plain;
   plain.instance = find_instance();
@@ -7284,12 +7284,12 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_folder_visibility_matches_the_miss
 
   /* The folder hidden must equal that. */
   ma = BKE_material_add(bmain, "PassVisibleFolder");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 200, 30, 30, 255), bc);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 200, 30, 30, 255), bc);
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, child, bc);
   ASSERT_NE(record, nullptr);
@@ -7330,12 +7330,12 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_folder_mode_switch_matches_the_cpu
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 
   ma = BKE_material_add(bmain, "PassThroughSwitch");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 200, 30, 30, 255), bc);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 200, 30, 30, 255), bc);
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, child, bc);
   ASSERT_NE(record, nullptr);
@@ -7432,14 +7432,14 @@ MaterialPaintLayer *add_content_correction(Material &ma,
                                            Image *map)
 {
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      ma, &row, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+      ma, &row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
   EXPECT_NE(correction, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
       ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   EXPECT_NE(record, nullptr);
   record->image = map;
   record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
-  BKE_paint_layers_correction_set_effect(ma, correction, MA_PAINT_LAYER_EFFECT_PAINT);
+  BKE_paint_layers_correction_source_set(ma, correction, MA_PAINT_LAYER_SOURCE_IMAGE);
   return correction;
 }
 
@@ -7499,7 +7499,7 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_opaque_raises_the_content_al
   const float a0 = 128.0f / 255.0f;
   ma = BKE_material_add(bmain, "CorrAlphaOpaque");
   MaterialPaintLayer *row = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 200, 200, 200, 128), bc);
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 200, 200, 200, 128), bc);
   Image *corr_map = add_solid_image("CorrOpaque", size, 0, 0, 255, 255);
   MaterialPaintLayer *correction = add_content_correction(*ma, *row, corr_map);
   ASSERT_NE(correction, nullptr);
@@ -7544,7 +7544,7 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_soft_edge_raises_the_content
   const float op = 0.5f;
   ma = BKE_material_add(bmain, "CorrAlphaSoft");
   MaterialPaintLayer *row = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 200, 200, 200, 128), bc);
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 200, 200, 200, 128), bc);
   const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   Image *corr_map = BKE_image_add_generated(
       bmain, size, size, "CorrSoft", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
@@ -7595,13 +7595,13 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_inside_a_folder_raises_the_c
   ma = BKE_material_add(bmain, "CorrAlphaFolder");
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Iso", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Iso", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   /* Opacity below one keeps the folder isolating: a full-weight single-child folder is
    * auto-detected as Pass Through and gets no group. */
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Top", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Top", folder, PaintLayerPlace::Into);
   ASSERT_NE(row, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, row, bc);
   ASSERT_NE(record, nullptr);
@@ -7661,11 +7661,11 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_data_map_raises_the_content_
   const float a0 = 128.0f / 255.0f;
   ma = BKE_material_add(bmain, "CorrAlphaData");
   MaterialPaintLayer *row = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 128, 128, 128, 128), channel);
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 128, 128, 128, 128), channel);
   Image *corr_map = add_solid_image("CorrData", size, 3, 3, 3, 128);
   make_image_data(corr_map);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, row, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+      *ma, row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
   ASSERT_NE(correction, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, channel);
   ASSERT_NE(record, nullptr);
@@ -7704,7 +7704,7 @@ TEST_F(PaintLayersGraphEvalTest, mask_correction_leaves_the_content_alpha_alone)
   const float a0 = 128.0f / 255.0f;
   ma = BKE_material_add(bmain, "MaskCorrAlpha");
   MaterialPaintLayer *row = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 200, 200, 200, 128));
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 200, 200, 200, 128));
   set_mask_image(*row, add_solid_image("MaskItem", size, 255, 255, 255, 255));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
@@ -7732,7 +7732,7 @@ TEST_F(PaintLayersGraphEvalTest, material_content_correction_builds_no_content_a
   ma = BKE_material_add(bmain, "MatCorrNoAlpha");
   Material *source = make_constant_principled_source(*bmain, "MatNoAlphaSource", row_color, 0.4f);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   Image *corr_map = add_solid_image("CorrMap", size, 240, 20, 20, 96);
@@ -7781,7 +7781,7 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_constant_row_keeps_its_alpha
   const float op = 0.5f;
   ma = BKE_material_add(bmain, "CorrConstAlpha");
   MaterialPaintLayer *fill = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FILL, "Fill", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(fill, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, bc), nullptr);
   const float fill_color[4] = {0.2f, 0.3f, 0.8f, c_a};
@@ -7845,7 +7845,7 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_paint_constant_row_keeps_its
   const float op = 0.5f;
   ma = BKE_material_add(bmain, "CorrPaintConstAlpha");
   MaterialPaintLayer *paint = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "PaintC", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "PaintC", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(paint, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, paint, bc), nullptr);
   const float value[4] = {0.2f, 0.3f, 0.8f, c_a};
@@ -7911,14 +7911,14 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_folder_row_keeps_its_alpha)
   ma = BKE_material_add(bmain, "CorrFolderAlpha");
   /* An opaque bottom map gives the CPU stack its pixel dimensions; the folder covers it fully. */
   add_layer("Bottom",
-            MA_PAINT_LAYER_KIND_PAINT,
+            MA_PAINT_LAYER_SOURCE_IMAGE,
             add_solid_image("CorrFolderBottom", size, 255, 0, 0, 255),
             bc);
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Fold", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Fold", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FILL, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, bc), nullptr);
   const float child_color[4] = {0.2f, 0.3f, 0.8f, c_a};
@@ -7939,7 +7939,7 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_folder_row_keeps_its_alpha)
   ASSERT_NE(corr_map, nullptr);
   fill_straight_soft_edge(corr_map, size, 0.6f);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, folder, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+      *ma, folder, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
   ASSERT_NE(correction, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, bc);
   ASSERT_NE(record, nullptr);
@@ -7988,9 +7988,9 @@ TEST_F(PaintLayersGraphEvalTest, guarded_fill_without_correction_keeps_its_alpha
   const float c_a = 0.4f;
   ma = BKE_material_add(bmain, "GuardFillAlpha");
   add_layer(
-      "Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("GuardBottom", size, 255, 0, 0, 255), bc);
+      "Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("GuardBottom", size, 255, 0, 0, 255), bc);
   MaterialPaintLayer *fill = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FILL, "Fill", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(fill, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, bc), nullptr);
   const float fill_color[4] = {0.2f, 0.3f, 0.8f, c_a};
@@ -8026,7 +8026,7 @@ TEST_F(PaintLayersGraphEvalTest, guarded_material_row_content_correction_alpha_u
   ma = BKE_material_add(bmain, "GuardMatAlpha");
   Material *source = make_constant_principled_source(*bmain, "GuardMatSource", row_color, 0.4f);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   Image *corr_map = add_solid_image("GuardMatCorr", size, 240, 20, 20, 96);
@@ -8053,10 +8053,10 @@ TEST_F(PaintLayersGraphEvalTest, guarded_normal_row_content_correction_alpha_unc
   const eMaterialPaintChannel ch = PAINT_MATERIAL_CHANNEL_NORMAL;
   ma = BKE_material_add(bmain, "GuardNormalAlpha");
   MaterialPaintLayer *row = add_layer(
-      "NormalRow", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("GuardNormalMap", size, 128, 128, 255, 128), ch);
+      "NormalRow", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("GuardNormalMap", size, 128, 128, 255, 128), ch);
   Image *corr_map = add_solid_image("GuardNormalCorr", size, 200, 200, 255, 128);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, row, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+      *ma, row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
   ASSERT_NE(correction, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, ch);
   ASSERT_NE(record, nullptr);
@@ -8105,7 +8105,7 @@ TEST_F(PaintLayersGraphEvalTest, baked_paint_row_keeps_its_content_alpha)
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "C6PaintRow");
   MaterialPaintLayer *row = add_layer(
-      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("C6PaintTop", size, 200, 200, 200, 128), bc);
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("C6PaintTop", size, 200, 200, 200, 128), bc);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   GraphInterpreter live;
@@ -8157,11 +8157,11 @@ TEST_F(PaintLayersGraphEvalTest, baked_paint_leaf_in_folder_keeps_its_content_al
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "C6PaintFolder");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Fold", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Fold", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, child, bc);
   ASSERT_NE(record, nullptr);
@@ -8210,7 +8210,7 @@ TEST_F(PaintLayersGraphEvalTest, baked_fill_row_keeps_its_content_alpha)
   const float c_a = 0.4f;
   ma = BKE_material_add(bmain, "C6FillRow");
   MaterialPaintLayer *fill = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FILL, "Fill", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(fill, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, bc), nullptr);
   const float fill_color[4] = {0.2f, 0.3f, 0.8f, c_a};
@@ -8258,11 +8258,11 @@ TEST_F(PaintLayersGraphEvalTest, baked_folder_keeps_its_content_alpha)
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "C6FolderBake");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Fold", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Fold", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, child, bc);
   ASSERT_NE(record, nullptr);
@@ -8309,7 +8309,7 @@ TEST_F(PaintLayersGraphEvalTest, baked_material_row_color_alpha_stays_one)
   ma = BKE_material_add(bmain, "C6MaterialRow");
   Material *source = make_constant_principled_source(*bmain, "C6MaterialSource", row_color, 0.4f);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   Image *corr_map = add_solid_image("C6MaterialCorr", size, 240, 20, 20, 96);
@@ -8335,10 +8335,10 @@ TEST_F(PaintLayersGraphEvalTest, baked_normal_row_color_alpha_stays_one)
   const eMaterialPaintChannel ch = PAINT_MATERIAL_CHANNEL_NORMAL;
   ma = BKE_material_add(bmain, "C6NormalRow");
   MaterialPaintLayer *row = add_layer(
-      "NormalRow", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("C6NormalMap", size, 128, 128, 255, 128), ch);
+      "NormalRow", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("C6NormalMap", size, 128, 128, 255, 128), ch);
   Image *corr_map = add_solid_image("C6NormalCorr", size, 200, 200, 255, 128);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, row, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+      *ma, row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
   ASSERT_NE(correction, nullptr);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, ch);
   ASSERT_NE(record, nullptr);
@@ -8368,7 +8368,7 @@ TEST_F(PaintLayersGraphEvalTest, bake_row_to_image_keeps_paint_alpha_and_is_opaq
   const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   ma = BKE_material_add(bmain, "C6ExportAlpha");
   MaterialPaintLayer *paint = add_layer(
-      "Paint", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("ExportPaint", size, 0, 200, 0, 128), bc);
+      "Paint", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("ExportPaint", size, 0, 200, 0, 128), bc);
 
   Image *dst = BKE_image_add_generated(
       bmain, size, size, "ExportDst", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
@@ -8388,7 +8388,7 @@ TEST_F(PaintLayersGraphEvalTest, bake_row_to_image_keeps_paint_alpha_and_is_opaq
   const float row_color[4] = {0.3f, 0.6f, 0.2f, 1.0f};
   Material *source = make_constant_principled_source(*bmain, "ExportMatSource", row_color, 0.4f);
   MaterialPaintLayer *mat = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(mat, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mat, source));
   ASSERT_NE(add_content_correction(*ma, *mat, add_solid_image("ExportMatCorr", size, 240, 20, 20, 96)),
@@ -8422,7 +8422,7 @@ TEST_F(PaintLayersGraphEvalTest, auto_baked_folder_matches_live)
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "C6AutoFolder");
   MaterialPaintLayer *child = add_layer(
-      "Child", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("AutoFolderChild", size, 200, 200, 200, 128), bc);
+      "Child", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("AutoFolderChild", size, 200, 200, 200, 128), bc);
   MaterialPaintLayer *members[1] = {child};
   MaterialPaintLayer *folder = BKE_paint_layers_group(
       *ma, Span<MaterialPaintLayer *>(members, 1));
@@ -8501,11 +8501,11 @@ TEST_F(PaintLayersGraphEvalTest, material_source_group_correction_opacity_matche
   const int size = 4;
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "MatCorrSourceGroup");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
 
   Material *source = make_specular_source(*bmain, "MatCorrWiredSource", false);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -8553,12 +8553,12 @@ TEST_F(PaintLayersGraphEvalTest, material_hybrid_correction_opacity_matches_the_
   const int size = 4;
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "MatCorrHybrid");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
 
   const float row_color[4] = {0.3f, 0.6f, 0.2f, 1.0f};
   Material *source = make_constant_principled_source(*bmain, "MatCorrHybridSource", row_color, 0.4f);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
 
@@ -8597,12 +8597,12 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_correction_opacity_matches_the_f
   const int size = 4;
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "MatCorrBaked");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
 
   const float row_color[4] = {0.3f, 0.6f, 0.2f, 1.0f};
   Material *source = make_constant_principled_source(*bmain, "MatCorrBakedSource", row_color, 0.4f);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
 
@@ -8661,7 +8661,7 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_isolating_folder_partial_alpha_m
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -8670,7 +8670,7 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_isolating_folder_partial_alpha_m
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "MatBakedFolder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "MatBakedFolder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
@@ -8678,7 +8678,7 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_isolating_folder_partial_alpha_m
   const float row_color[4] = {0.0f, 1.0f, 0.0f, 1.0f};
   Material *source = make_constant_principled_source(*bmain, "MatBakedIsoSource", row_color, 0.4f);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
 
@@ -8779,7 +8779,7 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_alpha_channel_isolating_folder_a
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -8788,7 +8788,7 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_alpha_channel_isolating_folder_a
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "MatBakedAlphaFolder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "MatBakedAlphaFolder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
@@ -8796,7 +8796,7 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_alpha_channel_isolating_folder_a
   const float row_color[4] = {0.2f, 0.6f, 0.8f, 1.0f};
   Material *source = make_constant_principled_source(*bmain, "MatBakedAlphaIsoSource", row_color, 0.4f);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
 
@@ -8841,7 +8841,7 @@ TEST_F(PaintLayersGraphEvalTest, material_hybrid_live_constant_isolating_folder_
   ASSERT_NE(ma, nullptr);
 
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
   ASSERT_NE(bottom_record, nullptr);
@@ -8850,7 +8850,7 @@ TEST_F(PaintLayersGraphEvalTest, material_hybrid_live_constant_isolating_folder_
   bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "MatHybridConstFolder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "MatHybridConstFolder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
@@ -8861,7 +8861,7 @@ TEST_F(PaintLayersGraphEvalTest, material_hybrid_live_constant_isolating_folder_
   const float row_color[4] = {0.0f, 1.0f, 0.0f, content_alpha};
   Material *source = make_constant_principled_source(*bmain, "MatHybridConstIsoSource", row_color, 0.4f);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
 
@@ -8920,9 +8920,9 @@ TEST_F(PaintLayersGraphEvalTest, paint_row_correction_opacity_matches_the_formul
   const int size = 4;
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "PaintCorr");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
   Image *row_map = add_solid_image("Row", size, 30, 200, 60, 255);
-  MaterialPaintLayer *row = add_layer("Row", MA_PAINT_LAYER_KIND_PAINT, row_map, bc);
+  MaterialPaintLayer *row = add_layer("Row", MA_PAINT_LAYER_SOURCE_IMAGE, row_map, bc);
 
   Image *corr_map = add_solid_image("CorrMap", size, 10, 10, 240, 160);
   MaterialPaintLayer *correction = add_content_correction(*ma, *row, corr_map);
@@ -8956,17 +8956,17 @@ TEST_F(PaintLayersGraphEvalTest, material_correction_fill_opacity_matches_the_fo
   const int size = 4;
   const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ma = BKE_material_add(bmain, "MatFillCorr");
-  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255), bc);
 
   Material *source = make_specular_source(*bmain, "MatFillCorrSource", false);
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
 
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, row, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_FILL, "C");
+      *ma, row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "C");
   ASSERT_NE(correction, nullptr);
   const float fill[4] = {0.0f, 1.0f, 0.0f, 1.0f};
   BKE_paint_layers_set_fill_color(*ma, correction, fill);
@@ -9002,20 +9002,20 @@ TEST_F(PaintLayersGraphEvalTest, source_group_material_in_pass_through_and_isola
   ma = BKE_material_add(bmain, "ReproStack");
 
   MaterialPaintLayer *iso = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Iso", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Iso", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(iso, nullptr);
   BKE_paint_layers_set_opacity(*ma, iso, 0.5f);
   MaterialPaintLayer *b = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatB", iso, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatB", iso, PaintLayerPlace::Into);
   ASSERT_NE(b, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, b, source_b));
 
   MaterialPaintLayer *pass = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Pass", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Pass", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(pass, nullptr);
   ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *pass));
   MaterialPaintLayer *c = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatC", pass, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatC", pass, PaintLayerPlace::Into);
   ASSERT_NE(c, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, c, source_c));
 
@@ -9075,7 +9075,7 @@ TEST_F(PaintLayersGraphEvalTest, material_source_group_transition_next_to_both_f
   ma = BKE_material_add(bmain, "ReproTransStack");
 
   MaterialPaintLayer *a = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatA", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatA", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(a, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, a, source_a));
   for (const eMaterialPaintChannel channel : BKE_paint_material_bakeable_channels()) {
@@ -9093,20 +9093,20 @@ TEST_F(PaintLayersGraphEvalTest, material_source_group_transition_next_to_both_f
   BKE_paint_layers_bake_finalize(*ma, *a);
 
   MaterialPaintLayer *iso = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Iso", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Iso", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(iso, nullptr);
   BKE_paint_layers_set_opacity(*ma, iso, 0.5f);
   MaterialPaintLayer *b = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatB", iso, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatB", iso, PaintLayerPlace::Into);
   ASSERT_NE(b, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, b, source_b));
 
   MaterialPaintLayer *pass = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Pass", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Pass", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(pass, nullptr);
   ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *pass));
   MaterialPaintLayer *c = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatC", pass, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatC", pass, PaintLayerPlace::Into);
   ASSERT_NE(c, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, c, source_c));
 
@@ -9536,7 +9536,7 @@ class PaintLayersFullStackTest : public PaintLayersGraphEvalTest {
 
     /* 1. Fill: Base Color from the fill colour, Roughness from its record. */
     s.fill = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_FILL, "Fill", nullptr, PaintLayerPlace::Above);
+        *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
     if (s.fill == nullptr ||
         BKE_paint_layers_channel_add(*ma, s.fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr ||
         BKE_paint_layers_channel_add(*ma, s.fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS) == nullptr)
@@ -9549,7 +9549,7 @@ class PaintLayersFullStackTest : public PaintLayersGraphEvalTest {
 
     /* 2. Material A with a Paint correction and a mask. */
     s.a = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatA", nullptr, PaintLayerPlace::Above);
+        *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatA", nullptr, PaintLayerPlace::Above);
     if (s.a == nullptr || !BKE_paint_layers_set_material(*ma, s.a, source_a) ||
         !bake_row(*s.a, name("FsBakeA"), true, source_spec_a, {}, 1.0f))
     {
@@ -9577,20 +9577,20 @@ class PaintLayersFullStackTest : public PaintLayersGraphEvalTest {
     /* 3. The isolating folder: Material B (Hybrid) and a Paint row. */
     if (options.iso) {
       s.iso = BKE_paint_layers_add(
-          *ma, MA_PAINT_LAYER_KIND_FOLDER, "Iso", nullptr, PaintLayerPlace::Above);
+          *ma, MA_PAINT_LAYER_SOURCE_STACK, "Iso", nullptr, PaintLayerPlace::Above);
       if (s.iso == nullptr) {
         return s;
       }
       BKE_paint_layers_set_opacity(*ma, s.iso, kFsIsoOpacity);
       s.b = BKE_paint_layers_add(
-          *ma, MA_PAINT_LAYER_KIND_MATERIAL, "MatB", s.iso, PaintLayerPlace::Into);
+          *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatB", s.iso, PaintLayerPlace::Into);
       if (s.b == nullptr || !BKE_paint_layers_set_material(*ma, s.b, source_b) ||
           !bake_row(*s.b, name("FsBakeB"), false, source_spec_a, source_spec_b, source_spec_b.alpha))
       {
         return s;
       }
       s.inner_paint = BKE_paint_layers_add(
-          *ma, MA_PAINT_LAYER_KIND_PAINT, "InnerPaint", s.iso, PaintLayerPlace::Into);
+          *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "InnerPaint", s.iso, PaintLayerPlace::Into);
       if (s.inner_paint == nullptr) {
         return s;
       }
@@ -9610,13 +9610,13 @@ class PaintLayersFullStackTest : public PaintLayersGraphEvalTest {
     if (options.with_c) {
       if (options.c_in_pass_folder) {
         s.pass = BKE_paint_layers_add(
-            *ma, MA_PAINT_LAYER_KIND_FOLDER, "Pass", nullptr, PaintLayerPlace::Above);
+            *ma, MA_PAINT_LAYER_SOURCE_STACK, "Pass", nullptr, PaintLayerPlace::Above);
         if (s.pass == nullptr || !BKE_paint_layers_folder_is_pass_through(*ma, *s.pass)) {
           return s;
         }
       }
       s.c = BKE_paint_layers_add(*ma,
-                                 MA_PAINT_LAYER_KIND_MATERIAL,
+                                 MA_PAINT_LAYER_SOURCE_MATERIAL,
                                  "MatC",
                                  s.pass,
                                  s.pass != nullptr ? PaintLayerPlace::Into : PaintLayerPlace::Above);
@@ -9635,7 +9635,7 @@ class PaintLayersFullStackTest : public PaintLayersGraphEvalTest {
     if (top_color == nullptr || top_rough == nullptr) {
       return s;
     }
-    s.top = add_layer("Top", MA_PAINT_LAYER_KIND_PAINT, top_color);
+    s.top = add_layer("Top", MA_PAINT_LAYER_SOURCE_IMAGE, top_color);
     MaterialPaintLayerChannel *top_rough_record = BKE_paint_layers_channel_add(
         *ma, s.top, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
     if (s.top == nullptr || top_rough_record == nullptr) {
@@ -9901,7 +9901,7 @@ TEST_F(PaintLayersFullStackTest, real_structure_edits_still_rebuild)
   /* A new top-level row changes the root's nodes. */
   bNodeTree *root = ma->paint_layers_tree;
   Vector<bNode *> nodes = root_node_ptrs(*root);
-  MaterialPaintLayer *extra = add_layer("Extra", MA_PAINT_LAYER_KIND_PAINT,
+  MaterialPaintLayer *extra = add_layer("Extra", MA_PAINT_LAYER_SOURCE_IMAGE,
                                         make_bake_data_map(bmain, "FsExtra", kFsSize, kFsTopColor));
   ASSERT_NE(extra, nullptr);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));

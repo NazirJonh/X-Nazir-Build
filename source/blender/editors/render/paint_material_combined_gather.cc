@@ -655,7 +655,7 @@ void combined_preview_bake_ensure(const bContext &C, Material &ma)
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
-      if (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL &&
+      if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
           BKE_paint_layers_material_mode(ma, *layer) == PaintLayerMaterialMode::SourceGroup &&
           BKE_paint_layers_bake_row_is_deferred(ma, *layer))
       {

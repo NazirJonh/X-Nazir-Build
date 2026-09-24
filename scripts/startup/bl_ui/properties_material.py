@@ -609,7 +609,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             layout.label(text="Tree out of step with the layers", icon='ERROR')
 
         row = layout.row(align=True)
-        row.operator_menu_enum("material.paint_layer_add", "kind", text="Add", icon='ADD')
+        row.operator_menu_enum("material.paint_layer_add", "source", text="Add", icon='ADD')
         row.operator("material.paint_layer_remove", text="", icon='REMOVE')
         row.operator("material.paint_layer_duplicate", text="", icon='DUPLICATE')
 
@@ -631,7 +631,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         layout.prop(layer, "name", text="Layer")
         layout.prop(layer, "blend_type", text="Blend")
         layout.prop(layer, "opacity", text="Opacity")
-        if layer.kind == 'FILL':
+        if layer.source == 'CONSTANT':
             layout.prop(layer, "fill_color")
 
         box = layout.box()
@@ -662,9 +662,9 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         row = box.row(align=True)
         row.operator_menu_enum("material.paint_layer_channel_add", "channel",
                                text="Add Channel", icon='ADD')
-        row.operator_menu_enum("material.paint_layer_correction_add", "section",
+        row.operator_menu_enum("material.paint_layer_correction_add", "role",
                                text="Add Correction", icon='ADD')
-        if layer.kind == 'CUSTOM':
+        if layer.source == 'NODE_GROUP':
             layout.operator_menu_enum("material.paint_layer_custom_channel_add", "channel",
                                       text="Add Custom Channel", icon='ADD')
 
@@ -688,7 +688,7 @@ class LAYER_MATERIAL_PT_source_material(LayerMaterialButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         _, layer = cls._active_layer(context)
-        return layer is not None and layer.kind == 'MATERIAL'
+        return layer is not None and layer.source == 'MATERIAL'
 
     def draw(self, context):
         layout = self.layout
@@ -737,7 +737,7 @@ class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
         _, layer = cls._active_layer(context)
         return (
             layer is not None and
-            layer.kind == 'MATERIAL' and
+            layer.source == 'MATERIAL' and
             layer.material is not None and
             layer.material.node_tree is not None
         )
@@ -763,7 +763,7 @@ class LAYER_MATERIAL_PT_custom_layer(LayerMaterialButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         _, layer = cls._active_layer(context)
-        return layer is not None and layer.kind == 'CUSTOM'
+        return layer is not None and layer.source == 'NODE_GROUP'
 
     def draw(self, context):
         layout = self.layout

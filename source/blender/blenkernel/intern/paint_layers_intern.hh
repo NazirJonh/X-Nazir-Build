@@ -83,7 +83,7 @@ inline const MaterialPaintLayerChannel *paint_layer_channel_find(const MaterialP
  */
 inline Image *paint_layer_material_source_map(const MaterialPaintLayer &layer, const int channel)
 {
-  if (layer.kind != MA_PAINT_LAYER_KIND_MATERIAL || layer.bake == nullptr || channel < 0 ||
+  if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer.bake == nullptr || channel < 0 ||
       channel >= int(ARRAY_SIZE(layer.bake->images)))
   {
     return nullptr;
@@ -102,7 +102,7 @@ inline Image *paint_layer_material_source_map(const MaterialPaintLayer &layer, c
 /** Whether \a layer takes part in \a channel at all: a record that is not absent. */
 inline bool paint_layer_channel_present(const MaterialPaintLayer &layer, const int channel)
 {
-  if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) {
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return paint_layer_material_source_map(layer, channel) != nullptr;
   }
   const MaterialPaintLayerChannel *entry = paint_layer_channel_find(layer, channel);
@@ -112,7 +112,7 @@ inline bool paint_layer_channel_present(const MaterialPaintLayer &layer, const i
 /** The image \a layer shows in \a channel, or null when its source is a constant. */
 inline Image *paint_layer_channel_image(const MaterialPaintLayer &layer, const int channel)
 {
-  if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) {
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return paint_layer_material_source_map(layer, channel);
   }
   const MaterialPaintLayerChannel *entry = paint_layer_channel_find(layer, channel);

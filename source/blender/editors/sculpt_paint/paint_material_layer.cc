@@ -122,7 +122,7 @@ MaterialPaintLayer *add_material_layer_from_material(bContext &C,
   }
 
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      owner, MA_PAINT_LAYER_KIND_MATERIAL, picked->id.name + 2, anchor, place);
+      owner, MA_PAINT_LAYER_SOURCE_MATERIAL, picked->id.name + 2, anchor, place);
   if (layer == nullptr) {
     return nullptr;
   }

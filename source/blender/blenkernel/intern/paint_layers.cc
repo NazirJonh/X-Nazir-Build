@@ -73,6 +73,18 @@ static_assert(sizeof(MaterialPaintLayer::channel_settings) /
                   sizeof(MaterialPaintLayerChannelSettings) ==
               PAINT_MATERIAL_CHANNEL_NUM);
 
+/** #MaterialPaintLayer::source stores the same values as #PaintLayerSourceType. */
+static_assert(int8_t(MA_PAINT_LAYER_SOURCE_IMAGE) == int8_t(PaintLayerSourceType::Image));
+static_assert(int8_t(MA_PAINT_LAYER_SOURCE_CONSTANT) == int8_t(PaintLayerSourceType::Constant));
+static_assert(int8_t(MA_PAINT_LAYER_SOURCE_MATERIAL) == int8_t(PaintLayerSourceType::Material));
+static_assert(int8_t(MA_PAINT_LAYER_SOURCE_NODE_GROUP) == int8_t(PaintLayerSourceType::NodeGroup));
+static_assert(int8_t(MA_PAINT_LAYER_SOURCE_STACK) == int8_t(PaintLayerSourceType::Stack));
+
+/** #MaterialPaintLayer::role stores the same values as #PaintLayerRole. */
+static_assert(int8_t(MA_PAINT_LAYER_ROLE_LAYER) == int8_t(PaintLayerRole::Layer));
+static_assert(int8_t(MA_PAINT_LAYER_ROLE_EFFECT) == int8_t(PaintLayerRole::Effect));
+static_assert(int8_t(MA_PAINT_LAYER_ROLE_MASK_ITEM) == int8_t(PaintLayerRole::MaskItem));
+
 /** A description edit: the generated tree is stale until it is rebuilt. Shared with the bake file. */
 void BKE_paint_layers_tag_edited(Material &ma)
 {
@@ -98,7 +110,7 @@ static bool paint_layer_or_ancestor_has_bake(const ListBase &list,
     /* A Material layer's bake is its source's maps, not a cache of the row: its values stay live
      * group inputs, so editing them is not topology. */
     const bool has_bake = ancestor_has_bake ||
-                          (layer.bake != nullptr && layer.kind != MA_PAINT_LAYER_KIND_MATERIAL);
+                          (layer.bake != nullptr && layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL);
     if (&layer == target) {
       return has_bake;
     }
@@ -195,11 +207,14 @@ bUUID paint_layer_unique_marker(const Material &ma)
  * correction list, and neither shares this through the other.
  */
 MaterialPaintLayer *paint_layer_alloc(Material &ma,
-                                      eMaterialPaintLayerKind kind,
+                                      eMaterialPaintLayerSource source,
                                       const char *name)
 {
   MaterialPaintLayer *layer = MEM_new<MaterialPaintLayer>(__func__);
-  layer->kind = kind;
+  layer->source = int8_t(source);
+  /* A fresh row is always a stack Layer; #BKE_paint_layers_correction_add sets the role once it
+   * links the row into an owner's effects/mask_stack list instead. */
+  layer->role = MA_PAINT_LAYER_ROLE_LAYER;
   layer->blend = MA_PAINT_LAYER_BLEND_MIX;
   layer->flag = MA_PAINT_LAYER_ENABLED;
   layer->opacity = 1.0f;
@@ -309,28 +324,27 @@ bool paint_layers_is_layered(const Material &ma)
   return (ma.paint_layers_flag & MA_PAINT_LAYERED) != 0;
 }
 
-const PaintLayerKindInfo &BKE_paint_layers_kind_info(const int kind)
+const PaintLayerKindInfo &BKE_paint_layers_kind_info(const int source)
 {
   static const PaintLayerKindInfo table[] = {
-      {MA_PAINT_LAYER_KIND_PAINT, "PAINT", "Paint", false, false, false},
-      {MA_PAINT_LAYER_KIND_FILL, "FILL", "Fill", false, true, false},
-      {MA_PAINT_LAYER_KIND_MATERIAL, "MATERIAL", "Material", false, false, true},
-      {MA_PAINT_LAYER_KIND_CORRECTION, "CORRECTION", "Correction", false, false, false},
-      {MA_PAINT_LAYER_KIND_FOLDER, "FOLDER", "Folder", true, false, false},
-      {MA_PAINT_LAYER_KIND_CUSTOM, "CUSTOM", "Custom", false, false, true},
+      {MA_PAINT_LAYER_SOURCE_IMAGE, "IMAGE", "Image", false, false, false},
+      {MA_PAINT_LAYER_SOURCE_CONSTANT, "CONSTANT", "Constant", false, true, false},
+      {MA_PAINT_LAYER_SOURCE_MATERIAL, "MATERIAL", "Material", false, false, true},
+      {MA_PAINT_LAYER_SOURCE_NODE_GROUP, "NODE_GROUP", "Node Group", false, false, true},
+      {MA_PAINT_LAYER_SOURCE_STACK, "STACK", "Folder", true, false, false},
   };
   for (const PaintLayerKindInfo &info : table) {
-    if (info.kind == kind) {
+    if (info.source == source) {
       return info;
     }
   }
-  /* An unknown kind reads as Paint, the same compatibility rule the DNA enum documents. */
+  /* An unknown source reads as Image, the same compatibility rule the DNA enum documents. */
   return table[0];
 }
 
 bool BKE_paint_layers_is_folder(const MaterialPaintLayer &layer)
 {
-  return BKE_paint_layers_kind_info(layer.kind).is_folder;
+  return BKE_paint_layers_kind_info(layer.source).is_folder;
 }
 
 bool BKE_paint_layers_folder_is_pass_through(const Material &ma,
@@ -372,32 +386,12 @@ bool BKE_paint_layers_folder_is_pass_through(const Material &ma,
 
 PaintLayerSourceType BKE_paint_layers_source_type(const MaterialPaintLayer &layer)
 {
-  switch (layer.kind) {
-    case MA_PAINT_LAYER_KIND_FILL:
-      return PaintLayerSourceType::Constant;
-    case MA_PAINT_LAYER_KIND_MATERIAL:
-      return PaintLayerSourceType::Material;
-    case MA_PAINT_LAYER_KIND_CUSTOM:
-      return PaintLayerSourceType::NodeGroup;
-    case MA_PAINT_LAYER_KIND_FOLDER:
-      return PaintLayerSourceType::Stack;
-    case MA_PAINT_LAYER_KIND_CORRECTION:
-      return (layer.effect == MA_PAINT_LAYER_EFFECT_FILL) ? PaintLayerSourceType::Constant :
-                                                            PaintLayerSourceType::Image;
-    case MA_PAINT_LAYER_KIND_PAINT:
-      return PaintLayerSourceType::Image;
-  }
-  /* An unknown kind composites as a Paint row, the same compatibility rule #PaintLayerKindInfo. */
-  return PaintLayerSourceType::Image;
+  return PaintLayerSourceType(layer.source);
 }
 
 PaintLayerRole BKE_paint_layers_role(const MaterialPaintLayer &layer)
 {
-  if (layer.kind != MA_PAINT_LAYER_KIND_CORRECTION) {
-    return PaintLayerRole::Layer;
-  }
-  return (layer.section == MA_PAINT_LAYER_SECTION_MASK) ? PaintLayerRole::MaskItem :
-                                                          PaintLayerRole::Effect;
+  return PaintLayerRole(layer.role);
 }
 
 namespace {
@@ -451,16 +445,21 @@ Vector<const MaterialPaintLayer *> BKE_paint_layers_mask_items(const MaterialPai
 bool BKE_paint_layers_fill_to_paint(Material &ma, MaterialPaintLayer &layer, float r_fill[4])
 {
   copy_v4_v4(r_fill, layer.fill_color);
-  if (!BKE_paint_layers_kind_info(layer.kind).uses_fill_color) {
+  /* Only a Layer-role Constant row reads as Fill; a Fill-effect correction is untouched by this
+   * conversion, matching the old kind table (which had no entry for a correction). */
+  if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer ||
+      !BKE_paint_layers_kind_info(layer.source).uses_fill_color)
+  {
     return false;
   }
   /* A Fill carries a value per channel (Base Color in `fill_color`, the rest in their records); a
    * Paint row carries the constant per channel, so each record keeps what the Fill showed before
-   * the kind flips and `fill_color` is reset. */
+   * the source flips and `fill_color` is reset. */
   for (int i = 0; i < layer.channels_num; i++) {
     paint_layer_channel_constant(layer, layer.channels[i].channel, layer.channels[i].value);
   }
-  BKE_paint_layers_kind_change(ma, &layer, MA_PAINT_LAYER_KIND_PAINT);
+  layer.source = MA_PAINT_LAYER_SOURCE_IMAGE;
+  BKE_paint_layers_tag_edited(ma);
   return true;
 }
 
@@ -474,7 +473,7 @@ void paint_layers_flatten_list(const ListBase &list,
   {
     /* A correction row is reached through its owner's effects/mask_stack lists, not here. A Custom and a
      * Material layer alike take part through their bake, so they are walked like any other row. */
-    if (layer.kind == MA_PAINT_LAYER_KIND_CORRECTION) {
+    if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer) {
       continue;
     }
     r_layers.append(&layer);
@@ -523,7 +522,7 @@ void BKE_paint_layers_correction_constant(const MaterialPaintLayer &correction,
 {
   for (int i = 0; i < correction.channels_num; i++) {
     if (correction.channels[i].channel == channel) {
-      if (correction.effect == MA_PAINT_LAYER_EFFECT_FILL) {
+      if (correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
         copy_v4_v4(r_color, correction.fill_color);
         return;
       }
@@ -532,7 +531,7 @@ void BKE_paint_layers_correction_constant(const MaterialPaintLayer &correction,
     }
   }
   /* No record in this channel: a Fill still contributes its colour, a Paint contributes nothing. */
-  if (correction.effect == MA_PAINT_LAYER_EFFECT_FILL) {
+  if (correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
     copy_v4_v4(r_color, correction.fill_color);
     return;
   }
@@ -927,7 +926,7 @@ bool BKE_paint_layers_custom_channel_add(Main &bmain,
                                          MaterialPaintLayer &layer,
                                          const eMaterialPaintChannel channel)
 {
-  if (layer.kind != MA_PAINT_LAYER_KIND_CUSTOM) {
+  if (layer.source != MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
     return false;
   }
   if (layer.custom_group == nullptr) {
@@ -1042,7 +1041,7 @@ MaterialPaintLayer *BKE_paint_layers_custom_layer_add(Main &bmain,
   }
 
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      ma, MA_PAINT_LAYER_KIND_CUSTOM, layer_name, anchor, place);
+      ma, MA_PAINT_LAYER_SOURCE_NODE_GROUP, layer_name, anchor, place);
   if (layer == nullptr) {
     BKE_id_free(&bmain, &group->id);
     return nullptr;
@@ -1059,7 +1058,7 @@ void BKE_paint_layers_custom_properties_sync(Material &ma)
   Vector<const MaterialPaintLayer *> layers;
   BKE_paint_layers_flatten(ma, layers);
   for (const MaterialPaintLayer *layer : layers) {
-    if (layer->kind != MA_PAINT_LAYER_KIND_CUSTOM || layer->custom_group == nullptr) {
+    if (layer->source != MA_PAINT_LAYER_SOURCE_NODE_GROUP || layer->custom_group == nullptr) {
       continue;
     }
     MaterialPaintLayer *writable = const_cast<MaterialPaintLayer *>(layer);
@@ -1100,7 +1099,7 @@ void BKE_paint_layers_custom_channels_get(const MaterialPaintLayer &layer,
                                           Vector<int> &r_channels)
 {
   r_channels.clear();
-  if (layer.kind != MA_PAINT_LAYER_KIND_CUSTOM || layer.custom_group == nullptr) {
+  if (layer.source != MA_PAINT_LAYER_SOURCE_NODE_GROUP || layer.custom_group == nullptr) {
     return;
   }
   for (const bNodeTreeInterfaceSocket *socket : layer.custom_group->interface_outputs()) {
@@ -1151,7 +1150,7 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
       issue.text = TIP_("Only a folder holds other layers; this row's nested rows are ignored");
       r_issues.append(issue);
     }
-    if (layer->kind == MA_PAINT_LAYER_KIND_CUSTOM && layer->custom_group != nullptr) {
+    if (layer->source == MA_PAINT_LAYER_SOURCE_NODE_GROUP && layer->custom_group != nullptr) {
       Vector<std::string> seen_inputs;
       Vector<std::string> seen_outputs;
       for (const bNodeTreeInterfaceSocket *socket : layer->custom_group->interface_inputs()) {
@@ -1169,7 +1168,7 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
     for (const MaterialPaintLayer &effect :
          *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer->effects))
     {
-      if (effect.effect != MA_PAINT_LAYER_EFFECT_FILL ||
+      if (effect.source != MA_PAINT_LAYER_SOURCE_CONSTANT ||
           (effect.flag & MA_PAINT_LAYER_ENABLED) == 0)
       {
         continue;
@@ -1218,24 +1217,23 @@ static MaterialPaintLayer *paint_layer_correction_owner(ListBase &list,
 }
 
 MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
-                                         eMaterialPaintLayerKind kind,
+                                         eMaterialPaintLayerSource source,
                                          const char *name,
                                          MaterialPaintLayer *anchor,
                                          PaintLayerPlace place)
 {
   /* Beside a correction would mean into its owner's corrections list, where a layer is neither
    * listed as a row nor composited as one (it would silently ride on the owner's visibility).
-   * Any caller anchoring on the active row can meet a correction, so the owner row stands in. */
-  if (anchor != nullptr && BKE_paint_layers_role(*anchor) != PaintLayerRole::Layer &&
-      kind != MA_PAINT_LAYER_KIND_CORRECTION)
-  {
+   * This function only ever creates a Layer-role row (a correction is linked through
+   * #BKE_paint_layers_correction_add instead), so the owner row always stands in here. */
+  if (anchor != nullptr && BKE_paint_layers_role(*anchor) != PaintLayerRole::Layer) {
     anchor = paint_layer_correction_owner(ma.paint_layers, *anchor);
     if (anchor == nullptr) {
       return nullptr;
     }
   }
 
-  MaterialPaintLayer *layer = paint_layer_alloc(ma, kind, name);
+  MaterialPaintLayer *layer = paint_layer_alloc(ma, source, name);
 
   if (anchor == nullptr) {
     BLI_addtail(&ma.paint_layers, layer);
@@ -1248,8 +1246,8 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
       return nullptr;
     }
     if (place == PaintLayerPlace::Into) {
-      /* Only a folder holds other rows. BKE never changes a kind implicitly: promoting a Paint or
-       * Fill layer to a folder would make its maps ignored (FolderHasMaps) and the painted
+      /* Only a folder holds other rows. BKE never changes a source implicitly: promoting an Image
+       * or Constant layer to a folder would make its maps ignored (FolderHasMaps) and the painted
        * result would silently disappear, so a UI that drops "into" a plain row groups instead. */
       if (!BKE_paint_layers_is_folder(*anchor)) {
         MEM_delete(layer);
@@ -1344,7 +1342,7 @@ bool BKE_paint_layers_move(Material &ma,
     if (BKE_paint_layers_subtree_contains(*layer, anchor->marker)) {
       return false;
     }
-    /* Only a folder holds other rows, and BKE never promotes a kind implicitly; refuse before
+    /* Only a folder holds other rows, and BKE never promotes a source implicitly; refuse before
      * touching the lists so the move is atomic. */
     if (place == PaintLayerPlace::Into && !BKE_paint_layers_is_folder(*anchor)) {
       return false;
@@ -1439,7 +1437,7 @@ MaterialPaintLayer *BKE_paint_layers_group(Material &ma, Span<MaterialPaintLayer
   }
 
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   if (folder == nullptr) {
     return nullptr;
   }
@@ -1535,7 +1533,7 @@ MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma, MaterialPaintLayer *
   /* The base mask is the first element of the mask stack: a constant item with the MULTIPLY blend,
    * so `F = F * value`. It is inserted first; a stroke turns it into a map in place. */
   MaterialPaintLayer *item = BKE_paint_layers_correction_add(
-      ma, layer, MA_PAINT_LAYER_SECTION_MASK, MA_PAINT_LAYER_EFFECT_FILL, "Mask");
+      ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, "Mask");
   if (item == nullptr) {
     return nullptr;
   }
@@ -1561,7 +1559,11 @@ bool BKE_paint_layers_channel_set_value(Material &ma,
     return false;
   }
   copy_v4_v4(record->value, value);
-  if (BKE_paint_layers_kind_info(layer->kind).uses_fill_color) {
+  /* Only a Layer-role Constant row is a group input value; a Fill-effect correction's record is
+   * not (it has no entry of its own in the old kind table). */
+  if (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
+      BKE_paint_layers_kind_info(layer->source).uses_fill_color)
+  {
     /* A Fill's channel value is a group input, like `fill_color`: a value-only edit, so animating
      * it does not rebuild the tree. */
     paint_layers_tag_value_only(ma);
@@ -1605,7 +1607,8 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
     return nullptr;
   }
   /* A folder carries no maps of its own: its participation in a channel is the union of its
-   * children's (design §5). Folder-ness is the kind, so an emptied folder is refused all the same. */
+   * children's (design §5). Folder-ness is the source, so an emptied folder is refused all the
+   * same. */
   if (BKE_paint_layers_is_folder(*layer)) {
     return nullptr;
   }
@@ -1623,9 +1626,13 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
   record.channel = channel;
   record.state = MA_PAINT_LAYER_CHANNEL_ENABLED;
   record.image = nullptr;
-  if (BKE_paint_layers_kind_info(layer->kind).uses_fill_color) {
+  if (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
+      BKE_paint_layers_kind_info(layer->source).uses_fill_color)
+  {
     /* A Fill shows a value per channel from the start; the Principled defaults keep the material
-     * looking like it did before the layer. */
+     * looking like it did before the layer. A Fill-effect correction's own first record instead
+     * falls to the transparent branch below, exactly as it did through the old kind table (which
+     * had no entry for a correction). */
     BKE_paint_layers_channel_default_value(ma, channel, record.value);
   }
   else {
@@ -1641,7 +1648,9 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
 
 void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer)
 {
-  if (!ELEM(layer.kind, MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_KIND_FILL)) {
+  if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer ||
+      !ELEM(layer.source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT))
+  {
     return;
   }
   /* The channels that reach a Principled socket and hold no viewport-wide side effect: Alpha would
@@ -1719,7 +1728,10 @@ void paint_layer_channel_constant(const MaterialPaintLayer &layer,
                                   const int channel,
                                   float r_color[4])
 {
-  if (BKE_paint_layers_kind_info(layer.kind).uses_fill_color &&
+  /* Layer-role only: a Fill-effect correction reads through #BKE_paint_layers_correction_constant
+   * instead, which has always kept its own fill-colour rule independent of this one. */
+  if (BKE_paint_layers_role(layer) == PaintLayerRole::Layer &&
+      BKE_paint_layers_kind_info(layer.source).uses_fill_color &&
       channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR)
   {
     copy_v4_v4(r_color, layer.fill_color);
@@ -1745,7 +1757,7 @@ bool paint_layers_material_depends_on(const Material &from, const Material &targ
     for (const MaterialPaintLayer &layer :
          *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
     {
-      if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL && layer.material != nullptr &&
+      if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr &&
           paint_layers_material_depends_on(*layer.material, target))
       {
         return true;
@@ -1771,7 +1783,7 @@ bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Mate
   if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
     return false;
   }
-  if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL) {
+  if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return false;
   }
   if (source == nullptr || source == &ma) {
@@ -1883,20 +1895,26 @@ bool BKE_paint_layers_channel_opacity_set(Material &ma,
   return true;
 }
 
-bool BKE_paint_layers_kind_change(Material &ma,
-                                  MaterialPaintLayer *layer,
-                                  eMaterialPaintLayerKind kind)
+bool BKE_paint_layers_source_change(Material &ma,
+                                    MaterialPaintLayer *layer,
+                                    int8_t source)
 {
   if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
     return false;
   }
-  if (!ELEM(kind, MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_KIND_FILL)) {
+  /* A source change between Image and Constant is a Layer-row operation only: a correction's
+   * source is changed through #BKE_paint_layers_correction_source_set instead, which carries the
+   * same restriction under a name that matches what it is changing. */
+  if (BKE_paint_layers_role(*layer) != PaintLayerRole::Layer) {
     return false;
   }
-  if (layer->kind == kind) {
+  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+    return false;
+  }
+  if (layer->source == source) {
     return true;
   }
-  if (kind == MA_PAINT_LAYER_KIND_FILL) {
+  if (source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
     /* A painted map is not a constant, so the maps go; the records stay, because a per-channel
      * blend/opacity override is a setting of the pair, not a pixel. Only the image is forgotten;
      * an image is owned by Main, so it is detached, not freed. */
@@ -1913,22 +1931,22 @@ bool BKE_paint_layers_kind_change(Material &ma,
     static const float fill_default[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     copy_v4_v4(layer->fill_color, fill_default);
   }
-  layer->kind = kind;
+  layer->source = source;
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
 
 MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     MaterialPaintLayer *owner,
-                                                    int section,
-                                                    int effect,
+                                                    int role,
+                                                    int source,
                                                     const char *name)
 {
   if (owner == nullptr || paint_layer_owner_list(&ma.paint_layers, owner) == nullptr) {
     return nullptr;
   }
-  if (!ELEM(section, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_SECTION_MASK) ||
-      !ELEM(effect, MA_PAINT_LAYER_EFFECT_PAINT, MA_PAINT_LAYER_EFFECT_FILL))
+  if (!ELEM(role, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_ROLE_MASK_ITEM) ||
+      !ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT))
   {
     return nullptr;
   }
@@ -1937,59 +1955,54 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
    * #MaterialPaintLayer::mask_stack its mask items. It is linked directly, never through add():
    * adding Into would promote the owner to a folder. */
   MaterialPaintLayer *correction = paint_layer_alloc(
-      ma, MA_PAINT_LAYER_KIND_CORRECTION, name != nullptr ? name : "Correction");
-  correction->section = int8_t(section);
-  correction->effect = int8_t(effect);
-  ListBase *destination = (section == MA_PAINT_LAYER_SECTION_MASK) ? &owner->mask_stack :
-                                                                     &owner->effects;
+      ma, eMaterialPaintLayerSource(source), name != nullptr ? name : "Correction");
+  correction->role = int8_t(role);
+  ListBase *destination = (role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ? &owner->mask_stack :
+                                                                    &owner->effects;
   BLI_addtail(destination, correction);
   paint_layer_mark_owned(ma);
   return correction;
 }
 
-bool BKE_paint_layers_correction_set_section(Material &ma,
-                                             MaterialPaintLayer *correction,
-                                             int section)
+bool BKE_paint_layers_role_set(Material &ma, MaterialPaintLayer *correction, int role)
 {
-  if (correction == nullptr || correction->kind != MA_PAINT_LAYER_KIND_CORRECTION) {
+  if (correction == nullptr || BKE_paint_layers_role(*correction) == PaintLayerRole::Layer) {
     return false;
   }
-  if (!ELEM(section, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_SECTION_MASK)) {
+  if (!ELEM(role, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_ROLE_MASK_ITEM)) {
     return false;
   }
   MaterialPaintLayer *owner = paint_layer_correction_owner(ma.paint_layers, *correction);
   if (owner == nullptr) {
     return false;
   }
-  if (correction->section == section) {
+  if (correction->role == role) {
     return true;
   }
-  /* The section chooses the list the row lives in, so changing it moves the row between the
-   * owner's effects and mask_stack, keeping it at the top of its new list. */
-  ListBase *source = (correction->section == MA_PAINT_LAYER_SECTION_MASK) ? &owner->mask_stack :
-                                                                            &owner->effects;
-  ListBase *destination = (section == MA_PAINT_LAYER_SECTION_MASK) ? &owner->mask_stack :
-                                                                     &owner->effects;
-  BLI_remlink(source, correction);
-  correction->section = int8_t(section);
+  /* The role chooses the list the row lives in, so changing it moves the row between the owner's
+   * effects and mask_stack, keeping it at the top of its new list. */
+  ListBase *source_list = (correction->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ? &owner->mask_stack :
+                                                                                &owner->effects;
+  ListBase *destination = (role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ? &owner->mask_stack :
+                                                                    &owner->effects;
+  BLI_remlink(source_list, correction);
+  correction->role = int8_t(role);
   BLI_addtail(destination, correction);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
 
-bool BKE_paint_layers_correction_set_effect(Material &ma,
-                                            MaterialPaintLayer *correction,
-                                            int effect)
+bool BKE_paint_layers_correction_source_set(Material &ma, MaterialPaintLayer *correction, int source)
 {
-  if (correction == nullptr || correction->kind != MA_PAINT_LAYER_KIND_CORRECTION ||
+  if (correction == nullptr || BKE_paint_layers_role(*correction) == PaintLayerRole::Layer ||
       paint_layer_owner_list(&ma.paint_layers, correction) == nullptr)
   {
     return false;
   }
-  if (!ELEM(effect, MA_PAINT_LAYER_EFFECT_PAINT, MA_PAINT_LAYER_EFFECT_FILL)) {
+  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
     return false;
   }
-  correction->effect = int8_t(effect);
+  correction->source = int8_t(source);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
@@ -2001,13 +2014,13 @@ void paint_layer_assert_consistent_row(const MaterialPaintLayer &layer)
   for (const MaterialPaintLayer &effect :
        *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.effects))
   {
-    BLI_assert(effect.section == MA_PAINT_LAYER_SECTION_CONTENT);
+    BLI_assert(BKE_paint_layers_role(effect) == PaintLayerRole::Effect);
     paint_layer_assert_consistent_row(effect);
   }
   for (const MaterialPaintLayer &mask_item :
        *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
   {
-    BLI_assert(mask_item.section == MA_PAINT_LAYER_SECTION_MASK);
+    BLI_assert(BKE_paint_layers_role(mask_item) == PaintLayerRole::MaskItem);
     paint_layer_assert_consistent_row(mask_item);
   }
   for (const MaterialPaintLayer &child :

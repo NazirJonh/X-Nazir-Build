@@ -43,7 +43,7 @@ struct MaterialPaintLayerChannel;
 struct PaintLayersRegenCache;
 struct bNodeTree;
 enum eMaterialPaintChannel : int8_t;
-enum eMaterialPaintLayerKind : int8_t;
+enum eMaterialPaintLayerSource : int8_t;
 enum eMaterialPaintLayerBlend : int8_t;
 
 template<typename T> class Span;
@@ -64,8 +64,9 @@ bool paint_layers_is_layered(const Material &ma);
  *
  * This is the single test for folder-ness everywhere -- the generator, the CPU compositor, the
  * channel rules and the UI -- so a row can never be a folder on one side and a leaf on another. It
- * reads #eMaterialPaintLayerKind, never a non-empty #children list: an emptied folder stays a
- * folder, and a malformed leaf that somehow has children is still a leaf.
+ * reads #MaterialPaintLayer::source (#MA_PAINT_LAYER_SOURCE_STACK), never a non-empty #children
+ * list: an emptied folder stays a folder, and a malformed leaf that somehow has children is still
+ * a leaf.
  */
 bool BKE_paint_layers_is_folder(const MaterialPaintLayer &layer);
 
@@ -85,10 +86,8 @@ bool BKE_paint_layers_folder_is_pass_through(const Material &ma,
 /**
  * Where a row reads its values from, the description-level view of a row's source.
  *
- * It is derived from #eMaterialPaintLayerKind (and, for a correction, from
- * #eMaterialPaintLayerCorrectionEffect) so callers ask what a row *is* rather than which stored
- * fields happen to encode it. Phase 2.2 replaces those fields with a dedicated source, and this
- * mapping is the one place that changes.
+ * Stored directly on the row as #MaterialPaintLayer::source, so callers ask what a row *is*
+ * rather than reconstruct it from other fields.
  */
 enum class PaintLayerSourceType : int8_t {
   /** A painted map; a Paint row with no map yet still reads as Image (its flat value is the
@@ -107,8 +106,7 @@ enum class PaintLayerSourceType : int8_t {
 /**
  * The #PaintLayerSourceType \a layer reads from.
  *
- * Paint -> Image, Fill -> Constant, Material -> Material, Custom -> NodeGroup, Folder -> Stack,
- * and a Correction answers by its effect: Paint effect -> Image, Fill effect -> Constant.
+ * Reads #MaterialPaintLayer::source directly; a correction's source is always Image or Constant.
  */
 PaintLayerSourceType BKE_paint_layers_source_type(const MaterialPaintLayer &layer);
 
@@ -125,10 +123,7 @@ enum class PaintLayerRole : int8_t {
   MaskItem,
 };
 
-/**
- * The #PaintLayerRole \a layer takes: Effect for a Correction in the content section, MaskItem for
- * one in the mask section, and Layer for every other row.
- */
+/** The #PaintLayerRole \a layer takes: reads #MaterialPaintLayer::role directly. */
 PaintLayerRole BKE_paint_layers_role(const MaterialPaintLayer &layer);
 
 /**
@@ -146,14 +141,18 @@ Vector<MaterialPaintLayer *> BKE_paint_layers_mask_items(MaterialPaintLayer &lay
 Vector<const MaterialPaintLayer *> BKE_paint_layers_mask_items(const MaterialPaintLayer &layer);
 
 /**
- * Static description of one #eMaterialPaintLayerKind: the per-kind switches that used to be
+ * Static description of one #eMaterialPaintLayerSource: the per-source switches that used to be
  * `ELEM(kind, ...)` checks scattered across the generator, the CPU compositor and the bake.
  *
- * One table instead of many, so adding a kind is one edit here plus its branches, and the
- * Outliner's add-kinds list, the generator and the bake all read the same answer.
+ * One table instead of many, so adding a source is one edit here plus its branches, and the
+ * Outliner's add-kinds list, the generator and the bake all read the same answer. A row's source
+ * alone decides these switches -- including for a correction, whose source is always Image or
+ * Constant -- so a caller for whom the structural role also matters (a Fill-effect correction is
+ * not a stack Layer) checks #BKE_paint_layers_role separately; see `paint_layers.cc` for where
+ * that distinction is load-bearing.
  */
 struct PaintLayerKindInfo {
-  int kind;
+  int source;
   /** Stable identifier shared with the Outliner's add-kinds and the Python API. */
   const char *identifier;
   /** Untranslated UI name. */
@@ -164,18 +163,18 @@ struct PaintLayerKindInfo {
   bool uses_fill_color;
   /**
    * The CPU compositor cannot evaluate the row: an editor bake fills its maps and the
-   * generator/CPU substitute them. MATERIAL bakes its source through the material bake; CUSTOM
+   * generator/CPU substitute them. MATERIAL bakes its source through the material bake; NODE_GROUP
    * is rendered through EEVEE/AOV.
    */
   bool needs_external_bake;
 };
 
-/** The descriptor for \a kind; an unknown kind reads back as Paint. */
-const PaintLayerKindInfo &BKE_paint_layers_kind_info(int kind);
+/** The descriptor for \a source; an unknown source reads back as Image. */
+const PaintLayerKindInfo &BKE_paint_layers_kind_info(int source);
 
 /**
  * Convert a Fill row to Paint, carrying its constant into every channel record first, so a stroke
- * can later give one channel a map while the others stay flat: kind -> Paint, every existing
+ * can later give one channel a map while the others stay flat: source -> Image, every existing
  * record's value set to the row's fill colour.
  *
  * \param r_fill: receives the row's fill colour (scene linear), valid after the call.
@@ -397,11 +396,11 @@ enum class PaintLayerPlace : int8_t {
  * With a null \a anchor the row is appended on top of the top-level list; otherwise it is placed
  * relative to \a anchor by \a place. #PaintLayerPlace::Into requires \a anchor to already be a
  * folder (#BKE_paint_layers_is_folder): the row goes on top of whatever it holds. A non-folder is
- * refused rather than promoted -- a kind is never changed implicitly, and promoting a Paint or Fill
- * layer would make its maps ignored. A UI that drops "into" a plain row groups instead (see
- * #BKE_paint_layers_group). The row is
- * given a fresh #bUUID marker unique within \a ma, and the usual defaults: the \a kind, Mix blend,
- * enabled, full opacity.
+ * refused rather than promoted -- a source is never changed implicitly, and promoting an Image or
+ * Constant layer would make its maps ignored. A UI that drops "into" a plain row groups instead
+ * (see #BKE_paint_layers_group). The row is
+ * given a fresh #bUUID marker unique within \a ma, and the usual defaults: the \a source, Mix
+ * blend, enabled, full opacity.
  *
  * Sets #MA_PAINT_LAYERED on \a ma -- a material that owns a description is a layered material, and
  * the old graph-as-truth path refuses it from then on -- and marks the generated tree stale; see
@@ -411,7 +410,7 @@ enum class PaintLayerPlace : int8_t {
  * other call may place a row under a foreign anchor, so all three places validate it first.
  */
 MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
-                                         eMaterialPaintLayerKind kind,
+                                         eMaterialPaintLayerSource source,
                                          const char *name,
                                          MaterialPaintLayer *anchor,
                                          PaintLayerPlace place);
@@ -428,7 +427,8 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
  * and Height: Base Color, Metallic, Roughness, Specular, Alpha and Emission. Each gets an enabled
  * record with no map: a Fill then shows its fill colour in all of them, a Paint contributes
  * nothing until a stroke gives a channel a map. Existing records are left as they are, so the call
- * is idempotent. Folders, corrections and the bake-backed kinds (Material, Custom) are left alone.
+ * is idempotent. Folders, corrections and the bake-backed sources (Material, NodeGroup) are left
+ * alone.
  */
 void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer);
 
@@ -450,7 +450,7 @@ void BKE_paint_layers_channel_default_value(const Material &ma, int channel, flo
 bool BKE_paint_layers_material_depends_on(const Material &from, const Material &target);
 
 /**
- * Set the source material a #MA_PAINT_LAYER_KIND_MATERIAL \a layer bakes from, maintaining the
+ * Set the source material a #MA_PAINT_LAYER_SOURCE_MATERIAL \a layer bakes from, maintaining the
  * source's user count.
  *
  * Refuses a null source, \a ma itself, and any source that already depends on \a ma (a cycle that
@@ -635,47 +635,57 @@ bool BKE_paint_layers_channel_opacity_set(Material &ma,
                                           float opacity);
 
 /**
- * Change the kind of \a layer between Paint and Fill, converting what the kinds disagree on:
- * Paint keeps its channels as future maps, Fill gives them up for its constant color (a painted
- * map is not a constant), and Fill's color carries into Paint as the starting point of the first
- * stroke's map.
+ * Change the source of \a layer between Image and Constant, converting what the two disagree on:
+ * Image keeps its channels as future maps, Constant gives them up for its constant color (a
+ * painted map is not a constant), and the constant color carries into Image as the starting point
+ * of the first stroke's map.
  *
- * Other kind changes are refused: a custom-group layer is created, not converted, and a correction
- * is born from its parent, not renamed into existence.
+ * Refused for anything else: a Material/NodeGroup/Stack layer is created, not converted, a
+ * custom-group layer likewise, and a correction changes its source through
+ * #BKE_paint_layers_correction_source_set instead, never through this one.
  *
- * \return false when \a layer is null, not part of \a ma, or \a kind is not Paint or Fill.
+ * \return false when \a layer is null, not part of \a ma, not a stack Layer (#PaintLayerRole), or
+ * \a source is not Image or Constant.
  */
-bool BKE_paint_layers_kind_change(Material &ma,
-                                  MaterialPaintLayer *layer,
-                                  eMaterialPaintLayerKind kind);
+bool BKE_paint_layers_source_change(Material &ma, MaterialPaintLayer *layer, int8_t source);
 
 /**
- * Add a correction row under \a owner: a child row of kind Correction carrying \a section and
- * \a effect. \a name may be null, in which case "Correction" is used.
+ * Add a correction row under \a owner: a row carrying \a role (Effect or MaskItem) and \a source
+ * (Image or Constant), linked into the owner's #MaterialPaintLayer::effects or #mask_stack list to
+ * match. \a name may be null, in which case "Correction" is used.
  *
- * \return the new row, or null when \a owner is null or not part of \a ma, or \a section or
- * \a effect is out of range.
+ * \return the new row, or null when \a owner is null or not part of \a ma, or \a role or \a source
+ * is out of range.
  */
 MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     MaterialPaintLayer *owner,
-                                                    int section,
-                                                    int effect,
+                                                    int role,
+                                                    int source,
                                                     const char *name);
 
-/** Set the section (#eMaterialPaintLayerCorrectionSection) of a correction row. */
-bool BKE_paint_layers_correction_set_section(Material &ma,
-                                             MaterialPaintLayer *correction,
-                                             int section);
-
-/** Set the effect (#eMaterialPaintLayerCorrectionEffect) of a correction row. */
-bool BKE_paint_layers_correction_set_effect(Material &ma,
-                                            MaterialPaintLayer *correction,
-                                            int effect);
+/**
+ * Set the role (#PaintLayerRole, Effect or MaskItem) of \a correction, moving it between its
+ * owner's #MaterialPaintLayer::effects and #mask_stack lists to match.
+ *
+ * \return false when \a correction is null, is not itself a correction (a stack Layer has no role
+ * to set), has no owner in \a ma, or \a role is not Effect or MaskItem -- in particular, Layer is
+ * always refused: a correction never becomes a stack row through this function.
+ */
+bool BKE_paint_layers_role_set(Material &ma, MaterialPaintLayer *correction, int role);
 
 /**
- * Debug check that the split lists agree with their rows' sections: every row of
- * #MaterialPaintLayer::effects carries #MA_PAINT_LAYER_SECTION_CONTENT and every row of
- * #MaterialPaintLayer::mask_stack carries #MA_PAINT_LAYER_SECTION_MASK. The body is `BLI_assert`
+ * Set the source (Image or Constant) of \a correction; the correction-scoped counterpart of
+ * #BKE_paint_layers_source_change, restricted to a row that is not a stack Layer.
+ *
+ * \return false when \a correction is null, is a stack Layer, has no owner in \a ma, or \a source
+ * is not Image or Constant.
+ */
+bool BKE_paint_layers_correction_source_set(Material &ma, MaterialPaintLayer *correction, int source);
+
+/**
+ * Debug check that the split lists agree with their rows' roles: every row of
+ * #MaterialPaintLayer::effects has #PaintLayerRole::Effect and every row of
+ * #MaterialPaintLayer::mask_stack has #PaintLayerRole::MaskItem. The body is `BLI_assert`
  * only, so it is a no-op in a release build; the generator calls it once per build to catch a
  * storage bug early.
  */
@@ -1025,9 +1035,9 @@ bool BKE_paint_layers_bake_substitute(const Material &ma,
  * A Custom group has no CPU expression at all, so a render without a GPU context -- or one that
  * started before the first bake landed -- has nothing live to fall back on. When maps exist from an
  * earlier bake they are still shown, flagged stale through \a r_stale, rather than dropping the row
- * to black; when no maps exist the row is skipped (the result below passes through). Only Custom is
- * covered: every other kind has a live subtree the strict #BKE_paint_layers_bake_substitute leaves in
- * place.
+ * to black; when no maps exist the row is skipped (the result below passes through). Only NodeGroup
+ * is covered: every other source has a live subtree the strict #BKE_paint_layers_bake_substitute
+ * leaves in place.
  *
  * \return true and sets \a r_image when a color map and a coverage map exist for \a channel.
  */
@@ -1165,9 +1175,10 @@ void BKE_paint_layers_custom_bake_apply(Main &bmain,
  * Hash of the subtree and parameters \a layer's bake depends on, the validity key. Two 32-bit
  * words, low first.
  *
- * Structure and parameters only -- kind, blend, flags, opacity, fill colour, channel/mask maps by
- * `session_uid`, mask value, effects, mask items, children order, the source material, a Custom
- * group, its IDProperty inputs, and the bake size. Pixel edits are not visible here; they arrive
+ * Structure and parameters only -- source, role, blend, flags, opacity, fill colour, channel/mask
+ * maps by `session_uid`, mask value, effects, mask items, children order, the source material, a
+ * Custom group, its IDProperty inputs, and the bake size. Pixel edits are not visible here; they
+ * arrive
  * through the partial-update subscription and settle as a re-bake of the changed rectangle.
  */
 void BKE_paint_layers_bake_hash(const MaterialPaintLayer &layer, uint32_t r_hash[2]);

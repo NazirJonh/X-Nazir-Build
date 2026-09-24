@@ -783,7 +783,7 @@ class PaintLayersCompositeTest : public bke::BlenderGTestBase {
   MaterialPaintLayer *add_paint_layer(const char *name, Image *image)
   {
     MaterialPaintLayer *layer = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_PAINT, name, nullptr, PaintLayerPlace::Above);
+        *ma, MA_PAINT_LAYER_SOURCE_IMAGE, name, nullptr, PaintLayerPlace::Above);
     EXPECT_NE(layer, nullptr);
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
         *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
@@ -808,7 +808,7 @@ class PaintLayersCompositeTest : public bke::BlenderGTestBase {
     EXPECT_TRUE(BKE_paint_layers_channel_add(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
     EXPECT_TRUE(BKE_paint_layers_channel_set_image(
         *ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, image));
-    BKE_paint_layers_correction_set_effect(*ma, item, MA_PAINT_LAYER_EFFECT_PAINT);
+    BKE_paint_layers_correction_source_set(*ma, item, MA_PAINT_LAYER_SOURCE_IMAGE);
     EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, item, enabled));
     return item;
   }
@@ -819,7 +819,7 @@ class PaintLayersCompositeTest : public bke::BlenderGTestBase {
                                              const float opacity)
   {
     MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-        *ma, &owner, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, name);
+        *ma, &owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, name);
     EXPECT_NE(correction, nullptr);
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
         *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
@@ -836,7 +836,7 @@ class PaintLayersCompositeTest : public bke::BlenderGTestBase {
                                           const float opacity)
   {
     MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-        *ma, &owner, MA_PAINT_LAYER_SECTION_MASK, MA_PAINT_LAYER_EFFECT_PAINT, name);
+        *ma, &owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, name);
     EXPECT_NE(correction, nullptr);
     /* A mask item is itself the row: its map lives in its Base-Color channel record. */
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
@@ -851,7 +851,7 @@ class PaintLayersCompositeTest : public bke::BlenderGTestBase {
   MaterialPaintLayer *add_fill_layer(const char *name, const float color[4])
   {
     MaterialPaintLayer *layer = BKE_paint_layers_add(
-        *ma, MA_PAINT_LAYER_KIND_FILL, name, nullptr, PaintLayerPlace::Above);
+        *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, name, nullptr, PaintLayerPlace::Above);
     EXPECT_NE(layer, nullptr);
     copy_v4_v4(layer->fill_color, color);
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
@@ -1025,7 +1025,7 @@ TEST_F(PaintLayersCompositeTest, fill_effect_correction_replaces_the_row_colour)
   MaterialPaintLayer *bottom = add_paint_layer(
       "Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, bottom, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_FILL, "C");
+      *ma, bottom, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "C");
   ASSERT_NE(correction, nullptr);
   const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
   ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, correction, green));

@@ -2279,7 +2279,7 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
   for (const MaterialPaintLayer *layer_const : layers) {
     /* The row the user is editing inside is left live: re-baking it on every source edit would
      * fight the edit. The bake catches up on a later update, once another row becomes active. */
-    if (layer_const->kind != MA_PAINT_LAYER_KIND_MATERIAL || layer_const->material == nullptr ||
+    if (layer_const->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer_const->material == nullptr ||
         layer_const->bake == nullptr || layer_const->bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
         BKE_paint_layers_bake_is_valid(ma, *layer_const) ||
         BKE_paint_layers_bake_row_is_deferred(ma, *layer_const) ||
@@ -2723,7 +2723,7 @@ bool custom_bake_apply(Main &bmain, CustomBakeJob &job)
     return false;
   }
   MaterialPaintLayer *row = BKE_paint_layers_find(*ma, job.marker);
-  if (row == nullptr || row->kind != MA_PAINT_LAYER_KIND_CUSTOM || row->bake == nullptr) {
+  if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_NODE_GROUP || row->bake == nullptr) {
     return false;
   }
   uint32_t hash[2];
@@ -2789,7 +2789,7 @@ void material_bake_custom_rows_ensure(Main &bmain, Material &ma)
   Vector<const MaterialPaintLayer *> layers;
   BKE_paint_layers_flatten(ma, layers);
   for (const MaterialPaintLayer *layer_const : layers) {
-    if (layer_const->kind != MA_PAINT_LAYER_KIND_CUSTOM ||
+    if (layer_const->source != MA_PAINT_LAYER_SOURCE_NODE_GROUP ||
         layer_const->custom_group == nullptr || layer_const->bake == nullptr ||
         layer_const->bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
         BKE_paint_layers_bake_is_valid(ma, *layer_const))

@@ -588,11 +588,11 @@ static void rna_Material_paint_layers_active_set(PointerRNA *ptr,
 }
 
 static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
-                                                         int kind,
+                                                         int source,
                                                          const char *name)
 {
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, eMaterialPaintLayerKind(kind), name, nullptr, PaintLayerPlace::Above);
+      *ma, eMaterialPaintLayerSource(source), name, nullptr, PaintLayerPlace::Above);
   if (layer != nullptr) {
     /* The default channel set a freshly authored Paint or Fill row takes part in. */
     BKE_paint_layers_default_channels_apply(*ma, *layer);
@@ -872,31 +872,55 @@ static void rna_MaterialPaintLayer_material_set(PointerRNA *ptr,
   }
 }
 
-static int rna_MaterialPaintLayer_section_get(PointerRNA *ptr)
+static int rna_MaterialPaintLayer_source_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
-  return layer->section;
+  return layer->source;
 }
 
-static void rna_MaterialPaintLayer_section_set(PointerRNA *ptr, int value)
+/*
+ * A stack Layer's source is changed by conversion, through #MaterialPaintLayer.source_change(),
+ * which #BKE_paint_layers_source_change restricts to Image/Constant and to a Layer row -- never by
+ * assigning this property. A correction's source, on the other hand, has always been a plain
+ * assignment (the old `effect` property); #BKE_paint_layers_correction_source_set keeps that
+ * shape. #rna_MaterialPaintLayer_source_editable reports the property as editable for a
+ * correction only, so a Layer row's own widget greys out instead of silently doing nothing; the
+ * setter still defers the actual restriction to the BKE call, which is what a script that bypasses
+ * `RNA_property_editable()` actually runs into.
+ */
+static int rna_MaterialPaintLayer_source_editable(const PointerRNA *ptr, const char **r_info)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer) {
+    if (r_info) {
+      *r_info = N_(
+          "A stack layer's source is changed by conversion, through source_change(), not by "
+          "assignment");
+    }
+    return 0;
+  }
+  return PROP_EDITABLE;
+}
+
+static void rna_MaterialPaintLayer_source_set(PointerRNA *ptr, int value)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
-    BKE_paint_layers_correction_set_section(*ma, layer, value);
+    BKE_paint_layers_correction_source_set(*ma, layer, value);
   }
 }
 
-static int rna_MaterialPaintLayer_effect_get(PointerRNA *ptr)
+static int rna_MaterialPaintLayer_role_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
-  return layer->effect;
+  return layer->role;
 }
 
-static void rna_MaterialPaintLayer_effect_set(PointerRNA *ptr, int value)
+static void rna_MaterialPaintLayer_role_set(PointerRNA *ptr, int value)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
-    BKE_paint_layers_correction_set_effect(*ma, layer, value);
+    BKE_paint_layers_role_set(*ma, layer, value);
   }
 }
 
@@ -904,14 +928,14 @@ static Material *rna_MaterialPaintLayer_owner(PointerRNA ptr, MaterialPaintLayer
 
 static MaterialPaintLayer *rna_MaterialPaintLayer_correction_add(PointerRNA ptr,
                                                                  ReportList *reports,
-                                                                 int section,
-                                                                 int effect,
+                                                                 int role,
+                                                                 int source,
                                                                  const char *name)
 {
   MaterialPaintLayer *layer = nullptr;
   if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
     MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-        *ma, layer, section, effect, name);
+        *ma, layer, role, source, name);
     if (correction != nullptr) {
       WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
       return correction;
@@ -1456,16 +1480,16 @@ static int rna_MaterialPaintLayer_channels_length(PointerRNA *ptr)
   return layer->channels_num;
 }
 
-static void rna_MaterialPaintLayer_kind_change(PointerRNA ptr, ReportList *reports, int kind)
+static void rna_MaterialPaintLayer_source_change(PointerRNA ptr, ReportList *reports, int source)
 {
   MaterialPaintLayer *layer = nullptr;
   if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
-    if (BKE_paint_layers_kind_change(*ma, layer, eMaterialPaintLayerKind(kind))) {
+    if (BKE_paint_layers_source_change(*ma, layer, int8_t(source))) {
       WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
       return;
     }
   }
-  BKE_report(reports, RPT_ERROR, "Cannot convert this paint layer to the given kind");
+  BKE_report(reports, RPT_ERROR, "Cannot convert this paint layer to the given source");
 }
 
 /* The IDProperty group of the layer, exposed as a PropertyGroup like the nodes modifier does. */
@@ -1543,21 +1567,20 @@ static std::optional<std::string> rna_MaterialPaintLayerChannelSettings_path(con
 
 namespace blender {
 
-static const EnumPropertyItem rna_enum_material_paint_layer_kind_items[] = {
-    {MA_PAINT_LAYER_KIND_PAINT, "PAINT", 0, "Paint", "A painted layer"},
-    {MA_PAINT_LAYER_KIND_FILL, "FILL", 0, "Fill", "A flat fill layer"},
-    {MA_PAINT_LAYER_KIND_MATERIAL,
+static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
+    {MA_PAINT_LAYER_SOURCE_IMAGE, "IMAGE", 0, "Image", "A painted map"},
+    {MA_PAINT_LAYER_SOURCE_CONSTANT, "CONSTANT", 0, "Constant", "A flat colour"},
+    {MA_PAINT_LAYER_SOURCE_MATERIAL,
      "MATERIAL",
      0,
      "Material",
-     "A layer baked from another material"},
-    {MA_PAINT_LAYER_KIND_CORRECTION, "CORRECTION", 0, "Correction", "A correction layer"},
-    {MA_PAINT_LAYER_KIND_FOLDER, "FOLDER", 0, "Folder", "A folder grouping other layers"},
-    {MA_PAINT_LAYER_KIND_CUSTOM,
-     "CUSTOM",
+     "Another material's channels, baked"},
+    {MA_PAINT_LAYER_SOURCE_NODE_GROUP,
+     "NODE_GROUP",
      0,
-     "Custom",
-     "A custom material layer backed by a node group"},
+     "Node Group",
+     "A user's node group"},
+    {MA_PAINT_LAYER_SOURCE_STACK, "STACK", 0, "Stack", "A nested stack of layers (a folder)"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1659,16 +1682,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_issue_code_items[] =
     {0, nullptr, 0, nullptr, nullptr},
 };
 
-/* Values match #eMaterialPaintLayerCorrectionSection / #...Effect. */
-static const EnumPropertyItem rna_enum_material_paint_layer_section_items[] = {
-    {0, "CONTENT", 0, "Content", "Adjusts what the row below paints"},
-    {1, "MASK", 0, "Mask", "Limits where the row applies"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
-static const EnumPropertyItem rna_enum_material_paint_layer_effect_items[] = {
-    {0, "PAINT", 0, "Paint", "Painted with a brush"},
-    {1, "FILL", 0, "Fill", "A flat colour, not painted with a brush"},
+/* Values match #eMaterialPaintLayerRole. */
+static const EnumPropertyItem rna_enum_material_paint_layer_role_items[] = {
+    {MA_PAINT_LAYER_ROLE_LAYER, "LAYER", 0, "Layer", "A stack member"},
+    {MA_PAINT_LAYER_ROLE_EFFECT, "EFFECT", 0, "Effect", "Adjusts what the row below paints"},
+    {MA_PAINT_LAYER_ROLE_MASK_ITEM, "MASK_ITEM", 0, "Mask Item", "Limits where the row applies"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1730,12 +1748,18 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Marker", "Stable identity of the paint layer");
 
-  /* Read-only: a kind change is a conversion, done through kind_change() rather than a write. */
-  prop = RNA_def_property(srna, "kind", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "kind");
-  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_kind_items);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Kind", "Kind of the paint layer");
+  /* A stack Layer's source is changed by conversion, through source_change(), never by assigning
+   * this property -- #rna_MaterialPaintLayer_source_editable reports it as not editable for that
+   * case, so a UI widget greys out rather than doing nothing. A correction's source is a plain,
+   * always-editable setting (the old `effect` property); #rna_MaterialPaintLayer_source_set
+   * defers the actual restriction to BKE either way. */
+  prop = RNA_def_property(srna, "source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_source_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintLayer_source_get", "rna_MaterialPaintLayer_source_set", nullptr);
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_source_editable");
+  RNA_def_property_ui_text(prop, "Source", "What the layer reads its values from");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_blend_items);
@@ -1765,19 +1789,13 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Color Tag", "Display color tag, interpreted by the UI only");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
-  /* Meaningful for a Correction row only; harmless to read on any row. */
-  prop = RNA_def_property(srna, "section", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_section_items);
+  /* Meaningful for a correction row only; harmless to read on a stack Layer, which is always
+   * #MA_PAINT_LAYER_ROLE_LAYER. Setting it to Layer is refused by #BKE_paint_layers_role_set. */
+  prop = RNA_def_property(srna, "role", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_role_items);
   RNA_def_property_enum_funcs(
-      prop, "rna_MaterialPaintLayer_section_get", "rna_MaterialPaintLayer_section_set", nullptr);
-  RNA_def_property_ui_text(prop, "Section", "Which part of the parent a correction adjusts");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "effect", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_effect_items);
-  RNA_def_property_enum_funcs(
-      prop, "rna_MaterialPaintLayer_effect_get", "rna_MaterialPaintLayer_effect_set", nullptr);
-  RNA_def_property_ui_text(prop, "Effect", "What a correction applies");
+      prop, "rna_MaterialPaintLayer_role_get", "rna_MaterialPaintLayer_role_set", nullptr);
+  RNA_def_property_ui_text(prop, "Role", "The row's structural place in its owner");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "fill_color", PROP_FLOAT, PROP_COLOR);
@@ -1795,7 +1813,7 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_pointer_funcs(
       prop, nullptr, "rna_MaterialPaintLayer_custom_group_set", nullptr, nullptr);
   RNA_def_property_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Custom Group", "Node group backing a Custom kind layer");
+  RNA_def_property_ui_text(prop, "Custom Group", "Node group backing a Node Group source layer");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
@@ -1967,32 +1985,32 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_function_ui_description(func, "Drop the row's baked cache");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA);
 
-  func = RNA_def_function(srna, "kind_change", "rna_MaterialPaintLayer_kind_change");
+  func = RNA_def_function(srna, "source_change", "rna_MaterialPaintLayer_source_change");
   RNA_def_function_ui_description(
-      func, "Convert the layer between Paint and Fill, converting what the kinds disagree on");
+      func, "Convert the layer between Image and Constant, converting what the two disagree on");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
   parm = RNA_def_enum(func,
-                      "kind",
-                      rna_enum_material_paint_layer_kind_items,
-                      MA_PAINT_LAYER_KIND_PAINT,
-                      "Kind",
-                      "The kind to convert to");
+                      "source",
+                      rna_enum_material_paint_layer_source_items,
+                      MA_PAINT_LAYER_SOURCE_IMAGE,
+                      "Source",
+                      "The source to convert to");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
 
   func = RNA_def_function(srna, "correction_add", "rna_MaterialPaintLayer_correction_add");
   RNA_def_function_ui_description(func, "Add a correction row under this paint layer");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
   parm = RNA_def_enum(func,
-                      "section",
-                      rna_enum_material_paint_layer_section_items,
-                      0,
-                      "Section",
+                      "role",
+                      rna_enum_material_paint_layer_role_items,
+                      MA_PAINT_LAYER_ROLE_EFFECT,
+                      "Role",
                       "Which part of the parent the correction adjusts");
   parm = RNA_def_enum(func,
-                      "effect",
-                      rna_enum_material_paint_layer_effect_items,
-                      0,
-                      "Effect",
+                      "source",
+                      rna_enum_material_paint_layer_source_items,
+                      MA_PAINT_LAYER_SOURCE_IMAGE,
+                      "Source",
                       "What the correction applies");
   RNA_def_string(
       func, "name", "Correction", MAX_NAME, "Name", "Name of the new correction");
@@ -2214,11 +2232,11 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
   func = RNA_def_function(srna, "new", "rna_Material_paint_layers_new");
   RNA_def_function_ui_description(func, "Add a paint layer on top of the stack");
   parm = RNA_def_enum(func,
-                      "kind",
-                      rna_enum_material_paint_layer_kind_items,
-                      MA_PAINT_LAYER_KIND_PAINT,
-                      "Kind",
-                      "Kind of the new layer");
+                      "source",
+                      rna_enum_material_paint_layer_source_items,
+                      MA_PAINT_LAYER_SOURCE_IMAGE,
+                      "Source",
+                      "Source of the new layer");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   RNA_def_string(func, "name", "Layer", MAX_NAME, "Name", "Name of the new layer");
   parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "", "The newly created paint layer");

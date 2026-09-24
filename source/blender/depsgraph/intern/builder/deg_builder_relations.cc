@@ -3261,7 +3261,7 @@ void DepsgraphRelationBuilder::build_material(Material *material, ID *owner)
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten(*material, layers);
     for (const MaterialPaintLayer *layer : layers) {
-      if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL || layer->material == nullptr ||
+      if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material == nullptr ||
           layer->material == material)
       {
         continue;

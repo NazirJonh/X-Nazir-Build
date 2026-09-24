@@ -22,6 +22,8 @@
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_report.hh"
 
+#include "paint_layers_intern.hh"
+
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
@@ -70,7 +72,8 @@ class PaintLayersDescription : public bke::BlenderGTestBase {
     MaterialPaintLayer *layer = MEM_new<MaterialPaintLayer>(__func__);
     STRNCPY(layer->name, name);
     layer->marker = BLI_uuid_generate_random();
-    layer->kind = MA_PAINT_LAYER_KIND_PAINT;
+    layer->source = MA_PAINT_LAYER_SOURCE_IMAGE;
+    layer->role = MA_PAINT_LAYER_ROLE_LAYER;
     layer->blend = MA_PAINT_LAYER_BLEND_MIX;
     layer->flag = MA_PAINT_LAYER_ENABLED;
     layer->opacity = 1.0f;
@@ -83,12 +86,13 @@ class PaintLayersDescription : public bke::BlenderGTestBase {
     MaterialPaintLayer *child = MEM_new<MaterialPaintLayer>(__func__);
     STRNCPY(child->name, name);
     child->marker = BLI_uuid_generate_random();
-    child->kind = MA_PAINT_LAYER_KIND_PAINT;
+    child->source = MA_PAINT_LAYER_SOURCE_IMAGE;
+    child->role = MA_PAINT_LAYER_ROLE_LAYER;
     child->blend = MA_PAINT_LAYER_BLEND_MIX;
     child->flag = MA_PAINT_LAYER_ENABLED;
     child->opacity = 1.0f;
     /* A parent that holds a child is a folder, so the fixture matches the invariants. */
-    parent.kind = MA_PAINT_LAYER_KIND_FOLDER;
+    parent.source = MA_PAINT_LAYER_SOURCE_STACK;
     BLI_addtail(&parent.children, child);
     return child;
   }
@@ -108,8 +112,8 @@ class PaintLayersDescription : public bke::BlenderGTestBase {
     MaterialPaintLayer *correction = MEM_new<MaterialPaintLayer>(__func__);
     STRNCPY(correction->name, name);
     correction->marker = BLI_uuid_generate_random();
-    correction->kind = MA_PAINT_LAYER_KIND_CORRECTION;
-    correction->section = MA_PAINT_LAYER_SECTION_CONTENT;
+    correction->source = MA_PAINT_LAYER_SOURCE_IMAGE;
+    correction->role = MA_PAINT_LAYER_ROLE_EFFECT;
     BLI_addtail(&parent.effects, correction);
     return correction;
   }
@@ -119,8 +123,8 @@ class PaintLayersDescription : public bke::BlenderGTestBase {
     MaterialPaintLayer *correction = MEM_new<MaterialPaintLayer>(__func__);
     STRNCPY(correction->name, name);
     correction->marker = BLI_uuid_generate_random();
-    correction->kind = MA_PAINT_LAYER_KIND_CORRECTION;
-    correction->section = MA_PAINT_LAYER_SECTION_MASK;
+    correction->source = MA_PAINT_LAYER_SOURCE_IMAGE;
+    correction->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
     BLI_addtail(&parent.mask_stack, correction);
     return correction;
   }
@@ -446,15 +450,15 @@ TEST_F(PaintLayersDescription, add_appends_and_assigns_unique_marker)
   ma->paint_layers_flag = {};
 
   MaterialPaintLayer *first = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "First", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "First", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(first, nullptr);
   EXPECT_STREQ(first->name, "First");
-  EXPECT_EQ(first->kind, MA_PAINT_LAYER_KIND_PAINT);
+  EXPECT_EQ(first->source, MA_PAINT_LAYER_SOURCE_IMAGE);
   EXPECT_FALSE(BLI_uuid_is_nil(first->marker));
   EXPECT_EQ(paint_layers_first(*ma), first);
 
   MaterialPaintLayer *second = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Second", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Second", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(second, nullptr);
   EXPECT_STREQ(second->name, "Second");
   /* A fresh marker, distinct from the first row. */
@@ -475,11 +479,11 @@ TEST_F(PaintLayersDescription, remove_frees_and_clears_active_when_needed)
 {
   Material *ma = BKE_material_add(bmain, "RemoveMat");
   MaterialPaintLayer *first = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "First", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "First", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *second = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Second", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Second", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", second, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", second, PaintLayerPlace::Into);
   const bUUID first_marker = first->marker;
   const bUUID second_marker = second->marker;
   const bUUID child_marker = child->marker;
@@ -502,7 +506,7 @@ TEST_F(PaintLayersDescription, remove_frees_and_clears_active_when_needed)
   /* Removing a row that is not active leaves the active marker alone. */
   BKE_paint_layers_active_set(*ma, first_marker);
   MaterialPaintLayer *other = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Other", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Other", nullptr, PaintLayerPlace::Above);
   EXPECT_TRUE(BKE_paint_layers_remove(*ma, other));
   EXPECT_TRUE(BLI_uuid_equal(BKE_paint_layers_active_get(*ma), first_marker));
 }
@@ -511,11 +515,11 @@ TEST_F(PaintLayersDescription, find_resolves_by_marker_never_by_position)
 {
   Material *ma = BKE_material_add(bmain, "FindMat");
   MaterialPaintLayer *top = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Top", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Top", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", top, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", top, PaintLayerPlace::Into);
   MaterialPaintLayer *above = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Above", top, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Above", top, PaintLayerPlace::Above);
   MaterialPaintLayer *correction = paint_layer_add_correction(*top, "Correction");
 
   /* A marker resolves to the exact row, wherever it sits: nested, a sibling, a correction. */
@@ -533,9 +537,9 @@ TEST_F(PaintLayersDescription, duplicate_markers_resolve_deterministically_and_a
 {
   Material *ma = BKE_material_add(bmain, "DuplicateMarkerMat");
   MaterialPaintLayer *top = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Top", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Top", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", top, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", top, PaintLayerPlace::Into);
   MaterialPaintLayer *correction = paint_layer_add_correction(*top, "Correction");
 
   /* Force the pathological state the uniqueness guarantee exists to avoid: one marker on a
@@ -555,7 +559,7 @@ TEST_F(PaintLayersDescription, duplicate_markers_resolve_deterministically_and_a
   ASSERT_EQ(markers.size(), 3);
 
   MaterialPaintLayer *added = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Added", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Added", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(added, nullptr);
   for (const bUUID &marker : markers) {
     EXPECT_FALSE(BLI_uuid_equal(marker, added->marker));
@@ -567,17 +571,17 @@ TEST_F(PaintLayersDescription, add_rejects_foreign_anchor)
   Material *owner = BKE_material_add(bmain, "AnchorOwnerMat");
   Material *foreign = BKE_material_add(bmain, "AnchorForeignMat");
   MaterialPaintLayer *top = BKE_paint_layers_add(
-      *owner, MA_PAINT_LAYER_KIND_PAINT, "Top", nullptr, PaintLayerPlace::Above);
+      *owner, MA_PAINT_LAYER_SOURCE_IMAGE, "Top", nullptr, PaintLayerPlace::Above);
 
   /* A row may never be linked under, above or below a row of another material. */
   EXPECT_EQ(BKE_paint_layers_add(
-                *foreign, MA_PAINT_LAYER_KIND_PAINT, "Above", top, PaintLayerPlace::Above),
+                *foreign, MA_PAINT_LAYER_SOURCE_IMAGE, "Above", top, PaintLayerPlace::Above),
             nullptr);
   EXPECT_EQ(BKE_paint_layers_add(
-                *foreign, MA_PAINT_LAYER_KIND_PAINT, "Below", top, PaintLayerPlace::Below),
+                *foreign, MA_PAINT_LAYER_SOURCE_IMAGE, "Below", top, PaintLayerPlace::Below),
             nullptr);
   EXPECT_EQ(BKE_paint_layers_add(
-                *foreign, MA_PAINT_LAYER_KIND_PAINT, "Into", top, PaintLayerPlace::Into),
+                *foreign, MA_PAINT_LAYER_SOURCE_IMAGE, "Into", top, PaintLayerPlace::Into),
             nullptr);
   EXPECT_TRUE(BLI_listbase_is_empty(&foreign->paint_layers));
   EXPECT_EQ(top->children.first, nullptr);
@@ -591,13 +595,13 @@ TEST_F(PaintLayersDescription, move_relocates_subtree_and_refuses_own_subtree)
 {
   Material *ma = BKE_material_add(bmain, "MoveMat");
   MaterialPaintLayer *bottom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *middle = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Middle", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Middle", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *top = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Top", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Top", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", middle, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", middle, PaintLayerPlace::Into);
   BKE_paint_layers_active_set(*ma, child->marker);
 
   /* Below the bottom row: the whole subtree travels, markers untouched. */
@@ -621,7 +625,7 @@ TEST_F(PaintLayersDescription, move_relocates_subtree_and_refuses_own_subtree)
   /* A foreign anchor is refused, like in add(). */
   Material *other = BKE_material_add(bmain, "MoveOtherMat");
   MaterialPaintLayer *foreign = BKE_paint_layers_add(
-      *other, MA_PAINT_LAYER_KIND_PAINT, "Foreign", nullptr, PaintLayerPlace::Above);
+      *other, MA_PAINT_LAYER_SOURCE_IMAGE, "Foreign", nullptr, PaintLayerPlace::Above);
   EXPECT_FALSE(BKE_paint_layers_move(*ma, middle, foreign, PaintLayerPlace::Above));
 }
 
@@ -629,13 +633,13 @@ TEST_F(PaintLayersDescription, reorder_moves_row_within_its_own_list_only)
 {
   Material *ma = BKE_material_add(bmain, "ReorderMat");
   MaterialPaintLayer *a = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "A", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "A", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *b = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "B", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "B", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *c = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "C", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "C", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", b, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", b, PaintLayerPlace::Into);
 
   /* Bottom-to-top: index 0 is the bottom row. The index is clamped to the list. */
   EXPECT_TRUE(BKE_paint_layers_reorder(*ma, a, 99));
@@ -650,7 +654,7 @@ TEST_F(PaintLayersDescription, reorder_moves_row_within_its_own_list_only)
 
   /* Reordering a nested row keeps its parent; index 0 is the first slot among siblings. */
   MaterialPaintLayer *child2 = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child2", b, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child2", b, PaintLayerPlace::Into);
   EXPECT_TRUE(BKE_paint_layers_reorder(*ma, child2, 0));
   EXPECT_EQ(static_cast<MaterialPaintLayer *>(b->children.first), child2);
   EXPECT_EQ(child2->next, child);
@@ -663,11 +667,11 @@ TEST_F(PaintLayersDescription, group_folds_rows_into_folder_and_ungroup_lifts_th
 {
   Material *ma = BKE_material_add(bmain, "GroupMat");
   MaterialPaintLayer *a = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "A", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "A", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *b = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "B", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "B", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *c = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "C", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "C", nullptr, PaintLayerPlace::Above);
   BKE_paint_layers_active_set(*ma, b->marker);
 
   MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, {a, b});
@@ -682,7 +686,7 @@ TEST_F(PaintLayersDescription, group_folds_rows_into_folder_and_ungroup_lifts_th
 
   /* A folder is addressed like any row: Into puts a row inside it. */
   MaterialPaintLayer *inner = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Inner", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Inner", folder, PaintLayerPlace::Into);
   EXPECT_EQ(inner->prev, b);
 
   /* Ungrouping lifts the children into the folder's slot and frees the folder. */
@@ -702,7 +706,7 @@ TEST_F(PaintLayersDescription, group_folds_rows_into_folder_and_ungroup_lifts_th
   EXPECT_TRUE(BKE_paint_layers_ungroup(*ma, mix_folder));
   Material *other = BKE_material_add(bmain, "GroupOtherMat");
   MaterialPaintLayer *foreign = BKE_paint_layers_add(
-      *other, MA_PAINT_LAYER_KIND_PAINT, "Foreign", nullptr, PaintLayerPlace::Above);
+      *other, MA_PAINT_LAYER_SOURCE_IMAGE, "Foreign", nullptr, PaintLayerPlace::Above);
   EXPECT_EQ(BKE_paint_layers_group(*ma, {a, foreign}), nullptr);
   EXPECT_FALSE(BKE_paint_layers_ungroup(*ma, nullptr));
 
@@ -723,9 +727,9 @@ TEST_F(PaintLayersDescription, duplicate_copies_branch_with_fresh_markers_and_im
 
   /* A folder with one Custom child: the child carries the data a deep copy has to handle. */
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_CUSTOM, "Layer", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "Layer", folder, PaintLayerPlace::Into);
   ASSERT_NE(layer, nullptr);
   MaterialPaintLayerChannel *channel = BKE_paint_layers_channel_add(
       *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
@@ -789,7 +793,7 @@ TEST_F(PaintLayersDescription, mask_add_inserts_a_base_item_and_toggles)
 {
   Material *ma = BKE_material_add(bmain, "MaskMat");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
 
   ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
   MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 0.75f);
@@ -824,7 +828,7 @@ TEST_F(PaintLayersDescription, fill_channel_value_is_value_only)
 {
   Material *ma = BKE_material_add(bmain, "FillValue");
   MaterialPaintLayer *fill = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FILL, "F", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(fill, nullptr);
   BKE_paint_layers_default_channels_apply(*ma, *fill);
   ma->paint_layers_flag = {};
@@ -852,7 +856,7 @@ TEST_F(PaintLayersDescription, authored_default_channels_set)
   Material *ma = BKE_material_add(bmain, "AuthoredChannels");
 
   MaterialPaintLayer *paint = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Paint", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Paint", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(paint, nullptr);
   BKE_paint_layers_default_channels_apply(*ma, *paint);
   ASSERT_EQ(paint->channels_num, 3);
@@ -877,7 +881,7 @@ TEST_F(PaintLayersDescription, authored_default_channels_set)
 
   /* A folder and a correction carry no participation of their own. */
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   BKE_paint_layers_default_channels_apply(*ma, *folder);
   EXPECT_EQ(folder->channels_num, 0);
   MaterialPaintLayer *correction = paint_layer_add_correction(*paint, "Correction");
@@ -891,7 +895,7 @@ TEST_F(PaintLayersDescription, material_layer_source_is_validated)
   Material *source = BKE_material_add(bmain, "MaterialSource");
   Material *other = BKE_material_add(bmain, "MaterialOther");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "M", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "M", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
 
   /* Setting the source keeps its user count. */
@@ -921,7 +925,7 @@ TEST_F(PaintLayersDescription, material_layer_source_is_validated)
 
   /* A row that is not a Material layer refuses the setter. */
   MaterialPaintLayer *paint = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Paint", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Paint", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(paint, nullptr);
   EXPECT_FALSE(BKE_paint_layers_set_material(*ma, paint, source));
   EXPECT_EQ(paint->material, nullptr);
@@ -930,7 +934,7 @@ TEST_F(PaintLayersDescription, material_layer_source_is_validated)
    * back at the first source, so the reverse dependency exists. */
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, layer, source));
   MaterialPaintLayer *back = BKE_paint_layers_add(
-      *source, MA_PAINT_LAYER_KIND_MATERIAL, "Back", nullptr, PaintLayerPlace::Above);
+      *source, MA_PAINT_LAYER_SOURCE_MATERIAL, "Back", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(back, nullptr);
   EXPECT_FALSE(BKE_paint_layers_set_material(*source, back, ma));
   EXPECT_EQ(back->material, nullptr);
@@ -942,7 +946,7 @@ TEST_F(PaintLayersDescription, channel_add_remove_and_set_enabled)
 {
   Material *ma = BKE_material_add(bmain, "ChannelMat");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   EXPECT_EQ(layer->channels_num, 0);
 
   MaterialPaintLayerChannel *base = BKE_paint_layers_channel_add(
@@ -981,11 +985,11 @@ TEST_F(PaintLayersDescription, channel_add_remove_and_set_enabled)
   EXPECT_EQ(layer->channels, nullptr);
 }
 
-TEST_F(PaintLayersDescription, kind_change_converts_between_paint_and_fill)
+TEST_F(PaintLayersDescription, source_change_converts_between_image_and_constant)
 {
   Material *ma = BKE_material_add(bmain, "KindMat");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
       *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   ASSERT_EQ(layer->channels_num, 1);
@@ -1005,8 +1009,8 @@ TEST_F(PaintLayersDescription, kind_change_converts_between_paint_and_fill)
   layer->fill_color[1] = 0.2f;
   layer->fill_color[2] = 0.3f;
   layer->fill_color[3] = 0.0f;
-  EXPECT_TRUE(BKE_paint_layers_kind_change(*ma, layer, MA_PAINT_LAYER_KIND_FILL));
-  EXPECT_EQ(layer->kind, MA_PAINT_LAYER_KIND_FILL);
+  EXPECT_TRUE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
   ASSERT_EQ(layer->channels_num, 1);
   EXPECT_EQ(layer->channels[0].image, nullptr);
   EXPECT_EQ(layer->channels[0].state, MA_PAINT_LAYER_CHANNEL_ENABLED);
@@ -1019,26 +1023,33 @@ TEST_F(PaintLayersDescription, kind_change_converts_between_paint_and_fill)
 
   /* Fill to Paint: the color resets to a clean starting point for the first stroke; the record and
    * its overrides stay. */
-  EXPECT_TRUE(BKE_paint_layers_kind_change(*ma, layer, MA_PAINT_LAYER_KIND_PAINT));
-  EXPECT_EQ(layer->kind, MA_PAINT_LAYER_KIND_PAINT);
+  EXPECT_TRUE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE));
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE);
   EXPECT_FLOAT_EQ(layer->fill_color[0], 0.0f);
   EXPECT_FLOAT_EQ(layer->fill_color[3], 1.0f);
   ASSERT_EQ(layer->channels_num, 1);
   EXPECT_FLOAT_EQ(layer->channel_settings[PAINT_MATERIAL_CHANNEL_BASE_COLOR].opacity, 0.5f);
 
-  /* Same-kind change is a no-op success; other kinds are refused. */
-  EXPECT_TRUE(BKE_paint_layers_kind_change(*ma, layer, MA_PAINT_LAYER_KIND_PAINT));
-  EXPECT_FALSE(BKE_paint_layers_kind_change(*ma, layer, MA_PAINT_LAYER_KIND_MATERIAL));
-  EXPECT_FALSE(BKE_paint_layers_kind_change(*ma, layer, MA_PAINT_LAYER_KIND_CORRECTION));
-  EXPECT_FALSE(BKE_paint_layers_kind_change(*ma, layer, MA_PAINT_LAYER_KIND_FOLDER));
-  EXPECT_FALSE(BKE_paint_layers_kind_change(*ma, layer, MA_PAINT_LAYER_KIND_CUSTOM));
+  /* Same-source change is a no-op success; other sources are refused. */
+  EXPECT_TRUE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE));
+  EXPECT_FALSE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_MATERIAL));
+  EXPECT_FALSE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_STACK));
+  EXPECT_FALSE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_NODE_GROUP));
+
+  /* A correction is not a stack Layer, so source_change() refuses it even for Image/Constant. */
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
+  ASSERT_NE(correction, nullptr);
+  /* GUARD (RED-verified 2026-09-24, paint_layers.cc: BKE_paint_layers_source_change's
+   * `role(*layer) != Layer` guard): removing it made this call return true instead of false. */
+  EXPECT_FALSE(BKE_paint_layers_source_change(*ma, correction, MA_PAINT_LAYER_SOURCE_CONSTANT));
 }
 
 TEST_F(PaintLayersDescription, value_setters_write_and_tag)
 {
   Material *ma = BKE_material_add(bmain, "SetterMat");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
 
   const float color[4] = {1.0f, 0.5f, 0.25f, 1.0f};
   EXPECT_TRUE(BKE_paint_layers_set_blend(*ma, layer, MA_PAINT_LAYER_BLEND_MULTIPLY));
@@ -1067,7 +1078,7 @@ TEST_F(PaintLayersDescription, set_blend_refuses_the_internal_normal_combine)
 {
   Material *ma = BKE_material_add(bmain, "BlendMat");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
 
   /* The Normal channel forces the operation; a stored value would be a switch the user cannot
    * make effective. */
@@ -1079,10 +1090,10 @@ TEST_F(PaintLayersDescription, issues_report_a_fill_correction_on_normal)
 {
   Material *ma = BKE_material_add(bmain, "IssueMat");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, layer, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_FILL, "C");
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "C");
   ASSERT_NE(correction, nullptr);
 
   Vector<PaintLayersIssue> issues;
@@ -1095,7 +1106,7 @@ TEST_F(PaintLayersDescription, issues_report_a_fill_correction_on_normal)
   ASSERT_NE(issues[0].text, nullptr);
 
   /* A Paint correction on Normal is supported, so it clears the issue. */
-  EXPECT_TRUE(BKE_paint_layers_correction_set_effect(*ma, correction, MA_PAINT_LAYER_EFFECT_PAINT));
+  EXPECT_TRUE(BKE_paint_layers_correction_source_set(*ma, correction, MA_PAINT_LAYER_SOURCE_IMAGE));
   BKE_paint_layers_issues_get(*ma, issues);
   EXPECT_TRUE(issues.is_empty());
 }
@@ -1126,7 +1137,7 @@ TEST_F(PaintLayersDescription, composite_image_writes_a_float_channel)
 {
   Material *ma = BKE_material_add(bmain, "CompositeMat");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
       *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   ASSERT_NE(record, nullptr);
@@ -1157,12 +1168,12 @@ TEST_F(PaintLayersDescription, folder_refuses_its_own_channels_and_reports_them)
 {
   Material *ma = BKE_material_add(bmain, "FolderMat");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
   EXPECT_TRUE(BKE_paint_layers_is_folder(*folder));
-  EXPECT_EQ(folder->kind, MA_PAINT_LAYER_KIND_FOLDER);
+  EXPECT_EQ(folder->source, MA_PAINT_LAYER_SOURCE_STACK);
 
   /* A folder has no maps: adding a channel to one is refused. */
   EXPECT_EQ(BKE_paint_layers_channel_add(*ma, folder, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
@@ -1199,13 +1210,13 @@ TEST_F(PaintLayersDescription, folder_kind_is_explicit_and_sticky)
 
   /* An explicitly created folder is a folder before it holds anything. */
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(folder, nullptr);
   EXPECT_TRUE(BKE_paint_layers_is_folder(*folder));
 
   /* An empty folder accepts Into ... */
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
   EXPECT_EQ(static_cast<MaterialPaintLayer *>(folder->children.first), child);
 
@@ -1216,22 +1227,22 @@ TEST_F(PaintLayersDescription, folder_kind_is_explicit_and_sticky)
   ASSERT_TRUE(BKE_paint_layers_move(*ma, child, nullptr, PaintLayerPlace::Above));
   EXPECT_TRUE(BLI_listbase_is_empty(&folder->children));
   EXPECT_TRUE(BKE_paint_layers_is_folder(*folder));
-  EXPECT_EQ(folder->kind, MA_PAINT_LAYER_KIND_FOLDER);
+  EXPECT_EQ(folder->source, MA_PAINT_LAYER_SOURCE_STACK);
 
   /* A non-folder that could never be a container refuses Into: correction, material and custom. */
   MaterialPaintLayer *correction = paint_layer_add_correction(*child, "Correction");
   EXPECT_EQ(BKE_paint_layers_add(
-                *ma, MA_PAINT_LAYER_KIND_PAINT, "IntoCorr", correction, PaintLayerPlace::Into),
+                *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "IntoCorr", correction, PaintLayerPlace::Into),
             nullptr);
   MaterialPaintLayer *material = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
   EXPECT_EQ(BKE_paint_layers_add(
-                *ma, MA_PAINT_LAYER_KIND_PAINT, "IntoMat", material, PaintLayerPlace::Into),
+                *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "IntoMat", material, PaintLayerPlace::Into),
             nullptr);
   MaterialPaintLayer *custom = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_CUSTOM, "Custom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "Custom", nullptr, PaintLayerPlace::Above);
   EXPECT_EQ(BKE_paint_layers_add(
-                *ma, MA_PAINT_LAYER_KIND_PAINT, "IntoCustom", custom, PaintLayerPlace::Into),
+                *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "IntoCustom", custom, PaintLayerPlace::Into),
             nullptr);
 }
 
@@ -1239,22 +1250,22 @@ TEST_F(PaintLayersDescription, into_a_plain_row_is_refused_and_leaves_it_unchang
 {
   Material *ma = BKE_material_add(bmain, "StrictIntoMat");
   MaterialPaintLayer *target = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Target", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Target", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayerChannel *target_channel = BKE_paint_layers_channel_add(
       *ma, target, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   ASSERT_NE(target_channel, nullptr);
   const int channels_before = target->channels_num;
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Row", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Row", nullptr, PaintLayerPlace::Above);
 
   /* Into a plain row is refused: BKE never promotes a kind implicitly, and the target's map stays
    * exactly where it was, so nothing silently disappears from the render. */
   EXPECT_EQ(BKE_paint_layers_add(
-                *ma, MA_PAINT_LAYER_KIND_PAINT, "Into", target, PaintLayerPlace::Into),
+                *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Into", target, PaintLayerPlace::Into),
             nullptr);
   EXPECT_FALSE(BKE_paint_layers_move(*ma, row, target, PaintLayerPlace::Into));
-  EXPECT_EQ(target->kind, MA_PAINT_LAYER_KIND_PAINT);
+  EXPECT_EQ(target->source, MA_PAINT_LAYER_SOURCE_IMAGE);
   EXPECT_EQ(target->channels_num, channels_before);
   EXPECT_EQ(target_channel,
             BKE_paint_layers_channel_add(*ma, target, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
@@ -1263,9 +1274,9 @@ TEST_F(PaintLayersDescription, into_a_plain_row_is_refused_and_leaves_it_unchang
 
   /* An explicitly created folder, empty or not, accepts Into. */
   MaterialPaintLayer *empty_folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Empty", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Empty", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *into_empty = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "IntoEmpty", empty_folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "IntoEmpty", empty_folder, PaintLayerPlace::Into);
   ASSERT_NE(into_empty, nullptr);
   EXPECT_EQ(static_cast<MaterialPaintLayer *>(empty_folder->children.first), into_empty);
 }
@@ -1274,9 +1285,9 @@ TEST_F(PaintLayersDescription, non_folder_with_children_is_reported)
 {
   Material *ma = BKE_material_add(bmain, "StrayChildrenMat");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *stray = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Stray", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Stray", nullptr, PaintLayerPlace::Above);
 
   /* A malformed state the API never makes: a leaf that holds a child. */
   BLI_remlink(&ma->paint_layers, stray);
@@ -1295,7 +1306,7 @@ TEST_F(PaintLayersDescription, custom_group_setter_keeps_user_counts)
   bNodeTree *first = static_cast<bNodeTree *>(BKE_id_new(bmain, ID_NT, "GroupSetterFirst"));
   bNodeTree *second = static_cast<bNodeTree *>(BKE_id_new(bmain, ID_NT, "GroupSetterSecond"));
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_CUSTOM, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "L", nullptr, PaintLayerPlace::Above);
 
   /* The setter adds exactly one reference; whether the freshly created ID starts at zero or one is
    * BKE_id_new's business, so the counts are compared relative to that baseline. */
@@ -1333,15 +1344,15 @@ static PointerRNA paint_layers_collection_ptr(PointerRNA &ma_ptr)
   return coll_ptr;
 }
 
-static MaterialPaintLayer *rna_paint_layers_new(PointerRNA &coll_ptr, int kind, const char *name)
+static MaterialPaintLayer *rna_paint_layers_new(PointerRNA &coll_ptr, int source, const char *name)
 {
   FunctionRNA *func = RNA_struct_find_function(coll_ptr.type, "new");
   BLI_assert(func != nullptr);
   ParameterList parms;
   RNA_parameter_list_create(&parms, &coll_ptr, func);
-  int kind_arg = kind;
+  int source_arg = source;
   const char *name_arg = name;
-  RNA_parameter_set_lookup(&parms, "kind", &kind_arg);
+  RNA_parameter_set_lookup(&parms, "source", &source_arg);
   RNA_parameter_set_lookup(&parms, "name", &name_arg);
 
   ReportList reports;
@@ -1424,7 +1435,7 @@ TEST_F(PaintLayersDescription, rna_paint_layers_collection_is_registered)
 
   /* Every property the task requires exists with the expected RNA type and editability. */
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
   PointerRNA dummy = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialPaintLayer, layer);
 
@@ -1438,11 +1449,32 @@ TEST_F(PaintLayersDescription, rna_paint_layers_collection_is_registered)
   EXPECT_EQ(RNA_property_type(layer_marker), PROP_STRING);
   EXPECT_EQ(RNA_property_flag(layer_marker) & PROP_EDITABLE, 0);
 
-  PropertyRNA *layer_kind = RNA_struct_find_property(&dummy, "kind");
-  ASSERT_NE(layer_kind, nullptr);
-  EXPECT_EQ(RNA_property_type(layer_kind), PROP_ENUM);
-  EXPECT_EQ(RNA_property_flag(layer_kind) & PROP_EDITABLE, 0);
-  EXPECT_EQ(RNA_property_enum_get(&dummy, layer_kind), MA_PAINT_LAYER_KIND_PAINT);
+  /* The property is declared editable at the struct level (a correction's source is a plain
+   * setting), but #rna_MaterialPaintLayer_source_editable reports it as not editable at runtime
+   * for a stack Layer -- changed only by conversion, through #MaterialPaintLayer.source_change()
+   * -- so a UI widget greys out rather than silently doing nothing. */
+  PropertyRNA *layer_source = RNA_struct_find_property(&dummy, "source");
+  ASSERT_NE(layer_source, nullptr);
+  EXPECT_EQ(RNA_property_type(layer_source), PROP_ENUM);
+  EXPECT_NE(RNA_property_flag(layer_source) & PROP_EDITABLE, 0);
+  /* GUARD (RED-verified 2026-09-24, rna_material.cc:
+   * rna_MaterialPaintLayer_source_editable's `role(*layer) == Layer` check): temporarily making
+   * the function always return PROP_EDITABLE made this EXPECT_FALSE fail (turned true). */
+  EXPECT_FALSE(RNA_property_editable(&dummy, layer_source));
+  EXPECT_EQ(RNA_property_enum_get(&dummy, layer_source), MA_PAINT_LAYER_SOURCE_IMAGE);
+  RNA_property_enum_set(&dummy, layer_source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(RNA_property_enum_get(&dummy, layer_source), MA_PAINT_LAYER_SOURCE_IMAGE);
+
+  /* A correction's source is editable both statically and at runtime. */
+  MaterialPaintLayer *correction_for_editable = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "SourceEditableC");
+  ASSERT_NE(correction_for_editable, nullptr);
+  PointerRNA correction_dummy = RNA_pointer_create_with_parent(
+      coll_ptr, RNA_MaterialPaintLayer, correction_for_editable);
+  EXPECT_TRUE(RNA_property_editable(&correction_dummy, layer_source));
+  RNA_property_enum_set(&correction_dummy, layer_source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(RNA_property_enum_get(&correction_dummy, layer_source),
+            MA_PAINT_LAYER_SOURCE_CONSTANT);
 
   PropertyRNA *layer_opacity = RNA_struct_find_property(&dummy, "opacity");
   ASSERT_NE(layer_opacity, nullptr);
@@ -1470,7 +1502,7 @@ TEST_F(PaintLayersDescription, rna_opacity_is_value_only_and_blend_is_structural
   Material *ma = BKE_material_add(bmain, "RnaValueMat");
   PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
   PointerRNA coll_ptr = paint_layers_collection_ptr(ma_ptr);
-  MaterialPaintLayer *layer = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_KIND_PAINT, "L");
+  MaterialPaintLayer *layer = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_SOURCE_IMAGE, "L");
   ASSERT_NE(layer, nullptr);
   PointerRNA layer_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialPaintLayer, layer);
 
@@ -1501,7 +1533,7 @@ TEST_F(PaintLayersDescription, rna_paint_layers_new_find_remove_round_trip)
   PointerRNA coll_ptr = paint_layers_collection_ptr(ma_ptr);
   ASSERT_NE(coll_ptr.type, nullptr);
 
-  MaterialPaintLayer *layer = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_KIND_PAINT, "L1");
+  MaterialPaintLayer *layer = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_SOURCE_IMAGE, "L1");
   ASSERT_NE(layer, nullptr);
   EXPECT_STREQ(layer->name, "L1");
   EXPECT_EQ(RNA_property_collection_length(&ma_ptr, prop), 1);
@@ -1540,54 +1572,104 @@ TEST_F(PaintLayersDescription, rna_paint_layers_new_find_remove_round_trip)
 
 /** \} */
 
-TEST_F(PaintLayersDescription, correction_add_sets_section_and_effect)
+TEST_F(PaintLayersDescription, correction_add_sets_role_and_source)
 {
   Material *ma = BKE_material_add(bmain, "CorrectionMat");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
 
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, layer, MA_PAINT_LAYER_SECTION_MASK, MA_PAINT_LAYER_EFFECT_FILL, "C");
+      *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, "C");
   ASSERT_NE(correction, nullptr);
-  EXPECT_EQ(correction->kind, MA_PAINT_LAYER_KIND_CORRECTION);
-  EXPECT_EQ(correction->section, MA_PAINT_LAYER_SECTION_MASK);
-  EXPECT_EQ(correction->effect, MA_PAINT_LAYER_EFFECT_FILL);
+  EXPECT_NE(BKE_paint_layers_role(*correction), PaintLayerRole::Layer);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(correction->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
   /* A correction is its own list on the owner, not a folder child, and adding one never turns the
-   * owner into a folder. The list it lands in is chosen by its section. */
+   * owner into a folder. The list it lands in is chosen by its role. */
   EXPECT_EQ(BLI_listbase_count(&layer->mask_stack), 1);
   EXPECT_EQ(BLI_listbase_count(&layer->effects), 0);
   EXPECT_EQ(BLI_listbase_count(&layer->children), 0);
-  EXPECT_EQ(layer->kind, MA_PAINT_LAYER_KIND_PAINT);
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE);
   EXPECT_FALSE(BKE_paint_layers_is_folder(*layer));
 
-  /* Changing the section moves the row between the two lists. */
+  /* Changing the role moves the row between the two lists. */
   EXPECT_TRUE(
-      BKE_paint_layers_correction_set_section(*ma, correction, MA_PAINT_LAYER_SECTION_CONTENT));
-  EXPECT_EQ(correction->section, MA_PAINT_LAYER_SECTION_CONTENT);
+      BKE_paint_layers_role_set(*ma, correction, MA_PAINT_LAYER_ROLE_EFFECT));
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_EFFECT);
   EXPECT_EQ(BLI_listbase_count(&layer->mask_stack), 0);
   EXPECT_EQ(BLI_listbase_count(&layer->effects), 1);
 
-  /* A row that is not a correction refuses the setter. */
-  EXPECT_FALSE(BKE_paint_layers_correction_set_effect(*ma, layer, MA_PAINT_LAYER_EFFECT_FILL));
+  /* A row that is not a correction refuses the setters: role_set() never turns a Layer into a
+   * correction, and correction_source_set() never touches a Layer's source. */
+  /* GUARD (RED-verified 2026-09-24, paint_layers.cc: BKE_paint_layers_role_set's first check):
+   * removing the `correction == nullptr || role(*correction) == Layer` guard made this call
+   * return true instead of false -- see the RED log in the handback report. */
+  EXPECT_FALSE(BKE_paint_layers_role_set(*ma, layer, MA_PAINT_LAYER_ROLE_EFFECT));
+  /* GUARD (RED-verified 2026-09-24, paint_layers.cc: BKE_paint_layers_correction_source_set's
+   * `role(*correction) == Layer` guard): removing it made this call return true instead of
+   * false. */
+  EXPECT_FALSE(BKE_paint_layers_correction_source_set(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  /* role_set() also refuses to convert a correction back into a stack Layer. */
+  /* GUARD (RED-verified 2026-09-24, paint_layers.cc: BKE_paint_layers_role_set's second check,
+   * `!ELEM(role, Effect, MaskItem)`): removing it made this call return true (and move the row to
+   * the Layer role) instead of false. */
+  EXPECT_FALSE(BKE_paint_layers_role_set(*ma, correction, MA_PAINT_LAYER_ROLE_LAYER));
+  /* An out-of-range role, and a Material/NodeGroup/Stack source, are both refused. */
   EXPECT_FALSE(BKE_paint_layers_correction_add(
-      *ma, layer, 99, MA_PAINT_LAYER_EFFECT_PAINT, nullptr));
+      *ma, layer, 99, MA_PAINT_LAYER_SOURCE_IMAGE, nullptr));
+  /* GUARD (RED-verified 2026-09-24, paint_layers.cc: BKE_paint_layers_correction_add's
+   * `!ELEM(source, Image, Constant)` half of its validity check): removing it made these three
+   * calls return a real correction (non-null) instead of nullptr. */
+  EXPECT_FALSE(BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, nullptr));
+  EXPECT_FALSE(BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, nullptr));
+  EXPECT_FALSE(BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, nullptr));
+}
+
+/**
+ * GUARD (RED-verified 2026-09-24, paint_layers.cc: BKE_paint_layers_role_set's first check).
+ *
+ * A role==Layer row is never itself found by #paint_layer_correction_owner through the public
+ * API (only #BKE_paint_layers_correction_add links a non-Layer role into an owner's effects/
+ * mask_stack list), so #correction_add_sets_role_and_source's plain top-level-layer case cannot
+ * tell this explicit role check apart from the owner lookup simply failing to find an unrelated
+ * row. This builds the malformed shape by hand -- a role==Layer row manually linked into an
+ * owner's effects list -- to isolate the explicit check on its own.
+ */
+TEST_F(PaintLayersDescription, role_set_refuses_a_role_layer_row_even_if_reachable_via_owner)
+{
+  Material *ma = BKE_material_add(bmain, "RoleSetMalformedMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+
+  MaterialPaintLayer *malformed = MEM_new<MaterialPaintLayer>(__func__);
+  malformed->marker = BLI_uuid_generate_random();
+  malformed->source = MA_PAINT_LAYER_SOURCE_IMAGE;
+  malformed->role = MA_PAINT_LAYER_ROLE_LAYER;
+  BLI_addtail(&owner->effects, malformed);
+
+  EXPECT_FALSE(BKE_paint_layers_role_set(*ma, malformed, MA_PAINT_LAYER_ROLE_EFFECT));
+  EXPECT_EQ(malformed->role, MA_PAINT_LAYER_ROLE_LAYER);
 }
 
 /** Call the layer-level RNA function \a name with the given correction arguments. */
 static MaterialPaintLayer *rna_paint_layer_correction_add(PointerRNA &layer_ptr,
-                                                          int section,
-                                                          int effect,
+                                                          int role,
+                                                          int source,
                                                           const char *name)
 {
   FunctionRNA *func = RNA_struct_find_function(layer_ptr.type, "correction_add");
   BLI_assert(func != nullptr);
   ParameterList parms;
   RNA_parameter_list_create(&parms, &layer_ptr, func);
-  int section_arg = section;
-  int effect_arg = effect;
+  int role_arg = role;
+  int source_arg = source;
   const char *name_arg = name;
-  RNA_parameter_set_lookup(&parms, "section", &section_arg);
-  RNA_parameter_set_lookup(&parms, "effect", &effect_arg);
+  RNA_parameter_set_lookup(&parms, "role", &role_arg);
+  RNA_parameter_set_lookup(&parms, "source", &source_arg);
   RNA_parameter_set_lookup(&parms, "name", &name_arg);
 
   ReportList reports;
@@ -1608,7 +1690,7 @@ TEST_F(PaintLayersDescription, rna_property_setters_and_correction_add)
   Material *ma = BKE_material_add(bmain, "RnaApiMat");
   PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
   PointerRNA coll_ptr = paint_layers_collection_ptr(ma_ptr);
-  MaterialPaintLayer *layer = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_KIND_PAINT, "L");
+  MaterialPaintLayer *layer = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_SOURCE_IMAGE, "L");
   ASSERT_NE(layer, nullptr);
   PointerRNA layer_ptr = RNA_pointer_create_with_parent(
       coll_ptr, RNA_MaterialPaintLayer, layer);
@@ -1624,18 +1706,18 @@ TEST_F(PaintLayersDescription, rna_property_setters_and_correction_add)
   EXPECT_FALSE(RNA_property_boolean_get(&layer_ptr, enabled));
 
   MaterialPaintLayer *correction = rna_paint_layer_correction_add(
-      layer_ptr, MA_PAINT_LAYER_SECTION_MASK, MA_PAINT_LAYER_EFFECT_FILL, "C");
+      layer_ptr, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, "C");
   ASSERT_NE(correction, nullptr);
-  EXPECT_EQ(correction->kind, MA_PAINT_LAYER_KIND_CORRECTION);
-  EXPECT_EQ(correction->section, MA_PAINT_LAYER_SECTION_MASK);
-  EXPECT_EQ(correction->effect, MA_PAINT_LAYER_EFFECT_FILL);
+  EXPECT_NE(BKE_paint_layers_role(*correction), PaintLayerRole::Layer);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(correction->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
 }
 
 TEST_F(PaintLayersDescription, bake_hash_tracks_structure_and_is_valid)
 {
   Material *ma = BKE_material_add(bmain, "BakeHash");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
 
   MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*layer);
@@ -1695,7 +1777,7 @@ TEST_F(PaintLayersDescription, bake_subscription_sees_pixel_changes)
 {
   Material *ma = BKE_material_add(bmain, "BakeSub");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   Image &image = *BKE_image_add_generated(
       bmain, 4, 4, "BakeSubMap", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
@@ -1727,7 +1809,7 @@ TEST_F(PaintLayersDescription, bake_substitute_only_when_valid_and_present)
 {
   Material *ma = BKE_material_add(bmain, "BakeSubstitute");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "L", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   const float color[4] = {0.5f, 0.5f, 0.5f, 1.0f};
   Image &baked = *BKE_image_add_generated(
       bmain, 8, 8, "BakedMap", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
@@ -1762,9 +1844,9 @@ TEST_F(PaintLayersDescription, value_edit_regens_only_a_baked_row_or_its_ancesto
 {
   Material *ma = BKE_material_add(bmain, "ValueRegen");
   MaterialPaintLayer *baked = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Baked", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Baked", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *plain = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Plain", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Plain", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(baked, nullptr);
   ASSERT_NE(plain, nullptr);
   BKE_paint_layers_bake_ensure(*baked);
@@ -1784,7 +1866,7 @@ TEST_F(PaintLayersDescription, custom_role_validation_reports_issues)
 {
   Material *ma = BKE_material_add(bmain, "CustomRoles");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_CUSTOM, "Custom", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "Custom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
   bNodeTree *group = static_cast<bNodeTree *>(BKE_id_new(bmain, ID_NT, "CustomRoleGroup"));
   layer->custom_group = group;
@@ -1881,7 +1963,7 @@ TEST_F(PaintLayersDescription, custom_template_and_channel_add)
   MaterialPaintLayer *layer = BKE_paint_layers_custom_layer_add(
       *bmain, *ma, "Custom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
-  EXPECT_EQ(layer->kind, MA_PAINT_LAYER_KIND_CUSTOM);
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_NODE_GROUP);
   ASSERT_NE(layer->custom_group, nullptr);
   EXPECT_EQ(layer->custom_group->id.us, 1);
   EXPECT_TRUE(BLI_uuid_equal(BKE_paint_layers_active_get(*ma), layer->marker));
@@ -1950,23 +2032,26 @@ TEST_F(PaintLayersDescription, custom_bake_hash_tracks_interface)
   EXPECT_TRUE(with_prop[0] != after[0] || with_prop[1] != after[1]);
 }
 
-/** The per-kind table is the one place the generator, CPU and bake read their kind switches. */
-TEST_F(PaintLayersDescription, kind_info_table_matches_the_kind_contract)
+/** The per-source table is the one place the generator, CPU and bake read their source switches. */
+TEST_F(PaintLayersDescription, kind_info_table_matches_the_source_contract)
 {
-  const PaintLayerKindInfo &folder = BKE_paint_layers_kind_info(MA_PAINT_LAYER_KIND_FOLDER);
+  const PaintLayerKindInfo &folder = BKE_paint_layers_kind_info(MA_PAINT_LAYER_SOURCE_STACK);
   EXPECT_TRUE(folder.is_folder);
   EXPECT_FALSE(folder.uses_fill_color);
   EXPECT_FALSE(folder.needs_external_bake);
 
-  EXPECT_TRUE(BKE_paint_layers_kind_info(MA_PAINT_LAYER_KIND_FILL).uses_fill_color);
-  EXPECT_TRUE(BKE_paint_layers_kind_info(MA_PAINT_LAYER_KIND_MATERIAL).needs_external_bake);
-  EXPECT_TRUE(BKE_paint_layers_kind_info(MA_PAINT_LAYER_KIND_CUSTOM).needs_external_bake);
-  EXPECT_FALSE(BKE_paint_layers_kind_info(MA_PAINT_LAYER_KIND_PAINT).needs_external_bake);
-  EXPECT_FALSE(BKE_paint_layers_kind_info(MA_PAINT_LAYER_KIND_CORRECTION).is_folder);
+  EXPECT_TRUE(BKE_paint_layers_kind_info(MA_PAINT_LAYER_SOURCE_CONSTANT).uses_fill_color);
+  EXPECT_TRUE(BKE_paint_layers_kind_info(MA_PAINT_LAYER_SOURCE_MATERIAL).needs_external_bake);
+  EXPECT_TRUE(BKE_paint_layers_kind_info(MA_PAINT_LAYER_SOURCE_NODE_GROUP).needs_external_bake);
+  EXPECT_FALSE(BKE_paint_layers_kind_info(MA_PAINT_LAYER_SOURCE_IMAGE).needs_external_bake);
+  EXPECT_FALSE(BKE_paint_layers_kind_info(MA_PAINT_LAYER_SOURCE_IMAGE).is_folder);
+  /* A correction's source is always Image or Constant, never Stack, so it is never a folder --
+   * #BKE_paint_layers_is_folder reads #MaterialPaintLayer::source, not a "kind"; there is no
+   * separate "Correction" source to probe here any more. */
 
-  /* An unknown kind reads back as Paint, the DNA enum's compatibility rule. */
+  /* An unknown source reads back as Image, the DNA enum's compatibility rule. */
   const PaintLayerKindInfo &unknown = BKE_paint_layers_kind_info(99);
-  EXPECT_EQ(unknown.kind, MA_PAINT_LAYER_KIND_PAINT);
+  EXPECT_EQ(unknown.source, MA_PAINT_LAYER_SOURCE_IMAGE);
 }
 
 /** \} */
@@ -1974,29 +2059,31 @@ TEST_F(PaintLayersDescription, kind_info_table_matches_the_kind_contract)
 /** \name Source and role accessors
  * \{ */
 
-/** The source kind is derived from the stored kind and effect: the one place callers ask what a
- * row reads from. */
-TEST_F(PaintLayersDescription, source_type_matches_the_kind_contract)
+/** #BKE_paint_layers_source_type() and #BKE_paint_layers_role() simply read the stored
+ * #MaterialPaintLayer::source/#role fields; there is no derivation step of its own to regress
+ * independently of the fields themselves. */
+TEST_F(PaintLayersDescription, source_type_and_role_read_the_stored_fields_directly)
 {
   Material *ma = BKE_material_add(bmain, "SourceTypeMat");
   MaterialPaintLayer *layer = paint_layer_add(*ma, "L");
 
-  layer->kind = MA_PAINT_LAYER_KIND_PAINT;
+  layer->source = MA_PAINT_LAYER_SOURCE_IMAGE;
   EXPECT_EQ(BKE_paint_layers_source_type(*layer), PaintLayerSourceType::Image);
-  layer->kind = MA_PAINT_LAYER_KIND_FILL;
+  layer->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
   EXPECT_EQ(BKE_paint_layers_source_type(*layer), PaintLayerSourceType::Constant);
-  layer->kind = MA_PAINT_LAYER_KIND_MATERIAL;
+  layer->source = MA_PAINT_LAYER_SOURCE_MATERIAL;
   EXPECT_EQ(BKE_paint_layers_source_type(*layer), PaintLayerSourceType::Material);
-  layer->kind = MA_PAINT_LAYER_KIND_CUSTOM;
+  layer->source = MA_PAINT_LAYER_SOURCE_NODE_GROUP;
   EXPECT_EQ(BKE_paint_layers_source_type(*layer), PaintLayerSourceType::NodeGroup);
-  layer->kind = MA_PAINT_LAYER_KIND_FOLDER;
+  layer->source = MA_PAINT_LAYER_SOURCE_STACK;
   EXPECT_EQ(BKE_paint_layers_source_type(*layer), PaintLayerSourceType::Stack);
 
-  layer->kind = MA_PAINT_LAYER_KIND_CORRECTION;
-  layer->effect = MA_PAINT_LAYER_EFFECT_PAINT;
-  EXPECT_EQ(BKE_paint_layers_source_type(*layer), PaintLayerSourceType::Image);
-  layer->effect = MA_PAINT_LAYER_EFFECT_FILL;
-  EXPECT_EQ(BKE_paint_layers_source_type(*layer), PaintLayerSourceType::Constant);
+  layer->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  EXPECT_EQ(BKE_paint_layers_role(*layer), PaintLayerRole::Effect);
+  layer->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  EXPECT_EQ(BKE_paint_layers_role(*layer), PaintLayerRole::MaskItem);
+  layer->role = MA_PAINT_LAYER_ROLE_LAYER;
+  EXPECT_EQ(BKE_paint_layers_role(*layer), PaintLayerRole::Layer);
 }
 
 /** A correction's role follows its section; every other row is a stack member. */
@@ -2065,6 +2152,236 @@ TEST_F(PaintLayersDescription, mask_base_is_the_first_mask_item)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Source/role stored fields (2.4 final)
+ *
+ * #MaterialPaintLayer::source and #MaterialPaintLayer::role are the row's only stored kind/place
+ * fields now; #kind, #section and #effect are gone. These tests check the *stored* fields
+ * directly against literal DNA constants -- not through #BKE_paint_layers_source_type() /
+ * #BKE_paint_layers_role(), which now simply return them -- so a regression in a writer cannot
+ * hide behind the accessor also being wrong the same way.
+ * \{ */
+
+TEST_F(PaintLayersDescription, source_role_stored_by_add_for_every_kind)
+{
+  Material *ma = BKE_material_add(bmain, "SourceRoleAddMat");
+
+  MaterialPaintLayer *paint = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(paint, nullptr);
+  EXPECT_EQ(paint->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(paint->role, MA_PAINT_LAYER_ROLE_LAYER);
+
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_EQ(fill->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(fill->role, MA_PAINT_LAYER_ROLE_LAYER);
+
+  MaterialPaintLayer *material = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(material, nullptr);
+  EXPECT_EQ(material->source, MA_PAINT_LAYER_SOURCE_MATERIAL);
+  EXPECT_EQ(material->role, MA_PAINT_LAYER_ROLE_LAYER);
+
+  MaterialPaintLayer *custom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "Custom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(custom, nullptr);
+  EXPECT_EQ(custom->source, MA_PAINT_LAYER_SOURCE_NODE_GROUP);
+  EXPECT_EQ(custom->role, MA_PAINT_LAYER_ROLE_LAYER);
+
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  EXPECT_EQ(folder->source, MA_PAINT_LAYER_SOURCE_STACK);
+  EXPECT_EQ(folder->role, MA_PAINT_LAYER_ROLE_LAYER);
+}
+
+TEST_F(PaintLayersDescription, source_role_stored_by_correction_add_for_every_section_and_effect)
+{
+  Material *ma = BKE_material_add(bmain, "SourceRoleCorrectionMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+
+  MaterialPaintLayer *content_paint = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "ContentPaint");
+  ASSERT_NE(content_paint, nullptr);
+  EXPECT_EQ(content_paint->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(content_paint->role, MA_PAINT_LAYER_ROLE_EFFECT);
+
+  MaterialPaintLayer *content_fill = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "ContentFill");
+  ASSERT_NE(content_fill, nullptr);
+  EXPECT_EQ(content_fill->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(content_fill->role, MA_PAINT_LAYER_ROLE_EFFECT);
+
+  MaterialPaintLayer *mask_paint = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "MaskPaint");
+  ASSERT_NE(mask_paint, nullptr);
+  EXPECT_EQ(mask_paint->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(mask_paint->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+
+  MaterialPaintLayer *mask_fill = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, "MaskFill");
+  ASSERT_NE(mask_fill, nullptr);
+  EXPECT_EQ(mask_fill->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(mask_fill->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+}
+
+TEST_F(PaintLayersDescription, source_role_stored_by_source_change_image_constant_round_trip)
+{
+  Material *ma = BKE_material_add(bmain, "SourceRoleKindChangeMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(layer->role, MA_PAINT_LAYER_ROLE_LAYER);
+
+  ASSERT_TRUE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(layer->role, MA_PAINT_LAYER_ROLE_LAYER);
+
+  ASSERT_TRUE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE));
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(layer->role, MA_PAINT_LAYER_ROLE_LAYER);
+}
+
+TEST_F(PaintLayersDescription, source_role_stored_by_correction_set_section_and_set_effect)
+{
+  Material *ma = BKE_material_add(bmain, "SourceRoleSetSectionMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "Correction");
+  ASSERT_NE(correction, nullptr);
+  EXPECT_EQ(correction->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_EFFECT);
+
+  /* Moving a content correction to the mask section changes its role but not its source: the
+   * effect (what it reads from) and the section (where it lives) are independent axes. */
+  ASSERT_TRUE(BKE_paint_layers_role_set(*ma, correction, MA_PAINT_LAYER_ROLE_MASK_ITEM));
+  EXPECT_EQ(correction->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+
+  ASSERT_TRUE(BKE_paint_layers_correction_source_set(*ma, correction, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_EQ(correction->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+}
+
+TEST_F(PaintLayersDescription, source_role_survives_layer_duplicate)
+{
+  Material *ma = BKE_material_add(bmain, "SourceRoleDuplicateMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *mask_item = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, "Mask");
+  ASSERT_NE(mask_item, nullptr);
+
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, owner);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(copy->source, MA_PAINT_LAYER_SOURCE_STACK);
+  EXPECT_EQ(copy->role, MA_PAINT_LAYER_ROLE_LAYER);
+  ASSERT_FALSE(BLI_listbase_is_empty(&copy->mask_stack));
+  MaterialPaintLayer *copy_mask_item = static_cast<MaterialPaintLayer *>(copy->mask_stack.first);
+  EXPECT_EQ(copy_mask_item->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(copy_mask_item->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+}
+
+TEST_F(PaintLayersDescription, source_role_survives_material_copy)
+{
+  Material *ma = BKE_material_add(bmain, "SourceRoleMaterialCopyMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "Effect");
+  ASSERT_NE(effect, nullptr);
+
+  Material *copy_ma = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy_ma, nullptr);
+  ASSERT_FALSE(BLI_listbase_is_empty(&copy_ma->paint_layers));
+  MaterialPaintLayer *copy_owner = static_cast<MaterialPaintLayer *>(copy_ma->paint_layers.first);
+  EXPECT_EQ(copy_owner->source, MA_PAINT_LAYER_SOURCE_MATERIAL);
+  EXPECT_EQ(copy_owner->role, MA_PAINT_LAYER_ROLE_LAYER);
+  ASSERT_FALSE(BLI_listbase_is_empty(&copy_owner->effects));
+  MaterialPaintLayer *copy_effect = static_cast<MaterialPaintLayer *>(copy_owner->effects.first);
+  EXPECT_EQ(copy_effect->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(copy_effect->role, MA_PAINT_LAYER_ROLE_EFFECT);
+}
+
+static void rna_paint_layer_source_change(PointerRNA &layer_ptr, int source)
+{
+  FunctionRNA *func = RNA_struct_find_function(layer_ptr.type, "source_change");
+  BLI_assert(func != nullptr);
+  ParameterList parms;
+  RNA_parameter_list_create(&parms, &layer_ptr, func);
+  int source_arg = source;
+  RNA_parameter_set_lookup(&parms, "source", &source_arg);
+
+  ReportList reports;
+  BKE_reports_init(&reports, RPT_STORE);
+  RNA_function_call(nullptr, &reports, &layer_ptr, func, &parms);
+  BKE_reports_free(&reports);
+  RNA_parameter_list_free(&parms);
+}
+
+/** The RNA user path (source_change()) writes #source/#role the same way the BKE call does. */
+TEST_F(PaintLayersDescription, rna_source_change_syncs_source_and_role)
+{
+  Material *ma = BKE_material_add(bmain, "RnaSourceChangeSourceRoleMat");
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  PointerRNA coll_ptr = paint_layers_collection_ptr(ma_ptr);
+  MaterialPaintLayer *layer = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_SOURCE_IMAGE, "L");
+  ASSERT_NE(layer, nullptr);
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+
+  PointerRNA layer_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialPaintLayer, layer);
+  rna_paint_layer_source_change(layer_ptr, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(layer->role, MA_PAINT_LAYER_ROLE_LAYER);
+}
+
+/** The RNA user path (correction_add() plus the role/source setters) writes #source/#role. */
+TEST_F(PaintLayersDescription, rna_correction_add_and_role_source_setters_sync_source_and_role)
+{
+  Material *ma = BKE_material_add(bmain, "RnaCorrectionSourceRoleMat");
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  PointerRNA coll_ptr = paint_layers_collection_ptr(ma_ptr);
+  MaterialPaintLayer *owner = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner");
+  ASSERT_NE(owner, nullptr);
+  PointerRNA owner_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialPaintLayer, owner);
+
+  MaterialPaintLayer *correction = rna_paint_layer_correction_add(
+      owner_ptr, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "Correction");
+  ASSERT_NE(correction, nullptr);
+  EXPECT_EQ(correction->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_EFFECT);
+
+  PointerRNA correction_ptr = RNA_pointer_create_with_parent(
+      coll_ptr, RNA_MaterialPaintLayer, correction);
+  PropertyRNA *role_prop = RNA_struct_find_property(&correction_ptr, "role");
+  PropertyRNA *source_prop = RNA_struct_find_property(&correction_ptr, "source");
+  ASSERT_NE(role_prop, nullptr);
+  ASSERT_NE(source_prop, nullptr);
+
+  RNA_property_enum_set(&correction_ptr, role_prop, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(correction->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+
+  RNA_property_enum_set(&correction_ptr, source_prop, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(correction->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+
+  /* role_set() refuses to move a correction back to Layer through the property too. */
+  RNA_property_enum_set(&correction_ptr, role_prop, MA_PAINT_LAYER_ROLE_LAYER);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Deferred bake
  * \{ */
 
@@ -2072,13 +2389,13 @@ TEST_F(PaintLayersDescription, bake_row_is_deferred_follows_the_active_row_subtr
 {
   Material *ma = BKE_material_add(bmain, "DeferredMat");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   MaterialPaintLayer *effect = paint_layer_add_correction(*folder, "Effect");
   MaterialPaintLayer *mask_item = paint_layer_add_mask_item(*child, "Mask");
   MaterialPaintLayer *sibling = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Sibling", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Sibling", nullptr, PaintLayerPlace::Above);
 
   /* The active row itself is deferred. */
   BKE_paint_layers_active_set(*ma, child->marker);
@@ -2108,9 +2425,9 @@ TEST_F(PaintLayersDescription, active_set_marks_material_bake_due_only_when_the_
 {
   Material *ma = BKE_material_add(bmain, "ActiveMaterialDueMat");
   MaterialPaintLayer *first = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "First", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "First", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *second = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Second", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Second", nullptr, PaintLayerPlace::Above);
 
   BKE_paint_layers_active_set(*ma, first->marker);
   BKE_paint_layers_material_bake_due_clear(*ma);
@@ -2129,9 +2446,9 @@ TEST_F(PaintLayersDescription, material_bake_due_survives_the_cpu_bake_ensure)
 {
   Material *ma = BKE_material_add(bmain, "MaterialDueSurvivesMat");
   MaterialPaintLayer *material = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *other = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Other", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Other", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(material, nullptr);
   BKE_paint_layers_bake_ensure(*material)->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
 
@@ -2204,7 +2521,7 @@ TEST_F(PaintLayersDescription, material_live_constant_reads_the_active_row_sourc
                      *principled,
                      *bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr));
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
 
@@ -2240,14 +2557,14 @@ TEST_F(PaintLayersDescription, material_live_constant_reads_the_active_row_sourc
 
   /* A row of another kind is refused even while it is the active one. */
   MaterialPaintLayer *paint = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Paint", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Paint", nullptr, PaintLayerPlace::Above);
   BKE_paint_layers_active_set(*ma, paint->marker);
   EXPECT_FALSE(
       BKE_paint_layers_material_live_constant(*ma, *paint, PAINT_MATERIAL_CHANNEL_ROUGHNESS, value));
 
   /* A Material row with no source is refused too. */
   MaterialPaintLayer *no_source = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "NoSource", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "NoSource", nullptr, PaintLayerPlace::Above);
   BKE_paint_layers_active_set(*ma, no_source->marker);
   EXPECT_FALSE(BKE_paint_layers_material_live_constant(
       *ma, *no_source, PAINT_MATERIAL_CHANNEL_ROUGHNESS, value));
@@ -2262,7 +2579,7 @@ TEST_F(PaintLayersDescription, material_mode_picks_hybrid_or_source_group)
   bNodeTree &tree = *source->nodetree;
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -2321,7 +2638,7 @@ TEST_F(PaintLayersDescription, material_mode_is_baked_without_a_principled)
   Material *ma = BKE_material_add(bmain, "ModeNoPrincipledMat");
   Material *source = BKE_material_add(bmain, "ModeNoPrincipledSource");
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -2353,7 +2670,7 @@ TEST_F(PaintLayersDescription, material_live_image_requires_a_trivial_flat_textu
   storage->projection = SHD_PROJ_FLAT;
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -2422,7 +2739,7 @@ TEST_F(PaintLayersDescription, material_lives_from_source_tracks_any_live_channe
   static_cast<NodeTexImage *>(texture->storage)->projection = SHD_PROJ_FLAT;
 
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -2443,11 +2760,11 @@ TEST_F(PaintLayersDescription, bake_image_is_deferred_follows_the_active_row_map
 {
   Material *ma = BKE_material_add(bmain, "DeferredImageMat");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Folder", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *child = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   MaterialPaintLayer *sibling = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_KIND_PAINT, "Sibling", nullptr, PaintLayerPlace::Above);
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Sibling", nullptr, PaintLayerPlace::Above);
   BKE_paint_layers_bake_ensure(*folder);
   BKE_paint_layers_bake_ensure(*child);
   BKE_paint_layers_bake_ensure(*sibling);
@@ -2495,7 +2812,7 @@ TEST_F(PaintLayersDescription, source_material_is_live_tracks_the_deferred_mater
   Material *layered = BKE_material_add(bmain, "LiveSourceOwner");
   Material *source = paint_layer_source_material(*bmain, "LiveSourceMat");
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *layered, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *layered, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*layered, row, source));
 
@@ -2506,7 +2823,7 @@ TEST_F(PaintLayersDescription, source_material_is_live_tracks_the_deferred_mater
 
   /* (b) Moving the active marker to a sibling leaves the source. */
   MaterialPaintLayer *sibling = BKE_paint_layers_add(
-      *layered, MA_PAINT_LAYER_KIND_PAINT, "Sibling", nullptr, PaintLayerPlace::Above);
+      *layered, MA_PAINT_LAYER_SOURCE_IMAGE, "Sibling", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(sibling, nullptr);
   BKE_paint_layers_active_set(*layered, sibling->marker);
   EXPECT_FALSE(BKE_paint_layers_source_material_is_live(*bmain, *source));
@@ -2514,7 +2831,7 @@ TEST_F(PaintLayersDescription, source_material_is_live_tracks_the_deferred_mater
   /* (c) Two layered materials read the source; only one has its row active. */
   Material *other = BKE_material_add(bmain, "OtherLiveSourceOwner");
   MaterialPaintLayer *other_row = BKE_paint_layers_add(
-      *other, MA_PAINT_LAYER_KIND_MATERIAL, "OtherSource", nullptr, PaintLayerPlace::Above);
+      *other, MA_PAINT_LAYER_SOURCE_MATERIAL, "OtherSource", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(other_row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*other, other_row, source));
   BKE_paint_layers_active_set(*other, other_row->marker);
@@ -2529,7 +2846,7 @@ TEST_F(PaintLayersDescription, source_material_is_live_is_false_in_baked_mode)
   /* No Principled on the source: the row falls back to its baked maps. */
   Material *source = BKE_material_add(bmain, "BakedSourceNoPrincipled");
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *layered, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+      *layered, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*layered, row, source));
   BKE_paint_layers_active_set(*layered, row->marker);

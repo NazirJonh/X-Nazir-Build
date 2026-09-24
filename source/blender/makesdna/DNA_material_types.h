@@ -421,25 +421,6 @@ struct MaterialLineArt {
   char _pad = {};
 };
 
-/** #MaterialPaintLayer::kind */
-enum eMaterialPaintLayerKind : int8_t {
-  /** A painted layer; the default for an unknown kind. */
-  MA_PAINT_LAYER_KIND_PAINT = 0,
-  /** A flat fill layer. */
-  MA_PAINT_LAYER_KIND_FILL = 1,
-  /** A layer baked from another material, see #material. Phase 3. */
-  MA_PAINT_LAYER_KIND_MATERIAL = 2,
-  /** A child of a layer that adjusts it. */
-  MA_PAINT_LAYER_KIND_CORRECTION = 3,
-  /**
-   * A folder: a row whose part in a channel is the union of its #children, laid over what is below
-   * as an isolated group. Folder-ness is this kind alone, never a non-empty #children list.
-   */
-  MA_PAINT_LAYER_KIND_FOLDER = 4,
-  /** A custom node-group layer, see #custom_group. Phase 4. */
-  MA_PAINT_LAYER_KIND_CUSTOM = 5,
-};
-
 /** #MaterialPaintLayer::blend */
 enum eMaterialPaintLayerBlend : int8_t {
   MA_PAINT_LAYER_BLEND_MIX = 0,
@@ -465,20 +446,26 @@ enum eMaterialPaintLayerBlend : int8_t {
   MA_PAINT_LAYER_BLEND_VALUE = 19,
 };
 
-/** #MaterialPaintLayer::section, for a correction row. */
-enum eMaterialPaintLayerCorrectionSection : int8_t {
-  /** The correction adjusts what the row below paints. */
-  MA_PAINT_LAYER_SECTION_CONTENT = 0,
-  /** The correction limits where the row applies. */
-  MA_PAINT_LAYER_SECTION_MASK = 1,
+/**
+ * #MaterialPaintLayer::source. Numerically matches #blender::PaintLayerSourceType
+ * (`BKE_paint_layers.hh`); kept in step with a static_assert in `paint_layers.cc`.
+ */
+enum eMaterialPaintLayerSource : int8_t {
+  MA_PAINT_LAYER_SOURCE_IMAGE = 0,
+  MA_PAINT_LAYER_SOURCE_CONSTANT = 1,
+  MA_PAINT_LAYER_SOURCE_MATERIAL = 2,
+  MA_PAINT_LAYER_SOURCE_NODE_GROUP = 3,
+  MA_PAINT_LAYER_SOURCE_STACK = 4,
 };
 
-/** #MaterialPaintLayer::effect, for a correction row. */
-enum eMaterialPaintLayerCorrectionEffect : int8_t {
-  /** The correction was painted. */
-  MA_PAINT_LAYER_EFFECT_PAINT = 0,
-  /** The correction is a flat fill. */
-  MA_PAINT_LAYER_EFFECT_FILL = 1,
+/**
+ * #MaterialPaintLayer::role. Numerically matches #blender::PaintLayerRole
+ * (`BKE_paint_layers.hh`); kept in step with a static_assert in `paint_layers.cc`.
+ */
+enum eMaterialPaintLayerRole : int8_t {
+  MA_PAINT_LAYER_ROLE_LAYER = 0,
+  MA_PAINT_LAYER_ROLE_EFFECT = 1,
+  MA_PAINT_LAYER_ROLE_MASK_ITEM = 2,
 };
 
 /** #MaterialPaintLayerChannel::state */
@@ -593,24 +580,29 @@ struct MaterialPaintLayer {
   char name[/*MAX_NAME*/ 64] = "";
   /** Stable identity of the row, shared by the nodes the generator builds for it. */
   bUUID marker = {};
-  /** #eMaterialPaintLayerKind. */
-  int8_t kind = MA_PAINT_LAYER_KIND_PAINT;
   /** #eMaterialPaintLayerBlend. */
   int8_t blend = MA_PAINT_LAYER_BLEND_MIX;
+  char _pad0[1] = {};
   /** #eMaterialPaintLayerFlag. */
   int16_t flag = MA_PAINT_LAYER_ENABLED;
   float opacity = 1.0f;
   float fill_color[4] = {};
   /** Display color tag, interpreted by the UI only. -1 means no color (default). */
   int8_t color_tag = -1;
-  /** #eMaterialPaintLayerCorrectionSection, for a #MA_PAINT_LAYER_KIND_CORRECTION row. */
-  int8_t section = MA_PAINT_LAYER_SECTION_CONTENT;
-  /** #eMaterialPaintLayerCorrectionEffect, for a #MA_PAINT_LAYER_KIND_CORRECTION row. */
-  int8_t effect = MA_PAINT_LAYER_EFFECT_PAINT;
+  /**
+   * #eMaterialPaintLayerSource: what the row paints with (image, constant, material, node group
+   * or stack). Read-only from the outside; changed only through #BKE_paint_layers_source_change.
+   */
+  int8_t source = MA_PAINT_LAYER_SOURCE_IMAGE;
+  /**
+   * #eMaterialPaintLayerRole: a stack layer, a content correction (effect) or a mask item.
+   * Changed only through #BKE_paint_layers_role_set.
+   */
+  int8_t role = MA_PAINT_LAYER_ROLE_LAYER;
   char _pad[5] = {};
-  /** Node group for a #MA_PAINT_LAYER_KIND_CUSTOM layer. */
+  /** Node group for a #MA_PAINT_LAYER_SOURCE_NODE_GROUP layer. */
   struct bNodeTree *custom_group = nullptr;
-  /** Source material of a #MA_PAINT_LAYER_KIND_MATERIAL layer. Phase 3. */
+  /** Source material of a #MA_PAINT_LAYER_SOURCE_MATERIAL layer. Phase 3. */
   struct Material *material = nullptr;
   /**
    * The row's baked cache, or null while nothing is baked. A snapshot the generator and the CPU

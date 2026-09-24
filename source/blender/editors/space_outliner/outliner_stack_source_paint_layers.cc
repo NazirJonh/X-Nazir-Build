@@ -420,10 +420,10 @@ void paint_stack_rows_from_description_impl(const Material &material,
   auto append_corrections = [&](const MaterialPaintLayer &layer,
                                 const int parent_ordinal,
                                 const int parent_depth,
-                                const int8_t section) {
+                                const int8_t role) {
     const Vector<const MaterialPaintLayer *> corrections =
-        (section == MA_PAINT_LAYER_SECTION_MASK) ? BKE_paint_layers_mask_items(layer) :
-                                                   BKE_paint_layers_effects(layer);
+        (role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ? BKE_paint_layers_mask_items(layer) :
+                                                  BKE_paint_layers_effects(layer);
     for (const MaterialPaintLayer *correction_ptr : corrections) {
       const MaterialPaintLayer &correction = *correction_ptr;
       if (ordinal > STACK_ROW_ORDINAL_MAX) {
@@ -434,7 +434,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
       row.ordinal = int16_t(ordinal++);
       row.depth = parent_depth + 1;
       row.parent_ordinal = int16_t(parent_ordinal);
-      row.parent_section_id = (section == MA_PAINT_LAYER_SECTION_MASK) ? "MASK" : "CHANNELS";
+      row.parent_section_id = (role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ? "MASK" : "CHANNELS";
       row.stable_id = correction.marker;
       row.enabled = (correction.flag & MA_PAINT_LAYER_ENABLED) != 0;
       row.supported = true;
@@ -487,7 +487,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
           row.name_buffer = const_cast<char *>(layer.name);
           row.color_tag = layer.color_tag;
           row.icon = folder                               ? ICON_FILE_FOLDER :
-                     layer.kind == MA_PAINT_LAYER_KIND_FILL ? ICON_GP_DRAW_FILL :
+                     layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT ? ICON_GP_DRAW_FILL :
                      has_mask                           ? paint_mask_state_icon(row.mask_enabled) :
                                                           ICON_IMAGE_RGB;
 
@@ -505,7 +505,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
               break;
             }
             row.preview_slots.append(std::move(channels_slot));
-            if (layer.kind == MA_PAINT_LAYER_KIND_FILL) {
+            if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
               /* A Fill is its colour: the swatch is what the row lays down, and clicking it opens
                * the picker. */
               StackRowPreview fill_swatch;
@@ -514,7 +514,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
               fill_swatch.label = IFACE_("Fill Color");
               row.preview_slots.append(std::move(fill_swatch));
             }
-            if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) {
+            if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
               /* The row's live state: one BKE answer the Source Material panel reads too, through
                * RNA. Compact: an icon with the full status in its tooltip. */
               StackRowPreview live_slot;
@@ -580,8 +580,8 @@ void paint_stack_rows_from_description_impl(const Material &material,
             r_rows.append(std::move(row));
           }
 
-          append_corrections(layer, row_ordinal, depth, MA_PAINT_LAYER_SECTION_CONTENT);
-          append_corrections(layer, row_ordinal, depth, MA_PAINT_LAYER_SECTION_MASK);
+          append_corrections(layer, row_ordinal, depth, MA_PAINT_LAYER_ROLE_EFFECT);
+          append_corrections(layer, row_ordinal, depth, MA_PAINT_LAYER_ROLE_MASK_ITEM);
           if (folder) {
             append_list(layer.children, depth + 1, row_ordinal);
             /* The tree is built walking the rows from the last one down, and a child is only hung
@@ -650,10 +650,10 @@ int paint_layers_edit_add(Material &material,
         kind, PAINT_STACK_ADD_CORRECTION_FILL, PAINT_STACK_ADD_MASK_CORRECTION_FILL);
     created = BKE_paint_layers_correction_add(material,
                                               layer,
-                                              mask_section ? MA_PAINT_LAYER_SECTION_MASK :
-                                                             MA_PAINT_LAYER_SECTION_CONTENT,
-                                              fill_effect ? MA_PAINT_LAYER_EFFECT_FILL :
-                                                            MA_PAINT_LAYER_EFFECT_PAINT,
+                                              mask_section ? MA_PAINT_LAYER_ROLE_MASK_ITEM :
+                                                             MA_PAINT_LAYER_ROLE_EFFECT,
+                                              fill_effect ? MA_PAINT_LAYER_SOURCE_CONSTANT :
+                                                            MA_PAINT_LAYER_SOURCE_IMAGE,
                                               "Correction");
   }
   else {
@@ -672,21 +672,21 @@ int paint_layers_edit_add(Material &material,
         return -1;
       }
       created = BKE_paint_layers_add(
-          material, MA_PAINT_LAYER_KIND_MATERIAL, source->id.name + 2, anchor, place);
+          material, MA_PAINT_LAYER_SOURCE_MATERIAL, source->id.name + 2, anchor, place);
       if (created != nullptr && !BKE_paint_layers_set_material(material, created, source)) {
         BKE_paint_layers_remove(material, created);
         created = nullptr;
       }
       return (created != nullptr) ? layers_ordinal_of(material, created) : -1;
     }
-    eMaterialPaintLayerKind layer_kind = MA_PAINT_LAYER_KIND_PAINT;
+    eMaterialPaintLayerSource layer_source = MA_PAINT_LAYER_SOURCE_IMAGE;
     if (kind == PAINT_STACK_ADD_FILL) {
-      layer_kind = MA_PAINT_LAYER_KIND_FILL;
+      layer_source = MA_PAINT_LAYER_SOURCE_CONSTANT;
     }
     else if (kind == PAINT_STACK_ADD_FOLDER) {
-      layer_kind = MA_PAINT_LAYER_KIND_FOLDER;
+      layer_source = MA_PAINT_LAYER_SOURCE_STACK;
     }
-    created = BKE_paint_layers_add(material, layer_kind, nullptr, anchor, place);
+    created = BKE_paint_layers_add(material, layer_source, nullptr, anchor, place);
     if (created != nullptr) {
       /* The default channel set is a policy of its own (see the BKE helper); the Add only places
        * the row. */
@@ -888,7 +888,7 @@ int paint_layers_edit_group_add(Material &material, const int ordinal)
     return -1;
   }
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      material, MA_PAINT_LAYER_KIND_FOLDER, "Folder", anchor, PaintLayerPlace::Above);
+      material, MA_PAINT_LAYER_SOURCE_STACK, "Folder", anchor, PaintLayerPlace::Above);
   return (folder != nullptr) ? layers_ordinal_of(material, folder) : -1;
 }
 
@@ -901,7 +901,7 @@ bool paint_layers_edit_color_tag(Material &material, const int ordinal, const in
 bool paint_layers_edit_fill_color(Material &material, const int ordinal, const float color[4])
 {
   MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
-  return layer != nullptr && layer->kind == MA_PAINT_LAYER_KIND_FILL &&
+  return layer != nullptr && layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
          BKE_paint_layers_set_fill_color(material, layer, color);
 }
 
@@ -1007,7 +1007,7 @@ class PaintLayersStackSource final : public StackSource,
            *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
       {
         hash = hash * 1000003u ^ UUID(layer.marker).hash();
-        hash ^= uint64_t(layer.kind) | (uint64_t(layer.flag) << 8) |
+        hash ^= uint64_t(layer.source) | (uint64_t(layer.flag) << 8) |
                 (uint64_t(layer.blend) << 16);
         /* The swatch and the columns show these, so a change to them has to reach the rows. */
         for (const float value : {layer.fill_color[0],
@@ -1036,7 +1036,7 @@ class PaintLayersStackSource final : public StackSource,
             hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*image) ? 1 : 0);
           }
         }
-        if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL &&
+        if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
             BKE_paint_layers_source_group_build_failed_get(material, layer))
         {
           /* A build failure is runtime data, not in `paint_layers_flag`: without mixing it in the
@@ -1048,8 +1048,8 @@ class PaintLayersStackSource final : public StackSource,
                *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&corrections))
           {
             hash = hash * 1000003u ^ UUID(correction.marker).hash();
-            hash ^= uint64_t(correction.kind) | (uint64_t(correction.flag) << 8) |
-                    (uint64_t(correction.section) << 16) | (uint64_t(correction.effect) << 24);
+            hash ^= uint64_t(correction.source) | (uint64_t(correction.flag) << 8) |
+                    (uint64_t(correction.role) << 16);
             for (int c = 0; c < correction.channels_num; c++) {
               const Image *image = correction.channels[c].image;
               hash ^= uint64_t(correction.channels[c].channel) << 32;
@@ -1708,7 +1708,9 @@ class PaintLayersStackSource final : public StackSource,
       }
       /* Only a Paint row is made of maps: a Fill is a colour (corrected, never painted), a folder
        * composites its children and a Material layer is its source's bake. */
-      if (row->kind != MA_PAINT_LAYER_KIND_PAINT) {
+      if (BKE_paint_layers_role(*row) != PaintLayerRole::Layer ||
+          row->source != MA_PAINT_LAYER_SOURCE_IMAGE)
+      {
         *r_disabled_hint = TIP_(
             "Only a Paint layer takes an image; drop it between rows to add a layer");
         return false;
@@ -2126,7 +2128,9 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
       BKE_report(op->reports, RPT_ERROR, "The layer the image was dropped on is gone");
       return OPERATOR_CANCELLED;
     }
-    if (layer->kind != MA_PAINT_LAYER_KIND_PAINT) {
+    if (BKE_paint_layers_role(*layer) != PaintLayerRole::Layer ||
+        layer->source != MA_PAINT_LAYER_SOURCE_IMAGE)
+    {
       BKE_report(op->reports, RPT_ERROR, "Only a Paint layer takes an image");
       return OPERATOR_CANCELLED;
     }
@@ -2140,7 +2144,7 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
     const PaintLayerPlace place = (anchor != nullptr && RNA_boolean_get(op->ptr, "below")) ?
                                       PaintLayerPlace::Below :
                                       PaintLayerPlace::Above;
-    layer = BKE_paint_layers_add(material, MA_PAINT_LAYER_KIND_PAINT, name, anchor, place);
+    layer = BKE_paint_layers_add(material, MA_PAINT_LAYER_SOURCE_IMAGE, name, anchor, place);
     if (layer == nullptr) {
       BKE_report(op->reports, RPT_ERROR, "Could not add a layer for the image");
       return OPERATOR_CANCELLED;

@@ -393,7 +393,7 @@ void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
   /* A Material row's bake is its source material rendered into maps; the row's own channel images,
    * effects and masks are composited over those maps live and never enter the render. Subscribing
    * to them would invalidate the source maps on every mask stroke, so the row has no sources. */
-  if (layer.kind != MA_PAINT_LAYER_KIND_MATERIAL) {
+  if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
     Vector<Image *> images;
     bake_collect_source_images(layer, images);
     for (Image *image : images) {
@@ -523,7 +523,7 @@ bool BKE_paint_layers_bake_substitute(const Material &ma,
   /* A Material layer's bake is its source baked into maps, not a cache of the row: those maps are
    * the row's content (#paint_layer_channel_image) and its mask, corrections and opacity apply to
    * them live, so the row is never substituted whole. */
-  if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) {
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return false;
   }
   if (!BKE_paint_layers_bake_is_valid(ma, layer)) {
@@ -543,7 +543,7 @@ bool BKE_paint_layers_bake_substitute_custom(const Material &ma,
                                              Image **r_image,
                                              bool *r_stale)
 {
-  if (layer.kind != MA_PAINT_LAYER_KIND_CUSTOM || layer.bake == nullptr || r_image == nullptr ||
+  if (layer.source != MA_PAINT_LAYER_SOURCE_NODE_GROUP || layer.bake == nullptr || r_image == nullptr ||
       channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM)
   {
     return false;
@@ -771,7 +771,7 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
       MaterialPaintLayer &layer = *const_cast<MaterialPaintLayer *>(layer_const);
       /* A Material layer is baked by the material bake job, not the CPU compositor: its channels
        * have no live description representation to render. */
-      if (BKE_paint_layers_kind_info(layer.kind).needs_external_bake) {
+      if (BKE_paint_layers_kind_info(layer.source).needs_external_bake) {
         continue;
       }
 
@@ -969,7 +969,7 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
-      if (BKE_paint_layers_kind_info(layer->kind).needs_external_bake) {
+      if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
         continue;
       }
       if (layer->bake != nullptr && layer->bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
@@ -1077,7 +1077,7 @@ static bool material_live_row_eligible(const Material &ma,
                                        const int channel,
                                        const PaintLayersRegenCache *cache)
 {
-  if (layer.kind != MA_PAINT_LAYER_KIND_MATERIAL || layer.material == nullptr || channel < 0 ||
+  if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer.material == nullptr || channel < 0 ||
       channel >= PAINT_MATERIAL_CHANNEL_NUM)
   {
     return false;
@@ -1150,7 +1150,7 @@ static PaintLayerMaterialMode material_mode_compute(const Material &ma,
                                                     const MaterialPaintLayer &layer,
                                                     const PaintLayersRegenCache *cache)
 {
-  if (layer.kind != MA_PAINT_LAYER_KIND_MATERIAL || layer.material == nullptr ||
+  if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer.material == nullptr ||
       layer.material->nodetree == nullptr)
   {
     return PaintLayerMaterialMode::Baked;
@@ -1294,7 +1294,7 @@ bool BKE_paint_layers_source_material_is_live(const Main &bmain, const Material 
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
-      if (layer->kind != MA_PAINT_LAYER_KIND_MATERIAL || layer->material != &source) {
+      if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material != &source) {
         continue;
       }
       if (!BKE_paint_layers_bake_row_is_deferred(ma, *layer)) {
@@ -1317,7 +1317,7 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
   Vector<const MaterialPaintLayer *> layers;
   BKE_paint_layers_flatten(ma, layers);
   for (const MaterialPaintLayer *layer : layers) {
-    if (BKE_paint_layers_kind_info(layer->kind).needs_external_bake) {
+    if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
       continue;
     }
     /* The active row and its ancestors are not queued: their bake catches up once the marker
@@ -1393,7 +1393,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
   job->material_session_uid = ma.id.session_uid;
 
   for (const MaterialPaintLayer *layer : layers) {
-    if (BKE_paint_layers_kind_info(layer->kind).needs_external_bake) {
+    if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
       continue;
     }
     /* The row the user is editing inside is left live; it is queued only after the active marker
@@ -1555,7 +1555,7 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
   Vector<const MaterialPaintLayer *> layers;
   BKE_paint_layers_flatten(*ma, layers);
   for (const MaterialPaintLayer *layer : layers) {
-    if (BKE_paint_layers_kind_info(layer->kind).needs_external_bake) {
+    if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
       continue;
     }
     if (layer->bake != nullptr && layer->bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
@@ -2203,11 +2203,11 @@ static uint64_t bake_hash_custom_interface(uint64_t h, const bNodeTree &group)
 
 static uint64_t bake_hash_layer(uint64_t h, const MaterialPaintLayer &layer, const bool is_child)
 {
-  if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL) {
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
     /* A Material layer's bake is its source material rendered into maps, and depends on nothing
      * else: the row's mask, corrections, opacity and blend apply to those maps live. Hashing them
      * here would re-render the source through EEVEE on every mask stroke or slider drag. */
-    h = bake_hash_mix(h, uint8_t(layer.kind));
+    h = bake_hash_mix(h, uint8_t(layer.source));
     h = bake_hash_mix(h, layer.material != nullptr ? layer.material->id.session_uid : 0);
     if (layer.material != nullptr) {
       h = bake_hash_mix(h, BKE_paint_layers_source_material_tree_hash(*layer.material));
@@ -2221,17 +2221,16 @@ static uint64_t bake_hash_layer(uint64_t h, const MaterialPaintLayer &layer, con
     }
     return h;
   }
-  h = bake_hash_mix(h, uint8_t(layer.kind));
+  h = bake_hash_mix(h, uint8_t(layer.source));
   h = bake_hash_mix(h, uint8_t(layer.blend));
   /* The non-visibility flags of the row itself. Visibility is appended only for a child, so the
    * row's own cache does not depend on its own on/off state. */
   h = bake_hash_mix(h, uint16_t(layer.flag & ~MA_PAINT_LAYER_ENABLED));
-  /* NOTE: the hash reads `section`/`effect`/`mask` directly and walks the effects and mask_stack
-   * lists itself; it is the serialized identity of the row, not a role query. A file written before
-   * the split had its rows interleaved in one list and hashes differently once, so its bakes are
-   * invalidated and re-rendered on first load; files written after it hash stably. */
-  h = bake_hash_mix(h, uint8_t(layer.section));
-  h = bake_hash_mix(h, uint8_t(layer.effect));
+  /* NOTE: the hash reads `role` directly and walks the effects and mask_stack lists itself; it is
+   * the serialized identity of the row, not a role query in the normal sense. A file written
+   * before the split had its rows interleaved in one list and hashes differently once, so its
+   * bakes are invalidated and re-rendered on first load; files written after it hash stably. */
+  h = bake_hash_mix(h, uint8_t(layer.role));
   h = bake_hash_float(h, layer.opacity);
   for (const float channel : layer.fill_color) {
     h = bake_hash_float(h, channel);
@@ -2254,11 +2253,11 @@ static uint64_t bake_hash_layer(uint64_t h, const MaterialPaintLayer &layer, con
   h = bake_hash_mix(h, layer.material != nullptr ? layer.material->id.session_uid : 0);
   /* A Material layer's bake follows edits to the source graph, which do not change its session
    * UID, so the source tree's state is part of what the bake is valid for. */
-  if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL && layer.material != nullptr) {
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr) {
     h = bake_hash_mix(h, BKE_paint_layers_source_material_tree_hash(*layer.material));
   }
   h = bake_hash_mix(h, layer.custom_group != nullptr ? layer.custom_group->id.session_uid : 0);
-  if (layer.kind == MA_PAINT_LAYER_KIND_CUSTOM && layer.custom_group != nullptr) {
+  if (layer.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP && layer.custom_group != nullptr) {
     h = bake_hash_custom_interface(h, *layer.custom_group);
   }
   h = bake_hash_mix(h, layer.bake != nullptr ? uint32_t(layer.bake->size) : 0);

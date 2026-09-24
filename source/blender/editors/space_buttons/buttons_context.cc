@@ -418,7 +418,7 @@ static bool buttons_context_path_layer_material(const bContext *C, ButsContextPa
   }
   Material *material = owner;
   if (MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(*owner)) {
-    if (layer->kind == MA_PAINT_LAYER_KIND_MATERIAL && layer->material != nullptr) {
+    if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->material != nullptr) {
       material = layer->material;
     }
   }

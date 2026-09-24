@@ -161,6 +161,7 @@ enum class bUserAssetLibraryAddType {
   Local = 1,
   ImageLibrary = 2,
   BrushLibrary = 3,
+  MaterialLibrary = 4,
 };
 
 static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperator *op)
@@ -225,6 +226,23 @@ static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperat
 
       new_library = BKE_preferences_asset_library_add(&U, name, dirpath);
       new_library->flag |= ASSET_LIBRARY_IS_BRUSH_LIBRARY;
+
+      MEM_delete(dirpath);
+      break;
+    }
+    case bUserAssetLibraryAddType::MaterialLibrary: {
+      char *dirpath = RNA_string_get_alloc(op->ptr, "directory", nullptr, 0, nullptr);
+
+      BLI_path_slash_rstrip(dirpath);
+      if (!name[0]) {
+        BLI_path_split_file_part(dirpath, name, sizeof(name));
+      }
+      if (!name[0]) {
+        STRNCPY(name, DATA_("Material Library"));
+      }
+
+      new_library = BKE_preferences_asset_library_add(&U, name, dirpath);
+      new_library->flag |= ASSET_LIBRARY_IS_MATERIAL_LIBRARY;
 
       MEM_delete(dirpath);
       break;
@@ -323,7 +341,8 @@ static wmOperatorStatus preferences_asset_library_add_invoke(bContext *C,
   if ((ELEM(library_type,
             bUserAssetLibraryAddType::Local,
             bUserAssetLibraryAddType::ImageLibrary,
-            bUserAssetLibraryAddType::BrushLibrary)) &&
+            bUserAssetLibraryAddType::BrushLibrary,
+            bUserAssetLibraryAddType::MaterialLibrary)) &&
       !RNA_struct_property_is_set(op->ptr, "directory"))
   {
     WM_event_add_fileselect(C, op);
@@ -350,7 +369,8 @@ static void preferences_asset_library_add_ui(bContext * /*C*/, wmOperator *op)
     }
     case bUserAssetLibraryAddType::Local:
     case bUserAssetLibraryAddType::ImageLibrary:
-    case bUserAssetLibraryAddType::BrushLibrary: {
+    case bUserAssetLibraryAddType::BrushLibrary:
+    case bUserAssetLibraryAddType::MaterialLibrary: {
       layout->prop(op->ptr, "name", ui::ITEM_R_IMMEDIATE, std::nullopt, ICON_NONE);
       break;
     }
@@ -382,6 +402,13 @@ static constexpr EnumPropertyItem custom_library_type_items[] = {
      "Add Brush Library",
      "Add an asset library dedicated to brushes; any image assets it contains are never shown "
      "in Texture asset browsing"},
+    {int(bUserAssetLibraryAddType::MaterialLibrary),
+     "MATERIAL_LIBRARY",
+     ICON_MATERIAL,
+     "Add Material Library",
+     "Add an asset library dedicated to materials; it is always offered when browsing material "
+     "assets (e.g. the PBR Paint material picker), while browsing for other asset types leaves "
+     "it out"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

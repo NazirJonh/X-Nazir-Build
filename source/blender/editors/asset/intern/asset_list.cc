@@ -39,6 +39,7 @@
 #include "../space_file/filelist.hh"
 
 #include "ED_asset_indexer.hh"
+#include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_fileselect.hh"
 #include "ED_screen.hh"
@@ -546,6 +547,10 @@ void tag_refresh_visible_asset_browsers(const AssetLibraryReference &library_ref
 
 void clear(const AssetLibraryReference *library_reference, wmWindowManager *wm)
 {
+  /* The library content may change on disk, so any cached material-content result for it becomes
+   * stale. */
+  library_material_content_cache_clear(*library_reference);
+
   AssetList *list = lookup_list(*library_reference);
   if (list) {
     list->clear(wm);
@@ -588,6 +593,10 @@ void clear(const AssetLibraryReference *library_reference, const bContext *C)
 
 void clear_all_library(const bContext *C)
 {
+  /* Libraries may have been added, removed or re-pointed; the material-content cache is keyed by
+   * library name, so reset it entirely. */
+  library_material_content_cache_reset();
+
   const AssetLibraryReference all_lib_ref = asset_system::all_library_reference();
   clear(&all_lib_ref, CTX_wm_manager(C));
 }
@@ -670,6 +679,9 @@ int size(const AssetLibraryReference *library_reference)
 
 void storage_exit()
 {
+  /* Can't wait for static deallocation: the material-content cache holds heap allocations that
+   * the guarded allocator would report as leaked on exit. */
+  library_material_content_cache_reset();
   libraries_map().clear();
 }
 

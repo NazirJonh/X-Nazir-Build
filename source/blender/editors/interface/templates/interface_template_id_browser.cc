@@ -1935,16 +1935,22 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
    * browsers sharing the #wmWindowManager grid settings (see #id_browser_name_match_settings_ptr). */
   PointerRNA name_match_settings_ptr = id_browser_name_match_settings_ptr(
       *wm, target_ptr, target_prop);
-  bool is_image = false;
-  if (target_prop && RNA_property_type(target_prop) == PROP_POINTER) {
-    const StructRNA *ptr_type = RNA_property_pointer_type(&target_ptr, target_prop);
-    is_image = ptr_type && RNA_type_to_ID_code(ptr_type) == ID_IM;
-  }
+  /* Shared with the library selector (#id_browser_library_rna_itemf): a single helper resolves
+   * the browsed ID type, so the two cannot drift apart when new types are added. */
+  const short target_idcode = id_browser_target_idcode(C);
+  const bool is_image = target_idcode == ID_IM;
+  const bool is_material = target_idcode == ID_MA;
   /* Only on the first build of the popover's block, i.e. when the user just opened it. Every
    * later re-draw reuses an old block, and changing the browser state (or tagging the file
    * modified) from a plain re-draw would be a side effect of drawing. */
   if (is_image && panel->layout->block()->oldblock == nullptr) {
     id_browser_sync_assigned_image_location(*C, target_ptr, *target_prop, *wm);
+  }
+  /* A remembered library selection can be hidden for the browsed type (e.g. the popover was last
+   * used for images and now browses materials): like the image-location sync above, only act on
+   * the first build of the popover's block, so a re-draw cannot undo what the user picked. */
+  if (is_material && panel->layout->block()->oldblock == nullptr) {
+    id_browser_library_ref_ensure_material_browsable(*wm);
   }
   /* The paint filters need both an image target and a space to back their state, and they only
    * apply to the blend-data source (an asset that is not imported yet has no local #Image to

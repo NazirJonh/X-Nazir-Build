@@ -318,6 +318,9 @@ class AssetLibraryListItem : public ui::AbstractTreeViewItem {
     if (library.flag & ASSET_LIBRARY_IS_BRUSH_LIBRARY) {
       return ICON_BRUSH_DATA;
     }
+    if (library.flag & ASSET_LIBRARY_IS_MATERIAL_LIBRARY) {
+      return ICON_MATERIAL;
+    }
     return ICON_DISK_DRIVE;
   }
 
@@ -392,7 +395,8 @@ class AssetLibraryListItem : public ui::AbstractTreeViewItem {
     STRNCPY(old_name, library_.user_library->name);
     BKE_preferences_asset_library_name_set(&U, library_.user_library, new_name.c_str());
     /* Read the name back: it may have been uniquified. Keeps references in open files pointing at
-     * this library instead of turning them Missing (see #library_references_rename). */
+     * this library instead of turning them Missing (see #library_references_rename, which also
+     * resets the name-keyed material-content cache). */
     ed::asset::library_references_rename(
         *CTX_data_main(&C), old_name, library_.user_library->name);
     label_ = library_.user_library->name;
@@ -598,13 +602,9 @@ void userpref_asset_libraries_panel_draw(const bContext *C, Panel *panel)
   draw_library_list(*C, row);
 
   ui::Layout &col = row.column(true);
-  if (USER_EXPERIMENTAL_TEST(&U, use_remote_asset_libraries)) {
-    col.op_menu_enum(C, "preferences.asset_library_add", "type", "", ICON_ADD);
-  }
-  else {
-    PointerRNA props = col.op("preferences.asset_library_add", "", ICON_ADD);
-    RNA_enum_set(&props, "type", ASSET_LIBRARY_LOCAL);
-  }
+  /* Always a menu: the enum itemf hides the Remote entry unless the experimental flag is set, so
+   * this offers Local plus the dedicated Image/Brush/Material library types in all cases. */
+  col.op_menu_enum(C, "preferences.asset_library_add", "type", "", ICON_ADD);
 
   /* Add a folder at the root level. */
   col.op("preferences.asset_library_folder_add", "", ICON_NEWFOLDER);

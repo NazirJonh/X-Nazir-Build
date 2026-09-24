@@ -102,6 +102,59 @@ void id_browser_library_ref_set(wmWindowManager &wm, const AssetLibraryReference
   }
 }
 
+short id_browser_target_idcode(const bContext *C)
+{
+  PointerRNA target_ptr = CTX_data_pointer_get(C, "id_browser_ptr");
+  const std::optional<StringRefNull> prop_name = CTX_data_string_get(C, "id_browser_prop");
+  if (!target_ptr.data || !prop_name) {
+    return 0;
+  }
+  PropertyRNA *target_prop = RNA_struct_find_property(&target_ptr, prop_name->c_str());
+  if (!target_prop || RNA_property_type(target_prop) != PROP_POINTER) {
+    return 0;
+  }
+  const StructRNA *ptr_type = RNA_property_pointer_type(&target_ptr, target_prop);
+  return ptr_type ? RNA_type_to_ID_code(ptr_type) : 0;
+}
+
+/* The popover remembers one library selection across uses, so a stored selection can be hidden
+ * for the type currently browsed: picking images last time may have left an image library
+ * selected for a popover that now browses materials, where it would come up empty. Reset to
+ * "All Libraries" on definite evidence only -- a tagged image/brush library can never provide
+ * materials, and a cached "contains no materials" result means the same. Unknown content is left
+ * alone, so a library the user just picked is never fought over. Never starts background
+ * fetching: unloaded libraries with unknown content are resolved through the already-loaded list
+ * only (null context consults the cache and iterates loaded lists, but fetches nothing). */
+void id_browser_library_ref_ensure_material_browsable(wmWindowManager &wm)
+{
+  const AssetLibraryReference ref = id_browser_library_ref_get(wm);
+  if (ref.type != ASSET_LIBRARY_CUSTOM) {
+    return;
+  }
+  const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(&U, &ref);
+  if (user_library == nullptr) {
+    return;
+  }
+  const int non_material_flags = ASSET_LIBRARY_IS_IMAGE_LIBRARY | ASSET_LIBRARY_IS_BRUSH_LIBRARY;
+  const bool is_tagged_non_material = (user_library->flag & non_material_flags) != 0;
+  if (is_tagged_non_material) {
+    id_browser_library_ref_set(wm, asset_system::all_library_reference());
+    return;
+  }
+  const std::optional<bool> cached_materials = ed::asset::library_material_content_cached(ref);
+  if (cached_materials.has_value()) {
+    if (!*cached_materials) {
+      id_browser_library_ref_set(wm, asset_system::all_library_reference());
+    }
+    return;
+  }
+  /* No cached result yet, but the list may already be loaded by another surface (Asset Browser,
+   * shelf): consult it without starting any job. Still unknown afterwards means still loading. */
+  if (ed::asset::list::is_loaded(&ref) && !ed::asset::library_contains_material(nullptr, ref)) {
+    id_browser_library_ref_set(wm, asset_system::all_library_reference());
+  }
+}
+
 bool id_browser_library_is_missing(wmWindowManager &wm)
 {
   AssetLibraryReference ref = id_browser_library_ref_get(wm);
@@ -459,31 +512,35 @@ void id_browser_foreach_asset(const bContext &C,
 
 const EnumPropertyItem *id_browser_library_rna_itemf(const bContext *C, bool *r_free)
 {
-  /* Restrict the library list to libraries explicitly set up via "Add Image Library" when the
-   * popover is actually browsing images (its only current use -- see
-   * #interface_template_id_browser.cc's docstring). Image indexing itself is opt-in (see
-   * #image_library_needs_reindex()), so an untagged library can never surface an image asset here
-   * either. Resolved the same way #build_id_grid() resolves its target idcode. Falls back to the
-   * permissive default for any other browsed ID type. */
-  bool only_image_libraries = false;
-  PointerRNA target_ptr = CTX_data_pointer_get(C, "id_browser_ptr");
-  const std::optional<StringRefNull> prop_name = CTX_data_string_get(C, "id_browser_prop");
-  if (target_ptr.data && prop_name) {
-    if (PropertyRNA *target_prop = RNA_struct_find_property(&target_ptr, prop_name->c_str())) {
-      if (RNA_property_type(target_prop) == PROP_POINTER) {
-        const StructRNA *ptr_type = RNA_property_pointer_type(&target_ptr, target_prop);
-        only_image_libraries = ptr_type && RNA_type_to_ID_code(ptr_type) == ID_IM;
-      }
-    }
-  }
+  /* Restrict the library list to the libraries that can actually provide the browsed asset type
+   * (resolved the same way #build_id_grid() resolves its target idcode):
+   * - Images: only libraries explicitly set up via "Add Image Library". Image indexing itself is
+   *   opt-in (see #image_library_needs_reindex()), so an untagged library can never surface an
+   *   image asset here either.
+   * - Materials: image and brush libraries never contribute anything, so they are excluded;
+   *   plain, untagged libraries are only offered once they are known to contain at least one
+   *   material asset, while libraries set up via "Add Material Library" are always listed (even
+   *   when still empty) -- see #LibraryEnumFilterOptions.
+   * Falls back to the permissive default for any other browsed ID type. */
+  const short target_idcode = id_browser_target_idcode(C);
+  const bool only_image_libraries = target_idcode == ID_IM;
+  const bool browse_materials = target_idcode == ID_MA;
+
+  ed::asset::LibraryEnumFilterOptions material_options;
+  material_options.exclude_brush_libraries = true;
+  material_options.require_material_content = true;
+  /* May be null (e.g. RNA introspection); the material content check then consults the cache
+   * only, it never starts background jobs. */
+  material_options.C = C;
 
   const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
       /*include_readonly=*/true,
       /*include_current_file=*/true,
       /*include_remote_libraries=*/false,
       /*include_separate_online_essentials=*/false,
-      /*exclude_image_libraries=*/false,
-      only_image_libraries);
+      /*exclude_image_libraries=*/browse_materials,
+      only_image_libraries,
+      browse_materials ? &material_options : nullptr);
   *r_free = (items != nullptr);
   return items;
 }

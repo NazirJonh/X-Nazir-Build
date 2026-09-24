@@ -350,6 +350,21 @@ PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm);
 AssetLibraryReference id_browser_library_ref_get(wmWindowManager &wm);
 /** Store an ID Browser asset library reference in its grid settings. */
 void id_browser_library_ref_set(wmWindowManager &wm, const AssetLibraryReference &library_ref);
+/**
+ * ID type the popover is currently browsing, resolved from the `id_browser_ptr` /
+ * `id_browser_prop` layout context the same way the grid does (see #build_id_grid): the ID code
+ * of the target pointer property, or 0 when it cannot be determined. Shared by the library
+ * selector and the popover draw so the two cannot drift apart when new browsed types are added.
+ */
+short id_browser_target_idcode(const bContext *C);
+/**
+ * The popover remembers one library selection across uses, so it can be hidden for the type
+ * currently browsed (e.g. an image library while browsing materials). When the stored library is
+ * one that can never provide material assets (tagged image or brush library, or a cached "contains
+ * no materials" result), reset it to "All Libraries". Only acts on definite evidence, never
+ * starts background fetching, so a library the user just picked is never fought over.
+ */
+void id_browser_library_ref_ensure_material_browsable(wmWindowManager &wm);
 /** True when the browsed library no longer exists in the Preferences (§5). */
 bool id_browser_library_is_missing(wmWindowManager &wm);
 /** UI name of the browsed asset library ("Current File", "All Libraries", custom name, ...). */

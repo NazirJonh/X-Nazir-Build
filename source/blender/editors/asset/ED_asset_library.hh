@@ -13,6 +13,8 @@
 #include "BLI_vector.hh"
 #include "DNA_asset_types.h"
 
+#include <optional>
+
 namespace blender {
 
 struct bUserAssetLibrary;
@@ -41,6 +43,23 @@ int library_reference_to_enum_value(const AssetLibraryReference *library);
  * #library_reference_to_enum_value().
  */
 AssetLibraryReference library_reference_from_enum_value(int value);
+/** Extra narrowing for #library_reference_to_rna_enum_itemf(), see its \param options doc. */
+struct LibraryEnumFilterOptions {
+  /** Leave out custom libraries set up via "Add Brush Library" (e.g. material browsing). */
+  bool exclude_brush_libraries = false;
+  /** Leave out custom libraries set up via "Add Material Library" (e.g. asset shelves; no shelf
+   * currently browses materials, so such a library could only ever come up empty there). */
+  bool exclude_material_libraries = false;
+  /** Only list plain, untagged custom libraries when they are known to contain at least one
+   * material asset (see #library_contains_material()). Libraries explicitly set up via
+   * "Add Material Library" are always listed, even when still empty. */
+  bool require_material_content = false;
+  /** Context used to start background asset-list fetches for libraries with unknown content. May
+   * be null to consult the cache only. Stack lifetime: must stay valid until the itemf call
+   * returns. */
+  const bContext *C = nullptr;
+};
+
 /**
  * Translate all available asset libraries to an RNA enum, whereby the enum values match the result
  * of #library_reference_to_enum_value() for any given library.
@@ -64,6 +83,7 @@ AssetLibraryReference library_reference_from_enum_value(int value);
  *    included; every other custom library (tagged or not) is left out. Use for surfaces where an
  *    untagged library can never actually contribute anything -- image indexing itself is opt-in
  *    (see #image_library_needs_reindex()), so a plain library never has image assets to show.
+ * \param options: Optional extra narrowing of the custom libraries, see #LibraryEnumFilterOptions.
  */
 const EnumPropertyItem *library_reference_to_rna_enum_itemf(
     bool include_readonly,
@@ -71,7 +91,8 @@ const EnumPropertyItem *library_reference_to_rna_enum_itemf(
     bool include_remote_libraries,
     bool include_separate_online_essentials,
     bool exclude_image_libraries = false,
-    bool only_image_libraries = false);
+    bool only_image_libraries = false,
+    const LibraryEnumFilterOptions *options = nullptr);
 /**
  * Same as #library_reference_to_rna_enum_itemf(), but only includes custom on-disk asset libraries
  * (libraries on disk, configured in the Preferences). Online asset libraries will be excluded,
@@ -164,6 +185,30 @@ void foreach_library_reference(Main &bmain, FunctionRef<void(AssetLibraryReferen
  * report Missing. This mirrors the contract #AssetWeakReference already documents.
  */
 void library_references_rename(Main &bmain, StringRefNull old_name, StringRefNull new_name);
+
+/**
+ * Cached knowledge about whether \a library_reference contains at least one material asset, or
+ * `std::nullopt` when the content is unknown. Never starts background jobs; backs the ID-browser
+ * fallback that only resets a stored library selection on definite evidence.
+ */
+std::optional<bool> library_material_content_cached(
+    const AssetLibraryReference &library_reference);
+/**
+ * Check if \a library_reference is known to contain at least one material asset. Consults (and
+ * fills) a cache: once an asset list is loaded, it is iterated once and the result is remembered
+ * until the list is cleared again. When the list is not loaded yet and \a C is non-null, a
+ * background fetch is started and false is returned; a later redraw (asset lists notify on
+ * completion) picks the result up. With a null \a C only the cache is consulted, no jobs are
+ * started.
+ *
+ * Main-thread only (used from UI drawing).
+ */
+bool library_contains_material(const bContext *C, const AssetLibraryReference &library_reference);
+/** Forget all cached material-content results (e.g. libraries were added/removed/renamed). */
+void library_material_content_cache_reset();
+/** Forget the cached material-content result for a single library (its content changed on
+ * disk). */
+void library_material_content_cache_clear(const AssetLibraryReference &library_reference);
 
 /**
  * Call after changes to an asset library have been made to reflect the changes in the UI.

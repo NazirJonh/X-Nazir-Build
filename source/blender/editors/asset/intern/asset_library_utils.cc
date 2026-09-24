@@ -173,6 +173,11 @@ void library_references_rename(Main &bmain,
     }
     new_name.copy_utf8_truncated(library_ref.custom_library_name);
   });
+
+  /* The material-content cache is keyed by library name: renaming would otherwise leave a stale
+   * record under the old name that a later library could inherit. Reset here (rather than at each
+   * rename call-site) so the tree-view rename and the RNA name setter stay covered by one edit. */
+  library_material_content_cache_reset();
 }
 
 void refresh_asset_library(const bContext *C, const AssetLibraryReference &library_ref)

@@ -72,6 +72,11 @@ enum eAssetLibrary_Flag : int {
    * popover. Distinct from the brush "favorites" feature in the same popover, which is about
    * individual brush assets, not libraries. */
   ASSET_LIBRARY_IS_PINNED = (1 << 5),
+  /** Set on libraries created via "Add Material Library": a library dedicated to material assets.
+   * Always offered on material-browsing surfaces (even when still empty), while surfaces
+   * dedicated to other asset types leave it out, where it could only ever come up empty (e.g.
+   * brush shelves). */
+  ASSET_LIBRARY_IS_MATERIAL_LIBRARY = (1 << 6),
 };
 
 enum class AssetAccess : int8_t {

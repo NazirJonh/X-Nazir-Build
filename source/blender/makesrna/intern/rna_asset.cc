@@ -574,15 +574,24 @@ const EnumPropertyItem *rna_asset_library_ui_reference_itemf(bContext *C,
    * Texture asset shelf: the reverse isn't true. Image indexing is opt-in (see
    * #image_library_needs_reindex()), so an untagged library can never actually surface an image
    * asset there; restrict the list to libraries explicitly set up via "Add Image Library" instead
-   * of merely excluding brush ones. Other consumers of this shared itemf (the regular Asset
-   * Browser, any other shelf) still want to see every library. */
+   * of merely excluding brush ones.
+   * Any asset shelf: libraries explicitly set up via "Add Material Library" only ever contain
+   * material assets, and no shelf currently browses materials, so they are excluded from every
+   * shelf (even one whose type is not set yet) -- they could only ever come up empty here.
+   * Other consumers of this shared itemf (e.g. the regular Asset Browser) still want to see every
+   * library. */
   bool exclude_image_libraries = false;
   bool only_image_libraries = false;
+  bool exclude_material_libraries = false;
   if (ptr && ptr->data && RNA_struct_is_a(ptr->type, RNA_AssetShelf)) {
+    /* Material libraries are never a shelf source, independent of the shelf type (which may still
+     * be unset while the shelf is being set up). */
+    exclude_material_libraries = true;
     const AssetShelf *shelf = static_cast<const AssetShelf *>(ptr->data);
     if (shelf->type) {
       exclude_image_libraries = ed::asset::shelf::shelf_idname_is_brush_shelf(shelf->type->idname);
-      only_image_libraries = STREQ(shelf->type->idname, ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME);
+      only_image_libraries = STREQ(shelf->type->idname,
+                                   ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME);
     }
   }
 
@@ -600,6 +609,9 @@ const EnumPropertyItem *rna_asset_library_ui_reference_itemf(bContext *C,
     }
   }
 
+  ed::asset::LibraryEnumFilterOptions options;
+  options.exclude_material_libraries = exclude_material_libraries;
+
   const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
       /* Include all valid libraries for the user to choose from. */
       /*include_readonly=*/true,
@@ -607,7 +619,8 @@ const EnumPropertyItem *rna_asset_library_ui_reference_itemf(bContext *C,
       /*include_remote_libraries=*/true,
       /*include_separate_online_essentials=*/false,
       exclude_image_libraries,
-      only_image_libraries);
+      only_image_libraries,
+      &options);
   if (!items) {
     *r_free = false;
     return rna_enum_dummy_NULL_items;

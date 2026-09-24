@@ -2925,14 +2925,20 @@ TEST_F(PaintLayersGraphEvalTest, mixed_paint_and_fill_isolating_folder_partial_a
 }
 
 /**
- * F2-C1 regression guard: a Material leaf inside an isolating folder on a tracked channel is
- * outside the content-alpha scope (F2-C4), so the folder group still carries no Content Alpha
- * socket and the row is treated as opaque there. A bake/hybrid Material row supplies its colour
- * through the wrapper, never through a map or constant leaf the chain could freeze.
+ * F2-C1/F2-C4a regression guard: a Material leaf whose row reads through the SourceGroup wrapper
+ * (its channels form a real graph, not a plain constant or a trivial map -- see the "A and C"
+ * comment on #build_group_source) is outside the content-alpha scope even after F2-C4a: the
+ * `source_group_instance` branch in the generator hands the row's colour and coverage to the
+ * wrapper's own COLOR/COVERAGE outputs and never assigns `current.content_alpha` at all, so the
+ * folder still carries no Content Alpha socket and the row is treated as opaque there. This is
+ * deliberately not a Hybrid row: F2-C4a gave Hybrid's own live_constant/live_map rows a content
+ * alpha (see the `material_hybrid_live_*` tests), so a Hybrid source would no longer prove the
+ * gap this guard exists for.
  */
 TEST_F(PaintLayersGraphEvalTest, untracked_material_child_inside_folder_adds_no_content_alpha)
 {
-  Material *source = build_hybrid_source(*bmain, "NoContentSource", "NoContentNormal", source_spec_b);
+  Material *source = build_group_source(
+      *bmain, "NoContentSource", "NoContentGroup", "NoContentMap", "NoContentShared", source_spec_a);
   ASSERT_NE(source, nullptr);
   ma = BKE_material_add(bmain, "NoContentStack");
   ASSERT_NE(ma, nullptr);
@@ -2950,6 +2956,7 @@ TEST_F(PaintLayersGraphEvalTest, untracked_material_child_inside_folder_adds_no_
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   ASSERT_NE(ma->paint_layers_tree, nullptr);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *mat), PaintLayerMaterialMode::SourceGroup);
 
   bNodeTree *folder_tree = nested_folder_tree_find(*bmain, "NoContentFolder");
   ASSERT_NE(folder_tree, nullptr);
@@ -5881,6 +5888,485 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_matches_the_cpu)
   ma = nullptr;
 }
 
+/** A top-level source whose Base Color (and, when \a link_alpha, Alpha) is a plain Image Texture
+ * over \a map, so both channels resolve to the row's own live map in Hybrid mode. */
+static Material *make_live_image_source(Main *bmain,
+                                        const char *name,
+                                        Image *map,
+                                        const bool link_alpha)
+{
+  Material *source = BKE_material_add(bmain, name);
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  bNode *texture = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
+  texture->id = &map->id;
+  id_us_plus(&map->id);
+  static_cast<NodeTexImage *>(texture->storage)->projection = SHD_PROJ_FLAT;
+  bke::node_add_link(ntree,
+                     *texture,
+                     *bke::node_find_socket(*texture, SOCK_OUT, "Color"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr));
+  if (link_alpha) {
+    bke::node_add_link(ntree,
+                       *texture,
+                       *bke::node_find_socket(*texture, SOCK_OUT, "Alpha"_ustr),
+                       *principled,
+                       *bke::node_find_socket(*principled, SOCK_IN, "Alpha"_ustr));
+  }
+  return source;
+}
+
+/**
+ * ТЗ: a Hybrid live-map Material row must stay in the generated graph. The early drop checked
+ * `live_constant` and `source_group_instance` but not `live_map`, so a row whose source shows a
+ * texture (no constant) vanished from the graph entirely. Top level, source Base Color a live image
+ * with a uniform partial alpha and its Alpha input left at the constant 1: a Material row's
+ * transparency is the Alpha input, so the channel map's own alpha is ignored -- the row covers by
+ * `opacity * 1` and its content alpha is 1. Graph, CPU and the closed form agree on all four
+ * components. The result differing from the bare red bottom is what proves the row took part.
+ */
+TEST_F(PaintLayersGraphEvalTest, live_material_image_row_participates_at_top_level)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float row_opacity = 0.5f;
+  const float tolerance = 1e-4f;
+
+  ma = BKE_material_add(bmain, "LiveImageTop");
+  add_layer(
+      "Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("LiveImageTopBottom", size, 255, 0, 0, 255));
+  Image *source_map = add_solid_image("LiveImageTopMap", size, 128, 128, 128, 128);
+  Material *source = make_live_image_source(bmain, "LiveImageTopSource", source_map, false);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, row_opacity));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  interpreter.x = 0;
+  interpreter.y = 0;
+  const RGBA sampled = interpreter.sample_image(source_map, "Color");
+  const float map_alpha = interpreter.sample_image(source_map, "Alpha").r;
+  /* The map is genuinely partial, so the assertions below would fail if its alpha were folded in. */
+  EXPECT_GT(map_alpha, 0.4f);
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    /* A Material row's transparency is the Alpha input (the constant 1): the channel map's own
+     * alpha is ignored, so the factor is the opacity alone. */
+    const float factor = row_opacity;
+    const RGBA expected = {1.0f * (1.0f - factor) + sampled.r * factor,
+                           0.0f * (1.0f - factor) + sampled.g * factor,
+                           0.0f * (1.0f - factor) + sampled.b * factor,
+                           0.0f};
+    /* The row is in the graph, not dropped: the bare red bottom would read (1, 0, 0). */
+    EXPECT_LT(graph.r, 1.0f - tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.r, expected.r, tolerance) << "graph x=" << x;
+    EXPECT_NEAR(graph.g, expected.g, tolerance) << "graph x=" << x;
+    EXPECT_NEAR(graph.b, expected.b, tolerance) << "graph x=" << x;
+    /* The Result alpha keeps the chain's blended value; see `live_material_image_matches_the_cpu`,
+     * which for the same reason pins rgb only. */
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "cpu x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "cpu x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "cpu x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * ТЗ: the same live-map row inside an isolating folder. A Material row's transparency is its Alpha
+ * input (the constant 1 here), so its factor is 1 and its content alpha is 1; the channel map's own
+ * alpha is ignored. The folder's isolated colour is the source's straight colour and the isolated
+ * content alpha is 1, laid over the bottom at `folder_opacity * 1`. Graph, CPU, the closed form and
+ * the folder's Coverage/Content Alpha outputs must all agree even though the map is partial.
+ */
+TEST_F(PaintLayersGraphEvalTest, live_material_image_in_isolating_folder_content_alpha_matches_cpu)
+{
+  const int size = 4;
+  const float folder_opacity = 0.5f;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "LiveImageIso");
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
+  ASSERT_NE(bottom_record, nullptr);
+  bottom_record->image = add_solid_image("LiveImageIsoBottom", size, 255, 0, 0, 255);
+  bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "LiveImageIsoFolder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *source_map = BKE_image_add_generated(
+      bmain, size, size, "LiveImageIsoMap", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(source_map, nullptr);
+  fill_nested_leaf_soft_edge(source_map, size, 128, 128, 128);
+
+  Material *source = make_live_image_source(bmain, "LiveImageIsoSource", source_map, false);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+
+  bNodeTree *folder_tree = nested_folder_tree_find(*bmain, "LiveImageIsoFolder");
+  ASSERT_NE(folder_tree, nullptr);
+  bNode *folder_instance = nested_group_instance_find(*ma->paint_layers_tree, *folder_tree);
+  ASSERT_NE(folder_instance, nullptr);
+  EXPECT_FALSE(folder_interface_has_socket(*folder_tree, "Content Alpha Base Color"));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  interpreter.tree->ensure_topology_cache();
+  folder_tree->ensure_topology_cache();
+  interpreter.x = 0;
+  interpreter.y = 0;
+  const RGBA sampled = interpreter.sample_image(source_map, "Color");
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = eval_channel_result(interpreter, channel);
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    /* The row's factor is its material Alpha (the constant 1), not the map's partial alpha; one
+     * child, so the folder's straight isolated colour is the sampled colour and it is laid at
+     * folder_opacity. A Material row tracks no content alpha, so the folder grows none. */
+    const float cov = folder_opacity;
+    const RGBA expected = {1.0f * (1.0f - cov) + sampled.r * cov,
+                           0.0f * (1.0f - cov) + sampled.g * cov,
+                           0.0f * (1.0f - cov) + sampled.b * cov,
+                           0.0f};
+    const float graph_cov = nested_folder_named_output_eval(
+        interpreter, *folder_tree, *folder_instance, "Coverage Base Color");
+
+    EXPECT_NEAR(graph.r, expected.r, tolerance) << "graph x=" << x;
+    EXPECT_NEAR(graph.g, expected.g, tolerance) << "graph x=" << x;
+    EXPECT_NEAR(graph.b, expected.b, tolerance) << "graph x=" << x;
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "cpu x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "cpu x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "cpu x=" << x;
+    EXPECT_NEAR(graph_cov, cov, tolerance) << "coverage x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * ТЗ: the live-map row on the Normal channel, which has no content alpha of its own, must still take
+ * part rather than drop. Source Normal goes through a Normal Map over a flat data texture, so it is
+ * a trivial live map; the row combines its decode against the flat bottom's. Graph, CPU and the
+ * decode-combine-normalize-encode closed form agree, and the result leaves the flat bottom. The
+ * map's partial alpha is what the row covers by (the source Alpha input is the constant 1).
+ */
+TEST_F(PaintLayersGraphEvalTest, live_material_image_on_normal_channel_participates)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+
+  ma = BKE_material_add(bmain, "LiveImageNormal");
+  Image *bottom_map = add_solid_image("LiveImageNormalBottom", size, 128, 128, 255, 255);
+  make_image_data(bottom_map);
+  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+
+  Image *normal_map = add_solid_image("LiveImageNormalMap", size, 255, 128, 128, 200);
+  make_image_data(normal_map);
+
+  Material *source = BKE_material_add(bmain, "LiveImageNormalSource");
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  bNode *texture = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
+  texture->id = &normal_map->id;
+  id_us_plus(&normal_map->id);
+  static_cast<NodeTexImage *>(texture->storage)->projection = SHD_PROJ_FLAT;
+  bNode *normal_node = bke::node_add_static_node(nullptr, ntree, SH_NODE_NORMAL_MAP);
+  ASSERT_NE(normal_node, nullptr);
+  bke::node_add_link(ntree,
+                     *texture,
+                     *bke::node_find_socket(*texture, SOCK_OUT, "Color"_ustr),
+                     *normal_node,
+                     *bke::node_find_socket(*normal_node, SOCK_IN, "Color"_ustr));
+  bke::node_add_link(ntree,
+                     *normal_node,
+                     *bke::node_find_socket(*normal_node, SOCK_OUT, "Normal"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  interpreter.x = 0;
+  interpreter.y = 0;
+  const RGBA bottom_enc = interpreter.sample_image(bottom_map, "Color");
+  const RGBA row_enc = interpreter.sample_image(normal_map, "Color");
+  const float map_alpha = interpreter.sample_image(normal_map, "Alpha").r;
+  /* The normal map is partial; as a Material row its alpha is data, not transparency. */
+  EXPECT_GT(map_alpha, 0.5f);
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    /* The row's transparency is the Alpha input (the constant 1), so the normal map's own partial
+     * alpha (which is data, not transparency) is ignored and the factor is 1. */
+    const float fac = 1.0f;
+    const float base[3] = {
+        bottom_enc.r * 2.0f - 1.0f, bottom_enc.g * 2.0f - 1.0f, bottom_enc.b * 2.0f - 1.0f};
+    const float detail[3] = {
+        row_enc.r * 2.0f - 1.0f, row_enc.g * 2.0f - 1.0f, row_enc.b * 2.0f - 1.0f};
+    float combined[3] = {base[0] + detail[0], base[1] + detail[1], base[2] * detail[2]};
+    normalize_v3(combined);
+    float encoded[3] = {combined[0] * 0.5f + 0.5f,
+                        combined[1] * 0.5f + 0.5f,
+                        combined[2] * 0.5f + 0.5f};
+    /* The Normal Combine interpolates base and encoded by the factor, then the chain's final
+     * decode-normalize-encode runs once more, exactly as #cpu_pixel_at applies it. */
+    float raw[3] = {bottom_enc.r * (1.0f - fac) + encoded[0] * fac,
+                    bottom_enc.g * (1.0f - fac) + encoded[1] * fac,
+                    bottom_enc.b * (1.0f - fac) + encoded[2] * fac};
+    float final_n[3] = {raw[0] * 2.0f - 1.0f, raw[1] * 2.0f - 1.0f, raw[2] * 2.0f - 1.0f};
+    normalize_v3(final_n);
+    const float expected[3] = {
+        final_n[0] * 0.5f + 0.5f, final_n[1] * 0.5f + 0.5f, final_n[2] * 0.5f + 0.5f};
+
+    /* The row participates: the bare flat bottom would stay at its stored encoding. */
+    EXPECT_GT(fabsf(graph.r - bottom_enc.r), 0.05f) << "x=" << x;
+    EXPECT_NEAR(graph.r, expected[0], tolerance) << "graph x=" << x;
+    EXPECT_NEAR(graph.g, expected[1], tolerance) << "graph x=" << x;
+    EXPECT_NEAR(graph.b, expected[2], tolerance) << "graph x=" << x;
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "cpu x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "cpu x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "cpu x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * ТЗ (material alpha): one source, one texture with a=0.25 on Base Color AND Alpha, op=0.5, over an
+ * opaque bottom. A Material row's transparency is the Alpha input, so Hybrid live_map and Baked (a
+ * real opaque channel map plus coverage = a) must both give the Principled's `op * a`, and the graph
+ * must agree with the CPU on all four components. This is the double-count regression guard: before
+ * the fix Hybrid multiplied the map alpha in a second time and read 0.975303 where the Principled
+ * reads 0.901600.
+ */
+TEST_F(PaintLayersGraphEvalTest, live_material_image_alpha_input_matches_baked)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float row_opacity = 0.5f;
+  const float tolerance = 1e-4f;
+
+  ma = BKE_material_add(bmain, "LiveImageParity");
+  add_layer("Bottom",
+            MA_PAINT_LAYER_KIND_PAINT,
+            add_solid_image("LiveImageParityBottom", size, 255, 0, 0, 255));
+  /* One texture, grey 0.5 with alpha 64/255, feeding Base Color and Alpha alike. */
+  Image *source_map = add_solid_image("LiveImageParityMap", size, 128, 128, 128, 64);
+  Material *source = make_live_image_source(bmain, "LiveImageParitySource", source_map, true);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, row_opacity));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  interpreter.x = 0;
+  interpreter.y = 0;
+  const RGBA sampled = interpreter.sample_image(source_map, "Color");
+  const float alpha = interpreter.sample_image(source_map, "Alpha").r;
+  /* The Principled's transparency: the Alpha input, here the same texture. */
+  const float factor = row_opacity * alpha;
+  const RGBA expected = {1.0f * (1.0f - factor) + sampled.r * factor,
+                         0.0f * (1.0f - factor) + sampled.g * factor,
+                         0.0f * (1.0f - factor) + sampled.b * factor,
+                         0.0f};
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    EXPECT_NEAR(graph.r, expected.r, tolerance) << "hybrid graph x=" << x;
+    EXPECT_NEAR(graph.g, expected.g, tolerance) << "hybrid graph x=" << x;
+    EXPECT_NEAR(graph.b, expected.b, tolerance) << "hybrid graph x=" << x;
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "hybrid cpu x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "hybrid cpu x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "hybrid cpu x=" << x;
+  }
+
+  /* The same row from a real bake: an opaque channel map (the source colour) plus coverage = a. */
+  const float cov[4] = {alpha, alpha, alpha, 1.0f};
+  Image *coverage = make_bake_data_map(bmain, "LiveImageParityCov", size, cov);
+  ASSERT_NE(coverage, nullptr);
+  for (int c = 0; c < PAINT_MATERIAL_CHANNEL_NUM; c++) {
+    const float rgba[4] = {sampled.r, sampled.g, sampled.b, 1.0f};
+    Image *map = make_bake_data_map(bmain, "LiveImageParityBake", size, rgba);
+    ASSERT_NE(map, nullptr);
+    ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, c, map));
+  }
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, -1, coverage));
+  BKE_paint_layers_bake_finalize(*ma, *row);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    EXPECT_NEAR(graph.r, expected.r, tolerance) << "baked graph x=" << x;
+    EXPECT_NEAR(graph.g, expected.g, tolerance) << "baked graph x=" << x;
+    EXPECT_NEAR(graph.b, expected.b, tolerance) << "baked graph x=" << x;
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "baked cpu x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "baked cpu x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "baked cpu x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * ТЗ (material alpha): a Hybrid live_map row on the Normal channel whose normal map has alpha 200
+ * while the Alpha input is the constant 1. Normal-map alpha is data, not transparency, so it must
+ * not influence the row's contribution: rewriting it to 255 changes nothing, and the graph still
+ * matches the CPU.
+ */
+TEST_F(PaintLayersGraphEvalTest, live_material_image_normal_map_alpha_is_ignored)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  const float tolerance = 1e-4f;
+
+  ma = BKE_material_add(bmain, "LiveImageNormalAlpha");
+  Image *bottom_map = add_solid_image("LiveImageNormalAlphaBottom", size, 128, 128, 255, 255);
+  make_image_data(bottom_map);
+  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+
+  Image *normal_map = add_solid_image("LiveImageNormalAlphaMap", size, 255, 128, 128, 200);
+  make_image_data(normal_map);
+
+  Material *source = BKE_material_add(bmain, "LiveImageNormalAlphaSource");
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  bNode *texture = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
+  texture->id = &normal_map->id;
+  id_us_plus(&normal_map->id);
+  static_cast<NodeTexImage *>(texture->storage)->projection = SHD_PROJ_FLAT;
+  bNode *normal_node = bke::node_add_static_node(nullptr, ntree, SH_NODE_NORMAL_MAP);
+  ASSERT_NE(normal_node, nullptr);
+  bke::node_add_link(ntree,
+                     *texture,
+                     *bke::node_find_socket(*texture, SOCK_OUT, "Color"_ustr),
+                     *normal_node,
+                     *bke::node_find_socket(*normal_node, SOCK_IN, "Color"_ustr));
+  bke::node_add_link(ntree,
+                     *normal_node,
+                     *bke::node_find_socket(*normal_node, SOCK_OUT, "Normal"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  interpreter.x = 0;
+  interpreter.y = 0;
+  const RGBA with_200 = interpreter.eval_result(result_name(channel));
+
+  /* Rewrite the map's alpha to 255: a Material row ignores the channel map's alpha. */
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(normal_map, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int64_t i : IndexRange(int64_t(size) * size)) {
+      pixels[i * 4 + 3] = 255;
+    }
+    BKE_image_release_ibuf(normal_map, ibuf, lock);
+  }
+  const RGBA with_255 = interpreter.eval_result(result_name(channel));
+  const RGBA cpu = cpu_pixel_at(channel, 0, 0);
+
+  EXPECT_NEAR(with_200.r, with_255.r, tolerance);
+  EXPECT_NEAR(with_200.g, with_255.g, tolerance);
+  EXPECT_NEAR(with_200.b, with_255.b, tolerance);
+  EXPECT_NEAR(with_255.r, cpu.r, tolerance);
+  EXPECT_NEAR(with_255.g, cpu.g, tolerance);
+  EXPECT_NEAR(with_255.b, cpu.b, tolerance);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
 /**
  * The wrapper copy must keep the source group's interface: the root's RGB and Value reach the group
  * inputs through Reroutes, Metallic is an instance value. If the copy's Group Input lost its
@@ -6771,6 +7257,279 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_correction_opacity_matches_the_f
   expect_correction_mix(sample, row_color, 1.0f, eval_channel_result(interpreter, bc), "op=1");
   rna_set_channel_opacity(*ma, *correction, bc, 25.0f);
   expect_correction_mix(sample, row_color, 0.25f, eval_channel_result(interpreter, bc), "op=0.25");
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * ТЗ-F2-C4a / material-alpha semantics: a Material row read from its baked maps (Baked mode), on a
+ * non-ALPHA tracked channel, inside an isolating folder. A Material row's transparency is its Alpha
+ * input, and a real bake map is opaque; the channel map's own alpha (kept partial here on purpose,
+ * in a data-space map) is therefore ignored -- neither its `content_cov` nor its content alpha. The
+ * row's factor is its coverage bake (1.0), its content alpha is 1, and the folder lays it at
+ * `folder_opacity * coverage`.
+ */
+TEST_F(PaintLayersGraphEvalTest, material_baked_isolating_folder_partial_alpha_matches_cpu)
+{
+  const int size = 4;
+  const float folder_opacity = 0.5f;
+  const float content_alpha = 0.4f;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MatBakedIso");
+  ASSERT_NE(ma, nullptr);
+
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
+  ASSERT_NE(bottom_record, nullptr);
+  bottom_record->image = add_solid_image("MatBakedIsoBottom", size, 255, 0, 0, 255);
+  ASSERT_NE(bottom_record->image, nullptr);
+  bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "MatBakedFolder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+
+  const float row_color[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+  Material *source = make_constant_principled_source(*bmain, "MatBakedIsoSource", row_color, 0.4f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+
+  /* A baked map in every channel makes the row ineligible to read its source live (Baked mode). */
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Image *coverage = make_bake_data_map(bmain, "MatBakedIsoCoverage", size, white);
+  ASSERT_NE(coverage, nullptr);
+  for (int c = 0; c < PAINT_MATERIAL_CHANNEL_NUM; c++) {
+    Image *map = nullptr;
+    if (c == channel) {
+      /* Base Color deliberately carries a partial alpha, in a data-space map so both sides read
+       * the bytes as-is (a real bake is opaque; this proves the alpha is ignored rather than
+       * relied on). #make_bake_data_map always writes alpha 1.0, so the byte helper is used. */
+      map = add_solid_image("MatBakedIsoBake",
+                            size,
+                            uchar(row_color[0] * 255.0f + 0.5f),
+                            uchar(row_color[1] * 255.0f + 0.5f),
+                            uchar(row_color[2] * 255.0f + 0.5f),
+                            uchar(content_alpha * 255.0f + 0.5f));
+    }
+    else {
+      /* Every other channel is opaque so it cannot influence the row's own coverage. */
+      const float rgba[4] = {row_color[0], row_color[1], row_color[2], 1.0f};
+      map = make_bake_data_map(bmain, "MatBakedIsoBake", size, rgba);
+    }
+    ASSERT_NE(map, nullptr);
+    make_image_data(map);
+    ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, c, map));
+  }
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, -1, coverage));
+  BKE_paint_layers_bake_finalize(*ma, *row);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+
+  bNodeTree *folder_tree = nested_folder_tree_find(*bmain, "MatBakedFolder");
+  ASSERT_NE(folder_tree, nullptr);
+  bNode *folder_instance = nested_group_instance_find(*ma->paint_layers_tree, *folder_tree);
+  ASSERT_NE(folder_instance, nullptr);
+  EXPECT_FALSE(folder_interface_has_socket(*folder_tree, "Content Alpha Base Color"));
+
+  GraphInterpreter root_interpreter;
+  root_interpreter.instance = find_instance();
+  root_interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(root_interpreter.instance, nullptr);
+  root_interpreter.tree->ensure_topology_cache();
+  folder_tree->ensure_topology_cache();
+
+  const float bottom_color[3] = {1.0f, 0.0f, 0.0f};
+  for (int x = 0; x < size; x++) {
+    const int y = 0;
+    /* A Material row's factor is its coverage bake (white, 1.0) times the Alpha input (the constant
+     * 1): the channel map's partial alpha is ignored, so the row's own factor is 1 and the folder's
+     * is `folder_opacity`. With one row and no accumulation below it, the straight colour the
+     * divide-by-coverage produces is the row's own colour, and no content-alpha socket is grown. */
+    const float row_factor = 1.0f;
+    const float factor = folder_opacity * row_factor;
+    const RGBA expected = {bottom_color[0] * (1.0f - factor) + row_color[0] * factor,
+                           bottom_color[1] * (1.0f - factor) + row_color[1] * factor,
+                           bottom_color[2] * (1.0f - factor) + row_color[2] * factor,
+                           0.0f};
+
+    root_interpreter.x = x;
+    root_interpreter.y = y;
+    const RGBA graph = eval_channel_result(root_interpreter, channel);
+    const RGBA cpu = cpu_pixel_at(channel, x, y);
+    const float graph_cov = nested_folder_named_output_eval(
+        root_interpreter, *folder_tree, *folder_instance, "Coverage Base Color");
+
+    EXPECT_NEAR(graph.r, expected.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, expected.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, expected.b, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.r, expected.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.g, expected.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.b, expected.b, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_cov, factor, tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * ТЗ-F2-C4a guard: a Material row read from its baked maps, on the ALPHA channel itself. Alpha has
+ * no bake slot of its own (#paint_layer_material_source_map answers it from
+ * #MaterialPaintLayerBake::coverage), and that same image already feeds the row's own coverage
+ * factor, so folding it in again as this channel's content alpha would double-count it. The
+ * isolating folder must therefore grow no "Content Alpha Alpha" socket at all.
+ */
+TEST_F(PaintLayersGraphEvalTest, material_baked_alpha_channel_isolating_folder_adds_no_content_alpha)
+{
+  const int size = 4;
+  const float folder_opacity = 0.5f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_ALPHA;
+
+  ma = BKE_material_add(bmain, "MatBakedAlphaIso");
+  ASSERT_NE(ma, nullptr);
+
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
+  ASSERT_NE(bottom_record, nullptr);
+  bottom_record->image = add_solid_image("MatBakedAlphaIsoBottom", size, 255, 255, 255, 255);
+  ASSERT_NE(bottom_record->image, nullptr);
+  bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "MatBakedAlphaFolder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+
+  const float row_color[4] = {0.2f, 0.6f, 0.8f, 1.0f};
+  Material *source = make_constant_principled_source(*bmain, "MatBakedAlphaIsoSource", row_color, 0.4f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Image *coverage = make_bake_data_map(bmain, "MatBakedAlphaIsoCoverage", size, white);
+  ASSERT_NE(coverage, nullptr);
+  for (int c = 0; c < PAINT_MATERIAL_CHANNEL_NUM; c++) {
+    Image *map = make_bake_data_map(bmain, "MatBakedAlphaIsoBake", size, white);
+    ASSERT_NE(map, nullptr);
+    ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, c, map));
+  }
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, -1, coverage));
+  BKE_paint_layers_bake_finalize(*ma, *row);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+
+  bNodeTree *folder_tree = nested_folder_tree_find(*bmain, "MatBakedAlphaFolder");
+  ASSERT_NE(folder_tree, nullptr);
+  EXPECT_FALSE(folder_interface_has_socket(*folder_tree, "Content Alpha Alpha"));
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * A Material row read live (Hybrid mode) whose Base Color resolves to a constant (unlinked RGBA
+ * socket, #ChannelResolution::Constant). A Material row's transparency is the Principled Alpha
+ * input, not the Base Color socket's own `.a`; its content alpha is a constant 1 (opaque), so the
+ * non-opaque Base Color alpha deliberately set below must change nothing.
+ */
+TEST_F(PaintLayersGraphEvalTest, material_hybrid_live_constant_isolating_folder_partial_alpha_matches_cpu)
+{
+  const int size = 4;
+  const float folder_opacity = 0.5f;
+  const float content_alpha = 0.4f;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MatHybridConstIso");
+  ASSERT_NE(ma, nullptr);
+
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Bottom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
+  ASSERT_NE(bottom_record, nullptr);
+  bottom_record->image = add_solid_image("MatHybridConstIsoBottom", size, 255, 0, 0, 255);
+  ASSERT_NE(bottom_record->image, nullptr);
+  bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "MatHybridConstFolder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, folder_opacity));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+
+  /* The Base Color RGBA socket's own `.a` (0.4) is deliberately non-opaque: a Material row's
+   * transparency is the Principled Alpha input (here the default 1.0), so this alpha must be
+   * ignored -- it neither scales the factor nor becomes the row's content alpha. */
+  const float row_color[4] = {0.0f, 1.0f, 0.0f, content_alpha};
+  Material *source = make_constant_principled_source(*bmain, "MatHybridConstIsoSource", row_color, 0.4f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", folder, PaintLayerPlace::Into);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+
+  bNodeTree *folder_tree = nested_folder_tree_find(*bmain, "MatHybridConstFolder");
+  ASSERT_NE(folder_tree, nullptr);
+  bNode *folder_instance = nested_group_instance_find(*ma->paint_layers_tree, *folder_tree);
+  ASSERT_NE(folder_instance, nullptr);
+  EXPECT_FALSE(folder_interface_has_socket(*folder_tree, "Content Alpha Base Color"));
+
+  GraphInterpreter root_interpreter;
+  root_interpreter.instance = find_instance();
+  root_interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(root_interpreter.instance, nullptr);
+  root_interpreter.tree->ensure_topology_cache();
+  folder_tree->ensure_topology_cache();
+
+  const float bottom_color[3] = {1.0f, 0.0f, 0.0f};
+  const float leaf_color[3] = {row_color[0], row_color[1], row_color[2]};
+  for (int x = 0; x < size; x++) {
+    const int y = 0;
+    /* The row's factor is its Alpha input (the constant 1); the Base Color socket's own `.a` (0.4)
+     * is ignored, and a Material row tracks no content alpha, so the folder grows none. */
+    const float factor = folder_opacity;
+    const RGBA expected = {bottom_color[0] * (1.0f - factor) + leaf_color[0] * factor,
+                           bottom_color[1] * (1.0f - factor) + leaf_color[1] * factor,
+                           bottom_color[2] * (1.0f - factor) + leaf_color[2] * factor,
+                           0.0f};
+
+    root_interpreter.x = x;
+    root_interpreter.y = y;
+    const RGBA graph = eval_channel_result(root_interpreter, channel);
+    const RGBA cpu = cpu_pixel_at(channel, x, y);
+    const float graph_cov = nested_folder_named_output_eval(
+        root_interpreter, *folder_tree, *folder_instance, "Coverage Base Color");
+
+    EXPECT_NEAR(graph.r, expected.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, expected.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, expected.b, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.r, expected.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.g, expected.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(cpu.b, expected.b, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_cov, folder_opacity, tolerance) << "x=" << x;
+  }
 
   BKE_id_free(bmain, ma);
   ma = nullptr;

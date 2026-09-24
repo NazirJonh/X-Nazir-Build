@@ -1760,7 +1760,7 @@ void paint_layers_tree_build(const Material &ma,
           }
         }
         else if (!substituted && !BKE_paint_layers_is_folder(*layer) &&
-                 !leaf_participates(*layer, channel) && !live_constant &&
+                 !leaf_participates(*layer, channel) && !live_constant && !live_map &&
                  source_group_instance == nullptr)
         {
           if (!paint_layer_channel_present(*layer, channel) &&
@@ -1884,24 +1884,10 @@ void paint_layers_tree_build(const Material &ma,
           }
           current.source_node = group_input;
           current.source = constant_out;
-          /* A Hybrid live constant's alpha is the source's own `.a`, frozen the same way as a
-           * Paint or Fill constant's alpha below (ТЗ-F2-C4a): the value already travelled through
-           * #BKE_paint_layers_material_live_constant above, so no extra sampler is needed here. */
-          if (track_content_alpha) {
-            bNode *alpha_value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
-            bNodeSocket *alpha_out = (alpha_value != nullptr) ? socket_out(*alpha_value, "Value") :
-                                                                nullptr;
-            if (alpha_value != nullptr && alpha_out != nullptr &&
-                alpha_out->default_value != nullptr)
-            {
-              alpha_value->location[0] = location_x - 90.0f;
-              alpha_value->location[1] = location_y - 40.0f;
-              static_cast<bNodeSocketValueFloat *>(alpha_out->default_value)->value =
-                  live_value[3];
-              current.content_alpha_node = alpha_value;
-              current.content_alpha = alpha_out;
-            }
-          }
+          /* A Material row's transparency is the Alpha input, never the channel's own value: the
+           * Principled ignores Base Color's RGBA alpha. It tracks no content alpha of its own --
+           * the material alpha already fed `layer_factor` -- so the Result alpha keeps the chain's
+           * blended value, exactly as the CPU computes it. */
         }
         else if (live_map) {
           /* The row shows the source's own texture. Its sampling settings travel with it; no Divide
@@ -1935,12 +1921,10 @@ void paint_layers_tree_build(const Material &ma,
           current.source_node = map;
           current.source = socket_out(*map, "Color");
           leaf_map_node = map;
-          /* A Hybrid live map's content alpha is the source's own texture Alpha output, the same
-           * trivial read a Paint or Fill map's own Image Texture node gives below (ТЗ-F2-C4a). */
-          if (track_content_alpha) {
-            current.content_alpha_node = map;
-            current.content_alpha = socket_out(*map, "Alpha");
-          }
+          /* A Material row's transparency is the source's Alpha input, not the channel map's own
+           * alpha (the Principled's Base Color reads RGB only). It tracks no content alpha of its
+           * own: the material alpha already fed `layer_factor`, and leaving the chain null keeps
+           * the Result alpha the chain's blended value, exactly as the CPU computes it. */
         }
         else if (source_group_instance != nullptr) {
           /* The whole source graph goes through the wrapper's COLOR:<CHANNEL> output. No map, so
@@ -1974,22 +1958,16 @@ void paint_layers_tree_build(const Material &ma,
           current.source_node = map;
           current.source = socket_out(*map, "Color");
           leaf_map_node = map;
-          /* A Paint, Fill, or Baked Material map carries its content alpha in the Image Texture
-           * Alpha output; it starts the content-alpha chain here rather than being read back out of
-           * the Color's own alpha. Custom stays outside since its bake substitutes above instead of
-           * reaching this branch, and a live Hybrid Material row is excluded above by
-           * `live_constant`/`live_map` (ТЗ-F2-C4a).
+          /* A Paint or Fill map carries its content alpha in the Image Texture Alpha output; it
+           * starts the content-alpha chain here rather than being read back out of the Color's own
+           * alpha. Custom stays outside since its bake substitutes above instead of reaching this
+           * branch.
            *
-           * A Baked Material row's own ALPHA channel is excluded here even though
-           * #paint_layer_channel_image resolves it to `bake->coverage` (source transparency has no
-           * slot of its own): that same image already feeds `layer_factor_socket` below as the row's
-           * coverage factor, so reading it again here as this channel's content alpha would double
-           * that factor into the composite instead of describing per-pixel content (ТЗ-F2-C4a p.4). */
-          const bool material_content_channel = layer->kind == MA_PAINT_LAYER_KIND_MATERIAL &&
-                                                channel != PAINT_MATERIAL_CHANNEL_ALPHA;
+           * A Material row never takes its content alpha from the channel map: the Principled's
+           * transparency is the Alpha input, and a real bake map is opaque. It tracks no content
+           * alpha at all, so the Result alpha stays the chain's blended value like the CPU's. */
           if (track_content_alpha &&
-              (ELEM(layer->kind, MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_KIND_FILL) ||
-               material_content_channel))
+              ELEM(layer->kind, MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_KIND_FILL))
           {
             current.content_alpha_node = map;
             current.content_alpha = socket_out(*map, "Alpha");
@@ -2167,10 +2145,14 @@ void paint_layers_tree_build(const Material &ma,
       }
       /* The row's own content coverage, kept apart from the mask: an unpainted texel of a fresh map
        * is transparent black and must show the rows below, and the content corrections raise this
-       * coverage. The mask multiplies it in afterwards, so a mask always clips a correction. */
+       * coverage. The mask multiplies it in afterwards, so a mask always clips a correction.
+       *
+       * A Material row has no such coverage of its own: the Principled's Base Color reads RGB only,
+       * so the channel map's alpha (a real bake is opaque) must not be folded into the factor -- the
+       * material's transparency already arrived as `layer_factor` from the Alpha input. */
       bNode *content_cov_node = nullptr;
       bNodeSocket *content_cov = nullptr;
-      if (leaf_map_node != nullptr) {
+      if (leaf_map_node != nullptr && layer->kind != MA_PAINT_LAYER_KIND_MATERIAL) {
         content_cov = socket_out(*leaf_map_node, "Alpha");
         content_cov_node = (content_cov != nullptr) ? leaf_map_node : nullptr;
       }

@@ -131,6 +131,13 @@ bool composite_layer_subtree_has_channel(const Material &material,
   if (BKE_paint_layers_material_live_constant(material, layer, channel, live_value)) {
     return true;
   }
+  /* Or through its source's own texture, for the same reason: it paints through that map rather
+   * than a channel record. Mirrors the generator's `layer_subtree_has_channel`. */
+  Image *live_image = nullptr;
+  const ImageUser *live_iuser = nullptr;
+  if (BKE_paint_layers_material_live_image(material, layer, channel, &live_image, &live_iuser)) {
+    return true;
+  }
   if (paint_layer_channel_present(layer, channel)) {
     return true;
   }
@@ -216,15 +223,22 @@ bool composite_image_layers_build(const Material &material,
     float live_value[4];
     const bool live = BKE_paint_layers_material_live_constant(
         material, *layer, channel, live_value);
+    /* The row may instead show its source's own texture. It takes part for the same reason a live
+     * constant does: it paints through that map, not through a channel record, so the drop gates
+     * below must see it or the row leaves the CPU stack while the generator keeps it. */
+    Image *live_map_image = nullptr;
+    const ImageUser *live_map_iuser = nullptr;
+    const bool live_map = !live && BKE_paint_layers_material_live_image(
+                                      material, *layer, channel, &live_map_image, &live_map_iuser);
     if (is_folder) {
       if (!composite_layer_subtree_has_channel(material, *layer, channel)) {
         continue;
       }
     }
-    else if (!live && !paint_layer_channel_present(*layer, channel)) {
+    else if (!live && !live_map && !paint_layer_channel_present(*layer, channel)) {
       continue;
     }
-    else if (!live && paint_layer_channel_image(*layer, channel) == nullptr &&
+    else if (!live && !live_map && paint_layer_channel_image(*layer, channel) == nullptr &&
              !BKE_paint_layers_kind_info(layer->kind).uses_fill_color)
     {
       /* Mirrors the generator: a non-Fill row with no map covers nothing unless its flat value is
@@ -332,8 +346,6 @@ bool composite_image_layers_build(const Material &material,
       out.children.assign(child_layers.begin(), child_layers.end());
     }
     else {
-      Image *live_image = nullptr;
-      const ImageUser *live_iuser = nullptr;
       if (live) {
         /* The active Material row shows its source's live constant, the same the generator builds;
          * its baked map is ignored while the row is deferred. */
@@ -341,13 +353,13 @@ bool composite_image_layers_build(const Material &material,
             eMaterialPaintChannel(channel), live_value, out.constant_color);
         out.has_constant_color = true;
       }
-      else if (BKE_paint_layers_material_live_image(
-                   material, *layer, channel, &live_image, &live_iuser))
-      {
-        /* The row shows the source's own texture, sampled in UV space like the generated node. */
-        out.color_image = live_image;
-        out.color_iuser = live_iuser;
-        out.color_alpha_coverage = true;
+      else if (live_map) {
+        /* The row shows the source's own texture, sampled in UV space like the generated node.
+         * A Material row's transparency is the Alpha input, not the channel map's own alpha, so
+         * its content coverage stays 1; the map alpha kept its Paint/Fill meaning. */
+        out.color_image = live_map_image;
+        out.color_iuser = live_map_iuser;
+        out.color_alpha_coverage = layer->kind != MA_PAINT_LAYER_KIND_MATERIAL;
       }
       else {
         Image *image = paint_layer_channel_image(*layer, channel);
@@ -357,8 +369,10 @@ bool composite_image_layers_build(const Material &material,
            * uses. */
           out.color_iuser = nullptr;
           /* A fresh map is transparent where nothing was painted; that texel must show the rows
-           * below rather than cover them with the map's black, as the generated chain does. */
-          out.color_alpha_coverage = true;
+           * below rather than cover them with the map's black, as the generated chain does. A
+           * Material row is the exception: its channel map (a real bake is opaque) never carries
+           * the row's coverage, so its content coverage stays 1. */
+          out.color_alpha_coverage = layer->kind != MA_PAINT_LAYER_KIND_MATERIAL;
         }
         else {
           /* A constant row: a Fill's colour, or a channel with no map. */

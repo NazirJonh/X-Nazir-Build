@@ -19,6 +19,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_generate.hh"
@@ -291,6 +292,68 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
       }
     }
     return true;
+  }
+
+  /**
+   * Stamp \a value into \a group's Group Input node. A preserved group keeps the stamp across a
+   * regenerate; a rebuilt group clears its nodes (the factory's `tree_clear_nodes`), so the field
+   * comes back defaulted. Unlike #group_mix_sentinel_set this needs no Mix node, so it works for a
+   * Normal-only row whose blend is the normal-combine group rather than a Mix.
+   */
+  static bool group_io_sentinel_set(bNodeTree &group, const float value)
+  {
+    for (bNode &node : group.nodes) {
+      if (node.is_group_input()) {
+        node.color[1] = value;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool group_io_sentinel_get(bNodeTree &group, const float value)
+  {
+    for (bNode &node : group.nodes) {
+      if (node.is_group_input()) {
+        return node.color[1] == value;
+      }
+    }
+    return false;
+  }
+
+  /** Every root link's sockets are still owned by the nodes it records, i.e. nothing dangles. */
+  static bool root_links_are_consistent(bNodeTree &tree)
+  {
+    for (bNodeLink &link : tree.links) {
+      if (link.fromsock == nullptr || link.tosock == nullptr || link.fromnode == nullptr ||
+          link.tonode == nullptr)
+      {
+        return false;
+      }
+      if (&link.fromsock->owner_node() != link.fromnode ||
+          &link.tosock->owner_node() != link.tonode)
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Compose Color Alpha nodes in \a tree left without a linked Alpha input, i.e. with no source. */
+  static int count_unfed_compose_alpha(bNodeTree &tree)
+  {
+    int count = 0;
+    for (bNode &node : tree.nodes) {
+      if (node.type_legacy != SH_NODE_COMPOSE_COLOR_ALPHA) {
+        continue;
+      }
+      bNodeSocket *alpha = bke::node_find_socket(
+          node, SOCK_IN, UString::from_ptr_noinline("Alpha"));
+      if (alpha == nullptr || alpha->directly_linked_links().is_empty()) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /** An input socket of a layer group's own interface, by name, or null. */
@@ -2298,9 +2361,69 @@ TEST_F(PaintLayersGenerateTest, source_group_refusal_falls_back_to_baked)
   EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
 }
 
-TEST_F(PaintLayersGenerateTest, source_group_mode_change_keeps_the_root)
+TEST_F(PaintLayersGenerateTest,
+       source_group_mode_change_keeps_the_root_when_channels_are_untracked)
 {
-  Material *source = add_principled_source("ModeHashSource", 0.3f);
+  /* F2-C4a gives every tracked map channel a content-alpha output, so a Material row whose channel
+   * set includes one changes the row group's interface when it moves between Hybrid and SourceGroup
+   * and the root is rebuilt (see the tracked-channel test below). This guards the other half: a row
+   * whose only channel is untracked builds no content alpha in either mode, so the interface holds
+   * and the root is kept. */
+  Material *source = add_principled_source("UntrackedModeSource", 0.3f);
+  bNodeTree &source_tree = *source->nodetree;
+  bNode *principled = principled_of(*source);
+  ASSERT_NE(principled, nullptr);
+
+  /* Every channel #channel_tracks_content_alpha would track is made Unavailable: the resolver
+   * rejects a tiled (UDIM) image, so linking each of those Principled inputs to one shared tiled
+   * Image Texture keeps them out of the wired set in both modes. */
+  auto add_flat_image_node = [&](Image &image) -> bNode * {
+    bNode *node = bke::node_add_static_node(nullptr, source_tree, SH_NODE_TEX_IMAGE);
+    if (node == nullptr) {
+      return nullptr;
+    }
+    node->id = &image.id;
+    id_us_plus(&image.id);
+    NodeTexImage *storage = static_cast<NodeTexImage *>(node->storage);
+    storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
+    storage->interpolation = SHD_INTERP_LINEAR;
+    storage->projection = SHD_PROJ_FLAT;
+    return node;
+  };
+  auto find_socket = [](bNode &node, const eNodeSocketInOut in_out, const char *name) {
+    return bke::node_find_socket(node, in_out, UString::from_ptr_noinline(name));
+  };
+
+  Image *unsampleable = add_image("UntrackedModeSuppress");
+  unsampleable->source = IMA_SRC_TILED;
+  bNode *suppressor = add_flat_image_node(*unsampleable);
+  ASSERT_NE(suppressor, nullptr);
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.socket_name == nullptr || info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+      continue;
+    }
+    if (bNodeSocket *input = find_socket(*principled, SOCK_IN, info.socket_name)) {
+      bke::node_add_link(source_tree,
+                         *suppressor,
+                         *find_socket(*suppressor, SOCK_OUT, "Color"),
+                         *principled,
+                         *input);
+    }
+  }
+
+  /* The one channel left is Normal, through a Bump with no Height: the resolver answers the flat
+   * constant there, so the row is Hybrid on a live constant. Normal is not tracked, so neither mode
+   * builds a content-alpha output for it. */
+  bNode *bump = bke::node_add_static_node(nullptr, source_tree, SH_NODE_BUMP);
+  ASSERT_NE(bump, nullptr);
+  bke::node_add_link(source_tree,
+                     *bump,
+                     *find_socket(*bump, SOCK_OUT, "Normal"),
+                     *principled,
+                     *find_socket(*principled, SOCK_IN, "Normal"));
+  BKE_ntree_update_tag_all(&source_tree);
+  BKE_ntree_update_after_single_tree_change(*bmain, source_tree);
+
   add_paint_layer("Bottom", add_image("Bottom"));
   MaterialPaintLayer *row = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
@@ -2315,16 +2438,73 @@ TEST_F(PaintLayersGenerateTest, source_group_mode_change_keeps_the_root)
   const Vector<bNode *> root_before = root_nodes(*root);
   bNodeTree *group = layer_tree_find(*bmain, "Source");
   ASSERT_NE(group, nullptr);
-  ASSERT_TRUE(group_mix_sentinel_set(*group, 0.125f));
+  /* Hybrid on an untracked channel: no content-alpha output on the row group. */
+  EXPECT_FALSE(interface_has_socket(*group, "Content Alpha Normal", true));
+  ASSERT_TRUE(group_io_sentinel_set(*group, 0.125f));
+
+  /* A Height source turns the Bump into a graph the CPU cannot reproduce: Normal moves to
+   * SourceGroup. The channel set is unchanged and neither mode tracks content alpha, so the row
+   * group rebuilds while the root is kept. */
+  bNode *noise = bke::node_add_static_node(nullptr, source_tree, SH_NODE_TEX_NOISE);
+  ASSERT_NE(noise, nullptr);
+  bke::node_add_link(source_tree,
+                     *noise,
+                     *find_socket(*noise, SOCK_OUT, "Fac"),
+                     *bump,
+                     *find_socket(*bump, SOCK_IN, "Height"));
+  BKE_ntree_update_tag_all(&source_tree);
+  BKE_ntree_update_after_single_tree_change(*bmain, source_tree);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+  ASSERT_EQ(layer_tree_find(*bmain, "Source"), group);
+  EXPECT_FALSE(group_io_sentinel_get(*group, 0.125f));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+}
+
+TEST_F(PaintLayersGenerateTest,
+       source_group_mode_change_keeps_the_root_on_tracked_channels)
+{
+  /* Base Color is a tracked channel, but a Material row's transparency is its Alpha input, so the
+   * row never exports a "Content Alpha Base Color" output in either mode. Constant -> Noise
+   * therefore moves the row to SourceGroup without moving the group's interface: the row's group
+   * rebuilds, the root is kept. The complementary guard to
+   * source_group_mode_change_keeps_the_root_when_channels_are_untracked. */
+  Material *source = add_principled_source("TrackedModeSource", 0.3f);
+  add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
+
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> root_before = root_nodes(*root);
+  bNodeTree *group = layer_tree_find(*bmain, "Source");
+  ASSERT_NE(group, nullptr);
+  /* A Material row tracks no content alpha, even on a tracked channel. */
+  EXPECT_FALSE(interface_has_socket(*group, "Content Alpha Base Color", true));
+  ASSERT_TRUE(group_io_sentinel_set(*group, 0.125f));
 
   /* Constant -> Noise moves the row to SourceGroup: its group rebuilds, the root does not. */
   source_set_noise_base_color(*bmain, *source);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
   ASSERT_EQ(layer_tree_find(*bmain, "Source"), group);
-  EXPECT_FALSE(group_mix_sentinel_get(*group, 0.125f));
+  EXPECT_FALSE(group_io_sentinel_get(*group, 0.125f));
+  EXPECT_FALSE(interface_has_socket(*group, "Content Alpha Base Color", true));
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+
+  /* The kept root is internally sound: every link still touches sockets its own endpoints own, and
+   * every Compose Color Alpha that survived is fed (the Base Color Paint row below still tracks
+   * content alpha). */
+  root->ensure_topology_cache();
+  EXPECT_TRUE(root_links_are_consistent(*root));
+  EXPECT_EQ(count_unfed_compose_alpha(*root), 0);
 }
 
 TEST_F(PaintLayersGenerateTest, source_group_row_stays_on_baked_maps_on_cpu)

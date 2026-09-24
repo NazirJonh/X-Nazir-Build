@@ -15,6 +15,7 @@
 #include "DNA_mesh_types.h"
 #include "DNA_scene_types.h"
 
+#include "BLI_listbase.h"
 #include "BLI_math_rotation.h"
 #include "BLI_rect.h"
 #include "BLI_string.h"
@@ -25,6 +26,7 @@
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
+#include "RNA_prototypes.hh"
 
 #include "rna_internal.hh"
 
@@ -96,6 +98,7 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
 #  include "BKE_mesh_types.hh"
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_mesh_maps.hh"
 #  include "BKE_paint_layers.hh"
 #  include "BKE_paint_layers_composite.hh"
 #  include "BKE_paint_layers_generate.hh"
@@ -910,6 +913,33 @@ static void rna_MaterialPaintLayer_source_set(PointerRNA *ptr, int value)
   }
 }
 
+static int rna_MaterialPaintLayer_mesh_map_type_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->mesh_map_type;
+}
+
+static int rna_MaterialPaintLayer_mesh_map_type_editable(const PointerRNA *ptr,
+                                                        const char **r_info)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    return PROP_EDITABLE;
+  }
+  if (r_info) {
+    *r_info = N_("Only a Mesh Map row has a map type; change its source first");
+  }
+  return 0;
+}
+
+static void rna_MaterialPaintLayer_mesh_map_type_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mesh_map_type_set(*ma, layer, int8_t(value));
+  }
+}
+
 static int rna_MaterialPaintLayer_role_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -1559,6 +1589,51 @@ static std::optional<std::string> rna_MaterialPaintLayerChannelSettings_path(con
       "paint_layers[{}].channel_settings[{}]", index, int(settings - layer->channel_settings));
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Mesh map RNA helpers
+ * \{ */
+
+static void rna_Material_mesh_map_slots_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  rna_iterator_listbase_begin(iter, ptr, &ma->mesh_map_slots, nullptr);
+}
+
+static int rna_Material_mesh_map_slots_length(PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  return BLI_listbase_count(&ma->mesh_map_slots);
+}
+
+static MaterialMeshMapSlot *rna_Material_mesh_map_slots_ensure(Material *ma, int type)
+{
+  return BKE_mesh_maps_slot_ensure(*ma, int8_t(type));
+}
+
+static MaterialMeshMapSlot *rna_Material_mesh_map_slots_find(Material *ma, int type)
+{
+  return BKE_mesh_maps_slot_find(*ma, int8_t(type));
+}
+
+static int rna_MaterialMeshMapSlot_type_get(PointerRNA *ptr)
+{
+  return static_cast<const MaterialMeshMapSlot *>(ptr->data)->type;
+}
+
+static void rna_MaterialMeshMapSlot_image_set(PointerRNA *ptr, PointerRNA value, ReportList *)
+{
+  MaterialMeshMapSlot *slot = static_cast<MaterialMeshMapSlot *>(ptr->data);
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  BKE_mesh_maps_slot_image_set(*ma, slot->type, static_cast<Image *>(value.data));
+}
+
+static PointerRNA rna_Material_mesh_map_settings_get(PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  return RNA_pointer_create_with_parent(
+      *ptr, RNA_MaterialMeshMapSettings, &ma->mesh_map_settings);
+}
+
 /** \} */
 
 }  // namespace blender
@@ -1581,6 +1656,28 @@ static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
      "Node Group",
      "A user's node group"},
     {MA_PAINT_LAYER_SOURCE_STACK, "STACK", 0, "Stack", "A nested stack of layers (a folder)"},
+    {MA_PAINT_LAYER_SOURCE_MESH_MAP,
+     "MESH_MAP",
+     0,
+     "Mesh Map",
+     "A geometry map of the object, read from the material's shared atlas"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* The mesh map types exposed to the UI. THICKNESS and POSITION have DNA values but no bake side
+ * yet, so they are not offered. */
+static const EnumPropertyItem rna_enum_material_mesh_map_type_items[] = {
+    {MA_MESH_MAP_AO, "AO", 0, "Ambient Occlusion", "Ambient occlusion map"},
+    {MA_MESH_MAP_CURVATURE, "CURVATURE", 0, "Curvature", "Curvature map"},
+    {MA_MESH_MAP_NORMAL_WORLD, "NORMAL_WORLD", 0, "Normal (World)", "World-space normal map"},
+    {MA_MESH_MAP_NORMAL_OBJECT,
+     "NORMAL_OBJECT",
+     0,
+     "Normal (Object)",
+     "Object-space normal map"},
+    {MA_MESH_MAP_ID_OBJECT, "ID_OBJECT", 0, "Object ID", "Object index map"},
+    {MA_MESH_MAP_ID_MATERIAL, "ID_MATERIAL", 0, "Material ID", "Material index map"},
+    {MA_MESH_MAP_EDGE, "EDGE", 0, "Edge", "Edge/bevel map"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1759,6 +1856,18 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "rna_MaterialPaintLayer_source_get", "rna_MaterialPaintLayer_source_set", nullptr);
   RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_source_editable");
   RNA_def_property_ui_text(prop, "Source", "What the layer reads its values from");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Which geometry map a MESH_MAP row reads. Editable only for a MESH_MAP row; the BKE setter
+   * refuses any other source, so a script that bypasses the editable flag changes nothing. */
+  prop = RNA_def_property(srna, "mesh_map_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_mesh_map_type_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_mesh_map_type_get",
+                              "rna_MaterialPaintLayer_mesh_map_type_set",
+                              nullptr);
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mesh_map_type_editable");
+  RNA_def_property_ui_text(prop, "Mesh Map Type", "Which geometry map a Mesh Map row reads");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
@@ -2349,6 +2458,128 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Active Layer", "Active paint layer of the material");
 }
+
+/* The mesh map RNA helpers that call BKE live in the runtime half (the definition pass must not
+ * depend on BKE); only the registration below is here. */
+
+static void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
+{
+  StructRNA *coll_srna;
+  PropertyRNA *prop;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  prop = RNA_def_property(srna, "mesh_map_slots", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialMeshMapSlot");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Material_mesh_map_slots_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop, "Mesh Map Slots", "The material's shared mesh map atlases, one per map type");
+
+  RNA_def_property_srna(prop, "MaterialMeshMapSlots");
+  coll_srna = RNA_def_struct(brna, "MaterialMeshMapSlots", nullptr);
+  RNA_def_struct_sdna(coll_srna, "Material");
+  RNA_def_struct_ui_text(coll_srna, "Mesh Map Slots", "Collection of mesh map atlas slots");
+
+  func = RNA_def_function(coll_srna, "ensure", "rna_Material_mesh_map_slots_ensure");
+  RNA_def_function_ui_description(func, "Get the slot for a map type, creating it if absent");
+  parm = RNA_def_enum(func,
+                      "type",
+                      rna_enum_material_mesh_map_type_items,
+                      MA_MESH_MAP_AO,
+                      "Type",
+                      "The mesh map type");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(
+      func, "slot", "MaterialMeshMapSlot", "", "The mesh map slot");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(coll_srna, "find", "rna_Material_mesh_map_slots_find");
+  RNA_def_function_ui_description(func, "Get the slot for a map type, or none");
+  parm = RNA_def_enum(func,
+                      "type",
+                      rna_enum_material_mesh_map_type_items,
+                      MA_MESH_MAP_AO,
+                      "Type",
+                      "The mesh map type");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(
+      func, "slot", "MaterialMeshMapSlot", "", "The mesh map slot, or none");
+  RNA_def_function_return(func, parm);
+
+  /* slot */
+  srna = RNA_def_struct(brna, "MaterialMeshMapSlot", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialMeshMapSlot");
+  RNA_def_struct_ui_text(srna, "Mesh Map Slot", "One shared mesh map atlas");
+
+  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_mesh_map_type_items);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialMeshMapSlot_type_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Type", "The mesh map this slot holds");
+
+  prop = RNA_def_property(srna, "image", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Image");
+  RNA_def_property_pointer_sdna(prop, nullptr, "image");
+  RNA_def_property_pointer_funcs(prop, nullptr, "rna_MaterialMeshMapSlot_image_set", nullptr, nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Image", "The shared atlas for this map type, or none");
+
+  /* settings */
+  prop = RNA_def_property(srna, "mesh_map_settings", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialMeshMapSettings");
+  RNA_def_property_pointer_funcs(prop, "rna_Material_mesh_map_settings_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop, "Mesh Map Settings", "Baking and viewport settings shared by the mesh maps");
+
+  srna = RNA_def_struct(brna, "MaterialMeshMapSettings", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialMeshMapSettings");
+  RNA_def_struct_ui_text(srna, "Mesh Map Settings", "Baking and viewport settings of mesh maps");
+
+  prop = RNA_def_property(srna, "resolution", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "resolution");
+  RNA_def_property_range(prop, 16, 16384);
+  RNA_def_property_ui_text(prop, "Resolution", "Square side the atlas is allocated at");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "samples", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "samples");
+  RNA_def_property_range(prop, 1, 4096);
+  RNA_def_property_ui_text(prop, "Samples", "Cycles samples the mesh map bake renders with");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "use_denoise", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_denoise", 1);
+  RNA_def_property_ui_text(prop, "Denoise", "Ask Cycles to denoise the mesh map bake");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "margin", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "margin");
+  RNA_def_property_range(prop, 0.0f, 256.0f);
+  RNA_def_property_ui_text(prop, "Margin", "UV margin in pixels applied while merging a bake");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "ao_distance", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "ao_distance");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "AO Distance", "Ambient occlusion ray distance; zero is automatic");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "edge_radius", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "edge_radius");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Edge Radius", "Edge/bevel ray radius in object-space units");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+}
+
+/** \} */
 
 static void rna_def_material_display(StructRNA *srna)
 {
@@ -3170,6 +3401,9 @@ void RNA_def_material(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Paint Layers", "The material's paint layer stack, bottom to top");
   rna_def_material_paint_layers(brna, prop);
+
+  /* mesh maps */
+  rna_def_material_mesh_maps(brna, srna);
 
   prop = RNA_def_property(srna, "is_layered", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_Material_is_layered_get", nullptr);

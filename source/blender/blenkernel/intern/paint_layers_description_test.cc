@@ -2856,4 +2856,261 @@ TEST_F(PaintLayersDescription, source_material_is_live_is_false_in_baked_mode)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Mesh map rows
+ * \{ */
+
+TEST_F(PaintLayersDescription, mesh_map_row_kind_and_type)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(BKE_paint_layers_source_type(*row), PaintLayerSourceType::MeshMap);
+  EXPECT_FALSE(BKE_paint_layers_is_folder(*row));
+
+  const PaintLayerKindInfo &info = BKE_paint_layers_kind_info(MA_PAINT_LAYER_SOURCE_MESH_MAP);
+  EXPECT_EQ(info.source, MA_PAINT_LAYER_SOURCE_MESH_MAP);
+  EXPECT_FALSE(info.is_folder);
+  EXPECT_FALSE(info.uses_fill_color);
+  EXPECT_FALSE(info.needs_external_bake);
+
+  EXPECT_EQ(row->mesh_map_type, MA_MESH_MAP_AO);
+  EXPECT_EQ(BKE_paint_layers_mesh_map_type_get(*row), MA_MESH_MAP_AO);
+
+  ASSERT_TRUE(BKE_paint_layers_mesh_map_type_set(*ma, row, MA_MESH_MAP_EDGE));
+  EXPECT_EQ(row->mesh_map_type, MA_MESH_MAP_EDGE);
+  EXPECT_EQ(BKE_paint_layers_mesh_map_type_get(*row), MA_MESH_MAP_EDGE);
+  EXPECT_TRUE(BKE_paint_layers_mesh_map_type_set(*ma, row, MA_MESH_MAP_EDGE));
+  EXPECT_FALSE(BKE_paint_layers_mesh_map_type_set(*ma, row, MA_MESH_MAP_TYPE_NUM));
+  EXPECT_EQ(row->mesh_map_type, MA_MESH_MAP_EDGE);
+
+  BKE_paint_layers_default_channels_apply(*ma, *row);
+  EXPECT_EQ(row->channels_num, 0);
+}
+
+TEST_F(PaintLayersDescription, mesh_map_type_set_refuses_other_sources)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapMat");
+  MaterialPaintLayer *image = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(image, nullptr);
+  EXPECT_EQ(BKE_paint_layers_mesh_map_type_get(*image), -1);
+  EXPECT_FALSE(BKE_paint_layers_mesh_map_type_set(*ma, image, MA_MESH_MAP_EDGE));
+  EXPECT_EQ(image->mesh_map_type, MA_MESH_MAP_AO);
+}
+
+TEST_F(PaintLayersDescription, mesh_map_corrections_allow_mesh_map_only)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO Effect");
+  ASSERT_NE(effect, nullptr);
+  EXPECT_EQ(effect->source, MA_PAINT_LAYER_SOURCE_MESH_MAP);
+  EXPECT_EQ(effect->role, MA_PAINT_LAYER_ROLE_EFFECT);
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MESH_MAP, "Mask");
+  ASSERT_NE(mask, nullptr);
+  EXPECT_EQ(mask->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+
+  EXPECT_EQ(BKE_paint_layers_correction_add(
+                *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "M"),
+            nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add(
+                *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "N"),
+            nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add(
+                *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "S"),
+            nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_correction_source_set(
+      *ma, effect, MA_PAINT_LAYER_SOURCE_IMAGE));
+  EXPECT_TRUE(BKE_paint_layers_correction_source_set(
+      *ma, effect, MA_PAINT_LAYER_SOURCE_MESH_MAP));
+  EXPECT_FALSE(BKE_paint_layers_correction_source_set(
+      *ma, effect, MA_PAINT_LAYER_SOURCE_MATERIAL));
+}
+
+TEST_F(PaintLayersDescription, source_change_still_refuses_mesh_map)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapMat");
+  MaterialPaintLayer *image = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(image, nullptr);
+  /* MESH_MAP is not a conversion target: source_change still only accepts Image and Constant. */
+  EXPECT_FALSE(BKE_paint_layers_source_change(*ma, image, MA_PAINT_LAYER_SOURCE_MESH_MAP));
+  EXPECT_FALSE(BKE_paint_layers_source_change(*ma, image, MA_PAINT_LAYER_SOURCE_MATERIAL));
+  EXPECT_EQ(image->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+
+  /* A Mesh Map row is a different kind of source: it is not converted to Image/Constant. */
+  MaterialPaintLayer *mesh_map = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(mesh_map, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_mesh_map_type_set(*ma, mesh_map, MA_MESH_MAP_EDGE));
+  EXPECT_FALSE(BKE_paint_layers_source_change(*ma, mesh_map, MA_PAINT_LAYER_SOURCE_IMAGE));
+  EXPECT_FALSE(BKE_paint_layers_source_change(*ma, mesh_map, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_EQ(mesh_map->source, MA_PAINT_LAYER_SOURCE_MESH_MAP);
+  EXPECT_EQ(mesh_map->mesh_map_type, MA_MESH_MAP_EDGE);
+}
+
+TEST_F(PaintLayersDescription, rna_mesh_map_row_and_editable_type)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapMat");
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  PointerRNA coll_ptr = paint_layers_collection_ptr(ma_ptr);
+  ASSERT_NE(coll_ptr.type, nullptr);
+
+  MaterialPaintLayer *row = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO");
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->source, MA_PAINT_LAYER_SOURCE_MESH_MAP);
+
+  PointerRNA row_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialPaintLayer, row);
+  PropertyRNA *prop = RNA_struct_find_property(&row_ptr, "mesh_map_type");
+  ASSERT_NE(prop, nullptr);
+  EXPECT_EQ(RNA_property_type(prop), PROP_ENUM);
+  EXPECT_TRUE(RNA_property_editable(&row_ptr, prop));
+
+  RNA_property_enum_set(&row_ptr, prop, MA_MESH_MAP_EDGE);
+  EXPECT_EQ(row->mesh_map_type, MA_MESH_MAP_EDGE);
+
+  MaterialPaintLayer *image = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_SOURCE_IMAGE, "Paint");
+  ASSERT_NE(image, nullptr);
+  PointerRNA image_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialPaintLayer, image);
+  EXPECT_FALSE(RNA_property_editable(&image_ptr, prop));
+  RNA_property_enum_set(&image_ptr, prop, MA_MESH_MAP_EDGE);
+  EXPECT_EQ(image->mesh_map_type, MA_MESH_MAP_AO);
+}
+
+static MaterialPaintLayer *rna_mesh_map_correction_add(PointerRNA &layer_ptr,
+                                                       int role,
+                                                       int source,
+                                                       const char *name)
+{
+  FunctionRNA *func = RNA_struct_find_function(layer_ptr.type, "correction_add");
+  BLI_assert(func != nullptr);
+  ParameterList parms;
+  RNA_parameter_list_create(&parms, &layer_ptr, func);
+  int role_arg = role;
+  int source_arg = source;
+  const char *name_arg = name;
+  RNA_parameter_set_lookup(&parms, "role", &role_arg);
+  RNA_parameter_set_lookup(&parms, "source", &source_arg);
+  RNA_parameter_set_lookup(&parms, "name", &name_arg);
+
+  ReportList reports;
+  BKE_reports_init(&reports, RPT_STORE);
+  RNA_function_call(nullptr, &reports, &layer_ptr, func, &parms);
+  BKE_reports_free(&reports);
+
+  void *ret = nullptr;
+  RNA_parameter_get_lookup(&parms, "correction", &ret);
+  MaterialPaintLayer *correction = ret != nullptr ? *static_cast<MaterialPaintLayer **>(ret) :
+                                                    nullptr;
+  RNA_parameter_list_free(&parms);
+  return correction;
+}
+
+TEST_F(PaintLayersDescription, rna_correction_add_accepts_mesh_map)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapMat");
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  PointerRNA coll_ptr = paint_layers_collection_ptr(ma_ptr);
+  MaterialPaintLayer *owner = rna_paint_layers_new(coll_ptr, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner");
+  ASSERT_NE(owner, nullptr);
+  PointerRNA owner_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialPaintLayer, owner);
+
+  MaterialPaintLayer *effect = rna_mesh_map_correction_add(
+      owner_ptr, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO");
+  ASSERT_NE(effect, nullptr);
+  EXPECT_EQ(effect->source, MA_PAINT_LAYER_SOURCE_MESH_MAP);
+
+  MaterialPaintLayer *refused = rna_mesh_map_correction_add(
+      owner_ptr, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  EXPECT_EQ(refused, nullptr);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name RNA mesh map slots
+ * \{ */
+
+static PointerRNA mesh_map_slots_collection_ptr(PointerRNA &ma_ptr)
+{
+  PropertyRNA *prop = RNA_struct_find_property(&ma_ptr, "mesh_map_slots");
+  PointerRNA coll_ptr = PointerRNA_NULL;
+  if (prop != nullptr) {
+    RNA_property_collection_type_get(&ma_ptr, prop, &coll_ptr);
+  }
+  return coll_ptr;
+}
+
+static MaterialMeshMapSlot *rna_mesh_map_slots_ensure(PointerRNA &coll_ptr, int type)
+{
+  FunctionRNA *func = RNA_struct_find_function(coll_ptr.type, "ensure");
+  BLI_assert(func != nullptr);
+  ParameterList parms;
+  RNA_parameter_list_create(&parms, &coll_ptr, func);
+  int type_arg = type;
+  RNA_parameter_set_lookup(&parms, "type", &type_arg);
+
+  ReportList reports;
+  BKE_reports_init(&reports, RPT_STORE);
+  RNA_function_call(nullptr, &reports, &coll_ptr, func, &parms);
+  BKE_reports_free(&reports);
+
+  void *ret = nullptr;
+  RNA_parameter_get_lookup(&parms, "slot", &ret);
+  MaterialMeshMapSlot *slot = ret != nullptr ? *static_cast<MaterialMeshMapSlot **>(ret) : nullptr;
+  RNA_parameter_list_free(&parms);
+  return slot;
+}
+
+TEST_F(PaintLayersDescription, rna_slot_image_set_maintains_user_counts)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapRna");
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *first = BKE_image_add_generated(
+      bmain, 8, 8, "RnaFirst", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  Image *second = BKE_image_add_generated(
+      bmain, 8, 8, "RnaSecond", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  PointerRNA coll_ptr = mesh_map_slots_collection_ptr(ma_ptr);
+  ASSERT_NE(coll_ptr.type, nullptr);
+  MaterialMeshMapSlot *slot = rna_mesh_map_slots_ensure(coll_ptr, MA_MESH_MAP_AO);
+  ASSERT_NE(slot, nullptr);
+  PointerRNA slot_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialMeshMapSlot, slot);
+  PropertyRNA *image_prop = RNA_struct_find_property(&slot_ptr, "image");
+  ASSERT_NE(image_prop, nullptr);
+
+  const int first_base = first->id.us;
+  PointerRNA first_ptr = RNA_id_pointer_create(&first->id);
+  RNA_property_pointer_set(&slot_ptr, image_prop, first_ptr, nullptr);
+  EXPECT_EQ(slot->image, first);
+  EXPECT_EQ(first->id.us, first_base + 1);
+
+  /* The same image again does not add a second reference. */
+  RNA_property_pointer_set(&slot_ptr, image_prop, first_ptr, nullptr);
+  EXPECT_EQ(first->id.us, first_base + 1);
+
+  const int second_base = second->id.us;
+  PointerRNA second_ptr = RNA_id_pointer_create(&second->id);
+  RNA_property_pointer_set(&slot_ptr, image_prop, second_ptr, nullptr);
+  EXPECT_EQ(first->id.us, first_base);
+  EXPECT_EQ(second->id.us, second_base + 1);
+
+  /* None releases the reference. */
+  RNA_property_pointer_set(&slot_ptr, image_prop, PointerRNA_NULL, nullptr);
+  EXPECT_EQ(slot->image, nullptr);
+  EXPECT_EQ(second->id.us, second_base);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

@@ -12,17 +12,22 @@
 #include "DNA_action_types.h"
 #include "DNA_layer_types.h"
 #include "DNA_lightprobe_types.h"
+#include "DNA_material_types.h"
 #include "DNA_meta_types.h"
 #include "DNA_object_types.h"
 
+#include "BLI_listbase.h"
 #include "BLI_math_rotation.h"
+#include "BLI_string.h"
 
 #include "BLT_translation.hh"
 
+#include "BKE_mesh_maps.hh"
 #include "BKE_paint.hh"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
+#include "RNA_prototypes.hh"
 
 #include "rna_internal.hh"
 
@@ -2382,6 +2387,100 @@ static void rna_LightLinking_collection_update(Main *bmain, Scene * /*scene*/, P
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, ptr->owner_id);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Mesh map state RNA helpers
+ * \{ */
+
+static void rna_Object_mesh_map_states_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  rna_iterator_listbase_begin(iter, ptr, &ob->mesh_map_states, nullptr);
+}
+
+static int rna_Object_mesh_map_states_length(PointerRNA *ptr)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  return BLI_listbase_count(&ob->mesh_map_states);
+}
+
+static ObjectMeshMapState *rna_Object_mesh_map_states_ensure(Object *ob,
+                                                             Material *material,
+                                                             int type)
+{
+  if (material == nullptr) {
+    return nullptr;
+  }
+  return BKE_mesh_maps_object_state_ensure(*ob, *material, int8_t(type));
+}
+
+static PointerRNA rna_ObjectMeshMapState_material_get(PointerRNA *ptr)
+{
+  ObjectMeshMapState *state = static_cast<ObjectMeshMapState *>(ptr->data);
+  return RNA_pointer_create_with_parent(*ptr, RNA_Material, state->material);
+}
+
+static int rna_ObjectMeshMapState_type_get(PointerRNA *ptr)
+{
+  return static_cast<const ObjectMeshMapState *>(ptr->data)->type;
+}
+
+static int rna_ObjectMeshMapState_status_get(PointerRNA *ptr)
+{
+  return static_cast<const ObjectMeshMapState *>(ptr->data)->status;
+}
+
+static void rna_ObjectMeshMapState_hash_get(PointerRNA *ptr, char *value)
+{
+  const ObjectMeshMapState *state = static_cast<const ObjectMeshMapState *>(ptr->data);
+  BLI_snprintf(value, 17, "%08x%08x", state->hash[0], state->hash[1]);
+}
+
+static int rna_ObjectMeshMapState_hash_length(PointerRNA * /*ptr*/)
+{
+  return 16;
+}
+
+static int rna_ObjectMeshMapState_baked_time_get(PointerRNA *ptr)
+{
+  return static_cast<const ObjectMeshMapState *>(ptr->data)->baked_time;
+}
+
+static PointerRNA rna_ObjectMeshMapState_source_object_get(PointerRNA *ptr)
+{
+  ObjectMeshMapState *state = static_cast<ObjectMeshMapState *>(ptr->data);
+  return RNA_pointer_create_with_parent(*ptr, RNA_Object, state->source_object);
+}
+
+/**
+ * The reserved high-poly source may only be a mesh object other than the state's own object: the
+ * object baking from itself is nonsense and, from Python, a plain assignment could set it so.
+ */
+static bool rna_ObjectMeshMapState_source_object_poll(PointerRNA *ptr, PointerRNA value)
+{
+  const Object *owner = id_cast<Object *>(ptr->owner_id);
+  const Object *source = reinterpret_cast<Object *>(value.owner_id);
+  if (source == nullptr || source == owner) {
+    return false;
+  }
+  return source->type == OB_MESH;
+}
+
+static void rna_ObjectMeshMapState_source_object_set(PointerRNA *ptr,
+                                                     PointerRNA value,
+                                                     ReportList *)
+{
+  ObjectMeshMapState *state = static_cast<ObjectMeshMapState *>(ptr->data);
+  Object *source = static_cast<Object *>(value.data);
+  /* The poll greys out the self-assignment in the UI; this refuses it for a script that bypasses
+   * the poll, exactly like the BKE setter would. */
+  if (source != nullptr && source == id_cast<Object *>(ptr->owner_id)) {
+    return;
+  }
+  state->source_object = source;
+}
+
+/** \} */
+
 }  // namespace blender
 
 #else
@@ -3024,6 +3123,133 @@ static void rna_def_object_visibility(StructRNA *srna)
   RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_Object_internal_update_draw");
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Mesh map states
+ * \{ */
+
+/* Values must match #eMaterialMeshMapType; kept local because rna_material.cc's table is static. */
+static const EnumPropertyItem rna_enum_object_mesh_map_type_items[] = {
+    {MA_MESH_MAP_AO, "AO", 0, "Ambient Occlusion", "Ambient occlusion map"},
+    {MA_MESH_MAP_CURVATURE, "CURVATURE", 0, "Curvature", "Curvature map"},
+    {MA_MESH_MAP_NORMAL_WORLD, "NORMAL_WORLD", 0, "Normal (World)", "World-space normal map"},
+    {MA_MESH_MAP_NORMAL_OBJECT,
+     "NORMAL_OBJECT",
+     0,
+     "Normal (Object)",
+     "Object-space normal map"},
+    {MA_MESH_MAP_ID_OBJECT, "ID_OBJECT", 0, "Object ID", "Object index map"},
+    {MA_MESH_MAP_ID_MATERIAL, "ID_MATERIAL", 0, "Material ID", "Material index map"},
+    {MA_MESH_MAP_EDGE, "EDGE", 0, "Edge", "Edge/bevel map"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values must match #eObjectMeshMapStatus. */
+static const EnumPropertyItem rna_enum_object_mesh_map_status_items[] = {
+    {OB_MESH_MAP_STATUS_NONE, "NONE", 0, "None", "Nothing has been baked"},
+    {OB_MESH_MAP_STATUS_VALID, "VALID", 0, "Valid", "The bake matches the object"},
+    {OB_MESH_MAP_STATUS_STALE, "STALE", 0, "Stale", "The object changed since the last bake"},
+    {OB_MESH_MAP_STATUS_BAKING, "BAKING", 0, "Baking", "A bake is in flight"},
+    {OB_MESH_MAP_STATUS_ERROR, "ERROR", 0, "Error", "The last bake failed"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* The mesh map state RNA helpers that call BKE live in the runtime half; only the registration
+ * and the enum tables below are here. */
+
+static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
+{
+  StructRNA *coll_srna;
+  PropertyRNA *prop;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  prop = RNA_def_property(srna, "mesh_map_states", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "ObjectMeshMapState");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Object_mesh_map_states_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop, "Mesh Map States", "Per-object bake state of the material mesh maps");
+
+  RNA_def_property_srna(prop, "ObjectMeshMapStates");
+  coll_srna = RNA_def_struct(brna, "ObjectMeshMapStates", nullptr);
+  RNA_def_struct_sdna(coll_srna, "Object");
+  RNA_def_struct_ui_text(coll_srna, "Mesh Map States", "Collection of mesh map bake states");
+
+  func = RNA_def_function(coll_srna, "ensure", "rna_Object_mesh_map_states_ensure");
+  RNA_def_function_ui_description(func, "Get the state for a material and map type, creating it");
+  parm = RNA_def_pointer(
+      func, "material", "Material", "Material", "The material whose atlas this state describes");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_enum(func,
+                      "type",
+                      rna_enum_object_mesh_map_type_items,
+                      MA_MESH_MAP_AO,
+                      "Type",
+                      "The mesh map type");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(
+      func, "state", "ObjectMeshMapState", "", "The mesh map state");
+  RNA_def_function_return(func, parm);
+
+  srna = RNA_def_struct(brna, "ObjectMeshMapState", nullptr);
+  RNA_def_struct_sdna(srna, "ObjectMeshMapState");
+  RNA_def_struct_ui_text(srna, "Mesh Map State", "Per-object bake state of one mesh map");
+
+  /* Read-only key: the (material, type) pair identifies the state, and changing the material by
+   * assignment would create duplicates `find` cannot tell apart. States are made through
+   * Object.mesh_map_states.ensure(material, type). */
+  prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_ObjectMeshMapState_material_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Material", "The material whose atlas this state describes");
+
+  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_object_mesh_map_type_items);
+  RNA_def_property_enum_funcs(prop, "rna_ObjectMeshMapState_type_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Type", "The mesh map type");
+
+  prop = RNA_def_property(srna, "status", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_object_mesh_map_status_items);
+  RNA_def_property_enum_funcs(prop, "rna_ObjectMeshMapState_status_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Status", "Bake state of this map");
+
+  prop = RNA_def_property(srna, "hash", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_ObjectMeshMapState_hash_get",
+                                "rna_ObjectMeshMapState_hash_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Hash", "Content hash of the object's contribution (hex)");
+
+  prop = RNA_def_property(srna, "baked_time", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop, "rna_ObjectMeshMapState_baked_time_get", nullptr, nullptr);
+  RNA_def_property_range(prop, 0, 2147483647);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Baked Time", "Unix time of the last successful bake");
+
+  prop = RNA_def_property(srna, "source_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_ObjectMeshMapState_source_object_get",
+                                 "rna_ObjectMeshMapState_source_object_set",
+                                 nullptr,
+                                 "rna_ObjectMeshMapState_source_object_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Source Object", "Reserved high-poly source object");
+}
+
+/** \} */
+
 static void rna_def_object(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3069,6 +3295,9 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_struct_ui_icon(srna, ICON_OBJECT_DATA);
 
   RNA_define_lib_overridable(true);
+
+  /* mesh maps */
+  rna_def_object_mesh_maps(brna, srna);
 
   prop = RNA_def_property(srna, "data", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "ID");

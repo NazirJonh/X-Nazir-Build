@@ -69,6 +69,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_mesh_maps.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
@@ -160,6 +161,7 @@ static void material_paint_layers_free(Material &material)
     layer = next;
   }
   material.paint_layers = {nullptr, nullptr};
+  BKE_mesh_maps_material_slots_free(material);
 }
 
 static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &src, const int flag)
@@ -325,6 +327,8 @@ static void material_paint_layers_blend_write(BlendWriter *writer, const Materia
   {
     material_paint_layer_blend_write(writer, layer);
   }
+  writer->write_struct_list(
+      reinterpret_cast<const ListBaseT<MaterialMeshMapSlot> *>(&material.mesh_map_slots));
 }
 
 static void material_paint_layers_blend_read(BlendDataReader *reader, Material &material)
@@ -339,6 +343,7 @@ static void material_paint_layers_blend_read(BlendDataReader *reader, Material &
   {
     material_paint_layer_blend_read(reader, layer);
   }
+  BLO_read_struct_list(reader, MaterialMeshMapSlot, &material.mesh_map_slots);
 }
 
 /** \} */
@@ -401,6 +406,10 @@ static void material_copy_data(Main *bmain,
   /* The generated tree is owned 1:1 as well: the copy gets its own deep copy (or shares the
    * pointer under COW), see the generator. */
   BKE_paint_layers_generate_copy_data(bmain, *material_dst, *material_src, flag);
+
+  /* The mesh map atlases are owned sub-data too: never share the source's list. The Image
+   * references themselves are remapped/counted by the generic copy machinery through foreach_id. */
+  BKE_mesh_maps_material_slots_copy(*material_dst, *material_src);
 
   material_dst->gpumaterial.clear_no_delete();
   BKE_paint_material_channel_cache_invalidate(material_dst);
@@ -474,6 +483,14 @@ static void material_foreach_id(ID *id, LibraryForeachIDData *data)
        *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&material->paint_layers))
   {
     BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&layer, data));
+  }
+
+  /* The mesh map atlases are ID references owned by the material; walking them keeps them alive
+   * across purge and remaps them on file read. */
+  for (MaterialMeshMapSlot &slot :
+       *reinterpret_cast<ListBaseT<MaterialMeshMapSlot> *>(&material->mesh_map_slots))
+  {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, slot.image, IDWALK_CB_USER);
   }
 }
 

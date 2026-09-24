@@ -827,6 +827,10 @@ uint64_t topology_hash_correction(uint64_t hash,
   topology_hash_string(hash, correction.name);
   hash = topology_hash_mix(hash, uint64_t(uint8_t(correction.role)));
   hash = topology_hash_mix(hash, uint64_t(uint8_t(correction.source)));
+  if (correction.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    /* Which geometry map the row reads is topology: another map is another node. */
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(correction.mesh_map_type)));
+  }
   hash = topology_hash_mix(hash, uint64_t(uint8_t(correction.blend)));
   /* Visibility is a value: a disabled effect or mask item stays in the chain with opacity zero
    * (#BKE_paint_layers_effective_opacity), so it must not move this hash. */
@@ -875,6 +879,10 @@ uint64_t topology_hash_layer(uint64_t hash,
 {
   const bool is_folder = BKE_paint_layers_is_folder(layer);
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.source)));
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    /* Which geometry map the row reads is topology: another map is another node. */
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.mesh_map_type)));
+  }
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.blend)));
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.role)));
   /* Visibility is a value: disabling leaves the row in the graph with factor zero, so the flag is
@@ -1626,6 +1634,11 @@ void paint_layers_tree_build(const Material &ma,
                            LayerGroup *layer_group) -> RowResult {
         /* A row a past rebuild left out of the graph contributes nothing. */
         if (row_is_removed(ma, *layer)) {
+          return {};
+        }
+        /* A MESH_MAP row names a geometry map the material owns; v1 draws it nowhere. It behaves
+         * like a Paint row with no map: no nodes, no contribution to any channel. */
+        if (layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
           return {};
         }
         /* The aliases keep the row body unchanged; for a leaf target points at the row's own group,

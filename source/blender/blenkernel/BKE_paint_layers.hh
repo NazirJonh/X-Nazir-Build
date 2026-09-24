@@ -101,6 +101,11 @@ enum class PaintLayerSourceType : int8_t {
   NodeGroup,
   /** A nested stack: a folder. */
   Stack,
+  /**
+   * A geometry map of the owning object, read from the material's shared UV atlas; the row stores
+   * the abstract map type in #MaterialPaintLayer::mesh_map_type.
+   */
+  MeshMap,
 };
 
 /**
@@ -681,6 +686,20 @@ bool BKE_paint_layers_role_set(Material &ma, MaterialPaintLayer *correction, int
  * is not Image or Constant.
  */
 bool BKE_paint_layers_correction_source_set(Material &ma, MaterialPaintLayer *correction, int source);
+
+/** The #eMaterialMeshMapType of a #MA_PAINT_LAYER_SOURCE_MESH_MAP row, or -1 for any other row. */
+int BKE_paint_layers_mesh_map_type_get(const MaterialPaintLayer &layer);
+
+/**
+ * Set the #eMaterialMeshMapType of \a layer, which must be a #MA_PAINT_LAYER_SOURCE_MESH_MAP row.
+ *
+ * A source-typed property like the source itself: it names which geometry map the row reads, not a
+ * value. Marks the generated tree stale (the map a row reads is topology).
+ *
+ * \return false when \a layer is null, is not part of \a ma, is not a MESH_MAP row, or \a type is
+ * out of range.
+ */
+bool BKE_paint_layers_mesh_map_type_set(Material &ma, MaterialPaintLayer *layer, int8_t type);
 
 /**
  * Debug check that the split lists agree with their rows' roles: every row of

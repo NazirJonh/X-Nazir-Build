@@ -10227,4 +10227,74 @@ TEST_F(PaintLayersFullStackTest, values_sync_resolves_each_source_at_most_once)
 
 /** \} */
 
+TEST_F(PaintLayersGraphEvalTest, mesh_map_mask_and_correction_contribute_nothing)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MeshMapNoContribution");
+  add_layer("Bottom",
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            add_solid_image("MmBottom", size, 200, 40, 10, 255),
+            eMaterialPaintChannel(channel));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("MmTop", size, 20, 180, 90, 200),
+      eMaterialPaintChannel(channel));
+
+  /* A normal Paint mask item and a normal content correction: these do change the result. */
+  ASSERT_NE(set_mask_image(*top, add_solid_image("MmMask", size, 128, 128, 128, 255)), nullptr);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "MmCorr");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayerChannel *correction_record = BKE_paint_layers_channel_add(
+      *ma, correction, eMaterialPaintChannel(channel));
+  ASSERT_NE(correction_record, nullptr);
+  correction_record->image = add_solid_image("MmCorrMap", size, 40, 40, 220, 255);
+  correction_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  ASSERT_TRUE(BKE_paint_layers_correction_source_set(
+      *ma, correction, MA_PAINT_LAYER_SOURCE_IMAGE));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  interpreter.tree->ensure_topology_cache();
+  const RGBA graph_before = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+  const RGBA cpu_before = cpu_pixel(channel);
+
+  /* A MESH_MAP mask item and a MESH_MAP content correction contribute nothing on either side. */
+  ASSERT_NE(BKE_paint_layers_correction_add(
+                *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MESH_MAP, "MmMaskMap"),
+            nullptr);
+  ASSERT_NE(BKE_paint_layers_correction_add(
+                *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MESH_MAP, "MmMapCorr"),
+            nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter after;
+  after.instance = find_instance();
+  after.tree = ma->paint_layers_tree;
+  ASSERT_NE(after.instance, nullptr);
+  after.tree->ensure_topology_cache();
+  const RGBA graph_after = eval_channel_result(after, eMaterialPaintChannel(channel));
+  const RGBA cpu_after = cpu_pixel(channel);
+
+  /* The stack without the MESH_MAP elements is the same picture, graph and CPU. */
+  EXPECT_NEAR(graph_after.r, graph_before.r, tolerance);
+  EXPECT_NEAR(graph_after.g, graph_before.g, tolerance);
+  EXPECT_NEAR(graph_after.b, graph_before.b, tolerance);
+  EXPECT_NEAR(graph_after.a, graph_before.a, tolerance);
+  EXPECT_NEAR(cpu_after.r, cpu_before.r, tolerance);
+  EXPECT_NEAR(cpu_after.g, cpu_before.g, tolerance);
+  EXPECT_NEAR(cpu_after.b, cpu_before.b, tolerance);
+  EXPECT_NEAR(cpu_after.a, cpu_before.a, tolerance);
+  /* And the two sides still agree with each other. */
+  EXPECT_NEAR(graph_after.r, cpu_after.r, tolerance);
+  EXPECT_NEAR(graph_after.g, cpu_after.g, tolerance);
+  EXPECT_NEAR(graph_after.b, cpu_after.b, tolerance);
+  EXPECT_NEAR(graph_after.a, cpu_after.a, tolerance);
+}
+
 }  // namespace blender::bke::tests

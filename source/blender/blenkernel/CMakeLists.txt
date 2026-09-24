@@ -263,6 +263,7 @@ set(SRC
     intern/paint_layers_composite.cc
     intern/paint_layers_generate.cc
     intern/paint_layers_target.cc
+  intern/mesh_maps.cc
   intern/paint_material_combined.cc
   intern/paint_material_composite.cc
   intern/paint_material_normal_combine.cc
@@ -518,6 +519,7 @@ set(SRC
   BKE_packedFile.hh
   BKE_paint.hh
   BKE_paint_bvh.hh
+  BKE_mesh_maps.hh
   BKE_paint_bvh_pixels.hh
   BKE_paint_layers.hh
   BKE_paint_layers_composite.hh
@@ -821,6 +823,7 @@ if(WITH_GTESTS)
     intern/lib_remap_test.cc
     intern/main_test.cc
     intern/main_namemap_test.cc
+    intern/mesh_maps_test.cc
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
     intern/paint_layers_description_test.cc

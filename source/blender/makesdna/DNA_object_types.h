@@ -463,6 +463,39 @@ struct LightLinking {
   LightLinkingRuntime runtime;
 };
 
+/** #ObjectMeshMapState::status. */
+enum eObjectMeshMapStatus : int8_t {
+  OB_MESH_MAP_STATUS_NONE = 0,
+  OB_MESH_MAP_STATUS_VALID = 1,
+  OB_MESH_MAP_STATUS_STALE = 2,
+  OB_MESH_MAP_STATUS_BAKING = 3,
+  OB_MESH_MAP_STATUS_ERROR = 4,
+};
+
+/**
+ * Per-object state of one mesh map, keyed by the material that owns the shared UV atlas and by
+ * #eMaterialMeshMapType. The pixels are not here: this records validity, the content hash of the
+ * object's own contribution and (reserved) the high-poly source object.
+ */
+struct ObjectMeshMapState {
+  DNA_DEFINE_CXX_METHODS(ObjectMeshMapState)
+
+  struct ObjectMeshMapState *next = nullptr, *prev = nullptr;
+  /** The material whose atlas this state describes; a key, not an owning user (#IDWALK_CB_NOP). */
+  struct Material *material = nullptr;
+  /** High-poly source object this low-poly object was baked from, or null. Reserved. */
+  struct Object *source_object = nullptr;
+  /** Content hash of this object's contribution at the last successful bake, low word first. */
+  uint32_t hash[2] = {};
+  /** Unix time of the last successful bake, or zero. Stored as int: RNA has no 64-bit int. */
+  int baked_time = 0;
+  /** #eMaterialMeshMapType. */
+  int8_t type = 0;
+  /** #eObjectMeshMapStatus. */
+  int8_t status = OB_MESH_MAP_STATUS_NONE;
+  char _pad[2] = {};
+};
+
 struct Object {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(Object)
@@ -668,6 +701,9 @@ struct Object {
 
   /** Irradiance caches baked for this object (light-probes only). */
   struct LightProbeObjectCache *lightprobe_cache = nullptr;
+
+  /** Per-object mesh map bake states, one #ObjectMeshMapState per (material, map type). */
+  ListBaseT<ObjectMeshMapState> mesh_map_states = {nullptr, nullptr};
 
   bke::ObjectRuntime *runtime = nullptr;
 

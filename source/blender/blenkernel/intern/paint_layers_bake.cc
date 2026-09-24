@@ -2222,6 +2222,10 @@ static uint64_t bake_hash_layer(uint64_t h, const MaterialPaintLayer &layer, con
     return h;
   }
   h = bake_hash_mix(h, uint8_t(layer.source));
+  /* Which geometry map a MESH_MAP row reads decides its result; only those rows carry the field. */
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    h = bake_hash_mix(h, uint8_t(layer.mesh_map_type));
+  }
   h = bake_hash_mix(h, uint8_t(layer.blend));
   /* The non-visibility flags of the row itself. Visibility is appended only for a child, so the
    * row's own cache does not depend on its own on/off state. */

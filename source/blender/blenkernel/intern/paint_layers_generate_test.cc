@@ -6473,4 +6473,30 @@ TEST_F(PaintLayersGenerateTest, removed_rows_state_is_dropped_with_its_material)
 
 /** \} */
 
+TEST_F(PaintLayersGenerateTest, mesh_map_row_builds_no_nodes_or_samplers)
+{
+  const int samplers_before = BKE_paint_layers_sampler_count(*ma);
+  MaterialPaintLayer *mesh_map = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(mesh_map, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* v1 draws a geometry map nowhere: no Image Texture node, no sampler, no wire from the row. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 0);
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), samplers_before);
+  EXPECT_EQ(interface_output_find("Result Base Color"), nullptr);
+}
+
+TEST_F(PaintLayersGenerateTest, mesh_map_type_moves_the_topology_hash)
+{
+  MaterialPaintLayer *mesh_map = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(mesh_map, nullptr);
+  const uint64_t hash_ao = paint_layers_layer_topology_hash(*ma, *mesh_map, Span<int>());
+
+  ASSERT_TRUE(BKE_paint_layers_mesh_map_type_set(*ma, mesh_map, MA_MESH_MAP_EDGE));
+  const uint64_t hash_edge = paint_layers_layer_topology_hash(*ma, *mesh_map, Span<int>());
+  EXPECT_NE(hash_ao, hash_edge);
+}
+
 }  // namespace blender::bke::tests

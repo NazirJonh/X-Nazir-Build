@@ -653,4 +653,65 @@ TEST_F(PaintLayersTargetTest, folder_mask_is_a_target_but_content_is_not)
   EXPECT_EQ(mask_item_map(*folder_masks.first()), image);
 }
 
+TEST_F(PaintLayersTargetTest, mesh_map_row_adds_nothing_to_the_cpu_composite)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapComposite");
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, bottom, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  Image *image = solid_image("Bottom", 8, 200, 50, 10);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, bottom, PAINT_MATERIAL_CHANNEL_BASE_COLOR, image));
+
+  float before[4];
+  composite_pixel(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 8, before);
+
+  MaterialPaintLayer *mesh_map = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(mesh_map, nullptr);
+  float after[4];
+  composite_pixel(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 8, after);
+
+  /* The row names a map the material owns; v1 contributes nothing, so the result is unchanged. */
+  for (int i = 0; i < 4; i++) {
+    EXPECT_FLOAT_EQ(after[i], before[i]) << i;
+  }
+}
+
+TEST_F(PaintLayersTargetTest, mesh_map_row_and_correction_are_not_content_targets)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapTarget");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, target));
+  EXPECT_EQ(target.layer, row);
+  EXPECT_NE(BKE_paint_layers_target_refusal(target), nullptr);
+  EXPECT_EQ(BKE_paint_layers_target_ensure_writable(*bmain, target, 4), nullptr);
+  EXPECT_EQ(row->channels_num, 0);
+
+  /* A correction whose source is a Mesh Map is refused the same way as the row. */
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO Effect");
+  ASSERT_NE(correction, nullptr);
+  BKE_paint_layers_active_set(*ma, correction->marker);
+
+  PaintLayersTarget correction_target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, correction_target));
+  EXPECT_EQ(correction_target.layer, correction);
+  EXPECT_NE(BKE_paint_layers_target_refusal(correction_target), nullptr);
+  EXPECT_EQ(BKE_paint_layers_target_ensure_writable(*bmain, correction_target, 4), nullptr);
+  EXPECT_EQ(correction->channels_num, 0);
+}
+
 }  // namespace blender::bke::tests

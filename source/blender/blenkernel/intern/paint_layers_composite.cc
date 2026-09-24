@@ -187,6 +187,10 @@ bool composite_image_layers_build(const Material &material,
        * through their bake below or, without one, by dropping out with no channel records. */
       continue;
     }
+    if (layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+      /* v1 draws a geometry map nowhere: the row contributes no pixels on either side. */
+      continue;
+    }
 
     /* A baked, current row stands in for its whole subtree: its colour and its coverage were
      * composited with the mask, corrections and opacity already folded in, so the row becomes a

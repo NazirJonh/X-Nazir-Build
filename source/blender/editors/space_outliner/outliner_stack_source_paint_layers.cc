@@ -1008,7 +1008,7 @@ class PaintLayersStackSource final : public StackSource,
       {
         hash = hash * 1000003u ^ UUID(layer.marker).hash();
         hash ^= uint64_t(layer.source) | (uint64_t(layer.flag) << 8) |
-                (uint64_t(layer.blend) << 16);
+                (uint64_t(layer.blend) << 16) | (uint64_t(layer.mesh_map_type) << 24);
         /* The swatch and the columns show these, so a change to them has to reach the rows. */
         for (const float value : {layer.fill_color[0],
                                   layer.fill_color[1],
@@ -1049,7 +1049,8 @@ class PaintLayersStackSource final : public StackSource,
           {
             hash = hash * 1000003u ^ UUID(correction.marker).hash();
             hash ^= uint64_t(correction.source) | (uint64_t(correction.flag) << 8) |
-                    (uint64_t(correction.role) << 16);
+                    (uint64_t(correction.role) << 16) |
+                    (uint64_t(correction.mesh_map_type) << 24);
             for (int c = 0; c < correction.channels_num; c++) {
               const Image *image = correction.channels[c].image;
               hash ^= uint64_t(correction.channels[c].channel) << 32;

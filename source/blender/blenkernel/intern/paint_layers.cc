@@ -79,6 +79,7 @@ static_assert(int8_t(MA_PAINT_LAYER_SOURCE_CONSTANT) == int8_t(PaintLayerSourceT
 static_assert(int8_t(MA_PAINT_LAYER_SOURCE_MATERIAL) == int8_t(PaintLayerSourceType::Material));
 static_assert(int8_t(MA_PAINT_LAYER_SOURCE_NODE_GROUP) == int8_t(PaintLayerSourceType::NodeGroup));
 static_assert(int8_t(MA_PAINT_LAYER_SOURCE_STACK) == int8_t(PaintLayerSourceType::Stack));
+static_assert(int8_t(MA_PAINT_LAYER_SOURCE_MESH_MAP) == int8_t(PaintLayerSourceType::MeshMap));
 
 /** #MaterialPaintLayer::role stores the same values as #PaintLayerRole. */
 static_assert(int8_t(MA_PAINT_LAYER_ROLE_LAYER) == int8_t(PaintLayerRole::Layer));
@@ -332,6 +333,9 @@ const PaintLayerKindInfo &BKE_paint_layers_kind_info(const int source)
       {MA_PAINT_LAYER_SOURCE_MATERIAL, "MATERIAL", "Material", false, false, true},
       {MA_PAINT_LAYER_SOURCE_NODE_GROUP, "NODE_GROUP", "Node Group", false, false, true},
       {MA_PAINT_LAYER_SOURCE_STACK, "STACK", "Folder", true, false, false},
+      /* A MESH_MAP row names a geometry map of the object, not a painted channel: it has no
+       * generated subtree of its own and no fill colour, and the CPU cannot evaluate it either. */
+      {MA_PAINT_LAYER_SOURCE_MESH_MAP, "MESH_MAP", "Mesh Map", false, false, false},
   };
   for (const PaintLayerKindInfo &info : table) {
     if (info.source == source) {
@@ -1908,6 +1912,11 @@ bool BKE_paint_layers_source_change(Material &ma,
   if (BKE_paint_layers_role(*layer) != PaintLayerRole::Layer) {
     return false;
   }
+  /* Only a painted/filled row converts: a Material, Node Group, Folder or Mesh Map row is a
+   * different kind of source, recreated rather than converted. */
+  if (!ELEM(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+    return false;
+  }
   if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
     return false;
   }
@@ -1946,7 +1955,10 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
     return nullptr;
   }
   if (!ELEM(role, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_ROLE_MASK_ITEM) ||
-      !ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT))
+      !ELEM(source,
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            MA_PAINT_LAYER_SOURCE_CONSTANT,
+            MA_PAINT_LAYER_SOURCE_MESH_MAP))
   {
     return nullptr;
   }
@@ -1999,10 +2011,34 @@ bool BKE_paint_layers_correction_source_set(Material &ma, MaterialPaintLayer *co
   {
     return false;
   }
-  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+  if (!ELEM(source,
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            MA_PAINT_LAYER_SOURCE_CONSTANT,
+            MA_PAINT_LAYER_SOURCE_MESH_MAP))
+  {
     return false;
   }
   correction->source = int8_t(source);
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+int BKE_paint_layers_mesh_map_type_get(const MaterialPaintLayer &layer)
+{
+  return (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) ? layer.mesh_map_type : -1;
+}
+
+bool BKE_paint_layers_mesh_map_type_set(Material &ma, MaterialPaintLayer *layer, const int8_t type)
+{
+  if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr ||
+      layer->source != MA_PAINT_LAYER_SOURCE_MESH_MAP || type < 0 || type >= MA_MESH_MAP_TYPE_NUM)
+  {
+    return false;
+  }
+  if (layer->mesh_map_type == type) {
+    return true;
+  }
+  layer->mesh_map_type = type;
   BKE_paint_layers_tag_edited(ma);
   return true;
 }

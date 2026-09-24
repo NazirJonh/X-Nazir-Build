@@ -456,6 +456,32 @@ enum eMaterialPaintLayerSource : int8_t {
   MA_PAINT_LAYER_SOURCE_MATERIAL = 2,
   MA_PAINT_LAYER_SOURCE_NODE_GROUP = 3,
   MA_PAINT_LAYER_SOURCE_STACK = 4,
+  /**
+   * A geometry map of the owning object (ambient occlusion, curvature, normal, ...), read from the
+   * material's shared UV atlas. The row stores only the abstract map type
+   * (#MaterialPaintLayer::mesh_map_type); the pixels live on the material as a #MaterialMeshMapSlot,
+   * so the same stack can be placed on another object without rewriting the row.
+   */
+  MA_PAINT_LAYER_SOURCE_MESH_MAP = 5,
+};
+
+/**
+ * #MaterialPaintLayer::mesh_map_type, and the key of #MaterialMeshMapSlot /
+ * #ObjectMeshMapState. The reserved values keep room for later maps without renumbering.
+ */
+enum eMaterialMeshMapType : int8_t {
+  MA_MESH_MAP_AO = 0,
+  MA_MESH_MAP_CURVATURE = 1,
+  MA_MESH_MAP_NORMAL_WORLD = 2,
+  MA_MESH_MAP_NORMAL_OBJECT = 3,
+  MA_MESH_MAP_ID_OBJECT = 4,
+  MA_MESH_MAP_ID_MATERIAL = 5,
+  MA_MESH_MAP_EDGE = 6,
+  /** Reserved; the architecture must not exclude these. */
+  MA_MESH_MAP_THICKNESS = 7,
+  /** Reserved; the architecture must not exclude these. */
+  MA_MESH_MAP_POSITION = 8,
+  MA_MESH_MAP_TYPE_NUM = 9,
 };
 
 /**
@@ -599,7 +625,9 @@ struct MaterialPaintLayer {
    * Changed only through #BKE_paint_layers_role_set.
    */
   int8_t role = MA_PAINT_LAYER_ROLE_LAYER;
-  char _pad[5] = {};
+  /** #eMaterialMeshMapType; read only when #source is #MA_PAINT_LAYER_SOURCE_MESH_MAP. */
+  int8_t mesh_map_type = MA_MESH_MAP_AO;
+  char _pad[4] = {};
   /** Node group for a #MA_PAINT_LAYER_SOURCE_NODE_GROUP layer. */
   struct bNodeTree *custom_group = nullptr;
   /** Source material of a #MA_PAINT_LAYER_SOURCE_MATERIAL layer. Phase 3. */
@@ -630,6 +658,48 @@ struct MaterialPaintLayer {
    * its coverage starts at one. Same type as a layer, linked by their own markers.
    */
   ListBase mask_stack = {nullptr, nullptr};
+};
+
+/**
+ * One mesh map atlas of a layered material: the pixels shared by every object using this material's
+ * UV atlas, one slot per #eMaterialMeshMapType. The Image is owned as an ID reference
+ * (#IDWALK_CB_USER); the per-object baking state lives in #ObjectMeshMapState.
+ *
+ * The slot is created without an Image (see #BKE_mesh_maps_slot_ensure): the atlas is allocated by
+ * the bake side, not merely by referencing the map from a row.
+ */
+struct MaterialMeshMapSlot {
+  DNA_DEFINE_CXX_METHODS(MaterialMeshMapSlot)
+
+  struct MaterialMeshMapSlot *next = nullptr, *prev = nullptr;
+  /** #eMaterialMeshMapType. */
+  int8_t type = MA_MESH_MAP_AO;
+  char _pad[7] = {};
+  /** The shared atlas for this map type, or null while nothing is baked. */
+  struct Image *image = nullptr;
+};
+
+/**
+ * Baking and viewport settings shared by every mesh map of a material. v1 stores the bake controls
+ * a per-map bake job reads; the file format and encoding of the atlas Image are decided there.
+ */
+struct MaterialMeshMapSettings {
+  DNA_DEFINE_CXX_METHODS(MaterialMeshMapSettings)
+
+  /** Square side the atlas is allocated at when it is first created. */
+  int resolution = 2048;
+  /** Cycles samples the mesh map bake renders with. */
+  int samples = 32;
+  /** Whether the mesh map bake asks Cycles for denoising. */
+  int8_t use_denoise = 0;
+  char _pad[3] = {};
+  /** UV margin in pixels applied while merging a per-object bake into the atlas. */
+  float margin = 16.0f;
+  /** Ambient-occlusion ray distance; zero means "from the object bounds". */
+  float ao_distance = 0.0f;
+  /** Edge/bevel ray radius in object-space units. */
+  float edge_radius = 0.01f;
+  char _pad2[4] = {};
 };
 
 struct Material {
@@ -746,6 +816,12 @@ struct Material {
   /** #eMaterialPaintLayersFlag. */
   eMaterialPaintLayersFlag paint_layers_flag = {};
   char _pad2[6] = {};
+  /** The material's mesh map atlases, one #MaterialMeshMapSlot per #eMaterialMeshMapType. */
+  ListBase mesh_map_slots = {nullptr, nullptr};
+  /** Bake/viewport settings shared by every mesh map of this material. */
+  MaterialMeshMapSettings mesh_map_settings;
+  /** Explicit tail padding: the struct's pointer alignment must not leave uninitialized bytes. */
+  char _pad_tail[4] = {};
 };
 
 }  // namespace blender

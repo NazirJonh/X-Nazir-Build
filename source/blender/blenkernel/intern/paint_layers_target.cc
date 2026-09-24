@@ -357,6 +357,14 @@ const char *BKE_paint_layers_target_refusal(const PaintLayersTarget &target)
     return "A Material layer shows its source material: add a Correction to paint on it, or "
            "paint its mask";
   }
+  /* A Mesh Map row draws a geometry map the object's bake owns; a stroke would not belong to the
+   * painted stack, so like a Fill it is changed through a Correction or its mask. */
+  if (target.layer != nullptr && target.mode == PaintLayersTargetMode::Content &&
+      target.layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP)
+  {
+    return "A Mesh Map layer shows a baked geometry map: add a Correction to paint on it, or "
+           "paint its mask";
+  }
   return nullptr;
 }
 
@@ -437,7 +445,11 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
   /* Content. A Fill row is a colour and never grows a map: it is changed through a Correction or
    * its mask (#BKE_paint_layers_target_refusal). The entry points refuse before getting here; this
    * keeps any other caller from converting the row behind the user's back. */
-  if (ELEM(target.layer->source, MA_PAINT_LAYER_SOURCE_CONSTANT, MA_PAINT_LAYER_SOURCE_MATERIAL)) {
+  if (ELEM(target.layer->source,
+           MA_PAINT_LAYER_SOURCE_CONSTANT,
+           MA_PAINT_LAYER_SOURCE_MATERIAL,
+           MA_PAINT_LAYER_SOURCE_MESH_MAP))
+  {
     return nullptr;
   }
   MaterialPaintLayerChannel *record = paint_layer_channel_find(*target.layer, target.channel);

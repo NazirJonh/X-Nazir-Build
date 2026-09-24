@@ -1986,6 +1986,24 @@ static wmOperatorStatus stack_id_drop_invoke(bContext *C,
   }
   if (affected_ordinal >= 0) {
     outliner_stack_row_activate(C, *space_outliner, affected_ordinal);
+    /* The source's own active row moved to the dropped one, but the tree store still carries the
+     * previous row's TSE_ACTIVE -- and #outliner_draw lets TSE_ACTIVE win over the source
+     * (`row_is_active`). Hand the remembered UI state to the dropped row too, the way the move and
+     * paste paths do, or the old row keeps lighting up. Resolved after the activate above, which
+     * re-read the rows the drop just renumbered. */
+    SpaceOutliner_Runtime &runtime = *space_outliner->runtime;
+    const StackItemIdentity affected_identity = outliner_stack_identity_of(*space_outliner,
+                                                                          affected_ordinal);
+    for (StackRowUiState &state : runtime.stack_row_ui_state.values()) {
+      state.selected = false;
+      state.active = false;
+    }
+    if (!BLI_uuid_is_nil(affected_identity.row_id)) {
+      StackRowUiState &state = runtime.stack_row_ui_state.lookup_or_add_default(
+          affected_identity.row_id);
+      state.selected = true;
+      state.active = true;
+    }
   }
   return OPERATOR_FINISHED;
 }

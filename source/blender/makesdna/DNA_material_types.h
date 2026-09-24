@@ -601,8 +601,8 @@ struct MaterialPaintLayer {
   int16_t flag = MA_PAINT_LAYER_ENABLED;
   float opacity = 1.0f;
   float fill_color[4] = {};
-  /** Display color tag, interpreted by the UI only. */
-  int8_t color_tag = 0;
+  /** Display color tag, interpreted by the UI only. -1 means no color (default). */
+  int8_t color_tag = -1;
   /** #eMaterialPaintLayerCorrectionSection, for a #MA_PAINT_LAYER_KIND_CORRECTION row. */
   int8_t section = MA_PAINT_LAYER_SECTION_CONTENT;
   /** #eMaterialPaintLayerCorrectionEffect, for a #MA_PAINT_LAYER_KIND_CORRECTION row. */

@@ -676,6 +676,28 @@ bool leaf_participates(const MaterialPaintLayer &layer, const int channel)
 }
 
 /**
+ * Whether \a channel's generated chain carries a content alpha worth tracking (F2-C1). The alpha a
+ * map row or a constant supplies must survive the isolating folder's Vector Math divide, which
+ * drops the fourth component, and be composed back at the Result.
+ *
+ * That is every channel the image canvas can resolve a map for (`supports_image_paint`). Normal is
+ * the exception: its row blend is the tangent-space normal-combine, a three-component operation the
+ * generic RGBA ramp blend does not model, and its reference keeps the alpha below rather than
+ * blending the row's one, so a content alpha has no meaning there. Custom, Height and AO build no
+ * map leaf, so nothing supplies an alpha either.
+ */
+static bool channel_tracks_content_alpha(const int channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return false;
+  }
+  return BKE_paint_material_channel_info(eMaterialPaintChannel(channel)).supports_image_paint;
+}
+
+/**
  * Whether \a layer's row gets a group of its own in \a channel: it is substituted by a bake, a
  * folder whose subtree takes part, or a leaf that paints something here. One helper for the build's
  * `group_this` and the root hash, so the two can never disagree about which instances the root has.
@@ -1575,10 +1597,11 @@ void paint_layers_tree_build(const Material &ma,
     bNode *folder_content_alpha_node = nullptr;
     bNodeSocket *folder_content_alpha = nullptr;
 
-    /* Content alpha is tracked only for Base Color (F2-B): the leaf supplies it, the isolating
-     * folder divides the premultiplied accumulation by coverage, and the final Result composes it
-     * back. Every other channel leaves the chain null, so nothing is built and nothing changes. */
-    const bool track_content_alpha = (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    /* Content alpha is tracked for every map channel except Normal (F2-C1): the leaf supplies it,
+     * the isolating folder divides the premultiplied accumulation by coverage, and the final Result
+     * composes it back. A channel outside that set leaves the chain null, so nothing is built and
+     * nothing changes. */
+    const bool track_content_alpha = channel_tracks_content_alpha(channel);
 
     std::function<ChainResult(const ListBase &, ChainLayer, bool, const RowTarget &)> build_list =
         [&](const ListBase &list,
@@ -1776,6 +1799,15 @@ void paint_layers_tree_build(const Material &ma,
         id_us_plus(&baked_color->id);
         baked_color_node->location[0] = location_x;
         baked_color_node->location[1] = location_y;
+        /* A substituted row's bake stores content alpha in the same Image Texture Alpha output as a
+         * live Paint/Fill map (both write IMA_ALPHA_STRAIGHT, #bake_image_ensure), so it starts the
+         * content-alpha chain here exactly as the live leaf does at its own Image Texture node. Not
+         * gated by kind: Custom has no live path and only reaches the generator through this branch,
+         * and Material never reaches it at all (its bake substitutes a whole subtree, not a row). */
+        if (track_content_alpha) {
+          current.content_alpha_node = baked_color_node;
+          current.content_alpha = socket_out(*baked_color_node, "Alpha");
+        }
         baked_coverage_node->id = &layer->bake->coverage->id;
         id_us_plus(&layer->bake->coverage->id);
         baked_coverage_node->location[0] = location_x - 90.0f;
@@ -1852,6 +1884,24 @@ void paint_layers_tree_build(const Material &ma,
           }
           current.source_node = group_input;
           current.source = constant_out;
+          /* A Hybrid live constant's alpha is the source's own `.a`, frozen the same way as a
+           * Paint or Fill constant's alpha below (ТЗ-F2-C4a): the value already travelled through
+           * #BKE_paint_layers_material_live_constant above, so no extra sampler is needed here. */
+          if (track_content_alpha) {
+            bNode *alpha_value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+            bNodeSocket *alpha_out = (alpha_value != nullptr) ? socket_out(*alpha_value, "Value") :
+                                                                nullptr;
+            if (alpha_value != nullptr && alpha_out != nullptr &&
+                alpha_out->default_value != nullptr)
+            {
+              alpha_value->location[0] = location_x - 90.0f;
+              alpha_value->location[1] = location_y - 40.0f;
+              static_cast<bNodeSocketValueFloat *>(alpha_out->default_value)->value =
+                  live_value[3];
+              current.content_alpha_node = alpha_value;
+              current.content_alpha = alpha_out;
+            }
+          }
         }
         else if (live_map) {
           /* The row shows the source's own texture. Its sampling settings travel with it; no Divide
@@ -1885,6 +1935,12 @@ void paint_layers_tree_build(const Material &ma,
           current.source_node = map;
           current.source = socket_out(*map, "Color");
           leaf_map_node = map;
+          /* A Hybrid live map's content alpha is the source's own texture Alpha output, the same
+           * trivial read a Paint or Fill map's own Image Texture node gives below (ТЗ-F2-C4a). */
+          if (track_content_alpha) {
+            current.content_alpha_node = map;
+            current.content_alpha = socket_out(*map, "Alpha");
+          }
         }
         else if (source_group_instance != nullptr) {
           /* The whole source graph goes through the wrapper's COLOR:<CHANNEL> output. No map, so
@@ -1918,9 +1974,23 @@ void paint_layers_tree_build(const Material &ma,
           current.source_node = map;
           current.source = socket_out(*map, "Color");
           leaf_map_node = map;
-          /* A Paint map carries its content alpha in the Image Texture Alpha output; it starts the
-           * content-alpha chain here rather than being read back out of the Color's own alpha. */
-          if (track_content_alpha && layer->kind == MA_PAINT_LAYER_KIND_PAINT) {
+          /* A Paint, Fill, or Baked Material map carries its content alpha in the Image Texture
+           * Alpha output; it starts the content-alpha chain here rather than being read back out of
+           * the Color's own alpha. Custom stays outside since its bake substitutes above instead of
+           * reaching this branch, and a live Hybrid Material row is excluded above by
+           * `live_constant`/`live_map` (ТЗ-F2-C4a).
+           *
+           * A Baked Material row's own ALPHA channel is excluded here even though
+           * #paint_layer_channel_image resolves it to `bake->coverage` (source transparency has no
+           * slot of its own): that same image already feeds `layer_factor_socket` below as the row's
+           * coverage factor, so reading it again here as this channel's content alpha would double
+           * that factor into the composite instead of describing per-pixel content (ТЗ-F2-C4a p.4). */
+          const bool material_content_channel = layer->kind == MA_PAINT_LAYER_KIND_MATERIAL &&
+                                                channel != PAINT_MATERIAL_CHANNEL_ALPHA;
+          if (track_content_alpha &&
+              (ELEM(layer->kind, MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_KIND_FILL) ||
+               material_content_channel))
+          {
             current.content_alpha_node = map;
             current.content_alpha = socket_out(*map, "Alpha");
           }
@@ -1932,9 +2002,11 @@ void paint_layers_tree_build(const Material &ma,
             current.source_node = group_input;
             current.source = group_input_socket(**fill_iface);
           }
-          /* A Paint constant's alpha is the constant colour's `.a`, the same number the RGB Fill
-           * input carries; it is frozen into a Value so the content-alpha chain has a scalar leaf. */
-          if (track_content_alpha && layer->kind == MA_PAINT_LAYER_KIND_PAINT &&
+          /* A Paint or Fill constant's alpha is the constant colour's `.a`, the same number the RGB
+           * Fill input carries; it is frozen into a Value so the content-alpha chain has a scalar
+           * leaf. Custom and Material leaves (F2-C3/C4) supply no such constant. */
+          if (track_content_alpha &&
+              ELEM(layer->kind, MA_PAINT_LAYER_KIND_PAINT, MA_PAINT_LAYER_KIND_FILL) &&
               current.source != nullptr)
           {
             float constant[4];

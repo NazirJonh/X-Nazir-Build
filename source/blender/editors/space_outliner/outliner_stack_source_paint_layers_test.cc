@@ -445,6 +445,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_group_add_and_color_tag)
   MaterialPaintLayer *folder_layer = paint_description_row_for_ordinal(*ma, folder);
   ASSERT_NE(folder_layer, nullptr);
   EXPECT_TRUE(BKE_paint_layers_is_folder(*folder_layer));
+  /* A newly created folder must have no color tag (-1 = none). */
+  EXPECT_EQ(folder_layer->color_tag, -1);
   ASSERT_TRUE(paint_layers_edit_color_tag(*ma, folder, 3));
   EXPECT_EQ(folder_layer->color_tag, 3);
 }

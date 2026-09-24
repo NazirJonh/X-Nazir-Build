@@ -1334,7 +1334,9 @@ class PaintLayersStackSource final : public StackSource,
       if (layer == nullptr) {
         return -1;
       }
+      BKE_paint_layers_active_set(material, layer->marker);
       WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+      WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
       return layers_ordinal_of(material, layer);
     }
     const int created = paint_layers_edit_add(material, kind, ordinal, args);
@@ -1795,6 +1797,9 @@ class PaintLayersStackSource final : public StackSource,
       if (created == nullptr) {
         return false;
       }
+      BKE_paint_layers_active_set(material, created->marker);
+      WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+      WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
       if (r_affected_ordinal != nullptr) {
         *r_affected_ordinal = layers_ordinal_of(material, created);
       }

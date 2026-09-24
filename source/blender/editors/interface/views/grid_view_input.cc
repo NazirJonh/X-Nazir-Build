@@ -301,8 +301,24 @@ static int grid_handle_fling_timer_event(bContext * /*C*/, const wmEvent *event,
   return WM_UI_HANDLER_BREAK;
 }
 
-static int grid_handle_wheel_event(bContext * /*C*/, const wmEvent *event, ARegion *region)
+static int grid_handle_wheel_event(bContext *C, const wmEvent *event, ARegion *region)
 {
+  /* Ctrl + wheel zooms the tiles of views that support it. Anything else with Ctrl held is left
+   * alone, exactly like the other modifier combinations below. */
+  if (ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE) && event->modifier == KM_CTRL) {
+    AbstractView *hover_view = region_view_find_at(region, event->xy, 0, nullptr);
+    AbstractGridView *hover_grid = dynamic_cast<AbstractGridView *>(hover_view);
+    wmWindowManager *wm = CTX_wm_manager(C);
+    if (hover_grid && wm &&
+        hover_grid->tile_size_step(*wm, (event->type == WHEELUPMOUSE) ? 1 : -1))
+    {
+      ED_region_tag_redraw(region);
+      ED_region_tag_refresh_ui(region);
+      return WM_UI_HANDLER_BREAK;
+    }
+    return WM_UI_HANDLER_CONTINUE;
+  }
+
   if (!(event->type == WHEELUPMOUSE || event->type == WHEELDOWNMOUSE ||
         event->type == MOUSEPAN) ||
       event->modifier)

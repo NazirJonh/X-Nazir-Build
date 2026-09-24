@@ -31,6 +31,7 @@ namespace blender {
 struct ARegion;
 struct bContext;
 struct View2D;
+struct wmWindowManager;
 
 namespace ui {
 
@@ -236,6 +237,15 @@ class AbstractGridView : public AbstractView {
   bool supports_scrolling() const override;
   bool is_fully_visible() const override;
   void scroll(ViewScrollDirection direction) override;
+  /**
+   * Ctrl + mouse wheel over the grid: grow (\a steps > 0) or shrink (\a steps < 0) the tiles.
+   * Returns true when the size changed and the region needs a rebuild; views with a fixed tile size
+   * keep the default, which does nothing.
+   */
+  virtual bool tile_size_step(wmWindowManager & /*wm*/, int /*steps*/)
+  {
+    return false;
+  }
   /**
    * Attach this view to the grid_id-keyed session registry entry (creating it on first use) so
    * the scroll position survives the per-refresh view rebuild and popover reopen. Call once,

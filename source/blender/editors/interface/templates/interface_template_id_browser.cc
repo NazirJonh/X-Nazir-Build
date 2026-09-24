@@ -120,6 +120,34 @@ static constexpr float ID_BROWSER_LIST_MIN_COL_UNITS_X = 28.0f / 3.0f;
  * the asset name a smaller font. Only affects the label text; the tile size is set separately.
  */
 static constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_PX = 48;
+/** Upper bound and Ctrl+wheel step (in pixels) of the user-adjustable grid preview size. The lower
+ * bound is #ID_BROWSER_GRID_PREVIEW_SIZE_PX, the standard size. */
+static constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_MAX_PX = 256;
+static constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_STEP_PX = 16;
+
+/** Preview size shared through the window manager's grid settings, clamped to the supported range
+ * (the RNA default is smaller than the standard size and maps to it). */
+static int id_browser_grid_preview_size_get(wmWindowManager &wm)
+{
+  PointerRNA settings = id_browser_grid_settings_ptr(wm);
+  if (settings.data == nullptr) {
+    return ID_BROWSER_GRID_PREVIEW_SIZE_PX;
+  }
+  return std::clamp(grid_settings::preview_size_get(settings),
+                    ID_BROWSER_GRID_PREVIEW_SIZE_PX,
+                    ID_BROWSER_GRID_PREVIEW_SIZE_MAX_PX);
+}
+
+/** Grid tile width in whole #UI_UNIT_X, so the popover width can snap to exact tile columns. */
+static int id_browser_grid_tile_units_x(const int preview_size)
+{
+  return std::max(3, (preview_tile_size_x(preview_size) + UI_UNIT_X - 1) / UI_UNIT_X);
+}
+
+static int id_browser_grid_tile_height(const int preview_size)
+{
+  return std::max(UI_UNIT_Y * 3, preview_tile_size_y(preview_size));
+}
 
 /** Catalog tree column in the ID-browser popover (asset source only): default/min/max width
  * in #UI_UNIT_X and the width of the vertical grip between the tree and the grid. Same
@@ -994,6 +1022,30 @@ class IDBrowserView : public AbstractGridView {
   {
   }
 
+  bool tile_size_step(wmWindowManager &wm, const int steps) override
+  {
+    if (list_mode_) {
+      return false;
+    }
+    PointerRNA settings = id_browser_grid_settings_ptr(wm);
+    if (settings.data == nullptr) {
+      return false;
+    }
+    const int old_size = id_browser_grid_preview_size_get(wm);
+    const int new_size = std::clamp(old_size + steps * ID_BROWSER_GRID_PREVIEW_SIZE_STEP_PX,
+                                    ID_BROWSER_GRID_PREVIEW_SIZE_PX,
+                                    ID_BROWSER_GRID_PREVIEW_SIZE_MAX_PX);
+    if (new_size == old_size) {
+      return false;
+    }
+    /* Keep the same top row in view: the view is rebuilt with the new tile height next redraw. */
+    const int old_tile_h = std::max(id_browser_grid_tile_height(old_size), 1);
+    scroll_px_set(int(int64_t(this->scroll_px()) * id_browser_grid_tile_height(new_size) /
+                      old_tile_h));
+    RNA_int_set(&settings, "preview_size", new_size);
+    return true;
+  }
+
   void build_items() override
   {
     const PointerRNA active_ptr = RNA_property_pointer_get(&target_ptr_, target_prop_);
@@ -1206,6 +1258,7 @@ static IDBrowserFilter id_browser_filter_resolve(const bContext &C,
 static void id_browser_view_set_tile_size(IDBrowserView &view,
                                           const Layout &layout,
                                           const bool list_mode,
+                                          const int preview_size,
                                           const int cols_hint)
 {
   if (list_mode) {
@@ -1222,9 +1275,11 @@ static void id_browser_view_set_tile_size(IDBrowserView &view,
     return;
   }
 
-  view.set_tile_size(UI_UNIT_X * 3, UI_UNIT_Y * 3);
-  /* Shrink the item-name font like the asset-shelf popover does. */
-  view.set_preview_size_px(ID_BROWSER_GRID_PREVIEW_SIZE_PX);
+  /* The tile width is a whole number of units so the popover snaps to exact columns. At the
+   * standard size the item-name font shrinks like in the asset-shelf popover. */
+  view.set_tile_size(id_browser_grid_tile_units_x(preview_size) * UI_UNIT_X,
+                     id_browser_grid_tile_height(preview_size));
+  view.set_preview_size_px(preview_size);
   if (cols_hint > 0) {
     /* The popover snaps its width to whole columns. */
     view.set_cols_per_row_hint(cols_hint);
@@ -1300,7 +1355,8 @@ static void build_id_grid(const bContext &C,
       idcode,
       std::move(name_match));
 
-  id_browser_view_set_tile_size(*view, layout, list_mode, cols_hint);
+  id_browser_view_set_tile_size(
+      *view, layout, list_mode, id_browser_grid_preview_size_get(*wm), cols_hint);
 
   view->set_min_viewport_height(int(UI_UNIT_Y * grid_viewport_units));
   view->set_fixed_viewport_layout(true);
@@ -1878,10 +1934,11 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
    * column count is forwarded to the grid so float rounding cannot drop a column. */
   const bool view_list_mode = RNA_enum_get(&wm_ptr, "id_browser_view_mode") ==
                               IMAGE_BROWSER_VIEW_LIST;
+  const int tile_units_x = id_browser_grid_tile_units_x(id_browser_grid_preview_size_get(*wm));
   int grid_cols = 1;
   if (!view_list_mode) {
-    grid_cols = std::max(1, popover_units_x / 3);
-    popover_units_x = grid_cols * 3;
+    grid_cols = std::max(1, popover_units_x / tile_units_x);
+    popover_units_x = grid_cols * tile_units_x;
   }
 
   /* Keep the expanded popover's outer width while switching source. Blend Data has no catalog tree,
@@ -1899,8 +1956,8 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
      * whole tile columns (grid mode only, same snap as above). */
     popover_units_x = std::min(popover_units_x, std::max(10, win_max_x - catalog_units - 1));
     if (!view_list_mode) {
-      grid_cols = std::max(1, popover_units_x / 3);
-      popover_units_x = grid_cols * 3;
+      grid_cols = std::max(1, popover_units_x / tile_units_x);
+      popover_units_x = grid_cols * tile_units_x;
     }
   }
   const float total_units_x = reserve_catalog_tree_width ?
@@ -1909,7 +1966,7 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   /* When the tree is unavailable (Blend Data), use all reserved width for the single content
    * column. With the asset tree visible, this remains the grid column width. */
   const float content_units_x = show_catalog_tree ? float(popover_units_x) : total_units_x;
-  const int content_grid_cols = view_list_mode ? 1 : std::max(1, int(content_units_x) / 3);
+  const int content_grid_cols = view_list_mode ? 1 : std::max(1, int(content_units_x) / tile_units_x);
 
   const IDBrowserImageFilter image_filter = id_browser_image_filter_from_context(*C);
   const bool paint_source = image_filter == IDBrowserImageFilter::PaintSource;

@@ -20,6 +20,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -303,6 +304,52 @@ bool BKE_name_match_filter_asset_passes(const NameMatchFilterState &state,
 {
   return BKE_name_match_resolved_asset_passes(
       BKE_name_match_filter_resolve(state, userdef), asset_name, metadata_tag_names);
+}
+
+std::string BKE_name_matching_guess_map_type_identifier(const UserDef &userdef,
+                                                        const StringRef filename)
+{
+  const std::string normalized = BLI_name_matching_normalize_asset_name(filename);
+  if (normalized.empty()) {
+    return {};
+  }
+
+  const bUserNameMatchMapType *matched = nullptr;
+  for (const bUserNameMatchMapType &map_type : userdef.name_match_map_types) {
+    /* Collect tokens for this map type. */
+    Vector<StringRef> tokens;
+    for (const bUserNameMatchToken &token : map_type.tokens) {
+      tokens.append(token.value);
+    }
+    if (tokens.is_empty()) {
+      continue;
+    }
+    if (BLI_name_matching_map_type_matches_name(normalized, tokens.as_span())) {
+      if (matched != nullptr) {
+        /* More than one map type matches — ambiguous, return nothing. */
+        return {};
+      }
+      matched = &map_type;
+    }
+  }
+  return matched ? std::string(matched->identifier) : std::string{};
+}
+
+std::string BKE_name_matching_base_name(const UserDef &userdef, const StringRef filename)
+{
+  const std::string normalized = BLI_name_matching_normalize_asset_name(filename);
+  Vector<StringRef> tokens;
+  for (const bUserNameMatchMapType &map_type : userdef.name_match_map_types) {
+    for (const bUserNameMatchToken &token : map_type.tokens) {
+      tokens.append(token.value);
+    }
+  }
+  /* Longer tokens first, so `base_color` is removed whole before a shorter `color` could split
+   * it. */
+  std::stable_sort(tokens.begin(), tokens.end(), [](const StringRef a, const StringRef b) {
+    return a.size() > b.size();
+  });
+  return BLI_name_matching_strip_tokens(normalized, tokens.as_span());
 }
 
 bUserNameMatchMapType *BKE_name_matching_map_type_add(UserDef *userdef,

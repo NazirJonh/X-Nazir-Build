@@ -12,6 +12,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_asset_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_enums.h"
 #include "DNA_uuid_types.h"
@@ -2580,6 +2581,35 @@ static void rna_CategoryTagDef_name_set(PointerRNA *ptr, const char *value)
   BLI_strncpy(tag->name, value, sizeof(tag->name));
 }
 
+/**
+ * Material paint channel items for #OperatorPaintChannelImageElement, built from the shared
+ * #rna_enum_material_paint_channel_items with a "None" entry prepended (unassigned / skip). The
+ * channel values are shifted by one: 0 is "None", and #PAINT_MATERIAL_CHANNEL_BASE_COLOR is also
+ * 0, so the unshifted values could not tell the two apart.
+ */
+static const EnumPropertyItem *rna_operator_paint_channel_itemf(bContext * /*C*/,
+                                                                PointerRNA * /*ptr*/,
+                                                                PropertyRNA * /*prop*/,
+                                                                bool *r_free)
+{
+  EnumPropertyItem *items = nullptr;
+  int totitem = 0;
+  static const EnumPropertyItem none_item = {
+      0, "NONE", 0, "None", "Leave the channel unassigned"};
+  RNA_enum_item_add(&items, &totitem, &none_item);
+  for (const EnumPropertyItem *channel_item = rna_enum_material_paint_channel_items;
+       channel_item->identifier != nullptr;
+       channel_item++)
+  {
+    EnumPropertyItem shifted = *channel_item;
+    shifted.value = channel_item->value + 1;
+    RNA_enum_item_add(&items, &totitem, &shifted);
+  }
+  RNA_enum_item_end(&items, &totitem);
+  *r_free = true;
+  return items;
+}
+
 }  // namespace blender
 
 #else /* RNA_RUNTIME */
@@ -2896,6 +2926,69 @@ static void rna_def_operator_asset_image_import_element(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "map_type_identifier", PROP_STRING, PROP_NONE);
   RNA_def_property_string_maxlength(prop, 64);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY | PROP_HIDDEN);
+}
+
+static void rna_def_operator_paint_channel_image_element(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "OperatorPaintChannelImageElement", "PropertyGroup");
+  RNA_def_struct_ui_text(srna,
+                         "Operator Paint Channel Image Element",
+                         "Per-file entry assigning an image to a material paint channel");
+
+  prop = RNA_def_property(srna, "filepath", PROP_STRING, PROP_FILEPATH);
+  RNA_def_property_string_maxlength(prop, FILE_MAX);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(
+      prop, "File Path", "Absolute path to an image file (ignored when 'name' is also given)");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_maxlength(prop, MAX_NAME);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(prop,
+                           "Image",
+                           "Name of an existing image data-block to assign (takes priority over "
+                           "the file path). For asset entries it only labels the row");
+
+  /* Placeholder items matching #rna_operator_paint_channel_itemf's "None" value; the item func
+   * overrides them with the full 1-based channel list. */
+  static const EnumPropertyItem channel_items[] = {
+      {0, "NONE", 0, "None", "Leave the channel unassigned"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, channel_items);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_enum_default(prop, 0);
+  RNA_def_property_ui_text(prop, "Channel", "Material paint channel to assign the image to");
+  RNA_def_property_enum_funcs(prop, nullptr, nullptr, "rna_operator_paint_channel_itemf");
+
+  prop = RNA_def_property(srna, "channel_identifier", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_maxlength(prop, 64);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY | PROP_HIDDEN);
+
+  prop = RNA_def_property(srna, "use_import", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_boolean_default(prop, true);
+  RNA_def_property_ui_text(prop,
+                           "Import Asset",
+                           "Load the image, keep it as an asset in the current file and assign it "
+                           "to its channel. Disable to ignore an accidentally dropped image");
+
+  /* Deferred asset reference, named as in #operator_asset_reference_props_register() so the
+   * shared asset lookup helpers read it directly. The asset is only imported on confirm. */
+  prop = RNA_def_property(srna, "asset_library_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_asset_library_type_items);
+  RNA_def_property_enum_default(prop, ASSET_LIBRARY_LOCAL);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY | PROP_HIDDEN);
+
+  prop = RNA_def_property(srna, "asset_library_identifier", PROP_STRING, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY | PROP_HIDDEN);
+
+  prop = RNA_def_property(srna, "relative_asset_identifier", PROP_STRING, PROP_NONE);
   RNA_def_property_flag(prop, PROP_IDPROPERTY | PROP_HIDDEN);
 }
 
@@ -4334,6 +4427,7 @@ void RNA_def_wm(BlenderRNA *brna)
   rna_def_operator_utils(brna);
   rna_def_operator_filelist_element(brna);
   rna_def_operator_asset_image_import_element(brna);
+  rna_def_operator_paint_channel_image_element(brna);
   rna_def_macro_operator(brna);
   rna_def_operator_type_macro(brna);
   rna_def_event_ndof_motion(brna);

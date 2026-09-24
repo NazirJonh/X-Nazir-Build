@@ -12,12 +12,9 @@
 #include "BKE_name_matching.hh"
 
 #include "BLI_listbase.h"
-#include "BLI_name_matching.hh"
-#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_ref.hh"
 #include "BLI_string_utf8.h"
-#include "BLI_vector.hh"
 
 #include "DNA_asset_types.h"
 #include "DNA_screen_types.h"
@@ -158,30 +155,7 @@ void name_match_map_type_id_replace(Main &bmain, const StringRef old_id, const S
 std::string ED_asset_name_matching_guess_map_type_identifier(const UserDef &userdef,
                                                              const StringRef filename)
 {
-  const std::string normalized = BLI_name_matching_normalize_asset_name(filename);
-  if (normalized.empty()) {
-    return {};
-  }
-
-  const bUserNameMatchMapType *matched = nullptr;
-  for (const bUserNameMatchMapType &map_type : userdef.name_match_map_types) {
-    /* Collect tokens for this map type. */
-    Vector<StringRef> tokens;
-    for (const bUserNameMatchToken &token : map_type.tokens) {
-      tokens.append(token.value);
-    }
-    if (tokens.is_empty()) {
-      continue;
-    }
-    if (BLI_name_matching_map_type_matches_name(normalized, tokens.as_span())) {
-      if (matched != nullptr) {
-        /* More than one map type matches — ambiguous, return nothing. */
-        return {};
-      }
-      matched = &map_type;
-    }
-  }
-  return matched ? std::string(matched->identifier) : std::string{};
+  return BKE_name_matching_guess_map_type_identifier(userdef, filename);
 }
 
 }  // namespace blender::ed::asset

@@ -43,6 +43,7 @@
 
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_icons.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
@@ -53,14 +54,17 @@
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_texture.h"
+#include "BKE_wm_runtime.hh"
 
 #include "AS_asset_library.hh"
+#include "AS_asset_representation.hh"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
 
 #include "ED_asset_import.hh"
 #include "ED_asset_image_utils.hh"
+#include "ED_asset_menu_utils.hh"
 #include "ED_paint.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
@@ -737,6 +741,180 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     return nullptr;
   }
 
+  /** True when the target property is a PBR paint channel's source image
+   * (#BrushMaterialPaintChannel.source_image), which can take a whole matching batch of images. */
+  bool targets_paint_channel() const
+  {
+    return target_ptr_.type && RNA_struct_is_a(target_ptr_.type, RNA_BrushMaterialPaintChannel);
+  }
+
+  /** All image file paths carried by a path drag, absolute and normalized. */
+  static Vector<std::string> drag_image_paths(const wmDrag &drag)
+  {
+    Vector<std::string> image_paths;
+    if (drag.type != WM_DRAG_PATH) {
+      return image_paths;
+    }
+    for (const std::string &path : WM_drag_get_paths(&drag)) {
+      if (!BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+        continue;
+      }
+      char abs[FILE_MAX];
+      BLI_strncpy(abs, path.c_str(), sizeof(abs));
+      BLI_path_abs(abs, BKE_main_blendfile_path_from_global());
+      BLI_path_normalize(abs);
+      image_paths.append(abs);
+    }
+    return image_paths;
+  }
+
+  /**
+   * The Asset Browser starts a #WM_DRAG_ASSET for the item under the cursor together with a
+   * #WM_DRAG_ASSET_LIST carrying the whole selection, and #drop_target_apply_drop() applies
+   * whichever of the two comes first. A paint channel takes the whole selection, so the
+   * single-asset drag defers to its list sibling.
+   */
+  static const wmDrag &paint_channel_effective_drag(const wmDrag &drag)
+  {
+    if (drag.type != WM_DRAG_ASSET) {
+      return drag;
+    }
+    const wmWindowManager *wm = static_cast<const wmWindowManager *>(G_MAIN->wm.first);
+    if (!wm) {
+      return drag;
+    }
+    for (const wmDrag &other : wm->runtime->drags) {
+      if (other.type == WM_DRAG_ASSET_LIST && first_image_item_in_list(other)) {
+        return other;
+      }
+    }
+    return drag;
+  }
+
+  /** Number of image assets carried by an asset/asset-list drag, without resolving them. */
+  static int drag_asset_image_count(const wmDrag &drag)
+  {
+    if (drag.type == WM_DRAG_ASSET) {
+      return WM_drag_get_asset_data(&drag, ID_IM) ? 1 : 0;
+    }
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      int count = 0;
+      const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+      if (!asset_drags) {
+        return 0;
+      }
+      for (const wmDragAssetListItem &item : *asset_drags) {
+        const ID_Type item_idtype = item.is_external ?
+                                        item.asset_data.external_info->asset->get_id_type() :
+                                        (item.asset_data.local_id ?
+                                             GS(item.asset_data.local_id->name) :
+                                             ID_Type(0));
+        if (item_idtype == ID_IM) {
+          count++;
+        }
+      }
+      return count;
+    }
+    return 0;
+  }
+
+  static void add_local_image_item(PointerRNA &props, const ID &image_id)
+  {
+    PointerRNA itemptr{};
+    RNA_collection_add(&props, "images", &itemptr);
+    RNA_string_set(&itemptr, "name", image_id.name + 2);
+  }
+
+  /**
+   * Add an "images" entry for an image asset without importing it: the operator only brings it
+   * into the file once the user confirms, and not at all for rows the user unticks.
+   */
+  static void add_asset_image_item(PointerRNA &props, const asset_system::AssetRepresentation &asset)
+  {
+    if (const ID *local_id = asset.local_id()) {
+      add_local_image_item(props, *local_id);
+      return;
+    }
+    PointerRNA itemptr{};
+    RNA_collection_add(&props, "images", &itemptr);
+    if (asset.full_library_path().empty()) {
+      /* An on-disk image asset is just its file, see #ed::asset::resolve_image_from_asset(). */
+      RNA_string_set(&itemptr, "filepath", asset.full_path().c_str());
+      return;
+    }
+    ed::asset::operator_asset_reference_props_set(asset, itemptr);
+    RNA_string_set(&itemptr, "name", asset.get_name().c_str());
+  }
+
+  static void add_drag_asset_image_items(PointerRNA &props, const wmDrag &drag)
+  {
+    if (drag.type == WM_DRAG_ASSET) {
+      if (const wmDragAsset *asset_drag = WM_drag_get_asset_data(&drag, ID_IM)) {
+        add_asset_image_item(props, *asset_drag->asset);
+      }
+      return;
+    }
+    if (drag.type != WM_DRAG_ASSET_LIST) {
+      return;
+    }
+    const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+    if (!asset_drags) {
+      return;
+    }
+    for (const wmDragAssetListItem &item : *asset_drags) {
+      if (item.is_external) {
+        const asset_system::AssetRepresentation &asset = *item.asset_data.external_info->asset;
+        if (asset.get_id_type() == ID_IM) {
+          add_asset_image_item(props, asset);
+        }
+      }
+      else if (item.asset_data.local_id && GS(item.asset_data.local_id->name) == ID_IM) {
+        add_local_image_item(props, *item.asset_data.local_id);
+      }
+    }
+  }
+
+  int paint_channel_drag_image_count(const wmDrag &drag) const
+  {
+    const wmDrag &effective_drag = paint_channel_effective_drag(drag);
+    return int(drag_image_paths(effective_drag).size()) + drag_asset_image_count(effective_drag);
+  }
+
+  /**
+   * Hand a multi-image drop on a PBR paint channel to
+   * #PAINT_OT_material_paint_channels_assign_images: the operator's dialog prefills a channel for
+   * every file through the Preferences name-matching map types and assigns them on confirm, so one
+   * drop fills the whole PBR set (Base Color, Normal, ...).
+   */
+  bool drop_to_channel_assign_operator(bContext *C, const ui::DragInfo &drag_info) const
+  {
+    const wmDrag &drag = paint_channel_effective_drag(drag_info.drag_data);
+
+    PointerRNA props = WM_operator_properties_create(
+        "PAINT_OT_material_paint_channels_assign_images");
+    for (const std::string &path : drag_image_paths(drag)) {
+      PointerRNA itemptr{};
+      RNA_collection_add(&props, "images", &itemptr);
+      RNA_string_set(&itemptr, "filepath", path.c_str());
+    }
+    add_drag_asset_image_items(props, drag);
+    RNA_boolean_set(&props, "use_name_matching", true);
+    /* The channel belongs to this brush, which is not necessarily the active one. */
+    if (target_ptr_.owner_id && GS(target_ptr_.owner_id->name) == ID_BR) {
+      RNA_int_set(&props, "brush_session_uid", int(target_ptr_.owner_id->session_uid));
+    }
+
+    const wmOperatorStatus status = WM_operator_name_call(
+        C,
+        "PAINT_OT_material_paint_channels_assign_images",
+        wm::OpCallContext::InvokeDefault,
+        &props,
+        &drag_info.event);
+    WM_operator_properties_free(&props);
+    /* The confirm dialog keeps the operator running modal until the user accepts it. */
+    return (status & (OPERATOR_FINISHED | OPERATOR_RUNNING_MODAL | OPERATOR_INTERFACE)) != 0;
+  }
+
  public:
   ImageIDBrowserDropTarget(const PointerRNA &target_ptr, PropertyRNA *target_prop)
       : target_ptr_(target_ptr), target_prop_(target_prop)
@@ -752,6 +930,11 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
       return first_image_item_in_list(drag) != nullptr;
     }
     if (drag.type == WM_DRAG_PATH) {
+      /* A paint channel takes a whole batch of images, so any image in the drag qualifies;
+       * other image slots keep taking the first path only. */
+      if (targets_paint_channel()) {
+        return !drag_image_paths(drag).is_empty();
+      }
       const char *path = WM_drag_get_single_path(&drag);
       return path && BLI_path_extension_check_array(path, imb_ext_image);
     }
@@ -760,6 +943,15 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
 
   std::string drop_tooltip(const ui::DragInfo &drag_info) const override
   {
+    const wmDrag &drag = drag_info.drag_data;
+    if (targets_paint_channel()) {
+      const int image_count = paint_channel_drag_image_count(drag);
+      if (image_count > 1) {
+        return fmt::format(
+            fmt::runtime(TIP_("Assign {} images to matching material paint channels")),
+            image_count);
+      }
+    }
     return fmt::format(fmt::runtime(TIP_("Assign {} to the image slot")),
                        WM_drag_get_item_name(const_cast<wmDrag *>(&drag_info.drag_data)));
   }
@@ -767,6 +959,13 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
   bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override
   {
     const wmDrag &drag = drag_info.drag_data;
+
+    if (targets_paint_channel()) {
+      if (paint_channel_drag_image_count(drag) > 1) {
+        return drop_to_channel_assign_operator(C, drag_info);
+      }
+    }
+
     Main *bmain = CTX_data_main(C);
     Image *image = nullptr;
     /* #BKE_image_load_exists hands out an extra user (it either allocates the ID or calls
@@ -791,7 +990,16 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
       }
     }
     else if (drag.type == WM_DRAG_PATH) {
-      if (const char *path = WM_drag_get_single_path(&drag)) {
+      if (targets_paint_channel()) {
+        /* The first path is not necessarily the image (an odd multi-file drop on a channel).
+         * Single-image drops keep using #WM_drag_get_single_path below. */
+        const Vector<std::string> image_paths = drag_image_paths(drag);
+        if (!image_paths.is_empty()) {
+          image = BKE_image_load_exists(bmain, image_paths[0].c_str(), nullptr);
+          image_has_extra_user = image != nullptr;
+        }
+      }
+      else if (const char *path = WM_drag_get_single_path(&drag)) {
         image = BKE_image_load_exists(bmain, path, nullptr);
         image_has_extra_user = image != nullptr;
       }

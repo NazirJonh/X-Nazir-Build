@@ -130,6 +130,52 @@ bool BLI_name_matching_token_matches(const StringRef normalized_name, const Stri
   return false;
 }
 
+std::string BLI_name_matching_strip_tokens(const StringRef normalized_name,
+                                           const Span<StringRef> tokens)
+{
+  std::string result = normalized_name;
+  /* Remove one delimited token occurrence per pass, so the delimiters around the remaining
+   * segments are re-evaluated after every removal. */
+  bool removed = true;
+  while (removed) {
+    removed = false;
+    for (const StringRef token : tokens) {
+      if (token.is_empty() || token.size() > int64_t(result.size())) {
+        continue;
+      }
+      const int64_t last_start = int64_t(result.size()) - token.size();
+      for (int64_t start = 0; start <= last_start; start++) {
+        if (!region_equals_case_insensitive(result, start, token)) {
+          continue;
+        }
+        const int64_t end = start + token.size();
+        const bool left_ok = (start == 0) || is_name_match_delimiter(result[start - 1]);
+        const bool right_ok = (end == int64_t(result.size())) ||
+                              is_name_match_delimiter(result[end]);
+        if (!left_ok || !right_ok) {
+          continue;
+        }
+        /* Take one neighboring delimiter along, preferring the one before the token. */
+        const int64_t erase_start = start > 0 ? start - 1 : start;
+        const int64_t erase_end = (start == 0 && end < int64_t(result.size())) ? end + 1 : end;
+        result.erase(size_t(erase_start), size_t(erase_end - erase_start));
+        removed = true;
+        break;
+      }
+      if (removed) {
+        break;
+      }
+    }
+  }
+
+  const size_t first = result.find_first_not_of("_-. ");
+  if (first == std::string::npos) {
+    return {};
+  }
+  const size_t last = result.find_last_not_of("_-. ");
+  return result.substr(first, last - first + 1);
+}
+
 bool BLI_name_matching_map_type_matches_name(const StringRef normalized_name,
                                              const Span<StringRef> tokens)
 {

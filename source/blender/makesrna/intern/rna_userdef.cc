@@ -868,6 +868,21 @@ static bool rna_NameMatchMapType_is_builtin_get(PointerRNA *ptr)
   return (map_type->flag & USER_NAME_MATCH_MAP_TYPE_BUILTIN) != 0;
 }
 
+static void rna_NameMatching_guess_map_type(UserDef *userdef,
+                                            const char *filename,
+                                            char *r_identifier)
+{
+  const std::string identifier = BKE_name_matching_guess_map_type_identifier(
+      *userdef, filename ? filename : "");
+  BLI_strncpy(r_identifier, identifier.c_str(), sizeof(bUserNameMatchMapType::identifier));
+}
+
+static void rna_NameMatching_base_name(UserDef *userdef, const char *filename, char *r_name)
+{
+  const std::string base_name = BKE_name_matching_base_name(*userdef, filename ? filename : "");
+  BLI_strncpy(r_name, base_name.c_str(), MAX_NAME);
+}
+
 static int rna_NameMatchMapType_identifier_editable(const PointerRNA *ptr, const char ** /*r_info*/)
 {
   const bUserNameMatchMapType *map_type = static_cast<const bUserNameMatchMapType *>(ptr->data);
@@ -8138,6 +8153,35 @@ static void rna_def_userdef_name_matching(BlenderRNA *brna)
     RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
     RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
   }
+
+  func = RNA_def_function(srna, "guess_map_type", "rna_NameMatching_guess_map_type");
+  RNA_def_function_ui_description(
+      func,
+      "Guess the map type of an image filename from the configured tokens. Returns the map type "
+      "identifier, or an empty string when nothing (or more than one map type) matches");
+  parm = RNA_def_string(func, "filename", nullptr, 0, "Filename", "Image filename or path to test");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func,
+                        "identifier",
+                        nullptr,
+                        sizeof(bUserNameMatchMapType::identifier),
+                        "Map Type Identifier",
+                        "Matching map type identifier, empty when nothing matches");
+  /* Needed for a string return value. */
+  RNA_def_parameter_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  RNA_def_function_output(func, parm);
+
+  func = RNA_def_function(srna, "base_name", "rna_NameMatching_base_name");
+  RNA_def_function_ui_description(
+      func,
+      "Texture-set name of an image filename: the name without extension and without the "
+      "configured map type tokens (\"brick_basecolor.png\" gives \"brick\")");
+  parm = RNA_def_string(func, "filename", nullptr, 0, "Filename", "Image filename to strip");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(
+      func, "name", nullptr, MAX_NAME, "Base Name", "Name without map type tokens");
+  RNA_def_parameter_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  RNA_def_function_output(func, parm);
 
   prop = RNA_def_property(srna, "filter_tags", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_collection_sdna(prop, nullptr, "name_match_filter_tags", nullptr);

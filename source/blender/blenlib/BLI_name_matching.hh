@@ -29,6 +29,14 @@ std::string BLI_name_matching_normalize_asset_name(StringRef name);
  */
 bool BLI_name_matching_token_matches(StringRef normalized_name, StringRef token);
 
+/**
+ * \a normalized_name with every delimited occurrence of any of \a tokens removed (together with
+ * one neighboring delimiter), and leading/trailing delimiters trimmed. For example
+ * `brick_wall_basecolor` with the token `basecolor` gives `brick_wall`. Uses the same segment
+ * rules as #BLI_name_matching_token_matches.
+ */
+std::string BLI_name_matching_strip_tokens(StringRef normalized_name, Span<StringRef> tokens);
+
 /** True if any token in \a tokens segment-matches \a normalized_name. */
 bool BLI_name_matching_map_type_matches_name(StringRef normalized_name, Span<StringRef> tokens);
 

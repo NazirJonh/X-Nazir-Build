@@ -87,6 +87,25 @@ bool BKE_name_match_resolved_asset_passes(const NameMatchResolvedFilter &resolve
                                          StringRef asset_name,
                                          Span<StringRef> metadata_tag_names);
 
+/**
+ * Guess the map-type identifier of an image filename by testing every map type's tokens against
+ * the normalized name. Returns the #bUserNameMatchMapType::identifier of the single matching map
+ * type, or an empty string when zero or more than one map types match.
+ *
+ * Used to prefill per-file map types in the image-import dialog, and to route multi-file
+ * image drops onto the matching PBR paint channels (shared by the Python-facing
+ * #PreferencesNameMatching.guess_map_type).
+ */
+std::string BKE_name_matching_guess_map_type_identifier(const UserDef &userdef,
+                                                        StringRef filename);
+
+/**
+ * The texture-set name of an image filename: the name without extension, duplicate suffix and
+ * every map type token configured in \a userdef (`brick_wall_basecolor.png` gives `brick_wall`).
+ * Empty when nothing but tokens remains.
+ */
+std::string BKE_name_matching_base_name(const UserDef &userdef, StringRef filename);
+
 /** Free #UserDef name-matching ListBases (including nested tokens). */
 void BKE_name_matching_userdef_free(UserDef *userdef);
 

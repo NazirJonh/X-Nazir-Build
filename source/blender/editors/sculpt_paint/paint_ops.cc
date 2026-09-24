@@ -15,14 +15,21 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_fileops.hh"
 #include "BLI_ghash.h"
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
+#include "BLI_path_utils.hh"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
+#include "BLT_translation.hh"
+
+#include "AS_asset_catalog.hh"
+#include "AS_asset_catalog_path.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 
@@ -36,6 +43,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 
+#include "BKE_asset.hh"
 #include "BKE_asset_edit.hh"
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
@@ -44,14 +52,19 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
+#include "ED_asset.hh"
+#include "ED_asset_catalog.hh"
 #include "ED_asset_image_utils.hh"
+#include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
+#include "ED_asset_mark_clear.hh"
 #include "ED_asset_menu_utils.hh"
 #include "ED_image.hh"
 #include "ED_paint.hh"
@@ -69,6 +82,12 @@
 #include "RNA_prototypes.hh"
 
 #include "IMB_colormanagement.hh"
+#include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
+
+#include "UI_interface_c.hh"
+#include "UI_interface_layout.hh"
+#include "UI_resources.hh"
 
 #include "paint_curve_intern.hh"
 #include "paint_curve_patch_edit_intern.hh"
@@ -1062,6 +1081,685 @@ void PAINT_OT_material_channel_source_image_set(wmOperatorType *ot)
 }
 
 /* -------------------------------------------------------------------- */
+/** \name Assign Images to Material Paint Channels
+ *
+ * Multi-file counterpart of #PAINT_OT_material_channel_source_image_set: routes a batch of image
+ * files, image assets or existing images onto a brush's PBR paint channels. Entries left without
+ * a channel are routed through the Preferences name-matching map types ("..._basecolor.png" ends
+ * up on Base Color, "..._normal.png" on Normal, and so on); the interactive drop path shows the
+ * resulting routing in a confirm dialog first. Images brought in from outside the current file
+ * are kept there as assets, in a catalog under "Brush Texture" by default.
+ * \{ */
+
+/** Map types that route onto a material paint channel. Keyed by
+ * #bUserNameMatchMapType::identifier, which built-in map types never change, so the table stays
+ * valid. Map types missing here (Mask, Patterns, Grunge) have no paint channel equivalent. */
+struct PaintChannelFromMapType {
+  const char *identifier;
+  eMaterialPaintChannel channel;
+};
+static constexpr PaintChannelFromMapType paint_channels_from_map_types[] = {
+    {"BASE_COLOR", PAINT_MATERIAL_CHANNEL_BASE_COLOR},
+    {"METALLIC", PAINT_MATERIAL_CHANNEL_METALLIC},
+    {"ROUGHNESS", PAINT_MATERIAL_CHANNEL_ROUGHNESS},
+    {"SPECULAR", PAINT_MATERIAL_CHANNEL_SPECULAR},
+    {"NORMAL", PAINT_MATERIAL_CHANNEL_NORMAL},
+    {"HEIGHT", PAINT_MATERIAL_CHANNEL_HEIGHT},
+    {"ALPHA", PAINT_MATERIAL_CHANNEL_ALPHA},
+    {"AO", PAINT_MATERIAL_CHANNEL_AO},
+    {"EMISSION", PAINT_MATERIAL_CHANNEL_EMISSION},
+};
+
+static std::optional<eMaterialPaintChannel> material_paint_channel_from_identifier(
+    const StringRef identifier)
+{
+  for (const PaintChannelFromMapType &entry : paint_channels_from_map_types) {
+    if (identifier == entry.identifier) {
+      return entry.channel;
+    }
+  }
+  /* A custom map type whose identifier names a channel routes onto it as well. */
+  int channel_value = 0;
+  if (RNA_enum_value_from_id(rna_enum_material_paint_channel_items,
+                             std::string(identifier).c_str(),
+                             &channel_value))
+  {
+    return eMaterialPaintChannel(channel_value);
+  }
+  return std::nullopt;
+}
+
+/** Fill the "images" list from the "directory" property, one entry per image file. */
+static void material_paint_channels_assign_images_from_directory(wmOperator *op)
+{
+  if (RNA_collection_length(op->ptr, "images") > 0) {
+    return;
+  }
+  char directory[FILE_MAX];
+  RNA_string_get(op->ptr, "directory", directory);
+  if (directory[0] == '\0') {
+    return;
+  }
+
+  direntry *dir_entries = nullptr;
+  const uint entry_count = BLI_filelist_dir_contents(directory, &dir_entries);
+  for (const direntry &entry : Span<direntry>(dir_entries, entry_count)) {
+    if (!BLI_path_extension_check_array(entry.relname, imb_ext_image)) {
+      continue;
+    }
+    PointerRNA itemptr{};
+    RNA_collection_add(op->ptr, "images", &itemptr);
+    char filepath[FILE_MAX];
+    BLI_path_join(filepath, sizeof(filepath), directory, entry.relname);
+    RNA_string_set(&itemptr, "filepath", filepath);
+    /* channel defaults to NONE; #material_paint_channels_assign_images_match() fills it. */
+  }
+  BLI_filelist_free(dir_entries, entry_count);
+}
+
+/** Guess a channel for every unassigned entry from its file name (Preferences name matching). */
+static void material_paint_channels_assign_images_match(wmOperator *op)
+{
+  if (!RNA_boolean_get(op->ptr, "use_name_matching")) {
+    return;
+  }
+  RNA_BEGIN (op->ptr, itemptr, "images")
+  {
+    if (RNA_enum_get(&itemptr, "channel") != 0) {
+      continue;
+    }
+    /* Prefer the file name; an existing-image entry falls back to the image's own name, which
+     * usually keeps the same map-type postfix. */
+    char filepath[FILE_MAX];
+    RNA_string_get(&itemptr, "filepath", filepath);
+    char name[MAX_NAME];
+    RNA_string_get(&itemptr, "name", name);
+    const char *match_name = (filepath[0] != '\0') ? BLI_path_basename(filepath) : name;
+    if (match_name[0] == '\0') {
+      continue;
+    }
+
+    const std::string guessed = BKE_name_matching_guess_map_type_identifier(U, match_name);
+    if (guessed.empty()) {
+      continue;
+    }
+    if (const std::optional<eMaterialPaintChannel> channel =
+            material_paint_channel_from_identifier(guessed))
+    {
+      /* The element's channel enum is 1-based (0 is "None"), see
+       * #rna_operator_paint_channel_itemf. Only the enum is written: it stays what the confirm
+       * dialog shows and what the user may override there. */
+      RNA_enum_set(&itemptr, "channel", int(*channel) + 1);
+    }
+  }
+  RNA_END;
+}
+
+/** Map-type identifier a channel is tagged with once its image becomes an asset, see
+ * #paint_channels_from_map_types. */
+static const char *material_paint_channel_map_type_identifier(const eMaterialPaintChannel channel)
+{
+  for (const PaintChannelFromMapType &entry : paint_channels_from_map_types) {
+    if (entry.channel == channel) {
+      return entry.identifier;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Root catalog of every catalog this operator creates, so images imported through the paint
+ * channels stay easy to find in the Asset Browser. Also the default target catalog.
+ */
+static constexpr const char *PAINT_CHANNEL_IMAGES_ROOT_CATALOG = "Brush Texture";
+
+static void material_paint_channels_assign_images_catalog_search(
+    const bContext *C,
+    PointerRNA * /*ptr*/,
+    PropertyRNA * /*prop*/,
+    const char *edit_text,
+    FunctionRef<void(StringPropertySearchVisitParams)> visit_fn)
+{
+  ed::asset::visit_library_catalogs_catalog_for_search(
+      *CTX_data_main(C), asset_system::current_file_library_reference(), edit_text, visit_fn);
+}
+
+/**
+ * Resolve (creating it when needed) the current-file catalog newly imported images are placed
+ * in: a new "Brush Texture/<name>" catalog, or the chosen existing catalog path.
+ */
+static const asset_system::AssetCatalog *material_paint_channels_assign_images_catalog_ensure(
+    Main *bmain, wmOperator *op)
+{
+  asset_system::AssetLibrary *library = AS_asset_library_load(
+      bmain, asset_system::current_file_library_reference());
+  if (library == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Could not resolve Current File asset library");
+    return nullptr;
+  }
+
+  const asset_system::AssetCatalogPath root_path(PAINT_CHANNEL_IMAGES_ROOT_CATALOG);
+  if (!RNA_boolean_get(op->ptr, "create_catalog")) {
+    char catalog_path[MAX_NAME];
+    RNA_string_get(op->ptr, "catalog_path", catalog_path);
+    const asset_system::AssetCatalogPath path =
+        catalog_path[0] != '\0' ? asset_system::AssetCatalogPath::from_user_input(catalog_path) :
+                                  root_path;
+    return &ed::asset::library_ensure_catalogs_in_path(*library, path);
+  }
+
+  char raw_name[MAX_NAME];
+  RNA_string_get(op->ptr, "new_catalog_name", raw_name);
+  std::string sanitized;
+  const ed::asset::CatalogNameValidateResult validate = ed::asset::
+      ED_asset_catalog_root_name_sanitize(raw_name, sanitized);
+  if (validate != ed::asset::CatalogNameValidateResult::Ok) {
+    const char *reason = (validate == ed::asset::CatalogNameValidateResult::Empty)   ? "empty" :
+                         (validate == ed::asset::CatalogNameValidateResult::TooLong) ? "too long" :
+                                                                                       "invalid "
+                                                                                       "characters";
+    BKE_reportf(op->reports, RPT_ERROR, "Catalog name is %s", reason);
+    return nullptr;
+  }
+
+  ed::asset::library_ensure_catalogs_in_path(*library, root_path);
+  if (library->catalog_service().find_catalog_by_path(root_path / sanitized)) {
+    BKE_reportf(op->reports,
+                RPT_ERROR,
+                "A catalog named \"%s/%s\" already exists",
+                PAINT_CHANNEL_IMAGES_ROOT_CATALOG,
+                sanitized.c_str());
+    return nullptr;
+  }
+  const asset_system::AssetCatalog *catalog = ed::asset::catalog_add(
+      library, sanitized, root_path.str());
+  if (catalog == nullptr) {
+    BKE_reportf(op->reports, RPT_ERROR, "Failed to create catalog \"%s\"", sanitized.c_str());
+  }
+  return catalog;
+}
+
+/** The brush the drop targeted, or the active paint brush when the caller named none. */
+static Brush *material_paint_channels_assign_images_brush_get(bContext *C, wmOperator *op)
+{
+  if (RNA_struct_property_is_set(op->ptr, "brush_session_uid")) {
+    const int session_uid = RNA_int_get(op->ptr, "brush_session_uid");
+    return id_cast<Brush *>(
+        BKE_libblock_find_session_uid(CTX_data_main(C), ID_BR, uint32_t(session_uid)));
+  }
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  return paint ? BKE_paint_brush(paint) : nullptr;
+}
+
+/**
+ * Image of one "images" entry: an asset (imported now, only after the user confirmed), an
+ * existing image data-block, or an image file. \a r_is_new_import is set when the image comes
+ * from outside the current file, so it is kept there as an asset.
+ */
+static Image *material_paint_channels_assign_images_entry_image(bContext *C,
+                                                                wmOperator *op,
+                                                                PointerRNA &itemptr,
+                                                                bool &r_is_new_import)
+{
+  Main *bmain = CTX_data_main(C);
+  r_is_new_import = false;
+
+  if (ed::asset::operator_asset_reference_props_is_set(itemptr)) {
+    const asset_system::AssetRepresentation *asset =
+        ed::asset::operator_asset_reference_props_get_asset_from_all_library(
+            *C, itemptr, op->reports);
+    if (asset == nullptr) {
+      return nullptr;
+    }
+    r_is_new_import = asset->local_id() == nullptr;
+    return ed::asset::resolve_image_from_asset(*bmain, *asset);
+  }
+
+  char name[MAX_NAME];
+  RNA_string_get(&itemptr, "name", name);
+  if (name[0] != '\0') {
+    Image *image = id_cast<Image *>(BKE_libblock_find_name(bmain, ID_IM, name));
+    if (image == nullptr) {
+      BKE_reportf(op->reports, RPT_WARNING, "Image not found: %s", name);
+    }
+    return image;
+  }
+
+  char filepath[FILE_MAX];
+  RNA_string_get(&itemptr, "filepath", filepath);
+  if (filepath[0] == '\0') {
+    return nullptr;
+  }
+  Image *image = BKE_image_load_exists(bmain, filepath, nullptr);
+  if (image == nullptr) {
+    BKE_reportf(op->reports, RPT_WARNING, "Could not load image \"%s\"", filepath);
+    return nullptr;
+  }
+  /* #BKE_image_load_exists hands out a temporary user; the channel setter adds its own. */
+  id_us_min(&image->id);
+  r_is_new_import = true;
+  return image;
+}
+
+static std::optional<eMaterialPaintChannel> material_paint_channels_assign_images_entry_channel(
+    PointerRNA &itemptr)
+{
+  /* The dialog enum (or an explicit enum set by a script) is authoritative; the hidden
+   * channel_identifier is a script-only alternative, read when the enum stays "None". */
+  const int channel_value = RNA_enum_get(&itemptr, "channel");
+  std::optional<eMaterialPaintChannel> channel = std::nullopt;
+  if (channel_value != 0) {
+    channel = eMaterialPaintChannel(channel_value - 1);
+  }
+  else {
+    char channel_identifier[64];
+    RNA_string_get(&itemptr, "channel_identifier", channel_identifier);
+    if (channel_identifier[0] != '\0') {
+      channel = material_paint_channel_from_identifier(channel_identifier);
+    }
+  }
+  if (channel && (*channel < 0 || *channel >= PAINT_MATERIAL_CHANNEL_NUM)) {
+    return std::nullopt;
+  }
+  return channel;
+}
+
+/** Keep a newly imported image in the current file as an asset of \a catalog. */
+static bool material_paint_channels_assign_images_mark_asset(
+    const bContext *C,
+    Image *image,
+    const asset_system::AssetCatalog &catalog,
+    const std::optional<eMaterialPaintChannel> channel)
+{
+  /* An image that already is an asset keeps the catalog the user organized it into. */
+  if (!ed::asset::image_can_be_asset(image) || !ed::asset::mark_id(&image->id)) {
+    return false;
+  }
+  ed::asset::generate_preview(C, &image->id);
+  BKE_asset_metadata_catalog_id_set(
+      image->id.asset_data, catalog.catalog_id, catalog.simple_name.c_str());
+  if (channel) {
+    /* Tag the map type so name-matching filters find the image like any imported texture. */
+    const char *identifier = material_paint_channel_map_type_identifier(*channel);
+    if (identifier && BKE_name_matching_map_type_find(&U, identifier)) {
+      BKE_asset_metadata_map_tags_clear(image->id.asset_data);
+      BKE_asset_metadata_map_tag_ensure(image->id.asset_data, identifier);
+    }
+  }
+  return true;
+}
+
+/** Whether confirming would bring any image in from outside the current file. */
+static bool material_paint_channels_assign_images_has_new_imports(wmOperator *op)
+{
+  bool has_new_imports = false;
+  RNA_BEGIN (op->ptr, itemptr, "images") {
+    if (!RNA_boolean_get(&itemptr, "use_import")) {
+      continue;
+    }
+    char name[MAX_NAME];
+    RNA_string_get(&itemptr, "name", name);
+    if (ed::asset::operator_asset_reference_props_is_set(itemptr) || name[0] == '\0') {
+      has_new_imports = true;
+      break;
+    }
+  }
+  RNA_END;
+  return has_new_imports;
+}
+
+static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, wmOperator *op)
+{
+  material_paint_channels_assign_images_from_directory(op);
+  if (RNA_collection_length(op->ptr, "images") == 0) {
+    BKE_report(op->reports, RPT_WARNING, "No image files to assign");
+    return OPERATOR_CANCELLED;
+  }
+
+  Brush *brush = material_paint_channels_assign_images_brush_get(C, op);
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No material paint brush to assign the images to");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* The dialog already applied the matching, and the user may have cleared channels to "None"
+   * deliberately; only guess when running straight from a script or a non-interactive caller. */
+  if (!RNA_boolean_get(op->ptr, "use_name_matching_applied")) {
+    material_paint_channels_assign_images_match(op);
+  }
+
+  /* Resolved up front: a catalog error cancels before anything is loaded. */
+  const asset_system::AssetCatalog *catalog = nullptr;
+  if (material_paint_channels_assign_images_has_new_imports(op)) {
+    catalog = material_paint_channels_assign_images_catalog_ensure(CTX_data_main(C), op);
+    if (catalog == nullptr) {
+      return OPERATOR_CANCELLED;
+    }
+  }
+
+  int assigned = 0;
+  int imported_only = 0;
+  int skipped = 0;
+  bool marked_any = false;
+  RNA_BEGIN (op->ptr, itemptr, "images") {
+    if (!RNA_boolean_get(&itemptr, "use_import")) {
+      continue;
+    }
+    const std::optional<eMaterialPaintChannel> channel =
+        material_paint_channels_assign_images_entry_channel(itemptr);
+
+    bool is_new_import = false;
+    Image *image = material_paint_channels_assign_images_entry_image(
+        C, op, itemptr, is_new_import);
+    if (image == nullptr) {
+      skipped++;
+      continue;
+    }
+    if (is_new_import && catalog) {
+      marked_any |= material_paint_channels_assign_images_mark_asset(C, image, *catalog, channel);
+    }
+
+    if (!channel) {
+      /* "None" with import enabled only brings the image in as an asset. */
+      if (is_new_import) {
+        imported_only++;
+      }
+      else {
+        skipped++;
+      }
+      continue;
+    }
+
+    BrushMaterialPaintChannel *channel_data = &brush->material_paint->channels[*channel];
+    PointerRNA channel_ptr = RNA_pointer_create_discrete(
+        &brush->id, RNA_BrushMaterialPaintChannel, channel_data);
+    RNA_pointer_set(&channel_ptr, "source_image", RNA_id_pointer_create(&image->id));
+    if (RNA_pointer_get(&channel_ptr, "source_image").data != &image->id) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Could not assign \"%s\" to this material paint channel",
+                  image->id.name + 2);
+      skipped++;
+      continue;
+    }
+    assigned++;
+  }
+  RNA_END;
+
+  if (marked_any) {
+    ed::asset::refresh_asset_library(C, asset_system::current_file_library_reference());
+    WM_main_add_notifier(NC_ASSET | ND_ASSET_LIST | NA_ADDED, nullptr);
+  }
+
+  if (assigned == 0 && imported_only == 0) {
+    BKE_report(op->reports, RPT_WARNING, "No images were assigned to material paint channels");
+    return OPERATOR_CANCELLED;
+  }
+
+  if (assigned > 0) {
+    BKE_brush_tag_unsaved_changes(brush);
+    WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  }
+
+  if (skipped > 0) {
+    BKE_reportf(op->reports, RPT_WARNING, "%d image(s) left unassigned", skipped);
+  }
+  if (imported_only > 0) {
+    BKE_reportf(op->reports,
+                RPT_INFO,
+                "%d image(s) imported as assets without a channel",
+                imported_only);
+  }
+  if (assigned > 0) {
+    BKE_reportf(op->reports,
+                RPT_INFO,
+                assigned == 1 ? "Assigned %d image to material paint channels" :
+                                "Assigned %d images to material paint channels",
+                assigned);
+  }
+  return OPERATOR_FINISHED;
+}
+
+static std::string material_paint_channels_assign_images_item_label(
+    const StringRef filepath, const Span<std::string> all_filepaths)
+{
+  const std::string filepath_storage = filepath;
+  const char *basename = BLI_path_basename(filepath_storage.c_str());
+  int basename_count = 0;
+  for (const std::string &other : all_filepaths) {
+    if (STREQ(BLI_path_basename(other.c_str()), basename)) {
+      basename_count++;
+    }
+  }
+  if (basename_count <= 1) {
+    return basename;
+  }
+
+  char dir[FILE_MAXDIR], file[FILE_MAX];
+  BLI_path_split_dir_file(filepath_storage.c_str(), dir, sizeof(dir), file, sizeof(file));
+  const char *parent = BLI_path_basename(dir);
+  if (parent[0] != '\0' && parent[0] != '.' && !STREQ(parent, file)) {
+    return std::string(parent) + "/" + file;
+  }
+  return filepath_storage;
+}
+
+/* Column widths of the per-image rows: name, then channel and import (of the remainder). */
+static constexpr float ASSIGN_IMAGES_NAME_FACTOR = 0.5f;
+static constexpr float ASSIGN_IMAGES_CHANNEL_FACTOR = 0.72f;
+
+static void material_paint_channels_assign_images_draw(bContext * /*C*/, wmOperator *op)
+{
+  ui::Layout *layout = op->layout;
+  PointerRNA *ptr = op->ptr;
+
+  Vector<std::string> filepaths;
+  filepaths.reserve(RNA_collection_length(ptr, "images"));
+  RNA_BEGIN (ptr, itemptr, "images") {
+    char filepath[FILE_MAX];
+    RNA_string_get(&itemptr, "filepath", filepath);
+    if (filepath[0] == '\0') {
+      /* An existing-image or asset entry: label it by its name. */
+      RNA_string_get(&itemptr, "name", filepath);
+    }
+    filepaths.append(filepath);
+  }
+  RNA_END;
+
+  {
+    ui::Layout &header_split = layout->split(ASSIGN_IMAGES_NAME_FACTOR, true);
+    header_split.use_property_split_set(false);
+    header_split.column(true).label(IFACE_("Name"), ICON_NONE);
+    ui::Layout &rest_split = header_split.split(ASSIGN_IMAGES_CHANNEL_FACTOR, true);
+    rest_split.column(true).label(IFACE_("Channel"), ICON_NONE);
+    rest_split.column(true).label(IFACE_("Import Asset"), ICON_NONE);
+  }
+
+  int filepath_index = 0;
+  RNA_BEGIN (ptr, itemptr, "images") {
+    const std::string display_name = material_paint_channels_assign_images_item_label(
+        filepaths[filepath_index], filepaths);
+    filepath_index++;
+    const bool use_import = RNA_boolean_get(&itemptr, "use_import");
+
+    ui::Layout &row_split = layout->split(ASSIGN_IMAGES_NAME_FACTOR, true);
+    row_split.use_property_split_set(false);
+    ui::Layout &name_col = row_split.column(true);
+    name_col.active_set(use_import);
+    name_col.label(display_name, ICON_IMAGE);
+    ui::Layout &rest_split = row_split.split(ASSIGN_IMAGES_CHANNEL_FACTOR, true);
+    ui::Layout &channel_col = rest_split.column(true);
+    channel_col.active_set(use_import);
+    channel_col.prop(&itemptr, "channel", UI_ITEM_NONE, "", ICON_NONE);
+    rest_split.column(true).prop(&itemptr, "use_import", UI_ITEM_NONE, "", ICON_NONE);
+  }
+  RNA_END;
+
+  if (!material_paint_channels_assign_images_has_new_imports(op)) {
+    /* Every image is already in the file, so there is nothing to catalog. */
+    return;
+  }
+
+  layout->separator();
+  layout->use_property_split_set(true);
+  layout->prop(ptr, "create_catalog", UI_ITEM_NONE, IFACE_("Create New Catalog"), ICON_NONE);
+  if (RNA_boolean_get(ptr, "create_catalog")) {
+    layout->prop(ptr, "new_catalog_name", UI_ITEM_NONE, IFACE_("Name"), ICON_NONE);
+  }
+  else {
+    layout->prop(ptr, "catalog_path", UI_ITEM_NONE, IFACE_("Catalog"), ICON_NONE);
+  }
+}
+
+/**
+ * Texture-set name shared by most entries (`brick_basecolor.png`, `brick_normal.png` give
+ * `brick`), used as the default name of a new catalog. Empty when no entry has one.
+ */
+static std::string material_paint_channels_assign_images_base_name(wmOperator *op)
+{
+  Map<std::string, int> base_name_counts;
+  std::string best_name;
+  int best_count = 0;
+  RNA_BEGIN (op->ptr, itemptr, "images") {
+    char filepath[FILE_MAX];
+    RNA_string_get(&itemptr, "filepath", filepath);
+    char name[MAX_NAME];
+    RNA_string_get(&itemptr, "name", name);
+    const char *match_name = (filepath[0] != '\0') ? BLI_path_basename(filepath) : name;
+    std::string base_name = BKE_name_matching_base_name(U, match_name);
+    if (base_name.empty()) {
+      continue;
+    }
+    int &count = base_name_counts.lookup_or_add(base_name, 0);
+    count++;
+    /* Ties keep the first entry's name, which follows the drop order. */
+    if (count > best_count) {
+      best_count = count;
+      best_name = std::move(base_name);
+    }
+  }
+  RNA_END;
+  return best_name;
+}
+
+static wmOperatorStatus material_paint_channels_assign_images_invoke(bContext *C,
+                                                                     wmOperator *op,
+                                                                     const wmEvent * /*event*/)
+{
+  material_paint_channels_assign_images_from_directory(op);
+  material_paint_channels_assign_images_match(op);
+  /* Tell exec the dialog prefill is done, so "None" rows the user cleared stay skipped. */
+  RNA_boolean_set(op->ptr, "use_name_matching_applied", true);
+  if (RNA_collection_length(op->ptr, "images") == 0) {
+    BKE_report(op->reports, RPT_WARNING, "No image files to assign");
+    return OPERATOR_CANCELLED;
+  }
+  if (!RNA_struct_property_is_set(op->ptr, "catalog_path")) {
+    RNA_string_set(op->ptr, "catalog_path", PAINT_CHANNEL_IMAGES_ROOT_CATALOG);
+  }
+  if (!RNA_struct_property_is_set(op->ptr, "new_catalog_name")) {
+    const std::string base_name = material_paint_channels_assign_images_base_name(op);
+    if (!base_name.empty()) {
+      RNA_string_set(op->ptr, "new_catalog_name", base_name.c_str());
+    }
+  }
+
+  return WM_operator_props_dialog_popup(C,
+                                        op,
+                                        720,
+                                        IFACE_("Assign Images to Paint Channels"),
+                                        IFACE_("Assign"));
+}
+
+void PAINT_OT_material_paint_channels_assign_images(wmOperatorType *ot)
+{
+  ot->name = "Assign Images to Paint Channels";
+  ot->description =
+      "Assign images to a brush's material paint channels, routing unassigned files by name "
+      "matching (the map types configured in Preferences). Images from outside the current file "
+      "are kept in it as assets";
+  ot->idname = "PAINT_OT_material_paint_channels_assign_images";
+
+  ot->invoke = material_paint_channels_assign_images_invoke;
+  ot->exec = material_paint_channels_assign_images_exec;
+  ot->ui = material_paint_channels_assign_images_draw;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  PropertyRNA *prop = RNA_def_collection_runtime(ot->srna,
+                                                 "images",
+                                                 RNA_OperatorPaintChannelImageElement,
+                                                 "Images",
+                                                 "Image files and the channels to assign them "
+                                                 "to");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_string_file_path(ot->srna,
+                                  "directory",
+                                  nullptr,
+                                  FILE_MAX,
+                                  "Directory",
+                                  "Folder with image files to assign when the images list is "
+                                  "empty");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "use_name_matching",
+                         true,
+                         "Use Name Matching",
+                         "Fill unassigned channels from the file names using the name matching "
+                         "map types configured in Preferences");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "use_name_matching_applied",
+                         false,
+                         "Name Matching Applied",
+                         "Internal: the dialog already applied the name matching prefill");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_int(ot->srna,
+                     "brush_session_uid",
+                     0,
+                     INT32_MIN,
+                     INT32_MAX,
+                     "Brush Session UID",
+                     "Session UID of the brush to assign to (the active brush when unset)",
+                     INT32_MIN,
+                     INT32_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "create_catalog",
+                         false,
+                         "Create New Catalog",
+                         "Put newly imported images in a new catalog under \"Brush Texture\"");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_string(ot->srna,
+                        "new_catalog_name",
+                        nullptr,
+                        MAX_NAME,
+                        "Catalog Name",
+                        "Name of the new catalog, created under \"Brush Texture\"");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_string(ot->srna,
+                        "catalog_path",
+                        nullptr,
+                        MAX_NAME,
+                        "Catalog",
+                        "Current-file catalog for newly imported images (\"Brush Texture\" when "
+                        "empty)");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  RNA_def_property_string_search_func_runtime(prop,
+                                              material_paint_channels_assign_images_catalog_search,
+                                              PROP_STRING_SEARCH_SUGGESTION);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Cycle Material Paint Canvas
  *
  * Steps the Image Editor's shown image (#SpaceImage.image) through the active material's texture
@@ -1754,6 +2452,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);
   WM_operatortype_append(PAINT_OT_material_channel_source_image_set);
+  WM_operatortype_append(PAINT_OT_material_paint_channels_assign_images);
   WM_operatortype_append(PAINT_OT_material_canvas_cycle);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);

@@ -710,9 +710,60 @@ static int paint_layer_subtree_weight(const MaterialPaintLayer &layer)
   return weight;
 }
 
+/**
+ * Free \a layer's bake structure and the service maps only it owns.
+ *
+ * A map whose last user was the bake is deleted; one still named by the generated tree keeps that
+ * other user and is simply detached, because freeing it there would leave the tree's node with a
+ * dangling pointer. The caller tags #MA_PAINT_LAYERS_REGEN, so the rebuild that follows drops the
+ * node before anything is evaluated; the tree is also tagged by itself so a node still naming a
+ * detached map resyncs. The bake subscription and the pending-job maps are deliberately not touched:
+ * a light row is never the one a heavy job renders.
+ */
+static void paint_layer_bake_structure_free(Main &bmain, Material &ma, MaterialPaintLayer &layer)
+{
+  if (layer.bake == nullptr) {
+    return;
+  }
+  auto release_map = [&](Image *&slot) {
+    Image *image = slot;
+    if (image == nullptr) {
+      return;
+    }
+    slot = nullptr;
+    /* A synchronous service map is handed to the bake without an extra user (unlike
+     * #BKE_paint_layers_bake_set_map); only decrement when the bake actually holds one. */
+    if (image->id.us > 0) {
+      id_us_min(&image->id);
+    }
+    if (image->id.us == 0 && ID_FAKE_USERS(&image->id) == 0) {
+      BKE_id_free(&bmain, &image->id);
+    }
+  };
+  for (Image *&image : layer.bake->images) {
+    release_map(image);
+  }
+  release_map(layer.bake->coverage);
+  if (ma.paint_layers_tree != nullptr) {
+    DEG_id_tag_update(&ma.paint_layers_tree->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  MEM_SAFE_DELETE(layer.bake);
+}
+
 bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
 {
   bool changed = false;
+  /* An AUTO row that no longer passes the heavy gate is cheaper live and never re-bakes: the bake
+   * left from when it was heavy is stale, its maps sit dead in the file, and the next edit to the
+   * row re-tags #MA_PAINT_LAYERS_REGEN for nothing (#paint_layer_or_ancestor_has_bake). Free it in
+   * the one pass that owns the weight gates. A manual ALWAYS/NEVER choice is the user's and is left
+   * alone; the callers below check the mode before invoking this. */
+  const auto drop_light_bake = [&](MaterialPaintLayer &light_layer) {
+    if (light_layer.bake != nullptr) {
+      paint_layer_bake_structure_free(bmain, ma, light_layer);
+      changed = true;
+    }
+  };
   if (paint_layers_is_layered(ma)) {
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten(ma, layers);
@@ -758,7 +809,9 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
         if (mode == MA_PAINT_LAYER_BAKE_AUTO &&
             paint_layer_subtree_weight(layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
         {
-          /* A light subtree is cheaper live. */
+          /* A light subtree is cheaper live; a bake carried over from when it was heavy is
+           * released and never re-rendered. */
+          drop_light_bake(layer);
           continue;
         }
         size = (layer.bake != nullptr) ? layer.bake->size : 0;
@@ -805,7 +858,8 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
             paint_layer_subtree_weight(layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
         {
           /* A light subtree is cheaper live, and stays without a bake structure: this is a final
-           * state for it, not a step toward one. */
+           * state for it, not a step toward one. A stale bake from a heavier past is released. */
+          drop_light_bake(layer);
           continue;
         }
         size = (layer.bake != nullptr) ? layer.bake->size : 0;

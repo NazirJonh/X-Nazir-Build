@@ -1036,6 +1036,13 @@ class PaintLayersStackSource final : public StackSource,
             hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*image) ? 1 : 0);
           }
         }
+        if (layer.kind == MA_PAINT_LAYER_KIND_MATERIAL &&
+            BKE_paint_layers_source_group_build_failed_get(material, layer))
+        {
+          /* A build failure is runtime data, not in `paint_layers_flag`: without mixing it in the
+           * cached rows would keep the "Live" preview after the wrapper failed to build. */
+          hash = hash * 1000003u ^ 0xB17D0FFAULL;
+        }
         auto hash_corrections = [&](const ListBase &corrections) {
           for (const MaterialPaintLayer &correction :
                *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&corrections))

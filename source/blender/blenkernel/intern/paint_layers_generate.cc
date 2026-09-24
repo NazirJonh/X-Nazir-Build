@@ -341,6 +341,18 @@ static Map<uint32_t, Vector<bUUID>> &removed_rows_state()
   return map;
 }
 
+/**
+ * The Material rows whose live source wrapper could not be built in the last regeneration, per owner
+ * `session_uid`. Runtime only, never saved: the Main-free status and the Outliner read it, and a
+ * successful rebuild, a different source or the owner's free drops the marker. Keyed by the row
+ * marker because the refusal is a per-row answer even when two rows share a source.
+ */
+static Map<uint32_t, Vector<bUUID>> &source_group_build_failed_state()
+{
+  static Map<uint32_t, Vector<bUUID>> map;
+  return map;
+}
+
 static bool removed_rows_contains(const Material &ma, const bUUID &marker)
 {
   const Vector<bUUID> *markers = removed_rows_state().lookup_ptr(ma.id.session_uid);
@@ -4653,6 +4665,7 @@ void BKE_paint_layers_sampler_state_free(const Material &ma)
 void BKE_paint_layers_generate_runtime_free(const Material &ma)
 {
   removed_rows_state().remove(ma.id.session_uid);
+  source_group_build_failed_state().remove(ma.id.session_uid);
 #if PAINT_LAYERS_DEBUG_LOG
   /* The diagnostic maps only exist with the log on; in a quiet build there is nothing to drop. */
   previous_row_modes().remove(ma.id.session_uid);
@@ -4816,6 +4829,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
         row.refusal = PaintLayersSourceGroupRefusal::TooManyTextures;
       }
       report.material_rows.append(row);
+      /* The row-level write the Main-free status reads. A source wrapper that failed to build is
+       * otherwise known only inside this report, which the tagged entry point discards. */
+      BKE_paint_layers_source_group_build_failed_set(
+          ma, *layer, refusal == PaintLayersSourceGroupRefusal::BuildFailed);
     }
   };
   populate_material_rows();
@@ -5874,6 +5891,134 @@ bNode *source_group_group_output(bNodeTree &tree)
   return bke::node_add_node(nullptr, tree, "NodeGroupOutput"_ustr);
 }
 
+/** A node and socket of the copied wrapper tree, or an empty pair when nothing feeds the input. */
+struct SourceGroupSourceSocket {
+  bNode *node = nullptr;
+  bNodeSocket *socket = nullptr;
+  explicit operator bool() const
+  {
+    return node != nullptr && socket != nullptr;
+  }
+};
+
+/**
+ * The socket feeding \a input after Reroutes and muted nodes, or an empty pair.
+ *
+ * Mirrors the resolver's own walk (`paint_material_resolve.cc`) without descending group instances:
+ * the wrapper can only link sockets of the copied tree it is building, and a group directly feeding
+ * the Principled is already handled by #source_group_build_level's path recursion.
+ */
+static SourceGroupSourceSocket source_group_follow_source(const bNodeSocket &input)
+{
+  const bNodeSocket *current = &input;
+  for (int step = 0; step < 64; step++) {
+    const Span<const bNodeLink *> links = current->directly_linked_links();
+    if (links.is_empty() || !links[0]->is_available() || links[0]->is_muted()) {
+      return {};
+    }
+    const bNodeLink *link = links[0];
+    if (link->fromnode->is_reroute()) {
+      current = static_cast<const bNodeSocket *>(link->fromnode->inputs.first);
+      continue;
+    }
+    if (link->fromnode->is_muted()) {
+      const bNodeLink *internal = nullptr;
+      for (const bNodeLink &candidate : link->fromnode->internal_links()) {
+        if (candidate.tosock == link->fromsock) {
+          internal = &candidate;
+          break;
+        }
+      }
+      if (internal == nullptr) {
+        return {};
+      }
+      current = internal->fromsock;
+      continue;
+    }
+    return {link->fromnode, link->fromsock};
+  }
+  return {};
+}
+
+/**
+ * Add a Vector Math Multiply-Add encoding a signed vector into the [0, 1] range a normal map stores:
+ * `0.5 * n + 0.5`. This is the same single node the bake's `vector_encode_node_add` uses
+ * (`render_material_bake.cc`); copied rather than shared because that file lives in the editors
+ * layer, which blenkernel cannot include. The caller routes the source into `Vector` and reads
+ * `Vector`.
+ */
+static bNode *source_group_normal_encode_node_add(bNodeTree &tree)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_MATH);
+  if (node == nullptr) {
+    return nullptr;
+  }
+  node->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
+  bNodeSocket *multiplier = bke::node_find_socket(*node, SOCK_IN, "Vector_001"_ustr);
+  bNodeSocket *addend = bke::node_find_socket(*node, SOCK_IN, "Vector_002"_ustr);
+  if (multiplier == nullptr || addend == nullptr) {
+    return nullptr;
+  }
+  for (bNodeSocket *socket : {multiplier, addend}) {
+    if (socket->default_value != nullptr) {
+      copy_v3_fl(static_cast<bNodeSocketValueVector *>(socket->default_value)->value, 0.5f);
+    }
+  }
+  return node;
+}
+
+/**
+ * Feed \a out_in the source's Normal in the format the bake reads and the Normal chain expects: the
+ * encoded tangent-space map. A Normal Map contributes its Color input (already encoded, its own
+ * output is decoded); any other source -- a Bump with relief, a computed normal -- is encoded
+ * through `0.5 * n + 0.5`. This mirrors the Normal branch of `channel_bake_source_socket` in
+ * `render_material_bake.cc`, so a live SourceGroup row and its bake see one source the same way.
+ *
+ * The output stays a `NodeSocketVector`: the encoded value is three components and the consumer
+ * decodes it; changing the interface type would move the wrapper's topology hash for no benefit.
+ */
+static bool source_group_wire_normal(bNodeTree &tree,
+                                     bNode &group_output,
+                                     bNodeSocket &out_in,
+                                     const bNodeSocket &principled_normal)
+{
+  const SourceGroupSourceSocket source = source_group_follow_source(principled_normal);
+  if (!source) {
+    return false;
+  }
+  if (source.node->type_legacy == SH_NODE_NORMAL_MAP) {
+    bNodeSocket *color = bke::node_find_socket(*source.node, SOCK_IN, "Color"_ustr);
+    if (color == nullptr) {
+      return false;
+    }
+    const SourceGroupSourceSocket color_source = source_group_follow_source(*color);
+    if (color_source) {
+      bke::node_add_link(tree, *color_source.node, *color_source.socket, group_output, out_in);
+      return true;
+    }
+    /* An unlinked Color is the encoded constant; carry its rgb to the vector output. */
+    if (color->default_value != nullptr && out_in.default_value != nullptr) {
+      const float *rgba = static_cast<const bNodeSocketValueRGBA *>(color->default_value)->value;
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(out_in.default_value)->value, rgba);
+      return true;
+    }
+    return false;
+  }
+  bNode *encode = source_group_normal_encode_node_add(tree);
+  bNodeSocket *encode_in = (encode != nullptr) ?
+                               bke::node_find_socket(*encode, SOCK_IN, "Vector"_ustr) :
+                               nullptr;
+  bNodeSocket *encode_out = (encode != nullptr) ?
+                                bke::node_find_socket(*encode, SOCK_OUT, "Vector"_ustr) :
+                                nullptr;
+  if (encode_in == nullptr || encode_out == nullptr) {
+    return false;
+  }
+  bke::node_add_link(tree, *source.node, *source.socket, *encode, *encode_in);
+  bke::node_add_link(tree, *encode, *encode_out, group_output, out_in);
+  return true;
+}
+
 /** Expose \a channels in \a tree, reading them straight from \a principled. */
 bool source_group_wire_principled(bNodeTree &tree,
                                   bNode &principled,
@@ -5911,11 +6056,16 @@ bool source_group_wire_principled(bNodeTree &tree,
       continue;
     }
     const Span<const bNodeLink *> links = input->directly_linked_links();
-    if (!links.is_empty()) {
-      bke::node_add_link(tree, *links[0]->fromnode, *links[0]->fromsock, *group_output, *out_in);
+    if (links.is_empty()) {
+      socket_default_copy(*out_in, *input);
+    }
+    else if (channels[i].channel == int(PAINT_MATERIAL_CHANNEL_NORMAL)) {
+      /* The Normal leaves as the encoded map the bake and the chain share, never as the decoded
+       * vector the Principled input carries. */
+      source_group_wire_normal(tree, *group_output, *out_in, *input);
     }
     else {
-      socket_default_copy(*out_in, *input);
+      bke::node_add_link(tree, *links[0]->fromnode, *links[0]->fromsock, *group_output, *out_in);
     }
   }
   return true;
@@ -6461,6 +6611,46 @@ const char *BKE_paint_layers_source_group_refusal_name(
   return "unknown";
 }
 
+bool BKE_paint_layers_source_group_build_failed_get(const Material &owner,
+                                                    const MaterialPaintLayer &layer)
+{
+  const Vector<bUUID> *markers = source_group_build_failed_state().lookup_ptr(owner.id.session_uid);
+  if (markers == nullptr) {
+    return false;
+  }
+  for (const bUUID &other : *markers) {
+    if (BLI_uuid_equal(other, layer.marker)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void BKE_paint_layers_source_group_build_failed_set(const Material &owner,
+                                                    const MaterialPaintLayer &layer,
+                                                    const bool failed)
+{
+  Vector<bUUID> *markers = source_group_build_failed_state().lookup_ptr(owner.id.session_uid);
+  for (int i = 0; markers != nullptr && i < markers->size();) {
+    if (BLI_uuid_equal((*markers)[i], layer.marker)) {
+      markers->remove(i);
+    }
+    else {
+      i++;
+    }
+  }
+  if (!failed) {
+    if (markers != nullptr && markers->is_empty()) {
+      source_group_build_failed_state().remove(owner.id.session_uid);
+    }
+    return;
+  }
+  if (markers == nullptr) {
+    markers = &source_group_build_failed_state().lookup_or_add(owner.id.session_uid, {});
+  }
+  markers->append(layer.marker);
+}
+
 /**
  * The Main-free refusal behind a Baked row: the same checks #BKE_paint_layers_source_group_ensure
  * runs before it touches #Main, so the UI names the same reason the regeneration reports. A live
@@ -6507,6 +6697,14 @@ PaintLayerMaterialLiveStatus BKE_paint_layers_material_live_status(
   PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
   if (mode == PaintLayerMaterialMode::Baked) {
     refusal = material_row_refusal_probe(ma, layer);
+  }
+  else if (mode == PaintLayerMaterialMode::SourceGroup &&
+           BKE_paint_layers_source_group_build_failed_get(ma, layer))
+  {
+    /* The live wrapper was refused when it was last built. The refusal only exists inside a
+     * regeneration report otherwise, which is discarded, so the Main-free status would call the
+     * row Live and the UI would never show that it did not build. */
+    refusal = PaintLayersSourceGroupRefusal::BuildFailed;
   }
   if (r_refusal != nullptr) {
     *r_refusal = refusal;

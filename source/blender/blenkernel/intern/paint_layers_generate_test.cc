@@ -4855,14 +4855,31 @@ TEST_F(PaintLayersGenerateTest, active_heavy_row_stays_live_and_gets_no_bake)
       << "the deferred gate must keep the active row out of the heavy queue too";
 }
 
+/** The session uids of every map a row's bake currently owns. */
+static Vector<uint32_t> bake_map_session_uids(const MaterialPaintLayer &layer)
+{
+  Vector<uint32_t> uids;
+  for (const Image *image : layer.bake->images) {
+    if (image != nullptr) {
+      uids.append(image->id.session_uid);
+    }
+  }
+  if (layer.bake->coverage != nullptr) {
+    uids.append(layer.bake->coverage->id.session_uid);
+  }
+  return uids;
+}
+
 /**
- * Test #9: a baked row's weight later drops under the threshold (its correction removed). This is a
- * known limitation carried unchanged from before this task: the row's stale bake structure is not
- * freed and not revalidated by the light-row path -- freeing it or re-deciding its liveness needs a
- * change in `paint_layers.cc`, out of scope here. Documented and pinned so it is not "fixed" by
- * accident; must pass on both the pre-task and the post-task code.
+ * Test #9 (rewritten from #baked_row_that_becomes_light_keeps_its_stale_bake): an AUTO row that
+ * later drops under the weight threshold no longer passes the heavy gate, so the synchronous planner
+ * releases its bake structure and the service maps only the bake owned. The stale map used to be
+ * pinned forever: never revalidated, never freed, and -- through
+ * #paint_layer_or_ancestor_has_bake -- it made every value edit on the row tag
+ * #MA_PAINT_LAYERS_REGEN. The canary's old expectation (bake != null) is exactly the defect, so the
+ * test now asserts the corrected behavior.
  */
-TEST_F(PaintLayersGenerateTest, baked_row_that_becomes_light_keeps_its_stale_bake)
+TEST_F(PaintLayersGenerateTest, baked_row_that_becomes_light_drops_its_bake)
 {
   MaterialPaintLayer *paint = add_paint_layer("BecomesLight", add_image("BecomesLightImg"));
   MaterialPaintLayer *corr = BKE_paint_layers_correction_add(
@@ -4879,6 +4896,8 @@ TEST_F(PaintLayersGenerateTest, baked_row_that_becomes_light_keeps_its_stale_bak
   EXPECT_TRUE(changed);
   ASSERT_NE(paint->bake, nullptr);
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *paint));
+  const Vector<uint32_t> bake_uids = bake_map_session_uids(*paint);
+  ASSERT_FALSE(bake_uids.is_empty()) << "the bake must have minted service maps";
 
   /* Switch to AUTO and drop the row under the weight threshold. */
   ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *paint, MA_PAINT_LAYER_BAKE_AUTO));
@@ -4888,14 +4907,102 @@ TEST_F(PaintLayersGenerateTest, baked_row_that_becomes_light_keeps_its_stale_bak
   ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *paint))
       << "the structural edit invalidates the stale hash";
 
-  changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
-  EXPECT_FALSE(changed);
-  /* Known limitation: the stale, invalid bake structure is not freed. row_is_substituted's own
-   * rule for a non-Material row is exactly #BKE_paint_layers_bake_is_valid, so the assertion above
-   * already covers it: the row is not substituted. */
+  changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_EQ(paint->bake, nullptr);
+  for (const uint32_t uid : bake_uids) {
+    EXPECT_EQ(BKE_libblock_find_session_uid(bmain, ID_IM, uid), nullptr)
+        << "a service map of the dropped bake was left behind";
+  }
+
+  /* The row no longer carries a bake, so #paint_layer_or_ancestor_has_bake sees none and a value
+   * edit is no longer topology. */
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  rna_set_row_opacity(*ma, *paint, 42.0f);
+  EXPECT_FALSE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0)
+      << "a dropped bake must not keep making value edits topology";
+}
+
+/** Guard: a manual ALWAYS choice is the user's; the light gate never releases its bake. */
+TEST_F(PaintLayersGenerateTest, always_row_that_becomes_light_keeps_its_bake)
+{
+  MaterialPaintLayer *paint = add_paint_layer("AlwaysLight", add_image("AlwaysLightImg"));
+  MaterialPaintLayer *corr = BKE_paint_layers_correction_add(
+      *ma, paint, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+  ASSERT_NE(corr, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *paint, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *paint, 4));
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *paint));
+
+  ASSERT_TRUE(BKE_paint_layers_channel_remove(*ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  BKE_paint_layers_tag_edited(*ma);
+  ASSERT_FALSE(BKE_paint_layers_bake_is_heavy(*ma, *paint));
+
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
   EXPECT_NE(paint->bake, nullptr);
-  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *paint));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *paint));
+}
+
+/** Guard: a heavy row keeps its bake; the light gate is not reached for it. */
+TEST_F(PaintLayersGenerateTest, heavy_auto_row_keeps_its_bake)
+{
+  MaterialPaintLayer *heavy = add_paint_layer("HeavyRow", add_image("HeavyRowImg"));
+  ASSERT_NE(add_channel(*heavy, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("HeavyRough")), nullptr);
+  ASSERT_NE(add_channel(*heavy, PAINT_MATERIAL_CHANNEL_METALLIC, add_image("HeavyMetal")), nullptr);
+  ASSERT_NE(add_channel(*heavy, PAINT_MATERIAL_CHANNEL_SPECULAR, add_image("HeavySpec")), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *heavy));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *heavy));
+
+  bool changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_NE(heavy->bake, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *heavy));
+}
+
+/** F2-D counterpart: an AUTO folder that becomes light releases its bake exactly like a row. */
+TEST_F(PaintLayersGenerateTest, auto_folder_that_becomes_light_drops_its_bake)
+{
+  MaterialPaintLayer *child = add_paint_layer("FChild", add_image("FChildMap"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *folder, 4));
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_NE(folder->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  const Vector<uint32_t> bake_uids = bake_map_session_uids(*folder);
+  ASSERT_FALSE(bake_uids.is_empty());
+
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_AUTO));
+  /* The mode is not part of the bake hash, so move a value too or the stored bake would still count
+   * as valid and the valid-bake gate would return before the light gate. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.25f));
+  ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  ASSERT_FALSE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
+
+  changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_EQ(folder->bake, nullptr);
+  for (const uint32_t uid : bake_uids) {
+    EXPECT_EQ(BKE_libblock_find_session_uid(bmain, ID_IM, uid), nullptr);
+  }
 }
 
 /* -------------------------------------------------------------------- */
@@ -6284,6 +6391,44 @@ TEST_F(PaintLayersGenerateTest, material_row_live_status)
   EXPECT_EQ(BKE_paint_layers_material_live_status(*ma, *refused_row, &refusal),
             PaintLayerMaterialLiveStatus::Refused);
   EXPECT_EQ(refusal, PaintLayersSourceGroupRefusal::NoPrincipled);
+}
+
+/**
+ * A Material row whose source wrapper failed to build must report Refused/BuildFailed through the
+ * Main-free status the UI reads. The failure is a defensive branch of the wrapper factory that valid
+ * data cannot reach, so the test seeds the runtime record at the row level -- exactly what
+ * #populate_material_rows calls when the factory refuses -- and checks the status read. Clearing the
+ * record (what a successful rebuild does) returns the row to Live.
+ */
+TEST_F(PaintLayersGenerateTest, build_failed_row_reports_refused_without_main)
+{
+  Material *source = add_principled_source("BuildFailSource", 0.5f);
+  source_set_noise_base_color(*bmain, *source);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "BuildFailRow", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+
+  PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
+  EXPECT_EQ(BKE_paint_layers_material_live_status(*ma, *row, &refusal),
+            PaintLayerMaterialLiveStatus::Live);
+
+  BKE_paint_layers_source_group_build_failed_set(*ma, *row, true);
+  EXPECT_TRUE(BKE_paint_layers_source_group_build_failed_get(*ma, *row));
+  refusal = PaintLayersSourceGroupRefusal::None;
+  EXPECT_EQ(BKE_paint_layers_material_live_status(*ma, *row, &refusal),
+            PaintLayerMaterialLiveStatus::Refused);
+  EXPECT_EQ(refusal, PaintLayersSourceGroupRefusal::BuildFailed);
+  EXPECT_STREQ(BKE_paint_layers_source_group_refusal_name(refusal), "build-failed");
+
+  /* Fixing the source drops the record; the status returns to Live. */
+  BKE_paint_layers_source_group_build_failed_set(*ma, *row, false);
+  refusal = PaintLayersSourceGroupRefusal::None;
+  EXPECT_EQ(BKE_paint_layers_material_live_status(*ma, *row, &refusal),
+            PaintLayerMaterialLiveStatus::Live);
+  EXPECT_EQ(refusal, PaintLayersSourceGroupRefusal::None);
 }
 
 /**

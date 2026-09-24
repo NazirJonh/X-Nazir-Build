@@ -6371,6 +6371,357 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_normal_map_alpha_is_ignored
 }
 
 /**
+ * The row's encoded Normal Result from the combination of \a bottom_enc and a source whose decoded
+ * normal is \a detail: the chain's decode-combine-normalize-encode plus the final normalize applied
+ * by `cpu_pixel_at`/the chain. \a fac is the row factor.
+ */
+static void normal_result_reference(const RGBA &bottom_enc,
+                                    const float detail[3],
+                                    const float fac,
+                                    float r_out[3])
+{
+  float base[3] = {bottom_enc.r * 2.0f - 1.0f,
+                   bottom_enc.g * 2.0f - 1.0f,
+                   bottom_enc.b * 2.0f - 1.0f};
+  /* The bottom row's own Result is the chain's final decode-normalize-encode, so the combine's A is
+   * the bottom vector already normalized; a near-flat map barely shows it, a tilted one does. */
+  normalize_v3(base);
+  float combined[3] = {base[0] + detail[0], base[1] + detail[1], base[2] * detail[2]};
+  normalize_v3(combined);
+  const float encoded[3] = {combined[0] * 0.5f + 0.5f,
+                            combined[1] * 0.5f + 0.5f,
+                            combined[2] * 0.5f + 0.5f};
+  const float raw[3] = {bottom_enc.r * (1.0f - fac) + encoded[0] * fac,
+                        bottom_enc.g * (1.0f - fac) + encoded[1] * fac,
+                        bottom_enc.b * (1.0f - fac) + encoded[2] * fac};
+  float final_n[3] = {raw[0] * 2.0f - 1.0f, raw[1] * 2.0f - 1.0f, raw[2] * 2.0f - 1.0f};
+  normalize_v3(final_n);
+  r_out[0] = final_n[0] * 0.5f + 0.5f;
+  r_out[1] = final_n[1] * 0.5f + 0.5f;
+  r_out[2] = final_n[2] * 0.5f + 0.5f;
+}
+
+/**
+ * A source whose Principled is at the top level and whose Base Color is a Noise: the resolver calls
+ * it Baked, so every row on it must show its source through the SourceGroup wrapper. Returns the
+ * material; \a r_principled receives the node the caller feeds Normal.
+ */
+static Material *make_wrapper_forced_source(Main &bmain, const char *name, bNode **r_principled)
+{
+  Material *source = BKE_material_add(&bmain, name);
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  bNode *noise = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_NOISE);
+  bke::node_add_link(ntree,
+                     *noise,
+                     *bke::node_find_socket(*noise, SOCK_OUT, "Color"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr));
+  *r_principled = principled;
+  return source;
+}
+
+/** The `.PL Source <name>` wrapper group in \a bmain, or null. */
+static bNodeTree *wrapper_tree_find(Main &bmain, const char *source_name)
+{
+  char full[MAX_ID_NAME - 2];
+  SNPRINTF(full, ".PL Source %s", source_name);
+  for (bNodeTree &tree : bmain.nodetrees) {
+    if (STREQ(tree.id.name + 2, full)) {
+      return &tree;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * B3 (a): a Material row in SourceGroup whose Normal comes from a computed source (not a Normal
+ * Map) must show the same encoded [0,1] normal the bake would store: the wrapper encodes the
+ * decoded vector through `0.5 * n + 0.5`. Before the fix the wrapper linked the decoded vector
+ * itself, so the chain decoded it a second time and the result was wrong. The interpreter has no
+ * Bump case, so the computed normal stands in for it.
+ */
+TEST_F(PaintLayersGraphEvalTest, source_group_normal_computed_is_encoded)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  const float raw[3] = {2.0f, 1.0f, 0.5f};
+
+  ma = BKE_material_add(bmain, "SGNormalComputed");
+  Image *bottom_map = add_solid_image("SGNormalComputedBottom", size, 128, 128, 255, 255);
+  make_image_data(bottom_map);
+  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+
+  bNode *principled = nullptr;
+  Material *source = make_wrapper_forced_source(*bmain, "SGNormalComputedSource", &principled);
+  bNode *normal = bke::node_add_static_node(nullptr, *source->nodetree, SH_NODE_VECTOR_MATH);
+  ASSERT_NE(normal, nullptr);
+  normal->custom1 = NODE_VECTOR_MATH_NORMALIZE;
+  bNodeSocket *normal_in = bke::node_find_socket(*normal, SOCK_IN, "Vector"_ustr);
+  ASSERT_NE(normal_in, nullptr);
+  copy_v3_v3(static_cast<bNodeSocketValueVector *>(normal_in->default_value)->value, raw);
+  bke::node_add_link(*source->nodetree,
+                     *normal,
+                     *bke::node_find_socket(*normal, SOCK_OUT, "Vector"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA bottom_enc = interpreter.sample_image(bottom_map, "Color");
+  float detail[3] = {raw[0], raw[1], raw[2]};
+  normalize_v3(detail);
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    float expected[3];
+    normal_result_reference(bottom_enc, detail, 1.0f, expected);
+    EXPECT_NEAR(graph.r, expected[0], tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, expected[1], tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, expected[2], tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * B3 (a follow-up): the same encoding for a computed normal that reaches the Principled through an
+ * RGB node. The source itself carries the constant, so `detail` is that colour.
+ */
+TEST_F(PaintLayersGraphEvalTest, source_group_normal_rgb_source_is_encoded)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+
+  ma = BKE_material_add(bmain, "SGNormalRgb");
+  Image *bottom_map = add_solid_image("SGNormalRgbBottom", size, 100, 160, 220, 255);
+  make_image_data(bottom_map);
+  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+
+  bNode *principled = nullptr;
+  Material *source = make_wrapper_forced_source(*bmain, "SGNormalRgbSource", &principled);
+  bNode *rgb = bke::node_add_static_node(nullptr, *source->nodetree, SH_NODE_RGB);
+  ASSERT_NE(rgb, nullptr);
+  bNodeSocket *rgb_out = bke::node_find_socket(*rgb, SOCK_OUT, "Color"_ustr);
+  ASSERT_NE(rgb_out, nullptr);
+  const float color[4] = {0.8f, 0.3f, 0.6f, 1.0f};
+  copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(rgb_out->default_value)->value, color);
+  bke::node_add_link(*source->nodetree,
+                     *rgb,
+                     *rgb_out,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA bottom_enc = interpreter.sample_image(bottom_map, "Color");
+  const float detail[3] = {color[0], color[1], color[2]};
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    float expected[3];
+    normal_result_reference(bottom_enc, detail, 1.0f, expected);
+    EXPECT_NEAR(graph.r, expected[0], tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, expected[1], tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, expected[2], tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * B3 (c): a Normal Map over a live texture inside a SourceGroup row must expose the Normal Map's
+ * Color input -- the encoded map -- without encoding it again. Decoding it gives the source normal
+ * the resolver sees; a second encode would shift it.
+ */
+TEST_F(PaintLayersGraphEvalTest, source_group_normal_map_color_is_not_reencoded)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+
+  ma = BKE_material_add(bmain, "SGNormalMap");
+  Image *bottom_map = add_solid_image("SGNormalMapBottom", size, 128, 128, 255, 255);
+  make_image_data(bottom_map);
+  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+
+  Image *source_normal = add_solid_image("SGNormalMapTexture", size, 255, 128, 128, 255);
+  make_image_data(source_normal);
+
+  bNode *principled = nullptr;
+  Material *source = make_wrapper_forced_source(*bmain, "SGNormalMapSource", &principled);
+  bNodeTree &ntree = *source->nodetree;
+  bNode *texture = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
+  ASSERT_NE(texture, nullptr);
+  texture->id = &source_normal->id;
+  id_us_plus(&source_normal->id);
+  static_cast<NodeTexImage *>(texture->storage)->projection = SHD_PROJ_FLAT;
+  bNode *normal_map = bke::node_add_static_node(nullptr, ntree, SH_NODE_NORMAL_MAP);
+  ASSERT_NE(normal_map, nullptr);
+  bke::node_add_link(ntree,
+                     *texture,
+                     *bke::node_find_socket(*texture, SOCK_OUT, "Color"_ustr),
+                     *normal_map,
+                     *bke::node_find_socket(*normal_map, SOCK_IN, "Color"_ustr));
+  bke::node_add_link(ntree,
+                     *normal_map,
+                     *bke::node_find_socket(*normal_map, SOCK_OUT, "Normal"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA bottom_enc = interpreter.sample_image(bottom_map, "Color");
+  const RGBA row_enc = interpreter.sample_image(source_normal, "Color");
+  /* The map is already encoded; the chain decodes it directly. */
+  const float detail[3] = {row_enc.r * 2.0f - 1.0f,
+                           row_enc.g * 2.0f - 1.0f,
+                           row_enc.b * 2.0f - 1.0f};
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    float expected[3];
+    normal_result_reference(bottom_enc, detail, 1.0f, expected);
+    EXPECT_NEAR(graph.r, expected[0], tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, expected[1], tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, expected[2], tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * B3 (f) guard: a value edit to the source normal keeps the wrapper's ID and interface (values are
+ * synced in place, no rebuild), and the row reflects the new value.
+ */
+TEST_F(PaintLayersGraphEvalTest, source_group_normal_value_edit_keeps_the_interface)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  const float raw_a[3] = {2.0f, 1.0f, 0.5f};
+  const float raw_b[3] = {0.2f, 3.0f, 1.5f};
+
+  ma = BKE_material_add(bmain, "SGNormalValue");
+  Image *bottom_map = add_solid_image("SGNormalValueBottom", size, 128, 128, 255, 255);
+  make_image_data(bottom_map);
+  add_layer("Bottom", MA_PAINT_LAYER_KIND_PAINT, bottom_map, channel);
+
+  bNode *principled = nullptr;
+  Material *source = make_wrapper_forced_source(*bmain, "SGNormalValueSource", &principled);
+  bNode *normal = bke::node_add_static_node(nullptr, *source->nodetree, SH_NODE_VECTOR_MATH);
+  ASSERT_NE(normal, nullptr);
+  normal->custom1 = NODE_VECTOR_MATH_NORMALIZE;
+  bNodeSocket *normal_in = bke::node_find_socket(*normal, SOCK_IN, "Vector"_ustr);
+  ASSERT_NE(normal_in, nullptr);
+  copy_v3_v3(static_cast<bNodeSocketValueVector *>(normal_in->default_value)->value, raw_a);
+  bke::node_add_link(*source->nodetree,
+                     *normal,
+                     *bke::node_find_socket(*normal, SOCK_OUT, "Vector"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+
+  bNodeTree *wrapper_before = wrapper_tree_find(*bmain, "SGNormalValueSource");
+  ASSERT_NE(wrapper_before, nullptr);
+  wrapper_before->ensure_interface_cache();
+  Vector<std::string> ids_before;
+  for (bNodeTreeInterfaceSocket *iface : wrapper_before->interface_outputs()) {
+    ids_before.append(iface->identifier != nullptr ? iface->identifier : "");
+  }
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  interpreter.x = 0;
+  interpreter.y = 0;
+  const RGBA before = interpreter.eval_result(result_name(channel));
+
+  /* A value-only edit: the topology hash does not move, so the wrapper is synced, not rebuilt. */
+  copy_v3_v3(static_cast<bNodeSocketValueVector *>(normal_in->default_value)->value, raw_b);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *wrapper_after = wrapper_tree_find(*bmain, "SGNormalValueSource");
+  ASSERT_NE(wrapper_after, nullptr);
+  EXPECT_EQ(wrapper_after, wrapper_before) << "a value edit must not rebuild the wrapper";
+  wrapper_after->ensure_interface_cache();
+  Vector<std::string> ids_after;
+  for (bNodeTreeInterfaceSocket *iface : wrapper_after->interface_outputs()) {
+    ids_after.append(iface->identifier != nullptr ? iface->identifier : "");
+  }
+  ASSERT_EQ(ids_after.size(), ids_before.size());
+  for (const int64_t i : ids_after.index_range()) {
+    EXPECT_EQ(ids_after[i], ids_before[i]);
+  }
+
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 0;
+  interpreter.y = 0;
+  const RGBA after = interpreter.eval_result(result_name(channel));
+  EXPECT_GT(fabsf(after.r - before.r) + fabsf(after.g - before.g) + fabsf(after.b - before.b),
+            1e-3f)
+      << "a value edit to the source normal must reach the row";
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
  * The wrapper copy must keep the source group's interface: the root's RGB and Value reach the group
  * inputs through Reroutes, Metallic is an instance value. If the copy's Group Input lost its
  * sockets, the Principled would fall back to its defaults and this would read 0.8 / 0.5 / 0.0.

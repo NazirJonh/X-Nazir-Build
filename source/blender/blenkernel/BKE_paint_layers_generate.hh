@@ -143,6 +143,22 @@ const char *BKE_paint_layers_source_group_refusal_name(
     const PaintLayersSourceGroupRefusal refusal);
 
 /**
+ * Whether the last regeneration could not build the live source wrapper of \a layer: the
+ * #PaintLayersSourceGroupRefusal::BuildFailed answer, kept as runtime data because
+ * #BKE_paint_layers_source_group_ensure's report never reaches the UI. Read by the Main-free
+ * #BKE_paint_layers_material_live_status and the Outliner; never saved, so a load starts clean.
+ */
+bool BKE_paint_layers_source_group_build_failed_get(const Material &owner,
+                                                    const MaterialPaintLayer &layer);
+/**
+ * Record or clear \a layer's build-failed marker. Called when a regeneration records the row's
+ * refusal; a successful rebuild, a different source or the owner's free clears it.
+ */
+void BKE_paint_layers_source_group_build_failed_set(const Material &owner,
+                                                    const MaterialPaintLayer &layer,
+                                                    bool failed);
+
+/**
  * The status of \a layer for the UI: #BKE_paint_layers_material_mode refined by
  * #BKE_paint_layers_material_bake_ready, #BKE_paint_layers_bake_row_is_deferred and the
  * Main-free refusal checks of #BKE_paint_layers_source_group_ensure. Read-only observation:

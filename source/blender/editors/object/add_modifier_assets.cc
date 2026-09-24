@@ -27,6 +27,7 @@
 #include "BLT_translation.hh"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
 
 #include "ED_asset.hh"
 #include "ED_asset_menu_utils.hh"
@@ -295,6 +296,9 @@ static wmOperatorStatus modifier_add_asset_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  const int insert_index = RNA_int_get(op->ptr, "insert_index");
+  const bool show_datablock_selector = RNA_boolean_get(op->ptr, "show_datablock_selector");
+
   bool changed = false;
   for (const PointerRNA &ptr : objects) {
     Object *object = static_cast<Object *>(ptr.data);
@@ -308,8 +312,16 @@ static wmOperatorStatus modifier_add_asset_exec(bContext *C, wmOperator *op)
     id_us_plus(&node_group->id);
     MOD_nodes_update_interface(object, nmd);
 
-    /* Don't show the data-block selector since it's not usually necessary for assets. */
-    nmd->flag |= NODES_MODIFIER_HIDE_DATABLOCK_SELECTOR;
+    /* Only ever move the new modifier up: an index past its position means "append". The regular
+     * move API is used so ordering constraints between modifiers are respected. */
+    if (insert_index >= 0 && insert_index < BLI_findindex(&object->modifiers, &nmd->modifier)) {
+      modifier_move_to_index(
+          op->reports, RPT_WARNING, object, &nmd->modifier, insert_index, true);
+    }
+
+    /* The data-block selector is not usually necessary for assets. */
+    SET_FLAG_FROM_TEST(
+        nmd->flag, !show_datablock_selector, NODES_MODIFIER_HIDE_DATABLOCK_SELECTOR);
     SET_FLAG_FROM_TEST(nmd->flag,
                        node_group->geometry_node_asset_traits &&
                            (node_group->geometry_node_asset_traits->flag &
@@ -370,6 +382,24 @@ static void OBJECT_OT_modifier_add_node_group(wmOperatorType *ot)
   asset::operator_asset_reference_props_register(*ot->srna);
   WM_operator_properties_id_lookup(ot, false);
   modifier_register_use_selected_objects_prop(ot);
+
+  PropertyRNA *prop = RNA_def_int(ot->srna,
+                                  "insert_index",
+                                  -1,
+                                  -1,
+                                  INT_MAX,
+                                  "Insert Index",
+                                  "Position in the modifier stack to insert the new modifier at "
+                                  "(-1 to append it at the end)",
+                                  -1,
+                                  INT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+  prop = RNA_def_boolean(ot->srna,
+                         "show_datablock_selector",
+                         false,
+                         "Show Data-Block Selector",
+                         "Show the node group selector in the new modifier");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 static MenuType modifier_add_unassigned_assets_menu_type()

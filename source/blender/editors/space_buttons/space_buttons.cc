@@ -175,6 +175,10 @@ static void buttons_main_region_init(wmWindowManager *wm, ARegion *region)
   keymap = WM_keymap_ensure(
       wm->runtime->defaultconf, "Property Editor", SPACE_PROPERTIES, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
+
+  ListBaseT<wmDropBox> *lb = WM_dropboxmap_find(
+      "Property Editor", SPACE_PROPERTIES, RGN_TYPE_WINDOW);
+  WM_event_add_dropbox_handler(&region->runtime->handlers, lb);
 }
 
 /** \} */
@@ -1115,6 +1119,7 @@ void ED_spacetype_buttons()
   st->duplicate = buttons_duplicate;
   st->operatortypes = buttons_operatortypes;
   st->keymap = buttons_keymap;
+  st->dropboxes = buttons_dropboxes;
   st->listener = buttons_area_listener;
   st->context = buttons_context;
   st->id_remap = buttons_id_remap;
@@ -1138,6 +1143,7 @@ void ED_spacetype_buttons()
   image_grid_catalog_selector_panel_register(art);
   image_grid_display_panel_register(art);
   image_grid_name_match_filter_panel_register(art);
+  buttons_modifier_drop_ghost_panel_register(art);
   BLI_addhead(&st->regiontypes, art);
 
   /* Register the panel types from modifiers. The actual panels are built per modifier rather

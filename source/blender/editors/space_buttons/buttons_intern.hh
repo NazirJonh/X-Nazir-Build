@@ -104,4 +104,9 @@ void BUTTONS_OT_file_browse(wmOperatorType *ot);
 void BUTTONS_OT_directory_browse(wmOperatorType *ot);
 void BUTTONS_OT_context_menu(wmOperatorType *ot);
 
+/* `buttons_dropboxes.cc` */
+
+void buttons_dropboxes();
+void buttons_modifier_drop_ghost_panel_register(ARegionType *art);
+
 }  // namespace blender

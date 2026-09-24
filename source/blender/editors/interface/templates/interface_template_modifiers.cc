@@ -14,6 +14,7 @@
 
 #include "BLI_listbase.h"
 
+#include "ED_buttons.hh"
 #include "ED_object.hh"
 
 #include "RNA_access.hh"
@@ -37,11 +38,22 @@ void template_modifiers(Layout * /*layout*/, bContext *C)
   Object *ob = ed::object::context_active_object(C);
   ListBaseT<ModifierData> *modifiers = &ob->modifiers;
 
-  const bool panels_match = panel_list_matches_data(region, modifiers, modifier_panel_id);
+  /* While a Geometry Nodes modifier is dragged over the region, a placeholder panel marks the drop
+   * position. It is not backed by modifier data, so the list is rebuilt on every redraw while it is
+   * shown (the drop-box only tags a redraw when the position changes), and the next rebuild after
+   * the drag removes it again because it never matches the data. */
+  const std::optional<int> ghost_index = ED_buttons_modifier_drop_insert_index(region);
+
+  const bool panels_match = !ghost_index &&
+                            panel_list_matches_data(region, modifiers, modifier_panel_id);
 
   if (!panels_match) {
     panels_free_instanced(C, region);
+    int md_index = 0;
     for (ModifierData &md : *modifiers) {
+      if (md_index++ == ghost_index) {
+        panel_add_instanced(C, region, &region->panels, MODIFIER_DROP_GHOST_PANEL_IDNAME, nullptr);
+      }
       const ModifierTypeInfo *mti = BKE_modifier_get_info(md.type);
       if (mti->panel_register == nullptr) {
         continue;
@@ -55,6 +67,9 @@ void template_modifiers(Layout * /*layout*/, bContext *C)
       *md_ptr = RNA_pointer_create_id_subdata(ob->id, RNA_Modifier, &md);
 
       panel_add_instanced(C, region, &region->panels, panel_idname, md_ptr);
+    }
+    if (ghost_index && *ghost_index >= md_index) {
+      panel_add_instanced(C, region, &region->panels, MODIFIER_DROP_GHOST_PANEL_IDNAME, nullptr);
     }
   }
   else {

@@ -8,12 +8,15 @@
 
 #pragma once
 
+#include <optional>
+
 #include "BLI_vector.hh"
 
 #include "DNA_space_types.h"
 
 namespace blender {
 
+struct ARegion;
 struct ScrArea;
 struct SpaceProperties;
 struct bContext;
@@ -55,5 +58,15 @@ void ED_buttons_set_context(const bContext *C,
  * an operator that assigns a texture can bring it up the same way.
  */
 void ED_buttons_texture_show(bContext *C, PointerRNA *ptr, PropertyRNA *prop);
+
+/** Placeholder panel marking the drop position in the modifier stack. */
+#define MODIFIER_DROP_GHOST_PANEL_IDNAME "MOD_PT_drop_ghost"
+
+/**
+ * While a Geometry Nodes modifier (local node group or asset) is dragged over \a region, return
+ * the modifier stack index the drop would insert at (equal to the modifier count when appending).
+ * Used by the modifier panels template to show a placeholder panel at the drop position.
+ */
+std::optional<int> ED_buttons_modifier_drop_insert_index(const ARegion *region);
 
 }  // namespace blender

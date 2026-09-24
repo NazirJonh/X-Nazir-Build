@@ -3319,6 +3319,59 @@ static SculptBrushTexSampleCoords sculpt_brush_texture_sample_coords_get(
 }
 
 /**
+ * Texture coordinate for Mapping: Roll, which maps the texture along the stroke's spline rather
+ * than through the view. The lookup needs the position after the radial-symmetry rotation but
+ * *before* the mirror flip, so it is recomputed from the (tile-offset-corrected) \a point. The
+ * result is already rotated by `mtex.rot`; sample it at `(x, -y)`.
+ */
+static float2 sculpt_roll_texture_coord(const StrokeCache &cache,
+                                        const Brush &brush,
+                                        const MTex &mtex,
+                                        const float3 &point)
+{
+  float3 tile_point = point;
+  if (cache.radial_symmetry_pass > 0) {
+    mul_m4_v3(cache.symm_rot_mat_inv.ptr(), tile_point);
+  }
+
+  /* Try each mirror-symmetry flip of the vertex and keep the result closest to the strip center.
+   * For mirror_pass=0 (no mirror) the only iteration is i=0 (identity). For mirror_pass=X, i=1
+   * flips X and maps the mirrored vertex back near the spline. Points outside the LUT bbox return
+   * FLT_MAX U and never win. */
+  float3 point_3d(FLT_MAX, 0.0f, 0.0f);
+  for (int i = 0; i < 8; i++) {
+    if ((int(cache.mirror_symmetry_pass) & i) != i) {
+      continue;
+    }
+
+    float3 symm_pt = tile_point;
+    for (int j = 0; j < 3; j++) {
+      if ((i & (1 << j)) && (i & int(cache.mirror_symmetry_pass))) {
+        symm_pt[j] = -symm_pt[j];
+      }
+    }
+
+    float3 spline_uv;
+    float3 tangent;
+    cache.stroke->spline_uv(cache, symm_pt, spline_uv, tangent);
+
+    if (std::abs(spline_uv[0]) < std::abs(point_3d[0])) {
+      point_3d = spline_uv;
+    }
+  }
+
+  /* U is already normalized to +/-1 at the strip borders. V is pre-normalized in the grid when
+   * pressure-scale is active, otherwise divide by initial_radius for standard tiling. */
+  if (!(brush.roll_pressure_scale && BKE_brush_use_size_pressure(&brush))) {
+    point_3d[1] /= cache.initial_radius;
+  }
+
+  float2 final_pt;
+  rotate_v2_v2fl(final_pt, point_3d, mtex.rot);
+  return final_pt;
+}
+
+/**
  * \param use_image_fallback: When #RE_texture_evaluate returns black, re-sample the underlying
  * image directly at the same brush coordinates. This is a workaround for texture node trees that
  * read mesh UVs, which sculpt cannot provide. It is opt-in because it is expensive (it acquires an
@@ -3349,6 +3402,16 @@ static void sculpt_sample_brush_mtex(const SculptSession &ss,
     const float3 point_3d = math::transform_point(cache.texture_sample_from_object, float3(point));
     *r_value = BKE_brush_sample_tex_3d(
         cache.paint, &brush, mtex, point_3d, r_rgba, thread_id, ss.tex_pool());
+    return;
+  }
+
+  if (cache.stroke && cache.stroke->need_roll_mapping()) {
+    /* Same construction as #sculpt_apply_texture's material path: it is what makes Mapping: Roll
+     * work for the classic brush texture (Mask/alpha slot) as well -- notably for Stroke Method:
+     * Curve, whose dabs feed the roll spline just like the Roll stroke method does. */
+    const float2 final_pt = sculpt_roll_texture_coord(cache, brush, *mtex, float3(point));
+    paint_get_tex_pixel(mtex, final_pt[0], -final_pt[1], ss.tex_pool(), thread_id, r_value, &r_rgba[0]);
+    sculpt_sample_brush_mtex_apply_bias(brush, apply_texture_bias, r_value, r_rgba);
     return;
   }
 
@@ -3530,50 +3593,9 @@ void sculpt_apply_texture(const SculptSession &ss,
     *r_value -= brush.texture_sample_bias;
   }
   else if (cache.stroke && cache.stroke->need_roll_mapping()) {
-    /* Roll maps the texture along the stroke's spline rather than through the view. The lookup
-     * needs the position after the radial-symmetry rotation but *before* the mirror flip, which
-     * #TexelSampleContext does not keep -- recompute it from #TexelSampleContext::point, which is
-     * already the tile-offset-corrected position. Only the Roll path pays for this. */
-    float3 tile_point = ctx.point;
-    if (cache.radial_symmetry_pass > 0) {
-      mul_m4_v3(cache.symm_rot_mat_inv.ptr(), tile_point);
-    }
-
-    /* Try each mirror-symmetry flip of the vertex and keep the result closest to the strip
-     * center. For mirror_pass=0 (no mirror) the only iteration is i=0 (identity). For
-     * mirror_pass=X, i=1 flips X and maps the mirrored vertex back near the spline. Points
-     * outside the LUT bbox return FLT_MAX U and never win. */
-    float3 point_3d(FLT_MAX, 0.0f, 0.0f);
-    for (int i = 0; i < 8; i++) {
-      if ((int(cache.mirror_symmetry_pass) & i) != i) {
-        continue;
-      }
-
-      float3 symm_pt = tile_point;
-      for (int j = 0; j < 3; j++) {
-        if ((i & (1 << j)) && (i & int(cache.mirror_symmetry_pass))) {
-          symm_pt[j] = -symm_pt[j];
-        }
-      }
-
-      float3 spline_uv;
-      float3 tangent;
-      cache.stroke->spline_uv(cache, symm_pt, spline_uv, tangent);
-
-      if (std::abs(spline_uv[0]) < std::abs(point_3d[0])) {
-        point_3d = spline_uv;
-      }
-    }
-
-    /* U is already normalized to +/-1 at the strip borders. V is pre-normalized in the grid when
-     * pressure-scale is active, otherwise divide by initial_radius for standard tiling. */
-    if (!(brush.roll_pressure_scale && BKE_brush_use_size_pressure(&brush))) {
-      point_3d[1] /= cache.initial_radius;
-    }
-
-    float3 final_pt;
-    rotate_v2_v2fl(final_pt, point_3d, mtex.rot);
-
+    /* #TexelSampleContext does not keep the pre-mirror position; #TexelSampleContext::point is
+     * already tile-offset-corrected, so the Roll coordinate is recomputed from it. */
+    const float2 final_pt = sculpt_roll_texture_coord(cache, brush, mtex, ctx.point);
     paint_get_tex_pixel(&mtex, final_pt[0], -final_pt[1], pool, thread_id, r_value, r_rgba);
     *r_value += brush.texture_sample_bias;
   }

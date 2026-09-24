@@ -909,7 +909,15 @@ bool curve_patch_start_from_anchor(
   /* The stroke's own measurement, handed to #curve_patch_begin_editing as the plane fallback for
    * patches whose curve is a straight segment. */
   const float3 plane_normal = cache.sculpt_normal;
-  if (const PaintCurve *paint_curve = brush.paint_curve) {
+  /* Only an object-space paint curve can be adopted as a control curve. A screen-space one
+   * (`use_3d_space == false`, as left behind by a legacy file or by a Curve stroke drawn in the
+   * Image Editor) stores region PIXELS, and the control-curve build would read those as
+   * object-space coordinates -- placing the patch far outside the mesh, always in the same shape,
+   * regardless of where the anchor stroke landed. Such a curve cannot describe where the user
+   * stroked, so fall through to the anchor seed below exactly as if the brush had no paint curve
+   * at all. */
+  const PaintCurve *paint_curve = brush.paint_curve;
+  if (paint_curve != nullptr && paint_curve->use_3d_space) {
     const int curves_num = paint_curve->geometry.wrap().curves_num();
     for (int i = 0; i < curves_num; i++) {
       bke::CurvesGeometry control_curve = ED_paintcurve_control_curve_for_patch(*paint_curve, i);

@@ -726,6 +726,49 @@ void paintcurve_geometry_add_point(bke::CurvesGeometry &geom,
   geom.tag_positions_changed();
 }
 
+/**
+ * Convert a screen-space paint curve to object space before an edit made in a 3D viewport.
+ *
+ * A screen-space curve stores region PIXELS: a point added to it from a View3D click is stored in
+ * pixels too and typically ends up outside the user's view, so with Stroke Method: Curve adding a
+ * point looks like it did nothing. Reprojecting in place lets the user at least see the point they
+ * just placed. Deliberately opens no undo step of its own: the caller's operation creates the next
+ * paint-curve snapshot (which then holds the converted geometry), and the previous snapshot
+ * restores the screen-space state.
+ */
+static void paintcurve_convert_to_object_space_for_view3d(bContext *C, PaintCurve *pc)
+{
+  if (pc == nullptr || pc->use_3d_space || CTX_wm_region_view3d(C) == nullptr) {
+    return;
+  }
+
+  /* An empty curve has nothing to reproject; flag it object-space so the point added next is too. */
+  if (!paintcurve_geometry_is_valid(pc->geometry.wrap())) {
+    pc->use_3d_space = 1;
+    return;
+  }
+
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  if (depsgraph == nullptr) {
+    return;
+  }
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  /* The converter reads the CURRENT flag to pick the direction: set the target space first, and
+   * revert on failure so a refused conversion cannot leave the flag lying about the geometry. */
+  pc->use_3d_space = 1;
+  if (!paintcurve_convert_geometry_space(C, pc, &vc, true)) {
+    pc->use_3d_space = 0;
+    return;
+  }
+
+  paintcurve_sync_to_source_object(C, pc);
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  if (Brush *brush = paint ? BKE_paint_brush(paint) : nullptr) {
+    BKE_brush_tag_unsaved_changes(brush);
+  }
+  WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
 static void paintcurve_point_add(bContext *C,
                                  wmOperator *op,
                                  const int loc[2],
@@ -754,6 +797,10 @@ static void paintcurve_point_add(bContext *C,
   }
 
   ED_paintcurve_undo_push_begin(C, op->type->name);
+
+  /* In a 3D viewport a screen-space curve must become object-space first, or the point added just
+   * below would be stored as region pixels and never drawn there. */
+  paintcurve_convert_to_object_space_for_view3d(C, pc);
 
   ViewContext vc = {};
   if (pc->use_3d_space && rv3d) {
@@ -920,6 +967,10 @@ static wmOperatorStatus paintcurve_insert_or_add_point_invoke(bContext *C,
 {
   Brush *br = nullptr;
   PaintCurve *pc = paintcurve_active_from_context(C, &br);
+
+  /* Convert before the hit-test below: in screen space a segment under the cursor could be
+   * "inserted into" and the add path (which converts on its own) would never run. */
+  paintcurve_convert_to_object_space_for_view3d(C, pc);
 
   const int loc[2] = {event->mval[0], event->mval[1]};
   const float loc_fl[2] = {float(loc[0]), float(loc[1])};

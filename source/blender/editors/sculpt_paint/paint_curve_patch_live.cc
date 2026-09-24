@@ -169,6 +169,7 @@ CurvePatchLiveInputs curve_patch_live_inputs_capture(const Paint &paint, const B
   in.falloff_curve_ts = brush.curve_distance_falloff ?
                             brush.curve_distance_falloff->changed_timestamp :
                             0;
+  in.texture_clip_shape = int(brush.texture_clip_shape);
   return in;
 }
 

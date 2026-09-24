@@ -414,9 +414,11 @@ float3 curve_patch_plane_normal_from_curve(const bke::CurvesGeometry &curve,
  * let any unrelated undo push in the application adopt or free it. See `paint_curve_patch_edit.cc`
  * (Stage 04) for the modal editor implementation.
  *
- * When the brush already owns a paint curve with at least two points on its active spline (as left
- * behind by Stroke Method: Curve), that curve is adopted as the control curve instead of seeding a
- * fresh two-point segment from the anchor drag.
+ * When the brush already owns an OBJECT-SPACE paint curve (`use_3d_space`) with at least two points
+ * on a spline (as left behind by Stroke Method: Curve), that curve is adopted as the control curve
+ * instead of seeding a fresh two-point segment from the anchor drag. A screen-space paint curve is
+ * never adopted: its points are region pixels, not object-space coordinates, so seeding from the
+ * anchor is the only way to get a patch at the click.
  */
 bool curve_patch_start_from_anchor(
     const Depsgraph &depsgraph, Object &ob, Sculpt &sd, const Brush &brush, const ViewContext &vc);

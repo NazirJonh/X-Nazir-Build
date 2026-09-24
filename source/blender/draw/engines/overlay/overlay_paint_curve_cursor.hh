@@ -230,12 +230,15 @@ class PaintCurveCursor : Overlay {
          * (`paint_curve_show_radius_handles` / `paint_curve_radius_display_mode`), so the two
          * editors stay one setting rather than two. Ctrl shows the insert preview, matching
          * Ctrl+RMB in the modal. */
+        const bool show_radius_handles = (brush == nullptr) ||
+                                         (brush->curve_patch.stamp_mode !=
+                                          BRUSH_CURVE_PATCH_STAMP_STAMPS);
         ed::sculpt_paint::ED_paint_curve_screen_handles_build_from_geometry(
             vc,
             image_patch_geometry,
             /*use_3d_space=*/false,
             sculpt,
-            /*show_radius_handles=*/true,
+            /*show_radius_handles=*/show_radius_handles,
             mval_region,
             /*compute_segment_hover=*/state.cursor_mval_valid,
             /*show_insert_preview=*/state.cursor_mval_valid && state.cursor_ctrl_pressed,
@@ -266,6 +269,9 @@ class PaintCurveCursor : Overlay {
       handles_.segments.clear();
       handles_.insert_preview = {};
 
+      const bool show_radius_handles = (brush == nullptr) ||
+                                       (brush->curve_patch.stamp_mode !=
+                                        BRUSH_CURVE_PATCH_STAMP_STAMPS);
       for (const int i : patch_overlay_.splines.index_range()) {
         const bke::CurvesGeometry *control_curve = patch_overlay_.splines[i];
         if (control_curve == nullptr) {
@@ -278,7 +284,7 @@ class PaintCurveCursor : Overlay {
             *control_curve,
             true,
             sculpt,
-            true,
+            show_radius_handles,
             mval_region,
             is_active ? compute_hover : false,
             is_active ? show_insert_preview : false,

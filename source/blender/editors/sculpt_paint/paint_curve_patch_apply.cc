@@ -343,6 +343,12 @@ static const PaintCurve *curve_patch_apply_resolve_paint_curve(bContext *C,
     BKE_report(op->reports, RPT_ERROR, "Curve Patch: no paint curve with at least two points");
     return nullptr;
   }
+  /* A screen-space curve stores region pixels, which the patch build would read as object-space
+   * coordinates; same rule as `curve_patch_start_from_anchor()`. */
+  if (!paint_curve->use_3d_space) {
+    BKE_report(op->reports, RPT_ERROR, "Curve Patch: the paint curve is not in 3D space");
+    return nullptr;
+  }
   /* Nothing here about the spline COUNT: a Curve Patch is one strip along one spline (see
    * `CurvePatchItem::control_curve`), and which spline that is comes from the operator's
    * `spline_index` or the curve's own active one -- see #ED_paintcurve_control_curve_for_patch.

@@ -16,6 +16,8 @@
 
 #include "ED_screen.hh"
 
+#include "screen_intern.hh"
+
 #include "UI_interface.hh"
 #include "UI_view2d.hh"
 
@@ -263,6 +265,9 @@ ARegion *ED_screen_area_region_under_cursor(wmWindow *win,
   }
   ScrArea *area = BKE_screen_find_area_xy(screen, space_type, event_xy);
   if (!area) {
+    return nullptr;
+  }
+  if (ED_area_actionzone_find_xy(area, event_xy) != nullptr) {
     return nullptr;
   }
   ARegion *region_hovered = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, event_xy);

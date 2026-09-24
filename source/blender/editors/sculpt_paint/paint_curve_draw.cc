@@ -335,16 +335,26 @@ bool ED_paint_curve_overlay_draws_brush_curve(const Brush *brush,
     return false;
   }
   /* The overlay may draw the brush's paint curve only where the curve's space matches the region's
-   * one. Curve Patch and the Curve Edit tool both edit an object-space curve whatever the paint
-   * curve's own flag says; a plain Stroke Method: Curve carries whichever space it was built in.
+   * one. Curve Patch and the Curve Edit tool only work with an object-space curve; a plain Stroke
+   * Method: Curve carries whichever space it was built in.
    */
   const PaintCurve *paint_curve = brush->paint_curve;
   const bool curve_is_object_space = is_curve_patch_stroke || is_curves_edit ||
                                      (paint_curve != nullptr && paint_curve->use_3d_space);
   if (is_space_v3d) {
-    /* A screen-space paint curve holds region pixels, which a viewport must not reinterpret as
-     * object-space coordinates. */
-    return paint_curve == nullptr || curve_is_object_space;
+    /* Curve Patch and the Curve Edit tool only ever edit an object-space curve, so a screen-space
+     * one (left behind by a plain Curve stroke) is not theirs to show: its region pixels would be
+     * reinterpreted as object-space coordinates, and Curve Patch never adopts it anyway (see
+     * `curve_patch_start_from_anchor()`). The paint curve's own flag decides. A plain Stroke Method:
+     * Curve carries whichever space it was built in and is drawn as-is: an object-space curve
+     * projects through the region, a screen-space one is painted as a region-pixel overlay exactly
+     * as the Image Editor draws it (the builder reads `use_3d_space` and skips projection for it).
+     * Refusing the screen-space case here is what made turning off "3D Curve" appear to delete the
+     * curve instead of pinning it to the view. */
+    if (is_curve_patch_stroke || is_curves_edit) {
+      return paint_curve == nullptr || paint_curve->use_3d_space;
+    }
+    return true;
   }
   /* Outside a viewport there is no #RegionView3D to project an object-space curve through -- and
    * the pixels it would produce would name nothing on this canvas anyway. */

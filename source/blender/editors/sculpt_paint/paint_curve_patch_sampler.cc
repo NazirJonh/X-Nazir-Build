@@ -570,10 +570,13 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         }
         /* The brush's own falloff curve fades the stamp toward its rim, so overlapping stamps
          * meet along a smooth seam instead of showing the square's hard edge. */
-        const float dist = std::sqrt(local_u * local_u + local_v * local_v);
+        const float dist = (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) ?
+                               std::max(std::abs(local_u), std::abs(local_v)) :
+                               std::sqrt(local_u * local_u + local_v * local_v);
         const float stamp_falloff = BKE_brush_curve_strength(&brush, dist, it->half_extent);
-        /* A square's corners reach `sqrt(2) * half_extent`, past the falloff's own length, and a
-         * CUSTOM brush curve is free to return a negative value out there -- which would invert
+        /* With the round clip shape a square's corners reach `sqrt(2) * half_extent` (the
+         * rectangle shape's Chebyshev distance never passes `half_extent`), past the falloff's own
+         * length, and a CUSTOM brush curve is free to return a negative value out there -- which would invert
          * the relief in the corners instead of fading it out. The Ribbon path guards its own
          * falloff the same way. */
         if (stamp_falloff <= 0.0f) {

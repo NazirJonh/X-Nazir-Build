@@ -84,6 +84,7 @@ struct CurvePatchLiveInputs {
 
   int falloff_preset = -1;
   int falloff_curve_ts = -1;
+  int texture_clip_shape = -1;
 
   /** PBR Paint / Poly Paint: everything a re-stamp reads out of #BrushMaterialPaint -- every
    * channel's paint value, blend mode and enable flag, the Base Color, both Alpha switches and

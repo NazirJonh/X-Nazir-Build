@@ -39,6 +39,9 @@ bool CurvePatchCurveEditor::radius_drag_begin(bContext &C,
                                               CurvePatchEditorHost &host,
                                               CurvePatchScreenAdapter &adapter)
 {
+  if (host.document().active_item().params.stamp_mode == bke::CurvePatchStampMode::Stamps) {
+    return false;
+  }
   const int active_point = host.document().active_point;
   bke::CurvesGeometry &curve = host.curve();
   if (active_point < 0 || active_point >= curve.points_num()) {
@@ -369,41 +372,44 @@ bool CurvePatchCurveEditor::drag_start_from_press(bContext &C,
   host.pickable_curves(curves);
   const float pos[2] = {float(event.mval[0]), float(event.mval[1])};
 
-  /* Radius handles take priority: they sit off the wire, so a hit there is unambiguous. */
+  /* Radius handles take priority: they sit off the wire, so a hit there is unambiguous.
+   * In Stamps mode radius handles are hidden, so radius interaction is skipped. */
   int best_curve = -1;
   int best_point = -1;
   float best_dist = FLT_MAX;
-  PaintCurveRadiusHandleScreen best_handle = {};
-  for (const int i : curves.index_range()) {
-    bke::CurvesGeometry projected;
-    CurvePatchPickSpace space;
-    Vector<PaintCurvePoint> screen_points;
-    if (!screen_points_get(C, adapter, *curves[i], projected, space, screen_points)) {
-      continue;
+  if (host.document().active_item().params.stamp_mode != bke::CurvePatchStampMode::Stamps) {
+    PaintCurveRadiusHandleScreen best_handle = {};
+    for (const int i : curves.index_range()) {
+      bke::CurvesGeometry projected;
+      CurvePatchPickSpace space;
+      Vector<PaintCurvePoint> screen_points;
+      if (!screen_points_get(C, adapter, *curves[i], projected, space, screen_points)) {
+        continue;
+      }
+      const int hit = paintcurve_find_radius_handle_at_pos_from_geometry(
+          *curves[i], screen_points.as_span(), pos, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
+      if (hit < 0) {
+        continue;
+      }
+      PaintCurveRadiusHandleScreen handle;
+      paintcurve_radius_handle_screen_get_from_geometry(
+          *curves[i], screen_points.data(), hit, &handle);
+      const float end[2] = {handle.end.x, handle.end.y};
+      const float dist = len_v2v2(pos, end);
+      if (dist < best_dist) {
+        best_dist = dist;
+        best_curve = i;
+        best_point = hit;
+        best_handle = handle;
+      }
     }
-    const int hit = paintcurve_find_radius_handle_at_pos_from_geometry(
-        *curves[i], screen_points.as_span(), pos, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
-    if (hit < 0) {
-      continue;
+    if (best_curve >= 0) {
+      host.pickable_curve_activate(best_curve);
+      host.active_point_set(best_point, 0x07);
+      dragging_radius_ = true;
+      radius_handle_ = best_handle;
+      return true;
     }
-    PaintCurveRadiusHandleScreen handle;
-    paintcurve_radius_handle_screen_get_from_geometry(
-        *curves[i], screen_points.data(), hit, &handle);
-    const float end[2] = {handle.end.x, handle.end.y};
-    const float dist = len_v2v2(pos, end);
-    if (dist < best_dist) {
-      best_dist = dist;
-      best_curve = i;
-      best_point = hit;
-      best_handle = handle;
-    }
-  }
-  if (best_curve >= 0) {
-    host.pickable_curve_activate(best_curve);
-    host.active_point_set(best_point, 0x07);
-    dragging_radius_ = true;
-    radius_handle_ = best_handle;
-    return true;
   }
 
   /* Tests the pivot AND both Bezier tangent handles. */

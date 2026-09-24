@@ -233,7 +233,11 @@ static Image *bake_service_image(Main &bmain,
                                  int channel,
                                  int size,
                                  bool is_color);
-static void bake_write_image(Image &image, const float *values, bool is_color, const int *rect);
+static void bake_write_image(Image &image,
+                             const float *values,
+                             const bool is_color,
+                             const int *rect,
+                             const bool use_alpha = true);
 static void bake_write_coverage_image(Image &image, const float *coverage, const int *rect);
 
 void BKE_paint_layers_custom_bake_apply(Main &bmain,
@@ -264,7 +268,9 @@ void BKE_paint_layers_custom_bake_apply(Main &bmain,
     if (color_image == nullptr) {
       continue;
     }
-    bake_write_image(*color_image, buffer->float_data(), info.is_color, nullptr);
+    /* The custom render's alpha is the row's coverage, written to the coverage map below; it is
+     * not a content alpha, so the colour map stays opaque. */
+    bake_write_image(*color_image, buffer->float_data(), info.is_color, nullptr, false);
     any = true;
   }
   if (!any) {
@@ -596,7 +602,8 @@ static Image *bake_service_image(Main &bmain,
 static void bake_write_image(Image &image,
                              const float *values,
                              const bool is_color,
-                             const int *rect)
+                             const int *rect,
+                             const bool use_alpha)
 {
   void *lock = nullptr;
   ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
@@ -613,14 +620,19 @@ static void bake_write_image(Image &image,
   for (int y = y0; y < y1; y++) {
     for (int x = x0; x < x1; x++) {
       const int64_t i = int64_t(y) * width + x;
-      float rgba[4] = {values[i * 4 + 0], values[i * 4 + 1], values[i * 4 + 2], 1.0f};
+      /* The colour's fourth component carries the row's content alpha (F2-C6); a caller whose
+       * pixels have no such meaning asks for an opaque map with #use_alpha false. */
+      float rgba[4] = {values[i * 4 + 0],
+                       values[i * 4 + 1],
+                       values[i * 4 + 2],
+                       use_alpha ? clamp_f(values[i * 4 + 3], 0.0f, 1.0f) : 1.0f};
       if (is_color && colorspace != nullptr) {
         IMB_colormanagement_scene_linear_to_colorspace_v3(rgba, colorspace);
       }
       pixels[i * 4 + 0] = uchar(clamp_i(int(rgba[0] * 255.0f + 0.5f), 0, 255));
       pixels[i * 4 + 1] = uchar(clamp_i(int(rgba[1] * 255.0f + 0.5f), 0, 255));
       pixels[i * 4 + 2] = uchar(clamp_i(int(rgba[2] * 255.0f + 0.5f), 0, 255));
-      pixels[i * 4 + 3] = 255;
+      pixels[i * 4 + 3] = uchar(clamp_i(int(rgba[3] * 255.0f + 0.5f), 0, 255));
     }
   }
   BKE_image_release_ibuf(&image, ibuf, lock);
@@ -670,7 +682,9 @@ bool BKE_paint_layers_bake_row_to_image(const Material &ma,
   if (!BKE_paint_layers_bake_render_node(ma, row, channel, size, color.data(), coverage.data())) {
     return false;
   }
-  bake_write_image(dst, color.data(), info.is_color, nullptr);
+  /* The exported map carries the row's content alpha straight (F2-C6), so a later read of it as a
+   * paint-layer map sees the same transparency the row had live. */
+  bake_write_image(dst, color.data(), info.is_color, nullptr, true);
   return true;
 }
 
@@ -714,11 +728,19 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
       int size = 0;
 
       if (BKE_paint_layers_is_folder(layer)) {
-        /* Folders are out of scope for this task: kept on their original eligibility gate, which
-         * already requires an existing bake structure. */
-        if (layer.bake == nullptr || layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
-            BKE_paint_layers_bake_is_valid(ma, layer))
-        {
+        const int mode = BKE_paint_layers_bake_mode_get(layer);
+        if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
+          continue;
+        }
+        if (layer.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, layer)) {
+          continue;
+        }
+        /* A folder with no bake yet is a candidate only when it is structurally isolating: a Pass
+         * Through folder must never be baked, or its mode flips and every child edit costs two
+         * compiles. Without a bake, #BKE_paint_layers_folder_is_pass_through's valid-bake early-out
+         * cannot fire, so it answers the structure alone; a folder that already carries a manual
+         * bake keeps its previous path. */
+        if (layer.bake == nullptr && BKE_paint_layers_folder_is_pass_through(ma, layer)) {
           continue;
         }
         /* The active row and its ancestors stay live for every mode: the user is editing inside
@@ -733,14 +755,13 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
         if (BKE_paint_layers_bake_is_heavy(ma, layer)) {
           continue;
         }
-        if (layer.bake->mode == MA_PAINT_LAYER_BAKE_AUTO) {
+        if (mode == MA_PAINT_LAYER_BAKE_AUTO &&
+            paint_layer_subtree_weight(layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
+        {
           /* A light subtree is cheaper live. */
-          if (paint_layer_subtree_weight(layer) <= PAINT_LAYERS_AUTO_BAKE_NODES) {
-            continue;
-          }
+          continue;
         }
-        bake = layer.bake;
-        size = bake->size;
+        size = (layer.bake != nullptr) ? layer.bake->size : 0;
         if (size <= 0) {
           /* A zero size means "the node's own map size": read it from the content. */
           int width = 0;
@@ -757,6 +778,9 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
         if (size <= 0) {
           continue;
         }
+        /* Every gate has passed and this folder is about to render: only here is it safe to
+         * allocate the bake structure. */
+        bake = BKE_paint_layers_bake_ensure(layer);
       }
       else {
         /* A light non-folder row never gets a bake structure: allocating one before it is about
@@ -866,7 +890,8 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
         if (color_image == nullptr || coverage_image == nullptr) {
           continue;
         }
-        bake_write_image(*color_image, color.data(), info.is_color, channel_rect);
+        /* The colour map's alpha carries the row's content alpha (F2-C6). */
+        bake_write_image(*color_image, color.data(), info.is_color, channel_rect, true);
         bake_write_coverage_image(*coverage_image, coverage.data(), channel_rect);
         any_channel = true;
       }
@@ -1247,15 +1272,21 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
       continue;
     }
     if (BKE_paint_layers_is_folder(*layer)) {
-      /* Folders are out of scope for this task: kept on their original eligibility gate, which
-       * already requires an existing bake structure. */
-      if (layer->bake != nullptr && layer->bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
-          !BKE_paint_layers_bake_is_valid(ma, *layer) &&
-          BKE_paint_layers_bake_is_heavy(ma, *layer))
-      {
-        return true;
+      const int mode = BKE_paint_layers_bake_mode_get(*layer);
+      if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
+        continue;
       }
-      continue;
+      if (layer->bake != nullptr && BKE_paint_layers_bake_is_valid(ma, *layer)) {
+        continue;
+      }
+      /* See #BKE_paint_layers_bake_ensure: a bake-less Pass Through folder is never queued. */
+      if (layer->bake == nullptr && BKE_paint_layers_folder_is_pass_through(ma, *layer)) {
+        continue;
+      }
+      if (!BKE_paint_layers_bake_is_heavy(ma, *layer)) {
+        continue;
+      }
+      return true;
     }
     /* is_heavy needs no bake structure, so it is checked first: a heavy-by-weight row with no
      * explicit bake can now be seen as pending, where the old bake-gated formula never queued it. */
@@ -1317,11 +1348,18 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
       continue;
     }
     if (BKE_paint_layers_is_folder(*layer)) {
-      /* Folders are out of scope for this task: kept on their original eligibility gate, which
-       * already requires an existing bake structure. */
-      if (layer->bake == nullptr || layer->bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
-          BKE_paint_layers_bake_is_valid(ma, *layer) || !BKE_paint_layers_bake_is_heavy(ma, *layer))
-      {
+      const int mode = BKE_paint_layers_bake_mode_get(*layer);
+      if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
+        continue;
+      }
+      if (layer->bake != nullptr && BKE_paint_layers_bake_is_valid(ma, *layer)) {
+        continue;
+      }
+      /* See #BKE_paint_layers_bake_ensure: a bake-less Pass Through folder is never queued. */
+      if (layer->bake == nullptr && BKE_paint_layers_folder_is_pass_through(ma, *layer)) {
+        continue;
+      }
+      if (!BKE_paint_layers_bake_is_heavy(ma, *layer)) {
         continue;
       }
     }
@@ -1351,7 +1389,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
       continue;
     }
     /* Every gate has passed and this row is queued right now: only here is it safe to allocate
-     * the bake structure (folders already have one, by the gate above). */
+     * the bake structure (a folder without one gets it here too). */
     MaterialPaintLayer &mutable_layer = *const_cast<MaterialPaintLayer *>(layer);
     BKE_paint_layers_bake_ensure(mutable_layer);
     PaintLayersBakeJob::RowResult row;
@@ -1439,7 +1477,8 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
       if (color_image == nullptr || coverage_image == nullptr) {
         continue;
       }
-      bake_write_image(*color_image, channel.color.data(), channel.is_color, nullptr);
+      /* The colour map's alpha carries the row's content alpha (F2-C6). */
+      bake_write_image(*color_image, channel.color.data(), channel.is_color, nullptr, true);
       bake_write_coverage_image(*coverage_image, channel.coverage.data(), nullptr);
       row_written = true;
     }
@@ -1606,7 +1645,11 @@ bool BKE_paint_layers_row_result_job_commit(PaintLayersRowResultJob &job)
       continue;
     }
     image->alpha_mode = IMA_ALPHA_STRAIGHT;
-    bake_write_image(*image, result.color.data(), info.is_color, nullptr);
+    /* Use Row Result renders \a source with #BKE_paint_layers_bake_render_node (CPU, not EEVEE), so
+     * the colour's alpha is already the source row's content alpha -- 1.0 when the source tracks
+     * none (Material/Normal), its straight alpha when it does. Written through unchanged so the
+     * target map means the same thing any other paint-layer map does. */
+    bake_write_image(*image, result.color.data(), info.is_color, nullptr, true);
     if (BKE_paint_layers_channel_add(*ma, target, eMaterialPaintChannel(result.channel)) ==
             nullptr ||
         !BKE_paint_layers_channel_set_image(

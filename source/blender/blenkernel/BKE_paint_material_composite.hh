@@ -123,6 +123,16 @@ struct PaintMaterialCompositeImageLayer {
    */
   bool color_alpha_coverage = false;
   /**
+   * Whether the generated chain tracks a content alpha for this row (F2-C1/F2-C5).
+   *
+   * True for a Paint/Fill/Custom row on a channel whose generated chain carries one, or a folder of
+   * such rows; false for a Material row and for the Normal channel, whose fourth component is the
+   * colour chain's own. When set, the evaluator lays the content corrections over this alpha --
+   * `a = a + fac * (1 - a)` -- instead of over the coverage, so a partially transparent row stays
+   * partially transparent under a correction. See #BKE_paint_material_channel_tracks_content_alpha.
+   */
+  bool tracks_content_alpha = false;
+  /**
    * A second coverage multiplied into the factor base with the mask, read as its grey: a Material
    * layer's source transparency, baked into a map. Kept apart from #mask_image so the user's own
    * mask stays live on top of it and editing that mask never re-bakes the source.
@@ -222,6 +232,8 @@ struct PaintMaterialCompositeLayer {
   bool mask_reads_grey = false;
   /** See #PaintMaterialCompositeImageLayer.color_alpha_coverage. */
   bool color_alpha_coverage = false;
+  /** See #PaintMaterialCompositeImageLayer.tracks_content_alpha. */
+  bool tracks_content_alpha = false;
   /** See #PaintMaterialCompositeImageLayer.coverage_image; with its buffer's colorspace. */
   ImBuf *coverage_ibuf = nullptr;
   const char *coverage_colorspace_name = nullptr;
@@ -267,6 +279,14 @@ struct PaintMaterialCompositeEvalStats {
   int layers_evaluated = 0;
   int64_t pixels_processed = 0;
 };
+
+/**
+ * Whether the generated chain of \a channel tracks a content alpha (F2-C1): every channel the image
+ * canvas can resolve a map for, except Normal, whose row blend is a three-component normal combine.
+ * The CPU stack builder and the generator both gate on this, so they agree on which rows carry a
+ * content alpha and which leave their fourth component to the colour chain.
+ */
+bool BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel channel);
 
 /**
  * Composite \a stack bottom to top into \a composite_ibuf, which must be byte RGBA of the stack's

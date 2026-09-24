@@ -606,8 +606,25 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
   if (has_corrections) {
     alpha_storage.resize(count);
     alpha = alpha_storage.data();
+    /* The alpha of the row's own content, kept apart from the coverage #r_factor carries. The
+     * generated chain tracks it only where the channel can show a map (a Paint/Fill/Custom leaf,
+     * or a folder whose contents track one; a Material row's transparency is its Alpha input and
+     * never the channel map). Where it is tracked, the content correction is laid over this alpha
+     * -- `a = a + fac * (1 - a)` -- exactly as it is over the coverage, and the result is what the
+     * fourth component reports. The coverage stays untouched. */
+    Vector<float> content_alpha_storage;
+    float *content_alpha = nullptr;
+    if (layer.tracks_content_alpha) {
+      content_alpha_storage.resize(count);
+      content_alpha = content_alpha_storage.data();
+    }
     for (int64_t i = 0; i < count; i++) {
       alpha[i] = content_coverage(i);
+      if (content_alpha != nullptr) {
+        /* A folder's `r_color` is its straight sub-stack result, a leaf's is its map or constant,
+         * so its fourth component is the content alpha before any correction. */
+        content_alpha[i] = clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f);
+      }
     }
 
     Vector<float> correction_storage;
@@ -638,14 +655,18 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         const float fac = clamp_f(correction.opacity * corr_alpha, 0.0f, 1.0f);
         blend_row_linear(r_color + i * 4, corr_rgba, correction.blend, fac);
         alpha[i] = alpha[i] + fac * (1.0f - alpha[i]);
+        if (content_alpha != nullptr) {
+          content_alpha[i] = content_alpha[i] + fac * (1.0f - content_alpha[i]);
+        }
       }
     }
     /* The factor the row blends by: the mask times the coverage the content corrections built, and
      * the mask corrections blend onto that. Each correction is decoded once for the tile, then read
-     * per pixel. */
+     * per pixel. The fourth component reports the content alpha instead, so the row keeps the
+     * transparency of its own contents. */
     for (int64_t i = 0; i < count; i++) {
       r_factor[i] = mask_coverage(i) * alpha[i];
-      r_color[i * 4 + 3] = r_factor[i];
+      r_color[i * 4 + 3] = (content_alpha != nullptr) ? content_alpha[i] : r_factor[i];
     }
     for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.mask_corrections) {
       if (!correction.enabled) {
@@ -1083,6 +1104,7 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
   r_layer.mask_from_alpha = image_layer.mask_from_alpha;
   r_layer.mask_reads_grey = image_layer.mask_reads_grey;
   r_layer.color_alpha_coverage = image_layer.color_alpha_coverage;
+  r_layer.tracks_content_alpha = image_layer.tracks_content_alpha;
   r_layer.is_bare_base = image_layer.is_bare_base;
   r_layer.is_folder = image_layer.is_folder;
   copy_v4_v4(r_layer.constant_color, image_layer.constant_color);
@@ -1337,7 +1359,10 @@ bool BKE_paint_material_composite_eval_row_content(
       r_color_rgba[i * 4 + 0] = color[i * 4 + 0];
       r_color_rgba[i * 4 + 1] = color[i * 4 + 1];
       r_color_rgba[i * 4 + 2] = color[i * 4 + 2];
-      r_color_rgba[i * 4 + 3] = 1.0f;
+      /* The colour map's alpha is the row's content alpha, so the generated chain can read it back
+       * after substitution (F2-C6). A row that tracks none -- Material, Normal, a channel outside
+       * the image-paint set -- keeps it opaque; its transparency is the coverage map alone. */
+      r_color_rgba[i * 4 + 3] = layer.tracks_content_alpha ? color[i * 4 + 3] : 1.0f;
       r_coverage_gray[i] = clamp_f(layer.opacity * factor[i], 0.0f, 1.0f);
     }
     ok = true;
@@ -1434,6 +1459,17 @@ bool BKE_paint_material_composite_stack_dimensions(
   return composite_stack_bottom_layer_info(image_layers, r_width, r_height, nullptr);
 }
 
+bool BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return false;
+  }
+  return BKE_paint_material_channel_info(channel).supports_image_paint;
+}
+
 /** Extend \a hash with everything about one correction that changes the composited pixels. */
 static uint64_t composite_correction_hash(uint64_t hash,
                                           const PaintMaterialCompositeCorrection &correction)
@@ -1487,7 +1523,8 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.coverage_image != nullptr ?
                                 layer.coverage_image->id.session_uid :
                                 0,
-                            layer.color_alpha_coverage);
+                            layer.color_alpha_coverage,
+                            layer.tracks_content_alpha);
     /* A live constant is not backed by an image, so its value has to be hashed explicitly or the
      * cached composite would not follow a source slider. */
     hash = get_default_hash(hash,

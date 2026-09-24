@@ -339,10 +339,13 @@ class GraphInterpreter {
         bNode &mutable_node = const_cast<bNode &>(node);
         const RGBA vector = eval_socket(
             *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        /* A VectorMath output is a Vector (three components). Read through a Color socket its
+         * fourth component is 1.0, never the alpha of the value that was fed in; modelling it as
+         * the input's alpha would hide a chain that drops a data map's alpha. */
         if (node.custom1 == NODE_VECTOR_MATH_NORMALIZE) {
           float normalized[3] = {vector.r, vector.g, vector.b};
           normalize_v3(normalized);
-          return {normalized[0], normalized[1], normalized[2], vector.a};
+          return {normalized[0], normalized[1], normalized[2], 1.0f};
         }
         if (node.custom1 == NODE_VECTOR_MATH_MULTIPLY_ADD) {
           const RGBA scale = eval_socket(
@@ -352,7 +355,7 @@ class GraphInterpreter {
           return {vector.r * scale.r + offset.r,
                   vector.g * scale.g + offset.g,
                   vector.b * scale.b + offset.b,
-                  vector.a};
+                  1.0f};
         }
         if (node.custom1 == NODE_VECTOR_MATH_DIVIDE) {
           const RGBA divisor = eval_socket(
@@ -362,9 +365,9 @@ class GraphInterpreter {
           return {safe(vector.r, divisor.r),
                   safe(vector.g, divisor.g),
                   safe(vector.b, divisor.b),
-                  vector.a};
+                  1.0f};
         }
-        return vector;
+        return {vector.r, vector.g, vector.b, 1.0f};
       }
       case SH_NODE_VALTORGB: {
         /* A Color Ramp: the CPU composite never evaluates a source graph, so this only serves the
@@ -7088,6 +7091,1031 @@ MaterialPaintLayer *add_content_correction(Material &ma,
   BKE_paint_layers_correction_set_effect(ma, correction, MA_PAINT_LAYER_EFFECT_PAINT);
   return correction;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name F2-C5: a content correction raises the tracked content alpha
+ * \{ */
+
+/** The over pair the CPU folds a content correction in with: `a + fac * (1 - a)`. */
+static float content_alpha_over(const float a, const float fac)
+{
+  return a + fac * (1.0f - a);
+}
+
+/** The `.PL Layer <name>` group in \a bmain, or null. */
+static bNodeTree *nested_layer_tree_find(Main &bmain, const char *layer_name)
+{
+  char full[96];
+  BLI_snprintf(full, sizeof(full), ".PL Layer %s", layer_name);
+  for (bNodeTree &tree : bmain.nodetrees) {
+    if (STREQ(tree.id.name + 2, full)) {
+      return &tree;
+    }
+  }
+  return nullptr;
+}
+
+/** Read \a row_name's tracked `Content Alpha <channel>` output, or -1 when it carries none. */
+static float row_content_alpha_eval(const GraphInterpreter &interpreter,
+                                    Main &bmain,
+                                    bNodeTree &root,
+                                    const char *row_name,
+                                    const char *channel_name)
+{
+  bNodeTree *row_tree = nested_layer_tree_find(bmain, row_name);
+  if (row_tree == nullptr) {
+    return -1.0f;
+  }
+  bNode *row_instance = nested_group_instance_find(root, *row_tree);
+  if (row_instance == nullptr) {
+    return -1.0f;
+  }
+  char socket_name[96];
+  BLI_snprintf(socket_name, sizeof(socket_name), "Content Alpha %s", channel_name);
+  return nested_folder_named_output_eval(interpreter, *row_tree, *row_instance, socket_name);
+}
+
+/**
+ * F2-C5: an opaque content correction must raise a part-covered row's alpha to one, the over pair
+ * `a = a + fac * (1 - a)` the CPU applies while it blends the correction in. Before the fix the
+ * generated chain kept the map's own alpha, so the graph's fourth component lagged the CPU while
+ * the colour stayed equal.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_opaque_raises_the_content_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float a0 = 128.0f / 255.0f;
+  ma = BKE_material_add(bmain, "CorrAlphaOpaque");
+  MaterialPaintLayer *row = add_layer(
+      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 200, 200, 200, 128), bc);
+  Image *corr_map = add_solid_image("CorrOpaque", size, 0, 0, 255, 255);
+  MaterialPaintLayer *correction = add_content_correction(*ma, *row, corr_map);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 1.0f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 0;
+  ASSERT_NE(interpreter.instance, nullptr);
+
+  const float expected_content_a = content_alpha_over(a0, 1.0f);
+  EXPECT_NEAR(row_content_alpha_eval(
+                  interpreter, *bmain, *ma->paint_layers_tree, "Top", "Base Color"),
+              expected_content_a,
+              1e-4f);
+
+  const RGBA graph = eval_channel_result(interpreter, bc);
+  const RGBA cpu = cpu_pixel_at(bc, 1, 0);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+  EXPECT_NEAR(graph.a, cpu.a, 1e-4f);
+  EXPECT_NEAR(graph.a, 1.0f, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-C5: the same over with a soft correction edge and a partial correction opacity. The tracked
+ * content alpha is `a0 + op * A * (1 - a0)` at every column, and graph and CPU agree on all four
+ * components.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_soft_edge_raises_the_content_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float a0 = 128.0f / 255.0f;
+  const float op = 0.5f;
+  ma = BKE_material_add(bmain, "CorrAlphaSoft");
+  MaterialPaintLayer *row = add_layer(
+      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 200, 200, 200, 128), bc);
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *corr_map = BKE_image_add_generated(
+      bmain, size, size, "CorrSoft", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(corr_map, nullptr);
+  fill_straight_soft_edge(corr_map, size, 0.3f);
+  MaterialPaintLayer *correction = add_content_correction(*ma, *row, corr_map);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, op));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const float expected_content_a = content_alpha_over(a0, op * soft_edge_alpha_q(x));
+    EXPECT_NEAR(row_content_alpha_eval(
+                    interpreter, *bmain, *ma->paint_layers_tree, "Top", "Base Color"),
+                expected_content_a,
+                1e-4f)
+        << "x=" << x;
+    const RGBA graph = eval_channel_result(interpreter, bc);
+    const RGBA cpu = cpu_pixel_at(bc, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.a, cpu.a, 1e-4f) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-C5: the corrected row sits inside an isolating folder, so its raised content alpha is
+ * straightened by the folder's divide and composed back at the Result. Graph and CPU still agree on
+ * all four components, and the folder's own `Content Alpha` output carries the raised value.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_inside_a_folder_raises_the_content_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float a0 = 128.0f / 255.0f;
+  const float op = 0.5f;
+  ma = BKE_material_add(bmain, "CorrAlphaFolder");
+
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Iso", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  /* Opacity below one keeps the folder isolating: a full-weight single-child folder is
+   * auto-detected as Pass Through and gets no group. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Top", folder, PaintLayerPlace::Into);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, row, bc);
+  ASSERT_NE(record, nullptr);
+  record->image = add_solid_image("Top", size, 200, 200, 200, 128);
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *corr_map = BKE_image_add_generated(
+      bmain, size, size, "CorrSoftIso", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(corr_map, nullptr);
+  fill_straight_soft_edge(corr_map, size, 0.3f);
+  MaterialPaintLayer *correction = add_content_correction(*ma, *row, corr_map);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, op));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *folder_tree = nested_folder_tree_find(*bmain, "Iso");
+  ASSERT_NE(folder_tree, nullptr);
+  bNode *folder_instance = nested_group_instance_find(*ma->paint_layers_tree, *folder_tree);
+  ASSERT_NE(folder_instance, nullptr);
+  EXPECT_TRUE(folder_interface_has_socket(*folder_tree, "Content Alpha Base Color"));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const float expected_content_a = content_alpha_over(a0, op * soft_edge_alpha_q(x));
+    EXPECT_NEAR(nested_folder_named_output_eval(
+                    interpreter, *folder_tree, *folder_instance, "Content Alpha Base Color"),
+                expected_content_a,
+                1e-4f)
+        << "x=" << x;
+    const RGBA graph = eval_channel_result(interpreter, bc);
+    const RGBA cpu = cpu_pixel_at(bc, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.a, cpu.a, 1e-4f) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-C5: the correction map is read as colour data (Roughness), so the chain straightens it with
+ * the Vector Math divide. The content alpha still rises by the over, graph and CPU still agree.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_data_map_raises_the_content_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_ROUGHNESS;
+  const float a0 = 128.0f / 255.0f;
+  ma = BKE_material_add(bmain, "CorrAlphaData");
+  MaterialPaintLayer *row = add_layer(
+      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 128, 128, 128, 128), channel);
+  Image *corr_map = add_solid_image("CorrData", size, 3, 3, 3, 128);
+  make_image_data(corr_map);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, channel);
+  ASSERT_NE(record, nullptr);
+  record->image = corr_map;
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 1.0f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 0;
+  ASSERT_NE(interpreter.instance, nullptr);
+
+  const float expected_content_a = content_alpha_over(a0, 128.0f / 255.0f);
+  EXPECT_NEAR(row_content_alpha_eval(
+                  interpreter, *bmain, *ma->paint_layers_tree, "Top", "Roughness"),
+              expected_content_a,
+              1e-4f);
+  const RGBA graph = eval_channel_result(interpreter, channel);
+  const RGBA cpu = cpu_pixel_at(channel, 1, 0);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+  EXPECT_NEAR(graph.a, cpu.a, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** F2-C5 guard: a mask item in the mask stack leaves the tracked content alpha untouched. */
+TEST_F(PaintLayersGraphEvalTest, mask_correction_leaves_the_content_alpha_alone)
+{
+  const int size = 4;
+  const float a0 = 128.0f / 255.0f;
+  ma = BKE_material_add(bmain, "MaskCorrAlpha");
+  MaterialPaintLayer *row = add_layer(
+      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("Top", size, 200, 200, 200, 128));
+  set_mask_image(*row, add_solid_image("MaskItem", size, 255, 255, 255, 255));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 0;
+  ASSERT_NE(interpreter.instance, nullptr);
+  EXPECT_NEAR(row_content_alpha_eval(
+                  interpreter, *bmain, *ma->paint_layers_tree, "Top", "Base Color"),
+              a0,
+              1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** F2-C5 guard: a Material row with a content correction tracks no content alpha, so its group
+ * carries no `Content Alpha` output. */
+TEST_F(PaintLayersGraphEvalTest, material_content_correction_builds_no_content_alpha)
+{
+  const int size = 4;
+  const float row_color[4] = {0.3f, 0.6f, 0.2f, 1.0f};
+  ma = BKE_material_add(bmain, "MatCorrNoAlpha");
+  Material *source = make_constant_principled_source(*bmain, "MatNoAlphaSource", row_color, 0.4f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  Image *corr_map = add_solid_image("CorrMap", size, 240, 20, 20, 96);
+  MaterialPaintLayer *correction = add_content_correction(*ma, *row, corr_map);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *row_tree = nested_layer_tree_find(*bmain, "Mat");
+  ASSERT_NE(row_tree, nullptr);
+  EXPECT_FALSE(folder_interface_has_socket(*row_tree, "Content Alpha Base Color"));
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/* -------------------------------------------------------------------- */
+/** \name F2-C5d: the explicit content-alpha flag on the CPU stack
+ * \{ */
+
+/** Whether any top-level CPU layer of \a channel tracks a content alpha. */
+static bool cpu_stack_tracks_content_alpha(Material &ma, const int channel)
+{
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  if (!BKE_paint_layers_composite_image_layers(ma, channel, layers)) {
+    return false;
+  }
+  for (const PaintMaterialCompositeImageLayer &layer : layers) {
+    if (layer.tracks_content_alpha) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * F2-C5d: a content correction on a constant Fill row lays over the row's own content alpha c_a.
+ * The CPU used to fold the correction into its coverage base and overwrite the fourth component
+ * with that factor, so a Fill at c_a = 0.4 turned opaque; now both sides agree on
+ * `a0 + op * A * (1 - a0)`.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_constant_row_keeps_its_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float c_a = 0.4f;
+  const float op = 0.5f;
+  ma = BKE_material_add(bmain, "CorrConstAlpha");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FILL, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, bc), nullptr);
+  const float fill_color[4] = {0.2f, 0.3f, 0.8f, c_a};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, fill_color));
+
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *corr_map = BKE_image_add_generated(bmain,
+                                            size,
+                                            size,
+                                            "CorrConstAlphaMap",
+                                            32,
+                                            false,
+                                            IMA_GENTYPE_BLANK,
+                                            black,
+                                            false,
+                                            false,
+                                            false);
+  ASSERT_NE(corr_map, nullptr);
+  fill_straight_soft_edge(corr_map, size, 0.6f);
+  MaterialPaintLayer *correction = add_content_correction(*ma, *fill, corr_map);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, op));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(cpu_stack_tracks_content_alpha(*ma, bc));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const float expected = content_alpha_over(c_a, op * soft_edge_alpha_q(x));
+    EXPECT_NEAR(row_content_alpha_eval(
+                    interpreter, *bmain, *ma->paint_layers_tree, "Fill", "Base Color"),
+                expected,
+                1e-4f)
+        << "x=" << x;
+    const RGBA graph = eval_channel_result(interpreter, bc);
+    const RGBA cpu = cpu_pixel_at(bc, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.a, cpu.a, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.a, expected, 1e-4f) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-C5d: a Paint row with no map paints through a constant whose alpha is its content alpha, so a
+ * content correction raises it the same way a Fill's is raised.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_paint_constant_row_keeps_its_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float c_a = 0.4f;
+  const float op = 0.5f;
+  ma = BKE_material_add(bmain, "CorrPaintConstAlpha");
+  MaterialPaintLayer *paint = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "PaintC", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(paint, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, paint, bc), nullptr);
+  const float value[4] = {0.2f, 0.3f, 0.8f, c_a};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(*ma, paint, bc, value));
+
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *corr_map = BKE_image_add_generated(bmain,
+                                            size,
+                                            size,
+                                            "CorrPaintConstMap",
+                                            32,
+                                            false,
+                                            IMA_GENTYPE_BLANK,
+                                            black,
+                                            false,
+                                            false,
+                                            false);
+  ASSERT_NE(corr_map, nullptr);
+  fill_straight_soft_edge(corr_map, size, 0.6f);
+  MaterialPaintLayer *correction = add_content_correction(*ma, *paint, corr_map);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, op));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(cpu_stack_tracks_content_alpha(*ma, bc));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const float expected = content_alpha_over(c_a, op * soft_edge_alpha_q(x));
+    EXPECT_NEAR(row_content_alpha_eval(
+                    interpreter, *bmain, *ma->paint_layers_tree, "PaintC", "Base Color"),
+                expected,
+                1e-4f)
+        << "x=" << x;
+    const RGBA graph = eval_channel_result(interpreter, bc);
+    const RGBA cpu = cpu_pixel_at(bc, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.a, cpu.a, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.a, expected, 1e-4f) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-C5d: an isolating folder's own content correction lays over the folder's content alpha, not
+ * over its coverage. The CPU used the coverage override as the base, so a folder over a
+ * half-transparent Fill turned opaque under a correction.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_folder_row_keeps_its_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float c_a = 0.4f;
+  const float op = 0.5f;
+  ma = BKE_material_add(bmain, "CorrFolderAlpha");
+  /* An opaque bottom map gives the CPU stack its pixel dimensions; the folder covers it fully. */
+  add_layer("Bottom",
+            MA_PAINT_LAYER_KIND_PAINT,
+            add_solid_image("CorrFolderBottom", size, 255, 0, 0, 255),
+            bc);
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Fold", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FILL, "Child", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, bc), nullptr);
+  const float child_color[4] = {0.2f, 0.3f, 0.8f, c_a};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, child, child_color));
+
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *corr_map = BKE_image_add_generated(bmain,
+                                            size,
+                                            size,
+                                            "CorrFolderMap",
+                                            32,
+                                            false,
+                                            IMA_GENTYPE_BLANK,
+                                            black,
+                                            false,
+                                            false,
+                                            false);
+  ASSERT_NE(corr_map, nullptr);
+  fill_straight_soft_edge(corr_map, size, 0.6f);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, folder, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, bc);
+  ASSERT_NE(record, nullptr);
+  record->image = corr_map;
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, op));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(cpu_stack_tracks_content_alpha(*ma, bc));
+
+  bNodeTree *folder_tree = nested_folder_tree_find(*bmain, "Fold");
+  ASSERT_NE(folder_tree, nullptr);
+  bNode *folder_instance = nested_group_instance_find(*ma->paint_layers_tree, *folder_tree);
+  ASSERT_NE(folder_instance, nullptr);
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const float expected = content_alpha_over(c_a, op * soft_edge_alpha_q(x));
+    EXPECT_NEAR(nested_folder_named_output_eval(
+                    interpreter, *folder_tree, *folder_instance, "Content Alpha Base Color"),
+                expected,
+                1e-4f)
+        << "x=" << x;
+    const RGBA graph = eval_channel_result(interpreter, bc);
+    const RGBA cpu = cpu_pixel_at(bc, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.a, cpu.a, 1e-4f) << "x=" << x;
+    EXPECT_NEAR(graph.a, expected, 1e-4f) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** F2-C5d guard: a Fill without a correction keeps its own content alpha, unchanged by the flag. */
+TEST_F(PaintLayersGraphEvalTest, guarded_fill_without_correction_keeps_its_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float c_a = 0.4f;
+  ma = BKE_material_add(bmain, "GuardFillAlpha");
+  add_layer(
+      "Bottom", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("GuardBottom", size, 255, 0, 0, 255), bc);
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FILL, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, bc), nullptr);
+  const float fill_color[4] = {0.2f, 0.3f, 0.8f, c_a};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, fill_color));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 0;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = eval_channel_result(interpreter, bc);
+  const RGBA cpu = cpu_pixel_at(bc, 1, 0);
+  EXPECT_NEAR(graph.a, cpu.a, 1e-4f);
+  EXPECT_NEAR(graph.a, c_a, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-C5d guard: a Material row's transparency is its Alpha input, never the channel map, so the new
+ * flag must not be set and its fourth component must stay what the pre-flag CPU produced. That was
+ * opaque here (the row's coverage is one, no mask); graph.a != cpu.a on the alpha channel is a
+ * known backlog divergence and is not asserted.
+ */
+TEST_F(PaintLayersGraphEvalTest, guarded_material_row_content_correction_alpha_unchanged)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float row_color[4] = {0.3f, 0.6f, 0.2f, 1.0f};
+  ma = BKE_material_add(bmain, "GuardMatAlpha");
+  Material *source = make_constant_principled_source(*bmain, "GuardMatSource", row_color, 0.4f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  Image *corr_map = add_solid_image("GuardMatCorr", size, 240, 20, 20, 96);
+  MaterialPaintLayer *correction = add_content_correction(*ma, *row, corr_map);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FALSE(cpu_stack_tracks_content_alpha(*ma, bc));
+
+  const RGBA cpu = cpu_pixel_at(bc, 1, 0);
+  EXPECT_NEAR(cpu.a, 1.0f, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-C5d guard: the Normal channel never tracks a content alpha, so the flag stays off and the CPU
+ * fourth component is unchanged. The row's blend is the normal combine, which leaves alpha at the
+ * bottom's one.
+ */
+TEST_F(PaintLayersGraphEvalTest, guarded_normal_row_content_correction_alpha_unchanged)
+{
+  const int size = 4;
+  const eMaterialPaintChannel ch = PAINT_MATERIAL_CHANNEL_NORMAL;
+  ma = BKE_material_add(bmain, "GuardNormalAlpha");
+  MaterialPaintLayer *row = add_layer(
+      "NormalRow", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("GuardNormalMap", size, 128, 128, 255, 128), ch);
+  Image *corr_map = add_solid_image("GuardNormalCorr", size, 200, 200, 255, 128);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, ch);
+  ASSERT_NE(record, nullptr);
+  record->image = corr_map;
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FALSE(cpu_stack_tracks_content_alpha(*ma, ch));
+
+  const RGBA cpu = cpu_pixel_at(ch, 1, 0);
+  EXPECT_NEAR(cpu.a, 1.0f, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name F2-C6: the bake keeps the row's content alpha in the colour map's alpha
+ * \{ */
+
+/** Bake \a row synchronously through the real planner, at \a size, and require it valid. */
+static void c6_bake_row_now(Main &bmain, Material &ma, MaterialPaintLayer &row, const int size)
+{
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(ma, row, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(ma, row, size));
+  bool changed = false;
+  BKE_paint_layers_bake_ensure(bmain, ma, &changed);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(ma, row));
+}
+
+/** Every component of \a baked near \a live, within the two 8-bit maps' quantization (~2/255). */
+static void c6_expect_baked_matches_live(const RGBA &live, const RGBA &baked, const char *tag)
+{
+  const float tolerance = 0.01f;
+  EXPECT_NEAR(baked.r, live.r, tolerance) << tag;
+  EXPECT_NEAR(baked.g, live.g, tolerance) << tag;
+  EXPECT_NEAR(baked.b, live.b, tolerance) << tag;
+  EXPECT_NEAR(baked.a, live.a, tolerance) << tag;
+}
+
+/** One top-level Paint row at (1,0), live then baked, always with the bake at map size. */
+TEST_F(PaintLayersGraphEvalTest, baked_paint_row_keeps_its_content_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "C6PaintRow");
+  MaterialPaintLayer *row = add_layer(
+      "Top", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("C6PaintTop", size, 200, 200, 200, 128), bc);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter live;
+  live.instance = find_instance();
+  live.tree = ma->paint_layers_tree;
+  live.x = 1;
+  live.y = 0;
+  ASSERT_NE(live.instance, nullptr);
+  const RGBA live_graph = eval_channel_result(live, bc);
+  const RGBA live_cpu = cpu_pixel_at(bc, 1, 0);
+  /* a0 = 128/255; the row covers a0 and reports content alpha a0 over it: 1 - a0 + a0^2. */
+  EXPECT_NEAR(live_graph.a, 0.7500f, 0.01f);
+  EXPECT_NEAR(live_graph.a, live_cpu.a, 1e-4f);
+
+  c6_bake_row_now(*bmain, *ma, *row, size);
+  /* The colour map itself carries the content alpha, quantized to 128. */
+  ASSERT_NE(row->bake->images[bc], nullptr);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(row->bake->images[bc], nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    const uchar *pixels = ibuf->byte_buffer.data;
+    ASSERT_NE(pixels, nullptr);
+    EXPECT_EQ(pixels[1 * 4 + 3], 128);
+    BKE_image_release_ibuf(row->bake->images[bc], ibuf, lock);
+  }
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter baked;
+  baked.instance = find_instance();
+  baked.tree = ma->paint_layers_tree;
+  baked.x = 1;
+  baked.y = 0;
+  ASSERT_NE(baked.instance, nullptr);
+  const RGBA baked_graph = eval_channel_result(baked, bc);
+  const RGBA baked_cpu = cpu_pixel_at(bc, 1, 0);
+  EXPECT_LT(baked_graph.a, 0.99f);
+  EXPECT_NEAR(baked_graph.a, baked_cpu.a, 1e-4f);
+  c6_expect_baked_matches_live(live_graph, baked_graph, "paint row");
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** A Paint leaf inside an isolating folder, baked while still live in the folder. */
+TEST_F(PaintLayersGraphEvalTest, baked_paint_leaf_in_folder_keeps_its_content_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "C6PaintFolder");
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Fold", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, child, bc);
+  ASSERT_NE(record, nullptr);
+  record->image = add_solid_image("C6FolderChild", size, 200, 200, 200, 128);
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter live;
+  live.instance = find_instance();
+  live.tree = ma->paint_layers_tree;
+  live.x = 1;
+  live.y = 0;
+  ASSERT_NE(live.instance, nullptr);
+  const RGBA live_graph = eval_channel_result(live, bc);
+  const RGBA live_cpu = cpu_pixel_at(bc, 1, 0);
+  EXPECT_LT(live_graph.a, 0.99f);
+
+  c6_bake_row_now(*bmain, *ma, *child, size);
+  ASSERT_NE(child->bake->images[bc], nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter baked;
+  baked.instance = find_instance();
+  baked.tree = ma->paint_layers_tree;
+  baked.x = 1;
+  baked.y = 0;
+  ASSERT_NE(baked.instance, nullptr);
+  const RGBA baked_graph = eval_channel_result(baked, bc);
+  const RGBA baked_cpu = cpu_pixel_at(bc, 1, 0);
+  EXPECT_LT(baked_graph.a, 0.99f);
+  EXPECT_NEAR(baked_graph.a, baked_cpu.a, 1e-4f);
+  c6_expect_baked_matches_live(live_graph, baked_graph, "paint leaf in folder");
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * A Fill leaf with c_a = 0.4: it has no map of its own, so a content correction gives the bake a
+ * source rectangle and the content alpha (0.4 over the correction) has a place to land.
+ */
+TEST_F(PaintLayersGraphEvalTest, baked_fill_row_keeps_its_content_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float c_a = 0.4f;
+  ma = BKE_material_add(bmain, "C6FillRow");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FILL, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, bc), nullptr);
+  const float fill_color[4] = {0.2f, 0.3f, 0.8f, c_a};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, fill_color));
+  Image *corr_map = add_solid_image("C6FillCorr", size, 60, 60, 60, 255);
+  MaterialPaintLayer *correction = add_content_correction(*ma, *fill, corr_map);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter live;
+  live.instance = find_instance();
+  live.tree = ma->paint_layers_tree;
+  live.x = 1;
+  live.y = 0;
+  ASSERT_NE(live.instance, nullptr);
+  const RGBA live_graph = eval_channel_result(live, bc);
+  const RGBA live_cpu = cpu_pixel_at(bc, 1, 0);
+  EXPECT_LT(live_graph.a, 0.99f);
+
+  c6_bake_row_now(*bmain, *ma, *fill, size);
+  ASSERT_NE(fill->bake->images[bc], nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter baked;
+  baked.instance = find_instance();
+  baked.tree = ma->paint_layers_tree;
+  baked.x = 1;
+  baked.y = 0;
+  ASSERT_NE(baked.instance, nullptr);
+  const RGBA baked_graph = eval_channel_result(baked, bc);
+  const RGBA baked_cpu = cpu_pixel_at(bc, 1, 0);
+  EXPECT_LT(baked_graph.a, 0.99f);
+  EXPECT_NEAR(baked_graph.a, baked_cpu.a, 1e-4f);
+  c6_expect_baked_matches_live(live_graph, baked_graph, "fill row");
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** An isolating folder baked whole, over a partially transparent child. */
+TEST_F(PaintLayersGraphEvalTest, baked_folder_keeps_its_content_alpha)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "C6FolderBake");
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_FOLDER, "Fold", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_PAINT, "Child", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, child, bc);
+  ASSERT_NE(record, nullptr);
+  record->image = add_solid_image("C6FolderBakeChild", size, 200, 200, 200, 128);
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter live;
+  live.instance = find_instance();
+  live.tree = ma->paint_layers_tree;
+  live.x = 1;
+  live.y = 0;
+  ASSERT_NE(live.instance, nullptr);
+  const RGBA live_graph = eval_channel_result(live, bc);
+  const RGBA live_cpu = cpu_pixel_at(bc, 1, 0);
+  EXPECT_LT(live_graph.a, 0.99f);
+
+  c6_bake_row_now(*bmain, *ma, *folder, size);
+  ASSERT_NE(folder->bake->images[bc], nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter baked;
+  baked.instance = find_instance();
+  baked.tree = ma->paint_layers_tree;
+  baked.x = 1;
+  baked.y = 0;
+  ASSERT_NE(baked.instance, nullptr);
+  const RGBA baked_graph = eval_channel_result(baked, bc);
+  const RGBA baked_cpu = cpu_pixel_at(bc, 1, 0);
+  EXPECT_LT(baked_graph.a, 0.99f);
+  EXPECT_NEAR(baked_graph.a, baked_cpu.a, 1e-4f);
+  c6_expect_baked_matches_live(live_graph, baked_graph, "folder");
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** F2-C6 guard: a Material row tracks no content alpha, so its bake colour map stays opaque. */
+TEST_F(PaintLayersGraphEvalTest, baked_material_row_color_alpha_stays_one)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float row_color[4] = {0.3f, 0.6f, 0.2f, 1.0f};
+  ma = BKE_material_add(bmain, "C6MaterialRow");
+  Material *source = make_constant_principled_source(*bmain, "C6MaterialSource", row_color, 0.4f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  Image *corr_map = add_solid_image("C6MaterialCorr", size, 240, 20, 20, 96);
+  MaterialPaintLayer *correction = add_content_correction(*ma, *row, corr_map);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_FALSE(cpu_stack_tracks_content_alpha(*ma, bc));
+
+  Vector<float> color(int64_t(size) * size * 4, -1.0f);
+  Vector<float> coverage(int64_t(size) * size, -1.0f);
+  ASSERT_TRUE(BKE_paint_layers_bake_render_node(
+      *ma, *row, int(bc), size, color.data(), coverage.data()));
+  EXPECT_NEAR(color[0 * 4 + 3], 1.0f, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** F2-C6 guard: the Normal channel tracks no content alpha, so its bake colour map stays opaque. */
+TEST_F(PaintLayersGraphEvalTest, baked_normal_row_color_alpha_stays_one)
+{
+  const int size = 4;
+  const eMaterialPaintChannel ch = PAINT_MATERIAL_CHANNEL_NORMAL;
+  ma = BKE_material_add(bmain, "C6NormalRow");
+  MaterialPaintLayer *row = add_layer(
+      "NormalRow", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("C6NormalMap", size, 128, 128, 255, 128), ch);
+  Image *corr_map = add_solid_image("C6NormalCorr", size, 200, 200, 255, 128);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, correction, ch);
+  ASSERT_NE(record, nullptr);
+  record->image = corr_map;
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_FALSE(cpu_stack_tracks_content_alpha(*ma, ch));
+
+  Vector<float> color(int64_t(size) * size * 4, -1.0f);
+  Vector<float> coverage(int64_t(size) * size, -1.0f);
+  ASSERT_TRUE(BKE_paint_layers_bake_render_node(
+      *ma, *row, int(ch), size, color.data(), coverage.data()));
+  EXPECT_NEAR(color[0 * 4 + 3], 1.0f, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-D/step 0: "Use Row Result" exports a Paint row's content alpha into the destination map
+ * (straight), and leaves a Material row's map opaque.
+ */
+TEST_F(PaintLayersGraphEvalTest, bake_row_to_image_keeps_paint_alpha_and_is_opaque_for_material)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  ma = BKE_material_add(bmain, "C6ExportAlpha");
+  MaterialPaintLayer *paint = add_layer(
+      "Paint", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("ExportPaint", size, 0, 200, 0, 128), bc);
+
+  Image *dst = BKE_image_add_generated(
+      bmain, size, size, "ExportDst", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(dst, nullptr);
+  dst->alpha_mode = IMA_ALPHA_STRAIGHT;
+  ASSERT_TRUE(BKE_paint_layers_bake_row_to_image(*ma, *paint, int(bc), size, *dst));
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(dst, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    const uchar *pixels = ibuf->byte_data();
+    ASSERT_NE(pixels, nullptr);
+    EXPECT_EQ(pixels[1 * 4 + 3], 128) << "the Paint row's content alpha travels straight";
+    BKE_image_release_ibuf(dst, ibuf, lock);
+  }
+
+  const float row_color[4] = {0.3f, 0.6f, 0.2f, 1.0f};
+  Material *source = make_constant_principled_source(*bmain, "ExportMatSource", row_color, 0.4f);
+  MaterialPaintLayer *mat = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_KIND_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(mat, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mat, source));
+  ASSERT_NE(add_content_correction(*ma, *mat, add_solid_image("ExportMatCorr", size, 240, 20, 20, 96)),
+            nullptr);
+  Image *dst_mat = BKE_image_add_generated(
+      bmain, size, size, "ExportDstMat", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(dst_mat, nullptr);
+  dst_mat->alpha_mode = IMA_ALPHA_STRAIGHT;
+  ASSERT_TRUE(BKE_paint_layers_bake_row_to_image(*ma, *mat, int(bc), size, *dst_mat));
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(dst_mat, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    const uchar *pixels = ibuf->byte_data();
+    ASSERT_NE(pixels, nullptr);
+    EXPECT_EQ(pixels[1 * 4 + 3], 255) << "a Material row's map stays opaque";
+    BKE_image_release_ibuf(dst_mat, ibuf, lock);
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * F2-D: a heavy isolating folder with no bake yet is auto-baked by the heavy job, and the result
+ * matches the live folder on all four components.
+ */
+TEST_F(PaintLayersGraphEvalTest, auto_baked_folder_matches_live)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "C6AutoFolder");
+  MaterialPaintLayer *child = add_layer(
+      "Child", MA_PAINT_LAYER_KIND_PAINT, add_solid_image("AutoFolderChild", size, 200, 200, 200, 128), bc);
+  MaterialPaintLayer *members[1] = {child};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(
+      *ma, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_EQ(folder->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter live;
+  live.instance = find_instance();
+  live.tree = ma->paint_layers_tree;
+  live.x = 1;
+  live.y = 0;
+  ASSERT_NE(live.instance, nullptr);
+  const RGBA live_graph = eval_channel_result(live, bc);
+  EXPECT_LT(live_graph.a, 0.99f);
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter baked;
+  baked.instance = find_instance();
+  baked.tree = ma->paint_layers_tree;
+  baked.x = 1;
+  baked.y = 0;
+  ASSERT_NE(baked.instance, nullptr);
+  const RGBA baked_graph = eval_channel_result(baked, bc);
+  EXPECT_LT(baked_graph.a, 0.99f);
+  c6_expect_baked_matches_live(live_graph, baked_graph, "auto folder");
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** \} */
 
 /**
  * The expected colour: the correction mixed into the row's own colour `S` with factor

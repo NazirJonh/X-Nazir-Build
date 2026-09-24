@@ -201,6 +201,9 @@ bool composite_image_layers_build(const Material &material,
     if (baked)
     {
       PaintMaterialCompositeImageLayer out;
+      out.tracks_content_alpha =
+          BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel)) &&
+          layer->kind != MA_PAINT_LAYER_KIND_MATERIAL;
       out.color_image = baked_color;
       out.color_iuser = nullptr;
       out.mask_image = layer->bake->coverage;
@@ -335,6 +338,12 @@ bool composite_image_layers_build(const Material &material,
       append_correction(*correction, false);
     }
     PaintMaterialCompositeImageLayer out;
+    /* The generated chain tracks a content alpha exactly where this is set: an image-paint
+     * channel, and a row that is not Material. A folder tracks it by its channel, like the
+     * generator's own gate at #channel_tracks_content_alpha. */
+    out.tracks_content_alpha =
+        BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel)) &&
+        layer->kind != MA_PAINT_LAYER_KIND_MATERIAL;
     /* Set when the row being collected sits inside this folder: the folder is still emitted, but
      * with only the part of its contents that lies below the row, and the walk stops after it. */
     bool stop_found_inside = false;
@@ -633,7 +642,9 @@ bool BKE_paint_layers_bake_render_node(const Material &ma,
       r_color_rgba[dst * 4 + 0] = content_color[src * 4 + 0];
       r_color_rgba[dst * 4 + 1] = content_color[src * 4 + 1];
       r_color_rgba[dst * 4 + 2] = content_color[src * 4 + 2];
-      r_color_rgba[dst * 4 + 3] = 1.0f;
+      /* The content alpha the row export carried travels with the colour, so a substituted row
+       * reads its own transparency back instead of turning opaque (F2-C6). */
+      r_color_rgba[dst * 4 + 3] = content_color[src * 4 + 3];
       r_coverage_gray[dst] = content_coverage[src];
     }
   }

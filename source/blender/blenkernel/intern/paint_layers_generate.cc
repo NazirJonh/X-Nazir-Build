@@ -676,28 +676,6 @@ bool leaf_participates(const MaterialPaintLayer &layer, const int channel)
 }
 
 /**
- * Whether \a channel's generated chain carries a content alpha worth tracking (F2-C1). The alpha a
- * map row or a constant supplies must survive the isolating folder's Vector Math divide, which
- * drops the fourth component, and be composed back at the Result.
- *
- * That is every channel the image canvas can resolve a map for (`supports_image_paint`). Normal is
- * the exception: its row blend is the tangent-space normal-combine, a three-component operation the
- * generic RGBA ramp blend does not model, and its reference keeps the alpha below rather than
- * blending the row's one, so a content alpha has no meaning there. Custom, Height and AO build no
- * map leaf, so nothing supplies an alpha either.
- */
-static bool channel_tracks_content_alpha(const int channel)
-{
-  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
-    return false;
-  }
-  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-    return false;
-  }
-  return BKE_paint_material_channel_info(eMaterialPaintChannel(channel)).supports_image_paint;
-}
-
-/**
  * Whether \a layer's row gets a group of its own in \a channel: it is substituted by a bake, a
  * folder whose subtree takes part, or a leaf that paints something here. One helper for the build's
  * `group_this` and the root hash, so the two can never disagree about which instances the root has.
@@ -1601,7 +1579,8 @@ void paint_layers_tree_build(const Material &ma,
      * the isolating folder divides the premultiplied accumulation by coverage, and the final Result
      * composes it back. A channel outside that set leaves the chain null, so nothing is built and
      * nothing changes. */
-    const bool track_content_alpha = channel_tracks_content_alpha(channel);
+    const bool track_content_alpha =
+        BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel));
 
     std::function<ChainResult(const ListBase &, ChainLayer, bool, const RowTarget &)> build_list =
         [&](const ListBase &list,
@@ -2462,6 +2441,70 @@ void paint_layers_tree_build(const Material &ma,
                     content_cov = socket_out(*joined, "Value");
                   }
                 }
+              }
+            }
+          }
+          /* The content alpha follows the colour that was just corrected: a content correction
+           * raises the row's alpha by the over model, `a = a + fac * (1 - a)`, exactly as the CPU
+           * folds it while it blends the correction in (#composite_layer_render). The fac is the
+           * same `opacity * A` the coverage update above uses. A row that tracks no content alpha
+           * (Material, Normal, a channel outside the image-paint set) builds nothing. */
+          if (track_content_alpha && current.content_alpha != nullptr &&
+              current.content_alpha_node != nullptr &&
+              correction_coverage_socket != nullptr && correction_coverage_node != nullptr)
+          {
+            bNode *alpha_one_minus = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+            bNode *alpha_scaled = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+            bNode *alpha_joined = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+            if (alpha_one_minus != nullptr && alpha_scaled != nullptr && alpha_joined != nullptr) {
+              bNodeSocket *aom_a = socket_in(*alpha_one_minus, "Value");
+              bNodeSocket *aom_b = socket_in(*alpha_one_minus, "Value_001");
+              bNodeSocket *asc_a = socket_in(*alpha_scaled, "Value");
+              bNodeSocket *asc_b = socket_in(*alpha_scaled, "Value_001");
+              bNodeSocket *ajo_a = socket_in(*alpha_joined, "Value");
+              bNodeSocket *ajo_b = socket_in(*alpha_joined, "Value_001");
+              if (aom_a != nullptr && aom_b != nullptr && asc_a != nullptr && asc_b != nullptr &&
+                  ajo_a != nullptr && ajo_b != nullptr)
+              {
+                alpha_one_minus->custom1 = NODE_MATH_SUBTRACT;
+                alpha_scaled->custom1 = NODE_MATH_MULTIPLY;
+                alpha_joined->custom1 = NODE_MATH_ADD;
+                alpha_one_minus->location[0] = location_x + 150.0f;
+                alpha_one_minus->location[1] = location_y - 480.0f;
+                alpha_scaled->location[0] = location_x + 230.0f;
+                alpha_scaled->location[1] = location_y - 480.0f;
+                alpha_joined->location[0] = location_x + 310.0f;
+                alpha_joined->location[1] = location_y - 480.0f;
+                if (aom_a->default_value != nullptr) {
+                  static_cast<bNodeSocketValueFloat *>(aom_a->default_value)->value = 1.0f;
+                }
+                bke::node_add_link(tree,
+                                   *current.content_alpha_node,
+                                   *current.content_alpha,
+                                   *alpha_one_minus,
+                                   *aom_b);
+                bke::node_add_link(tree,
+                                   *correction_coverage_node,
+                                   *correction_coverage_socket,
+                                   *alpha_scaled,
+                                   *asc_a);
+                bke::node_add_link(tree,
+                                   *alpha_one_minus,
+                                   *socket_out(*alpha_one_minus, "Value"),
+                                   *alpha_scaled,
+                                   *asc_b);
+                bke::node_add_link(tree,
+                                   *current.content_alpha_node,
+                                   *current.content_alpha,
+                                   *alpha_joined,
+                                   *ajo_a);
+                bke::node_add_link(tree,
+                                   *alpha_scaled,
+                                   *socket_out(*alpha_scaled, "Value"),
+                                   *alpha_joined,
+                                   *ajo_b);
+                current.content_alpha_node = alpha_joined;
+                current.content_alpha = socket_out(*alpha_joined, "Value");
               }
             }
           }

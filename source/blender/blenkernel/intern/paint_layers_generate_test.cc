@@ -51,6 +51,8 @@
 #include "DNA_color_types.h"
 #include "DNA_colorband_types.h"
 
+#include "IMB_colormanagement.hh"
+
 namespace blender::bke::tests {
 
 class PaintLayersGenerateTest : public bke::BlenderGTestBase {
@@ -808,6 +810,56 @@ TEST_F(PaintLayersGenerateTest, content_correction_adds_a_mix_over_the_map)
   /* Two layer maps and the correction map, each layer and the correction with one Mix. */
   EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 3);
   EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_MIX), 3);
+}
+
+/** Give \a image the data colorspace, so a correction map is read as colour data. */
+static void make_generate_image_data(Image &image)
+{
+  BLI_strncpy(image.colorspace_settings.name,
+              IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA),
+              sizeof(image.colorspace_settings.name));
+}
+
+/**
+ * F2-C5: a content correction whose map is read as colour data reaches the chain pre-multiplied, so
+ * the generator straightens it with a CombineXYZ plus a Vector Math divide. A colour-space map is
+ * un-premultiplied by the Image Texture node itself, so no such nodes are built.
+ */
+TEST_F(PaintLayersGenerateTest, content_correction_data_map_builds_a_straighten_divide)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *top = add_paint_layer("Top", add_image("Top"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+      *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(record, nullptr);
+  record->image = add_image("CorrectionData");
+  make_generate_image_data(*record->image);
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_COMBXYZ), 1);
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_VECTOR_MATH), 1);
+}
+
+TEST_F(PaintLayersGenerateTest, content_correction_color_map_builds_no_straighten_divide)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *top = add_paint_layer("Top", add_image("Top"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_SECTION_CONTENT, MA_PAINT_LAYER_EFFECT_PAINT, "C");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+      *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(record, nullptr);
+  record->image = add_image("CorrectionColor");
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_COMBXYZ), 0);
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_VECTOR_MATH), 0);
 }
 
 TEST_F(PaintLayersGenerateTest, fill_effect_correction_builds_a_constant_mix)
@@ -4670,8 +4722,9 @@ TEST_F(PaintLayersGenerateTest, paint_row_correction_opacity_rna_reaches_its_gra
  *
  * A non-folder row's bake structure may only be allocated the instant it is about to render or be
  * queued, never eagerly. A row light enough to stay live (#PAINT_LAYERS_AUTO_BAKE_NODES) keeps
- * #MaterialPaintLayer::bake null forever: it is a final state, not a step toward a bake. Folders are
- * untouched and keep their original gate (#BKE_paint_layers_is_folder).
+ * #MaterialPaintLayer::bake null forever: it is a final state, not a step toward a bake. A
+ * structurally isolating folder follows the same rule (F2-D); a Pass Through folder is never a
+ * candidate.
  * \{ */
 
 /** Test #1: a light Paint row's bake stays null after the synchronous planner runs. */
@@ -4843,6 +4896,243 @@ TEST_F(PaintLayersGenerateTest, baked_row_that_becomes_light_keeps_its_stale_bak
    * already covers it: the row is not substituted. */
   EXPECT_NE(paint->bake, nullptr);
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *paint));
+}
+
+/* -------------------------------------------------------------------- */
+/** \name F2-D: auto-baking structurally isolating folders
+ * \{ */
+
+/** F2-D (a): a heavy isolating folder with no bake is queued, and the structure appears only then. */
+TEST_F(PaintLayersGenerateTest, heavy_isolating_folder_becomes_a_bake_candidate)
+{
+  MaterialPaintLayer *child = add_paint_layer("IsChild", add_image("IsChildMap"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *folder));
+
+  /* No structure before the gates pass: the synchronous planner leaves a heavy folder to the job. */
+  EXPECT_EQ(folder->bake, nullptr);
+  bool changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(folder->bake, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
+
+  /* The queue allocates the structure and takes the row. */
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  EXPECT_NE(folder->bake, nullptr);
+  BKE_paint_layers_bake_job_free(*job);
+}
+
+/** F2-D (c)/(h): a structurally Pass Through folder is never a candidate, however heavy. */
+TEST_F(PaintLayersGenerateTest, pass_through_folder_is_never_a_bake_candidate)
+{
+  MaterialPaintLayer *child_a = add_paint_layer("PtChildA", add_image("PtChildAImg"));
+  MaterialPaintLayer *child_b = add_paint_layer("PtChildB", add_image("PtChildBImg"));
+  MaterialPaintLayer *members[2] = {child_a, child_b};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(
+      *ma, Span<MaterialPaintLayer *>(members, 2));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  bool changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(folder->bake, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+  ASSERT_EQ(BKE_paint_layers_bake_job_create(*bmain, *ma), nullptr);
+}
+
+/** F2-D (d): a structurally Pass Through folder carrying a manual bake keeps its old path. */
+TEST_F(PaintLayersGenerateTest, pass_through_folder_with_a_manual_bake_is_unchanged)
+{
+  MaterialPaintLayer *child = add_paint_layer("PtManChild", add_image("PtManChildImg"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *folder, 4));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder))
+      << "a manual mode and size do not bake pixels yet, so the folder is still structurally Pass "
+         "Through";
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder))
+      << "the baked result now stands in, exactly as before";
+}
+
+/** F2-D (e): the active row inside a folder keeps the folder live, so no bake is allocated. */
+TEST_F(PaintLayersGenerateTest, active_child_defers_its_folder_bake)
+{
+  MaterialPaintLayer *child = add_paint_layer("ActChild", add_image("ActChildImg"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
+  BKE_paint_layers_active_set(*ma, child->marker);
+  ASSERT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *folder));
+
+  bool changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(folder->bake, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+}
+
+/** F2-D (g): a folder whose mode is NEVER is never a candidate. */
+TEST_F(PaintLayersGenerateTest, never_mode_folder_is_not_baked)
+{
+  MaterialPaintLayer *child = add_paint_layer("NeverChild", add_image("NeverChildImg"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_NEVER));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  bool changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+  ASSERT_EQ(BKE_paint_layers_bake_job_create(*bmain, *ma), nullptr);
+}
+
+/** F2-D (f): a light isolating folder never gets a structure, so a child opacity edit is free. */
+TEST_F(PaintLayersGenerateTest, light_isolating_folder_stays_bakeless_and_does_not_regen)
+{
+  MaterialPaintLayer *child = add_paint_layer("LightChild", add_image("LightChildImg"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  ASSERT_FALSE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  bool changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(folder->bake, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  rna_set_row_opacity(*ma, *child, 42.0f);
+  EXPECT_EQ(folder->bake, nullptr);
+  EXPECT_FALSE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0)
+      << "a value edit under a permanently-bakeless folder must not tag a topology rebuild";
+}
+
+/**
+ * F2-D2 (step 1), guard. The reference for a row is #visibility_does_not_invalidate_the_rows_own_bake
+ * (a baked row's own hash moves on a value edit) plus #light_row_opacity_edit_does_not_regen_or_rebuild
+ * (`rna_set_row_opacity` is the Outliner path; #paint_layer_or_ancestor_has_bake decides
+ * #MA_PAINT_LAYERS_REGEN). Here the same sequence runs for the child of a heavy, auto-baked,
+ * isolating folder: the edit invalidates the folder's bake, tags stale/regen, and the drain restores
+ * it.
+ */
+TEST_F(PaintLayersGenerateTest, auto_baked_folder_child_value_edit_invalidates_and_drains)
+{
+  MaterialPaintLayer *child = add_paint_layer("EditChild", add_image("EditChildImg"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  /* Bake the folder through the real heavy job (F2-D). */
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  uint32_t before[2];
+  BKE_paint_layers_bake_hash(*folder, before);
+
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BAKE_STALE);
+  rna_set_row_opacity(*ma, *child, 42.0f);
+
+  /* The child's opacity is part of the folder's hash, so the same flags a baked row gets are set. */
+  uint32_t after[2];
+  BKE_paint_layers_bake_hash(*folder, after);
+  EXPECT_TRUE(before[0] != after[0] || before[1] != after[1])
+      << "the child's value edit must move the folder's bake hash";
+  EXPECT_TRUE((ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE) != 0);
+  EXPECT_TRUE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0)
+      << "a baked ancestor makes the child's value edit topology";
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
+
+  /* Drain: re-bake through the job, then the planner clears the stale signal. */
+  job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  bool changed = true;
+  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_FALSE(BKE_paint_layers_bake_stale_get(*ma));
+}
+
+/**
+ * F2-D2 (step 2), guard. A value edit on a sibling row outside the folder does not touch the
+ * folder's bake and never tags a rebuild: no bake covers the sibling.
+ */
+TEST_F(PaintLayersGenerateTest, editing_a_sibling_outside_the_folder_leaves_the_bake_alone)
+{
+  MaterialPaintLayer *child = add_paint_layer("SibChild", add_image("SibChildImg"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
+  MaterialPaintLayer *outside = add_paint_layer("Outside", add_image("OutsideImg"));
+  ASSERT_NE(outside, nullptr);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  uint32_t before[2];
+  BKE_paint_layers_bake_hash(*folder, before);
+
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BAKE_STALE);
+  rna_set_row_opacity(*ma, *outside, 33.0f);
+
+  uint32_t after[2];
+  BKE_paint_layers_bake_hash(*folder, after);
+  EXPECT_TRUE(before[0] == after[0] && before[1] == after[1])
+      << "a sibling's value must not move the folder's bake hash";
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  EXPECT_FALSE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0)
+      << "no bake covers the sibling, so its value edit must stay the free path";
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
 }
 
 /** \} */

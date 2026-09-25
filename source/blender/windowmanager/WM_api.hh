@@ -2022,9 +2022,11 @@ enum eWM_JobType {
    WM_JOB_TYPE_MATERIAL_IMAGES_BAKE,
    /** Heavy paint-layer bakes, keyed on the material; see `render_paint_layers_bake.cc`. */
    WM_JOB_TYPE_PAINT_LAYERS_BAKE,
-   /** A heavy "Use Row Result" render, keyed on the material; see `paint_material_layer_ops.cc`. */
-   WM_JOB_TYPE_PAINT_LAYERS_ROW_RESULT,
-  /* Add as needed, bake, seq proxy build
+    /** A heavy "Use Row Result" render, keyed on the material; see `paint_material_layer_ops.cc`. */
+    WM_JOB_TYPE_PAINT_LAYERS_ROW_RESULT,
+    /** A Mesh Map bake, keyed on the material that owns the atlas; see `mesh_map_bake.cc`. */
+    WM_JOB_TYPE_MESH_MAP_BAKE,
+   /* Add as needed, bake, seq proxy build
    * if having hard coded values is a problem. */
 };
 

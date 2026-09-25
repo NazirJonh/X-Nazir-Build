@@ -251,6 +251,7 @@ void operatortypes_object()
 
   WM_operatortype_append(OBJECT_OT_bake_image);
   WM_operatortype_append(OBJECT_OT_bake);
+  WM_operatortype_append(OBJECT_OT_mesh_map_bake);
   WM_operatortype_append(bake_simulation::OBJECT_OT_simulation_nodes_cache_calculate_to_frame);
   WM_operatortype_append(bake_simulation::OBJECT_OT_simulation_nodes_cache_bake);
   WM_operatortype_append(bake_simulation::OBJECT_OT_simulation_nodes_cache_delete);

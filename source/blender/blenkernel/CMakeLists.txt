@@ -264,6 +264,7 @@ set(SRC
     intern/paint_layers_generate.cc
     intern/paint_layers_target.cc
   intern/mesh_maps.cc
+  intern/mesh_maps_bake.cc
   intern/paint_material_combined.cc
   intern/paint_material_composite.cc
   intern/paint_material_normal_combine.cc
@@ -824,6 +825,7 @@ if(WITH_GTESTS)
     intern/main_test.cc
     intern/main_namemap_test.cc
     intern/mesh_maps_test.cc
+    intern/mesh_maps_bake_test.cc
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
     intern/paint_layers_description_test.cc

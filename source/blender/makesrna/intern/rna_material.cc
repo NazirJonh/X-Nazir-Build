@@ -1932,6 +1932,18 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Role", "The row's structural place in its owner");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  /* Meaningful for a mask item with a Material, Node Group or Stack source only; the generator
+   * ignores it for any other role/source combination. */
+  prop = RNA_def_property(srna, "mask_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mask_channel");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Mask Channel",
+      "Channel a mask item reads from a Material, Node Group or Stack source; a color channel "
+      "reduces to luminance");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
   prop = RNA_def_property(srna, "fill_color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_array(prop, 4);
   RNA_def_property_float_funcs(prop,

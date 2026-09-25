@@ -3259,7 +3259,7 @@ void DepsgraphRelationBuilder::build_material(Material *material, ID *owner)
    * branch above: a material has no `SHADING` operation of its own, only `MATERIAL_UPDATE`. */
   if (paint_layers_is_layered(*material)) {
     Vector<const MaterialPaintLayer *> layers;
-    BKE_paint_layers_flatten(*material, layers);
+    BKE_paint_layers_flatten_all(*material, layers);
     for (const MaterialPaintLayer *layer : layers) {
       if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material == nullptr ||
           layer->material == material)

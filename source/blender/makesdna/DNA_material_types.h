@@ -627,7 +627,14 @@ struct MaterialPaintLayer {
   int8_t role = MA_PAINT_LAYER_ROLE_LAYER;
   /** #eMaterialMeshMapType; read only when #source is #MA_PAINT_LAYER_SOURCE_MESH_MAP. */
   int8_t mesh_map_type = MA_MESH_MAP_AO;
-  char _pad[4] = {};
+  /**
+   * #eMaterialPaintChannel: which channel a MASK_ITEM row reads when #source is
+   * #MA_PAINT_LAYER_SOURCE_MATERIAL, #MA_PAINT_LAYER_SOURCE_NODE_GROUP or
+   * #MA_PAINT_LAYER_SOURCE_STACK. Not read for any other role or source. A color channel is
+   * reduced to luminance.
+   */
+  int8_t mask_channel = 7; /* PAINT_MATERIAL_CHANNEL_ALPHA */
+  char _pad[3] = {};
   /** Node group for a #MA_PAINT_LAYER_SOURCE_NODE_GROUP layer. */
   struct bNodeTree *custom_group = nullptr;
   /** Source material of a #MA_PAINT_LAYER_SOURCE_MATERIAL layer. Phase 3. */

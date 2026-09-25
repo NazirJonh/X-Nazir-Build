@@ -546,6 +546,30 @@ void BKE_paint_layers_flatten(const Material &ma, Vector<const MaterialPaintLaye
   paint_layers_flatten_list(ma.paint_layers, r_layers);
 }
 
+namespace {
+
+void paint_layers_flatten_all_list(const ListBase &list,
+                                   Vector<const MaterialPaintLayer *> &r_rows)
+{
+  for (const MaterialPaintLayer &layer :
+       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
+  {
+    r_rows.append(&layer);
+    paint_layers_flatten_all_list(layer.effects, r_rows);
+    paint_layers_flatten_all_list(layer.mask_stack, r_rows);
+    if (BKE_paint_layers_is_folder(layer)) {
+      paint_layers_flatten_all_list(layer.children, r_rows);
+    }
+  }
+}
+
+}  // namespace
+
+void BKE_paint_layers_flatten_all(const Material &ma, Vector<const MaterialPaintLayer *> &r_rows)
+{
+  paint_layers_flatten_all_list(ma.paint_layers, r_rows);
+}
+
 float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer)
 {
   if ((layer.flag & MA_PAINT_LAYER_ENABLED) == 0) {

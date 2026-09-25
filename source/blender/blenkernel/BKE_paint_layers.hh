@@ -234,6 +234,18 @@ bool BKE_paint_layers_fill_to_paint(Material &ma, MaterialPaintLayer &layer, flo
  */
 void BKE_paint_layers_flatten(const Material &ma, Vector<const MaterialPaintLayer *> &r_layers);
 
+/**
+ * Every row of \a ma's description, of any role, depth-first: a row, then its effects, then its
+ * mask stack, then its children, each walked recursively (a mask item may itself carry effects,
+ * a mask stack and children, to unbounded depth).
+ *
+ * Unlike #BKE_paint_layers_flatten, this does not skip corrections and mask items, so it is the
+ * walk the depsgraph and bake queue use to reach every row that can hold a source (including
+ * inside effects/mask_stack) instead of only the composited stack. The compositor keeps using
+ * #BKE_paint_layers_flatten.
+ */
+void BKE_paint_layers_flatten_all(const Material &ma, Vector<const MaterialPaintLayer *> &r_rows);
+
 /** Whether \a marker names \a layer or anything nested under it (children, effects,
  * mask stack). */
 bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &layer, const bUUID &marker);

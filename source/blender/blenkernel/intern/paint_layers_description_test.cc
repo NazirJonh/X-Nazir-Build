@@ -2233,6 +2233,67 @@ TEST_F(PaintLayersDescription, source_role_stored_by_correction_add_for_every_se
   EXPECT_EQ(mask_fill->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
 }
 
+/**
+ * #BKE_paint_layers_flatten_all walks every role, depth-first: a row, its effects, its mask
+ * stack, then its children, recursing into a mask item's own effects/mask stack/children too.
+ * #BKE_paint_layers_flatten (the compositor's walk) stays a stack-layer-only guard on the same
+ * description.
+ */
+TEST_F(PaintLayersDescription, flatten_all_walks_every_role_depth_first)
+{
+  Material *ma = BKE_material_add(bmain, "FlattenAllMat");
+
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
+  MaterialPaintLayer *effect = paint_layer_add_correction(*layer, "Effect");
+  MaterialPaintLayer *mask_item = paint_layer_add_mask_item(*layer, "MaskItem");
+  /* A mask item can itself carry an effect and a mask item, unbounded depth. */
+  MaterialPaintLayer *mask_item_effect = paint_layer_add_correction(*mask_item, "MaskItemEffect");
+  MaterialPaintLayer *mask_item_mask = paint_layer_add_mask_item(*mask_item, "MaskItemMask");
+
+  MaterialPaintLayer *folder = paint_layer_add(*ma, "Folder");
+  MaterialPaintLayer *folder_child = paint_layer_add_child(*folder, "FolderChild");
+
+  Vector<const MaterialPaintLayer *> all_rows;
+  BKE_paint_layers_flatten_all(*ma, all_rows);
+  ASSERT_EQ(all_rows.size(), 7);
+  EXPECT_EQ(all_rows[0], layer);
+  EXPECT_EQ(all_rows[1], effect);
+  EXPECT_EQ(all_rows[2], mask_item);
+  EXPECT_EQ(all_rows[3], mask_item_effect);
+  EXPECT_EQ(all_rows[4], mask_item_mask);
+  EXPECT_EQ(all_rows[5], folder);
+  EXPECT_EQ(all_rows[6], folder_child);
+
+  /* GUARD: the compositor's walk keeps skipping effects and mask items. */
+  Vector<const MaterialPaintLayer *> layer_rows;
+  BKE_paint_layers_flatten(*ma, layer_rows);
+  ASSERT_EQ(layer_rows.size(), 3);
+  EXPECT_EQ(layer_rows[0], layer);
+  EXPECT_EQ(layer_rows[1], folder);
+  EXPECT_EQ(layer_rows[2], folder_child);
+}
+
+/** A fresh row defaults #mask_channel to Alpha; copying the material preserves it. */
+TEST_F(PaintLayersDescription, mask_channel_defaults_to_alpha_and_survives_material_copy)
+{
+  Material *ma = BKE_material_add(bmain, "MaskChannelMat");
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
+  EXPECT_EQ(layer->mask_channel, PAINT_MATERIAL_CHANNEL_ALPHA);
+
+  MaterialPaintLayer *mask_item = paint_layer_add_mask_item(*layer, "MaskItem");
+  EXPECT_EQ(mask_item->mask_channel, PAINT_MATERIAL_CHANNEL_ALPHA);
+  mask_item->mask_channel = PAINT_MATERIAL_CHANNEL_ROUGHNESS;
+
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  MaterialPaintLayer *copy_layer = static_cast<MaterialPaintLayer *>(copy->paint_layers.first);
+  ASSERT_NE(copy_layer, nullptr);
+  MaterialPaintLayer *copy_mask_item = static_cast<MaterialPaintLayer *>(
+      copy_layer->mask_stack.first);
+  ASSERT_NE(copy_mask_item, nullptr);
+  EXPECT_EQ(copy_mask_item->mask_channel, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+}
+
 TEST_F(PaintLayersDescription, source_role_stored_by_source_change_image_constant_round_trip)
 {
   Material *ma = BKE_material_add(bmain, "SourceRoleKindChangeMat");

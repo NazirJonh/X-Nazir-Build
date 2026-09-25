@@ -302,7 +302,7 @@ Image *BKE_paint_layers_target_image(const PaintLayersTarget &target)
   {
     return nullptr;
   }
-  return paint_layer_mask_correction_image(*target.mask_item, target.channel);
+  return paint_layer_mask_correction_image(*target.material, *target.mask_item, target.channel);
 }
 
 /** Whether \a target, or any ancestor of it, is set to bake always: a frozen paint target. */
@@ -391,7 +391,9 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
       target.mask_item = items.first();
     }
     MaterialPaintLayer *item = target.mask_item;
-    if (Image *existing = paint_layer_mask_correction_image(*item, target.channel)) {
+    if (Image *existing = paint_layer_mask_correction_image(
+            *target.material, *item, target.channel))
+    {
       return existing;
     }
     /* The map lives in the item's Base-Color channel record; the index is a scalar placeholder. */
@@ -439,7 +441,7 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
     if (fill_effect) {
       BKE_paint_layers_correction_source_set(*target.material, item, MA_PAINT_LAYER_SOURCE_IMAGE);
     }
-    return paint_layer_mask_correction_image(*item, target.channel);
+    return paint_layer_mask_correction_image(*target.material, *item, target.channel);
   }
 
   /* Content. A Fill row is a colour and never grows a map: it is changed through a Correction or

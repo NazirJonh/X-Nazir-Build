@@ -59,6 +59,17 @@ struct rcti;
 struct PaintMaterialCompositeCorrection {
   Image *image = nullptr; /* null: Absent in this channel -> skipped */
   /**
+   * The correction reads a MESH_MAP atlas rather than a painted map.
+   *
+   * A geometry map may be baked at another resolution than the channel's painted maps, so the CPU
+   * resamples it onto the reference grid instead of rejecting the stack; #mesh_map_scalar makes a
+   * scalar atlas (AO, Curvature, Edge) contribute its R.
+   */
+  bool mesh_map = false;
+  bool mesh_map_scalar = false;
+  /** A MESH_MAP mask item reads the atlas R as its coverage; a Paint mask reads the mean. */
+  bool mesh_map_mask_reads_red = false;
+  /**
    * The correction's own map node's #ImageUser, or null. Owned by the material: copy it before
    * acquiring a buffer, since acquisition writes to it.
    */
@@ -85,6 +96,16 @@ struct PaintMaterialCompositeCorrection {
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
 struct PaintMaterialCompositeImageLayer {
   Image *color_image = nullptr;
+  /**
+   * The image is a MESH_MAP atlas rather than one of the channel's painted maps.
+   *
+   * A geometry map may be baked at another resolution than the channel's painted maps; the CPU
+   * composite resamples it onto the channel's reference grid (#resampled_color) rather than
+   * rejecting the stack, matching the graph's filtered UV sampling.
+   */
+  bool is_mesh_map = false;
+  /** A scalar atlas (AO, Curvature, Edge) contributes its R spread across the RGB. */
+  bool is_mesh_map_scalar = false;
   /**
    * The image node's own #ImageUser, or null. Owned by the material: copy it before acquiring a
    * buffer, since acquisition writes to it.
@@ -203,7 +224,10 @@ struct PaintMaterialCompositeCorrectionBuffer {
    * with the buffer that was handed over.
    */
   const char *colorspace_name = nullptr;
-  /** See #PaintMaterialCompositeCorrection.constant_color. */
+  /** See #PaintMaterialCompositeCorrection.mesh_map / .mesh_map_scalar. */
+  bool is_mesh_map = false;
+  bool is_mesh_map_scalar = false;
+  bool mesh_map_mask_reads_red = false;
   float constant_color[4] = {};
   bool has_constant_color = false;
   CompositeBlend blend = CompositeBlend::Mix;
@@ -219,6 +243,9 @@ struct PaintMaterialCompositeLayer {
    */
   ImBuf *color_ibuf = nullptr;
   ImBuf *mask_ibuf = nullptr;
+  /** See #PaintMaterialCompositeImageLayer.is_mesh_map. */
+  bool is_mesh_map = false;
+  bool is_mesh_map_scalar = false;
   /** Colorspace names of #color_ibuf / #mask_ibuf's buffers; see
    * #PaintMaterialCompositeCorrectionBuffer.colorspace_name. */
   const char *color_colorspace_name = nullptr;

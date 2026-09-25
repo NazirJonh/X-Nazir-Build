@@ -32,6 +32,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh_maps.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -45,6 +46,7 @@
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
+#include "BLI_math_interp.hh"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_ustring.hh"
@@ -82,6 +84,13 @@ class GraphInterpreter {
   bNodeTree *tree = nullptr;
   int x = 0;
   int y = 0;
+  /**
+   * The channel's reference grid the pixel `x`/`y` sit on, for reading a MESH_MAP atlas whose
+   * Image Texture node is set to Extend. Zero keeps every image read directly at `x`/`y`, which is
+   * what painted maps of the same resolution are.
+   */
+  int ref_width = 0;
+  int ref_height = 0;
   /** The interpreter of the tree that holds `instance`; null at the root, whose instance inputs are
    * unlinked. */
   const GraphInterpreter *parent = nullptr;
@@ -222,6 +231,78 @@ class GraphInterpreter {
     return out;
   }
 
+  /**
+   * Read an Extend-interpolated atlas Image Texture at the reference texel `x`/`y`: the same
+   * bilinear, edge-clamped lookup the CPU's resample performs (the reference centre `(x + 0.5) /
+   * W_ref` sampled at `u * W_atlas - 0.5`), so an atlas of any resolution agrees between the graph
+   * and the CPU, and at equal sizes the read is the direct texel.
+   */
+  RGBA sample_image_extend(Image *image, const char *output) const
+  {
+    RGBA out;
+    if (image == nullptr) {
+      return out;
+    }
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, &lock);
+    if (ibuf == nullptr) {
+      return out;
+    }
+    const float u = (float(x) + 0.5f) / float(ref_width);
+    const float v = (float(y) + 0.5f) / float(ref_height);
+    const float su = u * float(ibuf->x) - 0.5f;
+    const float sv = v * float(ibuf->y) - 0.5f;
+    float pixel[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool decoded = false;
+    if (ibuf->byte_buffer.data != nullptr && ibuf->channels == 4) {
+      const uchar4 c = math::interpolate_bilinear_byte(ibuf->byte_data(), ibuf->x, ibuf->y, su, sv);
+      pixel[0] = float(c.x) / 255.0f;
+      pixel[1] = float(c.y) / 255.0f;
+      pixel[2] = float(c.z) / 255.0f;
+      pixel[3] = float(c.w) / 255.0f;
+      decoded = true;
+      if (ibuf->byte_buffer.colorspace != nullptr) {
+        IMB_colormanagement_colorspace_to_scene_linear_v4(
+            pixel, false, ibuf->byte_buffer.colorspace);
+      }
+    }
+    else if (ibuf->float_buffer.data != nullptr && ibuf->channels == 4) {
+      const float4 c = math::interpolate_bilinear_fl(
+          ibuf->float_buffer.data, ibuf->x, ibuf->y, su, sv);
+      pixel[0] = c.x;
+      pixel[1] = c.y;
+      pixel[2] = c.z;
+      pixel[3] = c.w;
+      decoded = true;
+      /* A float buffer is premultiplied: straighten it, then decode its colorspace. */
+      if (pixel[3] > 0.0f) {
+        const float inv = 1.0f / pixel[3];
+        pixel[0] *= inv;
+        pixel[1] *= inv;
+        pixel[2] *= inv;
+      }
+      if (ibuf->float_buffer.colorspace != nullptr) {
+        IMB_colormanagement_colorspace_to_scene_linear_v4(
+            pixel, false, ibuf->float_buffer.colorspace);
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    if (!decoded) {
+      return out;
+    }
+    if (STREQ(output, "Alpha")) {
+      out.r = out.g = out.b = out.a = pixel[3];
+      return out;
+    }
+    out.r = pixel[0];
+    out.g = pixel[1];
+    out.b = pixel[2];
+    out.a = pixel[3];
+    return out;
+  }
+
   RGBA eval_socket(const bNodeSocket &socket) const
   {
     const Span<const bNodeLink *> links = socket.directly_linked_links();
@@ -248,8 +329,17 @@ class GraphInterpreter {
       return eval_group(node, out_identifier);
     }
     switch (node.type_legacy) {
-      case SH_NODE_TEX_IMAGE:
+      case SH_NODE_TEX_IMAGE: {
+        /* The generator sets Extend only on a MESH_MAP atlas' node; sampled bilinearly through the
+         * reference grid, like the CPU resample reads it. Painted maps keep the direct read. */
+        const NodeTexImage *storage = static_cast<const NodeTexImage *>(node.storage);
+        if (storage != nullptr && storage->extension == SHD_IMAGE_EXTENSION_EXTEND &&
+            ref_width > 0 && ref_height > 0)
+        {
+          return sample_image_extend(id_cast<Image *>(node.id), out_identifier);
+        }
         return sample_image(id_cast<Image *>(node.id), out_identifier);
+      }
       case SH_NODE_RGB:
       case SH_NODE_VALUE:
         if (const bNodeSocket *out = bke::node_find_socket(
@@ -448,6 +538,8 @@ class GraphInterpreter {
     child.tree = group;
     child.x = x;
     child.y = y;
+    child.ref_width = ref_width;
+    child.ref_height = ref_height;
     child.parent = this;
     group->ensure_topology_cache();
     group->ensure_interface_cache();
@@ -657,6 +749,54 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
       out.b = normal[2] * 0.5f + 0.5f;
     }
     return out;
+  }
+
+  /** A float Non-Color atlas of \a width x \a height whose R is a known gradient along x (G, B
+   * stay zero, the way a scalar geometry map writes only R) and whose alpha is one. */
+  Image *add_gradient_atlas(const char *name, const int width, const int height)
+  {
+    const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, width, height, name, 32, /*floatbuf=*/true, IMA_GENTYPE_BLANK, black, false, true, false);
+    EXPECT_NE(image, nullptr);
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    EXPECT_NE(ibuf, nullptr);
+    if (ibuf != nullptr) {
+      if (ibuf->float_data() != nullptr) {
+        float *pixels = ibuf->float_data_for_write();
+        for (const int y : IndexRange(height)) {
+          for (const int x : IndexRange(width)) {
+            float *p = pixels + (int64_t(y) * width + x) * 4;
+            p[0] = float(x) / float(width - 1);
+            p[1] = 0.0f;
+            p[2] = 0.0f;
+            p[3] = 1.0f;
+          }
+        }
+      }
+      BKE_image_release_ibuf(image, ibuf, lock);
+    }
+    return image;
+  }
+
+  /** A MESH_MAP row painting the material's shared atlas of \a type in Base Color, with \a opacity
+   * set like a user's row. The slot image is assigned by the caller. */
+  MaterialPaintLayer *add_mesh_map_layer(const char *name,
+                                         const eMaterialMeshMapType type,
+                                         const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *layer = BKE_paint_layers_add(
+        *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, name, nullptr, PaintLayerPlace::Above);
+    EXPECT_NE(layer, nullptr);
+    EXPECT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+              nullptr);
+    EXPECT_TRUE(BKE_paint_layers_mesh_map_type_set(*ma, layer, type));
+    if (opacity != 1.0f) {
+      EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, opacity));
+    }
+    return layer;
   }
 
   /** Defined after the shared test helpers, which this method builds on. */
@@ -10264,7 +10404,8 @@ TEST_F(PaintLayersGraphEvalTest, mesh_map_mask_and_correction_contribute_nothing
   const RGBA graph_before = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
   const RGBA cpu_before = cpu_pixel(channel);
 
-  /* A MESH_MAP mask item and a MESH_MAP content correction contribute nothing on either side. */
+  /* A MESH_MAP mask item and a MESH_MAP content correction with no atlas assigned (the slot has no
+   * image) read nothing and contribute nothing on either side (spec M2 item 4). */
   ASSERT_NE(BKE_paint_layers_correction_add(
                 *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MESH_MAP, "MmMaskMap"),
             nullptr);
@@ -10295,6 +10436,431 @@ TEST_F(PaintLayersGraphEvalTest, mesh_map_mask_and_correction_contribute_nothing
   EXPECT_NEAR(graph_after.g, cpu_after.g, tolerance);
   EXPECT_NEAR(graph_after.b, cpu_after.b, tolerance);
   EXPECT_NEAR(graph_after.a, cpu_after.a, tolerance);
+}
+
+/**
+ * The manual bilinear read both sides are specified to perform on a MESH_MAP atlas: the reference
+ * texel centre `(x + 0.5) / ref_w` is looked up in the atlas at `u * W_atlas - 0.5`, blended over
+ * the four neighbours and clamped to the edge (Linear + Extend). Written out here rather than
+ * reused, so it independently pins the formula the graph and the CPU have to agree on.
+ */
+static float manual_atlas_red(const Image &atlas,
+                              const int x,
+                              const int y,
+                              const int ref_w,
+                              const int ref_h)
+{
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(const_cast<Image *>(&atlas), nullptr, &lock);
+  EXPECT_NE(ibuf, nullptr);
+  if (ibuf == nullptr || ibuf->float_buffer.data == nullptr) {
+    if (ibuf != nullptr) {
+      BKE_image_release_ibuf(const_cast<Image *>(&atlas), ibuf, lock);
+    }
+    return 0.0f;
+  }
+  const float su = (float(x) + 0.5f) / float(ref_w) * float(ibuf->x) - 0.5f;
+  const float sv = (float(y) + 0.5f) / float(ref_h) * float(ibuf->y) - 0.5f;
+  const int x1 = int(floorf(su));
+  const int y1 = int(floorf(sv));
+  const float a = su - float(x1);
+  const float b = sv - float(y1);
+  const int x1c = min_ii(max_ii(x1, 0), ibuf->x - 1);
+  const int x2c = min_ii(max_ii(x1 + 1, 0), ibuf->x - 1);
+  const int y1c = min_ii(max_ii(y1, 0), ibuf->y - 1);
+  const int y2c = min_ii(max_ii(y1 + 1, 0), ibuf->y - 1);
+  const float *p11 = ibuf->float_buffer.data + (int64_t(y1c) * ibuf->x + x1c) * 4;
+  const float *p21 = ibuf->float_buffer.data + (int64_t(y1c) * ibuf->x + x2c) * 4;
+  const float *p12 = ibuf->float_buffer.data + (int64_t(y2c) * ibuf->x + x1c) * 4;
+  const float *p22 = ibuf->float_buffer.data + (int64_t(y2c) * ibuf->x + x2c) * 4;
+  const float red = (1.0f - a) * (1.0f - b) * p11[0] + a * (1.0f - b) * p21[0] +
+                    (1.0f - a) * b * p12[0] + a * b * p22[0];
+  BKE_image_release_ibuf(const_cast<Image *>(&atlas), ibuf, lock);
+  return red;
+}
+
+namespace {
+
+/** The interpreter pointed at the channel result of \a ma at pixel (px, py) of a ref_w x ref_h
+ * reference grid. */
+GraphInterpreter make_interpreter(Material &ma, const int px, const int py, const int ref_w, const int ref_h)
+{
+  GraphInterpreter interpreter;
+  interpreter.instance = nullptr;
+  for (bNode &node : ma.nodetree->nodes) {
+    if (node.id == &ma.paint_layers_tree->id) {
+      interpreter.instance = &node;
+    }
+  }
+  interpreter.tree = ma.paint_layers_tree;
+  interpreter.x = px;
+  interpreter.y = py;
+  interpreter.ref_width = ref_w;
+  interpreter.ref_height = ref_h;
+  interpreter.tree->ensure_topology_cache();
+  return interpreter;
+}
+
+}  // namespace
+
+/** Guard: the MESH_MAP row over a Paint row (graph: the Extend atlas chain in the generator; CPU:
+ * the resampled grey in #composite_layer_build); revert either and the two part, and with no atlas
+ * both sides must still drop the row entirely.
+ */
+TEST_F(PaintLayersGraphEvalTest, mesh_map_row_atlas_matches_the_cpu)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MeshMapAtlasRow");
+  add_layer("Bottom",
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            add_solid_image("MmBottom", size, 200, 40, 10, 128),
+            eMaterialPaintChannel(channel));
+
+  const RGBA baseline = cpu_pixel(channel);
+
+  /* The row, before any atlas: the slot has no image, so the row is exactly absent (M2 item 4). */
+  MaterialPaintLayer *row = add_mesh_map_layer("AO Row", MA_MESH_MAP_AO, 0.5f);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter before = make_interpreter(*ma, 1, 1, size, size);
+  const RGBA graph_before = eval_channel_result(before, eMaterialPaintChannel(channel));
+  const RGBA cpu_before = cpu_pixel(channel);
+  EXPECT_NEAR(graph_before.r, baseline.r, tolerance);
+  EXPECT_NEAR(graph_before.g, baseline.g, tolerance);
+  EXPECT_NEAR(graph_before.b, baseline.b, tolerance);
+  EXPECT_NEAR(graph_before.a, baseline.a, tolerance);
+  EXPECT_NEAR(cpu_before.r, baseline.r, tolerance);
+  EXPECT_NEAR(cpu_before.g, baseline.g, tolerance);
+  EXPECT_NEAR(cpu_before.b, baseline.b, tolerance);
+  EXPECT_NEAR(cpu_before.a, baseline.a, tolerance);
+
+  /* With the atlas the row mixes its grey over the stack at its opacity: Mix at 0.5. */
+  Image *atlas = add_gradient_atlas("MmAtlas", 8, 8);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter after = make_interpreter(*ma, 1, 1, size, size);
+  const RGBA graph_after = eval_channel_result(after, eMaterialPaintChannel(channel));
+  const RGBA cpu_after = cpu_pixel(channel);
+
+  const float grey = manual_atlas_red(*atlas, 1, 1, size, size);
+  EXPECT_NEAR(graph_after.r, cpu_after.r, tolerance);
+  EXPECT_NEAR(graph_after.g, cpu_after.g, tolerance);
+  EXPECT_NEAR(graph_after.b, cpu_after.b, tolerance);
+  EXPECT_NEAR(graph_after.a, cpu_after.a, tolerance);
+  EXPECT_NEAR(cpu_after.r, baseline.r + 0.5f * (grey - baseline.r), tolerance);
+  EXPECT_NEAR(cpu_after.g, baseline.g + 0.5f * (grey - baseline.g), tolerance);
+  EXPECT_NEAR(cpu_after.b, baseline.b + 0.5f * (grey - baseline.b), tolerance);
+  EXPECT_NEAR(cpu_after.a, baseline.a + 0.5f * (1.0f - baseline.a), tolerance);
+}
+
+/** Guard: a MESH_MAP mask item reads the atlas R as its coverage (the generator's Separate-X grey
+ * and the CPU's #mesh_map_mask_reads_red); revert either and the factor is wrong on one side. */
+TEST_F(PaintLayersGraphEvalTest, mesh_map_mask_item_atlas_matches_the_cpu)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MeshMapAtlasMask");
+  MaterialPaintLayer *owner = add_layer(
+      "Owner", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("MmOwner", size, 30, 200, 90, 255),
+      eMaterialPaintChannel(channel));
+  const RGBA baseline = cpu_pixel(channel);
+  /* The mask item lays the atlas R over the owner's factor at full opacity. */
+  MaterialPaintLayer *item = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO Mask");
+  ASSERT_NE(item, nullptr);
+  Image *atlas = add_gradient_atlas("MmMaskAtlas", 8, 8);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter = make_interpreter(*ma, 1, 1, size, size);
+  const RGBA graph = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+  const RGBA cpu = cpu_pixel(channel);
+  const float red = manual_atlas_red(*atlas, 1, 1, size, size);
+  /* The factor is the atlas R: the result is the owner's colour scaled by it over the channel's
+   * bottom constant (black), and the coverage reports it too. */
+  EXPECT_NEAR(graph.r, cpu.r, tolerance);
+  EXPECT_NEAR(graph.g, cpu.g, tolerance);
+  EXPECT_NEAR(graph.b, cpu.b, tolerance);
+  EXPECT_NEAR(graph.a, cpu.a, tolerance);
+  EXPECT_NEAR(cpu.r, baseline.r * red, tolerance);
+  EXPECT_NEAR(cpu.g, baseline.g * red, tolerance);
+  EXPECT_NEAR(cpu.b, baseline.b * red, tolerance);
+  EXPECT_NEAR(cpu.a, 1.0f, tolerance);
+}
+
+/** Guard: a MESH_MAP content correction spreads the atlas R to grey (the generator's
+ * Separate/Combine and the CPU's scalar resample); revert either and the colour is wrong. */
+TEST_F(PaintLayersGraphEvalTest, mesh_map_effect_atlas_matches_the_cpu)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MeshMapAtlasEffect");
+  MaterialPaintLayer *owner = add_layer(
+      "Owner", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("MmOwner", size, 30, 200, 90, 255),
+      eMaterialPaintChannel(channel));
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO Effect");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  Image *atlas = add_gradient_atlas("MmEffectAtlas", 8, 8);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter = make_interpreter(*ma, 1, 1, size, size);
+  const RGBA graph = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+  const RGBA cpu = cpu_pixel(channel);
+  const float grey = manual_atlas_red(*atlas, 1, 1, size, size);
+  /* The correction replaces the colour at full opacity: the grey the atlas R spreads to. */
+  EXPECT_NEAR(graph.r, cpu.r, tolerance);
+  EXPECT_NEAR(graph.g, cpu.g, tolerance);
+  EXPECT_NEAR(graph.b, cpu.b, tolerance);
+  EXPECT_NEAR(graph.a, cpu.a, tolerance);
+  EXPECT_NEAR(cpu.r, grey, tolerance);
+  EXPECT_NEAR(cpu.g, grey, tolerance);
+  EXPECT_NEAR(cpu.b, grey, tolerance);
+  EXPECT_NEAR(cpu.a, 1.0f, tolerance);
+}
+
+/**
+ * Guard: the CPU acquires the atlas' buffer on demand (#composite_image_acquire, like every
+ * painted map) instead of the resolver's old loaded-buffer check; restore that check and an
+ * assigned-but-unloaded atlas drops out of the CPU side while the graph keeps drawing it.
+ */
+TEST_F(PaintLayersGraphEvalTest, mesh_map_atlas_buffer_is_acquired_on_demand)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MeshMapAtlasReload");
+  add_layer("Bottom",
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            add_solid_image("MmBottom", size, 200, 40, 10, 128),
+            eMaterialPaintChannel(channel));
+  const RGBA baseline = cpu_pixel(channel);
+  add_mesh_map_layer("AO Row", MA_MESH_MAP_AO, 0.5f);
+  Image *atlas = add_gradient_atlas("MmAtlas", 8, 8);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter = make_interpreter(*ma, 1, 1, size, size);
+  const RGBA graph_loaded = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+  const RGBA cpu_loaded = cpu_pixel(channel);
+  const float grey = manual_atlas_red(*atlas, 1, 1, size, size);
+  /* The row mixes its grey over the stack at its opacity, graph and CPU alike. */
+  EXPECT_NEAR(graph_loaded.r, cpu_loaded.r, tolerance);
+  EXPECT_NEAR(graph_loaded.a, cpu_loaded.a, tolerance);
+  EXPECT_NEAR(cpu_loaded.r, baseline.r + 0.5f * (grey - baseline.r), tolerance);
+  EXPECT_NEAR(cpu_loaded.g, baseline.g + 0.5f * (grey - baseline.g), tolerance);
+  EXPECT_NEAR(cpu_loaded.b, baseline.b + 0.5f * (grey - baseline.b), tolerance);
+
+  /* Unload the buffer and re-evaluate: the CPU has to load it back itself, and the two sides have
+   * to agree on whatever the re-acquired buffer holds. */
+  BKE_image_free_buffers(atlas);
+  ASSERT_FALSE(BKE_image_has_loaded_ibuf(atlas));
+
+  /* The CPU goes first: its own acquire has to re-populate the cache, so the graph (which loads
+   * the buffer the same way) cannot mask a CPU that drops the row instead. */
+  const RGBA cpu_unloaded = cpu_pixel(channel);
+  /* The CPU's acquire re-populated the cache. */
+  EXPECT_TRUE(BKE_image_has_loaded_ibuf(atlas));
+  const float grey_reloaded = manual_atlas_red(*atlas, 1, 1, size, size);
+  GraphInterpreter reloaded = make_interpreter(*ma, 1, 1, size, size);
+  const RGBA graph_unloaded = eval_channel_result(reloaded, eMaterialPaintChannel(channel));
+  EXPECT_NEAR(graph_unloaded.r, cpu_unloaded.r, tolerance);
+  EXPECT_NEAR(graph_unloaded.g, cpu_unloaded.g, tolerance);
+  EXPECT_NEAR(graph_unloaded.b, cpu_unloaded.b, tolerance);
+  EXPECT_NEAR(graph_unloaded.a, cpu_unloaded.a, tolerance);
+  /* The re-acquired atlas holds the generated fill (black), so the mix collapses towards it. */
+  EXPECT_NEAR(cpu_unloaded.r, baseline.r + 0.5f * (grey_reloaded - baseline.r), tolerance);
+  EXPECT_NEAR(cpu_unloaded.g, baseline.g + 0.5f * (grey_reloaded - baseline.g), tolerance);
+  EXPECT_NEAR(cpu_unloaded.b, baseline.b + 0.5f * (grey_reloaded - baseline.b), tolerance);
+  EXPECT_NEAR(cpu_unloaded.a, cpu_loaded.a, tolerance);
+}
+
+/**
+ * Guard: the parent chain's `row_one` (a row without a Content Alpha output counts as opaque) --
+ * a Material row over a partially transparent Paint row must raise the result alpha by the over
+ * model, its source Alpha sitting in the row's coverage, exactly as the CPU computes it.
+ */
+TEST_F(PaintLayersGraphEvalTest, material_row_source_alpha_blends_the_content_alpha_over_the_below)
+{
+  const int size = 4;
+  const float tolerance = 1e-3f;
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MaterialRowOverPartial");
+  add_layer("Bottom",
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            add_solid_image("MrBottom", size, 200, 40, 10, 128),
+            eMaterialPaintChannel(channel));
+  const RGBA baseline = cpu_pixel(channel);
+  ASSERT_NEAR(baseline.a, 0.75f, 5e-3f);
+
+  /* A specular source with its Principled Alpha at 0.5: the row's coverage, not a content alpha.
+   * The spec is source_spec_b with the alpha swapped; the colour itself is not checked absolutely. */
+  const HybridSourceSpec source_alpha_half = {
+      {0.15f, 0.30f, 0.60f}, 0.80f, 0.42f, 0.20f, 0.50f, {0.05f, 0.10f, 0.40f}};
+  Material *source = build_hybrid_source(*bmain, "MrSource", "MrNormal", source_alpha_half);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  BKE_paint_layers_values_sync(*ma);
+
+  GraphInterpreter interpreter = make_interpreter(*ma, 1, 1, size, size);
+  const RGBA graph = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+  const RGBA cpu = cpu_pixel(channel);
+  /* The over model with an opaque row at coverage 0.5: a = a + f * (1 - a). */
+  EXPECT_NEAR(graph.a, cpu.a, tolerance);
+  EXPECT_NEAR(graph.r, cpu.r, tolerance);
+  EXPECT_NEAR(graph.g, cpu.g, tolerance);
+  EXPECT_NEAR(graph.b, cpu.b, tolerance);
+  EXPECT_NEAR(cpu.a, baseline.a + 0.5f * (1.0f - baseline.a), 5e-3f);
+}
+
+/** Guard: the same over model for a MESH_MAP row over a partially transparent Paint row -- the
+ * row_one constant feeds the chain, and the atlas' ignored alpha never clips the coverage. */
+TEST_F(PaintLayersGraphEvalTest, mesh_map_row_over_partial_alpha_reports_the_over_alpha)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MeshMapOverPartial");
+  add_layer("Bottom",
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            add_solid_image("MmBottom", size, 200, 40, 10, 128),
+            eMaterialPaintChannel(channel));
+  const RGBA baseline = cpu_pixel(channel);
+  ASSERT_NEAR(baseline.a, 0.75f, 5e-3f);
+
+  add_mesh_map_layer("AO Row", MA_MESH_MAP_AO, 0.5f);
+  /* A constant atlas: the grey value cannot muddy the alpha check. */
+  Image *atlas = add_gradient_atlas("MmAtlas", 2, 1);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(atlas, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    ASSERT_NE(ibuf->float_data(), nullptr);
+    float *pixels = ibuf->float_data_for_write();
+    for (const int64_t i : IndexRange(int64_t(2))) {
+      pixels[i * 4 + 0] = 0.5f;
+      pixels[i * 4 + 1] = 0.0f;
+      pixels[i * 4 + 2] = 0.0f;
+      pixels[i * 4 + 3] = 1.0f;
+    }
+    BKE_image_release_ibuf(atlas, ibuf, lock);
+  }
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter = make_interpreter(*ma, 1, 1, size, size);
+  const RGBA graph = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+  const RGBA cpu = cpu_pixel(channel);
+  /* The over model at coverage 1, opacity 0.5: a = a + f * (1 - a). */
+  EXPECT_NEAR(graph.a, cpu.a, tolerance);
+  EXPECT_NEAR(graph.r, cpu.r, tolerance);
+  EXPECT_NEAR(graph.g, cpu.g, tolerance);
+  EXPECT_NEAR(graph.b, cpu.b, tolerance);
+  EXPECT_NEAR(cpu.a, baseline.a + 0.5f * (1.0f - baseline.a), tolerance);
+}
+
+/** Guard: the bilinear atlas read (the CPU's resample and the graph's Extend sampling) and the
+ * shared resolver; a differently sized atlas must resample, not reject the stack, and the formula
+ * is pinned by the manual calculation. */
+TEST_F(PaintLayersGraphEvalTest, mesh_map_atlas_other_resolutions_match_the_manual_bilinear)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MeshMapAtlasSizes");
+  add_layer("Bottom",
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            add_solid_image("MmBottom", size, 200, 40, 10, 255),
+            eMaterialPaintChannel(channel));
+  add_mesh_map_layer("AO Row", MA_MESH_MAP_AO, 1.0f);
+  Image *double_atlas = add_gradient_atlas("MmAtlas2x", 8, 8);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, double_atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* Twice the resolution of the Paint map: the grey replaces the stack at full coverage. */
+  for (const int px : {0, 1, 2, 3}) {
+    GraphInterpreter interpreter = make_interpreter(*ma, px, px, size, size);
+    const RGBA graph = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+    const RGBA cpu = cpu_pixel_at(channel, px, px);
+    const float red = manual_atlas_red(*double_atlas, px, px, size, size);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << px;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << px;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << px;
+    EXPECT_NEAR(graph.a, cpu.a, tolerance) << px;
+    EXPECT_NEAR(cpu.r, red, tolerance) << px;
+    EXPECT_NEAR(cpu.g, red, tolerance) << px;
+    EXPECT_NEAR(cpu.b, red, tolerance) << px;
+  }
+
+  /* An odd-sized atlas: the same formula, now off a 37 x 23 grid. */
+  Image *odd_atlas = add_gradient_atlas("MmAtlasOdd", 37, 23);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, odd_atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  for (const int px : {0, 1, 2, 3}) {
+    GraphInterpreter interpreter = make_interpreter(*ma, px, px, size, size);
+    const RGBA graph = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+    const RGBA cpu = cpu_pixel_at(channel, px, px);
+    const float red = manual_atlas_red(*odd_atlas, px, px, size, size);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << px;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << px;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << px;
+    EXPECT_NEAR(graph.a, cpu.a, tolerance) << px;
+    EXPECT_NEAR(cpu.r, red, tolerance) << px;
+    EXPECT_NEAR(cpu.g, red, tolerance) << px;
+    EXPECT_NEAR(cpu.b, red, tolerance) << px;
+  }
+}
+
+/** Guard: the sampling formula degenerates to the direct texel when the atlas matches the
+ * reference grid; a half-texel offset or a needless resample would show here. */
+TEST_F(PaintLayersGraphEvalTest, mesh_map_atlas_equal_size_reads_the_texel_directly)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "MeshMapAtlasEqual");
+  add_layer("Bottom",
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            add_solid_image("MmBottom", size, 200, 40, 10, 255),
+            eMaterialPaintChannel(channel));
+  add_mesh_map_layer("AO Row", MA_MESH_MAP_AO, 1.0f);
+  Image *atlas = add_gradient_atlas("MmAtlas1x", size, size);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  for (const int px : {0, 1, 2, 3}) {
+    GraphInterpreter interpreter = make_interpreter(*ma, px, px, size, size);
+    const RGBA graph = eval_channel_result(interpreter, eMaterialPaintChannel(channel));
+    const RGBA cpu = cpu_pixel_at(channel, px, px);
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(atlas, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    const float direct = ibuf->float_buffer.data[(int64_t(px) * size + px) * 4];
+    BKE_image_release_ibuf(atlas, ibuf, lock);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << px;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << px;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << px;
+    EXPECT_NEAR(graph.a, cpu.a, tolerance) << px;
+    EXPECT_NEAR(cpu.r, direct, tolerance) << px;
+    EXPECT_NEAR(cpu.g, direct, tolerance) << px;
+    EXPECT_NEAR(cpu.b, direct, tolerance) << px;
+  }
 }
 
 }  // namespace blender::bke::tests

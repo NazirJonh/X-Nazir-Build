@@ -15,6 +15,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh_maps.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -31,6 +32,7 @@
 
 #include "NOD_socket.hh"
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_span.hh"
@@ -52,6 +54,8 @@
 #include "DNA_colorband_types.h"
 
 #include "IMB_colormanagement.hh"
+#include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
 
 namespace blender::bke::tests {
 
@@ -6475,13 +6479,15 @@ TEST_F(PaintLayersGenerateTest, removed_rows_state_is_dropped_with_its_material)
 
 TEST_F(PaintLayersGenerateTest, mesh_map_row_builds_no_nodes_or_samplers)
 {
+  /* The row's map type has no atlas assigned yet (no slot image): the row reads nothing, so it
+   * contributes nothing -- no Image Texture node, no sampler, no wire from the row (spec M2
+   * item 4). With an atlas the row builds a chain; that is covered by the atlas tests. */
   const int samplers_before = BKE_paint_layers_sampler_count(*ma);
   MaterialPaintLayer *mesh_map = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(mesh_map, nullptr);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
-  /* v1 draws a geometry map nowhere: no Image Texture node, no sampler, no wire from the row. */
   EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 0);
   EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), samplers_before);
   EXPECT_EQ(interface_output_find("Result Base Color"), nullptr);
@@ -6497,6 +6503,194 @@ TEST_F(PaintLayersGenerateTest, mesh_map_type_moves_the_topology_hash)
   ASSERT_TRUE(BKE_paint_layers_mesh_map_type_set(*ma, mesh_map, MA_MESH_MAP_EDGE));
   const uint64_t hash_edge = paint_layers_layer_topology_hash(*ma, *mesh_map, Span<int>());
   EXPECT_NE(hash_ao, hash_edge);
+}
+
+namespace {
+
+/** The layer's float Non-Color atlas of \a size, blank content. */
+Image *add_atlas_image(Main &bmain, const char *name, const int size)
+{
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  return BKE_image_add_generated(
+      &bmain, size, size, name, 32, /*floatbuf=*/true, IMA_GENTYPE_BLANK, black, false, true, false);
+}
+
+/** Every TEX_IMAGE node of \a tree whose #Image is \a image, descending into layer groups. */
+void collect_tex_images_of_image(const bNodeTree &tree, const Image *image, Vector<bNode *> &r_nodes)
+{
+  for (const bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id == &image->id) {
+      r_nodes.append(const_cast<bNode *>(&node));
+    }
+    if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+        !BKE_paint_material_is_normal_combine_group(node))
+    {
+      collect_tex_images_of_image(*reinterpret_cast<const bNodeTree *>(node.id), image, r_nodes);
+    }
+  }
+}
+
+}  // namespace
+
+/** Guard: the atlas chain is built by the MESH_MAP support in #paint_layers_tree_build (the
+ * early-return removal) reading the shared resolver in paint_layers_intern.hh; revert either and
+ * this finds no Extend Image Texture for the atlas. */
+TEST_F(PaintLayersGenerateTest, mesh_map_row_atlas_builds_an_extend_tex_image)
+{
+  Image *atlas = add_atlas_image(*bmain, "Atlas", 8);
+  ASSERT_NE(atlas, nullptr);
+
+  MaterialPaintLayer *mesh_map = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(mesh_map, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mesh_map, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+
+  const int samplers_before = BKE_paint_layers_sampler_count(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The row paints the atlas: one Image Texture node carries it, sampled Linear + Extend, and the
+   * row takes its sampler. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 1);
+  Vector<bNode *> tex_images;
+  collect_tex_images_of_image(*ma->paint_layers_tree, atlas, tex_images);
+  ASSERT_EQ(tex_images.size(), 1);
+  const NodeTexImage *storage = static_cast<const NodeTexImage *>(tex_images.first()->storage);
+  ASSERT_NE(storage, nullptr);
+  EXPECT_EQ(storage->extension, SHD_IMAGE_EXTENSION_EXTEND);
+  EXPECT_EQ(storage->interpolation, SHD_INTERP_LINEAR);
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), samplers_before + 1);
+  EXPECT_NE(interface_output_find("Result Base Color"), nullptr);
+}
+
+/** Guard: the corrections' MESH_MAP support in #paint_layers_tree_build (content map node and the
+ * mask item's Separate-X grey); revert it and neither element reads the atlas. */
+TEST_F(PaintLayersGenerateTest, mesh_map_mask_and_effect_atlas_build_tex_images)
+{
+  Image *atlas = add_atlas_image(*bmain, "Atlas", 8);
+  ASSERT_NE(atlas, nullptr);
+  MaterialPaintLayer *owner = add_paint_layer("Paint", add_image("Paint"));
+
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO Effect");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  MaterialPaintLayer *mask_item = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO Mask");
+  ASSERT_NE(mask_item, nullptr);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The owner's Paint map plus one atlas read for the content correction and one for the mask
+   * item; the mask reads its R through a Separate XYZ, so an extra one sits in the tree. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 3);
+  Vector<bNode *> tex_images;
+  collect_tex_images_of_image(*ma->paint_layers_tree, atlas, tex_images);
+  ASSERT_EQ(tex_images.size(), 2);
+  for (const bNode *tex : tex_images) {
+    const NodeTexImage *storage = static_cast<const NodeTexImage *>(tex->storage);
+    ASSERT_NE(storage, nullptr);
+    EXPECT_EQ(storage->extension, SHD_IMAGE_EXTENSION_EXTEND);
+  }
+}
+
+/** Guard: the atlas folds into the topology hash by Image identity (the material-aware
+ * #topology_hash_layer / #topology_hash_correction) and into the sampler counter by Image; revert
+ * either and a pixel edit or a slot re-point is seen wrong. */
+TEST_F(PaintLayersGenerateTest, mesh_map_atlas_pixels_do_not_move_the_topology_hash)
+{
+  Image *atlas = add_atlas_image(*bmain, "Atlas", 8);
+  ASSERT_NE(atlas, nullptr);
+  MaterialPaintLayer *mesh_map = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(mesh_map, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mesh_map, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const int wired[] = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t hash_before = paint_layers_layer_topology_hash(
+      *ma, *mesh_map, Span<int>(wired, 1));
+
+  /* Repainting the atlas keeps the Image (its session UID) and so the tree: the hash stands. */
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(atlas, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  ASSERT_NE(ibuf->float_data(), nullptr);
+  float *pixels = ibuf->float_data_for_write();
+  pixels[0] = 0.75f;
+  pixels[1] = 0.25f;
+  BKE_image_release_ibuf(atlas, ibuf, lock);
+  EXPECT_EQ(paint_layers_layer_topology_hash(*ma, *mesh_map, Span<int>(wired, 1)), hash_before);
+
+  /* Pointing the slot at another Image is a structural edit: the hash moves. */
+  Image *other = add_atlas_image(*bmain, "Other", 8);
+  ASSERT_NE(other, nullptr);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, other));
+  EXPECT_NE(paint_layers_layer_topology_hash(*ma, *mesh_map, Span<int>(wired, 1)), hash_before);
+}
+
+/** Guard: the sampler counter deduplicates by Image (the material-aware enumeration in
+ * #BKE_paint_layers_regenerate); revert it and a second row on the same atlas takes a sampler. */
+TEST_F(PaintLayersGenerateTest, two_mesh_map_rows_share_one_atlas_sampler)
+{
+  Image *atlas = add_atlas_image(*bmain, "Atlas", 8);
+  ASSERT_NE(atlas, nullptr);
+  for (const int i : IndexRange(2)) {
+    char name[32];
+    BLI_snprintf(name, sizeof(name), "AO %d", i);
+    MaterialPaintLayer *mesh_map = BKE_paint_layers_add(
+        *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, name, nullptr, PaintLayerPlace::Above);
+    ASSERT_NE(mesh_map, nullptr);
+    ASSERT_NE(BKE_paint_layers_channel_add(*ma, mesh_map, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+              nullptr);
+  }
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+
+  const int samplers_before = BKE_paint_layers_sampler_count(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* Both rows read the same atlas Image, so the dedup by Image leaves one sampler. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 2);
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), samplers_before + 1);
+}
+
+/** Guard: the structural resolver (`paint_layer_mesh_map_image` without the loaded-buffer check);
+ * restore the check and an assigned-but-unloaded atlas loses its node, its hash mix and its
+ * sampler. */
+TEST_F(PaintLayersGenerateTest, mesh_map_atlas_without_a_loaded_buffer_still_builds)
+{
+  Image *atlas = add_atlas_image(*bmain, "Atlas", 8);
+  ASSERT_NE(atlas, nullptr);
+  MaterialPaintLayer *mesh_map = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(mesh_map, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mesh_map, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The assigned, loaded atlas: one Image Texture node, one sampler. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 1);
+  const int samplers_loaded = BKE_paint_layers_sampler_count(*ma);
+  const int wired[] = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t hash_loaded = paint_layers_layer_topology_hash(
+      *ma, *mesh_map, Span<int>(wired, 1));
+
+  /* Unload the buffer: the assignment (DNA) is untouched, so nothing structural may move. */
+  BKE_image_free_buffers(atlas);
+  ASSERT_FALSE(BKE_image_has_loaded_ibuf(atlas));
+
+  EXPECT_EQ(paint_layers_layer_topology_hash(*ma, *mesh_map, Span<int>(wired, 1)), hash_loaded);
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), samplers_loaded);
+
+  /* A regenerate after the unload still builds the row's node, not an empty tree. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  Vector<bNode *> tex_images;
+  collect_tex_images_of_image(*ma->paint_layers_tree, atlas, tex_images);
+  EXPECT_EQ(tex_images.size(), 1);
 }
 
 }  // namespace blender::bke::tests

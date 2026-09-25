@@ -1166,7 +1166,7 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
             *layer, *socket, false, seen_inputs, seen_outputs, r_issues);
       }
     }
-    if (!paint_layer_channel_present(*layer, PAINT_MATERIAL_CHANNEL_NORMAL)) {
+    if (!paint_layer_channel_present(ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL)) {
       continue;
     }
     for (const MaterialPaintLayer &effect :
@@ -1652,9 +1652,19 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
 
 void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer)
 {
-  if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer ||
-      !ELEM(layer.source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT))
-  {
+  if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer) {
+    return;
+  }
+  /* A MESH_MAP row reads the material's shared atlas; a layer has a single explicit participation
+   * in it, so it defaults to Base Color alone. Its records name which channels the row paints, and
+   * channels are added and removed like a Paint row's, so the user opts into more. */
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    if (paint_layer_channel_find(layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr) {
+      BKE_paint_layers_channel_add(ma, &layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    }
+    return;
+  }
+  if (!ELEM(layer.source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
     return;
   }
   /* The channels that reach a Principled socket and hold no viewport-wide side effect: Alpha would

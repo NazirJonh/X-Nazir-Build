@@ -45,6 +45,9 @@
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
+#include "IMB_interp.hh"
+
+#include "BLI_math_interp.hh"
 
 #include <cstring>
 #include <memory>
@@ -197,7 +200,9 @@ static float mask_factor_at(
 }
 
 /**
- * The color and alpha of a mask-correction pixel: the mean of its stored RGB and its stored alpha.
+ * The color and alpha of a mask-correction pixel: the mean of its stored RGB and its stored alpha,
+ * or the R alone for a MESH_MAP mask item (#reads_red -- the atlas R is the coverage, the same
+ * value the generated Separate X reads).
  * The map is stored straight, like every paint-layer map, so the mean already is the coverage
  * colour `C`; there is no un-premultiply divide. The graph reads the same straight bytes, after its
  * texture upload has pre-multiplied and its Divide has undone that, so the two agree texel for
@@ -206,12 +211,13 @@ static float mask_factor_at(
 static void correction_mask_coverage_at(const ImBuf *ibuf,
                                         const int x,
                                         const int y,
+                                        const bool reads_red,
                                         float &r_gray,
                                         float &r_alpha)
 {
   float rgba[4];
   composite_read_sample_linear(ibuf, x, y, rgba);
-  r_gray = clamp_f((rgba[0] + rgba[1] + rgba[2]) / 3.0f, 0.0f, 1.0f);
+  r_gray = clamp_f(reads_red ? rgba[0] : (rgba[0] + rgba[1] + rgba[2]) / 3.0f, 0.0f, 1.0f);
   r_alpha = clamp_f(rgba[3], 0.0f, 1.0f);
 }
 
@@ -376,7 +382,12 @@ static float composite_correction_pixel_mask_factor(const PaintMaterialComposite
       corr_alpha = 1.0f;
     }
     else if (correction.ibuf != nullptr) {
-      correction_mask_coverage_at(correction.ibuf, x, y, gray, corr_alpha);
+      correction_mask_coverage_at(correction.ibuf,
+                                  x,
+                                  y,
+                                  correction.mesh_map_mask_reads_red,
+                                  gray,
+                                  corr_alpha);
       /* The map is stored straight, like every paint-layer map, so its grey is the colour `C`
        * directly: no un-premultiply here. The graph reaches the same `C` by dividing the texture,
        * which the upload pre-multiplied, by alpha. `mix(F, C, A * op)` is
@@ -695,8 +706,9 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         if (correction_pixels != nullptr) {
           const float *c = correction_pixels + i * 4;
           corr_alpha = c[3];
-          /* Read straight, exactly as in #composite_correction_pixel_mask_factor's loop. */
-          gray = (c[0] + c[1] + c[2]) / 3.0f;
+          /* Read straight, exactly as in #composite_correction_pixel_mask_factor's loop. A MESH_MAP
+           * mask item reads the atlas R, never the mean of its RGB. */
+          gray = correction.mesh_map_mask_reads_red ? c[0] : (c[0] + c[1] + c[2]) / 3.0f;
         }
         const float fac = clamp_f(corr_alpha * correction.opacity, 0.0f, 1.0f);
         const float gray_clamped = clamp_f(gray, 0.0f, 1.0f);
@@ -1058,6 +1070,9 @@ struct CompositeImageLock {
   Image *image = nullptr;
   ImBuf *ibuf = nullptr;
   void *lock = nullptr;
+  /** A buffer this code allocated (a resampled MESH_MAP atlas), freed on release instead of
+   * unlocked. #image is null for one; the atlas' own buffer is never owned. */
+  bool owned = false;
 };
 
 static ImBuf *composite_image_acquire(Image *image,
@@ -1086,17 +1101,119 @@ static ImBuf *composite_image_acquire(Image *image,
   return entry.ibuf;
 }
 
+/** Hand ownership of \a ibuf to \a r_locks, so it is freed once the evaluation is done. */
+static void composite_image_own(ImBuf *ibuf, Vector<CompositeImageLock> &r_locks)
+{
+  CompositeImageLock entry;
+  entry.image = nullptr;
+  entry.ibuf = ibuf;
+  entry.lock = nullptr;
+  entry.owned = true;
+  r_locks.append(entry);
+}
+
 static void composite_images_release(Span<CompositeImageLock> locks)
 {
   for (const CompositeImageLock &entry : locks) {
-    BKE_image_release_ibuf(entry.image, entry.ibuf, entry.lock);
+    if (entry.owned) {
+      IMB_freeImBuf(entry.ibuf);
+    }
+    else {
+      BKE_image_release_ibuf(entry.image, entry.ibuf, entry.lock);
+    }
   }
+}
+
+/**
+ * Resample \a src (a MESH_MAP atlas) onto a \a ref_width x \a ref_height grid, as a float RGBA
+ * scene-linear ImBuf the caller owns.
+ *
+ * The mapping matches the generator's Image Texture sampling: the reference texel centre `(x + 0.5)
+ * / W_ref` is looked up in the atlas at `u * W_atlas - 0.5`, bilinearly filtered with Extend
+ * clamping -- so a differently sized atlas agrees between the graph and the CPU, including at the
+ * borders. With equal sizes the read is the direct texel. The atlas is Non-Color and its alpha is
+ * ignored (alpha 1). A scalar atlas (#scalar) contributes its R spread across the RGB, the grey the
+ * generator's Separate/Combine pair builds; an RGB atlas passes its stored RGB through. A byte
+ * source is converted to scene linear here; the result's buffer colorspace is scene linear, so the
+ * evaluator's decode is the identity.
+ */
+static ImBuf *composite_resample_mesh_map(const ImBuf *src,
+                                          const int ref_width,
+                                          const int ref_height,
+                                          const bool scalar)
+{
+  if (src == nullptr || ref_width <= 0 || ref_height <= 0) {
+    return nullptr;
+  }
+  ImBuf *dst = IMB_allocImBuf(uint(ref_width), uint(ref_height), ImBufFlags::FloatData);
+  if (dst == nullptr || dst->float_data() == nullptr) {
+    if (dst != nullptr) {
+      IMB_freeImBuf(dst);
+    }
+    return nullptr;
+  }
+  dst->channels = 4;
+  float *out = dst->float_data_for_write();
+  const bool src_is_float = src->byte_buffer.data == nullptr && src->float_buffer.data != nullptr;
+  const int channels = src->channels == 0 ? 4 : src->channels;
+  /* The atlas is Non-Color in the model, so no colorspace transform is expected; a byte source is
+   * still scaled to [0, 1]. A float source is straight already (alpha 1). */
+  for (int y = 0; y < ref_height; y++) {
+    const float v = (float(y) + 0.5f) / float(ref_height);
+    const float sv = v * float(src->y) - 0.5f;
+    for (int x = 0; x < ref_width; x++) {
+      const float u = (float(x) + 0.5f) / float(ref_width);
+      const float su = u * float(src->x) - 0.5f;
+      float *p = out + (int64_t(y) * ref_width + x) * 4;
+      if (!src_is_float) {
+        const uchar4 c = math::interpolate_bilinear_byte(src->byte_data(), src->x, src->y, su, sv);
+        p[0] = float(c.x) / 255.0f;
+        p[1] = float(c.y) / 255.0f;
+        p[2] = float(c.z) / 255.0f;
+      }
+      else {
+        const float *data = src->float_buffer.data;
+        /* Read the four filtered channels without assuming 4 components. */
+        float4 sum(0.0f);
+        /* interpolate_bilinear_fl reads 4 components; a 3-component float atlas is uncommon here
+         * (the model stores RGBA), so only the 4-component and the plain read are handled. */
+        if (channels == 4) {
+          const float4 c = math::interpolate_bilinear_fl(data, src->x, src->y, su, sv);
+          sum = c;
+        }
+        else {
+          /* Non-4-channel float atlases: nearest read of the clamped texel. */
+          const int cx = min_ii(max_ii(int(floorf(su + 0.5f)), 0), src->x - 1);
+          const int cy = min_ii(max_ii(int(floorf(sv + 0.5f)), 0), src->y - 1);
+          const float *px = data + (int64_t(cy) * src->x + cx) * channels;
+          sum = float4(px[0], px[1], px[2], 1.0f);
+        }
+        p[0] = sum.x;
+        p[1] = sum.y;
+        p[2] = sum.z;
+      }
+      p[3] = 1.0f;
+      if (scalar) {
+        /* The scalar atlas' value lives in R; the grey is what the channel's colour and the mask
+         * both read, matching the graph's Separate X -> Combine XYZ spread. */
+        p[1] = p[0];
+        p[2] = p[0];
+      }
+    }
+  }
+  /* The result is scene linear, so the evaluator's decode is the identity. A fresh ImBuf's float
+   * colorspace is null, so it is assigned rather than written through. */
+  IMB_colormanagement_assign_float_colorspace(
+      dst, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+  return dst;
 }
 
 /** Acquire one image-layer's buffers into \a r_layer, recursing into a folder's children. */
 static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_layer,
                                   Vector<CompositeImageLock> &r_locks,
-                                  PaintMaterialCompositeLayer &r_layer)
+                                  PaintMaterialCompositeLayer &r_layer,
+                                  const int ref_width,
+                                  const int ref_height)
 {
   r_layer.blend = image_layer.blend;
   r_layer.opacity = image_layer.opacity;
@@ -1107,6 +1224,8 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
   r_layer.tracks_content_alpha = image_layer.tracks_content_alpha;
   r_layer.is_bare_base = image_layer.is_bare_base;
   r_layer.is_folder = image_layer.is_folder;
+  r_layer.is_mesh_map = image_layer.is_mesh_map;
+  r_layer.is_mesh_map_scalar = image_layer.is_mesh_map_scalar;
   copy_v4_v4(r_layer.constant_color, image_layer.constant_color);
   r_layer.has_constant_color = image_layer.has_constant_color;
   r_layer.coverage_constant = image_layer.coverage_constant;
@@ -1119,6 +1238,16 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
         image_layer.color_image, image_layer.color_iuser, r_locks);
     if (r_layer.color_ibuf == nullptr) {
       return false;
+    }
+    if (image_layer.is_mesh_map) {
+      /* A mesh map may be another resolution; resample it onto the reference grid so the stack is
+       * uniform, exactly as the graph's filtered UV sampling reads it. */
+      if (ImBuf *resampled = composite_resample_mesh_map(
+              r_layer.color_ibuf, ref_width, ref_height, image_layer.is_mesh_map_scalar))
+      {
+        composite_image_own(resampled, r_locks);
+        r_layer.color_ibuf = resampled;
+      }
     }
     /* The buffer's own colorspace, not the Image setting: the two can disagree, and the evaluator
      * has to decode what it is actually handed. */
@@ -1146,6 +1275,17 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
     if (buffer.ibuf == nullptr && correction.image != nullptr) {
       return false;
     }
+    buffer.is_mesh_map = correction.mesh_map;
+    buffer.is_mesh_map_scalar = correction.mesh_map_scalar;
+    if (buffer.ibuf != nullptr && correction.mesh_map) {
+      if (ImBuf *resampled = composite_resample_mesh_map(
+              buffer.ibuf, ref_width, ref_height, correction.mesh_map_scalar))
+      {
+        /* The atlas' own buffer is still locked; the owned copy is what the evaluator reads. */
+        composite_image_own(resampled, r_locks);
+        buffer.ibuf = resampled;
+      }
+    }
     if (buffer.ibuf != nullptr) {
       buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
     }
@@ -1162,6 +1302,17 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
     if (buffer.ibuf == nullptr && correction.image != nullptr) {
       return false;
     }
+    buffer.is_mesh_map = correction.mesh_map;
+    buffer.is_mesh_map_scalar = correction.mesh_map_scalar;
+    buffer.mesh_map_mask_reads_red = correction.mesh_map_mask_reads_red;
+    if (buffer.ibuf != nullptr && correction.mesh_map) {
+      if (ImBuf *resampled = composite_resample_mesh_map(
+              buffer.ibuf, ref_width, ref_height, correction.mesh_map_scalar))
+      {
+        composite_image_own(resampled, r_locks);
+        buffer.ibuf = resampled;
+      }
+    }
     if (buffer.ibuf != nullptr) {
       buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
     }
@@ -1174,7 +1325,7 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
   }
   for (const PaintMaterialCompositeImageLayer &child : image_layer.children) {
     PaintMaterialCompositeLayer child_layer;
-    if (!composite_layer_build(child, r_locks, child_layer)) {
+    if (!composite_layer_build(child, r_locks, child_layer, ref_width, ref_height)) {
       return false;
     }
     r_layer.children.push_back(child_layer);
@@ -1214,7 +1365,7 @@ static bool composite_stack_build(Span<PaintMaterialCompositeImageLayer> image_l
       continue;
     }
     PaintMaterialCompositeLayer layer;
-    if (!composite_layer_build(image_layer, r_locks, layer)) {
+    if (!composite_layer_build(image_layer, r_locks, layer, r_stack.width, r_stack.height)) {
       return false;
     }
     r_stack.layers.append(layer);
@@ -1375,30 +1526,37 @@ bool BKE_paint_material_composite_eval_row_content(
  * The image whose buffer answers the bottom layer's size and colorspace: the layer's own map, or
  * -- when the layer is Absent here and its corrections carry it -- the first correction map.
  */
+/**
+ * The size-providing image of \a layer, restricted to the map class \a mesh_maps: a painted map
+ * (false) or a MESH_MAP atlas (true). The two classes are probed separately so the channel's
+ * reference grid keeps coming from the painted maps and only falls back to the lowest participating
+ * MESH_MAP row's atlas when the channel has no painted map at all.
+ */
 static Image *composite_bottom_layer_size_image(const PaintMaterialCompositeImageLayer &layer,
-                                                const ImageUser *&r_iuser)
+                                                const ImageUser *&r_iuser,
+                                                const bool mesh_maps)
 {
   if (layer.is_folder) {
     /* A folder has no map of its own: its size comes from its contents. */
     for (const PaintMaterialCompositeImageLayer &child : layer.children) {
-      if (Image *image = composite_bottom_layer_size_image(child, r_iuser)) {
+      if (Image *image = composite_bottom_layer_size_image(child, r_iuser, mesh_maps)) {
         return image;
       }
     }
     return nullptr;
   }
-  if (layer.color_image != nullptr) {
+  if (layer.color_image != nullptr && layer.is_mesh_map == mesh_maps) {
     r_iuser = layer.color_iuser;
     return layer.color_image;
   }
   for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
-    if (correction.image != nullptr) {
+    if (correction.image != nullptr && correction.mesh_map == mesh_maps) {
       r_iuser = correction.iuser;
       return correction.image;
     }
   }
   for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
-    if (correction.image != nullptr) {
+    if (correction.image != nullptr && correction.mesh_map == mesh_maps) {
       r_iuser = correction.iuser;
       return correction.image;
     }
@@ -1429,26 +1587,31 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
   if (r_byte_colorspace != nullptr) {
     *r_byte_colorspace = nullptr;
   }
-  for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
-    if (!layer.enabled) {
-      continue;
-    }
-    const ImageUser *size_iuser = nullptr;
-    Image *size_image = composite_bottom_layer_size_image(layer, size_iuser);
-    if (size_image == nullptr) {
-      continue;
-    }
-    Vector<CompositeImageLock> locks;
-    const ImBuf *ibuf = composite_image_acquire(size_image, size_iuser, locks);
-    if (ibuf != nullptr) {
-      r_width = ibuf->x;
-      r_height = ibuf->y;
-      if (r_byte_colorspace != nullptr) {
-        *r_byte_colorspace = IMB_colormanagement_get_byte_colorspace(ibuf);
+  /* The painted maps set the reference grid; only a channel with no painted map falls back to the
+   * lowest participating MESH_MAP row's atlas, which a MESH_MAP-only stack then fills at its own
+   * resolution. */
+  for (const bool mesh_maps : {false, true}) {
+    for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
+      if (!layer.enabled) {
+        continue;
       }
+      const ImageUser *size_iuser = nullptr;
+      Image *size_image = composite_bottom_layer_size_image(layer, size_iuser, mesh_maps);
+      if (size_image == nullptr) {
+        continue;
+      }
+      Vector<CompositeImageLock> locks;
+      const ImBuf *ibuf = composite_image_acquire(size_image, size_iuser, locks);
+      if (ibuf != nullptr) {
+        r_width = ibuf->x;
+        r_height = ibuf->y;
+        if (r_byte_colorspace != nullptr) {
+          *r_byte_colorspace = IMB_colormanagement_get_byte_colorspace(ibuf);
+        }
+      }
+      composite_images_release(locks);
+      return r_width > 0 && r_height > 0;
     }
-    composite_images_release(locks);
-    return r_width > 0 && r_height > 0;
   }
   return false;
 }

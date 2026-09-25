@@ -15,6 +15,7 @@
 #include "BKE_lib_query.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh_maps.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -2886,7 +2887,10 @@ TEST_F(PaintLayersDescription, mesh_map_row_kind_and_type)
   EXPECT_EQ(row->mesh_map_type, MA_MESH_MAP_EDGE);
 
   BKE_paint_layers_default_channels_apply(*ma, *row);
-  EXPECT_EQ(row->channels_num, 0);
+  /* A MESH_MAP row paints the material's shared atlas: it defaults to Base Color alone, and the
+   * user opts into more channels like on a Paint row (spec M2). */
+  ASSERT_EQ(row->channels_num, 1);
+  EXPECT_EQ(row->channels[0].channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
 }
 
 TEST_F(PaintLayersDescription, mesh_map_type_set_refuses_other_sources)
@@ -3032,6 +3036,46 @@ TEST_F(PaintLayersDescription, rna_correction_add_accepts_mesh_map)
   MaterialPaintLayer *refused = rna_mesh_map_correction_add(
       owner_ptr, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
   EXPECT_EQ(refused, nullptr);
+}
+
+/** Guard: the MESH_MAP branch of #BKE_paint_layers_default_channels_apply — a new row paints the
+ * material's shared atlas in Base Color and opts into more like a Paint row; revert it and the row
+ * carries no channel. */
+TEST_F(PaintLayersDescription, mesh_map_row_gets_base_color_channel)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapBaseColor");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->channels_num, 0);
+
+  /* The row-creation paths that apply the defaults (RNA add, the outliner, the shading editor)
+   * leave the row painting Base Color alone, enabled. */
+  BKE_paint_layers_default_channels_apply(*ma, *row);
+  ASSERT_EQ(row->channels_num, 1);
+  EXPECT_EQ(row->channels[0].channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_EQ(row->channels[0].state, MA_PAINT_LAYER_CHANNEL_ENABLED);
+
+  /* A second apply does not duplicate the record. */
+  BKE_paint_layers_default_channels_apply(*ma, *row);
+  EXPECT_EQ(row->channels_num, 1);
+}
+
+/** Guard: #BKE_mesh_maps_slot_image_set tags the material edited (mesh_maps.cc) — the atlas is a
+ * map a MESH_MAP row reads, so re-pointing a slot is a structural edit that rebuilds the tree. */
+TEST_F(PaintLayersDescription, mesh_map_slot_image_set_marks_the_material_edited)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapSlotTag");
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_SLOTS_STALE);
+
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *atlas = BKE_image_add_generated(
+      bmain, 4, 4, "Atlas", 32, false, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(atlas, nullptr);
+
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+  EXPECT_TRUE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN);
+  EXPECT_TRUE(ma->paint_layers_flag & MA_PAINT_LAYERS_SLOTS_STALE);
 }
 
 /** \} */

@@ -138,7 +138,7 @@ bool composite_layer_subtree_has_channel(const Material &material,
   if (BKE_paint_layers_material_live_image(material, layer, channel, &live_image, &live_iuser)) {
     return true;
   }
-  if (paint_layer_channel_present(layer, channel)) {
+  if (paint_layer_channel_present(material, layer, channel)) {
     return true;
   }
   if (!BKE_paint_layers_is_folder(layer)) {
@@ -185,10 +185,6 @@ bool composite_image_layers_build(const Material &material,
     if (BKE_paint_layers_role(*layer) != PaintLayerRole::Layer) {
       /* A correction row is not composited here; a Custom and a Material layer are, either
        * through their bake below or, without one, by dropping out with no channel records. */
-      continue;
-    }
-    if (layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
-      /* v1 draws a geometry map nowhere: the row contributes no pixels on either side. */
       continue;
     }
 
@@ -242,10 +238,11 @@ bool composite_image_layers_build(const Material &material,
         continue;
       }
     }
-    else if (!live && !live_map && !paint_layer_channel_present(*layer, channel)) {
+    else if (!live && !live_map && !paint_layer_channel_present(material, *layer, channel)) {
       continue;
     }
-    else if (!live && !live_map && paint_layer_channel_image(*layer, channel) == nullptr &&
+    else if (!live && !live_map &&
+             paint_layer_channel_image(material, *layer, channel) == nullptr &&
              !BKE_paint_layers_kind_info(layer->source).uses_fill_color)
     {
       /* Mirrors the generator: a non-Fill row with no map covers nothing unless its flat value is
@@ -282,7 +279,11 @@ bool composite_image_layers_build(const Material &material,
       if ((correction.flag & MA_PAINT_LAYER_ENABLED) == 0) {
         return;
       }
-      if (!ELEM(correction.source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+      if (!ELEM(correction.source,
+                MA_PAINT_LAYER_SOURCE_IMAGE,
+                MA_PAINT_LAYER_SOURCE_CONSTANT,
+                MA_PAINT_LAYER_SOURCE_MESH_MAP))
+      {
         return;
       }
       const bool fill = BKE_paint_layers_source_type(correction) ==
@@ -301,15 +302,21 @@ bool composite_image_layers_build(const Material &material,
         out_correction.has_constant_color = true;
       }
       else {
+        const bool mesh_map = correction.source == MA_PAINT_LAYER_SOURCE_MESH_MAP;
         Image *correction_image = is_content ?
-                                      paint_layer_channel_image(correction, channel) :
-                                      paint_layer_mask_correction_image(correction, channel);
+                                      paint_layer_channel_image(material, correction, channel) :
+                                      paint_layer_mask_correction_image(material, correction, channel);
         if (correction_image == nullptr) {
           /* Absent in this channel: nothing to composite for it. */
           return;
         }
         out_correction.image = correction_image;
         out_correction.iuser = nullptr;
+        out_correction.mesh_map = mesh_map;
+        out_correction.mesh_map_scalar = mesh_map &&
+                                         paint_layer_mesh_map_is_scalar(correction.mesh_map_type);
+        /* A MESH_MAP mask item reads the atlas R, never the mean of its RGB. */
+        out_correction.mesh_map_mask_reads_red = mesh_map && !is_content;
       }
       /* A content correction changes the colour, so the Normal channel routes it through the
        * combine. A mask item lays its coverage over the factor: MIX replaces the factor with the
@@ -347,7 +354,9 @@ bool composite_image_layers_build(const Material &material,
      * generator's own gate at #channel_tracks_content_alpha. */
     out.tracks_content_alpha =
         BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel)) &&
-        layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL;
+        !ELEM(layer->source,
+              MA_PAINT_LAYER_SOURCE_MATERIAL,
+              MA_PAINT_LAYER_SOURCE_MESH_MAP);
     /* Set when the row being collected sits inside this folder: the folder is still emitted, but
      * with only the part of its contents that lies below the row, and the walk stops after it. */
     bool stop_found_inside = false;
@@ -375,17 +384,23 @@ bool composite_image_layers_build(const Material &material,
         out.color_alpha_coverage = layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL;
       }
       else {
-        Image *image = paint_layer_channel_image(*layer, channel);
+        Image *image = paint_layer_channel_image(material, *layer, channel);
         if (image != nullptr) {
           out.color_image = image;
           /* The description carries no per-node #ImageUser; the default one is what a plain map
            * uses. */
           out.color_iuser = nullptr;
-          /* A fresh map is transparent where nothing was painted; that texel must show the rows
-           * below rather than cover them with the map's black, as the generated chain does. A
-           * Material row is the exception: its channel map (a real bake is opaque) never carries
-           * the row's coverage, so its content coverage stays 1. */
-          out.color_alpha_coverage = layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL;
+          /* A MESH_MAP atlas is opaque in the model (its alpha is ignored), so it never carries the
+           * row's coverage; the CPU reads it straight. A fresh paint map is transparent where
+           * nothing was painted; that texel must show the rows below rather than cover them with the
+           * map's black, as the generated chain does. A Material row is the exception: its channel
+           * map (a real bake is opaque) never carries the row's coverage either. */
+          const bool mesh_map = layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP;
+          out.is_mesh_map = mesh_map;
+          out.is_mesh_map_scalar = mesh_map &&
+                                   paint_layer_mesh_map_is_scalar(layer->mesh_map_type);
+          out.color_alpha_coverage = !mesh_map &&
+                                     layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL;
         }
         else {
           /* A constant row: a Fill's colour, or a channel with no map. */

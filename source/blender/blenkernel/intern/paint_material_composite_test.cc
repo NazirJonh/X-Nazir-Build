@@ -12,6 +12,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh_maps.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -21,11 +22,13 @@
 #include "BKE_paint_material_composite.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_index_range.hh"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_uuid.h"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <utility>
 
@@ -1231,6 +1234,180 @@ TEST_F(PaintLayersCompositeTest, blend_mode_is_the_generated_mix_mode)
     scan(scan, *ma->paint_layers_tree);
     EXPECT_TRUE(found) << "blend " << int(expect.blend) << " -> ramp " << expect.ramp;
   }
+}
+
+namespace {
+
+/** A float Non-Color atlas of \a w x \a h filled per texel from \a fill, alpha one. */
+template<typename Fill>
+Image *add_atlas(Main &bmain, const char *name, const int w, const int h, Fill fill)
+{
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      &bmain, w, h, name, 32, /*floatbuf=*/true, IMA_GENTYPE_BLANK, black, false, true, false);
+  EXPECT_NE(image, nullptr);
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+  EXPECT_NE(ibuf, nullptr);
+  if (ibuf != nullptr) {
+    EXPECT_NE(ibuf->float_data(), nullptr);
+    if (ibuf->float_data() != nullptr) {
+      float *pixels = ibuf->float_data_for_write();
+      for (const int y : IndexRange(h)) {
+        for (const int x : IndexRange(w)) {
+          fill(pixels + (int64_t(y) * w + x) * 4, x, y);
+        }
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+  }
+  return image;
+}
+
+}  // namespace
+
+/** Guard: the CPU's MESH_MAP resample (#composite_resample_mesh_map) — bilinear onto the channel's
+ * reference grid, the scalar atlas' R spread to grey, alpha one; revert it and the values drift. */
+TEST_F(PaintLayersCompositeTest, mesh_map_row_values_match_the_resample_formula)
+{
+  /* The Paint map below defines the 4x4 reference grid. */
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 200, 40, 10, 255));
+
+  /* A 2x2 scalar atlas with known R values (row-major), small enough that the outer reference
+   * texels read past the atlas edge and exercise the Extend clamp. */
+  const float values[2][2] = {{0.1f, 0.3f}, {0.5f, 0.7f}};
+  Image *atlas = add_atlas(*bmain, "Atlas", 2, 2, [&](float *p, const int x, const int y) {
+    p[0] = values[y][x];
+    p[1] = 0.0f;
+    p[2] = 0.0f;
+    p[3] = 1.0f;
+  });
+  ASSERT_NE(atlas, nullptr);
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+
+  /* The bilinear the resample is specified to do: the reference texel centre `(x + 0.5) / 4`
+   * looked up in the atlas at `u * W_atlas - 0.5`, clamped to the edge. */
+  auto manual_red = [&](const int x, const int y) {
+    const float su = (float(x) + 0.5f) / 4.0f * 2.0f - 0.5f;
+    const float sv = (float(y) + 0.5f) / 4.0f * 2.0f - 0.5f;
+    const int x1 = int(floorf(su));
+    const int y1 = int(floorf(sv));
+    const float a = su - float(x1);
+    const float b = sv - float(y1);
+    auto clamp_texel = [](const int v) {
+      return min_ii(max_ii(v, 0), 1);
+    };
+    const float p11 = values[clamp_texel(y1)][clamp_texel(x1)];
+    const float p21 = values[clamp_texel(y1)][clamp_texel(x1 + 1)];
+    const float p12 = values[clamp_texel(y1 + 1)][clamp_texel(x1)];
+    const float p22 = values[clamp_texel(y1 + 1)][clamp_texel(x1 + 1)];
+    return (1.0f - a) * (1.0f - b) * p11 + a * (1.0f - b) * p21 + (1.0f - a) * b * p12 +
+           a * b * p22;
+  };
+
+  /* The atlas row covers fully, so its grey is the whole result. */
+  for (const int px : {0, 1, 2, 3}) {
+    const std::array<float, 4> got = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, px, px);
+    const float red = manual_red(px, px);
+    EXPECT_NEAR(got[0], red, 1e-4f) << px;
+    EXPECT_NEAR(got[1], red, 1e-4f) << px;
+    EXPECT_NEAR(got[2], red, 1e-4f) << px;
+    EXPECT_NEAR(got[3], 1.0f, 1e-4f) << px;
+  }
+}
+
+/** Guard: the CPU's MESH_MAP mask item reads the atlas R (#mesh_map_mask_reads_red), never the
+ * mean of its RGB; revert it and a non-scalar atlas masks by its luminance. */
+TEST_F(PaintLayersCompositeTest, mesh_map_mask_item_reads_the_atlas_red)
+{
+  MaterialPaintLayer *owner = add_paint_layer("Owner",
+                                              add_solid_image("Owner", 4, 30, 200, 90, 255));
+  const std::array<float, 4> baseline = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 1, 1);
+
+  /* A non-scalar atlas: R is 1, G is 0, B is 0.5. The coverage is R; the mean would be 0.5. */
+  Image *atlas = add_atlas(*bmain, "NormalAtlas", 2, 2, [](float *p, const int /*x*/, const int /*y*/) {
+    p[0] = 1.0f;
+    p[1] = 0.0f;
+    p[2] = 0.5f;
+    p[3] = 1.0f;
+  });
+  ASSERT_NE(atlas, nullptr);
+
+  MaterialPaintLayer *item = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MESH_MAP, "Normal Mask");
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_mesh_map_type_set(*ma, item, MA_MESH_MAP_NORMAL_WORLD));
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_NORMAL_WORLD, atlas));
+
+  const std::array<float, 4> got = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 1, 1);
+  /* R is one: the factor stays 1 and the owner's colour stands untouched. */
+  EXPECT_NEAR(got[0], baseline[0], 1e-4f);
+  EXPECT_NEAR(got[1], baseline[1], 1e-4f);
+  EXPECT_NEAR(got[2], baseline[2], 1e-4f);
+  EXPECT_NEAR(got[3], baseline[3], 1e-4f);
+}
+
+/** Guard: the CPU acquires the atlas' buffer on demand (#composite_image_acquire, like every
+ * painted map) instead of the resolver's old loaded-buffer check; restore that check and an
+ * assigned-but-unloaded atlas drops out of the CPU composite. */
+TEST_F(PaintLayersCompositeTest, mesh_map_atlas_buffer_is_acquired_on_demand)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 200, 40, 10, 255));
+
+  const float values[2][2] = {{0.1f, 0.3f}, {0.5f, 0.7f}};
+  Image *atlas = add_atlas(*bmain, "Atlas", 2, 2, [&](float *p, const int x, const int y) {
+    p[0] = values[y][x];
+    p[1] = 0.0f;
+    p[2] = 0.0f;
+    p[3] = 1.0f;
+  });
+  ASSERT_NE(atlas, nullptr);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+
+  /* The same bilinear the resample is specified to do, at the 2x2 atlas. */
+  auto manual_red = [&](const int x, const int y) {
+    const float su = (float(x) + 0.5f) / 4.0f * 2.0f - 0.5f;
+    const float sv = (float(y) + 0.5f) / 4.0f * 2.0f - 0.5f;
+    const int x1 = int(floorf(su));
+    const int y1 = int(floorf(sv));
+    const float a = su - float(x1);
+    const float b = sv - float(y1);
+    auto clamp_texel = [](const int v) {
+      return min_ii(max_ii(v, 0), 1);
+    };
+    const float p11 = values[clamp_texel(y1)][clamp_texel(x1)];
+    const float p21 = values[clamp_texel(y1)][clamp_texel(x1 + 1)];
+    const float p12 = values[clamp_texel(y1 + 1)][clamp_texel(x1)];
+    const float p22 = values[clamp_texel(y1 + 1)][clamp_texel(x1 + 1)];
+    return (1.0f - a) * (1.0f - b) * p11 + a * (1.0f - b) * p21 + (1.0f - a) * b * p12 +
+           a * b * p22;
+  };
+
+  for (const int px : {0, 1, 2, 3}) {
+    const std::array<float, 4> got = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, px, px);
+    const float red = manual_red(px, px);
+    EXPECT_NEAR(got[0], red, 1e-4f) << px;
+    EXPECT_NEAR(got[3], 1.0f, 1e-4f) << px;
+  }
+
+  /* Unload the buffer and evaluate again: the stack must not be rejected, the CPU reloads the
+   * buffer, and the row reads whatever the re-acquired buffer holds. */
+  BKE_image_free_buffers(atlas);
+  ASSERT_FALSE(BKE_image_has_loaded_ibuf(atlas));
+  const std::array<float, 4> reloaded = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 1, 1);
+  EXPECT_TRUE(BKE_image_has_loaded_ibuf(atlas));
+  /* The re-acquired atlas holds the generated fill (black): the grey collapses to zero. */
+  EXPECT_NEAR(reloaded[0], 0.0f, 1e-4f);
+  EXPECT_NEAR(reloaded[3], 1.0f, 1e-4f);
 }
 
 /** \} */

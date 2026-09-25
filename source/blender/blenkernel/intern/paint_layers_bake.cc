@@ -177,7 +177,7 @@ void BKE_paint_layers_bake_finalize(Material &ma, MaterialPaintLayer &layer)
     return;
   }
   uint32_t hash[2];
-  BKE_paint_layers_bake_hash(layer, hash);
+  BKE_paint_layers_bake_hash(ma, layer, hash);
   layer.bake->hash[0] = hash[0];
   layer.bake->hash[1] = hash[1];
   BKE_paint_layers_bake_subscribe(ma, layer);
@@ -953,7 +953,7 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
         continue;
       }
       uint32_t hash[2];
-      BKE_paint_layers_bake_hash(layer, hash);
+      BKE_paint_layers_bake_hash(ma, layer, hash);
       bake->hash[0] = hash[0];
       bake->hash[1] = hash[1];
       BKE_paint_layers_bake_subscribe(ma, layer);
@@ -1540,7 +1540,7 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
       continue;
     }
     uint32_t hash[2];
-    BKE_paint_layers_bake_hash(*layer, hash);
+    BKE_paint_layers_bake_hash(*ma, *layer, hash);
     layer->bake->hash[0] = hash[0];
     layer->bake->hash[1] = hash[1];
     BKE_paint_layers_bake_subscribe(*ma, *layer);
@@ -2201,7 +2201,10 @@ static uint64_t bake_hash_custom_interface(uint64_t h, const bNodeTree &group)
   return h;
 }
 
-static uint64_t bake_hash_layer(uint64_t h, const MaterialPaintLayer &layer, const bool is_child)
+static uint64_t bake_hash_layer(uint64_t h,
+                                const Material *ma,
+                                const MaterialPaintLayer &layer,
+                                const bool is_child)
 {
   if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
     /* A Material layer's bake is its source material rendered into maps, and depends on nothing
@@ -2222,9 +2225,19 @@ static uint64_t bake_hash_layer(uint64_t h, const MaterialPaintLayer &layer, con
     return h;
   }
   h = bake_hash_mix(h, uint8_t(layer.source));
-  /* Which geometry map a MESH_MAP row reads decides its result; only those rows carry the field. */
+  /* Which geometry map a MESH_MAP row reads decides its result; only those rows carry the field.
+   * The atlas Image's identity is folded in when the owning material is known, so pointing the slot
+   * at another Image invalidates the row's bake while a pixel edit (which does not change the UID)
+   * does not. */
   if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
     h = bake_hash_mix(h, uint8_t(layer.mesh_map_type));
+    if (ma != nullptr) {
+      const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(*ma, layer.mesh_map_type);
+      h = bake_hash_mix(h,
+                        (slot != nullptr && slot->image != nullptr) ?
+                            slot->image->id.session_uid :
+                            0);
+    }
   }
   h = bake_hash_mix(h, uint8_t(layer.blend));
   /* The non-visibility flags of the row itself. Visibility is appended only for a child, so the
@@ -2272,17 +2285,17 @@ static uint64_t bake_hash_layer(uint64_t h, const MaterialPaintLayer &layer, con
   for (const MaterialPaintLayer &effect :
        *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.effects))
   {
-    h = bake_hash_layer(h, effect, true);
+    h = bake_hash_layer(h, ma, effect, true);
   }
   for (const MaterialPaintLayer &mask_item :
        *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
   {
-    h = bake_hash_layer(h, mask_item, true);
+    h = bake_hash_layer(h, ma, mask_item, true);
   }
   for (const MaterialPaintLayer &child :
        *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
   {
-    h = bake_hash_layer(h, child, true);
+    h = bake_hash_layer(h, ma, child, true);
   }
   if (is_child) {
     h = bake_hash_mix(h, (layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1 : 0);
@@ -2292,7 +2305,17 @@ static uint64_t bake_hash_layer(uint64_t h, const MaterialPaintLayer &layer, con
 
 void BKE_paint_layers_bake_hash(const MaterialPaintLayer &layer, uint32_t r_hash[2])
 {
-  const uint64_t hash = bake_hash_layer(1469598103934665603ull, layer, false);
+  const uint64_t hash = bake_hash_layer(1469598103934665603ull, nullptr, layer, false);
+  r_hash[0] = uint32_t(hash & 0xFFFFFFFFu);
+  r_hash[1] = uint32_t(hash >> 32);
+}
+
+void BKE_paint_layers_bake_hash(const Material &ma,
+                                const MaterialPaintLayer &layer,
+                                uint32_t r_hash[2])
+{
+  /* The atlas identity is folded in, so a MESH_MAP row's bake invalidates when its slot changes. */
+  const uint64_t hash = bake_hash_layer(1469598103934665603ull, &ma, layer, false);
   r_hash[0] = uint32_t(hash & 0xFFFFFFFFu);
   r_hash[1] = uint32_t(hash >> 32);
 }
@@ -2303,7 +2326,7 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
     return false;
   }
   uint32_t hash[2];
-  BKE_paint_layers_bake_hash(layer, hash);
+  BKE_paint_layers_bake_hash(ma, layer, hash);
   if (hash[0] != layer.bake->hash[0] || hash[1] != layer.bake->hash[1] ||
       (hash[0] == 0 && hash[1] == 0))
   {

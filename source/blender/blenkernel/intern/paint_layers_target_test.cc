@@ -674,7 +674,8 @@ TEST_F(PaintLayersTargetTest, mesh_map_row_adds_nothing_to_the_cpu_composite)
   float after[4];
   composite_pixel(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 8, after);
 
-  /* The row names a map the material owns; v1 contributes nothing, so the result is unchanged. */
+  /* The row's map type has no atlas assigned yet (no slot image): it reads nothing, so it
+   * contributes nothing and the result is unchanged (spec M2 item 4). */
   for (int i = 0; i < 4; i++) {
     EXPECT_FLOAT_EQ(after[i], before[i]) << i;
   }

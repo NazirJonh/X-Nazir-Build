@@ -2531,6 +2531,9 @@ static void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_property_pointer_funcs(prop, nullptr, "rna_MaterialMeshMapSlot_image_set", nullptr, nullptr);
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Image", "The shared atlas for this map type, or none");
+  /* The atlas is a map a MESH_MAP row reads, so changing it is a structural edit: the generated
+   * tree has to be rebuilt. Same update a channel map's setter uses. */
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   /* settings */
   prop = RNA_def_property(srna, "mesh_map_settings", PROP_POINTER, PROP_NONE);

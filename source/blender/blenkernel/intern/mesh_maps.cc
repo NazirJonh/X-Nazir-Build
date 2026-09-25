@@ -15,6 +15,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BKE_lib_id.hh"
+#include "BKE_paint_layers.hh"
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
@@ -82,6 +83,10 @@ bool BKE_mesh_maps_slot_image_set(Material &ma, const int8_t type, Image *image)
   if (slot->image != nullptr) {
     id_us_plus(&slot->image->id);
   }
+  /* The atlas is a map a MESH_MAP row reads, so pointing the slot at another Image is a structural
+   * edit: the generated tree is stale and the evaluated copy has to sync. Mirrors what
+   * #BKE_paint_layers_channel_set_image does for a channel map. */
+  BKE_paint_layers_tag_edited(ma);
   return true;
 }
 

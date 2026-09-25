@@ -1203,6 +1203,16 @@ void BKE_paint_layers_custom_bake_apply(Main &bmain,
 void BKE_paint_layers_bake_hash(const MaterialPaintLayer &layer, uint32_t r_hash[2]);
 
 /**
+ * Like #BKE_paint_layers_bake_hash, but folds in the state that lives on \a ma rather than the row:
+ * the identity of the MESH_MAP atlas a MESH_MAP row reads. #BKE_paint_layers_bake_is_valid and the
+ * bake writers use this overload so pointing a mesh map slot at another Image invalidates the row's
+ * bake while a pixel edit (which does not change the session UID) does not.
+ */
+void BKE_paint_layers_bake_hash(const Material &ma,
+                                const MaterialPaintLayer &layer,
+                                uint32_t r_hash[2]);
+
+/**
  * Whether \a layer's stored bake can stand in for its live subtree right now.
  *
  * True when a bake exists, its stored hash matches #BKE_paint_layers_bake_hash, and the runtime

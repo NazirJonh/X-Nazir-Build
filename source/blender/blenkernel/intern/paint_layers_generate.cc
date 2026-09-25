@@ -508,7 +508,7 @@ bool layer_subtree_has_channel(const Material &ma,
   {
     return true;
   }
-  if (paint_layer_channel_present(layer, channel)) {
+  if (paint_layer_channel_present(ma, layer, channel)) {
     return true;
   }
   if (!BKE_paint_layers_is_folder(layer)) {
@@ -672,12 +672,12 @@ bool row_channel_substituted(const Material &ma,
  * or a constant a Fill carries. The build and the group decision both ask this, so they never
  * disagree about which rows exist.
  */
-bool leaf_participates(const MaterialPaintLayer &layer, const int channel)
+bool leaf_participates(const Material &ma, const MaterialPaintLayer &layer, const int channel)
 {
-  if (!paint_layer_channel_present(layer, channel)) {
+  if (!paint_layer_channel_present(ma, layer, channel)) {
     return false;
   }
-  if (paint_layer_channel_image(layer, channel) != nullptr) {
+  if (paint_layer_channel_image(ma, layer, channel) != nullptr) {
     return true;
   }
   if (BKE_paint_layers_role(layer) == PaintLayerRole::Layer &&
@@ -723,7 +723,7 @@ bool layer_row_has_group(const Material &ma,
   {
     return true;
   }
-  return leaf_participates(layer, channel);
+  return leaf_participates(ma, layer, channel);
 }
 
 /**
@@ -818,6 +818,7 @@ uint64_t topology_hash_map_id(const Image *image)
  * Opacity and a Fill constant are inputs, so they are not here.
  */
 uint64_t topology_hash_correction(uint64_t hash,
+                                  const Material &ma,
                                   const MaterialPaintLayer &correction,
                                   const Span<int> wired_channels,
                                   const bool mask_item)
@@ -841,7 +842,7 @@ uint64_t topology_hash_correction(uint64_t hash,
      * data texture is left pre-multiplied by the Image Texture node, a non-data one is straightened
      * there. A change of the map's colorspace must therefore rebuild the group. */
     const Image *mask_image = paint_layer_mask_correction_image(
-        correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+        ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     const bool data = mask_image != nullptr &&
                       IMB_colormanagement_space_name_is_data(mask_image->colorspace_settings.name);
     hash = topology_hash_mix(hash, data ? 1 : 0);
@@ -851,8 +852,9 @@ uint64_t topology_hash_correction(uint64_t hash,
     /* A content correction blends by its channel override; a mask item by the row blend. */
     hash = topology_hash_mix(
         hash, uint64_t(BKE_paint_layers_channel_blend_effective(correction, channel)));
-    const Image *image = mask_item ? paint_layer_mask_correction_image(correction, channel) :
-                                     paint_layer_channel_image(correction, channel);
+    const Image *image = mask_item ?
+                             paint_layer_mask_correction_image(ma, correction, channel) :
+                             paint_layer_channel_image(ma, correction, channel);
     hash = topology_hash_mix(hash, topology_hash_map_id(image));
     if (!mask_item && !fill) {
       /* A content effect reads its own map per channel; whether that map is data decides whether
@@ -927,7 +929,7 @@ uint64_t topology_hash_layer(uint64_t hash,
                              !(live_constant || live_map_probe);
     hash = topology_hash_mix(
         hash,
-        image_wired ? topology_hash_map_id(paint_layer_channel_image(layer, channel)) : 0);
+        image_wired ? topology_hash_map_id(paint_layer_channel_image(ma, layer, channel)) : 0);
     /* Whether the channel is currently shown live as a constant is topology (it decides whether the
      * row's group carries a live-constant input at all); the constant's own value is not (ТЗ-26): it
      * is a group input, filled by #create_value_inputs and kept current by #values_sync_socket via
@@ -957,10 +959,10 @@ uint64_t topology_hash_layer(uint64_t hash,
     }
   }
   for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(layer)) {
-    hash = topology_hash_correction(hash, *effect, wired_channels, false);
+    hash = topology_hash_correction(hash, ma, *effect, wired_channels, false);
   }
   for (const MaterialPaintLayer *mask_item : BKE_paint_layers_mask_items(layer)) {
-    hash = topology_hash_correction(hash, *mask_item, wired_channels, true);
+    hash = topology_hash_correction(hash, ma, *mask_item, wired_channels, true);
   }
   for (const MaterialPaintLayer &child :
        *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
@@ -1345,8 +1347,8 @@ void paint_layers_tree_build(const Material &ma,
     for (const int channel : wired_channels) {
       const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
           eMaterialPaintChannel(channel));
-      if (!paint_layer_channel_present(layer, channel) ||
-          paint_layer_channel_image(layer, channel) != nullptr)
+      if (!paint_layer_channel_present(ma, layer, channel) ||
+          paint_layer_channel_image(ma, layer, channel) != nullptr)
       {
         continue;
       }
@@ -1636,11 +1638,6 @@ void paint_layers_tree_build(const Material &ma,
         if (row_is_removed(ma, *layer)) {
           return {};
         }
-        /* A MESH_MAP row names a geometry map the material owns; v1 draws it nowhere. It behaves
-         * like a Paint row with no map: no nodes, no contribution to any channel. */
-        if (layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
-          return {};
-        }
         /* The aliases keep the row body unchanged; for a leaf target points at the row's own group,
          * where the value socket mirrors each root input the row uses. */
         bNodeTree &tree = *target.tree;
@@ -1767,10 +1764,10 @@ void paint_layers_tree_build(const Material &ma,
           }
         }
         else if (!substituted && !BKE_paint_layers_is_folder(*layer) &&
-                 !leaf_participates(*layer, channel) && !live_constant && !live_map &&
+                 !leaf_participates(ma, *layer, channel) && !live_constant && !live_map &&
                  source_group_instance == nullptr)
         {
-          if (!paint_layer_channel_present(*layer, channel) &&
+          if (!paint_layer_channel_present(ma, *layer, channel) &&
               layer->source == MA_PAINT_LAYER_SOURCE_NODE_GROUP &&
               custom_bake_missing_warn_once(ma, *layer))
           {
@@ -1869,7 +1866,7 @@ void paint_layers_tree_build(const Material &ma,
          * never falls through to an Image result. */
         Image *image = (live_constant || live_map || source_group_instance != nullptr) ?
                            nullptr :
-                           paint_layer_channel_image(*layer, channel);
+                           paint_layer_channel_image(ma, *layer, channel);
         if (live_constant) {
           /* The active Material row shows its source's live constant rather than its baked map.
            * The value lives in another material, so it is not topology (ТЗ-26): it is read from
@@ -1962,8 +1959,47 @@ void paint_layers_tree_build(const Material &ma,
           id_us_plus(&image->id);
           map->location[0] = location_x;
           map->location[1] = location_y;
+          /* A MESH_MAP atlas is sampled with Extend (clamp to the edge), the mode the CPU's own
+           * bilinear resample uses, so a differently sized atlas agrees at its borders. A painted
+           * map keeps its Repeat default. Read through the shared resolver so the two sides cannot
+           * disagree about whether the row is a mesh map at all. */
+          const bool mesh_map = layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP &&
+                                paint_layer_mesh_map_image(ma, *layer) == image;
+          if (mesh_map) {
+            if (NodeTexImage *storage = static_cast<NodeTexImage *>(map->storage)) {
+              storage->extension = SHD_IMAGE_EXTENSION_EXTEND;
+            }
+          }
           current.source_node = map;
           current.source = socket_out(*map, "Color");
+          /* A scalar atlas (AO, Curvature, Edge) stores its value in R; spread it across RGB so a
+           * colour channel reads it as grey and the CPU reads the same. An RGB atlas (Normal, IDs)
+           * is wired as it is. */
+          if (mesh_map && paint_layer_mesh_map_is_scalar(layer->mesh_map_type)) {
+            bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+            bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineXYZ"_ustr);
+            if (separate != nullptr && combine != nullptr) {
+              bNodeSocket *sep_vector = socket_in(*separate, "Vector");
+              bNodeSocket *sep_x = socket_out(*separate, "X");
+              bNodeSocket *combine_x = socket_in(*combine, "X");
+              bNodeSocket *combine_y = socket_in(*combine, "Y");
+              bNodeSocket *combine_z = socket_in(*combine, "Z");
+              if (sep_vector != nullptr && sep_x != nullptr && combine_x != nullptr &&
+                  combine_y != nullptr && combine_z != nullptr)
+              {
+                separate->location[0] = location_x + 80.0f;
+                separate->location[1] = location_y;
+                combine->location[0] = location_x + 160.0f;
+                combine->location[1] = location_y;
+                bke::node_add_link(tree, *map, *current.source, *separate, *sep_vector);
+                bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_x);
+                bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_y);
+                bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_z);
+                current.source_node = combine;
+                current.source = socket_out(*combine, "Vector");
+              }
+            }
+          }
           leaf_map_node = map;
           /* A Paint or Fill map carries its content alpha in the Image Texture Alpha output; it
            * starts the content-alpha chain here rather than being read back out of the Color's own
@@ -2161,7 +2197,9 @@ void paint_layers_tree_build(const Material &ma,
        * material's transparency already arrived as `layer_factor` from the Alpha input. */
       bNode *content_cov_node = nullptr;
       bNodeSocket *content_cov = nullptr;
-      if (leaf_map_node != nullptr && layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      if (leaf_map_node != nullptr &&
+          !ELEM(layer->source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_MESH_MAP))
+      {
         content_cov = socket_out(*leaf_map_node, "Alpha");
         content_cov_node = (content_cov != nullptr) ? leaf_map_node : nullptr;
       }
@@ -2196,8 +2234,10 @@ void paint_layers_tree_build(const Material &ma,
         const bool normal_channel = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
         for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(*layer)) {
           const MaterialPaintLayer &correction = *effect;
-          if (correction.source != MA_PAINT_LAYER_SOURCE_IMAGE &&
-              correction.source != MA_PAINT_LAYER_SOURCE_CONSTANT)
+          if (!ELEM(correction.source,
+                    MA_PAINT_LAYER_SOURCE_IMAGE,
+                    MA_PAINT_LAYER_SOURCE_CONSTANT,
+                    MA_PAINT_LAYER_SOURCE_MESH_MAP))
           {
             continue;
           }
@@ -2238,27 +2278,66 @@ void paint_layers_tree_build(const Material &ma,
             }
           }
           else {
-            Image *correction_image = paint_layer_channel_image(correction, channel);
+            const bool correction_mesh_map = correction.source == MA_PAINT_LAYER_SOURCE_MESH_MAP;
+            Image *correction_image = paint_layer_channel_image(ma, correction, channel);
             if (correction_image == nullptr) {
               continue;
             }
             /* Maps from files saved before #IMA_GPU_LINEAR_PREMUL existed, or assigned by hand,
-             * get it here; its texture is rebuilt because the storage format changes. */
-            if ((correction_image->flag & IMA_GPU_LINEAR_PREMUL) == 0) {
+             * get it here; its texture is rebuilt because the storage format changes. A MESH_MAP
+             * atlas is a material-owned image, not a paint map, so it is left alone. */
+            if (!correction_mesh_map && (correction_image->flag & IMA_GPU_LINEAR_PREMUL) == 0) {
               correction_image->flag |= IMA_GPU_LINEAR_PREMUL;
               BKE_image_free_gputextures(correction_image);
             }
-            content_map_is_data = IMB_colormanagement_space_name_is_data(
-                correction_image->colorspace_settings.name);
+            content_map_is_data = !correction_mesh_map &&
+                                  IMB_colormanagement_space_name_is_data(
+                                      correction_image->colorspace_settings.name);
             correction_source = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
             if (correction_source != nullptr) {
               correction_source->id = &correction_image->id;
               id_us_plus(&correction_image->id);
               correction_source->location[0] = location_x;
               correction_source->location[1] = location_y - 160.0f;
+              if (correction_mesh_map) {
+                if (NodeTexImage *storage = static_cast<NodeTexImage *>(
+                        correction_source->storage))
+                {
+                  storage->extension = SHD_IMAGE_EXTENSION_EXTEND;
+                }
+              }
               correction_color = socket_out(*correction_source, "Color");
               correction_alpha = socket_out(*correction_source, "Alpha");
               correction_color_node = correction_source;
+              /* A scalar atlas spreads its R across RGB, matching the row and the CPU. */
+              if (correction_mesh_map &&
+                  paint_layer_mesh_map_is_scalar(correction.mesh_map_type))
+              {
+                bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+                bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineXYZ"_ustr);
+                if (separate != nullptr && combine != nullptr) {
+                  bNodeSocket *sep_vector = socket_in(*separate, "Vector");
+                  bNodeSocket *sep_x = socket_out(*separate, "X");
+                  bNodeSocket *combine_x = socket_in(*combine, "X");
+                  bNodeSocket *combine_y = socket_in(*combine, "Y");
+                  bNodeSocket *combine_z = socket_in(*combine, "Z");
+                  if (sep_vector != nullptr && sep_x != nullptr && combine_x != nullptr &&
+                      combine_y != nullptr && combine_z != nullptr)
+                  {
+                    separate->location[0] = location_x + 80.0f;
+                    separate->location[1] = location_y - 160.0f;
+                    combine->location[0] = location_x + 160.0f;
+                    combine->location[1] = location_y - 160.0f;
+                    bke::node_add_link(
+                        tree, *correction_source, *correction_color, *separate, *sep_vector);
+                    bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_x);
+                    bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_y);
+                    bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_z);
+                    correction_color_node = combine;
+                    correction_color = socket_out(*combine, "Vector");
+                  }
+                }
+              }
             }
             if (correction_color == nullptr) {
               continue;
@@ -2604,6 +2683,7 @@ void paint_layers_tree_build(const Material &ma,
              * a premultiplied texture when its colorspace is not data (node_shader_tex_image.cc),
              * so only a data map still needs the chain's own Divide. */
             bool mask_map_is_data = false;
+            bool mask_map_is_mesh = false;
             if (fill) {
               if (bNodeTreeInterfaceSocket **fill_iface =
                       correction_fill_inputs.lookup_ptr(&correction))
@@ -2616,7 +2696,8 @@ void paint_layers_tree_build(const Material &ma,
               }
             }
             else {
-              Image *correction_image = paint_layer_mask_correction_image(correction, channel);
+              Image *correction_image = paint_layer_mask_correction_image(
+                  ma, correction, channel);
               if (correction_image == nullptr) {
                 continue;
               }
@@ -2630,13 +2711,38 @@ void paint_layers_tree_build(const Material &ma,
               id_us_plus(&correction_image->id);
               correction_map->location[0] = location_x - 220.0f;
               correction_map->location[1] = location_y - 320.0f;
+              /* A MESH_MAP mask item reads the atlas R, the same value the CPU reads, and is
+               * sampled Extend like every other atlas read. */
+              mask_map_is_mesh = correction.source == MA_PAINT_LAYER_SOURCE_MESH_MAP;
+              if (mask_map_is_mesh) {
+                if (NodeTexImage *storage = static_cast<NodeTexImage *>(correction_map->storage)) {
+                  storage->extension = SHD_IMAGE_EXTENSION_EXTEND;
+                }
+              }
               correction_alpha = socket_out(*correction_map, "Alpha");
               gray_source_color = socket_out(*correction_map, "Color");
               gray_source_node = correction_map;
             }
             bNode *correction_gray_node = nullptr;
             bNodeSocket *correction_gray = nullptr;
-            {
+            if (mask_map_is_mesh) {
+              /* A scalar atlas: its R is the coverage directly; no mean, no Divide (the atlas is
+               * Non-Color and its alpha is ignored). */
+              bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+              if (separate == nullptr) {
+                continue;
+              }
+              bNodeSocket *sep_x = socket_out(*separate, "X");
+              bNodeSocket *sep_vector = socket_in(*separate, "Vector");
+              if (sep_x == nullptr || sep_vector == nullptr) {
+                continue;
+              }
+              bke::node_add_link(
+                  tree, *gray_source_node, *gray_source_color, *separate, *sep_vector);
+              correction_gray_node = separate;
+              correction_gray = sep_x;
+            }
+            else {
               bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
               bNode *add_xy = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
               bNode *add_z = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
@@ -2704,7 +2810,7 @@ void paint_layers_tree_build(const Material &ma,
               if (correction_alpha == nullptr || correction_map == nullptr) {
                 continue;
               }
-              if (mask_map_is_data) {
+              if (mask_map_is_data && !mask_map_is_mesh) {
                 /* The map is stored straight, but the texture upload pre-multiplied its bytes by A,
                  * so the sampled grey already carries A once; mixing it by `A * op` would apply A
                  * twice. The Image Texture node leaves a data texture pre-multiplied, so the chain
@@ -2761,7 +2867,9 @@ void paint_layers_tree_build(const Material &ma,
             if (correction_opacity == nullptr || group_input == nullptr) {
               continue;
             }
-            if (fill) {
+            if (fill || mask_map_is_mesh) {
+              /* A Fill covers fully; a MESH_MAP atlas' alpha is ignored (spec M2 §1), so its factor
+               * is the item's opacity alone and no Alpha multiply is built. */
               bke::node_add_link(
                   tree, *group_input, *correction_opacity, *correction_mix, *mix_fac);
             }
@@ -3424,8 +3532,21 @@ void paint_layers_tree_build(const Material &ma,
          * at Mix; any other blend leaves the alpha below alone, like the colour path. */
         bNode *below_content_node = previous.content_alpha_node;
         bNodeSocket *below_content = previous.content_alpha;
-        if (track_content_alpha && current.content_alpha != nullptr &&
-            current.content_alpha_node != nullptr)
+        /* An untracked row counts as opaque, like the isolated chain's `row_one`: a MESH_MAP or
+         * Material leaf exposes no Content Alpha output, yet the CPU still blends the row's full
+         * coverage by the row factor, so the chain has to see a constant one here. */
+        bNode *row_one = nullptr;
+        bNodeSocket *row_content = current.content_alpha;
+        bNode *row_content_node = current.content_alpha_node;
+        if (track_content_alpha && row_content == nullptr) {
+          row_one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+          row_content = (row_one != nullptr) ? socket_out(*row_one, "Value") : nullptr;
+          if (row_content != nullptr && row_content->default_value != nullptr) {
+            static_cast<bNodeSocketValueFloat *>(row_content->default_value)->value = 1.0f;
+          }
+          row_content_node = row_one;
+        }
+        if (track_content_alpha && row_content != nullptr && row_content_node != nullptr)
         {
           if (below_content == nullptr) {
             bNode *bottom_one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
@@ -3455,7 +3576,7 @@ void paint_layers_tree_build(const Material &ma,
               gmul->custom1 = NODE_MATH_MULTIPLY;
               gadd->custom1 = NODE_MATH_ADD;
               bke::node_add_link(
-                  tree, *current.content_alpha_node, *current.content_alpha, *gsub, *gs_a);
+                  tree, *row_content_node, *row_content, *gsub, *gs_a);
               bke::node_add_link(tree, *below_content_node, *below_content, *gsub, *gs_b);
               bke::node_add_link(tree, *gsub, *gs_out, *gmul, *gm_a);
               if (current.factor != nullptr && current.factor_node != nullptr) {
@@ -4767,7 +4888,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
-      if (paint_layer_channel_present(*layer, PAINT_MATERIAL_CHANNEL_NORMAL)) {
+      if (paint_layer_channel_present(ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL)) {
         ctx.normal_combine_group = BKE_paint_material_normal_combine_group_ensure(bmain);
         break;
       }
@@ -4890,7 +5011,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
           continue;
         }
         for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
-          if (Image *image = paint_layer_channel_image(*effect, channel)) {
+          if (Image *image = paint_layer_channel_image(ma, *effect, channel)) {
             counter.add_image(*image);
           }
         }
@@ -4899,7 +5020,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
         if (BKE_paint_layers_source_type(*mask_item) == PaintLayerSourceType::Constant) {
           continue;
         }
-        if (Image *image = paint_layer_mask_correction_image(*mask_item, 0)) {
+        if (Image *image = paint_layer_mask_correction_image(ma, *mask_item, 0)) {
           counter.add_image(*image);
         }
       }
@@ -4984,7 +5105,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
                 participates = true;
               }
               /* No wrapper (refused): the build falls back to the row's own maps. */
-              else if (Image *image = paint_layer_channel_image(layer, channel)) {
+              else if (Image *image = paint_layer_channel_image(ma, layer, channel)) {
                 counter.add_image(*image);
                 participates = true;
               }
@@ -5008,7 +5129,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
               continue;
             }
           }
-          if (Image *image = paint_layer_channel_image(layer, channel)) {
+          if (Image *image = paint_layer_channel_image(ma, layer, channel)) {
             counter.add_image(*image);
             participates = true;
           }

@@ -823,6 +823,113 @@ class MATERIAL_PT_paint_layers(MaterialButtonsPanel, Panel):
             )
 
 
+_MESH_MAP_TYPES = (
+    ('AO', "Ambient Occlusion"),
+    ('CURVATURE', "Curvature"),
+    ('NORMAL_WORLD', "Normal (World)"),
+    ('NORMAL_OBJECT', "Normal (Object)"),
+    ('ID_OBJECT', "Object ID"),
+    ('ID_MATERIAL', "Material ID"),
+    ('EDGE', "Edge"),
+)
+
+_MESH_MAP_STATUS = {
+    'NONE': ("Not baked", 'DOT'),
+    'VALID': ("Valid", 'CHECKMARK'),
+    'STALE': ("Stale", 'FILE_REFRESH'),
+    'BAKING': ("Baking", 'FILE_REFRESH'),
+    'ERROR': ("Error", 'ERROR'),
+}
+
+
+def _mesh_map_state(context, mat, map_type):
+    for state in context.object.mesh_map_states:
+        if state.material == mat and state.type == map_type:
+            return state
+    return None
+
+
+class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
+    """Mesh map atlases of the stack's owner material and the active object's bake state.
+
+    Drawn in the Layer Material tab, so the material is the owner (the active slot), never the
+    source material `context.material` may point at; the bake operator bakes the active slot too.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_mesh_maps"
+    bl_label = "Mesh Maps"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return (
+            cls._owner_material(context) is not None and
+            ob.type == 'MESH' and ob.data is not None
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        mat = self._owner_material(context)
+        ob = context.object
+
+        layout.prop_search(mat, "paint_layers_uv_map", ob.data, "uv_layers")
+        uv_name = mat.paint_layers_uv_map
+        if not uv_name:
+            layout.operator("material.mesh_map_use_active_uv", text="Use Active UV")
+        elif ob.data.uv_layers.get(uv_name) is None:
+            layout.label(
+                text="The object has no UV layer '{}'".format(uv_name),
+                icon='ERROR',
+            )
+
+        header, settings_layout = layout.panel("mesh_map_settings", default_closed=True)
+        header.label(text="Settings")
+        if settings_layout:
+            settings = mat.mesh_map_settings
+            settings_layout.use_property_split = True
+            col = settings_layout.column(align=True)
+            col.prop(settings, "resolution")
+            col.prop(settings, "samples")
+            col.prop(settings, "use_denoise")
+            col.prop(settings, "margin")
+            col.prop(settings, "ao_distance")
+            col.prop(settings, "edge_radius")
+
+        layout.label(text="High-poly source: not implemented yet")
+
+        active_layer = mat.paint_layers.active
+        baking = False
+        for map_type, type_label in _MESH_MAP_TYPES:
+            row = layout.row(align=True)
+            row.label(text=type_label)
+            state = _mesh_map_state(context, mat, map_type)
+            if state is None:
+                status_label, status_icon = _MESH_MAP_STATUS['NONE']
+            else:
+                status_label, status_icon = _MESH_MAP_STATUS[state.status]
+                baking = baking or state.status == 'BAKING'
+            row.label(text=status_label, icon=status_icon)
+            slot = mat.mesh_map_slots.find(type=map_type)
+            image = slot.image if slot is not None else None
+            row.label(text=image.name if image is not None else "—")
+
+            bake = row.operator("object.mesh_map_bake", text="Bake", icon='RENDER_STILL')
+            bake.type = map_type
+            bake.material_index = 0
+
+            add_row = row.row(align=True)
+            add_row.operator("material.mesh_map_add_layer", text="Add Layer", icon='ADD').type = map_type
+            mask_row = row.row(align=True)
+            mask_row.enabled = active_layer is not None
+            mask_row.operator("material.mesh_map_add_mask", text="Add Mask", icon='ADD').type = map_type
+
+        if baking:
+            layout.label(text="Baking...", icon='FILE_REFRESH')
+
+        layout.operator("object.mesh_map_refresh", text="Refresh Status", icon='FILE_REFRESH')
+
+
 classes = (
     MATERIAL_MT_context_menu,
     MATERIAL_UL_matslots,
@@ -841,6 +948,7 @@ classes = (
     MATERIAL_PT_animation,
     MATERIAL_PT_custom_props,
     MATERIAL_PT_paint_layers,
+    LAYER_MATERIAL_PT_mesh_maps,
     BRUSH_MATERIAL_PT_context_material,
     BRUSH_MATERIAL_PT_surface,
     BRUSH_MATERIAL_PT_settings,

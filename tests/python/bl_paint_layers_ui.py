@@ -178,6 +178,40 @@ class PaintLayersUiTest(unittest.TestCase):
         resolved = self.material.path_resolve(paths[0])
         self.assertAlmostEqual(resolved, 25.0, places=4)
 
+    def test_mesh_map_ui_registration_and_poll(self):
+        bpy.ops.mesh.primitive_cube_add()
+        obj = bpy.context.object
+        bpy.ops.material.new_layered()
+        material = obj.active_material
+
+        with bpy.context.temp_override(material=material, object=obj, active_object=obj):
+            self.assertTrue(bpy.types.LAYER_MATERIAL_PT_mesh_maps.poll(bpy.context))
+            self.assertTrue(bpy.types.OBJECT_OT_mesh_map_refresh.poll(bpy.context))
+            self.assertTrue(bpy.types.MATERIAL_OT_mesh_map_add_layer.poll(bpy.context))
+            self.assertTrue(bpy.types.MATERIAL_OT_mesh_map_add_mask.poll(bpy.context))
+            self.assertTrue(bpy.types.MATERIAL_OT_mesh_map_use_active_uv.poll(bpy.context))
+        self.assertIsNotNone(material)
+
+    def test_mesh_map_operators_use_paint_layer_rna(self):
+        bpy.ops.mesh.primitive_cube_add()
+        obj = bpy.context.object
+        bpy.ops.material.new_layered()
+        material = obj.active_material
+
+        with bpy.context.temp_override(material=material, object=obj, active_object=obj):
+            result = bpy.ops.material.mesh_map_add_layer(type='AO')
+            self.assertEqual(result, {'FINISHED'})
+            layer = material.paint_layers.active
+            self.assertEqual(layer.source, 'MESH_MAP')
+            self.assertEqual(layer.mesh_map_type, 'AO')
+
+            result = bpy.ops.material.mesh_map_add_mask(type='CURVATURE')
+            self.assertEqual(result, {'FINISHED'})
+            mask = layer.mask_stack[-1]
+            self.assertEqual(mask.role, 'MASK_ITEM')
+            self.assertEqual(mask.source, 'MESH_MAP')
+            self.assertEqual(mask.mesh_map_type, 'CURVATURE')
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]] + (sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []))

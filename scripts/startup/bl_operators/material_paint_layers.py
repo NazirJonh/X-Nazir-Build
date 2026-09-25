@@ -354,6 +354,149 @@ class MATERIAL_OT_paint_layer_rebake(_PaintLayerOperator):
         return {'FINISHED'}
 
 
+def _mesh_map_owner(context):
+    # The stack owner is the active slot's material, not `context.material`: in the Layer Material
+    # tab that can be the active Material row's source. The bake operator uses the active slot too.
+    ob = context.object
+    mat = ob.active_material if ob is not None else None
+    if mat is None or not mat.is_layered or mat.grease_pencil:
+        return None
+    return mat
+
+
+class OBJECT_OT_mesh_map_refresh(Operator):
+    bl_idname = "object.mesh_map_refresh"
+    bl_label = "Refresh Mesh Map Status"
+    bl_description = "Re-check mesh map bake statuses for the active object"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob is not None and ob.type == 'MESH'
+
+    def execute(self, context):
+        depsgraph = context.evaluated_depsgraph_get()
+        changed = context.object.mesh_map_states.refresh_all(depsgraph=depsgraph)
+        self.report({'INFO'}, "Changed {} mesh map status(es)".format(changed))
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_mesh_map_add_layer(Operator):
+    bl_idname = "material.mesh_map_add_layer"
+    bl_label = "Add Mesh Map Layer"
+    bl_description = "Add a Mesh Map layer to the material"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    type: bpy.props.EnumProperty(
+        name="Map Type",
+        items=(
+            ('AO', "Ambient Occlusion", "Ambient occlusion map"),
+            ('CURVATURE', "Curvature", "Curvature map"),
+            ('NORMAL_WORLD', "Normal (World)", "World-space normal map"),
+            ('NORMAL_OBJECT', "Normal (Object)", "Object-space normal map"),
+            ('ID_OBJECT', "Object ID", "Object index map"),
+            ('ID_MATERIAL', "Material ID", "Material index map"),
+            ('EDGE', "Edge", "Edge/bevel map"),
+        ),
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return _mesh_map_owner(context) is not None
+
+    def execute(self, context):
+        names = {
+            'AO': "AO Map",
+            'CURVATURE': "Curvature Map",
+            'NORMAL_WORLD': "Normal (World) Map",
+            'NORMAL_OBJECT': "Normal (Object) Map",
+            'ID_OBJECT': "Object ID Map",
+            'ID_MATERIAL': "Material ID Map",
+            'EDGE': "Edge Map",
+        }
+        mat = _mesh_map_owner(context)
+        layer = mat.paint_layers.new(source='MESH_MAP', name=names[self.type])
+        if layer is None:
+            self.report({'ERROR'}, "Cannot add Mesh Map layer")
+            return {'CANCELLED'}
+        layer.mesh_map_type = self.type
+        mat.paint_layers.active = layer
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_mesh_map_add_mask(Operator):
+    bl_idname = "material.mesh_map_add_mask"
+    bl_label = "Add Mesh Map Mask"
+    bl_description = "Add a Mesh Map mask to the active paint layer"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    type: bpy.props.EnumProperty(
+        name="Map Type",
+        items=(
+            ('AO', "Ambient Occlusion", "Ambient occlusion map"),
+            ('CURVATURE', "Curvature", "Curvature map"),
+            ('NORMAL_WORLD', "Normal (World)", "World-space normal map"),
+            ('NORMAL_OBJECT', "Normal (Object)", "Object-space normal map"),
+            ('ID_OBJECT', "Object ID", "Object index map"),
+            ('ID_MATERIAL', "Material ID", "Material index map"),
+            ('EDGE', "Edge", "Edge/bevel map"),
+        ),
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return _mesh_map_owner(context) is not None
+
+    def execute(self, context):
+        mat = _mesh_map_owner(context)
+        layer = mat.paint_layers.active
+        if layer is None:
+            self.report({'ERROR'}, "No active paint layer for a Mesh Map mask")
+            return {'CANCELLED'}
+        names = {
+            'AO': "AO Mask",
+            'CURVATURE': "Curvature Mask",
+            'NORMAL_WORLD': "Normal (World) Mask",
+            'NORMAL_OBJECT': "Normal (Object) Mask",
+            'ID_OBJECT': "Object ID Mask",
+            'ID_MATERIAL': "Material ID Mask",
+            'EDGE': "Edge Mask",
+        }
+        mask = layer.correction_add(role='MASK_ITEM', source='MESH_MAP', name=names[self.type])
+        if mask is None:
+            self.report({'ERROR'}, "Cannot add Mesh Map mask to the active paint layer")
+            return {'CANCELLED'}
+        mask.mesh_map_type = self.type
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_mesh_map_use_active_uv(Operator):
+    bl_idname = "material.mesh_map_use_active_uv"
+    bl_label = "Use Active UV"
+    bl_description = "Use the object's active UV layer for the material paint stack"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return (
+            _mesh_map_owner(context) is not None and
+            ob.type == 'MESH' and ob.data is not None
+        )
+
+    def execute(self, context):
+        mat = _mesh_map_owner(context)
+        ob = context.object
+        if mat.paint_layers_uv_map:
+            return {'FINISHED'}
+        if ob.data.uv_layers.active is None:
+            self.report({'ERROR'}, "The object has no active UV layer")
+            return {'CANCELLED'}
+        mat.paint_layers_uv_map_autofill(object=ob)
+        return {'FINISHED'}
+
+
 classes = (
     MATERIAL_OT_paint_layers_regenerate,
     MATERIAL_OT_paint_layer_add,
@@ -370,4 +513,8 @@ classes = (
     MATERIAL_OT_paint_layer_channel_remove,
     MATERIAL_OT_paint_layer_correction_add,
     MATERIAL_OT_paint_layer_rebake,
+    OBJECT_OT_mesh_map_refresh,
+    MATERIAL_OT_mesh_map_add_layer,
+    MATERIAL_OT_mesh_map_add_mask,
+    MATERIAL_OT_mesh_map_use_active_uv,
 )

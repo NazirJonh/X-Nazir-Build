@@ -329,6 +329,25 @@ TEST_F(MeshMapsTest, deleting_the_material_clears_the_object_state)
   EXPECT_EQ(ob->mesh_map_states.first, nullptr);
 }
 
+/* The settings belong to the Material; they were once registered on the slot struct by mistake, which
+ * the UI only caught at draw time. */
+TEST_F(MeshMapsTest, rna_mesh_map_settings_is_a_material_property)
+{
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  ma->mesh_map_settings.resolution = 512;
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  PropertyRNA *settings_prop = RNA_struct_find_property(&ma_ptr, "mesh_map_settings");
+  ASSERT_NE(settings_prop, nullptr);
+  PointerRNA settings_ptr = RNA_property_pointer_get(&ma_ptr, settings_prop);
+  ASSERT_NE(settings_ptr.data, nullptr);
+  EXPECT_EQ(RNA_int_get(&settings_ptr, "resolution"), 512);
+
+  BKE_mesh_maps_slot_ensure(*ma, MA_MESH_MAP_AO);
+  PointerRNA slot_ptr = RNA_pointer_create_discrete(
+      &ma->id, RNA_MaterialMeshMapSlot, ma->mesh_map_slots.first);
+  EXPECT_EQ(RNA_struct_find_property(&slot_ptr, "mesh_map_settings"), nullptr);
+}
+
 TEST_F(MeshMapsTest, rna_state_material_read_only_and_source_object_poll)
 {
   Material *ma = BKE_material_add(bmain, "MapsMat");

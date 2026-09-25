@@ -2490,6 +2490,7 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
 static void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
 {
   StructRNA *coll_srna;
+  StructRNA *slot_srna;
   PropertyRNA *prop;
   FunctionRNA *func;
   PropertyRNA *parm;
@@ -2540,17 +2541,18 @@ static void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_function_return(func, parm);
 
   /* slot */
-  srna = RNA_def_struct(brna, "MaterialMeshMapSlot", nullptr);
-  RNA_def_struct_sdna(srna, "MaterialMeshMapSlot");
-  RNA_def_struct_ui_text(srna, "Mesh Map Slot", "One shared mesh map atlas");
+  /* `srna` stays the Material: the settings below belong to it, not to the slot. */
+  slot_srna = RNA_def_struct(brna, "MaterialMeshMapSlot", nullptr);
+  RNA_def_struct_sdna(slot_srna, "MaterialMeshMapSlot");
+  RNA_def_struct_ui_text(slot_srna, "Mesh Map Slot", "One shared mesh map atlas");
 
-  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  prop = RNA_def_property(slot_srna, "type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_mesh_map_type_items);
   RNA_def_property_enum_funcs(prop, "rna_MaterialMeshMapSlot_type_get", nullptr, nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Type", "The mesh map this slot holds");
 
-  prop = RNA_def_property(srna, "image", PROP_POINTER, PROP_NONE);
+  prop = RNA_def_property(slot_srna, "image", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "Image");
   RNA_def_property_pointer_sdna(prop, nullptr, "image");
   RNA_def_property_pointer_funcs(prop, nullptr, "rna_MaterialMeshMapSlot_image_set", nullptr, nullptr);

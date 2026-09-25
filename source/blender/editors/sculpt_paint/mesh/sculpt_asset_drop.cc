@@ -26,6 +26,13 @@
  * re-run #sculpt_mesh_asset_drop_exec after undoing (the source object/collection would stay
  * gone), which is exactly the class of bug this must avoid.
  *
+ * The `cursor_placement` property positions the drop relative to the sculpt 3D cursor: `None`
+ * snaps under the mouse as before, `CursorToOrigin` snaps under the mouse and then moves the
+ * cursor onto the placement origin, `AtCursor` places the asset at the cursor straight away.
+ * For Join drops a non-`None` mode also starts positioning right away (old geometry masked, cursor
+ * in Deform mode with the `builtin.sculpt_cursor` tool active). Separate drops only move the
+ * cursor or the placement matrix.
+ *
  * The drop box, poll and snap-matrix plumbing live in `view3d_dropboxes.cc`; this file only owns
  * the operator that runs after the drop callback.
  */
@@ -37,7 +44,10 @@
 
 #include "BLI_index_mask.hh"
 #include "BLI_math_bits.h"
+#include "BLI_math_matrix.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_vector.hh"
 
 #include "BKE_attribute.hh"
@@ -75,6 +85,7 @@
 #include "RNA_define.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "../paint_intern.hh"
@@ -82,6 +93,33 @@
 #include "sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint::asset_drop {
+
+/* Matches #ed::view3d::sculpt_drop_preview::CursorPlacement values (kept local so `sculpt_paint`
+ * does not depend on a `space_view3d` header). */
+enum eSculptAssetDropCursorPlacement {
+  SCULPT_ASSET_DROP_CURSOR_NONE = 0,
+  SCULPT_ASSET_DROP_CURSOR_TO_ORIGIN = 1,
+  SCULPT_ASSET_DROP_CURSOR_AT_CURSOR = 2,
+};
+
+static const EnumPropertyItem cursor_placement_items[] = {
+    {SCULPT_ASSET_DROP_CURSOR_NONE,
+     "NONE",
+     0,
+     "None",
+     "Place the asset under the mouse cursor as usual"},
+    {SCULPT_ASSET_DROP_CURSOR_TO_ORIGIN,
+     "CURSOR_TO_ORIGIN",
+     0,
+     "Cursor to Origin",
+     "Snap under the mouse, then move the sculpt 3D cursor onto the placement origin"},
+    {SCULPT_ASSET_DROP_CURSOR_AT_CURSOR,
+     "AT_CURSOR",
+     0,
+     "At Cursor",
+     "Place the asset at the current sculpt 3D cursor instead of the snap cursor"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
 
 /* -------------------------------------------------------------------- */
 /** \name Shared Helpers
@@ -155,6 +193,64 @@ static void mesh_flip_positions_for_symmetry(Mesh &mesh, const ePaintSymmetryFla
   if (count_bits_i(uint(symmpass) & uint(PAINT_SYMM_AXIS_ALL)) % 2 == 1) {
     bke::mesh_flip_faces(mesh, IndexMask(mesh.faces_num));
   }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Cursor Placement
+ * \{ */
+
+/**
+ * Move the sculpt 3D cursor onto the dropped asset's origin (`placement_world`, possibly scaled)
+ * and, when `start_positioning`, switch the cursor into Deform mode with its tool active so the
+ * unmasked dropped geometry can be moved/rotated/scaled around it right away.
+ */
+static void cursor_placement_apply(bContext &C,
+                                   Object &active_ob,
+                                   const float4x4 &placement_world,
+                                   bool start_positioning)
+{
+  Scene *scene = CTX_data_scene(&C);
+  if (scene == nullptr) {
+    return;
+  }
+  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(&C);
+  const Object *active_eval = DEG_get_evaluated(depsgraph, &active_ob);
+  if (active_eval == nullptr) {
+    return;
+  }
+
+  cursor::CursorState state;
+  state.location = math::transform_point(active_eval->world_to_object(), placement_world.location());
+
+  float world_rot[3][3];
+  copy_m3_m4(world_rot, placement_world.ptr());
+  normalize_m3(world_rot);
+  float ob_rot[3][3];
+  copy_m3_m4(ob_rot, active_eval->object_to_world().ptr());
+  normalize_m3(ob_rot);
+  float ob_rot_inv[3][3];
+  invert_m3_m3(ob_rot_inv, ob_rot);
+  float local_rot[3][3];
+  mul_m3_m3m3(local_rot, ob_rot_inv, world_rot);
+  float quat[4];
+  mat3_to_quat(quat, local_rot);
+  copy_qt_qt(state.rotation, quat);
+
+  cursor::state_set(*scene, active_ob, state);
+
+  if (start_positioning) {
+    Sculpt *sd = scene->toolsettings ? scene->toolsettings->sculpt : nullptr;
+    if (sd != nullptr) {
+      sd->sculpt_cursor_flag |= SCULPT_CURSOR_ENABLED;
+      sd->sculpt_cursor_flag &= ~SCULPT_CURSOR_PIN;
+      sd->sculpt_cursor_mode = SCULPT_CURSOR_MODE_DEFORM;
+    }
+    WM_toolsystem_ref_set_by_id(&C, "builtin.sculpt_cursor");
+    WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  }
+  WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, &active_ob);
 }
 
 /** \} */
@@ -393,16 +489,17 @@ static bool sculpt_mesh_asset_drop_poll(bContext *C)
  * the snap location.
  */
 static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
-                                                    wmOperator *op,
-                                                    Object &active_ob,
-                                                    ViewLayer &view_layer,
-                                                    Main *bmain,
-                                                    const float4x4 *snap_matrix,
-                                                    const bool join_to_active,
-                                                    const bool replace_face_sets,
-                                                    const bool keep_source,
-                                                    const bool apply_mask,
-                                                    Object *&r_target_ob)
+                                                     wmOperator *op,
+                                                     Object &active_ob,
+                                                     ViewLayer &view_layer,
+                                                     Main *bmain,
+                                                     const float4x4 *snap_matrix,
+                                                     const bool join_to_active,
+                                                     const bool replace_face_sets,
+                                                     const bool keep_source,
+                                                     const bool apply_mask,
+                                                     const int cursor_placement,
+                                                     Object *&r_target_ob)
 {
   const uint32_t collection_uid = uint32_t(RNA_int_get(op->ptr, "collection_uid"));
   Collection *collection = reinterpret_cast<Collection *>(
@@ -652,6 +749,12 @@ static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
     BKE_collection_delete(bmain, collection, true);
   }
 
+  /* Move the sculpt cursor onto the placement origin before the undo push so the cursor and tool
+   * state are captured together with the drop. Without snap there is no origin to move to. */
+  if (cursor_placement != SCULPT_ASSET_DROP_CURSOR_NONE && snap_matrix != nullptr) {
+    cursor_placement_apply(*C, active_ob, *snap_matrix, join_to_active);
+  }
+
   /* Plain #ED_undo_push, not the sculpt geometry undo type: this step can also add/remove the
    * dropped collection or a whole new object, which that undo type cannot represent. See the
    * matching comment in #sculpt_mesh_asset_drop_exec. */
@@ -694,6 +797,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
   const bool replace_face_sets = RNA_boolean_get(op->ptr, "replace_face_sets");
   const bool keep_source = RNA_boolean_get(op->ptr, "keep_source");
   const bool apply_mask = RNA_boolean_get(op->ptr, "apply_mask");
+  const int cursor_placement = RNA_enum_get(op->ptr, "cursor_placement");
 
   /* Collection drop path: exec was triggered by the sculpt collection dropbox. */
   const uint32_t collection_uid = uint32_t(RNA_int_get(op->ptr, "collection_uid"));
@@ -710,6 +814,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
                                                                 replace_face_sets,
                                                                 keep_source,
                                                                 apply_mask,
+                                                                cursor_placement,
                                                                 target_ob);
     if (status == OPERATOR_FINISHED) {
       refresh_sculpt_overlays_after_drop(*C, *op, *active_ob);
@@ -741,10 +846,32 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
     join_asset_into_active(*active_ob, *asset_mesh, replace_face_sets, apply_mask);
     BKE_id_free(nullptr, asset_mesh);
 
+    /* Placement origin for the cursor: the snap matrix when set, else the asset's own world
+     * transform (same fallback as #asset_mesh_in_active_space). Captured before the carrier
+     * object may be removed below. */
+    float4x4 placement_world = float4x4::identity();
+    bool have_placement = false;
+    if (has_snap) {
+      placement_world = snap_matrix;
+      have_placement = true;
+    }
+    else {
+      if (const Object *asset_eval = DEG_get_evaluated(depsgraph, asset_ob)) {
+        placement_world = asset_eval->object_to_world();
+        have_placement = true;
+      }
+    }
+
     /* Remove the carrier object from the scene only if it was imported for this drop.
      * Local assets already existed in the file and must not be deleted. */
     if (!keep_source) {
       ed::object::base_free_and_unlink(bmain, const_cast<Scene *>(scene), asset_ob);
+    }
+
+    /* Move the cursor (and enter Deform positioning) before the undo push so the cursor and tool
+     * state are captured together with the drop. */
+    if (cursor_placement != SCULPT_ASSET_DROP_CURSOR_NONE && have_placement) {
+      cursor_placement_apply(*C, *active_ob, placement_world, true);
     }
 
     /* A plain #ED_undo_push (rather than #ed::sculpt_paint::undo::geometry_begin/geometry_end) is
@@ -852,6 +979,12 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
     DEG_id_tag_update(&active_ob->id, ID_RECALC_GEOMETRY);
   }
 
+  /* Separate drops only move the cursor onto the placement origin; positioning stays off since
+   * Deform cannot act on a separate object. */
+  if (cursor_placement != SCULPT_ASSET_DROP_CURSOR_NONE && has_placement) {
+    cursor_placement_apply(*C, *active_ob, placement, false);
+  }
+
   /* Plain #ED_undo_push, not the sculpt geometry undo type: this path adds/duplicates a separate
    * object, which that undo type cannot represent. See the matching comment in the join branch
    * above. */
@@ -866,7 +999,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
 }
 
 /**
- * Informational only: these properties are decided interactively during hover (J/F/L keys, see
+ * Informational only: these properties are decided interactively during hover (J/F/L/M/C keys, see
  * #view3d_sculpt_on_event_while_hover in view3d_dropboxes.cc) and handed to the operator by
  * #copy before it runs. The panel is shown disabled (not #layout.enabled_set) because exec() only
  * ever runs once — the operator's redo panel cannot safely re-run it with different property
@@ -894,6 +1027,7 @@ static void sculpt_mesh_asset_drop_ui(bContext * /*C*/, wmOperator *op)
   col.prop(op->ptr, "replace_face_sets", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 
   layout.prop(op->ptr, "apply_mask", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.prop(op->ptr, "cursor_placement", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 }
 
 void SCULPT_OT_mesh_asset_drop(wmOperatorType *ot)
@@ -955,6 +1089,14 @@ void SCULPT_OT_mesh_asset_drop(wmOperatorType *ot)
                          "Mask the active mesh's pre-existing geometry so only the dropped-in "
                          "geometry stays sculptable; when off, its existing mask is left "
                          "untouched");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_enum(ot->srna,
+                      "cursor_placement",
+                      cursor_placement_items,
+                      SCULPT_ASSET_DROP_CURSOR_NONE,
+                      "Cursor Placement",
+                      "Where the dropped asset is placed relative to the sculpt 3D cursor");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 
   prop = RNA_def_boolean(ot->srna,

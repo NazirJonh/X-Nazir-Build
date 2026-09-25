@@ -1495,6 +1495,26 @@ static void sculpt_cursor_buttons_draw_prepare(const bContext *C, wmGizmoGroup *
   float world_mat[4][4];
   sculpt_cursor_world_matrix_get(*scene, *ob, world_mat);
 
+  /* While a cursor handle is dragged the buttons fade out so the result stays visible. In Deform
+   * mode the cursor itself is only written when the Transform session ends, so follow the live
+   * Transform pivot the handles are drawn at (see #sculpt_cursor_gizmo_modal) instead. */
+  bool is_dragging = false;
+  if (const wmGizmo *modal_gz = region->runtime->gizmo_map ?
+                                    WM_gizmomap_get_modal(region->runtime->gizmo_map) :
+                                    nullptr)
+  {
+    if (modal_gz->parent_gzgroup &&
+        STREQ(modal_gz->parent_gzgroup->type->idname, "VIEW3D_GGT_sculpt_cursor"))
+    {
+      is_dragging = true;
+      const wmGizmoOpElem *gzop = WM_gizmo_operator_get(const_cast<wmGizmo *>(modal_gz), 0);
+      if (gzop && gzop->type && STRPREFIX(gzop->type->idname, "TRANSFORM_OT_")) {
+        copy_v3_v3(world_mat[3], ob->runtime->sculpt_session->transform_pivot_pos_world);
+      }
+    }
+  }
+  const float drag_alpha = 0.25f;
+
   float co[2];
   if (ED_view3d_project_float_global(region, world_mat[3], co, V3D_PROJ_TEST_CLIP_NEAR) !=
       V3D_PROJ_RET_OK)
@@ -1534,12 +1554,21 @@ static void sculpt_cursor_buttons_draw_prepare(const bContext *C, wmGizmoGroup *
       WM_gizmo_set_flag(gz, WM_GIZMO_HIDDEN, !visible);
       if (visible) {
         sculpt_cursor_button_set_active(gz, slot_on[i]);
+        if (is_dragging) {
+          gz->color[3] *= drag_alpha;
+          gz->color_hi[3] *= drag_alpha;
+        }
       }
     }
     if (outlines[i]) {
       outlines[i]->matrix_basis[3][0] = x;
       outlines[i]->matrix_basis[3][1] = y;
       outlines[i]->matrix_basis[3][2] = 0.0f;
+      ui::theme::get_color_4fv(TH_PANEL_OUTLINE, outlines[i]->color);
+      if (is_dragging) {
+        outlines[i]->color[3] *= drag_alpha;
+      }
+      copy_v4_v4(outlines[i]->color_hi, outlines[i]->color);
       WM_gizmo_set_flag(outlines[i], WM_GIZMO_HIDDEN, false);
     }
   }

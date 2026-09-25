@@ -152,15 +152,18 @@ static void view3d_drop_snap_exit(wmDropBox *drop, wmDrag * /*drag*/)
 using SculptDropData = ed::view3d::sculpt_drop_preview::SculptDropData;
 
 /**
- * Placement-option toggles (J/F/L/M, see #view3d_sculpt_on_event_while_hover) carry over from one
- * drop to the next within the running session: kept here rather than in #SculptDropData, which is
- * freed and recreated for every new drag.
+ * Placement-option toggles (J/F/L/M/C, see #view3d_sculpt_on_event_while_hover) carry over from
+ * one drop to the next within the running session: kept here rather than in #SculptDropData,
+ * which is freed and recreated for every new drag.
  */
 struct SculptDropFlags {
   bool join_to_active = true;
   bool replace_face_sets = false;
   bool linked = true;
   bool apply_mask = false;
+  /* Cursor placement mode (C key), carried over between drops like the flags above. */
+  ed::view3d::sculpt_drop_preview::CursorPlacement cursor_placement =
+      ed::view3d::sculpt_drop_preview::CursorPlacement::None;
 };
 static SculptDropFlags sculpt_drop_flags;
 
@@ -189,6 +192,7 @@ static SculptDropData *sculpt_drop_data_create(wmDropBox *drop)
   data->replace_face_sets = sculpt_drop_flags.replace_face_sets;
   data->linked = sculpt_drop_flags.linked;
   data->apply_mask = sculpt_drop_flags.apply_mask;
+  data->cursor_placement = sculpt_drop_flags.cursor_placement;
   data->preview_cursor = WM_paint_cursor_activate(
       SPACE_VIEW3D,
       RGN_TYPE_WINDOW,
@@ -212,6 +216,24 @@ static void sculpt_drop_data_free(wmDropBox *drop)
     ED_view3d_cursor_snap_state_free(data->snap_state);
     MEM_delete(data);
     drop->draw_data = nullptr;
+  }
+}
+
+/* Hide the snap plane/box under the mouse in #CursorPlacement::AtCursor mode, where the ghost
+ * sits on the sculpt 3D cursor and the mouse snap display would mislead. Otherwise restores the
+ * on-enter values (`draw_plane` always on, `draw_box` only with captured box dimensions). */
+static void sculpt_drop_snap_draw_update(SculptDropData &data)
+{
+  if (data.snap_state == nullptr) {
+    return;
+  }
+  if (data.cursor_placement == ed::view3d::sculpt_drop_preview::CursorPlacement::AtCursor) {
+    data.snap_state->draw_plane = false;
+    data.snap_state->draw_box = false;
+  }
+  else {
+    data.snap_state->draw_plane = true;
+    data.snap_state->draw_box = data.has_box_dims;
   }
 }
 
@@ -342,6 +364,7 @@ static void view3d_sculpt_ob_drop_on_enter(wmDropBox *drop, wmDrag *drag)
     copy_v3_v3(data->base_box_dims, state->box_dimensions);
     ui::theme::get_color_4ubv(TH_GIZMO_PRIMARY, state->color_box);
     state->draw_box = true;
+    data->has_box_dims = true;
   }
 
   if (std::shared_ptr<ed::view3d::sculpt_drop_preview::PreviewJobState> active_job =
@@ -358,6 +381,7 @@ static void view3d_sculpt_ob_drop_on_enter(wmDropBox *drop, wmDrag *drag)
       }
     }
   }
+  sculpt_drop_snap_draw_update(*data);
 }
 
 static void view3d_sculpt_collection_drop_on_enter(wmDropBox *drop, wmDrag *drag)
@@ -412,6 +436,7 @@ static void view3d_sculpt_collection_drop_on_enter(wmDropBox *drop, wmDrag *drag
     copy_v3_v3(data->base_box_dims, state->box_dimensions);
     ui::theme::get_color_4ubv(TH_GIZMO_PRIMARY, state->color_box);
     state->draw_box = true;
+    data->has_box_dims = true;
   }
 
   if (std::shared_ptr<ed::view3d::sculpt_drop_preview::PreviewJobState> active_job =
@@ -428,6 +453,7 @@ static void view3d_sculpt_collection_drop_on_enter(wmDropBox *drop, wmDrag *drag
       }
     }
   }
+  sculpt_drop_snap_draw_update(*data);
 }
 
 static void view3d_sculpt_drop_on_exit(wmDropBox *drop, wmDrag *drag)
@@ -465,13 +491,14 @@ static void view3d_sculpt_drop_on_exit(wmDropBox *drop, wmDrag *drag)
  * Called for every event while the sculpt drop-box is active (poll passes).
  *
  * W/S: scale down/up by 5% per key press.
- * E/R: rotate left/right by 5 degrees per key press around the surface normal.
+ * Q/E: rotate clockwise/counter-clockwise by 5 degrees per key press around the surface normal.
  * J: toggle Join to Active.
  * F: toggle Replace Face Sets (only relevant while Join to Active is on).
  * L: toggle Linked (only relevant for local assets placed as a separate object).
  * M: toggle Mask — when on (default), pre-existing geometry on the active mesh is masked so only
  *    the dropped-in geometry stays sculptable; when off, the active mesh's existing mask is left
  *    untouched entirely.
+ * C: cycle cursor placement (Off → To Origin → At Cursor → Off).
  * ESC: resets scale and rotation to their defaults (placement-option toggles are left as-is).
  *
  * Placement options are decided here, before the drop runs, rather than via the operator's redo
@@ -491,8 +518,8 @@ static void view3d_sculpt_on_event_while_hover(bContext *C,
   WorkspaceStatus status(C);
   status.item(IFACE_("Scale Down"), ui::icon_from_event_type(EVT_WKEY, KM_PRESS));
   status.item(IFACE_("Scale Up"), ui::icon_from_event_type(EVT_SKEY, KM_PRESS));
-  status.item(IFACE_("Rotate Left"), ui::icon_from_event_type(EVT_EKEY, KM_PRESS));
-  status.item(IFACE_("Rotate Right"), ui::icon_from_event_type(EVT_RKEY, KM_PRESS));
+  status.item(IFACE_("Rotate Clockwise"), ui::icon_from_event_type(EVT_QKEY, KM_PRESS));
+  status.item(IFACE_("Rotate Counter-Clockwise"), ui::icon_from_event_type(EVT_EKEY, KM_PRESS));
   status.item_bool(IFACE_("Join to Active"),
                    data->join_to_active,
                    ui::icon_from_event_type(EVT_JKEY, KM_PRESS));
@@ -504,7 +531,26 @@ static void view3d_sculpt_on_event_while_hover(bContext *C,
   else {
     status.item_bool(IFACE_("Linked"), data->linked, ui::icon_from_event_type(EVT_LKEY, KM_PRESS));
   }
-  status.item_bool(IFACE_("Mask"), data->apply_mask, ui::icon_from_event_type(EVT_MKEY, KM_PRESS));
+  /* Mask is forced on while positioning a Join drop around the sculpt cursor (see #copy). */
+  const bool mask_show = (data->join_to_active &&
+                          data->cursor_placement !=
+                              ed::view3d::sculpt_drop_preview::CursorPlacement::None) ?
+                             true :
+                             data->apply_mask;
+  status.item_bool(IFACE_("Mask"), mask_show, ui::icon_from_event_type(EVT_MKEY, KM_PRESS));
+  const char *cursor_text = IFACE_("Cursor: Off");
+  switch (data->cursor_placement) {
+    case ed::view3d::sculpt_drop_preview::CursorPlacement::CursorToOrigin:
+      cursor_text = IFACE_("Cursor: To Origin");
+      break;
+    case ed::view3d::sculpt_drop_preview::CursorPlacement::AtCursor:
+      cursor_text = IFACE_("Cursor: At Cursor");
+      break;
+    case ed::view3d::sculpt_drop_preview::CursorPlacement::None:
+    default:
+      break;
+  }
+  status.item(cursor_text, ui::icon_from_event_type(EVT_CKEY, KM_PRESS));
   ed::view3d::sculpt_drop_preview::preview_try_pull(data->preview);
   V3DSnapCursorState *state = data->snap_state;
 
@@ -524,13 +570,15 @@ static void view3d_sculpt_on_event_while_hover(bContext *C,
       }
       break;
     }
-    case EVT_EKEY:
+    /* A positive angle turns counter-clockwise when looking down the surface normal (from the
+     * side the viewer usually sees the surface from). */
+    case EVT_QKEY:
       if (event->val == KM_PRESS) {
         data->rotation_angle -= float(M_PI) / 36.0f;
         ED_region_tag_redraw(CTX_wm_region(C));
       }
       break;
-    case EVT_RKEY: {
+    case EVT_EKEY: {
       if (event->val == KM_PRESS) {
         data->rotation_angle += float(M_PI) / 36.0f;
         ED_region_tag_redraw(CTX_wm_region(C));
@@ -576,6 +624,29 @@ static void view3d_sculpt_on_event_while_hover(bContext *C,
       }
       break;
     }
+    case EVT_CKEY: {
+      if (event->val == KM_PRESS) {
+        using ed::view3d::sculpt_drop_preview::CursorPlacement;
+        CursorPlacement next = CursorPlacement::None;
+        switch (data->cursor_placement) {
+          case CursorPlacement::None:
+            next = CursorPlacement::CursorToOrigin;
+            break;
+          case CursorPlacement::CursorToOrigin:
+            next = CursorPlacement::AtCursor;
+            break;
+          case CursorPlacement::AtCursor:
+          default:
+            next = CursorPlacement::None;
+            break;
+        }
+        data->cursor_placement = next;
+        sculpt_drop_flags.cursor_placement = next;
+        sculpt_drop_snap_draw_update(*data);
+        ED_region_tag_redraw(CTX_wm_region(C));
+      }
+      break;
+    }
     default:
       break;
   }
@@ -590,21 +661,15 @@ static bool view3d_sculpt_on_event_while_hover_handled(bContext * /*C*/,
     return false;
   }
 
-  /* Consume transform and placement-option keys so Sculpt keymaps cannot treat them as brush or
-   * tool shortcuts. */
-  if (ELEM(event->type,
-           EVT_WKEY,
-           EVT_SKEY,
-           EVT_EKEY,
-           EVT_RKEY,
-           EVT_JKEY,
-           EVT_FKEY,
-           EVT_LKEY,
-           EVT_MKEY))
-  {
-    return true;
+  /* Consume every keyboard event while hovering, not just the hover keys: a neighboring key
+   * missed by the user would otherwise run its Sculpt/global shortcut (brush switch, undo, mode
+   * change, ...) in the middle of the drag. Escape still passes through so the drag can be
+   * cancelled, and modifiers pass so the window keeps tracking their state. Mouse buttons, wheel
+   * and NDOF are not keyboard events, so view navigation keeps working. */
+  if (!ISKEYBOARD(event->type) || ISKEYMODIFIER(event->type) || event->type == EVT_ESCKEY) {
+    return false;
   }
-  return false;
+  return true;
 }
 
 /** \} */
@@ -1042,21 +1107,25 @@ static void view3d_ob_drop_copy_external_asset(bContext *C, wmDrag *drag, wmDrop
  *
  * Extends the standard #view3d_ob_drop_matrix_from_snap with user-driven uniform scale and
  * rotation around the surface normal acquired during the hover phase.
+ * The orientation/location frame comes from #placement_frame_get, so #CursorPlacement::AtCursor
+ * builds it from the sculpt 3D cursor instead of the snap cursor under the mouse.
+ * \return false when no placement frame is available.
  */
-static void sculpt_drop_build_ob_matrix(const SculptDropData *data,
+static bool sculpt_drop_build_ob_matrix(const bContext *C,
+                                        const SculptDropData *data,
                                         const Object *ob,
                                         float r_mat[4][4])
 {
-  const V3DSnapCursorData *snap_data = ED_view3d_cursor_snap_data_get();
+  float omat[3][3], loc[3];
+  if (!ed::view3d::sculpt_drop_preview::placement_frame_get(*C, *data, omat, loc)) {
+    return false;
+  }
 
   ed::view3d::sculpt_drop_preview::PreviewPlacement place;
   ed::view3d::sculpt_drop_preview::fill_placement_from_object(*ob, place);
-  ed::view3d::sculpt_drop_preview::build_single_object_matrix(data->rotation_angle,
-                                                              data->scale_factor,
-                                                              place,
-                                                              snap_data->plane_omat,
-                                                              snap_data->loc,
-                                                              r_mat);
+  ed::view3d::sculpt_drop_preview::build_single_object_matrix(
+      data->rotation_angle, data->scale_factor, place, omat, loc, r_mat);
+  return true;
 }
 
 /**
@@ -1090,7 +1159,7 @@ static void view3d_sculpt_mesh_asset_drop_copy(bContext *C, wmDrag *drag, wmDrop
 {
   SculptDropData *data = static_cast<SculptDropData *>(drop->draw_data);
 
-  /* Placement options were decided interactively during hover (J/F/L keys, see
+  /* Placement options were decided interactively during hover (J/F/L/M/C keys, see
    * #view3d_sculpt_on_event_while_hover); hand them to the operator now instead of leaving them
    * at their RNA defaults, since exec() only ever runs once (see the file-level comment in
    * sculpt_asset_drop.cc for why re-running it via the redo panel isn't supported). */
@@ -1099,6 +1168,13 @@ static void view3d_sculpt_mesh_asset_drop_copy(bContext *C, wmDrag *drag, wmDrop
     RNA_boolean_set(drop->ptr, "replace_face_sets", data->replace_face_sets);
     RNA_boolean_set(drop->ptr, "linked", data->linked);
     RNA_boolean_set(drop->ptr, "apply_mask", data->apply_mask);
+    RNA_enum_set(drop->ptr, "cursor_placement", int(data->cursor_placement));
+    /* Positioning a Join drop around the sculpt cursor needs the old geometry masked. */
+    if (data->join_to_active &&
+        data->cursor_placement != ed::view3d::sculpt_drop_preview::CursorPlacement::None)
+    {
+      RNA_boolean_set(drop->ptr, "apply_mask", true);
+    }
   }
   ED_workspace_status_text(C, nullptr);
 
@@ -1107,8 +1183,9 @@ static void view3d_sculpt_mesh_asset_drop_copy(bContext *C, wmDrag *drag, wmDrop
       return;
     }
     float obmat_final[4][4];
-    sculpt_drop_build_ob_matrix(data, ob, obmat_final);
-    RNA_float_set_array(drop->ptr, "matrix", &obmat_final[0][0]);
+    if (sculpt_drop_build_ob_matrix(C, data, ob, obmat_final)) {
+      RNA_float_set_array(drop->ptr, "matrix", &obmat_final[0][0]);
+    }
   };
 
   if (drag->type == WM_DRAG_ID) {
@@ -1182,13 +1259,20 @@ static void view3d_sculpt_collection_drop_copy(bContext *C, wmDrag *drag, wmDrop
   SculptDropData *data = static_cast<SculptDropData *>(drop->draw_data);
   Main *bmain = CTX_data_main(C);
 
-  /* Placement options were decided interactively during hover (J/F keys, see
+  /* Placement options were decided interactively during hover (J/F/M/C keys, see
    * #view3d_sculpt_on_event_while_hover); hand them to the operator now since exec() only ever
    * runs once. Linked doesn't apply to collections (there is no single carrier object to link). */
   if (data) {
     RNA_boolean_set(drop->ptr, "join_to_active", data->join_to_active);
     RNA_boolean_set(drop->ptr, "replace_face_sets", data->replace_face_sets);
     RNA_boolean_set(drop->ptr, "apply_mask", data->apply_mask);
+    RNA_enum_set(drop->ptr, "cursor_placement", int(data->cursor_placement));
+    /* Positioning a Join drop around the sculpt cursor needs the old geometry masked. */
+    if (data->join_to_active &&
+        data->cursor_placement != ed::view3d::sculpt_drop_preview::CursorPlacement::None)
+    {
+      RNA_boolean_set(drop->ptr, "apply_mask", true);
+    }
   }
   ED_workspace_status_text(C, nullptr);
 
@@ -1230,11 +1314,11 @@ static void view3d_sculpt_collection_drop_copy(bContext *C, wmDrag *drag, wmDrop
   /* Build the snap placement matrix for the collection as a whole.
    * The exec path will offset individual objects relative to their shared center. */
   if (data) {
-    const V3DSnapCursorData *snap_cdata = ED_view3d_cursor_snap_data_get();
-    if (snap_cdata) {
+    float omat[3][3], loc[3];
+    if (ed::view3d::sculpt_drop_preview::placement_frame_get(*C, *data, omat, loc)) {
       float mat[4][4];
       ed::view3d::sculpt_drop_preview::build_collection_snap_matrix(
-          data->rotation_angle, data->scale_factor, snap_cdata->plane_omat, snap_cdata->loc, mat);
+          data->rotation_angle, data->scale_factor, omat, loc, mat);
       RNA_float_set_array(drop->ptr, "matrix", &mat[0][0]);
     }
   }

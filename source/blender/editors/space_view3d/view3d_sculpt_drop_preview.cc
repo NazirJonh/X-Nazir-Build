@@ -42,6 +42,7 @@
 #include "DNA_windowmanager_types.h"
 
 #include "ED_screen.hh"
+#include "ED_sculpt.hh"
 #include "ED_view3d.hh"
 
 #include "GPU_batch.hh"
@@ -454,6 +455,31 @@ void build_collection_snap_matrix(const float rotation_angle,
   r_mat[3][3] = 1.0f;
 }
 
+bool placement_frame_get(const bContext &C,
+                         const SculptDropData &data,
+                         float r_omat[3][3],
+                         float r_loc[3])
+{
+  if (data.cursor_placement == CursorPlacement::AtCursor) {
+    Scene *scene = CTX_data_scene(&C);
+    Object *ob = CTX_data_active_object(&C);
+    if (scene == nullptr || ob == nullptr || ob->type != OB_MESH) {
+      return false;
+    }
+    const float4x4 cursor_mat = sculpt_paint::cursor::world_matrix_get(*scene, *ob);
+    copy_m3_m4(r_omat, cursor_mat.ptr());
+    copy_v3_v3(r_loc, cursor_mat.location());
+    return true;
+  }
+  const V3DSnapCursorData *snap_data = ED_view3d_cursor_snap_data_get();
+  if (snap_data == nullptr) {
+    return false;
+  }
+  copy_m3_m3(r_omat, snap_data->plane_omat);
+  copy_v3_v3(r_loc, snap_data->loc);
+  return true;
+}
+
 static void preview_item_gpu_free(PreviewItemGPU &item)
 {
   if (item.batch_tris) {
@@ -857,9 +883,15 @@ void preview_draw_paint_cursor(bContext *C,
   const int2 mval(xy.x - region->winrct.xmin, xy.y - region->winrct.ymin);
   ED_view3d_cursor_snap_data_update(data->snap_state, C, region, mval);
 
+  const bool is_at_cursor = (data->cursor_placement == CursorPlacement::AtCursor);
   const V3DSnapCursorData *snap_data = ED_view3d_cursor_snap_data_get();
   const bool draw_plane = data->snap_state->draw_plane || data->snap_state->draw_box;
-  if (snap_data->type_target == SCE_SNAP_TO_NONE && !draw_plane) {
+  if (!is_at_cursor && snap_data->type_target == SCE_SNAP_TO_NONE && !draw_plane) {
+    return;
+  }
+
+  float frame_omat[3][3], frame_loc[3];
+  if (!placement_frame_get(*C, *data, frame_omat, frame_loc)) {
     return;
   }
 
@@ -872,15 +904,11 @@ void preview_draw_paint_cursor(bContext *C,
   float m_drop[4][4];
   if (rt.is_collection) {
     build_collection_snap_matrix(
-        data->rotation_angle, data->scale_factor, snap_data->plane_omat, snap_data->loc, m_drop);
+        data->rotation_angle, data->scale_factor, frame_omat, frame_loc, m_drop);
   }
   else {
-    build_single_object_matrix(data->rotation_angle,
-                               data->scale_factor,
-                               rt.placement,
-                               snap_data->plane_omat,
-                               snap_data->loc,
-                               m_drop);
+    build_single_object_matrix(
+        data->rotation_angle, data->scale_factor, rt.placement, frame_omat, frame_loc, m_drop);
   }
 
   uchar color_ub[4];

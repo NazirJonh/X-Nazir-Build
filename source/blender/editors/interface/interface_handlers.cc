@@ -9850,7 +9850,7 @@ static void button_activate_state(bContext *C, Button *but, HandleButtonState st
 
   /* number editing */
   if (state == BUTTON_STATE_NUM_EDITING) {
-    if (button_is_cursor_warp(but)) {
+    if (button_is_cursor_warp(but) || (but->type == ButtonType::Grip && but->grip_cursor_wrap)) {
       if (ELEM(but->type, ButtonType::HsvCircle, ButtonType::HsvCube)) {
         rctf rectf;
         block_to_window_rctf(data->region, but->block, &rectf, &but->rect);
@@ -9891,7 +9891,7 @@ static void button_activate_state(bContext *C, Button *but, HandleButtonState st
       }
     }
 
-    if (button_is_cursor_warp(but)) {
+    if (button_is_cursor_warp(but) || (but->type == ButtonType::Grip && but->grip_cursor_wrap)) {
 
 #ifdef USE_CONT_MOUSE_CORRECT
       /* stereo3d has issues with changing cursor location so rather avoid */

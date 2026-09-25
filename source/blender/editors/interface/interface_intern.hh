@@ -295,6 +295,9 @@ struct Button : NonMovable {
   /** For a 2D corner grip placed at the *top* (e.g. a popover that opened upward): dragging up
    * grows #poin2 instead of dragging down. #poin (width) is unaffected. */
   bool grip_2d_flip_y = false;
+  /** Wrap the cursor around the screen edges while dragging this #ButtonType::Grip, so a popover
+   * resized towards a screen edge keeps growing. Independent of #USER_CONTINUOUS_MOUSE. */
+  bool grip_cursor_wrap = false;
   float hardmin = 0, hardmax = 0, softmin = 0, softmax = 0;
 
   /** See \ref button_func_identity_compare_set(). */

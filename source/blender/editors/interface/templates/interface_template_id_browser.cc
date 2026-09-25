@@ -1423,6 +1423,7 @@ static Button *id_browser_build_resize_grip_button(Layout &target_row,
                                0.0f,
                                std::nullopt);
   button_grip_2d_set(grip, &wm.id_browser_popup_height_units, flip_up);
+  grip->grip_cursor_wrap = true;
   button_flag_disable(grip, BUT_UNDO);
   button_func_set(grip, [](bContext & /*C*/) { WM_file_tag_modified(); });
   block_layout_set_current(block, &restore_current);

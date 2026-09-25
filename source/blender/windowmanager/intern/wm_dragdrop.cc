@@ -572,8 +572,12 @@ static wmDropBox *dropbox_active(bContext *C,
           /* This dropbox's poll succeeded but also set #disabled_info (e.g. a category-tab
            * extension drop blocked by the active filter). The dropbox claims this position, so
            * stop searching and show the disabled message instead of letting a later dropbox match.
-           * Only this dropbox's own poll can set the hint here, so the effect stays local to it. */
-          if (drag->drop_state.disabled_info.has_value()) {
+           * Only this dropbox's own poll can set the hint here, so the effect stays local to it.
+           * An empty hint counts as unset: a poll may hand back an empty-string default, which
+           * describes a successful drop, not a blocked one. */
+          if (drag->drop_state.disabled_info.has_value() &&
+              !drag->drop_state.disabled_info->empty())
+          {
             CTX_store_set(C, nullptr);
             return nullptr;
           }

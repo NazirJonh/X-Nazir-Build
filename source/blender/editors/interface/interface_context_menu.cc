@@ -161,7 +161,13 @@ static const char *shortcut_get_operator_property(bContext *C, Button *but, IDPr
     return "WM_OT_call_menu";
   }
 
-  if (std::optional asset_shelf_idname = button_asset_shelf_type_idname_get(but)) {
+  /* Only the popover button itself opens the shelf. The "asset_shelf_idname" context string is
+   * also inherited by everything drawn inside such a popover (and by the image grid's slot row),
+   * e.g. asset tiles, which would otherwise offer "Assign Shortcut" for opening the popover. */
+  if (std::optional asset_shelf_idname = (but->type == ButtonType::Popover) ?
+                                             button_asset_shelf_type_idname_get(but) :
+                                             std::nullopt)
+  {
     IDProperty *prop = bke::idprop::create_group(__func__).release();
     IDP_AddToGroup(prop, bke::idprop::create("name", *asset_shelf_idname).release());
     *r_prop = prop;

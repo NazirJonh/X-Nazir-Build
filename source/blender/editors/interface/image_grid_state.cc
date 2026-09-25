@@ -18,6 +18,7 @@
 #include "AS_asset_representation.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_path_utils.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_uuid.h"
@@ -325,6 +326,82 @@ bool image_grid_is_assignable_texture(const Image &image)
   return true;
 }
 
+/** Absolute, normalized form of \a filepath (relative to \a id's blend file), usable as a set key
+ * for comparisons that match #BLI_path_cmp_normalized. */
+static std::string image_grid_path_key(const char *filepath, const ID *id)
+{
+  char path[FILE_MAX];
+  STRNCPY(path, filepath);
+  if (id) {
+    BLI_path_abs(path, ID_BLEND_PATH_FROM_GLOBAL(id));
+  }
+  BLI_path_normalize(path);
+#ifdef WIN32
+  /* #BLI_path_cmp is case-insensitive on Windows. */
+  BLI_str_tolower_ascii(path, sizeof(path));
+#endif
+  return path;
+}
+
+/**
+ * Linked images (e.g. a brush asset's texture, linked in along with the brush) that another tile
+ * already represents, so listing them in Current File would only duplicate that tile:
+ * - A local image loading the same file. Making an asset brush local
+ *   (#bke::asset_edit_id_ensure_local) also makes local copies of its #Tex and #Image, while the
+ *   linked originals stay in #Main for the still-linked source brush.
+ * - An image asset of a loaded library, whose tile #image_grid_asset_represents_image highlights
+ *   as active.
+ * Linked images nothing else provides (e.g. packed into the brush file) stay listed.
+ */
+static Set<const ID *> image_grid_linked_images_covered(Main &bmain)
+{
+  Set<std::string> linked_paths;
+  Set<std::string> covering_paths;
+  for (const Image &image : bmain.images) {
+    if (image.filepath[0] == '\0' || !image_grid_is_assignable_texture(image)) {
+      continue;
+    }
+    std::string key = image_grid_path_key(image.filepath, &image.id);
+    if (ID_IS_LINKED(&image.id)) {
+      linked_paths.add(std::move(key));
+    }
+    else {
+      covering_paths.add(std::move(key));
+    }
+  }
+  Set<const ID *> covered;
+  if (linked_paths.is_empty()) {
+    return covered;
+  }
+
+  ed::asset::list::iterate(asset_system::all_library_reference(),
+                           [&](asset_system::AssetRepresentation &asset) {
+                             if (asset.get_id_type() != ID_IM || asset.local_id()) {
+                               return true;
+                             }
+                             const std::string path = asset.full_path();
+                             if (!path.empty()) {
+                               std::string key = image_grid_path_key(path.c_str(), nullptr);
+                               if (linked_paths.contains(key)) {
+                                 covering_paths.add(std::move(key));
+                               }
+                             }
+                             return true;
+                           });
+  if (covering_paths.is_empty()) {
+    return covered;
+  }
+
+  for (const Image &image : bmain.images) {
+    if (ID_IS_LINKED(&image.id) && image.filepath[0] != '\0' &&
+        covering_paths.contains(image_grid_path_key(image.filepath, &image.id)))
+    {
+      covered.add(&image.id);
+    }
+  }
+  return covered;
+}
+
 int image_grid_foreach_filtered_item(
     Main &bmain,
     const AssetLibraryReference &lib_ref,
@@ -378,6 +455,7 @@ int image_grid_foreach_filtered_item(
 
   /* Phase 2: non-asset images from the current file (LOCAL library only). */
   if (lib_ref.type == ASSET_LIBRARY_LOCAL) {
+    const Set<const ID *> covered_linked = image_grid_linked_images_covered(bmain);
     ID *id;
     FOREACH_MAIN_ID_BEGIN (&bmain, id) {
       if (GS(id->name) != ID_IM) {
@@ -387,7 +465,7 @@ int image_grid_foreach_filtered_item(
         /* Already iterated as an asset in phase 1. */
         continue;
       }
-      if (seen_ids.contains(id)) {
+      if (seen_ids.contains(id) || covered_linked.contains(id)) {
         continue;
       }
       Image *image = id_cast<Image *>(id);

@@ -47,7 +47,11 @@ static bool view_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
     return false;
   }
 
-  const char *disabled_info = "";
+  /* Must start null, not "": anything non-null is written to the drag's disabled_info, and the
+   * disabled-info gate in #wm_dropbox_active treats a set hint as "this drop is blocked" -- it
+   * then discards the dropbox, which suppresses the drop tooltip and the grid reorder insertion
+   * line even though #can_drop succeeded. */
+  const char *disabled_info = nullptr;
   const bool can_drop = drop_target->can_drop(*C, *drag, &disabled_info);
 
   if (disabled_info) {

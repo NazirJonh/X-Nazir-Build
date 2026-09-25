@@ -32,6 +32,7 @@
 #include "BKE_main.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_screen.hh"
+#include "BKE_wm_runtime.hh"
 
 #include "BLI_set.hh"
 #include "BLI_utildefines.h"
@@ -48,6 +49,7 @@
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
+#include "ED_asset_menu_utils.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
 #include "RNA_access.hh"
@@ -70,6 +72,7 @@
 
 #include "ED_asset_shelf.hh"
 #include "ED_image_grid.hh"
+#include "intern/asset_shelf_asset_lists.hh"
 
 #include "interface_templates_intern.hh"
 
@@ -148,7 +151,15 @@ static void image_grid_block_listener(const wmRegionListenerParams *params)
         /* Preview pixels updated: redraw only. Full UI refresh rebuilds all grid items. */
         ED_region_tag_redraw(params->region);
       }
-      else if (ELEM(wmn->data, int(ND_ASSET_LIST), int(ND_ASSET_LIST_READING))) {
+      else if (ELEM(wmn->data,
+                    int(ND_ASSET_LIST),
+                    int(ND_ASSET_LIST_READING),
+                    /* Recent/Favorites membership lists live outside the asset lists (JSON next
+                     * to the user config) and notify through ND_ASSET_CATALOGS (e.g.
+                     * #ASSETSHELF_OT_asset_favorite_toggle); the grid renders them, so it must
+                     * rebuild on their change. */
+                    int(ND_ASSET_CATALOGS)))
+      {
         ED_region_tag_redraw(params->region);
         ED_region_tag_refresh_ui(params->region);
       }
@@ -194,6 +205,48 @@ static void image_grid_block_listener(const wmRegionListenerParams *params)
 
 enum class ImageGridItemKind { Asset, BlendImage };
 
+/** Shift+drag source for reordering the image shelf's Favorites list from the grid. */
+class ImageGridFavoriteReorderDragController : public AbstractViewItemDragController {
+  asset_system::AssetRepresentation &asset_;
+
+ public:
+  ImageGridFavoriteReorderDragController(AbstractGridView &view,
+                                         asset_system::AssetRepresentation &asset)
+      : AbstractViewItemDragController(view), asset_(asset)
+  {
+  }
+
+  std::optional<eWM_DragDataType> get_drag_type() const override
+  {
+    return WM_DRAG_GRID_ITEM_REORDER_ASSET;
+  }
+
+  void *create_drag_data() const override
+  {
+    wmDragGridItemReorderAsset *drag_data = MEM_new<wmDragGridItemReorderAsset>(__func__);
+    drag_data->shelf_idname = IMAGE_TEXTURE_SHELF_IDNAME;
+    drag_data->source = asset_.make_weak_reference();
+    drag_data->display_name = asset_.get_name();
+    return drag_data;
+  }
+
+  void on_drag_start(bContext &C, AbstractViewItem & /*item*/) override
+  {
+    /* Small preview so the drop line hint under the cursor stays visible, like the asset shelf's
+     * Favorites reorder (see #view_drop_draw_droptip). */
+    wmWindowManager *wm = CTX_wm_manager(&C);
+    if (wm && !wm->runtime->drags.is_empty()) {
+      wmDrag &drag = *static_cast<wmDrag *>(wm->runtime->drags.last);
+      if (drag.type == WM_DRAG_GRID_ITEM_REORDER_ASSET) {
+        const int icon_id = image_grid_asset_preview_icon_id(asset_);
+        if (icon_id != ICON_NONE) {
+          WM_event_drag_preview_icon(&drag, icon_id, 0.5f);
+        }
+      }
+    }
+  }
+};
+
 class ImageAssetGridItem : public PreviewGridItem {
   ImageGridItemKind kind_;
   asset_system::AssetRepresentation *asset_ = nullptr;
@@ -204,20 +257,25 @@ class ImageAssetGridItem : public PreviewGridItem {
   /** True when this item lives in the Texture popover, not the N-Panel. Forwarded to the assign
    * operator so it marks the correct (cols, rows) layout as already focused. */
   bool is_popover_ = false;
+  /** The grid shows the Favorites membership list, whose order is user-defined: enables Shift+drag
+   * and the Move Left/Right context menu entries. Other modes are sorted by the library. */
+  bool in_favorites_ = false;
 
  public:
   ImageAssetGridItem(asset_system::AssetRepresentation &asset,
                      const PointerRNA &target_ptr,
                      PropertyRNA *target_prop,
                      const AssetLibraryReference &library_ref,
-                     const bool is_popover)
+                     const bool is_popover,
+                     const bool in_favorites)
       : PreviewGridItem(asset.library_relative_identifier(), asset.get_name(), ICON_NONE),
         kind_(ImageGridItemKind::Asset),
         asset_(&asset),
         target_ptr_(target_ptr),
         target_prop_(target_prop),
         library_ref_(library_ref),
-        is_popover_(is_popover)
+        is_popover_(is_popover),
+        in_favorites_(in_favorites)
   {
     this->init_item_callbacks();
   }
@@ -407,20 +465,6 @@ class ImageAssetGridItem : public PreviewGridItem {
 
     PreviewGridItem::build_grid_tile_button(overlap.column(true), preview_id);
 
-    Layout &overlay_row = overlap.row(true);
-    overlay_row.alignment_set(LayoutAlign::Right);
-
-    if (kind_ == ImageGridItemKind::BlendImage) {
-      wmOperatorType *mark_ot = WM_operatortype_find("IMAGE_GRID_OT_mark_asset", true);
-      if (mark_ot) {
-        /* Icon-only overlay like asset shelf online indicator — not a full #Layout::op button. */
-        Button *mark_but = uiItemL_ex(&overlay_row, "", ICON_SOLO_OFF, false, false);
-        button_operator_set(mark_but, mark_ot, wm::OpCallContext::ExecDefault, nullptr);
-        button_label_alpha_factor_set(mark_but, 0.6f);
-        button_label_draw_icon_border_set(mark_but, true);
-      }
-    }
-
     const int badge_icon = this->get_badge_icon();
     if (badge_icon != ICON_NONE) {
       /* Bottom-right badge: ICON_ASSET_MANAGER for assets native to the current file,
@@ -498,6 +542,73 @@ class ImageAssetGridItem : public PreviewGridItem {
     return false;
   }
 
+  bool supports_favorite_reorder() const
+  {
+    return in_favorites_ && kind_ == ImageGridItemKind::Asset;
+  }
+
+  bool supports_drag() const override
+  {
+    /* True on every press, not only Shift-held ones, so the drag threshold can recognize a later
+     * Shift-held move as a reorder drag (see #AssetViewItem::supports_drag()). */
+    return this->supports_favorite_reorder();
+  }
+
+  std::unique_ptr<AbstractViewItemDragController> create_drag_controller(
+      const wmEvent *event) const override
+  {
+    const bool shift = event && (event->modifier & KM_SHIFT);
+    if (shift && this->supports_favorite_reorder()) {
+      return std::make_unique<ImageGridFavoriteReorderDragController>(this->get_view(), *asset_);
+    }
+    return nullptr;
+  }
+
+  std::unique_ptr<GridViewItemDropTarget> create_drop_target() override;
+
+  /** Move Left/Right and Reorder to Front/Back, mirroring #AssetViewItem::build_context_menu. */
+  void build_favorite_reorder_menu(bContext &C, Layout &layout) const
+  {
+    const ed::asset::shelf::ShelfAssetRef ref = ed::asset::shelf::ShelfAssetRef::from_weak_reference(
+        asset_->make_weak_reference());
+    const Span<ed::asset::shelf::ShelfAssetRef> favorites =
+        ed::asset::shelf::shelf_asset_lists_favorites(IMAGE_TEXTURE_SHELF_IDNAME);
+    const int index = int(favorites.first_index_try(ref));
+    if (index < 0) {
+      return;
+    }
+    const int count = int(favorites.size());
+    /* No operator-context override: the operator has no invoke, and an override would also leak
+     * into the entries below (e.g. #IMAGE_GRID_OT_assign_catalog needs its invoke). */
+    const char *reorder_op = "ASSETSHELF_OT_asset_favorite_reorder";
+    {
+      Layout &sub = layout.row(false);
+      sub.enabled_set(index > 0);
+      PointerRNA ptr = sub.op(reorder_op, IFACE_("Move Left"), ICON_TRIA_LEFT_BAR);
+      ed::asset::operator_asset_reference_props_set(*asset_, ptr);
+      RNA_enum_set_identifier(&C, &ptr, "direction", "LEFT");
+    }
+    {
+      Layout &sub = layout.row(false);
+      sub.enabled_set(index < count - 1);
+      PointerRNA ptr = sub.op(reorder_op, IFACE_("Move Right"), ICON_TRIA_RIGHT_BAR);
+      ed::asset::operator_asset_reference_props_set(*asset_, ptr);
+      RNA_enum_set_identifier(&C, &ptr, "direction", "RIGHT");
+    }
+    layout.separator();
+    {
+      PointerRNA ptr = layout.op(reorder_op, IFACE_("Reorder to Front"), ICON_TRIA_LEFT_BAR);
+      ed::asset::operator_asset_reference_props_set(*asset_, ptr);
+      RNA_enum_set_identifier(&C, &ptr, "direction", "FRONT");
+    }
+    {
+      PointerRNA ptr = layout.op(reorder_op, IFACE_("Reorder to Back"), ICON_TRIA_RIGHT_BAR);
+      ed::asset::operator_asset_reference_props_set(*asset_, ptr);
+      RNA_enum_set_identifier(&C, &ptr, "direction", "BACK");
+    }
+    layout.separator();
+  }
+
   void build_context_menu(bContext &C, Layout &layout) const override
   {
     const ID *id = this->get_id();
@@ -507,6 +618,27 @@ class ImageAssetGridItem : public PreviewGridItem {
     }
 
     const bool linked = is_linked_item();
+
+    /* Favorites toggle on the image shelf's favorites list -- the same list the grid's Favorites
+     * membership mode renders and the asset-shelf popover's star button writes. The context
+     * string routes the operator's exec to the image shelf: without it the paint-mode fallback
+     * would resolve the *brush* shelf idname in sculpt mode. Only for asset items: Favorites mode
+     * emits asset-backed items only (#image_grid_foreach_membership_item), so a plain local
+     * image could never be shown there. */
+    if (kind_ == ImageGridItemKind::Asset) {
+      const bool is_favorite = ed::asset::shelf::shelf_asset_lists_is_favorite(
+          IMAGE_TEXTURE_SHELF_IDNAME, asset_->make_weak_reference());
+      layout.context_string_set("asset_shelf_idname", IMAGE_TEXTURE_SHELF_IDNAME);
+      if (in_favorites_) {
+        this->build_favorite_reorder_menu(C, layout);
+      }
+      PointerRNA favorite_props = layout.op("ASSETSHELF_OT_asset_favorite_toggle",
+                                            is_favorite ? IFACE_("Remove from Favorites") :
+                                                          IFACE_("Add to Favorites"),
+                                            is_favorite ? ICON_SOLO_ON : ICON_SOLO_OFF);
+      ed::asset::operator_asset_reference_props_set(*asset_, favorite_props);
+      layout.separator();
+    }
 
     if (id) {
       Layout &mark_col = layout.column(false);
@@ -739,6 +871,131 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
   }
 };
 
+/**
+ * Per-tile drop target in Favorites mode: Shift+drag reorders the image shelf's Favorites list.
+ *
+ * Not #GridItemReorderDropTarget: its operator (#ASSETSHELF_OT_asset_favorite_reorder_to) polls
+ * the *shelf's* active catalog, while this grid keeps its own membership mode, so the reorder is
+ * applied here directly. An item target shadows the view target
+ * (#region_views_find_drop_target_at), so any other drag is forwarded to #ImageGridDropTarget to
+ * keep image drops onto tiles working.
+ */
+class ImageGridFavoriteReorderDropTarget : public GridViewItemDropTarget {
+  AbstractGridViewItem &drop_item_;
+  ImageGridDropTarget image_drop_;
+
+  static const wmDragGridItemReorderAsset *reorder_data(const wmDrag &drag)
+  {
+    if (drag.type != WM_DRAG_GRID_ITEM_REORDER_ASSET) {
+      return nullptr;
+    }
+    return WM_drag_get_grid_item_reorder_asset_data(&drag);
+  }
+
+ public:
+  ImageGridFavoriteReorderDropTarget(AbstractGridView &view,
+                                     AbstractGridViewItem &drop_item,
+                                     const PointerRNA &target_ptr)
+      : GridViewItemDropTarget(view), drop_item_(drop_item), image_drop_(target_ptr)
+  {
+  }
+
+  bool can_drop(bContext &C, const wmDrag &drag, const char **r_disabled_hint) const override
+  {
+    if (drag.type != WM_DRAG_GRID_ITEM_REORDER_ASSET) {
+      return image_drop_.can_drop(C, drag, r_disabled_hint);
+    }
+    const wmDragGridItemReorderAsset *data = reorder_data(drag);
+    if (!data || data->shelf_idname != IMAGE_TEXTURE_SHELF_IDNAME) {
+      return false;
+    }
+    if (data->source.relative_asset_identifier &&
+        drop_item_.identifier() == data->source.relative_asset_identifier)
+    {
+      *r_disabled_hint = RPT_("Cannot move item to itself");
+      return false;
+    }
+    return true;
+  }
+
+  std::optional<DropLocation> choose_drop_location(const ARegion &region,
+                                                   const wmEvent &event) const override
+  {
+    /* Image drops ignore the location (and draw no line hint), so the split is harmless there. */
+    const std::optional<rctf> win_rect = drop_item_.win_rect_in_region(region);
+    if (!win_rect) {
+      return std::nullopt;
+    }
+    /* Same horizontal split as #GridItemReorderDropTarget::choose_drop_location. */
+    if (event.xy[0] - win_rect->xmin > BLI_rctf_size_x(&*win_rect) / 2.0f) {
+      return DropLocation::After;
+    }
+    return DropLocation::Before;
+  }
+
+  std::string drop_tooltip(const DragInfo &drag_info) const override
+  {
+    if (drag_info.drag_data.type != WM_DRAG_GRID_ITEM_REORDER_ASSET) {
+      return image_drop_.drop_tooltip(drag_info);
+    }
+    const StringRef item_name = static_cast<const PreviewGridItem &>(drop_item_).label;
+    if (drag_info.drop_location == DropLocation::After) {
+      return fmt::format(fmt::runtime(TIP_("Move after {}")), item_name);
+    }
+    return fmt::format(fmt::runtime(TIP_("Move before {}")), item_name);
+  }
+
+  void drop_linehint(ARegion &region, const DragInfo &drag_info) const override
+  {
+    if (drag_info.drag_data.type == WM_DRAG_GRID_ITEM_REORDER_ASSET) {
+      view_.set_drop_linehint(region, drop_item_, drag_info.drop_location);
+    }
+  }
+
+  bool on_drop(bContext *C, const DragInfo &drag_info) const override
+  {
+    const wmDragGridItemReorderAsset *data = reorder_data(drag_info.drag_data);
+    if (!data) {
+      return image_drop_.on_drop(C, drag_info);
+    }
+    view_.clear_drop_linehint();
+
+    namespace shelf = ed::asset::shelf;
+    const Span<shelf::ShelfAssetRef> favorites = shelf::shelf_asset_lists_favorites(
+        IMAGE_TEXTURE_SHELF_IDNAME);
+    const int current = int(
+        favorites.first_index_try(shelf::ShelfAssetRef::from_weak_reference(data->source)));
+    const int target_index = shelf::favorite_index_from_identifier(
+        favorites, std::string(drop_item_.identifier()));
+    if (current < 0 || target_index < 0) {
+      return false;
+    }
+
+    /* Same index math as #ASSETSHELF_OT_asset_favorite_reorder_to: the target index is taken
+     * before the source is removed from the list. */
+    const bool after = drag_info.drop_location == DropLocation::After;
+    int target = after ? target_index + (current > target_index ? 1 : 0) :
+                         target_index - (current < target_index ? 1 : 0);
+    target = clamp_i(target, 0, int(favorites.size()) - 1);
+    if (target == current) {
+      return false;
+    }
+
+    shelf::shelf_asset_lists_reorder_favorite(IMAGE_TEXTURE_SHELF_IDNAME, data->source, target);
+    WM_main_add_notifier(NC_ASSET | ND_ASSET_CATALOGS, nullptr);
+    return true;
+  }
+};
+
+std::unique_ptr<GridViewItemDropTarget> ImageAssetGridItem::create_drop_target()
+{
+  if (!this->supports_favorite_reorder()) {
+    return nullptr;
+  }
+  return std::make_unique<ImageGridFavoriteReorderDropTarget>(
+      this->get_view(), *this, target_ptr_);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -793,6 +1050,8 @@ class ImageGridDataSource : public GridDataSource {
   {
     Main *bmain = CTX_data_main(&C);
     ed::asset::list::storage_fetch(&library_ref_, &C);
+    const bool in_favorites = state_.filter.catalog_mode ==
+                              ed::image_grid::ImageGridCatalogMode::Favorites;
     return ed::image_grid::image_grid_foreach_filtered_item(
         *bmain,
         state_,
@@ -800,7 +1059,7 @@ class ImageGridDataSource : public GridDataSource {
           if (window.contains(filtered_index)) {
             if (item.asset) {
               view.add_item<ImageAssetGridItem>(
-                  *item.asset, target_ptr_, target_prop_, library_ref_, is_popover_);
+                  *item.asset, target_ptr_, target_prop_, library_ref_, is_popover_, in_favorites);
             }
             else {
               view.add_item<ImageAssetGridItem>(

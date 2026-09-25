@@ -16,6 +16,10 @@
 #include "BKE_main.hh"
 #include "BKE_preview_image.hh"
 
+#include "BLI_listbase_iterator.hh"
+#include "BLI_path_utils.hh"
+#include "BLI_string.h"
+
 #include "AS_asset_catalog.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
@@ -74,6 +78,41 @@ bool image_mark_as_asset(Image *image)
   return true;
 }
 
+/**
+ * An image already in \a bmain that loads \a filepath, linked ones included.
+ *
+ * #BKE_image_load_exists only reuses images owned by the current file, so picking a texture that a
+ * linked brush asset brought in along with it would load a second, local copy of the same file.
+ */
+static Image *find_image_by_filepath_any_library(Main &bmain, const char *filepath)
+{
+  char filepath_abs[FILE_MAX];
+  STRNCPY(filepath_abs, filepath);
+  BLI_path_abs(filepath_abs, BKE_main_blendfile_path(&bmain));
+
+  /* Prefer a local match: making a linked brush local also leaves a local copy of its image next
+   * to the linked original, and that local copy is the one the image grid lists. */
+  Image *linked_match = nullptr;
+  for (Image &image : bmain.images) {
+    if (ELEM(image.source, IMA_SRC_VIEWER, IMA_SRC_GENERATED)) {
+      continue;
+    }
+    char filepath_test[FILE_MAX];
+    STRNCPY(filepath_test, image.filepath);
+    BLI_path_abs(filepath_test, ID_BLEND_PATH(&bmain, &image.id));
+    if (BLI_path_cmp_normalized(filepath_test, filepath_abs) != 0) {
+      continue;
+    }
+    if (!ID_IS_LINKED(&image.id)) {
+      return &image;
+    }
+    if (!linked_match) {
+      linked_match = &image;
+    }
+  }
+  return linked_match;
+}
+
 Image *resolve_image_from_asset(Main &bmain,
                                 const asset_system::AssetRepresentation &asset)
 {
@@ -86,6 +125,10 @@ Image *resolve_image_from_asset(Main &bmain,
       return id_cast<Image *>(imported_id);
     }
     return nullptr;
+  }
+
+  if (Image *existing = find_image_by_filepath_any_library(bmain, asset.full_path().c_str())) {
+    return existing;
   }
 
   Image *image = BKE_image_load_exists(&bmain, asset.full_path().c_str(), nullptr);

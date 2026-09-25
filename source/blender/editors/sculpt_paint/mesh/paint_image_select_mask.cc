@@ -16,7 +16,6 @@
 
 #include "BLI_array.hh"
 #include "BLI_array_utils.hh"
-#include "BLI_bitmap_draw_2d.h"
 #include "BLI_function_ref.hh"
 #include "BLI_hash.hh"
 #include "BLI_implicit_sharing.hh"
@@ -96,6 +95,7 @@
 #include "UI_view2d.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "../../space_image/image_runtime.hh"
@@ -1377,11 +1377,10 @@ void PAINT_OT_image_select_invert(wmOperatorType *ot)
 /** \name Select Box
  * \{ */
 
-/* Shared with Lasso / Polyline below. */
-static void image_select_uv_polygon_rasterize_tile(const float2 &uv_origin,
-                                                    Span<float2> uv_points,
-                                                    ImBuf *mask,
-                                                    float fill_value);
+/* Shared with Lasso / Polyline below. The mirror flags rasterize the polygon across the tile's
+ * own centerlines, in tile-pixel space (`x' = width - x`); see
+ * #ImageSelectGestureShape::rasterize_tile_mirrored. Both implementations live in
+ * paint_image_select_gesture.cc next to the shared gesture sequence. */
 
 /**
  * Rectangular screen-space gesture. Its UV projection is an axis-aligned rectangle only while the
@@ -1447,6 +1446,22 @@ class ImageSelectBoxShape : public ImageSelectGestureShape {
     image_select_uv_polygon_rasterize_tile(uv_origin, uv_points_, mask, fill_value);
   }
 
+  void rasterize_tile_mirrored(const float2 &uv_origin,
+                               const rctf & /*tile_uv_rect*/,
+                               ImBuf *mask,
+                               const float fill_value,
+                               const bool mirror_x,
+                               const bool mirror_y) const override
+  {
+    image_select_uv_polygon_rasterize_tile(
+        uv_origin, uv_points_, mask, fill_value, mirror_x, mirror_y);
+  }
+
+  Vector<float2> uv_outline() const override
+  {
+    return uv_points_;
+  }
+
   PaintSelectionEdgePolicy edge_policy() const override
   {
     return BKE_image_paint_selection_edge_policy_hard();
@@ -1457,6 +1472,49 @@ static wmOperatorStatus image_select_box_exec(bContext *C, wmOperator *op)
 {
   ImageSelectBoxShape shape;
   return image_select_gesture_exec_generic(C, op, shape);
+}
+
+/**
+ * Live header hint: the gesture's width and height, in the active tile's canvas pixels. Cleared
+ * by the modal when the gesture ends.
+ */
+static void image_select_box_status_update(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  const ARegion *region = CTX_wm_region(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
+  ScrArea *area = CTX_wm_area(C);
+  if (!region || !sima || !sima->image || !area) {
+    return;
+  }
+
+  float uv_a[2], uv_b[2];
+  ui::view2d_region_to_view(&region->v2d,
+                            float(RNA_int_get(op->ptr, "click_x")),
+                            float(RNA_int_get(op->ptr, "click_y")),
+                            &uv_a[0],
+                            &uv_a[1]);
+  ui::view2d_region_to_view(
+      &region->v2d, float(event->mval[0]), float(event->mval[1]), &uv_b[0], &uv_b[1]);
+
+  ImageUser iuser = sima->iuser;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(sima->image, &iuser, nullptr);
+  if (!ibuf) {
+    return;
+  }
+  const int width_px = int(std::fabs(uv_b[0] - uv_a[0]) * float(ibuf->x));
+  const int height_px = int(std::fabs(uv_b[1] - uv_a[1]) * float(ibuf->y));
+  BKE_image_release_ibuf(sima->image, ibuf, nullptr);
+
+  char text[64];
+  SNPRINTF(text, "Width: %d  Height: %d", width_px, height_px);
+  ED_area_status_text(area, text);
+}
+
+static void image_select_status_clear(bContext *C)
+{
+  if (ScrArea *area = CTX_wm_area(C)) {
+    ED_area_status_text(area, nullptr);
+  }
 }
 
 static wmOperatorStatus image_select_box_invoke(bContext *C, wmOperator *op, const wmEvent *event)
@@ -1470,7 +1528,14 @@ static wmOperatorStatus image_select_box_invoke(bContext *C, wmOperator *op, con
 static wmOperatorStatus image_select_box_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   image_select_gesture_drag_detect(op, event);
-  return WM_gesture_box_modal(C, op, event);
+  const wmOperatorStatus ret = WM_gesture_box_modal(C, op, event);
+  if (event->type == MOUSEMOVE && (ret & OPERATOR_RUNNING_MODAL)) {
+    image_select_box_status_update(C, op, event);
+  }
+  else if ((ret & OPERATOR_RUNNING_MODAL) == 0) {
+    image_select_status_clear(C);
+  }
+  return ret;
 }
 
 /**
@@ -1517,45 +1582,6 @@ void PAINT_OT_image_select_box(wmOperatorType *ot)
 /** \name Select Lasso
  * \{ */
 
-/** Per-scanline sink for #BLI_bitmap_draw_2d_poly_v2i_n writing into a 1-channel float mask. */
-struct MaskPolyFillData {
-  float *data;
-  int width;
-  float fill_value;
-};
-
-static void mask_poly_fill_cb(int x, const int x_end, const int y, void *user_data)
-{
-  const MaskPolyFillData *fill = static_cast<const MaskPolyFillData *>(user_data);
-  float *row = fill->data + int64_t(y) * fill->width;
-  do {
-    row[x] = fill->fill_value;
-  } while (++x != x_end);
-}
-
-/**
- * Fill the interior of \a points into a 1-channel float buffer.
- *
- * Delegates to #BLI_bitmap_draw_2d_poly_v2i_n, which implements the even-odd rule with tracked
- * sorted spans. That handles self-intersecting lassos (a common freehand accident) correctly and
- * clips spans to the buffer, both of which the previous hand-rolled scanline fill got wrong.
- * Passing `(0, 0, width, height)` as the region makes the callback receive absolute buffer
- * coordinates, since the span callback reports coordinates relative to the region origin.
- */
-static void fill_polygon_float(ImBuf *ibuf, const Span<int2> points, const float color)
-{
-  if (points.size() < 3) {
-    return;
-  }
-
-  MaskPolyFillData fill{};
-  fill.data = ibuf->float_data_for_write();
-  fill.width = ibuf->x;
-  fill.fill_value = color;
-
-  BLI_bitmap_draw_2d_poly_v2i_n(0, 0, ibuf->x, ibuf->y, points, mask_poly_fill_cb, &fill);
-}
-
 /**
  * Convert the operator's `path` (region pixels, same RNA as lasso and polyline)
  * into UV-space points and the axis-aligned UV bounds of that polygon.
@@ -1584,20 +1610,6 @@ static bool image_select_path_to_uv_points(bContext *C,
   return true;
 }
 
-static void image_select_uv_polygon_rasterize_tile(const float2 &uv_origin,
-                                                   const Span<float2> uv_points,
-                                                   ImBuf *mask,
-                                                   const float fill_value)
-{
-  Vector<int2> tile_points;
-  tile_points.reserve(uv_points.size());
-  for (const float2 &uv : uv_points) {
-    tile_points.append(int2(int(roundf((uv.x - uv_origin.x) * mask->x)),
-                            int(roundf((uv.y - uv_origin.y) * mask->y))));
-  }
-  fill_polygon_float(mask, tile_points, fill_value);
-}
-
 /** Freehand gesture; caches its UV-space outline for per-tile rasterization. */
 class ImageSelectLassoShape : public ImageSelectGestureShape {
   bContext *C_;
@@ -1622,6 +1634,22 @@ class ImageSelectLassoShape : public ImageSelectGestureShape {
                       const float fill_value) const override
   {
     image_select_uv_polygon_rasterize_tile(uv_origin, uv_points_, mask, fill_value);
+  }
+
+  void rasterize_tile_mirrored(const float2 &uv_origin,
+                               const rctf & /*tile_uv_rect*/,
+                               ImBuf *mask,
+                               const float fill_value,
+                               const bool mirror_x,
+                               const bool mirror_y) const override
+  {
+    image_select_uv_polygon_rasterize_tile(
+        uv_origin, uv_points_, mask, fill_value, mirror_x, mirror_y);
+  }
+
+  Vector<float2> uv_outline() const override
+  {
+    return uv_points_;
   }
 
   PaintSelectionEdgePolicy edge_policy() const override
@@ -1710,6 +1738,22 @@ class ImageSelectPolylineShape : public ImageSelectGestureShape {
     image_select_uv_polygon_rasterize_tile(uv_origin, uv_points_, mask, fill_value);
   }
 
+  void rasterize_tile_mirrored(const float2 &uv_origin,
+                               const rctf & /*tile_uv_rect*/,
+                               ImBuf *mask,
+                               const float fill_value,
+                               const bool mirror_x,
+                               const bool mirror_y) const override
+  {
+    image_select_uv_polygon_rasterize_tile(
+        uv_origin, uv_points_, mask, fill_value, mirror_x, mirror_y);
+  }
+
+  Vector<float2> uv_outline() const override
+  {
+    return uv_points_;
+  }
+
   PaintSelectionEdgePolicy edge_policy() const override
   {
     return BKE_image_paint_selection_edge_policy_feathered();
@@ -1795,6 +1839,41 @@ static void fill_circle_float(ImBuf *ibuf, int cx, int cy, int rx, int ry, float
   }
 }
 
+/**
+ * Rasterize a UV-space circle/ellipse into one tile's mask, optionally mirrored across the
+ * tile's own centerlines (image-editor-space symmetry). The mirror is an affine transform of
+ * the tile onto itself, so the radii carry over unchanged; only the center is flipped.
+ */
+static void image_select_uv_circle_rasterize_tile(const float2 &uv_origin,
+                                                  const float2 &uv_center,
+                                                  const float uv_radius_x,
+                                                  const float uv_radius_y,
+                                                  ImBuf *mask,
+                                                  const float fill_value,
+                                                  const bool mirror_x = false,
+                                                  const bool mirror_y = false)
+{
+  float px = (uv_center.x - uv_origin.x) * mask->x;
+  float py = (uv_center.y - uv_origin.y) * mask->y;
+  if (mirror_x) {
+    px = float(mask->x) - px;
+  }
+  if (mirror_y) {
+    py = float(mask->y) - py;
+  }
+  const int cx = int(roundf(px));
+  const int cy = int(roundf(py));
+  int rx = int(roundf(uv_radius_x * mask->x));
+  if (rx <= 0) {
+    rx = 1;
+  }
+  int ry = int(roundf(uv_radius_y * mask->y));
+  if (ry <= 0) {
+    ry = 1;
+  }
+  fill_circle_float(mask, cx, cy, rx, ry, fill_value);
+}
+
 /** Circle gesture; caches its UV-space center and the two UV radii. */
 class ImageSelectCircleShape : public ImageSelectGestureShape {
   float2 uv_center_;
@@ -1855,20 +1934,35 @@ class ImageSelectCircleShape : public ImageSelectGestureShape {
                       ImBuf *mask,
                       const float fill_value) const override
   {
-    const int cx = int(roundf((uv_center_.x - uv_origin.x) * mask->x));
-    const int cy = int(roundf((uv_center_.y - uv_origin.y) * mask->y));
-    int rx = int(roundf(uv_radius_x_ * mask->x));
-    if (rx <= 0) {
-      rx = 1;
-    }
-    /* Compute Y pixel radius from the separately measured UV Y radius so the circle is
-     * correct on non-square tiles and in views with a non-1:1 aspect ratio. */
-    int ry = int(roundf(uv_radius_y_ * mask->y));
-    if (ry <= 0) {
-      ry = 1;
-    }
+    image_select_uv_circle_rasterize_tile(
+        uv_origin, uv_center_, uv_radius_x_, uv_radius_y_, mask, fill_value);
+  }
 
-    fill_circle_float(mask, cx, cy, rx, ry, fill_value);
+  void rasterize_tile_mirrored(const float2 &uv_origin,
+                               const rctf & /*tile_uv_rect*/,
+                               ImBuf *mask,
+                               const float fill_value,
+                               const bool mirror_x,
+                               const bool mirror_y) const override
+  {
+    /* The helper mirrors the center in tile-pixel space, which is the exact tile-local affine
+     * mirror; the radii carry over unchanged. */
+    image_select_uv_circle_rasterize_tile(
+        uv_origin, uv_center_, uv_radius_x_, uv_radius_y_, mask, fill_value, mirror_x, mirror_y);
+  }
+
+  Vector<float2> uv_outline() const override
+  {
+    /* A symmetry copy of an axis-aligned ellipse is generally rotated or bent, which the
+     * analytic fill cannot express; the copies use a dense polygon (the original fill above
+     * stays analytic). */
+    constexpr int SAMPLES = 64;
+    Vector<float2> ellipse(SAMPLES);
+    for (const int i : IndexRange(SAMPLES)) {
+      const float t = (2.0f * M_PI) * float(i) / float(SAMPLES);
+      ellipse[i] = uv_center_ + float2(cosf(t) * uv_radius_x_, sinf(t) * uv_radius_y_);
+    }
+    return ellipse;
   }
 
   PaintSelectionEdgePolicy edge_policy() const override
@@ -1893,12 +1987,53 @@ static wmOperatorStatus image_select_circle_invoke(bContext *C,
   return WM_gesture_circle_invoke(C, op, event);
 }
 
+/** Live header hint: the gesture radius in the active tile's canvas pixels. */
+static void image_select_circle_status_update(bContext *C, wmOperator *op)
+{
+  const ARegion *region = CTX_wm_region(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
+  ScrArea *area = CTX_wm_area(C);
+  const int mradius = RNA_int_get(op->ptr, "radius");
+  if (!region || !sima || !sima->image || !area || mradius <= 0) {
+    return;
+  }
+
+  const int mx = RNA_int_get(op->ptr, "x");
+  const int my = RNA_int_get(op->ptr, "y");
+  float co_center[2] = {float(mx), float(my)};
+  ui::view2d_region_to_view(&region->v2d, co_center[0], co_center[1], &co_center[0], &co_center[1]);
+  float co_edge[2] = {float(mx + mradius), float(my)};
+  ui::view2d_region_to_view(&region->v2d, co_edge[0], co_edge[1], &co_edge[0], &co_edge[1]);
+  const float uv_radius = std::fabs(co_edge[0] - co_center[0]);
+
+  ImageUser iuser = sima->iuser;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(sima->image, &iuser, nullptr);
+  if (!ibuf) {
+    return;
+  }
+  const int radius_px = int(uv_radius * float(ibuf->x));
+  BKE_image_release_ibuf(sima->image, ibuf, nullptr);
+
+  char text[64];
+  SNPRINTF(text, "Radius: %d", radius_px);
+  ED_area_status_text(area, text);
+}
+
 static wmOperatorStatus image_select_circle_modal(bContext *C,
                                                   wmOperator *op,
                                                   const wmEvent *event)
 {
   image_select_gesture_drag_detect(op, event);
-  return WM_gesture_circle_modal(C, op, event);
+  const wmOperatorStatus ret = WM_gesture_circle_modal(C, op, event);
+  if ((event->type == MOUSEMOVE || event->type == EVT_MODAL_MAP) &&
+      (ret & OPERATOR_RUNNING_MODAL))
+  {
+    image_select_circle_status_update(C, op);
+  }
+  else if ((ret & OPERATOR_RUNNING_MODAL) == 0) {
+    image_select_status_clear(C);
+  }
+  return ret;
 }
 
 void PAINT_OT_image_select_circle(wmOperatorType *ot)
@@ -1918,6 +2053,145 @@ void PAINT_OT_image_select_circle(wmOperatorType *ot)
   WM_operator_properties_select_operation_simple(ot);
 
   image_select_gesture_properties(ot);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Circle Select Radius (F)
+ * \{ */
+
+/** Drag state for #PAINT_OT_image_select_circle_radius. */
+struct ImageSelectCircleRadiusData {
+  int start_radius;
+  int start_x;
+};
+
+/** Write the radius into the active tool's stored operator properties. */
+static bool image_select_circle_radius_store(bContext *C, const int radius)
+{
+  bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  wmOperatorType *ot_circle = WM_operatortype_find("paint.image_select_circle", false);
+  if (!tref || !STREQ(tref->idname, "builtin.select_circle") || !ot_circle) {
+    return false;
+  }
+  PointerRNA props;
+  WM_toolsystem_ref_properties_ensure_from_operator(tref, ot_circle, &props);
+  RNA_int_set(&props, "radius", radius);
+  return true;
+}
+
+static wmOperatorStatus image_select_circle_radius_invoke(bContext *C,
+                                                          wmOperator *op,
+                                                          const wmEvent *event)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (!sima || !sima->image) {
+    return OPERATOR_CANCELLED;
+  }
+  bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  wmOperatorType *ot_circle = WM_operatortype_find("paint.image_select_circle", false);
+  if (!tref || !STREQ(tref->idname, "builtin.select_circle") || !ot_circle) {
+    return OPERATOR_CANCELLED;
+  }
+  PointerRNA props;
+  WM_toolsystem_ref_properties_ensure_from_operator(tref, ot_circle, &props);
+  const int start_radius = RNA_int_get(&props, "radius");
+  if (start_radius <= 0) {
+    return OPERATOR_CANCELLED;
+  }
+
+  auto *data = MEM_new<ImageSelectCircleRadiusData>(__func__);
+  data->start_radius = start_radius;
+  data->start_x = event->xy[0];
+  op->customdata = data;
+
+  WM_event_add_modal_handler(C, op);
+  ED_area_status_text(CTX_wm_area(C),
+                      "Move to set the circle radius, LMB or Enter confirms, Esc cancels");
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus image_select_circle_radius_modal(bContext *C,
+                                                         wmOperator *op,
+                                                         const wmEvent *event)
+{
+  ImageSelectCircleRadiusData *data = static_cast<ImageSelectCircleRadiusData *>(op->customdata);
+  if (!data) {
+    return OPERATOR_CANCELLED;
+  }
+
+  switch (event->type) {
+    case MOUSEMOVE: {
+      const int radius = std::max(1, data->start_radius + (event->xy[0] - data->start_x));
+      if (image_select_circle_radius_store(C, radius)) {
+        char text[64];
+        SNPRINTF(text, "Radius: %d", radius);
+        ED_area_status_text(CTX_wm_area(C), text);
+        ED_region_tag_redraw(CTX_wm_region(C));
+      }
+      return OPERATOR_RUNNING_MODAL;
+    }
+    case LEFTMOUSE: {
+      if (event->val == KM_PRESS) {
+        image_select_status_clear(C);
+        MEM_delete(data);
+        op->customdata = nullptr;
+        return OPERATOR_FINISHED;
+      }
+      return OPERATOR_RUNNING_MODAL;
+    }
+    case EVT_RETKEY:
+    case EVT_PADENTER: {
+      if (event->val == KM_PRESS) {
+        image_select_status_clear(C);
+        MEM_delete(data);
+        op->customdata = nullptr;
+        return OPERATOR_FINISHED;
+      }
+      return OPERATOR_RUNNING_MODAL;
+    }
+    case EVT_ESCKEY:
+    case RIGHTMOUSE: {
+      if (event->val == KM_PRESS) {
+        image_select_circle_radius_store(C, data->start_radius);
+        image_select_status_clear(C);
+        MEM_delete(data);
+        op->customdata = nullptr;
+        ED_region_tag_redraw(CTX_wm_region(C));
+        return OPERATOR_CANCELLED;
+      }
+      return OPERATOR_RUNNING_MODAL;
+    }
+    default:
+      return OPERATOR_RUNNING_MODAL;
+  }
+}
+
+static void image_select_circle_radius_cancel(bContext *C, wmOperator *op)
+{
+  ImageSelectCircleRadiusData *data = static_cast<ImageSelectCircleRadiusData *>(op->customdata);
+  if (!data) {
+    return;
+  }
+  image_select_circle_radius_store(C, data->start_radius);
+  image_select_status_clear(C);
+  MEM_delete(data);
+  op->customdata = nullptr;
+}
+
+void PAINT_OT_image_select_circle_radius(wmOperatorType *ot)
+{
+  ot->name = "Adjust Circle Select Radius";
+  ot->idname = "PAINT_OT_image_select_circle_radius";
+  ot->description =
+      "Interactively change the radius of the Circle Select tool (same as the F radial control)";
+
+  ot->invoke = image_select_circle_radius_invoke;
+  ot->modal = image_select_circle_radius_modal;
+  ot->cancel = image_select_circle_radius_cancel;
+  ot->poll = image_paint_selection_poll;
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /** \} */

@@ -6,6 +6,7 @@
  * \ingroup spimage
  */
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +18,7 @@
 #include "DNA_view2d_types.h"
 
 #include "BLI_listbase_wrapper.hh"
+#include "BLI_math_constants.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_string_utf8.h"
@@ -51,6 +53,7 @@
 
 #include "ED_gpencil_legacy.hh"
 #include "ED_image.hh"
+#include "ED_image_paint_symmetry.hh"
 #include "ED_mask.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
@@ -687,6 +690,8 @@ void draw_image_paint_selection_mask(const bContext *C, ARegion *region)
   GPU_matrix_pop_projection();
 }
 
+static void draw_image_paint_symmetry_line(const bContext *C, ARegion *region);
+
 void draw_image_main_helpers(const bContext *C, ARegion *region)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
@@ -710,7 +715,191 @@ void draw_image_main_helpers(const bContext *C, ARegion *region)
 
   /* Selection mask overlay for Texture Paint mode. */
   draw_image_paint_selection_mask(C, region);
+
+  /* Canvas-space symmetry line for Texture Paint mode. */
+  draw_image_paint_symmetry_line(C, region);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Canvas Symmetry overlay
+ * \{ */
+
+/** Straight UV segment, clipped to the tile, as a region-space line. */
+static void draw_image_paint_symmetry_segment(const ARegion *region,
+                                              const uint pos,
+                                              const float2 &a,
+                                              const float2 &b)
+{
+  float2 a_px, b_px;
+  ui::view2d_view_to_region_fl(&region->v2d, a.x, a.y, &a_px.x, &a_px.y);
+  ui::view2d_view_to_region_fl(&region->v2d, b.x, b.y, &b_px.x, &b_px.y);
+  immBegin(GPU_PRIM_LINES, 2);
+  immVertex2fv(pos, a_px);
+  immVertex2fv(pos, b_px);
+  immEnd();
+}
+
+/** Line through \a pivot along \a dir inside the tile, scaled around the pivot by \a length. */
+static void draw_image_paint_symmetry_tile_line(const ARegion *region,
+                                                const uint pos,
+                                                const float2 &pivot,
+                                                const float2 &dir,
+                                                const float2 &tile_origin,
+                                                const float length)
+{
+  float t0, t1;
+  if (ed::image_paint_symmetry::line_clip_to_tile(pivot, dir, tile_origin, t0, t1)) {
+    draw_image_paint_symmetry_segment(
+        region, pos, pivot + dir * (t0 * length), pivot + dir * (t1 * length));
+  }
+}
+
+/** Every guide of the symmetry, drawn with the currently bound color and line width. */
+static void draw_image_paint_symmetry_guides(const ARegion *region,
+                                             const uint pos,
+                                             const ImagePaintSettings &imapaint,
+                                             const float2 &tile_origin)
+{
+  namespace symmetry = ed::image_paint_symmetry;
+  const symmetry::CanvasSymmetry sym = symmetry::from_settings_unconditional(imapaint);
+  const float length = std::clamp(imapaint.symmetry_line_length, 0.05f, 1.0f);
+
+  switch (sym.type) {
+    case IMAGE_PAINT_SYMMETRY_TYPE_LINE:
+      draw_image_paint_symmetry_tile_line(
+          region, pos, sym.pivot, sym.direction(), tile_origin, length);
+      break;
+    case IMAGE_PAINT_SYMMETRY_TYPE_PARALLEL:
+      draw_image_paint_symmetry_tile_line(
+          region, pos, sym.pivot, sym.direction(), tile_origin, length);
+      for (const int copy : IndexRange(sym.copies_num())) {
+        draw_image_paint_symmetry_tile_line(
+            region, pos, sym.apply(copy, sym.pivot), sym.direction(), tile_origin, length);
+      }
+      break;
+    case IMAGE_PAINT_SYMMETRY_TYPE_CIRCLE: {
+      /* Sampled in UV so the circle follows the image aspect like the painted result. */
+      constexpr int segments = 96;
+      immBegin(GPU_PRIM_LINE_LOOP, segments);
+      for (const int i : IndexRange(segments)) {
+        const float t = (2.0f * float(M_PI)) * float(i) / float(segments);
+        const float2 uv = sym.pivot + float2(cosf(t), sinf(t)) * sym.radius;
+        float2 px;
+        ui::view2d_view_to_region_fl(&region->v2d, uv.x, uv.y, &px.x, &px.y);
+        immVertex2fv(pos, px);
+      }
+      immEnd();
+      break;
+    }
+  }
+}
+
+/** Quad centered on \a uv: an axis-aligned square, or a diamond when \a diamond is set. */
+static void draw_image_paint_symmetry_handle(const ARegion *region,
+                                             const uint pos,
+                                             const float2 &uv,
+                                             const float half,
+                                             const bool diamond)
+{
+  float2 co;
+  ui::view2d_view_to_region_fl(&region->v2d, uv.x, uv.y, &co.x, &co.y);
+  immBegin(GPU_PRIM_TRI_FAN, 4);
+  if (diamond) {
+    immVertex2f(pos, co.x, co.y - half);
+    immVertex2f(pos, co.x + half, co.y);
+    immVertex2f(pos, co.x, co.y + half);
+    immVertex2f(pos, co.x - half, co.y);
+  }
+  else {
+    immVertex2f(pos, co.x - half, co.y - half);
+    immVertex2f(pos, co.x + half, co.y - half);
+    immVertex2f(pos, co.x + half, co.y + half);
+    immVertex2f(pos, co.x - half, co.y + half);
+  }
+  immEnd();
+}
+
+/**
+ * Draw the canvas-space symmetry (line, inversion circle or parallel copies) of the active UDIM
+ * tile. The handles only show while #PAINT_OT_image_symmetry_edit runs in this editor.
+ */
+static void draw_image_paint_symmetry_line(const bContext *C, ARegion *region)
+{
+  namespace symmetry = ed::image_paint_symmetry;
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (sima->mode != SI_MODE_PAINT) {
+    return;
+  }
+  const Scene *scene = CTX_data_scene(C);
+  if (!scene) {
+    return;
+  }
+  const ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
+  if ((imapaint.symmetry_line_flag & IMAGE_PAINT_SYMMETRY_LINE_ENABLED) == 0 ||
+      !symmetry::canvas_mode_active(*scene->toolsettings))
+  {
+    return;
+  }
+  const Image *ima = ED_space_image(sima);
+  if (!ima) {
+    return;
+  }
+
+  const float2 tile_origin = symmetry::active_tile_origin(ima);
+  const float opacity = std::clamp(imapaint.symmetry_line_opacity, 0.0f, 1.0f);
+  const float3 color(imapaint.symmetry_line_color);
+  const float4 shadow(0.0f, 0.0f, 0.0f, 0.7f * opacity);
+
+  GPU_line_smooth(true);
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  /* Shadowed two-tone guides. */
+  GPU_line_width(3.0f);
+  immUniformColor4fv(shadow);
+  draw_image_paint_symmetry_guides(region, pos, imapaint, tile_origin);
+  GPU_line_width(1.5f);
+  immUniformColor4f(color.x, color.y, color.z, opacity);
+  draw_image_paint_symmetry_guides(region, pos, imapaint, tile_origin);
+
+  if (symmetry::edit_session_active(sima)) {
+    const symmetry::EditHandles handles = symmetry::edit_handles_calc(imapaint, tile_origin);
+    const symmetry::EditHandle hot = symmetry::edit_session_hot_handle();
+    const float outline = 1.0f * UI_SCALE_FAC;
+    const float small_half = 3.0f * UI_SCALE_FAC;
+
+    auto draw_small = [&](const float2 &uv, const symmetry::EditHandle handle) {
+      const float half = small_half * (hot == handle ? 1.4f : 1.0f);
+      immUniformColor4fv(shadow);
+      draw_image_paint_symmetry_handle(region, pos, uv, half + outline, false);
+      immUniformColor4f(color.x, color.y, color.z, opacity);
+      draw_image_paint_symmetry_handle(region, pos, uv, half, false);
+    };
+    if (handles.has_ends) {
+      draw_small(handles.end_a, symmetry::EditHandle::EndA);
+      draw_small(handles.end_b, symmetry::EditHandle::EndB);
+    }
+    if (handles.has_extent) {
+      draw_small(handles.extent, symmetry::EditHandle::Extent);
+    }
+
+    /* Pivot: white diamond, the main grab target. */
+    const float pivot_half = 4.5f * UI_SCALE_FAC *
+                             (hot == symmetry::EditHandle::Pivot ? 1.3f : 1.0f);
+    immUniformColor4fv(shadow);
+    draw_image_paint_symmetry_handle(region, pos, handles.pivot, pivot_half + outline * 1.4f, true);
+    immUniformColor4f(1.0f, 1.0f, 1.0f, opacity);
+    draw_image_paint_symmetry_handle(region, pos, handles.pivot, pivot_half, true);
+  }
+
+  immUnbindProgram();
+  GPU_blend(GPU_BLEND_NONE);
+  GPU_line_smooth(false);
+}
+
+/** \} */
 
 bool ED_space_image_show_cache(const SpaceImage *sima)
 {

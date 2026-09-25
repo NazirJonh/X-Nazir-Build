@@ -67,6 +67,7 @@
 #include "BLT_translation.hh"
 
 #include "ED_image.hh"
+#include "ED_image_paint_symmetry.hh"
 #include "ED_material_bake.hh"
 #include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
@@ -1895,6 +1896,11 @@ static void paint_cursor_ensure_material_source_bake(const bContext &C,
 static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, void * /*unused*/)
 {
   PRF_scope(ProfileCategory::Default);
+  /* Editing the canvas symmetry uses the system cursor over its handles; the brush cursor (and
+   * its texture preview) returns once the session ends. */
+  if (ed::image_paint_symmetry::edit_session_active(CTX_wm_space_image(C))) {
+    return;
+  }
   PaintCursorContext pcontext;
   if (!paint_cursor_context_init(C, xy, tilt, pcontext)) {
     return;

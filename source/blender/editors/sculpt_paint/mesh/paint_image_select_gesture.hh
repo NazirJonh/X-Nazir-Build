@@ -23,6 +23,8 @@
 #pragma once
 
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_windowmanager_enums.h"
 
@@ -79,6 +81,30 @@ class ImageSelectGestureShape {
                               ImBuf *mask,
                               float fill_value) const = 0;
 
+  /**
+   * Rasterize the shape mirrored across the tile's own centerlines, for the image-editor-space
+   * symmetry of the shared gesture sequence.
+   *
+   * The mirror is an affine transform within one UDIM tile (`u' = origin + 1 - (u - origin)`),
+   * so a tile-local mirror of the shape is exactly the mirror of the shape's intersection with
+   * that tile. Implementations mirror their cached geometry in tile-pixel space
+   * (`x' = width - x`, `y' = height - y`) and rasterize the result clipped to the tile; pixels
+   * outside the mirrored shape are never touched.
+   */
+  virtual void rasterize_tile_mirrored(const float2 &uv_origin,
+                                       const rctf &tile_uv_rect,
+                                       ImBuf *mask,
+                                       float fill_value,
+                                       bool mirror_x,
+                                       bool mirror_y) const = 0;
+
+  /**
+   * The shape's outline as a UV polygon, which the canvas-space symmetry
+   * (#ImagePaintSettings::symmetry_type) maps and fills for each of its copies. Curved shapes
+   * return a dense polygon; the original gesture keeps its exact #rasterize_tile.
+   */
+  virtual Vector<float2> uv_outline() const = 0;
+
   /** Edge policy applied to the resulting mask once the gesture completes. */
   virtual PaintSelectionEdgePolicy edge_policy() const = 0;
 };
@@ -117,5 +143,23 @@ void image_paint_selection_expand(bContext *C,
                                   Image *image,
                                   eSelectOp sel_op,
                                   const rctf *gesture_uv_bounds);
+
+/**
+ * Fill the interior of the UV-space polygon \a uv_points into one UDIM tile's selection mask.
+ *
+ * The polygon is converted to tile pixels (one tile spans one UV unit square at \a uv_origin)
+ * and filled with the even-odd rule, clipped to the mask. The optional mirror flags flip the
+ * polygon across the tile's own centerlines in tile-pixel space (`x' = width - x`), the
+ * image-editor-space symmetry shared by every gesture shape; see
+ * #ImageSelectGestureShape::rasterize_tile_mirrored.
+ *
+ * Shared by the box / lasso / polyline / curve shapes.
+ */
+void image_select_uv_polygon_rasterize_tile(const float2 &uv_origin,
+                                            Span<float2> uv_points,
+                                            ImBuf *mask,
+                                            float fill_value,
+                                            bool mirror_x = false,
+                                            bool mirror_y = false);
 
 }  // namespace blender

@@ -49,6 +49,7 @@ set(SRC
   ../include/ED_grease_pencil.hh
   ../include/ED_id_management.hh
   ../include/ED_image.hh
+  ../include/ED_image_paint_symmetry.hh
   ../include/ED_info.hh
   ../include/ED_keyframes_draw.hh
   ../include/ED_keyframes_edit.hh

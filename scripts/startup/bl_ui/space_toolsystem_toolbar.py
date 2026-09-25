@@ -2451,6 +2451,24 @@ class _defs_image_paint_select:
         )
 
     @ToolDef.from_fn
+    def curve():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_curve")
+            row = layout.row()
+            row.use_property_split = False
+            row.prop(props, "mode", text="", expand=True, icon_only=True)
+            _defs_image_paint_select.draw_select_expand(context, layout)
+
+        return dict(
+            idname="builtin.select_curve",
+            label="Select Curve",
+            icon="ops.curve.draw",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Select Curve",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def circle():
         def draw_settings(context, layout, tool):
             props = tool.operator_properties("paint.image_select_circle")
@@ -3920,6 +3938,7 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_image_paint_select.circle,
             _defs_image_paint_select.lasso,
             _defs_image_paint_select.polyline,
+            _defs_image_paint_select.curve,
             _defs_image_paint_select.move,
             _defs_image_paint_select.transform,
             _defs_image_paint_select.warp,

@@ -214,6 +214,8 @@ void PAINT_OT_image_select_invert(wmOperatorType *ot);
 void PAINT_OT_image_select_box(wmOperatorType *ot);
 void PAINT_OT_image_select_lasso(wmOperatorType *ot);
 void PAINT_OT_image_select_circle(wmOperatorType *ot);
+void PAINT_OT_image_select_circle_radius(wmOperatorType *ot);
+void PAINT_OT_image_select_curve(wmOperatorType *ot);
 
 /* Gradient tool operators. */
 void PAINT_OT_image_select_gradient(wmOperatorType *ot);

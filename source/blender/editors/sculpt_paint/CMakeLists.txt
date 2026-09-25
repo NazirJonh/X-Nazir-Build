@@ -122,6 +122,7 @@ set(SRC
   mesh/paint_image_uv_symmetry.cc
   mesh/paint_image_select_mask.cc
   mesh/paint_image_select_gesture.cc
+  mesh/paint_image_select_curve.cc
   mesh/paint_image_select_fragment.cc
   mesh/paint_image_select_floating.cc
   mesh/paint_image_select_move.cc
@@ -129,6 +130,8 @@ set(SRC
   mesh/paint_image_select_gradient.cc
   mesh/paint_image_select_warp.cc
   mesh/paint_image_select_gizmo.cc
+  mesh/paint_image_canvas_symmetry.cc
+  mesh/paint_image_symmetry_line.cc
   mesh/paint_image_2d_curve_mask.cc
   mesh/paint_area_plane_2d.cc
   mesh/paint_image_ops_paint.cc

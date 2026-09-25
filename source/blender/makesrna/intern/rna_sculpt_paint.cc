@@ -694,6 +694,19 @@ static void rna_Paint_symmetry_space_update(Main * /*bmain*/,
   WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 }
 
+static void rna_ImagePaintSettings_symmetry_mode_update(Main * /*bmain*/,
+                                                        Scene * /*scene*/,
+                                                        PointerRNA *ptr)
+{
+  /* Picking 2D Canvas means using it: switch the canvas symmetry on so the mode takes effect
+   * right away instead of leaving the user to find the separate toggle. */
+  ImagePaintSettings *imapaint = static_cast<ImagePaintSettings *>(ptr->data);
+  if (imapaint->symmetry_line_flag & IMAGE_PAINT_SYMMETRY_MODE_CANVAS) {
+    imapaint->symmetry_line_flag |= IMAGE_PAINT_SYMMETRY_LINE_ENABLED;
+  }
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
+}
+
 static void rna_ImagePaintSettings_gradient_update(Main * /*bmain*/,
                                                    Scene * /*scene*/,
                                                    PointerRNA * /*ptr*/)
@@ -3370,6 +3383,133 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Color Ramp", "Colors of the selection gradient");
   RNA_def_property_update(
       prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
+
+  /* Canvas-space (Photoshop-style) symmetry line. */
+  prop = RNA_def_property(srna, "use_symmetry_line", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "symmetry_line_flag", IMAGE_PAINT_SYMMETRY_LINE_ENABLED);
+  RNA_def_property_ui_text(
+      prop, "Symmetry Line", "Show and use a canvas-space symmetry line in the Image Editor");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "use_symmetry_line_brush", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "symmetry_line_flag", IMAGE_PAINT_SYMMETRY_LINE_AFFECT_BRUSH);
+  RNA_def_property_ui_text(
+      prop, "Affect Brush Paint", "Mirror brush strokes across the symmetry line");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_symmetry_line_selection", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "symmetry_line_flag", IMAGE_PAINT_SYMMETRY_LINE_AFFECT_SELECTION);
+  RNA_def_property_ui_text(
+      prop, "Affect Selection Tools", "Mirror selection gestures across the symmetry line");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_line_pivot", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_float_sdna(prop, nullptr, "symmetry_line_pivot");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_text(
+      prop, "Symmetry Line Pivot", "Pivot point of the symmetry line in the active tile's UV space");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_line_angle", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_sdna(prop, nullptr, "symmetry_line_angle");
+  RNA_def_property_ui_text(prop,
+                           "Symmetry Line Angle",
+                           "Direction of the symmetry line, counter-clockwise from the tile's X axis");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_line_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "symmetry_line_opacity");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Overlay Opacity", "Display opacity of the symmetry line overlay");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_line_color", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_float_sdna(prop, nullptr, "symmetry_line_color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop, "Line Color", "Display color of the symmetry line overlay");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_line_length", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "symmetry_line_length");
+  RNA_def_property_range(prop, 0.05f, 1.0f);
+  RNA_def_property_ui_text(
+      prop,
+      "Line Length",
+      "Displayed length of the symmetry line, as a fraction of its extent across the tile "
+      "(display only, the symmetry still uses the full line)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  static const EnumPropertyItem symmetry_mode_items[] = {
+      {0,
+       "MESH",
+       0,
+       "3D Symmetry",
+       "Mirror through the mesh with the X/Y/Z symmetry axes (standard projection)"},
+      {IMAGE_PAINT_SYMMETRY_MODE_CANVAS,
+       "CANVAS",
+       0,
+       "2D Canvas",
+       "Use the canvas-space symmetry (line, circle or parallel) instead of the mesh symmetry"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "symmetry_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_bitflag_sdna(prop, nullptr, "symmetry_line_flag");
+  RNA_def_property_enum_items(prop, symmetry_mode_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Symmetry Mode",
+      "How 2D painting and selection are mirrored");
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_symmetry_mode_update");
+
+  static const EnumPropertyItem symmetry_type_items[] = {
+      {IMAGE_PAINT_SYMMETRY_TYPE_LINE,
+       "LINE",
+       0,
+       "Line",
+       "Mirror across a line through the pivot"},
+      {IMAGE_PAINT_SYMMETRY_TYPE_CIRCLE,
+       "CIRCLE",
+       0,
+       "Circle",
+       "Invert through a circle around the pivot, swapping its inside and outside"},
+      {IMAGE_PAINT_SYMMETRY_TYPE_PARALLEL,
+       "PARALLEL",
+       0,
+       "Parallel",
+       "Repeat along the line normal at a fixed spacing"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "symmetry_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "symmetry_type");
+  RNA_def_property_enum_items(prop, symmetry_type_items);
+  RNA_def_property_ui_text(prop, "Symmetry Type", "Kind of canvas-space symmetry");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_circle_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "symmetry_circle_radius");
+  RNA_def_property_range(prop, 0.001f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.01f, 1.0f, 1, 3);
+  RNA_def_property_ui_text(prop, "Circle Radius", "Radius of the inversion circle in UV units");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_parallel_width", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "symmetry_parallel_width");
+  RNA_def_property_range(prop, 0.001f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.01f, 1.0f, 1, 3);
+  RNA_def_property_ui_text(prop, "Spacing", "Distance between parallel copies in UV units");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_parallel_count", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "symmetry_parallel_count");
+  RNA_def_property_range(prop, 1, 16);
+  RNA_def_property_ui_text(prop, "Count", "Number of parallel copies on each side of the line");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 }
 
 static void rna_def_particle_edit(BlenderRNA *brna)

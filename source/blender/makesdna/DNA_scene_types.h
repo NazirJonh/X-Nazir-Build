@@ -1426,6 +1426,31 @@ enum eImagePaint_WarpInterpolation : int8_t {
   IMAGE_PAINT_WARP_INTERP_SMOOTH = 1,
 };
 
+/** #ImagePaintSettings::symmetry_line_flag */
+enum eImagePaint_SymmetryLineFlag : short {
+  IMAGE_PAINT_SYMMETRY_LINE_ENABLED = (1 << 0),
+  /** Brush strokes mirror across the canvas-space symmetry line. */
+  IMAGE_PAINT_SYMMETRY_LINE_AFFECT_BRUSH = (1 << 1),
+  /** Selection gestures (box/lasso/polyline/circle/curve) mirror across the line. */
+  IMAGE_PAINT_SYMMETRY_LINE_AFFECT_SELECTION = (1 << 2),
+  /**
+   * 2D Canvas mode: the canvas symmetry replaces the mesh (3D) symmetry of the 2D paint and
+   * selection tools.
+   */
+  IMAGE_PAINT_SYMMETRY_MODE_CANVAS = (1 << 3),
+};
+ENUM_OPERATORS(eImagePaint_SymmetryLineFlag)
+
+/** #ImagePaintSettings::symmetry_type */
+enum eImagePaint_SymmetryType : short {
+  /** Reflection across the line through the pivot. */
+  IMAGE_PAINT_SYMMETRY_TYPE_LINE = 0,
+  /** Inversion through the circle around the pivot (inside <-> outside). */
+  IMAGE_PAINT_SYMMETRY_TYPE_CIRCLE = 1,
+  /** Copies repeated along the line normal, spaced by the parallel width. */
+  IMAGE_PAINT_SYMMETRY_TYPE_PARALLEL = 2,
+};
+
 /** Image Paint face/island expansion mode.
  *
  * Used by #ImagePaintSettings::selection_expand (Select Box/Lasso/Circle)
@@ -1519,6 +1544,37 @@ struct ImagePaintSettings {
    * #blo_update_defaults_scene and #blo_do_versions_520.
    */
   struct ColorBand gradient_colorband;
+
+  /* Canvas-space (Photoshop-style) symmetry line, defined in the active UDIM tile's UV square.
+   * Appended last so existing files keep their field offsets; old files get the display default
+   * (opacity, color, length) in #blo_do_versions_520. */
+  /** Pivot of the line in UV space. */
+  float symmetry_line_pivot[2] = {0.5f, 0.5f};
+  /** Direction of the line, radians counter-clockwise from +X. */
+  float symmetry_line_angle = 0.0f;
+  /** Display opacity of the symmetry line overlay. */
+  float symmetry_line_opacity = 1.0f;
+  /** Display color of the symmetry line overlay. */
+  float symmetry_line_color[3] = {0.2f, 0.7f, 1.0f};
+  /**
+   * Displayed fraction of the line's extent across the tile, scaled around the pivot. Display
+   * only: the symmetry itself always uses the infinite line.
+   */
+  float symmetry_line_length = 1.0f;
+  /** Radius of the inversion circle in UV, for #IMAGE_PAINT_SYMMETRY_TYPE_CIRCLE. */
+  float symmetry_circle_radius = 0.25f;
+  /** UV distance between copies, for #IMAGE_PAINT_SYMMETRY_TYPE_PARALLEL. */
+  float symmetry_parallel_width = 0.2f;
+  /** #eImagePaint_SymmetryLineFlag */
+  short symmetry_line_flag = IMAGE_PAINT_SYMMETRY_LINE_AFFECT_BRUSH |
+                             IMAGE_PAINT_SYMMETRY_LINE_AFFECT_SELECTION;
+  /** #eImagePaint_SymmetryType */
+  short symmetry_type = IMAGE_PAINT_SYMMETRY_TYPE_LINE;
+  /** Copies on each side of the line, for #IMAGE_PAINT_SYMMETRY_TYPE_PARALLEL. */
+  short symmetry_parallel_count = 1;
+  /* Pad the struct back to an 8-byte multiple (the added block is 46 bytes), so the fields
+   * following the embedded #ImagePaintSettings inside #ToolSettings stay 8-byte aligned. */
+  char _pad_symmetry_line[2] = {};
 };
 
 /** \} */

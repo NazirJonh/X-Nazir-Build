@@ -2295,6 +2295,9 @@ def km_image(params):
         ("paint.image_select_gradient_apply", {"type": 'RET', "value": 'PRESS'}, None),
         ("paint.image_select_gradient_apply", {"type": 'NUMPAD_ENTER', "value": 'PRESS'}, None),
         ("paint.image_select_gradient_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
+        # Cycle the Image Editor's selection tool group (Box → Circle → Lasso → Polyline → Curve
+        # → ...), like the Edit Mode W cycling of grouped tools.
+        op_tool_cycle("builtin.select_box", {"type": 'W', "value": 'PRESS'}),
     ])
 
     if not params.legacy:
@@ -7643,6 +7646,11 @@ def km_image_editor_tool_paint_select_circle(params, *, fallback):
                 ("paint.image_select_none",
                  {"type": params.tool_mouse, "value": 'CLICK'}, None),
             ]),
+            # Adjust the circle radius interactively (like the brush size radial control).
+            *([] if (fallback and not params.use_fallback_tool) else [
+                ("paint.image_select_circle_radius",
+                 {"type": 'F', "value": 'PRESS'}, None),
+            ]),
         ]},
     )
 
@@ -7684,6 +7692,22 @@ def km_image_editor_tool_paint_select_polyline(params, *, fallback):
             *([] if (fallback and not params.use_fallback_tool) else
               _template_items_tool_select_actions_simple(
                   "paint.image_select_polyline",
+                  type=params.tool_mouse,
+                  value='PRESS')),
+        ]},
+    )
+
+
+def km_image_editor_tool_paint_select_curve(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Select Curve", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else
+              _template_items_image_paint_select_lasso_gesture(params)),
+            *([] if (fallback and not params.use_fallback_tool) else
+              _template_items_tool_select_actions_simple(
+                  "paint.image_select_curve",
                   type=params.tool_mouse,
                   value='PRESS')),
         ]},
@@ -9622,6 +9646,7 @@ def generate_keymaps(params=None):
         *(km_image_editor_tool_paint_select_circle(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_lasso(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_polyline(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_select_curve(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_move(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_transform(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_warp(params, fallback=fallback) for fallback in (False, True)),

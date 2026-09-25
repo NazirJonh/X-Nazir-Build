@@ -76,6 +76,10 @@ class ImagePaintPanel(UnifiedPaintPanel):
     bl_region_type = 'UI'
 
 
+def _image_paint_canvas_symmetry_active(context):
+    return context.tool_settings.image_paint.symmetry_mode == 'CANVAS'
+
+
 class BrushButtonsPanel(UnifiedPaintPanel):
     bl_space_type = 'IMAGE_EDITOR'
     bl_region_type = 'UI'
@@ -208,6 +212,8 @@ class IMAGE_MT_select(Menu):
             layout.separator()
             layout.operator("paint.image_select_copy", text="Copy Selection")
             layout.operator("paint.image_select_paste", text="Paste Selection")
+            layout.separator()
+            layout.operator("paint.image_symmetry_edit", text="Edit Canvas Symmetry")
             return
 
         layout.operator("uv.select_all", text="All").action = 'SELECT'
@@ -872,7 +878,12 @@ class IMAGE_HT_tool_header(Header):
         tool_mode = context.mode if tool is None else tool.mode
 
         if tool_mode == 'PAINT':
-            layout.popover_group(space_type='IMAGE_EDITOR', region_type='UI', context=".imagepaint_2d", category="")
+            # Quick toggle for the canvas symmetry, joined to the Symmetry popover it belongs to.
+            row = layout.row(align=True)
+            sub = row.row(align=True)
+            sub.active = _image_paint_canvas_symmetry_active(context)
+            sub.prop(context.tool_settings.image_paint, "use_symmetry_line", text="", icon='MOD_MIRROR')
+            row.popover_group(space_type='IMAGE_EDITOR', region_type='UI', context=".imagepaint_2d", category="")
 
 
 class _draw_tool_settings_context_mode:
@@ -1954,7 +1965,10 @@ class IMAGE_PT_tools_imagepaint_symmetry(BrushButtonsPanel, Panel):
         tool_settings = context.tool_settings
         ipaint = tool_settings.image_paint
 
+        canvas_active = _image_paint_canvas_symmetry_active(context)
+
         col = layout.column(align=True)
+        col.active = not canvas_active
         col.label(text="Mirror")
         row = col.row(align=True)
         row.prop(ipaint, "use_symmetry_x", text="X", toggle=True)
@@ -1966,6 +1980,54 @@ class IMAGE_PT_tools_imagepaint_symmetry(BrushButtonsPanel, Panel):
         row = col.row(align=True)
         row.prop(ipaint, "tile_x", text="X", toggle=True)
         row.prop(ipaint, "tile_y", text="Y", toggle=True)
+
+        col = layout.column(align=True)
+        col.label(text="Symmetry Mode")
+        row = col.row(align=True)
+        row.prop(ipaint, "symmetry_mode", expand=True)
+
+
+class IMAGE_PT_paint_symmetry_line(BrushButtonsPanel, Panel):
+    bl_context = ".imagepaint_2d"
+    bl_label = "Canvas Symmetry"
+    bl_parent_id = "IMAGE_PT_tools_imagepaint_symmetry"
+    bl_category = "Tool"
+
+    def draw_header(self, context):
+        imapaint = context.tool_settings.image_paint
+        self.layout.active = _image_paint_canvas_symmetry_active(context)
+        self.layout.prop(imapaint, "use_symmetry_line", text="", icon='MOD_MIRROR')
+
+    def draw(self, context):
+        layout = self.layout
+        imapaint = context.tool_settings.image_paint
+        # 3D Symmetry (or PBR paint) uses the mesh axes; the canvas tools stay visible but inactive.
+        layout.active = _image_paint_canvas_symmetry_active(context)
+
+        row = layout.row()
+        row.prop(imapaint, "symmetry_type", expand=True)
+        layout.operator("paint.image_symmetry_edit", text="Edit Symmetry", icon='MOD_MIRROR')
+
+        col = layout.column(align=True)
+        col.active = imapaint.use_symmetry_line
+        col.prop(imapaint, "use_symmetry_line_brush", text="Affect Brush Paint")
+        col.prop(imapaint, "use_symmetry_line_selection", text="Affect Selection Tools")
+
+        col = layout.column(align=True)
+        col.active = imapaint.use_symmetry_line
+        col.use_property_split = True
+        col.use_property_decorate = False
+        if imapaint.symmetry_type == 'CIRCLE':
+            col.prop(imapaint, "symmetry_circle_radius", text="Radius")
+        else:
+            col.prop(imapaint, "symmetry_line_angle", text="Angle")
+            if imapaint.symmetry_type == 'PARALLEL':
+                col.prop(imapaint, "symmetry_parallel_width", text="Spacing")
+                col.prop(imapaint, "symmetry_parallel_count", text="Count")
+            col.prop(imapaint, "symmetry_line_length", text="Length", slider=True)
+        col.separator()
+        col.prop(imapaint, "symmetry_line_color", text="Color")
+        col.prop(imapaint, "symmetry_line_opacity", text="Opacity", slider=True)
 
 
 # Only a popover.
@@ -2510,6 +2572,7 @@ classes = (
     IMAGE_PT_paint_curve,
     IMAGE_PT_tools_brush_display,
     IMAGE_PT_tools_imagepaint_symmetry,
+    IMAGE_PT_paint_symmetry_line,
     IMAGE_PT_uv_sculpt_options,
     IMAGE_PT_uv_sculpt_curve,
     IMAGE_PT_view_histogram,

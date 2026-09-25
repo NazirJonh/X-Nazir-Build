@@ -2019,6 +2019,43 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The canvas-space symmetry line settings are new. A file written before them zero-fills the
+   * pivot (the tile corner) and the overlay opacity (fully transparent).
+   *
+   * NOTE: Keyed on the member existence, like the Sculpt gradient settings above. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "ImagePaintSettings", "float", "symmetry_line_opacity"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      ImagePaintSettings &imapaint = scene.toolsettings->imapaint;
+      imapaint.symmetry_line_pivot[0] = 0.5f;
+      imapaint.symmetry_line_pivot[1] = 0.5f;
+      imapaint.symmetry_line_opacity = 1.0f;
+    }
+  }
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "ImagePaintSettings", "float", "symmetry_line_length"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      ImagePaintSettings &imapaint = scene.toolsettings->imapaint;
+      copy_v3_fl3(imapaint.symmetry_line_color, 0.2f, 0.7f, 1.0f);
+      imapaint.symmetry_line_length = 1.0f;
+    }
+  }
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "ImagePaintSettings", "float", "symmetry_circle_radius"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      ImagePaintSettings &imapaint = scene.toolsettings->imapaint;
+      imapaint.symmetry_line_flag |= IMAGE_PAINT_SYMMETRY_LINE_AFFECT_BRUSH |
+                                     IMAGE_PAINT_SYMMETRY_LINE_AFFECT_SELECTION;
+      imapaint.symmetry_type = IMAGE_PAINT_SYMMETRY_TYPE_LINE;
+      imapaint.symmetry_circle_radius = 0.25f;
+      imapaint.symmetry_parallel_width = 0.2f;
+      imapaint.symmetry_parallel_count = 1;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

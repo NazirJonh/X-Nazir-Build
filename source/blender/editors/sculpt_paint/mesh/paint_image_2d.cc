@@ -97,6 +97,7 @@
 #include "paint_material_source.hh"
 
 #include "ED_image.hh"
+#include "ED_image_paint_symmetry.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
@@ -115,6 +116,7 @@
 #include "../paint_intern.hh"
 #include "mesh_brush_common.hh"
 #include "paint_image_select_gradient.hh"
+#include "paint_image_select_gesture.hh"
 #include "paint_image_select_intern.hh"
 #include "paint_image_uv_geom.hh"
 #include "paint_image_uv_symmetry.hh"
@@ -4291,6 +4293,30 @@ static void paint_2d_stroke_single(ImagePaintState *s,
         paint_2d_secondary_mesh_symmetry_dabs(s, uv_new, uv_old, base_size, primary_placed);
       }
     }
+
+    /* Canvas-space symmetry copies (2D Canvas mode): mapped in UV, then placed on the surface
+     * point under the mapped UV like a mesh-symmetry dab. Computed per state since the copy
+     * count is unbounded by #AREA_PLANE_SYMMETRY_SLOTS; one UV lookup per copy is cheap. */
+    if (geoms[0].valid) {
+      if (const std::optional<ed::image_paint_symmetry::CanvasSymmetry> canvas_symmetry =
+              ed::image_paint_symmetry::from_settings(*s->scene->toolsettings,
+                                                      IMAGE_PAINT_SYMMETRY_LINE_AFFECT_BRUSH))
+      {
+        const float size_scale = canvas_symmetry->dab_scale_at(uv_new);
+        for (const int copy : IndexRange(canvas_symmetry->copies_num())) {
+          SymmetryDab dab;
+          dab.computed = true;
+          dab.new_uv = canvas_symmetry->apply(copy, uv_new);
+          if (!mesh.hit_at_uv(dab.new_uv, dab.hit)) {
+            continue;
+          }
+          dab.valid = true;
+          dab.flipped = canvas_symmetry->is_reflection();
+          paint_2d_area_plane_stroke(
+              s, new_uv, base_size * size_scale, &dab, origin_position, uv_new, nullptr);
+        }
+      }
+    }
     painter->firsttouch = false;
     return;
   }
@@ -4306,22 +4332,45 @@ static void paint_2d_stroke_single(ImagePaintState *s,
   const bool use_symmetry = symm != 0 && paint_2d_use_area_plane_mesh(painter);
   const bool firsttouch_entry = painter->firsttouch;
 
+  /* Canvas-space symmetry (line, circle inversion or parallel copies): extra passes mapping the
+   * stroke in UV, independent of the mesh symmetry iterations. Gated by its own "affect brush"
+   * toggle. */
+  const std::optional<ed::image_paint_symmetry::CanvasSymmetry> canvas_symmetry =
+      ed::image_paint_symmetry::from_settings(*s->scene->toolsettings,
+                                              IMAGE_PAINT_SYMMETRY_LINE_AFFECT_BRUSH);
+  /* Mesh passes only run while the mesh symmetry is usable; the canvas copies run on their own. */
+  const int mesh_pass_count = (symm != 0 && use_symmetry) ? int(symm) + 1 : 1;
+  const int pass_count = mesh_pass_count +
+                         (canvas_symmetry ? canvas_symmetry->copies_num() : 0);
+
   /* Upper bound is `symm`, not the slot count: #is_symmetry_iteration_valid only tests that the
    * iteration shares a bit with `symm`, so iterating past it would accept supersets — with X
    * alone it would also run XY, XZ and XYZ. Every other symmetry loop in the codebase bounds the
    * same way. */
-  for (int iter = 0; iter <= int(symm); iter++) {
-    if (iter > 0 && !use_symmetry) {
-      break;
-    }
-    if (!ed::sculpt_paint::is_symmetry_iteration_valid(char(iter), symm)) {
-      continue;
-    }
+  for (int iter = 0; iter < pass_count; iter++) {
+    const bool is_canvas_mirror = (iter >= mesh_pass_count);
+    /* The circle inversion scales the dab with its local magnification `r^2 / d^2`, clamped so
+     * a stroke near the center does not flood the canvas. */
+    float iter_size_scale = 1.0f;
 
     float iter_new_uv[2];
     float iter_old_uv[2];
     float iter_mval[2] = {mval[0], mval[1]};
-    if (iter == 0) {
+    if (is_canvas_mirror) {
+      const int copy = iter - mesh_pass_count;
+      const float2 mirrored_new = canvas_symmetry->apply(copy, float2(new_uv[0], new_uv[1]));
+      const float2 mirrored_old = canvas_symmetry->apply(copy, float2(old_uv[0], old_uv[1]));
+      iter_size_scale = canvas_symmetry->dab_scale_at(float2(new_uv[0], new_uv[1]));
+      iter_new_uv[0] = mirrored_new.x;
+      iter_new_uv[1] = mirrored_new.y;
+      iter_old_uv[0] = mirrored_old.x;
+      iter_old_uv[1] = mirrored_old.y;
+      /* View mapping caches its source by cursor position, so every mirrored dab would sample
+       * the same patch of texture if the region coordinates were not moved with it. */
+      ui::view2d_view_to_region_fl(
+          s->v2d, iter_new_uv[0], iter_new_uv[1], &iter_mval[0], &iter_mval[1]);
+    }
+    else if (iter == 0) {
       copy_v2_v2(iter_new_uv, new_uv);
       copy_v2_v2(iter_old_uv, old_uv);
     }
@@ -4365,8 +4414,8 @@ static void paint_2d_stroke_single(ImagePaintState *s,
     }
 
     const float uv_brush_size[2] = {
-        (s->symmetry & PAINT_TILE_X) ? FLT_MAX : base_size / s->tiles[0].size[0],
-        (s->symmetry & PAINT_TILE_Y) ? FLT_MAX : base_size / s->tiles[0].size[1]};
+        (s->symmetry & PAINT_TILE_X) ? FLT_MAX : base_size * iter_size_scale / s->tiles[0].size[0],
+        (s->symmetry & PAINT_TILE_Y) ? FLT_MAX : base_size * iter_size_scale / s->tiles[0].size[1]};
 
     for (int i = 0; i < s->num_tiles; i++) {
       ImagePaintTile *tile = &s->tiles[i];
@@ -4387,7 +4436,7 @@ static void paint_2d_stroke_single(ImagePaintState *s,
         continue;
       }
 
-      float size = base_size * tile->radius_fac;
+      float size = base_size * iter_size_scale * tile->radius_fac;
 
       float new_coord[2], old_coord[2];
       paint_2d_uv_to_coord(tile, iter_new_uv, new_coord);
@@ -4577,6 +4626,28 @@ void paint_2d_stroke(void *ps,
                                                      iter == 0,
                                                      symm_jacobian);
       }
+
+      /* Canvas-space symmetry copies: the mapping's Jacobian makes each stamp the mirror (or
+       * translated) image of the main one, like the mesh symmetry passes above. */
+      if (const std::optional<ed::image_paint_symmetry::CanvasSymmetry> canvas_symmetry =
+              ed::image_paint_symmetry::from_settings(*s->scene->toolsettings,
+                                                      IMAGE_PAINT_SYMMETRY_LINE_AFFECT_BRUSH))
+      {
+        /* The Jacobian also carries the circle inversion's magnification, so the radius stays.
+         * Every copy shares it: the parallel copies are translations of each other. */
+        const float2x2 jacobian = canvas_symmetry->jacobian(new_uv);
+        for (const int copy : IndexRange(canvas_symmetry->copies_num())) {
+          ed::sculpt_paint::clone::clone_2d_stroke_dab(s->clone_runtime,
+                                                       s->clone_context,
+                                                       *s->paint,
+                                                       *s->brush,
+                                                       canvas_symmetry->apply(copy, new_uv),
+                                                       base_size,
+                                                       strength,
+                                                       false,
+                                                       &jacobian);
+        }
+      }
       paint_2d_clone_stamp_flag_redraw(*s);
     }
     return;
@@ -4670,6 +4741,10 @@ static ImagePaintState *paint_2d_new_stroke_for_image(bContext *C,
   s->image = image;
 
   s->symmetry = settings->imapaint.paint.symmetry_flags;
+  if (ed::image_paint_symmetry::canvas_mode_active(*settings)) {
+    /* 2D Canvas mode: the canvas symmetry replaces the mesh axes; tiling is kept. */
+    s->symmetry &= ~PAINT_SYMM_AXIS_ALL;
+  }
 
   if (BKE_image_has_packedfile(s->image) && s->image->rr != nullptr) {
     BKE_report(op->reports, RPT_WARNING, "Packed MultiLayer files cannot be painted");
@@ -4915,7 +4990,8 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     Vector<std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh>> secondary_area_plane_meshes;
     {
       const bool symmetry_on = (settings->imapaint.paint.symmetry_flags &
-                                PAINT_SYMM_AXIS_ALL) != 0;
+                                PAINT_SYMM_AXIS_ALL) != 0 &&
+                               !ed::image_paint_symmetry::canvas_mode_active(*settings);
       /* Symmetry mirrors a dab through the surface, so it needs the UV<->3D bridge even when no
        * channel has a source texture at all: #ChannelSourceSet is null for a flat-color stroke,
        * which still has to mirror. Area Plane's own need for the mesh is a separate condition. */

@@ -2973,6 +2973,41 @@ static void image_new_free(wmOperator *op)
   }
 }
 
+/**
+ * The PBR Paint canvas follows a texture the user creates while an Image Editor in Paint mode
+ * displays it: the canvas source flips to Image and the new image becomes the canvas, so the
+ * PBR Paint panel selects it without extra clicks.
+ */
+static void image_new_paint_canvas_follow(bContext *C, Scene *scene, Image *ima)
+{
+  PaintModeSettings *paint_mode = &scene->toolsettings->paint_mode;
+  if (paint_mode->canvas_source == PAINT_CANVAS_SOURCE_IMAGE && paint_mode->canvas_image == ima) {
+    return;
+  }
+
+  /* Assign the image first so the source update below sees a consistent canvas. Switching the
+   * source through RNA refreshes exactly like flipping the flag in the PBR Paint panel (mesh
+   * slots, shading tags, brush sync). */
+  paint_mode->canvas_image = ima;
+  BKE_imageuser_default(&paint_mode->image_user);
+
+  PointerRNA paint_mode_ptr = RNA_pointer_create_discrete(
+      &scene->id, RNA_PaintModeSettings, paint_mode);
+  PropertyRNA *source_prop = RNA_struct_find_property(&paint_mode_ptr, "canvas_source");
+  RNA_property_enum_set(&paint_mode_ptr, source_prop, PAINT_CANVAS_SOURCE_IMAGE);
+  RNA_property_update(C, &paint_mode_ptr, source_prop);
+
+  /* Painting on a flat texture mirrors in canvas space, not across the mesh. Going through RNA
+   * lets the mode update switch the canvas symmetry on, like picking 2D Canvas in the panel. */
+  PointerRNA imapaint_ptr = RNA_pointer_create_discrete(
+      &scene->id, RNA_ImagePaint, &scene->toolsettings->imapaint);
+  PropertyRNA *symmetry_mode_prop = RNA_struct_find_property(&imapaint_ptr, "symmetry_mode");
+  RNA_property_enum_set(&imapaint_ptr, symmetry_mode_prop, IMAGE_PAINT_SYMMETRY_MODE_CANVAS);
+  RNA_property_update(C, &imapaint_ptr, symmetry_mode_prop);
+
+  WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, scene);
+}
+
 static wmOperatorStatus image_new_exec(bContext *C, wmOperator *op)
 {
   SpaceImage *sima;
@@ -3054,6 +3089,17 @@ static wmOperatorStatus image_new_exec(bContext *C, wmOperator *op)
   }
 
   BKE_image_signal(bmain, ima, (sima) ? &sima->iuser : nullptr, IMA_SIGNAL_USER_NEW_IMAGE);
+
+  /* A texture created by hand while an Image Editor paints is a request to paint on it: make it
+   * the PBR Paint canvas so the panel selects it right away. Only when the editor itself now
+   * displays the image though -- a New launched from a sidebar property (the clone source, for
+   * one) fills that property and is not a canvas request. */
+  Scene *scene = CTX_data_scene(C);
+  if (scene != nullptr && scene->toolsettings != nullptr && sima != nullptr &&
+      sima->mode == SI_MODE_PAINT && sima->image == ima)
+  {
+    image_new_paint_canvas_follow(C, scene, ima);
+  }
 
   WM_event_add_notifier(C, NC_IMAGE | NA_ADDED, ima);
 

@@ -1026,14 +1026,20 @@ void PAINT_OT_brush_group_override_toggle(wmOperatorType *ot);
 /* paint_texture_ops.cc */
 void BRUSH_OT_texture_slot_assign_image(wmOperatorType *ot);
 
-/* paint_image_select_mask.cc, paint_image_select_move.cc, paint_image_select_transform.cc */
+/* paint_image_select_mask.cc, paint_image_select_curve.cc, paint_image_select_move.cc,
+ * paint_image_select_transform.cc */
 void PAINT_OT_image_select_all(wmOperatorType *ot);
 void PAINT_OT_image_select_none(wmOperatorType *ot);
 void PAINT_OT_image_select_box(wmOperatorType *ot);
 void PAINT_OT_image_select_lasso(wmOperatorType *ot);
 void PAINT_OT_image_select_circle(wmOperatorType *ot);
+void PAINT_OT_image_select_circle_radius(wmOperatorType *ot);
 void PAINT_OT_image_select_polyline(wmOperatorType *ot);
+void PAINT_OT_image_select_curve(wmOperatorType *ot);
 void PAINT_OT_image_select_invert(wmOperatorType *ot);
+
+/* paint_image_symmetry_line.cc */
+void PAINT_OT_image_symmetry_edit(wmOperatorType *ot);
 /* paint_image_paint_mask_island.cc */
 void PAINT_OT_paint_mask_island(wmOperatorType *ot);
 void PAINT_OT_image_select_move(wmOperatorType *ot);

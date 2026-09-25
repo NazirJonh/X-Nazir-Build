@@ -840,6 +840,31 @@ void BKE_brush_init_mesh_automasking_settings(Brush *brush)
   }
 }
 
+void BKE_brush_enable_sculpt_mode_from_image_paint(Brush *brush)
+{
+  if (brush->ob_mode & OB_MODE_SCULPT) {
+    return;
+  }
+  brush->ob_mode |= OB_MODE_SCULPT;
+
+  /* Temporary, until material paint has proper Sculpt Mode support: the brush was never authored
+   * for Sculpt, so #Brush.sculpt_brush_type is still the default Draw. Map the image brush type so
+   * it paints instead of displacing geometry. */
+  switch (brush->image_brush_type) {
+    case IMAGE_PAINT_BRUSH_TYPE_SOFTEN:
+      brush->sculpt_brush_type = SCULPT_BRUSH_TYPE_BLUR;
+      break;
+    case IMAGE_PAINT_BRUSH_TYPE_SMEAR:
+      brush->sculpt_brush_type = SCULPT_BRUSH_TYPE_SMEAR;
+      break;
+    default:
+      brush->sculpt_brush_type = SCULPT_BRUSH_TYPE_PAINT;
+      break;
+  }
+
+  BKE_brush_init_mesh_automasking_settings(brush);
+}
+
 void BKE_brush_init_curves_sculpt_settings(Brush *brush)
 {
   if (brush->curves_sculpt_settings == nullptr) {

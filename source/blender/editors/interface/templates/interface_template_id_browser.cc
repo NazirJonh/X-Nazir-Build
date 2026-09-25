@@ -80,6 +80,7 @@
 #include "UI_tree_view.hh"
 #include "BLI_vector.hh"
 
+#include "interface_grid_view.hh"
 #include "interface_grid_view_settings_utils.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
@@ -113,17 +114,14 @@ static constexpr float ID_BROWSER_POPOVER_UNITS_X = 15.0f;
  * columns instead of one tall single column.
  */
 static constexpr float ID_BROWSER_LIST_MIN_COL_UNITS_X = 28.0f / 3.0f;
-/**
- * Unscaled preview size (in pixels) forwarded to grid tiles so #draw_preview_item_stateless scales
- * the item-name font down. Matches the asset-shelf popover, which uses
- * #ASSET_SHELF_PREVIEW_SIZE_DEFAULT (48) -- below #PREVIEW_TILE_TEXT_SCALE_THRESHOLD (56) -- to give
- * the asset name a smaller font. Only affects the label text; the tile size is set separately.
- */
-static constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_PX = 48;
-/** Upper bound and Ctrl+wheel step (in pixels) of the user-adjustable grid preview size. The lower
- * bound is #ID_BROWSER_GRID_PREVIEW_SIZE_PX, the standard size. */
-static constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_MAX_PX = 256;
-static constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_STEP_PX = 16;
+/* #ID_BROWSER_GRID_PREVIEW_SIZE_PX (see UI_interface_c.hh) is the unscaled preview size forwarded to
+ * grid tiles so #draw_preview_item_stateless scales the item-name font down. It matches the
+ * asset-shelf popover, which uses #ASSET_SHELF_PREVIEW_SIZE_DEFAULT (48) -- below
+ * #PREVIEW_TILE_TEXT_SCALE_THRESHOLD (56) -- to give the asset name a smaller font. Only affects the
+ * label text; the tile size is set separately. */
+/** Width (in #UI_UNIT_X) of the preview-size slider in the bottom row. Kept compact so it does not
+ * draw more attention than the catalog tree toggle beside it. */
+static constexpr float ID_BROWSER_GRID_SLIDER_UNITS_X = 4.6f;
 
 /** Preview size shared through the window manager's grid settings, clamped to the supported range
  * (the RNA default is smaller than the standard size and maps to it). */
@@ -147,6 +145,14 @@ static int id_browser_grid_tile_units_x(const int preview_size)
 static int id_browser_grid_tile_height(const int preview_size)
 {
   return std::max(UI_UNIT_Y * 3, preview_tile_size_y(preview_size));
+}
+
+/** Scroll position that keeps the same top row in view when the tile height changes. */
+static int id_browser_grid_scroll_rescale(const int scroll_px,
+                                          const int old_tile_h,
+                                          const int new_tile_h)
+{
+  return int(int64_t(scroll_px) * new_tile_h / std::max(old_tile_h, 1));
 }
 
 /** Catalog tree column in the ID-browser popover (asset source only): default/min/max width
@@ -1039,9 +1045,9 @@ class IDBrowserView : public AbstractGridView {
       return false;
     }
     /* Keep the same top row in view: the view is rebuilt with the new tile height next redraw. */
-    const int old_tile_h = std::max(id_browser_grid_tile_height(old_size), 1);
-    scroll_px_set(int(int64_t(this->scroll_px()) * id_browser_grid_tile_height(new_size) /
-                      old_tile_h));
+    scroll_px_set(id_browser_grid_scroll_rescale(this->scroll_px(),
+                                                 id_browser_grid_tile_height(old_size),
+                                                 id_browser_grid_tile_height(new_size)));
     RNA_int_set(&settings, "preview_size", new_size);
     return true;
   }
@@ -2538,6 +2544,72 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     block_layout_set_current(parent_block, &layout);
   };
 
+  /** Grid preview-size slider for the bottom row: makes the Ctrl+wheel tile zoom discoverable and
+   * adjustable from the UI. Bound to the stepped #wmWindowManager wrapper of the shared
+   * #GridViewSettings preview size; applies the new tile size by rebuilding the popover block,
+   * keeping the scrolled-to row in view. */
+  auto build_preview_size_slider = [&](Layout &parent) {
+    /* The bottom row is aligned (zero spacing between its children), so the gap to the tree toggle
+     * has to be an explicit separator. Kept small: it is 6px * factor tall, below the row height. */
+    Layout &gap_row = parent.row(true);
+    gap_row.fixed_size_set(true);
+    gap_row.separator(1.0f);
+
+    /* Same slot height as the tree toggle and the grip so the row height never changes. Disabled
+     * in list mode, where the preview size has no effect. */
+    Layout &slider_row = parent.row(true);
+    slider_row.fixed_size_set(true);
+    slider_row.alignment_set(LayoutAlign::Left);
+    slider_row.enabled_set(!view_list_mode);
+
+    Block *slider_block = slider_row.block();
+    block_layout_set_current(slider_block, &slider_row);
+    Button *size_slider = uiDefButR(slider_block,
+                                    ButtonType::NumSlider,
+                                    "",
+                                    0,
+                                    0,
+                                    short(ID_BROWSER_GRID_SLIDER_UNITS_X * UI_UNIT_X),
+                                    short(UI_UNIT_Y * 0.7f),
+                                    &wm_ptr,
+                                    "id_browser_grid_preview_size",
+                                    -1,
+                                    0.0f,
+                                    0.0f,
+                                    TIP_("Preview size of the grid tiles (Ctrl + mouse wheel "
+                                         "over the grid also adjusts it)"));
+    button_flag_disable(size_slider, BUT_UNDO);
+    /* The button must not be captured: the callback runs after the button handling, by which time
+     * the popover block may have been rebuilt (drag steps, resizing) and the button freed. */
+    button_func_set(size_slider, [](bContext &C) {
+      wmWindowManager *slider_wm = CTX_wm_manager(&C);
+      if (slider_wm == nullptr) {
+        return;
+      }
+      /* Keep the same top row in view while the tile height changes (mirrors
+       * #IDBrowserView::tile_size_step): the session still holds the tile height of the last
+       * build. */
+      if (GridSessionState *session = grid_session_state_lookup(id_browser_grid_session_key)) {
+        const int new_tile_h = std::max(
+            id_browser_grid_tile_height(id_browser_grid_preview_size_get(*slider_wm)), 1);
+        if (session->tile_h > 0 && new_tile_h != session->tile_h) {
+          session->scroll_px = id_browser_grid_scroll_rescale(
+              session->scroll_px, session->tile_h, new_tile_h);
+        }
+      }
+      /* Like the other ID-browser popover state, the size is stored per-`.blend`. The redraw
+       * notifier comes from the property's RNA update. Rebuild the popover block so the new tile
+       * size, the column snap and the grid width apply; the direct region tags also cover the Blend
+       * Data source, where no asset listener is attached. */
+      WM_file_tag_modified();
+      if (ARegion *region = CTX_wm_region(&C)) {
+        ED_region_tag_refresh_ui(region);
+        ED_region_tag_redraw(region);
+      }
+    });
+    block_layout_set_current(slider_block, &layout);
+  };
+
   if (show_catalog_tree) {
     /* Offset the small toggle so its right edge is exactly on the catalog/grid divider. The
      * zero-size separator only keeps the fixed-width layout non-empty; unlike a regular separator
@@ -2552,6 +2624,8 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     btn_row.alignment_set(LayoutAlign::Left);
     btn_row.enabled_set(asset_source);
     build_tree_toggle(btn_row);
+
+    build_preview_size_slider(bottom_row);
 
     Layout &right_row = bottom_row.row(false);
     right_row.alignment_set(LayoutAlign::Right);
@@ -2569,6 +2643,8 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     toggle_row.alignment_set(LayoutAlign::Left);
     toggle_row.enabled_set(asset_source);
     build_tree_toggle(toggle_row);
+
+    build_preview_size_slider(bottom_row);
 
     Layout &right_row = bottom_row.row(false);
     right_row.alignment_set(LayoutAlign::Right);

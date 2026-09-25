@@ -54,9 +54,10 @@ const Cache *active_cache_get(const SculptSession &ss)
 
 static bool mode_enabled(const Paint &paint, const Brush *br, const eAutomasking_flag mode)
 {
-  int automasking = paint.mesh_automasking_settings->flags;
+  int automasking = paint.mesh_automasking_settings ? paint.mesh_automasking_settings->flags : 0;
 
-  if (br) {
+  /* Brushes opted into Sculpt mode by material paint sync may not have the settings allocated. */
+  if (br && br->mesh_automasking_settings) {
     automasking |= br->mesh_automasking_settings->flags;
   }
 

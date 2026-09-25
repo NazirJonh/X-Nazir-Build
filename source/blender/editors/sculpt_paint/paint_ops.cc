@@ -2092,7 +2092,12 @@ static wmOperatorStatus material_paint_brush_sync_exec(bContext *C, wmOperator *
    * source brush valid for the receiving mode before assigning it. */
   BLI_assert(destination->runtime != nullptr);
   if (!BKE_paint_can_use_brush(destination, source_brush)) {
-    source_brush->ob_mode |= destination->runtime->ob_mode;
+    if (destination->runtime->ob_mode == OB_MODE_SCULPT) {
+      BKE_brush_enable_sculpt_mode_from_image_paint(source_brush);
+    }
+    else {
+      source_brush->ob_mode |= destination->runtime->ob_mode;
+    }
     BKE_brush_tag_unsaved_changes(source_brush);
     BKE_reportf(op->reports,
                 RPT_INFO,

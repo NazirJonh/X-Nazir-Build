@@ -1638,6 +1638,53 @@ static const EnumPropertyItem *rna_WindowManager_id_browser_asset_library_itemf(
   return ui::id_browser_library_rna_itemf(C, r_free);
 }
 
+/* Preview-size slider of the ID-browser popover. A thin wrapper around the shared #GridViewSettings
+ * preview size (see #ui::id_browser_grid_settings_ptr) that gives the slider its own stepped range:
+ * the standard tile size sits at the slider's zero position and the step matches the Ctrl+wheel
+ * tile step. */
+
+static int rna_WindowManager_id_browser_grid_preview_size_get(PointerRNA *ptr)
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
+  if (wm == nullptr) {
+    return ui::ID_BROWSER_GRID_PREVIEW_SIZE_PX;
+  }
+  PointerRNA settings = ui::id_browser_grid_settings_ptr(*wm);
+  if (settings.data == nullptr) {
+    return ui::ID_BROWSER_GRID_PREVIEW_SIZE_PX;
+  }
+  /* Anything below the standard size is never applied by the popover, so it reads as the slider's
+   * zero position. */
+  return std::clamp(RNA_int_get(&settings, "preview_size"),
+                    ui::ID_BROWSER_GRID_PREVIEW_SIZE_PX,
+                    ui::ID_BROWSER_GRID_PREVIEW_SIZE_MAX_PX);
+}
+
+static void rna_WindowManager_id_browser_grid_preview_size_set(PointerRNA *ptr, const int value)
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
+  if (wm == nullptr) {
+    return;
+  }
+  PointerRNA settings = ui::id_browser_grid_settings_ptr(*wm);
+  if (settings.data == nullptr) {
+    return;
+  }
+  /* Snap to the Ctrl+wheel step, so slider writes always land on a supported size. */
+  const int offset = std::clamp(value,
+                                ui::ID_BROWSER_GRID_PREVIEW_SIZE_PX,
+                                ui::ID_BROWSER_GRID_PREVIEW_SIZE_MAX_PX) -
+                     ui::ID_BROWSER_GRID_PREVIEW_SIZE_PX;
+  const int snapped = ui::ID_BROWSER_GRID_PREVIEW_SIZE_PX +
+                      ((offset + ui::ID_BROWSER_GRID_PREVIEW_SIZE_STEP_PX / 2) /
+                       ui::ID_BROWSER_GRID_PREVIEW_SIZE_STEP_PX) *
+                          ui::ID_BROWSER_GRID_PREVIEW_SIZE_STEP_PX;
+  if (RNA_int_get(&settings, "preview_size") == snapped) {
+    return;
+  }
+  RNA_int_set(&settings, "preview_size", snapped);
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Key Config Preferences
  * \{ */
@@ -4049,6 +4096,29 @@ static void rna_def_windowmanager(BlenderRNA *brna)
                               "rna_WindowManager_id_browser_asset_library_itemf");
   RNA_def_property_ui_text(
       prop, "Asset Library", "Asset library browsed by the ID browser popover");
+  RNA_def_property_update(prop, NC_ASSET | ND_ASSET_LIST, nullptr);
+
+  /* Stepped preview-size slider of the ID-browser popover; wraps the shared #GridViewSettings
+   * preview size (see #rna_WindowManager_id_browser_grid_preview_size_get). The soft range is the
+   * slider's mapping, so the standard size sits at its zero position and the step matches the
+   * Ctrl+wheel zoom. */
+  prop = RNA_def_property(srna, "id_browser_grid_preview_size", PROP_INT, PROP_PIXEL);
+  RNA_def_property_int_funcs(prop,
+                             "rna_WindowManager_id_browser_grid_preview_size_get",
+                             "rna_WindowManager_id_browser_grid_preview_size_set",
+                             nullptr);
+  RNA_def_property_range(
+      prop, ui::ID_BROWSER_GRID_PREVIEW_SIZE_PX, ui::ID_BROWSER_GRID_PREVIEW_SIZE_MAX_PX);
+  RNA_def_property_ui_range(prop,
+                            ui::ID_BROWSER_GRID_PREVIEW_SIZE_PX,
+                            ui::ID_BROWSER_GRID_PREVIEW_SIZE_MAX_PX,
+                            ui::ID_BROWSER_GRID_PREVIEW_SIZE_STEP_PX,
+                            -1);
+  RNA_def_property_ui_text(prop,
+                           "Preview Size",
+                           "Preview tile size of the ID-browser grid (stepped like the "
+                           "Ctrl+mouse wheel zoom)");
+  /* Rebuilds the popover, including for changes that do not come from the slider itself. */
   RNA_def_property_update(prop, NC_ASSET | ND_ASSET_LIST, nullptr);
 
   RNA_api_wm(srna);

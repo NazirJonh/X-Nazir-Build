@@ -80,6 +80,13 @@ void BKE_brush_init_gpencil_settings(Brush *brush);
 
 void BKE_brush_init_mesh_automasking_settings(Brush *brush);
 
+/**
+ * Opt a brush authored for Image Paint into Sculpt Mode (used by material paint brush sync).
+ * Sets the matching #Brush.sculpt_brush_type and allocates the Sculpt-only settings. No-op when
+ * the brush is already enabled for Sculpt Mode.
+ */
+void BKE_brush_enable_sculpt_mode_from_image_paint(Brush *brush);
+
 void BKE_brush_init_curves_sculpt_settings(Brush *brush);
 
 /**

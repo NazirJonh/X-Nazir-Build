@@ -2940,6 +2940,16 @@ void template_id_browser_button(Layout *layout,
 
 /** Pointer to #wmWindowManager::id_browser_grid_view_settings (the ID browser's grid settings). */
 PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm);
+
+/**
+ * Range and Ctrl+wheel step (in pixels) of the user-adjustable ID browser grid preview size. The
+ * lower bound is the standard size. Shared with the preview-size slider's RNA wrapper
+ * (#wmWindowManager.id_browser_grid_preview_size).
+ */
+constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_PX = 48;
+constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_MAX_PX = 256;
+constexpr int ID_BROWSER_GRID_PREVIEW_SIZE_STEP_PX = 16;
+
 /**
  * Return the browsed asset library by value from #wmWindowManager::id_browser_grid_view_settings,
  * resolved against the current Preferences (see #ed::asset::library_reference_ensure_resolved).

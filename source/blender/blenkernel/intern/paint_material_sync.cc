@@ -126,7 +126,12 @@ static void paint_material_brush_sync_apply(Scene *scene, Paint *source, Paint *
    * checkbox in Brush Settings first. */
   BLI_assert(dst_paint->runtime != nullptr);
   if (!BKE_paint_can_use_brush(dst_paint, src_brush)) {
-    src_brush->ob_mode |= dst_paint->runtime->ob_mode;
+    if (dst_paint->runtime->ob_mode == OB_MODE_SCULPT) {
+      BKE_brush_enable_sculpt_mode_from_image_paint(src_brush);
+    }
+    else {
+      src_brush->ob_mode |= dst_paint->runtime->ob_mode;
+    }
     BKE_brush_tag_unsaved_changes(src_brush);
   }
 

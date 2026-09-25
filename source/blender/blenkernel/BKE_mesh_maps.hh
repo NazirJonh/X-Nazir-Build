@@ -68,6 +68,72 @@ void BKE_mesh_maps_object_state_status_set(ObjectMeshMapState &state, int8_t sta
 int BKE_mesh_maps_object_states_prune(Object &ob);
 
 /* -------------------------------------------------------------------- */
+/** \name Content hash and bake staleness
+ *
+ * The hash is a content hash of the object's own contribution to one map: the evaluated geometry,
+ * the UV layer the maps are sampled through, the type, the material settings that move the result
+ * and -- for the normal maps -- what determines the evaluated normals. It never reads pointers,
+ * `session_uid` or update counters, so an unchanged object hashes to the same value between runs.
+ * The bake side stores it when a bake starts and recomputes it on commit; a mismatch means the
+ * result is stale and must not be written.
+ * \{ */
+
+/**
+ * Compute the content hash of \a ob_eval's contribution to \a ma's mesh map \a type, low word
+ * first.
+ *
+ * \param ob_eval: the evaluated object from a depsgraph (#DEG_get_evaluated). The mesh is the
+ * evaluated one after modifiers; an object evaluated outside a depsgraph falls back to its own
+ * data mesh. A non-mesh object, or a mesh object without a mesh, yields a zero hash.
+ * \param ma: the material that owns the shared atlas and the settings that shape this map.
+ * \param type: an #eMaterialMeshMapType; a value outside the enum yields a zero hash.
+ */
+void BKE_mesh_maps_object_hash(const Object &ob_eval,
+                               const Material &ma,
+                               int8_t type,
+                               uint32_t r_hash[2]);
+
+/**
+ * Whether the UV layer \a ma names is missing from \a ob_eval's mesh, so a map cannot be sampled and
+ * its bake must be refused. False when no name is set, or the object is not a mesh with a mesh.
+ */
+bool BKE_mesh_maps_object_uv_missing(const Object &ob_eval, const Material &ma);
+
+/** Whether \a state's stored hash matches the object's current one. */
+bool BKE_mesh_maps_object_state_is_current(const ObjectMeshMapState &state,
+                                           const Object &ob_eval,
+                                           const Material &ma);
+
+/**
+ * Re-evaluate \a state against the object's current content.
+ *
+ * A #OB_MESH_MAP_STATUS_VALID state whose content moved becomes #OB_MESH_MAP_STATUS_STALE; a stale
+ * state whose content is back to the stored hash becomes valid again. The terminal states
+ * (#OB_MESH_MAP_STATUS_NONE, #OB_MESH_MAP_STATUS_BAKING, #OB_MESH_MAP_STATUS_ERROR) are left alone.
+ * Returns the (possibly updated) status.
+ */
+int8_t BKE_mesh_maps_object_state_refresh(ObjectMeshMapState &state,
+                                          const Object &ob_eval,
+                                          const Material &ma);
+
+/**
+ * Record a successful bake: \a hash is the hash computed when the bake started, \a baked_time its
+ * Unix time. The status becomes #OB_MESH_MAP_STATUS_VALID. C++ only; not exposed to RNA so a script
+ * cannot fake a valid state.
+ */
+void BKE_mesh_maps_object_state_mark_baked(ObjectMeshMapState &state,
+                                           const uint32_t hash[2],
+                                           int baked_time);
+
+/**
+ * Refresh every state of \a ob (each with the material stored on it). Returns how many states
+ * changed status.
+ */
+int BKE_mesh_maps_object_refresh_all(Object &ob, const Object &ob_eval);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Lifecycle helpers
  *
  * Called from `material.cc` / `object.cc`. The Image is an ID reference registered through

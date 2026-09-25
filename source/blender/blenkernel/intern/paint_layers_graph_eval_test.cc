@@ -49,6 +49,7 @@
 #include "BLI_math_interp.hh"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
+#include "BLI_string.h"
 #include "BLI_ustring.hh"
 #include "BLI_uuid.h"
 
@@ -339,6 +340,18 @@ class GraphInterpreter {
           return sample_image_extend(id_cast<Image *>(node.id), out_identifier);
         }
         return sample_image(id_cast<Image *>(node.id), out_identifier);
+      }
+      case SH_NODE_UVMAP: {
+        /* The generated stack reads one named UV layer. The tests run with a single UV layer and
+         * sample the reference texel, so the layer's coordinates are the reference centre; the node
+         * is otherwise a pass-through the Image Texture branch does not consult. */
+        if (ref_width > 0 && ref_height > 0) {
+          return {float(x + 0.5f) / float(ref_width),
+                  float(y + 0.5f) / float(ref_height),
+                  0.0f,
+                  1.0f};
+        }
+        return {0.0f, 0.0f, 0.0f, 1.0f};
       }
       case SH_NODE_RGB:
       case SH_NODE_VALUE:
@@ -1538,6 +1551,7 @@ TEST_F(PaintLayersGraphEvalTest, multi_source_rows_match_the_reference)
                       const GroupSourceSpec &group_spec,
                       const HybridSourceSpec &hybrid_spec) {
     ma = BKE_material_add(bmain, test_case.name);
+    BLI_strncpy(ma->paint_layers_uv_map, "UVMap", sizeof(ma->paint_layers_uv_map));
     MaterialPaintLayer *row = BKE_paint_layers_add(
         *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
     ASSERT_NE(row, nullptr);

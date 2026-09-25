@@ -15,6 +15,7 @@
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 
 #include "IMB_imbuf_types.hh"
 
@@ -117,6 +118,21 @@ std::optional<StringRef> BKE_paint_canvas_uvmap_name_get(const PaintModeSettings
       }
 
       const Mesh *mesh = id_cast<Mesh *>(ob->data);
+      /* A layered material names the UV layer its whole stack samples. A missing named layer is a
+       * hard no: never silently substitute another, the stroke is refused with a message. */
+      if (Material *ma = BKE_object_material_get(ob, ob->actcol)) {
+        if (paint_layers_is_layered(*ma)) {
+          bool missing = false;
+          const char *resolved = BKE_paint_layers_uv_map_resolve(*mesh, *ma, &missing);
+          if (missing) {
+            return std::nullopt;
+          }
+          if (resolved != nullptr && resolved[0] != '\0') {
+            return StringRef(resolved);
+          }
+        }
+      }
+
       if (has_uv_map_attribute(*mesh, mesh->active_uv_map_name())) {
         return mesh->active_uv_map_name();
       }

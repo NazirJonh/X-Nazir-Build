@@ -24,6 +24,10 @@
 
 #include "BKE_mesh_maps.hh"
 #include "BKE_paint.hh"
+#include "BKE_report.hh"
+
+#include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_query.hh"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
@@ -2413,6 +2417,106 @@ static ObjectMeshMapState *rna_Object_mesh_map_states_ensure(Object *ob,
   return BKE_mesh_maps_object_state_ensure(*ob, *material, int8_t(type));
 }
 
+/**
+ * The evaluated counterpart of the object that owns \a state, or null after reporting that the
+ * object is not part of \a depsgraph. The hash is a function of the evaluated geometry, so reading
+ * it from an original object would be wrong.
+ */
+static Object *rna_ObjectMeshMapState_object_eval(ID *self_id,
+                                                  Depsgraph *depsgraph,
+                                                  ReportList *reports)
+{
+  Object *ob = id_cast<Object *>(self_id);
+  if (ob == nullptr || depsgraph == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Object is not in the given depsgraph");
+    return nullptr;
+  }
+  Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
+  /* An object that is not part of the depsgraph is returned unchanged by DEG_get_evaluated. */
+  if (ob_eval == nullptr || ob_eval == ob) {
+    BKE_report(reports, RPT_ERROR, "Object is not in the given depsgraph");
+    return nullptr;
+  }
+  return ob_eval;
+}
+
+static bool rna_ObjectMeshMapState_is_current(ID *self_id,
+                                              ObjectMeshMapState *state,
+                                              ReportList *reports,
+                                              Depsgraph *depsgraph)
+{
+  if (state == nullptr || state->material == nullptr) {
+    return false;
+  }
+  Object *ob_eval = rna_ObjectMeshMapState_object_eval(self_id, depsgraph, reports);
+  if (ob_eval == nullptr) {
+    return false;
+  }
+  return BKE_mesh_maps_object_state_is_current(*state, *ob_eval, *state->material);
+}
+
+static bool rna_ObjectMeshMapState_uv_missing(ID *self_id,
+                                              ObjectMeshMapState *state,
+                                              ReportList *reports,
+                                              Depsgraph *depsgraph)
+{
+  if (state == nullptr || state->material == nullptr) {
+    return false;
+  }
+  Object *ob_eval = rna_ObjectMeshMapState_object_eval(self_id, depsgraph, reports);
+  if (ob_eval == nullptr) {
+    return false;
+  }
+  return BKE_mesh_maps_object_uv_missing(*ob_eval, *state->material);
+}
+
+static int rna_ObjectMeshMapState_refresh(ID *self_id,
+                                          ObjectMeshMapState *state,
+                                          ReportList *reports,
+                                          Depsgraph *depsgraph)
+{  if (state == nullptr || state->material == nullptr) {
+    return state != nullptr ? state->status : OB_MESH_MAP_STATUS_NONE;
+  }
+  Object *ob_eval = rna_ObjectMeshMapState_object_eval(self_id, depsgraph, reports);
+  if (ob_eval == nullptr) {
+    return state->status;
+  }
+  return BKE_mesh_maps_object_state_refresh(*state, *ob_eval, *state->material);
+}
+
+static void rna_ObjectMeshMapState_compute_hash(
+    ID *self_id, ObjectMeshMapState *state, ReportList *reports, Depsgraph *depsgraph, char *value)
+{
+  value[0] = '\0';
+  if (state == nullptr || state->material == nullptr) {
+    return;
+  }
+  Object *ob_eval = rna_ObjectMeshMapState_object_eval(self_id, depsgraph, reports);
+  if (ob_eval == nullptr) {
+    return;
+  }
+  uint32_t hash[2];
+  BKE_mesh_maps_object_hash(*ob_eval, *state->material, state->type, hash);
+  /* Same format as the `hash` property. */
+  BLI_snprintf(value, 17, "%08x%08x", hash[0], hash[1]);
+}
+
+static int rna_Object_mesh_map_states_refresh_all(Object *ob,
+                                                  ReportList *reports,
+                                                  Depsgraph *depsgraph)
+{
+  if (ob == nullptr || depsgraph == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Object is not in the given depsgraph");
+    return 0;
+  }
+  Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
+  if (ob_eval == nullptr || ob_eval == ob) {
+    BKE_report(reports, RPT_ERROR, "Object is not in the given depsgraph");
+    return 0;
+  }
+  return BKE_mesh_maps_object_refresh_all(*ob, *ob_eval);
+}
+
 static PointerRNA rna_ObjectMeshMapState_material_get(PointerRNA *ptr)
 {
   ObjectMeshMapState *state = static_cast<ObjectMeshMapState *>(ptr->data);
@@ -3198,6 +3302,19 @@ static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
       func, "state", "ObjectMeshMapState", "", "The mesh map state");
   RNA_def_function_return(func, parm);
 
+  func = RNA_def_function(coll_srna, "refresh_all", "rna_Object_mesh_map_states_refresh_all");
+  RNA_def_function_ui_description(
+      func,
+      "Re-check every mesh map state of this object against its evaluated geometry, returning how "
+      "many changed status");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(
+      func, "result", 0, 0, INT_MAX, "", "Number of states whose status changed", 0, INT_MAX);
+  RNA_def_function_return(func, parm);
+
   srna = RNA_def_struct(brna, "ObjectMeshMapState", nullptr);
   RNA_def_struct_sdna(srna, "ObjectMeshMapState");
   RNA_def_struct_ui_text(srna, "Mesh Map State", "Per-object bake state of one mesh map");
@@ -3246,6 +3363,53 @@ static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
                                  "rna_ObjectMeshMapState_source_object_poll");
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Source Object", "Reserved high-poly source object");
+
+  func = RNA_def_function(srna, "is_current", "rna_ObjectMeshMapState_is_current");
+  RNA_def_function_ui_description(
+      func, "Whether the stored content hash matches the object's current evaluated geometry");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "Whether the state matches the object");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "refresh", "rna_ObjectMeshMapState_refresh");
+  RNA_def_function_ui_description(
+      func,
+      "Re-check this state against the object's evaluated geometry and return the resulting status");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_enum(func,
+                      "result",
+                      rna_enum_object_mesh_map_status_items,
+                      OB_MESH_MAP_STATUS_NONE,
+                      "",
+                      "The status after the refresh");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "compute_hash", "rna_ObjectMeshMapState_compute_hash");
+  RNA_def_function_ui_description(
+      func, "Compute the content hash of the object's current contribution, without storing it");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "result", nullptr, 17, "", "The computed content hash (hex)");
+  RNA_def_parameter_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  RNA_def_function_output(func, parm);
+
+  func = RNA_def_function(srna, "uv_missing", "rna_ObjectMeshMapState_uv_missing");
+  RNA_def_function_ui_description(
+      func, "Whether the UV layer the material names is missing from the object's mesh");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "Whether the named UV layer is missing");
+  RNA_def_function_return(func, parm);
 }
 
 /** \} */

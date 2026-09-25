@@ -102,6 +102,12 @@ struct PaintLayersTarget {
   /** #eMaterialPaintChannel the target addresses. */
   int channel = 0;
   PaintLayersTargetMode mode = PaintLayersTargetMode::Content;
+  /**
+   * Empty when the object the target was resolved through has the UV layer its material names.
+   * Otherwise the reason a stroke is refused, formatted at resolution time because only the
+   * object-based resolver knows the mesh.
+   */
+  char uv_refusal[160] = {};
 };
 
 /**

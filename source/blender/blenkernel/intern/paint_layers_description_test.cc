@@ -14,7 +14,9 @@
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
 #include "BKE_main.hh"
+#include "BKE_attribute.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh.hh"
 #include "BKE_mesh_maps.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
@@ -3154,6 +3156,67 @@ TEST_F(PaintLayersDescription, rna_slot_image_set_maintains_user_counts)
   EXPECT_EQ(slot->image, nullptr);
   EXPECT_EQ(second->id.us, second_base);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Paint-layers UV map
+ * \{ */
+
+TEST_F(PaintLayersDescription, uv_map_name_copies_with_material)
+{
+  Material *ma = BKE_material_add(bmain, "UvCopy");
+  BLI_strncpy(ma->paint_layers_uv_map, "UVMap", sizeof(ma->paint_layers_uv_map));
+
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  EXPECT_STREQ(copy->paint_layers_uv_map, "UVMap");
+  BKE_id_free(bmain, copy);
+}
+
+TEST_F(PaintLayersDescription, uv_map_resolve_all_three_cases)
+{
+  Mesh *mesh = BKE_mesh_add(bmain, "UvResolveMesh");
+  bke::MutableAttributeAccessor attributes = mesh->attributes_for_write();
+  attributes.lookup_or_add_for_write_only_span<float2>("UVMap", bke::AttrDomain::Corner);
+  attributes.lookup_or_add_for_write_only_span<float2>("Second", bke::AttrDomain::Corner);
+  mesh->uv_maps_active_set("UVMap");
+
+  Material *ma = BKE_material_add(bmain, "UvResolve");
+  bool missing = false;
+
+  /* No name set: the active UV map, the behavior before names existed. */
+  EXPECT_STREQ(BKE_paint_layers_uv_map_resolve(*mesh, *ma, &missing), "UVMap");
+  EXPECT_FALSE(missing);
+
+  /* A name that exists on the mesh. */
+  BLI_strncpy(ma->paint_layers_uv_map, "Second", sizeof(ma->paint_layers_uv_map));
+  EXPECT_STREQ(BKE_paint_layers_uv_map_resolve(*mesh, *ma, &missing), "Second");
+  EXPECT_FALSE(missing);
+
+  /* A name the mesh does not have: null and missing, never a silent substitute. */
+  BLI_strncpy(ma->paint_layers_uv_map, "Missing", sizeof(ma->paint_layers_uv_map));
+  EXPECT_EQ(BKE_paint_layers_uv_map_resolve(*mesh, *ma, &missing), nullptr);
+  EXPECT_TRUE(missing);
+
+  BKE_id_free(bmain, mesh);
+}
+
+TEST_F(PaintLayersDescription, rna_uv_map_setter_marks_tree_stale)
+{
+  Material *ma = BKE_material_add(bmain, "UvRna");
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  PropertyRNA *prop = RNA_struct_find_property(&ma_ptr, "paint_layers_uv_map");
+  ASSERT_NE(prop, nullptr);
+
+  RNA_property_string_set(&ma_ptr, prop, "UVMap");
+  EXPECT_STREQ(ma->paint_layers_uv_map, "UVMap");
+
+  RNA_property_update_main(bmain, nullptr, &ma_ptr, prop);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+}
+
+/** \} */
 
 /** \} */
 

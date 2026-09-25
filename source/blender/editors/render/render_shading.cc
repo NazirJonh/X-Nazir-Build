@@ -904,6 +904,9 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator * /*op
   BKE_paint_layers_set_fill_color(*ma, base, base_color);
   BKE_paint_layers_active_set(*ma, base->marker);
   ma->paint_layers_flag |= MA_PAINT_LAYERS_LOCKED;
+  /* The object the material is going onto supplies the UV layer the stack samples, so a fresh
+   * layered material is wired to the UV the user already unwrapped with. */
+  BKE_paint_layers_uv_map_autofill(*ma, ob);
 
   if (prop) {
     if (ob != nullptr) {

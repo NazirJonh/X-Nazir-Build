@@ -815,7 +815,13 @@ struct Material {
   bUUID paint_layers_owner_uid = {};
   /** #eMaterialPaintLayersFlag. */
   eMaterialPaintLayersFlag paint_layers_flag = {};
-  char _pad2[6] = {};
+  /**
+   * The UV layer the Paint Layers stack samples, by name. Empty keeps the previous behavior: the
+   * generated graph reads the render UV and painting reads the object's active UV. Filled from the
+   * active object's active UV when a material first becomes layered.
+   */
+  char paint_layers_uv_map[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";
+  char _pad2[2] = {};
   /** The material's mesh map atlases, one #MaterialMeshMapSlot per #eMaterialMeshMapType. */
   ListBase mesh_map_slots = {nullptr, nullptr};
   /** Bake/viewport settings shared by every mesh map of this material. */

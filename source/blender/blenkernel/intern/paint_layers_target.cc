@@ -21,6 +21,7 @@
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
@@ -269,7 +270,23 @@ bool BKE_paint_layers_target_get(Object &ob,
   if (ma == nullptr) {
     return false;
   }
-  return BKE_paint_layers_target_get(*ma, channel, mode, r_target);
+  if (!BKE_paint_layers_target_get(*ma, channel, mode, r_target)) {
+    return false;
+  }
+  /* A named UV layer the object does not have is a hard refusal: the stroke must not fall back to
+   * another layer behind the user's back. */
+  if (ob.type == OB_MESH && ob.data != nullptr) {
+    const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+    bool missing = false;
+    BKE_paint_layers_uv_map_resolve(mesh, *ma, &missing);
+    if (missing) {
+      BLI_snprintf(r_target.uv_refusal,
+                   sizeof(r_target.uv_refusal),
+                   "The object has no UV layer '%s'",
+                   ma->paint_layers_uv_map);
+    }
+  }
+  return true;
 }
 
 bool BKE_paint_layers_target_get(Object &ob,
@@ -341,6 +358,9 @@ bool BKE_paint_layers_target_is_frozen(const PaintLayersTarget &target)
 
 const char *BKE_paint_layers_target_refusal(const PaintLayersTarget &target)
 {
+  if (target.uv_refusal[0] != '\0') {
+    return target.uv_refusal;
+  }
   if (BKE_paint_layers_target_is_frozen(target)) {
     return "The layer is frozen (bake); unfreeze it to paint";
   }

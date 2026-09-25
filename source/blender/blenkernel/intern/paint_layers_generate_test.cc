@@ -236,6 +236,32 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
     return count;
   }
 
+  /** Whether every Image Texture in \a tree (nested layer groups included) reads a UV Map node. */
+  static bool every_tex_image_uv_wired(const bNodeTree &tree)
+  {
+    for (const bNode &node : tree.nodes) {
+      if (node.type_legacy == SH_NODE_TEX_IMAGE) {
+        bNodeSocket *vector = bke::node_find_socket(
+            const_cast<bNode &>(node), SOCK_IN, UString::from_ptr_noinline("Vector"));
+        if (vector == nullptr || vector->directly_linked_links().is_empty()) {
+          return false;
+        }
+        const bNode *from = vector->directly_linked_links()[0]->fromnode;
+        if (from == nullptr || from->type_legacy != SH_NODE_UVMAP) {
+          return false;
+        }
+      }
+      if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+          !BKE_paint_material_is_normal_combine_group(node))
+      {
+        if (!every_tex_image_uv_wired(*reinterpret_cast<const bNodeTree *>(node.id))) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   /** Find the first node of \a type, descending into nested layer groups. */
   static bNode *find_type(bNodeTree &tree, const int type)
   {
@@ -591,6 +617,70 @@ TEST_F(PaintLayersGenerateTest, authored_paint_participates_but_covers_nothing)
   EXPECT_FALSE(base_color->directly_linked_links().is_empty());
   /* Only the bottom map and no fill input for the paint row. */
   EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 1);
+}
+
+TEST_F(PaintLayersGenerateTest, uv_map_name_wires_every_image_texture)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  add_paint_layer("Top", add_image("Top"));
+  BLI_strncpy(ma->paint_layers_uv_map, "UVMap", sizeof(ma->paint_layers_uv_map));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNode *uv = find_type(*ma->paint_layers_tree, SH_NODE_UVMAP);
+  ASSERT_NE(uv, nullptr);
+  const NodeShaderUVMap *storage = static_cast<const NodeShaderUVMap *>(uv->storage);
+  ASSERT_NE(storage, nullptr);
+  EXPECT_STREQ(storage->uv_map, "UVMap");
+  EXPECT_TRUE(every_tex_image_uv_wired(*ma->paint_layers_tree));
+}
+
+TEST_F(PaintLayersGenerateTest, uv_map_no_name_keeps_graph_unchanged)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_UVMAP), 0);
+}
+
+TEST_F(PaintLayersGenerateTest, uv_map_name_change_rebuilds_same_name_keeps_group)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  BLI_strncpy(ma->paint_layers_uv_map, "UVMap", sizeof(ma->paint_layers_uv_map));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Bottom");
+  ASSERT_NE(group, nullptr);
+  ASSERT_TRUE(group_io_sentinel_set(*group, 0.5f));
+
+  /* The same name: the group's topology hash is unchanged, so its nodes are preserved. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Bottom");
+  ASSERT_NE(group, nullptr);
+  EXPECT_TRUE(group_io_sentinel_get(*group, 0.5f));
+
+  /* A new name is topology: the group is rebuilt and its UV Map node carries the new name. */
+  BLI_strncpy(ma->paint_layers_uv_map, "Other", sizeof(ma->paint_layers_uv_map));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNode *uv = find_type(*ma->paint_layers_tree, SH_NODE_UVMAP);
+  ASSERT_NE(uv, nullptr);
+  const NodeShaderUVMap *storage = static_cast<const NodeShaderUVMap *>(uv->storage);
+  ASSERT_NE(storage, nullptr);
+  EXPECT_STREQ(storage->uv_map, "Other");
+}
+
+TEST_F(PaintLayersGenerateTest, uv_map_node_adds_no_sampler)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  BLI_strncpy(ma->paint_layers_uv_map, "UVMap", sizeof(ma->paint_layers_uv_map));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const int with_name = BKE_paint_layers_sampler_count(*ma);
+
+  BLI_strncpy(ma->paint_layers_uv_map, "", sizeof(ma->paint_layers_uv_map));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const int without_name = BKE_paint_layers_sampler_count(*ma);
+
+  EXPECT_EQ(with_name, without_name);
 }
 
 TEST_F(PaintLayersGenerateTest, regenerate_is_idempotent)

@@ -688,6 +688,18 @@ static void rna_Material_paint_layers_locked_set(PointerRNA *ptr, bool value)
   DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
 }
 
+/** A description edit: the stack samples another UV layer, so the generated tree is stale. */
+static void rna_Material_paint_layers_uv_map_update(Main * /*bmain*/,
+                                                    Scene * /*scene*/,
+                                                    PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr) {
+    return;
+  }
+  BKE_paint_layers_tag_edited(*ma);
+}
+
 /** Every layer-pointer setter goes back to the material that owns the row, which the pointer's
  * #owner_id carries however deep the row is nested. */
 static Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *layer)
@@ -3433,6 +3445,15 @@ void RNA_def_material(BlenderRNA *brna)
       "Locked",
       "The generator owns the node tree and overwrites manual edits; unlock for debugging, then "
       "Regenerate explicitly");
+
+  prop = RNA_def_property(srna, "paint_layers_uv_map", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "paint_layers_uv_map");
+  RNA_def_property_string_maxlength(prop, sizeof(((Material *)nullptr)->paint_layers_uv_map));
+  RNA_def_property_ui_text(
+      prop,
+      "UV Map",
+      "Name of the UV layer the Paint Layers stack samples; empty uses the object's active UV");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layers_uv_map_update");
 
   /* common */
   rna_def_animdata_common(srna);

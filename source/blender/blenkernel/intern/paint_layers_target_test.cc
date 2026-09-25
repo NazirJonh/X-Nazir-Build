@@ -11,6 +11,9 @@
 
 #include "testing/testing.h"
 
+#include <string>
+
+#include "BKE_attribute.hh"
 #include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_image.hh"
@@ -26,6 +29,7 @@
 
 #include "BLI_index_range.hh"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_string.h"
 #include "BLI_uuid.h"
 
@@ -713,6 +717,41 @@ TEST_F(PaintLayersTargetTest, mesh_map_row_and_correction_are_not_content_target
   EXPECT_NE(BKE_paint_layers_target_refusal(correction_target), nullptr);
   EXPECT_EQ(BKE_paint_layers_target_ensure_writable(*bmain, correction_target, 4), nullptr);
   EXPECT_EQ(correction->channels_num, 0);
+}
+
+TEST_F(PaintLayersTargetTest, object_target_refuses_a_missing_named_uv_layer)
+{
+  Mesh *mesh = BKE_mesh_add(bmain, "Mesh");
+  bke::MutableAttributeAccessor attributes = mesh->attributes_for_write();
+  attributes.lookup_or_add_for_write_only_span<float2>("UVMap", bke::AttrDomain::Corner);
+  mesh->uv_maps_active_set("UVMap");
+
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "Object");
+  ob->data = &mesh->id;
+  id_us_plus(&mesh->id);
+
+  Material *ma = BKE_material_add(bmain, "Layered");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_active_set(*ma, row->marker);
+  BKE_object_material_slot_add(bmain, ob);
+  BKE_object_material_assign(bmain, ob, ma, 1, BKE_MAT_ASSIGN_OBJECT);
+  ob->actcol = 1;
+
+  BLI_strncpy(ma->paint_layers_uv_map, "NoSuchLayer", sizeof(ma->paint_layers_uv_map));
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ob, -1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, target));
+  const char *refusal = BKE_paint_layers_target_refusal(target);
+  ASSERT_NE(refusal, nullptr);
+  EXPECT_NE(std::string(refusal).find("NoSuchLayer"), std::string::npos);
+
+  /* A name the object does have is no refusal. */
+  BLI_strncpy(ma->paint_layers_uv_map, "UVMap", sizeof(ma->paint_layers_uv_map));
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ob, -1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, target));
+  EXPECT_EQ(BKE_paint_layers_target_refusal(target), nullptr);
 }
 
 }  // namespace blender::bke::tests

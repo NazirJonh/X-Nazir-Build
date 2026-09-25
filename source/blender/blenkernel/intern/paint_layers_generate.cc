@@ -1001,7 +1001,10 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const Span<int> wired_channels,
                                           const PaintLayersRegenCache *cache)
 {
-  return topology_hash_layer(1469598103934665603ull, ma, layer, wired_channels, cache);
+  uint64_t hash = 1469598103934665603ull;
+  /* The UV layer a group's Image Texture nodes read is topology: changing it must rebuild them. */
+  topology_hash_string(hash, BKE_paint_layers_uv_map_name(ma));
+  return topology_hash_layer(hash, ma, layer, wired_channels, cache);
 }
 
 /**
@@ -1019,6 +1022,9 @@ uint64_t paint_layers_root_topology_hash(
     const PaintLayersRegenCache *cache)
 {
   uint64_t hash = 1469598103934665603ull;
+  /* The UV layer every generated Image Texture reads is topology: the root's nodes gain a UV Map
+   * node when it is set, so the name is part of what the root is built from. */
+  topology_hash_string(hash, BKE_paint_layers_uv_map_name(ma));
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
   }
@@ -1104,6 +1110,65 @@ static bool node_belongs_to_tree(const bNodeTree &tree, const bNode &node)
     }
   }
   return false;
+}
+
+/**
+ * Wire every Image Texture the generator created in \a tree to one UV Map node, so the whole stack
+ * samples the UV layer \a uv_name names. One shared node per tree is enough: every map in that tree
+ * reads the same layer. With no name set nothing is added and the maps keep reading the render UV,
+ * the behavior before names existed.
+ *
+ * The call is idempotent: a preserved group already carries its UV node and linked maps, so a
+ * value-only edit that rebuilds the root leaves them alone.
+ */
+static void generated_uv_maps_wire(bNodeTree &tree, const char *uv_name)
+{
+  if (uv_name == nullptr || uv_name[0] == '\0') {
+    return;
+  }
+  bNode *uv_node = nullptr;
+  bool needs_link = false;
+  for (bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_UVMAP) {
+      const NodeShaderUVMap *storage = static_cast<const NodeShaderUVMap *>(node.storage);
+      if (storage != nullptr && STREQ(storage->uv_map, uv_name)) {
+        uv_node = &node;
+      }
+    }
+    else if (node.type_legacy == SH_NODE_TEX_IMAGE) {
+      bNodeSocket *vector = socket_in(node, "Vector");
+      if (vector != nullptr && vector->link == nullptr) {
+        needs_link = true;
+      }
+    }
+  }
+  if (!needs_link) {
+    return;
+  }
+  if (uv_node == nullptr) {
+    uv_node = bke::node_add_static_node(nullptr, tree, SH_NODE_UVMAP);
+    if (uv_node == nullptr) {
+      return;
+    }
+    uv_node->location[0] = -600.0f;
+    uv_node->location[1] = -320.0f;
+    if (NodeShaderUVMap *storage = static_cast<NodeShaderUVMap *>(uv_node->storage)) {
+      BLI_strncpy(storage->uv_map, uv_name, sizeof(storage->uv_map));
+    }
+  }
+  bNodeSocket *uv_out = socket_out(*uv_node, "UV");
+  if (uv_out == nullptr) {
+    return;
+  }
+  for (bNode &node : tree.nodes) {
+    if (node.type_legacy != SH_NODE_TEX_IMAGE) {
+      continue;
+    }
+    bNodeSocket *vector = socket_in(node, "Vector");
+    if (vector != nullptr && vector->link == nullptr) {
+      bke::node_add_link(tree, *uv_node, *uv_out, node, *vector);
+    }
+  }
 }
 
 void paint_layers_tree_build(const Material &ma,
@@ -3846,6 +3911,17 @@ void paint_layers_tree_build(const Material &ma,
     }
     if (!stale.is_empty()) {
       refresh_layer_group(group);
+    }
+  }
+
+  /* Every Image Texture the build created samples the one UV layer the material names. Each layer
+   * group is a separate tree, so each that holds a map gets its own UV Map node; a tree with no map
+   * gets none. The root is handled the same way. */
+  const char *const uv_name = BKE_paint_layers_uv_map_name(ma);
+  generated_uv_maps_wire(tree, uv_name);
+  for (const auto &item : layer_groups.items()) {
+    if (item.value->tree != nullptr) {
+      generated_uv_maps_wire(*item.value->tree, uv_name);
     }
   }
 }

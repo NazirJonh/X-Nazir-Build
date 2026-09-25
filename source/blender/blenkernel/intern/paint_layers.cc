@@ -25,12 +25,14 @@
 #include "MEM_guardedalloc.h"
 
 #include "BKE_global.hh"
+#include "BKE_attribute.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh.hh"
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
@@ -60,6 +62,7 @@
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
 
@@ -323,6 +326,45 @@ bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &layer, const bU
 bool paint_layers_is_layered(const Material &ma)
 {
   return (ma.paint_layers_flag & MA_PAINT_LAYERED) != 0;
+}
+
+const char *BKE_paint_layers_uv_map_name(const Material &ma)
+{
+  return ma.paint_layers_uv_map;
+}
+
+const char *BKE_paint_layers_uv_map_resolve(const Mesh &mesh,
+                                            const Material &ma,
+                                            bool *r_missing)
+{
+  const char *name = ma.paint_layers_uv_map;
+  if (name[0] == '\0') {
+    /* No name set: the behavior before names existed. The active UV map's name lives on the mesh,
+     * so the returned pointer stays valid as long as the mesh does. */
+    return mesh.active_uv_map_name().c_str();
+  }
+  if (bke::mesh::is_uv_map(mesh.attributes().lookup_meta_data(name))) {
+    return name;
+  }
+  if (r_missing != nullptr) {
+    *r_missing = true;
+  }
+  return nullptr;
+}
+
+void BKE_paint_layers_uv_map_autofill(Material &ma, const Object *ob)
+{
+  if (ma.paint_layers_uv_map[0] != '\0' || ob == nullptr || ob->type != OB_MESH ||
+      ob->data == nullptr)
+  {
+    return;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(ob->data);
+  const StringRefNull active = mesh.active_uv_map_name();
+  if (active.is_empty()) {
+    return;
+  }
+  BLI_strncpy(ma.paint_layers_uv_map, active.c_str(), sizeof(ma.paint_layers_uv_map));
 }
 
 const PaintLayerKindInfo &BKE_paint_layers_kind_info(const int source)

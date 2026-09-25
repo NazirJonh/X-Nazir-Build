@@ -37,6 +37,8 @@ struct ImageUser;
 struct ImBuf;
 struct Main;
 struct Material;
+struct Mesh;
+struct Object;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerBake;
 struct MaterialPaintLayerChannel;
@@ -57,6 +59,33 @@ template<typename T> class Span;
  * shares; the description API here is what a layered material is edited through.
  */
 bool paint_layers_is_layered(const Material &ma);
+
+/**
+ * The UV layer name a Paint Layers stack samples, stored on the material itself. Never null; an
+ * empty string means no name is set and callers fall back to the old behavior.
+ */
+const char *BKE_paint_layers_uv_map_name(const Material &ma);
+
+/**
+ * The one UV layer a Paint Layers stack samples on \a mesh, the single point of choice for the
+ * generated graph, painting, baking and the mesh-map hash.
+ *
+ * When the material names a UV layer and \a mesh has it, the name is returned. When the material
+ * names one and \a mesh does not have it, null is returned and \a r_missing (when non-null) is set
+ * to true: a caller must not silently substitute another layer. With no name set the mesh's active
+ * UV map is returned, preserving the behavior before names existed.
+ */
+const char *BKE_paint_layers_uv_map_resolve(const Mesh &mesh,
+                                            const Material &ma,
+                                            bool *r_missing);
+
+/**
+ * Fill #Material::paint_layers_uv_map from \a ob's active UV map when it is still empty, so a
+ * material that has just become layered samples the UV the object is unwrapped with. \a ob may be
+ * null, or not a mesh object, or carry no UV layer; then the name is left empty and the active-UV
+ * fallback of #BKE_paint_layers_uv_map_resolve applies.
+ */
+void BKE_paint_layers_uv_map_autofill(Material &ma, const Object *ob);
 
 /**
  * Whether \a layer is a folder: a row that holds its stack in #MaterialPaintLayer::children and

@@ -17,6 +17,7 @@
 #include <string>
 
 #include "BLI_math_vector_types.hh"
+#include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_string.h"
 
@@ -335,6 +336,18 @@ TEST_F(MeshMapsTest, deleting_the_material_clears_the_object_state)
   }
   BKE_mesh_maps_object_states_prune(*ob);
   EXPECT_EQ(ob->mesh_map_states.first, nullptr);
+}
+
+/* A file always has non-mesh objects (camera, light, empty); they have no material count, and the
+ * source scan once dereferenced it and crashed the bake commit. */
+TEST_F(MeshMapsTest, source_collect_skips_objects_without_materials)
+{
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  BKE_object_add_only_object(bmain, OB_EMPTY, "Empty");
+  BKE_object_add_only_object(bmain, OB_CAMERA, "Camera");
+  Set<const Object *> sources;
+  BKE_mesh_maps_source_collect_for_material(*bmain, *ma, sources);
+  EXPECT_TRUE(sources.is_empty());
 }
 
 /* The settings belong to the Material; they were once registered on the slot struct by mistake, which

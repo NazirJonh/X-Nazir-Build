@@ -416,6 +416,11 @@ void BKE_mesh_maps_source_collect_for_material(Main &bmain,
                                                Set<const Object *> &r_objects)
 {
   for (Object &ob : bmain.objects) {
+    /* Only a mesh can own a mesh map; other types (camera, light, empty) have no material count
+     * and #BKE_object_material_index_get dereferences it. */
+    if (ob.type != OB_MESH || ob.data == nullptr) {
+      continue;
+    }
     if (BKE_object_material_index_get(&ob, &ma) < 0) {
       continue;
     }

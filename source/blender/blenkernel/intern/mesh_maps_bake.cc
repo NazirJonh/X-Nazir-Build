@@ -793,6 +793,10 @@ void BKE_mesh_maps_bake_plan_pairs(Main &bmain,
   Set<const Object *> source_objects;
   BKE_mesh_maps_source_collect_for_material(bmain, ma, source_objects);
   for (Object &ob : bmain.objects) {
+    /* See #BKE_mesh_maps_source_collect_for_material: non-mesh objects have no material count. */
+    if (ob.type != OB_MESH || ob.data == nullptr) {
+      continue;
+    }
     if (BKE_object_material_index_get(&ob, &ma) < 0) {
       continue;
     }

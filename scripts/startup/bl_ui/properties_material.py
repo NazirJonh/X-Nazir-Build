@@ -894,16 +894,16 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
         actions.operator_context = 'INVOKE_DEFAULT'
         bake_all = actions.operator(
             "object.mesh_map_bake_all", text="Bake All Maps", icon='RENDER_STILL')
-        bake_all.types = 0
+        bake_all.types = set()
         bake_all.object_scope = 'ACTIVE'
         bake_all.material_index = 0
         bake_all_objects = actions.operator(
             "object.mesh_map_bake_all", text="Bake All Objects")
-        bake_all_objects.types = 0
+        bake_all_objects.types = set()
         bake_all_objects.object_scope = 'ALL'
         bake_all_objects.material_index = 0
         actions.operator_context = 'EXEC_DEFAULT'
-        actions.operator("object.mesh_map_clear", text="Clear").types = 0
+        actions.operator("object.mesh_map_clear", text="Clear").types = set()
 
         header, settings_layout = layout.panel("mesh_map_settings", default_closed=True)
         header.label(text="Settings")

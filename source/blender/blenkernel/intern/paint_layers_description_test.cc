@@ -3230,6 +3230,9 @@ TEST_F(PaintLayersDescription, rna_uv_map_autofill_fills_from_the_object_active_
   id_us_plus(&mesh->id);
 
   Material *ma = BKE_material_add(bmain, "UvAutofill");
+  BKE_object_material_slot_add(bmain, ob);
+  BKE_object_material_assign(bmain, ob, ma, 1, BKE_MAT_ASSIGN_OBJECT);
+  ob->actcol = 1;
   ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
 
   PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);

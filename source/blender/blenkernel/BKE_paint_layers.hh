@@ -84,6 +84,12 @@ const char *BKE_paint_layers_uv_map_resolve(const Mesh &mesh,
  * material that has just become layered samples the UV the object is unwrapped with. \a ob may be
  * null, or not a mesh object, or carry no UV layer; then the name is left empty and the active-UV
  * fallback of #BKE_paint_layers_uv_map_resolve applies.
+ *
+ * \a ob must use \a ma in one of its material slots (object or data, per
+ * #BKE_object_material_index_get): a caller's context object can be unrelated to the material
+ * (another object's slot, an override, an addon holding the wrong pointer), and naming the stack
+ * after that object's mesh would fix it to a layer its real users do not have. A material already
+ * naming a layer is never overwritten either way.
  */
 void BKE_paint_layers_uv_map_autofill(Material &ma, const Object *ob);
 

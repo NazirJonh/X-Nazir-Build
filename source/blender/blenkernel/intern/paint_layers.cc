@@ -359,6 +359,13 @@ void BKE_paint_layers_uv_map_autofill(Material &ma, const Object *ob)
   {
     return;
   }
+  /* Only an object that actually uses the material may name its UV layer. The object in context can
+   * be unrelated to the material being edited (a different object's slot, an override, an addon
+   * passing the wrong pointer); taking its mesh's active UV would then silently fix the stack to a
+   * layer no object using the material is unwrapped with. */
+  if (BKE_object_material_index_get(const_cast<Object *>(ob), &ma) < 0) {
+    return;
+  }
   const Mesh &mesh = *id_cast<const Mesh *>(ob->data);
   const StringRefNull active = mesh.active_uv_map_name();
   if (active.is_empty()) {

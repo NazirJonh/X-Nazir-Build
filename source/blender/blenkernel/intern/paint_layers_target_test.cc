@@ -770,6 +770,9 @@ TEST_F(PaintLayersTargetTest, autofill_takes_the_object_active_uv_and_marks_the_
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   BKE_paint_layers_active_set(*ma, row->marker);
+  BKE_object_material_slot_add(bmain, ob);
+  BKE_object_material_assign(bmain, ob, ma, 1, BKE_MAT_ASSIGN_OBJECT);
+  ob->actcol = 1;
   ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
 
   /* The first action on the object names the stack's UV layer after the object's active one. */
@@ -777,6 +780,33 @@ TEST_F(PaintLayersTargetTest, autofill_takes_the_object_active_uv_and_marks_the_
   EXPECT_STREQ(ma->paint_layers_uv_map, "UVMap");
   /* A chosen name is topology: the generated tree gains a UV Map node, so the material is stale. */
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+}
+
+/* The object does not use the material: its UV is not taken and the material is not marked. */
+TEST_F(PaintLayersTargetTest, autofill_ignores_an_object_that_does_not_use_the_material)
+{
+  Mesh *mesh = BKE_mesh_add(bmain, "AutofillForeignMesh");
+  bke::MutableAttributeAccessor attributes = mesh->attributes_for_write();
+  attributes.lookup_or_add_for_write_only_span<float2>("UVMap", bke::AttrDomain::Corner);
+  mesh->uv_maps_active_set("UVMap");
+
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "AutofillForeignObject");
+  ob->data = &mesh->id;
+  id_us_plus(&mesh->id);
+
+  /* Another material sits in the object's slot, so its UV must not be taken for \a ma. */
+  Material *other = BKE_material_add(bmain, "AutofillForeignOther");
+  BKE_object_material_slot_add(bmain, ob);
+  BKE_object_material_assign(bmain, ob, other, 1, BKE_MAT_ASSIGN_OBJECT);
+  ob->actcol = 1;
+
+  Material *ma = BKE_material_add(bmain, "AutofillForeignMat");
+  BKE_paint_layers_add(*ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+
+  BKE_paint_layers_uv_map_autofill(*ma, ob);
+  EXPECT_STREQ(ma->paint_layers_uv_map, "");
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 }
 
 /* GUARD: an existing name is never overwritten. */

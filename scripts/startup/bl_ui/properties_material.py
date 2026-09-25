@@ -8,6 +8,11 @@ from bpy.app.translations import contexts as i18n_contexts
 from rna_prop_ui import PropertyPanel
 from bpy_extras.node_utils import find_node_input
 
+from bl_operators.material_paint_layers import (
+    mesh_map_objects_for_material,
+    mesh_map_source_member_count,
+    mesh_map_summary_status,
+)
 from bl_ui.space_properties import PropertiesAnimationMixin
 
 
@@ -883,6 +888,23 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
                 icon='ERROR',
             )
 
+        actions = layout.row(align=True)
+        # The bakes are background wmJobs; a plain button would run the synchronous exec path and
+        # block the UI. Clear is cheap and runs inline.
+        actions.operator_context = 'INVOKE_DEFAULT'
+        bake_all = actions.operator(
+            "object.mesh_map_bake_all", text="Bake All Maps", icon='RENDER_STILL')
+        bake_all.types = 0
+        bake_all.object_scope = 'ACTIVE'
+        bake_all.material_index = 0
+        bake_all_objects = actions.operator(
+            "object.mesh_map_bake_all", text="Bake All Objects")
+        bake_all_objects.types = 0
+        bake_all_objects.object_scope = 'ALL'
+        bake_all_objects.material_index = 0
+        actions.operator_context = 'EXEC_DEFAULT'
+        actions.operator("object.mesh_map_clear", text="Clear").types = 0
+
         header, settings_layout = layout.panel("mesh_map_settings", default_closed=True)
         header.label(text="Settings")
         if settings_layout:
@@ -896,7 +918,30 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
             col.prop(settings, "ao_distance")
             col.prop(settings, "edge_radius")
 
-        layout.label(text="High-poly source: not implemented yet")
+        source = next((item for item in ob.mesh_map_sources if item.material == mat), None)
+        hp_header, hp = layout.panel("mesh_map_highpoly", default_closed=True)
+        hp_header.label(text="High-poly Source")
+        if hp:
+            if source is None:
+                hp.operator("object.mesh_map_source_add", text="Use High-poly Source", icon='ADD')
+            else:
+                hp.prop_search(source, "high_poly", context.scene, "objects", text="Object")
+                hp.prop_search(
+                    source, "high_poly_collection", context.blend_data, "collections",
+                    text="Collection")
+                hp.label(
+                    text="AO is computed per high-poly object; pieces do not occlude each other")
+                hp.prop(source, "cage", text="Cage")
+                hp.prop(source, "cage_extrusion")
+                hp.prop(source, "max_ray_distance")
+                if mesh_map_source_member_count(source) == 0:
+                    hp.label(text="The source resolves to no mesh objects", icon='ERROR')
+                elif source.cage is not None and not source.cage_matches(
+                        depsgraph=context.view_layer.depsgraph):
+                    hp.label(
+                        text="The cage must have the same face count as the low-poly object",
+                        icon='ERROR')
+                hp.operator("object.mesh_map_source_remove", text="Remove", icon='X')
 
         active_layer = mat.paint_layers.active
         baking = False
@@ -914,9 +959,11 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
             image = slot.image if slot is not None else None
             row.label(text=image.name if image is not None else "—")
 
+            row.operator_context = 'INVOKE_DEFAULT'
             bake = row.operator("object.mesh_map_bake", text="Bake", icon='RENDER_STILL')
             bake.type = map_type
             bake.material_index = 0
+            row.operator_context = 'EXEC_DEFAULT'
 
             add_row = row.row(align=True)
             add_row.operator("material.mesh_map_add_layer", text="Add Layer", icon='ADD').type = map_type
@@ -926,6 +973,21 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
 
         if baking:
             layout.label(text="Baking...", icon='FILE_REFRESH')
+
+        objects = mesh_map_objects_for_material(context.scene, mat)
+        if len(objects) > 1:
+            box = layout.box()
+            box.label(text="Objects using this material", icon='OUTLINER_OB_MESH')
+            for other in objects:
+                status, count = mesh_map_summary_status(other, mat)
+                status_label, status_icon = _MESH_MAP_STATUS[status]
+                line = box.row(align=True)
+                line.label(
+                    text="{}: {} ({} map(s))".format(other.name, status_label, count),
+                    icon=status_icon,
+                )
+                if uv_name and other.data.uv_layers.get(uv_name) is None:
+                    line.label(text="no UV '{}'".format(uv_name), icon='ERROR')
 
         layout.operator("object.mesh_map_refresh", text="Refresh Status", icon='FILE_REFRESH')
 

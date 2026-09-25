@@ -12,8 +12,11 @@
 
 #include "testing/testing.h"
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 #include "BLI_array.hh"
 #include "BLI_listbase.h"
@@ -33,6 +36,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_mesh_maps.hh"
 #include "BKE_mesh_maps_bake.hh"
+#include "BKE_mesh_maps_bake_handshake.hh"
 #include "BKE_modifier.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
@@ -860,6 +864,323 @@ TEST_F(MeshMapBakeTest, commit_hash_from_viewport_keeps_state_valid)
   DEG_graph_free(render_graph);
 }
 
+TEST_F(MeshMapBakeTest, coverage_from_pixels_marks_covered)
+{
+  BakePixel pixels[3] = {};
+  pixels[0].primitive_id = 0;
+  pixels[1].primitive_id = 5;
+  pixels[2].primitive_id = -1;
+
+  uint8_t coverage[3] = {9, 9, 9};
+  BKE_mesh_maps_bake_coverage_from_pixels(pixels, 3, MutableSpan<uint8_t>(coverage, 3));
+  EXPECT_EQ(coverage[0], 1);
+  EXPECT_EQ(coverage[1], 1);
+  EXPECT_EQ(coverage[2], 0);
+
+  /* A destination shorter than the pixel array is left untouched rather than overrun. */
+  uint8_t short_coverage[2] = {7, 7};
+  BKE_mesh_maps_bake_coverage_from_pixels(pixels, 3, MutableSpan<uint8_t>(short_coverage, 2));
+  EXPECT_EQ(short_coverage[0], 7);
+  EXPECT_EQ(short_coverage[1], 7);
+}
+
+TEST_F(MeshMapBakeTest, coverage_union_and_overlap)
+{
+  uint8_t a[4] = {1, 1, 0, 0};
+  uint8_t b[4] = {0, 1, 1, 0};
+  uint8_t destination[4] = {0, 0, 1, 0};
+  BKE_mesh_maps_bake_coverage_union(Span<uint8_t>(a, 4), MutableSpan<uint8_t>(destination, 4));
+  EXPECT_EQ(destination[0], 1);
+  EXPECT_EQ(destination[1], 1);
+  EXPECT_EQ(destination[2], 1);
+  EXPECT_EQ(destination[3], 0);
+
+  EXPECT_EQ(BKE_mesh_maps_bake_coverage_overlap(Span<uint8_t>(a, 4), Span<uint8_t>(b, 4)), 1);
+}
+
+TEST_F(MeshMapBakeTest, write_with_margin_protects_foreign_islands)
+{
+  uint8_t own_coverage[4] = {1, 0, 0, 0};
+  uint8_t own_margin[4] = {0, 1, 1, 0};
+  uint8_t foreign[4] = {0, 0, 1, 1};
+  const float result[16] = {
+      0.10f, 0.20f, 0.30f, 1.0f, 0.40f, 0.50f, 0.60f, 1.0f,
+      0.70f, 0.80f, 0.90f, 1.0f, 0.15f, 0.25f, 0.35f, 1.0f};
+  float atlas[16] = {};
+
+  BKE_mesh_maps_bake_write_with_margin(MA_MESH_MAP_NORMAL_WORLD,
+                                       Span<uint8_t>(own_coverage, 4),
+                                       Span<uint8_t>(own_margin, 4),
+                                       Span<uint8_t>(foreign, 4),
+                                       4,
+                                       result,
+                                       MutableSpan<float>(atlas, 16));
+
+  /* Own covered pixel: written. */
+  EXPECT_FLOAT_EQ(atlas[0], 0.10f);
+  EXPECT_FLOAT_EQ(atlas[1], 0.20f);
+  EXPECT_FLOAT_EQ(atlas[2], 0.30f);
+  EXPECT_FLOAT_EQ(atlas[3], 1.0f);
+  /* Margin over an unowned texel: written. */
+  EXPECT_FLOAT_EQ(atlas[4], 0.40f);
+  EXPECT_FLOAT_EQ(atlas[5], 0.50f);
+  EXPECT_FLOAT_EQ(atlas[6], 0.60f);
+  /* Margin over a foreign island and over an untouched foreign texel: refused. */
+  for (int i = 8; i < 16; i++) {
+    EXPECT_FLOAT_EQ(atlas[i], 0.0f);
+  }
+}
+
+TEST_F(MeshMapBakeTest, write_with_margin_own_coverage_beats_foreign)
+{
+  uint8_t own_coverage[1] = {1};
+  uint8_t no_margin[1] = {0};
+  uint8_t foreign[1] = {1};
+  const float result[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  float atlas[4] = {};
+
+  BKE_mesh_maps_bake_write_with_margin(MA_MESH_MAP_NORMAL_WORLD,
+                                       Span<uint8_t>(own_coverage, 1),
+                                       Span<uint8_t>(no_margin, 1),
+                                       Span<uint8_t>(foreign, 1),
+                                       4,
+                                       result,
+                                       MutableSpan<float>(atlas, 4));
+  EXPECT_FLOAT_EQ(atlas[0], 0.25f);
+  EXPECT_FLOAT_EQ(atlas[1], 0.5f);
+  EXPECT_FLOAT_EQ(atlas[2], 0.75f);
+}
+
+TEST_F(MeshMapBakeTest, write_with_margin_spreads_scalar)
+{
+  uint8_t own_coverage[1] = {1};
+  uint8_t no_margin[1] = {0};
+  uint8_t no_foreign[1] = {0};
+  const float result[4] = {0.4f, 0.0f, 0.0f, 1.0f};
+  float atlas[4] = {};
+
+  BKE_mesh_maps_bake_write_with_margin(MA_MESH_MAP_AO,
+                                       Span<uint8_t>(own_coverage, 1),
+                                       Span<uint8_t>(no_margin, 1),
+                                       Span<uint8_t>(no_foreign, 1),
+                                       4,
+                                       result,
+                                       MutableSpan<float>(atlas, 4));
+  EXPECT_FLOAT_EQ(atlas[0], 0.4f);
+  EXPECT_FLOAT_EQ(atlas[1], 0.4f);
+  EXPECT_FLOAT_EQ(atlas[2], 0.4f);
+  EXPECT_FLOAT_EQ(atlas[3], 1.0f);
+}
+
+TEST_F(MeshMapBakeTest, foreign_coverage_only_material_and_named_uv)
+{
+  Material *ma = add_material("MapsMat");
+  Material *other = add_material("OtherMat");
+  STRNCPY(ma->paint_layers_uv_map, "UVMap");
+
+  Mesh *quad = add_quad_two_uv("Quad");
+  Mesh *quad_other = add_quad_two_uv("QuadOther");
+  Mesh *quad_outside = add_quad_two_uv("QuadOutside");
+  Mesh *pair = add_pair_mesh("Pair");
+  Object *self = add_simple_object("Self", quad, ma);
+  Object *good = add_simple_object("Good", quad, ma);
+  Object *wrong_material = add_simple_object("WrongMaterial", quad_other, other);
+  /* The material is in the slot but the mesh has no UV layer the material names. */
+  Object *no_uv = add_simple_object("NoUv", pair, ma);
+  /* Uses the material and the layer but lives outside the scene: the atlas is a material resource,
+   * so it still owns texels and is taken from its own (unevaluated) mesh. */
+  Object *outside = add_simple_object("Outside", quad_outside, ma);
+
+  Scene *scene = add_scene_with_object("Scene", self);
+  BKE_collection_object_add(bmain, scene->master_collection, good);
+  BKE_collection_object_add(bmain, scene->master_collection, wrong_material);
+  BKE_collection_object_add(bmain, scene->master_collection, no_uv);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+
+  const int resolution = 8;
+  const size_t pixels_num = size_t(resolution) * resolution;
+  /* Claiming every texel as our own makes any foreign coverage an overlap. */
+  Array<uint8_t> own_coverage(pixels_num, 1);
+  Array<uint8_t> foreign_coverage(pixels_num, 0);
+  char overlap_name[MAX_ID_NAME] = "";
+  const int foreign_num = BKE_mesh_maps_bake_foreign_coverage(
+      *bmain,
+      *scene,
+      *view_layer,
+      *self,
+      *ma,
+      resolution,
+      own_coverage,
+      foreign_coverage,
+      MutableSpan<char>(overlap_name, sizeof(overlap_name)));
+
+  /* `good` and the out-of-scene `outside` qualify; `self` is the baking object, `wrong_material`
+   * does not use `ma` and `no_uv` lacks the named layer. The first overlapping name in
+   * `bmain.objects` order is `good`. */
+  EXPECT_EQ(foreign_num, 2);
+  EXPECT_STREQ(overlap_name, "Good");
+  size_t covered = 0;
+  for (const uint8_t value : foreign_coverage) {
+    covered += value;
+  }
+  EXPECT_GT(covered, 0);
+}
+
+TEST_F(MeshMapBakeTest, plan_pairs_active_and_all_scopes)
+{
+  Material *ma = add_material("MapsMat");
+  Material *other = add_material("OtherMat");
+  Mesh *mesh = add_pair_mesh("Pair");
+  Object *a = add_simple_object("A", mesh, ma);
+  Object *b = add_simple_object("B", mesh, ma);
+  Object *c = add_simple_object("C", mesh, other);
+
+  Vector<MeshMapBakePair> active;
+  BKE_mesh_maps_bake_plan_pairs(
+      *bmain, a, *ma, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, MESH_MAP_BAKE_TYPE_MASK_SUPPORTED, active);
+  ASSERT_EQ(active.size(), 7u);
+  for (const MeshMapBakePair &pair : active) {
+    EXPECT_EQ(pair.object, a);
+    EXPECT_EQ(pair.material, ma);
+  }
+  EXPECT_EQ(active[0].type, MA_MESH_MAP_AO);
+  EXPECT_EQ(active[6].type, MA_MESH_MAP_EDGE);
+
+  /* A mask keeps only its set, supported bits; the reserved Thickness bit is ignored. */
+  Vector<MeshMapBakePair> masked;
+  const uint32_t mask = (1u << MA_MESH_MAP_AO) | (1u << MA_MESH_MAP_ID_MATERIAL) |
+                        (1u << MA_MESH_MAP_THICKNESS);
+  BKE_mesh_maps_bake_plan_pairs(
+      *bmain, a, *ma, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, mask, masked);
+  ASSERT_EQ(masked.size(), 2u);
+  EXPECT_EQ(masked[0].type, MA_MESH_MAP_AO);
+  EXPECT_EQ(masked[1].type, MA_MESH_MAP_ID_MATERIAL);
+
+  Vector<MeshMapBakePair> all;
+  BKE_mesh_maps_bake_plan_pairs(
+      *bmain, nullptr, *ma, MA_MESH_MAP_BAKE_ALL_OBJECTS, MESH_MAP_BAKE_TYPE_MASK_SUPPORTED, all);
+  /* A and B use `ma`; each contributes the seven supported types. */
+  ASSERT_EQ(all.size(), 14u);
+  bool saw_a = false;
+  bool saw_b = false;
+  bool saw_c = false;
+  for (const MeshMapBakePair &pair : all) {
+    saw_a = saw_a || pair.object == a;
+    saw_b = saw_b || pair.object == b;
+    saw_c = saw_c || pair.object == c;
+  }
+  EXPECT_TRUE(saw_a);
+  EXPECT_TRUE(saw_b);
+  EXPECT_FALSE(saw_c);
+}
+
+TEST_F(MeshMapBakeTest, states_rollback_restores_previous)
+{
+  Material *ma = add_material("MapsMat");
+  Object *a = add_empty("A");
+  Object *b = add_empty("B");
+  Object *c = add_empty("C");
+  ObjectMeshMapState *sa = BKE_mesh_maps_object_state_ensure(*a, *ma, MA_MESH_MAP_AO);
+  ObjectMeshMapState *sb = BKE_mesh_maps_object_state_ensure(*b, *ma, MA_MESH_MAP_AO);
+  ObjectMeshMapState *sc = BKE_mesh_maps_object_state_ensure(*c, *ma, MA_MESH_MAP_AO);
+  ASSERT_NE(sa, nullptr);
+  ASSERT_NE(sb, nullptr);
+  ASSERT_NE(sc, nullptr);
+
+  sa->status = OB_MESH_MAP_STATUS_VALID;
+  const int8_t previous[3] = {
+      BKE_mesh_maps_bake_state_begin(*sa),
+      BKE_mesh_maps_bake_state_begin(*sb),
+      BKE_mesh_maps_bake_state_begin(*sc),
+  };
+  EXPECT_EQ(previous[0], OB_MESH_MAP_STATUS_VALID);
+  EXPECT_EQ(previous[1], OB_MESH_MAP_STATUS_NONE);
+
+  ObjectMeshMapState *states[3] = {sa, sb, sc};
+  BKE_mesh_maps_bake_states_rollback(
+      Span<ObjectMeshMapState *>(states, 3), Span<int8_t>(previous, 3));
+  EXPECT_EQ(sa->status, OB_MESH_MAP_STATUS_VALID);
+  EXPECT_EQ(sb->status, OB_MESH_MAP_STATUS_NONE);
+  EXPECT_EQ(sc->status, OB_MESH_MAP_STATUS_NONE);
+}
+
+TEST_F(MeshMapBakeTest, error_of_one_pair_leaves_the_others_alone)
+{
+  Material *ma = add_material("MapsMat");
+  Object *a = add_empty("A");
+  Object *b = add_empty("B");
+  Object *c = add_empty("C");
+  ObjectMeshMapState *sa = BKE_mesh_maps_object_state_ensure(*a, *ma, MA_MESH_MAP_AO);
+  ObjectMeshMapState *sb = BKE_mesh_maps_object_state_ensure(*b, *ma, MA_MESH_MAP_AO);
+  ObjectMeshMapState *sc = BKE_mesh_maps_object_state_ensure(*c, *ma, MA_MESH_MAP_AO);
+  ASSERT_NE(sa, nullptr);
+  ASSERT_NE(sb, nullptr);
+  ASSERT_NE(sc, nullptr);
+  BKE_mesh_maps_bake_state_begin(*sa);
+  BKE_mesh_maps_bake_state_begin(*sb);
+  BKE_mesh_maps_bake_state_begin(*sc);
+
+  const uint32_t hash[2] = {0x12345678u, 0x9ABCDEF0u};
+  BKE_mesh_maps_bake_state_fail(*sb);
+  BKE_mesh_maps_bake_state_commit(*sa, hash, hash, 1);
+  BKE_mesh_maps_bake_state_commit(*sc, hash, hash, 2);
+
+  EXPECT_EQ(sa->status, OB_MESH_MAP_STATUS_VALID);
+  EXPECT_EQ(sb->status, OB_MESH_MAP_STATUS_ERROR);
+  EXPECT_EQ(sc->status, OB_MESH_MAP_STATUS_VALID);
+}
+
+TEST_F(MeshMapBakeTest, clear_type_blacks_atlas_and_resets_states)
+{
+  Material *ma = add_material("MapsMat");
+  Object *a = add_empty("A");
+  Object *b = add_empty("B");
+  ObjectMeshMapState *sa = BKE_mesh_maps_object_state_ensure(*a, *ma, MA_MESH_MAP_AO);
+  ObjectMeshMapState *sb = BKE_mesh_maps_object_state_ensure(*b, *ma, MA_MESH_MAP_AO);
+  ObjectMeshMapState *other_type = BKE_mesh_maps_object_state_ensure(*b, *ma, MA_MESH_MAP_CURVATURE);
+  ASSERT_NE(sa, nullptr);
+  ASSERT_NE(sb, nullptr);
+  ASSERT_NE(other_type, nullptr);
+  const uint32_t hash[2] = {7u, 8u};
+  BKE_mesh_maps_object_state_mark_baked(*sa, hash, 5);
+  BKE_mesh_maps_object_state_mark_baked(*sb, hash, 5);
+  BKE_mesh_maps_object_state_mark_baked(*other_type, hash, 5);
+
+  Image *atlas = BKE_mesh_maps_bake_atlas_ensure(*bmain, *ma, MA_MESH_MAP_AO, 8);
+  ASSERT_NE(atlas, nullptr);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(atlas, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    float *data = ibuf->float_data_for_write();
+    ASSERT_NE(data, nullptr);
+    data[0] = 0.5f;
+    data[1] = 0.5f;
+    data[2] = 0.5f;
+    BKE_image_release_ibuf(atlas, ibuf, lock);
+  }
+
+  const int reset = BKE_mesh_maps_bake_clear_type(*bmain, *ma, MA_MESH_MAP_AO);
+  EXPECT_EQ(reset, 2);
+  EXPECT_EQ(sa->status, OB_MESH_MAP_STATUS_NONE);
+  EXPECT_EQ(sb->status, OB_MESH_MAP_STATUS_NONE);
+  EXPECT_EQ(sa->hash[0], 0u);
+  EXPECT_EQ(sb->baked_time, 0);
+  /* Another map type is untouched. */
+  EXPECT_EQ(other_type->status, OB_MESH_MAP_STATUS_VALID);
+
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(atlas, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  const float *data = ibuf->float_data();
+  ASSERT_NE(data, nullptr);
+  EXPECT_FLOAT_EQ(data[0], 0.0f);
+  EXPECT_FLOAT_EQ(data[1], 0.0f);
+  EXPECT_FLOAT_EQ(data[2], 0.0f);
+  EXPECT_FLOAT_EQ(data[3], 1.0f);
+  BKE_image_release_ibuf(atlas, ibuf, lock);
+}
+
 /** Fixes defect 2: a byte atlas must not be reported as a valid bake. */
 TEST_F(MeshMapBakeTest, atlas_is_float_detects_byte_image)
 {
@@ -873,6 +1194,235 @@ TEST_F(MeshMapBakeTest, atlas_is_float_detects_byte_image)
       bmain, 8, 8, "Byte", 24, false, IMA_GENTYPE_BLANK, black, false, false, false);
   ASSERT_NE(byte_image, nullptr);
   EXPECT_FALSE(BKE_mesh_maps_bake_atlas_is_float(*byte_image));
+}
+
+/**
+ * The main/worker protocol must not let a slow main thread (its update runs on the WM timer, which
+ * can be slower than the worker's 50 ms wait timeout) make the worker give up after the first pair.
+ */
+TEST_F(MeshMapBakeTest, handshake_worker_survives_a_slow_main_thread)
+{
+  MeshMapBakeHandshake handshake;
+  std::atomic<int> rendered{0};
+  std::atomic<bool> stop{false};
+  const int pairs = 3;
+
+  std::thread worker([&] {
+    for (;;) {
+      if (!handshake.worker_await_world([&] { return stop.load(); })) {
+        break;
+      }
+      rendered.fetch_add(1);
+      if (!handshake.worker_publish_result([&] { return stop.load(); })) {
+        break;
+      }
+    }
+  });
+
+  for (int i = 0; i < pairs; i++) {
+    /* Slower than the worker's wait timeout: a single timed wait would give up here. */
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    handshake.main_publish_world(true);
+    /* Bounded, so a worker that gave up fails the assertion instead of hanging the test. */
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!handshake.main_try_take_result()) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    handshake.main_finish_commit();
+  }
+  handshake.main_publish_world(false);
+  worker.join();
+  EXPECT_EQ(rendered.load(), pairs);
+}
+
+/** A kill while the worker waits for a world must exit promptly and render nothing. */
+TEST_F(MeshMapBakeTest, handshake_stop_while_waiting_for_a_world)
+{
+  MeshMapBakeHandshake handshake;
+  std::atomic<bool> stop{false};
+  std::atomic<int> rendered{0};
+  std::thread worker([&] {
+    if (handshake.worker_await_world([&] { return stop.load(); })) {
+      rendered.fetch_add(1);
+    }
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const auto start = std::chrono::steady_clock::now();
+  stop.store(true);
+  worker.join();
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_EQ(rendered.load(), 0);
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 100);
+}
+
+/** A kill while the worker waits for the commit must exit promptly and commit nothing. */
+TEST_F(MeshMapBakeTest, handshake_stop_while_waiting_for_the_commit)
+{
+  MeshMapBakeHandshake handshake;
+  std::atomic<bool> stop{false};
+  std::atomic<int> rendered{0};
+  std::atomic<bool> committed{false};
+  std::thread worker([&] {
+    if (!handshake.worker_await_world([&] { return stop.load(); })) {
+      return;
+    }
+    rendered.fetch_add(1);
+    if (handshake.worker_publish_result([&] { return stop.load(); })) {
+      committed.store(true);
+    }
+  });
+
+  handshake.main_publish_world(true);
+  while (rendered.load() == 0) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const auto start = std::chrono::steady_clock::now();
+  stop.store(true);
+  worker.join();
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_EQ(rendered.load(), 1);
+  EXPECT_FALSE(committed.load());
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 100);
+}
+
+/** High-poly sources are inputs, never foreign atlas owners and never low-poly bake targets. */
+TEST_F(MeshMapBakeTest, source_objects_are_not_foreign_or_baked)
+{
+  Material *ma = add_material("MapsMat");
+  STRNCPY(ma->paint_layers_uv_map, "UVMap");
+
+  Mesh *low_mesh = add_quad_two_uv("LowQuad");
+  Mesh *high_mesh = add_quad_two_uv("HighQuad");
+  Object *low = add_simple_object("Low", low_mesh, ma);
+  Object *high = add_simple_object("High", high_mesh, ma);
+
+  Scene *scene = add_scene_with_object("Scene", low);
+  BKE_collection_object_add(bmain, scene->master_collection, high);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*low, *ma);
+  ASSERT_NE(source, nullptr);
+  source->high_poly = high;
+
+  const int resolution = 8;
+  const size_t pixels_num = size_t(resolution) * resolution;
+  Array<uint8_t> own_coverage(pixels_num, 1);
+  Array<uint8_t> foreign_coverage(pixels_num, 0);
+  char overlap_name[MAX_ID_NAME] = "";
+  const int foreign_num = BKE_mesh_maps_bake_foreign_coverage(
+      *bmain,
+      *scene,
+      *view_layer,
+      *low,
+      *ma,
+      resolution,
+      own_coverage,
+      foreign_coverage,
+      MutableSpan<char>(overlap_name, sizeof(overlap_name)));
+  EXPECT_EQ(foreign_num, 0);
+
+  Vector<MeshMapBakePair> pairs;
+  BKE_mesh_maps_bake_plan_pairs(
+      *bmain, nullptr, *ma, MA_MESH_MAP_BAKE_ALL_OBJECTS, MESH_MAP_BAKE_TYPE_MASK_SUPPORTED, pairs);
+  ASSERT_EQ(pairs.size(), 7u);
+  for (const MeshMapBakePair &pair : pairs) {
+    EXPECT_EQ(pair.object, low);
+  }
+}
+
+TEST_F(MeshMapBakeTest, cage_matches_requires_same_face_and_corner_count)
+{
+  Mesh *pair = add_pair_mesh("Pair");
+  Mesh *pair2 = add_pair_mesh("Pair2");
+  Mesh *quad = add_quad_two_uv("Quad");
+  EXPECT_TRUE(BKE_mesh_maps_bake_cage_matches(*pair, *pair2));
+  EXPECT_FALSE(BKE_mesh_maps_bake_cage_matches(*pair, *quad));
+}
+
+TEST_F(MeshMapBakeTest, fill_id_from_high_poly_reads_hit_object_and_material)
+{
+  Mesh *mesh = add_pair_mesh("Pair");
+  Material *first = add_material("First");
+  Material *second = add_material("Second");
+  Object *ob = add_object("Ob", mesh, first, second);
+
+  /* Triangle 0 belongs to face 0 (slot 0), triangle 1 to face 1 (slot 1); a -1 object is a miss. */
+  BakePixel pixels[3] = {};
+  pixels[0].object_id = 0;
+  pixels[0].primitive_id = 0;
+  pixels[1].object_id = 0;
+  pixels[1].primitive_id = 1;
+  pixels[2].object_id = -1;
+
+  const Object *objects[1] = {ob};
+  const Mesh *meshes[1] = {mesh};
+  float expected[3];
+
+  float material_result[12] = {};
+  BKE_mesh_maps_bake_fill_id_from_high_poly(
+      pixels, 3, objects, 1, meshes, 1, MA_MESH_MAP_ID_MATERIAL, 4, material_result);
+  BKE_mesh_maps_bake_id_material_color(0, expected);
+  EXPECT_FLOAT_EQ(material_result[0], expected[0]);
+  EXPECT_FLOAT_EQ(material_result[1], expected[1]);
+  EXPECT_FLOAT_EQ(material_result[2], expected[2]);
+  BKE_mesh_maps_bake_id_material_color(1, expected);
+  EXPECT_FLOAT_EQ(material_result[4], expected[0]);
+  EXPECT_FLOAT_EQ(material_result[5], expected[1]);
+  EXPECT_FLOAT_EQ(material_result[6], expected[2]);
+  for (int i = 8; i < 12; i++) {
+    EXPECT_FLOAT_EQ(material_result[i], 0.0f);
+  }
+
+  float object_result[12] = {};
+  BKE_mesh_maps_bake_fill_id_from_high_poly(
+      pixels, 3, objects, 1, meshes, 1, MA_MESH_MAP_ID_OBJECT, 4, object_result);
+  BKE_mesh_maps_bake_id_object_color(*ob, expected);
+  EXPECT_FLOAT_EQ(object_result[0], expected[0]);
+  EXPECT_FLOAT_EQ(object_result[1], expected[1]);
+  EXPECT_FLOAT_EQ(object_result[2], expected[2]);
+  EXPECT_FLOAT_EQ(object_result[4], expected[0]);
+  for (int i = 8; i < 12; i++) {
+    EXPECT_FLOAT_EQ(object_result[i], 0.0f);
+  }
+}
+
+TEST_F(MeshMapBakeTest, fill_id_from_high_poly_skips_out_of_range_object)
+{
+  Mesh *mesh = add_pair_mesh("Pair");
+  Material *first = add_material("First");
+  Material *second = add_material("Second");
+  Object *ob = add_object("Ob", mesh, first, second);
+
+  /* Texel 0 is a valid hit, texel 1 names an object past the end of the array. */
+  BakePixel pixels[2] = {};
+  pixels[0].object_id = 0;
+  pixels[0].primitive_id = 0;
+  pixels[1].object_id = 5;
+  pixels[1].primitive_id = 0;
+  const Object *objects[1] = {ob};
+  const Mesh *meshes[1] = {mesh};
+
+  float result[8];
+  for (int i = 0; i < 8; i++) {
+    result[i] = 9.0f;
+  }
+  BKE_mesh_maps_bake_fill_id_from_high_poly(
+      pixels, 2, objects, 1, meshes, 1, MA_MESH_MAP_ID_OBJECT, 4, result);
+
+  float expected[3];
+  BKE_mesh_maps_bake_id_object_color(*ob, expected);
+  EXPECT_FLOAT_EQ(result[0], expected[0]);
+  EXPECT_FLOAT_EQ(result[1], expected[1]);
+  EXPECT_FLOAT_EQ(result[2], expected[2]);
+  /* The out-of-range texel is left untouched, sentinel included. */
+  for (int i = 4; i < 8; i++) {
+    EXPECT_FLOAT_EQ(result[i], 9.0f);
+  }
 }
 
 }  // namespace blender::bke::tests

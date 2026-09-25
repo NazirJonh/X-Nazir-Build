@@ -19,11 +19,15 @@
 #include "BLI_generic_virtual_array.hh"
 #include "BLI_hash_mm2a.hh"
 #include "BLI_listbase.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_vector.hh"
 #include "MEM_guardedalloc.h"
 
 #include "BKE_attribute.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_main.hh"
+#include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint_layers.hh"
@@ -31,6 +35,7 @@
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
 
+#include "DNA_collection_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
@@ -119,6 +124,22 @@ uint64_t mesh_map_hash_attribute(uint64_t h,
   for (int64_t i = 0; i < varray.size(); i++) {
     varray.get(i, value.data());
     h = mesh_map_hash_bytes(h, value.data(), type.size);
+  }
+  return h;
+}
+
+/** Fold a high-poly/cage mesh's geometry: topology, positions, and the material index for IDs. */
+uint64_t mesh_map_hash_source_mesh(uint64_t h, const Mesh &mesh, const int8_t type)
+{
+  h = mesh_map_hash_mix(h, uint64_t(uint32_t(mesh.verts_num)));
+  h = mesh_map_hash_mix(h, uint64_t(uint32_t(mesh.edges_num)));
+  h = mesh_map_hash_mix(h, uint64_t(uint32_t(mesh.faces_num)));
+  h = mesh_map_hash_mix(h, uint64_t(uint32_t(mesh.corners_num)));
+  h = mesh_map_hash_span(h, mesh.face_offsets());
+  h = mesh_map_hash_span(h, mesh.corner_verts());
+  h = mesh_map_hash_span(h, mesh.vert_positions());
+  if (type == MA_MESH_MAP_ID_MATERIAL) {
+    h = mesh_map_hash_attribute(h, mesh.attributes(), "material_index");
   }
   return h;
 }
@@ -263,6 +284,156 @@ void BKE_mesh_maps_object_state_status_set(ObjectMeshMapState &state, const int8
 }
 
 /* -------------------------------------------------------------------- */
+/** \name High-poly sources
+ * \{ */
+
+int BKE_mesh_maps_sources_prune(Object &ob)
+{
+  int removed = 0;
+  for (ObjectMeshMapSource *source = static_cast<ObjectMeshMapSource *>(ob.mesh_map_sources.first),
+                                *next = nullptr;
+       source != nullptr;
+       source = next)
+  {
+    next = source->next;
+    if (source->material == nullptr) {
+      BLI_remlink(&ob.mesh_map_sources, source);
+      MEM_delete(source);
+      removed++;
+    }
+  }
+  return removed;
+}
+
+ObjectMeshMapSource *BKE_mesh_maps_source_find(Object &ob, const Material &ma)
+{
+  BKE_mesh_maps_sources_prune(ob);
+  for (ObjectMeshMapSource &source :
+       *reinterpret_cast<ListBaseT<ObjectMeshMapSource> *>(&ob.mesh_map_sources))
+  {
+    if (source.material == &ma) {
+      return &source;
+    }
+  }
+  return nullptr;
+}
+
+const ObjectMeshMapSource *BKE_mesh_maps_source_find(const Object &ob, const Material &ma)
+{
+  for (const ObjectMeshMapSource &source :
+       *reinterpret_cast<const ListBaseT<ObjectMeshMapSource> *>(&ob.mesh_map_sources))
+  {
+    if (source.material == &ma) {
+      return &source;
+    }
+  }
+  return nullptr;
+}
+
+ObjectMeshMapSource *BKE_mesh_maps_source_ensure(Object &ob, Material &ma)
+{
+  if (ObjectMeshMapSource *existing = BKE_mesh_maps_source_find(ob, ma)) {
+    return existing;
+  }
+  ObjectMeshMapSource *source = MEM_new<ObjectMeshMapSource>(__func__);
+  source->material = &ma;
+  BLI_addtail(&ob.mesh_map_sources, source);
+  return source;
+}
+
+bool BKE_mesh_maps_source_remove(Object &ob, const Material &ma)
+{
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_find(ob, ma);
+  if (source == nullptr) {
+    return false;
+  }
+  BLI_remlink(&ob.mesh_map_sources, source);
+  MEM_delete(source);
+  return true;
+}
+
+namespace {
+
+void mesh_map_source_add_collection(const Collection &collection,
+                                    const Object &low,
+                                    const Object *cage,
+                                    Vector<Object *> &r_objects)
+{
+  for (const CollectionObject &link :
+       *reinterpret_cast<const ListBaseT<CollectionObject> *>(&collection.gobject))
+  {
+    Object *ob = link.ob;
+    if (ob == nullptr || ob == &low || ob == cage || ob->type != OB_MESH || ob->data == nullptr) {
+      continue;
+    }
+    if (!r_objects.contains(ob)) {
+      r_objects.append(ob);
+    }
+  }
+  for (const CollectionChild &child :
+       *reinterpret_cast<const ListBaseT<CollectionChild> *>(&collection.children))
+  {
+    if (child.collection != nullptr) {
+      mesh_map_source_add_collection(*child.collection, low, cage, r_objects);
+    }
+  }
+}
+
+}  // namespace
+
+void BKE_mesh_maps_source_resolve(const Object &ob,
+                                  const Material &ma,
+                                  Vector<Object *> &r_objects,
+                                  Object **r_cage)
+{
+  r_objects.clear();
+  if (r_cage != nullptr) {
+    *r_cage = nullptr;
+  }
+  Object *ob_mut = const_cast<Object *>(&ob);
+  const ObjectMeshMapSource *source = BKE_mesh_maps_source_find(*ob_mut, ma);
+  if (source == nullptr) {
+    return;
+  }
+  if (r_cage != nullptr) {
+    *r_cage = source->cage;
+  }
+  if (source->high_poly != nullptr) {
+    if (source->high_poly->type == OB_MESH && source->high_poly->data != nullptr &&
+        source->high_poly != &ob && source->high_poly != source->cage)
+    {
+      r_objects.append(source->high_poly);
+    }
+  }
+  else if (source->high_poly_collection != nullptr) {
+    mesh_map_source_add_collection(
+        *source->high_poly_collection, ob, source->cage, r_objects);
+  }
+}
+
+void BKE_mesh_maps_source_collect_for_material(Main &bmain,
+                                               const Material &ma,
+                                               Set<const Object *> &r_objects)
+{
+  for (Object &ob : bmain.objects) {
+    if (BKE_object_material_index_get(&ob, &ma) < 0) {
+      continue;
+    }
+    Vector<Object *> objects;
+    Object *cage = nullptr;
+    BKE_mesh_maps_source_resolve(ob, ma, objects, &cage);
+    for (Object *source : objects) {
+      r_objects.add(source);
+    }
+    if (cage != nullptr) {
+      r_objects.add(cage);
+    }
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Content hash and bake staleness
  * \{ */
 
@@ -349,6 +520,51 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
   }
   if (type == MA_MESH_MAP_ID_OBJECT) {
     h = mesh_map_hash_string(h, StringRef(ob_eval.id.name + 2));
+  }
+
+  /* A high-poly source contributes its geometry, its transform relative to the low-poly, the cage
+   * and its transform, and the auto-cage/ray controls. An object the viewport depsgraph does not
+   * evaluate falls back to its original data mesh, exactly like the low-poly hash itself. */
+  const Object *ob_orig = DEG_get_original(&ob_eval);
+  const ObjectMeshMapSource *source =
+      ob_orig != nullptr ? BKE_mesh_maps_source_find(*ob_orig, ma) : nullptr;
+  if (source != nullptr) {
+    Depsgraph *depsgraph = DEG_get_depsgraph_by_id(ob_eval.id);
+    Vector<Object *> source_objects;
+    Object *cage = nullptr;
+    BKE_mesh_maps_source_resolve(*ob_orig, ma, source_objects, &cage);
+    const float4x4 mat_low = ob_eval.object_to_world();
+    for (Object *hp : source_objects) {
+      const Object *hp_eval = (depsgraph != nullptr) ? DEG_get_evaluated(depsgraph, hp) : hp;
+      const Mesh *hp_mesh = (hp_eval != nullptr) ? mesh_map_object_mesh(*hp_eval) : nullptr;
+      if (hp_mesh == nullptr) {
+        hp_mesh = id_cast<const Mesh *>(hp->data);
+      }
+      if (hp_mesh != nullptr) {
+        h = mesh_map_hash_source_mesh(h, *hp_mesh, type);
+      }
+      const Object *hp_ref = (hp_eval != nullptr) ? hp_eval : hp;
+      const float4x4 rel = math::invert(mat_low) * hp_ref->object_to_world();
+      h = mesh_map_hash_bytes(h, rel.ptr(), sizeof(float4x4));
+      if (ELEM(type, MA_MESH_MAP_ID_OBJECT, MA_MESH_MAP_ID_MATERIAL)) {
+        h = mesh_map_hash_string(h, StringRef(hp->id.name + 2));
+      }
+    }
+    if (cage != nullptr) {
+      const Object *cage_eval = (depsgraph != nullptr) ? DEG_get_evaluated(depsgraph, cage) : cage;
+      const Object *cage_ref = (cage_eval != nullptr) ? cage_eval : cage;
+      const Mesh *cage_mesh = (cage_eval != nullptr) ? mesh_map_object_mesh(*cage_eval) : nullptr;
+      if (cage_mesh == nullptr) {
+        cage_mesh = id_cast<const Mesh *>(cage->data);
+      }
+      if (cage_mesh != nullptr) {
+        h = mesh_map_hash_source_mesh(h, *cage_mesh, type);
+      }
+      const float4x4 rel = math::invert(mat_low) * cage_ref->object_to_world();
+      h = mesh_map_hash_bytes(h, rel.ptr(), sizeof(float4x4));
+    }
+    h = mesh_map_hash_bytes(h, &source->cage_extrusion, sizeof(float));
+    h = mesh_map_hash_bytes(h, &source->max_ray_distance, sizeof(float));
   }
 
   r_hash[0] = uint32_t(h & 0xFFFFFFFFu);
@@ -485,6 +701,32 @@ void BKE_mesh_maps_object_states_copy(Object &ob_dst, const Object &ob_src)
     dst->next = nullptr;
     dst->prev = nullptr;
     BLI_addtail(&ob_dst.mesh_map_states, dst);
+  }
+}
+
+void BKE_mesh_maps_object_sources_free(Object &ob)
+{
+  for (ObjectMeshMapSource *source = static_cast<ObjectMeshMapSource *>(ob.mesh_map_sources.first),
+                                *next = nullptr;
+       source != nullptr;
+       source = next)
+  {
+    next = source->next;
+    MEM_delete(source);
+  }
+  ob.mesh_map_sources = {nullptr, nullptr};
+}
+
+void BKE_mesh_maps_object_sources_copy(Object &ob_dst, const Object &ob_src)
+{
+  ob_dst.mesh_map_sources = {nullptr, nullptr};
+  for (const ObjectMeshMapSource &src :
+       *reinterpret_cast<const ListBaseT<ObjectMeshMapSource> *>(&ob_src.mesh_map_sources))
+  {
+    ObjectMeshMapSource *dst = MEM_dupalloc(&src);
+    dst->next = nullptr;
+    dst->prev = nullptr;
+    BLI_addtail(&ob_dst.mesh_map_sources, dst);
   }
 }
 

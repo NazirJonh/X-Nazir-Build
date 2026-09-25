@@ -22,6 +22,8 @@
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
+#include "BLI_set.hh"
+#include "BLI_string.h"
 #include "BLI_ustring.hh"
 #include "BLI_utildefines.h"
 #include "BLI_virtual_array.hh"
@@ -29,6 +31,7 @@
 #include "BKE_attribute.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_maps.hh"
@@ -380,6 +383,63 @@ void BKE_mesh_maps_bake_fill_id_pixels(const BakePixel *pixels,
   }
 }
 
+bool BKE_mesh_maps_bake_cage_matches(const Mesh &low, const Mesh &cage)
+{
+  return low.faces_num == cage.faces_num && low.corners_num == cage.corners_num;
+}
+
+void BKE_mesh_maps_bake_fill_id_from_high_poly(const BakePixel *pixels,
+                                               const size_t pixels_num,
+                                               const Object *const *objects,
+                                               const size_t objects_num,
+                                               const Mesh *const *meshes,
+                                               const size_t meshes_num,
+                                               const int8_t type,
+                                               const int channels,
+                                               float *result)
+{
+  if (pixels == nullptr || result == nullptr || channels < 3) {
+    return;
+  }
+  for (size_t i = 0; i < pixels_num; i++) {
+    const int object_index = pixels[i].object_id;
+    if (object_index < 0 || size_t(object_index) >= objects_num) {
+      continue;
+    }
+    float color[3];
+    if (type == MA_MESH_MAP_ID_OBJECT) {
+      BKE_mesh_maps_bake_id_object_color(*objects[object_index], color);
+    }
+    else if (type == MA_MESH_MAP_ID_MATERIAL) {
+      if (size_t(object_index) >= meshes_num) {
+        continue;
+      }
+      const Mesh *source_mesh = meshes[object_index];
+      if (source_mesh == nullptr) {
+        continue;
+      }
+      const int triangle = pixels[i].primitive_id;
+      const Span<int> tri_faces = source_mesh->corner_tri_faces();
+      if (triangle < 0 || triangle >= int(tri_faces.size())) {
+        continue;
+      }
+      const int face = tri_faces[triangle];
+      const VArraySpan<int> material_indices = *source_mesh->attributes().lookup<int>(
+          "material_index", bke::AttrDomain::Face);
+      const int index = material_indices.is_empty() ? 0 : material_indices[face];
+      BKE_mesh_maps_bake_id_material_color(index, color);
+    }
+    else {
+      continue;
+    }
+    float *destination = result + i * size_t(channels);
+    copy_v3_v3(destination, color);
+    if (channels >= 4) {
+      destination[3] = 1.0f;
+    }
+  }
+}
+
 void BKE_mesh_maps_bake_write_covered(const int8_t type,
                                       const BakePixel *pixels,
                                       const size_t pixels_num,
@@ -409,6 +469,163 @@ void BKE_mesh_maps_bake_write_covered(const int8_t type,
       destination[2] = source[0];
     }
   }
+}
+
+void BKE_mesh_maps_bake_coverage_from_pixels(const BakePixel *pixels,
+                                             const size_t pixels_num,
+                                             MutableSpan<uint8_t> r_coverage)
+{
+  if (pixels == nullptr || size_t(r_coverage.size()) < pixels_num) {
+    return;
+  }
+  for (size_t i = 0; i < pixels_num; i++) {
+    r_coverage[i] = pixels[i].primitive_id >= 0 ? uint8_t(1) : uint8_t(0);
+  }
+}
+
+void BKE_mesh_maps_bake_coverage_union(Span<uint8_t> source, MutableSpan<uint8_t> r_destination)
+{
+  const size_t num = size_t(std::min(source.size(), r_destination.size()));
+  for (size_t i = 0; i < num; i++) {
+    if (source[i] != 0) {
+      r_destination[i] = 1;
+    }
+  }
+}
+
+size_t BKE_mesh_maps_bake_coverage_overlap(Span<uint8_t> a, Span<uint8_t> b)
+{
+  const size_t num = size_t(std::min(a.size(), b.size()));
+  size_t count = 0;
+  for (size_t i = 0; i < num; i++) {
+    if (a[i] != 0 && b[i] != 0) {
+      count++;
+    }
+  }
+  return count;
+}
+
+void BKE_mesh_maps_bake_write_with_margin(const int8_t type,
+                                          Span<uint8_t> own_coverage,
+                                          Span<uint8_t> own_margin,
+                                          Span<uint8_t> foreign_coverage,
+                                          const int channels,
+                                          const float *result,
+                                          MutableSpan<float> atlas)
+{
+  if (result == nullptr || channels < 3) {
+    return;
+  }
+  const size_t pixels_num = size_t(std::min(
+      {own_coverage.size(), own_margin.size(), atlas.size() / int64_t(channels)}));
+  const bool scalar = BKE_mesh_maps_bake_type_scalar(type);
+  for (size_t i = 0; i < pixels_num; i++) {
+    const bool covered = own_coverage[i] != 0;
+    const bool margin = own_margin[i] != 0;
+    if (!covered && !margin) {
+      continue;
+    }
+    /* An own pixel is never given up; only the margin yields to a foreign island. */
+    if (!covered && i < size_t(foreign_coverage.size()) && foreign_coverage[i] != 0) {
+      continue;
+    }
+    const float *source = result + i * size_t(channels);
+    float *destination = atlas.data() + i * size_t(channels);
+    copy_v3_v3(destination, source);
+    if (channels >= 4) {
+      destination[3] = source[3];
+    }
+    if (scalar) {
+      destination[1] = source[0];
+      destination[2] = source[0];
+    }
+  }
+}
+
+int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
+                                        Scene &scene,
+                                        ViewLayer &view_layer,
+                                        const Object &ob,
+                                        const Material &ma,
+                                        const int resolution,
+                                        Span<uint8_t> own_coverage,
+                                        MutableSpan<uint8_t> r_coverage,
+                                        MutableSpan<char> r_overlap_name)
+{
+  if (!r_overlap_name.is_empty()) {
+    r_overlap_name[0] = '\0';
+  }
+  const size_t pixels_num = size_t(r_coverage.size());
+  if (pixels_num == 0 || resolution <= 0) {
+    return 0;
+  }
+  Depsgraph *depsgraph = BKE_scene_ensure_depsgraph(&bmain, &scene, &view_layer);
+  if (depsgraph == nullptr) {
+    return 0;
+  }
+  BKE_scene_graph_evaluated_ensure(depsgraph, &bmain);
+
+  Array<BakePixel> pixels(pixels_num);
+  Array<uint8_t> object_coverage(pixels_num);
+  /* `RE_bake_pixels_populate` always indexes `material_to_image`, even with no materials; a single
+   * null entry that matches the null bake image keeps the texel pass purely about geometry. */
+  Image *material_to_image[1] = {nullptr};
+  BakeImage bake_image = {};
+  bake_image.image = nullptr;
+  bake_image.width = resolution;
+  bake_image.height = resolution;
+  bake_image.offset = 0;
+  BakeTargets targets = {};
+  targets.images = &bake_image;
+  targets.images_num = 1;
+  targets.material_to_image = material_to_image;
+  targets.materials_num = 1;
+  targets.pixels_num = int(pixels_num);
+  targets.channels_num = 4;
+
+  /* High-poly sources are not "foreign" islands: they are geometry the low-poly samples, even when
+   * they happen to use the same material and UV layer. */
+  Set<const Object *> source_objects;
+  BKE_mesh_maps_source_collect_for_material(bmain, ma, source_objects);
+
+  int foreign_num = 0;
+  for (Object &candidate : bmain.objects) {
+    if (&candidate == &ob || candidate.type != OB_MESH) {
+      continue;
+    }
+    if (source_objects.contains(&candidate)) {
+      continue;
+    }
+    if (BKE_object_material_index_get(&candidate, &ma) < 0) {
+      continue;
+    }
+    /* Any object evaluated by this depsgraph contributes its viewport mesh; one that is not part
+     * of it (another scene, say) falls back to its own data mesh, without modifiers. */
+    Object *ob_eval = DEG_get_evaluated(depsgraph, &candidate);
+    Mesh *mesh = ob_eval != nullptr ? BKE_object_get_evaluated_mesh(ob_eval) : nullptr;
+    if (mesh == nullptr) {
+      mesh = id_cast<Mesh *>(candidate.data);
+    }
+    if (mesh == nullptr) {
+      continue;
+    }
+    bool missing = false;
+    const char *uv_name = BKE_paint_layers_uv_map_resolve(*mesh, ma, &missing);
+    if (missing || uv_name == nullptr || uv_name[0] == '\0') {
+      continue;
+    }
+    RE_bake_pixels_populate(mesh, pixels.data(), pixels_num, &targets, StringRef(uv_name));
+    BKE_mesh_maps_bake_restrict_to_material(pixels.data(), pixels_num, *mesh, candidate, ma);
+    BKE_mesh_maps_bake_coverage_from_pixels(pixels.data(), pixels_num, object_coverage);
+    if (!r_overlap_name.is_empty() && r_overlap_name[0] == '\0' &&
+        BKE_mesh_maps_bake_coverage_overlap(own_coverage, object_coverage) > 0)
+    {
+      BLI_strncpy(r_overlap_name.data(), candidate.id.name + 2, r_overlap_name.size());
+    }
+    BKE_mesh_maps_bake_coverage_union(object_coverage, r_coverage);
+    foreign_num++;
+  }
+  return foreign_num;
 }
 
 Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain,
@@ -540,6 +757,109 @@ int8_t BKE_mesh_maps_bake_state_commit(ObjectMeshMapState &state,
   }
   BKE_mesh_maps_object_state_mark_baked(state, start_hash, baked_time);
   return state.status;
+}
+
+bool BKE_mesh_maps_bake_type_is_supported(const int8_t type)
+{
+  return BKE_mesh_maps_bake_type_renders(type) || BKE_mesh_maps_bake_type_cpu_id(type);
+}
+
+void BKE_mesh_maps_bake_plan_pairs(Main &bmain,
+                                   Object *active_object,
+                                   Material &ma,
+                                   const int8_t object_scope,
+                                   const uint32_t type_mask,
+                                   Vector<MeshMapBakePair> &r_pairs)
+{
+  const auto append_types = [&](Object &ob) {
+    for (int type = 0; type < MA_MESH_MAP_TYPE_NUM; type++) {
+      if ((type_mask & (1u << uint(type))) == 0) {
+        continue;
+      }
+      if (!BKE_mesh_maps_bake_type_is_supported(int8_t(type))) {
+        continue;
+      }
+      r_pairs.append(MeshMapBakePair{&ob, &ma, int8_t(type)});
+    }
+  };
+
+  if (object_scope == MA_MESH_MAP_BAKE_ACTIVE_OBJECT) {
+    if (active_object != nullptr) {
+      append_types(*active_object);
+    }
+    return;
+  }
+  /* High-poly sources are never baked as low-poly: they are inputs of other objects' bakes. */
+  Set<const Object *> source_objects;
+  BKE_mesh_maps_source_collect_for_material(bmain, ma, source_objects);
+  for (Object &ob : bmain.objects) {
+    if (BKE_object_material_index_get(&ob, &ma) < 0) {
+      continue;
+    }
+    if (source_objects.contains(&ob)) {
+      continue;
+    }
+    append_types(ob);
+  }
+}
+
+void BKE_mesh_maps_bake_states_rollback(Span<ObjectMeshMapState *> states,
+                                        Span<int8_t> previous_statuses)
+{
+  const size_t num = size_t(std::min(states.size(), previous_statuses.size()));
+  for (size_t i = 0; i < num; i++) {
+    if (states[i] != nullptr) {
+      BKE_mesh_maps_bake_state_cancel(*states[i], previous_statuses[i]);
+    }
+  }
+}
+
+int BKE_mesh_maps_bake_clear_type(Main &bmain, Material &ma, const int8_t type)
+{
+  if (!mesh_map_bake_type_valid(type)) {
+    return 0;
+  }
+  int states_reset = 0;
+  for (Object &ob : bmain.objects) {
+    ObjectMeshMapState *state = BKE_mesh_maps_object_state_find(ob, ma, type);
+    if (state == nullptr) {
+      continue;
+    }
+    state->status = OB_MESH_MAP_STATUS_NONE;
+    state->hash[0] = 0;
+    state->hash[1] = 0;
+    state->baked_time = 0;
+    states_reset++;
+  }
+
+  MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, type);
+  if (slot == nullptr || slot->image == nullptr) {
+    return states_reset;
+  }
+  Image *image = slot->image;
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+  if (ibuf != nullptr) {
+    if (ibuf->float_data() != nullptr) {
+      float *data = ibuf->float_data_for_write();
+      const int channels = 4;
+      const size_t num = size_t(ibuf->x) * size_t(ibuf->y);
+      for (size_t i = 0; i < num; i++) {
+        float *texel = data + i * size_t(channels);
+        texel[0] = 0.0f;
+        texel[1] = 0.0f;
+        texel[2] = 0.0f;
+        texel[3] = 1.0f;
+      }
+      ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+      BKE_image_mark_dirty(image, ibuf);
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    BKE_image_partial_update_mark_full_update(image);
+    BKE_image_free_gputextures(image);
+    BKE_image_memorypack(image);
+  }
+  return states_reset;
 }
 
 }  // namespace blender

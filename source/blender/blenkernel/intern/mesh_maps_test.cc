@@ -20,6 +20,11 @@
 #include "BLI_span.hh"
 #include "BLI_string.h"
 
+#include "BLI_fileops.h"
+#include "BLI_listbase_iterator.hh"
+#include "BLI_path_utils.hh"
+
+#include "BKE_appdir.hh"
 #include "BKE_attribute.hh"
 #include "BKE_collection.hh"
 #include "BKE_global.hh"
@@ -46,6 +51,9 @@
 
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
+
+#include "BLO_readfile.hh"
+#include "BLO_writefile.hh"
 
 namespace blender {
 /* Internal to blenkernel and not exposed by a public header; the test needs a mesh created in Main
@@ -348,44 +356,57 @@ TEST_F(MeshMapsTest, rna_mesh_map_settings_is_a_material_property)
   EXPECT_EQ(RNA_struct_find_property(&slot_ptr, "mesh_map_settings"), nullptr);
 }
 
-TEST_F(MeshMapsTest, rna_state_material_read_only_and_source_object_poll)
+TEST_F(MeshMapsTest, rna_source_ensure_and_high_poly_poll)
 {
   Material *ma = BKE_material_add(bmain, "MapsMat");
   Object *ob = BKE_object_add_only_object(bmain, OB_EMPTY, "Ob");
   Object *mesh_ob = BKE_object_add_only_object(bmain, OB_MESH, "SrcMesh");
   Object *empty_ob = BKE_object_add_only_object(bmain, OB_EMPTY, "SrcEmpty");
-  ObjectMeshMapState *state = BKE_mesh_maps_object_state_ensure(*ob, *ma, MA_MESH_MAP_AO);
-  ASSERT_NE(state, nullptr);
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*ob, *ma);
+  ASSERT_NE(source, nullptr);
 
   PointerRNA ob_ptr = RNA_id_pointer_create(&ob->id);
-  PropertyRNA *coll_prop = RNA_struct_find_property(&ob_ptr, "mesh_map_states");
+  PropertyRNA *coll_prop = RNA_struct_find_property(&ob_ptr, "mesh_map_sources");
   ASSERT_NE(coll_prop, nullptr);
   PointerRNA coll_ptr = PointerRNA_NULL;
   RNA_property_collection_type_get(&ob_ptr, coll_prop, &coll_ptr);
   ASSERT_NE(coll_ptr.type, nullptr);
-  PointerRNA state_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_ObjectMeshMapState, state);
+  PointerRNA source_ptr = RNA_pointer_create_with_parent(
+      coll_ptr, RNA_ObjectMeshMapSource, source);
 
-  /* The material is the state's key: read-only, states are made by ensure(material, type). */
-  PropertyRNA *material_prop = RNA_struct_find_property(&state_ptr, "material");
+  /* The material is the source's key: read-only, sources are made by ensure(material). */
+  PropertyRNA *material_prop = RNA_struct_find_property(&source_ptr, "material");
   ASSERT_NE(material_prop, nullptr);
-  EXPECT_FALSE(RNA_property_editable(&state_ptr, material_prop));
+  EXPECT_FALSE(RNA_property_editable(&source_ptr, material_prop));
 
-  PropertyRNA *source_prop = RNA_struct_find_property(&state_ptr, "source_object");
-  ASSERT_NE(source_prop, nullptr);
-  EXPECT_TRUE(RNA_property_editable(&state_ptr, source_prop));
+  PropertyRNA *high_prop = RNA_struct_find_property(&source_ptr, "high_poly");
+  ASSERT_NE(high_prop, nullptr);
+  EXPECT_TRUE(RNA_property_editable(&source_ptr, high_prop));
 
   PointerRNA self_ptr = RNA_id_pointer_create(&ob->id);
   PointerRNA mesh_ptr = RNA_id_pointer_create(&mesh_ob->id);
   PointerRNA empty_ptr = RNA_id_pointer_create(&empty_ob->id);
-  EXPECT_FALSE(RNA_property_pointer_poll(&state_ptr, source_prop, &self_ptr));
-  EXPECT_FALSE(RNA_property_pointer_poll(&state_ptr, source_prop, &empty_ptr));
-  EXPECT_TRUE(RNA_property_pointer_poll(&state_ptr, source_prop, &mesh_ptr));
+  EXPECT_FALSE(RNA_property_pointer_poll(&source_ptr, high_prop, &self_ptr));
+  EXPECT_FALSE(RNA_property_pointer_poll(&source_ptr, high_prop, &empty_ptr));
+  EXPECT_TRUE(RNA_property_pointer_poll(&source_ptr, high_prop, &mesh_ptr));
 
   /* The setter refuses self even when the poll is bypassed, and accepts a mesh object. */
-  RNA_property_pointer_set(&state_ptr, source_prop, self_ptr, nullptr);
-  EXPECT_EQ(state->source_object, nullptr);
-  RNA_property_pointer_set(&state_ptr, source_prop, mesh_ptr, nullptr);
-  EXPECT_EQ(state->source_object, mesh_ob);
+  RNA_property_pointer_set(&source_ptr, high_prop, self_ptr, nullptr);
+  EXPECT_EQ(source->high_poly, nullptr);
+  RNA_property_pointer_set(&source_ptr, high_prop, mesh_ptr, nullptr);
+  EXPECT_EQ(source->high_poly, mesh_ob);
+
+  /* At most one of the object and the collection: setting one clears the other. */
+  Collection *coll = BKE_collection_add(bmain, nullptr, "SrcColl");
+  PropertyRNA *coll_item_prop = RNA_struct_find_property(&source_ptr, "high_poly_collection");
+  ASSERT_NE(coll_item_prop, nullptr);
+  PointerRNA coll_value = RNA_id_pointer_create(&coll->id);
+  RNA_property_pointer_set(&source_ptr, coll_item_prop, coll_value, nullptr);
+  EXPECT_EQ(source->high_poly_collection, coll);
+  EXPECT_EQ(source->high_poly, nullptr);
+
+  EXPECT_TRUE(BKE_mesh_maps_source_remove(*ob, *ma));
+  EXPECT_EQ(ob->mesh_map_sources.first, nullptr);
 }
 
 /* -------------------------------------------------------------------- */
@@ -927,6 +948,255 @@ TEST_F(MeshMapsTest, rna_reports_an_object_outside_the_depsgraph)
   BKE_reports_free(&reports);
   EXPECT_FALSE(rna_get_result<bool>(parms, "result", true));
   RNA_parameter_list_free(&parms);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name High-poly sources
+ * \{ */
+
+TEST_F(MeshMapsTest, source_ensure_find_remove_and_prune)
+{
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  Material *other = BKE_material_add(bmain, "OtherMat");
+  Object *ob = add_mesh_object("Low", add_quad_mesh("LowMesh"));
+
+  EXPECT_EQ(BKE_mesh_maps_source_find(*ob, *ma), nullptr);
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*ob, *ma);
+  ASSERT_NE(source, nullptr);
+  EXPECT_EQ(source->material, ma);
+  EXPECT_EQ(BKE_mesh_maps_source_find(*ob, *ma), source);
+  EXPECT_EQ(BKE_mesh_maps_source_find(*ob, *other), nullptr);
+
+  ObjectMeshMapSource *other_source = BKE_mesh_maps_source_ensure(*ob, *other);
+  ASSERT_NE(other_source, nullptr);
+  EXPECT_NE(other_source, source);
+
+  /* A record whose material was removed is dropped by the next find/prune. */
+  source->material = nullptr;
+  EXPECT_EQ(BKE_mesh_maps_sources_prune(*ob), 1);
+  EXPECT_EQ(BKE_mesh_maps_source_find(*ob, *ma), nullptr);
+
+  EXPECT_TRUE(BKE_mesh_maps_source_remove(*ob, *other));
+  EXPECT_EQ(ob->mesh_map_sources.first, nullptr);
+  EXPECT_FALSE(BKE_mesh_maps_source_remove(*ob, *other));
+}
+
+TEST_F(MeshMapsTest, source_resolve_single_collection_and_cage)
+{
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  Object *low = add_mesh_object("Low", add_quad_mesh("LowMesh"));
+  Object *high = add_mesh_object("High", add_quad_mesh("HighMesh"));
+  Object *cage = add_mesh_object("Cage", add_quad_mesh("CageMesh"));
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*low, *ma);
+
+  Vector<Object *> objects;
+  Object *out_cage = nullptr;
+
+  source->high_poly = high;
+  source->cage = cage;
+  BKE_mesh_maps_source_resolve(*low, *ma, objects, &out_cage);
+  ASSERT_EQ(objects.size(), 1u);
+  EXPECT_EQ(objects[0], high);
+  EXPECT_EQ(out_cage, cage);
+
+  /* The low-poly itself and the cage are never sources. */
+  source->high_poly = low;
+  BKE_mesh_maps_source_resolve(*low, *ma, objects, &out_cage);
+  EXPECT_TRUE(objects.is_empty());
+  source->high_poly = cage;
+  BKE_mesh_maps_source_resolve(*low, *ma, objects, &out_cage);
+  EXPECT_TRUE(objects.is_empty());
+
+  /* A collection recurses, keeps only mesh objects, and still excludes the low-poly and cage. */
+  Collection *coll = BKE_collection_add(bmain, nullptr, "Coll");
+  BKE_collection_object_add(bmain, coll, high);
+  BKE_collection_object_add(bmain, coll, low);
+  BKE_collection_object_add(bmain, coll, cage);
+  BKE_collection_object_add(bmain, coll, BKE_object_add_only_object(bmain, OB_EMPTY, "Empty"));
+  Object *high2 = add_mesh_object("High2", add_quad_mesh("High2Mesh"));
+  Collection *child = BKE_collection_add(bmain, coll, "Child");
+  BKE_collection_object_add(bmain, child, high2);
+
+  source->high_poly = nullptr;
+  source->high_poly_collection = coll;
+  BKE_mesh_maps_source_resolve(*low, *ma, objects, &out_cage);
+  ASSERT_EQ(objects.size(), 2u);
+  EXPECT_TRUE(objects.contains(high));
+  EXPECT_TRUE(objects.contains(high2));
+}
+
+TEST_F(MeshMapsTest, source_hash_tracks_geometry_transform_cage_and_extrusion)
+{
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  Object *low = add_mesh_object("Low", add_quad_mesh("LowMesh"));
+  Object *high = add_mesh_object("High", add_quad_mesh("HighMesh"));
+
+  uint32_t base[2];
+  hash_of(*low, *ma, MA_MESH_MAP_AO, base);
+
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*low, *ma);
+  uint32_t no_source[2];
+  hash_of(*low, *ma, MA_MESH_MAP_AO, no_source);
+  /* Merely having a source record is part of the content. */
+  EXPECT_FALSE(hashes_equal(base, no_source));
+
+  source->high_poly = high;
+  uint32_t with_source[2];
+  hash_of(*low, *ma, MA_MESH_MAP_AO, with_source);
+  EXPECT_FALSE(hashes_equal(no_source, with_source));
+
+  /* High-poly geometry moves the hash. */
+  id_cast<Mesh *>(high->data)->vert_positions_for_write().first() += float3(0.5f, 0.0f, 0.0f);
+  id_cast<Mesh *>(high->data)->tag_positions_changed();
+  uint32_t moved_mesh[2];
+  hash_of(*low, *ma, MA_MESH_MAP_AO, moved_mesh);
+  EXPECT_FALSE(hashes_equal(with_source, moved_mesh));
+
+  /* A cage, and the auto-cage controls. */
+  Object *cage = add_mesh_object("Cage", add_quad_mesh("CageMesh"));
+  source->cage = cage;
+  uint32_t with_cage[2];
+  hash_of(*low, *ma, MA_MESH_MAP_AO, with_cage);
+  EXPECT_FALSE(hashes_equal(moved_mesh, with_cage));
+
+  source->cage_extrusion = 0.5f;
+  uint32_t with_extrusion[2];
+  hash_of(*low, *ma, MA_MESH_MAP_AO, with_extrusion);
+  EXPECT_FALSE(hashes_equal(with_cage, with_extrusion));
+
+  /* Stable when nothing changes. */
+  uint32_t repeat[2];
+  hash_of(*low, *ma, MA_MESH_MAP_AO, repeat);
+  EXPECT_TRUE(hashes_equal(with_extrusion, repeat));
+}
+
+TEST_F(MeshMapsTest, source_hash_tracks_relative_transform)
+{
+  Scene *scene = BKE_scene_add(bmain, "Scene");
+  ASSERT_NE(scene, nullptr);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+  ASSERT_NE(view_layer, nullptr);
+  Depsgraph *depsgraph = BKE_scene_ensure_depsgraph(bmain, scene, view_layer);
+  ASSERT_NE(depsgraph, nullptr);
+
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  Object *low = add_mesh_object("Low", add_quad_mesh("LowMesh"));
+  Object *high = add_mesh_object("High", add_quad_mesh("HighMesh"));
+  BKE_collection_object_add(bmain, scene->master_collection, low);
+  BKE_collection_object_add(bmain, scene->master_collection, high);
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*low, *ma);
+  source->high_poly = high;
+
+  BKE_scene_graph_update_tagged(depsgraph, bmain);
+  Object *low_eval = DEG_get_evaluated(depsgraph, low);
+  ASSERT_NE(low_eval, nullptr);
+  ASSERT_NE(low_eval, low);
+  uint32_t before[2];
+  hash_of(*low_eval, *ma, MA_MESH_MAP_AO, before);
+
+  /* Moving the high-poly changes the relative transform the rays are cast in. */
+  high->loc[0] += 2.0f;
+  DEG_id_tag_update(&high->id, ID_RECALC_TRANSFORM);
+  BKE_scene_graph_update_tagged(depsgraph, bmain);
+  low_eval = DEG_get_evaluated(depsgraph, low);
+  uint32_t after[2];
+  hash_of(*low_eval, *ma, MA_MESH_MAP_AO, after);
+  EXPECT_FALSE(hashes_equal(before, after));
+}
+
+TEST_F(MeshMapsTest, source_lifecycle_copy_and_remap)
+{
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  Object *low = add_mesh_object("Low", add_quad_mesh("LowMesh"));
+  Object *high = add_mesh_object("High", add_quad_mesh("HighMesh"));
+  Object *cage = add_mesh_object("Cage", add_quad_mesh("CageMesh"));
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*low, *ma);
+  source->high_poly = high;
+  source->cage = cage;
+  source->cage_extrusion = 0.25f;
+  source->max_ray_distance = 1.5f;
+
+  Object *copy = id_cast<Object *>(BKE_id_copy(bmain, &low->id));
+  ASSERT_NE(copy, nullptr);
+  ObjectMeshMapSource *copy_source = BKE_mesh_maps_source_find(*copy, *ma);
+  ASSERT_NE(copy_source, nullptr);
+  EXPECT_EQ(copy_source->high_poly, high);
+  EXPECT_EQ(copy_source->cage, cage);
+  EXPECT_FLOAT_EQ(copy_source->cage_extrusion, 0.25f);
+  EXPECT_FLOAT_EQ(copy_source->max_ray_distance, 1.5f);
+
+  /* Deleting a referenced object nulls the pointer in both the original and its copy. */
+  BKE_id_delete(bmain, &high->id);
+  EXPECT_EQ(source->high_poly, nullptr);
+  EXPECT_EQ(copy_source->high_poly, nullptr);
+  BKE_id_delete(bmain, &cage->id);
+  EXPECT_EQ(source->cage, nullptr);
+  EXPECT_EQ(copy_source->cage, nullptr);
+}
+
+TEST_F(MeshMapsTest, sources_round_trip_through_a_blend_file)
+{
+  Material *ma = BKE_material_add(bmain, "MapsMat");
+  Object *low = add_mesh_object("Low", add_quad_mesh("LowMesh"));
+  Object *high = add_mesh_object("High", add_quad_mesh("HighMesh"));
+  Object *cage = add_mesh_object("Cage", add_quad_mesh("CageMesh"));
+  /* Link the objects so they have a user and are written to the file. */
+  Collection *collection = BKE_collection_add(bmain, nullptr, "SourceColl");
+  BKE_collection_object_add(bmain, collection, low);
+  BKE_collection_object_add(bmain, collection, high);
+  BKE_collection_object_add(bmain, collection, cage);
+  ObjectMeshMapSource *source = BKE_mesh_maps_source_ensure(*low, *ma);
+  source->high_poly = high;
+  source->cage = cage;
+  source->cage_extrusion = 0.25f;
+  source->max_ray_distance = 2.0f;
+
+  char filepath[FILE_MAX];
+  BLI_path_join(
+      filepath, sizeof(filepath), BKE_tempdir_session(), "mesh_maps_sources_round_trip.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+
+  Material *loaded_ma = nullptr;
+  Object *loaded_low = nullptr;
+  Object *loaded_high = nullptr;
+  Object *loaded_cage = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, "MapsMat")) {
+      loaded_ma = &candidate;
+    }
+  }
+  for (Object &candidate : bfd->main->objects) {
+    if (STREQ(candidate.id.name + 2, "Low")) {
+      loaded_low = &candidate;
+    }
+    else if (STREQ(candidate.id.name + 2, "High")) {
+      loaded_high = &candidate;
+    }
+    else if (STREQ(candidate.id.name + 2, "Cage")) {
+      loaded_cage = &candidate;
+    }
+  }
+  ASSERT_NE(loaded_ma, nullptr);
+  ASSERT_NE(loaded_low, nullptr);
+  ASSERT_NE(loaded_high, nullptr);
+  ASSERT_NE(loaded_cage, nullptr);
+
+  const ObjectMeshMapSource *loaded = BKE_mesh_maps_source_find(*loaded_low, *loaded_ma);
+  ASSERT_NE(loaded, nullptr);
+  EXPECT_EQ(loaded->high_poly, loaded_high);
+  EXPECT_EQ(loaded->cage, loaded_cage);
+  EXPECT_FLOAT_EQ(loaded->cage_extrusion, 0.25f);
+  EXPECT_FLOAT_EQ(loaded->max_ray_distance, 2.0f);
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
 }
 
 /** \} */

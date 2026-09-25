@@ -291,6 +291,7 @@ static void object_copy_data(Main *bmain,
   /* The per-object mesh map state is owned sub-data and is copied with the object. Its Material
    * key points at the same material the source used; the pointer is not an owning user. */
   BKE_mesh_maps_object_states_copy(*ob_dst, *ob_src);
+  BKE_mesh_maps_object_sources_copy(*ob_dst, *ob_src);
 }
 
 static void object_free_data(ID *id)
@@ -344,6 +345,7 @@ static void object_free_data(ID *id)
   BKE_lightprobe_cache_free(ob);
 
   BKE_mesh_maps_object_states_free(*ob);
+  BKE_mesh_maps_object_sources_free(*ob);
 
   MEM_delete(ob->runtime);
 }
@@ -425,12 +427,17 @@ static void object_foreach_id(ID *id, LibraryForeachIDData *data)
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, object->mat[i], IDWALK_CB_USER);
   }
 
-  /* The mesh map state is keyed by material and reserves a high-poly source object. Neither is an
-   * owning user here (the material is already kept alive by `mat`, and the source is a reference),
-   * but both are registered so remap nulls them when the target is removed. */
+  /* The mesh map state is keyed by material, and the high-poly source references an object or a
+   * collection plus an optional cage. None is an owning user (the material is already kept alive by
+   * `mat`), but all are registered so remap nulls them when the target is removed. */
   for (ObjectMeshMapState &state : object->mesh_map_states) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, state.material, IDWALK_CB_NOP);
-    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, state.source_object, IDWALK_CB_NOP);
+  }
+  for (ObjectMeshMapSource &source : object->mesh_map_sources) {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, source.material, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, source.high_poly, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, source.high_poly_collection, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, source.cage, IDWALK_CB_NOP);
   }
 
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, object->instance_collection, IDWALK_CB_USER);
@@ -858,6 +865,7 @@ static void object_blend_write(BlendWriter *writer, ID *id, const void *id_addre
   writer->write_struct_list(&ob->pc_ids);
 
   writer->write_struct_list(&ob->mesh_map_states);
+  writer->write_struct_list(&ob->mesh_map_sources);
 
   BKE_previewimg_blend_write(writer, ob->preview);
 
@@ -1070,6 +1078,7 @@ static void object_blend_read_data(BlendDataReader *reader, ID *id)
   BLO_read_struct_list(reader, LinkData, &ob->pc_ids);
 
   BLO_read_struct_list(reader, ObjectMeshMapState, &ob->mesh_map_states);
+  BLO_read_struct_list(reader, ObjectMeshMapSource, &ob->mesh_map_sources);
 
   /* in case this value changes in future, clamp else we get undefined behavior */
   CLAMP(ob->rotmode, ROT_MODE_MIN, ROT_MODE_MAX);

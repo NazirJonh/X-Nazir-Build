@@ -22,12 +22,18 @@
 
 #include <cstdint>
 
+#include "BLI_set.hh"
+#include "BLI_vector.hh"
+
 namespace blender {
 
+struct Collection;
 struct Image;
+struct Main;
 struct Material;
 struct MaterialMeshMapSlot;
 struct Object;
+struct ObjectMeshMapSource;
 struct ObjectMeshMapState;
 
 /** The slot of \a ma for mesh map \a type, or null. A type outside the enum reads as null. */
@@ -66,6 +72,49 @@ void BKE_mesh_maps_object_state_status_set(ObjectMeshMapState &state, int8_t sta
 
 /** Drop every state of \a ob whose material pointer is null. Returns how many were removed. */
 int BKE_mesh_maps_object_states_prune(Object &ob);
+
+/* -------------------------------------------------------------------- */
+/** \name High-poly sources
+ *
+ * One #ObjectMeshMapSource per (low-poly object, material), shared by every map type. The source is
+ * a single object or a collection, at most one of the two. It is a reference, never an owning user.
+ * \{ */
+
+/** The source record of \a ob for \a ma, or null. "Find" prunes records whose material is gone. */
+ObjectMeshMapSource *BKE_mesh_maps_source_find(Object &ob, const Material &ma);
+const ObjectMeshMapSource *BKE_mesh_maps_source_find(const Object &ob, const Material &ma);
+
+/** The source record of \a ob for \a ma, creating an empty one when absent. */
+ObjectMeshMapSource *BKE_mesh_maps_source_ensure(Object &ob, Material &ma);
+
+/** Remove the source record of \a ob for \a ma. Returns whether one was removed. */
+bool BKE_mesh_maps_source_remove(Object &ob, const Material &ma);
+
+/** Drop every source of \a ob whose material pointer is null. Returns how many were removed. */
+int BKE_mesh_maps_sources_prune(Object &ob);
+
+/**
+ * Resolve the source of (\a ob, \a ma) into the objects to bake *from*: the single high-poly object,
+ * or every mesh object of the collection recursively. \a ob itself and the cage are always excluded.
+ * An unset source yields an empty list. \a r_cage receives the cage object, or null.
+ *
+ * The objects are original data-blocks; the caller evaluates them in its depsgraph.
+ */
+void BKE_mesh_maps_source_resolve(const Object &ob,
+                                  const Material &ma,
+                                  Vector<Object *> &r_objects,
+                                  Object **r_cage);
+
+/**
+ * Union, across every object of \a bmain that uses \a ma in a slot, of the resolved source objects
+ * and cage. Used to keep high-poly out of the "foreign" atlas coverage and out of the all-objects
+ * bake scope: a high-poly is a source, never a low-poly to bake.
+ */
+void BKE_mesh_maps_source_collect_for_material(Main &bmain,
+                                               const Material &ma,
+                                               Set<const Object *> &r_objects);
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Content hash and bake staleness
@@ -146,6 +195,9 @@ void BKE_mesh_maps_material_slots_copy(Material &ma_dst, const Material &ma_src)
 
 void BKE_mesh_maps_object_states_free(Object &ob);
 void BKE_mesh_maps_object_states_copy(Object &ob_dst, const Object &ob_src);
+
+void BKE_mesh_maps_object_sources_free(Object &ob);
+void BKE_mesh_maps_object_sources_copy(Object &ob_dst, const Object &ob_src);
 
 /** \} */
 

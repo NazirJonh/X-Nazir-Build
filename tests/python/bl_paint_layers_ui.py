@@ -7,8 +7,34 @@ per-channel Outliner columns. These drive the real RNA/operators, not the DNA di
 
 import sys
 import unittest
+from types import SimpleNamespace
 
 import bpy
+
+from bl_operators.material_paint_layers import (
+    mesh_map_depsgraph_update_post,
+    mesh_map_geometry_updated_objects,
+    mesh_map_has_source,
+    mesh_map_objects_for_material,
+    mesh_map_pending_names_add,
+    mesh_map_source_member_count,
+    mesh_map_source_targets,
+    mesh_map_states_need_refresh,
+    mesh_map_summary_status,
+    mesh_map_updated_objects,
+)
+
+
+class _FakeUpdate:
+    def __init__(self, id, is_updated_geometry, is_updated_transform=False):
+        self.id = id
+        self.is_updated_geometry = is_updated_geometry
+        self.is_updated_transform = is_updated_transform
+
+
+class _FakeDepsgraph:
+    def __init__(self, updates):
+        self.updates = updates
 
 
 class PaintLayersUiTest(unittest.TestCase):
@@ -211,6 +237,116 @@ class PaintLayersUiTest(unittest.TestCase):
             self.assertEqual(mask.role, 'MASK_ITEM')
             self.assertEqual(mask.source, 'MESH_MAP')
             self.assertEqual(mask.mesh_map_type, 'CURVATURE')
+
+
+    def test_mesh_map_batch_operators_are_registered(self):
+        self.assertIn('mesh_map_bake_all', dir(bpy.ops.object))
+        self.assertIn('mesh_map_clear', dir(bpy.ops.object))
+        self.assertTrue(hasattr(bpy.types, 'OBJECT_OT_mesh_map_bake_all'))
+        self.assertTrue(hasattr(bpy.types, 'OBJECT_OT_mesh_map_clear'))
+        # The auto-refresh handler ships with the operators module.
+        self.assertIn(mesh_map_depsgraph_update_post, bpy.app.handlers.depsgraph_update_post)
+
+    def test_mesh_map_states_need_refresh_skips_baking_and_empty(self):
+        self.assertFalse(mesh_map_states_need_refresh([]))
+        for status in ('NONE', 'ERROR', 'BAKING'):
+            self.assertFalse(mesh_map_states_need_refresh([SimpleNamespace(status=status)]), status)
+        for status in ('VALID', 'STALE'):
+            self.assertTrue(mesh_map_states_need_refresh([SimpleNamespace(status=status)]), status)
+        # A single refreshable state is enough.
+        self.assertTrue(
+            mesh_map_states_need_refresh(
+                [SimpleNamespace(status='BAKING'), SimpleNamespace(status='STALE')]))
+
+    def test_mesh_map_handler_picks_only_geometry_updates(self):
+        bpy.ops.mesh.primitive_cube_add()
+        ob = bpy.context.object
+        bpy.ops.material.new_layered()
+        mat = ob.active_material
+        ob.mesh_map_states.ensure(material=mat, type='AO')
+
+        scene = bpy.context.scene
+        # A non-geometry update (the view moving) is ignored.
+        self.assertEqual(
+            mesh_map_geometry_updated_objects(scene, _FakeDepsgraph([_FakeUpdate(ob, False)])), [])
+        # A geometry update names the object.
+        self.assertEqual(
+            mesh_map_geometry_updated_objects(
+                scene, _FakeDepsgraph([_FakeUpdate(ob, False), _FakeUpdate(ob, True)])),
+            [ob])
+        # A mesh-data update maps back to the objects that share the mesh.
+        self.assertEqual(
+            mesh_map_geometry_updated_objects(
+                scene, _FakeDepsgraph([_FakeUpdate(ob.data, True)])),
+            [ob])
+        # The refreshable filter drops a state that is neither VALID nor STALE.
+        self.assertEqual(
+            mesh_map_updated_objects(scene, _FakeDepsgraph([_FakeUpdate(ob, True)])), [])
+
+    def test_mesh_map_source_reverse_map_and_members(self):
+        bpy.ops.mesh.primitive_cube_add()
+        low = bpy.context.object
+        bpy.ops.material.new_layered()
+        mat = low.active_material
+        high = bpy.data.objects.new("HighSrc", bpy.data.meshes.new("HighSrcMesh"))
+        bpy.context.scene.collection.objects.link(high)
+        cage = bpy.data.objects.new("CageSrc", bpy.data.meshes.new("CageSrcMesh"))
+        bpy.context.scene.collection.objects.link(cage)
+
+        source = low.mesh_map_sources.ensure(material=mat)
+        source.high_poly = high
+        source.cage = cage
+
+        targets = mesh_map_source_targets(bpy.context.scene)
+        self.assertEqual(targets.get("HighSrc"), [(low, mat)])
+        self.assertEqual(targets.get("CageSrc"), [(low, mat)])
+        self.assertTrue(mesh_map_has_source(low))
+        self.assertEqual(mesh_map_source_member_count(source), 1)
+        # A source object pointing at the low-poly itself is not a member.
+        source.high_poly = None
+        self.assertFalse(mesh_map_has_source(low))
+        self.assertEqual(mesh_map_source_member_count(source), 0)
+
+    def test_mesh_map_cage_matches_rna(self):
+        bpy.ops.mesh.primitive_cube_add()
+        low = bpy.context.object
+        bpy.ops.material.new_layered()
+        mat = low.active_material
+        bpy.ops.mesh.primitive_cube_add()
+        cage = bpy.context.object
+        source = low.mesh_map_sources.ensure(material=mat)
+        source.cage = cage
+        self.assertTrue(source.cage_matches(depsgraph=bpy.context.evaluated_depsgraph_get()))
+
+        bpy.ops.mesh.primitive_plane_add()
+        source.cage = bpy.context.object
+        self.assertFalse(source.cage_matches(depsgraph=bpy.context.evaluated_depsgraph_get()))
+
+    def test_mesh_map_debounce_accumulates_names_once(self):
+        pending = set()
+        objects = [SimpleNamespace(name="A"), SimpleNamespace(name="B")]
+        self.assertTrue(mesh_map_pending_names_add(pending, objects))
+        self.assertEqual(pending, {"A", "B"})
+        # The same objects again add nothing, so no second timer is needed.
+        self.assertFalse(mesh_map_pending_names_add(pending, objects))
+        # A new object is added.
+        self.assertTrue(mesh_map_pending_names_add(pending, [SimpleNamespace(name="C")]))
+        self.assertEqual(pending, {"A", "B", "C"})
+
+    def test_mesh_map_object_list_and_summary(self):
+        bpy.ops.mesh.primitive_cube_add()
+        ob = bpy.context.object
+        bpy.ops.material.new_layered()
+        mat = ob.active_material
+
+        self.assertIn(ob, mesh_map_objects_for_material(bpy.context.scene, mat))
+        self.assertEqual(mesh_map_summary_status(ob, mat), ('NONE', 0))
+        ob.mesh_map_states.ensure(material=mat, type='AO')
+        self.assertEqual(mesh_map_summary_status(ob, mat), ('NONE', 1))
+        # An object without the material in a slot is not part of the batch.
+        other = bpy.data.objects.new("NoMat", bpy.data.meshes.new("NoMat"))
+        bpy.context.scene.collection.objects.link(other)
+        self.assertNotIn(other, mesh_map_objects_for_material(bpy.context.scene, mat))
 
 
 if __name__ == "__main__":

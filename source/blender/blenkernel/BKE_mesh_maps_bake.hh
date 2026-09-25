@@ -28,6 +28,7 @@
 #include <cstdint>
 
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_scene_enums.h"
 #include "DNA_scene_types.h"
@@ -135,6 +136,34 @@ void BKE_mesh_maps_bake_fill_id_pixels(const BakePixel *pixels,
                                        float *result);
 
 /**
+ * Whether a custom \a cage can be cast through for a low-poly \a low: the cage must have the same
+ * face and corner counts, so each low-poly face has a matching cage face (mirrors the check the
+ * full bake does before it accepts a cage object).
+ */
+bool BKE_mesh_maps_bake_cage_matches(const Mesh &low, const Mesh &cage);
+
+/**
+ * Fill a CPU ID map when the texels were cast onto high-poly objects:
+ * - #MA_MESH_MAP_ID_OBJECT: the colour of the hit source object
+ *   (\a pixels[i].object_id indexes \a objects);
+ * - #MA_MESH_MAP_ID_MATERIAL: the colour of the material slot of the hit triangle, read from the
+ *   source mesh's `material_index` (\a pixels[i].primitive_id is the triangle, `object_id` the
+ *   source).
+ *
+ * A texel with no hit (`object_id < 0`) is left alone. \a objects and \a meshes are parallel and
+ * must both be at least as long as the largest `object_id`, or the texel is skipped.
+ */
+void BKE_mesh_maps_bake_fill_id_from_high_poly(const BakePixel *pixels,
+                                               size_t pixels_num,
+                                               const Object *const *objects,
+                                               size_t objects_num,
+                                               const Mesh *const *meshes,
+                                               size_t meshes_num,
+                                               int8_t type,
+                                               int channels,
+                                               float *result);
+
+/**
  * Copy the covered texels of \a result into \a atlas, leaving every uncovered texel as it was. A
  * scalar map has its R spread over G and B, so the CPU reads the same value from any channel.
  * Does nothing when \a atlas is shorter than `pixels_num * channels`.
@@ -145,6 +174,75 @@ void BKE_mesh_maps_bake_write_covered(int8_t type,
                                       int channels,
                                       const float *result,
                                       MutableSpan<float> atlas);
+
+/* -------------------------------------------------------------------- */
+/** \name Per-object coverage and guarded atlas merge
+ *
+ * A bake belongs to one object, but the atlas is shared by every object using the material. The
+ * margin that hides UV seams therefore must not overwrite the islands another object already
+ * baked. These helpers separate the three steps: a coverage mask from the rasterized
+ * #BakePixel array, the union of the other objects' coverage, and a merge that always writes the
+ * object's own pixels but only the margin where no other object owns the texel.
+ * \{ */
+
+/**
+ * Mark every texel \a pixels covers (its `primitive_id` is not -1) in \a r_coverage, as 1, and
+ * every other texel as 0. Does nothing when \a r_coverage is shorter than \a pixels_num.
+ */
+void BKE_mesh_maps_bake_coverage_from_pixels(const BakePixel *pixels,
+                                             size_t pixels_num,
+                                             MutableSpan<uint8_t> r_coverage);
+
+/** OR \a source into \a r_destination; the shorter of the two bounds the write. */
+void BKE_mesh_maps_bake_coverage_union(Span<uint8_t> source, MutableSpan<uint8_t> r_destination);
+
+/** How many texels both masks mark. The shorter of the two bounds the count. */
+size_t BKE_mesh_maps_bake_coverage_overlap(Span<uint8_t> a, Span<uint8_t> b);
+
+/**
+ * Merge one object's bake into the shared atlas with a margin that respects the other objects.
+ *
+ * \param own_coverage: texels the object's own rasters cover. Always written.
+ * \param own_margin: texels the margin fill added for this object. Written only where
+ *   \a foreign_coverage is zero, so the margin of one object never lands on another's island.
+ * \param foreign_coverage: union of the coverage of every other object sharing the atlas.
+ * \param result: `pixels_num * channels` floats of this object's bake; a scalar map has its R
+ *   spread over G and B, exactly as #BKE_mesh_maps_bake_write_covered does.
+ */
+void BKE_mesh_maps_bake_write_with_margin(int8_t type,
+                                          Span<uint8_t> own_coverage,
+                                          Span<uint8_t> own_margin,
+                                          Span<uint8_t> foreign_coverage,
+                                          int channels,
+                                          const float *result,
+                                          MutableSpan<float> atlas);
+
+/**
+ * Union into \a r_coverage the coverage of every object in \a bmain other than \a ob that uses \a ma
+ * in a slot and carries the UV layer the material names (resolved through
+ * #BKE_paint_layers_uv_map_resolve, so an object without it is skipped). The atlas belongs to the
+ * material, and a material is shared across every scene of the file, so the scope is the whole file
+ * rather than one view layer. No render happens: the texels come from #RE_bake_pixels_populate on
+ * each object's evaluated mesh plus #BKE_mesh_maps_bake_restrict_to_material, on the viewport
+ * depsgraph. An object that the viewport depsgraph does not evaluate (one in another scene, say) is
+ * taken from its own data mesh, without modifiers: a proximity estimate, not an exact one.
+ *
+ * When \a r_overlap_name is non-empty and some foreign coverage intersects \a own_coverage, it
+ * receives the name (without the ID prefix) of the first such object; it is cleared otherwise.
+ *
+ * \return how many objects contributed coverage.
+ */
+int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
+                                        Scene &scene,
+                                        ViewLayer &view_layer,
+                                        const Object &ob,
+                                        const Material &ma,
+                                        int resolution,
+                                        Span<uint8_t> own_coverage,
+                                        MutableSpan<uint8_t> r_coverage,
+                                        MutableSpan<char> r_overlap_name);
+
+/** \} */
 
 /**
  * The atlas of \a ma for \a type, created on first use and recreated when \a resolution no longer
@@ -215,5 +313,66 @@ int8_t BKE_mesh_maps_bake_state_commit(ObjectMeshMapState &state,
                                        const uint32_t start_hash[2],
                                        const uint32_t now_hash[2],
                                        int baked_time);
+
+/* -------------------------------------------------------------------- */
+/** \name Multi-pair planning, rollback and clearing
+ *
+ * A "bake all" job is a sequence of (object, material, map type) pairs. The plan is pure data so the
+ * operator and the tests can agree on which objects and types a run touches without any rendering.
+ * \{ */
+
+/** One (object, map type) of a bake-all run. */
+struct MeshMapBakePair {
+  Object *object;
+  Material *material;
+  int8_t type;
+};
+
+/** Which objects a bake-all run targets. */
+enum eMeshMapBakeObjectScope : int8_t {
+  /** Only the active object. */
+  MA_MESH_MAP_BAKE_ACTIVE_OBJECT = 0,
+  /** Every object in the file that uses the material in a slot. */
+  MA_MESH_MAP_BAKE_ALL_OBJECTS = 1,
+};
+
+/** Bit \a type set in a type mask; the supported types are 0..#MA_MESH_MAP_EDGE. */
+#define MESH_MAP_BAKE_TYPE_MASK_SUPPORTED 0x7Fu
+
+/** Whether \a type is one the bake can produce (excludes the reserved Thickness/Position). */
+bool BKE_mesh_maps_bake_type_is_supported(int8_t type);
+
+/**
+ * Append to \a r_pairs the (object, type) pairs a run over \a ma should bake, in a stable order:
+ * objects in `bmain.objects` order (or just \a active_object for
+ * #MA_MESH_MAP_BAKE_ACTIVE_OBJECT), types ascending. A type whose bit is unset in \a type_mask, or
+ * that is reserved, is skipped. Only objects that use \a ma in a slot are considered for the
+ * all-objects scope; \a active_object may be null for it.
+ */
+void BKE_mesh_maps_bake_plan_pairs(Main &bmain,
+                                   Object *active_object,
+                                   Material &ma,
+                                   int8_t object_scope,
+                                   uint32_t type_mask,
+                                   Vector<MeshMapBakePair> &r_pairs);
+
+/**
+ * Restore, for a cancelled run, the statuses of the pairs that were begun but never committed.
+ * \a previous_statuses is paired with \a states; the shorter of the two bounds the loop.
+ */
+void BKE_mesh_maps_bake_states_rollback(Span<ObjectMeshMapState *> states,
+                                        Span<int8_t> previous_statuses);
+
+/**
+ * Clear \a ma's atlas for \a type: every texel becomes opaque black, and every object state for
+ * (\a ma, \a type) in \a bmain goes back to #OB_MESH_MAP_STATUS_NONE with its hash and time reset.
+ * Returns how many object states were reset.
+ *
+ * The whole atlas is cleared, not one object's pixels: the atlas is a shared material resource, and
+ * a partial clear would leave other objects' states claiming VALID pixels that are now half gone.
+ */
+int BKE_mesh_maps_bake_clear_type(Main &bmain, Material &ma, int8_t type);
+
+/** \} */
 
 }  // namespace blender

@@ -474,8 +474,8 @@ enum eObjectMeshMapStatus : int8_t {
 
 /**
  * Per-object state of one mesh map, keyed by the material that owns the shared UV atlas and by
- * #eMaterialMeshMapType. The pixels are not here: this records validity, the content hash of the
- * object's own contribution and (reserved) the high-poly source object.
+ * #eMaterialMeshMapType. The pixels are not here: this records validity and the content hash of the
+ * object's own contribution.
  */
 struct ObjectMeshMapState {
   DNA_DEFINE_CXX_METHODS(ObjectMeshMapState)
@@ -483,8 +483,6 @@ struct ObjectMeshMapState {
   struct ObjectMeshMapState *next = nullptr, *prev = nullptr;
   /** The material whose atlas this state describes; a key, not an owning user (#IDWALK_CB_NOP). */
   struct Material *material = nullptr;
-  /** High-poly source object this low-poly object was baked from, or null. Reserved. */
-  struct Object *source_object = nullptr;
   /** Content hash of this object's contribution at the last successful bake, low word first. */
   uint32_t hash[2] = {};
   /** Unix time of the last successful bake, or zero. Stored as int: RNA has no 64-bit int. */
@@ -494,6 +492,33 @@ struct ObjectMeshMapState {
   /** #eObjectMeshMapStatus. */
   int8_t status = OB_MESH_MAP_STATUS_NONE;
   char _pad[2] = {};
+};
+
+/**
+ * The high-poly source a low-poly object bakes one of its materials' mesh maps from, keyed by that
+ * material. One source per (object, material), shared by every map type: the geometry the maps are
+ * derived from does not depend on the map type.
+ *
+ * The source is either a single object or a collection (all mesh objects in it, recursively); at
+ * most one of the two is set, and the RNA setters keep that invariant. Everything here is a
+ * reference, not an owning user (#IDWALK_CB_NOP).
+ */
+struct ObjectMeshMapSource {
+  DNA_DEFINE_CXX_METHODS(ObjectMeshMapSource)
+
+  struct ObjectMeshMapSource *next = nullptr, *prev = nullptr;
+  /** The material whose maps this source feeds; a key, not an owning user (#IDWALK_CB_NOP). */
+  struct Material *material = nullptr;
+  /** The single high-poly source object, or null when #high_poly_collection is set. */
+  struct Object *high_poly = nullptr;
+  /** The high-poly source collection, or null when #high_poly is set. */
+  struct Collection *high_poly_collection = nullptr;
+  /** Optional cage object; null means an auto-cage extruded from the low-poly. */
+  struct Object *cage = nullptr;
+  /** Auto-cage extrusion along the low-poly normals, in object-space units. */
+  float cage_extrusion = 0.0f;
+  /** Maximum ray distance from the cage to the high-poly; zero means unlimited. */
+  float max_ray_distance = 0.0f;
 };
 
 struct Object {
@@ -704,6 +729,9 @@ struct Object {
 
   /** Per-object mesh map bake states, one #ObjectMeshMapState per (material, map type). */
   ListBaseT<ObjectMeshMapState> mesh_map_states = {nullptr, nullptr};
+
+  /** Per-object high-poly sources, one #ObjectMeshMapSource per material. */
+  ListBaseT<ObjectMeshMapSource> mesh_map_sources = {nullptr, nullptr};
 
   bke::ObjectRuntime *runtime = nullptr;
 

@@ -6,6 +6,7 @@
 corrections. UI-only code lives in bl_ui; these operate on Material.paint_layers by marker."""
 
 import bpy
+from bpy.app.handlers import persistent
 from bpy.types import Operator
 
 
@@ -497,6 +498,319 @@ class MATERIAL_OT_mesh_map_use_active_uv(Operator):
         return {'FINISHED'}
 
 
+class OBJECT_OT_mesh_map_source_add(Operator):
+    bl_idname = "object.mesh_map_source_add"
+    bl_label = "Use High-poly Source"
+    bl_description = "Give this material a high-poly source object or collection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _mesh_map_owner(context) is not None
+
+    def execute(self, context):
+        mat = _mesh_map_owner(context)
+        ob = context.object
+        if mat is None or ob is None:
+            return {'CANCELLED'}
+        if ob.mesh_map_sources.ensure(material=mat) is None:
+            self.report({'ERROR'}, "Cannot create a high-poly source")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class OBJECT_OT_mesh_map_source_remove(Operator):
+    bl_idname = "object.mesh_map_source_remove"
+    bl_label = "Remove High-poly Source"
+    bl_description = "Remove this material's high-poly source"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _mesh_map_owner(context) is not None
+
+    def execute(self, context):
+        mat = _mesh_map_owner(context)
+        ob = context.object
+        if mat is None or ob is None:
+            return {'CANCELLED'}
+        ob.mesh_map_sources.remove(material=mat)
+        return {'FINISHED'}
+
+
+def mesh_map_source_objects(scene, mat):
+    """The objects that are high-poly sources (object, collection members or cage) for \a mat.
+
+    A source is geometry the low-poly samples, never a low-poly to bake: it must not show up in the
+    object list and must not be treated as an owner of the shared atlas.
+    """
+    result = set()
+    if scene is None or mat is None:
+        return result
+    for ob in scene.objects:
+        for source in ob.mesh_map_sources:
+            if source.material != mat:
+                continue
+            if source.high_poly is not None:
+                result.add(source.high_poly)
+            if source.high_poly_collection is not None:
+                for member in source.high_poly_collection.all_objects:
+                    result.add(member)
+            if source.cage is not None:
+                result.add(source.cage)
+    return result
+
+
+def mesh_map_objects_for_material(scene, mat):
+    """The mesh objects of \a scene that use \a mat in one of their slots, sources excluded.
+
+    Exposed for addons and the Mesh Maps panel, so both agree on which objects a "bake all"
+    touches.
+    """
+    if scene is None or mat is None:
+        return []
+    sources = mesh_map_source_objects(scene, mat)
+    result = []
+    for ob in scene.objects:
+        if ob.type != 'MESH' or ob.data is None or ob in sources:
+            continue
+        if any(slot.material == mat for slot in ob.material_slots):
+            result.append(ob)
+    return result
+
+
+def mesh_map_summary_status(ob, mat):
+    """The worst mesh-map status of \a ob for \a mat, and how many states it has."""
+    states = [state for state in ob.mesh_map_states if state.material == mat]
+    if len(states) == 0:
+        return ('NONE', 0)
+    statuses = {state.status for state in states}
+    for candidate in ('BAKING', 'ERROR', 'STALE', 'VALID'):
+        if candidate in statuses:
+            return (candidate, len(states))
+    return ('NONE', len(states))
+
+
+def mesh_map_states_need_refresh(states):
+    """Whether an object with \a states should be re-checked on a geometry change.
+
+    Only VALID or STALE states have something to re-check: NONE was never baked, ERROR stays until an
+    explicit retry, and an in-flight bake owns its status until the worker sets the final one.
+    """
+    return any(state.status in {'VALID', 'STALE'} for state in states)
+
+
+def mesh_map_geometry_updated_objects(scene, depsgraph):
+    """The scene objects whose evaluated geometry changed in \a depsgraph and have mesh-map states.
+
+    Only the `is_updated_geometry` updates count, so moving the view or the cursor never re-hashes a
+    mesh. A mesh-data update maps back to the objects that share that mesh.
+    """
+    result = []
+    seen = set()
+    if scene is None or depsgraph is None:
+        return result
+
+    def consider(ob):
+        if ob is None or ob.name in seen or ob.type != 'MESH' or ob.data is None:
+            return
+        if len(ob.mesh_map_states) == 0:
+            return
+        seen.add(ob.name)
+        result.append(ob)
+
+    for update in depsgraph.updates:
+        if not update.is_updated_geometry:
+            continue
+        id_orig = update.id
+        if isinstance(id_orig, bpy.types.Object):
+            consider(id_orig)
+        elif isinstance(id_orig, bpy.types.Mesh):
+            for ob in scene.objects:
+                if ob.type == 'MESH' and ob.data == id_orig:
+                    consider(ob)
+    return result
+
+
+def mesh_map_source_member_count(source):
+    """How many mesh objects a source record resolves to (0 means the source is empty)."""
+    count = 0
+    if source.high_poly is not None:
+        count += 1
+    if source.high_poly_collection is not None:
+        count += sum(1 for ob in source.high_poly_collection.all_objects if ob.type == 'MESH')
+    return count
+
+
+def mesh_map_has_source(ob):
+    """Whether \a ob bakes at least one material from a high-poly source."""
+    return any(
+        source.high_poly is not None or source.high_poly_collection is not None
+        for source in ob.mesh_map_sources
+    )
+
+
+def mesh_map_source_targets(scene):
+    """Map a source object's name to the (low-poly object, material) pairs it feeds.
+
+    The reverse of `Object.mesh_map_sources`, for the update handler: a change to a high-poly or a
+    cage must re-check the low-poly objects that bake from it.
+    """
+    targets = {}
+    if scene is None:
+        return targets
+    for target in scene.objects:
+        if target.type != 'MESH':
+            continue
+        for source in target.mesh_map_sources:
+            if source.material is None:
+                continue
+            members = []
+            if source.high_poly is not None:
+                members.append(source.high_poly)
+            if source.high_poly_collection is not None:
+                members.extend(source.high_poly_collection.all_objects)
+            if source.cage is not None:
+                members.append(source.cage)
+            for member in members:
+                targets.setdefault(member.name, []).append((target, source.material))
+    return targets
+
+
+def mesh_map_updated_objects(scene, depsgraph):
+    """The low-poly objects whose mesh-map statuses should be re-checked after this update.
+
+    Direct: an object with refreshable states, when its geometry changed, or its transform changed
+    while it uses a high-poly source (the hash folds the relative transform).
+    Reverse: a high-poly source or cage keeps no state of its own, so a geometry or transform change
+    to it re-checks the low-poly objects that bake from it, for the matching material.
+    """
+    result = []
+    seen = set()
+    if scene is None or depsgraph is None:
+        return result
+    targets_by_source = mesh_map_source_targets(scene)
+
+    def add(ob, material=None):
+        if ob is None or ob.name in seen or ob.type != 'MESH' or ob.data is None:
+            return
+        states = list(ob.mesh_map_states)
+        if material is not None:
+            states = [state for state in states if state.material == material]
+        if not mesh_map_states_need_refresh(states):
+            return
+        seen.add(ob.name)
+        result.append(ob)
+
+    for update in depsgraph.updates:
+        is_geometry = update.is_updated_geometry
+        is_transform = getattr(update, 'is_updated_transform', False)
+        if not (is_geometry or is_transform):
+            continue
+        id_orig = update.id
+        objects = []
+        if isinstance(id_orig, bpy.types.Object):
+            objects.append(id_orig)
+        elif isinstance(id_orig, bpy.types.Mesh):
+            for ob in scene.objects:
+                if ob.type == 'MESH' and ob.data == id_orig:
+                    objects.append(ob)
+        for ob in objects:
+            for target, material in targets_by_source.get(ob.name, ()):
+                add(target, material)
+            if is_geometry:
+                add(ob)
+            elif is_transform and mesh_map_has_source(ob):
+                add(ob)
+    return result
+
+
+def mesh_map_pending_names_add(pending, objects):
+    """Add the names of \a objects to the \a pending set, returning whether anything was new.
+
+    Kept free of `bpy.app.timers` and of bpy objects other than the name, so the debounce
+    accumulation can be tested on its own.
+    """
+    added = False
+    for ob in objects:
+        if ob.name not in pending:
+            pending.add(ob.name)
+            added = True
+    return added
+
+
+def mesh_map_pending_add(pending, scene, depsgraph):
+    """Queue the freshly changed, refreshable objects of \a depsgraph for the debounce timer."""
+    return mesh_map_pending_names_add(pending, mesh_map_updated_objects(scene, depsgraph))
+
+
+# Objects whose geometry changed recently, waiting for the debounce timer to re-check them. Names,
+# not references, so a deleted object is simply skipped when the timer fires.
+_mesh_map_pending = set()
+_mesh_map_timer_active = False
+
+_MESH_MAP_REFRESH_DELAY = 0.3
+
+
+def _mesh_map_refresh_timer():
+    """One-shot timer: re-check the queued objects against the current depsgraph."""
+    global _mesh_map_timer_active
+    _mesh_map_timer_active = False
+    names = tuple(_mesh_map_pending)
+    _mesh_map_pending.clear()
+    try:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+    except RuntimeError:
+        depsgraph = None
+    if depsgraph is None:
+        return None
+    for name in names:
+        ob = bpy.data.objects.get(name)
+        if ob is None or ob.type != 'MESH' or len(ob.mesh_map_states) == 0:
+            continue
+        ob.mesh_map_states.refresh_all(depsgraph=depsgraph)
+    return None
+
+
+@persistent
+def mesh_map_depsgraph_update_post(scene, depsgraph=None):
+    """Queue mesh-map statuses for a debounced re-check after each depsgraph update.
+
+    A step-by-step edit in Edit/Sculpt mode fires many updates; the timer coalesces them into one
+    hash check. `refresh_all` only tags the object when a status actually flips (see `mesh_maps.cc`),
+    so this cannot feed itself: the shading tag produces one more update where nothing is queued.
+    """
+    if depsgraph is None:
+        return
+    global _mesh_map_timer_active
+    mesh_map_pending_add(_mesh_map_pending, scene, depsgraph)
+    if _mesh_map_pending and not _mesh_map_timer_active:
+        _mesh_map_timer_active = True
+        bpy.app.timers.register(_mesh_map_refresh_timer, first_interval=_MESH_MAP_REFRESH_DELAY)
+
+
+def register():
+    handlers = bpy.app.handlers.depsgraph_update_post
+    if mesh_map_depsgraph_update_post not in handlers:
+        handlers.append(mesh_map_depsgraph_update_post)
+
+
+def unregister():
+    global _mesh_map_timer_active
+    handlers = bpy.app.handlers.depsgraph_update_post
+    try:
+        handlers.remove(mesh_map_depsgraph_update_post)
+    except ValueError:
+        pass
+    _mesh_map_pending.clear()
+    if _mesh_map_timer_active:
+        try:
+            bpy.app.timers.unregister(_mesh_map_refresh_timer)
+        except ValueError:
+            pass
+        _mesh_map_timer_active = False
+
+
 classes = (
     MATERIAL_OT_paint_layers_regenerate,
     MATERIAL_OT_paint_layer_add,
@@ -517,4 +831,6 @@ classes = (
     MATERIAL_OT_mesh_map_add_layer,
     MATERIAL_OT_mesh_map_add_mask,
     MATERIAL_OT_mesh_map_use_active_uv,
+    OBJECT_OT_mesh_map_source_add,
+    OBJECT_OT_mesh_map_source_remove,
 )

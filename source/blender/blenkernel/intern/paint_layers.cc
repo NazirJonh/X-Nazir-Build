@@ -2040,12 +2040,19 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
   if (owner == nullptr || paint_layer_owner_list(&ma.paint_layers, owner) == nullptr) {
     return nullptr;
   }
-  if (!ELEM(role, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_ROLE_MASK_ITEM) ||
-      !ELEM(source,
-            MA_PAINT_LAYER_SOURCE_IMAGE,
-            MA_PAINT_LAYER_SOURCE_CONSTANT,
-            MA_PAINT_LAYER_SOURCE_MESH_MAP))
-  {
+  if (!ELEM(role, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_ROLE_MASK_ITEM)) {
+    return nullptr;
+  }
+  /* An Effect also reads a Material or Node Group, exactly like a Layer row of the same kind: it
+   * behaves as that row's own channel content, baked and tracked the same way. A Mask Item stays
+   * limited to Image/Constant/Mesh Map -- a mask has no external-bake path of its own. */
+  const bool source_ok = ELEM(source,
+                              MA_PAINT_LAYER_SOURCE_IMAGE,
+                              MA_PAINT_LAYER_SOURCE_CONSTANT,
+                              MA_PAINT_LAYER_SOURCE_MESH_MAP) ||
+                         (role == MA_PAINT_LAYER_ROLE_EFFECT &&
+                          ELEM(source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_NODE_GROUP));
+  if (!source_ok) {
     return nullptr;
   }
   /* A correction is its own list on the owner, not a folder child: #MaterialPaintLayer::children
@@ -2097,11 +2104,15 @@ bool BKE_paint_layers_correction_source_set(Material &ma, MaterialPaintLayer *co
   {
     return false;
   }
-  if (!ELEM(source,
-            MA_PAINT_LAYER_SOURCE_IMAGE,
-            MA_PAINT_LAYER_SOURCE_CONSTANT,
-            MA_PAINT_LAYER_SOURCE_MESH_MAP))
-  {
+  /* Symmetric with #BKE_paint_layers_correction_add: an Effect also accepts Material/Node Group,
+   * a Mask Item does not. */
+  const bool source_ok = ELEM(source,
+                              MA_PAINT_LAYER_SOURCE_IMAGE,
+                              MA_PAINT_LAYER_SOURCE_CONSTANT,
+                              MA_PAINT_LAYER_SOURCE_MESH_MAP) ||
+                         (BKE_paint_layers_role(*correction) == PaintLayerRole::Effect &&
+                          ELEM(source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_NODE_GROUP));
+  if (!source_ok) {
     return false;
   }
   correction->source = int8_t(source);

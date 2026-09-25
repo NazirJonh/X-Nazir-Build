@@ -91,6 +91,28 @@ struct PaintMaterialCompositeCorrection {
   /** The correction's identity, shared by every channel's nodes for it (spec 18 AO: map lookup by
    * tag). */
   bUUID marker = {};
+  /**
+   * A Material-source correction's own coverage: its source's Alpha input, never #image's own
+   * alpha (that is the *content* channel's map, e.g. Base Color, which carries no transparency of
+   * its own -- see #PaintMaterialCompositeImageLayer.coverage_image for the identical rule on a
+   * Material row). Unset (#has_coverage_constant false, #coverage_image null) for every other
+   * correction kind, which keeps using #image's own alpha as its coverage, unchanged.
+   */
+  float coverage_constant = 1.0f;
+  bool has_coverage_constant = false;
+  Image *coverage_image = nullptr;
+  const ImageUser *coverage_iuser = nullptr;
+  /** Whether #coverage_image is read as its alpha (a live source texture) or its grey (a baked
+   * coverage map, spread across RGB like #PaintMaterialCompositeImageLayer.coverage_from_alpha's
+   * own baked case). */
+  bool coverage_from_alpha = false;
+  /**
+   * A Material-source correction: its coverage is always #coverage_constant/#coverage_image (or,
+   * absent both, flat opacity), never #image's own alpha -- #image there is the *content* channel's
+   * map (Base Color, say), which carries no transparency of its own. Every other correction kind
+   * keeps reading its coverage from #image's own alpha as it always did.
+   */
+  bool material_source = false;
 };
 
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
@@ -233,6 +255,15 @@ struct PaintMaterialCompositeCorrectionBuffer {
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   bool enabled = true;
+  /** See #PaintMaterialCompositeCorrection.coverage_image / .has_coverage_constant /
+   * .coverage_constant / .coverage_from_alpha. */
+  ImBuf *coverage_ibuf = nullptr;
+  const char *coverage_colorspace_name = nullptr;
+  float coverage_constant = 1.0f;
+  bool has_coverage_constant = false;
+  bool coverage_from_alpha = false;
+  /** See #PaintMaterialCompositeCorrection.material_source. */
+  bool material_source = false;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */

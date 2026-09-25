@@ -354,11 +354,32 @@ static float composite_correction_pixel_mask_factor(const PaintMaterialComposite
   }
 
   for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
-    if (!correction.enabled || correction.ibuf == nullptr) {
+    if (!correction.enabled) {
       continue;
     }
-    /* The correction's colour arrives through its own coverage: its map alpha. */
-    const float corr_alpha = composite_color_alpha_at(correction.ibuf, x, y);
+    float corr_alpha;
+    if (correction.has_coverage_constant) {
+      /* A Material correction's own live source Alpha (a constant), never its content map's alpha
+       * -- see #PaintMaterialCompositeCorrection.coverage_image's own doc comment. */
+      corr_alpha = correction.coverage_constant;
+    }
+    else if (correction.coverage_ibuf != nullptr) {
+      /* The same source Alpha, live (its own alpha) or baked (its grey), like the row's own
+       * #layer.coverage_ibuf a few lines above. */
+      corr_alpha = mask_factor_at(
+          correction.coverage_ibuf, correction.coverage_from_alpha, x, y, 1.0f);
+    }
+    else if (!correction.material_source && correction.ibuf != nullptr) {
+      /* Every other correction's colour arrives through its own coverage: its map alpha. A
+       * Material correction's #ibuf is its content channel's map (Base Color, say), which is never
+       * read as coverage -- see #PaintMaterialCompositeCorrection.coverage_image's own comment. */
+      corr_alpha = composite_color_alpha_at(correction.ibuf, x, y);
+    }
+    else {
+      /* A Fill correction, or a Material correction with no coverage of its own yet: no alpha
+       * contribution here (a Fill's opacity reaches the colour blend directly, not this factor). */
+      continue;
+    }
     /* The correction's coverage reaches the factor by the same Multiply the graph uses. */
     const float fac = clamp_f(correction.opacity * corr_alpha, 0.0f, 1.0f);
     alpha = alpha + fac * (1.0f - alpha);
@@ -639,6 +660,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     }
 
     Vector<float> correction_storage;
+    Vector<float> correction_coverage_storage;
     for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
       if (!correction.enabled) {
         continue;
@@ -656,12 +678,39 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       else {
         continue;
       }
+      /* The correction's own coverage (a Material source's Alpha), decoded apart from its colour
+       * -- mirrors #extra_coverage above and #composite_correction_pixel_mask_factor. Every other
+       * correction kind keeps reading its coverage from its own colour pixel's alpha, unchanged. */
+      const float *correction_coverage_pixels = nullptr;
+      if (!correction.has_coverage_constant && correction.coverage_ibuf != nullptr) {
+        correction_coverage_storage.resize(count * 4);
+        composite_decode_tile(correction.coverage_ibuf,
+                              correction.coverage_colorspace_name,
+                              tile,
+                              correction_coverage_storage.data());
+        correction_coverage_pixels = correction_coverage_storage.data();
+      }
       for (int64_t i = 0; i < count; i++) {
         float corr_alpha = 1.0f;
         const float *corr_rgba = correction.constant_color;
         if (correction_pixels != nullptr) {
           corr_rgba = correction_pixels + i * 4;
-          corr_alpha = corr_rgba[3];
+          /* A Material correction's own pixel is its content channel's map (Base Color, say): its
+           * alpha is never coverage, so #corr_alpha stays the flat default of 1.0 here and waits
+           * for the coverage fields below (or the correction covers fully, like Baked with no bake
+           * coverage yet). */
+          if (!correction.material_source) {
+            corr_alpha = corr_rgba[3];
+          }
+        }
+        if (correction.has_coverage_constant) {
+          corr_alpha = correction.coverage_constant;
+        }
+        else if (correction_coverage_pixels != nullptr) {
+          const float *cc = correction_coverage_pixels + i * 4;
+          corr_alpha = correction.coverage_from_alpha ?
+                          clamp_f(cc[3], 0.0f, 1.0f) :
+                          clamp_f((cc[0] + cc[1] + cc[2]) / 3.0f, 0.0f, 1.0f);
         }
         const float fac = clamp_f(correction.opacity * corr_alpha, 0.0f, 1.0f);
         blend_row_linear(r_color + i * 4, corr_rgba, correction.blend, fac);
@@ -1294,6 +1343,18 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
     buffer.has_constant_color = correction.has_constant_color;
     buffer.opacity = correction.opacity;
     buffer.enabled = correction.enabled;
+    buffer.has_coverage_constant = correction.has_coverage_constant;
+    buffer.coverage_constant = correction.coverage_constant;
+    buffer.coverage_from_alpha = correction.coverage_from_alpha;
+    buffer.material_source = correction.material_source;
+    if (correction.coverage_image != nullptr) {
+      buffer.coverage_ibuf = composite_image_acquire(
+          correction.coverage_image, correction.coverage_iuser, r_locks);
+      if (buffer.coverage_ibuf == nullptr) {
+        return false;
+      }
+      buffer.coverage_colorspace_name = composite_buffer_colorspace_name(buffer.coverage_ibuf);
+    }
     r_layer.content_corrections.append(buffer);
   }
   for (const PaintMaterialCompositeCorrection &correction : image_layer.mask_corrections) {
@@ -1652,11 +1713,19 @@ static uint64_t composite_correction_hash(uint64_t hash,
                           node_bytes);
   /* Session UID rather than a pointer, like the layers' own maps: a freed image's address can
    * come back as a different one. */
-  return get_default_hash(hash,
+  hash = get_default_hash(hash,
                           correction.image != nullptr ? correction.image->id.session_uid : 0,
                           int(correction.blend),
                           correction.enabled,
                           correction.opacity);
+  /* A Material correction's own coverage (its source's Alpha) can change independently of its
+   * colour above -- a source Alpha edit must invalidate this composite too. */
+  return get_default_hash(
+      hash,
+      correction.coverage_image != nullptr ? correction.coverage_image->id.session_uid : 0,
+      correction.has_coverage_constant,
+      correction.coverage_constant,
+      correction.coverage_from_alpha);
 }
 
 uint64_t BKE_paint_material_composite_stack_hash(
@@ -1904,6 +1973,9 @@ static Vector<Image *> composite_layer_images(const PaintMaterialCompositeImageL
   for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
     if (correction.image != nullptr) {
       images.append_non_duplicates(correction.image);
+    }
+    if (correction.coverage_image != nullptr) {
+      images.append_non_duplicates(correction.coverage_image);
     }
   }
   for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {

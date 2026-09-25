@@ -3756,6 +3756,315 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_color_channel_partial_alpha_
   ma = nullptr;
 }
 
+/**
+ * An Effect correction with source Material in Hybrid mode (a live constant): the generator's
+ * group input and the CPU's #composite_material_live must agree exactly, like a Layer row of that
+ * source (#live_material_constant_matches_the_cpu).
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_material_constant_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "CorrMatConstant");
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  Material *source = BKE_material_add(bmain, "CorrMatConstantSource");
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  const float source_color[4] = {0.6f, 0.2f, 0.1f, 1.0f};
+  bNodeSocket *base_color = bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(base_color->default_value)->value, source_color);
+
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "C");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, correction, source));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(channel));
+  const RGBA cpu = cpu_pixel(channel);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * The same Effect correction, but in Baked mode (the source has no Principled): both sides read
+ * the correction's own external bake through #paint_layer_channel_image.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_material_baked_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "CorrMatBaked");
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  Material *source = BKE_material_add(bmain, "CorrMatBakedSource");
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "C");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, correction, source));
+  Image *bake_map = add_solid_image("CorrMatBakedMap", size, 10, 200, 90, 255);
+  fill_straight_soft_edge(bake_map, size, 0.4f);
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *correction, channel, bake_map));
+  BKE_paint_layers_bake_finalize(*ma, *correction);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *correction), PaintLayerMaterialMode::Baked);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const float tolerance = 1e-4f;
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * A Material correction in Hybrid mode with a live source Alpha < 1: its coverage is that Alpha
+ * constant, exactly like a Layer row of that source (`layer_factor`) -- never the flat opacity a
+ * live colour constant would otherwise give it (that was the bug: before this fix, a live-constant
+ * correction ignored its source's Alpha entirely and covered fully).
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_material_constant_partial_alpha_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "CorrMatConstantAlpha");
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  Material *source = BKE_material_add(bmain, "CorrMatConstantAlphaSource");
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  const float source_color[4] = {0.6f, 0.2f, 0.1f, 1.0f};
+  bNodeSocket *base_color = bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(base_color->default_value)->value, source_color);
+  bNodeSocket *alpha = bke::node_find_socket(*principled, SOCK_IN, "Alpha"_ustr);
+  ASSERT_NE(alpha, nullptr);
+  static_cast<bNodeSocketValueFloat *>(alpha->default_value)->value = 0.4f;
+
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "C");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, correction, source));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *correction), PaintLayerMaterialMode::Hybrid);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(channel));
+  const RGBA cpu = cpu_pixel(channel);
+  /* The correction's blend factor is opacity(1.0, default) * source Alpha(0.4), so it must land
+   * strictly between the bottom colour and the correction's own colour -- proof the Alpha actually
+   * scaled it, not a full-strength blend. */
+  EXPECT_GT(graph.b, 0.0f);
+  EXPECT_LT(graph.b, 1.0f);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * A Material correction in Baked mode whose own bake coverage is a soft, non-uniform edge (not a
+ * fresh row's flat 1.0): the coverage varies per pixel exactly like a Layer row's own
+ * `layer->bake->coverage` fallback (`grey_of_map`), never the content bake map's own alpha.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_material_baked_partial_coverage_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "CorrMatBakedCoverage");
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  Material *source = BKE_material_add(bmain, "CorrMatBakedCoverageSource");
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "C");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, correction, source));
+  /* An opaque colour map: only the separate bake coverage should vary the result across x. A baked
+   * coverage is read as its grey (the mean of RGB), never its alpha -- the mask-correction
+   * convention #paint_material_composite.cc documents -- so the map's grey is what must vary here,
+   * with alpha left opaque throughout. */
+  Image *bake_map = add_solid_image("CorrMatBakedCoverageMap", size, 10, 200, 90, 255);
+  Image *bake_coverage = add_solid_image("CorrMatBakedCoverageAlpha", size, 255, 255, 255, 255);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(bake_coverage, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (int x = 0; x < size; x++) {
+      const uchar grey = uchar(64 * (x + 1));
+      pixels[x * 4 + 0] = grey;
+      pixels[x * 4 + 1] = grey;
+      pixels[x * 4 + 2] = grey;
+      pixels[x * 4 + 3] = 255;
+    }
+    BKE_image_release_ibuf(bake_coverage, ibuf, lock);
+  }
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *correction, channel, bake_map));
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *correction, -1, bake_coverage));
+  BKE_paint_layers_bake_finalize(*ma, *correction);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *correction), PaintLayerMaterialMode::Baked);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const float tolerance = 1e-4f;
+  Vector<float> graph_reds;
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "x=" << x;
+    graph_reds.append(graph.r);
+  }
+  /* The soft-edge coverage must actually vary the result across x, or this test could pass with
+   * the coverage silently ignored on both sides. */
+  EXPECT_NE(graph_reds[0], graph_reds[size - 1]);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * An Effect correction with source Node Group: Baked-only, like a Layer row of that source. With a
+ * valid bake, both sides read the same external bake image.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_node_group_baked_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "CorrNodeGroupBaked");
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "NGC");
+  ASSERT_NE(correction, nullptr);
+  Image *bake_map = add_solid_image("CorrNgBakedMap", size, 220, 30, 140, 255);
+  fill_straight_soft_edge(bake_map, size, 0.6f);
+  Image *coverage = add_solid_image("CorrNgBakedCoverage", size, 255, 255, 255, 255);
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *correction, channel, bake_map));
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *correction, -1, coverage));
+  BKE_paint_layers_bake_finalize(*ma, *correction);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const float tolerance = 1e-4f;
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * Without a valid bake, a Node Group correction contributes nothing at all -- on both sides -- so
+ * the result equals the row with no correction. #BKE_paint_layers_composite_image_layers's own
+ * content_corrections list must come back empty for it too.
+ */
+TEST_F(PaintLayersGraphEvalTest, content_correction_node_group_without_bake_matches_the_uncorrected_row)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "CorrNodeGroupNoBake");
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const RGBA cpu_before = cpu_pixel(channel);
+
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "NGC");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+  for (const PaintMaterialCompositeImageLayer &l : layers) {
+    if (BLI_uuid_equal(l.marker, top->marker)) {
+      EXPECT_TRUE(l.content_corrections.is_empty());
+    }
+  }
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(channel));
+  const RGBA cpu_after = cpu_pixel(channel);
+  EXPECT_NEAR(cpu_after.r, cpu_before.r, 1e-6f);
+  EXPECT_NEAR(cpu_after.g, cpu_before.g, 1e-6f);
+  EXPECT_NEAR(cpu_after.b, cpu_before.b, 1e-6f);
+  EXPECT_NEAR(graph.r, cpu_after.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu_after.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu_after.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
 TEST_F(PaintLayersGraphEvalTest, every_blend_mode_matches_the_cpu)
 {
   const int size = 4;

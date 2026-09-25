@@ -4336,6 +4336,261 @@ TEST_F(PaintLayersGenerateTest, material_row_correction_opacity_syncs)
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.0f);
 }
 
+/** The first Image Texture node of \a tree (descending nested layer groups) whose id is \a image. */
+static bNode *find_tex_image_of(bNodeTree &tree, const Image &image)
+{
+  for (bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id == &image.id) {
+      return &node;
+    }
+    if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+        !BKE_paint_material_is_normal_combine_group(node))
+    {
+      if (bNode *found = find_tex_image_of(*reinterpret_cast<bNodeTree *>(node.id), image)) {
+        return found;
+      }
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * An Effect correction with source Material behaves exactly like a Layer row of that source: in
+ * Baked mode (no Principled on the source, so #BKE_paint_layers_material_mode answers Baked) it
+ * reads its own external bake through the same #paint_layer_channel_image resolver a Layer row's
+ * Baked mode uses.
+ */
+TEST_F(PaintLayersGenerateTest, effect_material_baked_reads_the_bake_map)
+{
+  Material *source = BKE_material_add(bmain, "EffectBakedSource");
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("OwnerMap"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "MC");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, correction, source));
+  Image *bake_map = add_image("EffectBakedMap");
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, bake_map));
+  BKE_paint_layers_bake_finalize(*ma, *correction);
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *correction), PaintLayerMaterialMode::Baked);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+  EXPECT_NE(find_tex_image_of(*group, *bake_map), nullptr);
+}
+
+/**
+ * An Effect correction with source Material in SourceGroup mode (its source reads a Noise graph
+ * the CPU cannot reproduce) goes through the same `.PL Source` wrapper a Layer row of that source
+ * uses, not a baked Image Texture.
+ */
+TEST_F(PaintLayersGenerateTest, effect_material_source_group_uses_the_wrapper)
+{
+  Material *source = add_principled_source("EffectSgSource", 0.3f);
+  source_set_noise_base_color(*bmain, *source);
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("OwnerMap"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "MC");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, correction, source));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *correction),
+            PaintLayerMaterialMode::SourceGroup);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+  /* Only the owner row's own map is an Image Texture; the correction's whole source graph goes
+   * through the wrapper instance instead. */
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
+  bool wrapper_found = false;
+  for (bNode &node : group->nodes) {
+    if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+        !BKE_paint_material_is_normal_combine_group(node) &&
+        StringRef(node.id->name + 2).startswith(".PL Source"))
+    {
+      wrapper_found = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(wrapper_found);
+}
+
+/**
+ * A Material correction in SourceGroup mode is transparent through its source's Alpha input, like
+ * a Layer row of that source (`layer_factor`, ~2276-2356): its own coverage/mix factor is wired to
+ * the wrapper's dedicated `Coverage` output, never a flat opacity and never the content channel's
+ * own map alpha (the correction has no content map in SourceGroup mode to begin with).
+ */
+TEST_F(PaintLayersGenerateTest, effect_material_source_group_factor_uses_the_wrapper_coverage)
+{
+  Material *source = add_principled_source("EffectSgCoverageSource", 0.3f);
+  source_set_noise_base_color(*bmain, *source);
+  bNode *principled = principled_of(*source);
+  ASSERT_NE(principled, nullptr);
+  bNodeSocket *alpha = bke::node_find_socket(*principled, SOCK_IN, "Alpha"_ustr);
+  ASSERT_NE(alpha, nullptr);
+  static_cast<bNodeSocketValueFloat *>(alpha->default_value)->value = 0.5f;
+
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("OwnerMap"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "MC");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, correction, source));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *correction),
+            PaintLayerMaterialMode::SourceGroup);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+
+  bNode *wrapper_instance = nullptr;
+  for (bNode &node : group->nodes) {
+    if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+        !BKE_paint_material_is_normal_combine_group(node) &&
+        StringRef(node.id->name + 2).startswith(".PL Source"))
+    {
+      wrapper_instance = &node;
+      break;
+    }
+  }
+  ASSERT_NE(wrapper_instance, nullptr);
+  bNodeTree *wrapper_tree = reinterpret_cast<bNodeTree *>(wrapper_instance->id);
+  ASSERT_NE(wrapper_tree, nullptr);
+  bNodeSocket *coverage_out = nullptr;
+  for (bNodeSocket *s : wrapper_instance->output_sockets()) {
+    if (s->name != nullptr && STREQ(s->name, "Coverage")) {
+      coverage_out = s;
+      break;
+    }
+  }
+  ASSERT_NE(coverage_out, nullptr);
+  /* The wrapper's Coverage output must feed *something* in the correction's factor chain -- the
+   * generator wires it into the Multiply that scales the correction's opacity, exactly like
+   * `layer_factor` does for the row's own COVERAGE query at the same output. */
+  EXPECT_FALSE(coverage_out->directly_linked_links().is_empty());
+}
+
+/**
+ * An Effect correction with source Node Group is Baked-only, like a Layer row of that source: with
+ * no valid bake yet it takes no part at all (mirrors the Layer row's own
+ * #custom_bake_missing_warn_once skip).
+ */
+TEST_F(PaintLayersGenerateTest, effect_node_group_without_bake_does_not_participate)
+{
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("OwnerMap"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+  const int nodes_before = node_count(*group);
+
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "NGC");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+  /* No bake yet: the correction contributes no node at all. */
+  EXPECT_EQ(node_count(*group), nodes_before);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
+}
+
+/**
+ * The same Node Group correction, once it has a valid external bake, reads that bake through an
+ * Image Texture node -- the same shape a baked Custom Layer row's own map takes.
+ */
+TEST_F(PaintLayersGenerateTest, effect_node_group_with_bake_reads_the_bake_image)
+{
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("OwnerMap"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "NGC");
+  ASSERT_NE(correction, nullptr);
+  Image *bake_map = add_image("NodeGroupBakeMap");
+  Image *coverage = add_image("NodeGroupBakeCoverage");
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, bake_map));
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *correction, -1, coverage));
+  BKE_paint_layers_bake_finalize(*ma, *correction);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+  EXPECT_NE(find_tex_image_of(*group, *bake_map), nullptr);
+}
+
+/**
+ * TZ-26 for a correction: editing the live source's own value is not topology, so it must sync
+ * through the group input in place, exactly like a Layer row's live constant
+ * (#live_material_constant_edit_syncs_without_rebuild).
+ */
+TEST_F(PaintLayersGenerateTest, effect_material_live_constant_edit_syncs_without_rebuild)
+{
+  Material *source = add_principled_source("EffectLiveSource", 0.1f);
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("OwnerMap"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "MC");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, correction, source));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *correction), PaintLayerMaterialMode::Hybrid);
+
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> root_before = root_nodes(*root);
+  bNodeTree *group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+  /* The owner row only wires Base Color (#add_paint_layer's one channel record), so that is the
+   * only channel the correction's own live constant can be observed through here -- Roughness is
+   * never a wired channel of this material and would drop the correction's Source socket. */
+  bNodeTreeInterfaceSocket *live_iface = group_input_find(*group, "Owner MC Base Color Source");
+  ASSERT_NE(live_iface, nullptr);
+
+  bNode *principled = principled_of(*source);
+  ASSERT_NE(principled, nullptr);
+  bNodeSocket *base_color = bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  static_cast<bNodeSocketValueRGBA *>(base_color->default_value)->value[0] = 0.9f;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* Neither the row's group nor the root was rebuilt. */
+  EXPECT_EQ(layer_tree_find(*bmain, "Owner"), group);
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+
+  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *live_iface);
+  ASSERT_NE(socket, nullptr);
+  const float *value = static_cast<bNodeSocketValueRGBA *>(socket->default_value)->value;
+  EXPECT_NEAR(value[0], 0.9f, 1e-4f);
+}
+
+/**
+ * Switching a correction's own source (Image to Material) is topology and must rebuild its
+ * owner's group, matching #BKE_paint_layers_correction_source_set now allowing the change.
+ */
+TEST_F(PaintLayersGenerateTest, effect_correction_source_change_to_material_rebuilds_the_group)
+{
+  Material *source = BKE_material_add(bmain, "EffectSourceChangeMat");
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("OwnerMap"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "MC");
+  ASSERT_NE(correction, nullptr);
+  BKE_paint_layers_channel_add(*ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  BKE_paint_layers_channel_set_image(
+      *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("CorrectionImage"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+  const Vector<bNode *> nodes_before = root_nodes(*group);
+
+  ASSERT_TRUE(BKE_paint_layers_correction_source_set(*ma, correction, MA_PAINT_LAYER_SOURCE_MATERIAL));
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, correction, source));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+  /* The group's own node list changed shape: the Image Texture correction node is gone. */
+  EXPECT_FALSE(same_nodes(nodes_before, root_nodes(*group)));
+}
+
 /**
  * A stack shaped like the user's: named and unnamed Paint rows, Material rows, a folder. Two
  * regenerations with no edits in between must keep every group and the root.

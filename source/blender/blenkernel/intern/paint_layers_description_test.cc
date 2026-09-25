@@ -1619,18 +1619,33 @@ TEST_F(PaintLayersDescription, correction_add_sets_role_and_source)
    * `!ELEM(role, Effect, MaskItem)`): removing it made this call return true (and move the row to
    * the Layer role) instead of false. */
   EXPECT_FALSE(BKE_paint_layers_role_set(*ma, correction, MA_PAINT_LAYER_ROLE_LAYER));
-  /* An out-of-range role, and a Material/NodeGroup/Stack source, are both refused. */
+  /* An out-of-range role, and a Stack source, are both refused. */
   EXPECT_FALSE(BKE_paint_layers_correction_add(
       *ma, layer, 99, MA_PAINT_LAYER_SOURCE_IMAGE, nullptr));
+  /* An Effect also accepts a Material or Node Group source, exactly like a Layer row of the same
+   * kind: it behaves as that row's own channel content. */
+  EXPECT_NE(BKE_paint_layers_correction_add(
+                *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, nullptr),
+            nullptr);
+  EXPECT_NE(BKE_paint_layers_correction_add(
+                *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, nullptr),
+            nullptr);
   /* GUARD (RED-verified 2026-09-24, paint_layers.cc: BKE_paint_layers_correction_add's
-   * `!ELEM(source, Image, Constant)` half of its validity check): removing it made these three
-   * calls return a real correction (non-null) instead of nullptr. */
-  EXPECT_FALSE(BKE_paint_layers_correction_add(
-      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, nullptr));
-  EXPECT_FALSE(BKE_paint_layers_correction_add(
-      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, nullptr));
+   * `!ELEM(source, Image, Constant)` half of its validity check): removing it made this call
+   * return a real correction (non-null) instead of nullptr. */
   EXPECT_FALSE(BKE_paint_layers_correction_add(
       *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, nullptr));
+  /* GUARD: a Mask Item stays limited to Image/Constant/Mesh Map -- a mask has no external-bake
+   * path of its own, unlike an Effect. */
+  EXPECT_EQ(BKE_paint_layers_correction_add(
+                *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, nullptr),
+            nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add(*ma,
+                                            layer,
+                                            MA_PAINT_LAYER_ROLE_MASK_ITEM,
+                                            MA_PAINT_LAYER_SOURCE_NODE_GROUP,
+                                            nullptr),
+            nullptr);
 }
 
 /**
@@ -2906,6 +2921,32 @@ TEST_F(PaintLayersDescription, source_material_is_live_tracks_the_deferred_mater
   EXPECT_FALSE(BKE_paint_layers_source_material_is_live(*bmain, *source));
 }
 
+TEST_F(PaintLayersDescription, source_material_is_live_tracks_an_effect_correction)
+{
+  /* #BKE_paint_layers_flatten (Layer rows only) does not see a correction; the sites that answer
+   * whether a source is "live" (deferred, catch-up re-bake, active tagging) were moved onto
+   * #BKE_paint_layers_flatten_all so an Effect correction with source Material is tracked exactly
+   * like a Layer row that reads the same source. */
+  Material *layered = BKE_material_add(bmain, "LiveSourceCorrectionOwner");
+  Material *source = paint_layer_source_material(*bmain, "LiveSourceCorrectionMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *layered, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *layered, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "Effect");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*layered, effect, source));
+
+  /* The source is read live while the Effect correction itself is active. */
+  BKE_paint_layers_active_set(*layered, effect->marker);
+  EXPECT_NE(BKE_paint_layers_material_mode(*layered, *effect), PaintLayerMaterialMode::Baked);
+  EXPECT_TRUE(BKE_paint_layers_source_material_is_live(*bmain, *source));
+
+  /* Moving the active marker off the correction's owner leaves the source. */
+  BKE_paint_layers_active_set(*layered, {});
+  EXPECT_FALSE(BKE_paint_layers_source_material_is_live(*bmain, *source));
+}
+
 TEST_F(PaintLayersDescription, source_material_is_live_is_false_in_baked_mode)
 {
   Material *layered = BKE_material_add(bmain, "BakedSourceOwner");
@@ -2987,22 +3028,35 @@ TEST_F(PaintLayersDescription, mesh_map_corrections_allow_mesh_map_only)
   ASSERT_NE(mask, nullptr);
   EXPECT_EQ(mask->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
 
-  EXPECT_EQ(BKE_paint_layers_correction_add(
+  /* An Effect also accepts Material/Node Group, like a Layer row of the same kind. */
+  EXPECT_NE(BKE_paint_layers_correction_add(
                 *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "M"),
             nullptr);
-  EXPECT_EQ(BKE_paint_layers_correction_add(
+  EXPECT_NE(BKE_paint_layers_correction_add(
                 *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "N"),
             nullptr);
   EXPECT_EQ(BKE_paint_layers_correction_add(
                 *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "S"),
+            nullptr);
+  /* GUARD: a Mask Item stays limited to Image/Constant/Mesh Map, unlike an Effect. */
+  EXPECT_EQ(BKE_paint_layers_correction_add(
+                *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M2"),
+            nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add(
+                *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "N2"),
             nullptr);
 
   ASSERT_TRUE(BKE_paint_layers_correction_source_set(
       *ma, effect, MA_PAINT_LAYER_SOURCE_IMAGE));
   EXPECT_TRUE(BKE_paint_layers_correction_source_set(
       *ma, effect, MA_PAINT_LAYER_SOURCE_MESH_MAP));
-  EXPECT_FALSE(BKE_paint_layers_correction_source_set(
+  /* An Effect's source_set is symmetric with correction_add: Material is now accepted. */
+  EXPECT_TRUE(BKE_paint_layers_correction_source_set(
       *ma, effect, MA_PAINT_LAYER_SOURCE_MATERIAL));
+  /* GUARD: a Mask Item's source_set stays refused for Material, even though the Effect above just
+   * accepted it -- the gate is keyed on the correction's own role, not on the source alone. */
+  EXPECT_FALSE(BKE_paint_layers_correction_source_set(
+      *ma, mask, MA_PAINT_LAYER_SOURCE_MATERIAL));
 }
 
 TEST_F(PaintLayersDescription, source_change_still_refuses_mesh_map)
@@ -3098,8 +3152,15 @@ TEST_F(PaintLayersDescription, rna_correction_add_accepts_mesh_map)
   ASSERT_NE(effect, nullptr);
   EXPECT_EQ(effect->source, MA_PAINT_LAYER_SOURCE_MESH_MAP);
 
-  MaterialPaintLayer *refused = rna_mesh_map_correction_add(
+  /* An Effect also accepts Material through the RNA path, like #BKE_paint_layers_correction_add
+   * itself. */
+  MaterialPaintLayer *accepted = rna_mesh_map_correction_add(
       owner_ptr, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  EXPECT_NE(accepted, nullptr);
+
+  /* GUARD: a Mask Item stays refused for Material through the same RNA path. */
+  MaterialPaintLayer *refused = rna_mesh_map_correction_add(
+      owner_ptr, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M2");
   EXPECT_EQ(refused, nullptr);
 }
 

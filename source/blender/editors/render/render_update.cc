@@ -183,7 +183,8 @@ void ED_render_scene_update(const DEGEditorUpdateContext *update_ctx, const bool
     {
       Set<Material *> caught_up;
       Vector<const MaterialPaintLayer *> layers;
-      BKE_paint_layers_flatten(ma, layers);
+      /* An Effect correction with source Material catches up the same way a Layer row does. */
+      BKE_paint_layers_flatten_all(ma, layers);
       for (const MaterialPaintLayer *layer : layers) {
         if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material == nullptr) {
           continue;
@@ -312,7 +313,9 @@ static void material_changed(Main *bmain, Material *ma)
       continue;
     }
     Vector<const MaterialPaintLayer *> layers;
-    BKE_paint_layers_flatten(layered, layers);
+    /* An Effect correction reading this source must be tagged live too, or it freezes on the
+     * values of its last build (see the comment above for a Layer row). */
+    BKE_paint_layers_flatten_all(layered, layers);
     for (const MaterialPaintLayer *layer : layers) {
       if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material != ma) {
         continue;

@@ -110,6 +110,32 @@ CompositeBlend layer_channel_blend(const MaterialPaintLayer &layer, const int ch
 namespace {
 
 /**
+ * What \a row shows live in \a channel through its Material source: a constant, a trivial texture,
+ * or neither (Baked mode, or SourceGroup -- the CPU has no shader evaluator, so a mapped/projected
+ * source simply falls back to the row's own bake, exactly what a false/false answer here leads to).
+ * One helper for a Layer row's own participation gate and an Effect correction's content, so the
+ * two can never disagree about what "live" means for this source.
+ */
+struct CompositeMaterialLive {
+  bool constant = false;
+  float value[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  bool map = false;
+  Image *map_image = nullptr;
+  const ImageUser *map_iuser = nullptr;
+};
+
+CompositeMaterialLive composite_material_live(const Material &material,
+                                              const MaterialPaintLayer &row,
+                                              const int channel)
+{
+  CompositeMaterialLive out;
+  out.constant = BKE_paint_layers_material_live_constant(material, row, channel, out.value);
+  out.map = !out.constant && BKE_paint_layers_material_live_image(
+                                 material, row, channel, &out.map_image, &out.map_iuser);
+  return out;
+}
+
+/**
  * Whether \a layer or anything nested under it takes part in \a channel. A valid bake counts even
  * without a channel record -- a Material layer's channels exist only as its baked maps -- so this
  * matches the generator's `layer_subtree_has_channel`.
@@ -222,17 +248,15 @@ bool composite_image_layers_build(const Material &material,
 
     const bool is_folder = BKE_paint_layers_is_folder(*layer);
     /* The active Material row's source constant, when the channel has one; it takes part and paints
-     * through that constant rather than through a map. */
-    float live_value[4];
-    const bool live = BKE_paint_layers_material_live_constant(
-        material, *layer, channel, live_value);
-    /* The row may instead show its source's own texture. It takes part for the same reason a live
-     * constant does: it paints through that map, not through a channel record, so the drop gates
-     * below must see it or the row leaves the CPU stack while the generator keeps it. */
-    Image *live_map_image = nullptr;
-    const ImageUser *live_map_iuser = nullptr;
-    const bool live_map = !live && BKE_paint_layers_material_live_image(
-                                      material, *layer, channel, &live_map_image, &live_map_iuser);
+     * through that constant rather than through a map. The row may instead show its source's own
+     * texture: it takes part for the same reason a live constant does, so the drop gates below must
+     * see it or the row leaves the CPU stack while the generator keeps it. */
+    const CompositeMaterialLive live_source = composite_material_live(material, *layer, channel);
+    const float *live_value = live_source.value;
+    const bool live = live_source.constant;
+    Image *live_map_image = live_source.map_image;
+    const ImageUser *live_map_iuser = live_source.map_iuser;
+    const bool live_map = live_source.map;
     if (is_folder) {
       if (!composite_layer_subtree_has_channel(material, *layer, channel)) {
         continue;
@@ -279,10 +303,15 @@ bool composite_image_layers_build(const Material &material,
       if ((correction.flag & MA_PAINT_LAYER_ENABLED) == 0) {
         return;
       }
+      /* A Material or Node Group source is an Effect-only kind, exactly like #BKE_paint_layers_
+       * correction_add's own gate: a mask item has no external-bake path of its own. */
+      const bool material_or_group = ELEM(
+          correction.source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_NODE_GROUP);
       if (!ELEM(correction.source,
                 MA_PAINT_LAYER_SOURCE_IMAGE,
                 MA_PAINT_LAYER_SOURCE_CONSTANT,
-                MA_PAINT_LAYER_SOURCE_MESH_MAP))
+                MA_PAINT_LAYER_SOURCE_MESH_MAP) &&
+          !(is_content && material_or_group))
       {
         return;
       }
@@ -300,6 +329,77 @@ bool composite_image_layers_build(const Material &material,
         BKE_paint_layers_constant_to_linear(
             eMaterialPaintChannel(channel), constant, out_correction.constant_color);
         out_correction.has_constant_color = true;
+      }
+      else if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+        out_correction.material_source = true;
+        /* An Effect correction with source Material behaves exactly as a Layer row of that source
+         * (#composite_material_live is the same helper the row's own participation gate uses): a
+         * live constant, a live map, or -- Baked mode, or without a bake at all yet -- nothing,
+         * exactly like the row in the same state. */
+        const CompositeMaterialLive live_source = composite_material_live(
+            material, correction, channel);
+        if (live_source.constant) {
+          BKE_paint_layers_constant_to_linear(
+              eMaterialPaintChannel(channel), live_source.value, out_correction.constant_color);
+          out_correction.has_constant_color = true;
+        }
+        else if (live_source.map) {
+          out_correction.image = live_source.map_image;
+          out_correction.iuser = live_source.map_iuser;
+        }
+        else {
+          Image *correction_image = paint_layer_channel_image(material, correction, channel);
+          if (correction_image == nullptr) {
+            return;
+          }
+          out_correction.image = correction_image;
+          out_correction.iuser = nullptr;
+        }
+        /* The correction's own coverage: its source's Alpha input, exactly like a Layer row of
+         * this source (mirrors the row-building code's own Alpha resolution a few lines below --
+         * #BKE_paint_layers_material_live_constant/_image on the Alpha channel, falling back to the
+         * correction's own bake coverage). Never #out_correction.image's own alpha -- that is the
+         * content channel's map (Base Color, say), which carries no transparency of its own. */
+        float coverage_live_alpha[4];
+        if (BKE_paint_layers_material_live_constant(
+                material, correction, PAINT_MATERIAL_CHANNEL_ALPHA, coverage_live_alpha))
+        {
+          out_correction.coverage_constant = coverage_live_alpha[0];
+          out_correction.has_coverage_constant = true;
+        }
+        else {
+          Image *coverage_live_image = nullptr;
+          const ImageUser *coverage_live_iuser = nullptr;
+          if (BKE_paint_layers_material_live_image(material,
+                                                   correction,
+                                                   PAINT_MATERIAL_CHANNEL_ALPHA,
+                                                   &coverage_live_image,
+                                                   &coverage_live_iuser))
+          {
+            out_correction.coverage_image = coverage_live_image;
+            out_correction.coverage_iuser = coverage_live_iuser;
+            out_correction.coverage_from_alpha = true;
+          }
+          else if (correction.bake != nullptr && correction.bake->coverage != nullptr) {
+            out_correction.coverage_image = correction.bake->coverage;
+          }
+        }
+      }
+      else if (correction.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+        /* A Node Group correction is Baked-only, like a Layer row of that source: no live path
+         * exists, so a correction with no valid bake yet contributes nothing at all. */
+        Image *correction_baked = nullptr;
+        if (!BKE_paint_layers_bake_substitute(material, correction, channel, &correction_baked) &&
+            !BKE_paint_layers_bake_substitute_custom(
+                material, correction, channel, &correction_baked, nullptr))
+        {
+          return;
+        }
+        if (correction_baked == nullptr) {
+          return;
+        }
+        out_correction.image = correction_baked;
+        out_correction.iuser = nullptr;
       }
       else {
         const bool mesh_map = correction.source == MA_PAINT_LAYER_SOURCE_MESH_MAP;

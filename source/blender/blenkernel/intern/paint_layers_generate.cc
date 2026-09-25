@@ -821,7 +821,8 @@ uint64_t topology_hash_correction(uint64_t hash,
                                   const Material &ma,
                                   const MaterialPaintLayer &correction,
                                   const Span<int> wired_channels,
-                                  const bool mask_item)
+                                  const bool mask_item,
+                                  const PaintLayersRegenCache *cache)
 {
   topology_hash_uid(hash, correction.marker);
   /* The correction's name reaches the group's mirror input names for its value inputs. */
@@ -862,6 +863,46 @@ uint64_t topology_hash_correction(uint64_t hash,
       const bool data = image != nullptr &&
                         IMB_colormanagement_space_name_is_data(image->colorspace_settings.name);
       hash = topology_hash_mix(hash, data ? 1 : 0);
+    }
+    if (!mask_item && correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      /* Mirrors the Layer-row hash (#topology_hash_layer): a live constant or live map is topology
+       * (it decides whether the group carries a live-constant input, or shows a texture instead of
+       * the baked one), and so is the Baked/Hybrid/SourceGroup mode and, in SourceGroup, the
+       * source's own topology. The value behind a live constant is not topology (ТЗ-26): it syncs
+       * through the group input in place. */
+      float live_value[4];
+      const bool live_constant = BKE_paint_layers_material_live_constant(
+          ma, correction, channel, live_value, cache);
+      Image *live_map_image_probe = nullptr;
+      const ImageUser *live_map_iuser_probe = nullptr;
+      const bool live_map_probe = !live_constant &&
+                                  BKE_paint_layers_material_live_image(
+                                      ma, correction, channel, &live_map_image_probe,
+                                      &live_map_iuser_probe, cache);
+      hash = topology_hash_mix(hash, live_constant ? 1 : 0);
+      hash = topology_hash_mix(hash, live_map_probe ? 1 : 0);
+      if (live_map_probe) {
+        hash = topology_hash_mix(hash, topology_hash_map_id(live_map_image_probe));
+      }
+      const PaintLayerMaterialMode material_mode = BKE_paint_layers_material_mode(
+          ma, correction, cache);
+      hash = topology_hash_mix(hash, uint64_t(material_mode));
+      if (material_mode == PaintLayerMaterialMode::SourceGroup && correction.material != nullptr) {
+        hash = topology_hash_mix(
+            hash, BKE_paint_layers_source_material_topology_hash(*correction.material));
+      }
+    }
+    if (!mask_item && correction.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+      /* A Node Group correction is Baked-only (no live path exists for it, see the generator's own
+       * comment on this branch): whether it currently has a valid bake, and which image, is what
+       * decides whether the group carries the TEX_IMAGE node at all. #paint_layer_channel_image has
+       * no Node Group branch (unlike Material), so the per-channel hash above never saw this. */
+      Image *correction_baked = nullptr;
+      const bool has_bake =
+          BKE_paint_layers_bake_substitute(ma, correction, channel, &correction_baked) ||
+          BKE_paint_layers_bake_substitute_custom(ma, correction, channel, &correction_baked, nullptr);
+      hash = topology_hash_mix(hash, has_bake ? 1 : 0);
+      hash = topology_hash_mix(hash, has_bake ? topology_hash_map_id(correction_baked) : 0);
     }
   }
   return hash;
@@ -959,10 +1000,10 @@ uint64_t topology_hash_layer(uint64_t hash,
     }
   }
   for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(layer)) {
-    hash = topology_hash_correction(hash, ma, *effect, wired_channels, false);
+    hash = topology_hash_correction(hash, ma, *effect, wired_channels, false, cache);
   }
   for (const MaterialPaintLayer *mask_item : BKE_paint_layers_mask_items(layer)) {
-    hash = topology_hash_correction(hash, ma, *mask_item, wired_channels, true);
+    hash = topology_hash_correction(hash, ma, *mask_item, wired_channels, true, cache);
   }
   for (const MaterialPaintLayer &child :
        *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
@@ -1208,6 +1249,8 @@ void paint_layers_tree_build(const Material &ma,
    * value, not topology, so it travels through a group input like opacity and Fill, instead of
    * being baked into an RGB node's default. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> live_constant_inputs;
+  /* The same, for an Effect correction with source Material (see #resolve_row_material_source). */
+  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> correction_live_constant_inputs;
 
 
   /* One output per wired channel. */
@@ -1290,6 +1333,55 @@ void paint_layers_tree_build(const Material &ma,
     }
     source_group_instances.add(&layer, instance);
     return instance;
+  };
+
+  /**
+   * What \a row shows in \a channel when its source is Material or Node Group: the same
+   * Baked/Hybrid/SourceGroup resolution a Layer row's own channel content uses. One helper for
+   * both, so an Effect correction with source Material/Node Group behaves exactly as the Layer row
+   * of the same kind -- a live constant, a live map, or the wrapper's `COLOR:<CHANNEL>` output.
+   * \a substituted mirrors the caller's own gate: a row already replaced by its bake never asks the
+   * wrapper for an instance (row_is_substituted excludes Material, so this only affects Node Group).
+   */
+  struct RowMaterialSource {
+    PaintLayerMaterialMode mode = PaintLayerMaterialMode::Baked;
+    bool live_constant = false;
+    float live_value[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool live_map = false;
+    Image *live_map_image = nullptr;
+    const ImageUser *live_map_iuser = nullptr;
+    bNode *source_group_instance = nullptr;
+    bNodeTree *source_group_tree = nullptr;
+    bNodeSocket *source_group_socket = nullptr;
+  };
+  auto resolve_row_material_source = [&](const MaterialPaintLayer &row,
+                                         const int channel,
+                                         bNodeTree &row_tree,
+                                         const bool substituted) -> RowMaterialSource {
+    RowMaterialSource out;
+    out.live_constant = BKE_paint_layers_material_live_constant(
+        ma, row, channel, out.live_value, cache);
+    out.live_map = !out.live_constant && BKE_paint_layers_material_live_image(
+                                             ma, row, channel, &out.live_map_image, &out.live_map_iuser, cache);
+    out.mode = (row.source == MA_PAINT_LAYER_SOURCE_MATERIAL) ?
+                  BKE_paint_layers_material_mode(ma, row, cache) :
+                  PaintLayerMaterialMode::Baked;
+    /* See the doc comment on the call site this was extracted from: the gate keeps an Unavailable
+     * channel from looking live through the wrapper's always-present `COLOR:<CHANNEL>` socket, and
+     * keeps a substituted row from asking the wrapper for an instance at all. */
+    if (!substituted && out.mode == PaintLayerMaterialMode::SourceGroup &&
+        material_source_group_channel(ma, row, channel, cache))
+    {
+      out.source_group_instance = source_group_instance_get(row, row_tree);
+      out.source_group_tree = source_group_trees.lookup_default(&row, nullptr);
+      if (out.source_group_instance != nullptr && out.source_group_tree != nullptr) {
+        out.source_group_socket = source_group_output(
+            *out.source_group_tree, *out.source_group_instance, channel, false);
+      }
+      BLI_assert(out.source_group_instance == nullptr ||
+                 node_belongs_to_tree(row_tree, *out.source_group_instance));
+    }
+    return out;
   };
 
   auto refresh_layer_group = [&](LayerGroup &group) {
@@ -1491,6 +1583,38 @@ void paint_layers_tree_build(const Material &ma,
                           BKE_paint_layers_channel_opacity_effective(correction, channel);
         }
         correction_opacity_inputs.lookup_or_add_default(&correction).add(channel, socket);
+      }
+      /* An Effect correction with source Material gets the same per-channel live-constant input a
+       * Layer row of that source gets (ТЗ-26): the value lives on another material's node tree, so
+       * it travels through a group input kept current by #values_sync_socket. #ROLE_LIVE_CONSTANT
+       * is reused as-is -- #values_sync_socket looks its row up by marker, and #BKE_paint_layers_find
+       * walks the whole tree, so a correction's marker resolves to the correction itself. */
+      if (!mask_item && correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+        for (const int channel : wired_channels) {
+          float live_value[4];
+          if (!BKE_paint_layers_material_live_constant(ma, correction, channel, live_value, cache)) {
+            continue;
+          }
+          const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+              eMaterialPaintChannel(channel));
+          char live_base[224];
+          SNPRINTF(live_base,
+                   "%s %s %s Source",
+                   layer.name[0] != '\0' ? layer.name : "Layer",
+                   correction.name[0] != '\0' ? correction.name : "Correction",
+                   info.ui_name);
+          bNodeTreeInterfaceSocket *live_socket = layer_group_value_input(
+              group, live_base, "NodeSocketColor", ROLE_LIVE_CONSTANT, correction.marker, channel);
+          if (live_socket == nullptr) {
+            continue;
+          }
+          if (live_socket->socket_data != nullptr) {
+            copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(live_socket->socket_data)->value,
+                      live_value);
+          }
+          correction_live_constant_inputs.lookup_or_add_default(&correction).add(channel,
+                                                                                 live_socket);
+        }
       }
       if (BKE_paint_layers_source_type(correction) != PaintLayerSourceType::Constant) {
         return;
@@ -1728,43 +1852,20 @@ void paint_layers_tree_build(const Material &ma,
         /* The active Material row's live value for this channel, when it has one. A live constant
          * needs no sampler; a live map is the source's own texture. Both count as the row taking
          * part even without a channel record, so the early drop below must see them. */
+        const RowMaterialSource row_source = resolve_row_material_source(
+            *layer, channel, tree, substituted);
         float live_value[4];
-        Image *live_map_image = nullptr;
-        const ImageUser *live_map_iuser = nullptr;
-        const bool live_constant = BKE_paint_layers_material_live_constant(
-            ma, *layer, channel, live_value, cache);
-        const bool live_map = !live_constant &&
-                              BKE_paint_layers_material_live_image(
-                                  ma, *layer, channel, &live_map_image, &live_map_iuser, cache);
+        copy_v4_v4(live_value, row_source.live_value);
+        Image *live_map_image = row_source.live_map_image;
+        const ImageUser *live_map_iuser = row_source.live_map_iuser;
+        const bool live_constant = row_source.live_constant;
+        const bool live_map = row_source.live_map;
         /* A Material row whose whole source graph goes through the wrapper group. Its instance is
          * created once per row and reused for every channel. */
-        const PaintLayerMaterialMode material_mode = (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL) ?
-                                                         BKE_paint_layers_material_mode(
-                                                             ma, *layer, cache) :
-                                                         PaintLayerMaterialMode::Baked;
-        bNode *source_group_instance = nullptr;
-        bNodeTree *source_group_tree = nullptr;
-        bNodeSocket *source_group_socket = nullptr;
-        /* A Material row only takes part in a channel the resolver can supply. Without this gate
-         * the wrapper's own `COLOR:Normal` output (the socket exists even when the resolver calls
-         * the channel Unavailable) would make the row look live there; and because an unavailable
-         * channel gives the row no layer group, `target.tree` is the parent tree, while the wrapper
-         * instance cached from the row's own group tree would then be linked into it -- a link
-         * between two trees, which crashed the rebuild. */
-        if (!substituted && material_mode == PaintLayerMaterialMode::SourceGroup &&
-            material_source_group_channel(ma, *layer, channel, cache))
-        {
-          source_group_instance = source_group_instance_get(*layer, tree);
-          source_group_tree = source_group_trees.lookup_default(layer, nullptr);
-          if (source_group_instance != nullptr && source_group_tree != nullptr) {
-            source_group_socket = source_group_output(
-                *source_group_tree, *source_group_instance, channel, false);
-          }
-          /* The instance is cached once per row and reused across that row's channels, which all
-           * build in the row's own group tree; it must never come from another tree. */
-          BLI_assert(source_group_instance == nullptr ||
-                     node_belongs_to_tree(tree, *source_group_instance));
-        }
+        const PaintLayerMaterialMode material_mode = row_source.mode;
+        bNode *source_group_instance = row_source.source_group_instance;
+        bNodeTree *source_group_tree = row_source.source_group_tree;
+        bNodeSocket *source_group_socket = row_source.source_group_socket;
 
         if (!substituted && BKE_paint_layers_is_folder(*layer)) {
           /* A folder: its contents are built in isolation -- pre-multiplied colour and coverage --
@@ -2302,7 +2403,9 @@ void paint_layers_tree_build(const Material &ma,
           if (!ELEM(correction.source,
                     MA_PAINT_LAYER_SOURCE_IMAGE,
                     MA_PAINT_LAYER_SOURCE_CONSTANT,
-                    MA_PAINT_LAYER_SOURCE_MESH_MAP))
+                    MA_PAINT_LAYER_SOURCE_MESH_MAP,
+                    MA_PAINT_LAYER_SOURCE_MATERIAL,
+                    MA_PAINT_LAYER_SOURCE_NODE_GROUP))
           {
             continue;
           }
@@ -2327,6 +2430,14 @@ void paint_layers_tree_build(const Material &ma,
           bNodeSocket *correction_alpha = nullptr;
           /* The node owning the colour socket: the group input for a Fill, the map for a Paint. */
           bNode *correction_color_node = nullptr;
+          /* A Material correction's own coverage, exactly like a Layer row of that source
+           * (#BKE_paint_layers_material_lives_from_source's caller reads `layer_factor` the same
+           * way): the source's Alpha input decides its transparency, never the content channel's own
+           * map alpha (a Material row has no coverage of its own -- see the comment on `content_cov`
+           * below). Populated only for a Material correction; every other kind keeps using
+           * `correction_alpha`, its own content map's alpha. */
+          bNode *correction_material_coverage_node = nullptr;
+          bNodeSocket *correction_material_coverage_socket = nullptr;
           /* Whether the effect's map is read as colour data. The Image Texture node only
            * un-premultiplies a non-data texture, so a data map needs the chain's own Divide (the
            * same rule the mask chain follows). */
@@ -2338,6 +2449,165 @@ void paint_layers_tree_build(const Material &ma,
               correction_color = group_input_socket(**fill_iface);
               correction_color_node = group_input;
             }
+            if (correction_color == nullptr) {
+              continue;
+            }
+          }
+          else if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+            /* An Effect correction with source Material behaves exactly as a Layer row of that
+             * source: the same Baked/Hybrid/SourceGroup resolution, through the one helper both
+             * share. */
+            const RowMaterialSource row_source = resolve_row_material_source(
+                correction, channel, tree, false);
+            if (row_source.live_constant) {
+              if (Map<int, bNodeTreeInterfaceSocket *> *live_by_channel =
+                      correction_live_constant_inputs.lookup_ptr(&correction))
+              {
+                if (bNodeTreeInterfaceSocket **live_iface = live_by_channel->lookup_ptr(channel)) {
+                  correction_color = group_input_socket(**live_iface);
+                  correction_color_node = group_input;
+                }
+              }
+              if (correction_color == nullptr) {
+                continue;
+              }
+            }
+            else if (row_source.live_map) {
+              bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+              if (map == nullptr) {
+                continue;
+              }
+              map->id = &row_source.live_map_image->id;
+              id_us_plus(&row_source.live_map_image->id);
+              map->location[0] = location_x;
+              map->location[1] = location_y - 160.0f;
+              if (NodeTexImage *dst = static_cast<NodeTexImage *>(map->storage)) {
+                if (row_source.live_map_iuser != nullptr) {
+                  dst->iuser = *row_source.live_map_iuser;
+                }
+              }
+              correction_color = socket_out(*map, "Color");
+              correction_alpha = socket_out(*map, "Alpha");
+              correction_color_node = map;
+              correction_source = map;
+              if (correction_color == nullptr) {
+                continue;
+              }
+            }
+            else if (row_source.source_group_instance != nullptr &&
+                     row_source.source_group_socket != nullptr)
+            {
+              /* The whole source graph goes through the wrapper's COLOR:<CHANNEL> output, exactly
+               * like a Layer row in SourceGroup mode. */
+              correction_color = row_source.source_group_socket;
+              correction_color_node = row_source.source_group_instance;
+            }
+            else {
+              /* Baked: the correction's own external bake, read through the same resolver a Layer
+               * row's Baked mode uses. */
+              Image *correction_image = paint_layer_channel_image(ma, correction, channel);
+              if (correction_image == nullptr) {
+                continue;
+              }
+              content_map_is_data = IMB_colormanagement_space_name_is_data(
+                  correction_image->colorspace_settings.name);
+              correction_source = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+              if (correction_source == nullptr) {
+                continue;
+              }
+              correction_source->id = &correction_image->id;
+              id_us_plus(&correction_image->id);
+              correction_source->location[0] = location_x;
+              correction_source->location[1] = location_y - 160.0f;
+              correction_color = socket_out(*correction_source, "Color");
+              correction_alpha = socket_out(*correction_source, "Alpha");
+              correction_color_node = correction_source;
+              if (correction_color == nullptr) {
+                continue;
+              }
+            }
+            /* The correction's own coverage: the same Baked/Hybrid/SourceGroup precedence
+             * #resolve_row_material_source uses for content, but read on the Alpha channel and
+             * ending at the wrapper's dedicated COVERAGE output (SourceGroup) or the correction's
+             * own bake coverage (Baked) -- mirrors `layer_factor` above (~2276-2356) exactly, with
+             * `correction` standing in for `*layer`. */
+            const RowMaterialSource alpha_source = resolve_row_material_source(
+                correction, PAINT_MATERIAL_CHANNEL_ALPHA, tree, false);
+            if (alpha_source.live_constant) {
+              bNode *value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+              bNodeSocket *value_out = (value != nullptr) ? socket_out(*value, "Value") : nullptr;
+              if (value != nullptr && value_out != nullptr && value_out->default_value != nullptr) {
+                value->location[0] = location_x - 90.0f;
+                value->location[1] = location_y - 240.0f;
+                static_cast<bNodeSocketValueFloat *>(value_out->default_value)->value =
+                    alpha_source.live_value[0];
+                correction_material_coverage_node = value;
+                correction_material_coverage_socket = value_out;
+              }
+            }
+            else if (alpha_source.live_map) {
+              bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+              bNodeSocket *map_alpha = (map != nullptr) ? socket_out(*map, "Alpha") : nullptr;
+              if (map != nullptr && map_alpha != nullptr) {
+                map->id = &alpha_source.live_map_image->id;
+                id_us_plus(&alpha_source.live_map_image->id);
+                map->location[0] = location_x - 90.0f;
+                map->location[1] = location_y - 240.0f;
+                if (NodeTexImage *dst = static_cast<NodeTexImage *>(map->storage)) {
+                  if (alpha_source.live_map_iuser != nullptr) {
+                    dst->iuser = *alpha_source.live_map_iuser;
+                  }
+                }
+                correction_material_coverage_node = map;
+                correction_material_coverage_socket = map_alpha;
+              }
+            }
+            else if (alpha_source.source_group_instance != nullptr &&
+                     alpha_source.source_group_tree != nullptr)
+            {
+              bNodeSocket *coverage_out = source_group_output(*alpha_source.source_group_tree,
+                                                               *alpha_source.source_group_instance,
+                                                               PAINT_MATERIAL_CHANNEL_ALPHA,
+                                                               true);
+              if (coverage_out != nullptr) {
+                correction_material_coverage_node = alpha_source.source_group_instance;
+                correction_material_coverage_socket = coverage_out;
+              }
+              else if (correction.bake != nullptr && correction.bake->coverage != nullptr) {
+                std::tie(correction_material_coverage_node, correction_material_coverage_socket) =
+                    grey_of_map(*correction.bake->coverage, -240.0f);
+              }
+            }
+            else if (correction.bake != nullptr && correction.bake->coverage != nullptr) {
+              std::tie(correction_material_coverage_node, correction_material_coverage_socket) =
+                  grey_of_map(*correction.bake->coverage, -240.0f);
+            }
+          }
+          else if (correction.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+            /* A Node Group correction is Baked-only, exactly like a Layer row of that source: no
+             * live path exists, so a correction with no valid bake yet takes no part (mirrors the
+             * Custom row's own #custom_bake_missing_warn_once skip). */
+            Image *correction_baked = nullptr;
+            if (!BKE_paint_layers_bake_substitute(ma, correction, channel, &correction_baked) &&
+                !BKE_paint_layers_bake_substitute_custom(
+                    ma, correction, channel, &correction_baked, nullptr))
+            {
+              continue;
+            }
+            if (correction_baked == nullptr) {
+              continue;
+            }
+            correction_source = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+            if (correction_source == nullptr) {
+              continue;
+            }
+            correction_source->id = &correction_baked->id;
+            id_us_plus(&correction_baked->id);
+            correction_source->location[0] = location_x;
+            correction_source->location[1] = location_y - 160.0f;
+            correction_color = socket_out(*correction_source, "Color");
+            correction_alpha = socket_out(*correction_source, "Alpha");
+            correction_color_node = correction_source;
             if (correction_color == nullptr) {
               continue;
             }
@@ -2515,7 +2785,19 @@ void paint_layers_tree_build(const Material &ma,
           bNodeSocket *correction_coverage_socket = nullptr;
           bNode *correction_coverage_node = nullptr;
           if (correction_opacity != nullptr && group_input != nullptr) {
-            if (fill) {
+            /* A Material correction's per-pixel coverage is its own Alpha-channel resolution
+             * (`correction_material_coverage_*`, built above like `layer_factor`), never the
+             * content channel's own map alpha -- a Material row has no coverage of its own either
+             * (see the comment on `content_cov`). Every other kind uses its content map's alpha
+             * (`correction_alpha`) the way it always did. A Fill correction's factor is its opacity
+             * alone, with no per-pixel term to scale it; a Material correction with none of its own
+             * (Baked with no bake coverage yet, say) behaves the same way for this purpose. */
+            const bool material_correction = correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
+            bNodeSocket *coverage_map_socket = material_correction ? correction_material_coverage_socket :
+                                                                     correction_alpha;
+            bNode *coverage_map_node = material_correction ? correction_material_coverage_node :
+                                                              correction_source;
+            if (fill || coverage_map_socket == nullptr || coverage_map_node == nullptr) {
               /* A flat correction's factor is its opacity; it covers fully. */
               correction_coverage_socket = correction_opacity;
               correction_coverage_node = group_input;
@@ -2524,7 +2806,7 @@ void paint_layers_tree_build(const Material &ma,
             }
             else {
               bNode *correction_factor = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
-              if (correction_factor == nullptr || correction_alpha == nullptr) {
+              if (correction_factor == nullptr) {
                 continue;
               }
               correction_factor->custom1 = NODE_MATH_MULTIPLY;
@@ -2538,11 +2820,8 @@ void paint_layers_tree_build(const Material &ma,
               }
               bke::node_add_link(
                   tree, *group_input, *correction_opacity, *correction_factor, *factor_value);
-              bke::node_add_link(tree,
-                                 *correction_source,
-                                 *correction_alpha,
-                                 *correction_factor,
-                                 *factor_coverage);
+              bke::node_add_link(
+                  tree, *coverage_map_node, *coverage_map_socket, *correction_factor, *factor_coverage);
               bke::node_add_link(
                   tree, *correction_factor, *factor_out, *correction_mix, *mix_fac);
               correction_coverage_socket = factor_out;
@@ -4990,11 +5269,16 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   auto populate_material_rows = [&]() {
     report.material_rows.clear();
     Vector<const MaterialPaintLayer *> layers;
-    BKE_paint_layers_flatten(ma, layers);
+    /* An Effect correction with source Material needs its own wrapper ensured here too (this is
+     * what fills #ctx.source_group_get, read by #resolve_row_material_source), so this walks every
+     * role, not just Layer rows. The report itself stays Layer-only below: it is a per-row status
+     * display, and mixing a correction into it would change what its existing readers see. */
+    BKE_paint_layers_flatten_all(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
       if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
         continue;
       }
+      const bool is_layer_row = BKE_paint_layers_role(*layer) == PaintLayerRole::Layer;
       const PaintLayerMaterialMode mode = BKE_paint_layers_material_mode(ma, *layer, &regen_cache);
       PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
       bool wrapper_built = false;
@@ -5026,26 +5310,29 @@ bool BKE_paint_layers_regenerate(Main &bmain,
         }
         wrapper_built = wrapper != nullptr;
       }
-      PaintLayersRegenerateReport::MaterialRowModeReport row;
-      row.marker = layer->marker;
-      STRNCPY(row.name, layer->name);
-      row.mode = mode;
-      row.refusal = refusal;
-      row.wrapper_built = wrapper_built;
-      row.group_depth = group_depth;
-      row.source_name[0] = '\0';
-      row.source_uid = 0;
-      if (layer->material != nullptr) {
-        STRNCPY(row.source_name, layer->material->id.name + 2);
-        row.source_uid = layer->material->id.session_uid;
+      if (is_layer_row) {
+        PaintLayersRegenerateReport::MaterialRowModeReport row;
+        row.marker = layer->marker;
+        STRNCPY(row.name, layer->name);
+        row.mode = mode;
+        row.refusal = refusal;
+        row.wrapper_built = wrapper_built;
+        row.group_depth = group_depth;
+        row.source_name[0] = '\0';
+        row.source_uid = 0;
+        if (layer->material != nullptr) {
+          STRNCPY(row.source_name, layer->material->id.name + 2);
+          row.source_uid = layer->material->id.session_uid;
+        }
+        row.deferred = BKE_paint_layers_bake_row_is_deferred(ma, *layer);
+        if (BKE_paint_layers_material_forced_bake(ma, *layer)) {
+          row.refusal = PaintLayersSourceGroupRefusal::TooManyTextures;
+        }
+        report.material_rows.append(row);
       }
-      row.deferred = BKE_paint_layers_bake_row_is_deferred(ma, *layer);
-      if (BKE_paint_layers_material_forced_bake(ma, *layer)) {
-        row.refusal = PaintLayersSourceGroupRefusal::TooManyTextures;
-      }
-      report.material_rows.append(row);
       /* The row-level write the Main-free status reads. A source wrapper that failed to build is
-       * otherwise known only inside this report, which the tagged entry point discards. */
+       * otherwise known only inside this report, which the tagged entry point discards. Read for
+       * any role, so an Effect correction's own SourceGroup failure is tracked too. */
       BKE_paint_layers_source_group_build_failed_set(
           ma, *layer, refusal == PaintLayersSourceGroupRefusal::BuildFailed);
     }

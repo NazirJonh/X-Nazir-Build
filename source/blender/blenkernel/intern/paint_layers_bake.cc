@@ -1264,7 +1264,9 @@ bool BKE_paint_layers_bake_image_is_deferred(const Main &bmain, const Image &ima
       continue;
     }
     Vector<const MaterialPaintLayer *> layers;
-    BKE_paint_layers_flatten(ma, layers);
+    /* An Effect correction now also owns an external bake (Material/Node Group), so its maps must
+     * be found here too, or they would never be recognised as deferred. */
+    BKE_paint_layers_flatten_all(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
       if (layer->bake == nullptr || !BKE_paint_layers_bake_row_is_deferred(ma, *layer)) {
         continue;
@@ -1292,7 +1294,9 @@ bool BKE_paint_layers_source_material_is_live(const Main &bmain, const Material 
       continue;
     }
     Vector<const MaterialPaintLayer *> layers;
-    BKE_paint_layers_flatten(ma, layers);
+    /* An Effect correction reading this source is as live as a Layer row reading it, so it must
+     * count here too. */
+    BKE_paint_layers_flatten_all(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
       if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer->material != &source) {
         continue;

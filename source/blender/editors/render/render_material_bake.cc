@@ -2138,7 +2138,9 @@ static const MaterialPaintLayer *bake_image_owner_find(Main &bmain,
       continue;
     }
     Vector<const MaterialPaintLayer *> layers;
-    BKE_paint_layers_flatten(layered, layers);
+    /* An Effect correction's own external bake (Material/Node Group) owns maps too, so it must be
+     * found here or they would be treated as orphaned leftovers. */
+    BKE_paint_layers_flatten_all(layered, layers);
     for (const MaterialPaintLayer *layer : layers) {
       if (layer->bake == nullptr) {
         continue;
@@ -2275,7 +2277,9 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
     return row.bake->coverage != nullptr && material_bake_source_is_baking(*row.bake->coverage);
   };
   Vector<const MaterialPaintLayer *> layers;
-  BKE_paint_layers_flatten(ma, layers);
+  /* An Effect correction with source Material is baked by this same job queue, so it must be
+   * enqueued here too. */
+  BKE_paint_layers_flatten_all(ma, layers);
   for (const MaterialPaintLayer *layer_const : layers) {
     /* The row the user is editing inside is left live: re-baking it on every source edit would
      * fight the edit. The bake catches up on a later update, once another row becomes active. */
@@ -2787,7 +2791,9 @@ void material_bake_custom_rows_ensure(Main &bmain, Material &ma)
     return;
   }
   Vector<const MaterialPaintLayer *> layers;
-  BKE_paint_layers_flatten(ma, layers);
+  /* An Effect correction with source Node Group is baked by this same job queue, so it must be
+   * enqueued here too. */
+  BKE_paint_layers_flatten_all(ma, layers);
   for (const MaterialPaintLayer *layer_const : layers) {
     if (layer_const->source != MA_PAINT_LAYER_SOURCE_NODE_GROUP ||
         layer_const->custom_group == nullptr || layer_const->bake == nullptr ||

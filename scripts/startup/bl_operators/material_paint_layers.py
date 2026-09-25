@@ -31,6 +31,14 @@ def _paint_layers_active_layer(context):
     return mat.paint_layers.active
 
 
+def _paint_layers_uv_autofill(context):
+    """Name the stack's UV layer after the object's active UV map when it is still empty."""
+    mat = context.material
+    obj = context.object
+    if mat is not None and obj is not None:
+        mat.paint_layers_uv_map_autofill(object=obj)
+
+
 class _PaintLayerOperator(Operator):
     """Base for the thin layer operators: undo, a report and the RNA notifier, and the row they
     act on taken from the operator or the material's active layer (a marker lookup).
@@ -77,6 +85,7 @@ class MATERIAL_OT_paint_layer_add(_PaintLayerOperator):
 
     def execute(self, context):
         layers = context.material.paint_layers
+        _paint_layers_uv_autofill(context)
         layer = layers.new(source=self.source, name=self.name)
         if layer is not None:
             layers.active = layer
@@ -327,6 +336,7 @@ class MATERIAL_OT_paint_layer_correction_add(_PaintLayerOperator):
         layer = self._layer(context)
         if layer is None:
             return {'CANCELLED'}
+        _paint_layers_uv_autofill(context)
         layer.correction_add(role=self.role, source=self.source, name=self.name)
         return {'FINISHED'}
 

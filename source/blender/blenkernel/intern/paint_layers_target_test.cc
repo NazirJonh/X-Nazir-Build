@@ -754,4 +754,63 @@ TEST_F(PaintLayersTargetTest, object_target_refuses_a_missing_named_uv_layer)
   EXPECT_EQ(BKE_paint_layers_target_refusal(target), nullptr);
 }
 
+TEST_F(PaintLayersTargetTest, autofill_takes_the_object_active_uv_and_marks_the_material)
+{
+  Mesh *mesh = BKE_mesh_add(bmain, "AutofillMesh");
+  bke::MutableAttributeAccessor attributes = mesh->attributes_for_write();
+  attributes.lookup_or_add_for_write_only_span<float2>("UVMap", bke::AttrDomain::Corner);
+  mesh->uv_maps_active_set("UVMap");
+
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "AutofillObject");
+  ob->data = &mesh->id;
+  id_us_plus(&mesh->id);
+
+  Material *ma = BKE_material_add(bmain, "AutofillMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+
+  /* The first action on the object names the stack's UV layer after the object's active one. */
+  BKE_paint_layers_uv_map_autofill(*ma, ob);
+  EXPECT_STREQ(ma->paint_layers_uv_map, "UVMap");
+  /* A chosen name is topology: the generated tree gains a UV Map node, so the material is stale. */
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+}
+
+/* GUARD: an existing name is never overwritten. */
+TEST_F(PaintLayersTargetTest, autofill_keeps_a_name_that_is_already_set)
+{
+  Mesh *mesh = BKE_mesh_add(bmain, "AutofillKeepMesh");
+  bke::MutableAttributeAccessor attributes = mesh->attributes_for_write();
+  attributes.lookup_or_add_for_write_only_span<float2>("UVMap", bke::AttrDomain::Corner);
+  attributes.lookup_or_add_for_write_only_span<float2>("Chosen", bke::AttrDomain::Corner);
+  mesh->uv_maps_active_set("UVMap");
+
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "AutofillKeepObject");
+  ob->data = &mesh->id;
+  id_us_plus(&mesh->id);
+
+  Material *ma = BKE_material_add(bmain, "AutofillKeepMat");
+  BLI_strncpy(ma->paint_layers_uv_map, "Chosen", sizeof(ma->paint_layers_uv_map));
+
+  BKE_paint_layers_uv_map_autofill(*ma, ob);
+  EXPECT_STREQ(ma->paint_layers_uv_map, "Chosen");
+}
+
+/* GUARD: a mesh with no UV layer leaves the name empty. */
+TEST_F(PaintLayersTargetTest, autofill_leaves_an_empty_name_for_a_mesh_without_uv)
+{
+  Mesh *mesh = BKE_mesh_add(bmain, "AutofillNoUvMesh");
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "AutofillNoUvObject");
+  ob->data = &mesh->id;
+  id_us_plus(&mesh->id);
+
+  Material *ma = BKE_material_add(bmain, "AutofillNoUvMat");
+
+  BKE_paint_layers_uv_map_autofill(*ma, ob);
+  EXPECT_STREQ(ma->paint_layers_uv_map, "");
+}
+
 }  // namespace blender::bke::tests

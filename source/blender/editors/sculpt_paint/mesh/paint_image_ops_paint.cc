@@ -460,6 +460,9 @@ static bool texture_paint_prepare_layered_maps(bContext *C,
       continue;
     }
     any_layered = true;
+    /* A stack that names no UV layer adopts this object's active one before the target resolves it,
+     * so the first stroke paints the layer the object is actually unwrapped with. */
+    BKE_paint_layers_uv_map_autofill(*ma, ob);
     PaintLayersTarget target;
     if (BKE_paint_layers_target_get(
             *ob, slot, paint_mode.active_layer_channel, paint_mode, target))

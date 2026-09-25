@@ -21,6 +21,7 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_object.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_report.hh"
@@ -47,6 +48,7 @@
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include <algorithm>
@@ -3213,6 +3215,37 @@ TEST_F(PaintLayersDescription, rna_uv_map_setter_marks_tree_stale)
   EXPECT_STREQ(ma->paint_layers_uv_map, "UVMap");
 
   RNA_property_update_main(bmain, nullptr, &ma_ptr, prop);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+}
+
+TEST_F(PaintLayersDescription, rna_uv_map_autofill_fills_from_the_object_active_uv)
+{
+  Mesh *mesh = BKE_mesh_add(bmain, "UvAutofillMesh");
+  bke::MutableAttributeAccessor attributes = mesh->attributes_for_write();
+  attributes.lookup_or_add_for_write_only_span<float2>("UVMap", bke::AttrDomain::Corner);
+  mesh->uv_maps_active_set("UVMap");
+
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "UvAutofillObject");
+  ob->data = &mesh->id;
+  id_us_plus(&mesh->id);
+
+  Material *ma = BKE_material_add(bmain, "UvAutofill");
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  FunctionRNA *func = RNA_struct_find_function(ma_ptr.type, "paint_layers_uv_map_autofill");
+  ASSERT_NE(func, nullptr);
+  ParameterList parms;
+  RNA_parameter_list_create(&parms, &ma_ptr, func);
+  Object *ob_raw = ob;
+  RNA_parameter_set_lookup(&parms, "object", &ob_raw);
+  ReportList reports;
+  BKE_reports_init(&reports, RPT_STORE);
+  RNA_function_call(nullptr, &reports, &ma_ptr, func, &parms);
+  BKE_reports_free(&reports);
+  RNA_parameter_list_free(&parms);
+
+  EXPECT_STREQ(ma->paint_layers_uv_map, "UVMap");
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 }
 

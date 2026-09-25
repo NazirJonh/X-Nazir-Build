@@ -5507,6 +5507,9 @@ bool SculptPaintStroke::ensure_layered_maps(bContext *C, wmOperator *op)
   if (ma == nullptr || !paint_layers_is_layered(*ma)) {
     return true;
   }
+  /* A stack that names no UV layer adopts this object's active one before the target resolves it,
+   * so the first stroke paints the layer the object is actually unwrapped with. */
+  BKE_paint_layers_uv_map_autofill(*ma, ob);
   /* A geometry brush (Draw, Grab, Mask, Face Sets) never writes an image, so it must not grow the
    * description or leave an undo step. */
   if (!sculpt_brush_uses_image_canvas(*brush, *paint_mode_settings_, sculpt_->paint, *ob)) {

@@ -365,6 +365,9 @@ void BKE_paint_layers_uv_map_autofill(Material &ma, const Object *ob)
     return;
   }
   BLI_strncpy(ma.paint_layers_uv_map, active.c_str(), sizeof(ma.paint_layers_uv_map));
+  /* A chosen name is topology: the generated graph gains a UV Map node, so the material has to be
+   * marked stale for the next regeneration to pick it up. */
+  BKE_paint_layers_tag_edited(ma);
 }
 
 const PaintLayerKindInfo &BKE_paint_layers_kind_info(const int source)

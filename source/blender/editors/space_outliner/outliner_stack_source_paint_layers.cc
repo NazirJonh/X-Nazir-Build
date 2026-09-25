@@ -1311,6 +1311,9 @@ class PaintLayersStackSource final : public StackSource,
       return -1;
     }
     Material &material = layers_owner(owner);
+    /* A stack that names no UV layer adopts the active object's active one on the first add, so the
+     * generated graph is wired to the layer the user is unwrapped with. */
+    BKE_paint_layers_uv_map_autofill(material, CTX_data_active_object(&C));
     if (kind == PAINT_STACK_ADD_MATERIAL) {
       /* The Material layer bakes its source, so it is made by the same ED verb the material drop
        * uses; that owns the bake and the reports. */

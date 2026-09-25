@@ -700,6 +700,19 @@ static void rna_Material_paint_layers_uv_map_update(Main * /*bmain*/,
   BKE_paint_layers_tag_edited(*ma);
 }
 
+/**
+ * The RNA half of #BKE_paint_layers_uv_map_autofill: when the stack names no UV layer, take \a ob's
+ * active UV map, so an add-on's first action wires the graph to the layer the object is unwrapped
+ * with. A material that already names one is left alone.
+ */
+static void rna_Material_paint_layers_uv_map_autofill(Material *ma, Object *ob)
+{
+  if (ma == nullptr) {
+    return;
+  }
+  BKE_paint_layers_uv_map_autofill(*ma, ob);
+}
+
 /** Every layer-pointer setter goes back to the material that owns the row, which the pointer's
  * #owner_id carries however deep the row is nested. */
 static Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *layer)
@@ -3454,6 +3467,18 @@ void RNA_def_material(BlenderRNA *brna)
       "UV Map",
       "Name of the UV layer the Paint Layers stack samples; empty uses the object's active UV");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layers_uv_map_update");
+
+  {
+    FunctionRNA *func = RNA_def_function(
+        srna, "paint_layers_uv_map_autofill", "rna_Material_paint_layers_uv_map_autofill");
+    RNA_def_function_ui_description(
+        func,
+        "Name the stack's UV layer from the object's active UV map when it is still empty, so a "
+        "freshly authored stack samples the layer the object is unwrapped with");
+    PropertyRNA *parm = RNA_def_pointer(
+        func, "object", "Object", "Object", "Mesh object whose active UV map names the layer");
+    RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  }
 
   /* common */
   rna_def_animdata_common(srna);

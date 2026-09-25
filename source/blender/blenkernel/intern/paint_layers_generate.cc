@@ -6347,7 +6347,8 @@ bool source_group_build_level(Main &bmain,
                               const bool is_root,
                               const bUUID &owner_uid,
                               const int source_uid,
-                              const char *source_name)
+                              const char *source_name,
+                              const char *uv_name)
 {
   Map<const bNode *, bNode *> node_map;
   if (!source_group_copy_nodes(bmain, tree, orig_tree, node_map)) {
@@ -6358,6 +6359,9 @@ bool source_group_build_level(Main &bmain,
    * Principled's source is not seen and the Group Output keeps the socket defaults instead of the
    * values the group is fed. */
   tree.ensure_topology_cache();
+  /* Every Image Texture the wrapper copied samples the owner's named UV layer: an already-wired
+   * Vector is left alone, an open one is linked to the shared UV Map node. */
+  generated_uv_maps_wire(tree, uv_name);
   if (depth >= int(path.size())) {
     bNode *copied_principled = node_map.lookup_default(principled, nullptr);
     if (copied_principled == nullptr) {
@@ -6408,7 +6412,8 @@ bool source_group_build_level(Main &bmain,
                                 false,
                                 owner_uid,
                                 source_uid,
-                                source_name))
+                                source_name,
+                                uv_name))
   {
     return false;
   }
@@ -6443,7 +6448,8 @@ bool source_group_build(Main &bmain,
                                   true,
                                   owner.paint_layers_owner_uid,
                                   source_uid,
-                                  source.id.name + 2);
+                                  source.id.name + 2,
+                                  BKE_paint_layers_uv_map_name(owner));
 }
 
 /** Delete the wrapper trees of \a owner whose source is no longer referenced by any row. */
@@ -6979,7 +6985,10 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
     owner.paint_layers_owner_uid = BLI_uuid_generate_random();
   }
   const uint64_t source_values = BKE_paint_layers_source_material_tree_hash(source);
-  const uint64_t source_topology = BKE_paint_layers_source_material_topology_hash(source);
+  uint64_t source_topology = BKE_paint_layers_source_material_topology_hash(source);
+  /* The owner's UV layer name decides the UV Map wiring inside the wrapper, so it is part of what
+   * the wrapper is built from: a change rebuilds it, the same name keeps it. */
+  topology_hash_string(source_topology, BKE_paint_layers_uv_map_name(owner));
   const int source_uid = int(source.id.session_uid);
   char name[MAX_ID_NAME - 2];
   SNPRINTF(name, ".PL Source %s", source.id.name + 2);

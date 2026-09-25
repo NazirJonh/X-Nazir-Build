@@ -2329,7 +2329,138 @@ void source_set_noise_base_color(Main &bmain, Material &source)
   BKE_ntree_update_after_single_tree_change(bmain, *source.nodetree);
 }
 
+/** The node of \a tree named \a name, or null; a copied wrapper preserves node names. */
+bNode *node_by_name(bNodeTree &tree, const StringRefNull name)
+{
+  for (bNode &node : tree.nodes) {
+    if (node.name == name) {
+      return &node;
+    }
+  }
+  return nullptr;
+}
+
+/** The node feeding the Vector input of \a tex, or null when nothing is linked. */
+bNode *vector_source(bNode &tex)
+{
+  bNodeSocket *vector = bke::node_find_socket(tex, SOCK_IN, "Vector"_ustr);
+  if (vector == nullptr) {
+    return nullptr;
+  }
+  const Span<const bNodeLink *> links = vector->directly_linked_links();
+  if (links.is_empty()) {
+    return nullptr;
+  }
+  return links[0]->fromnode;
+}
+
+/** The UV layer name a UV Map node reads, or "". */
+const char *uv_node_layer(const bNode &node)
+{
+  const NodeShaderUVMap *storage = static_cast<const NodeShaderUVMap *>(node.storage);
+  return (storage != nullptr) ? storage->uv_map : "";
+}
+
 }  // namespace
+
+TEST_F(PaintLayersGenerateTest, source_group_uv_wires_unlinked_textures_only)
+{
+  Material *source = add_principled_source("UvWrapSource", 0.3f);
+  source_set_noise_base_color(*bmain, *source);
+  bNodeTree &src_tree = *source->nodetree;
+
+  /* A texture with no Vector link must sample the named layer; one already wired to its own UV Map
+   * node is left alone. */
+  bNode *tex_open = bke::node_add_static_node(nullptr, src_tree, SH_NODE_TEX_IMAGE);
+  bNode *tex_linked = bke::node_add_static_node(nullptr, src_tree, SH_NODE_TEX_IMAGE);
+  bNode *src_uv = bke::node_add_static_node(nullptr, src_tree, SH_NODE_UVMAP);
+  ASSERT_NE(tex_open, nullptr);
+  ASSERT_NE(tex_linked, nullptr);
+  ASSERT_NE(src_uv, nullptr);
+  BLI_strncpy(static_cast<NodeShaderUVMap *>(src_uv->storage)->uv_map,
+              "SourceUV",
+              sizeof(static_cast<NodeShaderUVMap *>(src_uv->storage)->uv_map));
+  bke::node_add_link(src_tree,
+                     *src_uv,
+                     *bke::node_find_socket(*src_uv, SOCK_OUT, "UV"_ustr),
+                     *tex_linked,
+                     *bke::node_find_socket(*tex_linked, SOCK_IN, "Vector"_ustr));
+  BKE_ntree_update_tag_all(&src_tree);
+  BKE_ntree_update_after_single_tree_change(*bmain, src_tree);
+
+  BLI_strncpy(ma->paint_layers_uv_map, "UVMap", sizeof(ma->paint_layers_uv_map));
+  PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::NoNodeTree;
+  bNodeTree *group = BKE_paint_layers_source_group_ensure(*bmain, *ma, *source, refusal);
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(refusal, PaintLayersSourceGroupRefusal::None);
+  /* The links the wrapper build added are only visible after its runtime cache is rebuilt. */
+  group->ensure_topology_cache();
+
+  bNode *copied_open = node_by_name(*group, tex_open->name);
+  bNode *copied_linked = node_by_name(*group, tex_linked->name);
+  ASSERT_NE(copied_open, nullptr);
+  ASSERT_NE(copied_linked, nullptr);
+  bNode *open_source = vector_source(*copied_open);
+  bNode *linked_source = vector_source(*copied_linked);
+  ASSERT_NE(open_source, nullptr);
+  ASSERT_NE(linked_source, nullptr);
+  EXPECT_EQ(open_source->type_legacy, SH_NODE_UVMAP);
+  EXPECT_STREQ(uv_node_layer(*open_source), "UVMap");
+  /* The already-wired texture keeps its own UV Map node untouched. */
+  EXPECT_EQ(linked_source->type_legacy, SH_NODE_UVMAP);
+  EXPECT_STREQ(uv_node_layer(*linked_source), "SourceUV");
+
+  /* The source material itself is never written to: its open texture stays open. */
+  EXPECT_EQ(vector_source(*tex_open), nullptr);
+}
+
+TEST_F(PaintLayersGenerateTest, source_group_uv_name_change_rebuilds_the_wrapper)
+{
+  Material *source = add_principled_source("UvRebuildSource", 0.3f);
+  source_set_noise_base_color(*bmain, *source);
+  bNode *tex = bke::node_add_static_node(nullptr, *source->nodetree, SH_NODE_TEX_IMAGE);
+  ASSERT_NE(tex, nullptr);
+
+  BLI_strncpy(ma->paint_layers_uv_map, "First", sizeof(ma->paint_layers_uv_map));
+  PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
+  bNodeTree *group = BKE_paint_layers_source_group_ensure(*bmain, *ma, *source, refusal);
+  ASSERT_NE(group, nullptr);
+  group->ensure_topology_cache();
+  bNode *first_uv = vector_source(*node_by_name(*group, tex->name));
+  ASSERT_NE(first_uv, nullptr);
+  EXPECT_STREQ(uv_node_layer(*first_uv), "First");
+
+  /* The same name keeps the wrapper and its nodes. */
+  bNodeTree *again = BKE_paint_layers_source_group_ensure(*bmain, *ma, *source, refusal);
+  EXPECT_EQ(again, group);
+  group->ensure_topology_cache();
+  EXPECT_EQ(vector_source(*node_by_name(*group, tex->name)), first_uv);
+
+  /* A new name is topology: the wrapper rebuilds and the UV Map node names the new layer. */
+  BLI_strncpy(ma->paint_layers_uv_map, "Second", sizeof(ma->paint_layers_uv_map));
+  bNodeTree *rebuilt = BKE_paint_layers_source_group_ensure(*bmain, *ma, *source, refusal);
+  EXPECT_EQ(rebuilt, group);
+  group->ensure_topology_cache();
+  bNode *second_uv = vector_source(*node_by_name(*group, tex->name));
+  ASSERT_NE(second_uv, nullptr);
+  EXPECT_STREQ(uv_node_layer(*second_uv), "Second");
+}
+
+/* GUARD: an empty UV name adds no node and leaves textures open. */
+TEST_F(PaintLayersGenerateTest, source_group_uv_empty_name_adds_no_node)
+{
+  Material *source = add_principled_source("UvEmptySource", 0.3f);
+  source_set_noise_base_color(*bmain, *source);
+  bNode *tex = bke::node_add_static_node(nullptr, *source->nodetree, SH_NODE_TEX_IMAGE);
+  ASSERT_NE(tex, nullptr);
+
+  BLI_strncpy(ma->paint_layers_uv_map, "", sizeof(ma->paint_layers_uv_map));
+  PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
+  bNodeTree *group = BKE_paint_layers_source_group_ensure(*bmain, *ma, *source, refusal);
+  ASSERT_NE(group, nullptr);
+  group->ensure_topology_cache();
+  EXPECT_EQ(vector_source(*node_by_name(*group, tex->name)), nullptr);
+}
 
 TEST_F(PaintLayersGenerateTest, source_group_wraps_principled_channels)
 {

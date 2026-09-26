@@ -2024,6 +2024,102 @@ TEST_F(PaintLayersDescription, value_edit_regens_only_a_baked_row_or_its_ancesto
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 }
 
+TEST_F(PaintLayersDescription, is_stale_combines_cpu_and_scheduled_signals)
+{
+  Material *ma = BKE_material_add(bmain, "IsStale");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+
+  /* A material with no bake carried and nothing scheduled is not stale. */
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*ma));
+
+  /* The CPU planner's own stale mark is one of the signals. */
+  ma->paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+  EXPECT_TRUE(BKE_paint_layers_is_stale(*ma));
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*ma));
+
+  /* A Material row left behind by the active marker moving is another. */
+  ma->paint_layers_flag |= MA_PAINT_LAYERS_MATERIAL_BAKE_DUE;
+  EXPECT_TRUE(BKE_paint_layers_is_stale(*ma));
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_MATERIAL_BAKE_DUE;
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*ma));
+
+  /* The editor's own scheduled/in-flight hand-off, independent of both flags above. */
+  EXPECT_FALSE(BKE_paint_layers_bake_scheduled_get(*ma));
+  BKE_paint_layers_bake_scheduled_set(*ma, true);
+  EXPECT_TRUE(BKE_paint_layers_bake_scheduled_get(*ma));
+  EXPECT_TRUE(BKE_paint_layers_is_stale(*ma));
+  BKE_paint_layers_bake_scheduled_set(*ma, false);
+  EXPECT_FALSE(BKE_paint_layers_bake_scheduled_get(*ma));
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*ma));
+
+  /* #BKE_paint_layers_bake_heavy_pending is the fourth signal, delegated to rather than
+   * re-derived; its own heavy/pass-through/hash rules are covered where it is implemented
+   * (`paint_layers_generate_test.cc`, `paint_layers_graph_eval_test.cc`). Here only the
+   * delegation itself is checked, through a plain image row's stack-level bake, which
+   * #BKE_paint_layers_bake_is_heavy always reports as heavy once it carries an AUTO bake. */
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*layer);
+  bake->mode = MA_PAINT_LAYER_BAKE_AUTO;
+  bake->size = PAINT_LAYERS_HEAVY_BAKE_SIZE;
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *layer));
+  ASSERT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
+  EXPECT_TRUE(BKE_paint_layers_is_stale(*ma));
+
+  uint32_t hash[2];
+  BKE_paint_layers_bake_hash(*ma, *layer, hash);
+  bake->hash[0] = hash[0];
+  bake->hash[1] = hash[1];
+  ASSERT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*ma));
+
+  /* A non-layered material is never stale, whatever its flags say. */
+  Material *plain = BKE_material_add(bmain, "PlainNotLayered");
+  plain->paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*plain));
+}
+
+TEST_F(PaintLayersDescription, blend_read_clears_the_scheduled_bake_mark)
+{
+  /* #MA_PAINT_LAYERS_BAKE_SCHEDULED is the editor's own hand-off for a debounce timer armed or a
+   * bake job in flight -- both are runtime-only `wmJob`/timer state that a save can never carry
+   * forward. A material saved mid-wait must not load back in permanently "stale" with nothing
+   * left running to ever clear the mark, so the read path must reset it exactly like the other
+   * runtime-only paint-layer flags. */
+  Material *ma = BKE_material_add(bmain, "ScheduledRoundTripMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED | MA_PAINT_LAYERS_BAKE_SCHEDULED;
+  id_us_plus(&ma->id);
+
+  char filepath[FILE_MAX];
+  BLI_path_join(
+      filepath, sizeof(filepath), BKE_tempdir_session(), "paint_layers_scheduled_bit.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+
+  Material *reloaded = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, "ScheduledRoundTripMat")) {
+      reloaded = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded, nullptr);
+  /* The description itself survives the round trip... */
+  EXPECT_EQ(reloaded->paint_layers_flag & MA_PAINT_LAYERED, MA_PAINT_LAYERED);
+  /* ...but the outstanding-bake hand-off does not: nothing is left running after a fresh load to
+   * ever clear it otherwise, and #BKE_paint_layers_is_stale would report it forever. */
+  EXPECT_FALSE(BKE_paint_layers_bake_scheduled_get(*reloaded));
+  EXPECT_EQ(reloaded->paint_layers_flag & MA_PAINT_LAYERS_BAKE_SCHEDULED, 0);
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
+}
+
 TEST_F(PaintLayersDescription, custom_role_validation_reports_issues)
 {
   Material *ma = BKE_material_add(bmain, "CustomRoles");

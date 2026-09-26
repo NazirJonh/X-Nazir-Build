@@ -89,6 +89,7 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
 #  include "BKE_colorband.hh"
 #  include "BKE_context.hh"
 #  include "BKE_editmesh.hh"
+#  include "BKE_global.hh"
 #  include "BKE_gpencil_legacy.h"
 #  include "BKE_grease_pencil.hh"
 #  include "BKE_lib_id.hh"
@@ -113,6 +114,7 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
 #  include "ED_gpencil_legacy.hh"
 #  include "ED_image.hh"
 #  include "ED_node.hh"
+#  include "ED_paint_layers_bake.hh"
 #  include "ED_screen.hh"
 
 namespace blender {
@@ -642,6 +644,24 @@ static bool rna_Material_paint_layers_composite(Material *ma,
     BKE_report(reports, RPT_ERROR, "No destination image");
     return false;
   }
+  /* An RNA function is always reached like `exec` -- there is no modal loop it could go into --
+   * so a stale result is refused rather than waited out; a headless caller (no #wmWindowManager)
+   * never is, since #material_changed's own headless branch already ran every bake synchronously
+   * before this could be asked. See #paint_layers_bake_gate_decide. */
+  wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
+  const bool stale = (wm != nullptr) ? ed::material_bake::ED_paint_layers_stale_or_pending(*wm,
+                                                                                            *ma) :
+                                       BKE_paint_layers_is_stale(*ma);
+  if (ed::material_bake::paint_layers_bake_gate_decide(
+          stale, /*is_invoke=*/false, /*headless=*/wm == nullptr) ==
+      ed::material_bake::PaintLayersBakeGateAction::Refuse)
+  {
+    BKE_report(reports,
+              RPT_ERROR,
+              "Paint layers bake is not up to date; wait until Material.paint_layers_is_stale "
+              "is False (see bpy.ops.material.paint_layers_bake_now)");
+    return false;
+  }
   return BKE_paint_layers_composite_image(*ma, channel, *image, nullptr, reports);
 }
 
@@ -668,6 +688,31 @@ static bool rna_Material_paint_layers_tree_is_stale_get(PointerRNA *ptr)
    * a rebuild; an unlocked material can sit in this state until the user regenerates. */
   return ma->paint_layers_tree == nullptr ||
          (ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0;
+}
+
+static bool rna_Material_paint_layers_is_stale_get(PointerRNA *ptr)
+{
+  /* BKE-only signal: it cannot see a light bake job already running through `wmJob` before the
+   * editor has stamped #MA_PAINT_LAYERS_BAKE_SCHEDULED for it. That gap is deliberate here -- an
+   * `ED_`-level answer would need window-manager access that RNA getters cannot take. */
+  return BKE_paint_layers_is_stale(*id_cast<Material *>(ptr->owner_id));
+}
+
+static bool rna_Material_paint_layers_bake_pending_get(PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  /* Unlike #rna_Material_paint_layers_is_stale_get, this one does take the extra step to a
+   * #wmWindowManager when one exists (the same #G_MAIN pattern #rna_Main_ID_previews_clear and
+   * others already use from an RNA function), so it also catches a light bake job already running
+   * through `wmJob` before #MA_PAINT_LAYERS_BAKE_SCHEDULED was stamped for it -- the one gap
+   * #BKE_paint_layers_is_stale's own doc-comment leaves open. It exists for the Image Editor
+   * header/Combined-preview "Updating..." indicator, which needs exactly that -- a script deciding
+   * whether it may read a baked result should still use `paint_layers_is_stale`, deliberately the
+   * cheaper, BKE-only signal. */
+  if (wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first)) {
+    return ed::material_bake::ED_paint_layers_stale_or_pending(*wm, *ma);
+  }
+  return BKE_paint_layers_is_stale(*ma);
 }
 
 static bool rna_Material_paint_layers_locked_get(PointerRNA *ptr)
@@ -3462,6 +3507,27 @@ void RNA_def_material(BlenderRNA *brna)
       prop,
       "Tree Is Stale",
       "The generated node tree does not match the layer description and needs a Regenerate");
+
+  prop = RNA_def_property(srna, "paint_layers_is_stale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Material_paint_layers_is_stale_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Layers Bake Is Stale",
+      "The material's baked paint layer result (image maps, Combined preview, exported passes) "
+      "does not match its current layer stack yet; wait for it to become False, or use "
+      "MATERIAL_OT_paint_layers_bake_now, before reading a baked result");
+
+  prop = RNA_def_property(srna, "paint_layers_bake_pending", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Material_paint_layers_bake_pending_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Layers Bake Pending",
+      "The material's baked paint layer result is not fresh yet, including a bake job the "
+      "window manager already has running; used to show an \"Updating\" indicator in the UI. "
+      "A script deciding whether it may read a baked result should use paint_layers_is_stale "
+      "instead");
 
   prop = RNA_def_property(srna, "paint_layers_locked", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop,

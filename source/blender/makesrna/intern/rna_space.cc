@@ -2892,6 +2892,16 @@ static bool rna_SpaceImageEditor_is_material_paint_combined_get(PointerRNA *ptr)
          sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED;
 }
 
+static bool rna_SpaceImageEditor_show_material_paint_composite_get(PointerRNA *ptr)
+{
+  /* A thin RNA wrapper, not re-derived: #ED_space_image_has_composite is also what
+   * #ED_space_image_acquire_composite_buffer and the image engine gate on, and Python (the header,
+   * the "Updating..." indicator) needs exactly the same condition rather than a string match on
+   * `material_paint_canvas`'s identifier, which would drift the moment a new pass identifier is
+   * added. */
+  return ED_space_image_has_composite(static_cast<const SpaceImage *>(ptr->data));
+}
+
 static int rna_SpaceImageEditor_display_channels_get(PointerRNA *ptr)
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
@@ -7867,6 +7877,16 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Show Combined Preview",
                            "The Combined preview is the pass currently shown in this editor");
+
+  prop = RNA_def_property(srna, "show_material_paint_composite", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SpaceImageEditor_show_material_paint_composite_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Show Paint Layers Composite",
+      "This editor is showing a paint-layers composite pass (a channel or Combined), not a "
+      "plain image");
 
   prop = RNA_def_property(srna, "material_paint_light_rotation", PROP_FLOAT, PROP_ANGLE);
   RNA_def_property_float_sdna(prop, nullptr, "material_paint_light_rot_z");

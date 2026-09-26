@@ -242,7 +242,8 @@ void template_running_jobs(Layout *layout, bContext *C)
   if (owner == nullptr) {
     for (Material &material : bmain->materials) {
       if (WM_jobs_test(wm, &material, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE) ||
-          WM_jobs_test(wm, &material, WM_JOB_TYPE_MESH_MAP_BAKE))
+          WM_jobs_test(wm, &material, WM_JOB_TYPE_MESH_MAP_BAKE) ||
+          WM_jobs_test(wm, &material, WM_JOB_TYPE_PAINT_LAYERS_BAKE))
       {
         owner = &material;
         icon = ICON_MATERIAL;

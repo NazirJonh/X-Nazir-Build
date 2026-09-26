@@ -334,9 +334,13 @@ static void material_paint_layers_blend_write(BlendWriter *writer, const Materia
 static void material_paint_layers_blend_read(BlendDataReader *reader, Material &material)
 {
   /* The texture-paint slot cache and the bake queue are runtime only; never trust the saved stale
-   * flags. The first bake check after a load re-bakes everything through the hash anyway. */
+   * flags. The first bake check after a load re-bakes everything through the hash anyway.
+   * #MA_PAINT_LAYERS_BAKE_SCHEDULED belongs to the editor's `wmJob`/debounce-timer state, which
+   * a file never carries across a save: a file saved while a bake was armed or in flight must not
+   * load back in permanently "stale" with nothing left running to ever clear the mark. */
   material.paint_layers_flag &= ~(MA_PAINT_LAYERS_SLOTS_STALE | MA_PAINT_LAYERS_BAKE_STALE |
-                                   MA_PAINT_LAYERS_MATERIAL_BAKE_DUE);
+                                   MA_PAINT_LAYERS_MATERIAL_BAKE_DUE |
+                                   MA_PAINT_LAYERS_BAKE_SCHEDULED);
   BLO_read_struct_list(reader, MaterialPaintLayer, &material.paint_layers);
   for (MaterialPaintLayer &layer :
        *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&material.paint_layers))

@@ -26,6 +26,7 @@
  */
 
 #include "ED_material_bake.hh"
+#include "ED_paint_layers_bake.hh"
 
 #include <algorithm>
 #include <array>
@@ -1962,6 +1963,28 @@ static void material_bake_images_free(void *customdata)
    * they were in flight becomes ready now, and only a regeneration turns that into its Baked mode. */
   if (Main *bmain = G_MAIN) {
     material_bake_rows_landed_tag(*bmain, job->target_session_uids);
+    /* This callback always runs, success or cancel (see the doc-comment above): it is where the
+     * 0.3s debounce's #MA_PAINT_LAYERS_BAKE_SCHEDULED mark settles for a layered material that was
+     * only waiting on THIS job -- #paint_layers_bake_debounce_timer starts this job through a
+     * Material row's *source*, so the layered material never owns it and could not be told
+     * otherwise. A material with something else still outstanding (another row, the heavy bake)
+     * keeps its mark and is swept again the next time some job of its frees.
+     *
+     * This job's own (owner, type) -- the source material this job baked, #WM_JOB_TYPE_MATERIAL_IMAGES_BAKE
+     * -- is excluded: `WM_jobs_test` still reports it as running from inside this very free
+     * callback (see #paint_layers_bake_job_test_excluding), and without excluding it a layered
+     * material only waiting on this one job would never be told it is free. */
+    if (wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first)) {
+      Material *source_material = nullptr;
+      for (Material &material : bmain->materials) {
+        if (material.id.session_uid == job->material_session_uid) {
+          source_material = &material;
+          break;
+        }
+      }
+      paint_layers_bake_scheduled_settle(
+          *bmain, *wm, source_material, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE);
+    }
   }
   MEM_delete(job);
 }

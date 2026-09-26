@@ -42,6 +42,7 @@
 #include "ED_image.hh"
 #include "ED_material_bake.hh"
 #include "ED_mesh.hh"
+#include "ED_paint_layers_bake.hh"
 #include "ED_object.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
@@ -254,6 +255,13 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
     BKE_paint_material_composite_cache_free_all();
     /* And the Combined preview derived from them, which owns a float buffer of its own. */
     BKE_paint_material_combined_cache_free_all();
+    /* The 0.3s paint-layers bake debounce keeps its armed timer and pending set as process-static
+     * state, keyed on the #wmWindowManager whose file is going away right here: a stale pending
+     * entry would be harmless (it resolves to nothing next tick), but the timer handle itself would
+     * dangle once `wm_close_and_free` frees it, for the next file's first edit to dereference. */
+    if (wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first)) {
+      material_bake::paint_layers_bake_debounce_reset(*wm);
+    }
   }
   else {
     /* Memfile undo, where the entries stay reachable but their pixels may not be current any

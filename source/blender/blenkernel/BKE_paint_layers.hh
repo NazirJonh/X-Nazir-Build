@@ -26,6 +26,7 @@
 
 #include "BKE_paint_material_resolve.hh"
 
+#include "BLI_function_ref.hh"
 #include "BLI_map.hh"
 #include "BLI_vector.hh"
 #include "DNA_uuid_types.h"
@@ -1042,8 +1043,15 @@ struct PaintLayersBakeJob;
 /** Collect \a ma's heavy pending rows and localize its description; null when there is none. */
 PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma);
 
-/** Render every collected row from the localized copy. Runs on the worker thread. */
-void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job);
+/**
+ * Render every collected row from the localized copy. Runs on the worker thread.
+ *
+ * \param report_progress: called after each row/channel pair finishes, with the fraction (0..1) of
+ * the job's total row/channel pairs done so far; left empty (the default) by every caller that has
+ * nothing to report progress to, such as a test.
+ */
+void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
+                                       FunctionRef<void(float progress)> report_progress = {});
 
 /**
  * Write the computed maps back to the live material and mark the tree stale. Runs on the main
@@ -1171,6 +1179,29 @@ void BKE_paint_layers_bake_stale_clear(Material &ma);
 bool BKE_paint_layers_material_bake_due_get(const Material &ma);
 /** Clear \a ma's due mark; the editor planner calls this once it has run. */
 void BKE_paint_layers_material_bake_due_clear(Material &ma);
+
+/**
+ * Whether the editor has a bake outstanding for \a ma right now: a debounce timer armed after an
+ * edit, or a bake job started but not committed yet. BKE cannot see `wmJob` state on its own, so
+ * this is the editor's hand-off -- set and cleared only by `ED_` scheduling code, never derived
+ * here.
+ */
+bool BKE_paint_layers_bake_scheduled_get(const Material &ma);
+/** Set or clear \a ma's outstanding-bake mark; see #BKE_paint_layers_bake_scheduled_get. */
+void BKE_paint_layers_bake_scheduled_set(Material &ma, bool scheduled);
+
+/**
+ * Whether \a ma's paint-layer result is not the one its current description would produce right
+ * now: some row's stored bake does not match #BKE_paint_layers_bake_is_valid, a heavy bake is
+ * queued but not yet run (#BKE_paint_layers_bake_heavy_pending), or the editor has a bake
+ * outstanding for it (#BKE_paint_layers_bake_scheduled_get).
+ *
+ * This is the BKE half of "is the result fresh": it has no visibility into a light bake job
+ * already running through `wmJob` that has not yet set the scheduled mark, so a caller that can
+ * see window-manager state should prefer `ED_paint_layers_stale_or_pending`, which also checks
+ * that.
+ */
+bool BKE_paint_layers_is_stale(const Material &ma);
 
 /**
  * Allocate \a layer's bake cache if it has none and return it, without marking anything: the caller

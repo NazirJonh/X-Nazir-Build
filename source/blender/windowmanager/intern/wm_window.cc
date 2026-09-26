@@ -78,6 +78,7 @@
 
 #include "ED_anim_api.hh"
 #include "ED_fileselect.hh"
+#include "ED_paint_layers_bake.hh"
 #include "ED_render.hh"
 #include "ED_scene.hh"
 #include "ED_screen.hh"
@@ -2222,6 +2223,13 @@ static bool wm_window_timers_process(const bContext *C, int *sleep_us_p)
     }
     else if (wt.event_type == TIMERNOTIFIER) {
       WM_main_add_notifier(POINTER_AS_UINT(wt.customdata), nullptr);
+    }
+    else if (wt.event_type == TIMERPAINTLAYERSBAKE) {
+      /* Mirrors #TIMERAUTOSAVE: a WM-internal-timer event dispatched straight to its handler,
+       * never queued to a window, since it belongs to no editor or operator. The handler itself
+       * lives in the paint-layers bake module (`ED_paint_layers_bake.hh`), not here, exactly like
+       * `wm_autosave_timer` keeps its own logic in `wm_files.cc` rather than this dispatch loop. */
+      blender::ed::material_bake::paint_layers_bake_debounce_timer(*bmain, *wm, wt);
     }
     else if (wmWindow *win = wt.win) {
       wmEvent event;

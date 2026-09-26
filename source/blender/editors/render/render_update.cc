@@ -294,12 +294,21 @@ static void material_changed(Main *bmain, Material *ma)
   /* The Combined preview reads every channel of this material, so a node-tree edit can change it
    * in ways no input hash is asked about. */
   BKE_paint_material_combined_cache_invalidate(ma);
-  /* A Material paint layer is a bake of this material into maps the user owns; editing the source
-   * is how that layer is re-configured, so its maps follow without being asked. */
-  ed::material_bake::material_bake_images_rebake_stale(*bmain, *ma);
-  /* The layered description's Material rows keep their baked maps on the row, not on an image's
-   * bake link, so they are re-baked from the same editor update. */
-  ed::material_bake::material_bake_layered_rows_ensure(*bmain, *ma);
+  /* A Material paint layer is a bake of this material into maps the user owns, and the layered
+   * description's own Material rows keep their baked maps on the row the same way -- editing the
+   * source is how either is re-configured, so its maps must follow without being asked.
+   *
+   * Run once immediately in the one case that can never see a debounce timer tick: no #wmWindowManager
+   * means no event loop to wake it, which is exactly background mode and every unit test -- neither
+   * may wait on a timer that will never fire. Everywhere else this is deferred 0.3s so a burst of
+   * edits inside that window coalesces into one bake pass instead of restarting a `wmJob` on each. */
+  if (wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first)) {
+    ed::material_bake::paint_layers_bake_debounce_arm(*wm, *ma);
+  }
+  else {
+    ed::material_bake::material_bake_images_rebake_stale(*bmain, *ma);
+    ed::material_bake::material_bake_layered_rows_ensure(*bmain, *ma);
+  }
 
   /* A live Material row reads another material's source, so an edit here does not reach the
    * layered material's generator by itself: tag every layered material with a Material row that

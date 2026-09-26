@@ -125,6 +125,13 @@ enum eMaterialPaintLayersFlag : short {
    * counts a Material row as pending, so it cannot carry this signal.
    */
   MA_PAINT_LAYERS_MATERIAL_BAKE_DUE = 1 << 5,
+  /**
+   * The editor has a bake outstanding for this material -- a debounce timer armed after an edit,
+   * or a bake job started but not committed yet. BKE has no visibility into `wmJob` state, so this
+   * flag is the editor's hand-off to #BKE_paint_layers_is_stale, set and cleared by the `ED_`
+   * scheduling code alone (see `ED_paint_layers_stale_or_pending`).
+   */
+  MA_PAINT_LAYERS_BAKE_SCHEDULED = 1 << 6,
 };
 ENUM_OPERATORS(eMaterialPaintLayersFlag)
 

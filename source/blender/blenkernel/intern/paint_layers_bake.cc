@@ -135,6 +135,21 @@ void BKE_paint_layers_material_bake_due_clear(Material &ma)
   ma.paint_layers_flag &= ~MA_PAINT_LAYERS_MATERIAL_BAKE_DUE;
 }
 
+bool BKE_paint_layers_bake_scheduled_get(const Material &ma)
+{
+  return (ma.paint_layers_flag & MA_PAINT_LAYERS_BAKE_SCHEDULED) != 0;
+}
+
+void BKE_paint_layers_bake_scheduled_set(Material &ma, const bool scheduled)
+{
+  if (scheduled) {
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_SCHEDULED;
+  }
+  else {
+    ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_SCHEDULED;
+  }
+}
+
 bool BKE_paint_layers_bake_clear(Material &ma, MaterialPaintLayer &layer)
 {
   if (paint_layer_owner_list(&ma.paint_layers, &layer) == nullptr) {
@@ -1378,6 +1393,22 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
   return false;
 }
 
+bool BKE_paint_layers_is_stale(const Material &ma)
+{
+  if (!paint_layers_is_layered(ma)) {
+    return false;
+  }
+  /* The CPU-planner and Material-row signals cover the light rows; #BKE_paint_layers_bake_scheduled_get
+   * is the editor's own hand-off for whatever it has queued or running that has not resolved into
+   * one of those flags yet. */
+  if (BKE_paint_layers_bake_stale_get(ma) || BKE_paint_layers_material_bake_due_get(ma) ||
+      BKE_paint_layers_bake_scheduled_get(ma))
+  {
+    return true;
+  }
+  return BKE_paint_layers_bake_heavy_pending(ma);
+}
+
 struct PaintLayersBakeJob {
   Main *bmain = nullptr;
   Material *material = nullptr;
@@ -1494,24 +1525,39 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
   return job;
 }
 
-void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job)
+void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
+                                       const FunctionRef<void(float progress)> report_progress)
 {
   if (job.material_copy == nullptr) {
     return;
   }
   Material &ma = *job.material_copy;
+  /* Every row is weighted by the same fixed channel count, whether or not each channel actually
+   * renders (a channel #BKE_paint_layers_bake_render_node skips is still one unit of work this job
+   * already accounted for when it decided its row/channel pairs) -- so progress only ever needs the
+   * two totals below, not a running tally of what got kept. */
+  const int64_t total_pairs = int64_t(job.rows.size()) * BKE_paint_material_channels().size();
+  int64_t done_pairs = 0;
   for (PaintLayersBakeJob::RowResult &row : job.rows) {
     MaterialPaintLayer *layer = BKE_paint_layers_find(ma, row.marker);
     if (layer == nullptr) {
+      done_pairs += BKE_paint_material_channels().size();
+      if (report_progress) {
+        report_progress(total_pairs > 0 ? float(done_pairs) / float(total_pairs) : 1.0f);
+      }
       continue;
     }
     for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
       const int channel = int(info.channel);
       Vector<float> color(int64_t(row.size) * row.size * 4);
       Vector<float> coverage(int64_t(row.size) * row.size);
-      if (!BKE_paint_layers_bake_render_node(
-              ma, *layer, channel, row.size, color.data(), coverage.data()))
-      {
+      const bool rendered = BKE_paint_layers_bake_render_node(
+          ma, *layer, channel, row.size, color.data(), coverage.data());
+      done_pairs++;
+      if (report_progress) {
+        report_progress(total_pairs > 0 ? float(done_pairs) / float(total_pairs) : 1.0f);
+      }
+      if (!rendered) {
         continue;
       }
       PaintLayersBakeJob::ChannelResult result;

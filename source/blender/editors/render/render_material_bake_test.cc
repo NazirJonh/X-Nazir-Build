@@ -14,6 +14,7 @@
 #include "BKE_paint_layers.hh"
 
 #include "ED_material_bake.hh"
+#include "ED_paint_layers_bake.hh"
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
@@ -30,6 +31,7 @@
 #include "IMB_colormanagement.hh"
 
 #include <cmath>
+#include <cstdint>
 
 namespace blender::ed::material_bake::tests {
 
@@ -304,6 +306,127 @@ TEST_F(MaterialBakeTest, legacy_srgb_color_map_is_normalized)
   EXPECT_NEAR(ibuf->float_data()[1], 0.5f, 1e-3f);
   EXPECT_NEAR(ibuf->float_data()[2], 0.8f, 1e-3f);
   BKE_image_release_ibuf(image, ibuf, lock);
+}
+
+TEST_F(MaterialBakeTest, debounce_resolve_keeps_only_surviving_materials)
+{
+  /* #paint_layers_bake_debounce_resolve is the pure half of the 0.3s debounce: given a list of
+   * `session_uid`s and a #Main, it must say which still name a real material, without touching a
+   * #wmWindowManager or a `wmTimer` -- exactly the shape a material can be in after waiting: still
+   * there, or deleted (or belonging to a file that has since been closed) while the timer waited. */
+  Material *second = add_material_with_principled("SecondMaterial");
+  ASSERT_NE(second, nullptr);
+
+  const uint32_t material_uid = material->id.session_uid;
+  const uint32_t second_uid = second->id.session_uid;
+  /* No material in this #Main was ever handed this uid: stands in for one deleted, or from a file
+   * that was since closed, while the timer waited. */
+  const uint32_t deleted_uid = second_uid + 1000000u;
+
+  const Vector<uint32_t> pending = {material_uid, deleted_uid, second_uid};
+  Vector<Material *> found;
+  paint_layers_bake_debounce_resolve(*bmain, pending.as_span(), found);
+
+  ASSERT_EQ(found.size(), 2);
+  EXPECT_TRUE(found.contains(material));
+  EXPECT_TRUE(found.contains(second));
+
+  /* An empty pending list resolves to nothing, and must not walk every material in \a bmain to
+   * find that out. */
+  Vector<Material *> empty_found;
+  paint_layers_bake_debounce_resolve(*bmain, {}, empty_found);
+  EXPECT_TRUE(empty_found.is_empty());
+}
+
+TEST_F(MaterialBakeTest, debounce_arm_replaces_a_running_timer_for_trailing_edge)
+{
+  /* A trailing-edge debounce must restart its countdown on every edit, not just the first, or a
+   * continuous drag (a slider held for two seconds) would still tick -- and bake -- every 0.3s
+   * instead of once after the drag ends. #paint_layers_bake_debounce_should_replace_timer is the
+   * named, pure form of that "restart, don't leave running" decision: true whenever a timer already
+   * exists, checked with nothing but a pointer, never dereferenced. */
+  EXPECT_FALSE(paint_layers_bake_debounce_should_replace_timer(nullptr));
+  wmTimer *const not_dereferenced = reinterpret_cast<wmTimer *>(std::uintptr_t(1));
+  EXPECT_TRUE(paint_layers_bake_debounce_should_replace_timer(not_dereferenced));
+}
+
+TEST_F(MaterialBakeTest, debounce_settles_immediately_only_when_nothing_is_or_will_be_running)
+{
+  /* The tick may clear #MA_PAINT_LAYERS_BAKE_SCHEDULED itself only when its own calls started
+   * nothing (no job in flight) AND nothing is about to be started for it either (no heavy bake
+   * #paint_layers_bake_jobs_ensure has not queued yet) -- otherwise the mark would flicker false for
+   * the window between the tick returning and that queuing happening, or #paint_layers_bake_scheduled_settle
+   * would never be told to check a material with nothing running belonging to it any more. */
+  EXPECT_TRUE(paint_layers_bake_debounce_settles_immediately(false, false));
+  EXPECT_FALSE(paint_layers_bake_debounce_settles_immediately(true, false));
+  EXPECT_FALSE(paint_layers_bake_debounce_settles_immediately(false, true));
+  EXPECT_FALSE(paint_layers_bake_debounce_settles_immediately(true, true));
+}
+
+TEST_F(MaterialBakeTest, scheduled_settle_clears_only_once_nothing_is_in_flight)
+{
+  /* #paint_layers_bake_scheduled_settle_clears is the one decision the free callback of every bake
+   * job type the debounce timer can start (#paint_layers_bake_free, `material_bake_images_free`)
+   * relies on to know when #MA_PAINT_LAYERS_BAKE_SCHEDULED may finally come down -- an add-on
+   * reading `Material.paint_layers_is_stale` must never see "fresh" while a job it cannot see is
+   * still writing. */
+  EXPECT_FALSE(paint_layers_bake_scheduled_settle_clears(true));
+  EXPECT_TRUE(paint_layers_bake_scheduled_settle_clears(false));
+}
+
+TEST_F(MaterialBakeTest, job_is_excluded_matches_owner_and_type_exactly)
+{
+  /* `WM_jobs_test` still reports a job as running from *inside* its own free callback
+   * (`wm_jobs_handle_finished` and `wm_jobs_kill_job` in `wm_jobs.cc` both free before the job is
+   * marked finished or removed) -- #paint_layers_bake_job_is_excluded is what lets a settle call
+   * made from there treat that one (owner, job_type) pair as already gone, without ever
+   * dereferencing either pointer. Every other (owner, job_type) -- a different owner, a different
+   * type, or both -- must still go through the real #WM_jobs_test. */
+  int owner_a = 0;
+  int owner_b = 0;
+  const void *a = &owner_a;
+  const void *b = &owner_b;
+
+  EXPECT_TRUE(paint_layers_bake_job_is_excluded(a, 1, a, 1));
+  EXPECT_FALSE(paint_layers_bake_job_is_excluded(a, 1, b, 1));
+  EXPECT_FALSE(paint_layers_bake_job_is_excluded(a, 1, a, 2));
+  EXPECT_FALSE(paint_layers_bake_job_is_excluded(a, 1, b, 2));
+  EXPECT_FALSE(paint_layers_bake_job_is_excluded(nullptr, 0, a, 1));
+}
+
+TEST_F(MaterialBakeTest, gate_decide_headless_always_proceeds)
+{
+  /* Headless has no timer, no `wmJob`, and no modal loop to ever become fresh through, so refusing
+   * it would only ever be a false refusal: #material_changed's own headless branch already ran
+   * every bake synchronously before this could be asked, so \a stale is normally false there
+   * anyway. Both `invoke` and `exec` proceed, and so does a headless caller that somehow still
+   * observes stale. */
+  EXPECT_EQ(paint_layers_bake_gate_decide(false, false, true),
+           PaintLayersBakeGateAction::Proceed);
+  EXPECT_EQ(paint_layers_bake_gate_decide(false, true, true), PaintLayersBakeGateAction::Proceed);
+  EXPECT_EQ(paint_layers_bake_gate_decide(true, false, true), PaintLayersBakeGateAction::Proceed);
+  EXPECT_EQ(paint_layers_bake_gate_decide(true, true, true), PaintLayersBakeGateAction::Proceed);
+}
+
+TEST_F(MaterialBakeTest, gate_decide_fresh_always_proceeds)
+{
+  /* Nothing is stale: there is nothing to wait for or refuse, whether reached from `invoke` or
+   * `exec`. */
+  EXPECT_EQ(paint_layers_bake_gate_decide(false, false, false),
+           PaintLayersBakeGateAction::Proceed);
+  EXPECT_EQ(paint_layers_bake_gate_decide(false, true, false),
+           PaintLayersBakeGateAction::Proceed);
+}
+
+TEST_F(MaterialBakeTest, gate_decide_stale_invoke_waits_exec_refuses)
+{
+  /* The accepted UI decision: an `invoke`-reached, stale result forces a bake and goes modal
+   * (#Wait) rather than acting on stale data or refusing outright; `exec`/an RNA function cannot go
+   * modal, so it is refused instead (#Refuse) with a message pointing at
+   * `Material.paint_layers_is_stale` / `MATERIAL_OT_paint_layers_bake_now`. */
+  EXPECT_EQ(paint_layers_bake_gate_decide(true, true, false), PaintLayersBakeGateAction::Wait);
+  EXPECT_EQ(paint_layers_bake_gate_decide(true, false, false),
+           PaintLayersBakeGateAction::Refuse);
 }
 
 }  // namespace blender::ed::material_bake::tests

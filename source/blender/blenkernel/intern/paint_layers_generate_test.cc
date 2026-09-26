@@ -100,6 +100,27 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
     return layer;
   }
 
+  /**
+   * Add a Layer-role row directly into \a anchor's own #children -- a Stack correction/mask item
+   * (#BKE_paint_layers_add accepts \a place Into there since it is a folder in every sense
+   * #BKE_paint_layers_is_folder cares about, regardless of \a anchor's role). Mirrors
+   * #add_paint_layer, which always anchors at the top level instead.
+   */
+  MaterialPaintLayer *add_paint_layer_into(MaterialPaintLayer *anchor,
+                                           const char *name,
+                                           Image *image)
+  {
+    MaterialPaintLayer *layer = BKE_paint_layers_add(
+        *ma, MA_PAINT_LAYER_SOURCE_IMAGE, name, anchor, PaintLayerPlace::Into);
+    EXPECT_NE(layer, nullptr);
+    MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+        *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    EXPECT_NE(record, nullptr);
+    record->image = image;
+    record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+    return layer;
+  }
+
   bNodeTree *make_tree(const char *name)
   {
     return bke::node_tree_add_tree(bmain, name, "ShaderNodeTree");
@@ -4592,6 +4613,69 @@ TEST_F(PaintLayersGenerateTest, effect_correction_source_change_to_material_rebu
 }
 
 /**
+ * Changing a Mask Item's `mask_channel` is topology (a different channel reads a different
+ * socket and reduces it a different way -- RGBTOBW, Separate X, or the coverage itself), so it
+ * must rebuild the owner's group; a value edit on the source, meanwhile, must not.
+ */
+TEST_F(PaintLayersGenerateTest, mask_channel_change_rebuilds_the_group)
+{
+  Material *source = BKE_material_add(bmain, "MaskChannelChangeSource");
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("OwnerMap"));
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+  const Vector<bNode *> nodes_before = root_nodes(*group);
+
+  ASSERT_TRUE(mask->mask_channel != int8_t(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  BKE_paint_layers_tag_edited(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+  /* Base Color is a colour channel (RGBTOBW) and Roughness a scalar one (Separate X): the node
+   * shape must differ. */
+  EXPECT_FALSE(same_nodes(nodes_before, root_nodes(*group)));
+}
+
+/**
+ * A Material mask's own coverage-source value edit, by contrast, is not topology (ТЗ-26): editing
+ * the source's Roughness with `mask_channel` unchanged must sync in place, exactly like a Layer
+ * row's or an Effect correction's own live constant.
+ */
+TEST_F(PaintLayersGenerateTest, mask_material_live_constant_edit_syncs_without_rebuild)
+{
+  Material *source = add_principled_source("MaskLiveEditSource", 0.1f);
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("OwnerMap"));
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> root_before = root_nodes(*root);
+  bNodeTree *group = layer_tree_find(*bmain, "Owner");
+  ASSERT_NE(group, nullptr);
+
+  bNode *principled = principled_of(*source);
+  ASSERT_NE(principled, nullptr);
+  bNodeSocket *roughness = bke::node_find_socket(*principled, SOCK_IN, "Roughness"_ustr);
+  ASSERT_NE(roughness, nullptr);
+  static_cast<bNodeSocketValueFloat *>(roughness->default_value)->value = 0.9f;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(layer_tree_find(*bmain, "Owner"), group);
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+}
+
+/**
  * A stack shaped like the user's: named and unnamed Paint rows, Material rows, a folder. Two
  * regenerations with no edits in between must keep every group and the root.
  */
@@ -7167,6 +7251,54 @@ TEST_F(PaintLayersGenerateTest, mesh_map_atlas_without_a_loaded_buffer_still_bui
   Vector<bNode *> tex_images;
   collect_tex_images_of_image(*ma->paint_layers_tree, atlas, tex_images);
   EXPECT_EQ(tex_images.size(), 1);
+}
+
+/**
+ * Phase 4: a Stack (content) correction's topology hash follows its children's structure, exactly
+ * like #topology_hash_layer follows a Layer folder's own children -- adding a second child, or
+ * changing a child's source, moves the owner row's hash; editing a child's *value* (opacity, a Fill
+ * constant) does not, mirroring ТЗ-26 for every other row kind.
+ */
+TEST_F(PaintLayersGenerateTest, stack_effect_correction_hash_follows_subtree_structure)
+{
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("Owner"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(correction, nullptr);
+
+  MaterialPaintLayer *child = add_paint_layer_into(correction, "Child", add_image("Child"));
+
+  const int wired[] = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t hash_before = paint_layers_layer_topology_hash(*ma, *owner, Span<int>(wired, 1));
+
+  /* A value edit inside the subtree (opacity) must not move the owner's hash. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, child, 0.3f));
+  EXPECT_EQ(paint_layers_layer_topology_hash(*ma, *owner, Span<int>(wired, 1)), hash_before);
+
+  /* A structural edit inside the subtree -- a second child -- must move it. */
+  add_paint_layer_into(correction, "Second", add_image("Second"));
+  EXPECT_NE(paint_layers_layer_topology_hash(*ma, *owner, Span<int>(wired, 1)), hash_before);
+}
+
+/** Phase 4: a TEX_IMAGE inside a Stack correction's subtree is reachable from the material output
+ * exactly like any other, so it is counted by the same generic, topology-only sampler walk
+ * (#SamplerCounter) with no special-casing needed for a correction's own children. */
+TEST_F(PaintLayersGenerateTest, stack_effect_correction_child_image_counts_as_a_sampler)
+{
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("Owner"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(correction, nullptr);
+
+  const int samplers_before = BKE_paint_layers_sampler_count(*ma);
+  add_paint_layer_into(correction, "Child", add_image("Child"));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The owner's own map plus the correction child's map: two samplers over the baseline (zero
+   * rows). #SamplerCounter follows the tree from its output nodes regardless of which row's
+   * subtree a TEX_IMAGE node was built for. */
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), samplers_before + 2);
 }
 
 }  // namespace blender::bke::tests

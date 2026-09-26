@@ -60,6 +60,26 @@ enum class CompositeBlend : int8_t {
 };
 
 /**
+ * How a mask correction's straight map pixel reduces to the one grey number `C` its coverage-over
+ * model needs.
+ *
+ * #Mean is every existing Image/Mesh Map mask's own rule, unchanged: the mean of RGB (a scalar
+ * value, R=G=B by construction, reduces to itself; #Red is the one exception, a Mesh Map atlas'
+ * dedicated coverage channel). A Material/Node Group mask instead reduces a colour channel with
+ * #Luminance (a mean would not match #IMB_colormanagement_get_luminance, the generator's own
+ * #SH_NODE_RGBTOBW), and reads a live source Alpha texture with #Alpha -- the source's coverage
+ * lives in that texture's own alpha, not its RGB, and this mode also forces the item's own factor
+ * flat (opacity alone), matching the generator's decision that squaring the same number as both
+ * the grey and its multiplier would be wrong.
+ */
+enum class MaskGrayMode : int8_t {
+  Mean = 0,
+  Red = 1,
+  Luminance = 2,
+  Alpha = 3,
+};
+
+/**
  * What a layer *is*, as opposed to how one was made.
  *
  * Stored as an id-property on the layer's Mix nodes -- on the group's own tree for a group -- the

@@ -1305,8 +1305,21 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
   /* Beside a correction would mean into its owner's corrections list, where a layer is neither
    * listed as a row nor composited as one (it would silently ride on the owner's visibility).
    * This function only ever creates a Layer-role row (a correction is linked through
-   * #BKE_paint_layers_correction_add instead), so the owner row always stands in here. */
-  if (anchor != nullptr && BKE_paint_layers_role(*anchor) != PaintLayerRole::Layer) {
+   * #BKE_paint_layers_correction_add instead), so the owner row always stands in here --
+   * except when \a place is Into and \a anchor is itself a Stack correction or mask item: a
+   * Stack correction is a folder in every sense #BKE_paint_layers_is_folder cares about (its
+   * source, not its role, decides that), and Into a folder means inside that folder's own
+   * #children, the correction's included. Redirecting it to the owner row first would have
+   * "Into <the Stack correction>" place the new row inside the *owner's* children instead --
+   * the wrong list, and one the owner row usually is not even a folder for. Above/Below still
+   * redirect a correction anchor to its owner row unconditionally (unchanged): those mean
+   * "beside the owner's own row", never "beside the correction". */
+  const bool into_stack_correction = place == PaintLayerPlace::Into && anchor != nullptr &&
+                                     BKE_paint_layers_role(*anchor) != PaintLayerRole::Layer &&
+                                     BKE_paint_layers_is_folder(*anchor);
+  if (anchor != nullptr && BKE_paint_layers_role(*anchor) != PaintLayerRole::Layer &&
+      !into_stack_correction)
+  {
     anchor = paint_layer_correction_owner(ma.paint_layers, *anchor);
     if (anchor == nullptr) {
       return nullptr;
@@ -2043,15 +2056,18 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
   if (!ELEM(role, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_ROLE_MASK_ITEM)) {
     return nullptr;
   }
-  /* An Effect also reads a Material or Node Group, exactly like a Layer row of the same kind: it
-   * behaves as that row's own channel content, baked and tracked the same way. A Mask Item stays
-   * limited to Image/Constant/Mesh Map -- a mask has no external-bake path of its own. */
+  /* An Effect or a Mask Item also reads a Material, a Node Group, or a Stack, exactly like a Layer
+   * row of the same kind: it behaves as that row's own channel content (an Effect) or as the one
+   * number its `mask_channel` picks out (a Mask Item), baked and tracked the same way. A Stack
+   * correction composites its own children in isolation, like a Layer folder (phase 4). */
   const bool source_ok = ELEM(source,
                               MA_PAINT_LAYER_SOURCE_IMAGE,
                               MA_PAINT_LAYER_SOURCE_CONSTANT,
                               MA_PAINT_LAYER_SOURCE_MESH_MAP) ||
-                         (role == MA_PAINT_LAYER_ROLE_EFFECT &&
-                          ELEM(source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_NODE_GROUP));
+                         ELEM(source,
+                              MA_PAINT_LAYER_SOURCE_MATERIAL,
+                              MA_PAINT_LAYER_SOURCE_NODE_GROUP,
+                              MA_PAINT_LAYER_SOURCE_STACK);
   if (!source_ok) {
     return nullptr;
   }
@@ -2104,14 +2120,16 @@ bool BKE_paint_layers_correction_source_set(Material &ma, MaterialPaintLayer *co
   {
     return false;
   }
-  /* Symmetric with #BKE_paint_layers_correction_add: an Effect also accepts Material/Node Group,
-   * a Mask Item does not. */
+  /* Symmetric with #BKE_paint_layers_correction_add: both roles accept Material/Node Group/Stack
+   * now (phase 4). */
   const bool source_ok = ELEM(source,
                               MA_PAINT_LAYER_SOURCE_IMAGE,
                               MA_PAINT_LAYER_SOURCE_CONSTANT,
                               MA_PAINT_LAYER_SOURCE_MESH_MAP) ||
-                         (BKE_paint_layers_role(*correction) == PaintLayerRole::Effect &&
-                          ELEM(source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_NODE_GROUP));
+                         ELEM(source,
+                              MA_PAINT_LAYER_SOURCE_MATERIAL,
+                              MA_PAINT_LAYER_SOURCE_NODE_GROUP,
+                              MA_PAINT_LAYER_SOURCE_STACK);
   if (!source_ok) {
     return false;
   }

@@ -747,6 +747,16 @@ Vector<int> paint_layers_wired_channels(const Material &ma, const PaintLayersReg
   return wired;
 }
 
+/* Forward declaration: a Stack correction's topology recurses into its children through
+ * #topology_hash_layer (defined below, after #topology_hash_correction), which in turn recurses
+ * into a Layer folder's own effects/mask items through #topology_hash_correction -- the two are
+ * mutually recursive. */
+uint64_t topology_hash_layer(uint64_t hash,
+                             const Material &ma,
+                             const MaterialPaintLayer &layer,
+                             Span<int> wired_channels,
+                             const PaintLayersRegenCache *cache);
+
 /** Mix \a value into the FNV-1a style accumulator; order-sensitive, so lists hash in order. */
 uint64_t topology_hash_mix(uint64_t hash, const uint64_t value)
 {
@@ -838,7 +848,12 @@ uint64_t topology_hash_correction(uint64_t hash,
    * (#BKE_paint_layers_effective_opacity), so it must not move this hash. */
   const bool fill = BKE_paint_layers_source_type(correction) == PaintLayerSourceType::Constant;
   hash = topology_hash_mix(hash, fill ? 1 : 0);
-  if (mask_item && !fill) {
+  const bool mask_material_or_group = mask_item &&
+                                      ELEM(correction.source,
+                                           MA_PAINT_LAYER_SOURCE_MATERIAL,
+                                           MA_PAINT_LAYER_SOURCE_NODE_GROUP,
+                                           MA_PAINT_LAYER_SOURCE_STACK);
+  if (mask_item && !fill && !mask_material_or_group) {
     /* Whether the mask map is read as colour data decides whether the chain builds its Divide: a
      * data texture is left pre-multiplied by the Image Texture node, a non-data one is straightened
      * there. A change of the map's colorspace must therefore rebuild the group. */
@@ -847,6 +862,82 @@ uint64_t topology_hash_correction(uint64_t hash,
     const bool data = mask_image != nullptr &&
                       IMB_colormanagement_space_name_is_data(mask_image->colorspace_settings.name);
     hash = topology_hash_mix(hash, data ? 1 : 0);
+  }
+  if (mask_material_or_group) {
+    /* Which channel the mask reads is topology (another channel is another sub-graph: a
+     * different socket, a different reduction -- RGBTOBW, Separate X, or the coverage itself). A
+     * Normal channel builds nothing at all (the item is skipped), so nothing past the channel
+     * number itself can move this hash. */
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(correction.mask_channel)));
+    if (correction.mask_channel != PAINT_MATERIAL_CHANNEL_NORMAL) {
+      if (correction.source == MA_PAINT_LAYER_SOURCE_STACK) {
+        /* A Stack mask item's topology is its children's: each child's own full topology
+         * (#topology_hash_layer already loops every wired channel for it), depth-first, exactly
+         * like a Layer folder's own children below. A value edit inside the subtree (opacity, a
+         * Fill constant) does not move this hash, since #topology_hash_layer excludes those the
+         * same way it does for a top-level row. */
+        for (const MaterialPaintLayer &child :
+             *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&correction.children))
+        {
+          hash = topology_hash_layer(hash, ma, child, wired_channels, cache);
+        }
+      }
+      else if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+        /* Mirrors the content-correction hash above and #topology_hash_layer: a live constant or
+         * live map is topology, and so is the Baked/Hybrid/SourceGroup mode and, in SourceGroup,
+         * the source's own topology. */
+        float live_value[4];
+        const bool live_constant = BKE_paint_layers_material_live_constant(
+            ma, correction, correction.mask_channel, live_value, cache);
+        Image *live_map_image_probe = nullptr;
+        const ImageUser *live_map_iuser_probe = nullptr;
+        const bool live_map_probe = !live_constant &&
+                                    BKE_paint_layers_material_live_image(
+                                        ma, correction, correction.mask_channel,
+                                        &live_map_image_probe, &live_map_iuser_probe, cache);
+        hash = topology_hash_mix(hash, live_constant ? 1 : 0);
+        hash = topology_hash_mix(hash, live_map_probe ? 1 : 0);
+        if (live_map_probe) {
+          hash = topology_hash_mix(hash, topology_hash_map_id(live_map_image_probe));
+        }
+        const PaintLayerMaterialMode material_mode = BKE_paint_layers_material_mode(
+            ma, correction, cache);
+        hash = topology_hash_mix(hash, uint64_t(material_mode));
+        if (material_mode == PaintLayerMaterialMode::SourceGroup &&
+            correction.material != nullptr)
+        {
+          hash = topology_hash_mix(
+              hash, BKE_paint_layers_source_material_topology_hash(*correction.material));
+        }
+        if (!live_constant && !live_map_probe) {
+          /* Baked fallback: #paint_layer_channel_image already has a Material branch. */
+          const Image *baked_mask_image = paint_layer_channel_image(
+              ma, correction, correction.mask_channel);
+          hash = topology_hash_mix(hash, topology_hash_map_id(baked_mask_image));
+        }
+      }
+      else {
+        /* Node Group is Baked-only, like its content-correction counterpart above. */
+        Image *correction_baked = nullptr;
+        const bool has_bake =
+            BKE_paint_layers_bake_substitute(
+                ma, correction, correction.mask_channel, &correction_baked) ||
+            BKE_paint_layers_bake_substitute_custom(
+                ma, correction, correction.mask_channel, &correction_baked, nullptr);
+        hash = topology_hash_mix(hash, has_bake ? 1 : 0);
+        hash = topology_hash_mix(hash, has_bake ? topology_hash_map_id(correction_baked) : 0);
+      }
+    }
+  }
+  if (!mask_item && correction.source == MA_PAINT_LAYER_SOURCE_STACK) {
+    /* A content (Effect) Stack correction's topology is its children's, exactly like the Mask Item
+     * branch above and a Layer folder's own children below: each child's full topology, depth-first,
+     * value edits inside excluded the same way #topology_hash_layer excludes them everywhere else. */
+    for (const MaterialPaintLayer &child :
+         *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&correction.children))
+    {
+      hash = topology_hash_layer(hash, ma, child, wired_channels, cache);
+    }
   }
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
@@ -1616,6 +1707,35 @@ void paint_layers_tree_build(const Material &ma,
                                                                                  live_socket);
         }
       }
+      /* A Mask Item only ever reads its own single `mask_channel`, never every wired channel of
+       * the owner row -- one group input, not one per channel. Not needed for Alpha: there the
+       * mask's grey is the coverage itself, built straight into the tree, never a group input. */
+      if (mask_item && correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+          correction.mask_channel != PAINT_MATERIAL_CHANNEL_ALPHA)
+      {
+        const int channel = correction.mask_channel;
+        float live_value[4];
+        if (BKE_paint_layers_material_live_constant(ma, correction, channel, live_value, cache)) {
+          const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+              eMaterialPaintChannel(channel));
+          char live_base[224];
+          SNPRINTF(live_base,
+                   "%s %s %s Source",
+                   layer.name[0] != '\0' ? layer.name : "Layer",
+                   correction.name[0] != '\0' ? correction.name : "Correction",
+                   info.ui_name);
+          bNodeTreeInterfaceSocket *live_socket = layer_group_value_input(
+              group, live_base, "NodeSocketColor", ROLE_LIVE_CONSTANT, correction.marker, channel);
+          if (live_socket != nullptr) {
+            if (live_socket->socket_data != nullptr) {
+              copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(live_socket->socket_data)->value,
+                        live_value);
+            }
+            correction_live_constant_inputs.lookup_or_add_default(&correction).add(channel,
+                                                                                   live_socket);
+          }
+        }
+      }
       if (BKE_paint_layers_source_type(correction) != PaintLayerSourceType::Constant) {
         return;
       }
@@ -1780,15 +1900,6 @@ void paint_layers_tree_build(const Material &ma,
     previous.source = socket_out(*bottom_node, "Color");
     float location_x = 180.0f;
 
-    /* Set while a folder's own row is built: its source is the sub-chain's straight result, and its
-     * factor is multiplied by the sub-chain's coverage. */
-    bNode *folder_source_node = nullptr;
-    bNodeSocket *folder_source = nullptr;
-    bNode *folder_coverage_node = nullptr;
-    bNodeSocket *folder_coverage = nullptr;
-    bNode *folder_content_alpha_node = nullptr;
-    bNodeSocket *folder_content_alpha = nullptr;
-
     /* Content alpha is tracked for every map channel except Normal (F2-C1): the leaf supplies it,
      * the isolating folder divides the premultiplied accumulation by coverage, and the final Result
      * composes it back. A channel outside that set leaves the chain null, so nothing is built and
@@ -1796,11 +1907,22 @@ void paint_layers_tree_build(const Material &ma,
     const bool track_content_alpha =
         BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel));
 
-    std::function<ChainResult(const ListBase &, ChainLayer, bool, const RowTarget &)> build_list =
-        [&](const ListBase &list,
-            ChainLayer previous,
-            const bool premul,
-            const RowTarget &parent_target) -> ChainResult {
+    std::function<ChainResult(const ListBase &, ChainLayer, bool, const RowTarget &, int)>
+        build_list = [&](const ListBase &list,
+                         ChainLayer previous,
+                         const bool premul,
+                         const RowTarget &parent_target,
+                         const int channel) -> ChainResult {
+      /* Shadows the enclosing per-channel loop's own `channel` for this whole call and everything
+       * it recurses into (including the nested #build_row below): a Stack mask's subtree builds in
+       * its own fixed `mask_channel` (or Base Color, for the Alpha convention), never in whichever
+       * channel the owner row happens to be generating right now -- see the two call sites below
+       * that pass something other than the plain `channel` they were handed. #track_content_alpha
+       * is re-derived from this parameter for the same reason: Normal is the only channel that does
+       * not track it, and a mask fixed to a non-Normal channel must track it even while the owner
+       * itself is generating its own Normal row. */
+      const bool track_content_alpha =
+          BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel));
       /* This list builds in the tree it is handed: the root, or a folder's own group. */
       bNodeTree &tree = *parent_target.tree;
       bNode *coverage_node = nullptr;
@@ -1845,10 +1967,21 @@ void paint_layers_tree_build(const Material &ma,
         /* A Custom and a Material row alike have no generated subtree: a valid bake substitutes
          * above, and without one there is no channel record and the row drops out below. */
 
-        folder_source_node = nullptr;
-        folder_source = nullptr;
-        folder_coverage_node = nullptr;
-        folder_coverage = nullptr;
+        /* Set while THIS row is built and it is itself a folder: its source is the sub-chain's
+         * straight result, and its factor is multiplied by the sub-chain's coverage. These are
+         * local to one #build_row call (not the enclosing #build_list's shared state): a
+         * correction's own children -- and an isolating folder's own children -- recurse back into
+         * #build_row for a different #layer, and a shared copy would carry that nested call's
+         * folder bookkeeping right past its own return, into a completely unrelated row's coverage
+         * multiply near this call's end (see the crash this fixed: a Stack correction's own row
+         * inherited a grouped child's leftover folder-coverage node, in the child's tree, and linked
+         * it into this row's tree). */
+        bNode *folder_source_node = nullptr;
+        bNodeSocket *folder_source = nullptr;
+        bNode *folder_coverage_node = nullptr;
+        bNodeSocket *folder_coverage = nullptr;
+        bNode *folder_content_alpha_node = nullptr;
+        bNodeSocket *folder_content_alpha = nullptr;
         /* The active Material row's live value for this channel, when it has one. A live constant
          * needs no sampler; a live map is the source's own texture. Both count as the row taking
          * part even without a channel record, so the early drop below must see them. */
@@ -1882,7 +2015,7 @@ void paint_layers_tree_build(const Material &ma,
           ChainLayer sub_previous;
           sub_previous.source_node = p_zero;
           sub_previous.source = p_zero_out;
-          ChainResult sub = build_list(layer->children, sub_previous, true, target);
+          ChainResult sub = build_list(layer->children, sub_previous, true, target, channel);
           if (sub.chain.source == nullptr || sub.coverage == nullptr) {
             return {};
           }
@@ -2270,6 +2403,71 @@ void paint_layers_tree_build(const Material &ma,
         return {divide, socket_out(*divide, "Value")};
       };
 
+      /* A Material/Node Group correction's own coverage: the same Baked/Hybrid/SourceGroup
+       * precedence #resolve_row_material_source uses for content, but always read on the Alpha
+       * channel and ending at the wrapper's dedicated COVERAGE output (SourceGroup) or the
+       * correction's own bake coverage (Baked) -- mirrors `layer_factor` below (~2276-2356)
+       * exactly, with \a row standing in for `*layer`. One helper for a content Effect (its own
+       * coverage multiplier) and a Mask Item (its coverage when `mask_channel` is not Alpha), so
+       * the two cannot disagree about what "the source's coverage" means. */
+      auto resolve_correction_coverage =
+          [&](const MaterialPaintLayer &row) -> std::pair<bNode *, bNodeSocket *> {
+        if (row.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+          /* A Node Group has no live path at all (it is Baked-only); its "coverage" is its own
+           * bake coverage, the same map a substituted row's factor would read. */
+          if (row.bake != nullptr && row.bake->coverage != nullptr) {
+            return grey_of_map(*row.bake->coverage, -240.0f);
+          }
+          return {nullptr, nullptr};
+        }
+        const RowMaterialSource alpha_source = resolve_row_material_source(
+            row, PAINT_MATERIAL_CHANNEL_ALPHA, tree, false);
+        if (alpha_source.live_constant) {
+          bNode *value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+          bNodeSocket *value_out = (value != nullptr) ? socket_out(*value, "Value") : nullptr;
+          if (value != nullptr && value_out != nullptr && value_out->default_value != nullptr) {
+            value->location[0] = location_x - 90.0f;
+            value->location[1] = location_y - 240.0f;
+            static_cast<bNodeSocketValueFloat *>(value_out->default_value)->value =
+                alpha_source.live_value[0];
+            return {value, value_out};
+          }
+          return {nullptr, nullptr};
+        }
+        if (alpha_source.live_map) {
+          bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+          bNodeSocket *map_alpha = (map != nullptr) ? socket_out(*map, "Alpha") : nullptr;
+          if (map != nullptr && map_alpha != nullptr) {
+            map->id = &alpha_source.live_map_image->id;
+            id_us_plus(&alpha_source.live_map_image->id);
+            map->location[0] = location_x - 90.0f;
+            map->location[1] = location_y - 240.0f;
+            if (NodeTexImage *dst = static_cast<NodeTexImage *>(map->storage)) {
+              if (alpha_source.live_map_iuser != nullptr) {
+                dst->iuser = *alpha_source.live_map_iuser;
+              }
+            }
+            return {map, map_alpha};
+          }
+          return {nullptr, nullptr};
+        }
+        if (alpha_source.source_group_instance != nullptr &&
+            alpha_source.source_group_tree != nullptr)
+        {
+          bNodeSocket *coverage_out = source_group_output(*alpha_source.source_group_tree,
+                                                           *alpha_source.source_group_instance,
+                                                           PAINT_MATERIAL_CHANNEL_ALPHA,
+                                                           true);
+          if (coverage_out != nullptr) {
+            return {alpha_source.source_group_instance, coverage_out};
+          }
+        }
+        if (row.bake != nullptr && row.bake->coverage != nullptr) {
+          return grey_of_map(*row.bake->coverage, -240.0f);
+        }
+        return {nullptr, nullptr};
+      };
+
       /* The factor base the mask stack builds on: one, times -- for a Material layer -- its
        * source's coverage (what the source's own transparency baked into), so a mask on a
        * transparent source limits it further and never re-bakes it. */
@@ -2405,7 +2603,8 @@ void paint_layers_tree_build(const Material &ma,
                     MA_PAINT_LAYER_SOURCE_CONSTANT,
                     MA_PAINT_LAYER_SOURCE_MESH_MAP,
                     MA_PAINT_LAYER_SOURCE_MATERIAL,
-                    MA_PAINT_LAYER_SOURCE_NODE_GROUP))
+                    MA_PAINT_LAYER_SOURCE_NODE_GROUP,
+                    MA_PAINT_LAYER_SOURCE_STACK))
           {
             continue;
           }
@@ -2612,6 +2811,47 @@ void paint_layers_tree_build(const Material &ma,
               continue;
             }
           }
+          else if (correction.source == MA_PAINT_LAYER_SOURCE_STACK) {
+            /* A Stack correction composites its own children in isolation, exactly like a Layer
+             * folder composites its own (#build_list over `layer->children` above, ~1957-1993):
+             * accumulate premultiplied colour and coverage starting from transparent, then the
+             * same Vector Math Divide straightens the result to `S = P / a`. The straight colour
+             * is this correction's content; the coverage stands in for a Material correction's own
+             * Alpha input below (`correction_material_coverage_*`), never a content map's alpha --
+             * a Stack correction has no map of its own, only its children's accumulated result. */
+            bNode *p_zero = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
+            bNodeSocket *p_zero_out = (p_zero != nullptr) ? socket_out(*p_zero, "Color") : nullptr;
+            if (p_zero_out == nullptr) {
+              continue;
+            }
+            if (p_zero_out->default_value != nullptr) {
+              copy_v4_fl(static_cast<bNodeSocketValueRGBA *>(p_zero_out->default_value)->value,
+                         0.0f);
+            }
+            ChainLayer sub_previous;
+            sub_previous.source_node = p_zero;
+            sub_previous.source = p_zero_out;
+            ChainResult sub = build_list(correction.children, sub_previous, true, target, channel);
+            if (sub.chain.source == nullptr || sub.coverage == nullptr) {
+              continue;
+            }
+            bNode *divide = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+            bNodeSocket *div_a = (divide != nullptr) ? socket_in(*divide, "Vector") : nullptr;
+            bNodeSocket *div_b = (divide != nullptr) ? socket_in(*divide, "Vector_001") : nullptr;
+            bNodeSocket *div_out = (divide != nullptr) ? socket_out(*divide, "Vector") : nullptr;
+            if (div_out == nullptr) {
+              continue;
+            }
+            divide->custom1 = NODE_VECTOR_MATH_DIVIDE;
+            divide->location[0] = location_x;
+            divide->location[1] = location_y - 160.0f;
+            bke::node_add_link(tree, *sub.chain.source_node, *sub.chain.source, *divide, *div_a);
+            bke::node_add_link(tree, *sub.coverage_node, *sub.coverage, *divide, *div_b);
+            correction_color = div_out;
+            correction_color_node = divide;
+            correction_material_coverage_node = sub.coverage_node;
+            correction_material_coverage_socket = sub.coverage;
+          }
           else {
             const bool correction_mesh_map = correction.source == MA_PAINT_LAYER_SOURCE_MESH_MAP;
             Image *correction_image = paint_layer_channel_image(ma, correction, channel);
@@ -2785,14 +3025,16 @@ void paint_layers_tree_build(const Material &ma,
           bNodeSocket *correction_coverage_socket = nullptr;
           bNode *correction_coverage_node = nullptr;
           if (correction_opacity != nullptr && group_input != nullptr) {
-            /* A Material correction's per-pixel coverage is its own Alpha-channel resolution
-             * (`correction_material_coverage_*`, built above like `layer_factor`), never the
-             * content channel's own map alpha -- a Material row has no coverage of its own either
-             * (see the comment on `content_cov`). Every other kind uses its content map's alpha
-             * (`correction_alpha`) the way it always did. A Fill correction's factor is its opacity
-             * alone, with no per-pixel term to scale it; a Material correction with none of its own
-             * (Baked with no bake coverage yet, say) behaves the same way for this purpose. */
-            const bool material_correction = correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
+            /* A Material or Stack correction's per-pixel coverage is its own Alpha-channel
+             * resolution or its subtree's accumulated coverage (`correction_material_coverage_*`,
+             * built above like `layer_factor`), never the content channel's own map alpha -- neither
+             * has a content map of its own (see the comment on `content_cov`). Every other kind uses
+             * its content map's alpha (`correction_alpha`) the way it always did. A Fill correction's
+             * factor is its opacity alone, with no per-pixel term to scale it; a Material or Stack
+             * correction with none of its own (Baked with no bake coverage yet, or an empty subtree)
+             * behaves the same way for this purpose. */
+            const bool material_correction = ELEM(
+                correction.source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_STACK);
             bNodeSocket *coverage_map_socket = material_correction ? correction_material_coverage_socket :
                                                                      correction_alpha;
             bNode *coverage_map_node = material_correction ? correction_material_coverage_node :
@@ -3007,6 +3249,18 @@ void paint_layers_tree_build(const Material &ma,
             const MaterialPaintLayer &correction = *mask_item;
             const bool fill = BKE_paint_layers_source_type(correction) ==
                               PaintLayerSourceType::Constant;
+            const bool mask_material_or_group = ELEM(correction.source,
+                                                      MA_PAINT_LAYER_SOURCE_MATERIAL,
+                                                      MA_PAINT_LAYER_SOURCE_NODE_GROUP,
+                                                      MA_PAINT_LAYER_SOURCE_STACK);
+            /* A Normal mask channel has no visual meaning to reduce to one number (it is a
+             * tangent-space direction, not a scalar or a colour); the item is quietly skipped,
+             * exactly like a Node Group correction with no bake yet. */
+            if (mask_material_or_group &&
+                correction.mask_channel == PAINT_MATERIAL_CHANNEL_NORMAL)
+            {
+              continue;
+            }
             bNodeSocket *correction_opacity = nullptr;
             if (Map<int, bNodeTreeInterfaceSocket *> *opacity_by_channel =
                     correction_opacity_inputs.lookup_ptr(&correction))
@@ -3028,6 +3282,11 @@ void paint_layers_tree_build(const Material &ma,
              * so only a data map still needs the chain's own Divide. */
             bool mask_map_is_data = false;
             bool mask_map_is_mesh = false;
+            /* A Material/Node Group mask's own coverage (its source's Alpha), independent of the
+             * grey it lays over the factor -- reused as-is when `mask_channel` is Alpha (the grey
+             * itself is this number) or as the item's Fac multiplier otherwise. */
+            bNode *correction_coverage_node = nullptr;
+            bNodeSocket *correction_coverage_socket = nullptr;
             if (fill) {
               if (bNodeTreeInterfaceSocket **fill_iface =
                       correction_fill_inputs.lookup_ptr(&correction))
@@ -3037,6 +3296,225 @@ void paint_layers_tree_build(const Material &ma,
               }
               if (gray_source_color == nullptr) {
                 continue;
+              }
+            }
+            else if (mask_material_or_group) {
+              const bool mask_alpha_channel = correction.mask_channel ==
+                                              PAINT_MATERIAL_CHANNEL_ALPHA;
+              if (correction.source == MA_PAINT_LAYER_SOURCE_STACK) {
+                /* A Stack mask item reads its own children's accumulated result, exactly like a
+                 * Stack content correction and a Layer folder's own children (#build_list,
+                 * mirrors ~1957-1993 and the content correction's own Stack branch above): straight
+                 * colour + coverage, starting from transparent. The subtree's coverage is this
+                 * item's Fac multiplier on every channel (below) and, on the Alpha channel, the
+                 * grey itself -- there is no separate content map to read.
+                 *
+                 * The subtree builds in a fixed channel, never in the owner's current `channel`: on
+                 * the Alpha convention it always reads Base Color (exactly like every other Paint
+                 * mask -- #paint_layer_mask_correction_image always reads Base Color too), and
+                 * otherwise it reads `mask_channel` itself. Both are constant across every channel
+                 * the owner row generates, or the same mask would answer differently depending on
+                 * which of the owner's own channels happens to be built at the time -- the bug
+                 * #stack_mask_fixed_channel_applies_to_every_owner_channel_matches_the_cpu and
+                 * #stack_mask_alpha_reads_base_color_on_every_owner_channel_matches_the_cpu regress. */
+                const int mask_build_channel = mask_alpha_channel ?
+                                                   int(PAINT_MATERIAL_CHANNEL_BASE_COLOR) :
+                                                   int(correction.mask_channel);
+                bNode *p_zero = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
+                bNodeSocket *p_zero_out = (p_zero != nullptr) ? socket_out(*p_zero, "Color") :
+                                                                nullptr;
+                if (p_zero_out == nullptr) {
+                  continue;
+                }
+                if (p_zero_out->default_value != nullptr) {
+                  copy_v4_fl(
+                      static_cast<bNodeSocketValueRGBA *>(p_zero_out->default_value)->value, 0.0f);
+                }
+                ChainLayer sub_previous;
+                sub_previous.source_node = p_zero;
+                sub_previous.source = p_zero_out;
+                ChainResult sub = build_list(
+                    correction.children, sub_previous, true, target, mask_build_channel);
+                if (sub.chain.source == nullptr || sub.coverage == nullptr) {
+                  continue;
+                }
+                bNode *divide = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+                bNodeSocket *div_a = (divide != nullptr) ? socket_in(*divide, "Vector") : nullptr;
+                bNodeSocket *div_b = (divide != nullptr) ? socket_in(*divide, "Vector_001") :
+                                                           nullptr;
+                bNodeSocket *div_out = (divide != nullptr) ? socket_out(*divide, "Vector") :
+                                                             nullptr;
+                if (div_out == nullptr) {
+                  continue;
+                }
+                divide->custom1 = NODE_VECTOR_MATH_DIVIDE;
+                divide->location[0] = location_x - 220.0f;
+                divide->location[1] = location_y - 320.0f;
+                bke::node_add_link(
+                    tree, *sub.chain.source_node, *sub.chain.source, *divide, *div_a);
+                bke::node_add_link(tree, *sub.coverage_node, *sub.coverage, *divide, *div_b);
+                correction_coverage_node = sub.coverage_node;
+                correction_coverage_socket = sub.coverage;
+                if (!mask_alpha_channel) {
+                  const bool mask_is_color = BKE_paint_material_channel_info(
+                                                  eMaterialPaintChannel(correction.mask_channel))
+                                                  .is_color;
+                  if (mask_is_color) {
+                    bNode *rgbtobw = bke::node_add_static_node(nullptr, tree, SH_NODE_RGBTOBW);
+                    bNodeSocket *bw_in = (rgbtobw != nullptr) ? socket_in(*rgbtobw, "Color") :
+                                                                nullptr;
+                    bNodeSocket *bw_out = (rgbtobw != nullptr) ? socket_out(*rgbtobw, "Val") :
+                                                                 nullptr;
+                    if (bw_in == nullptr || bw_out == nullptr) {
+                      continue;
+                    }
+                    rgbtobw->location[0] = location_x - 140.0f;
+                    rgbtobw->location[1] = location_y - 320.0f;
+                    bke::node_add_link(tree, *divide, *div_out, *rgbtobw, *bw_in);
+                    gray_source_node = rgbtobw;
+                    gray_source_color = bw_out;
+                  }
+                  else {
+                    bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+                    bNodeSocket *sep_vector = (separate != nullptr) ?
+                                                  socket_in(*separate, "Vector") :
+                                                  nullptr;
+                    bNodeSocket *sep_x = (separate != nullptr) ? socket_out(*separate, "X") :
+                                                                 nullptr;
+                    if (sep_vector == nullptr || sep_x == nullptr) {
+                      continue;
+                    }
+                    bke::node_add_link(tree, *divide, *div_out, *separate, *sep_vector);
+                    gray_source_node = separate;
+                    gray_source_color = sep_x;
+                  }
+                }
+              }
+              else if (mask_alpha_channel) {
+                /* The channel itself is the source's coverage: no separate grey/coverage split. */
+                std::tie(correction_coverage_node, correction_coverage_socket) =
+                    resolve_correction_coverage(correction);
+                if (correction_coverage_node == nullptr || correction_coverage_socket == nullptr) {
+                  continue;
+                }
+              }
+              else {
+                const bool mask_is_color = BKE_paint_material_channel_info(
+                                                eMaterialPaintChannel(correction.mask_channel))
+                                                .is_color;
+                bNode *value_node = nullptr;
+                bNodeSocket *value_socket = nullptr;
+                if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+                  const RowMaterialSource row_source = resolve_row_material_source(
+                      correction, correction.mask_channel, tree, false);
+                  if (row_source.live_constant) {
+                    if (Map<int, bNodeTreeInterfaceSocket *> *live_by_channel =
+                            correction_live_constant_inputs.lookup_ptr(&correction))
+                    {
+                      if (bNodeTreeInterfaceSocket **live_iface =
+                              live_by_channel->lookup_ptr(correction.mask_channel))
+                      {
+                        value_socket = group_input_socket(**live_iface);
+                        value_node = group_input;
+                      }
+                    }
+                  }
+                  else if (row_source.live_map) {
+                    bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+                    if (map != nullptr) {
+                      map->id = &row_source.live_map_image->id;
+                      id_us_plus(&row_source.live_map_image->id);
+                      map->location[0] = location_x - 220.0f;
+                      map->location[1] = location_y - 320.0f;
+                      if (NodeTexImage *dst = static_cast<NodeTexImage *>(map->storage)) {
+                        if (row_source.live_map_iuser != nullptr) {
+                          dst->iuser = *row_source.live_map_iuser;
+                        }
+                      }
+                      value_socket = socket_out(*map, "Color");
+                      value_node = map;
+                    }
+                  }
+                  else if (row_source.source_group_instance != nullptr &&
+                           row_source.source_group_socket != nullptr)
+                  {
+                    value_socket = row_source.source_group_socket;
+                    value_node = row_source.source_group_instance;
+                  }
+                  else {
+                    Image *mask_image = paint_layer_channel_image(
+                        ma, correction, correction.mask_channel);
+                    if (mask_image != nullptr) {
+                      bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+                      if (map != nullptr) {
+                        map->id = &mask_image->id;
+                        id_us_plus(&mask_image->id);
+                        map->location[0] = location_x - 220.0f;
+                        map->location[1] = location_y - 320.0f;
+                        value_socket = socket_out(*map, "Color");
+                        value_node = map;
+                      }
+                    }
+                  }
+                }
+                else {
+                  /* Node Group: Baked-only, like the content correction of the same source. */
+                  Image *mask_baked = nullptr;
+                  if (BKE_paint_layers_bake_substitute(
+                          ma, correction, correction.mask_channel, &mask_baked) ||
+                      BKE_paint_layers_bake_substitute_custom(
+                          ma, correction, correction.mask_channel, &mask_baked, nullptr))
+                  {
+                    if (mask_baked != nullptr) {
+                      bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+                      if (map != nullptr) {
+                        map->id = &mask_baked->id;
+                        id_us_plus(&mask_baked->id);
+                        map->location[0] = location_x - 220.0f;
+                        map->location[1] = location_y - 320.0f;
+                        value_socket = socket_out(*map, "Color");
+                        value_node = map;
+                      }
+                    }
+                  }
+                }
+                if (value_socket == nullptr || value_node == nullptr) {
+                  continue;
+                }
+                if (mask_is_color) {
+                  bNode *rgbtobw = bke::node_add_static_node(nullptr, tree, SH_NODE_RGBTOBW);
+                  bNodeSocket *bw_in = (rgbtobw != nullptr) ? socket_in(*rgbtobw, "Color") :
+                                                              nullptr;
+                  bNodeSocket *bw_out = (rgbtobw != nullptr) ? socket_out(*rgbtobw, "Val") :
+                                                               nullptr;
+                  if (bw_in == nullptr || bw_out == nullptr) {
+                    continue;
+                  }
+                  rgbtobw->location[0] = location_x - 140.0f;
+                  rgbtobw->location[1] = location_y - 320.0f;
+                  bke::node_add_link(tree, *value_node, *value_socket, *rgbtobw, *bw_in);
+                  gray_source_node = rgbtobw;
+                  gray_source_color = bw_out;
+                }
+                else {
+                  /* A scalar channel's map or constant stores its value spread across R=G=B
+                   * (#socket_default_to_constant's SOCK_FLOAT case, and every scalar bake/AOV);
+                   * Separate X reads it directly, exactly like a MESH_MAP scalar atlas. */
+                  bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+                  bNodeSocket *sep_vector = (separate != nullptr) ? socket_in(*separate, "Vector") :
+                                                                    nullptr;
+                  bNodeSocket *sep_x = (separate != nullptr) ? socket_out(*separate, "X") : nullptr;
+                  if (sep_vector == nullptr || sep_x == nullptr) {
+                    continue;
+                  }
+                  bke::node_add_link(tree, *value_node, *value_socket, *separate, *sep_vector);
+                  gray_source_node = separate;
+                  gray_source_color = sep_x;
+                }
+                /* This item's own Fac multiplier: the source's coverage, resolved once more (its
+                 * own Alpha channel, independent of `mask_channel`). */
+                std::tie(correction_coverage_node, correction_coverage_socket) =
+                    resolve_correction_coverage(correction);
               }
             }
             else {
@@ -3069,7 +3547,19 @@ void paint_layers_tree_build(const Material &ma,
             }
             bNode *correction_gray_node = nullptr;
             bNodeSocket *correction_gray = nullptr;
-            if (mask_map_is_mesh) {
+            if (mask_material_or_group) {
+              /* Already reduced to one number above: the coverage itself (Alpha channel) or the
+               * RGBTOBW/Separate-X result (colour/scalar channel) -- no further mean/Divide here. */
+              if (correction.mask_channel == PAINT_MATERIAL_CHANNEL_ALPHA) {
+                correction_gray_node = correction_coverage_node;
+                correction_gray = correction_coverage_socket;
+              }
+              else {
+                correction_gray_node = gray_source_node;
+                correction_gray = gray_source_color;
+              }
+            }
+            else if (mask_map_is_mesh) {
               /* A scalar atlas: its R is the coverage directly; no mean, no Divide (the atlas is
                * Non-Color and its alpha is ignored). */
               bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
@@ -3150,7 +3640,11 @@ void paint_layers_tree_build(const Material &ma,
              * grey rather than replacing it with the grey; every other mode reads as MIX. */
             bNode *b_node = correction_gray_node;
             bNodeSocket *b_socket = correction_gray;
-            if (!fill) {
+            /* A Material/Node Group mask never premultiplies: its grey is either the source's own
+             * coverage (Alpha channel) or a value/RGBTOBW read straight from a live constant,
+             * live texture or bake, none of which the texture-upload premultiply touches -- only a
+             * user-painted Image/MeshMap map needs the straighten-by-A step below. */
+            if (!fill && !mask_material_or_group) {
               if (correction_alpha == nullptr || correction_map == nullptr) {
                 continue;
               }
@@ -3211,11 +3705,47 @@ void paint_layers_tree_build(const Material &ma,
             if (correction_opacity == nullptr || group_input == nullptr) {
               continue;
             }
-            if (fill || mask_map_is_mesh) {
+            /* A Material/Node Group mask on its own Alpha channel is the coverage itself, so its
+             * Fac is the opacity alone (the coordinator's decision: squaring the same number as
+             * both the grey and its own multiplier would be wrong) -- flat, exactly like Fill and
+             * a MESH_MAP atlas. On every other channel its Fac multiplies by the source's own
+             * coverage (`correction_coverage_*`, resolved above), never a texture's own alpha. */
+            const bool mask_alpha_flat = mask_material_or_group &&
+                                         correction.mask_channel == PAINT_MATERIAL_CHANNEL_ALPHA;
+            if (fill || mask_map_is_mesh || mask_alpha_flat) {
               /* A Fill covers fully; a MESH_MAP atlas' alpha is ignored (spec M2 §1), so its factor
                * is the item's opacity alone and no Alpha multiply is built. */
               bke::node_add_link(
                   tree, *group_input, *correction_opacity, *correction_mix, *mix_fac);
+            }
+            else if (mask_material_or_group) {
+              if (correction_coverage_node == nullptr || correction_coverage_socket == nullptr) {
+                /* No coverage of its own yet (Baked with no bake coverage, say): flat, exactly
+                 * like the row-level factor falls back to full coverage in the same state. */
+                bke::node_add_link(
+                    tree, *group_input, *correction_opacity, *correction_mix, *mix_fac);
+              }
+              else {
+                bNode *fac_multiply = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+                if (fac_multiply == nullptr) {
+                  continue;
+                }
+                fac_multiply->custom1 = NODE_MATH_MULTIPLY;
+                bNodeSocket *fac_value = socket_in(*fac_multiply, "Value");
+                bNodeSocket *fac_coverage = socket_in(*fac_multiply, "Value_001");
+                bNodeSocket *fac_out = socket_out(*fac_multiply, "Value");
+                if (fac_value == nullptr || fac_coverage == nullptr || fac_out == nullptr) {
+                  continue;
+                }
+                bke::node_add_link(
+                    tree, *group_input, *correction_opacity, *fac_multiply, *fac_value);
+                bke::node_add_link(tree,
+                                   *correction_coverage_node,
+                                   *correction_coverage_socket,
+                                   *fac_multiply,
+                                   *fac_coverage);
+                bke::node_add_link(tree, *fac_multiply, *fac_out, *correction_mix, *mix_fac);
+              }
             }
             else {
               if (correction_alpha == nullptr || correction_map == nullptr) {
@@ -3536,7 +4066,7 @@ void paint_layers_tree_build(const Material &ma,
            * the same folder. Alternatives considered and rejected: reserving correction slots (does
            * not avoid the code change) and an always-present opacity input (complicates every chain
            * for this rare case). */
-          ChainResult sub = build_list(layer->children, previous, premul, parent_target);
+          ChainResult sub = build_list(layer->children, previous, premul, parent_target, channel);
           previous = sub.chain;
           coverage_node = sub.coverage_node;
           coverage = sub.coverage;
@@ -4090,7 +4620,7 @@ void paint_layers_tree_build(const Material &ma,
       }
       return {previous, coverage_node, coverage, content_alpha_node, content_alpha};
     };
-    ChainResult built = build_list(ma.paint_layers, previous, false, target);
+    ChainResult built = build_list(ma.paint_layers, previous, false, target, channel);
     previous = built.chain;
 
     /* A partial factor interpolates the combine's encoded output against the base, which shortens
@@ -5736,7 +6266,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     BKE_ntree_update_after_single_tree_change(bmain, *layer_tree);
     DEG_id_tag_update(&layer_tree->id, ID_RECALC_SYNC_TO_EVAL);
   }
-
   const uint64_t root_hash = paint_layers_root_topology_hash(
       ma, wired_channels, layer_trees, &regen_cache);
   uint64_t stored_root = 0;

@@ -200,24 +200,42 @@ static float mask_factor_at(
 }
 
 /**
- * The color and alpha of a mask-correction pixel: the mean of its stored RGB and its stored alpha,
- * or the R alone for a MESH_MAP mask item (#reads_red -- the atlas R is the coverage, the same
- * value the generated Separate X reads).
- * The map is stored straight, like every paint-layer map, so the mean already is the coverage
- * colour `C`; there is no un-premultiply divide. The graph reads the same straight bytes, after its
- * texture upload has pre-multiplied and its Divide has undone that, so the two agree texel for
- * texel.
+ * The color and alpha of a mask-correction pixel, reduced by \a mode:
+ * #Mean (every existing Image/Mesh Map mask, unchanged) is the mean of its stored RGB; #Red (a
+ * MESH_MAP mask item) is the atlas R alone, the same value the generated Separate X reads;
+ * #Luminance (a Material/Node Group mask on a colour channel) matches
+ * #IMB_colormanagement_get_luminance, the generator's own #SH_NODE_RGBTOBW; #Alpha (a Material
+ * mask reading a live source Alpha texture) reads the grey from the pixel's own alpha instead of
+ * its RGB, and forces the returned alpha to 1 -- the source's coverage lives in that texture's
+ * alpha, not a second one, so the item's own factor is flat (opacity alone), never squared.
+ * The map is stored straight, like every paint-layer map, so the reduced value already is the
+ * coverage colour `C`; there is no un-premultiply divide. The graph reads the same straight bytes,
+ * after its texture upload has pre-multiplied and its Divide has undone that, so the two agree
+ * texel for texel.
  */
 static void correction_mask_coverage_at(const ImBuf *ibuf,
                                         const int x,
                                         const int y,
-                                        const bool reads_red,
+                                        const MaskGrayMode mode,
                                         float &r_gray,
                                         float &r_alpha)
 {
   float rgba[4];
   composite_read_sample_linear(ibuf, x, y, rgba);
-  r_gray = clamp_f(reads_red ? rgba[0] : (rgba[0] + rgba[1] + rgba[2]) / 3.0f, 0.0f, 1.0f);
+  if (mode == MaskGrayMode::Alpha) {
+    r_gray = clamp_f(rgba[3], 0.0f, 1.0f);
+    r_alpha = 1.0f;
+    return;
+  }
+  if (mode == MaskGrayMode::Luminance) {
+    r_gray = clamp_f(IMB_colormanagement_get_luminance(rgba), 0.0f, 1.0f);
+  }
+  else if (mode == MaskGrayMode::Red) {
+    r_gray = clamp_f(rgba[0], 0.0f, 1.0f);
+  }
+  else {
+    r_gray = clamp_f((rgba[0] + rgba[1] + rgba[2]) / 3.0f, 0.0f, 1.0f);
+  }
   r_alpha = clamp_f(rgba[3], 0.0f, 1.0f);
 }
 
@@ -397,18 +415,19 @@ static float composite_correction_pixel_mask_factor(const PaintMaterialComposite
     float gray = 0.0f;
     float corr_alpha = 0.0f;
     if (correction.has_constant_color) {
-      gray = (correction.constant_color[0] + correction.constant_color[1] +
-              correction.constant_color[2]) /
-             3.0f;
+      /* A Material mask's live constant on a colour channel reduces to luminance, like its live
+       * texture / bake counterpart just below; every other constant mask (Fill) keeps the mean. */
+      gray = (correction.mask_gray_mode == MaskGrayMode::Luminance) ?
+                IMB_colormanagement_get_luminance(correction.constant_color) :
+                (correction.constant_color[0] + correction.constant_color[1] +
+                 correction.constant_color[2]) /
+                    3.0f;
       corr_alpha = 1.0f;
     }
     else if (correction.ibuf != nullptr) {
-      correction_mask_coverage_at(correction.ibuf,
-                                  x,
-                                  y,
-                                  correction.mesh_map_mask_reads_red,
-                                  gray,
-                                  corr_alpha);
+      const MaskGrayMode mode = correction.mesh_map_mask_reads_red ? MaskGrayMode::Red :
+                                                                     correction.mask_gray_mode;
+      correction_mask_coverage_at(correction.ibuf, x, y, mode, gray, corr_alpha);
       /* The map is stored straight, like every paint-layer map, so its grey is the colour `C`
        * directly: no un-premultiply here. The graph reaches the same `C` by dividing the texture,
        * which the upload pre-multiplied, by alpha. `mix(F, C, A * op)` is
@@ -416,6 +435,16 @@ static float composite_correction_pixel_mask_factor(const PaintMaterialComposite
     }
     else {
       continue;
+    }
+    /* A Material/Node Group mask's own coverage (its source's Alpha, on a channel other than
+     * Alpha itself) overrides whatever #correction_mask_coverage_at answered above -- that
+     * function's `corr_alpha` is only meaningful for a plain Image/Mesh Map map's own alpha. */
+    if (correction.has_coverage_constant) {
+      corr_alpha = correction.coverage_constant;
+    }
+    else if (correction.coverage_ibuf != nullptr) {
+      corr_alpha = mask_factor_at(
+          correction.coverage_ibuf, correction.coverage_from_alpha, x, y, 1.0f);
     }
     const float fac = clamp_f(corr_alpha * correction.opacity, 0.0f, 1.0f);
     const float gray_clamped = clamp_f(gray, 0.0f, 1.0f);
@@ -528,6 +557,38 @@ static void composite_decode_tile(const ImBuf *ibuf,
  * correction's map through its own coverage. The factor the row finally blends by is the coverage
  * chain, computed pixel by pixel; a mask image owns it, and the mask corrections sit on top.
  */
+/* Forward declaration: a Stack correction's own content is its children's isolated result,
+ * computed the same way a Layer folder's own children are (#composite_folder_accumulate, defined
+ * below, after #composite_layer_render, which it is mutually recursive with through a folder's own
+ * corrections). */
+static void composite_folder_accumulate(const PaintMaterialCompositeLayer &folder,
+                                        const rcti &tile,
+                                        float *r_straight,
+                                        float *r_coverage);
+
+/**
+ * A Stack correction's own content: its children's isolated result over transparency
+ * (#composite_folder_accumulate, exactly like a Layer folder's own children), the subtree's
+ * coverage packed into the straight colour's alpha component. A plain Paint correction's own map
+ * alpha is already read as its coverage by the callers below, so packing it here means neither
+ * loop needs a separate code path for a folder correction -- it reads like any other map.
+ */
+static void composite_correction_stack_tile(
+    const PaintMaterialCompositeCorrectionBuffer &correction,
+    const rcti &tile,
+    Vector<float> &r_pixels)
+{
+  const int64_t count = int64_t(BLI_rcti_size_x(&tile)) * BLI_rcti_size_y(&tile);
+  PaintMaterialCompositeLayer stack_layer;
+  stack_layer.children = correction.children;
+  Vector<float> coverage(count);
+  r_pixels.resize(count * 4);
+  composite_folder_accumulate(stack_layer, tile, r_pixels.data(), coverage.data());
+  for (int64_t i = 0; i < count; i++) {
+    r_pixels[i * 4 + 3] = coverage[i];
+  }
+}
+
 /**
  * Render one row onto tile-sized buffers: its straight colour in \a r_color and the coverage it
  * blends by in \a r_factor. The destination is not touched, so a folder can composite the rows it
@@ -666,7 +727,13 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         continue;
       }
       const float *correction_pixels = nullptr;
-      if (correction.has_constant_color) {
+      if (correction.is_folder) {
+        /* The subtree's own coverage is packed into alpha, so the unchanged code below reads it
+         * exactly like a Paint correction's own map alpha -- #material_source stays false. */
+        composite_correction_stack_tile(correction, tile, correction_storage);
+        correction_pixels = correction_storage.data();
+      }
+      else if (correction.has_constant_color) {
         correction_storage.clear();
       }
       else if (correction.ibuf != nullptr) {
@@ -728,16 +795,28 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       r_factor[i] = mask_coverage(i) * alpha[i];
       r_color[i * 4 + 3] = (content_alpha != nullptr) ? content_alpha[i] : r_factor[i];
     }
+    Vector<float> mask_coverage_storage;
     for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.mask_corrections) {
       if (!correction.enabled) {
         continue;
       }
       const float *correction_pixels = nullptr;
       float constant_gray = 0.0f;
-      if (correction.has_constant_color) {
-        constant_gray = (correction.constant_color[0] + correction.constant_color[1] +
-                         correction.constant_color[2]) /
-                        3.0f;
+      if (correction.is_folder) {
+        /* The subtree's coverage is packed into alpha; #correction.mask_gray_mode (Alpha/Red/
+         * Luminance, set when the correction was built) picks the right reduction below, exactly
+         * like a Material/Node Group mask reading its own subtree. */
+        composite_correction_stack_tile(correction, tile, correction_storage);
+        correction_pixels = correction_storage.data();
+      }
+      else if (correction.has_constant_color) {
+        /* Mirrors the per-pixel loop: a Material mask's live constant on a colour channel reduces
+         * to luminance, every other constant mask (Fill) keeps the mean. */
+        constant_gray = (correction.mask_gray_mode == MaskGrayMode::Luminance) ?
+                          IMB_colormanagement_get_luminance(correction.constant_color) :
+                          (correction.constant_color[0] + correction.constant_color[1] +
+                           correction.constant_color[2]) /
+                              3.0f;
       }
       else if (correction.ibuf != nullptr) {
         correction_storage.resize(count * 4);
@@ -748,6 +827,17 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       else {
         continue;
       }
+      /* A Material/Node Group mask's own coverage, decoded apart from its grey -- mirrors the
+       * per-pixel #composite_correction_pixel_mask_factor and the content loop above. */
+      const float *coverage_pixels = nullptr;
+      if (!correction.has_coverage_constant && correction.coverage_ibuf != nullptr) {
+        mask_coverage_storage.resize(count * 4);
+        composite_decode_tile(correction.coverage_ibuf,
+                              correction.coverage_colorspace_name,
+                              tile,
+                              mask_coverage_storage.data());
+        coverage_pixels = mask_coverage_storage.data();
+      }
       for (int64_t i = 0; i < count; i++) {
         /* Straight coverage laid over the factor; the bytes are read as stored, never divided. */
         float gray = constant_gray;
@@ -756,8 +846,34 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
           const float *c = correction_pixels + i * 4;
           corr_alpha = c[3];
           /* Read straight, exactly as in #composite_correction_pixel_mask_factor's loop. A MESH_MAP
-           * mask item reads the atlas R, never the mean of its RGB. */
-          gray = correction.mesh_map_mask_reads_red ? c[0] : (c[0] + c[1] + c[2]) / 3.0f;
+           * mask item reads the atlas R, never the mean of its RGB; a Material/Node Group mask on a
+           * colour channel reads luminance, and one reading a live source Alpha texture reads that
+           * texture's own alpha as its grey and forces its own factor flat below. */
+          if (correction.mesh_map_mask_reads_red || correction.mask_gray_mode == MaskGrayMode::Red)
+          {
+            /* A MESH_MAP atlas' dedicated coverage channel, or a Stack mask on a scalar channel
+             * (its subtree's Separate-X-equivalent reduction): both read R alone. */
+            gray = c[0];
+          }
+          else if (correction.mask_gray_mode == MaskGrayMode::Alpha) {
+            gray = c[3];
+            corr_alpha = 1.0f;
+          }
+          else if (correction.mask_gray_mode == MaskGrayMode::Luminance) {
+            gray = IMB_colormanagement_get_luminance(c);
+          }
+          else {
+            gray = (c[0] + c[1] + c[2]) / 3.0f;
+          }
+        }
+        if (correction.has_coverage_constant) {
+          corr_alpha = correction.coverage_constant;
+        }
+        else if (coverage_pixels != nullptr) {
+          const float *cc = coverage_pixels + i * 4;
+          corr_alpha = correction.coverage_from_alpha ?
+                          clamp_f(cc[3], 0.0f, 1.0f) :
+                          clamp_f((cc[0] + cc[1] + cc[2]) / 3.0f, 0.0f, 1.0f);
         }
         const float fac = clamp_f(corr_alpha * correction.opacity, 0.0f, 1.0f);
         const float gray_clamped = clamp_f(gray, 0.0f, 1.0f);
@@ -1355,6 +1471,18 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
       }
       buffer.coverage_colorspace_name = composite_buffer_colorspace_name(buffer.coverage_ibuf);
     }
+    if (correction.is_folder) {
+      /* A Stack correction has no map of its own; its children are acquired the same way a Layer
+       * folder's own children are, recursively. */
+      buffer.is_folder = true;
+      for (const PaintMaterialCompositeImageLayer &child : correction.children) {
+        PaintMaterialCompositeLayer child_layer;
+        if (!composite_layer_build(child, r_locks, child_layer, ref_width, ref_height)) {
+          return false;
+        }
+        buffer.children.push_back(child_layer);
+      }
+    }
     r_layer.content_corrections.append(buffer);
   }
   for (const PaintMaterialCompositeCorrection &correction : image_layer.mask_corrections) {
@@ -1382,6 +1510,29 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
     buffer.has_constant_color = correction.has_constant_color;
     buffer.opacity = correction.opacity;
     buffer.enabled = correction.enabled;
+    buffer.has_coverage_constant = correction.has_coverage_constant;
+    buffer.coverage_constant = correction.coverage_constant;
+    buffer.coverage_from_alpha = correction.coverage_from_alpha;
+    buffer.material_source = correction.material_source;
+    buffer.mask_gray_mode = correction.mask_gray_mode;
+    if (correction.coverage_image != nullptr) {
+      buffer.coverage_ibuf = composite_image_acquire(
+          correction.coverage_image, correction.coverage_iuser, r_locks);
+      if (buffer.coverage_ibuf == nullptr) {
+        return false;
+      }
+      buffer.coverage_colorspace_name = composite_buffer_colorspace_name(buffer.coverage_ibuf);
+    }
+    if (correction.is_folder) {
+      buffer.is_folder = true;
+      for (const PaintMaterialCompositeImageLayer &child : correction.children) {
+        PaintMaterialCompositeLayer child_layer;
+        if (!composite_layer_build(child, r_locks, child_layer, ref_width, ref_height)) {
+          return false;
+        }
+        buffer.children.push_back(child_layer);
+      }
+    }
     r_layer.mask_corrections.append(buffer);
   }
   for (const PaintMaterialCompositeImageLayer &child : image_layer.children) {
@@ -1977,10 +2128,23 @@ static Vector<Image *> composite_layer_images(const PaintMaterialCompositeImageL
     if (correction.coverage_image != nullptr) {
       images.append_non_duplicates(correction.coverage_image);
     }
+    /* A Stack correction has no map of its own; its images are its children's, exactly like a
+     * Layer folder's own children below -- a paint stroke deep inside the subtree must still poke
+     * this subscription. */
+    for (const PaintMaterialCompositeImageLayer &child : correction.children) {
+      for (Image *image : composite_layer_images(child)) {
+        images.append_non_duplicates(image);
+      }
+    }
   }
   for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
     if (correction.image != nullptr) {
       images.append_non_duplicates(correction.image);
+    }
+    for (const PaintMaterialCompositeImageLayer &child : correction.children) {
+      for (Image *image : composite_layer_images(child)) {
+        images.append_non_duplicates(image);
+      }
     }
   }
   for (const PaintMaterialCompositeImageLayer &child : layer.children) {

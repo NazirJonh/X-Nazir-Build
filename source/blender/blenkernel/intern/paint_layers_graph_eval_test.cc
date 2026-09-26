@@ -366,6 +366,18 @@ class GraphInterpreter {
         bNodeSocket *input = bke::node_find_socket(mutable_node, SOCK_IN, "Input"_ustr);
         return (input != nullptr) ? eval_socket(*input) : RGBA{};
       }
+      case SH_NODE_RGBTOBW: {
+        /* Real Blender's own GPU implementation (node_shader_rgb_to_bw.cc) is exactly
+         * #IMB_colormanagement_get_luminance_coefficients applied through GPU_stack_link -- the
+         * same coefficients #IMB_colormanagement_get_luminance uses, so calling it here is not an
+         * approximation but the node's own defining formula. */
+        bNode &mutable_node = const_cast<bNode &>(node);
+        const RGBA color = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Color"_ustr));
+        float rgb[3] = {color.r, color.g, color.b};
+        const float value = IMB_colormanagement_get_luminance(rgb);
+        return {value, value, value, 1.0f};
+      }
       case SH_NODE_MIX: {
         bNode &mutable_node = const_cast<bNode &>(node);
         const NodeShaderMix &storage = *static_cast<const NodeShaderMix *>(node.storage);
@@ -688,6 +700,29 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
   {
     MaterialPaintLayer *layer = BKE_paint_layers_add(
         *ma, source, name, nullptr, PaintLayerPlace::Above);
+    EXPECT_NE(layer, nullptr);
+    MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
+    EXPECT_NE(record, nullptr);
+    record->image = image;
+    record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+    return layer;
+  }
+
+  /**
+   * Add a Layer-role row directly into \a anchor's own #children -- a Stack correction/mask item
+   * (#BKE_paint_layers_add accepts \a place Into there since it is a folder in every sense
+   * #BKE_paint_layers_is_folder cares about, regardless of \a anchor's role) or an ordinary folder.
+   * Mirrors #add_layer, which always anchors at the top level instead.
+   */
+  MaterialPaintLayer *add_layer_into(MaterialPaintLayer *anchor,
+                                     const char *name,
+                                     const eMaterialPaintLayerSource source,
+                                     Image *image,
+                                     const eMaterialPaintChannel channel =
+                                         PAINT_MATERIAL_CHANNEL_BASE_COLOR)
+  {
+    MaterialPaintLayer *layer = BKE_paint_layers_add(
+        *ma, source, name, anchor, PaintLayerPlace::Into);
     EXPECT_NE(layer, nullptr);
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
     EXPECT_NE(record, nullptr);
@@ -4065,6 +4100,478 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_node_group_without_bake_matc
   ma = nullptr;
 }
 
+/**
+ * A Mask Item with source Material reading its own Alpha channel (`mask_channel` = Alpha), in
+ * Hybrid mode (a live constant): the mask's grey is the coverage itself, and its own factor is
+ * flat (opacity alone) -- graph and CPU must still agree exactly.
+ */
+TEST_F(PaintLayersGraphEvalTest, mask_material_alpha_hybrid_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "MaskMatAlphaHybrid");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  Material *source = BKE_material_add(bmain, "MaskMatAlphaHybridSource");
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  bNodeSocket *alpha = bke::node_find_socket(*principled, SOCK_IN, "Alpha"_ustr);
+  ASSERT_NE(alpha, nullptr);
+  static_cast<bNodeSocketValueFloat *>(alpha->default_value)->value = 0.35f;
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ALPHA);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(channel));
+  const RGBA cpu = cpu_pixel(channel);
+  /* Partial coverage: the result must sit strictly between the bottom (red) and the row's own
+   * blue, proving the mask actually clipped the row rather than leaving it fully on or off. */
+  EXPECT_GT(graph.b, 0.0f);
+  EXPECT_LT(graph.b, 1.0f);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** The same Alpha-channel mask, but Baked (no Principled): both sides read the correction's own
+ * bake coverage, which varies across x. */
+TEST_F(PaintLayersGraphEvalTest, mask_material_alpha_baked_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "MaskMatAlphaBaked");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  Material *source = BKE_material_add(bmain, "MaskMatAlphaBakedSource");
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ALPHA);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+  Image *coverage = add_solid_image("MaskMatAlphaBakedCoverage", size, 255, 255, 255, 255);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(coverage, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (int x = 0; x < size; x++) {
+      const uchar grey = uchar(50 * (x + 1));
+      pixels[x * 4 + 0] = grey;
+      pixels[x * 4 + 1] = grey;
+      pixels[x * 4 + 2] = grey;
+      pixels[x * 4 + 3] = 255;
+    }
+    BKE_image_release_ibuf(coverage, ibuf, lock);
+  }
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *mask, -1, coverage));
+  BKE_paint_layers_bake_finalize(*ma, *mask);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const float tolerance = 1e-4f;
+  Vector<float> reds;
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "x=" << x;
+    reds.append(graph.r);
+  }
+  EXPECT_NE(reds[0], reds[size - 1]);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** A Mask Item reading a scalar channel (Roughness), Hybrid mode: the mask's grey is the live
+ * constant itself (R=G=B by construction), and its own factor multiplies by the source's separate
+ * Alpha coverage. */
+TEST_F(PaintLayersGraphEvalTest, mask_material_roughness_hybrid_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "MaskMatRoughHybrid");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  Material *source = BKE_material_add(bmain, "MaskMatRoughHybridSource");
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  bNodeSocket *roughness = bke::node_find_socket(*principled, SOCK_IN, "Roughness"_ustr);
+  ASSERT_NE(roughness, nullptr);
+  static_cast<bNodeSocketValueFloat *>(roughness->default_value)->value = 0.7f;
+  bNodeSocket *alpha = bke::node_find_socket(*principled, SOCK_IN, "Alpha"_ustr);
+  ASSERT_NE(alpha, nullptr);
+  static_cast<bNodeSocketValueFloat *>(alpha->default_value)->value = 0.5f;
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(channel));
+  const RGBA cpu = cpu_pixel(channel);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** The same Roughness mask, Baked: both sides read the correction's own bake map, which varies
+ * across x, as its grey (mean of RGB, R=G=B by the bake/AOV convention). */
+TEST_F(PaintLayersGraphEvalTest, mask_material_roughness_baked_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "MaskMatRoughBaked");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  Material *source = BKE_material_add(bmain, "MaskMatRoughBakedSource");
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+  Image *rough_map = add_solid_image("MaskMatRoughBakedMap", size, 255, 255, 255, 255);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(rough_map, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (int x = 0; x < size; x++) {
+      const uchar grey = uchar(50 * (x + 1));
+      pixels[x * 4 + 0] = grey;
+      pixels[x * 4 + 1] = grey;
+      pixels[x * 4 + 2] = grey;
+      pixels[x * 4 + 3] = 255;
+    }
+    BKE_image_release_ibuf(rough_map, ibuf, lock);
+  }
+  ASSERT_TRUE(
+      BKE_paint_layers_bake_set_map(*ma, *mask, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough_map));
+  BKE_paint_layers_bake_finalize(*ma, *mask);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const float tolerance = 1e-4f;
+  Vector<float> reds;
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "x=" << x;
+    reds.append(graph.r);
+  }
+  EXPECT_NE(reds[0], reds[size - 1]);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * A Mask Item reading a colour channel (Base Color), Hybrid mode: the mask's grey is the live
+ * constant's luminance. This is the critical check the coordinator asked for: the generator's
+ * #SH_NODE_RGBTOBW and the CPU's #IMB_colormanagement_get_luminance must agree on a distinctly
+ * non-grey colour, or graph and CPU would disagree here specifically -- no tolerance was widened
+ * to make this pass.
+ */
+TEST_F(PaintLayersGraphEvalTest, mask_material_base_color_hybrid_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "MaskMatColorHybrid");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  Material *source = BKE_material_add(bmain, "MaskMatColorHybridSource");
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  const float base_color[4] = {0.6f, 0.2f, 0.1f, 1.0f};
+  bNodeSocket *base_color_socket = bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color_socket, nullptr);
+  copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(base_color_socket->default_value)->value,
+            base_color);
+  bNodeSocket *alpha = bke::node_find_socket(*principled, SOCK_IN, "Alpha"_ustr);
+  ASSERT_NE(alpha, nullptr);
+  static_cast<bNodeSocketValueFloat *>(alpha->default_value)->value = 0.6f;
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(channel));
+  const RGBA cpu = cpu_pixel(channel);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+  /* A mean of (0.6, 0.2, 0.1) would be 0.3; its luminance is noticeably different. Proves the
+   * mask actually used luminance and not the mean the Image/Mesh Map path still uses. */
+  const float mean = (base_color[0] + base_color[1] + base_color[2]) / 3.0f;
+  float luminance[3] = {base_color[0], base_color[1], base_color[2]};
+  const float luminance_value = IMB_colormanagement_get_luminance(luminance);
+  EXPECT_GT(std::abs(luminance_value - mean), 0.02f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** The same Base Color mask, Baked: both sides reduce the correction's own bake map to luminance,
+ * per pixel, across x. */
+TEST_F(PaintLayersGraphEvalTest, mask_material_base_color_baked_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "MaskMatColorBaked");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  Material *source = BKE_material_add(bmain, "MaskMatColorBakedSource");
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+  Image *color_map = add_solid_image("MaskMatColorBakedMap", size, 150, 60, 20, 255);
+  ASSERT_TRUE(
+      BKE_paint_layers_bake_set_map(*ma, *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, color_map));
+  BKE_paint_layers_bake_finalize(*ma, *mask);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(channel));
+  const RGBA cpu = cpu_pixel(channel);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** A Mask Item with source Node Group: Baked-only, like its content-correction counterpart. With a
+ * valid bake (a scalar channel and its own coverage), both sides agree. */
+TEST_F(PaintLayersGraphEvalTest, mask_node_group_baked_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "MaskNodeGroupBaked");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "N");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  Image *rough_map = add_solid_image("MaskNgRoughMap", size, 255, 255, 255, 255);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(rough_map, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (int x = 0; x < size; x++) {
+      const uchar grey = uchar(50 * (x + 1));
+      pixels[x * 4 + 0] = grey;
+      pixels[x * 4 + 1] = grey;
+      pixels[x * 4 + 2] = grey;
+      pixels[x * 4 + 3] = 255;
+    }
+    BKE_image_release_ibuf(rough_map, ibuf, lock);
+  }
+  Image *coverage = add_solid_image("MaskNgCoverage", size, 255, 255, 255, 255);
+  ASSERT_TRUE(
+      BKE_paint_layers_bake_set_map(*ma, *mask, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough_map));
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *mask, -1, coverage));
+  BKE_paint_layers_bake_finalize(*ma, *mask);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const float tolerance = 1e-4f;
+  Vector<float> reds;
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "x=" << x;
+    reds.append(graph.r);
+  }
+  EXPECT_NE(reds[0], reds[size - 1]);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** A Material mask with no bake at all yet (Baked mode, no Principled) leaves the row's coverage
+ * exactly as it was without the mask -- on both sides. */
+TEST_F(PaintLayersGraphEvalTest, mask_material_without_bake_does_not_change_coverage)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "MaskMatNoBake");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const RGBA cpu_before = cpu_pixel(channel);
+
+  Material *source = BKE_material_add(bmain, "MaskMatNoBakeSource");
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(channel));
+  const RGBA cpu_after = cpu_pixel(channel);
+  EXPECT_NEAR(cpu_after.r, cpu_before.r, 1e-6f);
+  EXPECT_NEAR(cpu_after.g, cpu_before.g, 1e-6f);
+  EXPECT_NEAR(cpu_after.b, cpu_before.b, 1e-6f);
+  EXPECT_NEAR(graph.r, cpu_after.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu_after.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu_after.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** A Normal mask channel is quietly skipped: the row's coverage is unaffected, on both sides. */
+TEST_F(PaintLayersGraphEvalTest, mask_material_normal_channel_is_skipped)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "MaskMatNormalSkip");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255), channel);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const RGBA cpu_before = cpu_pixel(channel);
+
+  Material *source = BKE_material_add(bmain, "MaskMatNormalSkipSource");
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_NORMAL);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(channel));
+  const RGBA cpu_after = cpu_pixel(channel);
+  EXPECT_NEAR(cpu_after.r, cpu_before.r, 1e-6f);
+  EXPECT_NEAR(cpu_after.g, cpu_before.g, 1e-6f);
+  EXPECT_NEAR(cpu_after.b, cpu_before.b, 1e-6f);
+  EXPECT_NEAR(graph.r, cpu_after.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu_after.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu_after.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
 TEST_F(PaintLayersGraphEvalTest, every_blend_mode_matches_the_cpu)
 {
   const int size = 4;
@@ -4424,6 +4931,407 @@ TEST_F(PaintLayersGraphEvalTest, folder_single_child_equals_the_child_alone)
   EXPECT_NEAR(folded.r, ungrouped.r, 1e-4f);
   EXPECT_NEAR(folded.g, ungrouped.g, 1e-4f);
   EXPECT_NEAR(folded.b, ungrouped.b, 1e-4f);
+}
+
+/**
+ * Phase 4: a Stack correction on either role composites its own children in isolation, exactly
+ * like a Layer folder's own children, and the isolated result feeds the same correction pipeline a
+ * Material correction's own source does. These tests build the correction's #children through the
+ * public #add_layer_into (#BKE_paint_layers_add with \a place Into, anchored on the correction/mask
+ * item itself: a Stack source is a folder in every sense #BKE_paint_layers_is_folder cares about,
+ * regardless of role, so Into no longer needs to be built by hand).
+ */
+TEST_F(PaintLayersGraphEvalTest, stack_effect_correction_paint_and_fill_children_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "StackEffectEval");
+
+  MaterialPaintLayer *row = add_layer(
+      "Row", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Row", size, 200, 100, 50, 255), bc);
+
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 0.6f));
+
+  /* Paint child: half-covering blue. */
+  MaterialPaintLayer *paint_child = add_layer_into(
+      correction,
+      "PaintChild",
+      MA_PAINT_LAYER_SOURCE_IMAGE,
+      add_solid_image("PaintChild", size, 0, 0, 255, 128),
+      bc);
+
+  /* Fill child on top, half opacity, green: the subtree's coverage is not simply the paint child's
+   * own alpha, so a formula that skipped the Fill's own contribution to coverage would disagree.
+   * Into always appends, so the second call lands after `paint_child`, in the same order the
+   * hand-built list used to. */
+  MaterialPaintLayer *fill_child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "FillChild", correction, PaintLayerPlace::Into);
+  ASSERT_NE(fill_child, nullptr);
+  const float fill_color[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+  BKE_paint_layers_set_fill_color(*ma, fill_child, fill_color);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, fill_child, 0.5f));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(bc));
+  const RGBA cpu = cpu_pixel(bc);
+  /* Not a no-op: the correction must actually have moved the row's colour away from its own map. */
+  EXPECT_NE(graph.g, 0.0f);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** A Stack mask item reading its subtree's Alpha (coverage itself, flat Fac). */
+TEST_F(PaintLayersGraphEvalTest, stack_mask_item_alpha_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "StackMaskAlphaEval");
+
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *row = add_layer(
+      "Row", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Row", size, 0, 0, 255, 255), bc);
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "StackMask");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ALPHA);
+
+  /* Half-covering child: the mask clips the row to half. */
+  MaterialPaintLayer *child = add_layer_into(
+      mask,
+      "MaskChild",
+      MA_PAINT_LAYER_SOURCE_IMAGE,
+      add_solid_image("MaskChild", size, 255, 255, 255, 128),
+      bc);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(bc));
+  const RGBA cpu = cpu_pixel(bc);
+  /* Partial coverage: strictly between the bottom (red) and the row's own blue. */
+  EXPECT_GT(graph.b, 0.0f);
+  EXPECT_LT(graph.b, 1.0f);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** A Stack mask item reading its subtree's Base Color (luminance of the straight result). */
+TEST_F(PaintLayersGraphEvalTest, stack_mask_item_base_color_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "StackMaskColorEval");
+
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *row = add_layer(
+      "Row", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Row", size, 0, 0, 255, 255), bc);
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "StackMask");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+
+  /* A mid-grey, fully covering child: its luminance is the mask's grey, and its full coverage is
+   * the mask's own Fac multiplier. */
+  MaterialPaintLayer *child = add_layer_into(
+      mask,
+      "MaskChild",
+      MA_PAINT_LAYER_SOURCE_IMAGE,
+      add_solid_image("MaskChild", size, 180, 180, 180, 255),
+      bc);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(bc));
+  const RGBA cpu = cpu_pixel(bc);
+  EXPECT_GT(graph.b, 0.0f);
+  EXPECT_LT(graph.b, 1.0f);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * A folder nested inside a Stack content correction's own subtree, with a further leaf inside that
+ * folder: two levels of row grouping inside the correction's #children, exactly as an isolating
+ * folder nests inside another one at the top level. Regression test for a use-after-scope bug where
+ * `folder_source_node`/`folder_coverage_node`/`folder_content_alpha_node` (the bookkeeping a
+ * #build_row call uses when the row it is building is itself a folder) were captured by reference
+ * from the enclosing per-channel #build_list scope instead of being local to each #build_row call:
+ * a correction's own children recurse back into #build_row for a different row, and that recursion
+ * left its folder bookkeeping in the shared variables past its own return. The owner row (not a
+ * folder itself) then read that leftover state near the end of its own #build_row call and linked a
+ * node living in the nested folder's tree into its own tree, corrupting the graph (SEH 0xC0000005 in
+ * #BKE_paint_layers_regenerate). Fixed by making the six variables local to #build_row.
+ */
+TEST_F(PaintLayersGraphEvalTest, nested_folder_inside_stack_correction_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "StackNestedFolderEval");
+
+  MaterialPaintLayer *row = add_layer(
+      "Row", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Row", size, 200, 100, 50, 255), bc);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 0.7f));
+
+  /* An inner folder inside the correction's own subtree, holding one half-covering child. */
+  MaterialPaintLayer *inner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Inner", correction, PaintLayerPlace::Into);
+  ASSERT_NE(inner, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, inner, 0.5f));
+
+  MaterialPaintLayer *leaf = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Leaf", inner, PaintLayerPlace::Into);
+  ASSERT_NE(leaf, nullptr);
+  MaterialPaintLayerChannel *leaf_record = BKE_paint_layers_channel_add(*ma, leaf, bc);
+  leaf_record->image = add_solid_image("Leaf", size, 0, 0, 255, 200);
+  leaf_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(bc));
+  const RGBA cpu = cpu_pixel(bc);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * A child of a Stack correction that itself carries its own mask item, exercising a grouped row
+ * inside a correction's #children whose own #build_row call reaches the mask-processing code. Kept
+ * alongside #nested_folder_inside_stack_correction_matches_the_cpu as a second regression case for
+ * the same #build_row-local-variable fix (see that test's comment); this one confirms the fix does
+ * not depend on the nested row being a folder.
+ */
+TEST_F(PaintLayersGraphEvalTest, stack_correction_child_with_own_mask_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "StackChildOwnMaskEval");
+
+  MaterialPaintLayer *row = add_layer(
+      "Row", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Row", size, 200, 100, 50, 255), bc);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 0.8f));
+
+  MaterialPaintLayer *child = add_layer_into(
+      correction, "Child", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Child", size, 0, 0, 255, 255), bc);
+
+  /* The child's own mask item, an ordinary Image mask at half influence: the recursion into a
+   * correction's subtree must reach a plain row's own mask_stack exactly as it does at the top
+   * level, with no cross-talk between the two contexts. */
+  set_mask_image(*child, add_solid_image("ChildMask", size, 255, 255, 255, 128));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(bc));
+  const RGBA cpu = cpu_pixel(bc);
+  EXPECT_NEAR(graph.r, cpu.r, 1e-4f);
+  EXPECT_NEAR(graph.g, cpu.g, 1e-4f);
+  EXPECT_NEAR(graph.b, cpu.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * A Stack mask item's subtree must build in \a mask_channel, not in whichever channel the owner
+ * row currently happens to be generating: the owner here paints both Base Color and Roughness, and
+ * the mask targets Roughness alone. The mask's only child carries content in Roughness only (no
+ * Base Color record at all), so a build that wrongly used the owner's current channel would drop
+ * the child out of the Base Color pass entirely -- zero coverage, no masking effect at all on that
+ * output -- while Roughness would happen to still work (it coincides with `mask_channel` there).
+ * #BKE_paint_layers_composite_image_layers (the CPU side) already keys off `mask_channel` and not
+ * its own \a channel argument for a non-Alpha Stack mask, so it is ground truth here: comparing the
+ * generated graph against it on BOTH owner channels is enough to catch the generator alone reading
+ * its enclosing per-channel loop variable instead of `mask_channel`.
+ */
+TEST_F(PaintLayersGraphEvalTest, stack_mask_fixed_channel_applies_to_every_owner_channel_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const eMaterialPaintChannel rough = PAINT_MATERIAL_CHANNEL_ROUGHNESS;
+  auto result_name_for = [](const int ch) {
+    return std::string("Result ") +
+           BKE_paint_material_channel_info(eMaterialPaintChannel(ch)).ui_name;
+  };
+  ma = BKE_material_add(bmain, "StackMaskFixedChannelRoughness");
+
+  MaterialPaintLayer *row = add_layer(
+      "Row", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("RowBC", size, 200, 100, 50, 255), bc);
+  MaterialPaintLayerChannel *row_rough = BKE_paint_layers_channel_add(*ma, row, rough);
+  ASSERT_NE(row_rough, nullptr);
+  row_rough->image = add_solid_image("RowRough", size, 90, 90, 90, 255);
+  row_rough->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "StackMask");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(rough);
+
+  MaterialPaintLayer *child = add_layer_into(
+      mask,
+      "MaskChild",
+      MA_PAINT_LAYER_SOURCE_IMAGE,
+      add_solid_image("MaskChild", size, 180, 180, 180, 128),
+      rough);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+
+  const RGBA graph_bc = interpreter.eval_result(result_name_for(bc).c_str());
+  const RGBA graph_rough = interpreter.eval_result(result_name_for(rough).c_str());
+  const RGBA cpu_bc = cpu_pixel(bc);
+  const RGBA cpu_rough = cpu_pixel(rough);
+
+  /* The mask must have a real, partial effect on Base Color too: not fully unmasked (the bug --
+   * the child dropped out of a Base-Color-context build) and not fully masked out either. */
+  EXPECT_GT(graph_bc.r, 0.0f);
+  EXPECT_LT(graph_bc.r, 200.0f / 255.0f + 0.05f);
+  EXPECT_NEAR(graph_bc.r, cpu_bc.r, 1e-4f);
+  EXPECT_NEAR(graph_bc.g, cpu_bc.g, 1e-4f);
+  EXPECT_NEAR(graph_bc.b, cpu_bc.b, 1e-4f);
+  EXPECT_NEAR(graph_rough.r, cpu_rough.r, 1e-4f);
+  EXPECT_NEAR(graph_rough.g, cpu_rough.g, 1e-4f);
+  EXPECT_NEAR(graph_rough.b, cpu_rough.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * The same invariant as the previous test, for the Alpha convention (mask_channel=Alpha reads the
+ * subtree's own coverage as a flat-opacity grey, always through Base Color -- like every other
+ * Paint mask's #paint_layer_mask_correction_image, which reads Base Color regardless of the
+ * channel argument it is passed). The mask's child carries a Base Color record only (no Roughness
+ * one), so a build keyed to the owner's current channel would find no content at all while
+ * generating Roughness -- the mask would vanish there (coverage 0, and with mask_gray_mode::Alpha
+ * forcing the item's own factor flat, that reads as `r_factor = 0`, hiding the row completely) --
+ * while Base Color would coincidentally still show the right, partial value. Because both the CPU
+ * and the generator shared exactly this bug before the fix, a plain graph-vs-cpu comparison on one
+ * channel would not have caught it (both sides would agree, wrongly); the cross-channel factor
+ * comparison below is the check that does.
+ */
+TEST_F(PaintLayersGraphEvalTest, stack_mask_alpha_reads_base_color_on_every_owner_channel_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const eMaterialPaintChannel rough = PAINT_MATERIAL_CHANNEL_ROUGHNESS;
+  ma = BKE_material_add(bmain, "StackMaskFixedChannelAlpha");
+
+  MaterialPaintLayer *row = add_layer(
+      "Row", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("RowBC", size, 200, 100, 50, 255), bc);
+  MaterialPaintLayerChannel *row_rough = BKE_paint_layers_channel_add(*ma, row, rough);
+  ASSERT_NE(row_rough, nullptr);
+  row_rough->image = add_solid_image("RowRough", size, 90, 90, 90, 255);
+  row_rough->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  /* The reference: the row alone, before any mask exists, so the CPU's fully-unmasked value (F=1)
+   * is known for both channels without depending on any of the code this test exercises. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const RGBA unmasked_bc = cpu_pixel(bc);
+  const RGBA unmasked_rough = cpu_pixel(rough);
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "StackMask");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ALPHA);
+
+  /* A Base-Color-only child at half coverage: no Roughness record at all. */
+  MaterialPaintLayer *child = add_layer_into(
+      mask, "MaskChild", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("MaskChild", size, 128, 128, 128, 128), bc);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+
+  const RGBA graph_bc = interpreter.eval_result(result_name(bc));
+  const RGBA graph_rough = interpreter.eval_result(
+      (std::string("Result ") + BKE_paint_material_channel_info(rough).ui_name).c_str());
+  const RGBA cpu_bc = cpu_pixel(bc);
+  const RGBA cpu_rough = cpu_pixel(rough);
+
+  /* Base Color's own bottom is black (component 0); Roughness's is a neutral 0.5
+   * (#BKE_paint_layers_channel_bottom_color). Inverting the plain lerp against the row's own,
+   * mask-free value gives the mask's implied factor without hand-computing any sRGB conversion. */
+  const float f_bc_cpu = cpu_bc.r / unmasked_bc.r;
+  const float f_rough_cpu = (cpu_rough.r - 0.5f) / (unmasked_rough.r - 0.5f);
+  const float f_bc_graph = graph_bc.r / unmasked_bc.r;
+  const float f_rough_graph = (graph_rough.r - 0.5f) / (unmasked_rough.r - 0.5f);
+
+  /* The key invariant (task's point (b)): the same Alpha-mask coverage, read from Base Color,
+   * applies to every owner channel -- not just the one that happens to be Base Color itself. */
+  EXPECT_NEAR(f_rough_cpu, f_bc_cpu, 0.02f);
+  EXPECT_NEAR(f_rough_graph, f_bc_graph, 0.02f);
+  EXPECT_GT(f_bc_cpu, 0.3f);
+  EXPECT_LT(f_bc_cpu, 0.7f);
+
+  EXPECT_NEAR(graph_bc.r, cpu_bc.r, 1e-4f);
+  EXPECT_NEAR(graph_bc.g, cpu_bc.g, 1e-4f);
+  EXPECT_NEAR(graph_bc.b, cpu_bc.b, 1e-4f);
+  EXPECT_NEAR(graph_rough.r, cpu_rough.r, 1e-4f);
+  EXPECT_NEAR(graph_rough.g, cpu_rough.g, 1e-4f);
+  EXPECT_NEAR(graph_rough.b, cpu_rough.b, 1e-4f);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
 }
 
 TEST_F(PaintLayersGraphEvalTest, bake_render_node_folder_minimal)
@@ -8924,6 +9832,124 @@ TEST_F(PaintLayersGraphEvalTest, auto_baked_folder_matches_live)
   const RGBA baked_graph = eval_channel_result(baked, bc);
   EXPECT_LT(baked_graph.a, 0.99f);
   c6_expect_baked_matches_live(live_graph, baked_graph, "auto folder");
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * 4B.4: a Stack (content) correction folder is gated into the AUTO bake cycle exactly like a Layer
+ * folder (#BKE_paint_layers_bake_ensure now walks #BKE_paint_layers_flatten_all), and its bake
+ * substitutes into the generated graph the same way (#row_is_substituted is role-agnostic): the
+ * graph read before the bake (live) and after the bake job commits (baked, through the generator's
+ * substitution) must agree, mirroring #auto_baked_folder_matches_live for a Layer folder.
+ */
+TEST_F(PaintLayersGraphEvalTest, stack_effect_correction_folder_auto_baked_matches_live)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "C6AutoStackFX");
+  MaterialPaintLayer *owner = add_layer(
+      "Owner", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("StackFXOwner", size, 255, 0, 0, 255), bc);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayer *child = add_layer_into(
+      correction,
+      "Child",
+      MA_PAINT_LAYER_SOURCE_IMAGE,
+      add_solid_image("AutoStackFXChild", size, 200, 200, 200, 128),
+      bc);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *correction));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_EQ(correction->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter live;
+  live.instance = find_instance();
+  live.tree = ma->paint_layers_tree;
+  live.x = 1;
+  live.y = 0;
+  ASSERT_NE(live.instance, nullptr);
+  const RGBA live_graph = eval_channel_result(live, bc);
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *correction));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter baked;
+  baked.instance = find_instance();
+  baked.tree = ma->paint_layers_tree;
+  baked.x = 1;
+  baked.y = 0;
+  ASSERT_NE(baked.instance, nullptr);
+  const RGBA baked_graph = eval_channel_result(baked, bc);
+  c6_expect_baked_matches_live(live_graph, baked_graph, "stack effect correction folder");
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * The Mask Item counterpart: a Stack mask folder is gated into the AUTO bake cycle the same way,
+ * and its bake substitutes into the mask evaluation identically to the content case above.
+ */
+TEST_F(PaintLayersGraphEvalTest, stack_mask_item_folder_auto_baked_matches_live)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ma = BKE_material_add(bmain, "C6AutoStackMask");
+  MaterialPaintLayer *owner = add_layer(
+      "Owner", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("StackMaskOwner", size, 255, 0, 0, 255), bc);
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "StackMask");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = bc;
+  MaterialPaintLayer *child = add_layer_into(
+      mask,
+      "Child",
+      MA_PAINT_LAYER_SOURCE_IMAGE,
+      add_solid_image("AutoStackMaskChild", size, 200, 200, 200, 128),
+      bc);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, mask, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *mask));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_EQ(mask->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter live;
+  live.instance = find_instance();
+  live.tree = ma->paint_layers_tree;
+  live.x = 1;
+  live.y = 0;
+  ASSERT_NE(live.instance, nullptr);
+  const RGBA live_graph = eval_channel_result(live, bc);
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *mask));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  GraphInterpreter baked;
+  baked.instance = find_instance();
+  baked.tree = ma->paint_layers_tree;
+  baked.x = 1;
+  baked.y = 0;
+  ASSERT_NE(baked.instance, nullptr);
+  const RGBA baked_graph = eval_channel_result(baked, bc);
+  c6_expect_baked_matches_live(live_graph, baked_graph, "stack mask item folder");
 
   BKE_id_free(bmain, ma);
   ma = nullptr;

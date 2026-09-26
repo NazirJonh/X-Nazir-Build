@@ -1286,6 +1286,140 @@ TEST_F(PaintLayersDescription, into_a_plain_row_is_refused_and_leaves_it_unchang
   EXPECT_EQ(static_cast<MaterialPaintLayer *>(empty_folder->children.first), into_empty);
 }
 
+/**
+ * #BKE_paint_layers_add with \a place Into and a Stack Effect correction as \a anchor: the new
+ * Layer row goes into the correction's own #children, exactly as it would for an ordinary folder
+ * -- #BKE_paint_layers_is_folder already says so for a Stack source regardless of role, and the
+ * function must not redirect the anchor to the owner row first (the owner row is an ordinary
+ * content row here, not a folder, so that redirect used to make Into fail outright).
+ */
+TEST_F(PaintLayersDescription, into_a_stack_effect_places_the_new_row_in_its_children)
+{
+  Material *ma = BKE_material_add(bmain, "IntoStackEffectMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(correction, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_is_folder(*correction));
+
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", correction, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  EXPECT_EQ(static_cast<MaterialPaintLayer *>(correction->children.first), child);
+  /* The child never touched the top-level list or the owner's own children. */
+  bool found_top_level = false;
+  for (MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ma->paint_layers.first);
+       layer != nullptr;
+       layer = layer->next)
+  {
+    found_top_level |= (layer == child);
+  }
+  EXPECT_FALSE(found_top_level);
+  EXPECT_TRUE(BLI_listbase_is_empty(&owner->children));
+}
+
+/** Same as above, for a Stack Mask Item: role alone must not matter, only the Stack source. */
+TEST_F(PaintLayersDescription, into_a_stack_mask_places_the_new_row_in_its_children)
+{
+  Material *ma = BKE_material_add(bmain, "IntoStackMaskMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "StackMask");
+  ASSERT_NE(mask, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_is_folder(*mask));
+
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", mask, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  EXPECT_EQ(static_cast<MaterialPaintLayer *>(mask->children.first), child);
+  EXPECT_TRUE(BLI_listbase_is_empty(&owner->children));
+}
+
+/**
+ * #BKE_paint_layers_add with \a place Above/Below and an anchor that is a plain Layer row living
+ * inside a Stack correction's #children: the new row lands beside it, in that same #children list
+ * -- #paint_layer_owner_list already recurses into a correction's own children (it walks
+ * #children/#effects/#mask_stack for every #MaterialPaintLayer it visits, corrections included),
+ * so this needs no code change of its own, only this regression lock.
+ */
+TEST_F(PaintLayersDescription, above_below_inside_a_stack_correction_insert_beside_the_anchor)
+{
+  Material *ma = BKE_material_add(bmain, "InsideStackCorrectionMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayer *first = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "First", correction, PaintLayerPlace::Into);
+  ASSERT_NE(first, nullptr);
+
+  MaterialPaintLayer *above = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Above", first, PaintLayerPlace::Above);
+  ASSERT_NE(above, nullptr);
+  MaterialPaintLayer *below = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Below", first, PaintLayerPlace::Below);
+  ASSERT_NE(below, nullptr);
+
+  /* Both landed in the correction's own children, beside `first`, in the requested order --
+   * never in the top-level list or the owner's own children. */
+  Vector<MaterialPaintLayer *> order;
+  for (MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(correction->children.first);
+       layer != nullptr;
+       layer = layer->next)
+  {
+    order.append(layer);
+  }
+  ASSERT_EQ(order.size(), 3);
+  EXPECT_EQ(order[0], below);
+  EXPECT_EQ(order[1], first);
+  EXPECT_EQ(order[2], above);
+  EXPECT_TRUE(BLI_listbase_is_empty(&owner->children));
+}
+
+/**
+ * GUARD: an Effect/Mask correction whose source is not Stack (so it is not a folder --
+ * #BKE_paint_layers_is_folder keys off source, not role) still refuses Into and still redirects
+ * Above/Below to the owner row, exactly as before this change. Covered already by
+ * #folder_kind_is_explicit_and_sticky's `correction` case (source Image); this test only makes the
+ * Above/Below half of "previous behavior" explicit for a non-Stack correction anchor.
+ */
+TEST_F(PaintLayersDescription, above_below_a_non_stack_correction_still_redirects_to_the_owner_row)
+{
+  Material *ma = BKE_material_add(bmain, "NonStackCorrectionRedirectMat");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "ImgFX");
+  ASSERT_NE(correction, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_is_folder(*correction));
+
+  EXPECT_EQ(BKE_paint_layers_add(
+                *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "IntoCorr", correction, PaintLayerPlace::Into),
+            nullptr);
+
+  MaterialPaintLayer *above = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Above", correction, PaintLayerPlace::Above);
+  ASSERT_NE(above, nullptr);
+  /* Landed beside the owner row in the top-level list, not inside the correction (it has no
+   * #children a Layer row could join) and not inside the owner's own children either. */
+  bool found_top_level = false;
+  for (MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ma->paint_layers.first);
+       layer != nullptr;
+       layer = layer->next)
+  {
+    found_top_level |= (layer == above);
+  }
+  EXPECT_TRUE(found_top_level);
+  EXPECT_TRUE(BLI_listbase_is_empty(&owner->children));
+}
+
 TEST_F(PaintLayersDescription, non_folder_with_children_is_reported)
 {
   Material *ma = BKE_material_add(bmain, "StrayChildrenMat");
@@ -1630,21 +1764,29 @@ TEST_F(PaintLayersDescription, correction_add_sets_role_and_source)
   EXPECT_NE(BKE_paint_layers_correction_add(
                 *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, nullptr),
             nullptr);
-  /* GUARD (RED-verified 2026-09-24, paint_layers.cc: BKE_paint_layers_correction_add's
-   * `!ELEM(source, Image, Constant)` half of its validity check): removing it made this call
-   * return a real correction (non-null) instead of nullptr. */
-  EXPECT_FALSE(BKE_paint_layers_correction_add(
-      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, nullptr));
-  /* GUARD: a Mask Item stays limited to Image/Constant/Mesh Map -- a mask has no external-bake
-   * path of its own, unlike an Effect. */
-  EXPECT_EQ(BKE_paint_layers_correction_add(
-                *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, nullptr),
+  /* Phase 4: an Effect also accepts a Stack source (a folder of its own), exactly like a Layer
+   * row: it composites its children in isolation and behaves as that row's own channel content. */
+  EXPECT_NE(BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, nullptr),
+      nullptr);
+  /* Phase 3: a Mask Item also accepts a Material or Node Group source, reading the one number
+   * its `mask_channel` picks out. */
+  EXPECT_NE(BKE_paint_layers_correction_add(*ma,
+                                            layer,
+                                            MA_PAINT_LAYER_ROLE_MASK_ITEM,
+                                            MA_PAINT_LAYER_SOURCE_MATERIAL,
+                                            nullptr),
             nullptr);
-  EXPECT_EQ(BKE_paint_layers_correction_add(*ma,
+  EXPECT_NE(BKE_paint_layers_correction_add(*ma,
                                             layer,
                                             MA_PAINT_LAYER_ROLE_MASK_ITEM,
                                             MA_PAINT_LAYER_SOURCE_NODE_GROUP,
                                             nullptr),
+            nullptr);
+  /* Phase 4: a Mask Item also accepts a Stack source, reading the subtree's coverage/value/
+   * luminance through `mask_channel`, like a Material/Node Group mask item. */
+  EXPECT_NE(BKE_paint_layers_correction_add(
+                *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, nullptr),
             nullptr);
 }
 
@@ -3035,14 +3177,15 @@ TEST_F(PaintLayersDescription, mesh_map_corrections_allow_mesh_map_only)
   EXPECT_NE(BKE_paint_layers_correction_add(
                 *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "N"),
             nullptr);
-  EXPECT_EQ(BKE_paint_layers_correction_add(
+  /* Phase 4: Stack is now accepted for a Mask Item too. */
+  EXPECT_NE(BKE_paint_layers_correction_add(
                 *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "S"),
             nullptr);
-  /* GUARD: a Mask Item stays limited to Image/Constant/Mesh Map, unlike an Effect. */
-  EXPECT_EQ(BKE_paint_layers_correction_add(
+  /* Phase 3: a Mask Item also accepts Material/Node Group, like an Effect. */
+  EXPECT_NE(BKE_paint_layers_correction_add(
                 *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M2"),
             nullptr);
-  EXPECT_EQ(BKE_paint_layers_correction_add(
+  EXPECT_NE(BKE_paint_layers_correction_add(
                 *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "N2"),
             nullptr);
 
@@ -3053,10 +3196,14 @@ TEST_F(PaintLayersDescription, mesh_map_corrections_allow_mesh_map_only)
   /* An Effect's source_set is symmetric with correction_add: Material is now accepted. */
   EXPECT_TRUE(BKE_paint_layers_correction_source_set(
       *ma, effect, MA_PAINT_LAYER_SOURCE_MATERIAL));
-  /* GUARD: a Mask Item's source_set stays refused for Material, even though the Effect above just
-   * accepted it -- the gate is keyed on the correction's own role, not on the source alone. */
-  EXPECT_FALSE(BKE_paint_layers_correction_source_set(
+  /* A Mask Item's source_set is symmetric too. */
+  EXPECT_TRUE(BKE_paint_layers_correction_source_set(
       *ma, mask, MA_PAINT_LAYER_SOURCE_MATERIAL));
+  /* Phase 4: Stack is now accepted for either role's source_set. */
+  EXPECT_TRUE(BKE_paint_layers_correction_source_set(
+      *ma, effect, MA_PAINT_LAYER_SOURCE_STACK));
+  EXPECT_TRUE(BKE_paint_layers_correction_source_set(
+      *ma, mask, MA_PAINT_LAYER_SOURCE_STACK));
 }
 
 TEST_F(PaintLayersDescription, source_change_still_refuses_mesh_map)
@@ -3158,10 +3305,15 @@ TEST_F(PaintLayersDescription, rna_correction_add_accepts_mesh_map)
       owner_ptr, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "M");
   EXPECT_NE(accepted, nullptr);
 
-  /* GUARD: a Mask Item stays refused for Material through the same RNA path. */
-  MaterialPaintLayer *refused = rna_mesh_map_correction_add(
+  /* Phase 3: a Mask Item also accepts Material through the same RNA path. */
+  MaterialPaintLayer *mask_accepted = rna_mesh_map_correction_add(
       owner_ptr, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "M2");
-  EXPECT_EQ(refused, nullptr);
+  EXPECT_NE(mask_accepted, nullptr);
+
+  /* Phase 4: Stack is now accepted for a Mask Item through the RNA path too. */
+  MaterialPaintLayer *stack_accepted = rna_mesh_map_correction_add(
+      owner_ptr, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "S");
+  EXPECT_NE(stack_accepted, nullptr);
 }
 
 /** Guard: the MESH_MAP branch of #BKE_paint_layers_default_channels_apply — a new row paints the

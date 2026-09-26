@@ -303,15 +303,18 @@ bool composite_image_layers_build(const Material &material,
       if ((correction.flag & MA_PAINT_LAYER_ENABLED) == 0) {
         return;
       }
-      /* A Material or Node Group source is an Effect-only kind, exactly like #BKE_paint_layers_
-       * correction_add's own gate: a mask item has no external-bake path of its own. */
+      /* A Material or Node Group source reads through either role: an Effect (its own channel
+       * content) or a Mask Item (the one number `mask_channel` picks out). A Stack source reads
+       * through either role too, its own children composited in isolation like a Layer folder
+       * (phase 4). */
       const bool material_or_group = ELEM(
           correction.source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_NODE_GROUP);
+      const bool is_stack = correction.source == MA_PAINT_LAYER_SOURCE_STACK;
       if (!ELEM(correction.source,
                 MA_PAINT_LAYER_SOURCE_IMAGE,
                 MA_PAINT_LAYER_SOURCE_CONSTANT,
                 MA_PAINT_LAYER_SOURCE_MESH_MAP) &&
-          !(is_content && material_or_group))
+          !material_or_group && !is_stack)
       {
         return;
       }
@@ -322,6 +325,17 @@ bool composite_image_layers_build(const Material &material,
       if (normal_channel && is_content && fill) {
         return;
       }
+      /* A Mask Item reads its own single `mask_channel`, never the channel this whole stack is
+       * being built for. A Normal mask has no visual meaning to reduce to one number, so it is
+       * quietly skipped, like a Node Group correction with no bake yet. */
+      const int effective_channel = is_content ? channel : correction.mask_channel;
+      if (!is_content && (material_or_group || is_stack) &&
+          effective_channel == PAINT_MATERIAL_CHANNEL_NORMAL)
+      {
+        return;
+      }
+      const bool mask_alpha_channel = !is_content && material_or_group &&
+                                      effective_channel == PAINT_MATERIAL_CHANNEL_ALPHA;
       PaintMaterialCompositeCorrection out_correction;
       if (fill) {
         float constant[4];
@@ -330,76 +344,178 @@ bool composite_image_layers_build(const Material &material,
             eMaterialPaintChannel(channel), constant, out_correction.constant_color);
         out_correction.has_constant_color = true;
       }
-      else if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
-        out_correction.material_source = true;
-        /* An Effect correction with source Material behaves exactly as a Layer row of that source
-         * (#composite_material_live is the same helper the row's own participation gate uses): a
-         * live constant, a live map, or -- Baked mode, or without a bake at all yet -- nothing,
-         * exactly like the row in the same state. */
-        const CompositeMaterialLive live_source = composite_material_live(
-            material, correction, channel);
-        if (live_source.constant) {
-          BKE_paint_layers_constant_to_linear(
-              eMaterialPaintChannel(channel), live_source.value, out_correction.constant_color);
-          out_correction.has_constant_color = true;
-        }
-        else if (live_source.map) {
-          out_correction.image = live_source.map_image;
-          out_correction.iuser = live_source.map_iuser;
-        }
-        else {
-          Image *correction_image = paint_layer_channel_image(material, correction, channel);
-          if (correction_image == nullptr) {
-            return;
+      else if (is_stack) {
+        /* A Stack correction composites its own children in isolation, exactly like a Layer folder
+         * (#composite_image_layers_build recurses the same way for both): the subtree's straight
+         * colour and coverage stand in for a map and its alpha, so the evaluator (built below in
+         * #paint_material_composite.cc, matching #composite_folder_accumulate) never needs a real
+         * image for this correction.
+         *
+         * A mask's subtree never reads the owner's current `channel`: on the Alpha channel it
+         * reads the subtree's coverage from a Base Color build, exactly like every other Paint
+         * mask (#paint_layer_mask_correction_image always reads Base Color regardless of the
+         * channel it is asked about); on any other `mask_channel` it reads that fixed channel's own
+         * content. Either way, the same mask read while the owner generates a different channel
+         * must give the same number. */
+        const int stack_build_channel = (!is_content &&
+                                         effective_channel == PAINT_MATERIAL_CHANNEL_ALPHA) ?
+                                            int(PAINT_MATERIAL_CHANNEL_BASE_COLOR) :
+                                            effective_channel;
+        Vector<PaintMaterialCompositeImageLayer> child_layers;
+        composite_image_layers_build(
+            material, correction.children, stack_build_channel, nullptr, child_layers);
+        out_correction.is_folder = true;
+        out_correction.children.assign(child_layers.begin(), child_layers.end());
+        if (!is_content) {
+          /* The mask's reduction of the subtree's straight colour to one grey number: the
+           * coverage itself on the Alpha channel, the atlas-style Red component for a scalar
+           * channel (mirrors the generator's Separate X), or luminance for a colour channel
+           * (mirrors the generator's RGBTOBW) -- the same three cases a Material/Node Group mask
+           * item already uses. */
+          if (effective_channel == PAINT_MATERIAL_CHANNEL_ALPHA) {
+            out_correction.mask_gray_mode = MaskGrayMode::Alpha;
           }
-          out_correction.image = correction_image;
-          out_correction.iuser = nullptr;
-        }
-        /* The correction's own coverage: its source's Alpha input, exactly like a Layer row of
-         * this source (mirrors the row-building code's own Alpha resolution a few lines below --
-         * #BKE_paint_layers_material_live_constant/_image on the Alpha channel, falling back to the
-         * correction's own bake coverage). Never #out_correction.image's own alpha -- that is the
-         * content channel's map (Base Color, say), which carries no transparency of its own. */
-        float coverage_live_alpha[4];
-        if (BKE_paint_layers_material_live_constant(
-                material, correction, PAINT_MATERIAL_CHANNEL_ALPHA, coverage_live_alpha))
-        {
-          out_correction.coverage_constant = coverage_live_alpha[0];
-          out_correction.has_coverage_constant = true;
-        }
-        else {
-          Image *coverage_live_image = nullptr;
-          const ImageUser *coverage_live_iuser = nullptr;
-          if (BKE_paint_layers_material_live_image(material,
-                                                   correction,
-                                                   PAINT_MATERIAL_CHANNEL_ALPHA,
-                                                   &coverage_live_image,
-                                                   &coverage_live_iuser))
+          else if (BKE_paint_material_channel_info(eMaterialPaintChannel(effective_channel))
+                       .is_color)
           {
-            out_correction.coverage_image = coverage_live_image;
-            out_correction.coverage_iuser = coverage_live_iuser;
-            out_correction.coverage_from_alpha = true;
+            out_correction.mask_gray_mode = MaskGrayMode::Luminance;
           }
-          else if (correction.bake != nullptr && correction.bake->coverage != nullptr) {
-            out_correction.coverage_image = correction.bake->coverage;
+          else {
+            out_correction.mask_gray_mode = MaskGrayMode::Red;
           }
         }
       }
-      else if (correction.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
-        /* A Node Group correction is Baked-only, like a Layer row of that source: no live path
-         * exists, so a correction with no valid bake yet contributes nothing at all. */
-        Image *correction_baked = nullptr;
-        if (!BKE_paint_layers_bake_substitute(material, correction, channel, &correction_baked) &&
-            !BKE_paint_layers_bake_substitute_custom(
-                material, correction, channel, &correction_baked, nullptr))
+      else if (material_or_group && mask_alpha_channel) {
+        /* The channel itself is the source's coverage: assigned as the correction's own colour
+         * (`C`), not into the coverage fields below -- there is no separate number to multiply it
+         * by (the coordinator's decision: squaring the same number would be wrong), so the mask
+         * consumer's flat-opacity/#MaskGrayMode::Alpha path carries the factor instead. */
+        float live_alpha[4];
+        if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+            BKE_paint_layers_material_live_constant(
+                material, correction, PAINT_MATERIAL_CHANNEL_ALPHA, live_alpha))
         {
-          return;
+          BKE_paint_layers_constant_to_linear(
+              PAINT_MATERIAL_CHANNEL_ALPHA, live_alpha, out_correction.constant_color);
+          out_correction.has_constant_color = true;
         }
-        if (correction_baked == nullptr) {
-          return;
+        else {
+          Image *live_alpha_image = nullptr;
+          const ImageUser *live_alpha_iuser = nullptr;
+          if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+              BKE_paint_layers_material_live_image(material,
+                                                   correction,
+                                                   PAINT_MATERIAL_CHANNEL_ALPHA,
+                                                   &live_alpha_image,
+                                                   &live_alpha_iuser))
+          {
+            out_correction.image = live_alpha_image;
+            out_correction.iuser = live_alpha_iuser;
+            out_correction.mask_gray_mode = MaskGrayMode::Alpha;
+          }
+          else if (correction.bake != nullptr && correction.bake->coverage != nullptr) {
+            /* Baked coverage is already grey-spread-RGB (the generator's #grey_of_map
+             * convention), so the default #MaskGrayMode::Mean reads it correctly. */
+            out_correction.image = correction.bake->coverage;
+          }
+          else {
+            return;
+          }
         }
-        out_correction.image = correction_baked;
-        out_correction.iuser = nullptr;
+      }
+      else if (material_or_group) {
+        /* Only a content Material correction's own #ibuf is ever a non-coverage content map (Base
+         * Color, say); a content Node Group correction keeps using its own map's alpha as before
+         * (#material_source stays false for it, unchanged from phase 2), and a mask reads its
+         * coverage through the dedicated fields below regardless of this flag. */
+        out_correction.material_source = is_content &&
+                                         correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
+        if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+          /* Behaves exactly as a Layer row of this source (#composite_material_live is the same
+           * helper the row's own participation gate uses): a live constant, a live map, or --
+           * Baked mode, or without a bake at all yet -- nothing, exactly like the row. */
+          const CompositeMaterialLive live_source = composite_material_live(
+              material, correction, effective_channel);
+          if (live_source.constant) {
+            BKE_paint_layers_constant_to_linear(eMaterialPaintChannel(effective_channel),
+                                               live_source.value,
+                                               out_correction.constant_color);
+            out_correction.has_constant_color = true;
+          }
+          else if (live_source.map) {
+            out_correction.image = live_source.map_image;
+            out_correction.iuser = live_source.map_iuser;
+          }
+          else {
+            Image *correction_image = paint_layer_channel_image(
+                material, correction, effective_channel);
+            if (correction_image == nullptr) {
+              return;
+            }
+            out_correction.image = correction_image;
+            out_correction.iuser = nullptr;
+          }
+        }
+        else {
+          /* Node Group is Baked-only, like a Layer row of that source: no live path exists, so a
+           * correction with no valid bake yet contributes nothing at all. */
+          Image *correction_baked = nullptr;
+          if (!BKE_paint_layers_bake_substitute(
+                  material, correction, effective_channel, &correction_baked) &&
+              !BKE_paint_layers_bake_substitute_custom(
+                  material, correction, effective_channel, &correction_baked, nullptr))
+          {
+            return;
+          }
+          if (correction_baked == nullptr) {
+            return;
+          }
+          out_correction.image = correction_baked;
+          out_correction.iuser = nullptr;
+        }
+        if (!is_content) {
+          /* A Mask Item's colour channel reduces to luminance (#IMB_colormanagement_get_luminance,
+           * matching the generator's #SH_NODE_RGBTOBW); a scalar one is already one number spread
+           * across R=G=B, so the default #MaskGrayMode::Mean reads it correctly as-is. */
+          if (BKE_paint_material_channel_info(eMaterialPaintChannel(effective_channel)).is_color) {
+            out_correction.mask_gray_mode = MaskGrayMode::Luminance;
+          }
+          /* This item's own coverage (its source's Alpha, resolved once more, independent of
+           * `mask_channel`) is its Fac multiplier -- #Node Group reuses the same bake coverage its
+           * generator counterpart (#resolve_correction_coverage) falls back to. */
+        }
+        if (is_content && correction.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+          /* A content Node Group correction keeps using its own map's alpha (unchanged from
+           * before phase 3): no separate coverage resolution for it. */
+        }
+        else {
+          float coverage_live_alpha[4];
+          if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+              BKE_paint_layers_material_live_constant(
+                  material, correction, PAINT_MATERIAL_CHANNEL_ALPHA, coverage_live_alpha))
+          {
+            out_correction.coverage_constant = coverage_live_alpha[0];
+            out_correction.has_coverage_constant = true;
+          }
+          else {
+            Image *coverage_live_image = nullptr;
+            const ImageUser *coverage_live_iuser = nullptr;
+            if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+                BKE_paint_layers_material_live_image(material,
+                                                     correction,
+                                                     PAINT_MATERIAL_CHANNEL_ALPHA,
+                                                     &coverage_live_image,
+                                                     &coverage_live_iuser))
+            {
+              out_correction.coverage_image = coverage_live_image;
+              out_correction.coverage_iuser = coverage_live_iuser;
+              out_correction.coverage_from_alpha = true;
+            }
+            else if (correction.bake != nullptr && correction.bake->coverage != nullptr) {
+              out_correction.coverage_image = correction.bake->coverage;
+            }
+          }
+        }
       }
       else {
         const bool mesh_map = correction.source == MA_PAINT_LAYER_SOURCE_MESH_MAP;
@@ -672,6 +788,50 @@ static ListBase *paint_layer_owner_list_for(ListBase *list, const MaterialPaintL
   return nullptr;
 }
 
+/**
+ * The stack entry that stands for \a layer's own content in \a channel, for the bake: \a layer
+ * itself when it is a Layer row (found among its siblings, isolated), or -- for a Stack
+ * correction/mask folder, which #composite_image_layers_build never emits as a stack entry on
+ * purpose (a correction/mask normally folds into its owner's #content_corrections/#mask_corrections
+ * instead) -- a synthetic isolating-folder entry built by hand from \a layer's own #children, since
+ * #BKE_paint_layers_is_folder already treats it as a folder in every other sense.
+ */
+static bool paint_layer_bake_entry_for(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       const int channel,
+                                       PaintMaterialCompositeImageLayer &r_entry)
+{
+  if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer) {
+    Vector<PaintMaterialCompositeImageLayer> child_layers;
+    composite_image_layers_build(ma, layer.children, channel, nullptr, child_layers, true);
+    r_entry.is_folder = true;
+    r_entry.children.assign(child_layers.begin(), child_layers.end());
+    r_entry.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
+        eMaterialPaintChannel(channel));
+    r_entry.blend = layer_channel_blend(layer, channel);
+    r_entry.opacity = BKE_paint_layers_channel_opacity_effective(layer, channel);
+    r_entry.enabled = true;
+    r_entry.is_bare_base = false;
+    r_entry.marker = layer.marker;
+    return true;
+  }
+  ListBase *owner = paint_layer_owner_list_for(&const_cast<Material &>(ma).paint_layers, &layer);
+  if (owner == nullptr) {
+    return false;
+  }
+  Vector<PaintMaterialCompositeImageLayer> entries;
+  /* The bake renders the row itself, so a Pass Through folder is emitted as an isolating one here:
+   * the isolated formula yields the same pixels as the inlined chain would. */
+  composite_image_layers_build(ma, *owner, channel, nullptr, entries, true);
+  for (const PaintMaterialCompositeImageLayer &entry : entries) {
+    if (BLI_uuid_equal(entry.marker, layer.marker)) {
+      r_entry = entry;
+      return true;
+    }
+  }
+  return false;
+}
+
 bool BKE_paint_layers_bake_render_node(const Material &ma,
                                        const MaterialPaintLayer &layer,
                                        const int channel,
@@ -685,29 +845,14 @@ bool BKE_paint_layers_bake_render_node(const Material &ma,
   {
     return false;
   }
-  ListBase *owner = paint_layer_owner_list_for(
-      &const_cast<Material &>(ma).paint_layers, &layer);
-  if (owner == nullptr) {
-    return false;
-  }
-  Vector<PaintMaterialCompositeImageLayer> entries;
-  /* The bake renders the row itself, so a Pass Through folder is emitted as an isolating one here:
-   * the isolated formula yields the same pixels as the inlined chain would. */
-  composite_image_layers_build(ma, *owner, channel, nullptr, entries, true);
-  const PaintMaterialCompositeImageLayer *found = nullptr;
-  for (const PaintMaterialCompositeImageLayer &entry : entries) {
-    if (BLI_uuid_equal(entry.marker, layer.marker)) {
-      found = &entry;
-      break;
-    }
-  }
-  if (found == nullptr) {
+  PaintMaterialCompositeImageLayer entry;
+  if (!paint_layer_bake_entry_for(ma, layer, channel, entry)) {
     return false;
   }
   /* The row's content, straight and with its own factor, from the one shared isolated-group
    * formula -- for a leaf and a folder alike. */
   Vector<PaintMaterialCompositeImageLayer> one;
-  one.append(*found);
+  one.append(entry);
   int width = 0;
   int height = 0;
   if (!BKE_paint_material_composite_stack_dimensions(one, width, height) || width <= 0 ||
@@ -776,22 +921,15 @@ bool BKE_paint_layers_row_dimensions(const Material &ma,
                                      int &r_width,
                                      int &r_height)
 {
-  ListBase *owner = paint_layer_owner_list_for(
-      &const_cast<Material &>(ma).paint_layers, &layer);
-  if (owner == nullptr) {
+  /* A folder (Layer or Stack correction/mask alike) needs its own emitted row to measure; its
+   * isolated form has the same content. */
+  PaintMaterialCompositeImageLayer entry;
+  if (!paint_layer_bake_entry_for(ma, layer, channel, entry)) {
     return false;
   }
-  Vector<PaintMaterialCompositeImageLayer> entries;
-  /* A folder needs its own emitted row to measure; its isolated form has the same content. */
-  composite_image_layers_build(ma, *owner, channel, nullptr, entries, true);
-  for (const PaintMaterialCompositeImageLayer &entry : entries) {
-    if (BLI_uuid_equal(entry.marker, layer.marker)) {
-      Vector<PaintMaterialCompositeImageLayer> one;
-      one.append(entry);
-      return BKE_paint_material_composite_stack_dimensions(one, r_width, r_height);
-    }
-  }
-  return false;
+  Vector<PaintMaterialCompositeImageLayer> one;
+  one.append(entry);
+  return BKE_paint_material_composite_stack_dimensions(one, r_width, r_height);
 }
 
 bool BKE_paint_layers_composite_channel(const Material &ma,

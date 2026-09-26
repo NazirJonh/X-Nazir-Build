@@ -766,9 +766,16 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
   };
   if (paint_layers_is_layered(ma)) {
     Vector<const MaterialPaintLayer *> layers;
-    BKE_paint_layers_flatten(ma, layers);
+    /* An Effect/Mask Item Stack folder now bakes exactly like a Layer folder (cache-bake-by-
+     * default), so the AUTO cycle must see every role, not only Layer rows. */
+    BKE_paint_layers_flatten_all(ma, layers);
     for (const MaterialPaintLayer *layer_const : layers) {
       MaterialPaintLayer &layer = *const_cast<MaterialPaintLayer *>(layer_const);
+      /* A leaf effect or mask item (its own image/constant, not a Stack folder) has no bake of its
+       * own to gate: only a Layer row and a Stack correction/mask folder do. */
+      if (layer.role != MA_PAINT_LAYER_ROLE_LAYER && !BKE_paint_layers_is_folder(layer)) {
+        continue;
+      }
       /* A Material layer is baked by the material bake job, not the CPU compositor: its channels
        * have no live description representation to render. */
       if (BKE_paint_layers_kind_info(layer.source).needs_external_bake) {
@@ -963,11 +970,13 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
   if (changed) {
     ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
   }
-  /* The queue is drained once no baked row is invalid any more; only then is the signal cleared. */
+  /* The queue is drained once no baked row is invalid any more; only then is the signal cleared.
+   * The same role-agnostic walk as the AUTO cycle above, so a Stack correction/mask folder's stale
+   * bake keeps the flag set until it is re-rendered too. */
   bool pending = false;
   if (paint_layers_is_layered(ma)) {
     Vector<const MaterialPaintLayer *> layers;
-    BKE_paint_layers_flatten(ma, layers);
+    BKE_paint_layers_flatten_all(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
       if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
         continue;
@@ -1319,8 +1328,15 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
     return false;
   }
   Vector<const MaterialPaintLayer *> layers;
-  BKE_paint_layers_flatten(ma, layers);
+  /* A Stack correction/mask folder is gated exactly like a Layer folder (see
+   * #BKE_paint_layers_bake_ensure), so it must be seen by the same heavy-pending scan. */
+  BKE_paint_layers_flatten_all(ma, layers);
   for (const MaterialPaintLayer *layer : layers) {
+    /* A leaf effect or mask item has no bake of its own to gate: only a Layer row and a Stack
+     * correction/mask folder do (see #BKE_paint_layers_bake_ensure). */
+    if (layer->role != MA_PAINT_LAYER_ROLE_LAYER && !BKE_paint_layers_is_folder(*layer)) {
+      continue;
+    }
     if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
       continue;
     }
@@ -1389,7 +1405,9 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
     return nullptr;
   }
   Vector<const MaterialPaintLayer *> layers;
-  BKE_paint_layers_flatten(ma, layers);
+  /* Mirrors #BKE_paint_layers_bake_ensure's AUTO cycle: a heavy Stack correction/mask folder is
+   * queued into this job exactly like a heavy Layer folder. */
+  BKE_paint_layers_flatten_all(ma, layers);
 
   PaintLayersBakeJob *job = MEM_new<PaintLayersBakeJob>(__func__);
   job->bmain = &bmain;
@@ -1397,6 +1415,11 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
   job->material_session_uid = ma.id.session_uid;
 
   for (const MaterialPaintLayer *layer : layers) {
+    /* A leaf effect or mask item has no bake of its own to gate: only a Layer row and a Stack
+     * correction/mask folder do (see #BKE_paint_layers_bake_ensure). */
+    if (layer->role != MA_PAINT_LAYER_ROLE_LAYER && !BKE_paint_layers_is_folder(*layer)) {
+      continue;
+    }
     if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
       continue;
     }
@@ -1554,10 +1577,10 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
   }
   /* The queue is drained once no baked row is invalid any more, exactly as the synchronous
-   * planner decides it. */
+   * planner decides it (role-agnostic, see #BKE_paint_layers_bake_ensure). */
   bool pending = false;
   Vector<const MaterialPaintLayer *> layers;
-  BKE_paint_layers_flatten(*ma, layers);
+  BKE_paint_layers_flatten_all(*ma, layers);
   for (const MaterialPaintLayer *layer : layers) {
     if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
       continue;

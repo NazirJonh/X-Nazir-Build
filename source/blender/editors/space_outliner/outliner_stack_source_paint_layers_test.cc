@@ -753,5 +753,68 @@ TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_tracks_a_blank_map_becomin
   EXPECT_NE(source().state_hash(ctx, ma->id), before);
 }
 
+/**
+ * 4B.5: a Stack (content) correction and a Stack mask item may each now be a folder with children
+ * of their own (phases 3/4). The tree build must not crash on that shape and must not invent rows
+ * for the children -- exposing a correction/mask's own subtree in the Outliner is Phase 6 UI work,
+ * out of scope here; #append_corrections (outliner_stack_source_paint_layers.cc) still emits one
+ * flat row per correction/mask item and never recurses into its #children, so the row set stays
+ * exactly the pre-Phase-6 shape: the owner row plus one row per correction/mask item.
+ */
+TEST_F(OutlinerStackPaintLayersSourceTest, stack_correction_and_mask_with_children_do_not_crash)
+{
+  Material *ma = BKE_material_add(bmain, "StackFolderCorrections");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(effect, nullptr);
+  MaterialPaintLayer *effect_child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "FxChild", effect, PaintLayerPlace::Into);
+  ASSERT_NE(effect_child, nullptr);
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "StackMask");
+  ASSERT_NE(mask, nullptr);
+  MaterialPaintLayer *mask_child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "MaskChild", mask, PaintLayerPlace::Into);
+  ASSERT_NE(mask_child, nullptr);
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  Vector<StackRow> rows;
+  ASSERT_TRUE(source().rows_build(ctx, {}, ma->id, rows));
+
+  /* The owner row, the effect row and the mask row -- three rows, none for either child. */
+  ASSERT_EQ(rows.size(), 3);
+  int owner_rows = 0;
+  int effect_rows = 0;
+  int mask_rows = 0;
+  for (const StackRow &row : rows) {
+    EXPECT_FALSE(BLI_uuid_equal(row.stable_id, effect_child->marker))
+        << "a Stack correction's child must not become its own Outliner row yet (Phase 6)";
+    EXPECT_FALSE(BLI_uuid_equal(row.stable_id, mask_child->marker))
+        << "a Stack mask item's child must not become its own Outliner row yet (Phase 6)";
+    if (BLI_uuid_equal(row.stable_id, owner->marker)) {
+      owner_rows++;
+    }
+    else if (BLI_uuid_equal(row.stable_id, effect->marker)) {
+      effect_rows++;
+      EXPECT_EQ(row.parent_section_id, "CHANNELS");
+    }
+    else if (BLI_uuid_equal(row.stable_id, mask->marker)) {
+      mask_rows++;
+      EXPECT_EQ(row.parent_section_id, "MASK");
+    }
+  }
+  EXPECT_EQ(owner_rows, 1);
+  EXPECT_EQ(effect_rows, 1);
+  EXPECT_EQ(mask_rows, 1);
+
+  /* The state hash must not crash either, whatever it does or does not fold from the children. */
+  EXPECT_NO_FATAL_FAILURE(source().state_hash(ctx, ma->id));
+}
+
 }  // namespace tests
 }  // namespace blender::ed::outliner

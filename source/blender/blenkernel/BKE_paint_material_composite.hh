@@ -48,6 +48,11 @@ struct ImageUser;
 struct Material;
 struct rcti;
 
+/* Forward declaration: a Stack correction's #children holds the same layer type a folder row's
+ * own children does (defined below), so the two never disagree about what a subtree is. */
+struct PaintMaterialCompositeImageLayer;
+struct PaintMaterialCompositeLayer;
+
 /**
  * One correction of a layer, as data-blocks: an image blended onto the layer's colour (a content
  * section) or onto its coverage (a mask one), below the layer's own blend.
@@ -113,6 +118,23 @@ struct PaintMaterialCompositeCorrection {
    * keeps reading its coverage from #image's own alpha as it always did.
    */
   bool material_source = false;
+  /**
+   * A mask item's reduction of its map (or, for #MaskGrayMode::Alpha, the map #coverage_image
+   * names below it): #MaskGrayMode::Mean for everything but a Material/Node Group mask, which
+   * reduces a colour `mask_channel` with #MaskGrayMode::Luminance or a live source Alpha texture
+   * with #MaskGrayMode::Alpha. Unused for a content correction.
+   */
+  MaskGrayMode mask_gray_mode = MaskGrayMode::Mean;
+  /**
+   * A Stack correction: #children are composited in isolation over transparency, exactly like a
+   * Layer folder's own children (design phase 4). #image stays null -- there is no map of its own,
+   * only the subtree's accumulated straight colour and coverage, read the same way a Material
+   * correction's own source is (#material_source is set alongside this).
+   */
+  bool is_folder = false;
+  /* std::vector, not blender::Vector: a self-referential member needs a container that accepts an
+   * incomplete type, which is exactly the case std::vector allows for. */
+  std::vector<PaintMaterialCompositeImageLayer> children;
 };
 
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
@@ -264,6 +286,11 @@ struct PaintMaterialCompositeCorrectionBuffer {
   bool coverage_from_alpha = false;
   /** See #PaintMaterialCompositeCorrection.material_source. */
   bool material_source = false;
+  /** See #PaintMaterialCompositeCorrection.mask_gray_mode. */
+  MaskGrayMode mask_gray_mode = MaskGrayMode::Mean;
+  /** See #PaintMaterialCompositeCorrection.is_folder / .children. */
+  bool is_folder = false;
+  std::vector<PaintMaterialCompositeLayer> children;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */

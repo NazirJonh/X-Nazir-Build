@@ -55,6 +55,7 @@ struct PointerRNA;
 struct PropertyRNA;
 struct ReportList;
 struct ResultBLF;
+struct Tex;
 struct bContext;
 struct bContextStore;
 struct bNode;
@@ -2891,6 +2892,17 @@ struct IDBrowserParams {
   /** Reduce the template to a single browser button, for places with no room for the full row. */
   bool compact = false;
   /**
+   * For a #Texture pointer property, browse images instead of textures: picking or dropping an
+   * image assigns it wrapped in a new image texture (see #BKE_texture_image_wrap_for_slot),
+   * which is what users of paint-slot-like Texture properties expect to pick.
+   *
+   * Meant only for editable, reference-counted (#PROP_ID_REFCOUNT) texture slots owned by a
+   * brush or similar paint data: the assignment follows the paint-slot policy of
+   * #ED_paint_texture_property_assign_image (the slot owns a single user of its texture, the
+   * texture follows the owner's library, the owning brush is tagged as changed).
+   */
+  bool browse_images = false;
+  /**
    * Optional controls of the appended #template_ID row, see #IDBrowserRowParams. Kept here rather
    * than as trailing boolean parameters so hosts can opt out of one without spelling out the
    * others, and so a new control does not shift an existing argument list.
@@ -3299,6 +3311,65 @@ void uiTemplateImageSettings(ui::Layout *layout,
                              PointerRNA *imfptr,
                              bool color_management,
                              const char *panel_idname = nullptr);
+
+/* -------------------------------------------------------------------- */
+/** \name Paint Texture Assignment (interface_drop_image.cc)
+ *
+ * Shared assignment of an #Image into a #Texture pointer property (a brush texture slot, a Curve
+ * Patch texture slot, the Face Set color texture, ...), used by the image drag&drop targets and
+ * the ID browser. Lives in the interface module because the assignment drives RNA properties,
+ * notifiers and texture previews; every image -> texture entry point goes through these.
+ * \{ */
+
+/**
+ * Wrap \a image into a #TEX_IMAGE texture for a slot owned by \a owner (may be null), and
+ * normalize the libraries: the new texture follows the owner's library (a linked asset-editable
+ * brush can never reference a local texture, the reference-counted setter silently refuses the
+ * assignment otherwise, see #BKE_id_can_use_id), and a linked texture must not reference a local
+ * image either -- the image is moved (freshly loaded) or copied (pre-existing) into that library.
+ * Consumes the load reference when \a image_has_extra_user. Returns the texture with one user
+ * (the assigning slot's), already in the owner's library, so direct DNA assignment needs no
+ * further bookkeeping.
+ */
+struct Tex *ED_paint_texture_wrap_image_for_owner(struct Main *bmain,
+                                                  struct Tex *current,
+                                                  const struct ID *owner,
+                                                  struct Image *image,
+                                                  bool image_has_extra_user);
+
+/**
+ * Assign \a image to the #Texture pointer property \a target_prop on \a target_ptr, wrapping it
+ * into a #TEX_IMAGE texture owned by the slot (see #ED_paint_texture_wrap_image_for_owner).
+ * Returns null for a non-editable (linked / library-override) owner, leaving no side effects.
+ * Does not push undo; callers do that with their own label.
+ *
+ * \param image_has_extra_user: \a image carries an extra #BKE_image_load_exists user that this
+ * call consumes once the texture holds its own reference.
+ * \return The assigned texture, or null when the owner refuses the assignment.
+ */
+struct Tex *ED_paint_texture_property_assign_image(struct bContext *C,
+                                                   const PointerRNA &target_ptr,
+                                                   PropertyRNA *target_prop,
+                                                   struct Image *image,
+                                                   bool image_has_extra_user);
+
+/**
+ * Shared tail of an image/texture assignment to a paint texture slot: tag the texture for shading
+ * update, notify #NC_TEXTURE (added or edited), tag unsaved changes and notify for a brush owner
+ * (\a owner may be null), and regenerate the texture's preview icon. Does not push undo.
+ *
+ * \param refresh_preview: pass false when assigning several textures at once and refresh their
+ * previews together through #DROP_IMAGE_update_textures_preview_batch afterwards: the preview
+ * update kills running preview jobs, so per-texture calls would cancel each other's render jobs.
+ */
+void ED_paint_texture_assignment_finalize(struct bContext *C,
+                                          struct ID *owner,
+                                          struct Tex *tex,
+                                          bool created,
+                                          bool refresh_preview = true);
+
+/** \} */
+
 void uiTemplateImageStereo3d(ui::Layout *layout, PointerRNA *stereo3d_format_ptr);
 void uiTemplateImageViews(ui::Layout *layout, PointerRNA *imaptr);
 void uiTemplateImageFormatViews(ui::Layout *layout, PointerRNA *imfptr, PointerRNA *ptr);

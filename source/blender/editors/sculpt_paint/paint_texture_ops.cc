@@ -11,9 +11,11 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_fileops.hh"
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
+#include "BLI_time.h"
 #include "BLI_utildefines.h"
 
 #include "BLT_translation.hh"
@@ -28,12 +30,11 @@
 #include "BKE_context.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
 #include "BKE_texture.h"
-
-#include "DEG_depsgraph.hh"
 
 #include "ED_paint.hh"
 #include "ED_screen.hh"
@@ -44,17 +45,16 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
 
 #include "paint_intern.hh"
-
-/* For #DROP_IMAGE_update_texture_preview_smart(). */
-#include "../interface/interface_drop_image.hh"
 
 namespace blender {
 
@@ -170,16 +170,12 @@ static void assign_image_props_copy(PointerRNA *dst, wmOperator *op)
 
 /** Shared tail: refresh evaluation, notify, update the preview icon and push undo. */
 static wmOperatorStatus assign_image_finish(
-    bContext *C, Main *bmain, Brush *brush, Tex *tex, const bool created)
+    bContext *C, Brush *brush, Tex *tex, const bool created)
 {
+  /* The slot takes an image either way (a freshly wrapped texture is already an image texture;
+   * a re-used one now holds an image but may have been procedural before). */
   tex->type = TEX_IMAGE;
-  DEG_id_tag_update(&tex->id, ID_RECALC_SHADING);
-
-  WM_event_add_notifier(C, NC_TEXTURE | (created ? NA_ADDED : NA_EDITED), tex);
-  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
-
-  /* Refresh the texture preview/icon for immediate visual feedback. */
-  DROP_IMAGE_update_texture_preview_smart(C, bmain, tex, true);
+  ED_paint_texture_assignment_finalize(C, &brush->id, tex, created);
 
   /* Linked data cannot participate in global (memfile) undo. */
   if (!ID_IS_LINKED(&brush->id) && !ID_IS_LINKED(&tex->id)) {
@@ -223,7 +219,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
       image_same_source(tex->ima, image))
   {
     BKE_image_signal(bmain, tex->ima, nullptr, IMA_SIGNAL_RELOAD);
-    return assign_image_finish(C, bmain, brush, tex, false);
+    return assign_image_finish(C, brush, tex, false);
   }
 
   /* Create a wrapping texture when the slot is empty, or when the user explicitly chose to create a
@@ -278,7 +274,7 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
     id_us_plus(&slot_image->id);
   }
 
-  return assign_image_finish(C, bmain, brush, tex, created);
+  return assign_image_finish(C, brush, tex, created);
 }
 
 static wmOperatorStatus paint_assign_image_invoke(bContext *C,
@@ -391,6 +387,210 @@ void BRUSH_OT_texture_slot_assign_image(wmOperatorType *ot)
 
   /* ID lookup properties for drag and drop */
   WM_operator_properties_id_lookup(ot, true);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Open Image as Texture Operator (shared flow)
+ *
+ * The file-select Open button of #template_ID_browser rows on #Texture pointer properties (Curve
+ * Patch Start/Middle/End textures, stamp slots, ...). Finds its target through the invoking
+ * button's template-ID context, exactly like #IMAGE_OT_open does for Image properties, and
+ * assigns the loaded image wrapped in a #TEX_IMAGE texture.
+ *
+ * The invoke/exec flow is shared with #SCULPT_OT_face_set_color_texture_open, which only adds its
+ * Face Set specific mode switch on top; see #texture_image_open_invoke_common and
+ * #texture_image_open_assign_common in #paint_intern.hh.
+ * \{ */
+
+/** Suppress KM_RELEASE invoke right after file-select exec (double-click passes through). */
+static double texture_image_open_suppress_release_until = 0.0;
+static constexpr double texture_image_open_suppress_release_delay = 0.25;
+
+void texture_image_open_suppress_release_arm()
+{
+  texture_image_open_suppress_release_until = BLI_time_now_seconds() +
+                                              texture_image_open_suppress_release_delay;
+}
+
+void texture_image_open_cancel_common(wmOperator *op)
+{
+  if (op->customdata) {
+    MEM_delete(static_cast<TextureImageOpenData *>(op->customdata));
+    op->customdata = nullptr;
+  }
+}
+
+void texture_image_open_init_common(bContext *C, wmOperator *op)
+{
+  auto *data = MEM_new<TextureImageOpenData>(__func__);
+  ui::context_active_but_prop_get_templateID(C, &data->pprop.ptr, &data->pprop.prop);
+  op->customdata = data;
+}
+
+wmOperatorStatus texture_image_open_invoke_common(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent *event)
+{
+  if (event && event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+    if (BLI_time_now_seconds() < texture_image_open_suppress_release_until) {
+      return OPERATOR_CANCELLED;
+    }
+  }
+
+  texture_image_open_init_common(C, op);
+
+  if (RNA_struct_property_is_set(op->ptr, "filepath")) {
+    return op->type->exec(C, op);
+  }
+
+  /* Default the file-select to the directory of the image already shown in the slot, so
+   * re-opening keeps the user in their current working folder. The buffer outlives the
+   * #RNA_string_set below, which copies it into the operator properties. */
+  const char *path = U.textudir;
+  char image_path[FILE_MAX];
+  PointerRNA ptr;
+  PropertyRNA *prop;
+  ui::context_active_but_prop_get_templateID(C, &ptr, &prop);
+  if (prop) {
+    Tex *tex = static_cast<Tex *>(RNA_property_pointer_get(&ptr, prop).data);
+    if (tex && tex->type == TEX_IMAGE && tex->ima) {
+      STRNCPY(image_path, tex->ima->filepath);
+      BLI_path_abs(image_path, ID_BLEND_PATH(CTX_data_main(C), &tex->ima->id));
+      if (BLI_exists(image_path)) {
+        path = image_path;
+      }
+    }
+  }
+
+  RNA_string_set(op->ptr, "filepath", path);
+  WM_event_add_fileselect(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+Tex *texture_image_open_assign_common(bContext *C, wmOperator *op, const char *filepath)
+{
+  if (!op->customdata) {
+    texture_image_open_init_common(C, op);
+  }
+  auto *data = static_cast<TextureImageOpenData *>(op->customdata);
+
+  if (!data->pprop.prop ||
+      RNA_property_pointer_type(&data->pprop.ptr, data->pprop.prop) != RNA_Texture)
+  {
+    BKE_report(op->reports, RPT_ERROR, "No texture property to assign the image to");
+    texture_image_open_cancel_common(op);
+    return nullptr;
+  }
+  /* The wrapping assignment below must not leave dangling side effects on an owner that would
+   * refuse it (a linked brush). */
+  if (data->pprop.ptr.owner_id &&
+      (!ID_IS_EDITABLE(data->pprop.ptr.owner_id) ||
+       ID_IS_OVERRIDE_LIBRARY(data->pprop.ptr.owner_id)))
+  {
+    BKE_report(op->reports, RPT_ERROR, "Cannot edit linked brush data");
+    texture_image_open_cancel_common(op);
+    return nullptr;
+  }
+  if (filepath[0] == '\0') {
+    texture_image_open_cancel_common(op);
+    return nullptr;
+  }
+
+  Main *bmain = CTX_data_main(C);
+  Image *ima = BKE_image_load_exists(bmain, filepath, nullptr);
+  if (!ima) {
+    BKE_report(op->reports, RPT_ERROR, "Cannot load image");
+    texture_image_open_cancel_common(op);
+    return nullptr;
+  }
+
+  /* #BKE_image_load_exists hands out an extra user on the image; the wrapping assignment below
+   * consumes it (the texture takes its own reference instead). Returns null when the owner
+   * refuses the assignment, leaving no side effects. */
+  Tex *tex = ED_paint_texture_property_assign_image(
+      C, data->pprop.ptr, data->pprop.prop, ima, true);
+  if (!tex) {
+    /* Unreachable as long as the owner guard above stays in sync with the assignment's own, but
+     * the load loan is not consumed on this path: drop it instead of leaking the extra user. */
+    id_us_min(&ima->id);
+    BKE_report(op->reports, RPT_ERROR, "Cannot edit linked brush data");
+    texture_image_open_cancel_common(op);
+    return nullptr;
+  }
+
+  texture_image_open_apply_relative_path(C, op, tex);
+  return tex;
+}
+
+/** Store the image path relative to the file it now lives in (#WM_FILESEL_RELPATH), same as
+ * #IMAGE_OT_open. */
+void texture_image_open_apply_relative_path(bContext *C, wmOperator *op, Tex *tex)
+{
+  if (!RNA_struct_find_property(op->ptr, "relative_path") ||
+      !RNA_boolean_get(op->ptr, "relative_path"))
+  {
+    return;
+  }
+  Image *ima = tex->ima;
+  if (!ima || BKE_image_has_packedfile(ima) || BLI_path_is_rel(ima->filepath)) {
+    return;
+  }
+  char path[FILE_MAX];
+  STRNCPY(path, ima->filepath);
+  BLI_path_rel(path, ID_BLEND_PATH(CTX_data_main(C), &ima->id));
+  STRNCPY(ima->filepath, path);
+}
+
+/** Shared exec tail: customdata cleanup and release suppression. */
+static wmOperatorStatus texture_image_open_exec_common(bContext *C, wmOperator *op)
+{
+  char filepath[FILE_MAX];
+  RNA_string_get(op->ptr, "filepath", filepath);
+  Tex *tex = texture_image_open_assign_common(C, op, filepath);
+  if (!tex) {
+    return OPERATOR_CANCELLED;
+  }
+  texture_image_open_cancel_common(op);
+  texture_image_open_suppress_release_arm();
+  return OPERATOR_FINISHED;
+}
+
+static void texture_image_open_cancel(bContext * /*C*/, wmOperator *op)
+{
+  texture_image_open_cancel_common(op);
+}
+
+static wmOperatorStatus texture_image_open_invoke(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent *event)
+{
+  return texture_image_open_invoke_common(C, op, event);
+}
+
+void BRUSH_OT_texture_image_open(wmOperatorType *ot)
+{
+  ot->name = "Open Image as Texture";
+  ot->idname = "BRUSH_OT_texture_image_open";
+  ot->description = "Open an image from disk and assign it wrapped in an image texture";
+
+  ot->invoke = texture_image_open_invoke;
+  ot->exec = texture_image_open_exec_common;
+  ot->cancel = texture_image_open_cancel;
+  /* The target property is resolved from the invoking button at invoke time and validated again
+   * in #exec, so there is no mode-specific poll: the operator is only reachable through the Open
+   * button of a Texture template-ID row (a general template is usable outside paint modes). */
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  WM_operator_properties_filesel(ot,
+                                 FILE_TYPE_FOLDER | FILE_TYPE_IMAGE,
+                                 FILE_SPECIAL,
+                                 FILE_OPENFILE,
+                                 WM_FILESEL_FILEPATH | WM_FILESEL_DIRECTORY | WM_FILESEL_RELPATH,
+                                 FILE_DEFAULTDISPLAY,
+                                 FILE_SORT_DEFAULT);
 }
 
 /** \} */

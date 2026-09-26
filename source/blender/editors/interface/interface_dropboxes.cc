@@ -203,6 +203,13 @@ std::unique_ptr<DropTargetInterface> region_but_find_drop_target_at(bContext *C,
   {
     return target;
   }
+  /* After the ID browser: the Curve Patch list row that also hosts a browser button must keep
+   * the browser target for that button, and only fall back to the list target elsewhere. */
+  if (std::unique_ptr<DropTargetInterface> target = curve_patch_texture_list_drop_target_get(
+          C, region, event))
+  {
+    return target;
+  }
   return nullptr;
 }
 

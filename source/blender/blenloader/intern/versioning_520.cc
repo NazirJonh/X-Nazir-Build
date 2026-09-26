@@ -1956,6 +1956,35 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 78)) {
+    for (Brush &brush : bmain->brushes) {
+      /* #Brush.face_set_color_mtex is newer than some files (including brush asset libraries)
+       * that read it back as zeroes: zero projection axes make the texture evaluation degenerate
+       * to a constant coordinate, so every sample hits the image's center texel and the whole
+       * color map collapses to one Face Set. The whole MTex is reset, since a zeroed one carries
+       * a zero size and angle range as well; a genuinely configured one always has the DNA
+       * defaults for the projection axes (there is no UI to change them). */
+      MTex &mtex = brush.face_set_color_mtex;
+      if (mtex.projx == PROJ_N && mtex.projy == PROJ_N && mtex.projz == PROJ_N) {
+        Tex *tex = mtex.tex;
+        mtex = blender::dna::shallow_copy(MTex());
+        mtex.tex = tex;
+      }
+
+      /* #Brush.face_sets_texture_mode is new: files predating it read zero, which is not a valid
+       * #eBrushTextureDataMode. Keep the effective mode when the feature is on, so the same
+       * sub-mode comes back when it is toggled off and on again. */
+      if (!ELEM(brush.face_sets_texture_mode,
+                BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE,
+                BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE))
+      {
+        brush.face_sets_texture_mode = (brush.texture_data_mode != BRUSH_TEXTURE_DATA_MODE_NONE) ?
+                                           brush.texture_data_mode :
+                                           BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE;
+      }
+    }
+  }
+
   /* The Sculpt Color Gradient tool settings are new. A file written before them zero-fills the
    * opacity (fully transparent) and leaves the embedded #ColorBand without stops.
    *

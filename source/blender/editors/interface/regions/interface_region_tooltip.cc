@@ -58,6 +58,7 @@
 
 #include "BIF_glutil.hh"
 
+#include "DNA_texture_types.h"
 #include "DNA_vfont_types.h"
 
 #include "GPU_immediate.hh"
@@ -2267,6 +2268,12 @@ static std::unique_ptr<TooltipData> tooltip_data_from_search_item_tooltip_data(I
   }
   else if (type_id == ID_VF) {
     tooltip_from_vfont(*reinterpret_cast<VFont *>(id), *data);
+  }
+  else if (type_id == ID_TE && id_cast<Tex *>(id)->type == TEX_IMAGE && id_cast<Tex *>(id)->ima)
+  {
+    /* An image texture is picked for the picture it wraps (paint slots browse images and wrap
+     * them), so show that image's preview and info rather than a generic line. */
+    tooltip_from_image(*id_cast<Tex *>(id)->ima, *data);
   }
   else {
     tooltip_text_field_add(

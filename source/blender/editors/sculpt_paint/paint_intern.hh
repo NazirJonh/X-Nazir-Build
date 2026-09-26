@@ -25,6 +25,8 @@
 #include "DNA_vec_types.h"
 #include "DNA_windowmanager_enums.h"
 
+#include "RNA_types.hh" /* PropertyPointerRNA */
+
 #include "ED_view3d.hh"
 
 #include <memory>
@@ -55,6 +57,7 @@ struct Scene;
 struct ScrArea;
 struct SculptSession;
 struct SpaceImage;
+struct Tex;
 struct ToolSettings;
 struct VertProjHandle;
 struct ViewContext;
@@ -64,6 +67,7 @@ struct wmKeyConfig;
 struct wmKeyMap;
 struct wmOperator;
 struct wmOperatorType;
+struct PropertyRNA;
 
 namespace bke::pbvh {
 class Node;
@@ -1025,6 +1029,59 @@ void PAINT_OT_brush_group_override_toggle(wmOperatorType *ot);
 
 /* paint_texture_ops.cc */
 void BRUSH_OT_texture_slot_assign_image(wmOperatorType *ot);
+void BRUSH_OT_texture_image_open(wmOperatorType *ot);
+
+/**
+ * Shared #op->customdata of the template-ID "Open image as texture" operators
+ * (#BRUSH_OT_texture_image_open, #SCULPT_OT_face_set_color_texture_open): the invoking button's
+ * Texture pointer target, resolved at invoke time.
+ */
+struct TextureImageOpenData {
+  PropertyPointerRNA pprop;
+};
+
+/**
+ * Shared invoke: suppress the trailing KM_RELEASE re-invoke after a file-select confirm, resolve
+ * the template-ID target into #TextureImageOpenData (as #op->customdata) and open the file-select
+ * dialog defaulting to the currently assigned slot image's folder. When `filepath` is already set
+ * on \a op, #exec runs directly.
+ */
+wmOperatorStatus texture_image_open_invoke_common(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent *event);
+
+/**
+ * Shared exec body: resolve the Texture pointer target captured in #op->customdata (creating it
+ * from the active button when missing), load \a filepath and assign it wrapped in a #TEX_IMAGE
+ * texture through #ED_paint_texture_property_assign_image. Reports and frees the customdata on
+ * every failure path.
+ *
+ * \return The assigned texture, or null on failure (the caller returns #OPERATOR_CANCELLED then).
+ */
+Tex *texture_image_open_assign_common(bContext *C, wmOperator *op, const char *filepath);
+
+/** Free the shared #TextureImageOpenData customdata (safe on an already-null #op->customdata). */
+void texture_image_open_cancel_common(wmOperator *op);
+
+/**
+ * Resolve the template-ID target of the invoking button into a #TextureImageOpenData stored as
+ * #op->customdata. Exposed for exec bodies that inspect the captured target directly (the Face
+ * Set open operator falls back to the active brush when no Texture property was captured).
+ */
+void texture_image_open_init_common(bContext *C, wmOperator *op);
+
+/**
+ * Store the assigned image's path relative to the file it now lives in (#WM_FILESEL_RELPATH),
+ * same as #IMAGE_OT_open. No-op when \a op has no `relative_path` property or it is off.
+ */
+void texture_image_open_apply_relative_path(bContext *C, wmOperator *op, Tex *tex);
+
+/**
+ * Arm the shared KM_RELEASE suppression: for a short time after the exec, a trailing KM_RELEASE
+ * invoke of the same operator (a double-click passing through the file-select confirm) is
+ * ignored.
+ */
+void texture_image_open_suppress_release_arm();
 
 /* paint_image_select_mask.cc, paint_image_select_curve.cc, paint_image_select_move.cc,
  * paint_image_select_transform.cc */

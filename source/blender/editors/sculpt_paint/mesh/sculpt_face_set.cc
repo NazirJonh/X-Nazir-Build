@@ -55,6 +55,7 @@
 #include "BKE_image.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_fair.hh"
@@ -69,11 +70,6 @@
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_texture.h"
 
-#include "BLI_fileops.h"
-#include "BLI_path_utils.hh"
-#include "BLI_string.h"
-#include "BLI_time.h"
-
 #include "UI_interface_c.hh"
 
 #include "DEG_depsgraph.hh"
@@ -86,6 +82,7 @@
 #include "ED_sculpt.hh"
 
 #include "mesh_brush_common.hh"
+#include "../paint_intern.hh"
 #include "paint_hide.hh"
 #include "sculpt_boundary.hh"
 #include "sculpt_gesture.hh"
@@ -1633,25 +1630,9 @@ void SCULPT_OT_face_set_colors_flip(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER;
 }
 
-struct FaceSetColorTextureOpenData {
-  PropertyPointerRNA pprop;
-};
-
-/** Suppress KM_RELEASE invoke right after file-select exec (double-click passes through). */
-static double face_set_color_texture_open_suppress_release_until = 0.0;
-static constexpr double face_set_color_texture_open_suppress_release_delay = 0.25;
-
-static void face_set_color_texture_open_init(bContext *C, wmOperator *op)
-{
-  auto *data = MEM_new<FaceSetColorTextureOpenData>(__func__);
-  ui::context_active_but_prop_get_templateID(C, &data->pprop.ptr, &data->pprop.prop);
-  op->customdata = data;
-}
-
 static void face_set_color_texture_open_cancel(bContext * /*C*/, wmOperator *op)
 {
-  MEM_delete(static_cast<FaceSetColorTextureOpenData *>(op->customdata));
-  op->customdata = nullptr;
+  texture_image_open_cancel_common(op);
 }
 
 static bool face_set_color_texture_open_poll(bContext *C)
@@ -1664,93 +1645,108 @@ static bool face_set_color_texture_open_poll(bContext *C)
   return sd && BKE_paint_brush_for_read(&sd->paint);
 }
 
+/**
+ * Assign to the active brush's Face Set color slot when the operator runs without a template-ID
+ * button (Python call, keymap): the shared flow has no target to assign through, so the texture
+ * is written into #Brush.face_set_color_mtex directly, same as before the shared flow existed.
+ */
+static Tex *face_set_color_texture_open_assign_direct(bContext *C,
+                                                      wmOperator *op,
+                                                      const char *filepath)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+
+  auto *data = static_cast<TextureImageOpenData *>(op->customdata);
+  Brush *brush = (data->pprop.ptr.owner_id && GS(data->pprop.ptr.owner_id->name) == ID_BR) ?
+                     id_cast<Brush *>(data->pprop.ptr.owner_id) :
+                     nullptr;
+  if (!brush) {
+    Sculpt *sd = scene->toolsettings->sculpt;
+    brush = sd ? BKE_paint_brush(&sd->paint) : nullptr;
+  }
+  if (!brush) {
+    texture_image_open_cancel_common(op);
+    return nullptr;
+  }
+  if (filepath[0] == '\0') {
+    texture_image_open_cancel_common(op);
+    return nullptr;
+  }
+  if (!ID_IS_EDITABLE(brush) || ID_IS_OVERRIDE_LIBRARY(&brush->id)) {
+    BKE_report(op->reports, RPT_ERROR, "Cannot edit linked brush data");
+    texture_image_open_cancel_common(op);
+    return nullptr;
+  }
+
+  Image *ima = BKE_image_load_exists(bmain, filepath, nullptr);
+  if (!ima) {
+    BKE_report(op->reports, RPT_ERROR, "Cannot load image");
+    texture_image_open_cancel_common(op);
+    return nullptr;
+  }
+
+  /* Direct DNA assignment: the wrap hands the texture back with exactly the one user the slot
+   * owns (a retarget keeps the slot's own reference). When the wrap created a new texture, the
+   * slot's own reference on the old one has to be dropped here -- there is no reference-counted
+   * RNA setter to do it on this path. */
+  Tex *old_tex = brush->face_set_color_mtex.tex;
+  Tex *tex = ED_paint_texture_wrap_image_for_owner(bmain, old_tex, &brush->id, ima, true);
+  brush->face_set_color_mtex.tex = tex;
+  if (old_tex && tex != old_tex) {
+    id_us_min(&old_tex->id);
+  }
+  texture_image_open_apply_relative_path(C, op, tex);
+  ED_paint_texture_assignment_finalize(C, &brush->id, tex, tex != old_tex);
+  return tex;
+}
+
+/**
+ * Thin wrapper over the shared template-ID open flow (#BRUSH_OT_texture_image_open): the image is
+ * loaded and assigned wrapped to the button's Texture property, then the Face Set specific part
+ * runs -- switching the brush into the color sub-mode (same entry point the RNA
+ * `use_face_set_color_texture` setter uses) and refreshing the color overlay with the new image.
+ */
 static wmOperatorStatus face_set_color_texture_open_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
 
-  if (!op->customdata) {
-    face_set_color_texture_open_init(C, op);
-  }
-  FaceSetColorTextureOpenData *data = static_cast<FaceSetColorTextureOpenData *>(op->customdata);
-
   char filepath[FILE_MAX];
   RNA_string_get(op->ptr, "filepath", filepath);
-  if (filepath[0] == '\0') {
-    face_set_color_texture_open_cancel(C, op);
-    return OPERATOR_CANCELLED;
-  }
 
-  bool exists = false;
-  Image *ima = BKE_image_load_exists(bmain, filepath, &exists);
-  if (!ima) {
-    BKE_report(op->reports, RPT_ERROR, "Cannot load image");
-    face_set_color_texture_open_cancel(C, op);
-    return OPERATOR_CANCELLED;
+  if (!op->customdata) {
+    texture_image_open_init_common(C, op);
   }
-
-  Brush *brush = nullptr;
-  if (data->pprop.ptr.owner_id && GS(data->pprop.ptr.owner_id->name) == ID_BR) {
-    brush = reinterpret_cast<Brush *>(data->pprop.ptr.owner_id);
-  }
-  if (!brush) {
-    Sculpt *sd = scene->toolsettings->sculpt;
-    if (sd) {
-      brush = BKE_paint_brush(&sd->paint);
-    }
-  }
-  if (!brush) {
-    face_set_color_texture_open_cancel(C, op);
-    return OPERATOR_CANCELLED;
-  }
+  const auto *data = static_cast<const TextureImageOpenData *>(op->customdata);
 
   Tex *tex = data->pprop.prop ?
-                 static_cast<Tex *>(
-                     RNA_property_pointer_get(&data->pprop.ptr, data->pprop.prop).data) :
-                 brush->face_set_color_mtex.tex;
-
+                 texture_image_open_assign_common(C, op, filepath) :
+                 face_set_color_texture_open_assign_direct(C, op, filepath);
   if (!tex) {
-    tex = BKE_texture_add(bmain, ima->id.name + 2);
-    BKE_texture_type_set(tex, TEX_IMAGE);
-
-    if (data->pprop.prop) {
-      id_us_min(&tex->id);
-      if (data->pprop.ptr.owner_id) {
-        BKE_id_move_to_same_lib(*bmain, tex->id, *data->pprop.ptr.owner_id);
-      }
-      PointerRNA texptr = RNA_id_pointer_create(&tex->id);
-      RNA_property_pointer_set(&data->pprop.ptr, data->pprop.prop, texptr, nullptr);
-      RNA_property_update(C, &data->pprop.ptr, data->pprop.prop);
-    }
-    else {
-      brush->face_set_color_mtex.tex = tex;
-      id_us_plus(&tex->id);
-    }
-  }
-  else if (tex->type != TEX_IMAGE) {
-    BKE_texture_type_set(tex, TEX_IMAGE);
+    return OPERATOR_CANCELLED;
   }
 
-  tex->ima = ima;
-  id_us_plus(&ima->id);
-
-  BKE_image_signal(bmain, ima, nullptr, IMA_SIGNAL_RELOAD);
-
-  if (brush->texture_data_mode != BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE) {
-    brush->texture_data_mode = BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE;
-    brush->vcol_channel = BRUSH_VCOL_CHANNEL_RGB;
-    sync_face_set_color_mtex_mapping_from_mask(*brush);
+  Brush *brush = (data->pprop.ptr.owner_id && GS(data->pprop.ptr.owner_id->name) == ID_BR) ?
+                     id_cast<Brush *>(data->pprop.ptr.owner_id) :
+                     nullptr;
+  if (!brush) {
+    Sculpt *sd = scene->toolsettings->sculpt;
+    brush = sd ? BKE_paint_brush(&sd->paint) : nullptr;
   }
-
+  if (brush && brush->texture_data_mode != BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE) {
+    /* Assigning the color texture also flips the brush into the color sub-mode (same entry point
+     * the RNA `use_face_set_color_texture` setter uses). An already-active color mode is left
+     * untouched: re-opening the image must not override the user's channel or mapping choices. */
+    BKE_brush_face_sets_texture_mode_set(*brush,
+                                         BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE);
+  }
+  BKE_image_signal(bmain, tex->ima, nullptr, IMA_SIGNAL_RELOAD);
   BKE_paint_invalidate_overlay_tex(*bmain, scene, view_layer, tex);
-  BKE_brush_tag_unsaved_changes(brush);
-  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
-  WM_event_add_notifier(C, NC_TEXTURE | NA_EDITED, tex);
 
-  face_set_color_texture_open_cancel(C, op);
-  face_set_color_texture_open_suppress_release_until =
-      BLI_time_now_seconds() + face_set_color_texture_open_suppress_release_delay;
+  texture_image_open_cancel_common(op);
+  texture_image_open_suppress_release_arm();
   return OPERATOR_FINISHED;
 }
 
@@ -1758,38 +1754,7 @@ static wmOperatorStatus face_set_color_texture_open_invoke(bContext *C,
                                                            wmOperator *op,
                                                            const wmEvent *event)
 {
-  const char *path = U.textudir;
-
-  if (event && event->type == LEFTMOUSE && event->val == KM_RELEASE) {
-    if (BLI_time_now_seconds() < face_set_color_texture_open_suppress_release_until) {
-      return OPERATOR_CANCELLED;
-    }
-  }
-
-  PointerRNA ptr;
-  PropertyRNA *prop;
-  ui::context_active_but_prop_get_templateID(C, &ptr, &prop);
-  if (prop) {
-    Tex *tex = static_cast<Tex *>(RNA_property_pointer_get(&ptr, prop).data);
-    if (tex && tex->type == TEX_IMAGE && tex->ima) {
-      char image_path[FILE_MAX];
-      STRNCPY(image_path, tex->ima->filepath);
-      BLI_path_abs(image_path, ID_BLEND_PATH(CTX_data_main(C), &tex->ima->id));
-      if (BLI_exists(image_path)) {
-        path = image_path;
-      }
-    }
-  }
-
-  if (RNA_struct_property_is_set(op->ptr, "filepath")) {
-    face_set_color_texture_open_init(C, op);
-    return face_set_color_texture_open_exec(C, op);
-  }
-
-  face_set_color_texture_open_init(C, op);
-  RNA_string_set(op->ptr, "filepath", path);
-  WM_event_add_fileselect(C, op);
-  return OPERATOR_RUNNING_MODAL;
+  return texture_image_open_invoke_common(C, op, event);
 }
 
 void SCULPT_OT_face_set_color_texture_open(wmOperatorType *ot)
@@ -1806,11 +1771,10 @@ void SCULPT_OT_face_set_color_texture_open(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
   WM_operator_properties_filesel(ot,
-                                 FILE_TYPE_FOLDER | FILE_TYPE_IMAGE | FILE_TYPE_MOVIE,
+                                 FILE_TYPE_FOLDER | FILE_TYPE_IMAGE,
                                  FILE_SPECIAL,
                                  FILE_OPENFILE,
-                                 WM_FILESEL_FILEPATH | WM_FILESEL_DIRECTORY | WM_FILESEL_FILES |
-                                     WM_FILESEL_RELPATH,
+                                 WM_FILESEL_FILEPATH | WM_FILESEL_DIRECTORY | WM_FILESEL_RELPATH,
                                  FILE_DEFAULTDISPLAY,
                                  FILE_SORT_DEFAULT);
 }
@@ -3105,23 +3069,6 @@ void SCULPT_OT_sample_face_set_id(wmOperatorType *ot)
 }
 
 /** \} */
-
-void sync_face_set_color_mtex_mapping_from_mask(Brush &brush)
-{
-  if (brush.texture_data_mode != BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE) {
-    return;
-  }
-
-  const MTex &mask_mtex = *BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
-  MTex &color_mtex = brush.face_set_color_mtex;
-
-  color_mtex.brush_map_mode = mask_mtex.brush_map_mode;
-  copy_v3_v3(color_mtex.ofs, mask_mtex.ofs);
-  copy_v3_v3(color_mtex.size, mask_mtex.size);
-  color_mtex.rot = mask_mtex.rot;
-  color_mtex.brush_angle_mode = mask_mtex.brush_angle_mode;
-  color_mtex.random_angle = mask_mtex.random_angle;
-}
 
 void FaceSetColorStrokeCache::clear()
 {

@@ -561,6 +561,16 @@ struct Brush {
 
   /** How texture affects brush behavior. #eBrushTextureDataMode. */
   int texture_data_mode = BRUSH_TEXTURE_DATA_MODE_NONE;
+  /**
+   * Last Face Sets-from-texture sub-mode picked explicitly (#eBrushTextureDataMode, never
+   * #BRUSH_TEXTURE_DATA_MODE_NONE): #texture_data_mode is cleared when the feature is turned off,
+   * so the choice has to live separately to survive toggling it back on.
+   *
+   * The padding keeps the following members (pointer-bearing `MTex` fields among them) on their
+   * 8-byte aligned offsets, so inserting this field does not shift the rest of the struct.
+   */
+  int face_sets_texture_mode = BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE;
+  char _pad_fstm[4] = {};
   /** Alpha threshold for binary texture mode. Range [0..1], default 0.5. */
   float texture_threshold = 0.5f;
   /** Explicit Face Set ID to assign (0 = auto-generate on first stroke). */

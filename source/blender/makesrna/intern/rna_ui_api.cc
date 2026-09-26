@@ -880,7 +880,8 @@ static void rna_uiTemplateID_browser(Layout *layout,
                                      const char *image_filter,
                                      bool use_rename,
                                      bool use_unlink,
-                                     bool use_users)
+                                     bool use_users,
+                                     bool browse_images)
 {
   Material *material = nullptr;
   if (material_ptr && material_ptr->data) {
@@ -898,6 +899,7 @@ static void rna_uiTemplateID_browser(Layout *layout,
   params.use_rename = use_rename;
   params.use_unlink = use_unlink;
   params.use_users = use_users;
+  params.browse_images = browse_images;
   ui::template_id_browser(layout, C, ptr, propname, material, newop, openop, unlinkop, params);
 }
 
@@ -2365,6 +2367,14 @@ void RNA_api_ui_layout(StructRNA *srna)
                   true,
                   "Use Users",
                   "Show the number-of-users button for the assigned data-block");
+  RNA_def_boolean(func,
+                  "browse_images",
+                  false,
+                  "Browse Images",
+                  "For a Texture pointer property, list images instead of textures: picking or "
+                  "dropping an image assigns it wrapped in a new image texture, so the user "
+                  "picks a picture rather than a Texture data-block. Intended for brush/paint "
+                  "texture slots only: the slot owns its texture exclusively");
 
   func = RNA_def_function(
       srna, "template_ID_browser_button", "rna_uiTemplateID_browser_button");

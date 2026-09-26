@@ -65,6 +65,7 @@
 #include "UI_view2d.hh"
 
 #include "interface_grid_view.hh"
+#include "interface_drop_image.hh"
 #include "interface_intern.hh"
 
 #include "WM_api.hh"
@@ -703,12 +704,7 @@ static const wmDragAssetListItem *first_image_item_in_list(const wmDrag &drag)
     return nullptr;
   }
   for (const wmDragAssetListItem &item : *asset_drags) {
-    const ID_Type item_idtype = item.is_external ?
-                                    item.asset_data.external_info->asset->get_id_type() :
-                                    (item.asset_data.local_id ?
-                                         GS(item.asset_data.local_id->name) :
-                                         ID_Type(0));
-    if (item_idtype == ID_IM) {
+    if (drag_asset_list_item_idtype(item) == ID_IM) {
       return &item;
     }
   }

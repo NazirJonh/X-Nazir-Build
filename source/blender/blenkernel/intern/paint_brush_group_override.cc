@@ -222,6 +222,9 @@ static bool brush_group_copy_face_sets(const Brush &src, Brush &dst)
 
   if (from_texture) {
     changed |= assign_changed(dst.texture_data_mode, src.texture_data_mode);
+    /* The remembered Face Sets sub-mode travels with the effective mode, so a group brush keeps
+     * its own answer when the user toggles the feature off and back on. */
+    changed |= assign_changed(dst.face_sets_texture_mode, src.face_sets_texture_mode);
     changed |= assign_changed(dst.texture_threshold, src.texture_threshold);
     changed |= brush_flag2_copy(src, dst, BRUSH_TEXTURE_INVERT_ALPHA);
     changed |= brush_flag2_copy(src, dst, BRUSH_DISABLE_FACE_SET_WRITE);

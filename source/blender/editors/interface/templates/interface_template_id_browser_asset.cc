@@ -522,7 +522,7 @@ const EnumPropertyItem *id_browser_library_rna_itemf(const bContext *C, bool *r_
    *   material asset, while libraries set up via "Add Material Library" are always listed (even
    *   when still empty) -- see #LibraryEnumFilterOptions.
    * Falls back to the permissive default for any other browsed ID type. */
-  const short target_idcode = id_browser_target_idcode(C);
+  const short target_idcode = id_browser_browse_idcode(C);
   const bool only_image_libraries = target_idcode == ID_IM;
   const bool browse_materials = target_idcode == ID_MA;
 

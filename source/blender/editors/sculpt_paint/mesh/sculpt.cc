@@ -9382,7 +9382,7 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
         }
         BKE_image_release_ibuf(color_mtex->tex->ima, tex_ibuf, nullptr);
       }
-      face_set::sync_face_set_color_mtex_mapping_from_mask(*this->brush);
+      BKE_brush_face_set_color_mtex_sync_mapping_from_mask(*this->brush);
       /* Shared across every object in this stroke -- see the pre-loop block above that builds
        * #shared_face_set_color_cache once from the primary object's mesh. Assigning it here
        * (rather than each object independently calling #face_set_color_stroke_cache_init on its

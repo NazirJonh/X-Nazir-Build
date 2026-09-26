@@ -1362,6 +1362,31 @@ const MTex *BKE_brush_face_set_color_texture_get(const Brush *brush,
   return &brush->face_set_color_mtex;
 }
 
+void BKE_brush_face_set_color_mtex_sync_mapping_from_mask(Brush &brush)
+{
+  const MTex &mask_mtex = *BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
+  MTex &color_mtex = brush.face_set_color_mtex;
+
+  color_mtex.brush_map_mode = mask_mtex.brush_map_mode;
+  copy_v3_v3(color_mtex.ofs, mask_mtex.ofs);
+  copy_v3_v3(color_mtex.size, mask_mtex.size);
+  color_mtex.rot = mask_mtex.rot;
+  color_mtex.brush_angle_mode = mask_mtex.brush_angle_mode;
+  color_mtex.random_angle = mask_mtex.random_angle;
+}
+
+void BKE_brush_face_sets_texture_mode_set(Brush &brush, const eBrushTextureDataMode mode)
+{
+  BLI_assert(ELEM(mode,
+                  BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE,
+                  BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE));
+
+  brush.face_sets_texture_mode = mode;
+  brush.texture_data_mode = mode;
+  brush.vcol_channel = BRUSH_VCOL_CHANNEL_RGB;
+  BKE_brush_face_set_color_mtex_sync_mapping_from_mask(brush);
+}
+
 float2 BKE_brush_get_aspect_correction(const MTex *mtex, ImagePool *pool)
 {
   if ((mtex->mapping_flags & MTEX_MAPPING_PRESERVE_ASPECT) == 0) {

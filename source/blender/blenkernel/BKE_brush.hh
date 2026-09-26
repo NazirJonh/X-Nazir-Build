@@ -306,6 +306,23 @@ const MTex *BKE_brush_color_texture_get(const Brush *brush, eObjectMode object_m
 const MTex *BKE_brush_face_set_color_texture_get(const Brush *brush, eObjectMode object_mode);
 
 /**
+ * Copy the mask texture's stroke mapping (map mode, offset, scale, rotation, angle mode) onto
+ * #Brush.face_set_color_mtex. The Face Set color map is sampled with the same screen-space
+ * anchoring as the mask (the same stencil position and stroke mouse reference), so it has to
+ * follow the mask's mapping rather than the main texture slot's.
+ */
+void BKE_brush_face_set_color_mtex_sync_mapping_from_mask(Brush &brush);
+
+/**
+ * Switch the brush's Face Sets-from-texture feature to \a mode (one of
+ * #BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE or
+ * #BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE): sets #Brush::face_sets_texture_mode and
+ * the effective #Brush::texture_data_mode, writes the RGB output channel, and syncs the color map
+ * mapping from the mask. RNA setters and the open-assign operators share this one entry point.
+ */
+void BKE_brush_face_sets_texture_mode_set(Brush &brush, eBrushTextureDataMode mode);
+
+/**
  * Radial control.
  *
  * \param r_is_color: When non-null, set true if the preview stores RGB (Material Paint source)

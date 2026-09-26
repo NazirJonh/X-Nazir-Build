@@ -6513,6 +6513,11 @@ const PointerRNA *button_context_ptr_get(const Button *but,
                                          const StringRef name,
                                          const StructRNA *type)
 {
+  /* Same null-store guard as #button_context_string_get / #button_context_int_get: buttons are
+   * not required to have a context store (a drop-target lookup probes arbitrary buttons). */
+  if (!but->context) {
+    return nullptr;
+  }
   return CTX_store_ptr_lookup(but->context, name, type);
 }
 

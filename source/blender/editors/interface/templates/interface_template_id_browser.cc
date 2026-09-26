@@ -34,6 +34,7 @@
 #include "BKE_preferences.h"
 #include "BKE_preview_image.hh"
 #include "BKE_screen.hh"
+#include "BKE_texture.h"
 #include "BKE_wm_runtime.hh"
 #include "BKE_name_matching.hh"
 
@@ -54,6 +55,7 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_space_types.h"
+#include "DNA_texture_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
@@ -222,6 +224,26 @@ IDBrowserImageFilter id_browser_image_filter_from_context(const bContext &C)
     return IDBrowserImageFilter::PaintSource;
   }
   return IDBrowserImageFilter::Default;
+}
+
+/** Layout context key publishing the `browse_images` flag to the browser popover (set by
+ * #template_id_browser, read by #id_browser_browse_idcode_for_target). */
+constexpr StringRefNull id_browser_browse_images_ctx = "id_browser_browse_images";
+
+/** Apply the `browse_images` context flag to a target idcode (see #id_browser_browse_idcode). */
+static short id_browser_browse_idcode_for_target(const bContext &C, const short target_idcode)
+{
+  if (target_idcode == ID_TE &&
+      CTX_data_int_get(&C, id_browser_browse_images_ctx.c_str()).value_or(0) != 0)
+  {
+    return ID_IM;
+  }
+  return target_idcode;
+}
+
+short id_browser_browse_idcode(const bContext *C)
+{
+  return id_browser_browse_idcode_for_target(*C, id_browser_target_idcode(C));
 }
 
 /** Where the browser can show an assigned Image. */
@@ -981,12 +1003,64 @@ static NameMatchFilterState id_browser_name_match_state_get(wmWindowManager &wm,
   return grid_settings::name_match_filter_get(settings_ptr);
 }
 
+/**
+ * Assign \a id to the browsed pointer property. With \a wrap_images, a local #Image is wrapped
+ * into a #TEX_IMAGE texture first (see #BKE_texture_image_wrap_for_slot) so a #Texture property
+ * can take the image the user picked. \a id_has_extra_user releases a load reference the caller
+ * holds (from #BKE_image_load_exists): after wrapping, the texture carries its own reference on
+ * the image; on the direct path the reference-counted property setter takes its own user.
+ */
+static Tex *id_browser_assign_id_to_target(bContext &C,
+                                           PointerRNA &target_ptr,
+                                           PropertyRNA *target_prop,
+                                           ID *id,
+                                           const bool wrap_images,
+                                           const bool id_has_extra_user)
+{
+  if (wrap_images && GS(id->name) == ID_IM) {
+    /* Handles the linked-owner (asset-editable brush) library relocation, refcounts, the
+     * non-editable guard and the preview/notifier tail; no undo push here, matching the plain
+     * activation below. */
+    Tex *tex = ED_paint_texture_property_assign_image(
+        &C, target_ptr, target_prop, id_cast<Image *>(id), id_has_extra_user);
+    if (!tex && id_has_extra_user) {
+      /* The owner refused the assignment, so the load reference was not consumed. */
+      id_us_min(id);
+    }
+    return tex;
+  }
+
+  PointerRNA value = RNA_id_pointer_create(id);
+  RNA_property_pointer_set(&target_ptr, target_prop, value, nullptr);
+  if (id_has_extra_user && (RNA_property_flag(target_prop) & PROP_ID_REFCOUNT)) {
+    id_us_min(id);
+  }
+  RNA_property_update(&C, &target_ptr, target_prop);
+  return nullptr;
+}
+
+/** The Tex wrapper an image was wrapped into, when the target property is a Texture; null when
+ * the target holds the image itself (or holds a non-image texture). */
+static const Tex *id_browser_target_image_texture(const ID *active_id, const bool wrap_images)
+{
+  if (!wrap_images) {
+    return nullptr;
+  }
+  const Tex *tex = (active_id != nullptr && GS(active_id->name) == ID_TE) ?
+                       id_cast<const Tex *>(active_id) :
+                       nullptr;
+  if (tex == nullptr || tex->type != TEX_IMAGE || tex->ima == nullptr) {
+    return nullptr;
+  }
+  return tex;
+}
+
 class IDBrowserView : public AbstractGridView {
   PointerRNA target_ptr_;
   PropertyRNA *target_prop_;
   Main *bmain_;
   const bContext *context_;
-  /** Data-block list for the target property's ID type (#which_libbase). Null when #source_ is
+  /** Data-block list for the browsed ID type (#which_libbase). Null when #source_ is
    * #ID_BROWSER_SOURCE_ASSET_LIBRARY: that source iterates the asset library instead, see
    * #build_items(). */
   ListBaseT<ID> *idlb_;
@@ -997,7 +1071,10 @@ class IDBrowserView : public AbstractGridView {
   int source_;
   AssetLibraryReference asset_library_ref_;
   grid_settings::CatalogMode catalog_mode_;
+  /** ID type the popover browses (images for a Texture target opened with #browse_images). */
   short idcode_;
+  /** ID type of the target pointer property itself; assignment wraps to it from #idcode_. */
+  short target_idcode_;
   NameMatchFilterState name_match_;
 
  public:
@@ -1012,6 +1089,7 @@ class IDBrowserView : public AbstractGridView {
                 const AssetLibraryReference &asset_library_ref,
                 const grid_settings::CatalogMode catalog_mode,
                 const short idcode,
+                const short target_idcode,
                 NameMatchFilterState name_match)
       : target_ptr_(target_ptr),
         target_prop_(target_prop),
@@ -1024,6 +1102,7 @@ class IDBrowserView : public AbstractGridView {
         asset_library_ref_(asset_library_ref),
         catalog_mode_(catalog_mode),
         idcode_(idcode),
+        target_idcode_(target_idcode),
         name_match_(std::move(name_match))
   {
   }
@@ -1056,6 +1135,8 @@ class IDBrowserView : public AbstractGridView {
   {
     const PointerRNA active_ptr = RNA_property_pointer_get(&target_ptr_, target_prop_);
     const ID *active_id = active_ptr.data ? static_cast<ID *>(active_ptr.data) : nullptr;
+    /* A Texture target opened with #browse_images browses images and wraps them on assignment. */
+    const bool wrap_images = (target_idcode_ == ID_TE && idcode_ == ID_IM);
 
     const NameMatchResolvedFilter name_match_resolved = BKE_name_match_filter_resolve(
         name_match_, U);
@@ -1077,7 +1158,7 @@ class IDBrowserView : public AbstractGridView {
         if (!id_browser_asset_passes_name_match(name_match_resolved, asset)) {
           return true;
         }
-        this->add_asset_item(asset, active_id);
+        this->add_asset_item(asset, active_id, wrap_images);
         return true;
       };
 
@@ -1107,14 +1188,19 @@ class IDBrowserView : public AbstractGridView {
       PropertyRNA *target_prop = target_prop_;
       ID *id_ptr = &id;
       item.set_on_activate_fn(
-          [target_ptr, target_prop, id_ptr](bContext &C, PreviewGridItem & /*item*/) {
-            PointerRNA value = RNA_id_pointer_create(id_ptr);
+          [target_ptr, target_prop, id_ptr, wrap_images](bContext &C, PreviewGridItem & /*item*/) {
+            /* A local copy: captured values are const, and the assignment mutates its target. */
             PointerRNA ptr = target_ptr;
-            RNA_property_pointer_set(&ptr, target_prop, value, nullptr);
-            RNA_property_update(&C, &ptr, target_prop);
+            id_browser_assign_id_to_target(
+                C, ptr, target_prop, id_ptr, wrap_images, /*id_has_extra_user=*/false);
           });
-      item.set_is_active_fn(
-          [active_id, id_ptr]() { return active_id != nullptr && id_ptr == active_id; });
+      item.set_is_active_fn([active_id, id_ptr, wrap_images]() {
+        if (const Tex *tex = id_browser_target_image_texture(active_id, wrap_images)) {
+          /* The target holds the wrapper; it is active when it wraps this image. */
+          return tex->ima == id_cast<Image *>(id_ptr);
+        }
+        return active_id != nullptr && id_ptr == active_id;
+      });
     }
   }
 
@@ -1122,7 +1208,9 @@ class IDBrowserView : public AbstractGridView {
   /** Add one asset-sourced grid item and wire up its activation (import + assign) and active-state
    * callbacks. Split out of #build_items() only because it is invoked from inside the
    * #id_browser_foreach_asset callback. */
-  void add_asset_item(asset_system::AssetRepresentation &asset, const ID *active_id)
+  void add_asset_item(asset_system::AssetRepresentation &asset,
+                      const ID *active_id,
+                      const bool wrap_images)
   {
     const StringRefNull identifier = asset.library_relative_identifier();
     const StringRefNull name = asset.get_name();
@@ -1134,7 +1222,8 @@ class IDBrowserView : public AbstractGridView {
     asset_system::AssetRepresentation *asset_ptr = &asset;
     const short idcode = idcode_;
     item.set_on_activate_fn(
-        [target_ptr, target_prop, asset_ptr, idcode](bContext &C, PreviewGridItem & /*item*/) {
+        [target_ptr, target_prop, asset_ptr, idcode, wrap_images](bContext &C,
+                                                                 PreviewGridItem & /*item*/) {
           Main *bmain = CTX_data_main(&C);
           /* Returns the existing local ID, or links/appends per the library's import method
            * (falling back to "Append & Reuse"). Same path as an asset drag-and-drop. A real
@@ -1146,6 +1235,7 @@ class IDBrowserView : public AbstractGridView {
                                                              /*import_method*/ std::nullopt,
                                                              /*instantiate_context*/ std::nullopt,
                                                              CTX_wm_reports(&C));
+          bool id_has_extra_user = false;
           /* #asset_local_id_ensure_imported only handles assets stored inside a .blend library; it
            * returns null when #AssetRepresentation::full_library_path is empty, which is the case
            * for an image browsed straight from disk (a loose file in an on-disk asset library, not
@@ -1156,17 +1246,12 @@ class IDBrowserView : public AbstractGridView {
                     bmain, asset_ptr->full_path().c_str(), nullptr))
             {
               /* #BKE_image_load_exists takes a loan on the user count regardless of whether the
-               * block was newly created or already existed. Only release it when the target
-               * property actually counts the reference below: #template_id_browser is reachable
-               * from Python with an arbitrary property (#RNA_UI_api's template_id_browser), and
-               * some ID pointer properties are deliberately not reference-counted (e.g.
-               * `SpaceImageEditor.image`, `SpaceProperties.pin_id`). Releasing unconditionally
-               * would under-count a non-refcounted assignment, making the image purgeable while
-               * still referenced. */
-              if (RNA_property_flag(target_prop) & PROP_ID_REFCOUNT) {
-                id_us_min(&image->id);
-              }
+               * block was newly created or already existed; #id_browser_assign_id_to_target
+               * releases it once the target (or its texture wrapper) holds a real reference.
+               * Releasing here would under-count a non-refcounted assignment, making the image
+               * purgeable while still referenced. */
               id = &image->id;
+              id_has_extra_user = true;
             }
           }
           if (id == nullptr || GS(id->name) != idcode) {
@@ -1177,17 +1262,22 @@ class IDBrowserView : public AbstractGridView {
           const std::string record_shelf_idname = id_browser_shelf_idname(idcode);
           ed::asset::shelf::shelf_asset_lists_record_recent(record_shelf_idname,
                                                             asset_ptr->make_weak_reference());
-          PointerRNA value = RNA_id_pointer_create(id);
+          /* A local copy: captured values are const, and the assignment mutates its target. */
           PointerRNA ptr = target_ptr;
-          RNA_property_pointer_set(&ptr, target_prop, value, nullptr);
-          RNA_property_update(&C, &ptr, target_prop);
+          id_browser_assign_id_to_target(
+              C, ptr, target_prop, id, wrap_images, id_has_extra_user);
         });
-    item.set_is_active_fn([active_id, asset_ptr]() {
-      if (active_id == nullptr || GS(active_id->name) != ID_IM) {
+    item.set_is_active_fn([active_id, asset_ptr, wrap_images]() {
+      const ID *compare_id = active_id;
+      if (const Tex *tex = id_browser_target_image_texture(active_id, wrap_images)) {
+        /* The target holds the wrapper; compare the image it wraps against the asset. */
+        compare_id = &tex->ima->id;
+      }
+      if (compare_id == nullptr || GS(compare_id->name) != ID_IM) {
         return false;
       }
       return ed::image_grid::image_grid_asset_represents_image(
-          *asset_ptr, *id_cast<const Image *>(active_id));
+          *asset_ptr, *id_cast<const Image *>(compare_id));
     });
   }
 };
@@ -1303,7 +1393,10 @@ static void build_id_grid(const bContext &C,
   }
   PointerRNA target_ptr = target->ptr;
   PropertyRNA *target_prop = target->prop;
-  const short idcode = target->idcode;
+  const short target_idcode = target->idcode;
+  /* A Texture target opened with #browse_images browses images (wrapped into textures on
+   * assignment); everything below keys off the browsed type. */
+  const short idcode = id_browser_browse_idcode_for_target(C, target_idcode);
 
   wmWindowManager *wm = CTX_wm_manager(&C);
   if (wm == nullptr) {
@@ -1359,6 +1452,7 @@ static void build_id_grid(const bContext &C,
       id_browser_library_ref_get(*wm),
       catalog_mode,
       idcode,
+      target_idcode,
       std::move(name_match));
 
   id_browser_view_set_tile_size(
@@ -2662,6 +2756,10 @@ void id_browser_popover_context_set(Layout &layout, const IDBrowserTarget &targe
 {
   layout.context_ptr_set("id_browser_ptr", target.ptr);
   layout.context_string_set("id_browser_prop", target.propname);
+  if (target.browse_images) {
+    /* Read back by #id_browser_browse_idcode (library selector, grid build). */
+    layout.context_int_set(id_browser_browse_images_ctx, 1);
+  }
   if (target.material) {
     PointerRNA mat_ptr = RNA_id_pointer_create(&target.material->id);
     layout.context_ptr_set("id_browser_material", &mat_ptr);
@@ -2829,6 +2927,23 @@ static void id_browser_add_compact_button(Layout &row,
   id_preview_tooltip_set(but, id);
 }
 
+/**
+ * The icon of the labelled button shown while the paint slot is empty: the ID type's own icon
+ * (Image, Material, ...). When images are browsed for a Texture property (#browse_images), the
+ * user picks a picture, so the button is labelled with the Image icon instead.
+ */
+static int id_browser_empty_slot_icon(PointerRNA *ptr, PropertyRNA *prop, const bool browse_images)
+{
+  const StructRNA *pointer_type = RNA_property_pointer_type(ptr, prop);
+  if (pointer_type == nullptr) {
+    return ICON_NONE;
+  }
+  if (browse_images && RNA_type_to_ID_code(pointer_type) == ID_TE) {
+    return ICON_IMAGE_DATA;
+  }
+  return RNA_struct_ui_icon(pointer_type);
+}
+
 void template_id_browser(Layout *layout,
                          const bContext *C,
                          PointerRNA *ptr,
@@ -2845,7 +2960,8 @@ void template_id_browser(Layout *layout,
     return;
   }
 
-  const IDBrowserTarget target{ptr, propname, material, params.filter_type, params.image_filter};
+  const IDBrowserTarget target{
+      ptr, propname, material, params.filter_type, params.image_filter, params.browse_images};
 
   if (params.compact) {
     id_browser_add_compact_button(layout->row(true), C, target, prop);
@@ -2864,10 +2980,7 @@ void template_id_browser(Layout *layout,
   }
 
   if (mode == IDBrowserMode::PaintSlotEmpty) {
-    /* The empty slot has no data-block to take a preview from, so the button is labelled with the
-     * ID type's own icon (Image, Material, ...) rather than a hard-coded one. */
-    StructRNA *pointer_type = RNA_property_pointer_type(ptr, prop);
-    const int icon = pointer_type ? RNA_struct_ui_icon(pointer_type) : ICON_NONE;
+    const int icon = id_browser_empty_slot_icon(ptr, prop, params.browse_images);
     id_browser_add_drop_button(row, C, target, params.text, icon);
   }
   else {

@@ -2464,6 +2464,7 @@ void ED_operatortypes_paint()
 
   /* texture assignment */
   WM_operatortype_append(BRUSH_OT_texture_slot_assign_image);
+  WM_operatortype_append(BRUSH_OT_texture_image_open);
 
   /* weight */
   WM_operatortype_append(PAINT_OT_weight_paint_toggle);

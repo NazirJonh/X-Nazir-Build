@@ -43,6 +43,7 @@
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
+#include "BKE_library.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_texture.h"
@@ -360,6 +361,40 @@ void BKE_texture_default(Tex *tex)
 void BKE_texture_type_set(Tex *tex, eTex_Type type)
 {
   tex->type = type;
+}
+
+Tex *BKE_texture_image_wrap_for_slot(Main *bmain, Tex *current, Image *image)
+{
+  BLI_assert(bmain != nullptr);
+  BLI_assert(image != nullptr);
+
+  /* The slot already owns an image texture: retarget it so the slot's mapping settings survive,
+   * instead of piling up a new texture per assigned image. The guards keep this away from
+   * textures that must not be hijacked: shared with other slots/data-blocks (#ID_REAL_USERS),
+   * protected from deletion by a fake user, exposed as an asset (rewriting its image would
+   * modify the asset), or not editable in place (linked data without the asset-editable flag). */
+  if (current != nullptr && current->type == TEX_IMAGE && ID_REAL_USERS(current) <= 1 &&
+      !ID_FAKE_USERS(current) && !ID_IS_ASSET(current) && ID_IS_EDITABLE(current))
+  {
+    if (current->ima != image) {
+      if (current->ima != nullptr) {
+        id_us_min(&current->ima->id);
+      }
+      current->ima = image;
+      id_us_plus(&image->id);
+    }
+    return current;
+  }
+
+  /* Either there is no texture yet, or the current one is procedural (or shared) and belongs to
+   * its users: wrap the image in a fresh texture rather than mutating a texture used elsewhere.
+   * #BKE_texture_add returns the texture with one user already; the assigning slot is that user
+   * (the slot-owns-a-single-user convention). */
+  Tex *tex = BKE_texture_add(bmain, image->id.name + 2);
+  BKE_texture_type_set(tex, TEX_IMAGE);
+  tex->ima = image;
+  id_us_plus(&image->id);
+  return tex;
 }
 
 /* ------------------------------------------------------------------------- */

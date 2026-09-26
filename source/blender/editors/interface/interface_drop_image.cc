@@ -47,6 +47,7 @@
 #include "BKE_icons.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_main_invariants.hh"
 #include "BKE_material.hh"
@@ -95,6 +96,104 @@
 #include "interface_intern.hh"
 
 namespace blender {
+
+/* -------------------------------------------------------------------- */
+/** \name Shared Drag Helpers
+ * \{ */
+
+/**
+ * The ID type an Asset Browser multi-select drag item resolves to, without importing or resolving
+ * anything. External (library) items are typed by their asset representation, local items by the
+ * data-block itself.
+ */
+ID_Type drag_asset_list_item_idtype(const wmDragAssetListItem &item)
+{
+  return item.is_external ?
+             item.asset_data.external_info->asset->get_id_type() :
+             (item.asset_data.local_id ? GS(item.asset_data.local_id->name) : ID_Type(0));
+}
+
+/** First item of an Asset Browser multi-select drag matching any of \a idtypes, or null. */
+static const wmDragAssetListItem *drag_asset_list_first_of(const wmDrag &drag,
+                                                           const Span<const ID_Type> idtypes)
+{
+  const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+  if (!asset_drags) {
+    return nullptr;
+  }
+  for (const wmDragAssetListItem &item : *asset_drags) {
+    if (idtypes.contains(drag_asset_list_item_idtype(item))) {
+      return &item;
+    }
+  }
+  return nullptr;
+}
+
+/** Number of items of \a idtype an Asset Browser multi-select drag carries. */
+static int drag_asset_list_count_of(const wmDrag &drag, const ID_Type idtype)
+{
+  const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+  if (!asset_drags) {
+    return 0;
+  }
+  int count = 0;
+  for (const wmDragAssetListItem &item : *asset_drags) {
+    if (drag_asset_list_item_idtype(item) == idtype) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/** True when \a id can be edited in place (a local ID, or an asset-editable linked one). */
+static bool paint_texture_target_owner_editable(const ID *id)
+{
+  return id != nullptr && ID_IS_EDITABLE(id) && !ID_IS_OVERRIDE_LIBRARY(id);
+}
+
+/** True when \a owner (linked data) cannot reference the local \a tex at all. */
+static bool paint_texture_linked_owner_refuses_local_tex(const ID *owner, const Tex &tex)
+{
+  return ID_IS_LINKED(owner) && !ID_IS_LINKED(&tex.id);
+}
+
+/** The dragged #Texture data-block, when the drag carries one as a local ID (no imports). */
+static const Tex *drag_local_texture(const wmDrag &drag)
+{
+  const ID *id = WM_drag_get_local_ID(const_cast<wmDrag *>(&drag), ID_TE);
+  return id ? id_cast<const Tex *>(id) : nullptr;
+}
+
+/**
+ * The Asset Browser starts a drag for the item under the cursor together with a
+ * #WM_DRAG_ASSET_LIST carrying the whole selection, and #drop_target_apply_drop() applies
+ * whichever of the two comes first. The item drag is a #WM_DRAG_ASSET for an external asset but a
+ * #WM_DRAG_ID for an asset stored in the current file (see #button_drag_start), so both defer.
+ * Targets that take the whole selection (multi-image drops) defer the item drag to its list
+ * sibling when one is present and matches \a predicate. A #WM_DRAG_ID started elsewhere (the
+ * Outliner, ...) gets an empty list sibling, which no predicate matches, so it stays as is.
+ * Walks the window manager's active drags: no #bContext is available in #drop_tooltip, where this
+ * is called too.
+ */
+static const wmDrag &drag_prefer_asset_list_sibling(
+    const wmDrag &drag, FunctionRef<bool(const wmDrag &asset_list_drag)> predicate)
+{
+  if (!ELEM(drag.type, WM_DRAG_ASSET, WM_DRAG_ID)) {
+    return drag;
+  }
+  const wmWindowManager *wm = static_cast<const wmWindowManager *>(G_MAIN->wm.first);
+  if (!wm) {
+    return drag;
+  }
+  for (const wmDrag &other : wm->runtime->drags) {
+    if (other.type == WM_DRAG_ASSET_LIST && predicate(other)) {
+      return other;
+    }
+  }
+  return drag;
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Brush Texture Slot Detection
@@ -331,11 +430,7 @@ static bool DROP_IMAGE_set_preview_for_drag(bContext *C, wmDrag *drag, int max_s
     const ListBaseT<wmDragAssetListItem> *asset_items = WM_drag_asset_list_get(drag);
     if (asset_items) {
       for (const wmDragAssetListItem &item : *asset_items) {
-        const ID_Type id_type = item.is_external ?
-                                    item.asset_data.external_info->asset->get_id_type() :
-                                    (item.asset_data.local_id ? GS(item.asset_data.local_id->name) :
-                                                                 ID_Type(0));
-        if (id_type != ID_IM) {
+        if (drag_asset_list_item_idtype(item) != ID_IM) {
           continue;
         }
         Image *image = item.is_external ?
@@ -424,21 +519,7 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
    */
   static const wmDragAssetListItem *first_image_item_in_list(const wmDrag &drag)
   {
-    const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
-    if (!asset_drags) {
-      return nullptr;
-    }
-    for (const wmDragAssetListItem &item : *asset_drags) {
-      const ID_Type item_idtype = item.is_external ?
-                                      item.asset_data.external_info->asset->get_id_type() :
-                                      (item.asset_data.local_id ?
-                                           GS(item.asset_data.local_id->name) :
-                                           ID_Type(0));
-      if (item_idtype == ID_IM) {
-        return &item;
-      }
-    }
-    return nullptr;
+    return drag_asset_list_first_of(drag, {ID_IM});
   }
 
   static Image *resolve_asset_image(bContext *C, const wmDrag &drag)
@@ -592,21 +673,7 @@ std::unique_ptr<ui::DropTargetInterface> brush_texture_slot_drop_target_get(bCon
 class BrushMaterialSlotDropTarget : public ui::DropTargetInterface {
   static const wmDragAssetListItem *first_material_item_in_list(const wmDrag &drag)
   {
-    const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
-    if (!asset_drags) {
-      return nullptr;
-    }
-    for (const wmDragAssetListItem &item : *asset_drags) {
-      const ID_Type item_idtype = item.is_external ?
-                                      item.asset_data.external_info->asset->get_id_type() :
-                                      (item.asset_data.local_id ?
-                                           GS(item.asset_data.local_id->name) :
-                                           ID_Type(0));
-      if (item_idtype == ID_MA) {
-        return &item;
-      }
-    }
-    return nullptr;
+    return drag_asset_list_first_of(drag, {ID_MA});
   }
 
   static Material *resolve_asset_material(bContext *C, const wmDrag &drag)
@@ -714,6 +781,133 @@ std::unique_ptr<ui::DropTargetInterface> brush_material_slot_drop_target_get(
 /** \name Texture Drop Registration
  * \{ */
 
+/** Resolve the dragged #Tex: a local #WM_DRAG_ID, an imported #WM_DRAG_ASSET, or the first
+ * texture of a multi-select #WM_DRAG_ASSET_LIST. Null when the drag carries no texture. */
+static Tex *resolve_drag_texture(bContext *C, const wmDrag &drag)
+{
+  if (ID *id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_TE)) {
+    return (GS(id->name) == ID_TE) ? id_cast<Tex *>(id) : nullptr;
+  }
+  if (drag.type == WM_DRAG_ASSET_LIST) {
+    const wmDragAssetListItem *item = drag_asset_list_first_of(drag, {ID_TE});
+    if (!item) {
+      return nullptr;
+    }
+    if (item->is_external) {
+      ID *id = ed::asset::asset_local_id_ensure_imported(*CTX_data_main(C),
+                                                         *item->asset_data.external_info->asset,
+                                                         /*flags*/ 0,
+                                                         /*import_method*/ std::nullopt,
+                                                         /*instantiate_context*/ std::nullopt,
+                                                         CTX_wm_reports(C));
+      return (id && GS(id->name) == ID_TE) ? id_cast<Tex *>(id) : nullptr;
+    }
+    return id_cast<Tex *>(item->asset_data.local_id);
+  }
+  return nullptr;
+}
+
+Tex *ED_paint_texture_wrap_image_for_owner(Main *bmain,
+                                           Tex *current,
+                                           const ID *owner,
+                                           Image *image,
+                                           bool image_has_extra_user)
+{
+  BLI_assert(image != nullptr);
+  Tex *tex = BKE_texture_image_wrap_for_slot(bmain, current, image);
+
+  /* The new texture follows the owner's library, whatever it is: a linked (asset-editable) brush
+   * can never reference a local texture, and #BKE_id_can_use_id makes the reference-counted
+   * setter silently refuse the assignment otherwise. Same treatment as #paint_assign_image_exec
+   * (#BRUSH_OT_texture_slot_assign_image); a no-op for a local owner. */
+  if (owner != nullptr) {
+    BKE_id_move_to_same_lib(*bmain, tex->id, *owner);
+  }
+
+  /* A linked texture must not reference a local image either: a freshly loaded image simply
+   * moves into the texture's library (its load reference travels with it), while a pre-existing
+   * local image is copied -- moving it would leave its session_uid present both locally
+   * (referenced by earlier undo steps) and linked, crashing the next undo. */
+  if (ID_IS_LINKED(&tex->id) && !ID_IS_LINKED(&image->id)) {
+    if (image_has_extra_user) {
+      BKE_id_move_to_same_lib(*bmain, image->id, tex->id);
+    }
+    else {
+      Image *copy = id_cast<Image *>(BKE_id_copy(bmain, &image->id));
+      /* #BKE_id_copy leaves one user; hand the wrap's image reference over to the copy. */
+      id_us_min(&copy->id);
+      id_us_min(&image->id);
+      tex->ima = copy;
+      id_us_plus(&copy->id);
+      BKE_id_move_to_same_lib(*bmain, copy->id, tex->id);
+    }
+  }
+
+  if (image_has_extra_user) {
+    /* A freshly loaded image's creation reference is superseded by the texture's own. */
+    id_us_min(&image->id);
+  }
+  return tex;
+}
+
+void ED_paint_texture_assignment_finalize(bContext *C,
+                                          ID *owner,
+                                          Tex *tex,
+                                          const bool created,
+                                          const bool refresh_preview)
+{
+  DEG_id_tag_update(&tex->id, ID_RECALC_SHADING);
+
+  WM_event_add_notifier(C, NC_TEXTURE | (created ? NA_ADDED : NA_EDITED), tex);
+  if (owner && GS(owner->name) == ID_BR) {
+    Brush *brush = id_cast<Brush *>(owner);
+    BKE_brush_tag_unsaved_changes(brush);
+    WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  }
+
+  /* Refresh the texture preview/icon for immediate visual feedback. */
+  if (refresh_preview) {
+    DROP_IMAGE_update_texture_preview_smart(C, CTX_data_main(C), tex, true);
+  }
+}
+
+Tex *ED_paint_texture_property_assign_image(bContext *C,
+                                            const PointerRNA &target_ptr,
+                                            PropertyRNA *target_prop,
+                                            Image *image,
+                                            const bool image_has_extra_user)
+{
+  BLI_assert(image != nullptr);
+  Main *bmain = CTX_data_main(C);
+  PointerRNA ptr = target_ptr;
+
+  /* The wrapping path takes real refcount side effects before the assignment; a non-editable
+   * (linked / library-override) owner can never take them (the generated setter refuses it
+   * silently), so don't leave them dangling. */
+  if (ptr.owner_id && !paint_texture_target_owner_editable(ptr.owner_id)) {
+    return nullptr;
+  }
+
+  Tex *old_tex = static_cast<Tex *>(RNA_property_pointer_get(&ptr, target_prop).data);
+  Tex *tex = ED_paint_texture_wrap_image_for_owner(
+      bmain, old_tex, ptr.owner_id, image, image_has_extra_user);
+
+  if (tex != old_tex && (RNA_property_flag(target_prop) & PROP_ID_REFCOUNT)) {
+    /* The generated setter takes its own user on the new texture; #BKE_texture_add left the one
+     * the assigning slot owns. */
+    id_us_min(&tex->id);
+  }
+
+  RNA_property_pointer_set(&ptr, target_prop, RNA_id_pointer_create(&tex->id), nullptr);
+  RNA_property_update(C, &ptr, target_prop);
+
+  /* The browser row shows the texture's preview: a retarget swapped the image on the SAME
+   * texture, so without regenerating its preview the row keeps showing the previous image and
+   * the replacement looks like a no-op. Same refresh as #assign_image_finish. */
+  ED_paint_texture_assignment_finalize(C, ptr.owner_id, tex, tex != old_tex);
+  return tex;
+}
+
 /**
  * Drop target for the labelled Image #template_ID_browser control. The button's context identifies
  * the target property, so the same target works for every specialized image browser template.
@@ -721,31 +915,25 @@ std::unique_ptr<ui::DropTargetInterface> brush_material_slot_drop_target_get(
 class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
   PointerRNA target_ptr_;
   PropertyRNA *target_prop_;
+  /**
+   * True when the target property wants a #Texture (a brush Curve Patch texture slot, the Face Set
+   * color texture, ...): dragged images are wrapped into a #TEX_IMAGE texture through
+   * #ED_paint_texture_property_assign_image, and #Texture data-blocks are assigned directly.
+   */
+  bool wrap_in_texture_;
 
+  /** First image item of an Asset Browser multi-select drag, or null. */
   static const wmDragAssetListItem *first_image_item_in_list(const wmDrag &drag)
   {
-    const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
-    if (!asset_drags) {
-      return nullptr;
-    }
-    for (const wmDragAssetListItem &item : *asset_drags) {
-      const ID_Type item_idtype = item.is_external ?
-                                      item.asset_data.external_info->asset->get_id_type() :
-                                      (item.asset_data.local_id ?
-                                           GS(item.asset_data.local_id->name) :
-                                           ID_Type(0));
-      if (item_idtype == ID_IM) {
-        return &item;
-      }
-    }
-    return nullptr;
+    return drag_asset_list_first_of(drag, {ID_IM});
   }
 
   /** True when the target property is a PBR paint channel's source image
    * (#BrushMaterialPaintChannel.source_image), which can take a whole matching batch of images. */
   bool targets_paint_channel() const
   {
-    return target_ptr_.type && RNA_struct_is_a(target_ptr_.type, RNA_BrushMaterialPaintChannel);
+    return !wrap_in_texture_ && target_ptr_.type &&
+           RNA_struct_is_a(target_ptr_.type, RNA_BrushMaterialPaintChannel);
   }
 
   /** All image file paths carried by a path drag, absolute and normalized. */
@@ -776,19 +964,10 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
    */
   static const wmDrag &paint_channel_effective_drag(const wmDrag &drag)
   {
-    if (drag.type != WM_DRAG_ASSET) {
-      return drag;
-    }
-    const wmWindowManager *wm = static_cast<const wmWindowManager *>(G_MAIN->wm.first);
-    if (!wm) {
-      return drag;
-    }
-    for (const wmDrag &other : wm->runtime->drags) {
-      if (other.type == WM_DRAG_ASSET_LIST && first_image_item_in_list(other)) {
-        return other;
-      }
-    }
-    return drag;
+    return drag_prefer_asset_list_sibling(
+        drag, [](const wmDrag &asset_list_drag) {
+          return drag_asset_list_first_of(asset_list_drag, {ID_IM}) != nullptr;
+        });
   }
 
   /** Number of image assets carried by an asset/asset-list drag, without resolving them. */
@@ -798,22 +977,7 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
       return WM_drag_get_asset_data(&drag, ID_IM) ? 1 : 0;
     }
     if (drag.type == WM_DRAG_ASSET_LIST) {
-      int count = 0;
-      const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
-      if (!asset_drags) {
-        return 0;
-      }
-      for (const wmDragAssetListItem &item : *asset_drags) {
-        const ID_Type item_idtype = item.is_external ?
-                                        item.asset_data.external_info->asset->get_id_type() :
-                                        (item.asset_data.local_id ?
-                                             GS(item.asset_data.local_id->name) :
-                                             ID_Type(0));
-        if (item_idtype == ID_IM) {
-          count++;
-        }
-      }
-      return count;
+      return drag_asset_list_count_of(drag, ID_IM);
     }
     return 0;
   }
@@ -917,12 +1081,49 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
 
  public:
   ImageIDBrowserDropTarget(const PointerRNA &target_ptr, PropertyRNA *target_prop)
-      : target_ptr_(target_ptr), target_prop_(target_prop)
+      : target_ptr_(target_ptr),
+        target_prop_(target_prop),
+        /* #RNA_property_pointer_type takes a mutable #PointerRNA; #target_ptr_ is the copy it
+         * reads. */
+        wrap_in_texture_(RNA_property_pointer_type(&target_ptr_, target_prop) == RNA_Texture)
   {
   }
 
-  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char **r_disabled_hint) const override
   {
+    if (wrap_in_texture_) {
+      /* A texture target belongs to a brush (Curve Patch slots, Face Set color map); the
+       * assignment edits that brush, so linked data must not take it. */
+      if (target_ptr_.owner_id && !paint_texture_target_owner_editable(target_ptr_.owner_id)) {
+        *r_disabled_hint = TIP_("Cannot edit linked brush data");
+        return false;
+      }
+      /* A linked brush can never reference a local texture either (the reference-counted setter
+       * refuses it); report that combination instead of silently no-op'ing in #on_drop. */
+      if (target_ptr_.owner_id) {
+        if (const Tex *tex = drag_local_texture(drag);
+            tex && paint_texture_linked_owner_refuses_local_tex(target_ptr_.owner_id, *tex))
+        {
+          *r_disabled_hint = TIP_("A linked brush cannot use a local texture");
+          return false;
+        }
+      }
+      /* Local image or texture ID, or an asset of either type (#WM_drag_is_ID_type covers both
+       * #WM_DRAG_ID and #WM_DRAG_ASSET). */
+      if (WM_drag_is_ID_type(&drag, ID_IM) || WM_drag_is_ID_type(&drag, ID_TE)) {
+        return true;
+      }
+      if (drag.type == WM_DRAG_ASSET_LIST) {
+        return first_image_item_in_list(drag) != nullptr ||
+               drag_asset_list_first_of(drag, {ID_TE}) != nullptr;
+      }
+      if (drag.type == WM_DRAG_PATH) {
+        const char *path = WM_drag_get_single_path(&drag);
+        return path && BLI_path_extension_check_array(path, imb_ext_image);
+      }
+      return false;
+    }
+
     if (WM_drag_is_ID_type(&drag, ID_IM)) {
       return true;
     }
@@ -952,8 +1153,45 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
             image_count);
       }
     }
+    if (wrap_in_texture_) {
+      return fmt::format(fmt::runtime(TIP_("Assign {} to the texture slot")),
+                         WM_drag_get_item_name(const_cast<wmDrag *>(&drag_info.drag_data)));
+    }
     return fmt::format(fmt::runtime(TIP_("Assign {} to the image slot")),
                        WM_drag_get_item_name(const_cast<wmDrag *>(&drag_info.drag_data)));
+  }
+
+  /** Assign \a tex to the texture target property. The reference-counted generated setter takes
+   * its own user, so a drag-resolved texture needs no extra bookkeeping. */
+  bool assign_texture(bContext *C, Tex *tex) const
+  {
+    /* A pre-existing local texture can never be referenced by a linked brush (and moving it into
+     * the library would duplicate its session_uid across undo steps): refuse before pushing any
+     * undo step. */
+    if (target_ptr_.owner_id &&
+        paint_texture_linked_owner_refuses_local_tex(target_ptr_.owner_id, *tex))
+    {
+      return false;
+    }
+    PointerRNA target_ptr = target_ptr_;
+    RNA_property_pointer_set(&target_ptr, target_prop_, RNA_id_pointer_create(&tex->id), nullptr);
+    RNA_property_update(C, &target_ptr, target_prop_);
+    ED_paint_texture_assignment_finalize(C, target_ptr_.owner_id, tex, false);
+    ED_undo_memfile_push(C, "Assign Texture");
+    return true;
+  }
+
+  /** Wrap \a image into a #TEX_IMAGE texture (retargeting the slot's own image texture, if it has
+   * one) and assign it to the texture target property. */
+  bool assign_image_wrapped(bContext *C, Image *image, const bool image_has_extra_user) const
+  {
+    Tex *tex = ED_paint_texture_property_assign_image(
+        C, target_ptr_, target_prop_, image, image_has_extra_user);
+    if (!tex) {
+      return false;
+    }
+    ED_undo_memfile_push(C, "Assign Texture");
+    return true;
   }
 
   bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override
@@ -963,6 +1201,13 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     if (targets_paint_channel()) {
       if (paint_channel_drag_image_count(drag) > 1) {
         return drop_to_channel_assign_operator(C, drag_info);
+      }
+    }
+
+    /* A texture target takes the dragged #Texture directly when the drag carries one. */
+    if (wrap_in_texture_) {
+      if (Tex *tex = resolve_drag_texture(C, drag)) {
+        return assign_texture(C, tex);
       }
     }
 
@@ -1009,6 +1254,17 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
       return false;
     }
 
+    if (wrap_in_texture_) {
+      if (assign_image_wrapped(C, image, image_has_extra_user)) {
+        return true;
+      }
+      /* The owner refused (a non-editable brush): the load loan was not consumed. */
+      if (image_has_extra_user) {
+        id_us_min(&image->id);
+      }
+      return false;
+    }
+
     PointerRNA target_ptr = target_ptr_;
     RNA_property_pointer_set(
         &target_ptr, target_prop_, RNA_id_pointer_create(&image->id), nullptr);
@@ -1048,8 +1304,11 @@ static bool image_id_browser_button_target(const ui::Button &but,
 
   PointerRNA ptr = *target_ptr;
   PropertyRNA *prop = RNA_struct_find_property(&ptr, prop_name->c_str());
+  /* Image targets assign the dragged image directly; Texture targets wrap it into an image
+   * texture instead (see #ImageIDBrowserDropTarget::wrap_in_texture_). */
+  const StructRNA *prop_type = prop ? RNA_property_pointer_type(&ptr, prop) : nullptr;
   if (!prop || RNA_property_type(prop) != PROP_POINTER ||
-      RNA_property_pointer_type(&ptr, prop) != RNA_Image)
+      (prop_type != RNA_Image && prop_type != RNA_Texture))
   {
     return false;
   }
@@ -1074,6 +1333,338 @@ std::unique_ptr<ui::DropTargetInterface> image_id_browser_drop_target_get(bConte
   return std::make_unique<ImageIDBrowserDropTarget>(target_ptr, target_prop);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Curve Patch Texture List Drop Target
+ * \{ */
+
+/**
+ * What a button in the Curve Patch STAMPS texture list (#SCULPT_UL_curve_patch_textures) offers
+ * as a drop target: the whole list (append one slot per dropped image) or one row (replace that
+ * slot's texture). The Python UI publishes the targets through the `curve_patch_texture_list` /
+ * `curve_patch_texture_slot` layout context pointers.
+ */
+struct CurvePatchTextureListTarget {
+  Brush *brush = nullptr;
+  /** Slot to replace when the drop landed on a row's button; null to append new slots. */
+  BrushCurvePatchTextureSlot *replace_slot = nullptr;
+  /** The replace slot as an RNA pointer, for the reference-counted `texture` assignment. */
+  PointerRNA replace_slot_ptr{};
+};
+
+static bool curve_patch_texture_button_target(const ui::Button &but,
+                                              CurvePatchTextureListTarget *r_target)
+{
+  /* The row's own buttons carry the slot context: the drop replaces that slot's texture. */
+  if (const PointerRNA *slot_ptr = ui::button_context_ptr_get(&but,
+                                                              "curve_patch_texture_slot",
+                                                              nullptr))
+  {
+    if (slot_ptr->type && RNA_struct_is_a(slot_ptr->type, RNA_BrushCurvePatchTextureSlot) &&
+        slot_ptr->owner_id && GS(slot_ptr->owner_id->name) == ID_BR)
+    {
+      Brush *brush = id_cast<Brush *>(slot_ptr->owner_id);
+      BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(slot_ptr->data);
+      if (slot != nullptr && BLI_findindex(&brush->curve_patch.texture_slots, slot) != -1) {
+        r_target->brush = brush;
+        r_target->replace_slot = slot;
+        r_target->replace_slot_ptr = *slot_ptr;
+        return true;
+      }
+    }
+  }
+  /* The list frame and the add/remove buttons carry the list context: the drop appends slots. */
+  if (const PointerRNA *list_ptr = ui::button_context_ptr_get(&but,
+                                                              "curve_patch_texture_list",
+                                                              nullptr))
+  {
+    if (list_ptr->type && RNA_struct_is_a(list_ptr->type, RNA_BrushCurvePatchSettings) &&
+        list_ptr->owner_id && GS(list_ptr->owner_id->name) == ID_BR)
+    {
+      r_target->brush = id_cast<Brush *>(list_ptr->owner_id);
+      r_target->replace_slot = nullptr;
+      r_target->replace_slot_ptr = {};
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Drop target for the Curve Patch STAMPS texture list. A multi-select Asset Browser drag or a
+ * multi-file drop appends one slot per image (or takes the dragged texture directly); a drop on a
+ * single row replaces that slot's texture.
+ */
+class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
+  CurvePatchTextureListTarget target_;
+
+  /**
+   * The Asset Browser starts a #WM_DRAG_ASSET for the item under the cursor together with a
+   * #WM_DRAG_ASSET_LIST carrying the whole selection, and #drop_target_apply_drop() applies
+   * whichever of the two comes first. This target takes the whole selection, so the single-asset
+   * drag defers to its list sibling when one is present (same as
+   * #ImageIDBrowserDropTarget::paint_channel_effective_drag).
+   */
+  static const wmDrag &effective_drag(const wmDrag &drag)
+  {
+    return drag_prefer_asset_list_sibling(drag, [](const wmDrag &asset_list_drag) {
+      return drag_asset_list_first_of(asset_list_drag, {ID_IM, ID_TE}) != nullptr;
+    });
+  }
+
+  /** Whether the multi-select drag carries at least one image or texture, without resolving any
+   * of them (no imports, no file loads). */
+  static bool asset_list_has_assignable_item(const wmDrag &drag)
+  {
+    return drag_asset_list_first_of(drag, {ID_IM, ID_TE}) != nullptr;
+  }
+
+  /** Number of slots the drag would fill: images AND textures in an asset list (a mixed
+   * selection appends one slot each), images of a path drag, or a single dragged ID. Tooltip
+   * only. */
+  static int drag_assignable_count(const wmDrag &drag)
+  {
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      return drag_asset_list_count_of(drag, ID_IM) + drag_asset_list_count_of(drag, ID_TE);
+    }
+    if (WM_drag_is_ID_type(&drag, ID_IM) || WM_drag_is_ID_type(&drag, ID_TE)) {
+      return 1;
+    }
+    if (drag.type == WM_DRAG_PATH) {
+      int count = 0;
+      for (const std::string &path : WM_drag_get_paths(&drag)) {
+        if (BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+          count++;
+        }
+      }
+      return count;
+    }
+    return 0;
+  }
+
+  /** An image and where it came from: freshly loaded ones carry an extra #BKE_image_load_exists
+   * user that must be released once the slot's texture holds its own reference. */
+  struct ResolvedImage {
+    Image *image = nullptr;
+    bool has_extra_user = false;
+  };
+
+  /** Every image carried by the drag, in drag order: a multi-select asset list, then a local ID,
+   * then the image files of a multi-file path drop. */
+  static Vector<ResolvedImage> resolve_drag_images(bContext *C, const wmDrag &drag)
+  {
+    Vector<ResolvedImage> images;
+    Main *bmain = CTX_data_main(C);
+
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+      if (asset_drags) {
+        for (const wmDragAssetListItem &item : *asset_drags) {
+          if (drag_asset_list_item_idtype(item) != ID_IM) {
+            continue;
+          }
+          /* #resolve_image_from_asset releases its own load reference, see
+           * #ed::asset::resolve_image_from_asset. */
+          Image *image = item.is_external ?
+                             ed::asset::resolve_image_from_asset(
+                                 *bmain, *item.asset_data.external_info->asset) :
+                             id_cast<Image *>(item.asset_data.local_id);
+          if (image) {
+            images.append({image, false});
+          }
+        }
+        if (!images.is_empty()) {
+          return images;
+        }
+      }
+    }
+
+    if (ID *id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_IM)) {
+      if (GS(id->name) == ID_IM) {
+        images.append({id_cast<Image *>(id), false});
+      }
+      return images;
+    }
+
+    if (drag.type == WM_DRAG_PATH) {
+      for (const std::string &path : WM_drag_get_paths(&drag)) {
+        if (!BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+          continue;
+        }
+        if (Image *image = BKE_image_load_exists(bmain, path.c_str(), nullptr)) {
+          images.append({image, true});
+        }
+      }
+    }
+    return images;
+  }
+
+  /** Append one slot holding \a tex. Direct DNA assignment: the new slot is the texture's one
+   * user, matching #BKE_brush_curve_patch_texture_slot_remove's bookkeeping. */
+  BrushCurvePatchTextureSlot *append_slot_with_texture(Main &bmain, Brush &brush, Tex *tex) const
+  {
+    BrushCurvePatchTextureSlot *slot = BKE_brush_curve_patch_texture_slot_add(brush);
+    slot->tex = tex;
+    /* A freshly wrapped texture follows the brush's library; a drag-resolved one is already
+     * wherever it lives (a linked brush cannot take a local texture: #can_drop refuses that
+     * combination for #WM_DRAG_ID drags and #on_drop rejects it). */
+    if (!ID_IS_LINKED(&tex->id)) {
+      BKE_id_move_to_same_lib(bmain, tex->id, brush.id);
+    }
+    return slot;
+  }
+
+ public:
+  explicit CurvePatchTextureListDropTarget(const CurvePatchTextureListTarget &target)
+      : target_(target)
+  {
+  }
+
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char **r_disabled_hint) const override
+  {
+    /* Asset-editable linked brushes (the Essentials brushes, for instance) are editable the same
+     * way the slot add/remove operators allow; other linked data is not. */
+    if (target_.brush == nullptr || !paint_texture_target_owner_editable(&target_.brush->id)) {
+      *r_disabled_hint = TIP_("Cannot edit linked brush data");
+      return false;
+    }
+    if (WM_drag_is_ID_type(&drag, ID_IM)) {
+      return true;
+    }
+    if (WM_drag_is_ID_type(&drag, ID_TE)) {
+      /* A pre-existing local texture can never be referenced by a linked brush; report that
+       * instead of a silent no-op in #on_drop. */
+      const Tex *tex = drag_local_texture(drag);
+      if (tex && paint_texture_linked_owner_refuses_local_tex(&target_.brush->id, *tex)) {
+        *r_disabled_hint = TIP_("A linked brush cannot use a local texture");
+        return false;
+      }
+      return true;
+    }
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      return asset_list_has_assignable_item(drag);
+    }
+    if (drag.type == WM_DRAG_PATH) {
+      for (const std::string &path : WM_drag_get_paths(&drag)) {
+        if (BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return false;
+  }
+
+  std::string drop_tooltip(const ui::DragInfo &drag_info) const override
+  {
+    const wmDrag &drag = effective_drag(drag_info.drag_data);
+    const std::string item_name = WM_drag_get_item_name(const_cast<wmDrag *>(&drag));
+
+    if (target_.replace_slot) {
+      return fmt::format(fmt::runtime(TIP_("Replace this slot's texture with {}")), item_name);
+    }
+
+    const int count = drag_assignable_count(drag);
+    if (count > 1) {
+      return fmt::format(fmt::runtime(TIP_("Add {} texture slots")), count);
+    }
+    return fmt::format(fmt::runtime(TIP_("Assign {} to a new texture slot")), item_name);
+  }
+
+  bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override
+  {
+    const wmDrag &drag = effective_drag(drag_info.drag_data);
+    Brush *brush = target_.brush;
+    if (brush == nullptr || !paint_texture_target_owner_editable(&brush->id)) {
+      return false;
+    }
+    Main *bmain = CTX_data_main(C);
+
+    /* A dragged #Texture replaces (or fills one new slot with) itself directly. A pre-existing
+     * local texture can never be referenced by a linked brush (and moving it into the library
+     * would duplicate its session_uid across undo steps), so those combinations do nothing. */
+    if (Tex *tex = resolve_drag_texture(C, drag)) {
+      if (paint_texture_linked_owner_refuses_local_tex(&brush->id, *tex)) {
+        return false;
+      }
+      if (target_.replace_slot) {
+        PointerRNA slot_ptr = target_.replace_slot_ptr;
+        PropertyRNA *prop = RNA_struct_find_property(&slot_ptr, "texture");
+        if (!prop) {
+          return false;
+        }
+        RNA_property_pointer_set(&slot_ptr, prop, RNA_id_pointer_create(&tex->id), nullptr);
+        RNA_property_update(C, &slot_ptr, prop);
+        ED_paint_texture_assignment_finalize(C, &brush->id, tex, false);
+        ED_undo_memfile_push(C, "Replace Curve Patch Texture");
+        return true;
+      }
+      append_slot_with_texture(*bmain, *brush, tex);
+      id_us_plus(&tex->id);
+      /* The texture itself already existed (a drag-resolved data-block); the new slot is what was
+       * added, which the #NC_BRUSH notifier in the finalize covers. */
+      ED_paint_texture_assignment_finalize(C, &brush->id, tex, false);
+      ED_undo_memfile_push(C, "Add Curve Patch Texture");
+      return true;
+    }
+
+    const Vector<ResolvedImage> images = resolve_drag_images(C, drag);
+    if (images.is_empty()) {
+      return false;
+    }
+
+    if (target_.replace_slot) {
+      const ResolvedImage &resolved = images[0];
+      PointerRNA slot_ptr = target_.replace_slot_ptr;
+      PropertyRNA *prop = RNA_struct_find_property(&slot_ptr, "texture");
+      if (!prop) {
+        return false;
+      }
+      Tex *tex = ED_paint_texture_property_assign_image(
+          C, slot_ptr, prop, resolved.image, resolved.has_extra_user);
+      if (!tex) {
+        return false;
+      }
+      ED_undo_memfile_push(C, "Replace Curve Patch Texture");
+      return true;
+    }
+
+    Vector<Tex *> added_textures;
+    for (const ResolvedImage &resolved : images) {
+      /* Prepares the texture (and its image) in the brush's library, handling asset-editable
+       * linked brushes; the new slot is the texture's one user (#ED_paint_texture_wrap_image_
+       * for_owner hands it back with exactly that one user, no extra reference to take). */
+      Tex *tex = ED_paint_texture_wrap_image_for_owner(
+          bmain, nullptr, &brush->id, resolved.image, resolved.has_extra_user);
+      BrushCurvePatchTextureSlot *slot = BKE_brush_curve_patch_texture_slot_add(*brush);
+      slot->tex = tex;
+      /* The preview is refreshed once for the whole batch below: per-texture updates kill
+       * running preview jobs and rebuild dependency relations, cancelling each other out. */
+      ED_paint_texture_assignment_finalize(
+          C, &brush->id, tex, true, /*refresh_preview=*/false);
+      added_textures.append(tex);
+    }
+    DROP_IMAGE_update_textures_preview_batch(C, bmain, added_textures);
+    ED_undo_memfile_push(C, images.size() > 1 ? "Add Curve Patch Textures" :
+                                               "Add Curve Patch Texture");
+    return true;
+  }
+};
+
+std::unique_ptr<ui::DropTargetInterface> curve_patch_texture_list_drop_target_get(
+    bContext * /*C*/, const ARegion *region, const wmEvent *event)
+{
+  CurvePatchTextureListTarget target;
+  if (!find_button_at(region, event, [&](const ui::Button &but) {
+        return curve_patch_texture_button_target(but, &target);
+      }))
+  {
+    return nullptr;
+  }
+  return std::make_unique<CurvePatchTextureListDropTarget>(target);
+}
+
+/** \} */
+
 static bool brush_texture_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
 {
   const ARegion *region = CTX_wm_region(C);
@@ -1086,7 +1677,13 @@ static bool brush_texture_drop_poll(bContext *C, wmDrag *drag, const wmEvent *ev
     return false;
   }
   const char *disabled_hint = nullptr;
-  return target->can_drop(*C, *drag, &disabled_hint);
+  const bool can_drop = target->can_drop(*C, *drag, &disabled_hint);
+  /* Publish the reason a blocked drop is blocked (a linked brush, ...), same as
+   * #view_drop_poll. */
+  if (disabled_hint) {
+    drag->drop_state.disabled_info = disabled_hint;
+  }
+  return can_drop;
 }
 
 static std::string brush_texture_drop_tooltip(bContext *C,

@@ -244,67 +244,11 @@ void DROP_IMAGE_update_texture_preview(bContext *C, Main *bmain, Tex *tex, bool 
     return;
   }
 
-  /* 1. CRITICAL: Stop all competing preview jobs to prevent conflicts */
-  ED_preview_kill_jobs(CTX_wm_manager(C), bmain);
-
-  /* 2. Force preview regeneration with enhanced system */
-  BKE_previewimg_id_free(&tex->id);
-  BKE_previewimg_id_ensure(&tex->id);
-  BKE_icon_changed(BKE_icon_id_ensure(&tex->id));
-  ED_previews_tag_dirty_by_id(*bmain, tex->id);
-
-  /* 3. Start asynchronous rendering for better performance */
-  ui::icon_render_id(C, nullptr, &tex->id, ICON_SIZE_PREVIEW, true);
-
-  /* 4. Universal area refresh - update all relevant areas, not just Properties */
-  for (bScreen &screen : ListBaseT<bScreen>(bmain->screens)) {
-    for (ScrArea &area : ListBaseT<ScrArea>(screen.areabase)) {
-      switch (area.spacetype) {
-        case SPACE_PROPERTIES: {
-          SpaceProperties *sbuts = (SpaceProperties *)area.spacedata.first;
-          if (sbuts) {
-            sbuts->preview = 1;
-          }
-          break;
-        }
-        case SPACE_VIEW3D: {
-          /* Force 3D Viewport refresh for immediate texture display */
-          ED_region_tag_redraw((ARegion *)area.regionbase.first);
-          break;
-        }
-        case SPACE_NODE: {
-          /* Force Node Editor refresh for texture nodes */
-          ED_region_tag_redraw((ARegion *)area.regionbase.first);
-          break;
-        }
-        case SPACE_IMAGE: {
-          /* Force Image Editor refresh */
-          ED_region_tag_redraw((ARegion *)area.regionbase.first);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /* 5. Update dependency graph with enhanced flags */
-  DEG_id_tag_update(&tex->id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
-  DEG_relations_tag_update(bmain);
-
-  /* 6. Send comprehensive notifications for all relevant systems */
-  WM_event_add_notifier(C, NC_TEXTURE | ND_SHADING_PREVIEW, &tex->id);
-  WM_event_add_notifier(C, NC_TEXTURE | ND_SHADING_DRAW, &tex->id);
-  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
-  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
-  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_NODE, nullptr);
-  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
-  WM_event_add_notifier(C, NC_WINDOW, nullptr);
+  DROP_IMAGE_update_textures_preview_batch(C, bmain, {tex});
 
   if (force_update) {
     WM_event_add_notifier(C, NC_TEXTURE | ND_SHADING_DRAW, nullptr);
   }
-
 }
 
 /**
@@ -394,6 +338,65 @@ void DROP_IMAGE_update_texture_preview_smart(bContext *C, Main *bmain, Tex *tex,
   else {
     DROP_IMAGE_update_texture_preview(C, bmain, tex, force_update);
   }
+}
+
+void DROP_IMAGE_update_textures_preview_batch(bContext *C,
+                                              Main *bmain,
+                                              const Span<Tex *> textures)
+{
+  if (!C || !bmain || textures.is_empty()) {
+    return;
+  }
+
+  /* One job-kill for the whole batch: the single-texture variant kills before every render, so
+   * calling it per texture would cancel the just-started render job of the previous texture
+   * (and rebuild dependency relations once per image). */
+  ED_preview_kill_jobs(CTX_wm_manager(C), bmain);
+
+  /* Mark every texture's preview for regeneration, start its asynchronous render, and tag/notifier
+   * the texture itself. */
+  for (Tex *tex : textures) {
+    BKE_previewimg_id_free(&tex->id);
+    BKE_previewimg_id_ensure(&tex->id);
+    BKE_icon_changed(BKE_icon_id_ensure(&tex->id));
+    ED_previews_tag_dirty_by_id(*bmain, tex->id);
+    ui::icon_render_id(C, nullptr, &tex->id, ICON_SIZE_PREVIEW, true);
+
+    DEG_id_tag_update(&tex->id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+    WM_event_add_notifier(C, NC_TEXTURE | ND_SHADING_PREVIEW, &tex->id);
+    WM_event_add_notifier(C, NC_TEXTURE | ND_SHADING_DRAW, &tex->id);
+  }
+
+  /* Universal area refresh, dependency relations and notifiers once for the whole batch. */
+  for (bScreen &screen : ListBaseT<bScreen>(bmain->screens)) {
+    for (ScrArea &area : ListBaseT<ScrArea>(screen.areabase)) {
+      switch (area.spacetype) {
+        case SPACE_PROPERTIES: {
+          SpaceProperties *sbuts = (SpaceProperties *)area.spacedata.first;
+          if (sbuts) {
+            sbuts->preview = 1;
+          }
+          break;
+        }
+        case SPACE_VIEW3D:
+        case SPACE_NODE:
+        case SPACE_IMAGE: {
+          /* Force refresh for immediate texture display */
+          ED_region_tag_redraw((ARegion *)area.regionbase.first);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+  DEG_relations_tag_update(bmain);
+
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_NODE, nullptr);
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+  WM_event_add_notifier(C, NC_WINDOW, nullptr);
 }
 
 /** \} */

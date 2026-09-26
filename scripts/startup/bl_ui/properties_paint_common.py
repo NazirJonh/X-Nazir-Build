@@ -679,8 +679,33 @@ class TextureMaskPanel(BrushPanel):
             col.prop(mask_tex_slot, "use_preserve_aspect")
 
 
+def draw_texture_drop_row(layout, data, propname, label):
+    """Image Browser row for a Texture pointer property, labelled for the slot it fills.
+
+    Clicking opens the Image Browser popover (images, not textures); picking one assigns it
+    wrapped in a new image texture. Dropping an image (Asset Browser, Outliner, file system) on
+    the row does the same, and a drop of an existing Texture data-block assigns it directly.
+    """
+    row = layout.row(align=True)
+    row.template_ID_browser(
+        data,
+        propname,
+        open="brush.texture_image_open",
+        text=iface_("Drop image: {:s}").format(label),
+        image_filter='PAINT_SOURCE',
+        browse_images=True,
+        # The user count is not actionable here; the row is a paint source picker, not a
+        # data-block manager.
+        use_users=False,
+    )
+    return row
+
+
 class SCULPT_UL_curve_patch_textures(UIList):
     def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_propname, _index):
+        # Marks the row's buttons as the target of a texture drop: dropping on a row replaces
+        # that slot's texture (the list context below appends new slots instead).
+        layout.context_pointer_set("curve_patch_texture_slot", item)
         if item.texture:
             layout.prop(item.texture, "name", text="", emboss=False, icon_value=layout.icon(item.texture))
         else:
@@ -744,31 +769,58 @@ class StrokePanel(BrushPanel):
                 col.row().prop(cp, "stamp_texture_source", text="Textures", expand=True)
                 if cp.stamp_texture_source == 'MULTI':
                     row = col.row()
-                    row.template_list(
-                        "SCULPT_UL_curve_patch_textures", "",
-                        cp, "texture_slots",
-                        cp, "texture_active_index",
-                        rows=3,
-                    )
+                    # A context pointer set on a layout is inherited only by its children, so the
+                    # list target is published on each layout hosting a drop target: the list
+                    # itself, the add/remove buttons and the drop zone below.
+                    # Dropping images appends one slot per image (dropping on a row replaces that
+                    # slot, see the UIList above).
+                    row.context_pointer_set("curve_patch_texture_list", cp)
+                    if len(cp.texture_slots) == 0:
+                        # An empty UIList draws no rows and has no hook for an empty-state line, so
+                        # a list-sized drop zone takes its place until the first slot exists.
+                        empty_col = row.column(align=True)
+                        empty_col.scale_y = 3.0
+                        empty_col.operator(
+                            "brush.curve_patch_texture_slot_add",
+                            text=iface_("Drop Textures Here"),
+                            icon='IMAGE_DATA')
+                    else:
+                        row.template_list(
+                            "SCULPT_UL_curve_patch_textures", "",
+                            cp, "texture_slots",
+                            cp, "texture_active_index",
+                            rows=3,
+                        )
                     sub = row.column(align=True)
+                    sub.context_pointer_set("curve_patch_texture_list", cp)
                     sub.operator("brush.curve_patch_texture_slot_add", icon='ADD', text="")
                     sub.operator("brush.curve_patch_texture_slot_remove", icon='REMOVE', text="")
                     sub.separator()
                     sub.operator("brush.curve_patch_texture_slot_move", icon='TRIA_UP', text="").type = 'UP'
                     sub.operator("brush.curve_patch_texture_slot_move", icon='TRIA_DOWN', text="").type = 'DOWN'
                     slots = cp.texture_slots
+                    if len(slots) > 0:
+                        # Once the list has rows, a drop on a row replaces that slot's texture, so
+                        # appending needs its own zone: dropping several images here adds one slot
+                        # per image, clicking adds one empty slot.
+                        add_row = col.row(align=True)
+                        add_row.context_pointer_set("curve_patch_texture_list", cp)
+                        add_row.operator(
+                            "brush.curve_patch_texture_slot_add",
+                            text=iface_("Drop Textures to Add"),
+                            icon='IMAGE_DATA')
                     index = cp.texture_active_index
                     if 0 <= index < len(slots):
                         active_slot = slots[index]
-                        col.template_ID(active_slot, "texture", new="texture.new")
+                        draw_texture_drop_row(col, active_slot, "texture", active_slot.name or "Stamp")
                         col.prop(active_slot, "weight", text="Weight")
             else:
                 col.row().prop(cp, "ribbon_texture_source", text="Textures", expand=True)
                 if cp.ribbon_texture_source == 'MULTI':
-                    col.template_ID(cp, "texture_start", new="texture.new")
+                    draw_texture_drop_row(col, cp, "texture_start", "Start")
                     col.prop(cp, "cap_start_length", text="Start Length")
-                    col.template_ID(cp, "texture_middle", new="texture.new")
-                    col.template_ID(cp, "texture_end", new="texture.new")
+                    draw_texture_drop_row(col, cp, "texture_middle", "Middle")
+                    draw_texture_drop_row(col, cp, "texture_end", "End")
                     col.prop(cp, "cap_end_length", text="End Length")
                     col.separator()
                 col.row().prop(cp, "length_mode", text="Curve Patch Length", expand=True)

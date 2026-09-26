@@ -237,6 +237,8 @@ struct IDBrowserTarget {
   const char *filter_type = nullptr;
   /** Built-in image filtering preset, see #IDBrowserImageFilter (may be null/empty). */
   const char *image_filter = nullptr;
+  /** Browse images for a Texture pointer property, wrapping them on assignment. */
+  bool browse_images = false;
 };
 
 /**
@@ -357,6 +359,13 @@ void id_browser_library_ref_set(wmWindowManager &wm, const AssetLibraryReference
  * selector and the popover draw so the two cannot drift apart when new browsed types are added.
  */
 short id_browser_target_idcode(const bContext *C);
+/**
+ * The ID type whose data-blocks the popover lists: #id_browser_target_idcode, except that a
+ * #Texture target opened with the `browse_images` flag lists images (they are wrapped into a
+ * texture on assignment, see #IDBrowserTarget::browse_images). Shared by the library selector,
+ * the popover draw and the grid build so the three cannot drift apart.
+ */
+short id_browser_browse_idcode(const bContext *C);
 /**
  * The popover remembers one library selection across uses, so it can be hidden for the type
  * currently browsed (e.g. an image library while browsing materials). When the stored library is

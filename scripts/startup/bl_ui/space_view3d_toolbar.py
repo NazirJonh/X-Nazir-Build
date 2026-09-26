@@ -1253,13 +1253,17 @@ def _draw_face_sets_from_texture_content(tex_panel, context, brush, use_from_tex
     col_color_tex.active = is_color
     col_color_tex.label(text="Face Set Color Texture")
     tex_slot = brush.face_set_color_texture_slot
-    col_color_tex.template_ID_preview(
+    # Image Browser row on the slot's Texture pointer: dropping or picking an image assigns it
+    # wrapped in an image texture. Open keeps the Face Set-specific operator, which also flips
+    # the Face Sets color mode on when it assigns.
+    col_color_tex.template_ID_browser(
         tex_slot,
         "texture",
-        new="texture.new",
         open="sculpt.face_set_color_texture_open",
-        rows=3,
-        cols=8,
+        text="Drop image: Face Set Color",
+        image_filter='PAINT_SOURCE',
+        browse_images=True,
+        use_users=False,
     )
 
     tex_panel.separator()
@@ -2739,70 +2743,11 @@ class VIEW3D_PT_tools_grease_pencil_v3_brush_gap_closure(View3DPanel, Panel):
                 col.prop(gp_settings, "fill_gap_factor", text="Detection Factor")
 
 
-def _brush_use_face_sets_from_texture_get(self):
-    return self.texture_data_mode != 'NONE'
+# The Face Sets-from-texture feature toggles (use_face_sets_from_texture, use_face_set_texture,
+# use_face_set_color_texture) are RNA properties on Brush now. #Brush.face_sets_texture_mode
+# remembers the last picked sub-mode in DNA, so toggling the feature off and back on restores it
+# per brush, survives file save/load and undo, and is kept in sync for brush groups.
 
-
-def _brush_use_face_sets_from_texture_set(self, value):
-    if value:
-        if self.texture_data_mode == 'NONE':
-            self.texture_data_mode = 'FACE_SETS_FROM_TEXTURE'
-        self.write_color_channel = 'RGB'
-    else:
-        self.texture_data_mode = 'NONE'
-
-
-def _brush_face_set_texture_get(self):
-    return self.texture_data_mode == 'FACE_SETS_FROM_TEXTURE'
-
-
-def _brush_face_set_texture_set(self, value):
-    if value:
-        self.texture_data_mode = 'FACE_SETS_FROM_TEXTURE'
-    elif self.texture_data_mode == 'FACE_SETS_FROM_TEXTURE':
-        self.texture_data_mode = 'NONE'
-
-
-def _brush_face_set_color_texture_get(self):
-    return self.texture_data_mode == 'FACE_SETS_COLOR_FROM_TEXTURE'
-
-
-def _brush_face_set_color_texture_set(self, value):
-    if value:
-        self.texture_data_mode = 'FACE_SETS_COLOR_FROM_TEXTURE'
-        self.write_color_channel = 'RGB'
-        src = self.texture_slot
-        dst = self.face_set_color_texture_slot
-        # Match main brush texture mapping (view / stencil / area plane) for stroke projection.
-        dst.map_mode = src.map_mode
-        dst.offset = src.offset
-        dst.scale = src.scale
-        dst.angle = src.angle
-    elif self.texture_data_mode == 'FACE_SETS_COLOR_FROM_TEXTURE':
-        self.texture_data_mode = 'FACE_SETS_FROM_TEXTURE'
-
-
-bpy.types.Brush.use_face_sets_from_texture = bpy.props.BoolProperty(
-    name="Face Sets From Texture",
-    description="Use a texture to assign Face Sets while sculpting",
-    get=_brush_use_face_sets_from_texture_get,
-    set=_brush_use_face_sets_from_texture_set,
-    default=False,
-)
-
-bpy.types.Brush.use_face_set_texture = bpy.props.BoolProperty(
-    name="Alpha Mask",
-    description="Sample texture alpha to determine Face Set ID assignment",
-    get=_brush_face_set_texture_get,
-    set=_brush_face_set_texture_set,
-)
-
-bpy.types.Brush.use_face_set_color_texture = bpy.props.BoolProperty(
-    name="Face Sets from Color Texture",
-    description="Assign Face Sets per face from RGB texture; alpha texture is the stroke mask",
-    get=_brush_face_set_color_texture_get,
-    set=_brush_face_set_color_texture_set,
-)
 
 _face_set_unified_sync_owner = object()
 _face_set_unified_sync_guard = False

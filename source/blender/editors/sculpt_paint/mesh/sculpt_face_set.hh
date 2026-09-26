@@ -59,8 +59,6 @@ struct FaceSetColorStrokeCache {
   int ensure_face_set_id_for_quant_color(Object &object, const float quant[3]);
 };
 
-/** Copy mask/alpha mapping (offset, scale, angle, mode) onto #Brush.face_set_color_mtex. */
-void sync_face_set_color_mtex_mapping_from_mask(Brush &brush);
 /** Build the per-stroke color cache once when color texture mode is active. */
 void face_set_color_stroke_cache_init(StrokeCache &cache, const Brush &brush, const Mesh &mesh);
 void face_set_color_stroke_cache_clear(StrokeCache &cache);

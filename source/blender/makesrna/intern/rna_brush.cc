@@ -931,6 +931,70 @@ static void rna_Brush_drag_kind_update(Main *bmain, Scene *scene, PointerRNA *pt
   rna_Brush_update(bmain, scene, ptr);
 }
 
+/** \name Face Sets-from-texture toggles
+ *
+ * #Brush.texture_data_mode is the effective mode (NONE / alpha / color); all 59 C++ reads stay on
+ * it. The booleans below are convenience accessors over it plus #Brush.face_sets_texture_mode,
+ * which remembers the last explicitly picked sub-mode across on/off toggles. They share one
+ * entry point (#BKE_brush_face_sets_texture_mode_set) with the open-assign operators.
+ * \{ */
+
+static bool rna_Brush_use_face_sets_from_texture_get(PointerRNA *ptr)
+{
+  const Brush *br = static_cast<const Brush *>(ptr->data);
+  return br->texture_data_mode != BRUSH_TEXTURE_DATA_MODE_NONE;
+}
+
+static void rna_Brush_use_face_sets_from_texture_set(PointerRNA *ptr, const bool value)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+  if (value) {
+    BKE_brush_face_sets_texture_mode_set(*br, eBrushTextureDataMode(br->face_sets_texture_mode));
+  }
+  else if (br->texture_data_mode != BRUSH_TEXTURE_DATA_MODE_NONE) {
+    /* Only the effective mode is cleared; the sub-mode choice survives for the next enable. */
+    br->texture_data_mode = BRUSH_TEXTURE_DATA_MODE_NONE;
+  }
+}
+
+static bool rna_Brush_face_set_texture_get(PointerRNA *ptr)
+{
+  const Brush *br = static_cast<const Brush *>(ptr->data);
+  return br->texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE;
+}
+
+static void rna_Brush_face_set_texture_set(PointerRNA *ptr, const bool value)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+  if (value) {
+    BKE_brush_face_sets_texture_mode_set(*br, BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE);
+  }
+  else if (br->texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE) {
+    br->texture_data_mode = BRUSH_TEXTURE_DATA_MODE_NONE;
+  }
+}
+
+static bool rna_Brush_face_set_color_texture_get(PointerRNA *ptr)
+{
+  const Brush *br = static_cast<const Brush *>(ptr->data);
+  return br->texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE;
+}
+
+static void rna_Brush_face_set_color_texture_set(PointerRNA *ptr, const bool value)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+  if (value) {
+    BKE_brush_face_sets_texture_mode_set(*br, BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE);
+  }
+  else if (br->texture_data_mode == BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE) {
+    /* Unchecking must leave both sub-toggles off: falling back to the alpha mode here would
+     * silently re-select a mode the user did not ask for. */
+    br->texture_data_mode = BRUSH_TEXTURE_DATA_MODE_NONE;
+  }
+}
+
+/** \} */
+
 static void rna_Brush_color_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
@@ -6217,6 +6281,32 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
   RNA_def_property_ui_text(prop, "Face Set Color Texture", "RGB map for per-face Face Set colors");
   RNA_def_property_update(prop, NC_TEXTURE, "rna_Brush_face_set_color_tex_update");
+
+  /* Face Sets-from-texture feature toggles: computed accessors over #texture_data_mode and
+   * #face_sets_texture_mode (no SDNA of their own), see the get/set callbacks above. */
+  prop = RNA_def_property(srna, "use_face_sets_from_texture", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_Brush_use_face_sets_from_texture_get",
+                                 "rna_Brush_use_face_sets_from_texture_set");
+  RNA_def_property_ui_text(
+      prop, "Face Sets From Texture", "Use a texture to assign Face Sets while sculpting");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_face_set_texture", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Brush_face_set_texture_get", "rna_Brush_face_set_texture_set");
+  RNA_def_property_ui_text(
+      prop, "Alpha Mask", "Sample texture alpha to determine Face Set ID assignment");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_face_set_color_texture", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Brush_face_set_color_texture_get", "rna_Brush_face_set_color_texture_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Face Sets from Color Texture",
+      "Assign Face Sets per face from RGB texture; alpha texture is the stroke mask");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "texture_overlay_alpha", PROP_INT, PROP_PERCENTAGE);
   RNA_def_property_int_sdna(prop, nullptr, "texture_overlay_alpha");

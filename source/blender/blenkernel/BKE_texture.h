@@ -12,6 +12,7 @@ namespace blender {
 struct Brush;
 struct ColorBand;
 struct FreestyleLineStyle;
+struct Image;
 struct ImagePool;
 struct LibraryForeachIDData;
 struct MTex;
@@ -34,6 +35,22 @@ void BKE_texture_mtex_foreach_id(struct LibraryForeachIDData *data, struct MTex 
 void BKE_texture_default(struct Tex *tex);
 struct Tex *BKE_texture_add(struct Main *bmain, const char *name);
 void BKE_texture_type_set(struct Tex *tex, eTex_Type type);
+
+/**
+ * Return a #TEX_IMAGE texture wrapping \a image, ready to be owned by a single assignment slot
+ * (a brush texture slot, a Curve Patch texture slot, ...).
+ *
+ * Contract: if \a current is an image texture the slot may safely take over -- its only real user
+ * (#ID_REAL_USERS <= 1), no fake user, not an asset, editable in place -- its image is retargeted
+ * and \a current is returned with its user count unchanged. Otherwise a new texture is created,
+ * returned holding exactly one user (the assigning slot's), with one user added on \a image. The
+ * caller must not take an extra reference when storing the result directly into a DNA slot;
+ * assigning it through a reference-counted RNA pointer property adds the setter's own user, so a
+ * newly created texture must have that creation user dropped afterwards (#id_us_min).
+ */
+struct Tex *BKE_texture_image_wrap_for_slot(struct Main *bmain,
+                                            struct Tex *current,
+                                            struct Image *image);
 
 void BKE_texture_mtex_default(struct MTex *mtex);
 struct MTex *BKE_texture_mtex_add();

@@ -1024,6 +1024,57 @@ static void rna_MaterialPaintLayer_role_set(PointerRNA *ptr, int value)
   }
 }
 
+/* Normal never reaches this getter as a fresh value (the itemf below and the setter both refuse
+ * it), but a .blend written before that restriction existed, or a direct DNA edit, can still carry
+ * it on disk: clamp to Alpha rather than hand the UI a value its own item list does not list,
+ * which would otherwise draw the enum blank instead of a real channel. */
+static int rna_MaterialPaintLayer_mask_channel_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer->mask_channel == PAINT_MATERIAL_CHANNEL_NORMAL) ? PAINT_MATERIAL_CHANNEL_ALPHA :
+                                                                  layer->mask_channel;
+}
+
+static void rna_MaterialPaintLayer_mask_channel_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  /* A mask reads one scalar; Normal is a vector, meaningless for that read, so the setter clamps
+   * it exactly like the itemf list below excludes it -- a script that bypasses the UI still lands
+   * on a channel the generator honours instead of one it silently ignores. */
+  layer->mask_channel = int8_t(value == PAINT_MATERIAL_CHANNEL_NORMAL ? PAINT_MATERIAL_CHANNEL_ALPHA :
+                                                                        value);
+}
+
+/* #rna_enum_material_paint_channel_items minus Normal: a mask reads one scalar, and Normal is a
+ * tangent-space vector the generator ignores for a mask channel (see #BKE_paint_layers_mask_add
+ * and the mask-item source generator), so it never belongs in this list. The filtered list is
+ * fixed, so it is built once and cached, like #rna_ActionSlot_target_id_type_itemf. */
+static const EnumPropertyItem *rna_MaterialPaintLayer_mask_channel_itemf(bContext * /*C*/,
+                                                                         PointerRNA * /*ptr*/,
+                                                                         PropertyRNA * /*prop*/,
+                                                                         bool *r_free)
+{
+  static EnumPropertyItem *cached_items = nullptr;
+  if (cached_items != nullptr) {
+    *r_free = false;
+    return cached_items;
+  }
+
+  EnumPropertyItem *items = nullptr;
+  int totitem = 0;
+  for (int i = 0; rna_enum_material_paint_channel_items[i].identifier != nullptr; i++) {
+    if (rna_enum_material_paint_channel_items[i].value == PAINT_MATERIAL_CHANNEL_NORMAL) {
+      continue;
+    }
+    RNA_enum_item_add(&items, &totitem, &rna_enum_material_paint_channel_items[i]);
+  }
+  RNA_enum_item_end(&items, &totitem);
+
+  *r_free = false;
+  cached_items = items;
+  return cached_items;
+}
+
 static Material *rna_MaterialPaintLayer_owner(PointerRNA ptr, MaterialPaintLayer **r_layer);
 
 static MaterialPaintLayer *rna_MaterialPaintLayer_correction_add(PointerRNA ptr,
@@ -1977,11 +2028,16 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Role", "The row's structural place in its owner");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
-  /* Meaningful for a mask item with a Material, Node Group or Stack source only; the generator
-   * ignores it for any other role/source combination. */
+  /* Meaningful for a mask item (role MASK_ITEM) with a Material, Node Group or Stack source only;
+   * the generator ignores it for any other role/source combination. Normal is left out of the
+   * item list (and refused by the setter): a mask is a single scalar, and Normal is a vector the
+   * generator has nothing to reduce it to. */
   prop = RNA_def_property(srna, "mask_channel", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "mask_channel");
   RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_mask_channel_get",
+                              "rna_MaterialPaintLayer_mask_channel_set",
+                              "rna_MaterialPaintLayer_mask_channel_itemf");
   RNA_def_property_ui_text(
       prop,
       "Mask Channel",

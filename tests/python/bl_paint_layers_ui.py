@@ -160,6 +160,59 @@ class PaintLayersUiTest(unittest.TestCase):
         correction = layer.correction_add(role='EFFECT', source='IMAGE', name="C")
         self.assertEqual(len(correction.channels), 0)
 
+    def test_correction_add_accepts_every_layer_source(self):
+        # Phase 6, goal 1: a correction or mask item offers the same sources a Layer row does
+        # (BKE_paint_layers_correction_add already accepts all of them from phase 4 on); the
+        # operator-level IMAGE/CONSTANT-only filter was UI policy, not a BKE restriction.
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        for role in ('EFFECT', 'MASK_ITEM'):
+            for source in ('IMAGE', 'CONSTANT', 'MESH_MAP', 'MATERIAL', 'NODE_GROUP', 'STACK'):
+                correction = layer.correction_add(role=role, source=source, name="C")
+                self.assertIsNotNone(correction, (role, source))
+                self.assertEqual(correction.source, source)
+                self.assertEqual(correction.role, role)
+
+    def test_paint_layer_correction_add_operator_offers_every_source(self):
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers.active = layer
+        with bpy.context.temp_override(material=self.material):
+            op = bpy.ops.material.paint_layer_correction_add
+            sources = {item.identifier for item in op.get_rna_type().properties['source'].enum_items}
+            self.assertEqual(sources, {'IMAGE', 'CONSTANT', 'MESH_MAP', 'MATERIAL', 'NODE_GROUP',
+                                       'STACK'})
+            result = op(role='MASK_ITEM', source='MESH_MAP', mesh_map_type='CURVATURE', name="M")
+            self.assertEqual(result, {'FINISHED'})
+            mask = layer.mask_stack[-1]
+            self.assertEqual(mask.source, 'MESH_MAP')
+            self.assertEqual(mask.mesh_map_type, 'CURVATURE')
+            # The operator also makes the new row active, so the reused Source Material / Custom
+            # Group / mask_channel UI (keyed off paint_layers.active) shows up for it right away.
+            self.assertEqual(self.material.paint_layers.active.marker, mask.marker)
+
+    def test_paint_layer_correction_select_operator_sets_active(self):
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        mask = layer.mask_add(value=1.0)
+        self.material.paint_layers.active = layer
+        self.assertNotEqual(self.material.paint_layers.active.marker, mask.marker)
+        with bpy.context.temp_override(material=self.material):
+            result = bpy.ops.material.paint_layer_correction_select(marker=mask.marker)
+            self.assertEqual(result, {'FINISHED'})
+        self.assertEqual(self.material.paint_layers.active.marker, mask.marker)
+
+    def test_mask_channel_excludes_normal(self):
+        # Phase 6, goal 3: Normal is a tangent-space vector, meaningless for a mask's single scalar
+        # read, so it must not be offered even though the underlying enum (shared with the channel
+        # pickers) still lists it.
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        mask = layer.correction_add(role='MASK_ITEM', source='MATERIAL', name="M")
+        items = mask.bl_rna.properties['mask_channel'].enum_items
+        self.assertNotIn('NORMAL', {item.identifier for item in items})
+        self.assertIn('ALPHA', {item.identifier for item in items})
+        # A direct assignment (a script bypassing the UI) is clamped, not crashed, the same way a
+        # value written by an older build would be read back safely.
+        mask.mask_channel = 'BASE_COLOR'
+        self.assertEqual(mask.mask_channel, 'BASE_COLOR')
+
     def channel_settings(self, layer, channel):
         return next(item for item in layer.channel_settings if item.channel == channel)
 
@@ -242,8 +295,11 @@ class PaintLayersUiTest(unittest.TestCase):
     def test_mesh_map_batch_operators_are_registered(self):
         self.assertIn('mesh_map_bake_all', dir(bpy.ops.object))
         self.assertIn('mesh_map_clear', dir(bpy.ops.object))
-        self.assertTrue(hasattr(bpy.types, 'OBJECT_OT_mesh_map_bake_all'))
-        self.assertTrue(hasattr(bpy.types, 'OBJECT_OT_mesh_map_clear'))
+        # These are C++ operators (WM_operatortype_append), not bpy.types.Operator subclasses, so
+        # they never show up on bpy.types by idname; get_rna_type() is what actually proves they
+        # are registered, the way bpy.ops itself resolves an idname before calling it.
+        self.assertIsNotNone(bpy.ops.object.mesh_map_bake_all.get_rna_type())
+        self.assertIsNotNone(bpy.ops.object.mesh_map_clear.get_rna_type())
         # The auto-refresh handler ships with the operators module.
         self.assertIn(mesh_map_depsgraph_update_post, bpy.app.handlers.depsgraph_update_post)
 

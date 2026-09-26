@@ -44,6 +44,22 @@ enum PaintStackAddKind : int {
   PAINT_STACK_ADD_CORRECTION_FILL,
   PAINT_STACK_ADD_MASK_CORRECTION_PAINT,
   PAINT_STACK_ADD_MASK_CORRECTION_FILL,
+  /* Phase 6, goal 1: a correction or mask item accepts every source a Layer row does
+   * (#BKE_paint_layers_correction_add, phase 4); these round out the Add menu to match. Appended
+   * after the original eight rather than interleaved, so the existing kinds keep their ordinal --
+   * these are positions in the #StackEditor::add_kinds vector, not a persisted value, but nothing
+   * needs the churn of renumbering them. Material and Node Group take their source the same way
+   * #PAINT_STACK_ADD_MATERIAL does (#StackAddArgs::source), but without an eager bake: the
+   * correction is created empty and its material/group is picked afterward through the same
+   * Source Material / Custom Group panel a Layer row of that source uses. */
+  PAINT_STACK_ADD_CORRECTION_MESH_MAP,
+  PAINT_STACK_ADD_CORRECTION_MATERIAL,
+  PAINT_STACK_ADD_CORRECTION_NODE_GROUP,
+  PAINT_STACK_ADD_CORRECTION_STACK,
+  PAINT_STACK_ADD_MASK_CORRECTION_MESH_MAP,
+  PAINT_STACK_ADD_MASK_CORRECTION_MATERIAL,
+  PAINT_STACK_ADD_MASK_CORRECTION_NODE_GROUP,
+  PAINT_STACK_ADD_MASK_CORRECTION_STACK,
 };
 
 /**

@@ -28,6 +28,7 @@
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
@@ -190,12 +191,27 @@ int layers_ordinal_of(const ListBase &list, const MaterialPaintLayer *target, in
         return r_index;
       }
       r_index++;
+      /* A Stack-sourced effect is a folder like any other (Phase 6, goal 4): its own children
+       * consume ordinals here, in lockstep with #paint_stack_rows_from_description_impl's
+       * #append_corrections, which is what actually numbers the rows the Outliner hands back. */
+      if (BKE_paint_layers_is_folder(*correction)) {
+        const int found = layers_ordinal_of(correction->children, target, r_index);
+        if (found >= 0) {
+          return found;
+        }
+      }
     }
     for (const MaterialPaintLayer *correction : BKE_paint_layers_mask_items(layer)) {
       if (correction == target) {
         return r_index;
       }
       r_index++;
+      if (BKE_paint_layers_is_folder(*correction)) {
+        const int found = layers_ordinal_of(correction->children, target, r_index);
+        if (found >= 0) {
+          return found;
+        }
+      }
     }
     if (BKE_paint_layers_is_folder(layer)) {
       const int found = layers_ordinal_of(layer.children, target, r_index);
@@ -415,8 +431,15 @@ void paint_stack_rows_from_description_impl(const Material &material,
     }
   };
 
+  /* Forward-declared so #append_corrections can recurse into a Stack correction/mask item's own
+   * children (Phase 6, goal 4): the two lambdas call each other, and a `std::function` variable can
+   * be referenced before it is assigned as long as nothing actually calls it that early. */
+  std::function<void(const ListBase &, int, int)> append_list;
+
   /* Corrections of \a layer, split by their role so an effect lists under CHANNELS and a mask item
-   * under MASK, in storage order. */
+   * under MASK, in storage order. A Stack-sourced correction/mask item is a folder exactly like a
+   * Stack Layer row (#BKE_paint_layers_is_folder keys off `source`, not `role`): its own children
+   * are appended the same way a folder Layer's are, with the correction's row as their parent. */
   auto append_corrections = [&](const MaterialPaintLayer &layer,
                                 const int parent_ordinal,
                                 const int parent_depth,
@@ -430,6 +453,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
         overflow = true;
         return;
       }
+      const bool folder = BKE_paint_layers_is_folder(correction);
       StackRow row;
       row.ordinal = int16_t(ordinal++);
       row.depth = parent_depth + 1;
@@ -438,16 +462,70 @@ void paint_stack_rows_from_description_impl(const Material &material,
       row.stable_id = correction.marker;
       row.enabled = (correction.flag & MA_PAINT_LAYER_ENABLED) != 0;
       row.supported = true;
-      row.name = correction.name[0] != '\0' ? correction.name : "Correction";
+      row.name = correction.name[0] != '\0' ? correction.name :
+                 folder                        ? "Folder" :
+                                                 "Correction";
       row.name_buffer = const_cast<char *>(correction.name);
-      row.icon = ICON_MODIFIER;
+      row.can_hold_children = folder;
+      row.has_children = folder && !BLI_listbase_is_empty(&correction.children);
+      /* Same icon rule as a Layer row of the same shape (Phase 6, goal 5): a correction is not a
+       * visually different kind of row just because it hangs off `effects`/`mask_stack` instead of
+       * the stack proper. */
+      row.icon = folder ? ICON_FILE_FOLDER :
+                 correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT ? ICON_GP_DRAW_FILL :
+                                                                       ICON_IMAGE_RGB;
+      if (correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+        StackRowPreview fill_swatch;
+        fill_swatch.is_color_swatch = true;
+        copy_v4_v4(fill_swatch.color, correction.fill_color);
+        fill_swatch.label = IFACE_("Fill Color");
+        row.preview_slots.append(std::move(fill_swatch));
+      }
+      if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+        /* The same Live/Baking/Baked/Refused indicator a Material Layer row shows, read through the
+         * same BKE answer the Source Material panel uses -- a correction's bake state is not a
+         * second truth. */
+        StackRowPreview live_slot;
+        PaintLayersSourceGroupRefusal live_refusal = PaintLayersSourceGroupRefusal::None;
+        const PaintLayerMaterialLiveStatus live_status = BKE_paint_layers_material_live_status(
+            material, correction, &live_refusal);
+        switch (live_status) {
+          case PaintLayerMaterialLiveStatus::Live:
+            live_slot.icon = ICON_HIDE_OFF;
+            live_slot.label = IFACE_("Live");
+            break;
+          case PaintLayerMaterialLiveStatus::Baking:
+            live_slot.icon = ICON_FILE_REFRESH;
+            live_slot.label = IFACE_("Baking...");
+            break;
+          case PaintLayerMaterialLiveStatus::Baked:
+            live_slot.icon = ICON_IMAGE_DATA;
+            live_slot.label = IFACE_("Baked");
+            break;
+          case PaintLayerMaterialLiveStatus::Refused:
+            live_slot.icon = ICON_ERROR;
+            live_slot.label = "Refused: " + std::string(BKE_paint_layers_source_group_refusal_name(
+                                                 live_refusal));
+            break;
+        }
+        row.preview_slots.append(std::move(live_slot));
+      }
       append_issue_slots(row, layer.marker, correction.marker);
       set_pair_columns(row, correction);
-      r_rows.append(std::move(row));
+      const int row_ordinal = row.ordinal;
+      if (!folder) {
+        r_rows.append(std::move(row));
+      }
+      if (folder) {
+        /* Depth/parent bookkeeping mirrors a folder Layer's own recursion below: the correction's
+         * row is at `parent_depth + 1`, so its children sit one further in. */
+        append_list(correction.children, parent_depth + 2, row_ordinal);
+        r_rows.append(std::move(row));
+      }
     }
   };
 
-  std::function<void(const ListBase &, int, int)> append_list =
+  append_list =
       [&](const ListBase &list, const int depth, const int parent_ordinal) {
         for (const MaterialPaintLayer &layer :
              *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
@@ -625,11 +703,21 @@ int paint_layers_edit_add(Material &material,
     return -1;
   }
 
+  const bool is_mesh_map_correction = ELEM(
+      kind, PAINT_STACK_ADD_CORRECTION_MESH_MAP, PAINT_STACK_ADD_MASK_CORRECTION_MESH_MAP);
+  const bool is_material_correction = ELEM(
+      kind, PAINT_STACK_ADD_CORRECTION_MATERIAL, PAINT_STACK_ADD_MASK_CORRECTION_MATERIAL);
+  const bool is_node_group_correction = ELEM(
+      kind, PAINT_STACK_ADD_CORRECTION_NODE_GROUP, PAINT_STACK_ADD_MASK_CORRECTION_NODE_GROUP);
+  const bool is_stack_correction = ELEM(
+      kind, PAINT_STACK_ADD_CORRECTION_STACK, PAINT_STACK_ADD_MASK_CORRECTION_STACK);
   const bool is_correction = ELEM(kind,
                                   PAINT_STACK_ADD_CORRECTION_PAINT,
                                   PAINT_STACK_ADD_CORRECTION_FILL,
                                   PAINT_STACK_ADD_MASK_CORRECTION_PAINT,
-                                  PAINT_STACK_ADD_MASK_CORRECTION_FILL);
+                                  PAINT_STACK_ADD_MASK_CORRECTION_FILL) ||
+                             is_mesh_map_correction || is_material_correction ||
+                             is_node_group_correction || is_stack_correction;
   MaterialPaintLayer *created = nullptr;
   if (is_correction) {
     if (anchor == nullptr) {
@@ -645,16 +733,50 @@ int paint_layers_edit_add(Material &material,
     }
     const bool mask_section = ELEM(kind,
                                    PAINT_STACK_ADD_MASK_CORRECTION_PAINT,
-                                   PAINT_STACK_ADD_MASK_CORRECTION_FILL);
+                                   PAINT_STACK_ADD_MASK_CORRECTION_FILL,
+                                   PAINT_STACK_ADD_MASK_CORRECTION_MESH_MAP,
+                                   PAINT_STACK_ADD_MASK_CORRECTION_MATERIAL,
+                                   PAINT_STACK_ADD_MASK_CORRECTION_NODE_GROUP,
+                                   PAINT_STACK_ADD_MASK_CORRECTION_STACK);
     const bool fill_effect = ELEM(
         kind, PAINT_STACK_ADD_CORRECTION_FILL, PAINT_STACK_ADD_MASK_CORRECTION_FILL);
+    int source = MA_PAINT_LAYER_SOURCE_IMAGE;
+    if (fill_effect) {
+      source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+    }
+    else if (is_mesh_map_correction) {
+      source = MA_PAINT_LAYER_SOURCE_MESH_MAP;
+    }
+    else if (is_material_correction) {
+      source = MA_PAINT_LAYER_SOURCE_MATERIAL;
+    }
+    else if (is_node_group_correction) {
+      source = MA_PAINT_LAYER_SOURCE_NODE_GROUP;
+    }
+    else if (is_stack_correction) {
+      source = MA_PAINT_LAYER_SOURCE_STACK;
+    }
     created = BKE_paint_layers_correction_add(material,
                                               layer,
                                               mask_section ? MA_PAINT_LAYER_ROLE_MASK_ITEM :
                                                              MA_PAINT_LAYER_ROLE_EFFECT,
-                                              fill_effect ? MA_PAINT_LAYER_SOURCE_CONSTANT :
-                                                            MA_PAINT_LAYER_SOURCE_IMAGE,
+                                              source,
                                               "Correction");
+    /* Material and Node Group take their source the same way #PAINT_STACK_ADD_MATERIAL does
+     * (#StackAddArgs::source), but unlike a Layer row this is not an eager bake: the correction is
+     * left empty when no source is given (or the wrong ID type is), pickable afterward through the
+     * same Source Material / Custom Group panel a Layer row of that source already reuses (Phase
+     * 6, goal 2). */
+    if (created != nullptr && is_material_correction && args.source != nullptr &&
+        GS(args.source->name) == ID_MA)
+    {
+      BKE_paint_layers_set_material(material, created, id_cast<Material *>(args.source));
+    }
+    else if (created != nullptr && is_node_group_correction && args.source != nullptr &&
+             GS(args.source->name) == ID_NT)
+    {
+      BKE_paint_layers_set_custom_group(material, created, id_cast<bNodeTree *>(args.source));
+    }
   }
   else {
     PaintLayerPlace place = PaintLayerPlace::Above;
@@ -1060,6 +1182,12 @@ class PaintLayersStackSource final : public StackSource,
                 hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*image) ? 1 : 0);
               }
             }
+            /* A Stack-sourced correction/mask item is a folder like any other (Phase 6, goal 4):
+             * an edit to a row inside it must invalidate the cached rows exactly as an edit inside a
+             * folder Layer's own children already does via #walk below. */
+            if (BKE_paint_layers_is_folder(correction)) {
+              walk(correction.children);
+            }
           }
         };
         hash_corrections(layer.effects);
@@ -1298,6 +1426,56 @@ class PaintLayersStackSource final : public StackSource,
                     IFACE_("Mask Fill Correction"),
                     "A flat-fill correction limiting where the row this is added from applies",
                     ICON_BRUSH_DATA});
+
+    /* Phase 6, goal 1: the remaining Layer sources, offered as a correction/mask the same way
+     * Paint/Fill already are. Order matches #PaintStackAddKind exactly (index-based dispatch). */
+    r_kinds.append({"CORRECTION_MESH_MAP",
+                    IFACE_("Mesh Map Correction"),
+                    "A geometry map of the object adjusting the content of the row this is added "
+                    "from",
+                    ICON_BRUSH_DATA});
+    StackAddKindInfo correction_material{
+        "CORRECTION_MATERIAL",
+        IFACE_("Material Correction"),
+        "Another material's channels, baked, adjusting the content of the row this is added from",
+        ICON_MATERIAL};
+    correction_material.source_id_type = ID_MA;
+    r_kinds.append(correction_material);
+    StackAddKindInfo correction_node_group{
+        "CORRECTION_NODE_GROUP",
+        IFACE_("Node Group Correction"),
+        "A user's node group adjusting the content of the row this is added from",
+        ICON_NODETREE};
+    correction_node_group.source_id_type = ID_NT;
+    r_kinds.append(correction_node_group);
+    r_kinds.append({"CORRECTION_STACK",
+                    IFACE_("Folder Correction"),
+                    "A nested stack of layers adjusting the content of the row this is added from",
+                    ICON_FILE_FOLDER});
+
+    r_kinds.append({"MASK_CORRECTION_MESH_MAP",
+                    IFACE_("Mesh Map Mask"),
+                    "A geometry map of the object limiting where the row this is added from "
+                    "applies",
+                    ICON_BRUSH_DATA});
+    StackAddKindInfo mask_correction_material{
+        "MASK_CORRECTION_MATERIAL",
+        IFACE_("Material Mask"),
+        "Another material's channels, baked, limiting where the row this is added from applies",
+        ICON_MATERIAL};
+    mask_correction_material.source_id_type = ID_MA;
+    r_kinds.append(mask_correction_material);
+    StackAddKindInfo mask_correction_node_group{
+        "MASK_CORRECTION_NODE_GROUP",
+        IFACE_("Node Group Mask"),
+        "A user's node group limiting where the row this is added from applies",
+        ICON_NODETREE};
+    mask_correction_node_group.source_id_type = ID_NT;
+    r_kinds.append(mask_correction_node_group);
+    r_kinds.append({"MASK_CORRECTION_STACK",
+                    IFACE_("Folder Mask"),
+                    "A nested stack of layers limiting where the row this is added from applies",
+                    ICON_FILE_FOLDER});
   }
 
   int row_add(bContext &C,
@@ -2009,6 +2187,11 @@ MaterialPaintLayer *paint_description_row_for_ordinal(Material &material, const 
           return;
         }
         index++;
+        /* Symmetric with #layers_ordinal_of: a Stack-sourced effect's own children consume
+         * ordinals here too, in lockstep with #append_corrections (Phase 6, goal 4). */
+        if (BKE_paint_layers_is_folder(*correction)) {
+          walk(correction->children);
+        }
       }
       for (MaterialPaintLayer *correction : BKE_paint_layers_mask_items(layer)) {
         if (found != nullptr) {
@@ -2019,6 +2202,9 @@ MaterialPaintLayer *paint_description_row_for_ordinal(Material &material, const 
           return;
         }
         index++;
+        if (BKE_paint_layers_is_folder(*correction)) {
+          walk(correction->children);
+        }
       }
       if (BKE_paint_layers_is_folder(layer)) {
         walk(layer.children);

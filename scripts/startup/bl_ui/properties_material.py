@@ -648,10 +648,42 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 text="",
                 icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT',
             ).item_marker = item.marker
-            row.label(text=item.name if item.name else "Mask")
-            row.operator("material.paint_layer_mask_remove", text="", icon='X').item_marker = \
+            select = row.operator(
+                "material.paint_layer_correction_select",
+                text=item.name if item.name else "Mask",
+                icon='RADIOBUT_ON' if item.marker == layer.marker else 'RADIOBUT_OFF',
+                emboss=False,
+            )
+            select.marker = item.marker
+            row.operator("material.paint_layer_correction_remove", text="", icon='X').item_marker = \
                 item.marker
+            # A mask item's own channel choice only means something for a source that carries more
+            # than one scalar (Material, Node Group, Stack); Image/Constant/Mesh Map already read
+            # as a single value and never show this.
+            if item.source in {'MATERIAL', 'NODE_GROUP', 'STACK'}:
+                sub = box.row()
+                sub.use_property_split = True
+                sub.prop(item, "mask_channel")
         box.operator("material.paint_layer_mask_add", text="Add Mask", icon='ADD')
+
+        box = layout.box()
+        box.label(text="Effects", icon='MODIFIER')
+        for item in layer.effects:
+            row = box.row(align=True)
+            row.operator(
+                "material.paint_layer_mask_toggle",
+                text="",
+                icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT',
+            ).item_marker = item.marker
+            select = row.operator(
+                "material.paint_layer_correction_select",
+                text=item.name if item.name else "Correction",
+                icon='RADIOBUT_ON' if item.marker == layer.marker else 'RADIOBUT_OFF',
+                emboss=False,
+            )
+            select.marker = item.marker
+            row.operator("material.paint_layer_correction_remove", text="", icon='X').item_marker = \
+                item.marker
 
         box = layout.box()
         box.label(text="Channels", icon='IMAGE_RGB')

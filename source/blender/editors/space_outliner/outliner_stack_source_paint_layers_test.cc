@@ -59,6 +59,43 @@ class OutlinerStackPaintLayersSourceTest : public bke::BlenderGTestBase {
   }
 };
 
+/**
+ * Phase 6, goal 1: the Add menu (Python operator and Outliner alike) offers every source a Layer
+ * row can have for a correction/mask too. #PaintStackAddKind's new entries and their positions in
+ * #StackEditor::add_kinds are what #row_add reads back by index, so the two must stay aligned.
+ */
+TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_every_correction_and_mask_source)
+{
+  const StackEditor *editor = source().editor();
+  ASSERT_NE(editor, nullptr);
+  Vector<StackAddKindInfo> kinds;
+  editor->add_kinds(kinds);
+
+  auto has = [&](const char *identifier) {
+    for (const StackAddKindInfo &kind : kinds) {
+      if (kind.identifier == identifier) {
+        return true;
+      }
+    }
+    return false;
+  };
+  EXPECT_TRUE(has("CORRECTION_MESH_MAP"));
+  EXPECT_TRUE(has("CORRECTION_MATERIAL"));
+  EXPECT_TRUE(has("CORRECTION_NODE_GROUP"));
+  EXPECT_TRUE(has("CORRECTION_STACK"));
+  EXPECT_TRUE(has("MASK_CORRECTION_MESH_MAP"));
+  EXPECT_TRUE(has("MASK_CORRECTION_MATERIAL"));
+  EXPECT_TRUE(has("MASK_CORRECTION_NODE_GROUP"));
+  EXPECT_TRUE(has("MASK_CORRECTION_STACK"));
+
+  /* Index alignment with #PaintStackAddKind: row_add reads a kind back by its position here. */
+  ASSERT_GT(kinds.size(), int(PAINT_STACK_ADD_MASK_CORRECTION_STACK));
+  EXPECT_EQ(kinds[PAINT_STACK_ADD_CORRECTION_MATERIAL].identifier, "CORRECTION_MATERIAL");
+  EXPECT_EQ(kinds[PAINT_STACK_ADD_CORRECTION_MATERIAL].source_id_type, ID_MA);
+  EXPECT_EQ(kinds[PAINT_STACK_ADD_CORRECTION_NODE_GROUP].identifier, "CORRECTION_NODE_GROUP");
+  EXPECT_EQ(kinds[PAINT_STACK_ADD_CORRECTION_NODE_GROUP].source_id_type, ID_NT);
+}
+
 TEST_F(OutlinerStackPaintLayersSourceTest, layered_material_rows_come_from_the_description)
 {
   Material *ma = BKE_material_add(bmain, "Layered");
@@ -336,6 +373,107 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_add_into_folder_nests_and_into_n
   ASSERT_NE(child_layer, nullptr);
   /* The child was added into the folder, not beside it. */
   EXPECT_EQ(BLI_findindex(&folder_layer->children, child_layer), 0);
+}
+
+/**
+ * Phase 6, goal 4: `row_add` with an Outliner anchor that is itself a Stack correction/mask item
+ * (not a Layer row) places the new row inside that correction's own #children, exactly as it
+ * already does for a folder Layer row (#BKE_paint_layers_is_folder does not care which list the
+ * folder hangs off). This was already true from phase 4 (#paint_layers_edit_add's non-correction
+ * branch never special-cased the anchor's role, only whether it is a folder); the assertion here
+ * locks that in rather than introducing it.
+ */
+TEST_F(OutlinerStackPaintLayersSourceTest, edit_add_anchored_on_a_stack_correction_nests_inside_it)
+{
+  Material *ma = BKE_material_add(bmain, "AddIntoCorrection");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(effect, nullptr);
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  Vector<StackRow> rows;
+  ASSERT_TRUE(source().rows_build(ctx, {}, ma->id, rows));
+  int effect_ordinal = -1;
+  for (const StackRow &row : rows) {
+    if (BLI_uuid_equal(row.stable_id, effect->marker)) {
+      effect_ordinal = row.ordinal;
+    }
+  }
+  ASSERT_GE(effect_ordinal, 0);
+
+  const int child = paint_layers_edit_add(*ma, PAINT_STACK_ADD_PAINT, effect_ordinal, {});
+  ASSERT_GE(child, 0);
+  MaterialPaintLayer *child_layer = paint_description_row_for_ordinal(*ma, child);
+  ASSERT_NE(child_layer, nullptr);
+  EXPECT_EQ(BLI_findindex(&effect->children, child_layer), 0);
+}
+
+/**
+ * Phase 6, goal 4, ordinal lockstep: #paint_stack_rows_from_description_impl now recurses into a
+ * folder correction's own children (#append_corrections), which consumes ordinals that
+ * #paint_description_row_for_ordinal and #layers_ordinal_of did not previously account for. Every
+ * row *after* a correction-with-children in storage order would otherwise resolve to the wrong
+ * ordinal between what the Outliner shows (rows_build) and what an edit verb resolves
+ * (paint_description_row_for_ordinal) -- silently misdirecting rename/move/remove/reorder on any
+ * row past such a correction. Both helpers were fixed in the same change that added the recursion.
+ */
+TEST_F(OutlinerStackPaintLayersSourceTest,
+      ordinals_stay_in_lockstep_with_rows_after_a_correction_folder)
+{
+  Material *ma = BKE_material_add(bmain, "OrdinalLockstep");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(effect, nullptr);
+  MaterialPaintLayer *effect_child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "FxChild", effect, PaintLayerPlace::Into);
+  ASSERT_NE(effect_child, nullptr);
+  /* A sibling layer stored after the correction-carrying owner. */
+  MaterialPaintLayer *later = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Later", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(later, nullptr);
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  Vector<StackRow> rows;
+  ASSERT_TRUE(source().rows_build(ctx, {}, ma->id, rows));
+  int later_row_ordinal = -1;
+  for (const StackRow &row : rows) {
+    if (BLI_uuid_equal(row.stable_id, later->marker)) {
+      later_row_ordinal = row.ordinal;
+    }
+  }
+  ASSERT_GE(later_row_ordinal, 0);
+
+  /* #paint_description_row_for_ordinal must agree with rows_build's numbering, or an edit on this
+   * ordinal silently lands on the wrong row. */
+  EXPECT_EQ(paint_description_row_for_ordinal(*ma, later_row_ordinal), later);
+
+  ASSERT_TRUE(paint_layers_edit_rename(*ma, later_row_ordinal, "Renamed"));
+  EXPECT_STREQ(later->name, "Renamed");
+  EXPECT_STREQ(owner->name, "Owner");
+
+  /* #layers_ordinal_of (the sibling helper `paint_layers_edit_add`'s return value goes through) is
+   * TU-local, so it is exercised indirectly here: a brand new top-level row's returned ordinal must
+   * also agree with where rows_build places it, which it can only do if the two counters stayed in
+   * lockstep across the correction's children. */
+  const int fresh = paint_layers_edit_add(*ma, PAINT_STACK_ADD_PAINT, -1, {});
+  ASSERT_GE(fresh, 0);
+  MaterialPaintLayer *fresh_layer = paint_description_row_for_ordinal(*ma, fresh);
+  ASSERT_NE(fresh_layer, nullptr);
+  rows.clear();
+  ASSERT_TRUE(source().rows_build(ctx, {}, ma->id, rows));
+  int fresh_row_ordinal = -1;
+  for (const StackRow &row : rows) {
+    if (BLI_uuid_equal(row.stable_id, fresh_layer->marker)) {
+      fresh_row_ordinal = row.ordinal;
+    }
+  }
+  EXPECT_EQ(fresh_row_ordinal, fresh);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, edit_remove_clears_the_row)
@@ -754,14 +892,13 @@ TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_tracks_a_blank_map_becomin
 }
 
 /**
- * 4B.5: a Stack (content) correction and a Stack mask item may each now be a folder with children
- * of their own (phases 3/4). The tree build must not crash on that shape and must not invent rows
- * for the children -- exposing a correction/mask's own subtree in the Outliner is Phase 6 UI work,
- * out of scope here; #append_corrections (outliner_stack_source_paint_layers.cc) still emits one
- * flat row per correction/mask item and never recurses into its #children, so the row set stays
- * exactly the pre-Phase-6 shape: the owner row plus one row per correction/mask item.
+ * Phase 6, goal 4: a Stack (content) correction and a Stack mask item may each be a folder with
+ * children of their own (phases 3/4). #append_corrections (outliner_stack_source_paint_layers.cc)
+ * now recurses into a folder correction/mask item's own #children exactly as it does for a folder
+ * Layer row: its child becomes its own row, nested one level deeper, parented at the
+ * correction/mask row's ordinal.
  */
-TEST_F(OutlinerStackPaintLayersSourceTest, stack_correction_and_mask_with_children_do_not_crash)
+TEST_F(OutlinerStackPaintLayersSourceTest, stack_correction_and_mask_children_become_nested_rows)
 {
   Material *ma = BKE_material_add(bmain, "StackFolderCorrections");
   MaterialPaintLayer *owner = BKE_paint_layers_add(
@@ -786,34 +923,61 @@ TEST_F(OutlinerStackPaintLayersSourceTest, stack_correction_and_mask_with_childr
   Vector<StackRow> rows;
   ASSERT_TRUE(source().rows_build(ctx, {}, ma->id, rows));
 
-  /* The owner row, the effect row and the mask row -- three rows, none for either child. */
-  ASSERT_EQ(rows.size(), 3);
+  /* The owner row, the effect row, the mask row, and now one row each for their children. */
+  ASSERT_EQ(rows.size(), 5);
   int owner_rows = 0;
   int effect_rows = 0;
   int mask_rows = 0;
+  int effect_child_rows = 0;
+  int mask_child_rows = 0;
+  int16_t effect_ordinal = -1;
+  int16_t mask_ordinal = -1;
   for (const StackRow &row : rows) {
-    EXPECT_FALSE(BLI_uuid_equal(row.stable_id, effect_child->marker))
-        << "a Stack correction's child must not become its own Outliner row yet (Phase 6)";
-    EXPECT_FALSE(BLI_uuid_equal(row.stable_id, mask_child->marker))
-        << "a Stack mask item's child must not become its own Outliner row yet (Phase 6)";
     if (BLI_uuid_equal(row.stable_id, owner->marker)) {
       owner_rows++;
     }
     else if (BLI_uuid_equal(row.stable_id, effect->marker)) {
       effect_rows++;
+      effect_ordinal = row.ordinal;
       EXPECT_EQ(row.parent_section_id, "CHANNELS");
+      EXPECT_TRUE(row.can_hold_children);
+      EXPECT_TRUE(row.has_children);
     }
     else if (BLI_uuid_equal(row.stable_id, mask->marker)) {
       mask_rows++;
+      mask_ordinal = row.ordinal;
       EXPECT_EQ(row.parent_section_id, "MASK");
+      EXPECT_TRUE(row.can_hold_children);
+      EXPECT_TRUE(row.has_children);
+    }
+    else if (BLI_uuid_equal(row.stable_id, effect_child->marker)) {
+      effect_child_rows++;
+    }
+    else if (BLI_uuid_equal(row.stable_id, mask_child->marker)) {
+      mask_child_rows++;
     }
   }
   EXPECT_EQ(owner_rows, 1);
   EXPECT_EQ(effect_rows, 1);
   EXPECT_EQ(mask_rows, 1);
+  EXPECT_EQ(effect_child_rows, 1);
+  EXPECT_EQ(mask_child_rows, 1);
 
-  /* The state hash must not crash either, whatever it does or does not fold from the children. */
-  EXPECT_NO_FATAL_FAILURE(source().state_hash(ctx, ma->id));
+  /* Each child is parented at its own correction/mask row, not at the owner or at each other. */
+  for (const StackRow &row : rows) {
+    if (BLI_uuid_equal(row.stable_id, effect_child->marker)) {
+      EXPECT_EQ(row.parent_ordinal, effect_ordinal);
+    }
+    else if (BLI_uuid_equal(row.stable_id, mask_child->marker)) {
+      EXPECT_EQ(row.parent_ordinal, mask_ordinal);
+    }
+  }
+
+  /* An edit inside a correction's own subtree must invalidate the cached rows, exactly as an edit
+   * inside a folder Layer's children already does. */
+  const uint64_t before = source().state_hash(ctx, ma->id);
+  effect_child->opacity = 0.5f;
+  EXPECT_NE(source().state_hash(ctx, ma->id), before);
 }
 
 }  // namespace tests

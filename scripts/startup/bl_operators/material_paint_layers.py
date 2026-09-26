@@ -216,13 +216,21 @@ class MATERIAL_OT_paint_layer_mask_add(_PaintLayerOperator):
         return {'FINISHED'}
 
 
-class MATERIAL_OT_paint_layer_mask_remove(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_mask_remove"
-    bl_label = "Remove Paint Layer Mask"
+class MATERIAL_OT_paint_layer_correction_remove(_PaintLayerOperator):
+    """Remove a correction: an effect or a mask item, addressed by marker.
+
+    One operator for both (the removal itself is the same generic `layers.remove()` either way),
+    named and worded for a correction in general so the tooltip on an Effects-box button does not
+    lie about removing a mask; the Mask box passes a mask item's marker, the Effects box an
+    effect's, same as `paint_layer_correction_select` already does for "make active"."""
+
+    bl_idname = "material.paint_layer_correction_remove"
+    bl_label = "Remove Paint Layer Correction"
 
     item_marker: bpy.props.StringProperty(
-        name="Mask Item",
-        description="UUID marker of the mask item to remove; the first one when unset",
+        name="Correction",
+        description="UUID marker of the effect or mask item to remove; the layer's first mask "
+                    "item when unset",
         options={'SKIP_SAVE'},
     )
 
@@ -233,6 +241,8 @@ class MATERIAL_OT_paint_layer_mask_remove(_PaintLayerOperator):
         layers = context.material.paint_layers
         item = layers.find(self.item_marker) if self.item_marker else None
         if item is None:
+            # Unset only ever means "the layer's own first mask item" (e.g. a keymap shortcut with
+            # no explicit target); an Effects-box button always passes a marker.
             item = layer.mask_stack[0] if len(layer.mask_stack) else None
         if item is None:
             return {'CANCELLED'}
@@ -261,6 +271,38 @@ class MATERIAL_OT_paint_layer_mask_toggle(_PaintLayerOperator):
         if item is None:
             return {'CANCELLED'}
         item.enabled = not item.enabled
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_paint_layer_correction_select(Operator):
+    """Make a correction or mask item the material's active row.
+
+    A plain `layout.prop` write in a panel's `draw()` is against the rules this add-on follows
+    (CLAUDE.md: never change data in draw()), so the Effect/Mask rows in the Layer Material tab
+    call this instead of assigning `paint_layers.active` straight from the UI. Reused by the
+    Effects and Mask boxes alike: an effect and a mask item are addressed by marker the same way.
+    """
+
+    bl_idname = "material.paint_layer_correction_select"
+    bl_label = "Select Paint Layer Row"
+    bl_options = {'UNDO', 'REGISTER'}
+
+    marker: bpy.props.StringProperty(
+        name="Row",
+        description="UUID marker of the correction or mask item to make active",
+        options={'SKIP_SAVE'},
+    )
+
+    @classmethod
+    def poll(cls, context):
+        mat = context.material
+        return mat is not None and mat.is_layered
+
+    def execute(self, context):
+        item = context.material.paint_layers.find(self.marker) if self.marker else None
+        if item is None:
+            return {'CANCELLED'}
+        context.material.paint_layers.active = item
         return {'FINISHED'}
 
 
@@ -327,8 +369,19 @@ class MATERIAL_OT_paint_layer_correction_add(_PaintLayerOperator):
         items=lambda self, context: [
             (item.identifier, item.name, "")
             for item in bpy.types.MaterialPaintLayer.bl_rna.properties["source"].enum_items
-            # A correction only ever paints (Image) or fills (Constant).
-            if item.identifier in ('IMAGE', 'CONSTANT')
+            # A correction reads a Material, a Node Group or a Stack exactly like a Layer row of
+            # the same kind (BKE_paint_layers_correction_add, phase 4); every source but Layer's
+            # own conversion-only distinction applies here too.
+        ],
+    )
+    # Only meaningful when source is Mesh Map; the Mesh Map correction otherwise has no way to
+    # pick its map type at creation (the dedicated mesh_map_add_mask operator sets it the same
+    # way, after the fact, for the mask-only path this operator now covers for both roles).
+    mesh_map_type: bpy.props.EnumProperty(
+        name="Map Type",
+        items=lambda self, context: [
+            (item.identifier, item.name, "")
+            for item in bpy.types.MaterialPaintLayer.bl_rna.properties["mesh_map_type"].enum_items
         ],
     )
     name: bpy.props.StringProperty(name="Name")
@@ -338,7 +391,17 @@ class MATERIAL_OT_paint_layer_correction_add(_PaintLayerOperator):
         if layer is None:
             return {'CANCELLED'}
         _paint_layers_uv_autofill(context)
-        layer.correction_add(role=self.role, source=self.source, name=self.name)
+        correction = layer.correction_add(role=self.role, source=self.source, name=self.name)
+        if correction is None:
+            return {'CANCELLED'}
+        if self.source == 'MESH_MAP':
+            correction.mesh_map_type = self.mesh_map_type
+        # Material and Node Group sources are picked afterward, through the same Source
+        # Material / Custom Group panels a Layer row uses (they key off the active row, whatever
+        # its role, not just the active Layer). Becoming the active row is what makes those panels
+        # (and the mask_channel field) show up for it at all, mirroring what paint_layer_add does
+        # for a fresh Layer row.
+        context.material.paint_layers.active = correction
         return {'FINISHED'}
 
 
@@ -821,8 +884,9 @@ classes = (
     MATERIAL_OT_paint_layer_ungroup,
     MATERIAL_OT_paint_layer_move,
     MATERIAL_OT_paint_layer_mask_add,
-    MATERIAL_OT_paint_layer_mask_remove,
+    MATERIAL_OT_paint_layer_correction_remove,
     MATERIAL_OT_paint_layer_mask_toggle,
+    MATERIAL_OT_paint_layer_correction_select,
     MATERIAL_OT_paint_layer_channel_add,
     MATERIAL_OT_paint_layer_channel_remove,
     MATERIAL_OT_paint_layer_correction_add,

@@ -29,11 +29,15 @@
  * apart on what a channel value *means*.
  */
 
+#include <algorithm>
+
+#include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_utildefines.h"
 
 #include "DNA_scene_types.h"
 
+#include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 
 namespace blender::ed::sculpt_paint::material {
@@ -161,6 +165,74 @@ inline float apply_scalar_blend(const float current,
   float4 result;
   IMB_blend_color_float(result, current_color, mix_color, blend_mode);
   return result.x;
+}
+
+/**
+ * Reoriented normal mapping blend of \a detail over \a base (both tangent-space, components in
+ * [-1, 1]), shared by the shape shader and the paint brushes so the two cannot disagree on what
+ * a normal write means (ТЗ §3.8).
+ *
+ * \param factor: strength of the detail in [0, 1]; 0 returns \a base.
+ */
+inline float3 blend_normal_rnm(const float3 &base, const float3 &detail, const float factor)
+{
+  if (factor <= 0.0f) {
+    return base;
+  }
+  const float3 detail_scaled = float3(0.0f, 0.0f, 1.0f) * (1.0f - factor) + detail * factor;
+  const float3 t = base + float3(0.0f, 0.0f, 1.0f);
+  const float3 u = detail_scaled * float3(-1.0f, -1.0f, 1.0f);
+  const float denom = std::max(t.z, 1e-6f);
+  const float3 r = (t / denom) * math::dot(t, u) - u;
+  const float len = math::length(r);
+  if (len < 1e-9f) {
+    return float3(0.0f, 0.0f, 1.0f);
+  }
+  return r / len;
+}
+
+/**
+ * Express a decal-space normal \a n_d in the texel's tangent space (#t_m, #b_m, #n_m), given the
+ * decal frame's screen axes carried onto the surface (#t_screen, #b_screen) and the surface normal
+ * \a n_m. Returns a unit tangent normal (unencoded).
+ *
+ * This is pure math and lives here (next to #blend_normal_rnm) so the shape blend core does not
+ * have to reach up into the mesh layer for it; the brush's brush-mapped normal source and the
+ * shape tools' screen-space shape normal share it.
+ */
+inline float3 remap_decal_normal_to_tangent(const float3 &n_d,
+                                            const float3 &t_screen,
+                                            const float3 &b_screen,
+                                            const float3 &n_m,
+                                            const float3 &t_m,
+                                            const float3 &b_m)
+{
+  const float3 n_local = n_d.x * t_screen + n_d.y * b_screen + n_d.z * n_m;
+  float3 n_t(math::dot(n_local, t_m), math::dot(n_local, b_m), math::dot(n_local, n_m));
+  const float n_t_len = math::length(n_t);
+  n_t = n_t_len > 1e-6f ? n_t / n_t_len : float3(0.0f, 0.0f, 1.0f);
+  return n_t;
+}
+
+/**
+ * Encode a scene-linear Canvas color for an image buffer: data buffers and normal maps keep
+ * their values, everything else converts to the buffer's colorspace. Shared by the 2D paint
+ * paths so brush strokes and shape bakes encode identically.
+ */
+inline void encode_canvas_rgb(const bool is_data,
+                              const bool is_srgb,
+                              const ColorSpace *byte_colorspace,
+                              float rgb[3])
+{
+  if (is_data) {
+    return;
+  }
+  if (is_srgb) {
+    IMB_colormanagement_scene_linear_to_srgb_v3(rgb, rgb);
+  }
+  else if (byte_colorspace) {
+    IMB_colormanagement_scene_linear_to_colorspace_v3(rgb, byte_colorspace);
+  }
 }
 
 }  // namespace blender::ed::sculpt_paint::material

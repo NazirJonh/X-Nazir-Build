@@ -1,0 +1,979 @@
+/* SPDX-FileCopyrightText: 2026 Nazir Galimov
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+/** \file
+ * \ingroup edsculpt
+ *
+ * Pixel mode of the Image Editor shape drawing tools ("Paint Shape").
+ *
+ * One modal operator draws any of the supported shapes directly into the texture in a single
+ * action (parameters are set up front, the release of the drag bakes everything in one undo
+ * step):
+ *
+ * - Line / Rectangle / Ellipse are drag tools. Shift snaps (8-direction line, square, circle),
+ *   Alt grows the shape from its center, holding Space moves the in-progress shape, and a plain
+ *   click (rectangle / ellipse) draws the default size from the tool settings at the click
+ *   point.
+ * - Polyline / Curve Patch reuse the shared Bézier input module, exactly like Select Curve:
+ *   click to place points, drag to shape their handles, click the first point or double-click
+ *   to close, Enter to confirm (Polyline may stay open).
+ *
+ * The in-progress outline is drawn as an animated dashed overlay while the drag or the input
+ * runs. `exec` replays the stored shape and style properties (Python and Redo/F9: the redo
+ * panel exposes colors, width and opacities on top of the stored style); the profile and ramp
+ * tables and the PBR channel values follow the current settings, and Vector mode always bakes
+ * as pixels.
+ */
+
+#include <algorithm>
+#include <cmath>
+#include <optional>
+
+#include "MEM_guardedalloc.h"
+
+#include "BLI_math_base.hh"
+#include "BLI_math_vector.hh"
+#include "BLI_math_vector_types.hh"
+#include "BLI_rect.h"
+#include "BLI_span.hh"
+#include "BLI_utildefines.h"
+#include "BLI_vector.hh"
+
+#include "DNA_image_types.h"
+#include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
+#include "DNA_windowmanager_types.h"
+
+#include "BKE_brush.hh"
+#include "BKE_context.hh"
+#include "BKE_image.hh"
+#include "BKE_main.hh"
+#include "BKE_paint.hh"
+#include "BKE_report.hh"
+#include "BKE_screen.hh"
+
+#include "BLT_translation.hh"
+
+#include "ED_paint.hh"
+#include "ED_screen.hh"
+#include "ED_space_api.hh"
+
+#include "RNA_access.hh"
+#include "RNA_define.hh"
+#include "RNA_prototypes.hh"
+
+#include "UI_resources.hh"
+#include "UI_view2d.hh"
+
+#include "WM_api.hh"
+#include "WM_keymap.hh"
+#include "WM_types.hh"
+
+#include "../paint_bezier_input.hh"
+#include "../paint_intern.hh"
+#include "../paint_shape_create.hh"
+#include "../paint_shape_draw.hh"
+#include "../paint_shape_op_props.hh"
+#include "paint_image_select_intern.hh"
+#include "paint_image_shape.hh"
+#include "paint_image_shape_composite.hh"
+#include "../paint_shape_raster.hh"
+#include "paint_image_shape_vector_intern.hh"
+
+namespace blender {
+
+namespace bezier_input = ed::sculpt_paint::bezier_input;
+namespace shape = ed::sculpt_paint::shape;
+
+/* -------------------------------------------------------------------- */
+/** \name Constants
+ * \{ */
+
+/** Flattening error (canvas pixels) of the drag preview outline. */
+constexpr float SHAPE_PREVIEW_ERROR_PX = 2.0f;
+
+/**
+ * Undo-step name of the Pixel bake. It must stay equal to #PAINT_OT_image_shape_draw's
+ * `ot->name`: the operator deliberately carries no OPTYPE_UNDO, so the compositor's own image
+ * undo step is the only step of the bake, and the redo machinery finds it by the operator name.
+ */
+constexpr char SHAPE_UNDO_NAME[] = "Paint Shape";
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Coordinate helpers
+ * \{ */
+
+static float2 image_shape_event_uv(const ARegion *region, const wmEvent *event)
+{
+  float uv[2];
+  ui::view2d_region_to_view(
+      &region->v2d, float(event->mval[0]), float(event->mval[1]), &uv[0], &uv[1]);
+  return float2(uv[0], uv[1]);
+}
+
+/** Shape-space (reference-tile) pixel position of \a event for shapes anchored at \a ref_tile. */
+static float2 image_shape_event_to_px(const ARegion *region,
+                                      const wmEvent *event,
+                                      const int ref_tile,
+                                      const int2 ref_tile_size)
+{
+  const float2 uv = image_shape_event_uv(region, event);
+  return (uv - shape::tile_uv_origin(ref_tile)) * float2(ref_tile_size);
+}
+
+/** Shape-space pixels to Image Editor region pixels, for the overlay. */
+static float2 image_shape_px_to_region(const ARegion *region,
+                                       const shape::CanvasTile &tile,
+                                       const float2 &px)
+{
+  const float2 uv = shape::shape_px_to_uv(tile, px);
+  float2 region_px;
+  ui::view2d_view_to_region_fl(&region->v2d, uv.x, uv.y, &region_px.x, &region_px.y);
+  return region_px;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Bézier input mapping (UV space, like Select Curve)
+ * \{ */
+
+static float2 image_shape_input_to_region(const ARegion &region, const float2 &uv)
+{
+  float region_px[2];
+  ui::view2d_view_to_region_fl(&region.v2d, uv.x, uv.y, &region_px[0], &region_px[1]);
+  return float2(region_px[0], region_px[1]);
+}
+
+static float2 image_shape_input_event_to_user(const ARegion &region, const wmEvent &event)
+{
+  float uv[2];
+  ui::view2d_region_to_view(
+      &region.v2d, float(event.mval[0]), float(event.mval[1]), &uv[0], &uv[1]);
+  return float2(uv[0], uv[1]);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Operator state
+ * \{ */
+
+struct ImageShapeState {
+  SpaceImage *owner_sima = nullptr;
+  ARegionType *owner_region_type = nullptr;
+  void *draw_handle = nullptr;
+
+  /** Reference tile (and its pixel size) the shape coordinates refer to. */
+  int ref_tile = 1001;
+  int2 ref_tile_size = int2(1024);
+  shape::CanvasTile canvas_tile() const
+  {
+    return {ref_tile, ref_tile_size};
+  }
+
+  /** The shared creation machine (drag + Bézier input); unset while editing a Vector session. */
+  std::optional<shape::ShapeCreateGesture> create;
+
+  /** Editing an already-live Vector session (move drag) instead of creating a shape. The
+   * modal outlives every gesture and only ends with the session (commit, cancel, takeover), so
+   * the session hotkeys stay available between drags; see #image_shape_draw_modal. */
+  bool vector_edit = false;
+  /** The shared gesture state machine; the modal forwards `vector_edit` events to it. */
+  shape::ShapeVectorEditor vector_editor;
+};
+
+static void image_shape_state_free(bContext *C, wmOperator *op)
+{
+  ImageShapeState *state = static_cast<ImageShapeState *>(op->customdata);
+  if (state == nullptr) {
+    return;
+  }
+  if (state->vector_edit) {
+    if (shape::ImageShapeVectorState *session = shape::image_shape_vector_state_get(
+            state->owner_sima))
+    {
+      shape::image_shape_vector_modal_set_active(session, false);
+    }
+  }
+  if (state->draw_handle && state->owner_region_type) {
+    ED_region_draw_cb_exit(state->owner_region_type, state->draw_handle);
+    state->draw_handle = nullptr;
+  }
+  MEM_delete(state);
+  op->customdata = nullptr;
+  if (wmWindow *win = CTX_wm_window(C)) {
+    WM_cursor_modal_restore(win);
+  }
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Drawing
+ * \{ */
+
+static void image_shape_draw_drag(const bContext *C, ARegion *region, void *arg)
+{
+  ImageShapeState *state = static_cast<ImageShapeState *>(arg);
+  if (state == nullptr || !state->create || !state->create->has_shape()) {
+    return;
+  }
+  if (CTX_wm_space_image(C) != state->owner_sima) {
+    return;
+  }
+  /* The invoking press builds a degenerate shape at the press point; wait for the first real move
+   * so no spurious outline (a dash from the region corner) flashes before the drag starts. */
+  if (!state->create->moved()) {
+    return;
+  }
+
+  const shape::PaintShape &shape = state->create->shape();
+  const shape::CanvasTile tile = state->canvas_tile();
+  /* While F adjusts the width, the stroke edges are drawn too, so the band is visible. */
+  const bool show_width = state->create->value_drag_active() &&
+                          state->create->value_drag_is_width();
+  shape::shape_draw_creation_preview(
+      shape,
+      SHAPE_PREVIEW_ERROR_PX,
+      [&](const float2 &p) { return image_shape_px_to_region(region, tile, p); },
+      show_width ? &state->create->style() : nullptr);
+}
+
+static void image_shape_draw_input(const bContext *C, ARegion *region, void *arg)
+{
+  ImageShapeState *state = static_cast<ImageShapeState *>(arg);
+  if (state == nullptr || !state->create) {
+    return;
+  }
+  if (CTX_wm_space_image(C) != state->owner_sima) {
+    return;
+  }
+  const bezier_input::Mapping mapping = {image_shape_input_to_region,
+                                        image_shape_input_event_to_user};
+  state->create->input().draw(*region, mapping, bezier_input::DrawStyle());
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Status bar
+ * \{ */
+
+static void image_shape_status_set_edit(bContext *C, const wmOperatorType *ot)
+{
+  WorkspaceStatus status(C);
+  status.item(IFACE_("Move"), ICON_MOUSE_LMB);
+  status.item(IFACE_("Cut Contour"), ICON_EVENT_CTRL, ICON_MOUSE_RMB);
+  if (ot != nullptr) {
+    status.opmodal(IFACE_("Grab"), ot, PAINT_SHAPE_MODAL_MOVE);
+    status.opmodal(IFACE_("Rotate"), ot, PAINT_SHAPE_MODAL_ROTATE);
+    status.opmodal(IFACE_("Scale"), ot, PAINT_SHAPE_MODAL_SCALE);
+    status.opmodal(IFACE_("Stroke Width"), ot, PAINT_SHAPE_MODAL_STROKE_WIDTH);
+    status.opmodal(IFACE_("Strength"), ot, PAINT_SHAPE_MODAL_STROKE_OPACITY);
+    status.opmodal(IFACE_("Extrude"), ot, PAINT_SHAPE_MODAL_EXTRUDE);
+    status.opmodal(IFACE_("Next Shape"), ot, PAINT_SHAPE_MODAL_SELECT_NEXT);
+    status.opmodal(IFACE_("Undo"), ot, PAINT_SHAPE_MODAL_UNDO);
+    status.opmodal(IFACE_("Redo"), ot, PAINT_SHAPE_MODAL_REDO);
+    status.item(IFACE_("Reset Origin"), ICON_EVENT_O);
+  }
+  status.item(IFACE_("Apply"), ICON_EVENT_RETURN);
+  status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
+}
+
+/** Status of an in-flight session gesture: confirm/cancel plus the X/Y axis locks for the move
+ * and scale gestures. */
+static void image_shape_status_set_gesture(bContext *C,
+                                           const wmOperatorType *ot,
+                                           const shape::ShapeVectorEditor::Gesture gesture,
+                                           const shape::ShapeAxisLock lock)
+{
+  WorkspaceStatus status(C);
+  if (ot != nullptr) {
+    status.opmodal(IFACE_("Confirm"), ot, PAINT_SHAPE_MODAL_CONFIRM);
+    status.opmodal(IFACE_("Cancel"), ot, PAINT_SHAPE_MODAL_CANCEL);
+  }
+  using Gesture = shape::ShapeVectorEditor::Gesture;
+  if (ELEM(gesture, Gesture::MovePick, Gesture::MoveActive, Gesture::Scale)) {
+    status.item_bool(IFACE_("Lock X"),
+                     lock == shape::ShapeAxisLock::X,
+                     ICON_EVENT_X);
+    status.item_bool(IFACE_("Lock Y"),
+                     lock == shape::ShapeAxisLock::Y,
+                     ICON_EVENT_Y);
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Vector session gestures
+ * \{ */
+
+/** Grab tolerance in session pixels, scaled by the interface scale. */
+static float image_shape_hit_tolerance_px()
+{
+  return shape::SHAPE_HIT_TOLERANCE_PX * UI_SCALE_FAC;
+}
+
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Commit
+ * \{ */
+
+/** Bake the current shape and finish the operator. */
+static wmOperatorStatus image_shape_apply(bContext *C, wmOperator *op, ImageShapeState *state)
+{
+  shape::ShapeCreateGesture &create = *state->create;
+  shape::PaintShape shape = create.has_shape() ? create.shape() : create.shape_from_input();
+
+  /* The Bézier input runs in UV space; the shape converts into reference-tile pixels here. */
+  if (create.use_input()) {
+    const float2 size = float2(state->ref_tile_size);
+    const float2 origin = shape::tile_uv_origin(state->ref_tile);
+    for (shape::ShapeSpline &spline : shape.splines) {
+      for (shape::ShapePoint &point : spline.points) {
+        point.co = (point.co - origin) * size;
+        point.handle_left = (point.handle_left - origin) * size;
+        point.handle_right = (point.handle_right - origin) * size;
+      }
+    }
+  }
+  if (shape.is_empty()) {
+    image_shape_state_free(C, op);
+    return OPERATOR_CANCELLED;
+  }
+
+  shape::shape_to_op_props(op, shape);
+  /* Read before the state is freed below. */
+  const shape::CanvasTile tile = state->canvas_tile();
+  shape::canvas_tile_to_op_props(op, tile);
+  const shape::ShapeStyle style = create.style();
+  shape::style_to_op_props(op, style);
+  image_shape_state_free(C, op);
+
+  /* Vector mode: instead of baking, open the floating editing session with the shape. The
+   * operator ends CANCELLED: vector changes are not repeatable and the commit is its own undo
+   * step, so this operator must not become the redo anchor here (see the flag comment in
+   * #PAINT_OT_image_shape_draw). */
+  if (style.draw_mode == PAINT_SHAPE_DRAW_VECTOR) {
+    if (SpaceImage *sima = CTX_wm_space_image(C)) {
+      shape::image_shape_vector_session_begin(
+          C, sima, std::move(shape), tile, style);
+    }
+    return OPERATOR_CANCELLED;
+  }
+
+  const Vector<shape::PaintShape> shapes = {shape};
+  if (shape::shape_bake(C, shapes, tile, style, true, SHAPE_UNDO_NAME)) {
+    return OPERATOR_FINISHED;
+  }
+  /* Material mode with no writable map: say why instead of silently doing nothing. */
+  if (const char *reason = shape::shape_targets_refusal_message(C, CTX_data_active_object(C))) {
+    BKE_report(op->reports, RPT_WARNING, reason);
+  }
+  return OPERATOR_CANCELLED;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Operator callbacks
+ * \{ */
+
+static bool image_shape_draw_poll(bContext *C)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (!sima) {
+    return false;
+  }
+  /* A live Vector shape session in this editor is re-invoked as a move drag, so it must pass
+   * the poll even though the shared selection poll rejects anything floating. */
+  const bool session_is_mine = shape::image_shape_vector_is_floating_in_space(sima);
+  if (!session_is_mine) {
+    /* Mode, editability, region and "another tool is floating" checks come from the shared
+     * selection poll: the same constraints apply to drawing shapes. */
+    if (!image_paint_selection_poll(C)) {
+      return false;
+    }
+  }
+  return (sima->image != nullptr);
+}
+
+static bool image_shape_tile_size_get(Image *image, const int tile_number, int2 &r_size)
+{
+  ImageUser iuser{};
+  iuser.tile = tile_number;
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, &lock);
+  if (!ibuf) {
+    return false;
+  }
+  r_size = int2(ibuf->x, ibuf->y);
+  BKE_image_release_ibuf(image, ibuf, lock);
+  return r_size.x > 0 && r_size.y > 0;
+}
+
+static wmOperatorStatus image_shape_draw_invoke(bContext *C,
+                                                wmOperator *op,
+                                                const wmEvent *event)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  ARegion *region = CTX_wm_region(C);
+  Scene *scene = CTX_data_scene(C);
+  if (!sima || !sima->image || !region || !scene || !scene->toolsettings) {
+    return OPERATOR_CANCELLED;
+  }
+
+  auto *state = MEM_new<ImageShapeState>(__func__);
+  state->owner_sima = sima;
+  shape::ShapeStyle style = shape::style_from_settings(
+      BKE_paint_shape_settings_get(*scene->toolsettings));
+  shape::style_brush_values_from_brush(scene->toolsettings->imapaint.paint, style);
+
+  /* A live Vector session in this editor: this invocation becomes a move drag on it. The
+   * invoking press already is the drag press; a press outside the shape confirms the session
+   * (the shape is baked, the operator ends, and the next press starts a new shape). */
+  if (style.draw_mode == PAINT_SHAPE_DRAW_VECTOR) {
+    shape::ImageShapeVectorState *session = shape::image_shape_vector_state_get(sima);
+    if (session != nullptr) {
+      if (shape::image_shape_vector_modal_active(session)) {
+        /* The live modal already drives this session (a search-menu invoke while it runs):
+         * opening a second one would starve it and double every gesture. */
+        MEM_delete(state);
+        return OPERATOR_CANCELLED;
+      }
+      std::unique_ptr<shape::VectorEditHost> host = shape::image_shape_vector_host_create(
+          *C, *session, image_shape_hit_tolerance_px());
+      const float2 press_px = image_shape_event_to_px(
+          region, event, host->ref_tile(), host->ref_tile_size());
+
+      if (!state->vector_editor.start_move_pick(C, press_px, *host)) {
+        /* A press outside the shape confirms the session. The commit runs through the apply
+         * operator rather than the direct session function, so the apply op registers and a later
+         * F9 resolves to it instead of an older Pixel bake (see the flag comment on
+         * #PAINT_OT_image_shape_vector_apply). */
+        MEM_delete(state);
+        WM_operator_name_call(C,
+                              "PAINT_OT_image_shape_vector_apply",
+                              wm::OpCallContext::InvokeDefault,
+                              nullptr,
+                              event);
+        return OPERATOR_CANCELLED;
+      }
+      state->vector_edit = true;
+      shape::image_shape_vector_modal_set_active(session, true);
+      op->customdata = state;
+      WM_event_add_modal_handler(C, op);
+      WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
+      image_shape_status_set_edit(C, op->type);
+      ED_region_tag_redraw(region);
+      return OPERATOR_RUNNING_MODAL;
+    }
+  }
+
+  /* The tool's type property overrides the settings; -1 means "use the settings' type". */
+  int type = RNA_enum_get(op->ptr, "type");
+  if (type < 0) {
+    type = BKE_paint_shape_settings_get(*scene->toolsettings).type;
+  }
+
+  /* The one map-creation call of the draw: the PBR channel images are created here instead of
+   * inside the bake, which runs outside any undo step that would record the creation (the
+   * brush's stroke start resolves its targets the same ensure-free way). */
+  if (ToolSettings *toolsettings = scene->toolsettings) {
+    shape::composite_targets_ensure_writable(C,
+                                             CTX_data_active_object(C),
+                                             toolsettings->imapaint.paint,
+                                             BKE_paint_shape_settings_get(*toolsettings));
+  }
+
+  const float2 uv = image_shape_event_uv(region, event);
+  /* UDIM columns wrap every 10 tiles; clamp so UV x >= 10 stays on the last column. */
+  const int tile_column = std::clamp(int(math::floor(uv.x)), 0, 9);
+  const int tile_row = std::max(int(math::floor(uv.y)), 0);
+  state->ref_tile = 1001 + 10 * tile_row + tile_column;
+  if (!image_shape_tile_size_get(sima->image, state->ref_tile, state->ref_tile_size)) {
+    /* Fall back to the primary tile. */
+    state->ref_tile = 1001;
+    if (!image_shape_tile_size_get(sima->image, state->ref_tile, state->ref_tile_size)) {
+      MEM_delete(state);
+      return OPERATOR_CANCELLED;
+    }
+  }
+
+  state->create.emplace(ePaintShapeType(type),
+                        style,
+                        bezier_input::Mapping{image_shape_input_to_region,
+                                              image_shape_input_event_to_user});
+  const float2 start_uv = image_shape_event_uv(region, event);
+  const float2 screen_start = float2(event->mval[0], event->mval[1]);
+  float screen_x_uv[2], screen_y_uv[2];
+  ui::view2d_region_to_view(&region->v2d,
+                            screen_start.x + 1.0f,
+                            screen_start.y,
+                            &screen_x_uv[0],
+                            &screen_x_uv[1]);
+  ui::view2d_region_to_view(&region->v2d,
+                            screen_start.x,
+                            screen_start.y + 1.0f,
+                            &screen_y_uv[0],
+                            &screen_y_uv[1]);
+  const float2 drag_axis_x = (float2(screen_x_uv[0], screen_x_uv[1]) - start_uv) *
+                             float2(state->ref_tile_size);
+  const float2 drag_axis_y = (float2(screen_y_uv[0], screen_y_uv[1]) - start_uv) *
+                             float2(state->ref_tile_size);
+  state->create->set_drag_axes(drag_axis_x, drag_axis_y);
+  state->create->begin(*region,
+                       *event,
+                       image_shape_event_to_px(
+                           region, event, state->ref_tile, state->ref_tile_size),
+                       (event->type == LEFTMOUSE) && (event->val == KM_PRESS));
+
+  state->owner_region_type = region->runtime->type;
+  if (state->create->use_input()) {
+    state->draw_handle = ED_region_draw_cb_activate(
+        state->owner_region_type, image_shape_draw_input, state, REGION_DRAW_POST_PIXEL);
+    shape::shape_status_set_input(C);
+  }
+  else {
+    state->draw_handle = ED_region_draw_cb_activate(
+        state->owner_region_type, image_shape_draw_drag, state, REGION_DRAW_POST_PIXEL);
+    shape::shape_status_set_creation(C, state->create->type());
+  }
+
+  op->customdata = state;
+  WM_event_add_modal_handler(C, op);
+  WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_CROSS);
+  ED_region_tag_redraw(region);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus image_shape_draw_modal(bContext *C,
+                                               wmOperator *op,
+                                               const wmEvent *event)
+{
+  ImageShapeState *state = static_cast<ImageShapeState *>(op->customdata);
+  SpaceImage *sima = CTX_wm_space_image(C);
+  ARegion *region = CTX_wm_region(C);
+  if (state == nullptr || !sima || !region) {
+    image_shape_state_free(C, op);
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Vector session edit. The modal outlives every gesture and only ends with the session
+   * (commit, cancel, takeover), so the session hotkeys stay available between drags. Unknown
+   * events pass through (navigation and panels keep working); only the modal-map actions and
+   * the gestures consume. */
+  if (state->vector_edit) {
+    shape::ImageShapeVectorState *session = shape::image_shape_vector_state_get(sima);
+    if (!session) {
+      /* The session ended underneath (takeover, editor teardown). The commit (if any) was the
+       * takeover's own undo step: this operator must not become the redo anchor. */
+      image_shape_state_free(C, op);
+      return OPERATOR_CANCELLED;
+    }
+    /* Mouse events only count in the owning editor's main region: a press in the header or
+     * another editor must reach the UI underneath instead of confirming the shape. */
+    const bool in_owner_region = (sima == state->owner_sima &&
+                                  region->regiontype == RGN_TYPE_WINDOW);
+    std::unique_ptr<shape::VectorEditHost> host = shape::image_shape_vector_host_create(
+        *C, *session, image_shape_hit_tolerance_px());
+    const float2 event_px =
+        in_owner_region ? image_shape_event_to_px(
+                              region, event, host->ref_tile(), host->ref_tile_size()) :
+                          state->vector_editor.cursor_px();
+
+    /* The gesture machine lives in #ShapeVectorEditor; the host talks to the session and its
+     * backend directly. Operator status / undo / the apply-operator indirection stay here,
+     * unchanged. */
+
+    /* Cancel the in-flight gesture and step the session stack; empty stack passes through so
+     * the global undo fires (and settles the session through its own hook). */
+    auto session_undo = [&]() -> wmOperatorStatus {
+      const bool stepped = state->vector_editor.undo(C, *host);
+      if (wmWindow *win = CTX_wm_window(C)) {
+        WM_cursor_modal_restore(win);
+      }
+      if (stepped) {
+        ED_region_tag_redraw(region);
+        image_shape_status_set_edit(C, op->type);
+        return OPERATOR_RUNNING_MODAL;
+      }
+      /* Nothing left in the session history: discard the whole session and consume the key, so
+       * the global undo does not also fire (it would cancel the session and pop the user's
+       * previous action in one step). */
+      image_shape_state_free(C, op);
+      shape::image_shape_vector_session_cancel(C, sima);
+      return OPERATOR_CANCELLED;
+    };
+    auto session_redo = [&]() -> wmOperatorStatus {
+      const bool stepped = state->vector_editor.redo(C, *host);
+      if (wmWindow *win = CTX_wm_window(C)) {
+        WM_cursor_modal_restore(win);
+      }
+      if (stepped) {
+        ED_region_tag_redraw(region);
+        image_shape_status_set_edit(C, op->type);
+        return OPERATOR_RUNNING_MODAL;
+      }
+      return OPERATOR_PASS_THROUGH;
+    };
+
+    if (event->type == EVT_MODAL_MAP &&
+        (event->val == PAINT_SHAPE_MODAL_UNDO || event->val == PAINT_SHAPE_MODAL_REDO))
+    {
+      return (event->val == PAINT_SHAPE_MODAL_REDO) ? session_redo() : session_undo();
+    }
+    /* Raw Ctrl/Cmd+Z when the modal map left it unconverted: swallow while the session stack can
+     * step; pass through on an empty stack. Shift selects redo; Ctrl+Y redoes too. */
+    if (event->val == KM_PRESS && (event->modifier & (KM_CTRL | KM_OSKEY)) != 0 &&
+        ELEM(event->type, EVT_ZKEY, EVT_YKEY))
+    {
+      if (event->type == EVT_YKEY || (event->modifier & KM_SHIFT) != 0) {
+        return session_redo();
+      }
+      return session_undo();
+    }
+
+    /* X swaps the shape's own Stroke / Fill colors; the axis lock only takes X during a
+     * move/scale gesture. Refresh the preview so the edited shape recolors immediately. */
+    if (event->type == EVT_MODAL_MAP && event->val == PAINT_SHAPE_MODAL_AXIS_X &&
+        !ELEM(state->vector_editor.gesture(),
+              shape::ShapeVectorEditor::Gesture::MovePick,
+              shape::ShapeVectorEditor::Gesture::MoveActive,
+              shape::ShapeVectorEditor::Gesture::Scale))
+    {
+      WM_operator_name_call(
+          C, "PAINT_OT_shape_colors_swap", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+      host->restamp(C);
+      ED_region_tag_redraw(region);
+      return OPERATOR_RUNNING_MODAL;
+    }
+
+    /* A press on the active Rect/Ellipse cage belongs to the transform gizmo (handle drags), not
+     * to the modal's own move/point gestures. Passing the event through lets the gizmo's own modal
+     * own it, exactly like the selection transform. Presses outside the cage reach the gesture
+     * machine below (contour move, click-outside confirm). */
+    if (event->type == LEFTMOUSE && event->val == KM_PRESS && in_owner_region &&
+        state->vector_editor.gesture() == shape::ShapeVectorEditor::Gesture::None &&
+        ED_image_shape_transform_gizmo_hit(C, event->mval))
+    {
+      return OPERATOR_PASS_THROUGH;
+    }
+
+    switch (state->vector_editor.handle_event(C, *event, event_px, in_owner_region, *host)) {
+      case shape::ShapeVectorEditor::Status::Handled: {
+        if (state->vector_editor.gesture() == shape::ShapeVectorEditor::Gesture::None) {
+          if (wmWindow *win = CTX_wm_window(C)) {
+            WM_cursor_modal_restore(win);
+          }
+          image_shape_status_set_edit(C, op->type);
+        }
+        else {
+          if (wmWindow *win = CTX_wm_window(C)) {
+            WM_cursor_modal_set(win, WM_CURSOR_NSEW_SCROLL);
+          }
+          image_shape_status_set_gesture(
+              C, op->type, state->vector_editor.gesture(), state->vector_editor.axis_lock());
+        }
+        ED_region_tag_redraw(region);
+        return OPERATOR_RUNNING_MODAL;
+      }
+      case shape::ShapeVectorEditor::Status::Unhandled:
+        return OPERATOR_PASS_THROUGH;
+      case shape::ShapeVectorEditor::Status::Finished:
+        /* Through the apply operator, so the commit registers and a later F9 resolves to it
+         * instead of an older Pixel bake (see the flag comment on
+         * #PAINT_OT_image_shape_vector_apply). This operator itself ends CANCELLED: vector
+         * changes are not repeatable. */
+        image_shape_state_free(C, op);
+        WM_operator_name_call(
+            C, "PAINT_OT_image_shape_vector_apply", wm::OpCallContext::InvokeDefault, nullptr, event);
+        return OPERATOR_CANCELLED;
+      case shape::ShapeVectorEditor::Status::Cancelled:
+        image_shape_state_free(C, op);
+        shape::image_shape_vector_session_cancel(C, sima);
+        /* A cancel records nothing: no undo step to anchor a redo on. */
+        return OPERATOR_CANCELLED;
+    }
+    return OPERATOR_RUNNING_MODAL;
+  }
+
+  shape::ShapeCreateGesture &create = *state->create;
+
+  /* Pixel F / Shift+F: adjust the stroke width / the brush strength (the shape's overall
+   * opacity), like the Vector session and the brush radial control. Any other modal action ends
+   * an in-flight value drag. */
+  Scene *scene = CTX_data_scene(C);
+  if (event->type == EVT_MODAL_MAP && scene && scene->toolsettings) {
+    if (ELEM(event->val,
+             PAINT_SHAPE_MODAL_STROKE_WIDTH,
+             PAINT_SHAPE_MODAL_STROKE_OPACITY))
+    {
+      const bool is_width = (event->val == PAINT_SHAPE_MODAL_STROKE_WIDTH);
+      Paint &paint = scene->toolsettings->imapaint.paint;
+      float start = create.style().stroke_width;
+      if (!is_width) {
+        if (Brush *brush = BKE_paint_brush(&paint)) {
+          start = BKE_brush_alpha_get(&paint, brush);
+        }
+      }
+      create.begin_value_drag(is_width, int2(event->mval[0], event->mval[1]), start);
+      return OPERATOR_RUNNING_MODAL;
+    }
+    if (event->val == PAINT_SHAPE_MODAL_AXIS_X) {
+      /* X swaps the shape's own Stroke / Fill colors; rebuild the style so the in-progress shape
+       * uses the new pair. */
+      WM_operator_name_call(
+          C, "PAINT_OT_shape_colors_swap", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+      shape::ShapeStyle style = shape::style_from_settings(
+          BKE_paint_shape_settings_get(*scene->toolsettings));
+      shape::style_brush_values_from_brush(scene->toolsettings->imapaint.paint, style);
+      create.set_style(style);
+      ED_region_tag_redraw(region);
+      return OPERATOR_RUNNING_MODAL;
+    }
+    create.end_value_drag();
+  }
+  if (create.value_drag_active()) {
+    if (event->type == EVT_FKEY && event->val == KM_RELEASE) {
+      create.end_value_drag();
+      return OPERATOR_RUNNING_MODAL;
+    }
+    if (ELEM(event->type, MOUSEMOVE, INBETWEEN_MOUSEMOVE) && scene && scene->toolsettings) {
+      const float value = create.update_value_drag(int2(event->mval[0], event->mval[1]));
+      if (create.value_drag_is_width()) {
+        BKE_paint_shape_settings_get(*scene->toolsettings).stroke_width = value;
+      }
+      else {
+        /* The opacity itself is derived from the brush strength in one place
+         * (#style_brush_values_from_brush); the drag only writes the strength. */
+        Paint &paint = scene->toolsettings->imapaint.paint;
+        if (Brush *brush = BKE_paint_brush(&paint)) {
+          BKE_brush_alpha_set(&paint, brush, value);
+        }
+      }
+      WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
+      ED_region_tag_redraw(region);
+      return OPERATOR_RUNNING_MODAL;
+    }
+  }
+
+  const float2 event_px = image_shape_event_to_px(
+      region, event, state->ref_tile, state->ref_tile_size);
+  switch (create.handle_event(*event, event_px, true)) {
+    case shape::ShapeCreateResult::Confirmed:
+      return image_shape_apply(C, op, state);
+    case shape::ShapeCreateResult::Cancelled:
+      image_shape_state_free(C, op);
+      return OPERATOR_CANCELLED;
+    case shape::ShapeCreateResult::Changed:
+      ED_region_tag_redraw(region);
+      return OPERATOR_RUNNING_MODAL;
+    case shape::ShapeCreateResult::None:
+      return OPERATOR_RUNNING_MODAL;
+  }
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static void image_shape_draw_cancel(bContext *C, wmOperator *op)
+{
+  image_shape_state_free(C, op);
+}
+
+static wmOperatorStatus image_shape_draw_exec(bContext *C, wmOperator *op)
+{
+  Scene *scene = CTX_data_scene(C);
+  if (!scene || !scene->toolsettings) {
+    return OPERATOR_CANCELLED;
+  }
+  std::optional<shape::PaintShape> shape = shape::shape_from_op_props(op);
+  if (!shape || shape->is_empty()) {
+    return OPERATOR_CANCELLED;
+  }
+  shape::ShapeStyle style = shape::style_from_settings(
+      BKE_paint_shape_settings_get(*scene->toolsettings));
+  /* Redo (F9) replays the style stored with the operator; a fresh call keeps the settings. */
+  if (!shape::style_from_op_props(op, style)) {
+    shape::style_brush_values_from_brush(scene->toolsettings->imapaint.paint, style);
+  }
+  const Vector<shape::PaintShape> shapes = {*shape};
+  const shape::CanvasTile tile = shape::canvas_tile_from_op_props(op);
+  if (shape::shape_bake(C, shapes, tile, style, true, SHAPE_UNDO_NAME)) {
+    return OPERATOR_FINISHED;
+  }
+  /* Material mode with no writable map: say why instead of silently doing nothing. */
+  if (const char *reason = shape::shape_targets_refusal_message(C, CTX_data_active_object(C))) {
+    BKE_report(op->reports, RPT_WARNING, reason);
+  }
+  return OPERATOR_CANCELLED;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Modal keymap
+ * \{ */
+
+wmKeyMap *paint_shape_modal_keymap(wmKeyConfig *keyconf)
+{
+  static const EnumPropertyItem modal_items[] = {
+      {PAINT_SHAPE_MODAL_CONFIRM, "CONFIRM", 0, "Confirm", ""},
+      {PAINT_SHAPE_MODAL_CANCEL, "CANCEL", 0, "Cancel", ""},
+      {PAINT_SHAPE_MODAL_UNDO, "UNDO", 0, "Undo", ""},
+      {PAINT_SHAPE_MODAL_REDO, "REDO", 0, "Redo", ""},
+      {PAINT_SHAPE_MODAL_MOVE, "MOVE", 0, "Move", ""},
+      {PAINT_SHAPE_MODAL_ROTATE, "ROTATE", 0, "Rotate", ""},
+      {PAINT_SHAPE_MODAL_SCALE, "SCALE", 0, "Scale", ""},
+      {PAINT_SHAPE_MODAL_STROKE_WIDTH, "STROKE_WIDTH", 0, "Stroke Width", ""},
+      {PAINT_SHAPE_MODAL_STROKE_OPACITY, "STROKE_OPACITY", 0, "Stroke Opacity", ""},
+      {PAINT_SHAPE_MODAL_EXTRUDE, "EXTRUDE", 0, "Extrude", ""},
+      {PAINT_SHAPE_MODAL_SELECT_NEXT, "SELECT_NEXT", 0, "Select Next", ""},
+      {PAINT_SHAPE_MODAL_AXIS_X, "AXIS_X", 0, "Axis X", ""},
+      {PAINT_SHAPE_MODAL_AXIS_Y, "AXIS_Y", 0, "Axis Y", ""},
+      /* Reset the active shape's origin to its computed mean (bound to O). */
+      {PAINT_SHAPE_MODAL_ORIGIN_RESET, "ORIGIN_RESET", 0, "Reset Origin", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const char *name = "Image Paint Shape Modal";
+
+  wmKeyMap *keymap = WM_modalkeymap_find(keyconf, name);
+
+  /* Called once per space-type; the map and its items only need to be built the first time. */
+  if (keymap && keymap->modal_items) {
+    return keymap;
+  }
+
+  keymap = WM_modalkeymap_ensure(keyconf, name, modal_items);
+
+  /* No default bindings in C. The working layout comes from the Python key configs
+   * (`km_image_paint_shape_modal_map` in blender_default.py / industry_compatible_data.py),
+   * which also carried every item including ORIGIN_RESET. The C items above only declare the
+   * modal enum so the Python bindings resolve; adding bindings here would duplicate them and
+   * has drifted from Python on modifiers (see O34). */
+
+  WM_modalkeymap_assign(keymap, "PAINT_OT_image_shape_draw");
+  /* The 3D Viewport frontend shares the map (same confirm, cancel and undo items). */
+  WM_modalkeymap_assign(keymap, "SCULPT_OT_paint_shape_draw");
+
+  return keymap;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Shape color swap
+ * \{ */
+
+static wmOperatorStatus shape_colors_swap_exec(bContext *C, wmOperator * /*op*/)
+{
+  Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The live Vector session owns its own settings copy: swapping colors in the owning Image
+   * Editor edits that copy and must not touch the shared global block. */
+  SpaceImage *sima = CTX_wm_space_image(C);
+  PaintShapeSettings *shape_ptr = ED_image_shape_session_settings_get(sima);
+  if (shape_ptr == nullptr && CTX_wm_view3d(C) != nullptr) {
+    /* The Sculpt Mode Vector session owns a settings copy too (the shared block is not what its
+     * preview reads), so a swap from the 3D Viewport must edit that copy. */
+    if (Object *ob = CTX_data_active_object(C)) {
+      shape_ptr = ED_paint_shape_session_settings_get(*ob);
+    }
+  }
+  if (shape_ptr == nullptr) {
+    shape_ptr = &BKE_paint_shape_settings_get(*scene->toolsettings);
+  }
+  PaintShapeSettings &shape = *shape_ptr;
+  for (int i = 0; i < 4; i++) {
+    const float tmp = shape.stroke_color[i];
+    shape.stroke_color[i] = shape.fill_color[i];
+    shape.fill_color[i] = tmp;
+  }
+  /* Refresh the live Vector previews and redraw the headers / editors. */
+  ED_paint_shape_settings_update(CTX_data_main(C), scene, shape_ptr);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
+  WM_main_add_notifier(NC_IMAGE | NA_EDITED, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+static bool shape_colors_swap_poll(bContext *C)
+{
+  const Scene *scene = CTX_data_scene(C);
+  return scene != nullptr && scene->toolsettings != nullptr;
+}
+
+void PAINT_OT_shape_colors_swap(wmOperatorType *ot)
+{
+  ot->name = "Swap Shape Colors";
+  ot->idname = "PAINT_OT_shape_colors_swap";
+  ot->description = "Swap the shape tool's Stroke and Fill colors";
+  ot->exec = shape_colors_swap_exec;
+  ot->poll = shape_colors_swap_poll;
+  /* No OPTYPE_UNDO: the swap writes the live session's own settings copy (or the shared UI
+   * settings), so a memfile step in the paint modes is neither needed nor wanted. */
+  ot->flag = OPTYPE_REGISTER;
+}
+
+/** \} */
+
+void PAINT_OT_image_shape_draw(wmOperatorType *ot)
+{
+  ot->name = "Paint Shape";
+  ot->idname = "PAINT_OT_image_shape_draw";
+  ot->description =
+      "Draw a shape into the texture: drag for line/rectangle/ellipse, click to place points "
+      "for polyline and curve patch; Shift snaps, Alt grows from the center, Space moves";
+
+  ot->invoke = image_shape_draw_invoke;
+  ot->modal = image_shape_draw_modal;
+  ot->exec = image_shape_draw_exec;
+  ot->cancel = image_shape_draw_cancel;
+  ot->poll = image_shape_draw_poll;
+  /* No OPTYPE_UNDO: the bake opens and closes its own image undo step named #SHAPE_UNDO_NAME
+   * inside the compositor. Letting WM push a second step on top would leave F9 popping the empty
+   * WM step and re-baking over the already-baked pixels, and every undo would take two presses
+   * (the convention of the image-undo-pushing operators of this feature, see
+   * #IMAGE_SELECT_GESTURE_OPTYPE_FLAGS in paint_image_select_mask.cc). OPTYPE_REGISTER is kept
+   * for the "Adjust Last Operation" panel; the redo machinery finds the image step by
+   * `ot->name`. */
+  ot->flag = OPTYPE_REGISTER;
+
+  static const EnumPropertyItem type_items[] = {
+      {-1, "DEFAULT", 0, "Default", "Use the type from the tool settings"},
+      {PAINT_SHAPE_LINE, "LINE", 0, "Line", "Straight line"},
+      {PAINT_SHAPE_POLYLINE, "POLYLINE", 0, "Polyline", "Chain of straight segments"},
+      {PAINT_SHAPE_RECT, "RECTANGLE", 0, "Rectangle", "Rectangle with rounded corners"},
+      {PAINT_SHAPE_ELLIPSE, "ELLIPSE", 0, "Ellipse", "Ellipse"},
+      {PAINT_SHAPE_CURVE, "CURVE", 0, "Curve Patch", "Bézier curve patch"},
+      {PAINT_SHAPE_POLYGON, "POLYGON", 0, "Polygon", "Regular polygon"},
+      {PAINT_SHAPE_STAR, "STAR", 0, "Star", "Star polygon"},
+      {PAINT_SHAPE_ARC, "ARC", 0, "Arc", "Elliptical arc"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  PropertyRNA *prop = RNA_def_property(ot->srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, type_items);
+  RNA_def_property_enum_default(prop, -1);
+  RNA_def_property_ui_text(prop, "Type", "Shape to draw");
+  /* Invoke-time selector only: `exec` reads the serialized `shape_type`, so Redo does not need
+   * this one persisted. */
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  shape::shape_op_properties_register(ot);
+  shape::style_op_properties_register(ot);
+}
+
+}  // namespace blender

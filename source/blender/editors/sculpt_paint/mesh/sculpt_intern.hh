@@ -1201,6 +1201,37 @@ bool vertex_is_occluded(const Depsgraph &depsgraph,
                         bool original);
 
 /**
+ * Same test as above, but with an explicit view context and projection matrix instead of the
+ * per-stroke/filter cache. Used by callers that run outside a brush stroke and therefore own no
+ * cache (the shape drawing tools).
+ */
+bool vertex_is_occluded(const Depsgraph &depsgraph,
+                        const Object &object,
+                        const ViewContext &vc,
+                        const float4x4 &projection,
+                        const float3 &position,
+                        bool original);
+
+namespace shape {
+struct ViewProjectorCamera;
+}  // namespace shape
+
+/**
+ * Occlusion test for a frozen projector (the Paint Shape tools): the camera is the object-space
+ * camera saved in a #shape::ViewProjectorSpace instead of a live #ViewContext. Brush strokes use
+ * the overload above. The viewport's clipping region (Alt+B) is not honored here, which is
+ * expected for a frozen projector.
+ */
+bool vertex_is_occluded(const Depsgraph &depsgraph,
+                        const Object &object,
+                        const shape::ViewProjectorCamera &camera,
+                        const float3 &position,
+                        bool original);
+
+/** Register the shape tools' stroke-width paint cursor (once, guarded internally). */
+void ED_paint_shape_cursor_register();
+
+/**
  * Coordinates used for manipulating the base mesh when Grab Active Vertex is enabled.
  */
 Span<float3> vert_positions_for_grab_active_get(const Depsgraph &depsgraph, const Object &object);
@@ -1790,6 +1821,11 @@ void SCULPT_OT_curve_patch_edit(wmOperatorType *ot);
  * to when a tool, brush or workspace change interrupts it -- never invoked by the user directly. */
 void SCULPT_OT_curve_patch_edit_confirm(wmOperatorType *ot);
 
+/* Defined in `paint_shape_vector_3d.cc`. The Apply/Discard/Continue dialog a live Paint Shape
+ * session is handed to when the mode, the workspace or the active object changes -- never invoked
+ * by the user directly. */
+void SCULPT_OT_paint_shape_session_confirm(wmOperatorType *ot);
+
 void SCULPT_OT_curve_patch_handle_type_set(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_delete_point(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_toggle_cyclic(wmOperatorType *ot);
@@ -1864,6 +1900,14 @@ wmKeyMap *modal_keymap(wmKeyConfig *keyconf);
 namespace ed::sculpt_paint::cloth {
 void SCULPT_OT_cloth_filter(wmOperatorType *ot);
 }
+
+namespace ed::sculpt_paint {
+/* sculpt_paint_shape_ops.cc */
+void SCULPT_OT_paint_shape_draw(wmOperatorType *ot);
+/* paint_shape_gizmo_view3d.cc */
+void SCULPT_OT_paint_shape_transform_toggle(wmOperatorType *ot);
+void SCULPT_OT_paint_shape_flush_preview(wmOperatorType *ot);
+}  // namespace ed::sculpt_paint
 
 namespace ed::sculpt_paint::color {
 void SCULPT_OT_color_filter(wmOperatorType *ot);

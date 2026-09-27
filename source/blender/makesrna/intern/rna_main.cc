@@ -26,6 +26,7 @@
 #  include "BKE_global.hh"
 #  include "BKE_main.hh"
 #  include "BKE_mesh.hh"
+#  include "BKE_paint_vector.hh"
 
 namespace blender {
 
@@ -172,6 +173,7 @@ RNA_MAIN_LISTBASE_FUNCS_DEF(movieclips)
 RNA_MAIN_LISTBASE_FUNCS_DEF(nodetrees)
 RNA_MAIN_LISTBASE_FUNCS_DEF(objects)
 RNA_MAIN_LISTBASE_FUNCS_DEF(paintcurves)
+RNA_MAIN_LISTBASE_FUNCS_DEF(paint_vectors)
 RNA_MAIN_LISTBASE_FUNCS_DEF(palettes)
 RNA_MAIN_LISTBASE_FUNCS_DEF(particles)
 RNA_MAIN_LISTBASE_FUNCS_DEF(pointclouds)
@@ -512,6 +514,12 @@ void RNA_def_main(BlenderRNA *brna)
        "Paint Curves",
        "Paint Curves data-blocks",
        RNA_def_main_paintcurves},
+      {"paint_vectors",
+       "PaintVector",
+       "rna_Main_paint_vectors_begin",
+       "Paint Vectors",
+       "Paint Vector data-blocks",
+       RNA_def_main_paint_vectors},
       {"workspaces",
        "WorkSpace",
        "rna_Main_workspaces_begin",

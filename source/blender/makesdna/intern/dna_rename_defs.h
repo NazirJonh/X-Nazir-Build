@@ -43,6 +43,7 @@
 /* NOTE: Keep sorted! */
 
 DNA_STRUCT_RENAME(ActionChannelBag, ActionChannelbag)
+DNA_STRUCT_RENAME(ImagePaintShapeSettings, PaintShapeSettings)
 DNA_STRUCT_RENAME(Lamp, Light)
 DNA_STRUCT_RENAME(NodeImageMultiFile, NodeCompositorFileOutput)
 DNA_STRUCT_RENAME(SeqConnection, StripConnection)

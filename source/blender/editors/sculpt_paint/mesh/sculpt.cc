@@ -124,6 +124,7 @@
 #include "sculpt_face_set.hh"
 #include "sculpt_filter.hh"
 #include "sculpt_hide.hh"
+#include "../paint_shape_space.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_islands.hh"
 #include "sculpt_multi_object.hh"
@@ -11265,25 +11266,19 @@ void fake_neighbors_free(Object &ob)
   pose_fake_neighbors_free(ss);
 }
 
-bool vertex_is_occluded(const Depsgraph &depsgraph,
-                        const Object &object,
-                        const float3 &position,
-                        bool original)
+/** The shared tail of both #vertex_is_occluded overloads: assemble the #RaycastData around
+ * \a ray_normal_in (which points away from the camera) and \a depth, and walk the PBVH. */
+static bool vertex_is_occluded_ray(const Depsgraph &depsgraph,
+                                   const Object &object,
+                                   const float3 &position,
+                                   const float3 &ray_normal_in,
+                                   const float depth,
+                                   const bool original)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
 
-  ViewContext *vc = ss.cache ? ss.cache->vc : &ss.filter_cache->vc;
-
-  const float2 mouse = ED_view3d_project_float_v2_m4(
-      vc->region, position, ss.cache ? ss.cache->projection_mat : ss.filter_cache->viewmat);
-
-  float3 ray_start;
-  float3 ray_end;
-  float3 ray_normal;
-  float depth = raycast_init(vc, mouse, ray_end, ray_start, ray_normal, original);
-
-  ray_normal = ray_normal * -1.0f;
-  ray_start = position + ray_normal * 0.002f;
+  const float3 ray_normal = ray_normal_in * -1.0f;
+  const float3 ray_start = position + ray_normal * 0.002f;
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(const_cast<Object &>(object));
 
@@ -11316,6 +11311,57 @@ bool vertex_is_occluded(const Depsgraph &depsgraph,
       srd.use_original);
 
   return srd.hit;
+}
+
+bool vertex_is_occluded(const Depsgraph &depsgraph,
+                        const Object &object,
+                        const ViewContext &vc,
+                        const float4x4 &projection,
+                        const float3 &position,
+                        bool original)
+{
+  const float2 mouse = ED_view3d_project_float_v2_m4(vc.region, position, projection);
+
+  float3 ray_start;
+  float3 ray_end;
+  float3 ray_normal;
+  const float depth = raycast_init(
+      &const_cast<ViewContext &>(vc), mouse, ray_end, ray_start, ray_normal, original);
+
+  return vertex_is_occluded_ray(depsgraph, object, position, ray_normal, depth, original);
+}
+
+bool vertex_is_occluded(const Depsgraph &depsgraph,
+                        const Object &object,
+                        const shape::ViewProjectorCamera &camera,
+                        const float3 &position,
+                        bool original)
+{
+  float3 ray_normal;
+  float depth;
+  if (camera.is_persp) {
+    /* Away from the camera; the shared tail flips it toward the camera. */
+    ray_normal = math::normalize(position - camera.position_object);
+    depth = math::distance(position, camera.position_object);
+  }
+  else {
+    ray_normal = -camera.view_dir_object;
+    /* Any depth within the frozen clip range reaches the viewer; orthographic rays are parallel. */
+    depth = camera.clip_end;
+  }
+  return vertex_is_occluded_ray(depsgraph, object, position, ray_normal, depth, original);
+}
+
+bool vertex_is_occluded(const Depsgraph &depsgraph,
+                        const Object &object,
+                        const float3 &position,
+                        bool original)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+
+  const ViewContext *vc = ss.cache ? ss.cache->vc : &ss.filter_cache->vc;
+  const float4x4 &projection = ss.cache ? ss.cache->projection_mat : ss.filter_cache->viewmat;
+  return vertex_is_occluded(depsgraph, object, *vc, projection, position, original);
 }
 
 namespace islands {

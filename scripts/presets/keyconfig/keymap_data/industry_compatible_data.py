@@ -3592,6 +3592,39 @@ def km_object_non_modal(params):
 # Modal Maps
 
 
+def km_image_paint_shape_modal_map(_params):
+    items = []
+    keymap = (
+        "Image Paint Shape Modal",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW', "modal": True},
+        {"items": items},
+    )
+
+    items.extend([
+        ("CONFIRM", {"type": 'RET', "value": 'PRESS', "any": True}, None),
+        ("CONFIRM", {"type": 'NUMPAD_ENTER', "value": 'PRESS', "any": True}, None),
+        ("CANCEL", {"type": 'ESC', "value": 'PRESS', "any": True}, None),
+        ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'PRESS', "any": True}, None),
+        ("UNDO", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
+        ("UNDO", {"type": 'Z', "value": 'PRESS', "oskey": True}, None),
+        ("REDO", {"type": 'Z', "value": 'PRESS', "ctrl": True, "shift": True}, None),
+        ("REDO", {"type": 'Z', "value": 'PRESS', "oskey": True, "shift": True}, None),
+        ("REDO", {"type": 'Y', "value": 'PRESS', "ctrl": True}, None),
+        ("MOVE", {"type": 'G', "value": 'PRESS'}, None),
+        ("ROTATE", {"type": 'R', "value": 'PRESS'}, None),
+        ("SCALE", {"type": 'S', "value": 'PRESS'}, None),
+        ("STROKE_WIDTH", {"type": 'F', "value": 'PRESS'}, None),
+        ("STROKE_OPACITY", {"type": 'F', "value": 'PRESS', "shift": True}, None),
+        ("EXTRUDE", {"type": 'E', "value": 'PRESS'}, None),
+        ("SELECT_NEXT", {"type": 'TAB', "value": 'PRESS'}, None),
+        ("AXIS_X", {"type": 'X', "value": 'PRESS'}, None),
+        ("AXIS_Y", {"type": 'Y', "value": 'PRESS'}, None),
+        ("ORIGIN_RESET", {"type": 'O', "value": 'PRESS'}, None),
+    ])
+
+    return keymap
+
+
 def km_knife_tool_modal_map(_params):
     items = []
     keymap = (
@@ -3947,6 +3980,7 @@ def generate_keymaps_impl(params=None):
         km_object_non_modal(params),
 
         # Modal maps.
+        km_image_paint_shape_modal_map(params),
         km_knife_tool_modal_map(params),
         km_eyedropper_modal_map(params),
         km_eyedropper_colorramp_pointsampling_map(params),

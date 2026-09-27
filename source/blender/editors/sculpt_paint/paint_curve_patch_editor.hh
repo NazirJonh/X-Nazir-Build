@@ -28,13 +28,12 @@
 
 #include "paint_curve_intern.hh"
 
+namespace blender {
 struct ARegion;
 struct ViewContext;
-struct wmEvent;
-
-namespace blender {
 struct bContext;
-}
+struct wmEvent;
+}  // namespace blender
 
 namespace blender::ed::sculpt_paint {
 

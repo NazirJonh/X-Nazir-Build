@@ -620,9 +620,10 @@ static bool do_lasso_select_objects(const ViewContext *vc,
      * selected after this gesture; otherwise activate the first newly-selected sculpting
      * object, in the same view-layer order this loop already walks. */
     if (!(old_obact_base && (old_obact_base->flag & BASE_SELECTED)) && first_sculpt_selected) {
-      ed::object::base_activate(vc->C, first_sculpt_selected);
-      ed::object::object_overlay_mode_transfer_animation_start(vc->C,
-                                                                first_sculpt_selected->object);
+      if (ed::object::base_activate_user(vc->C, first_sculpt_selected)) {
+        ed::object::object_overlay_mode_transfer_animation_start(vc->C,
+                                                                 first_sculpt_selected->object);
+      }
     }
   }
 
@@ -1703,7 +1704,7 @@ static wmOperatorStatus object_select_menu_exec(bContext *C, wmOperator *op)
   }
 
   if (oldbasact != basact) {
-    ed::object::base_activate(C, basact);
+    ed::object::base_activate_user(C, basact);
   }
 
   /* weak but ensures we activate menu again before using the enum */
@@ -1933,7 +1934,9 @@ static wmOperatorStatus bone_select_menu_exec(bContext *C, wmOperator *op)
     }
     else {
       if (oldbasact != basact) {
-        ed::object::base_activate(C, basact);
+        /* User-initiated activation (Alt+click menu): may be deferred to the live Paint Shape
+         * session's confirm dialog. There are no side effects tied to the activation here. */
+        ed::object::base_activate_user(C, basact);
       }
     }
   }
@@ -3026,12 +3029,15 @@ static bool ed_object_select_pick(bContext *C,
    * the object from the pose-bone selected is also activated. */
   if (use_activate_selected_base && (basact != nullptr)) {
     changed_object = true;
-    ed::object::base_activate(C, basact); /* adds notifier */
-    if (basact->object->mode & OB_MODE_SCULPT) {
-      ed::object::object_overlay_mode_transfer_animation_start(C, basact->object);
-    }
-    if ((scene->toolsettings->object_flag & SCE_OBJECT_MODE_LOCK) == 0) {
-      WM_toolsystem_update_from_context_view3d(C);
+    /* May be deferred to the Paint Shape confirm dialog; only touch the toolsystem / flash when
+     * the activation actually happened. */
+    if (ed::object::base_activate_user(C, basact)) { /* adds notifier */
+      if (basact->object->mode & OB_MODE_SCULPT) {
+        ed::object::object_overlay_mode_transfer_animation_start(C, basact->object);
+      }
+      if ((scene->toolsettings->object_flag & SCE_OBJECT_MODE_LOCK) == 0) {
+        WM_toolsystem_update_from_context_view3d(C);
+      }
     }
   }
 
@@ -4430,8 +4436,10 @@ static bool do_object_box_select(bContext *C,
      * order this loop already walks) so the multi-object sculpt session always has a valid
      * active object to follow. */
     if (!(old_obact_base && (old_obact_base->flag & BASE_SELECTED)) && first_sculpt_selected) {
-      ed::object::base_activate(C, first_sculpt_selected);
-      ed::object::object_overlay_mode_transfer_animation_start(C, first_sculpt_selected->object);
+      if (ed::object::base_activate_user(C, first_sculpt_selected)) {
+        ed::object::object_overlay_mode_transfer_animation_start(C,
+                                                                 first_sculpt_selected->object);
+      }
     }
   }
 

@@ -166,6 +166,104 @@ CurveMapping *BKE_paint_default_curve()
   return cumap;
 }
 
+/* Flat profile: constant 1 across the whole range (the "no profile" default of the shape
+ * tools). */
+static void shape_profile_make_flat(CurveMapping *cumap)
+{
+  cumap->flag &= ~CUMA_EXTEND_EXTRAPOLATE;
+  cumap->cm->totpoint = 2;
+  cumap->cm->curve[0].x = 0.0f;
+  cumap->cm->curve[0].y = 1.0f;
+  cumap->cm->curve[1].x = 1.0f;
+  cumap->cm->curve[1].y = 1.0f;
+  BKE_curvemapping_changed(cumap, false);
+  BKE_curvemapping_init(cumap);
+}
+
+static CurveMapping *shape_profile_new_flat()
+{
+  CurveMapping *cumap = BKE_curvemapping_add(1, 0.0f, 0.0f, 1.0f, 1.0f);
+  shape_profile_make_flat(cumap);
+  return cumap;
+}
+
+void BKE_paint_shape_settings_init(PaintShapeSettings *settings)
+{
+  static_assert(PAINT_MATERIAL_CHANNEL_NUM == 10,
+                "PaintShapeSettings::stroke_channels/fill_channels sizes are spelled as a "
+                "literal for makesdna and must match PAINT_MATERIAL_CHANNEL_NUM");
+  static_assert(sizeof(PaintShapeSettings::stroke_channels) / sizeof(PaintShapeChannelValue) ==
+                    PAINT_MATERIAL_CHANNEL_NUM,
+                "PaintShapeSettings channel array size out of sync");
+  /* The DNA default member values double as the runtime defaults; keep the owned curve/ramp
+   * pointers across the reset so repeated calls are leak-free. */
+  const PaintShapeSettings defaults{};
+  CurveMapping *stroke_profile = settings->stroke_profile;
+  CurveMapping *fill_profile = settings->fill_profile;
+  ColorBand *stroke_ramp = settings->stroke_ramp;
+  ColorBand *fill_gradient = settings->fill_gradient;
+  *settings = defaults;
+  settings->stroke_profile = stroke_profile;
+  settings->fill_profile = fill_profile;
+  settings->stroke_ramp = stroke_ramp;
+  settings->fill_gradient = fill_gradient;
+
+  if (!settings->stroke_profile) {
+    settings->stroke_profile = shape_profile_new_flat();
+  }
+  else {
+    shape_profile_make_flat(settings->stroke_profile);
+  }
+  if (!settings->fill_profile) {
+    settings->fill_profile = shape_profile_new_flat();
+  }
+  else {
+    shape_profile_make_flat(settings->fill_profile);
+  }
+
+  if (!settings->stroke_ramp) {
+    settings->stroke_ramp = BKE_colorband_add(true);
+  }
+  else {
+    BKE_colorband_init(settings->stroke_ramp, true);
+  }
+
+  if (!settings->fill_gradient) {
+    settings->fill_gradient = BKE_colorband_add(true);
+  }
+  else {
+    BKE_colorband_init(settings->fill_gradient, true);
+  }
+
+  /* PBR Paint defaults: Base Color follows the canvas part colors, the Height/Normal strengths
+   * get usable values, every other channel starts disabled. */
+  PaintShapeChannelValue &stroke_base = settings->stroke_channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  PaintShapeChannelValue &fill_base = settings->fill_channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  stroke_base.use = true;
+  stroke_base.color[0] = settings->stroke_color[0];
+  stroke_base.color[1] = settings->stroke_color[1];
+  stroke_base.color[2] = settings->stroke_color[2];
+  fill_base.use = true;
+  fill_base.color[0] = settings->fill_color[0];
+  fill_base.color[1] = settings->fill_color[1];
+  fill_base.color[2] = settings->fill_color[2];
+  settings->stroke_channels[PAINT_MATERIAL_CHANNEL_HEIGHT].strength = 0.1f;
+  settings->fill_channels[PAINT_MATERIAL_CHANNEL_HEIGHT].strength = 0.1f;
+  settings->stroke_channels[PAINT_MATERIAL_CHANNEL_NORMAL].strength = 1.0f;
+  settings->fill_channels[PAINT_MATERIAL_CHANNEL_NORMAL].strength = 1.0f;
+}
+
+PaintShapeSettings &BKE_paint_shape_settings_get(ToolSettings &tool_settings)
+{
+  return tool_settings.imapaint.shape;
+}
+
+const PaintShapeSettings &BKE_paint_shape_settings_get(const ToolSettings &tool_settings)
+{
+  return tool_settings.imapaint.shape;
+}
+
+
 static void scene_init_data(ID *id)
 {
   Scene *scene = id_cast<Scene *>(id);
@@ -191,6 +289,9 @@ static void scene_init_data(ID *id)
 
   /* Image paint gradient tool color ramp (embedded by value, needs runtime init). */
   BKE_colorband_init(&scene->toolsettings->imapaint.gradient_colorband, true);
+
+  /* Shape tools (owned profiles and color ramps need runtime init). */
+  BKE_paint_shape_settings_init(&scene->toolsettings->imapaint.shape);
 
   scene->toolsettings->unified_paint_settings.curve_rand_hue = BKE_paint_default_curve();
   scene->toolsettings->unified_paint_settings.curve_rand_saturation = BKE_paint_default_curve();
@@ -694,6 +795,22 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     SCENE_FOREACH_UNDO_RESTORE,
                                                     reader,
                                                     &toolsett_old->imapaint.canvas,
+                                                    IDWALK_CB_USER);
+  /* Shape tool 2D curve sources: assigned from the UI (user-counted, see the RNA property's
+   * #PROP_ID_REFCOUNT). */
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &toolsett->imapaint.shape.curve_source_collection,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &toolsett_old->imapaint.shape.curve_source_collection,
+                                                    IDWALK_CB_USER);
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &toolsett->imapaint.shape.curve_source_object,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &toolsett_old->imapaint.shape.curve_source_object,
                                                     IDWALK_CB_USER);
 
   /* Poly Paint: the canvas Image and the per-channel Image overrides an add-on can bind. Without
@@ -1387,6 +1504,18 @@ static void scene_blend_write(BlendWriter *writer, ID *id, const void *id_addres
   }
 
   BKE_paint_blend_write(writer, &ts->imapaint.paint);
+  if (ts->imapaint.shape.stroke_profile) {
+    BKE_curvemapping_blend_write(writer, ts->imapaint.shape.stroke_profile);
+  }
+  if (ts->imapaint.shape.fill_profile) {
+    BKE_curvemapping_blend_write(writer, ts->imapaint.shape.fill_profile);
+  }
+  if (ts->imapaint.shape.stroke_ramp) {
+    writer->write_struct(ts->imapaint.shape.stroke_ramp);
+  }
+  if (ts->imapaint.shape.fill_gradient) {
+    writer->write_struct(ts->imapaint.shape.fill_gradient);
+  }
 
   Editing *ed = sce->ed;
   if (ed) {
@@ -1541,6 +1670,20 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
         reader, sce, reinterpret_cast<Paint **>(&sce->toolsettings->curves_sculpt));
 
     BKE_paint_blend_read_data(reader, sce, &sce->toolsettings->imapaint.paint);
+
+    /* Relink the shape settings' owned curves and ramps. */
+    BLO_read_struct(reader, CurveMapping, &sce->toolsettings->imapaint.shape.stroke_profile);
+    if (sce->toolsettings->imapaint.shape.stroke_profile) {
+      BKE_curvemapping_blend_read(reader, sce->toolsettings->imapaint.shape.stroke_profile);
+      BKE_curvemapping_init(sce->toolsettings->imapaint.shape.stroke_profile);
+    }
+    BLO_read_struct(reader, CurveMapping, &sce->toolsettings->imapaint.shape.fill_profile);
+    if (sce->toolsettings->imapaint.shape.fill_profile) {
+      BKE_curvemapping_blend_read(reader, sce->toolsettings->imapaint.shape.fill_profile);
+      BKE_curvemapping_init(sce->toolsettings->imapaint.shape.fill_profile);
+    }
+    BLO_read_struct(reader, ColorBand, &sce->toolsettings->imapaint.shape.stroke_ramp);
+    BLO_read_struct(reader, ColorBand, &sce->toolsettings->imapaint.shape.fill_gradient);
 
     BLO_read_struct_list(
         reader, ColorPickerPalette, &sce->toolsettings->color_picker_palettes);
@@ -1944,6 +2087,22 @@ ToolSettings *BKE_toolsettings_copy(ToolSettings *toolsettings, const int flag)
       toolsettings->unified_paint_settings.curve_rand_value);
 
   BKE_paint_copy(&toolsettings->imapaint.paint, &ts->imapaint.paint, flag);
+  if (toolsettings->imapaint.shape.stroke_profile) {
+    ts->imapaint.shape.stroke_profile = BKE_curvemapping_copy(
+        toolsettings->imapaint.shape.stroke_profile);
+    BKE_curvemapping_init(ts->imapaint.shape.stroke_profile);
+  }
+  if (toolsettings->imapaint.shape.fill_profile) {
+    ts->imapaint.shape.fill_profile = BKE_curvemapping_copy(
+        toolsettings->imapaint.shape.fill_profile);
+    BKE_curvemapping_init(ts->imapaint.shape.fill_profile);
+  }
+  if (toolsettings->imapaint.shape.stroke_ramp) {
+    ts->imapaint.shape.stroke_ramp = MEM_dupalloc(toolsettings->imapaint.shape.stroke_ramp);
+  }
+  if (toolsettings->imapaint.shape.fill_gradient) {
+    ts->imapaint.shape.fill_gradient = MEM_dupalloc(toolsettings->imapaint.shape.fill_gradient);
+  }
   ts->particle.paintcursor = nullptr;
   ts->particle.scene = nullptr;
   ts->particle.object = nullptr;
@@ -2035,6 +2194,18 @@ void BKE_toolsettings_free(ToolSettings *toolsettings)
     MEM_delete(toolsettings->curves_sculpt);
   }
   BKE_paint_free(&toolsettings->imapaint.paint);
+  if (toolsettings->imapaint.shape.stroke_profile) {
+    BKE_curvemapping_free(toolsettings->imapaint.shape.stroke_profile);
+  }
+  if (toolsettings->imapaint.shape.fill_profile) {
+    BKE_curvemapping_free(toolsettings->imapaint.shape.fill_profile);
+  }
+  if (toolsettings->imapaint.shape.stroke_ramp) {
+    MEM_delete(toolsettings->imapaint.shape.stroke_ramp);
+  }
+  if (toolsettings->imapaint.shape.fill_gradient) {
+    MEM_delete(toolsettings->imapaint.shape.fill_gradient);
+  }
 
   /* Color jitter curves in unified paint settings. */
   if (toolsettings->unified_paint_settings.curve_rand_hue) {

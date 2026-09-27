@@ -1409,7 +1409,8 @@ static void select_marker_camera_switch(
           if (base) {
             object::base_select(base, object::eObjectSelect_Mode(sel));
             if (!extend) {
-              object::base_activate(C, base);
+              /* Camera activation from a marker click is user-initiated. */
+              object::base_activate_user(C, base);
             }
           }
         }

@@ -2062,7 +2062,7 @@ static wmOperatorStatus edcu_shortest_path_pick_invoke(bContext *C,
 
   BKE_view_layer_synced_ensure(*vc.bmain, vc.scene, vc.view_layer);
   if (BKE_view_layer_active_base_get(vc.view_layer) != basact) {
-    ed::object::base_activate(C, basact);
+    ed::object::base_activate_user(C, basact);
   }
 
   DEG_id_tag_update(obedit->data, ID_RECALC_SELECT | ID_RECALC_SYNC_TO_EVAL);

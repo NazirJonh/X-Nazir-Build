@@ -650,6 +650,8 @@ NodeType geometry_tag_to_component(const ID *id)
       return NodeType::GEOMETRY;
     case ID_PAL: /* Palettes */
       return NodeType::PARAMETERS;
+    case ID_PV: /* Paint Vectors */
+      return NodeType::PARAMETERS;
     case ID_MSK:
       return NodeType::PARAMETERS;
     case ID_GP:

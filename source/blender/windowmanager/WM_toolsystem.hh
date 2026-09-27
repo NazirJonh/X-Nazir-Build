@@ -101,6 +101,21 @@ void WM_toolsystem_ref_set_from_runtime(bContext *C,
                                         const char *idname);
 
 /**
+ * Called through the tool-change observer (see #WM_toolsystem_tool_change_callback_set) after the
+ * active tool of \a tref actually changed. WM knows nothing about the observers; editors register
+ * one opt-in (like #WM_paint_cursor_activate).
+ */
+using wmToolChangeCallbackFn = void (*)(bContext &C, const bToolRef &tref);
+
+/**
+ * Register (or clear with null) the single tool-change observer. Editors that must react to the
+ * active tool changing outside their own operators (e.g. the live Paint Shape session, whose
+ * owning tool can be switched from the toolbar while no operator runs) use it instead of polling
+ * from draw / poll callbacks.
+ */
+void WM_toolsystem_tool_change_callback_set(wmToolChangeCallbackFn callback);
+
+/**
  * Sync the internal active state of a tool back into the tool system,
  * this is needed for active brushes where the real active state is not stored in the tool system.
  *

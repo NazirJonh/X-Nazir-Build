@@ -32,6 +32,13 @@ from bl_ui.space_toolsystem_common import (
 )
 from bl_ui.properties_paint_common import (
     BrushAssetShelf,
+    UnifiedPaintPanel,
+    draw_paint_shape_extra_options,
+    draw_shape_color_row,
+    paint_shape_is_transformable,
+    paint_shape_linked_3d_object,
+    paint_shape_settings,
+    paint_shape_tool_flags,
 )
 
 
@@ -2337,7 +2344,21 @@ class _defs_image_paint_select:
     def draw_select_expand(context, layout):
         imapaint = context.tool_settings.image_paint
         row = layout.row(align=True)
+        row.use_property_split = False
         row.prop(imapaint, "selection_expand", text="", expand=True)
+
+    @staticmethod
+    def draw_select_mode_expand(context, layout, props, *, radius=False):
+        """Draw the Select tool Mode enum and the shared Selection Expand toggle, each in its own
+        full-width row. Shared by every Image Editor paint select tool so the tool header and the
+        Active Tool panel lay out identically."""
+        row = layout.row(align=True)
+        row.use_property_split = False
+        row.prop(props, "mode", text="", expand=True, icon_only=True)
+        if radius:
+            layout.prop(props, "radius")
+        layout.separator()
+        _defs_image_paint_select.draw_select_expand(context, layout)
 
     @ToolDef.from_fn
     def move():
@@ -2380,10 +2401,7 @@ class _defs_image_paint_select:
     def box():
         def draw_settings(context, layout, tool):
             props = tool.operator_properties("paint.image_select_box")
-            row = layout.row()
-            row.use_property_split = False
-            row.prop(props, "mode", text="", expand=True, icon_only=True)
-            _defs_image_paint_select.draw_select_expand(context, layout)
+            _defs_image_paint_select.draw_select_mode_expand(context, layout, props)
 
         return dict(
             idname="builtin.select_box",
@@ -2418,10 +2436,7 @@ class _defs_image_paint_select:
     def lasso():
         def draw_settings(context, layout, tool):
             props = tool.operator_properties("paint.image_select_lasso")
-            row = layout.row()
-            row.use_property_split = False
-            row.prop(props, "mode", text="", expand=True, icon_only=True)
-            _defs_image_paint_select.draw_select_expand(context, layout)
+            _defs_image_paint_select.draw_select_mode_expand(context, layout, props)
 
         return dict(
             idname="builtin.select_lasso",
@@ -2436,10 +2451,7 @@ class _defs_image_paint_select:
     def polyline():
         def draw_settings(context, layout, tool):
             props = tool.operator_properties("paint.image_select_polyline")
-            row = layout.row()
-            row.use_property_split = False
-            row.prop(props, "mode", text="", expand=True, icon_only=True)
-            _defs_image_paint_select.draw_select_expand(context, layout)
+            _defs_image_paint_select.draw_select_mode_expand(context, layout, props)
 
         return dict(
             idname="builtin.select_polyline",
@@ -2454,10 +2466,7 @@ class _defs_image_paint_select:
     def curve():
         def draw_settings(context, layout, tool):
             props = tool.operator_properties("paint.image_select_curve")
-            row = layout.row()
-            row.use_property_split = False
-            row.prop(props, "mode", text="", expand=True, icon_only=True)
-            _defs_image_paint_select.draw_select_expand(context, layout)
+            _defs_image_paint_select.draw_select_mode_expand(context, layout, props)
 
         return dict(
             idname="builtin.select_curve",
@@ -2472,11 +2481,7 @@ class _defs_image_paint_select:
     def circle():
         def draw_settings(context, layout, tool):
             props = tool.operator_properties("paint.image_select_circle")
-            row = layout.row()
-            row.use_property_split = False
-            row.prop(props, "mode", text="", expand=True, icon_only=True)
-            layout.prop(props, "radius")
-            _defs_image_paint_select.draw_select_expand(context, layout)
+            _defs_image_paint_select.draw_select_mode_expand(context, layout, props, radius=True)
 
         def draw_cursor(_context, tool, xy):
             from gpu_extras.presets import draw_circle_2d
@@ -2493,6 +2498,311 @@ class _defs_image_paint_select:
             draw_settings=draw_settings,
             draw_cursor=draw_cursor,
         )
+
+
+# The eight shape tools, identical in both spaces; only the keymap group differs.
+# (attribute name, tool idname, label, icon, keymap suffix)
+_PAINT_SHAPE_TOOLS = (
+    ("line", "builtin.paint_shape_line", "Shape Line",
+     "ops.gpencil.primitive_line", "Shape Line"),
+    ("polyline", "builtin.paint_shape_polyline", "Shape Polyline",
+     "ops.gpencil.primitive_polyline", "Shape Polyline"),
+    ("rect", "builtin.paint_shape_rect", "Shape Rectangle",
+     "ops.gpencil.primitive_box", "Shape Rectangle"),
+    ("ellipse", "builtin.paint_shape_ellipse", "Shape Ellipse",
+     "ops.gpencil.primitive_circle", "Shape Ellipse"),
+    ("curve", "builtin.paint_shape_curve", "Shape Curve Patch",
+     "ops.gpencil.primitive_curve", "Shape Curve"),
+    ("polygon", "builtin.paint_shape_polygon", "Shape Polygon",
+     "MESH_PLANE", "Shape Polygon"),
+    ("star", "builtin.paint_shape_star", "Shape Star",
+     "MESH_CIRCLE", "Shape Star"),
+    ("arc", "builtin.paint_shape_arc", "Shape Arc",
+     "MESH_TORUS", "Shape Arc"),
+)
+
+
+def _paint_shape_tools(keymap_prefix, draw_settings, cursor=None):
+    """One ToolDef base for the shape tools (R10.1): ``keymap_prefix`` is the space's keymap group
+    ("Image Editor Tool: Paint" or "3D View Tool: Sculpt"), ``draw_settings`` the space's settings
+    panel. Module level, so `ToolDef.from_fn` can run without referencing a class name that is not
+    bound yet (the trap behind the old `_image_paint_shape_tool` note)."""
+    tools = {}
+    for name, idname, label, icon, suffix in _PAINT_SHAPE_TOOLS:
+        def entry_from_fn(_idname=idname, _label=label, _icon=icon, _suffix=suffix):
+            entry = dict(
+                idname=_idname,
+                label=_label,
+                icon=_icon,
+                widget=None,
+                keymap="{!s}, {!s}".format(keymap_prefix, _suffix),
+                draw_settings=draw_settings,
+            )
+            if cursor is not None:
+                entry["cursor"] = cursor
+            return entry
+
+        tools[name] = ToolDef.from_fn(entry_from_fn)
+    return tools
+
+
+def _paint_shape_target_channels(context, kind=0):
+    """Channel identifiers a shape bake writes for ``kind`` (0 image maps, 1 vertex attributes),
+    or ``None`` when the canvas is not Material-based.
+
+    The resolution rule lives in C (#BKE_paint_shape_target_channels, surfaced as
+    ``PaintShapeSettings.target_channels``); this only maps the returned bit mask onto the RNA
+    channel identifiers the UI uses. Module level on purpose: a nested helper referenced from
+    ``ToolDef.from_fn`` runs while the class body is still executing (see ``_paint_shape_tools``)."""
+    tool_settings = context.tool_settings
+    if tool_settings.paint_mode.canvas_source != 'MATERIAL':
+        return None
+    mask = paint_shape_settings(context).target_channels(kind=kind)
+    channels = set()
+    for index, channel_id in enumerate(_defs_image_paint_shape._SHAPE_CHANNEL_DNA_ORDER):
+        if mask & (1 << index):
+            channels.add(channel_id)
+    return channels
+
+
+def _paint_shape_strength_prop(layout, context, brush, *, text, header):
+    """Draw the brush/unified Strength with the same helper the brush panels use, so the shape
+    tools share the standard Shift+F behavior. The value is the shape's overall opacity (stroke
+    and fill). Shown in the tool header only."""
+    if brush is None:
+        paint = UnifiedPaintPanel.paint_settings(context)
+        ups = None if paint is None else paint.unified_paint_settings
+        if not (ups and ups.use_unified_strength):
+            return
+    UnifiedPaintPanel.prop_unified(
+        layout, context, brush, "strength",
+        unified_name="use_unified_strength", text=text, header=header)
+
+
+class _defs_image_paint_shape:
+
+    # DNA order of #eMaterialPaintChannel (DNA_scene_types.h): the per-channel arrays of the
+    # shape settings follow the DNA enum, while the writable-channel helpers work with RNA
+    # identifiers.
+    _SHAPE_CHANNEL_DNA_ORDER = (
+        'BASE_COLOR',
+        'METALLIC',
+        'ROUGHNESS',
+        'SPECULAR',
+        'NORMAL',
+        'CUSTOM',
+        'HEIGHT',
+        'ALPHA',
+        'AO',
+        'EMISSION',
+    )
+
+    @staticmethod
+    def draw_shape_settings(context, layout, _tool):
+        imapaint = context.tool_settings.image_paint
+        # A live Vector session owns a private settings copy; the Image Editor UI edits that copy.
+        shape = paint_shape_settings(context)
+        # Only the Line drag is always open (it has no interior). Polyline and Curve Patch can be
+        # closed, so they show the Fill / Stroke toggles like Rectangle; the C++ side only forces
+        # the stroke of a genuinely open outline (#style_resolve_for_shapes).
+        is_line, is_rect, _is_sized = paint_shape_tool_flags(context)
+        is_transformable = paint_shape_is_transformable(context)
+        # An Image Editor linked to a 3D Sculpt session shows / toggles that session's cage; the
+        # button reads the object's runtime flag, exactly like the 3D Viewport's button.
+        linked_ob = paint_shape_linked_3d_object(context)
+        if linked_ob is not None:
+            transform_active = linked_ob.paint_shape_transform_active
+        else:
+            transform_active = context.space_data.paint_shape_transform_active
+
+        # Material (PBR) canvas mode bakes into the active object's material channel maps
+        # instead of the image open in this editor; say so and show the targeted channel count.
+        target_channels = _paint_shape_target_channels(context, 0)
+        if target_channels is not None:
+            layout.label(text="PBR: {:d} Channels".format(len(target_channels)))
+
+        region_is_header = context.region.type == 'TOOL_HEADER'
+        brush = imapaint.brush
+        canvas_source = context.tool_settings.paint_mode.canvas_source
+
+        if region_is_header:
+            # A flat horizontal row with separators: a column wraps the items of a tool header.
+            # Order: Draw Mode -> colors -> Blend -> Width -> Strength -> Fill/Stroke ->
+            # Corner Radius -> Angle -> options popover.
+            row = layout.row(align=True)
+            row.prop(shape, "draw_mode", text="", expand=True)
+            layout.separator()
+            draw_shape_color_row(layout, shape, header=True)
+            layout.separator()
+            if brush is not None:
+                blend_row = layout.row(align=True)
+                blend_row.active = canvas_source not in {'MATERIAL', 'MATERIAL_PAINT'}
+                blend_row.prop(brush, "blend", text="")
+                layout.separator()
+            layout.prop(shape, "stroke_width", text="Width", slider=True)
+            layout.separator()
+            _paint_shape_strength_prop(layout, context, brush, text="Strength", header=True)
+            if not is_line:
+                layout.separator()
+                row = layout.row(align=True)
+                row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
+                row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
+                layout.separator()
+                layout.prop(shape, "stroke_align", text="")
+                # Corner shape of the stroke outline (Round / Bevel / Miter = sharp).
+                layout.prop(shape, "join_type", text="")
+            if is_rect and shape.use_fill:
+                layout.separator()
+                layout.prop(shape, "corner_radius", index=0, text="Corner Radius")
+            layout.separator()
+            layout.prop(shape, "rotation", text="Angle")
+            if is_transformable:
+                layout.separator()
+                layout.operator(
+                    "paint.image_shape_transform_toggle",
+                    text="Transform",
+                    depress=transform_active,
+                )
+            layout.separator()
+            layout.popover(panel="IMAGE_PT_tools_shape_options", text="Options")
+            # Confirm / cancel while the Image Editor owns a live Vector session.
+            if bpy.ops.paint.image_shape_vector_apply.poll():
+                layout.separator()
+                row = layout.row(align=True)
+                row.operator("paint.image_shape_vector_apply", text="Apply", icon='CHECKMARK')
+                row.operator("paint.image_shape_vector_cancel", text="Cancel", icon='X')
+            return
+
+        # Match the Sculpt Mode Active Tool layout: a single full-width Draw Mode row, then the
+        # remaining fields drawn directly into the property-split layout (no nested column).
+        row = layout.row(align=True)
+        row.use_property_split = False
+        row.prop(shape, "draw_mode", text="", expand=True)
+        draw_shape_color_row(layout, shape)
+        layout.prop(shape, "stroke_width", text="Width", slider=True)
+        if not is_line:
+            row = layout.row(align=True)
+            row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
+            row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
+        layout.prop(shape, "rotation", text="Angle")
+        if is_transformable:
+            layout.operator(
+                "paint.image_shape_transform_toggle",
+                text="Transform",
+                depress=transform_active,
+            )
+        draw_paint_shape_extra_options(context, layout, shape)
+
+# R10.1: the Image Editor tools come from the shared base; only the keymap group differs.
+for _shape_tool_name, _shape_tool in _paint_shape_tools(
+        "Image Editor Tool: Paint", _defs_image_paint_shape.draw_shape_settings).items():
+    setattr(_defs_image_paint_shape, _shape_tool_name, _shape_tool)
+del _shape_tool_name, _shape_tool
+
+
+class _defs_sculpt_paint_shape:
+    # Sculpt Mode (PBR Paint) frontend of the shape tools; the settings are shared with the Image
+    # Editor tools (`tool_settings.image_paint.shape`).
+
+    @staticmethod
+    def draw_shape_settings(context, layout, tool):
+        # A live Sculpt Vector session owns a private settings copy; the UI edits that copy.
+        from bl_ui.properties_paint_common import paint_shape_settings
+        shape = paint_shape_settings(context)
+        settings = context.tool_settings.sculpt
+        # Projection (View / Surface) is a per-tool operator property of Pixel mode, applied to the
+        # draw operator on invocation; Vector is always surface-anchored.
+        props = tool.operator_properties("sculpt.paint_shape_draw")
+        region_is_header = context.region.type == 'TOOL_HEADER'
+        brush = None if settings is None else settings.brush
+        # Only the Line drag is always open; Polyline and Curve Patch can be closed and filled.
+        is_line, is_rect, _is_sized = paint_shape_tool_flags(context)
+        canvas_source = context.tool_settings.paint_mode.canvas_source
+        # Polygon/Star/Arc live sessions show the transform cage on demand (the Image Editor's
+        # equivalent is the shape session's Transform button).
+        is_transformable = paint_shape_is_transformable(context)
+        transform_active = bool(getattr(context.object, "paint_shape_transform_active", False))
+
+        if region_is_header:
+            # A flat horizontal row with separators: a column wraps the items of a tool header.
+            # Order: Draw Mode -> Projection -> colors -> Blend -> Width -> Strength -> Fill/Stroke
+            # -> Corner Radius -> Angle -> options popover.
+            row = layout.row(align=True)
+            row.prop(shape, "draw_mode", text="", expand=True)
+            layout.separator()
+            # Projection applies to Pixel mode only; Vector is always surface-anchored.
+            if shape.draw_mode == 'PIXEL':
+                layout.prop(props, "space", text="Projection")
+                layout.separator()
+            draw_shape_color_row(layout, shape, header=True)
+            layout.separator()
+            if brush is not None:
+                blend_row = layout.row(align=True)
+                blend_row.active = canvas_source not in {'MATERIAL', 'MATERIAL_PAINT'}
+                blend_row.prop(brush, "blend", text="")
+                layout.separator()
+            layout.prop(shape, "stroke_width", text="Width", slider=True)
+            layout.separator()
+            # Strength lives in the tool header only (Active Tool / Properties use the panel below).
+            _paint_shape_strength_prop(layout, context, brush, text="Strength", header=True)
+            if not is_line:
+                layout.separator()
+                row = layout.row(align=True)
+                row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
+                row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
+                layout.separator()
+                layout.prop(shape, "stroke_align", text="")
+                # Corner shape of the stroke outline (Round / Bevel / Miter = sharp).
+                layout.prop(shape, "join_type", text="")
+            if is_rect:
+                # The radius rounds the stroke outline too, so it is not tied to Fill.
+                layout.separator()
+                layout.prop(shape, "corner_radius", index=0, text="Corner Radius")
+            layout.separator()
+            layout.prop(shape, "rotation", text="Angle")
+            if is_transformable:
+                layout.separator()
+                layout.operator("sculpt.paint_shape_transform_toggle",
+                                text="Transform", depress=transform_active)
+            layout.separator()
+            layout.popover(panel="VIEW3D_PT_tools_shape_options", text="Options")
+        else:
+            row = layout.row(align=True)
+            row.use_property_split = False
+            row.prop(shape, "draw_mode", text="", expand=True)
+            # Projection applies to Pixel mode only; Vector is always surface-anchored.
+            if shape.draw_mode == 'PIXEL':
+                layout.prop(props, "space", text="Projection")
+            draw_shape_color_row(layout, shape)
+            layout.prop(shape, "stroke_width", text="Width", slider=True)
+            if not is_line:
+                row = layout.row(align=True)
+                row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
+                row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
+            layout.prop(shape, "rotation", text="Angle")
+            if is_transformable:
+                layout.operator("sculpt.paint_shape_transform_toggle",
+                                text="Transform", depress=transform_active)
+            draw_paint_shape_extra_options(context, layout, shape)
+
+        # The PBR channel toggles, exactly as the Color Gradient tool shows them for the same
+        # canvases (the shape tools write the same Sculpt paint channels).
+        if (not region_is_header and
+                settings is not None and
+                context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}):
+            from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
+            draw_material_paint_channel_toggles(
+                layout, settings.brush, settings,
+                show_custom=(context.tool_settings.paint_mode.canvas_source == 'MATERIAL_PAINT'),
+            )
+
+# R10.1: the Sculpt Mode tools come from the same base; the cursor is the only other difference.
+for _shape_tool_name, _shape_tool in _paint_shape_tools(
+        "3D View Tool: Sculpt",
+        _defs_sculpt_paint_shape.draw_shape_settings,
+        cursor='PAINT_CROSS').items():
+    setattr(_defs_sculpt_paint_shape, _shape_tool_name, _shape_tool)
+del _shape_tool_name, _shape_tool
 
 
 class _defs_weight_paint:
@@ -3991,6 +4301,18 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_texture_paint.selection_gradient,
             _defs_texture_paint.mask,
             None,
+            (
+                _defs_image_paint_shape.rect,
+                _defs_image_paint_shape.ellipse,
+                _defs_image_paint_shape.polygon,
+                _defs_image_paint_shape.star,
+                _defs_image_paint_shape.arc,
+            ),
+            (
+                _defs_image_paint_shape.line,
+                _defs_image_paint_shape.polyline,
+                _defs_image_paint_shape.curve,
+            ),
             *_tools_image_paint_select,
             # Standalone tool (not part of the selection group above): it writes the 3D Viewport
             # face selection paint mask instead of the Image Editor's own 2D selection mask.
@@ -4412,6 +4734,18 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.layer_eraser,
             _defs_sculpt.texture_fill,
             _defs_sculpt.color_gradient,
+            (
+                _defs_sculpt_paint_shape.rect,
+                _defs_sculpt_paint_shape.ellipse,
+                _defs_sculpt_paint_shape.polygon,
+                _defs_sculpt_paint_shape.star,
+                _defs_sculpt_paint_shape.arc,
+            ),
+            (
+                _defs_sculpt_paint_shape.line,
+                _defs_sculpt_paint_shape.polyline,
+                _defs_sculpt_paint_shape.curve,
+            ),
             None,
             _defs_transform.translate,
             _defs_transform.rotate,

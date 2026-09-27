@@ -23,11 +23,10 @@
 
 #include "paint_curve_patch_document.hh"
 
-struct ReportList;
-
 namespace blender {
+struct ReportList;
 struct bContext;
-}
+}  // namespace blender
 
 namespace blender::ed::sculpt_paint {
 

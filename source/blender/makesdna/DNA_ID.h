@@ -728,7 +728,7 @@ struct PreviewImage {
 
 /* Check whether datablock type is covered by copy-on-evaluation. */
 #define ID_TYPE_USE_COPY_ON_EVAL(_id_type) \
-  (!ELEM(_id_type, ID_LI, ID_SCR, ID_VF, ID_BR, ID_WM, ID_PAL, ID_PC, ID_WS, ID_IM))
+  (!ELEM(_id_type, ID_LI, ID_SCR, ID_VF, ID_BR, ID_WM, ID_PAL, ID_PC, ID_PV, ID_WS, ID_IM))
 
 /* Check whether data-block type requires copy-on-evaluation from #ID_RECALC_PARAMETERS.
  * Keep in sync with #BKE_id_eval_properties_copy. */
@@ -1234,6 +1234,7 @@ enum IDRecalcFlag {
 #define FILTER_ID_LI (1ULL << 39)
 #define FILTER_ID_GP (1ULL << 40)
 #define FILTER_ID_IP (1ULL << 41)
+#define FILTER_ID_PV (1ULL << 42)
 
 #define FILTER_ID_ALL \
   (FILTER_ID_AC | FILTER_ID_AR | FILTER_ID_BR | FILTER_ID_CA | FILTER_ID_CU_LEGACY | \
@@ -1243,7 +1244,7 @@ enum IDRecalcFlag {
    FILTER_ID_SPK | FILTER_ID_SO | FILTER_ID_TE | FILTER_ID_TXT | FILTER_ID_VF | FILTER_ID_WO | \
    FILTER_ID_CF | FILTER_ID_WS | FILTER_ID_LP | FILTER_ID_CV | FILTER_ID_PT | FILTER_ID_VO | \
    FILTER_ID_SIM | FILTER_ID_KE | FILTER_ID_SCR | FILTER_ID_WM | FILTER_ID_LI | FILTER_ID_GP | \
-   FILTER_ID_IP)
+   FILTER_ID_IP | FILTER_ID_PV)
 
 /**
  * This enum defines the index assigned to each type of IDs in the array returned by
@@ -1343,6 +1344,9 @@ enum eID_Index {
   INDEX_ID_PAL,
   INDEX_ID_PC,
   INDEX_ID_BR,
+  /* Paint Vector: a material-owned preset-like data type (ADR-2), after Material so its Image /
+   * profile references resolve during processing. */
+  INDEX_ID_PV,
 
   /* Scene, after preset-like ID types because of tool settings. */
   INDEX_ID_SCE,

@@ -13,6 +13,7 @@
 
 #include "DNA_collection_types.h"
 #include "DNA_gpencil_legacy_types.h"
+#include "DNA_brush_types.h"
 #include "DNA_lightprobe_types.h"
 #include "DNA_object_types.h"
 #include "DNA_screen_types.h"
@@ -496,12 +497,18 @@ static void view3d_main_region_exit(wmWindowManager *wm, ARegion *region)
   ED_view3d_stop_render_preview(wm, region);
 }
 
+static void VIEW3D_GGT_paint_shape_transform(wmGizmoGroupType *gzgt)
+{
+  ED_view3d_shape_transform_gizmo_setup(gzgt);
+}
+
 static void view3d_widgets()
 {
   wmGizmoMapType_Params params{SPACE_VIEW3D, RGN_TYPE_WINDOW};
   wmGizmoMapType *gzmap_type = WM_gizmomaptype_ensure(&params);
 
   WM_gizmogrouptype_append_and_link(gzmap_type, ed::transform::VIEW3D_GGT_xform_gizmo_context);
+  WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_paint_shape_transform);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_light_spot);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_light_point);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_light_area);
@@ -1605,6 +1612,18 @@ static void space_view3d_listener(const wmSpaceTypeListenerParams *params)
           }
           break;
         }
+        case ND_TOOLSETTINGS:
+          /* Unified paint strength / symmetry feed a live Sculpt Vector shape preview; re-composite
+           * it (its own settings copy stays isolated). */
+          ED_paint_shape_brush_update(params->bmain, params->scene, nullptr);
+          break;
+      }
+      break;
+    case NC_BRUSH:
+      if (wmn->action == NA_EDITED) {
+        /* Strength / blend of the active Sculpt brush feed the live Vector shape preview. */
+        ED_paint_shape_brush_update(
+            params->bmain, params->scene, static_cast<const Brush *>(wmn->reference));
       }
       break;
     case NC_WORLD:

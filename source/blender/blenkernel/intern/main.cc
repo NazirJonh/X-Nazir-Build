@@ -161,6 +161,7 @@ void BKE_main_clear(Main &bmain)
         CASE_ID_INDEX(INDEX_ID_PAL);
         CASE_ID_INDEX(INDEX_ID_PC);
         CASE_ID_INDEX(INDEX_ID_BR);
+        CASE_ID_INDEX(INDEX_ID_PV);
         CASE_ID_INDEX(INDEX_ID_SCE);
         CASE_ID_INDEX(INDEX_ID_SCR);
         CASE_ID_INDEX(INDEX_ID_WS);
@@ -1065,6 +1066,8 @@ ListBaseT<ID> *which_libbase(Main *bmain, short type)
       return &(bmain->palettes.cast<ID>());
     case ID_PC:
       return &(bmain->paintcurves.cast<ID>());
+    case ID_PV:
+      return &(bmain->paint_vectors.cast<ID>());
     case ID_CF:
       return &(bmain->cachefiles.cast<ID>());
     case ID_WS:
@@ -1125,6 +1128,7 @@ MainListsArray BKE_main_lists_get(Main &bmain)
   lb[INDEX_ID_GR] = &(bmain.collections.cast<ID>());
   lb[INDEX_ID_PAL] = &(bmain.palettes.cast<ID>());
   lb[INDEX_ID_PC] = &(bmain.paintcurves.cast<ID>());
+  lb[INDEX_ID_PV] = &(bmain.paint_vectors.cast<ID>());
   lb[INDEX_ID_BR] = &(bmain.brushes.cast<ID>());
   lb[INDEX_ID_PA] = &(bmain.particles.cast<ID>());
   lb[INDEX_ID_SPK] = &(bmain.speakers.cast<ID>());

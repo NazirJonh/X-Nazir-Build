@@ -50,6 +50,7 @@
 #include "ED_keyframing.hh"
 #include "ED_object.hh"
 #include "ED_outliner.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_select_utils.hh"
 
@@ -115,8 +116,33 @@ void base_activate(bContext *C, Base *base)
   base_active_refresh(CTX_data_main(C), scene, view_layer);
 }
 
+bool base_activate_user(bContext *C, Base *base)
+{
+  /* A live Paint Shape session must be resolved by the user before its owner stops being the
+   * active object (the cage and the linked Image Editor display are keyed to it). Only an
+   * explicit user activation goes through here: the plain #base_activate stays untouched so
+   * object-add / duplicate / join and the other programmatic callers keep working while a session
+   * happens to be live. The change is refused and re-issued by
+   * SCULPT_OT_paint_shape_session_confirm once the session is resolved; the second attempt finds
+   * no session and proceeds normally. */
+  if (base != nullptr &&
+      ED_paint_shape_session_defer_object_change(C, int(base->object->id.session_uid)))
+  {
+    return false;
+  }
+  base_activate(C, base);
+  return true;
+}
+
 void base_activate_with_mode_exit_if_needed(bContext *C, Base *base)
 {
+  /* Same rule for the Outliner / animation-editor activation: it is always the user picking a new
+   * active object, so it is refused and re-issued by the confirm dialog while a session is live. */
+  if (base != nullptr &&
+      ED_paint_shape_session_defer_object_change(C, int(base->object->id.session_uid)))
+  {
+    return;
+  }
   Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
@@ -291,7 +317,7 @@ bool jump_to_object(bContext *C, Object *ob, const bool /*reveal_hidden*/)
     }
 
     /* Make active if not active. */
-    base_activate(C, base);
+    base_activate_user(C, base);
   }
 
   return true;
@@ -811,7 +837,7 @@ static bool select_grouped_parent(bContext *C)
   /* can be nullptr if parent in other scene */
   if (baspar && BASE_SELECTABLE(v3d, baspar)) {
     base_select(baspar, BA_SELECT);
-    base_activate(C, baspar);
+    base_activate_user(C, baspar);
     changed = true;
   }
   return changed;

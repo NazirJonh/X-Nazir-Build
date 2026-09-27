@@ -107,6 +107,7 @@
 #include "paint_curve_patch_host.hh"
 #include "paint_curve_patch_live.hh"
 #include "paint_curve_patch_session.hh"
+#include "paint_session_confirm.hh"
 
 namespace blender::ed::sculpt_paint {
 
@@ -1638,8 +1639,8 @@ void SCULPT_OT_curve_patch_edit(wmOperatorType *ot)
  */
 static bool g_curve_patch_confirm_pending = false;
 
-/* Defined below, after the deferred-resume helpers and the three action cores. */
-static wmOperatorStatus curve_patch_confirm_popup_open(bContext *C, wmOperator *op);
+/* Defined below; the shared dialog calls it back with the answer. */
+static void curve_patch_confirm_answer(bContext &C, int action, wmOperator &prompt_op);
 
 static wmOperatorStatus curve_patch_edit_confirm_invoke(bContext *C,
                                                         wmOperator *op,
@@ -1648,51 +1649,13 @@ static wmOperatorStatus curve_patch_edit_confirm_invoke(bContext *C,
   /* A custom popup rather than #WM_operator_confirm_ex: that one offers exactly two buttons
    * (confirm + cancel), and "Continue Editing" is a third answer -- keep the session, revert the
    * switch that interrupted it, and resume the modal. */
-  return curve_patch_confirm_popup_open(C, op);
-}
-
-/**
- * Resume the sculpt-mode exit that deferred itself to this dialog (see `sculpt_mode_toggle_exec()`
- * in `mesh/sculpt_ops.cc`). Runs on BOTH answers: the dialog decides the fate of the PATCH, not of
- * the mode change the user asked for.
- *
- * Cannot recurse: the session has just been freed, so the check that deferred the toggle in the
- * first place no longer holds and the second run exits the mode for real.
- */
-static void curve_patch_confirm_resume_mode_toggle(bContext *C, const bool resume_mode_toggle)
-{
-  if (!resume_mode_toggle) {
-    return;
-  }
-  WM_operator_name_call(
-      C, "SCULPT_OT_sculptmode_toggle", wm::OpCallContext::ExecDefault, nullptr, nullptr);
-}
-
-/**
- * Perform the workspace change that #curve_patch_defer_workspace_change refused while the patch
- * was still live. Runs on Apply and Discard, for the same reason the mode toggle does: the dialog
- * decides the fate of the PATCH, not of the workspace change the user asked for.
- *
- * Cannot recurse: the session is gone by now, so the refusal no longer triggers.
- */
-static void curve_patch_confirm_resume_workspace_change(bContext *C,
-                                                        const int workspace_session_uid)
-{
-  if (workspace_session_uid == 0) {
-    return;
-  }
-  WorkSpace *workspace = id_cast<WorkSpace *>(
-      BKE_libblock_find_session_uid(CTX_data_main(C), ID_WS, uint32_t(workspace_session_uid)));
-  wmWindow *win = CTX_wm_window(C);
-  if (!workspace || !win) {
-    return;
-  }
-  /* Posted as a notifier rather than run through #WM_window_set_active_workspace directly: this
-   * runs from the dialog's popup handler, and a workspace change swaps the screen out from under
-   * whatever handler is executing. The window manager performs it from #wm_event_do_notifiers
-   * instead, at the same safe point the workspace tabs themselves go through (see
-   * `rna_Window_workspace_update()`, which defers for exactly this reason). */
-  WM_event_add_notifier_ex(CTX_wm_manager(C), win, NC_SCREEN | ND_WORKSPACE_SET, workspace);
+  return paint_session_confirm_popup_open(
+      C,
+      *op,
+      N_("Apply Curve Patch?"),
+      N_("The Curve Patch edit session is ending. Apply writes the patch into the mesh or "
+         "texture, Discard drops it, Continue Editing returns to the curve."),
+      curve_patch_confirm_answer);
 }
 
 /** The deferred work Apply and Discard owe their caller, in the order the deferred paths would have
@@ -1704,8 +1667,8 @@ static void curve_patch_confirm_resume_deferred(bContext *C,
                                                 const int workspace_session_uid)
 {
   g_curve_patch_confirm_pending = false;
-  curve_patch_confirm_resume_mode_toggle(C, resume_mode_toggle);
-  curve_patch_confirm_resume_workspace_change(C, workspace_session_uid);
+  paint_session_confirm_resume_mode_toggle(C, resume_mode_toggle);
+  paint_session_confirm_resume_workspace_change(C, workspace_session_uid);
 }
 
 /* The object an answer acts on. 0 means the active object; the active-object-changed route passes
@@ -1722,26 +1685,6 @@ static Object *curve_patch_confirm_target(bContext *C, const int object_session_
 /* -------------------------------------------------------------------- */
 /** \name Interrupted-session dialog (Apply / Discard / Continue Editing)
  * \{ */
-
-enum eCurvePatchConfirmAction {
-  CURVE_PATCH_CONFIRM_APPLY = 0,
-  CURVE_PATCH_CONFIRM_DISCARD = 1,
-  CURVE_PATCH_CONFIRM_CONTINUE = 2,
-};
-
-/** Everything one answer needs, resolved from the prompt operator once, at invoke. */
-struct CurvePatchConfirmPopup {
-  wmOperator *op = nullptr;
-  int brush_session_uid = 0;
-  int object_session_uid = 0;
-  int stroke_method_at_invoke = -1;
-  int workspace_session_uid = 0;
-  bool resume_mode_toggle = false;
-  bool reopen_editor = false;
-  char tool_idname[256] = "";
-  /** Set once an answer ran, so the Esc/click-away path does not answer twice. */
-  bool answered = false;
-};
 
 /** Continue Editing: keep the session, revert the switch that interrupted it, resume the modal. */
 static void curve_patch_confirm_continue(bContext *C, wmOperator *op)
@@ -1812,7 +1755,7 @@ static void curve_patch_confirm_continue(bContext *C, wmOperator *op)
 static wmOperatorStatus curve_patch_edit_confirm_exec(bContext *C, wmOperator *op)
 {
   const int action = RNA_enum_get(op->ptr, "action");
-  if (action == CURVE_PATCH_CONFIRM_CONTINUE) {
+  if (action == PAINT_SESSION_CONFIRM_CONTINUE) {
     curve_patch_confirm_continue(C, op);
     /* Nothing was decided, so there is nothing for #OPTYPE_UNDO to record. */
     return OPERATOR_CANCELLED;
@@ -1830,7 +1773,7 @@ static wmOperatorStatus curve_patch_edit_confirm_exec(bContext *C, wmOperator *o
     return OPERATOR_CANCELLED;
   }
 
-  if (action == CURVE_PATCH_CONFIRM_DISCARD) {
+  if (action == PAINT_SESSION_CONFIRM_DISCARD) {
     /* Restore the mesh; the image effect's destructor discards its `ImageUndoStep`, so a declined
      * patch leaves the canvas untouched. No brush restore is needed: this path re-stamps nothing.
      */
@@ -1874,128 +1817,26 @@ static void curve_patch_edit_confirm_cancel(bContext *C, wmOperator *op)
 
 /** Run one of the three answers. Going through the action operator (rather than acting inline)
  * keeps #OPTYPE_UNDO's transaction on a real operator, exactly as the two-button dialog did. */
-static void curve_patch_confirm_answer(bContext *C,
-                                       const CurvePatchConfirmPopup &popup,
-                                       const int action)
+static void curve_patch_confirm_answer(bContext &C, const int action, wmOperator &prompt_op)
 {
   PointerRNA props = WM_operator_properties_create("SCULPT_OT_curve_patch_edit_confirm");
   RNA_enum_set(&props, "action", action);
-  RNA_int_set(&props, "brush_session_uid", popup.brush_session_uid);
-  RNA_int_set(&props, "object_session_uid", popup.object_session_uid);
-  RNA_int_set(&props, "stroke_method_at_invoke", popup.stroke_method_at_invoke);
-  RNA_int_set(&props, "workspace_session_uid", popup.workspace_session_uid);
-  RNA_boolean_set(&props, "resume_mode_toggle", popup.resume_mode_toggle);
-  RNA_boolean_set(&props, "reopen_editor", popup.reopen_editor);
-  RNA_string_set(&props, "tool_idname_at_invoke", popup.tool_idname);
+  RNA_int_set(&props, "brush_session_uid", RNA_int_get(prompt_op.ptr, "brush_session_uid"));
+  RNA_int_set(&props, "object_session_uid", RNA_int_get(prompt_op.ptr, "object_session_uid"));
+  RNA_int_set(&props,
+              "stroke_method_at_invoke",
+              RNA_int_get(prompt_op.ptr, "stroke_method_at_invoke"));
+  RNA_int_set(&props, "workspace_session_uid", RNA_int_get(prompt_op.ptr, "workspace_session_uid"));
+  RNA_boolean_set(&props,
+                  "resume_mode_toggle",
+                  RNA_boolean_get(prompt_op.ptr, "resume_mode_toggle"));
+  RNA_boolean_set(&props, "reopen_editor", RNA_boolean_get(prompt_op.ptr, "reopen_editor"));
+  char tool_idname[256];
+  RNA_string_get(prompt_op.ptr, "tool_idname_at_invoke", tool_idname);
+  RNA_string_set(&props, "tool_idname_at_invoke", tool_idname);
   WM_operator_name_call(
-      C, "SCULPT_OT_curve_patch_edit_confirm", wm::OpCallContext::ExecDefault, &props, nullptr);
+      &C, "SCULPT_OT_curve_patch_edit_confirm", wm::OpCallContext::ExecDefault, &props, nullptr);
   WM_operator_properties_free(&props);
-}
-
-/* --- The popup itself --- */
-
-static void curve_patch_confirm_popup_free(CurvePatchConfirmPopup *popup)
-{
-  if (popup->op) {
-    WM_operator_free(popup->op);
-  }
-  MEM_delete(popup);
-}
-
-/** Called when the popup closes with OK: a button already ran the answer, so just release. */
-static void curve_patch_confirm_popup_ok(bContext * /*C*/, void *arg, int /*retval*/)
-{
-  curve_patch_confirm_popup_free(static_cast<CurvePatchConfirmPopup *>(arg));
-}
-
-/** Esc / click-away means Continue Editing, the non-destructive answer. */
-static void curve_patch_confirm_popup_cancel(bContext *C, void *arg)
-{
-  CurvePatchConfirmPopup *popup = static_cast<CurvePatchConfirmPopup *>(arg);
-  if (!popup->answered) {
-    curve_patch_confirm_answer(C, *popup, CURVE_PATCH_CONFIRM_CONTINUE);
-  }
-  curve_patch_confirm_popup_free(popup);
-}
-
-static void curve_patch_confirm_add_button(ui::Block *block,
-                                           CurvePatchConfirmPopup *popup,
-                                           const char *text,
-                                           const int action,
-                                           const bool active_default)
-{
-  ui::Button *but = uiDefIconTextBut(
-      block, ui::ButtonType::But, ICON_NONE, text, 0, 0, 0, UI_UNIT_Y, nullptr, "");
-  button_drawflag_disable(but, ui::BUT_TEXT_LEFT);
-  if (active_default) {
-    button_flag_enable(but, ui::BUT_ACTIVE_DEFAULT);
-  }
-  button_func_set(but, [block, popup, action](bContext &C) {
-    popup->answered = true;
-    /* Close before acting: an answer re-opens the editor or swaps the screen out from under the
-     * popup handler (the file-close dialog orders it the same way). */
-    wmWindow *win = CTX_wm_window(&C);
-    popup_block_close(&C, win, block);
-    curve_patch_confirm_answer(&C, *popup, action);
-    curve_patch_confirm_popup_free(popup);
-  });
-}
-
-static ui::Block *curve_patch_confirm_block_create(bContext *C, ARegion *region, void *arg)
-{
-  CurvePatchConfirmPopup *popup = static_cast<CurvePatchConfirmPopup *>(arg);
-
-  ui::Block *block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
-  block_theme_style_set(block, ui::BLOCK_THEME_STYLE_POPUP);
-  block_flag_enable(
-      block, ui::BLOCK_KEEP_OPEN | ui::BLOCK_LOOP | ui::BLOCK_NO_WIN_CLIP | ui::BLOCK_NUMSELECT);
-  if (popup->op) {
-    popup_dummy_panel_set(region, block, popup->op->idname);
-  }
-
-  ui::Layout &layout = *uiItemsAlertBox(block, 34, ui::AlertIcon::Question);
-
-  uiItemL_ex(&layout, IFACE_("Apply Curve Patch?"), ICON_NONE, true, false);
-  layout.separator(0.5f);
-  layout.label(IFACE_("The Curve Patch edit session is ending. Apply writes the patch into the "
-                      "mesh or texture, Discard drops it, Continue Editing returns to the curve."),
-               ICON_NONE);
-  layout.separator(2.0f);
-
-  /* Split so the three buttons share the row, exactly like the file-close dialog. */
-  ui::Layout &split = layout.split(0.0f, true);
-  split.scale_y_set(1.2f);
-  split.column(false);
-  curve_patch_confirm_add_button(block, popup, IFACE_("Apply"), CURVE_PATCH_CONFIRM_APPLY, false);
-  split.column(false);
-  curve_patch_confirm_add_button(block, popup, IFACE_("Discard"), CURVE_PATCH_CONFIRM_DISCARD, false);
-  split.column(false);
-  curve_patch_confirm_add_button(
-      block, popup, IFACE_("Continue Editing"), CURVE_PATCH_CONFIRM_CONTINUE, true);
-
-  block_bounds_set_centered(block, int(14 * UI_SCALE_FAC));
-  return block;
-}
-
-static wmOperatorStatus curve_patch_confirm_popup_open(bContext *C, wmOperator *op)
-{
-  CurvePatchConfirmPopup *popup = MEM_new<CurvePatchConfirmPopup>(__func__);
-  popup->op = op;
-  popup->brush_session_uid = RNA_int_get(op->ptr, "brush_session_uid");
-  popup->object_session_uid = RNA_int_get(op->ptr, "object_session_uid");
-  popup->stroke_method_at_invoke = RNA_int_get(op->ptr, "stroke_method_at_invoke");
-  popup->workspace_session_uid = RNA_int_get(op->ptr, "workspace_session_uid");
-  popup->resume_mode_toggle = RNA_boolean_get(op->ptr, "resume_mode_toggle");
-  popup->reopen_editor = RNA_boolean_get(op->ptr, "reopen_editor");
-  RNA_string_get(op->ptr, "tool_idname_at_invoke", popup->tool_idname);
-
-  popup_block_ex(C,
-                 curve_patch_confirm_block_create,
-                 curve_patch_confirm_popup_ok,
-                 curve_patch_confirm_popup_cancel,
-                 popup,
-                 op);
-  return OPERATOR_RUNNING_MODAL;
 }
 
 /** \} */
@@ -2024,17 +1865,25 @@ void SCULPT_OT_curve_patch_edit_confirm(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
 
   static const EnumPropertyItem action_items[] = {
-      {CURVE_PATCH_CONFIRM_APPLY, "APPLY", 0, "Apply", "Write the patch into the mesh or texture"},
-      {CURVE_PATCH_CONFIRM_DISCARD, "DISCARD", 0, "Discard", "Drop the patch"},
-      {CURVE_PATCH_CONFIRM_CONTINUE,
+      {PAINT_SESSION_CONFIRM_APPLY,
+       "APPLY",
+       0,
+       "Apply",
+       "Write the patch into the mesh or texture"},
+      {PAINT_SESSION_CONFIRM_DISCARD, "DISCARD", 0, "Discard", "Drop the patch"},
+      {PAINT_SESSION_CONFIRM_CONTINUE,
        "CONTINUE",
        0,
        "Continue",
        "Keep the session and return to editing the curve"},
       {0, nullptr, 0, nullptr, nullptr},
   };
-  PropertyRNA *prop = RNA_def_enum(
-      ot->srna, "action", action_items, CURVE_PATCH_CONFIRM_APPLY, "Action", "What to do with the patch");
+  PropertyRNA *prop = RNA_def_enum(ot->srna,
+                                   "action",
+                                   action_items,
+                                   PAINT_SESSION_CONFIRM_APPLY,
+                                   "Action",
+                                   "What to do with the patch");
   RNA_def_property_flag(prop, PropertyFlag(PROP_HIDDEN | PROP_SKIP_SAVE));
 
   prop = RNA_def_int(ot->srna,

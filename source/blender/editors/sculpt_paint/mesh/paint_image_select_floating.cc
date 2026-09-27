@@ -32,10 +32,11 @@
  * header re-includes paint_image_select_floating.hh, which is `#pragma once`. */
 #include "paint_image_select_intern.hh"
 /* This file is the one true consumer of every tool's teardown entry points (see the dispatch
- * table below), so unlike other consumers of the umbrella above it needs all three. */
+ * table below), so unlike other consumers of the umbrella above it needs all of them. */
 #include "paint_image_select_move_intern.hh"
 #include "paint_image_select_transform_intern.hh"
 #include "paint_image_select_warp_intern.hh"
+#include "paint_image_shape_vector_intern.hh"
 
 namespace blender {
 
@@ -144,7 +145,13 @@ static const PaintSelectToolType g_tool_types[] = {
     {image_select_warp_session_end_for_takeover,
      image_select_warp_session_cancel,
      image_select_warp_session_free},
+    /* Shape (Vector mode) */
+    {ed::sculpt_paint::shape::image_shape_vector_session_end_for_takeover,
+     ed::sculpt_paint::shape::image_shape_vector_session_cancel,
+     ed::sculpt_paint::shape::image_shape_vector_state_free},
 };
+static_assert(ARRAY_SIZE(g_tool_types) == int(PaintSelectTool::Shape) + 1,
+              "The tool dispatch table must cover every PaintSelectTool value");
 
 static const PaintSelectToolType &image_select_tool_type_get(const PaintSelectTool tool)
 {

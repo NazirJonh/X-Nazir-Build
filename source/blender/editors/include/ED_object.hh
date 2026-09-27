@@ -245,9 +245,19 @@ void parent_clear(Object *ob, int type);
  */
 void base_select(Base *base, eObjectSelect_Mode mode);
 /**
- * Change active base, it includes the notifier
+ * Change active base, it includes the notifier.
+ * \note For programmatic activations only (add / duplicate / join / undo / scripts). Any
+ * user-initiated activation (viewport pick, menus, Outliner, select operators, mode transfer)
+ * must go through #base_activate_user instead.
  */
 void base_activate(bContext *C, Base *base);
+/**
+ * As #base_activate, but for an activation the user explicitly asked for (a viewport pick, an
+ * Outliner row, a mode transfer). While a live Paint Shape session owns the current active object
+ * the change is refused and handed to the session's Apply / Discard / Continue dialog, which
+ * re-issues it once the shape is resolved. Returns false when the change was deferred.
+ */
+bool base_activate_user(bContext *C, Base *base);
 void base_activate_with_mode_exit_if_needed(bContext *C, Base *base);
 /**
  * Call when the active base has changed.

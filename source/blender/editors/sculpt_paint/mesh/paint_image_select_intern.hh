@@ -119,8 +119,6 @@ inline void selection_tile_fragments_free(Vector<SelectionTileFragment> &fragmen
   fragments.clear();
 }
 
-void paint_select_session_free(PaintSelectSession &session);
-
 bool image_paint_selection_poll(bContext *C);
 int image_paint_selection_resolve_tile(Image *ima, const SpaceImage *sima, int preferred_tile);
 
@@ -149,8 +147,7 @@ inline int2 image_select_udim_tile_col_row(int tile_number)
 /** Bottom-left UV corner of a UDIM tile (its column/row in whole-tile UV units). */
 inline float2 image_select_udim_tile_uv_origin(int tile_number)
 {
-  const int2 col_row = image_select_udim_tile_col_row(tile_number);
-  return float2(float(col_row.x), float(col_row.y));
+  return BKE_image_get_tile_uv_origin(tile_number);
 }
 
 /**

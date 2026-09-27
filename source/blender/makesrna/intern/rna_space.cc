@@ -2358,6 +2358,22 @@ static bool rna_SpaceImageEditor_paint_select_is_transforming_get(PointerRNA *pt
   return ED_image_paint_select_is_transforming(sima);
 }
 
+static bool rna_SpaceImageEditor_paint_shape_transform_active_get(PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  return ED_image_shape_transform_is_active(sima);
+}
+
+static PointerRNA rna_SpaceImageEditor_paint_shape_session_settings_get(PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  PaintShapeSettings *settings = ED_image_shape_session_settings_get(sima);
+  if (settings == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_PaintShapeSettings, settings);
+}
+
 static void rna_SpaceImageEditor_paint_select_translation_get(PointerRNA *ptr, float *values)
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
@@ -4776,7 +4792,7 @@ static IDFilterEnumPropertyItem rna_enum_space_file_id_filter_categories[] = {
      "Environment",
      "Show worlds, lights, cameras and speakers"},
     {FILTER_ID_BR | FILTER_ID_GD_LEGACY | FILTER_ID_PA | FILTER_ID_PAL | FILTER_ID_PC |
-         FILTER_ID_TXT | FILTER_ID_VF | FILTER_ID_CF | FILTER_ID_WS,
+         FILTER_ID_PV | FILTER_ID_TXT | FILTER_ID_VF | FILTER_ID_CF | FILTER_ID_WS,
      "category_misc",
      ICON_GREASEPENCIL,
      "Miscellaneous",
@@ -7719,6 +7735,26 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Is Transforming", "A paint selection transform is currently in progress");
+
+  /* Live Vector shape session Transform mode (runtime only). */
+  prop = RNA_def_property(srna, "paint_shape_transform_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SpaceImageEditor_paint_shape_transform_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Shape Transform Active", "A Polygon/Star/Arc transform cage is shown");
+
+  /* The live Vector shape session's own settings copy (Variant A). Read-only pointer; its child
+   * properties are editable and drive the session, not the shared tool settings. */
+  prop = RNA_def_property(srna, "paint_shape_session_settings", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "PaintShapeSettings");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_SpaceImageEditor_paint_shape_session_settings_get", nullptr, nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Shape Session Settings",
+      "The live shape session's own settings copy (null when none)");
 
   prop = RNA_def_property(srna, "paint_select_translation", PROP_FLOAT, PROP_TRANSLATION);
   RNA_def_property_array(prop, 2);

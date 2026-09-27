@@ -44,6 +44,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BKE_attribute.hh"
 #include "BKE_blender.hh"
@@ -2200,37 +2201,72 @@ void PAINT_OT_image_select_circle_radius(wmOperatorType *ot)
 /** \name Session lifetime
  * \{ */
 
-void paint_select_session_free(PaintSelectSession &session)
-{
-  image_select_floating_session_free(session.active);
-  session.active = nullptr;
-}
-
-void ED_image_paint_select_session_free(SpaceImage *sima)
-{
-  if (!sima || !sima->runtime) {
-    return;
-  }
-  /* Release the canvas-borrow token before the slot itself is freed below. This deliberately
-   * does not go through #image_select_session_clear, which would also null `paint_select.active`
-   * -- #paint_select_session_free still needs that pointer to free the concrete session through
-   * its tool's own destructor. Skipping the borrow release here would leave
-   * #bke::ImageRuntime::paint_selection_borrowed_by pointing at a session that no longer exists,
-   * permanently locking the canvas out of every Image Editor showing this Image. */
-  if (sima->image && sima->image->runtime &&
-      sima->image->runtime->paint_selection_borrowed_by == sima)
-  {
-    sima->image->runtime->paint_selection_borrowed_by = nullptr;
-  }
-  paint_select_session_free(sima->runtime->paint_select);
-}
-
 void ED_image_paint_select_session_cancel(bContext *C, SpaceImage *sima)
 {
   if (!sima || !sima->runtime) {
     return;
   }
   image_select_floating_sessions_cancel(C, sima);
+}
+
+void ED_image_paint_select_session_settle(bContext *C, SpaceImage *sima)
+{
+  if (!sima || !sima->runtime) {
+    return;
+  }
+  image_select_floating_sessions_end_all(C, sima);
+}
+
+/** Walk every Image Editor space-link of every screen in \a bmain -- the secondary layouts and the
+ * screens of inactive workspaces included: a session survives a workspace switch, and an undo /
+ * Save All that skipped its screen would leave it holding stale backups. */
+static void foreach_space_image(bContext *C, const FunctionRef<void(SpaceImage &)> callback)
+{
+  Main *bmain = CTX_data_main(C);
+  if (bmain == nullptr) {
+    return;
+  }
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      /* Not filtered on the area's active type: a hidden Image Editor space-link keeps its state. */
+      for (SpaceLink &sl : area.spacedata) {
+        if (sl.spacetype != SPACE_IMAGE) {
+          continue;
+        }
+        callback(*reinterpret_cast<SpaceImage *>(&sl));
+      }
+    }
+  }
+}
+
+void ED_image_paint_select_sessions_settle_all(bContext *C)
+{
+  foreach_space_image(C, [&](SpaceImage &sima) {
+    image_select_floating_sessions_end_all(C, &sima);
+  });
+}
+
+void ED_image_paint_select_sessions_cancel_all(bContext *C)
+{
+  foreach_space_image(C, [&](SpaceImage &sima) {
+    image_select_floating_sessions_cancel(C, &sima);
+  });
+}
+
+/** Cancel only the live Image Editor Vector shape session of every editor. Returns true when at
+ * least one was cancelled; the caller consumes the undo step then (the uncommitted shape takes the
+ * first undo, like its Esc), while the other floating tools keep their settle-then-undo behavior. */
+bool ED_image_paint_shape_sessions_cancel_all(bContext *C)
+{
+  bool cancelled = false;
+  foreach_space_image(C, [&](SpaceImage &sima) {
+    const PaintSelectFloatingSession *session = image_select_session_active(&sima);
+    if (session != nullptr && session->tool == PaintSelectTool::Shape) {
+      image_select_floating_sessions_cancel(C, &sima);
+      cancelled = true;
+    }
+  });
+  return cancelled;
 }
 
 void ED_image_paint_select_transform_state_free(SpaceImage *sima)

@@ -709,6 +709,19 @@ static Palette *rna_Main_palettes_new(Main *bmain, const char *name)
   return static_cast<Palette *>(palette);
 }
 
+static PaintVector *rna_Main_paint_vectors_new(Main *bmain, const char *name)
+{
+  char safe_name[MAX_ID_NAME - 2];
+  rna_idname_validate(name, safe_name);
+
+  PaintVector *paint_vector = BKE_paint_vector_add(bmain, safe_name);
+  id_us_min(&paint_vector->id);
+
+  WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
+
+  return paint_vector;
+}
+
 static MovieClip *rna_Main_movieclip_load(Main *bmain,
                                           ReportList *reports,
                                           const char *filepath,
@@ -2079,6 +2092,41 @@ void RNA_def_main_palettes(BlenderRNA *brna, PropertyRNA *cprop)
   func = RNA_def_function(srna, "tag", "rna_Main_palettes_tag");
   parm = RNA_def_boolean(func, "value", false, "Value", "");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+}
+void RNA_def_main_paint_vectors(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "BlendDataPaintVectors");
+  srna = RNA_def_struct(brna, "BlendDataPaintVectors", nullptr);
+  RNA_def_struct_sdna(srna, "Main");
+  RNA_def_struct_ui_text(srna, "Main Paint Vectors", "Collection of paint vectors");
+
+  func = RNA_def_function(srna, "new", "rna_Main_paint_vectors_new");
+  RNA_def_function_ui_description(func, "Add a new paint vector to the main database");
+  parm = RNA_def_string(func, "name", "PaintVector", 0, "", "New name for the data-block");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  /* return type */
+  parm = RNA_def_pointer(func, "paint_vector", "PaintVector", "", "New paint vector data-block");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_Main_ID_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove a paint vector from the current blendfile");
+  parm = RNA_def_pointer(func, "paint_vector", "PaintVector", "", "Paint vector to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  RNA_def_boolean(
+      func, "do_unlink", true, "", "Unlink all usages of this paint vector before deleting it");
+  RNA_def_boolean(func,
+                  "do_id_user",
+                  true,
+                  "",
+                  "Decrement user counter of all data-blocks used by this paint vector");
+  RNA_def_boolean(
+      func, "do_ui_user", true, "", "Make sure interface does not reference this paint vector");
 }
 void RNA_def_main_cachefiles(BlenderRNA *brna, PropertyRNA *cprop)
 {

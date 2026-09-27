@@ -37,11 +37,10 @@
 #include <memory>
 #include <optional>
 
-struct ImagePool;
-
 namespace blender {
 
 struct Brush;
+struct ImagePool;
 struct Paint;
 struct bContext;
 struct Image;

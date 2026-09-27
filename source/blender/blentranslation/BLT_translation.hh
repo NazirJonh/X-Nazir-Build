@@ -131,6 +131,7 @@ StringRef BLT_translate_do_new_dataname(StringRef msgctxt, StringRef msgid);
 #define BLT_I18NCONTEXT_ID_NODETREE "NodeTree"
 #define BLT_I18NCONTEXT_ID_OBJECT "Object"
 #define BLT_I18NCONTEXT_ID_PAINTCURVE "PaintCurve"
+#define BLT_I18NCONTEXT_ID_PAINTVECTOR "PaintVector"
 #define BLT_I18NCONTEXT_ID_PALETTE "Palette"
 #define BLT_I18NCONTEXT_ID_PARTICLESETTINGS "ParticleSettings"
 #define BLT_I18NCONTEXT_ID_POINTCLOUD "PointCloud"

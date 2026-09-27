@@ -7788,6 +7788,129 @@ def km_image_editor_tool_paint_select_gradient(params, *, fallback):
     )
 
 
+def _template_items_image_paint_shape(params, shape_type):
+    return [
+        ("paint.image_shape_draw",
+         {"type": params.tool_mouse, "value": 'PRESS'},
+         {"properties": [("type", shape_type)]}),
+        # F adjusts the shape stroke width in reference-tile pixels; Shift+F the brush strength,
+        # which the shape uses as its overall opacity (the same radial-control gesture as the
+        # brush size/strength).
+        ("wm.radial_control", {"type": 'F', "value": 'PRESS'},
+         {"properties": [("data_path_primary",
+                         "tool_settings.image_paint.shape.stroke_width")]}),
+        ("wm.radial_control", {"type": 'F', "value": 'PRESS', "shift": True},
+         radial_control_properties("image_paint", "strength",
+                                   secondary_prop="use_unified_strength")),
+        # X swaps the shape's own Stroke / Fill colors.
+        ("paint.shape_colors_swap", {"type": 'X', "value": 'PRESS'}, None),
+        # Confirm / cancel of a live Vector shape session.
+        ("paint.image_shape_vector_apply",
+         {"type": 'RET', "value": 'PRESS'},
+         None),
+        ("paint.image_shape_vector_apply",
+         {"type": 'NUMPAD_ENTER', "value": 'PRESS'},
+         None),
+        ("paint.image_shape_vector_cancel",
+         {"type": 'ESC', "value": 'PRESS'},
+         None),
+        # Ctrl+Z steps the shape session's own undo. The Image Vector modal handles it while it
+        # runs; for a linked 3D Sculpt session this keymap is what keeps it off the global stack
+        # (a global undo would cancel the session).
+        ("paint.image_shape_vector_undo",
+         {"type": 'Z', "value": 'PRESS', "ctrl": True},
+         None),
+    ]
+
+
+def _km_image_editor_tool_paint_shape(params, fallback, keymap_name, shape_type):
+    return (
+        _fallback_id(keymap_name, fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else
+              _template_items_image_paint_shape(params, shape_type)),
+        ]},
+    )
+
+
+def km_image_editor_tool_paint_shape_line(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Line", 'LINE')
+
+
+def km_image_editor_tool_paint_shape_polyline(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Polyline", 'POLYLINE')
+
+
+def km_image_editor_tool_paint_shape_rect(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Rectangle", 'RECTANGLE')
+
+
+def km_image_editor_tool_paint_shape_ellipse(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Ellipse", 'ELLIPSE')
+
+
+def km_image_editor_tool_paint_shape_curve(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Curve", 'CURVE')
+
+
+def km_image_editor_tool_paint_shape_polygon(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Polygon", 'POLYGON')
+
+
+def km_image_editor_tool_paint_shape_star(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Star", 'STAR')
+
+
+def km_image_editor_tool_paint_shape_arc(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Arc", 'ARC')
+
+
+def km_image_paint_shape_modal_map(_params):
+    items = []
+    keymap = (
+        "Image Paint Shape Modal",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW', "modal": True},
+        {"items": items},
+    )
+
+    items.extend([
+        ("CONFIRM", {"type": 'RET', "value": 'PRESS', "any": True}, None),
+        ("CONFIRM", {"type": 'NUMPAD_ENTER', "value": 'PRESS', "any": True}, None),
+        ("CANCEL", {"type": 'ESC', "value": 'PRESS', "any": True}, None),
+        # Ctrl+RMB is the contour cut of a live Vector shape, so it must reach the modal untranslated
+        # (a plain, Shift or Alt RMB still cancels).
+        ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'PRESS'}, None),
+        ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True}, None),
+        ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("UNDO", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
+        ("UNDO", {"type": 'Z', "value": 'PRESS', "oskey": True}, None),
+        ("REDO", {"type": 'Z', "value": 'PRESS', "ctrl": True, "shift": True}, None),
+        ("REDO", {"type": 'Z', "value": 'PRESS', "oskey": True, "shift": True}, None),
+        ("REDO", {"type": 'Y', "value": 'PRESS', "ctrl": True}, None),
+        ("MOVE", {"type": 'G', "value": 'PRESS'}, None),
+        ("ROTATE", {"type": 'R', "value": 'PRESS'}, None),
+        ("SCALE", {"type": 'S', "value": 'PRESS'}, None),
+        ("STROKE_WIDTH", {"type": 'F', "value": 'PRESS'}, None),
+        ("STROKE_OPACITY", {"type": 'F', "value": 'PRESS', "shift": True}, None),
+        ("EXTRUDE", {"type": 'E', "value": 'PRESS'}, None),
+        ("SELECT_NEXT", {"type": 'TAB', "value": 'PRESS'}, None),
+        ("AXIS_X", {"type": 'X', "value": 'PRESS'}, None),
+        ("AXIS_Y", {"type": 'Y', "value": 'PRESS'}, None),
+        ("ORIGIN_RESET", {"type": 'O', "value": 'PRESS'}, None),
+    ])
+
+    return keymap
+
+
 # ------------------------------------------------------------------------------
 # Tool System (Node Editor)
 
@@ -8852,6 +8975,39 @@ def km_3d_view_tool_sculpt_color_gradient(params):
     )
 
 
+def _km_3d_view_tool_sculpt_paint_shape(keymap_name, shape_type, params):
+    return (
+        keymap_name,
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("sculpt.paint_shape_draw",
+             {"type": params.tool_mouse, "value": 'PRESS'},
+             {"properties": [("type", shape_type)]}),
+            # Ctrl+RMB cuts the contour of a live Vector shape (inserts a point), like the Curve
+            # stroke method.
+            ("sculpt.paint_shape_draw",
+             {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True},
+             {"properties": [("type", shape_type)]}),
+            # F is the stroke width in region pixels (the 3D shape is built in region pixels, so
+            # the radial circle matches the painted width); Shift+F is the brush strength, which
+            # the shape uses as its overall opacity. The tool key-map is consulted before the mode
+            # key-map, so the Sculpt brush size on F stays untouched while a shape tool is active.
+            # A live Vector session edits its own width first (the operator passes the key through
+            # when there is none, so the radial control below serves Pixel mode).
+            ("sculpt.paint_shape_draw", {"type": 'F', "value": 'PRESS'},
+             {"properties": [("type", shape_type)]}),
+            ("wm.radial_control", {"type": 'F', "value": 'PRESS'},
+             {"properties": [("data_path_primary",
+                             "tool_settings.image_paint.shape.stroke_width")]}),
+            ("wm.radial_control", {"type": 'F', "value": 'PRESS', "shift": True},
+             radial_control_properties("sculpt", "strength",
+                                       secondary_prop="use_unified_strength")),
+            # X swaps the shape's own Stroke / Fill colors.
+            ("paint.shape_colors_swap", {"type": 'X', "value": 'PRESS'}, None),
+        ]},
+    )
+
+
 def km_3d_view_tool_sculpt_mask_by_color(params):
     return (
         "3D View Tool: Sculpt, Mask by Color",
@@ -9598,6 +9754,7 @@ def generate_keymaps(params=None):
         km_grease_pencil_primitive_tool_modal_map(params),
         km_grease_pencil_fill_tool_modal_map(params),
         km_grease_pencil_interpolate_tool_modal_map(params),
+        km_image_paint_shape_modal_map(params),
         km_sequencer_slip_modal_map(params),
 
         # Gizmos.
@@ -9651,6 +9808,14 @@ def generate_keymaps(params=None):
         *(km_image_editor_tool_paint_select_transform(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_warp(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_gradient(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_line(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_polyline(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_rect(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_ellipse(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_curve(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_polygon(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_star(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_arc(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_box(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_lasso(params, fallback=fallback) for fallback in (False, True)),
@@ -9733,6 +9898,17 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_cloth_filter(params),
         km_3d_view_tool_sculpt_color_filter(params),
         km_3d_view_tool_sculpt_color_gradient(params),
+        *(_km_3d_view_tool_sculpt_paint_shape("3D View Tool: Sculpt, Shape " + name, shape_type, params)
+          for name, shape_type in (
+              ("Line", 'LINE'),
+              ("Polyline", 'POLYLINE'),
+              ("Rectangle", 'RECTANGLE'),
+              ("Ellipse", 'ELLIPSE'),
+              ("Curve", 'CURVE'),
+              ("Polygon", 'POLYGON'),
+              ("Star", 'STAR'),
+              ("Arc", 'ARC'),
+          )),
         km_3d_view_tool_sculpt_mask_by_color(params),
         km_3d_view_tool_sculpt_mask_by_topology_island(params),
         km_3d_view_tool_sculpt_face_set_edit(params),

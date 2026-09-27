@@ -2605,6 +2605,8 @@ static BIFIconID tree_element_get_icon_from_id(const ID *id)
       return ICON_SEQUENCE;
     case ID_PC:
       return ICON_CURVE_BEZCURVE;
+    case ID_PV:
+      return ICON_CURVE_BEZCURVE;
     case ID_PA:
       return ICON_PARTICLES;
     case ID_PAL:

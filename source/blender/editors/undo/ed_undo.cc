@@ -35,6 +35,7 @@
 #include "ED_gpencil_legacy.hh"
 #include "ED_object.hh"
 #include "ED_outliner.hh"
+#include "ED_paint.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
@@ -174,8 +175,12 @@ void ED_undo_memfile_push(bContext *C, const char *name)
 
 /**
  * Common pre management of undo/redo (killing all running jobs, calling pre handlers, etc.).
+ *
+ * \return true when the stack step must be performed. False when a live Sculpt Vector shape
+ * session consumed the undo: its uncommitted preview is cancelled instead (one undo = one shape),
+ * so the previous committed step must not also be popped.
  */
-static void ed_undo_step_pre(bContext *C,
+static bool ed_undo_step_pre(bContext *C,
                              wmWindowManager *wm,
                              const enum eUndoStepDir undo_dir,
                              ReportList *reports)
@@ -205,6 +210,25 @@ static void ed_undo_step_pre(bContext *C,
         bmain, &scene->id, (undo_dir == STEP_UNDO) ? BKE_CB_EVT_UNDO_PRE : BKE_CB_EVT_REDO_PRE);
     wm->op_undo_depth--;
   }
+
+  /* Settle the floating sessions before the stack transition: undo/redo only rewrites the tiles
+   * and regions a step recorded, so a session preview outside them would otherwise survive in the
+   * live buffers with no undo step behind it, and restoring from the session backups is only valid
+   * BEFORE the load (they hold pre-preview pixels of the current canvas).
+   *
+   * A live Vector shape session (Image Editor or Sculpt Mode) is handled first and consumes the
+   * undo: the first Ctrl+Z cancels its uncommitted preview and must not also pop the previous
+   * committed step. It is cancelled before the blanket image cancel below (which would otherwise
+   * already have consumed it). The other floating tools (gradient, warp, move, transform) keep
+   * their settle-then-undo behavior. */
+  /* Both cancels must always run: each one owns a different kind of floating session. They are
+   * evaluated unconditionally and combined afterwards so the second cannot be short-circuited
+   * away by the first returning true. */
+  const bool shape_cancelled_image = ED_image_paint_shape_sessions_cancel_all(C);
+  const bool shape_cancelled_vector = ED_paint_shape_sessions_cancel_all(C);
+  const bool shape_cancelled = shape_cancelled_image || shape_cancelled_vector;
+  ED_image_paint_select_sessions_cancel_all(C);
+  return !shape_cancelled;
 }
 
 /**
@@ -270,7 +294,11 @@ static wmOperatorStatus ed_undo_step_direction(bContext *C,
 
   wmWindowManager *wm = CTX_wm_manager(C);
 
-  ed_undo_step_pre(C, wm, step, reports);
+  if (!ed_undo_step_pre(C, wm, step, reports)) {
+    /* A live Sculpt Vector shape session consumed the undo by cancelling itself. */
+    ed_undo_step_post(C, wm, step, reports);
+    return OPERATOR_FINISHED;
+  }
 
   if (step == STEP_UNDO) {
     BKE_undosys_step_undo(wm->runtime->undo_stack, C);

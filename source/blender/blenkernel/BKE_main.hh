@@ -83,6 +83,7 @@ struct WorkSpace;
 struct Curves;
 struct PointCloud;
 struct Volume;
+struct PaintVector;
 
 struct Brush;
 struct CacheFile;
@@ -409,6 +410,7 @@ struct Main : NonCopyable, NonMovable {
   ListBaseT<Curves> hair_curves = {};
   ListBaseT<PointCloud> pointclouds = {};
   ListBaseT<Volume> volumes = {};
+  ListBaseT<PaintVector> paint_vectors = {};
 
   /**
    * Must be generated, used and freed by same code - never assume this is valid data unless you

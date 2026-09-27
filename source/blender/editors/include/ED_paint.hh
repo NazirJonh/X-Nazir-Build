@@ -27,6 +27,7 @@ struct CurvePatchParams;
 enum class PaintMode : int8_t;
 struct ARegion;
 struct bContext;
+struct ARegionType;
 struct Brush;
 struct bToolRef;
 struct Depsgraph;
@@ -484,6 +485,63 @@ void ED_image_paint_select_scale_set(SpaceImage *sima, const float scale[2]);
 /** Register the gizmo group that draws the floating selection transform cage. */
 void ED_image_paint_select_transform_gizmo_setup(wmGizmoGroupType *gzgt);
 
+/* `paint_image_shape_gizmo.cc` */
+
+/** Register the gizmo group that draws the live Vector shape session's transform cage. */
+void ED_image_shape_transform_gizmo_setup(wmGizmoGroupType *gzgt);
+
+/** True when \a mval is over the live shape session's cage handles or interior. The draw
+ * operator's modal yields LEFTMOUSE to the gizmo when this returns true. */
+bool ED_image_shape_transform_gizmo_hit(const bContext *C, const int mval[2]);
+
+/** Runtime "Transform" mode of the live Vector session in \a sima (Polygon/Star/Arc cage). */
+bool ED_image_shape_transform_is_active(SpaceImage *sima);
+
+/* `paint_shape_gizmo_view3d.cc` */
+
+/** Register the 3D Viewport gizmo group that draws the live Sculpt Vector session's cage. */
+void ED_view3d_shape_transform_gizmo_setup(wmGizmoGroupType *gzgt);
+
+/** True when \a mval is over the live Sculpt shape session's cage handles or interior. */
+bool ED_view3d_shape_transform_gizmo_hit(const bContext *C, const int mval[2]);
+
+/* `paint_shape_image_3d.cc` */
+
+/** Register the Image Editor gizmo group that displays a live 3D Sculpt shape session's cage in
+ * the editor's UV space (X1b). */
+void ED_image_paint_shape3d_gizmo_setup(wmGizmoGroupType *gzgt);
+
+/** Add the draw callback that shows a live 3D Sculpt shape session's contour in every Image Editor
+ * displaying one of its target images (X1a). Called once from the Image Editor's main region type
+ * setup. */
+void ED_image_paint_shape3d_draw_register(ARegionType *art);
+
+/** True while any live 3D Sculpt shape session exists (cheap guard for listeners and draws). */
+bool ED_paint_shape_sessions_alive();
+
+/* `paint_shape_image_3d.cc` X1c: the linked Image Editor edits the same 3D session. */
+
+/** True when the Image Editor of the current context shows a live 3D Sculpt shape session (one of
+ * its target images, without an Image Vector session of its own). */
+bool ED_image_paint_shape3d_session_linked(const bContext *C);
+
+/** Apply (bake) / cancel the 3D session shown by the Image Editor of the current context. False
+ * when this editor is not linked to one. */
+bool ED_image_paint_shape3d_session_apply(bContext *C);
+bool ED_image_paint_shape3d_session_cancel(bContext *C);
+
+/** Ask the user what to do with a live 3D Sculpt shape session (Apply / Discard / Continue)
+ * before the workspace changes; see #ED_paint_shape_session_defer_object_change. \return true
+ * when the caller must abandon this workspace change. */
+bool ED_paint_shape_session_defer_workspace_change(bContext *C, int workspace_session_uid);
+
+/** Ask the user what to do with a live 3D Sculpt shape session on the active object before it
+ * stops being active (a viewport pick, an Outliner / animation-editor row, a mode transfer; see
+ * #object::base_activate_user). \a object_new_session_uid is the object the user asked to
+ * activate; the change is re-issued once the session is resolved. \return true when the caller
+ * must abandon this activation. */
+bool ED_paint_shape_session_defer_object_change(bContext *C, int object_new_session_uid);
+
 /* `paint_image_select_move.cc` */
 
 bool ED_image_paint_select_is_moving(SpaceImage *sima);
@@ -493,17 +551,41 @@ void ED_image_paint_select_move_offset_set(SpaceImage *sima, const float offset[
 /* `paint_image_select_mask.cc` */
 
 /**
- * Free every floating selection operation state held by the editor's #PaintSelectSession
- * without restoring pixels. Safe to call with a null runtime; used when undo/redo has already
- * rewritten the canvas (#NC_WM / #ND_UNDO).
- */
-void ED_image_paint_select_session_free(SpaceImage *sima);
-
-/**
  * Cancel the floating session: restore lifted pixels or gradient backups, close an open
  * image-undo step, then free. \a C may be null (space free / editor close).
  */
 void ED_image_paint_select_session_cancel(bContext *C, SpaceImage *sima);
+
+/**
+ * Settle \a sima's floating session the takeover way: the user's in-progress edit is kept (a
+ * shape session bakes with its own undo step, a lifted-pixels session commits, a gradient
+ * preview is restored and discarded). Used by the image-save paths, which must not write
+ * unconfirmed preview pixels to disk without an undo step.
+ */
+void ED_image_paint_select_session_settle(bContext *C, SpaceImage *sima);
+
+/**
+ * #ED_image_paint_select_session_settle for every Image Editor in \a bmain (any window).
+ * Used by Save All, which writes images of editors the context is not showing.
+ */
+void ED_image_paint_select_sessions_settle_all(bContext *C);
+
+/**
+ * Cancel (restore + free) the floating session of every Image Editor in \a bmain. Called from
+ * the undo/redo pre-step: undo only rewrites the tiles and regions a step recorded, so a session
+ * preview outside them would otherwise survive in the live buffers with no undo step behind it,
+ * and restoring after the load would paint the pre-preview backups back over the undone canvas.
+ * Cancelling matches every tool's own Esc semantics. This changes the previously discarded-on-
+ * undo behavior of the gradient/warp/move/transform sessions as well.
+ */
+void ED_image_paint_select_sessions_cancel_all(bContext *C);
+
+/**
+ * Cancel only the live Image Editor Vector shape session(s). Returns true when at least one was
+ * cancelled, so the undo pre-step can consume the step (the uncommitted shape takes the first
+ * undo) while the other floating tools keep their settle-then-undo behavior.
+ */
+bool ED_image_paint_shape_sessions_cancel_all(bContext *C);
 
 /**
  * Discard only the floating transform state, leaving the rest of the session untouched. Used
@@ -526,5 +608,57 @@ void ED_image_paint_select_gradient_settings_revision_bump();
  * warp session picks up a changed #ImagePaintSettings::warp_grid_size.
  */
 void ED_image_paint_select_warp_settings_revision_bump();
+
+/* `paint_image_shape_vector.cc` */
+
+struct Main;
+/**
+ * A #PaintShapeSettings block changed. \a changed is the block the RNA setter wrote: when it is a
+ * live Vector session's own copy, only that session is refreshed; a change to the global
+ * `tool_settings.image_paint.shape` is ignored by live sessions (they own their copy, Variant A).
+ */
+void ED_paint_shape_settings_update(Main *bmain, Scene *scene, PaintShapeSettings *changed);
+
+/**
+ * The active brush changed (refresh the live Vector sessions whose preview reads it). Strength and
+ * blend are folded into the preview from the brush (#style_brush_values_from_brush), so a change
+ * from any editor must re-composite. \a brush is the notifier reference: when non-null only
+ * sessions whose image-paint brush is \a brush are refreshed; null refreshes every session in
+ * \a scene. Shape settings stay isolated (Variant A); only the brush is re-read.
+ */
+void ED_paint_shape_brush_update(const Main *bmain, const Scene *scene, const Brush *brush);
+
+/**
+ * The live Vector session's own #PaintShapeSettings copy when \a sima owns a session, else null.
+ * The Image Editor's shape UI edits this copy so settings changes elsewhere never reach the
+ * session and the shared settings stay untouched.
+ */
+PaintShapeSettings *ED_image_shape_session_settings_get(SpaceImage *sima);
+
+/* `paint_shape_vector_3d.cc` — live Vector shape session of Sculpt Mode (Image canvas) */
+
+namespace ed::sculpt_paint::shape {
+struct PaintShapeSession;
+}
+
+/** The live Vector shape session of \a ob, or null. */
+ed::sculpt_paint::shape::PaintShapeSession *ED_paint_shape_session_get(Object &ob);
+bool ED_paint_shape_session_active(const Object &ob);
+/** Cancel every live Vector session in \a bmain; called from the undo/redo pre-step. Returns true
+ * when at least one session was cancelled, so the caller can consume the undo step (the session's
+ * uncommitted preview takes the first undo, like its Esc). */
+bool ED_paint_shape_sessions_cancel_all(bContext *C);
+/** Context-less teardown: restore the preview and free (object deletion, mode exit). */
+void ED_paint_shape_session_discard_on_session_end(Object &ob);
+/** The live 3D session's own #PaintShapeSettings copy, or null. Edited by the Sculpt shape UI. */
+PaintShapeSettings *ED_paint_shape_session_settings_get(Object &ob);
+/** Runtime "Transform" flag of the live 3D session (Polygon/Star/Arc cage). */
+bool ED_paint_shape_transform_is_active(const Object &ob);
+/** True when \a ob owns a live 3D shape session whose write targets include \a image: an Image
+ * Editor showing that image is "linked" to the session. */
+bool ED_paint_shape_session_shows_image(const Object &ob, const Image &image);
+/** True when the live session's active shape supports the Transform cage (a generated
+ * Polygon/Star/Arc, i.e. parametric without an analytic SDF). */
+bool ED_paint_shape_transform_is_available(const Object &ob);
 
 }  // namespace blender

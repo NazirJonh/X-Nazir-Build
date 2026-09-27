@@ -2056,6 +2056,56 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The shape settings are new: a file written before them has the embedded struct
+   * zero-filled, so the owned profiles and color ramps need to be allocated and the scalar fields
+   * set to their defaults.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion so this fork-only change
+   * doesn't claim a subversion number that upstream will use for its own versioning. The alias
+   * lookup takes the current (post-rename) member type name: it also matches files written
+   * before the `ImagePaintShapeSettings` -> `PaintShapeSettings` rename, so their settings are
+   * not reset on every load. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "ImagePaintSettings", "PaintShapeSettings", "shape"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings) {
+        BKE_paint_shape_settings_init(&scene.toolsettings->imapaint.shape);
+      }
+    }
+  }
+
+  /* Files written between the shape settings appeared and the Polygon/Star/Arc, fill style and
+   * PBR relief fields were appended carry the older layout: everything up to the curve source
+   * block is valid there, only the appended fields are zero-filled. Keyed the same way as the
+   * block above, on one of the appended members, so those fields get their defaults and the
+   * owned gradient without resetting the user's existing settings. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "PaintShapeSettings", "float", "star_inner_ratio"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (!scene.toolsettings) {
+        continue;
+      }
+      PaintShapeSettings &settings = scene.toolsettings->imapaint.shape;
+      const PaintShapeSettings defaults{};
+      settings.polygon_sides = defaults.polygon_sides;
+      settings.arc_mode = defaults.arc_mode;
+      settings.fill_type = defaults.fill_type;
+      settings.fill_rule = defaults.fill_rule;
+      settings.dash_cap = defaults.dash_cap;
+      settings.height_blend = defaults.height_blend;
+      settings.star_inner_ratio = defaults.star_inner_ratio;
+      settings.arc_start = defaults.arc_start;
+      settings.arc_end = defaults.arc_end;
+      settings.height_depth = defaults.height_depth;
+      settings.normal_strength = defaults.normal_strength;
+      if (settings.fill_gradient == nullptr) {
+        settings.fill_gradient = BKE_colorband_add(true);
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

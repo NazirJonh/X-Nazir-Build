@@ -2318,6 +2318,8 @@ static void image_save_as_free(wmOperator *op)
 
 static wmOperatorStatus image_save_as_exec(bContext *C, wmOperator *op)
 {
+  /* Commit-before-save, see #image_save_exec. */
+  ED_image_paint_select_session_settle(C, CTX_wm_space_image(C));
   Main *bmain = CTX_data_main(C);
   ImageSaveData *isd;
 
@@ -2551,6 +2553,10 @@ static bool image_save_poll(bContext *C)
 static wmOperatorStatus image_save_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
+  /* Commit-before-save: a live floating session (a gradient preview, a shape edit) has its
+   * pixels composited into the live buffers, and this save would put them on disk without an
+   * undo step. Settling bakes (or restores) first, so the file only ever holds committed data. */
+  ED_image_paint_select_session_settle(C, CTX_wm_space_image(C));
   Image *image = image_from_context(C);
   ImageUser *iuser = image_user_from_context(C);
   Scene *scene = CTX_data_scene(C);
@@ -2819,6 +2825,10 @@ bool ED_image_save_all_modified(const bContext *C, ReportList *reports)
 {
   Main *bmain = CTX_data_main(C);
 
+  /* Save All writes images of every editor, so settle every editor's floating session first
+   * (commit-before-save, see #image_save_exec). */
+  ED_image_paint_select_sessions_settle_all(const_cast<bContext *>(C));
+
   ED_image_save_all_modified_info(bmain, reports);
 
   bool ok = true;
@@ -2998,7 +3008,8 @@ static void image_new_paint_canvas_follow(bContext *C, Scene *scene, Image *ima)
   RNA_property_update(C, &paint_mode_ptr, source_prop);
 
   /* Painting on a flat texture mirrors in canvas space, not across the mesh. Going through RNA
-   * lets the mode update switch the canvas symmetry on, like picking 2D Canvas in the panel. */
+   * switches the mode and redraws the overlay, like picking 2D Canvas in the panel; the symmetry
+   * checkbox itself is never enabled here (the user turns symmetry on explicitly). */
   PointerRNA imapaint_ptr = RNA_pointer_create_discrete(
       &scene->id, RNA_ImagePaint, &scene->toolsettings->imapaint);
   PropertyRNA *symmetry_mode_prop = RNA_struct_find_property(&imapaint_ptr, "symmetry_mode");

@@ -354,9 +354,11 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
         ob = context.active_object
         if ob is None or ob.mode != 'SCULPT':
             return False
-        # The Color Gradient tool writes into the same material channels as the Paint brush.
+        # The Color Gradient and shape tools write into the same material channels as the Paint
+        # brush.
         tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
-        if tool is not None and tool.idname == "builtin.color_gradient":
+        if tool is not None and (tool.idname == "builtin.color_gradient" or
+                                 tool.idname.startswith("builtin.paint_shape_")):
             return True
         # Material Paint channels only work with the Paint brush type; deformation brushes
         # (Grab, Smooth, etc.) have no material-channel sampling/blending behind them.
@@ -383,6 +385,11 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
 
         if paint.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}:
             settings = UnifiedPaintPanel.paint_settings(context)
+            if settings is None and context.mode == 'SCULPT':
+                # Shape and Color Gradient tools have no `use_brushes`, so paint_settings()
+                # returns None for them; the backend still samples the Sculpt paint (its brush
+                # and visible channel set), so use the same object here.
+                settings = context.tool_settings.sculpt
             brush = settings.brush if settings else None
             draw_material_paint_channels(
                 context, layout, brush, settings, paint,
@@ -543,6 +550,11 @@ class SelectPaintSlotHelper:
     def get_active_brush(self, context):
         return context.tool_settings.image_paint.brush
 
+    def get_active_paint(self, context):
+        """The Paint data-block matching #get_active_brush: its visible channel set is what the
+        channel rows edit. Overridden by the Sculpt canvas, which uses the Sculpt paint."""
+        return context.tool_settings.image_paint
+
     def draw_header(self, context):
         layout = self.layout
         mode_settings = self.get_mode_settings(context)
@@ -584,7 +596,7 @@ class SelectPaintSlotHelper:
                     context,
                     layout,
                     self.get_active_brush(context),
-                    settings,
+                    self.get_active_paint(context),
                     mode_settings,
                     show_custom=(canvas_source == 'MATERIAL_PAINT'),
                 )
@@ -784,6 +796,10 @@ class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
         ob = context.active_object
         if ob is None or ob.mode != 'SCULPT':
             return False
+        # The shape tools paint the same material channels as the Paint brush.
+        tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
+        if tool is not None and tool.idname.startswith("builtin.paint_shape_"):
+            return True
         # Material Paint channels only work with the Paint brush type; Smear, other sculpt
         # brushes, and non-brush tools have no material-channel sampling/blending behind them.
         brush = context.tool_settings.sculpt.brush
@@ -794,6 +810,9 @@ class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
 
     def get_active_brush(self, context):
         return context.tool_settings.sculpt.brush
+
+    def get_active_paint(self, context):
+        return context.tool_settings.sculpt
 
     def draw_image_interpolation(self, **_kwargs):
         pass
@@ -3071,9 +3090,35 @@ class VIEW3D_OT_face_set_colors_swap(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class VIEW3D_PT_tools_shape_options(Panel, View3DPaintPanel):
+    """Popover of the rare Shape tool settings (size, alignment, non-uniform corners). The tool
+    header shows the main fields; the Active Tool panel shows everything."""
+    bl_context = ".paint_common"
+    bl_category = "Tool"
+    bl_label = "Shape Options"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_ui_units_x = 10
+
+    @classmethod
+    def poll(cls, context):
+        from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
+        tool = ToolSelectPanelHelper.tool_active_from_context(context)
+        return tool is not None and tool.idname.startswith("builtin.paint_shape_")
+
+    def draw(self, context):
+        from bl_ui.properties_paint_common import draw_paint_shape_extra_options, paint_shape_settings
+        layout = self.layout
+        # A live Sculpt session owns a private settings copy; edit that one, like the tool header.
+        shape = paint_shape_settings(context)
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        draw_paint_shape_extra_options(context, layout.column(), shape)
+
+
 classes = (
     VIEW3D_OT_face_set_colors_swap,
     VIEW3D_MT_brush_context_menu,
+    VIEW3D_PT_tools_shape_options,
     VIEW3D_PT_tools_object_options,
     VIEW3D_PT_tools_object_options_transform,
     VIEW3D_PT_tools_meshedit_options,

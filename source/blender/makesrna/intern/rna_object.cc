@@ -343,6 +343,7 @@ const EnumPropertyItem rna_enum_object_axis_flip_items[] = {
 #  include "ED_lattice.hh"
 #  include "ED_mesh.hh"
 #  include "ED_object.hh"
+#  include "ED_paint.hh"
 #  include "ED_particle.hh"
 
 #  include "DEG_depsgraph_query.hh"
@@ -371,6 +372,33 @@ static PointerRNA rna_Object_curve_patch_session_get(PointerRNA *ptr)
   }
   return RNA_pointer_create_with_parent(
       *ptr, RNA_CurvePatchSession, const_cast<ed::sculpt_paint::CurvePatchSession *>(session));
+}
+
+/* Live Sculpt Mode Vector shape session (Image canvas). Read-only: the session's own settings copy
+ * (edited through #RNA_PaintShapeSettings, which routes back to the session via
+ * #ED_paint_shape_settings_update) plus the runtime "Transform" flag. */
+
+static PointerRNA rna_Object_paint_shape_session_settings_get(PointerRNA *ptr)
+{
+  Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  PaintShapeSettings *settings = ED_paint_shape_session_settings_get(*ob);
+  if (settings == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_PaintShapeSettings, settings);
+}
+
+static bool rna_Object_paint_shape_transform_active_get(PointerRNA *ptr)
+{
+  Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  return ED_paint_shape_transform_is_active(*ob);
+}
+
+/** True when the live session's active shape can show the Transform cage (Polygon/Star/Arc). */
+static bool rna_Object_paint_shape_transform_available_get(PointerRNA *ptr)
+{
+  Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  return ED_paint_shape_transform_is_available(*ob);
 }
 
 static int rna_CurvePatchSession_point_count_get(PointerRNA *ptr)
@@ -3877,6 +3905,34 @@ static void rna_def_object(BlenderRNA *brna)
       prop, "rna_Object_curve_patch_session_get", nullptr, nullptr, nullptr);
   RNA_def_property_ui_text(
       prop, "Curve Patch Session", "Curve Patch edit currently running on this object, or None");
+
+  /* Live Sculpt Mode Vector shape session: the session's own settings copy (read-only pointer) and
+   * the runtime "Transform" flag. */
+  prop = RNA_def_property(srna, "paint_shape_session_settings", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "PaintShapeSettings");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_pointer_funcs(
+      prop, "rna_Object_paint_shape_session_settings_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Shape Session Settings",
+      "The live Sculpt shape session's own settings copy, or None");
+
+  prop = RNA_def_property(srna, "paint_shape_transform_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Object_paint_shape_transform_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Paint Shape Transform Active", "A Polygon/Star/Arc transform cage is shown");
+
+  prop = RNA_def_property(srna, "paint_shape_transform_available", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Object_paint_shape_transform_available_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Shape Transform Available",
+      "The live session's active shape is a generated Polygon/Star/Arc that can show a cage");
 
   /* Mesh Symmetry Settings */
 

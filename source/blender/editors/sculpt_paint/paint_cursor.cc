@@ -2266,6 +2266,8 @@ void ED_paint_cursor_start(Paint *paint, bool (*poll)(bContext *C))
 
   /* Register the overlay-redraw cursor (once, guarded internally). */
   ED_paint_curve_overlay_redraw_register();
+  /* Register the shape tools' stroke-width cursor (once, guarded internally). */
+  ed::sculpt_paint::ED_paint_shape_cursor_register();
 
   /* Invalidate the paint cursors. */
   BKE_paint_invalidate_overlay_all();

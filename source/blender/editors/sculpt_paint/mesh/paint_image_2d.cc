@@ -94,6 +94,7 @@
 #include "../paint_clone_2d.hh"
 #include "../paint_clone_stroke.hh"
 #include "paint_area_plane_2d.hh"
+#include "paint_material_blend.hh"
 #include "paint_material_source.hh"
 
 #include "ED_image.hh"
@@ -2943,15 +2944,11 @@ static void paint_2d_area_encode_canvas_rgb(const BrushPainterCache *cache,
                                             const bool is_normal,
                                             float rgb[3])
 {
-  if (is_normal || cache->is_data) {
+  if (is_normal) {
     return;
   }
-  if (cache->is_srgb) {
-    IMB_colormanagement_scene_linear_to_srgb_v3(rgb, rgb);
-  }
-  else if (cache->byte_colorspace) {
-    IMB_colormanagement_scene_linear_to_colorspace_v3(rgb, cache->byte_colorspace);
-  }
+  ed::sculpt_paint::material::encode_canvas_rgb(
+      cache->is_data, cache->is_srgb, cache->byte_colorspace, rgb);
 }
 
 static ed::sculpt_paint::AreaPlaneFrame paint_2d_area_channel_frame(

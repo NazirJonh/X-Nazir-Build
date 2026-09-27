@@ -72,6 +72,16 @@ static void toolsystem_ref_set_by_id_pending(Main *bmain,
                                              bToolRef *tref,
                                              const char *idname_pending);
 
+/** The tool-change observer (see #WM_toolsystem_tool_change_callback_set). Single slot: the
+ * observers are main-thread, user-paced (a toolbar click / keymap tool switch), and the only
+ * current use guards one feature's state. */
+static wmToolChangeCallbackFn g_tool_change_callback = nullptr;
+
+void WM_toolsystem_tool_change_callback_set(wmToolChangeCallbackFn callback)
+{
+  g_tool_change_callback = callback;
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Tool Reference API
  * \{ */
@@ -500,7 +510,14 @@ static void toolsystem_brush_sync_for_texture_paint(Main *bmain,
       tkey.space_type = SPACE_IMAGE;
       tkey.mode = SI_MODE_PAINT;
       bToolRef *tref_other = WM_toolsystem_ref_find(workspace, &tkey);
-      if (tref_other) {
+      /* Only skip the sync when the paired space already has an initialized non-brush tool
+       * (Shape / Select / Move / ...), which must keep its own tool: this function also runs from
+       * the blanket #WM_toolsystem_refresh_active() of every undo, where overriding the other
+       * editor's tool with the brush tool would silently revert the user's tool switch. When the
+       * runtime is not initialized yet, keep the vanilla behavior of setting a pending change. */
+      if (tref_other && (tref_other->runtime == nullptr ||
+                         (tref_other->runtime->flag & TOOLREF_FLAG_USE_BRUSHES)))
+      {
         toolsystem_ref_set_by_id_pending(bmain, tref_other, tref->idname);
       }
     }
@@ -511,7 +528,9 @@ static void toolsystem_brush_sync_for_texture_paint(Main *bmain,
       tkey.space_type = SPACE_VIEW3D;
       tkey.mode = CTX_MODE_PAINT_TEXTURE;
       bToolRef *tref_other = WM_toolsystem_ref_find(workspace, &tkey);
-      if (tref_other) {
+      if (tref_other && (tref_other->runtime == nullptr ||
+                         (tref_other->runtime->flag & TOOLREF_FLAG_USE_BRUSHES)))
+      {
         toolsystem_ref_set_by_id_pending(bmain, tref_other, tref->idname);
       }
     }
@@ -652,6 +671,10 @@ void WM_toolsystem_ref_set_from_runtime(bContext *C,
 {
   Main *bmain = CTX_data_main(C);
 
+  /* Whether this call actually switches the tool: the observers (editors with state tied to the
+   * active tool) must not run for a re-setup of the same tool (mode re-init, undo, startup). */
+  const bool idname_changed = !STREQ(tref->idname, idname);
+
   if (tref->runtime) {
     toolsystem_unlink_ref(C, workspace, tref);
   }
@@ -707,6 +730,12 @@ void WM_toolsystem_ref_set_from_runtime(bContext *C,
   {
     wmMsgBus *mbus = CTX_wm_message_bus(C);
     WM_msg_publish_rna_prop(mbus, &workspace->id, workspace, WorkSpace, tools);
+  }
+
+  /* Run after #toolsystem_refresh_screen_from_active_tool, so an observer comparing a saved tool
+   * against an area's current active tool sees the new one. */
+  if (idname_changed && g_tool_change_callback != nullptr) {
+    g_tool_change_callback(*C, *tref);
   }
 }
 

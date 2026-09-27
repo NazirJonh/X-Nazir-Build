@@ -8,7 +8,9 @@
 
 #pragma once
 
+namespace blender {
 struct wmOperatorType;
+}  // namespace blender
 
 namespace blender {
 namespace ed::sculpt_paint::image::curve_patch::edit {

@@ -3077,6 +3077,121 @@ def draw_color_settings(context, layout, brush, color_type=False):
                 col.prop(brush, "grad_spacing")
 
 
+def draw_shape_color_row(layout, shape, *, header=False):
+    """Draw the shape tool's own colors: Color = stroke, Secondary Color = fill. No swap button;
+    X (``paint.shape_colors_swap``) swaps them.
+
+    ``header`` keeps the two swatches and their separator in the brush tool header's fixed
+    4-UI-unit row so the shape colors match the brush color swatch width."""
+    row = layout.row(align=True)
+    if header:
+        row.ui_units_x = 4
+    row.prop(shape, "stroke_color", text="")
+    row.prop(shape, "fill_color", text="")
+    row.separator()
+    return row
+
+
+def paint_shape_linked_3d_object(context):
+    """The object whose live 3D Sculpt Paint Shape session this Image Editor shows, or None.
+
+    Single source of truth for "this Image Editor is linked to a 3D session" (mirrors the C++
+    #image3d_linked_session): the current space must be an Image Editor in Paint/View mode without
+    a Vector session of its own, showing a non-UDIM image that the active object's live session
+    draws to. Everything else (the shared settings, the Transform button, the cage) keys off
+    this."""
+    space = getattr(context, "space_data", None)
+    if space is None or space.type != 'IMAGE_EDITOR':
+        return None
+    if getattr(space, "mode", None) not in ('PAINT', 'VIEW'):
+        return None
+    # An Image Editor with its own Vector session takes priority.
+    if getattr(space, "paint_shape_session_settings", None) is not None:
+        return None
+    image = getattr(space, "image", None)
+    if image is None or image.source == 'TILED':
+        return None
+    ob = getattr(context, "object", None)
+    if ob is None:
+        return None
+    if not ob.paint_shape_session_shows_image(image):
+        return None
+    return ob
+
+
+def paint_shape_tool_flags(context):
+    """(is_line, is_rect, is_sized) for the active Shape tool, derived from the active tool so the
+    settings UI does not read the operator-only ``shape.type``."""
+    from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
+    tool = ToolSelectPanelHelper.tool_active_from_context(context)
+    tool_id = tool.idname if tool else ""
+    is_line = tool_id == "builtin.paint_shape_line"
+    is_rect = tool_id in ("", "builtin.paint_shape_rect")
+    is_sized = tool_id in ("", "builtin.paint_shape_rect", "builtin.paint_shape_ellipse")
+    return is_line, is_rect, is_sized
+
+
+def paint_shape_is_transformable(context):
+    """True for the generated Polygon/Star/Arc shapes, which support the Transform cage.
+
+    For an Image Editor linked to a 3D session the session's own active shape decides; otherwise
+    the active Shape tool does."""
+    ob = paint_shape_linked_3d_object(context)
+    if ob is not None:
+        return ob.paint_shape_transform_available
+    from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
+    tool = ToolSelectPanelHelper.tool_active_from_context(context)
+    tool_id = tool.idname if tool else ""
+    return tool_id in ("builtin.paint_shape_polygon",
+                       "builtin.paint_shape_star",
+                       "builtin.paint_shape_arc")
+
+
+def paint_shape_settings(context):
+    """The ``PaintShapeSettings`` the shape UI should edit.
+
+    A live Image Vector session owns a private copy of the settings, exposed on its ``SpaceImage``
+    as ``paint_shape_session_settings``; the UI of that space edits the copy, so settings changes in
+    other spaces never reach the session. An Image Editor linked to a live 3D Sculpt shape session
+    (no Vector session of its own, target image shown) instead edits that session's copy, exposed on
+    the owner object as ``paint_shape_session_settings``. Every other space (other Image Editors,
+    the 3D Viewport) uses the shared ``tool_settings.image_paint.shape``."""
+    space = getattr(context, "space_data", None)
+    if space is not None and space.type == 'IMAGE_EDITOR':
+        session_settings = getattr(space, "paint_shape_session_settings", None)
+        if session_settings is not None:
+            return session_settings
+        ob = paint_shape_linked_3d_object(context)
+        if ob is not None:
+            return ob.paint_shape_session_settings
+    elif context.mode == 'SCULPT':
+        ob = getattr(context, "object", None)
+        session_settings = (getattr(ob, "paint_shape_session_settings", None)
+                            if ob is not None else None)
+        if session_settings is not None:
+            return session_settings
+    return context.tool_settings.image_paint.shape
+
+
+def draw_paint_shape_extra_options(context, layout, shape):
+    """The rarer Shape settings, shown in the Shape tool's popover and (all of them) in the
+    N-panel: the rectangle/ellipse default size, the stroke alignment and the non-uniform corner
+    radii. The tool header shows only the main fields."""
+    is_line, is_rect, is_sized = paint_shape_tool_flags(context)
+    if is_sized:
+        layout.prop(shape, "size")
+    if not is_line:
+        layout.prop(shape, "stroke_align", text="Align")
+    if is_rect and shape.use_fill:
+        if not shape.use_uniform_corners:
+            sub = layout.column(align=True)
+            sub.prop(shape, "corner_radius", index=0, text="Top Left")
+            sub.prop(shape, "corner_radius", index=1, text="Top Right")
+            sub.prop(shape, "corner_radius", index=2, text="Bottom Right")
+            sub.prop(shape, "corner_radius", index=3, text="Bottom Left")
+        layout.prop(shape, "use_uniform_corners", text="Uniform Corners")
+
+
 def _brush_texture_for_slot(brush, tex_slot):
     if tex_slot == brush.texture_slot:
         return brush.texture

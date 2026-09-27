@@ -457,4 +457,102 @@ Array<float> distances_create_priority_queue(const Span<float3> vert_positions,
   return dists;
 }
 
+GeodesicCurveField curve_geodesic_field_create(const Span<float3> vert_positions,
+                                               const Span<int2> edges,
+                                               const OffsetIndices<int> faces,
+                                               const Span<int> corner_verts,
+                                               const GroupedSpan<int> vert_to_edge_map,
+                                               const GroupedSpan<int> edge_to_face_map,
+                                               const Span<bool> hide_poly,
+                                               const Span<int> seed_verts,
+                                               const Span<float> seed_params,
+                                               const Span<float> seed_distances)
+{
+  const int verts_num = vert_positions.size();
+  BLI_assert(seed_verts.size() == seed_params.size());
+  BLI_assert(seed_verts.size() == seed_distances.size());
+
+  GeodesicCurveField field;
+  field.dist = Array<float>(verts_num, FLT_MAX);
+  field.param = Array<float>(verts_num, 0.0f);
+  BitVector<> visited(verts_num, false);
+
+  /* Min-heap Dijkstra in increasing-distance order. Seeds start at their Euclidean distance to
+   * the curve, so the propagated field remains continuous where mesh vertices do not lie exactly
+   * on the stroke. */
+  using HeapEntry = std::pair<float, int>;
+  std::priority_queue<HeapEntry, std::vector<HeapEntry>, std::greater<HeapEntry>> heap;
+  for (const int i : seed_verts.index_range()) {
+    const int v = seed_verts[i];
+    if (v < 0 || v >= verts_num) {
+      continue;
+    }
+    if (seed_distances[i] < field.dist[v]) {
+      field.dist[v] = seed_distances[i];
+      field.param[v] = seed_params[i];
+      heap.push({seed_distances[i], v});
+    }
+  }
+
+  while (!heap.empty()) {
+    const auto [d, v0] = heap.top();
+    heap.pop();
+    if (visited[v0] || d > field.dist[v0]) {
+      continue;
+    }
+    visited[v0].set();
+
+    for (const int e : vert_to_edge_map[v0]) {
+      const int v1 = (edges[e][0] == v0) ? edges[e][1] : edges[e][0];
+      if (visited[v1]) {
+        continue;
+      }
+
+      /* Straight-edge relax: always runs first so `v1`'s distance is finite (any finite candidate
+       * beats the initial FLT_MAX) before the triangle relax below reads it. */
+      const float edge_candidate = field.dist[v0] +
+                                   len_v3v3(vert_positions[v0], vert_positions[v1]);
+      if (edge_candidate < field.dist[v1]) {
+        field.dist[v1] = edge_candidate;
+        field.param[v1] = field.param[v0];
+        heap.push({edge_candidate, v1});
+      }
+
+      /* Triangle relax: try to improve the third corner of every face sharing this edge using
+       * `v0`/`v1` as the two known corners, mirroring #distances_create's triangle test. */
+      for (const int face : edge_to_face_map[e]) {
+        if (!hide_poly.is_empty() && hide_poly[face]) {
+          continue;
+        }
+        for (const int v2 : corner_verts.slice(faces[face])) {
+          if (ELEM(v2, v0, v1) || visited[v2]) {
+            continue;
+          }
+          const float d0 = field.dist[v0];
+          const float d1 = field.dist[v1];
+          /* Candidate distance for `v2` unfolded across the (v0, v1, v2) triangle: the target
+           * vertex comes first, then the two known corners and their distances in order. */
+          const float dist2 = geodesic_distance_propagate_across_triangle(
+              vert_positions[v2], vert_positions[v0], vert_positions[v1], d0, d1);
+          if (dist2 < field.dist[v2]) {
+            field.dist[v2] = dist2;
+            /* Blend the two sources' parameters by inverse distance instead of taking the closer
+             * seed's outright: on coarse meshes the piecewise-constant Voronoi assignment shows
+             * as visible banding in the gradient, and this smooths the cell boundaries into a
+             * gradual transition. The blend stays within the two parameters' range, and a source
+             * at distance zero (the query vertex is a seed) dominates outright. */
+            const float w_sum = d0 + d1;
+            field.param[v2] = (w_sum > 0.0f) ?
+                                  ((field.param[v0] * d1 + field.param[v1] * d0) / w_sum) :
+                                  field.param[v0];
+            heap.push({dist2, v2});
+          }
+        }
+      }
+    }
+  }
+
+  return field;
+}
+
 }  // namespace blender::ed::sculpt_paint::geodesic

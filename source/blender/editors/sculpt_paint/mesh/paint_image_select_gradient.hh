@@ -6,11 +6,17 @@
  * \ingroup edsculpt
  *
  * Masked gradient rasterization and session API for Image Paint.
+ *
+ * The vector-based shapes (Linear..Square) evaluate `t` from a start / end pair; the Curve shape
+ * evaluates it from a hand-drawn polyline (#blender::ed::sculpt_paint::gradient_curve::
+ * GradientCurve2D) carried by #ImagePaintGradientParams, with its own Along / Across parameter
+ * modes and an optional width limit (a NaN parameter leaves a pixel untouched).
  */
 
 #pragma once
 
 #include "BLI_math_vector_types.hh"
+#include "DNA_scene_types.h"
 
 #include "IMB_imbuf.hh"
 
@@ -26,12 +32,18 @@ struct wmOperatorType;
 
 namespace blender {
 
+namespace ed::sculpt_paint::gradient_curve {
+template<typename T> class GradientCurve;
+using GradientCurve2D = GradientCurve<float2>;
+}  // namespace ed::sculpt_paint::gradient_curve
+
 enum class ImagePaintGradientType {
   Linear = 0,
   Radial = 1,
   Conical = 2,
   Diamond = 3,
   Square = 4,
+  Curve = 5,
 };
 
 enum class ImagePaintGradientRepeat {
@@ -47,6 +59,26 @@ struct ImagePaintGradientParams {
   float opacity = 1.0f;
   /** Color ramp used to evaluate the gradient; always set by the param builders. */
   ColorBand *colorband = nullptr;
+
+  /* Curve type only (`ImagePaintGradientType::Curve`). */
+  /**
+   * The drawn polyline, expressed in the pixel space of the tile whose UV origin is
+   * #curve_tile_origin_uv (an already isotropic space, so #axis_scale is ignored for this type).
+   * Null when no curve has been drawn yet: pixels are left untouched.
+   * Not owned; typically points into the floating gradient session's state.
+   */
+  const blender::ed::sculpt_paint::gradient_curve::GradientCurve2D *curve = nullptr;
+  /** #eGradientCurveMode */
+  eGradientCurveMode curve_mode = GRADIENT_CURVE_MODE_ALONG;
+  /** Influence limit around the curve in canvas pixels (0: unlimited for Along). */
+  float curve_width = 0.0f;
+  /** Global UV origin of the tile the curve's pixel space refers to. */
+  float2 curve_tile_origin_uv = float2(0.0f);
+  /** Pixel dimensions of the tile the curve was drawn on. */
+  int2 curve_tile_size = int2(0);
+  /** Bounds of #curve in its own pixel space, for work-region culling. */
+  float2 curve_bounds_min = float2(0.0f);
+  float2 curve_bounds_max = float2(0.0f);
 };
 
 /** Evaluate gradient parameter t at pixel (tile-local coordinates). */
@@ -109,9 +141,6 @@ void image_paint_gradient_apply_region(const Scene *scene,
                                        const float2 &end_px,
                                        float midpoint,
                                        const rcti &work_region);
-
-/** Recompute the floating gradient preview from current tool settings, if active. */
-void image_select_gradient_refresh_preview_from_settings(bContext *C);
 
 struct ImageSelectGradientState;
 

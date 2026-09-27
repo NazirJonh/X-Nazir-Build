@@ -14,6 +14,11 @@
  * operator. All gradient math is encapsulated here, away from UI, paint backends,
  * or mesh data structures.
  *
+ * The Curve gradient shapes (`SCULPT_GRADIENT_CURVE` / `IMAGE_PAINT_GRADIENT_CURVE`) do not go
+ * through this engine: their polyline math lives in #blender::ed::sculpt_paint::gradient_curve
+ * (see paint_gradient_curve.hh), which the sculpt and image-paint gradient backends evaluate
+ * directly.
+ *
  * Usage:
  * \code{.cpp}
  *   gradient::Params params;

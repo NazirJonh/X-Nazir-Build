@@ -79,6 +79,20 @@ static const EnumPropertyItem rna_enum_visible_material_paint_channel_items[] = 
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem gradient_curve_mode_items[] = {
+    {GRADIENT_CURVE_MODE_ALONG,
+     "ALONG",
+     0,
+     "Along",
+     "Color flows along the curve, following its bends"},
+    {GRADIENT_CURVE_MODE_ACROSS,
+     "ACROSS",
+     0,
+     "Across",
+     "The gradient forms a strip of the given width around the curve"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 const EnumPropertyItem rna_enum_particle_edit_hair_brush_items[] = {
     {PE_BRUSH_COMB, "COMB", 0, "Comb", "Comb hairs"},
     {PE_BRUSH_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth hairs"},
@@ -2419,6 +2433,11 @@ static void rna_def_sculpt(BlenderRNA *brna)
        0,
        "Radial",
        "Interpolate outward from the surface point under the cursor, in the plane of its normal"},
+      {SCULPT_GRADIENT_CURVE,
+       "CURVE",
+       0,
+       "Curve",
+       "Interpolate along a hand-drawn curve projected onto the surface"},
       {0, nullptr, 0, nullptr, nullptr},
   };
   static const EnumPropertyItem gradient_color_source_items[] = {
@@ -2434,6 +2453,19 @@ static void rna_def_sculpt(BlenderRNA *brna)
       {IMAGE_PAINT_GRADIENT_REPEAT_NONE, "NONE", 0, "None", ""},
       {IMAGE_PAINT_GRADIENT_REPEAT_REPEAT, "REPEAT", 0, "Repeat", ""},
       {IMAGE_PAINT_GRADIENT_REPEAT_REFLECT, "REFLECT", 0, "Reflect", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  static const EnumPropertyItem gradient_curve_distance_items[] = {
+      {SCULPT_GRADIENT_CURVE_EUCLIDEAN,
+       "EUCLIDEAN",
+       0,
+       "Euclidean",
+       "Straight-line distance through space (fast)"},
+      {SCULPT_GRADIENT_CURVE_GEODESIC,
+       "GEODESIC",
+       0,
+       "Geodesic",
+       "Distance along the mesh surface, correct across folds (color attribute canvas only)"},
       {0, nullptr, 0, nullptr, nullptr},
   };
   static const EnumPropertyItem gradient_blend_items[] = {
@@ -2452,6 +2484,44 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "gradient_type");
   RNA_def_property_enum_items(prop, gradient_type_items);
   RNA_def_property_ui_text(prop, "Gradient Type", "Shape of the color gradient");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_curve_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_curve_mode");
+  RNA_def_property_enum_items(prop, gradient_curve_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Gradient Curve Mode",
+                           "How the gradient parameter follows the drawn curve");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_curve_distance", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_curve_distance");
+  RNA_def_property_enum_items(prop, gradient_curve_distance_items);
+  RNA_def_property_ui_text(prop,
+                           "Gradient Curve Distance",
+                           "How distances to the curve are measured on the surface");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_curve_width", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "gradient_curve_width");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_subtype(prop, PROP_DISTANCE);
+  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 0.1f, 3);
+  RNA_def_property_ui_text(prop,
+                           "Gradient Curve Width",
+                           "Along mode: limit the gradient's influence to this distance around the "
+                           "curve (0 removes the limit). Across mode: distance over which the ramp "
+                           "reaches its end color, after which it clamps or repeats (0 uses an "
+                           "automatic width). A non-zero width also greatly speeds up evaluation "
+                           "on large canvases");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_curve_smooth", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "gradient_curve_smooth");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Gradient Curve Smooth",
+                           "Smoothing applied to the drawn curve before it is used");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "gradient_color_source", PROP_ENUM, PROP_NONE);
@@ -3317,6 +3387,11 @@ static void rna_def_image_paint(BlenderRNA *brna)
        0,
        "Square",
        "Interpolate along square-shaped iso-lines around the start point"},
+      {IMAGE_PAINT_GRADIENT_CURVE,
+       "CURVE",
+       0,
+       "Curve",
+       "Interpolate along a hand-drawn curve in UV space"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -3343,6 +3418,39 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "gradient_type");
   RNA_def_property_enum_items(prop, gradient_type_items);
   RNA_def_property_ui_text(prop, "Gradient Type", "Shape of the selection gradient");
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
+
+  prop = RNA_def_property(srna, "gradient_curve_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_curve_mode");
+  RNA_def_property_enum_items(prop, gradient_curve_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Gradient Curve Mode",
+                           "How the gradient parameter follows the drawn curve");
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
+
+  prop = RNA_def_property(srna, "gradient_curve_width", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "gradient_curve_width");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_subtype(prop, PROP_PIXEL);
+  RNA_def_property_ui_range(prop, 0.0f, 2048.0f, 1.0f, 1);
+  RNA_def_property_ui_text(prop,
+                           "Gradient Curve Width",
+                           "Along mode: limit the gradient's influence to this distance around the "
+                           "curve in canvas pixels (0 removes the limit). Across mode: distance "
+                           "over which the ramp reaches its end color, after which it clamps or "
+                           "repeats (0 uses an automatic width). A non-zero width also greatly "
+                           "speeds up evaluation on large canvases");
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
+
+  prop = RNA_def_property(srna, "gradient_curve_smooth", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "gradient_curve_smooth");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Gradient Curve Smooth",
+                           "Smoothing applied to the drawn curve before it is used");
   RNA_def_property_update(
       prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
 

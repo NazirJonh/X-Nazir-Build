@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
+#include <limits>
+#include <memory>
 
 #include "MEM_guardedalloc.h"
 
@@ -52,6 +55,7 @@
 #include "ED_undo.hh"
 
 #include "GPU_immediate.hh"
+#include "GPU_immediate_util.hh"
 #include "GPU_state.hh"
 
 #include "IMB_colormanagement.hh"
@@ -60,6 +64,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_prototypes.hh"
 
 #include "UI_view2d.hh"
 
@@ -68,11 +73,15 @@
 #include "WM_types.hh"
 
 #include "../../space_image/image_runtime.hh"
+#include "../paint_gradient_curve.hh"
 #include "../paint_intern.hh"
 #include "paint_image_select_gradient.hh"
 #include "paint_image_select_intern.hh"
 
 namespace blender {
+
+/* Short alias for the curve-polyline namespace nested under sculpt_paint. */
+namespace gradient_curve = ed::sculpt_paint::gradient_curve;
 
 static uint64_t image_paint_gradient_settings_revision = 0;
 
@@ -184,6 +193,18 @@ static float image_paint_gradient_axis_frame(const float2 &p0,
 }
 
 /**
+ * Wrap a raw gradient parameter by the repeat mode and bend it by the midpoint. Shared by the
+ * generic evaluation switch and the Curve branch of the per-row task.
+ */
+static float image_paint_gradient_finish_t(const float t_raw,
+                                           const ImagePaintGradientRepeat repeat,
+                                           const float midpoint)
+{
+  const float t = image_paint_gradient_sample_t(t_raw, repeat);
+  return image_paint_gradient_remap_midpoint(t, midpoint);
+}
+
+/**
  * Core gradient parameter evaluation in a generic 2D space. \a p0 and \a p1 are the gradient
  * endpoints and \a sample is the evaluated point, all expressed in the same space. \a min_len is
  * the smallest endpoint separation treated as non-degenerate: 1 pixel for tile-local pixel space,
@@ -193,6 +214,11 @@ static float image_paint_gradient_axis_frame(const float2 &p0,
  * diamond / square iso-lines stay isotropic in pixels. In normalized UV space a non-square
  * texture stretches them along the longer axis; passing (width/height, 1) cancels that. The
  * pixel-space path is already isotropic and passes (1, 1).
+ *
+ * The Curve type ignores #axis_scale: its polyline is built in an already isotropic space (the
+ * canvas pixels of the tile it was drawn on), so \a sample must be expressed in that same space
+ * by the caller (see the per-row task for the UDIM tile offset). A null curve (nothing drawn
+ * yet) and Along-mode points outside the width limit return NaN, meaning "leave untouched".
  */
 static float image_paint_gradient_eval_t_generic(const ImagePaintGradientParams &params,
                                                  const float2 &p0_in,
@@ -253,10 +279,20 @@ static float image_paint_gradient_eval_t_generic(const ImagePaintGradientParams 
       }
       break;
     }
+    case ImagePaintGradientType::Curve: {
+      if (params.curve == nullptr) {
+        /* Nothing drawn yet: a NaN parameter leaves every pixel untouched. */
+        return std::numeric_limits<float>::quiet_NaN();
+      }
+      /* The curve and the sample are both in the curve's own (isotropic) space. */
+      t_raw = params.curve->eval_t(eGradientCurveMode(params.curve_mode),
+                                   params.curve_width,
+                                   sample_in);
+      break;
+    }
   }
 
-  const float t = image_paint_gradient_sample_t(t_raw, params.repeat);
-  return image_paint_gradient_remap_midpoint(t, midpoint);
+  return image_paint_gradient_finish_t(t_raw, params.repeat, midpoint);
 }
 
 float image_paint_gradient_eval_t(const ImagePaintGradientParams &params,
@@ -314,6 +350,8 @@ ImagePaintGradientParams image_paint_gradient_params_from_brush(const Paint *pai
                                                                 const Brush *brush)
 {
   ImagePaintGradientParams params;
+  /* The Fill brush has no stroke to draw a curve with: only the Linear / Radial fill modes exist
+   * here, and #ImagePaintGradientType::Curve is deliberately unreachable from this path. */
   params.type = (brush->gradient_fill_mode == BRUSH_GRADIENT_LINEAR) ?
                     ImagePaintGradientType::Linear :
                     ImagePaintGradientType::Radial;
@@ -415,9 +453,9 @@ void image_paint_gradient_calc_work_region(const Scene * /*scene*/,
  * Work region of \a tile_number: the selection bounds when a mask is active, the whole tile
  * otherwise.
  *
- * \note There is deliberately no bounding-box culling against the gradient vector. That vector
- * only positions the ramp, it does not bound the painted area. With
- * #ImagePaintGradientRepeat::None the parameter is *clamped* to [0, 1] (see
+ * \note There is deliberately no bounding-box culling against the gradient vector for the
+ * vector-based types. That vector only positions the ramp, it does not bound the painted area.
+ * With #ImagePaintGradientRepeat::None the parameter is *clamped* to [0, 1] (see
  * #image_paint_gradient_sample_t), so pixels past the drag still receive the ramp's end color
  * rather than being skipped, and Repeat/Reflect wrap it indefinitely. On top of that, Conical
  * parameterizes by the angle around the start point and so sweeps the whole plane, Linear is
@@ -426,13 +464,18 @@ void image_paint_gradient_calc_work_region(const Scene * /*scene*/,
  * dropped tiles in every one of those cases, leaving them silently unpainted. Culling only
  * becomes sound once the ramp is known not to contribute (a fully transparent end stop, say),
  * which cannot be decided from the gradient geometry alone.
+ *
+ * The Curve type is the only bounded exception, and only in Along mode with an explicit width:
+ * there the parameter is NaN ("leave untouched") beyond that width, so the region can safely
+ * shrink to the curve's bounding box plus the width. Across is unbounded like the vector types
+ * (the ramp keeps going past the width / clamps its end color), so it is not culled.
  */
 static void image_paint_gradient_calc_work_region_uv(const Scene * /*scene*/,
                                                      const Image *image,
                                                      const int tile_number,
                                                      const int tile_w,
                                                      const int tile_h,
-                                                     const ImagePaintGradientParams & /*params*/,
+                                                     const ImagePaintGradientParams &params,
                                                      const float2 & /*start_uv*/,
                                                      const float2 & /*end_uv*/,
                                                      rcti &r_region)
@@ -449,6 +492,33 @@ static void image_paint_gradient_calc_work_region_uv(const Scene * /*scene*/,
 
   BLI_rcti_init(&r_region, 0, tile_w, 0, tile_h);
   image_paint_gradient_sanitize_region(r_region, tile_w, tile_h);
+
+  if (params.type == ImagePaintGradientType::Curve && params.curve != nullptr) {
+    /* Only Along with an explicit width bounds the influence (NaN beyond it), so the region can
+     * shrink to the curve's bounds plus that width. Across is unbounded like the vector types:
+     * its parameter keeps growing past the width and the repeat / clamp logic paints the ramp's
+     * end color (or repeated bands) everywhere, so the whole tile must be repainted. */
+    if (params.curve_mode == GRADIENT_CURVE_MODE_ALONG && params.curve_width > 0.0f) {
+      /* Pixels further than the width from the curve return NaN, so nothing outside the curve's
+       * bounds plus the width can change. */
+      const float2 origin_px =
+          (image_select_udim_tile_uv_origin(tile_number) - params.curve_tile_origin_uv) *
+          float2(params.curve_tile_size);
+      const float2 curve_to_tile_scale = float2(tile_w, tile_h) / float2(params.curve_tile_size);
+      const float margin = params.curve_width + 1.0f;
+      rcti curve_region;
+      BLI_rcti_init(&curve_region,
+                    int(std::floor((params.curve_bounds_min.x - origin_px.x - margin) *
+                                   curve_to_tile_scale.x)),
+                    int(std::ceil((params.curve_bounds_max.x - origin_px.x + margin) *
+                                  curve_to_tile_scale.x)),
+                    int(std::floor((params.curve_bounds_min.y - origin_px.y - margin) *
+                                   curve_to_tile_scale.y)),
+                    int(std::ceil((params.curve_bounds_max.y - origin_px.y + margin) *
+                                  curve_to_tile_scale.y)));
+      BLI_rcti_isect(&r_region, &curve_region, &r_region);
+    }
+  }
 }
 
 /** \} */
@@ -479,6 +549,11 @@ struct GradientRowTaskData {
   float2 start_px;
   float2 end_px;
   float midpoint;
+  /**
+   * Curve type: shift from this tile's local pixel space into the curve's own space (the canvas
+   * pixels of the tile it was drawn on), see #image_paint_gradient_apply_region.
+   */
+  float2 curve_offset_px = float2(0.0f);
   ImBuf *canvas_ibuf;
   /** Writable pixel buffers; acquired once before parallel work (not thread-safe in ImBuf). */
   float *canvas_float_data = nullptr;
@@ -551,6 +626,22 @@ static float image_paint_gradient_row_eval_t(const GradientRowTaskData &data,
                                              const int px,
                                              const int py)
 {
+  if (data.params.type == ImagePaintGradientType::Curve && data.params.curve != nullptr) {
+    /* The curve lives in the start tile's pixel space; shift this tile's local pixels into it
+     * (see #image_paint_gradient_apply_region for how the offset is derived). The empty-curve
+     * NaN and the Along width-limit NaN both survive the repeat / midpoint wrapping; Across is
+     * unbounded and simply clamps / repeats. */
+    const float2 sample = float2(float(px), float(py)) *
+                              (float2(data.params.curve_tile_size) /
+                               float2(data.canvas_ibuf->x, data.canvas_ibuf->y)) +
+                          data.curve_offset_px;
+    return image_paint_gradient_finish_t(
+        data.params.curve->eval_t(eGradientCurveMode(data.params.curve_mode),
+                                  data.params.curve_width,
+                                  sample),
+        data.params.repeat,
+        data.midpoint);
+  }
   return image_paint_gradient_eval_t(
       data.params, data.start_px, data.end_px, data.midpoint, float(px), float(py));
 }
@@ -561,6 +652,10 @@ static void image_paint_gradient_composite_pixel_float(const GradientRowTaskData
                                                        float *dst_px)
 {
   const float t = image_paint_gradient_row_eval_t(data, px, py);
+  if (std::isnan(t)) {
+    /* Curve (Along width limit) or nothing was drawn: leave this pixel untouched. */
+    return;
+  }
   const float4 &grad_col = image_paint_gradient_lut_sample(data, t);
 
   float sel_w = 1.0f;
@@ -584,6 +679,10 @@ static void image_paint_gradient_composite_pixel_byte(const GradientRowTaskData 
                                                       uchar *dst_px)
 {
   const float t = image_paint_gradient_row_eval_t(data, px, py);
+  if (std::isnan(t)) {
+    /* Curve (Along width limit) or nothing was drawn: leave this pixel untouched. */
+    return;
+  }
   /* LUT RGB is already converted to the canvas color space (see build_color_lut). */
   const float4 &grad_col = image_paint_gradient_lut_sample(data, t);
 
@@ -679,6 +778,14 @@ void image_paint_gradient_apply_region(const Scene *scene,
   task_data.canvas_ibuf = canvas_ibuf;
   task_data.work_region = work_region;
 
+  if (params.type == ImagePaintGradientType::Curve) {
+    /* The curve pixel coordinates use the dimensions of its originating tile, including when
+     * this UDIM tile has a different resolution. */
+    task_data.curve_offset_px = (image_select_udim_tile_uv_origin(tile_number) -
+                                 params.curve_tile_origin_uv) *
+                                float2(params.curve_tile_size);
+  }
+
   image_paint_gradient_rasterize(task_data);
 }
 
@@ -718,13 +825,18 @@ static rcti image_paint_gradient_viewport_clip_px(const ARegion *region,
  *
  * \param viewport_clip  Optional pixel rectangle to limit processing to the viewport-visible
  *                       region.  Pass nullptr for a full-tile update (e.g. on mouse release).
- * \param r_work_region  Output: the actual pixel region that was restored and painted.
- *                       Empty when the gradient does not intersect the tile.
+ * \param painted_region In/out: tile-local pixels already modified by previous preview passes.
+ *                       The on-screen part is restored before repainting; the off-screen part is
+ *                       left for a later pass. Updated to reflect what this pass leaves dirty.
+ * \param r_work_region  Output: the pixel region that was restored (and, where it intersects the
+ *                       work region, painted). Empty when there is nothing to do for the tile.
  *
  * \a backup_ibuf is the full-tile, pixel-identical copy of the canvas captured at session start
  * (coordinates are 1:1 with \a canvas_ibuf). The function restores only the pixels it is about to
  * repaint, then applies the gradient. Restoring from the original every frame keeps each blend a
- * fresh composite over the unmodified texture, so non-`MIX` blend modes cannot accumulate.
+ * fresh composite over the unmodified texture, so non-`MIX` blend modes cannot accumulate. It
+ * also restores the still-visible part of the *previous* pass's region, so a shrunken work region
+ * (a narrower width, a moved or removed curve, a mode switch) cannot leave a stale gradient behind.
  */
 static void image_paint_gradient_apply_preview_uv(const Scene *scene,
                                                   Image *image,
@@ -736,6 +848,7 @@ static void image_paint_gradient_apply_preview_uv(const Scene *scene,
                                                   const float2 &end_uv,
                                                   const float midpoint,
                                                   const rcti *viewport_clip,
+                                                  rcti &painted_region,
                                                   rcti &r_work_region)
 {
   rcti work_region;
@@ -753,34 +866,72 @@ static void image_paint_gradient_apply_preview_uv(const Scene *scene,
     BLI_rcti_isect(&work_region, viewport_clip, &work_region);
   }
 
-  r_work_region = work_region;
+  /* Restore the region about to be repainted plus what earlier passes left dirty and are still
+   * on-screen. On a viewport-clipped pass the off-screen part of the history is deliberately left
+   * alone: it is invisible, so restoring it would only clean pixels we are not going to repaint,
+   * leaving them blank until the next full pass. Keeping it painted lets the pass that later
+   * scrolls it into view restore + repaint it correctly, and the full pass settles the rest. A
+   * zeroed rectangle is not empty for #BLI_rcti_union, so only real rects are combined. */
+  rcti restore_region = work_region;
+  if (!BLI_rcti_is_empty(&painted_region)) {
+    rcti hist = painted_region;
+    if (viewport_clip && !BLI_rcti_is_empty(viewport_clip)) {
+      BLI_rcti_isect(&hist, viewport_clip, &hist);
+    }
+    if (!BLI_rcti_is_empty(&hist)) {
+      if (BLI_rcti_is_empty(&restore_region)) {
+        restore_region = hist;
+      }
+      else {
+        BLI_rcti_union(&restore_region, &hist);
+      }
+    }
+  }
+  r_work_region = restore_region;
 
-  if (BLI_rcti_is_empty(&work_region)) {
+  if (BLI_rcti_is_empty(&restore_region)) {
     return;
   }
 
-  /* Restore only the sub-region we are about to re-paint so that backup pixels outside the
-   * work_region are never needlessly copied. The backup is the full tile, so coordinates are
-   * 1:1 with the canvas. */
+  /* The backup is the full tile, so coordinates are 1:1 with the canvas. */
   if (backup_ibuf) {
     IMB_copy_rect(canvas_ibuf,
                   backup_ibuf,
-                  int2(work_region.xmin, work_region.ymin),
-                  int2(work_region.xmin, work_region.ymin),
-                  int2(BLI_rcti_size_x(&work_region), BLI_rcti_size_y(&work_region)));
+                  int2(restore_region.xmin, restore_region.ymin),
+                  int2(restore_region.xmin, restore_region.ymin),
+                  int2(BLI_rcti_size_x(&restore_region), BLI_rcti_size_y(&restore_region)));
   }
 
-  /* The gradient vector is stored in global UDIM UV space so its handles remain continuous across
-   * tiles. Convert it to this tile's pixel space before rasterizing, matching the established 2D
-   * image-paint gradient path. In particular, this avoids the separate global-UV rasterizer that
-   * left tiled ImBufs unchanged. */
-  const float2 tile_origin = image_select_udim_tile_uv_origin(tile_number);
-  const float2 start_px((start_uv.x - tile_origin.x) * canvas_ibuf->x,
-                        (start_uv.y - tile_origin.y) * canvas_ibuf->y);
-  const float2 end_px((end_uv.x - tile_origin.x) * canvas_ibuf->x,
-                      (end_uv.y - tile_origin.y) * canvas_ibuf->y);
-  image_paint_gradient_apply_region(
-      scene, image, tile_number, canvas_ibuf, params, start_px, end_px, midpoint, work_region);
+  if (!BLI_rcti_is_empty(&work_region)) {
+    /* The gradient vector is stored in global UDIM UV space so its handles remain continuous
+     * across tiles. Convert it to this tile's pixel space before rasterizing, matching the
+     * established 2D image-paint gradient path. In particular, this avoids the separate global-UV
+     * rasterizer that left tiled ImBufs unchanged. */
+    const float2 tile_origin = image_select_udim_tile_uv_origin(tile_number);
+    const float2 start_px((start_uv.x - tile_origin.x) * canvas_ibuf->x,
+                          (start_uv.y - tile_origin.y) * canvas_ibuf->y);
+    const float2 end_px((end_uv.x - tile_origin.x) * canvas_ibuf->x,
+                        (end_uv.y - tile_origin.y) * canvas_ibuf->y);
+    image_paint_gradient_apply_region(
+        scene, image, tile_number, canvas_ibuf, params, start_px, end_px, midpoint, work_region);
+  }
+
+  /* Track what is left dirty. A full pass repaints everything it restored, so the dirty set is
+   * exactly the work region. A viewport-clipped pass leaves the off-screen history untouched (it
+   * still holds the old preview), so keep the union until a pass covers it. */
+  if (viewport_clip && !BLI_rcti_is_empty(viewport_clip)) {
+    if (!BLI_rcti_is_empty(&work_region)) {
+      if (BLI_rcti_is_empty(&painted_region)) {
+        painted_region = work_region;
+      }
+      else {
+        BLI_rcti_union(&painted_region, &work_region);
+      }
+    }
+  }
+  else {
+    painted_region = work_region;
+  }
 }
 
 /** \} */
@@ -795,6 +946,13 @@ struct ImageSelectGradientTileData {
   /** Full-tile, pixel-identical copy of the canvas at session start. Doubles as the preview
    * restore source (every frame composites over the original) and the undo snapshot on commit. */
   ImBuf *undo_ibuf = nullptr;
+  /**
+   * Tile-local pixels this preview has already modified but not yet restored from #undo_ibuf. A
+   * preview pass restores `painted_region ∪ new work region` before repainting, so pixels painted
+   * by an earlier pass outside the new (possibly smaller) work region -- a narrower width, a moved
+   * curve, a mode switch -- are rolled back instead of leaving a stale gradient on the canvas.
+   */
+  rcti painted_region = {0, 0, 0, 0};
 };
 
 /**
@@ -815,6 +973,22 @@ struct ImageSelectGradientState : public PaintSelectFloatingSession {
   float2 start_uv = {0.0f, 0.0f};
   float2 end_uv = {0.0f, 0.0f};
   float midpoint = 0.5f;
+
+  /* Curve gradient (`IMAGE_PAINT_GRADIENT_CURVE`). The raw points are collected in global UV, the
+   * resampled curve lives in the canvas pixels of #start_tile_number (see the helpers below);
+   * null until the drag has produced at least two distinct points. The raw points are the
+   * editable control points of the curve (selection and hover are indices into them). */
+  Vector<float2> curve_points_uv;
+  std::unique_ptr<gradient_curve::GradientCurve2D> curve;
+  /** Indices into #curve_points_uv of the currently selected control points. */
+  Vector<int> curve_selected_points;
+  /** Control point under the mouse, for the overlay highlight (-1 when none). */
+  int curve_hover_point = -1;
+  /** Set while a brand-new stroke is being drawn: the raw points are still hundreds of samples
+   * long, so the overlay hides the control-point markers until the stroke is released. */
+  bool curve_is_drawing = false;
+  /** Pixel dimensions of the starting tile, for the UV <-> curve-space conversions. */
+  int2 tile_size = int2(1024);
 
   double last_preview_time = 0.0;
   bool preview_pending = false;
@@ -843,6 +1017,7 @@ static void image_select_gradient_free_tile_data(ImageSelectGradientTileData &ti
     IMB_freeImBuf(tile.undo_ibuf);
     tile.undo_ibuf = nullptr;
   }
+  BLI_rcti_init(&tile.painted_region, 0, 0, 0, 0);
 }
 
 void image_select_gradient_state_free(ImageSelectGradientState *state)
@@ -886,9 +1061,253 @@ static float2 image_select_gradient_mid_uv(const ImageSelectGradientState *state
   return state->start_uv + state->midpoint * (state->end_uv - state->start_uv);
 }
 
-static ImagePaintGradientParams image_select_gradient_current_params(const Scene *scene)
+/* -------------------------------------------------------------------- */
+/** \name Curve gradient session helpers
+ * \{ */
+
+/** Canvas pixels of the tile the curve was drawn on, from a global UV point. */
+static float2 image_select_gradient_curve_px_from_uv(const ImageSelectGradientState *state,
+                                                     const float2 &uv)
 {
-  return image_paint_gradient_params_from_imapaint(scene->toolsettings->imapaint);
+  /* The curve is intentionally measured in its starting tile's pixels. Other tiles may have
+   * different resolutions; their pixel-coordinate offsets are resolved independently at apply. */
+  return (uv - image_select_udim_tile_uv_origin(state->start_tile_number)) *
+         float2(state->tile_size);
+}
+
+/** Global UV point from the canvas pixels of the tile the curve was drawn on. */
+static float2 image_select_gradient_curve_uv_from_px(const ImageSelectGradientState *state,
+                                                     const float2 &px)
+{
+  return image_select_udim_tile_uv_origin(state->start_tile_number) +
+         px / float2(state->tile_size);
+}
+
+/** Position of the midpoint handle: on the curve for the Curve type, on the vector otherwise. */
+static float2 image_select_gradient_mid_uv_for_type(const ImageSelectGradientState *state,
+                                                    const bool is_curve)
+{
+  if (is_curve && state->curve != nullptr) {
+    const float2 mid_px = state->curve->position_at_s(state->midpoint * state->curve->length());
+    return image_select_gradient_curve_uv_from_px(state, mid_px);
+  }
+  return image_select_gradient_mid_uv(state);
+}
+
+/** Whether the session's gradient is the Curve type (read live, it can change mid-session). */
+static bool image_select_gradient_is_curve(const Scene *scene)
+{
+  return scene != nullptr &&
+         scene->toolsettings->imapaint.gradient_type == IMAGE_PAINT_GRADIENT_CURVE;
+}
+
+/**
+ * Rebuild the resampled curve from the collected UV points, in the start tile's pixel space.
+ * An invalid or not-yet-drawn curve is stored as null: the evaluation then leaves every pixel
+ * untouched instead of painting a degenerate ramp.
+ */
+static void image_select_gradient_curve_rebuild(ImageSelectGradientState *state,
+                                                const ImagePaintSettings &imapaint)
+{
+  if (state->curve_points_uv.size() < 2) {
+    state->curve = nullptr;
+    return;
+  }
+  Vector<float2> raw_px;
+  raw_px.reserve(state->curve_points_uv.size());
+  for (const float2 &uv : state->curve_points_uv) {
+    raw_px.append(image_select_gradient_curve_px_from_uv(state, uv));
+  }
+  auto curve = std::make_unique<gradient_curve::GradientCurve2D>();
+  /* Even ~3 pixel spacing over the canvas is far below what a color ramp can resolve, and the
+   * curve builder caps the point count for very long strokes. */
+  const gradient_curve::GradientCurveBuildParams params = {
+      /*spacing=*/3.0f,
+      /*smooth=*/imapaint.gradient_curve_smooth,
+      gradient_curve::default_smooth_iterations,
+  };
+  curve->build(raw_px, params);
+  state->curve = curve->is_valid() ? std::move(curve) : nullptr;
+}
+
+/**
+ * Reduce the raw samples collected during a drag to a small, editable set of control points: RDP
+ * in the curve's own pixel space (isotropic, so a non-square tile does not distort the metric),
+ * keeping the corners and curvature extremes a hand-placed curve would have. Without this the
+ * overlay body, hit-testing and per-point editing would each work on hundreds of points spaced a
+ * few pixels apart.
+ */
+static void image_select_gradient_curve_simplify(ImageSelectGradientState *state,
+                                                 const ImagePaintSettings &imapaint)
+{
+  if (state->curve_points_uv.size() <= 2) {
+    return;
+  }
+  Array<float2> raw_px(state->curve_points_uv.size());
+  for (const int i : state->curve_points_uv.index_range()) {
+    raw_px[i] = image_select_gradient_curve_px_from_uv(state, state->curve_points_uv[i]);
+  }
+  const Vector<int> kept = gradient_curve::simplify_control_points<float2>(
+      raw_px, gradient_curve::simplify_tolerance_px, gradient_curve::max_control_points);
+  if (kept.size() >= state->curve_points_uv.size()) {
+    return;
+  }
+  Vector<float2> reduced;
+  reduced.reserve(kept.size());
+  for (const int index : kept) {
+    reduced.append(state->curve_points_uv[index]);
+  }
+  state->curve_points_uv = std::move(reduced);
+  /* The old selection / hover indices no longer match the reduced list. */
+  state->curve_selected_points.clear();
+  state->curve_hover_point = -1;
+  image_select_gradient_curve_rebuild(state, imapaint);
+}
+
+/** Hit radius (region pixels) for curve control points and the curve body. Sized to match the
+ * enlarged control-point markers. */
+static constexpr float GRADIENT_CURVE_HIT_RADIUS_PX = 12.0f;
+/** Marker radii (region pixels) of the editable curve control points. */
+static constexpr float GRADIENT_CURVE_POINT_RADIUS_PX = 5.25f;
+static constexpr float GRADIENT_CURVE_POINT_HOVER_RADIUS_PX = 7.5f;
+
+enum class GradientCurveHitType {
+  /** No curve feature under the mouse. */
+  None,
+  /** A control point (including the two endpoints) is under the mouse. */
+  ControlPoint,
+  /** The mouse is on the curve between control points. */
+  CurveBody,
+};
+
+struct GradientCurveHitResult {
+  GradientCurveHitType type = GradientCurveHitType::None;
+  /** Control point index, for #GradientCurveHitType::ControlPoint. */
+  int point_index = -1;
+  /** Arc-length position (curve space) of the nearest point on the curve, for the body. */
+  float nearest_s = 0.0f;
+};
+
+/**
+ * Curve hit-testing for the per-point editing: the nearest control point within the hit radius
+ * wins; otherwise the mouse projecting onto the drawn curve within the radius hits the body.
+ * Screen distances are measured in region pixels so the hit radius is zoom independent.
+ */
+static GradientCurveHitResult image_select_gradient_curve_hit_test(
+    const ARegion *region, const wmEvent *event, const ImageSelectGradientState *state)
+{
+  GradientCurveHitResult hit;
+  if (region == nullptr || state->curve_points_uv.is_empty()) {
+    return hit;
+  }
+  /* Window-absolute to region-relative, like the handle hit-test: #wmEvent.mval cannot be
+   * trusted while the modal runs. */
+  const float mx = float(event->xy[0] - region->winrct.xmin);
+  const float my = float(event->xy[1] - region->winrct.ymin);
+  const float2 mouse_px(mx, my);
+
+  int nearest_i = -1;
+  float nearest_dist_sq = GRADIENT_CURVE_HIT_RADIUS_PX * GRADIENT_CURVE_HIT_RADIUS_PX;
+  for (const int i : state->curve_points_uv.index_range()) {
+    float rx, ry;
+    ui::view2d_view_to_region_fl(
+        &region->v2d, state->curve_points_uv[i].x, state->curve_points_uv[i].y, &rx, &ry);
+    const float dist_sq = math::distance_squared(float2(rx, ry), mouse_px);
+    if (dist_sq <= nearest_dist_sq) {
+      nearest_dist_sq = dist_sq;
+      nearest_i = i;
+    }
+  }
+  if (nearest_i >= 0) {
+    hit.type = GradientCurveHitType::ControlPoint;
+    hit.point_index = nearest_i;
+    return hit;
+  }
+
+  if (state->curve != nullptr && state->curve->is_valid()) {
+    float ux, uy;
+    ui::view2d_region_to_view(&region->v2d, mx, my, &ux, &uy);
+    const float2 mouse_curve_px = image_select_gradient_curve_px_from_uv(state, float2(ux, uy));
+    const gradient_curve::CurveProjection proj = state->curve->project(mouse_curve_px);
+    const float2 proj_uv = image_select_gradient_curve_uv_from_px(
+        state, state->curve->position_at_s(proj.s));
+    float rx, ry;
+    ui::view2d_view_to_region_fl(&region->v2d, proj_uv.x, proj_uv.y, &rx, &ry);
+    if (math::distance(float2(rx, ry), mouse_px) <= GRADIENT_CURVE_HIT_RADIUS_PX) {
+      hit.type = GradientCurveHitType::CurveBody;
+      hit.nearest_s = proj.s;
+    }
+  }
+  return hit;
+}
+
+/**
+ * Index in #curve_points_uv at which a control point at \a uv keeps the point list ordered along
+ * the curve: the raw segment the position is closest to, so the point is inserted between its
+ * two neighbors.
+ */
+static int image_select_gradient_curve_insert_index(const ImageSelectGradientState *state,
+                                                    const float2 &uv)
+{
+  const int points_num = state->curve_points_uv.size();
+  int best_i = points_num;
+  float best_dist_sq = FLT_MAX;
+  for (const int i : IndexRange(1, points_num - 1)) {
+    const float dist_sq = dist_squared_to_line_segment_v2(
+        uv, state->curve_points_uv[i - 1], state->curve_points_uv[i]);
+    if (dist_sq < best_dist_sq) {
+      best_dist_sq = dist_sq;
+      best_i = i;
+    }
+  }
+  return best_i;
+}
+
+/** Remove every selected control point (if any), clear the selection and rebuild the curve. */
+static void image_select_gradient_curve_remove_selected(ImageSelectGradientState *state,
+                                                        const ImagePaintSettings &imapaint)
+{
+  Vector<int> &selected = state->curve_selected_points;
+  if (selected.is_empty()) {
+    return;
+  }
+  /* Highest index first, so the removals below keep the remaining indices valid. */
+  Array<int> sorted(selected.as_span());
+  std::sort(sorted.begin(), sorted.end(), std::greater<int>());
+  for (const int index : sorted) {
+    if (index >= 0 && index < state->curve_points_uv.size()) {
+      state->curve_points_uv.remove(index);
+    }
+  }
+  selected.clear();
+  state->curve_hover_point = -1;
+  image_select_gradient_curve_rebuild(state, imapaint);
+}
+
+/** \} */
+
+/**
+ * Runtime parameters of the floating gradient session: the tool settings, plus the drawn curve
+ * for the Curve type (null until at least two points have been collected).
+ */
+static ImagePaintGradientParams image_select_gradient_current_params(
+    const Scene *scene, const ImageSelectGradientState *state)
+{
+  ImagePaintGradientParams params = image_paint_gradient_params_from_imapaint(
+      scene->toolsettings->imapaint);
+  if (params.type == ImagePaintGradientType::Curve && state != nullptr &&
+      state->curve != nullptr)
+  {
+    params.curve = state->curve.get();
+    params.curve_mode = eGradientCurveMode(scene->toolsettings->imapaint.gradient_curve_mode);
+    params.curve_width = scene->toolsettings->imapaint.gradient_curve_width;
+    params.curve_tile_origin_uv = image_select_udim_tile_uv_origin(state->start_tile_number);
+    params.curve_tile_size = state->tile_size;
+    const blender::Bounds<float2> bounds = state->curve->bounds();
+    params.curve_bounds_min = bounds.min;
+    params.curve_bounds_max = bounds.max;
+  }
+  return params;
 }
 
 /* One-way sync: imapaint -> operator props (all marked PROP_SKIP_SAVE).
@@ -902,6 +1321,23 @@ static void image_select_gradient_sync_op_from_imapaint(wmOperator *op, const Sc
   RNA_enum_set(op->ptr, "repeat", imapaint.gradient_repeat);
   RNA_enum_set(op->ptr, "blend_mode", imapaint.gradient_blend_mode);
   RNA_float_set(op->ptr, "opacity", imapaint.gradient_opacity);
+}
+
+/* One-way sync of the drawn curve into the operator's hidden `curve_points` collection (global
+ * UV per point), so the last drag is inspectable from the redo panel and from Python. The
+ * floating session stays the source of truth for the preview. */
+static void image_select_gradient_sync_curve_to_op(wmOperator *op,
+                                                   const ImageSelectGradientState *state)
+{
+  RNA_collection_clear(op->ptr, "curve_points");
+  if (state == nullptr) {
+    return;
+  }
+  for (const float2 &uv : state->curve_points_uv) {
+    PointerRNA itemptr;
+    RNA_collection_add(op->ptr, "curve_points", &itemptr);
+    RNA_float_set_array(&itemptr, "loc", uv);
+  }
 }
 
 static bool image_select_gradient_mouse_to_global_uv(
@@ -998,6 +1434,8 @@ static bool image_select_gradient_init_tile_backup(bContext * /*C*/,
   tile.tile_number = tile_number;
   tile.iuser = sima->iuser;
   tile.iuser.tile = tile_number;
+  /* The fresh backup equals the canvas, so nothing is dirty yet. */
+  BLI_rcti_init(&tile.painted_region, 0, 0, 0, 0);
 
   void *lock = nullptr;
   ImBuf *ibuf = BKE_image_acquire_ibuf(ima, &tile.iuser, &lock);
@@ -1127,9 +1565,9 @@ static void image_select_gradient_run_preview(bContext *C,
       }
     }
 
-    /* Apply preview; work_region is the actual region that was restored + painted.
-     * This also eliminates the redundant second call to image_paint_gradient_calc_work_region_uv
-     * that previously followed this block. */
+    /* Apply preview; work_region is the union of the previous painted region and the current
+     * work region -- both restored, the current one also painted. Marking the whole union keeps
+     * the GPU texture coherent in the part that was only cleaned. */
     rcti work_region;
     image_paint_gradient_apply_preview_uv(scene,
                                           ima,
@@ -1141,6 +1579,7 @@ static void image_select_gradient_run_preview(bContext *C,
                                           state->end_uv,
                                           state->midpoint,
                                           viewport_clip_ptr,
+                                          tile.painted_region,
                                           work_region);
 
     if (commit_to_image) {
@@ -1194,6 +1633,14 @@ static void image_select_gradient_update_preview(bContext *C,
 
   const bool settings_changed = state->applied_settings_revision !=
                                 image_paint_gradient_settings_revision;
+  if (settings_changed) {
+    /* Curve mode / width are re-read from the tool settings on every render, but the smoothing
+     * setting changes the curve itself, so it needs a rebuild from the stored points. */
+    const Scene *settings_scene = CTX_data_scene(C);
+    if (image_select_gradient_is_curve(settings_scene) && state->curve_points_uv.size() >= 2) {
+      image_select_gradient_curve_rebuild(state, settings_scene->toolsettings->imapaint);
+    }
+  }
   if (!force && !settings_changed) {
     const double now = BLI_time_now_seconds();
     if (now - state->last_preview_time < (1.0 / 60.0)) {
@@ -1213,17 +1660,7 @@ static void image_select_gradient_update_preview(bContext *C,
   /* Interactive (non-forced) updates clip to the viewport for performance.
    * Forced updates (LMB release, settings change) do a full-tile refresh. */
   image_select_gradient_run_preview(
-      C, state, image_select_gradient_current_params(scene), false, /*use_viewport_clip=*/!force);
-}
-
-void image_select_gradient_refresh_preview_from_settings(bContext *C)
-{
-  SpaceImage *sima = CTX_wm_space_image(C);
-  ImageSelectGradientState *state = image_select_gradient_state_get(sima);
-  if (!state) {
-    return;
-  }
-  image_select_gradient_update_preview(C, state, true);
+      C, state, image_select_gradient_current_params(scene, state), false, /*use_viewport_clip=*/!force);
 }
 
 static void image_select_gradient_restore_session_backup(bContext *C,
@@ -1254,12 +1691,111 @@ static void draw_gradient_diamond(const uint pos, const float center[2], const f
   immEnd();
 }
 
-static void draw_gradient_vector_overlay(const bContext * /*C*/, ARegion *region, void *arg)
+static void draw_gradient_vector_overlay(const bContext *C, ARegion *region, void *arg)
 {
   ImageSelectGradientState *state = static_cast<ImageSelectGradientState *>(arg);
   if (!state) {
     return;
   }
+
+  const Scene *scene = CTX_data_scene(C);
+  const bool is_curve = (scene != nullptr) &&
+                        scene->toolsettings->imapaint.gradient_type == IMAGE_PAINT_GRADIENT_CURVE;
+
+  GPU_line_smooth(true);
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  if (is_curve) {
+    /* The drawn polyline replaces the straight gradient vector; the start / end markers sit at
+     * its ends and the midpoint diamond at its arc-length position. */
+    if (state->curve == nullptr) {
+      immUnbindProgram();
+      GPU_blend(GPU_BLEND_NONE);
+      GPU_line_smooth(false);
+      return;
+    }
+
+    Vector<float2> region_pts;
+    region_pts.reserve(state->curve->points_num());
+    for (const float2 &px : state->curve->points()) {
+      const float2 uv = image_select_gradient_curve_uv_from_px(state, px);
+      float rx, ry;
+      ui::view2d_view_to_region_fl(&region->v2d, uv.x, uv.y, &rx, &ry);
+      region_pts.append(float2(rx, ry));
+    }
+
+    for (const int pass : IndexRange(2)) {
+      GPU_line_width((pass == 0) ? 3.0f : 1.5f);
+      if (pass == 0) {
+        immUniformColor4f(0.0f, 0.0f, 0.0f, 0.55f);
+      }
+      else {
+        immUniformColor4f(1.0f, 1.0f, 1.0f, 0.9f);
+      }
+      immBegin(GPU_PRIM_LINE_STRIP, region_pts.size());
+      for (const float2 &co : region_pts) {
+        immVertex2f(pos, co.x, co.y);
+      }
+      immEnd();
+    }
+
+    const float2 mid_px = state->curve->position_at_s(state->midpoint * state->curve->length());
+    const float2 mid_uv = image_select_gradient_curve_uv_from_px(state, mid_px);
+
+    const float p0[2] = {region_pts.first().x, region_pts.first().y};
+    const float p1[2] = {region_pts.last().x, region_pts.last().y};
+    float pm[2];
+    ui::view2d_view_to_region_fl(&region->v2d, mid_uv.x, mid_uv.y, &pm[0], &pm[1]);
+
+    GPU_line_width(3.0f);
+    immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
+    draw_gradient_polyline_circle(pos, p0, 7.0f, 24);
+    draw_gradient_polyline_circle(pos, p1, 9.0f, 24);
+    draw_gradient_diamond(pos, pm, 6.0f);
+
+    GPU_line_width(1.5f);
+    immUniformColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+    draw_gradient_polyline_circle(pos, p0, 7.0f, 24);
+    immUniformColor4f(1.0f, 0.85f, 0.0f, 0.95f);
+    draw_gradient_polyline_circle(pos, p1, 9.0f, 24);
+    immUniformColor4f(0.2f, 0.9f, 1.0f, 0.95f);
+    draw_gradient_diamond(pos, pm, 6.0f);
+
+    /* Control points of the raw polyline (editable): hollow circles, filled when selected and
+     * enlarged when hovered. Endpoints keep their bigger start / end markers above and still
+     * get their selection fill here. Hidden while a new stroke is being drawn: the raw points are
+     * still hundreds of unsimplified samples that would bury the curve. */
+    if (!state->curve_is_drawing) {
+      for (const int i : state->curve_points_uv.index_range()) {
+        const bool selected = state->curve_selected_points.contains(i);
+        const bool hovered = (state->curve_hover_point == i);
+        const float radius = hovered ? GRADIENT_CURVE_POINT_HOVER_RADIUS_PX :
+                                       GRADIENT_CURVE_POINT_RADIUS_PX;
+        float cx, cy;
+        ui::view2d_view_to_region_fl(
+            &region->v2d, state->curve_points_uv[i].x, state->curve_points_uv[i].y, &cx, &cy);
+        if (selected) {
+          immUniformColor4f(0.2f, 0.9f, 1.0f, 0.55f);
+          imm_draw_circle_fill_2d(pos, cx, cy, radius + 1.0f, 16);
+        }
+        GPU_line_width(3.0f);
+        immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
+        imm_draw_circle_wire_2d(pos, cx, cy, radius, 16);
+        GPU_line_width(1.5f);
+        immUniformColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+        imm_draw_circle_wire_2d(pos, cx, cy, radius, 16);
+      }
+    }
+
+    immUnbindProgram();
+    GPU_blend(GPU_BLEND_NONE);
+    GPU_line_smooth(false);
+    return;
+  }
+
   /* Draw handles even when tiles is empty (degenerate/zero-length gradient at drag start). */
 
   const float2 mid_uv = image_select_gradient_mid_uv(state);
@@ -1268,12 +1804,6 @@ static void draw_gradient_vector_overlay(const bContext * /*C*/, ARegion *region
   ui::view2d_view_to_region_fl(&region->v2d, state->start_uv.x, state->start_uv.y, &p0[0], &p0[1]);
   ui::view2d_view_to_region_fl(&region->v2d, state->end_uv.x, state->end_uv.y, &p1[0], &p1[1]);
   ui::view2d_view_to_region_fl(&region->v2d, mid_uv.x, mid_uv.y, &pm[0], &pm[1]);
-
-  GPU_line_smooth(true);
-  GPU_blend(GPU_BLEND_ALPHA);
-  GPUVertFormat *format = immVertexFormat();
-  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
-  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
 
   GPU_line_width(3.0f);
   immUniformColor4f(0.0f, 0.0f, 0.0f, 0.55f);
@@ -1342,7 +1872,7 @@ static void image_select_gradient_begin_session(bContext *C,
    * previewing: otherwise a face-selection-only mask would be ignored until the commit, so the
    * drag preview would neither show nor clip by it. */
   image_paint_selection_mask_from_face_selection(C, scene, ima);
-  const ImagePaintGradientParams params = image_select_gradient_current_params(scene);
+  const ImagePaintGradientParams params = image_select_gradient_current_params(scene, state);
   image_select_gradient_sync_tile_backups(C, state, params);
 
   if (state->tiles.is_empty()) {
@@ -1355,6 +1885,15 @@ static void image_select_gradient_begin_session(bContext *C,
   if (state->tiles.is_empty()) {
     image_select_gradient_state_free(state);
     return;
+  }
+
+  /* Pixel dimensions of the originating tile define the curve's pixel-space conversions. */
+  if (ImageSelectGradientTileData *start_tile = image_select_gradient_find_tile(
+          state, state->start_tile_number))
+  {
+    if (start_tile->undo_ibuf != nullptr) {
+      state->tile_size = int2(start_tile->undo_ibuf->x, start_tile->undo_ibuf->y);
+    }
   }
 
   ARegion *region = CTX_wm_region(C);
@@ -1418,7 +1957,7 @@ static void image_select_gradient_apply_session(bContext *C, ImageSelectGradient
    * when at least one object has an active selection; with no active selection the masks are freed
    * and painting is unrestricted (a no-op with the flag off). */
   image_paint_selection_mask_from_face_selection(C, scene, ima);
-  const ImagePaintGradientParams params = image_select_gradient_current_params(scene);
+  const ImagePaintGradientParams params = image_select_gradient_current_params(scene, state);
 
   image_select_gradient_run_preview(C, state, params, true, /*use_viewport_clip=*/false);
 
@@ -1459,14 +1998,58 @@ enum class GradientDragMode {
   Start,
   End,
   Mid,
+  /** Curve: dragging the selected control point(s) of an already drawn curve. */
+  PointDrag,
 };
 
 struct GradientDragData {
   GradientDragMode drag_mode;
   wmTimer *timer = nullptr;
+  /* Curve per-point drag: the selected point indices, their pre-drag positions and the press
+   * position, plus the region-space position of the last collected point for the sampling
+   * threshold. */
+  Vector<int> drag_points;
+  Vector<float2> drag_orig_points;
+  float2 drag_press_uv = float2(0.0f);
+  float2 last_collect_px = float2(0.0f);
 };
 
 static constexpr float GRADIENT_HANDLE_HIT_RADIUS_PX = 15.0f;
+/** Minimum cursor travel (region pixels) before the next curve sample is accepted. */
+static constexpr float GRADIENT_CURVE_COLLECT_DIST_PX = 4.0f;
+
+/**
+ * Resolve a Curve-mode press over the floating session: grab the midpoint handle, select and drag
+ * control points (Shift toggles multi-selection), insert a point when pressing the curve body
+ * (Ctrl inserts without grabbing), or start a brand-new curve on empty space. Returns the drag
+ * mode the session should enter.
+ */
+static GradientDragMode image_select_gradient_curve_press_resolve(const ARegion *region,
+                                                                  Image *ima,
+                                                                  const wmEvent *event,
+                                                                  Scene *scene,
+                                                                  ImageSelectGradientState *state,
+                                                                  GradientDragData *data);
+
+/** Reset the curve drag to a fresh single-point curve at \a uv; \a r_px gets its region position. */
+static void image_select_gradient_curve_start(ImageSelectGradientState *state,
+                                              const float2 &uv,
+                                              const ARegion *region,
+                                              float2 &r_px)
+{
+  state->curve_points_uv.clear();
+  state->curve = nullptr;
+  state->curve_selected_points.clear();
+  state->curve_hover_point = -1;
+  state->curve_points_uv.append(uv);
+  float rx, ry;
+  ui::view2d_view_to_region_fl(&region->v2d, uv.x, uv.y, &rx, &ry);
+  r_px = float2(rx, ry);
+  /* Keep the vector handles consistent with the still-empty curve. */
+  state->start_uv = uv;
+  state->end_uv = uv;
+  state->midpoint = 0.5f;
+}
 
 static bool image_select_gradient_hit_test_handle(const ARegion *region,
                                                   const wmEvent *event,
@@ -1498,6 +2081,86 @@ static float image_select_gradient_project_midpoint(const float2 &uv,
   }
   const float t = ((uv.x - start_uv.x) * dx + (uv.y - start_uv.y) * dy) / dist_sq;
   return clamp_f(t, 0.05f, 0.95f);
+}
+
+static GradientDragMode image_select_gradient_curve_press_resolve(const ARegion *region,
+                                                                  Image *ima,
+                                                                  const wmEvent *event,
+                                                                  Scene *scene,
+                                                                  ImageSelectGradientState *state,
+                                                                  GradientDragData *data)
+{
+  const GradientCurveHitResult hit = image_select_gradient_curve_hit_test(region, event, state);
+  if (hit.type == GradientCurveHitType::None) {
+    if (image_select_gradient_hit_test_handle(
+            region, event, image_select_gradient_mid_uv_for_type(state, true)))
+    {
+      return GradientDragMode::Mid;
+    }
+    /* Empty space: start a brand-new curve from this point. On a UV miss (out of the canvas)
+     * there is nothing to start from, but the mode is still New: clear the previous curve so the
+     * drag does not keep editing it. */
+    int tile_number = 0;
+    float2 uv;
+    if (image_select_gradient_mouse_to_global_uv(region, ima, event, tile_number, uv)) {
+      image_select_gradient_curve_start(state, uv, region, data->last_collect_px);
+    }
+    else {
+      state->curve_points_uv.clear();
+      state->curve = nullptr;
+      state->curve_selected_points.clear();
+      state->curve_hover_point = -1;
+    }
+    state->curve_is_drawing = true;
+    return GradientDragMode::New;
+  }
+
+  int tile_number = 0;
+  float2 press_uv;
+  image_select_gradient_mouse_to_global_uv(region, ima, event, tile_number, press_uv);
+
+  if (hit.type == GradientCurveHitType::ControlPoint) {
+    const int idx = hit.point_index;
+    Vector<int> &selected = state->curve_selected_points;
+    if (event->modifier & KM_SHIFT) {
+      if (selected.contains(idx)) {
+        /* Shift-click on a selected point deselects it and starts no drag. */
+        selected.remove_first_occurrence_and_reorder(idx);
+        return GradientDragMode::Idle;
+      }
+      selected.append(idx);
+    }
+    else if (!selected.contains(idx)) {
+      /* Clicking an unselected point selects just that one; a selected one keeps the whole
+       * selection so the group can be dragged together. */
+      selected.reinitialize(1);
+      selected[0] = idx;
+    }
+    /* Start dragging the whole selection. */
+    data->drag_points = selected;
+    data->drag_press_uv = press_uv;
+    data->drag_orig_points = state->curve_points_uv;
+    return GradientDragMode::PointDrag;
+  }
+
+  /* Curve body: insert a new control point at the nearest position on the curve, between its
+   * future neighbors in the raw point list. */
+  BLI_assert(state->curve != nullptr);
+  const float2 insert_uv = image_select_gradient_curve_uv_from_px(
+      state, state->curve->position_at_s(hit.nearest_s));
+  const int insert_index = image_select_gradient_curve_insert_index(state, insert_uv);
+  state->curve_points_uv.insert(insert_index, insert_uv);
+  image_select_gradient_curve_rebuild(state, scene->toolsettings->imapaint);
+  state->curve_selected_points.reinitialize(1);
+  state->curve_selected_points[0] = insert_index;
+  if (event->modifier & KM_CTRL) {
+    /* Ctrl-click inserts without grabbing. */
+    return GradientDragMode::Idle;
+  }
+  data->drag_points = state->curve_selected_points;
+  data->drag_press_uv = press_uv;
+  data->drag_orig_points = state->curve_points_uv;
+  return GradientDragMode::PointDrag;
 }
 
 /** \} */
@@ -1562,7 +2225,9 @@ static wmOperatorStatus image_select_gradient_invoke(bContext *C,
   float midpoint = 0.5f;
 
   ImageSelectGradientState *existing = image_select_gradient_state_get(sima);
-  if (existing) {
+  Scene *scene = CTX_data_scene(C);
+  const bool is_curve = image_select_gradient_is_curve(scene);
+  if (!is_curve && existing) {
     start_uv = existing->start_uv;
     end_uv = existing->end_uv;
     midpoint = existing->midpoint;
@@ -1573,7 +2238,7 @@ static wmOperatorStatus image_select_gradient_invoke(bContext *C,
       drag_mode = GradientDragMode::End;
     }
     else if (image_select_gradient_hit_test_handle(
-                 region, event, image_select_gradient_mid_uv(existing)))
+                 region, event, image_select_gradient_mid_uv_for_type(existing, is_curve)))
     {
       drag_mode = GradientDragMode::Mid;
     }
@@ -1592,7 +2257,7 @@ static wmOperatorStatus image_select_gradient_invoke(bContext *C,
       return OPERATOR_CANCELLED;
     }
   }
-  else if (existing) {
+  else if (!is_curve && existing) {
     existing->start_uv = start_uv;
     existing->end_uv = end_uv;
     existing->midpoint = midpoint;
@@ -1605,6 +2270,12 @@ static wmOperatorStatus image_select_gradient_invoke(bContext *C,
 
   GradientDragData *data = MEM_new<GradientDragData>(__func__);
   data->drag_mode = drag_mode;
+  if (is_curve) {
+    /* The Curve press resolves per point / curve body / midpoint / new curve; the session is
+     * guaranteed to exist here (created above when absent). */
+    data->drag_mode = image_select_gradient_curve_press_resolve(
+        region, ima, event, scene, existing, data);
+  }
   /* When the modal is first entered via invoke with LMB already pressed (New mode),
    * the drag starts immediately. Otherwise (Start/End/Mid) wait for LMB release
    * to transition to Idle, then a subsequent press to begin dragging. */
@@ -1761,6 +2432,22 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
     return OPERATOR_PASS_THROUGH | OPERATOR_RUNNING_MODAL;
   }
 
+  const bool is_curve = image_select_gradient_is_curve(CTX_data_scene(C));
+
+  /* Curve hover feedback before event routing: idle mouse moves pass through below, but the
+   * overlay still needs to know which control point is under the mouse. */
+  if (is_curve && event->type == MOUSEMOVE && data->drag_mode == GradientDragMode::Idle) {
+    const GradientCurveHitResult hover_hit = image_select_gradient_curve_hit_test(
+        region, event, state);
+    const int hover = (hover_hit.type == GradientCurveHitType::ControlPoint) ?
+                          hover_hit.point_index :
+                          -1;
+    if (hover != state->curve_hover_point) {
+      state->curve_hover_point = hover;
+      ED_region_tag_redraw(region);
+    }
+  }
+
   /* While no handle is being dragged, a mouse event over the header / tool-settings / N-panel
    * belongs to the UI. Pass it through (without breaking the event) so its widgets receive the
    * click instead of the gradient hijacking it to start a spurious new vector. An in-progress drag
@@ -1772,6 +2459,14 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
   }
 
   if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
+    if (is_curve) {
+      data->drag_mode = image_select_gradient_curve_press_resolve(
+          region, ima, event, CTX_data_scene(C), state, data);
+      /* A press can already have changed the curve (insert, new-curve start, selection). */
+      image_select_gradient_update_preview(C, state, false);
+      ED_region_tag_redraw(region);
+      return OPERATOR_RUNNING_MODAL;
+    }
     if (image_select_gradient_hit_test_handle(region, event, state->start_uv)) {
       data->drag_mode = GradientDragMode::Start;
     }
@@ -1779,7 +2474,7 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
       data->drag_mode = GradientDragMode::End;
     }
     else if (image_select_gradient_hit_test_handle(
-                 region, event, image_select_gradient_mid_uv(state)))
+                 region, event, image_select_gradient_mid_uv_for_type(state, is_curve)))
     {
       data->drag_mode = GradientDragMode::Mid;
     }
@@ -1810,11 +2505,51 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
             state->start_uv = uv;
             break;
           case GradientDragMode::Mid:
-            state->midpoint = image_select_gradient_project_midpoint(
-                uv, state->start_uv, state->end_uv);
+            if (is_curve && state->curve != nullptr) {
+              const float2 mid_px = image_select_gradient_curve_px_from_uv(state, uv);
+              const gradient_curve::CurveProjection proj = state->curve->project(mid_px);
+              state->midpoint = clamp_f(proj.s / state->curve->length(), 0.05f, 0.95f);
+            }
+            else {
+              state->midpoint = image_select_gradient_project_midpoint(
+                  uv, state->start_uv, state->end_uv);
+            }
             break;
           case GradientDragMode::End:
+            state->end_uv = uv;
+            break;
+          case GradientDragMode::PointDrag: {
+            /* Move the dragged selection rigidly: each point takes its pre-drag position plus
+             * the total drag delta. */
+            const float2 delta = uv - data->drag_press_uv;
+            for (const int point_index : data->drag_points) {
+              if (point_index >= 0 && point_index < state->curve_points_uv.size()) {
+                state->curve_points_uv[point_index] = data->drag_orig_points[point_index] + delta;
+              }
+            }
+            image_select_gradient_curve_rebuild(state, CTX_data_scene(C)->toolsettings->imapaint);
+            break;
+          }
           case GradientDragMode::New:
+            if (is_curve) {
+              /* Collect surface points while the button is held; the threshold is in region
+               * pixels so slow strokes do not crowd the curve. */
+              float rx, ry;
+              ui::view2d_view_to_region_fl(&region->v2d, uv.x, uv.y, &rx, &ry);
+              const float2 cur_px(rx, ry);
+              if (len_v2v2(cur_px, data->last_collect_px) >= GRADIENT_CURVE_COLLECT_DIST_PX)
+              {
+                state->curve_points_uv.append(uv);
+                data->last_collect_px = cur_px;
+                image_select_gradient_curve_rebuild(
+                    state, CTX_data_scene(C)->toolsettings->imapaint);
+              }
+              state->end_uv = uv;
+            }
+            else {
+              state->end_uv = uv;
+            }
+            break;
           case GradientDragMode::Idle:
           default:
             state->end_uv = uv;
@@ -1825,8 +2560,25 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
     }
 
     if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+      const GradientDragMode released_mode = data->drag_mode;
+      /* The stroke is over: reveal the control points again (before the simplify pass below, so
+       * the redraw shows the settled points). Tag a redraw explicitly because the throttled
+       * preview update below may skip one. */
+      state->curve_is_drawing = false;
+      if (region) {
+        ED_region_tag_redraw(region);
+      }
       /* End the active drag; transition to Idle so MOUSEMOVE no longer moves handles. */
       data->drag_mode = GradientDragMode::Idle;
+      /* A finished draw gesture is the user's chance to settle the curve: thin the raw samples
+       * into a handful of editable control points, then rebuild and re-sync so the redo panel and
+       * the overlay agree on the simplified form. */
+      if (is_curve && released_mode == GradientDragMode::New && state->curve_points_uv.size() > 2) {
+        image_select_gradient_curve_simplify(state, CTX_data_scene(C)->toolsettings->imapaint);
+        image_select_gradient_update_preview(C, state, true);
+      }
+      /* Mirror the drawn curve into the operator's RNA for the redo panel / scripting. */
+      image_select_gradient_sync_curve_to_op(op, state);
       if (state->preview_pending) {
         image_select_gradient_update_preview(C, state, true);
       }
@@ -1840,6 +2592,34 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
       return OPERATOR_PASS_THROUGH;
     }
     return OPERATOR_RUNNING_MODAL;
+  }
+
+  /* Curve editing keys: Delete / X remove the selected control points, A toggles select-all.
+   * The floating curve owns these keys only while a session is up, and only for its own
+   * redraw -- everything else passes through. */
+  if (is_curve && event->val == KM_PRESS) {
+    if (ELEM(event->type, EVT_DELKEY, EVT_XKEY) && !state->curve_selected_points.is_empty()) {
+      image_select_gradient_curve_remove_selected(state,
+                                                  CTX_data_scene(C)->toolsettings->imapaint);
+      image_select_gradient_update_preview(C, state, true);
+      image_select_gradient_sync_curve_to_op(op, state);
+      ED_region_tag_redraw(region);
+      return OPERATOR_RUNNING_MODAL;
+    }
+    if (event->type == EVT_AKEY && !state->curve_points_uv.is_empty()) {
+      Vector<int> &selected = state->curve_selected_points;
+      if (selected.size() == state->curve_points_uv.size()) {
+        selected.clear();
+      }
+      else {
+        selected.reinitialize(state->curve_points_uv.size());
+        for (const int i : selected.index_range()) {
+          selected[i] = i;
+        }
+      }
+      ED_region_tag_redraw(region);
+      return OPERATOR_RUNNING_MODAL;
+    }
   }
 
   /* All other events (wheel zoom, middle-mouse pan, trackpad gestures, modifier keys, etc.).
@@ -1899,6 +2679,7 @@ void PAINT_OT_image_select_gradient(wmOperatorType *ot)
       {IMAGE_PAINT_GRADIENT_CONICAL, "CONICAL", 0, "Conical", ""},
       {IMAGE_PAINT_GRADIENT_DIAMOND, "DIAMOND", 0, "Diamond", ""},
       {IMAGE_PAINT_GRADIENT_SQUARE, "SQUARE", 0, "Square", ""},
+      {IMAGE_PAINT_GRADIENT_CURVE, "CURVE", 0, "Curve", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -1941,6 +2722,14 @@ void PAINT_OT_image_select_gradient(wmOperatorType *ot)
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
   prop = RNA_def_float(ot->srna, "opacity", 1.0f, 0.0f, 1.0f, "Opacity", "", 0.0f, 1.0f);
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  /* Hidden mirror of the floating session's drawn curve, one global UV per element (filled on
+   * drag release, see #image_select_gradient_sync_curve_to_op). */
+  prop = RNA_def_collection_runtime(
+      ot->srna, "curve_points", RNA_OperatorMousePath, "Curve Points", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  RNA_def_property_ui_text(prop,
+                           "Curve Points",
+                           "Global UV points of the drawn gradient curve, in stroke order");
 }
 
 void PAINT_OT_image_select_gradient_apply(wmOperatorType *ot)

@@ -521,6 +521,10 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
     ts->sculpt->paint_curve_show_radius_handles = defaults.paint_curve_show_radius_handles;
     ts->sculpt->paint_curve_radius_display_mode = defaults.paint_curve_radius_display_mode;
     ts->sculpt->gradient_opacity = defaults.gradient_opacity;
+    ts->sculpt->gradient_curve_mode = defaults.gradient_curve_mode;
+    ts->sculpt->gradient_curve_distance = defaults.gradient_curve_distance;
+    ts->sculpt->gradient_curve_width = defaults.gradient_curve_width;
+    ts->sculpt->gradient_curve_smooth = defaults.gradient_curve_smooth;
     BKE_colorband_init(&ts->sculpt->gradient_colorband, true);
   }
 
@@ -587,7 +591,11 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
   /* Gradient tool defaults for ImagePaintSettings. */
   {
     ImagePaintSettings &imapaint = ts->imapaint;
-    imapaint.gradient_opacity = 1.0f;
+    const ImagePaintSettings defaults = {};
+    imapaint.gradient_opacity = defaults.gradient_opacity;
+    imapaint.gradient_curve_mode = defaults.gradient_curve_mode;
+    imapaint.gradient_curve_width = defaults.gradient_curve_width;
+    imapaint.gradient_curve_smooth = defaults.gradient_curve_smooth;
     BKE_colorband_init(&imapaint.gradient_colorband, true);
   }
 

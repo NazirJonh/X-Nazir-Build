@@ -1411,6 +1411,28 @@ enum eImagePaint_GradientType : int8_t {
   IMAGE_PAINT_GRADIENT_CONICAL = 2,
   IMAGE_PAINT_GRADIENT_DIAMOND = 3,
   IMAGE_PAINT_GRADIENT_SQUARE = 4,
+  /** Gradient along (or across) a hand-drawn curve in UV space. */
+  IMAGE_PAINT_GRADIENT_CURVE = 5,
+};
+
+/**
+ * Parameter mode of the Curve gradient. Shared by #Sculpt::gradient_curve_mode and
+ * #ImagePaintSettings::gradient_curve_mode.
+ */
+enum eGradientCurveMode : int8_t {
+  /** t follows the arc-length position of the closest point on the curve: color "flows" along
+   * the bend. */
+  GRADIENT_CURVE_MODE_ALONG = 0,
+  /** t is the distance to the curve scaled by the band width: a strip of gradient around it. */
+  GRADIENT_CURVE_MODE_ACROSS = 1,
+};
+
+/** #Sculpt::gradient_curve_distance */
+enum eSculptGradientCurveDistance : int8_t {
+  /** Straight-line distance through space (fast). */
+  SCULPT_GRADIENT_CURVE_EUCLIDEAN = 0,
+  /** Distance along the mesh surface, correct across folds (color-attribute canvas only). */
+  SCULPT_GRADIENT_CURVE_GEODESIC = 1,
 };
 
 /** #ImagePaintSettings::gradient_repeat */
@@ -1575,6 +1597,25 @@ struct ImagePaintSettings {
   /* Pad the struct back to an 8-byte multiple (the added block is 46 bytes), so the fields
    * following the embedded #ImagePaintSettings inside #ToolSettings stay 8-byte aligned. */
   char _pad_symmetry_line[2] = {};
+
+  /* Curve gradient settings (`IMAGE_PAINT_GRADIENT_CURVE`). Appended last so existing files keep
+   * their field offsets, like the symmetry members above; old files get the defaults below in
+   * #blo_do_versions_520. */
+  /** #eGradientCurveMode */
+  int8_t gradient_curve_mode = GRADIENT_CURVE_MODE_ALONG;
+  /* Pad so the following floats stay 4-byte aligned and the struct size (which holds pointers)
+   * stays a multiple of 8. */
+  char _pad_gradient_curve[3] = {};
+  /**
+   * Influence limit around the curve in pixels of the canvas tile: pixels further away are left
+   * untouched (#GRADIENT_CURVE_MODE_ALONG) or the band simply ends there
+   * (#GRADIENT_CURVE_MODE_ACROSS). Zero disables the limit for Along mode.
+   */
+  float gradient_curve_width = 0.0f;
+  /** Laplacian smoothing strength of the drawn stroke in [0, 1]. */
+  float gradient_curve_smooth = 0.5f;
+  /* Pad the struct to an 8-byte multiple after adding gradient_curve fields. */
+  char _pad_gradient_curve_end[4] = {};
 };
 
 /** \} */
@@ -1874,6 +1915,8 @@ enum eSculptGradientType : int8_t {
   SCULPT_GRADIENT_LINEAR = 0,
   /** Surface gradient around the point under the cursor, in the plane of its normal. */
   SCULPT_GRADIENT_RADIAL = 1,
+  /** Gradient along (or across) a hand-drawn curve projected onto the surface. */
+  SCULPT_GRADIENT_CURVE = 2,
 };
 
 /** #Sculpt::gradient_color_source */
@@ -2047,6 +2090,26 @@ struct Sculpt {
   /** #eSculptSymmetryCursorSource */
   int8_t symmetry_cursor_source = SCULPT_SYMM_CURSOR_OBJECT;
   char _pad_sculpt_cursor[5] = {};
+
+  /* Curve gradient settings (`SCULPT_GRADIENT_CURVE`). Appended at the end for the same layout
+   * reason as the other gradient members above; old files get the defaults below in
+   * #blo_do_versions_520. */
+  /** #eGradientCurveMode */
+  int8_t gradient_curve_mode = GRADIENT_CURVE_MODE_ALONG;
+  /** #eSculptGradientCurveDistance */
+  int8_t gradient_curve_distance = SCULPT_GRADIENT_CURVE_EUCLIDEAN;
+  char _pad_gradient_curve[2] = {};
+  /**
+   * Influence limit around the curve in world units: vertices further away are left untouched
+   * (#GRADIENT_CURVE_MODE_ALONG) or the band simply ends there (#GRADIENT_CURVE_MODE_ACROSS).
+   * Zero disables the limit for Along mode.
+   */
+  float gradient_curve_width = 0.0f;
+  /** Laplacian smoothing strength of the drawn stroke in [0, 1]. */
+  float gradient_curve_smooth = 0.5f;
+  /* Pad the struct back to an 8-byte multiple (this block is 16 bytes; #Sculpt is embedded by
+   * value in #ToolSettings). */
+  char _pad_gradient_curve1[4] = {};
 };
 
 /** #CurvesSculpt::multi_object_edit_scope */

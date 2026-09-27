@@ -2002,6 +2002,15 @@ class _defs_sculpt:
             region_is_header = context.region.type == 'TOOL_HEADER'
 
             layout.prop(settings, "gradient_type", text="" if region_is_header else "Type")
+            if settings.gradient_type == 'CURVE':
+                if region_is_header:
+                    layout.popover("VIEW3D_PT_sculpt_color_gradient_curve_advanced", text="Curve")
+                else:
+                    col = layout.column(align=True)
+                    col.prop(settings, "gradient_curve_mode", text="Mode")
+                    col.prop(settings, "gradient_curve_width")
+                    col.prop(settings, "gradient_curve_smooth", slider=True)
+                    col.prop(settings, "gradient_curve_distance", text="Distance")
             row = layout.row(align=True)
             row.prop(settings, "gradient_color_source", expand=True)
             if settings.gradient_color_source == 'COLORS':
@@ -2302,6 +2311,11 @@ class _defs_texture_paint:
         def draw_settings(context, layout, _tool):
             imapaint = context.tool_settings.image_paint
             layout.prop(imapaint, "gradient_type", text="Type")
+            if imapaint.gradient_type == 'CURVE':
+                col = layout.column(align=True)
+                col.prop(imapaint, "gradient_curve_mode", text="Mode")
+                col.prop(imapaint, "gradient_curve_width")
+                col.prop(imapaint, "gradient_curve_smooth", slider=True)
             layout.template_color_ramp(imapaint, "color_ramp", expand=True, compact=True)
             layout.popover("IMAGE_PT_paint_select_gradient_advanced", text="Color Ramp Advanced")
             layout.prop(imapaint, "gradient_opacity", text="Opacity")

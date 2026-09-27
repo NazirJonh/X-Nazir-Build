@@ -24,6 +24,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
+#include "BKE_bvhutils.hh"
 #include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
@@ -38,6 +39,10 @@
 #include "BKE_report.hh"
 #include "BKE_unit.hh"
 
+#include "GPU_immediate.hh"
+#include "GPU_matrix.hh"
+#include "GPU_state.hh"
+
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 
@@ -47,9 +52,14 @@
 
 #include "ED_paint.hh"
 #include "ED_screen.hh"
+#include "ED_space_api.hh"
 #include "ED_view3d.hh"
 
+#include "BKE_mesh_mapping.hh"
+#include "BKE_screen.hh"
+
 #include "../paint_intern.hh"
+#include "../paint_gradient_curve.hh"
 
 #include "paint_image_select_gradient.hh"
 
@@ -57,12 +67,14 @@
 #include "sculpt_automask.hh"
 #include "sculpt_color.hh"
 #include "sculpt_filter.hh"
+#include "sculpt_geodesic.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_smooth.hh"
 #include "sculpt_undo.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_prototypes.hh"
 
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
@@ -815,23 +827,25 @@ void SCULPT_OT_color_filter(wmOperatorType *ot)
  * tool's color ramp, see #Sculpt::gradient_color_source) over the active color attribute, or
  * over every enabled Image/Material paint canvas target. Linear gradients follow the screen-space
  * drag line; radial ones lie on the surface around the point under the drag start (see
- * #GradientGeometry). Painting honors the face selection mask.
+ * #GradientGeometry); curve gradients follow a hand-drawn polyline raycast onto the surface
+ * (see #gradient_curve::GradientCurve3D and the Curve gesture section below). Painting honors
+ * the face selection mask.
  * `SCULPT_use_image_paint_brush` decides, per object, which of the two applies (see
  * #sculpt_color_gradient_apply and #sculpt_color_gradient_apply_image_object).
  *
- * Lifetime (driven by `WM_gesture_straightline_*`):
+ * Lifetime (driven by `WM_gesture_straightline_*`, or by the Curve gesture's own modal):
  * - `invoke`: opens exactly one undo step for the whole gesture -- sculpt-undo
  *   (`push_begin_multi_object`) for a color-attribute selection, or Image-undo
  *   (`ED_image_undo_push_begin`) when any object uses an image/Material canvas; the two cannot
  *   both be open at once (see #sculpt_color_gradient_uses_image_undo) -- then hands control to
- *   `WM_gesture_straightline_invoke`.
+ *   `WM_gesture_straightline_invoke` or the Curve modal.
  * - `exec`: called by the gesture on every mouse move (live preview) and once more
  *   on release (final commit). The color-attribute path always blends from the undo snapshot
  *   (`orig_color_data_lookup_mesh`), so repeated previews are idempotent; `push_nodes(...,
  *   Color)`/`do_push_undo_tile` only store a node/tile the first time, preserving the
  *   pre-stroke original for the whole drag.
- * - `modal`: delegates to `WM_gesture_straightline_modal`; on FINISHED closes the
- *   undo step, on CANCELLED restores originals and discards the step.
+ * - `modal`: delegates to `WM_gesture_straightline_modal` (or the Curve modal); on FINISHED
+ *   closes the undo step, on CANCELLED restores originals and discards the step.
  * - `cancel`: same restore + discard path for external cancellation.
  *
  * A selection that mixes both canvas types in one gesture is not supported: whichever objects
@@ -962,7 +976,9 @@ static float4 gradient_blend_value(const GradientColoring &coloring,
 /**
  * The gesture's shape. Linear is a screen-space line; Radial is a world-space disc on the surface:
  * centered on the point under the drag start, lying in the plane of its sampled normal (like a
- * brush), with the radius reaching the point of that plane under the cursor.
+ * brush), with the radius reaching the point of that plane under the cursor. Curve is a
+ * world-space polyline projected onto the surface while it is drawn (see
+ * #GradientCurve3D), reused by both apply paths through the shared pointer.
  */
 struct GradientGeometry {
   eSculptGradientType type = SCULPT_GRADIENT_LINEAR;
@@ -975,10 +991,27 @@ struct GradientGeometry {
   float3 normal = float3(0.0f, 0.0f, 1.0f);
   float radius = 0.0f;
 
-  /** False for a zero-length drag, which paints nothing. */
+  /* Curve gradient (`SCULPT_GRADIENT_CURVE`). */
+  std::shared_ptr<const gradient_curve::GradientCurve3D> curve;
+  /** #eGradientCurveMode */
+  eGradientCurveMode curve_mode = GRADIENT_CURVE_MODE_ALONG;
+  /** Influence limit around the curve in world units (0: unlimited for Along). */
+  float curve_width = 0.0f;
+  /** #eSculptGradientCurveDistance */
+  eSculptGradientCurveDistance curve_distance = SCULPT_GRADIENT_CURVE_EUCLIDEAN;
+
+  /** False for a zero-length drag or a degenerate curve, which paint nothing. */
   bool is_valid() const
   {
-    return (type == SCULPT_GRADIENT_LINEAR) ? inv_axis_len_sq > 0.0f : radius > 1e-6f;
+    switch (type) {
+      case SCULPT_GRADIENT_LINEAR:
+        return inv_axis_len_sq > 0.0f;
+      case SCULPT_GRADIENT_RADIAL:
+        return radius > 1e-6f;
+      case SCULPT_GRADIENT_CURVE:
+        return curve != nullptr && curve->is_valid();
+    }
+    return false;
   }
 };
 
@@ -1001,6 +1034,111 @@ static float gradient_radial_radius(const ARegion *region,
   return math::length(offset);
 }
 
+/** Minimum cursor travel in pixels before a new surface sample is accepted. */
+static constexpr float GRADIENT_CURVE_MIN_DIST_PX = 2.5f;
+
+/**
+ * Live state of a Curve gesture: the raw accepted samples and the curve built from them. The
+ * modal keeps this in sync with the operator's RNA collection (same point count), so the
+ * evaluation can reuse the already-built curve instead of rebuilding it from RNA on every
+ * preview pass -- and the overlay and the apply passes are then guaranteed to share one curve.
+ */
+struct ColorGradientCurveData {
+  /** Raw surface samples in world space (mirrored into RNA for the live preview and redo). */
+  Vector<float3> raw_points;
+  /** Resampled / smoothed curve rebuilt after every accepted sample; drives the overlay. */
+  std::shared_ptr<const gradient_curve::GradientCurve3D> curve;
+  /** Screen position of the last accepted sample, for the minimum-distance threshold. */
+  float2 last_mval = float2(0.0f);
+  /** Region type the draw callback is registered with; static, stays valid if the area closes. */
+  ARegionType *region_type = nullptr;
+  void *draw_handle = nullptr;
+  /** Live-preview throttling (mirrors the Image Editor's select gradient): the apply pass walks
+   * every PBVH node, so it is rate-limited to ~60 Hz and the remainder is flushed by #timer. */
+  double last_preview_time = 0.0;
+  bool preview_pending = false;
+  wmTimer *timer = nullptr;
+  /** Set right before the commit-time #sculpt_color_gradient_exec, so the geodesic distance mode
+   * (and its warnings) only run once, on release, and the live gesture stays Euclidean. */
+  bool is_final = false;
+};
+
+static ColorGradientCurveData *curve_gesture_data_get(wmOperator *op)
+{
+  if (op->customdata == nullptr || !RNA_boolean_get(op->ptr, "is_curve_gesture")) {
+    return nullptr;
+  }
+  return static_cast<ColorGradientCurveData *>(op->customdata);
+}
+
+/**
+ * Build the world-space curve from the raw drawn points: resampled at an even arc-length step and
+ * smoothed per the tool settings. The spacing (auto: ~1/64 of the stroke extent, capped at
+ * #gradient_curve::max_points) and the smoothing iterations come from the shared builder. The
+ * returned curve may be invalid for degenerate input.
+ */
+static std::shared_ptr<gradient_curve::GradientCurve3D> sculpt_color_gradient_curve_build(
+    const Sculpt &sd, const Span<float3> raw_points)
+{
+  const gradient_curve::GradientCurveBuildParams params = {
+      /*spacing=*/0.0f,
+      /*smooth=*/sd.gradient_curve_smooth,
+      gradient_curve::default_smooth_iterations,
+  };
+  auto curve = std::make_shared<gradient_curve::GradientCurve3D>();
+  curve->build(raw_points, params);
+  return curve;
+}
+
+/**
+ * The curve built by the live Curve gesture, when the operator is running its modal and the RNA
+ * collection is in sync with the gesture's samples (null otherwise: standalone execution and the
+ * redo panel always rebuild from RNA).
+ */
+static std::shared_ptr<const gradient_curve::GradientCurve3D>
+sculpt_color_gradient_curve_cached_get(wmOperator *op)
+{
+  const ColorGradientCurveData *data = curve_gesture_data_get(op);
+  if (data == nullptr) {
+    return nullptr;
+  }
+  PropertyRNA *prop = RNA_struct_find_property(op->ptr, "curve_points");
+  const int rna_len = (prop != nullptr) ? RNA_property_collection_length(op->ptr, prop) : 0;
+  if (data->curve == nullptr || int(data->raw_points.size()) != rna_len) {
+    return nullptr;
+  }
+  return data->curve;
+}
+
+/**
+ * Build the world-space curve gradient from the operator's stored RNA points. The raw input is
+ * resampled at an even arc-length step and smoothed per the tool settings; the spacing keeps the
+ * resampled count within #gradient_curve::max_points while tracking the stroke's extent. During
+ * the live gesture the curve built by the modal is reused, so the overlay and the apply passes
+ * evaluate one shared curve instead of rebuilding it on every preview pass.
+ */
+static void gradient_geometry_curve_init(GradientGeometry &geometry,
+                                         const Sculpt &sd,
+                                         wmOperator *op,
+                                         const Vector<float3> &raw_points)
+{
+  geometry.curve_mode = eGradientCurveMode(sd.gradient_curve_mode);
+  geometry.curve_width = sd.gradient_curve_width;
+  geometry.curve_distance = eSculptGradientCurveDistance(sd.gradient_curve_distance);
+  /* While the curve gesture is live, the geodesic field would be rebuilt (a full Dijkstra sweep)
+   * on every accepted sample, which is far too heavy to keep up with the cursor. The live preview
+   * stays Euclidean; the geodesic distance is only resolved on the final commit (see
+   * #sculpt_color_gradient_curve_session_end). */
+  const ColorGradientCurveData *data = curve_gesture_data_get(op);
+  if (data != nullptr && !data->is_final) {
+    geometry.curve_distance = SCULPT_GRADIENT_CURVE_EUCLIDEAN;
+  }
+  geometry.curve = sculpt_color_gradient_curve_cached_get(op);
+  if (geometry.curve == nullptr) {
+    geometry.curve = sculpt_color_gradient_curve_build(sd, raw_points);
+  }
+}
+
 static GradientGeometry sculpt_color_gradient_geometry_get(const bContext *C, wmOperator *op)
 {
   const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
@@ -1015,6 +1153,20 @@ static GradientGeometry sculpt_color_gradient_geometry_get(const bContext *C, wm
     const float len_sq = math::length_squared(geometry.axis_ss);
     /* Shorter than a pixel: degenerate. */
     geometry.inv_axis_len_sq = (len_sq >= 1.0f) ? 1.0f / len_sq : 0.0f;
+    return geometry;
+  }
+  if (geometry.type == SCULPT_GRADIENT_CURVE) {
+    Vector<float3> raw_points;
+    PropertyRNA *curve_prop = RNA_struct_find_property(op->ptr, "curve_points");
+    if (curve_prop != nullptr && RNA_property_type(curve_prop) == PROP_COLLECTION) {
+      RNA_PROP_BEGIN (op->ptr, itemptr, curve_prop) {
+        float co[3];
+        RNA_float_get_array(&itemptr, "location", co);
+        raw_points.append(float3(co));
+      }
+      RNA_PROP_END;
+    }
+    gradient_geometry_curve_init(geometry, sd, op, raw_points);
     return geometry;
   }
 
@@ -1035,6 +1187,12 @@ static GradientGeometry sculpt_color_gradient_geometry_get(const bContext *C, wm
  * object-space positions of one object, honoring its mirror symmetry: every symmetry pass
  * mirrors the position and the pass nearest to the gradient start wins, so a mirrored half gets
  * the mirrored gradient.
+ *
+ * The Curve type deviates from that rule on purpose: the pass whose mirrored position lies
+ * closest *to the curve* wins (minimal distance, not minimal t), otherwise a mirrored half would
+ * pick up whichever curve section happens to produce the smaller parameter. In geodesic distance
+ * mode the mirrored seeds are merged into the per-object field up front (mirroring preserves arc
+ * length), so #t_at_vert reads the winning (distance, parameter) pair directly.
  */
 class GradientEvaluator {
   const GradientGeometry &geometry_;
@@ -1042,9 +1200,18 @@ class GradientEvaluator {
   float4x4 object_to_world_;
   Vector<ePaintSymmetryFlags, 8> passes_;
 
+  /** Geodesic distance mode (`SCULPT_GRADIENT_CURVE_GEODESIC`): per-vertex distance and
+   * curve-parameter field over this object's surface. Built by #sculpt_color_gradient_apply_object
+   * and owned by it for the duration of the evaluator. */
+  const geodesic::GeodesicCurveField *geodesic_ = nullptr;
+
  public:
-  GradientEvaluator(const GradientGeometry &geometry, Object &ob, const ARegion *region)
-      : geometry_(geometry), region_(region), object_to_world_(ob.object_to_world())
+  GradientEvaluator(const GradientGeometry &geometry,
+                    Object &ob,
+                    const ARegion *region,
+                    const geodesic::GeodesicCurveField *geodesic = nullptr)
+      : geometry_(geometry), region_(region), object_to_world_(ob.object_to_world()),
+        geodesic_(geodesic)
   {
     const int symmetry_flags = int(mesh_symmetry_xyz_get(ob));
     for (int i = 0; i <= symmetry_flags; i++) {
@@ -1072,6 +1239,12 @@ class GradientEvaluator {
   /** NaN when no symmetry pass can see \a position (outside the view for Linear). */
   float t_at(const float3 &position) const
   {
+    if (geometry_.type == SCULPT_GRADIENT_CURVE) {
+      /* The geodesic field is indexed by vertex (see #t_at_vert); a position-only query cannot
+       * resolve it. The vertex paths never reach here in geodesic mode. */
+      return (geodesic_ == nullptr) ? t_at_curve_euclidean(position) :
+                                      std::numeric_limits<float>::quiet_NaN();
+    }
     float best = std::numeric_limits<float>::quiet_NaN();
     for (const ePaintSymmetryFlags pass : passes_) {
       const float3 flipped = symmetry_flip(position, pass);
@@ -1098,6 +1271,60 @@ class GradientEvaluator {
       }
     }
     return best;
+  }
+
+  /**
+   * Geodesic-mode Curve evaluation for a vertex of the object the field was built for: the field
+   * already merged every symmetry pass, so there is nothing left to mirror here. Unreachable
+   * vertices (disconnected or fully hidden) read as an infinite distance and are left untouched.
+   */
+  float t_at_vert(const int vert) const
+  {
+    BLI_assert(geometry_.type == SCULPT_GRADIENT_CURVE && geodesic_ != nullptr);
+    if (!geometry_.curve->is_valid()) {
+      return std::numeric_limits<float>::quiet_NaN();
+    }
+    const float dist = geodesic_->dist[vert];
+    if (!(dist < std::numeric_limits<float>::max())) {
+      return std::numeric_limits<float>::quiet_NaN();
+    }
+    return curve_eval_t(geodesic_->param[vert], dist);
+  }
+
+ private:
+  /**
+   * Euclidean Curve evaluation: the pass whose mirrored position lies closest to the curve wins
+   * (minimal distance, not minimal t), so a mirrored half picks up the mirrored curve section,
+   * and the winning (parameter, distance) pair is mapped to a parameter with the same Along /
+   * Across rules as #GradientCurve3D::eval_t.
+   */
+  float t_at_curve_euclidean(const float3 &position) const
+  {
+    float best_dist = std::numeric_limits<float>::max();
+    float best_s = 0.0f;
+    bool found = false;
+    for (const ePaintSymmetryFlags pass : passes_) {
+      const float3 flipped = symmetry_flip(position, pass);
+      const float3 world = math::transform_point(object_to_world_, flipped);
+      const gradient_curve::CurveProjection proj = geometry_.curve->project(world);
+      if (proj.distance < best_dist) {
+        best_dist = proj.distance;
+        best_s = proj.s;
+        found = true;
+      }
+    }
+    if (!found) {
+      return std::numeric_limits<float>::quiet_NaN();
+    }
+    return curve_eval_t(best_s, best_dist);
+  }
+
+  /** Same parameter rules as #GradientCurve3D::eval_t, from a precomputed (s, distance) pair. */
+  float curve_eval_t(const float s, const float dist) const
+  {
+    const gradient_curve::CurveProjection proj = {s, dist};
+    return gradient_curve::eval_t_from_projection(
+        geometry_.curve_mode, geometry_.curve_width, geometry_.curve->length(), proj);
   }
 };
 
@@ -1173,6 +1400,119 @@ static void sculpt_color_gradient_restore(bContext *C)
   }
 }
 
+/**
+ * Build the geodesic (distance, curve-parameter) field for one object in
+ * #SCULPT_GRADIENT_CURVE_GEODESIC distance mode: nearby mesh vertices and their symmetry mirrors
+ * seed a propagation of the arc-length parameter over the surface
+ * (see #geodesic::curve_geodesic_field_create). Returns false when no seed
+ * vertex could be resolved; the caller falls back to the Euclidean projection then.
+ */
+static bool sculpt_color_gradient_geodesic_field_build(
+    Object &ob,
+    const Span<float3> vert_positions,
+    const GradientGeometry &geometry,
+    bke::BVHTreeFromMesh &r_vert_bvh,
+    geodesic::GeodesicCurveField &r_field)
+{
+  const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+
+  r_vert_bvh = bke::bvhtree_from_mesh_verts_init(mesh, IndexMask(mesh.verts_num));
+  if (r_vert_bvh.tree == nullptr) {
+    return false;
+  }
+
+  const float4x4 world_to_object = ob.world_to_object();
+  const float4x4 object_to_world = ob.object_to_world();
+  const int samples = geometry.curve->points_num();
+  const float curve_length = geometry.curve->length();
+  /* The vertex positions and BVH are in object space, matching Dijkstra's edge lengths. Keep the
+   * seed neighborhood and projected distances in that same space. */
+  const Span<int2> edges = mesh.edges();
+  float average_edge_length = 0.0f;
+  for (const int2 &edge : edges) {
+    average_edge_length += math::distance(vert_positions[edge[0]], vert_positions[edge[1]]);
+  }
+  average_edge_length = edges.is_empty() ? 0.0f : average_edge_length / float(edges.size());
+  const float seed_radius = std::max(average_edge_length, 1e-6f);
+  Map<int, float2> seed_map;
+  const int symmetry_flags = int(mesh_symmetry_xyz_get(ob));
+  for (int i = 0; i <= symmetry_flags; i++) {
+    if (!is_symmetry_iteration_valid(i, symmetry_flags)) {
+      continue;
+    }
+    const ePaintSymmetryFlags pass = ePaintSymmetryFlags(i);
+    for (const int k : IndexRange(samples)) {
+      const float s = (samples > 1) ? curve_length * (float(k) / float(samples - 1)) : 0.0f;
+      const float3 obj_co = symmetry_flip(
+          math::transform_point(world_to_object, geometry.curve->position_at_s(s)), pass);
+      BLI_bvhtree_range_query_cpp(
+          *r_vert_bvh.tree,
+          obj_co,
+          seed_radius,
+          [&](const int vert, const float3 & /*co*/, const float /*dist_sq*/) {
+            const float3 vert_obj = symmetry_flip(vert_positions[vert], pass);
+            const float3 vert_world = math::transform_point(object_to_world, vert_obj);
+            const gradient_curve::CurveProjection projection =
+                geometry.curve->project(vert_world);
+            const float3 projected_obj = math::transform_point(
+                world_to_object, geometry.curve->position_at_s(projection.s));
+            const float distance = math::distance(vert_obj, projected_obj);
+            const float2 candidate(projection.s, distance);
+            if (!seed_map.contains(vert) || distance < seed_map.lookup(vert).y) {
+              seed_map.add_overwrite(vert, candidate);
+            }
+          });
+    }
+  }
+  if (seed_map.is_empty()) {
+    return false;
+  }
+
+  Vector<int> seed_verts;
+  Vector<float> seed_params;
+  Vector<float> seed_distances;
+  seed_verts.reserve(seed_map.size());
+  seed_params.reserve(seed_map.size());
+  seed_distances.reserve(seed_map.size());
+  for (const auto &[vert, values] : seed_map.items()) {
+    seed_verts.append(vert);
+    seed_params.append(values.x);
+    seed_distances.append(values.y);
+  }
+
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const Span<int> corner_edges = mesh.corner_edges();
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const VArray<bool> hide_poly_varray = *attributes.lookup_or_default<bool>(
+      ".hide_poly", bke::AttrDomain::Face, false);
+  Array<bool> hide_poly_array(mesh.faces_num, false);
+  hide_poly_varray.materialize(hide_poly_array.as_mutable_span());
+
+  /* Same lazily-built adjacency caches as the Expand tool's geodesic falloff. */
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  if (ss.edge_to_face_map.is_empty()) {
+    ss.edge_to_face_map = blender::bke::mesh::build_edge_to_face_map(
+        faces, corner_edges, edges.size(), ss.edge_to_face_offsets, ss.edge_to_face_indices);
+  }
+  if (ss.vert_to_edge_map.is_empty()) {
+    ss.vert_to_edge_map = blender::bke::mesh::build_vert_to_edge_map(
+        edges, mesh.verts_num, ss.vert_to_edge_offsets, ss.vert_to_edge_indices);
+  }
+
+  r_field = geodesic::curve_geodesic_field_create(vert_positions,
+                                                 edges,
+                                                 faces,
+                                                 corner_verts,
+                                                 ss.vert_to_edge_map,
+                                                 ss.edge_to_face_map,
+                                                 hide_poly_array,
+                                                 seed_verts,
+                                                 seed_params,
+                                                 seed_distances);
+  return true;
+}
+
 static bool sculpt_color_gradient_apply_object(bContext *C,
                                                Object &ob,
                                                const ARegion *region,
@@ -1208,7 +1548,22 @@ static bool sculpt_color_gradient_apply_object(bContext *C,
   const FaceSelectionMask &face_selection_mask = face_selection_mask_ensure(ob);
   const bool use_face_selection = face_selection_mask.state == FaceSelectionState::Active;
 
-  const GradientEvaluator evaluator(geometry, ob, region);
+  /* Geodesic distance mode: one (distance, parameter) field per object, seeded from the curve and
+   * its symmetry mirrors. Built here rather than per vertex because the Dijkstra sweep is far too
+   * heavy to repeat per query. The vertex BVH is owned by the struct and freed with it. */
+  geodesic::GeodesicCurveField geodesic_field;
+  bke::BVHTreeFromMesh geodesic_vert_bvh;
+  bool use_geodesic = false;
+  if (geometry.type == SCULPT_GRADIENT_CURVE &&
+      geometry.curve_distance == SCULPT_GRADIENT_CURVE_GEODESIC && geometry.curve != nullptr &&
+      geometry.curve->is_valid())
+  {
+    use_geodesic = sculpt_color_gradient_geodesic_field_build(
+        ob, vert_positions, geometry, geodesic_vert_bvh, geodesic_field);
+  }
+
+  const GradientEvaluator evaluator(
+      geometry, ob, region, use_geodesic ? &geodesic_field : nullptr);
   const bool evaluator_valid = evaluator.is_valid();
 
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh->nodes<bke::pbvh::MeshNode>();
@@ -1234,7 +1589,8 @@ static bool sculpt_color_gradient_apply_object(bContext *C,
           if (evaluator_valid &&
               !(use_face_selection && !face_selection_mask.vert_paintable[vert]))
           {
-            const float t = evaluator.t_at(vert_positions[vert]);
+            const float t = use_geodesic ? evaluator.t_at_vert(vert) :
+                                           evaluator.t_at(vert_positions[vert]);
             if (!std::isnan(t)) {
               new_color = math::clamp(gradient_blend_color(coloring, orig_color, t), 0.0f, 1.0f);
               new_color.w = orig_color.w;
@@ -1703,6 +2059,32 @@ static bool sculpt_color_gradient_apply_image_canvases(bContext *C, wmOperator *
   const GradientGeometry geometry = sculpt_color_gradient_geometry_get(C, op);
   const GradientColoring coloring = sculpt_color_gradient_coloring_get(C, op);
 
+  /* Geodesic distances only exist per vertex of the color-attribute path; pixel positions of an
+   * image canvas cannot be resolved to a vertex, so they always take the Euclidean projection.
+   * Reported on the final commit only, not on every live-preview move: the gesture's final apply
+   * is marked by #ColorGradientCurveData::is_final before the session tears its data down, and a
+   * standalone / redo run has no gesture data at all. The live gesture deliberately resets its
+   * distance mode to Euclidean (see #gradient_geometry_curve_init), so this is the only place the
+   * user is told the image canvases are painted with the Euclidean fallback. */
+  const ColorGradientCurveData *curve_data = curve_gesture_data_get(op);
+  const bool is_final_apply = curve_data == nullptr || curve_data->is_final;
+  if (geometry.type == SCULPT_GRADIENT_CURVE &&
+      geometry.curve_distance == SCULPT_GRADIENT_CURVE_GEODESIC && is_final_apply)
+  {
+    for (Object *ob : objects) {
+      if (ob != nullptr && ob->type == OB_MESH &&
+          SCULPT_use_image_paint_brush(
+              *paint_mode_settings, *ob, brush, sd->paint.visible_material_channels))
+      {
+        BKE_report(op->reports,
+                   RPT_WARNING,
+                   "Geodesic curve distance is not supported for image canvases; using Euclidean "
+                   "distance there");
+        break;
+      }
+    }
+  }
+
   bool any_painted = false;
   for (Object *ob : objects) {
     if (ob == nullptr || ob->type != OB_MESH) {
@@ -1869,6 +2251,369 @@ static wmOperatorStatus sculpt_color_gradient_exec(bContext *C, wmOperator *op)
   return OPERATOR_FINISHED;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Color Gradient Curve gesture
+ *
+ * The Curve type cannot reuse the straight-line gesture: every cursor position along the drag is
+ * raycast onto the surface and kept as a world-space curve sample. The samples live in the
+ * operator's RNA (`curve_points`, world space) the moment they are accepted, so the live preview
+ * (#sculpt_color_gradient_exec) and the redo panel read the exact same geometry no matter where
+ * the viewport was when the curve was drawn. #ColorGradientCurveData (defined with the gradient
+ * geometry above) keeps the built curve so the overlay and the apply passes share it.
+ * \{ */
+
+static void sculpt_color_gradient_curve_draw(const bContext * /*C*/,
+                                             ARegion * /*region*/,
+                                             void *arg)
+{
+  ColorGradientCurveData *data = static_cast<ColorGradientCurveData *>(arg);
+  const Span<float3> polyline = data->curve != nullptr ? data->curve->points() :
+                                                        Span<float3>(data->raw_points);
+  if (polyline.size() < 2) {
+    return;
+  }
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPU_line_smooth(true);
+  /* The curve hugs the surface; a depth test would clip most of it against the mesh it follows. */
+  const GPUDepthTest depth_prev = GPU_depth_test_get();
+  GPU_depth_test(GPU_DEPTH_NONE);
+
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  /* Dark under-stroke then light core, matching the Image Editor's gradient overlay. */
+  for (const int pass : IndexRange(2)) {
+    GPU_line_width((pass == 0) ? 3.0f : 1.5f);
+    if (pass == 0) {
+      immUniformColor4f(0.0f, 0.0f, 0.0f, 0.55f);
+    }
+    else {
+      immUniformColor4f(1.0f, 1.0f, 1.0f, 0.9f);
+    }
+    immBegin(GPU_PRIM_LINE_STRIP, polyline.size());
+    for (const float3 &co : polyline) {
+      immVertex3f(pos, co.x, co.y, co.z);
+    }
+    immEnd();
+  }
+
+  /* Start / end markers: axis-aligned crosses scaled with the curve, big enough to spot. */
+  const float marker = 0.03f * math::length(polyline.last() - polyline.first());
+  immBegin(GPU_PRIM_LINES, 12);
+  for (const float3 &co : {polyline.first(), polyline.last()}) {
+    for (const int axis : IndexRange(3)) {
+      float3 offset(0.0f);
+      offset[axis] = marker;
+      immVertex3f(pos, co.x - offset.x, co.y - offset.y, co.z - offset.z);
+      immVertex3f(pos, co.x + offset.x, co.y + offset.y, co.z + offset.z);
+    }
+  }
+  immEnd();
+
+  immUnbindProgram();
+  GPU_depth_test(depth_prev);
+  GPU_blend(GPU_BLEND_NONE);
+  GPU_line_smooth(false);
+}
+
+/** Raycast the cursor onto the front-most sculpt surface, in world space. */
+static bool sculpt_color_gradient_curve_surface_point(bContext *C,
+                                                      const float2 &mval,
+                                                      float3 &r_world)
+{
+  Object *hit_ob = nullptr;
+  const std::optional<CursorGeometryInfo> hit = cursor_geometry_info_update(C, mval, true, &hit_ob);
+  if (!hit || hit_ob == nullptr) {
+    return false;
+  }
+  r_world = math::transform_point(hit_ob->object_to_world(), hit->location);
+  return true;
+}
+
+/** Store one accepted sample in the operator's RNA (live preview and redo read it from there). */
+static void sculpt_color_gradient_curve_point_store(wmOperator *op, const float3 &world)
+{
+  PointerRNA itemptr;
+  RNA_collection_add(op->ptr, "curve_points", &itemptr);
+  RNA_float_set_array(&itemptr, "location", world);
+}
+
+/**
+ * Thin the accepted samples to a small, editable set of control points before committing, so the
+ * stored curve, the redo panel and any future per-point editing work on a handful of points
+ * instead of one per few pixels. RDP runs on the screen-space projection (the metric matches what
+ * the user sees), but the kept 3D world points are preserved verbatim. The raw points and the RNA
+ * collection are rewritten together so they stay in sync.
+ */
+static void sculpt_color_gradient_curve_simplify(bContext *C,
+                                                 wmOperator *op,
+                                                 ColorGradientCurveData *data)
+{
+  const ARegion *region = CTX_wm_region(C);
+  if (data->raw_points.size() <= 2 || region == nullptr || region->regiondata == nullptr) {
+    return;
+  }
+  Array<float2> screen(data->raw_points.size());
+  for (const int i : data->raw_points.index_range()) {
+    float co[2];
+    if (ED_view3d_project_float_global(region, data->raw_points[i], co, V3D_PROJ_TEST_NOP) !=
+        V3D_PROJ_RET_OK)
+    {
+      /* A sample could not be projected (degenerate view): keep the raw points rather than
+       * dropping a point and silently changing the shape. */
+      return;
+    }
+    screen[i] = float2(co);
+  }
+  const Vector<int> kept = gradient_curve::simplify_control_points<float2>(
+      screen, gradient_curve::simplify_tolerance_px, gradient_curve::max_control_points);
+  if (kept.size() >= data->raw_points.size()) {
+    return;
+  }
+  Vector<float3> reduced;
+  reduced.reserve(kept.size());
+  for (const int index : kept) {
+    reduced.append(data->raw_points[index]);
+  }
+  data->raw_points = std::move(reduced);
+  data->curve = sculpt_color_gradient_curve_build(*CTX_data_tool_settings(C)->sculpt,
+                                                  data->raw_points);
+  RNA_collection_clear(op->ptr, "curve_points");
+  for (const float3 &co : data->raw_points) {
+    sculpt_color_gradient_curve_point_store(op, co);
+  }
+}
+
+/**
+ * Live preview during the curve gesture. The apply pass walks every PBVH node of every object, so
+ * it is throttled to ~60 Hz; a skipped update sets #ColorGradientCurveData::preview_pending and is
+ * flushed by the gesture's timer tick.
+ */
+static void sculpt_color_gradient_curve_preview(bContext *C,
+                                                wmOperator *op,
+                                                ColorGradientCurveData *data,
+                                                const bool force)
+{
+  if (!force) {
+    const double now = BLI_time_now_seconds();
+    if (now - data->last_preview_time < (1.0 / 60.0)) {
+      data->preview_pending = true;
+      return;
+    }
+    data->last_preview_time = now;
+  }
+  else {
+    data->last_preview_time = BLI_time_now_seconds();
+  }
+  data->preview_pending = false;
+  sculpt_color_gradient_exec(C, op);
+}
+
+static void sculpt_color_gradient_curve_status_update(bContext *C, wmOperator *op)
+{
+  ScrArea *area = CTX_wm_area(C);
+  if (area == nullptr) {
+    return;
+  }
+  const Sculpt *sd = CTX_data_tool_settings(C)->sculpt;
+  std::string text = fmt::format("{}: {}    ({})",
+                                 IFACE_("Curve points"),
+                                 RNA_collection_length(op->ptr, "curve_points"),
+                                 IFACE_("Wheel: move midpoint, Backspace: remove last point"));
+  if (sd != nullptr &&
+      eSculptGradientCurveDistance(sd->gradient_curve_distance) == SCULPT_GRADIENT_CURVE_GEODESIC)
+  {
+    text += fmt::format("    ({})", IFACE_("Geodesic distances are computed on release"));
+  }
+  ED_area_status_text(area, text.c_str());
+}
+
+/** Release the gesture's resources, then either commit or roll back the whole undo step. */
+static void sculpt_color_gradient_curve_session_end(bContext *C,
+                                                    wmOperator *op,
+                                                    const bool commit)
+{
+  ColorGradientCurveData *data = static_cast<ColorGradientCurveData *>(op->customdata);
+  if (data == nullptr) {
+    return;
+  }
+  if (data->timer != nullptr) {
+    WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data->timer);
+    data->timer = nullptr;
+  }
+  if (data->region_type != nullptr && data->draw_handle != nullptr) {
+    ED_region_draw_cb_exit(data->region_type, data->draw_handle);
+  }
+  sculpt_color_gradient_status_clear(C);
+  if (commit) {
+    if (data->raw_points.size() >= 2) {
+      /* Settle the curve to its editable control points, then mark this as the final apply so
+       * the geodesic distance mode (too heavy for the live gesture) runs exactly once. */
+      sculpt_color_gradient_curve_simplify(C, op, data);
+      data->is_final = true;
+      sculpt_color_gradient_exec(C, op);
+    }
+    Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+    ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+    sculpt_color_gradient_finish(
+        C, sculpt_color_gradient_uses_image_undo(C, sculpt_mode_objects(vc)));
+  }
+  else {
+    sculpt_color_gradient_abort(C);
+  }
+  WM_cursor_modal_restore(CTX_wm_window(C));
+  if (ARegion *draw_region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(draw_region);
+  }
+  MEM_delete(data);
+  op->customdata = nullptr;
+}
+
+static wmOperatorStatus sculpt_color_gradient_curve_modal(bContext *C,
+                                                          wmOperator *op,
+                                                          const wmEvent *event)
+{
+  ColorGradientCurveData *data = static_cast<ColorGradientCurveData *>(op->customdata);
+  ARegion *region = CTX_wm_region(C);
+  const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+
+  if (event->type == TIMER) {
+    if (data->timer == nullptr || event->customdata != data->timer) {
+      return OPERATOR_PASS_THROUGH;
+    }
+    /* Flush a preview the mouse-move throttling skipped. */
+    if (data->preview_pending) {
+      sculpt_color_gradient_curve_preview(C, op, data, true);
+    }
+    return OPERATOR_RUNNING_MODAL;
+  }
+
+  if (event->type == EVT_MODAL_MAP) {
+    /* Because "Gesture Straight Line" is assigned to this operator, the window manager rewrites
+     * the matching events before the modal sees them: LMB release arrives as SELECT, Esc / RMB as
+     * CANCEL and LMB press as BEGIN. The raw checks further down stay as a fallback for a user-
+     * rebound keymap, which is also why unmapped events (Backspace, wheel, mouse-move) still come
+     * through raw. */
+    switch (event->val) {
+      case GESTURE_MODAL_SELECT:
+        sculpt_color_gradient_curve_session_end(C, op, true);
+        return OPERATOR_FINISHED;
+      case GESTURE_MODAL_CANCEL:
+        sculpt_color_gradient_curve_session_end(C, op, false);
+        return OPERATOR_CANCELLED;
+      default:
+        /* BEGIN (and Move / Snap / Flip, which this gesture does not use) keeps running. */
+        return OPERATOR_RUNNING_MODAL;
+    }
+  }
+
+  if (ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE)) {
+    /* Shifting the halfway color along the curve, like the straight-line gestures. */
+    const float step = (event->type == WHEELUPMOUSE) ? 0.05f : -0.05f;
+    const float midpoint = math::clamp(
+        RNA_float_get(op->ptr, "midpoint") + step, 0.05f, 0.95f);
+    RNA_float_set(op->ptr, "midpoint", midpoint);
+    sculpt_color_gradient_curve_preview(C, op, data, true);
+    sculpt_color_gradient_curve_status_update(C, op);
+    return OPERATOR_RUNNING_MODAL;
+  }
+
+  if ((event->type == EVT_ESCKEY || event->type == RIGHTMOUSE) && event->val == KM_PRESS) {
+    sculpt_color_gradient_curve_session_end(C, op, false);
+    return OPERATOR_CANCELLED;
+  }
+
+  if (event->type == EVT_BACKSPACEKEY && event->val == KM_PRESS) {
+    if (PropertyRNA *prop = RNA_struct_find_property(op->ptr, "curve_points")) {
+      const int len = RNA_property_collection_length(op->ptr, prop);
+      if (len > 0) {
+        RNA_property_collection_remove(op->ptr, prop, len - 1);
+        data->raw_points.resize(len - 1);
+        data->curve = (len - 1 >= 2) ? sculpt_color_gradient_curve_build(sd, data->raw_points) :
+                                       nullptr;
+        sculpt_color_gradient_curve_preview(C, op, data, true);
+        sculpt_color_gradient_curve_status_update(C, op);
+        ED_region_tag_redraw(region);
+      }
+    }
+    return OPERATOR_RUNNING_MODAL;
+  }
+
+  if (event->type == MOUSEMOVE) {
+    const float2 mval(float(event->mval[0]), float(event->mval[1]));
+    if (data->raw_points.is_empty() ||
+        math::distance(mval, data->last_mval) >= GRADIENT_CURVE_MIN_DIST_PX)
+    {
+      float3 world;
+      /* Misses (cursor off the mesh) are simply skipped: the next hit continues the curve. */
+      if (sculpt_color_gradient_curve_surface_point(C, mval, world)) {
+        data->raw_points.append(world);
+        data->last_mval = mval;
+        data->curve = sculpt_color_gradient_curve_build(sd, data->raw_points);
+        sculpt_color_gradient_curve_point_store(op, world);
+        sculpt_color_gradient_curve_preview(C, op, data, false);
+        sculpt_color_gradient_curve_status_update(C, op);
+      }
+    }
+    ED_region_tag_redraw(region);
+    return OPERATOR_RUNNING_MODAL;
+  }
+
+  if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+    sculpt_color_gradient_curve_session_end(C, op, true);
+    return OPERATOR_FINISHED;
+  }
+
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus sculpt_color_gradient_curve_invoke(bContext *C,
+                                                           wmOperator *op,
+                                                           const wmEvent *event)
+{
+  ARegion *region = CTX_wm_region(C);
+
+  int start_mval[2];
+  WM_event_drag_start_mval(event, region, start_mval);
+  float3 first_point;
+  if (!sculpt_color_gradient_curve_surface_point(
+          C, float2(float(start_mval[0]), float(start_mval[1])), first_point))
+  {
+    /* The gesture's undo step is already open at this point: roll it back like a cancel. */
+    BKE_report(op->reports, RPT_WARNING, "Curve gradient must start on the surface");
+    sculpt_color_gradient_abort(C);
+    return OPERATOR_CANCELLED;
+  }
+
+  RNA_collection_clear(op->ptr, "curve_points");
+  RNA_boolean_set(op->ptr, "is_curve_gesture", true);
+
+  ColorGradientCurveData *data = MEM_new<ColorGradientCurveData>(__func__);
+  data->region_type = region->runtime->type;
+  data->raw_points.append(first_point);
+  data->last_mval = float2(float(start_mval[0]), float(start_mval[1]));
+  data->curve = sculpt_color_gradient_curve_build(
+      *CTX_data_tool_settings(C)->sculpt, data->raw_points);
+  sculpt_color_gradient_curve_point_store(op, first_point);
+  if (data->region_type != nullptr) {
+    data->draw_handle = ED_region_draw_cb_activate(
+        data->region_type, sculpt_color_gradient_curve_draw, data, REGION_DRAW_POST_VIEW);
+  }
+  /* Flushes a live preview the mouse-move throttling skipped, so a slow stroke still catches up
+   * between events without blocking on the full PBVH apply pass. */
+  data->timer = WM_event_timer_add(CTX_wm_manager(C), CTX_wm_window(C), TIMER, 1.0 / 30.0);
+  op->customdata = data;
+
+  WM_event_add_modal_handler(C, op);
+  WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_CROSS);
+  ED_region_tag_redraw(region);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+/** \} */
+
 /**
  * For the Radial type, store the surface point and sampled normal under the cursor as the
  * gradient center and plane. Returns false when the cursor is not over a sculpt object.
@@ -1919,6 +2664,12 @@ static wmOperatorStatus sculpt_color_gradient_invoke(bContext *C,
 
   ED_paint_brush_type_update_sticky_shading_color(C, &ob);
 
+  /* A leftover flag from a previous Curve run must not route the straight-line gesture into the
+   * curve modal. */
+  RNA_boolean_set(op->ptr, "is_curve_gesture", false);
+  if (sd.gradient_type == SCULPT_GRADIENT_CURVE) {
+    return sculpt_color_gradient_curve_invoke(C, op, event);
+  }
   return WM_gesture_straightline_invoke(C, op, event);
 }
 
@@ -1926,6 +2677,10 @@ static wmOperatorStatus sculpt_color_gradient_modal(bContext *C,
                                                     wmOperator *op,
                                                     const wmEvent *event)
 {
+  if (RNA_boolean_get(op->ptr, "is_curve_gesture") && op->customdata != nullptr) {
+    return sculpt_color_gradient_curve_modal(C, op, event);
+  }
+
   if (ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE)) {
     const wmGesture *gesture = static_cast<const wmGesture *>(op->customdata);
     if (gesture != nullptr && gesture->is_active) {
@@ -1963,6 +2718,12 @@ static wmOperatorStatus sculpt_color_gradient_modal(bContext *C,
 
 static void sculpt_color_gradient_cancel(bContext *C, wmOperator *op)
 {
+  if (RNA_boolean_get(op->ptr, "is_curve_gesture") && op->customdata != nullptr) {
+    /* External teardown of a Curve gesture: #sculpt_color_gradient_curve_session_end rolls the
+     * whole undo step back and frees the draw handler and sample data. */
+    sculpt_color_gradient_curve_session_end(C, op, false);
+    return;
+  }
   sculpt_color_gradient_status_clear(C);
   sculpt_color_gradient_abort(C);
   WM_gesture_straightline_cancel(C, op);
@@ -2051,6 +2812,18 @@ void SCULPT_OT_color_gradient(wmOperatorType *ot)
                        "the mouse wheel while dragging)",
                        0.05f,
                        0.95f);
+
+  /* World-space samples of the Curve gradient's drag; stored the moment each point is accepted so
+   * the live preview and the redo panel share one source of truth (kept over redo, unlike the
+   * gesture coordinates, since a Curve drag cannot be replayed from the view alone). */
+  prop = RNA_def_collection_runtime(
+      ot->srna, "curve_points", RNA_OperatorStrokeElement, "Curve Points", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+  RNA_def_property_ui_text(prop,
+                           "Curve Points",
+                           "World-space points of the drawn gradient curve, in stroke order");
+  prop = RNA_def_boolean(ot->srna, "is_curve_gesture", false, "Curve Gesture", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 
   WM_operator_properties_gesture_straightline(ot, WM_CURSOR_EDIT);
 }

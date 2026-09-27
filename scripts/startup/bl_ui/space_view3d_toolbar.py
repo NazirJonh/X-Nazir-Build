@@ -416,6 +416,28 @@ class VIEW3D_PT_sculpt_color_gradient_ramp_advanced(Panel):
             layout.prop(coba, "interpolation", text="Interpolation")
 
 
+class VIEW3D_PT_sculpt_color_gradient_curve_advanced(Panel):
+    bl_label = "Curve Gradient"
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    @classmethod
+    def poll(cls, context):
+        sculpt = context.tool_settings.sculpt
+        return sculpt is not None and sculpt.gradient_type == 'CURVE'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        settings = context.tool_settings.sculpt
+        layout.prop(settings, "gradient_curve_mode", text="Mode")
+        layout.prop(settings, "gradient_curve_width")
+        layout.prop(settings, "gradient_curve_smooth", slider=True)
+        layout.prop(settings, "gradient_curve_distance", text="Distance")
+
+
 class VIEW3D_PT_tools_brush_settings(Panel, View3DPaintBrushPanel):
     bl_context = ".paint_common"
     bl_label = "Brush Settings"
@@ -3034,6 +3056,7 @@ classes = (
     VIEW3D_PT_tools_brush_select,
     VIEW3D_PT_paint_canvas_npanel,
     VIEW3D_PT_sculpt_color_gradient_ramp_advanced,
+    VIEW3D_PT_sculpt_color_gradient_curve_advanced,
     VIEW3D_PT_tools_brush_settings,
     VIEW3D_PT_tools_brush_color,
     VIEW3D_PT_tools_brush_swatches,

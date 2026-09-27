@@ -1777,6 +1777,9 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
      * the embedded #ColorBand needs an explicit runtime init to hold any stops. Assign the whole
      * block so the DNA defaults and the versioned values cannot drift apart. */
     for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings == nullptr) {
+        continue;
+      }
       ImagePaintSettings &imapaint = scene.toolsettings->imapaint;
       imapaint.gradient_type = IMAGE_PAINT_GRADIENT_LINEAR;
       imapaint.gradient_repeat = IMAGE_PAINT_GRADIENT_REPEAT_NONE;
@@ -2015,6 +2018,40 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
         copy_v4_v4(sd->gradient_color, defaults.gradient_color);
         copy_v4_v4(sd->gradient_secondary_color, defaults.gradient_secondary_color);
       }
+    }
+  }
+
+  /* The curve gradient settings are new for both the Sculpt and the Image Paint gradient tools.
+   * A file written before them zero-fills the mode (Along happens to be the intended default)
+   * and the smoothing (no smoothing), so assign the whole block from the DNA defaults.
+   *
+   * NOTE: Keyed on the member existence, like the Sculpt gradient settings above. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "Sculpt", "float", "gradient_curve_width"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (Sculpt *sd = scene.toolsettings ? scene.toolsettings->sculpt : nullptr) {
+        const Sculpt defaults = {};
+        sd->gradient_curve_mode = defaults.gradient_curve_mode;
+        sd->gradient_curve_distance = defaults.gradient_curve_distance;
+        sd->gradient_curve_width = defaults.gradient_curve_width;
+        sd->gradient_curve_smooth = defaults.gradient_curve_smooth;
+      }
+    }
+  }
+  /* The Image Paint settings block is initialized independently; scenes can lack tool settings. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "ImagePaintSettings", "float", "gradient_curve_width"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings == nullptr) {
+        continue;
+      }
+      ImagePaintSettings &imapaint = scene.toolsettings->imapaint;
+      const ImagePaintSettings defaults = {};
+      imapaint.gradient_curve_mode = defaults.gradient_curve_mode;
+      imapaint.gradient_curve_width = defaults.gradient_curve_width;
+      imapaint.gradient_curve_smooth = defaults.gradient_curve_smooth;
     }
   }
 

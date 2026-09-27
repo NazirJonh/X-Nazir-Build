@@ -429,4 +429,33 @@ TEST_F(MaterialBakeTest, gate_decide_stale_invoke_waits_exec_refuses)
            PaintLayersBakeGateAction::Refuse);
 }
 
+TEST_F(MaterialBakeTest, bke_scheduled_mark_is_seen_by_the_gate_without_a_window_manager)
+{
+  /* C1 contract: the editor stamps #MA_PAINT_LAYERS_BAKE_SCHEDULED for whatever it has queued or
+   * running, and the RNA layer now reads freshness through #BKE_paint_layers_is_stale alone, with
+   * no #wmWindowManager. With the mark set, that BKE-only signal must report stale, and the gate
+   * must then refuse an `exec`/RNA caller rather than let it read a result still being written.
+   * This covers the BKE half of the wiring; the editor half -- a job stamping and settling the mark
+   * -- needs a real #wmJob and is a manual check. */
+  material->paint_layers_flag |= MA_PAINT_LAYERED;
+  EXPECT_FALSE(BKE_paint_layers_bake_scheduled_get(*material));
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*material));
+
+  BKE_paint_layers_bake_scheduled_set(*material, true);
+  ASSERT_TRUE(BKE_paint_layers_bake_scheduled_get(*material));
+  EXPECT_TRUE(BKE_paint_layers_is_stale(*material));
+  EXPECT_EQ(
+      BKE_paint_layers_bake_gate_decide(/*stale=*/true, /*is_invoke=*/false, /*headless=*/false),
+      PaintLayersBakeGateAction::Refuse);
+  /* Headless still proceeds: #material_changed's own headless branch already ran every bake
+   * synchronously before this could be asked, so refusing would only ever be a false refusal. */
+  EXPECT_EQ(
+      BKE_paint_layers_bake_gate_decide(/*stale=*/true, /*is_invoke=*/false, /*headless=*/true),
+      PaintLayersBakeGateAction::Proceed);
+
+  BKE_paint_layers_bake_scheduled_set(*material, false);
+  EXPECT_FALSE(BKE_paint_layers_bake_scheduled_get(*material));
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*material));
+}
+
 }  // namespace blender::ed::material_bake::tests

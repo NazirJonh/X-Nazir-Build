@@ -261,7 +261,13 @@ set(SRC
     intern/paint_layers.cc
     intern/paint_layers_bake.cc
     intern/paint_layers_composite.cc
-    intern/paint_layers_generate.cc
+    intern/paint_layers_generate_common.cc
+    intern/paint_layers_generate_build.cc
+    intern/paint_layers_generate_regen.cc
+    intern/paint_layers_generate_source_group.cc
+    intern/paint_layers_generate_sampler.cc
+    intern/paint_layers_generate_values.cc
+    intern/paint_layers_generate_intern.hh
     intern/paint_layers_target.cc
   intern/mesh_maps.cc
   intern/mesh_maps_bake.cc

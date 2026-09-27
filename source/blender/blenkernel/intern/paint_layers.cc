@@ -104,13 +104,11 @@ namespace {
  * invalidate a substituted node. Walks \a list and reports through the return whether the target was
  * found with a baked ancestor on the way.
  */
-static bool paint_layer_or_ancestor_has_bake(const ListBase &list,
+static bool paint_layer_or_ancestor_has_bake(const ListBaseT<MaterialPaintLayer> &list,
                                              const MaterialPaintLayer *target,
                                              const bool ancestor_has_bake)
 {
-  for (const MaterialPaintLayer &layer :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
-  {
+  for (const MaterialPaintLayer &layer : list) {
     /* A Material layer's bake is its source's maps, not a cache of the row: its values stay live
      * group inputs, so editing them is not topology. */
     const bool has_bake = ancestor_has_bake ||
@@ -162,21 +160,20 @@ void paint_layers_tag_value_only(Material &ma)
 }
 
 /** Depth-first search for \a marker through \a list, its folders and its corrections. */
-MaterialPaintLayer *paint_layer_find_in_list(const ListBase *list, const bUUID &marker)
+MaterialPaintLayer *paint_layer_find_in_list(const ListBaseT<MaterialPaintLayer> &list,
+                                             const bUUID &marker)
 {
-  for (const MaterialPaintLayer &layer :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(list))
-  {
+  for (const MaterialPaintLayer &layer : list) {
     if (BLI_uuid_equal(layer.marker, marker)) {
       return const_cast<MaterialPaintLayer *>(&layer);
     }
-    if (MaterialPaintLayer *found = paint_layer_find_in_list(&layer.children, marker)) {
+    if (MaterialPaintLayer *found = paint_layer_find_in_list(layer.children, marker)) {
       return found;
     }
-    if (MaterialPaintLayer *found = paint_layer_find_in_list(&layer.effects, marker)) {
+    if (MaterialPaintLayer *found = paint_layer_find_in_list(layer.effects, marker)) {
       return found;
     }
-    if (MaterialPaintLayer *found = paint_layer_find_in_list(&layer.mask_stack, marker)) {
+    if (MaterialPaintLayer *found = paint_layer_find_in_list(layer.mask_stack, marker)) {
       return found;
     }
   }
@@ -201,7 +198,7 @@ bUUID paint_layer_unique_marker(const Material &ma)
   bUUID marker;
   do {
     marker = BLI_uuid_generate_random();
-  } while (paint_layer_find_in_list(&const_cast<Material &>(ma).paint_layers, marker) != nullptr);
+  } while (paint_layer_find_in_list(const_cast<Material &>(ma).paint_layers, marker) != nullptr);
   return marker;
 }
 
@@ -257,19 +254,13 @@ MaterialPaintLayer *paint_layer_branch_duplicate(Main &bmain,
   dst->channels = nullptr;
   dst->properties = nullptr;
 
-  for (const MaterialPaintLayer &child :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&src.children))
-  {
+  for (const MaterialPaintLayer &child : src.children) {
     BLI_addtail(&dst->children, paint_layer_branch_duplicate(bmain, ma, child, copy_images));
   }
-  for (const MaterialPaintLayer &effect :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&src.effects))
-  {
+  for (const MaterialPaintLayer &effect : src.effects) {
     BLI_addtail(&dst->effects, paint_layer_branch_duplicate(bmain, ma, effect, copy_images));
   }
-  for (const MaterialPaintLayer &mask_item :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&src.mask_stack))
-  {
+  for (const MaterialPaintLayer &mask_item : src.mask_stack) {
     BLI_addtail(&dst->mask_stack, paint_layer_branch_duplicate(bmain, ma, mask_item, copy_images));
   }
 
@@ -299,23 +290,17 @@ bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &layer, const bU
   if (BLI_uuid_equal(layer.marker, marker)) {
     return true;
   }
-  for (const MaterialPaintLayer &child :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
-  {
+  for (const MaterialPaintLayer &child : layer.children) {
     if (BKE_paint_layers_subtree_contains(child, marker)) {
       return true;
     }
   }
-  for (const MaterialPaintLayer &effect :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.effects))
-  {
+  for (const MaterialPaintLayer &effect : layer.effects) {
     if (BKE_paint_layers_subtree_contains(effect, marker)) {
       return true;
     }
   }
-  for (const MaterialPaintLayer &mask_item :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
-  {
+  for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
     if (BKE_paint_layers_subtree_contains(mask_item, marker)) {
       return true;
     }
@@ -452,18 +437,18 @@ PaintLayerRole BKE_paint_layers_role(const MaterialPaintLayer &layer)
 
 namespace {
 
-void paint_layer_list_collect(const ListBase &list, Vector<const MaterialPaintLayer *> &r_items)
+void paint_layer_list_collect(const ListBaseT<MaterialPaintLayer> &list,
+                              Vector<const MaterialPaintLayer *> &r_items)
 {
-  for (const MaterialPaintLayer &item :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
-  {
+  for (const MaterialPaintLayer &item : list) {
     r_items.append(&item);
   }
 }
 
-void paint_layer_list_collect(ListBase &list, Vector<MaterialPaintLayer *> &r_items)
+void paint_layer_list_collect(ListBaseT<MaterialPaintLayer> &list,
+                              Vector<MaterialPaintLayer *> &r_items)
 {
-  for (MaterialPaintLayer &item : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&list)) {
+  for (MaterialPaintLayer &item : list) {
     r_items.append(&item);
   }
 }
@@ -521,12 +506,10 @@ bool BKE_paint_layers_fill_to_paint(Material &ma, MaterialPaintLayer &layer, flo
 
 namespace {
 
-void paint_layers_flatten_list(const ListBase &list,
+void paint_layers_flatten_list(const ListBaseT<MaterialPaintLayer> &list,
                                Vector<const MaterialPaintLayer *> &r_layers)
 {
-  for (const MaterialPaintLayer &layer :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
-  {
+  for (const MaterialPaintLayer &layer : list) {
     /* A correction row is reached through its owner's effects/mask_stack lists, not here. A Custom and a
      * Material layer alike take part through their bake, so they are walked like any other row. */
     if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer) {
@@ -548,12 +531,10 @@ void BKE_paint_layers_flatten(const Material &ma, Vector<const MaterialPaintLaye
 
 namespace {
 
-void paint_layers_flatten_all_list(const ListBase &list,
+void paint_layers_flatten_all_list(const ListBaseT<MaterialPaintLayer> &list,
                                    Vector<const MaterialPaintLayer *> &r_rows)
 {
-  for (const MaterialPaintLayer &layer :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
-  {
+  for (const MaterialPaintLayer &layer : list) {
     r_rows.append(&layer);
     paint_layers_flatten_all_list(layer.effects, r_rows);
     paint_layers_flatten_all_list(layer.mask_stack, r_rows);
@@ -1245,9 +1226,7 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
     if (!paint_layer_channel_present(ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL)) {
       continue;
     }
-    for (const MaterialPaintLayer &effect :
-         *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer->effects))
-    {
+    for (const MaterialPaintLayer &effect : layer->effects) {
       if (effect.source != MA_PAINT_LAYER_SOURCE_CONSTANT ||
           (effect.flag & MA_PAINT_LAYER_ENABLED) == 0)
       {
@@ -1265,20 +1244,16 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
 }
 
 /** The row whose effects/mask_stack holds \a correction, searching \a list and its folders. */
-static MaterialPaintLayer *paint_layer_correction_owner(ListBase &list,
+static MaterialPaintLayer *paint_layer_correction_owner(ListBaseT<MaterialPaintLayer> &list,
                                                         const MaterialPaintLayer &correction)
 {
-  for (MaterialPaintLayer &layer : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&list)) {
-    for (const MaterialPaintLayer &candidate :
-         *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.effects))
-    {
+  for (MaterialPaintLayer &layer : list) {
+    for (const MaterialPaintLayer &candidate : layer.effects) {
       if (&candidate == &correction) {
         return &layer;
       }
     }
-    for (const MaterialPaintLayer &candidate :
-         *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
-    {
+    for (const MaterialPaintLayer &candidate : layer.mask_stack) {
       if (&candidate == &correction) {
         return &layer;
       }
@@ -1385,7 +1360,7 @@ bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
 
 MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
 {
-  return paint_layer_find_in_list(&ma.paint_layers, marker);
+  return paint_layer_find_in_list(ma.paint_layers, marker);
 }
 
 void BKE_paint_layers_active_set(Material &ma, const bUUID &marker)
@@ -1397,7 +1372,7 @@ void BKE_paint_layers_active_set(Material &ma, const bUUID &marker)
     ma.paint_layers_flag |= MA_PAINT_LAYERS_MATERIAL_BAKE_DUE;
     /* The row and its ancestor folders left behind may carry a cache that has to catch up, and the
      * chain that bakes Material rows by hand (#material_bake_layered_rows_ensure) only knows
-     * Material rows. This signal makes the K-1 planner (#BKE_paint_layers_bake_ensure, reached
+     * Material rows. This signal makes the K-1 planner (#BKE_paint_layers_bake_plan_run, reached
      * from #BKE_paint_layers_regenerate_tagged) pick the stale non-Material rows too; it is not
      * cleared until no baked row is invalid any more. */
     ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
@@ -1483,7 +1458,7 @@ bool BKE_paint_layers_reorder(Material &ma, MaterialPaintLayer *layer, int index
     BLI_addhead(owner, layer);
   }
   else {
-    BLI_insertlinkbefore(owner, static_cast<MaterialPaintLayer *>(BLI_findlink(owner, index)), layer);
+    BLI_insertlinkbefore(owner, BLI_findlink(owner, index), layer);
   }
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -1545,9 +1520,7 @@ MaterialPaintLayer *BKE_paint_layers_group(Material &ma, Span<MaterialPaintLayer
     BLI_addtail(owner, folder);
   }
   else {
-    BLI_insertlinkbefore(owner,
-                         static_cast<MaterialPaintLayer *>(BLI_findlink(owner, insert_index)),
-                         folder);
+    BLI_insertlinkbefore(owner, BLI_findlink(owner, insert_index), folder);
   }
   BKE_paint_layers_tag_edited(ma);
   return folder;
@@ -1572,23 +1545,18 @@ bool BKE_paint_layers_ungroup(Material &ma, MaterialPaintLayer *folder)
   BLI_remlink(owner, folder);
 
   /* The children lift into the folder's slot in their own order; the folder itself keeps nothing. */
-  ListBase lifted = folder->children;
+  ListBaseT<MaterialPaintLayer> lifted = folder->children;
   folder->children = {nullptr, nullptr};
   BKE_material_paint_layer_free(folder);
 
   int insert_index = folder_index;
-  for (MaterialPaintLayer *child = static_cast<MaterialPaintLayer *>(lifted.first), *next;
-       child != nullptr;
-       child = next)
-  {
-    next = child->next;
-    BLI_remlink(&lifted, child);
+  for (MaterialPaintLayer &child : lifted.items_mutable()) {
+    BLI_remlink(&lifted, &child);
     if (insert_index >= BLI_listbase_count(owner)) {
-      BLI_addtail(owner, child);
+      BLI_addtail(owner, &child);
     }
     else {
-      BLI_insertlinkbefore(
-          owner, static_cast<MaterialPaintLayer *>(BLI_findlink(owner, insert_index)), child);
+      BLI_insertlinkbefore(owner, BLI_findlink(owner, insert_index), &child);
     }
     insert_index++;
   }
@@ -1856,21 +1824,20 @@ bool paint_layers_material_depends_on(const Material &from, const Material &targ
   if (&from == &target) {
     return true;
   }
-  std::function<bool(const ListBase &)> walk = [&](const ListBase &list) {
-    for (const MaterialPaintLayer &layer :
-         *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
-    {
-      if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr &&
-          paint_layers_material_depends_on(*layer.material, target))
-      {
-        return true;
-      }
-      if (walk(layer.children) || walk(layer.effects) || walk(layer.mask_stack)) {
-        return true;
-      }
-    }
-    return false;
-  };
+  std::function<bool(const ListBaseT<MaterialPaintLayer> &)> walk =
+      [&](const ListBaseT<MaterialPaintLayer> &list) {
+        for (const MaterialPaintLayer &layer : list) {
+          if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr &&
+              paint_layers_material_depends_on(*layer.material, target))
+          {
+            return true;
+          }
+          if (walk(layer.children) || walk(layer.effects) || walk(layer.mask_stack)) {
+            return true;
+          }
+        }
+        return false;
+      };
   return walk(from.paint_layers);
 }
 
@@ -2162,21 +2129,15 @@ namespace {
 
 void paint_layer_assert_consistent_row(const MaterialPaintLayer &layer)
 {
-  for (const MaterialPaintLayer &effect :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.effects))
-  {
+  for (const MaterialPaintLayer &effect : layer.effects) {
     BLI_assert(BKE_paint_layers_role(effect) == PaintLayerRole::Effect);
     paint_layer_assert_consistent_row(effect);
   }
-  for (const MaterialPaintLayer &mask_item :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
-  {
+  for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
     BLI_assert(BKE_paint_layers_role(mask_item) == PaintLayerRole::MaskItem);
     paint_layer_assert_consistent_row(mask_item);
   }
-  for (const MaterialPaintLayer &child :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
-  {
+  for (const MaterialPaintLayer &child : layer.children) {
     paint_layer_assert_consistent_row(child);
   }
 }
@@ -2185,9 +2146,7 @@ void paint_layer_assert_consistent_row(const MaterialPaintLayer &layer)
 
 void BKE_paint_layers_assert_consistent(const Material &ma)
 {
-  for (const MaterialPaintLayer &layer :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&ma.paint_layers))
-  {
+  for (const MaterialPaintLayer &layer : ma.paint_layers) {
     paint_layer_assert_consistent_row(layer);
   }
 }
@@ -2289,3 +2248,5 @@ bool BKE_paint_layers_set_custom_group(Material &ma,
 }
 
 }  // namespace blender
+
+

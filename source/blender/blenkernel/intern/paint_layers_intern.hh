@@ -74,19 +74,20 @@ inline Image *paint_layer_mesh_map_image(const Material &ma, const MaterialPaint
 }
 
 /** The list whose direct members include \a target, or null when it is not in \a list. */
-inline ListBase *paint_layer_owner_list(ListBase *list, const MaterialPaintLayer *target)
+inline ListBaseT<MaterialPaintLayer> *paint_layer_owner_list(ListBaseT<MaterialPaintLayer> *list,
+                                                             const MaterialPaintLayer *target)
 {
-  for (MaterialPaintLayer &layer : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(list)) {
+  for (MaterialPaintLayer &layer : *list) {
     if (&layer == target) {
       return list;
     }
-    if (ListBase *found = paint_layer_owner_list(&layer.children, target)) {
+    if (ListBaseT<MaterialPaintLayer> *found = paint_layer_owner_list(&layer.children, target)) {
       return found;
     }
-    if (ListBase *found = paint_layer_owner_list(&layer.effects, target)) {
+    if (ListBaseT<MaterialPaintLayer> *found = paint_layer_owner_list(&layer.effects, target)) {
       return found;
     }
-    if (ListBase *found = paint_layer_owner_list(&layer.mask_stack, target)) {
+    if (ListBaseT<MaterialPaintLayer> *found = paint_layer_owner_list(&layer.mask_stack, target)) {
       return found;
     }
   }

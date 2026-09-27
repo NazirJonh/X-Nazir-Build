@@ -1810,6 +1810,8 @@ void ED_operatortypes_paint()
   WM_operatortype_append(MATERIAL_OT_paint_layer_add_custom);
   WM_operatortype_append(MATERIAL_OT_paint_layer_custom_channel_add);
   WM_operatortype_append(ed::material_bake::MATERIAL_OT_paint_layers_bake_now);
+  /* Once at startup: the paint-layer bake undo cleanup, so it is live before the first update. */
+  ed::material_bake::paint_layers_bake_undo_callback_init();
 
   /* partial visibility */
   WM_operatortype_append(hide::PAINT_OT_hide_show_all);

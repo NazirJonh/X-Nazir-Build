@@ -609,7 +609,7 @@ struct MaterialPaintLayer {
 
   struct MaterialPaintLayer *next = nullptr, *prev = nullptr;
   /** Nested folder layers; the same type as the parent list. */
-  ListBase children = {nullptr, nullptr};
+  ListBaseT<MaterialPaintLayer> children = {nullptr, nullptr};
   char name[/*MAX_NAME*/ 64] = "";
   /** Stable identity of the row, shared by the nodes the generator builds for it. */
   bUUID marker = {};
@@ -666,12 +666,12 @@ struct MaterialPaintLayer {
    * Effects that adjust what the row paints with, bottom to top. Same type as a layer, linked by
    * their own markers.
    */
-  ListBase effects = {nullptr, nullptr};
+  ListBaseT<MaterialPaintLayer> effects = {nullptr, nullptr};
   /**
    * Mask items that limit where the row applies, bottom to top. A mask is a stack like any other;
    * its coverage starts at one. Same type as a layer, linked by their own markers.
    */
-  ListBase mask_stack = {nullptr, nullptr};
+  ListBaseT<MaterialPaintLayer> mask_stack = {nullptr, nullptr};
 };
 
 /**
@@ -816,7 +816,7 @@ struct Material {
    * The DNA description of the paint layer stack, bottom-to-top. When #MA_PAINT_LAYERED is set,
    * the node tree is generated from this and the description is the source of truth.
    */
-  ListBase paint_layers = {nullptr, nullptr};
+  ListBaseT<MaterialPaintLayer> paint_layers = {nullptr, nullptr};
   /** Marker of the active layer or mask; an index is ambiguous across nesting. */
   bUUID active_layer_marker = {};
   /** The generated node group holding the stack, see the paint layer generator. */

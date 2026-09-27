@@ -217,21 +217,21 @@ bool paint_layers_image_use_match(MaterialPaintLayer &layer,
     }
   }
   for (MaterialPaintLayer &effect :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.effects))
+       layer.effects)
   {
     if (paint_layers_image_use_match(effect, image, true, effect.marker, r_use)) {
       return true;
     }
   }
   for (MaterialPaintLayer &mask_item :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
+       layer.mask_stack)
   {
     if (paint_layers_image_use_match(mask_item, image, true, mask_item.marker, r_use)) {
       return true;
     }
   }
   for (MaterialPaintLayer &child :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.children))
+       layer.children)
   {
     if (paint_layers_image_use_match(child, image, false, {}, r_use)) {
       return true;
@@ -247,7 +247,7 @@ bool BKE_paint_layers_find_image_use(Material &ma,
                                      PaintLayersImageUse &r_use)
 {
   for (MaterialPaintLayer &layer :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&ma.paint_layers))
+       ma.paint_layers)
   {
     if (paint_layers_image_use_match(layer, image, false, {}, r_use)) {
       return true;
@@ -323,13 +323,11 @@ Image *BKE_paint_layers_target_image(const PaintLayersTarget &target)
 }
 
 /** Whether \a target, or any ancestor of it, is set to bake always: a frozen paint target. */
-static bool paint_layer_always_baked(const ListBase &list,
+static bool paint_layer_always_baked(const ListBaseT<MaterialPaintLayer> &list,
                                      const MaterialPaintLayer *target,
                                      const bool ancestor_always)
 {
-  for (const MaterialPaintLayer &layer :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
-  {
+  for (const MaterialPaintLayer &layer : list) {
     const bool always = ancestor_always ||
                         (layer.bake != nullptr &&
                          layer.bake->mode == MA_PAINT_LAYER_BAKE_ALWAYS);
@@ -526,3 +524,4 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
 }
 
 }  // namespace blender
+

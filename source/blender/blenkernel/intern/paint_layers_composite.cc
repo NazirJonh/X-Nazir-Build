@@ -171,7 +171,7 @@ bool composite_layer_subtree_has_channel(const Material &material,
     return false;
   }
   for (const MaterialPaintLayer &child :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
+       layer.children)
   {
     if (composite_layer_subtree_has_channel(material, child, channel)) {
       return true;
@@ -193,15 +193,13 @@ bool composite_layer_subtree_has_channel(const Material &material,
  * #BKE_paint_layers_bake_render_node asks for this.
  */
 bool composite_image_layers_build(const Material &material,
-                                  const ListBase &list,
+                                  const ListBaseT<MaterialPaintLayer> &list,
                                   const int channel,
                                   const MaterialPaintLayer *stop_at,
                                   Vector<PaintMaterialCompositeImageLayer> &r_layers,
                                   const bool isolate_pass_through = false)
 {
-  for (const MaterialPaintLayer &layer_ref :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
-  {
+  for (const MaterialPaintLayer &layer_ref : list) {
     const MaterialPaintLayer *layer = &layer_ref;
     /* The row whose "below" is being collected is not part of it, and neither is anything above
      * it: the walk stops exactly at it and reports that it found it. */
@@ -769,19 +767,21 @@ Image *BKE_paint_layers_below_image(Main &bmain,
 }
 
 /** The list that directly owns \a target, or null. */
-static ListBase *paint_layer_owner_list_for(ListBase *list, const MaterialPaintLayer *target)
+static ListBaseT<MaterialPaintLayer> *paint_layer_owner_list_for(ListBaseT<MaterialPaintLayer> *list,
+                                                                 const MaterialPaintLayer *target)
 {
-  for (MaterialPaintLayer &layer : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(list)) {
+  for (MaterialPaintLayer &layer : *list) {
     if (&layer == target) {
       return list;
     }
-    if (ListBase *found = paint_layer_owner_list_for(&layer.children, target)) {
+    if (ListBaseT<MaterialPaintLayer> *found = paint_layer_owner_list_for(&layer.children, target)) {
       return found;
     }
-    if (ListBase *found = paint_layer_owner_list_for(&layer.effects, target)) {
+    if (ListBaseT<MaterialPaintLayer> *found = paint_layer_owner_list_for(&layer.effects, target)) {
       return found;
     }
-    if (ListBase *found = paint_layer_owner_list_for(&layer.mask_stack, target)) {
+    if (ListBaseT<MaterialPaintLayer> *found = paint_layer_owner_list_for(&layer.mask_stack,
+                                                                          target)) {
       return found;
     }
   }
@@ -815,7 +815,8 @@ static bool paint_layer_bake_entry_for(const Material &ma,
     r_entry.marker = layer.marker;
     return true;
   }
-  ListBase *owner = paint_layer_owner_list_for(&const_cast<Material &>(ma).paint_layers, &layer);
+  ListBaseT<MaterialPaintLayer> *owner = paint_layer_owner_list_for(
+      &const_cast<Material &>(ma).paint_layers, &layer);
   if (owner == nullptr) {
     return false;
   }
@@ -1046,3 +1047,4 @@ bool BKE_paint_layers_composite_image(Material &ma,
 }
 
 }  // namespace blender
+

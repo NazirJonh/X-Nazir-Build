@@ -114,7 +114,6 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
 #  include "ED_gpencil_legacy.hh"
 #  include "ED_image.hh"
 #  include "ED_node.hh"
-#  include "ED_paint_layers_bake.hh"
 #  include "ED_screen.hh"
 
 namespace blender {
@@ -647,14 +646,19 @@ static bool rna_Material_paint_layers_composite(Material *ma,
   /* An RNA function is always reached like `exec` -- there is no modal loop it could go into --
    * so a stale result is refused rather than waited out; a headless caller (no #wmWindowManager)
    * never is, since #material_changed's own headless branch already ran every bake synchronously
-   * before this could be asked. See #paint_layers_bake_gate_decide. */
+   * before this could be asked. See #BKE_paint_layers_bake_gate_decide.
+   *
+   * The freshness test is the BKE-only #BKE_paint_layers_is_stale, deliberately: RNA may not reach
+   * into the editor for a #wmWindowManager. That is enough because the editor stamps
+   * #MA_PAINT_LAYERS_BAKE_SCHEDULED before every bake job it starts for a layered material -- the
+   * Material-row and Custom jobs included, keyed on a source/host material rather than the layered
+   * one -- so the mark, not a `WM_jobs_test`, is what keeps this answer in step with
+   * `ED_paint_layers_stale_or_pending`. */
   wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
-  const bool stale = (wm != nullptr) ? ed::material_bake::ED_paint_layers_stale_or_pending(*wm,
-                                                                                            *ma) :
-                                       BKE_paint_layers_is_stale(*ma);
-  if (ed::material_bake::paint_layers_bake_gate_decide(
+  const bool stale = BKE_paint_layers_is_stale(*ma);
+  if (BKE_paint_layers_bake_gate_decide(
           stale, /*is_invoke=*/false, /*headless=*/wm == nullptr) ==
-      ed::material_bake::PaintLayersBakeGateAction::Refuse)
+      PaintLayersBakeGateAction::Refuse)
   {
     BKE_report(reports,
               RPT_ERROR,
@@ -701,17 +705,13 @@ static bool rna_Material_paint_layers_is_stale_get(PointerRNA *ptr)
 static bool rna_Material_paint_layers_bake_pending_get(PointerRNA *ptr)
 {
   Material *ma = id_cast<Material *>(ptr->owner_id);
-  /* Unlike #rna_Material_paint_layers_is_stale_get, this one does take the extra step to a
-   * #wmWindowManager when one exists (the same #G_MAIN pattern #rna_Main_ID_previews_clear and
-   * others already use from an RNA function), so it also catches a light bake job already running
-   * through `wmJob` before #MA_PAINT_LAYERS_BAKE_SCHEDULED was stamped for it -- the one gap
-   * #BKE_paint_layers_is_stale's own doc-comment leaves open. It exists for the Image Editor
-   * header/Combined-preview "Updating..." indicator, which needs exactly that -- a script deciding
-   * whether it may read a baked result should still use `paint_layers_is_stale`, deliberately the
-   * cheaper, BKE-only signal. */
-  if (wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first)) {
-    return ed::material_bake::ED_paint_layers_stale_or_pending(*wm, *ma);
-  }
+  /* The editor's own hand-off for whatever it has queued or running is the
+   * #MA_PAINT_LAYERS_BAKE_SCHEDULED mark, folded into #BKE_paint_layers_is_stale here. The editor
+   * stamps that mark before starting any bake job for the material, Material-row and Custom jobs
+   * included, so the BKE-only signal also covers a job already in flight through `wmJob` without
+   * this getter needing a #wmWindowManager. It exists for the Image Editor header/Combined-preview
+   * "Updating..." indicator; a script deciding whether it may read a baked result uses
+   * `paint_layers_is_stale`, the same BKE-only signal. */
   return BKE_paint_layers_is_stale(*ma);
 }
 
@@ -1312,10 +1312,10 @@ static int rna_MaterialPaintLayer_channel_settings_length(PointerRNA * /*ptr*/)
 }
 
 /** The layer whose channel record is \a channel, searching the whole stack. */
-static MaterialPaintLayer *rna_paint_layer_by_channel(ListBase &list,
+static MaterialPaintLayer *rna_paint_layer_by_channel(ListBaseT<MaterialPaintLayer> &list,
                                                       const MaterialPaintLayerChannel *channel)
 {
-  for (MaterialPaintLayer &layer : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&list)) {
+  for (MaterialPaintLayer &layer : list) {
     for (const int i : IndexRange(layer.channels_num)) {
       if (&layer.channels[i] == channel) {
         return &layer;
@@ -1338,9 +1338,9 @@ static MaterialPaintLayer *rna_paint_layer_by_channel(ListBase &list,
 
 /** The layer whose fixed \a settings array contains \a settings, searching the whole stack. */
 static MaterialPaintLayer *rna_paint_layer_by_settings(
-    ListBase &list, const MaterialPaintLayerChannelSettings *settings)
+    ListBaseT<MaterialPaintLayer> &list, const MaterialPaintLayerChannelSettings *settings)
 {
-  for (MaterialPaintLayer &layer : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&list)) {
+  for (MaterialPaintLayer &layer : list) {
     if (settings >= &layer.channel_settings[0] &&
         settings < &layer.channel_settings[PAINT_MATERIAL_CHANNEL_NUM])
     {
@@ -1698,7 +1698,7 @@ static std::optional<std::string> rna_MaterialPaintLayerChannelSettings_path(con
     return std::nullopt;
   }
   MaterialPaintLayer *layer = rna_paint_layer_by_settings(
-      const_cast<ListBase &>(ma->paint_layers), settings);
+      const_cast<ListBaseT<MaterialPaintLayer> &>(ma->paint_layers), settings);
   if (layer == nullptr) {
     return std::nullopt;
   }

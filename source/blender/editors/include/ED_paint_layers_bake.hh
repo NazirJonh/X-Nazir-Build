@@ -28,6 +28,8 @@
  * `Material.paint_layers_is_stale` never sees "fresh" while a job it cannot see is still writing.
  */
 
+#include "BKE_paint_layers.hh"
+
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
@@ -49,6 +51,14 @@ namespace blender::ed::material_bake {
  * nothing heavy pending is skipped without touching the job system.
  */
 void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bmain);
+
+/**
+ * Register the #BKE_CB_EVT_UNDO_POST handler that clears a stale #MA_PAINT_LAYERS_BAKE_SCHEDULED
+ * mark left in a memfile-undo snapshot. Called once from the editor's startup init
+ * (#ED_operatortypes_paint), after #BKE_callback_global_init, so it is registered before the first
+ * scene update; the callback system owns and frees the store.
+ */
+void paint_layers_bake_undo_callback_init();
 
 /**
  * Whether (\a owner, \a job_type) is the exact job named by \a exclude_owner / \a exclude_job_type.
@@ -168,40 +178,19 @@ void paint_layers_bake_scheduled_settle(Main &bmain,
 void paint_layers_bake_debounce_reset(wmWindowManager &wm);
 
 /**
- * What a caller wanting a paint-layer bake *result* -- a bake/export/"Apply" operator, or the RNA
- * `Material.paint_layers.composite()` this mirrors -- should do about a stale one, from three
- * things it already knows about itself: whether the result it read is stale
- * (#ED_paint_layers_stale_or_pending, or #BKE_paint_layers_is_stale where no #wmWindowManager
- * exists to ask), whether it was reached through `invoke` (a person, who can wait a moment) rather
- * than `exec`/an RNA function (a script, which cannot), and whether it is running headless at all
- * (\a headless, `wm == nullptr`).
- *
- * Headless always resolves to #Proceed regardless of \a stale: #material_changed's headless branch
- * already runs every bake synchronously before this could ever be asked, so \a stale is normally
- * false there anyway, and there is no timer, no `wmJob`, and no modal loop for a background script
- * to ever become fresh through -- refusing it would only ever be a false refusal, never a real
- * wait. This is the one rule #BKE_paint_layers_is_stale's own doc-comment leaves to the caller: it
- * has no idea whether it is being asked from a script or a person, headless or not.
- *
- * A person (`invoke`) gets #Wait: go modal on a short `wmTimer`, matching the accepted UI decision
- * ("Waiting for paint layers bake..."), and re-ask once it ticks. A script (`exec`, or the RNA
- * function) gets #Refuse: report the error named in `Material.paint_layers_is_stale`'s own
- * doc-comment and stop, since a script cannot go modal at all.
- *
- * Pure -- three booleans in, one of three outcomes out -- so the one behavioral rule every result
- * consumer must share (headless first, then invoke-vs-exec) is checked without a #Material, a
- * #wmWindowManager, or a #bContext.
+ * The stale-until-action rule, re-exported for editors: #BKE_paint_layers_bake_gate_decide holds
+ * the decision, so the editor callers and the RNA layer that now reaches the same function through
+ * BKE can never drift apart. Kept as a named editor alias so the `ed::material_bake` namespace
+ * still reads naturally at the call sites and in the tests.
  */
-enum class PaintLayersBakeGateAction {
-  /** Nothing is stale, or nothing can be done about it here (headless): go ahead now. */
-  Proceed,
-  /** `invoke` reached a stale result: go modal and re-ask once the bake has had time to run. */
-  Wait,
-  /** `exec`/RNA reached a stale result and cannot go modal: report and stop. */
-  Refuse,
-};
+using PaintLayersBakeGateAction = blender::PaintLayersBakeGateAction;
 
-PaintLayersBakeGateAction paint_layers_bake_gate_decide(bool stale, bool is_invoke, bool headless);
+inline PaintLayersBakeGateAction paint_layers_bake_gate_decide(const bool stale,
+                                                               const bool is_invoke,
+                                                               const bool headless)
+{
+  return BKE_paint_layers_bake_gate_decide(stale, is_invoke, headless);
+}
 
 /**
  * "Bake Paint Layers Now": collapse \a ma's 0.3s debounce (if one is armed for it) and run its due

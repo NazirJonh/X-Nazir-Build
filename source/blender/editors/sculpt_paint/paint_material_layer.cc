@@ -51,21 +51,21 @@ static bool paint_layer_subtree_has_marker(const MaterialPaintLayer &layer, cons
     return true;
   }
   for (const MaterialPaintLayer &child :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
+       layer.children)
   {
     if (paint_layer_subtree_has_marker(child, marker)) {
       return true;
     }
   }
   for (const MaterialPaintLayer &effect :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.effects))
+       layer.effects)
   {
     if (paint_layer_subtree_has_marker(effect, marker)) {
       return true;
     }
   }
   for (const MaterialPaintLayer &mask_item :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
+       layer.mask_stack)
   {
     if (paint_layer_subtree_has_marker(mask_item, marker)) {
       return true;
@@ -193,3 +193,4 @@ void mask_edit_end_if_target_removed(bContext &C, Material &ma, const bUUID &rem
 }
 
 }  // namespace blender::ed::sculpt_paint::material_layer
+

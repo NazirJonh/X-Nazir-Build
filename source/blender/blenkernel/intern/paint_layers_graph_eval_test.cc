@@ -5357,7 +5357,7 @@ TEST_F(PaintLayersGraphEvalTest, bake_render_node_folder_minimal)
   EXPECT_NEAR(color[1], 0.0f, 1e-4f);
   EXPECT_NEAR(color[2], 1.0f, 1e-4f);
 
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*folder);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*folder);
   bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_solid_image("BakedColor", size, 0, 0, 255, 255);
   bake->coverage = add_solid_image("BakedCov", size, 255, 255, 255, 255);
   uint32_t hash[2];
@@ -5481,7 +5481,7 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_computes_and_commits)
     record->image = add_solid_image("Map", size, 128, 64, 32, 255);
     record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
   }
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*layer);
   bake->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
   bake->size = size;
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *layer));
@@ -5588,7 +5588,7 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_drops_removed_row)
     record->image = add_solid_image("Map", size, 128, 64, 32, 255);
     record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
   }
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*layer);
   bake->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
   bake->size = size;
 
@@ -5659,11 +5659,11 @@ TEST_F(PaintLayersGraphEvalTest, bake_planner_writes_maps_and_substitutes)
   ASSERT_NE(interpreter.instance, nullptr);
   const RGBA live = interpreter.eval_result("Result Base Color");
 
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*top);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*top);
   bake->size = size;
   ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *top, MA_PAINT_LAYER_BAKE_ALWAYS));
   bool changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_TRUE(changed);
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *top));
   EXPECT_NE(bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
@@ -5800,7 +5800,7 @@ TEST_F(PaintLayersGraphEvalTest, baked_node_equals_the_live_node)
     Vector<float> coverage(int64_t(size) * size);
     ASSERT_TRUE(BKE_paint_layers_bake_render_node(
         *ma, *baked_node, channel, size, color.data(), coverage.data()));
-    MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*baked_node);
+    MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*baked_node);
     bake->images[channel] = make_float_image("BakeColor", color.data(), nullptr);
     bake->coverage = make_float_image("BakeCoverage", nullptr, coverage.data());
     uint32_t hash[2];
@@ -5844,7 +5844,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_bake_is_its_content_in_graph_and
   MaterialPaintLayer *material = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
   material->material = source;
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*material);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*material);
   bake->size = size;
   bake->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
 
@@ -5897,7 +5897,7 @@ TEST_F(PaintLayersGraphEvalTest, custom_layer_bake_substitutes_in_graph_and_cpu)
   ASSERT_NE(interpreter.instance, nullptr);
   const RGBA without_bake = interpreter.eval_result(result_name(channel));
 
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*custom);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*custom);
   bake->size = size;
   bake->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
   Image *color = add_solid_image("CustomBakeColor", size, 0, 255, 0, 255);
@@ -5936,7 +5936,7 @@ TEST_F(PaintLayersGraphEvalTest, custom_stale_bake_still_substitutes)
       *bmain, *ma, "Custom", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(custom, nullptr);
 
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*custom);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*custom);
   bake->size = size;
   bake->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
   Image *color = add_solid_image("StaleCustomColor", size, 0, 255, 0, 255);
@@ -6011,7 +6011,7 @@ TEST_F(PaintLayersGraphEvalTest, custom_layer_isolating_folder_partial_alpha_mat
       *bmain, *ma, "CustomChild", folder, PaintLayerPlace::Into);
   ASSERT_NE(custom, nullptr);
 
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*custom);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*custom);
   bake->size = size;
   bake->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
   /* Green, partial straight alpha 0.4 -- the leaf's own content alpha. */
@@ -6118,7 +6118,7 @@ TEST_F(PaintLayersGraphEvalTest, substituted_paint_row_isolating_folder_partial_
   paint_record->image = add_solid_image("SubPaintLive", size, 0, 0, 255, 255);
   paint_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*paint);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*paint);
   bake->size = size;
   bake->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
   /* Green, partial straight alpha 0.4 -- the row's cached content alpha, distinct from the live
@@ -6246,7 +6246,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_semi_transparent_bake_matches_cp
   MaterialPaintLayer *material = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
   material->material = source;
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*material);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*material);
   bake->size = size;
   bake->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
 
@@ -6397,7 +6397,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_mask_is_live_and_keeps_the_bake)
   MaterialPaintLayer *material = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
   material->material = source;
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*material);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*material);
   bake->size = size;
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(
       *ma, *material, channel, add_solid_image("MaskedBakeColor", size, 0, 255, 0, 255)));
@@ -6443,7 +6443,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_paint_correction_opacity_is_live
   MaterialPaintLayer *material = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Material", nullptr, PaintLayerPlace::Above);
   material->material = source;
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*material);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*material);
   bake->size = size;
   bake->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(
@@ -9455,7 +9455,7 @@ static void c6_bake_row_now(Main &bmain, Material &ma, MaterialPaintLayer &row, 
   ASSERT_TRUE(BKE_paint_layers_bake_mode_set(ma, row, MA_PAINT_LAYER_BAKE_ALWAYS));
   ASSERT_TRUE(BKE_paint_layers_bake_size_set(ma, row, size));
   bool changed = false;
-  BKE_paint_layers_bake_ensure(bmain, ma, &changed);
+  BKE_paint_layers_bake_plan_run(bmain, ma, &changed);
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(ma, row));
 }
 
@@ -9839,7 +9839,7 @@ TEST_F(PaintLayersGraphEvalTest, auto_baked_folder_matches_live)
 
 /**
  * 4B.4: a Stack (content) correction folder is gated into the AUTO bake cycle exactly like a Layer
- * folder (#BKE_paint_layers_bake_ensure now walks #BKE_paint_layers_flatten_all), and its bake
+ * folder (#BKE_paint_layers_bake_plan_run now walks #BKE_paint_layers_flatten_all), and its bake
  * substitutes into the generated graph the same way (#row_is_substituted is role-agnostic): the
  * graph read before the bake (live) and after the bake job commits (baked, through the generator's
  * substitution) must agree, mirroring #auto_baked_folder_matches_live for a Layer folder.
@@ -12213,3 +12213,4 @@ TEST_F(PaintLayersGraphEvalTest, mesh_map_atlas_equal_size_reads_the_texel_direc
 }
 
 }  // namespace blender::bke::tests
+

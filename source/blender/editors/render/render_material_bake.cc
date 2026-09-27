@@ -2267,6 +2267,14 @@ static void rebake_start(Main &bmain,
   if (wm == nullptr || targets.is_empty()) {
     return;
   }
+  /* A layered \a ma is having its own maps re-baked: stamp the outstanding mark before the worker
+   * can run, so Material.paint_layers_is_stale does not read fresh while it writes. A plain source
+   * material's job is keyed on \a ma, and any layered material that reads it as a row's source is
+   * handled by the caller that owns that layered description (or by the layer scan in
+   * #paint_layers_bake_jobs_in_flight). */
+  if (paint_layers_is_layered(ma)) {
+    BKE_paint_layers_bake_scheduled_set(ma, true);
+  }
   {
     std::lock_guard lock(g_bake_cache_mutex);
     g_image_rebake_started_hash.add_overwrite(ma.id.session_uid, current_hash);
@@ -2361,6 +2369,10 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
                     ma.id.name + 2,
                     row->name);
     const uint64_t source_hash = material_bake_source_node_tree_hash(*row->material);
+    /* This row's bake is now outstanding for the layered \a ma: stamp it before the worker can run,
+     * so Material.paint_layers_is_stale never reads fresh while the map is being rendered. The job
+     * is keyed on the row's *source* material, so the mark cannot come from `wmJob` state. */
+    BKE_paint_layers_bake_scheduled_set(ma, true);
     const MaterialBakeToImagesResult due_result = material_bake_to_images(bmain, wm, win, params);
     if (due_result.ok) {
       /* The maps just handed over are the source's; record the state this job renders so the
@@ -2538,9 +2550,14 @@ uint64_t custom_bake_key(const uint32_t session_uid, const bUUID &marker)
   return h;
 }
 
-Set<uint64_t> &custom_bake_active()
+/** Active Custom bake jobs by their #custom_bake_key, each holding the owning layered material's
+ * `ID::session_uid`. A material can have several Custom rows rendering at once, and the #wmJob's
+ * owner is a throw-away host material in a private #Main, so the session_uid recorded here is the
+ * only thing that can answer "is a Custom row of \a ma still rendering?" --
+ * #material_bake_custom_in_flight, reached by the paint-layer bake gate. */
+Map<uint64_t, uint32_t> &custom_bake_active()
 {
-  static Set<uint64_t> active;
+  static Map<uint64_t, uint32_t> active;
   return active;
 }
 
@@ -2802,8 +2819,19 @@ void custom_bake_wm_end(void *customdata)
 void custom_bake_wm_free(void *customdata)
 {
   CustomBakeJob *job = static_cast<CustomBakeJob *>(customdata);
-  custom_bake_active().remove(custom_bake_key(job->owner_session_uid, job->marker));
+  const uint32_t owner_session_uid = job->owner_session_uid;
+  custom_bake_active().remove(custom_bake_key(owner_session_uid, job->marker));
   custom_bake_job_free(job);
+  /* Always runs, success or #WM_jobs_stop_all_from_owner cancel alike: settle whichever layered
+   * material was only waiting on this Custom row, exactly like #paint_layers_bake_free does for the
+   * heavy job. The job is already out of #custom_bake_active above, so
+   * #paint_layers_bake_jobs_in_flight no longer counts it -- no exclusion is needed. #G_MAIN rather
+   * than a parameter: `wmJob` free callbacks take only their own `customdata`. */
+  if (Main *bmain = G_MAIN) {
+    if (wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first)) {
+      paint_layers_bake_scheduled_settle(*bmain, *wm, nullptr, WM_JOB_TYPE_ANY);
+    }
+  }
 }
 
 }  // namespace
@@ -2849,8 +2877,13 @@ void material_bake_custom_rows_ensure(Main &bmain, Material &ma)
     }
     wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first);
     const bool heavy = size >= PAINT_LAYERS_HEAVY_BAKE_SIZE && wm != nullptr;
-    custom_bake_active().add(key);
+    custom_bake_active().add(key, ma.id.session_uid);
     if (heavy) {
+      /* The editor now has an outstanding bake for \a ma: stamp it before the job can run, so
+       * Material.paint_layers_is_stale never reads fresh while the worker is writing. #ma is the
+       * layered owner, while the job below is keyed on the throw-away host, which is exactly why
+       * the mark cannot be derived from `wmJob` state and had to be set here. */
+      BKE_paint_layers_bake_scheduled_set(ma, true);
       wmWindow *win = static_cast<wmWindow *>(wm->windows.first);
       wmJob *wm_job = WM_jobs_get(wm,
                                   win,
@@ -2872,6 +2905,16 @@ void material_bake_custom_rows_ensure(Main &bmain, Material &ma)
       custom_bake_job_free(job);
     }
   }
+}
+
+bool material_bake_custom_in_flight(const Material &ma)
+{
+  for (const auto &item : custom_bake_active().items()) {
+    if (item.value == ma.id.session_uid) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** \} */

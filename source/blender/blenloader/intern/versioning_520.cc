@@ -1189,17 +1189,17 @@ static void do_versions_paint_layer_channel_settings(MaterialPaintLayer &layer,
     }
   }
   for (MaterialPaintLayer &child :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.children))
+       layer.children)
   {
     do_versions_paint_layer_channel_settings(child, migrate_records);
   }
   for (MaterialPaintLayer &effect :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.effects))
+       layer.effects)
   {
     do_versions_paint_layer_channel_settings(effect, migrate_records);
   }
   for (MaterialPaintLayer &mask_item :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
+       layer.mask_stack)
   {
     do_versions_paint_layer_channel_settings(mask_item, migrate_records);
   }
@@ -1218,7 +1218,7 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
         fd->filesdna, "MaterialPaintLayerChannel", "int8_t", "blend");
     for (Material &ma : bmain->materials) {
       for (MaterialPaintLayer &layer :
-           *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&ma.paint_layers))
+           ma.paint_layers)
       {
         do_versions_paint_layer_channel_settings(layer, migrate_records);
       }

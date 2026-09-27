@@ -112,29 +112,35 @@ static void material_init_data(ID *id)
  * walk and serialize it.
  * \{ */
 
+/**
+ * Call \a fn for each of a layer's three sub-lists, in the fixed order the file writer, the readers
+ * and the ID walk rely on: #MaterialPaintLayer::children, then #effects, then #mask_stack. This is
+ * the one place the traversal order lives, so the serialization order cannot drift between passes.
+ */
+template<typename Fn>
+static void material_paint_layer_foreach_sublist(MaterialPaintLayer &layer, Fn &&fn)
+{
+  fn(layer.children);
+  fn(layer.effects);
+  fn(layer.mask_stack);
+}
+template<typename Fn>
+static void material_paint_layer_foreach_sublist(const MaterialPaintLayer &layer, Fn &&fn)
+{
+  fn(layer.children);
+  fn(layer.effects);
+  fn(layer.mask_stack);
+}
+
 void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
 {
-  for (MaterialPaintLayer *child = static_cast<MaterialPaintLayer *>(layer->children.first);
-       child != nullptr;)
-  {
-    MaterialPaintLayer *next = child->next;
-    BKE_material_paint_layer_free(child);
-    child = next;
-  }
-  for (MaterialPaintLayer *effect = static_cast<MaterialPaintLayer *>(layer->effects.first);
-       effect != nullptr;)
-  {
-    MaterialPaintLayer *next = effect->next;
-    BKE_material_paint_layer_free(effect);
-    effect = next;
-  }
-  for (MaterialPaintLayer *mask_item = static_cast<MaterialPaintLayer *>(layer->mask_stack.first);
-       mask_item != nullptr;)
-  {
-    MaterialPaintLayer *next = mask_item->next;
-    BKE_material_paint_layer_free(mask_item);
-    mask_item = next;
-  }
+  material_paint_layer_foreach_sublist(*layer, [](ListBaseT<MaterialPaintLayer> &list) {
+    /* Free every element of the sub-list. The mutable iterator caches the next pointer, so freeing
+     * the current element is safe; the list itself is discarded with \a layer. */
+    for (MaterialPaintLayer &item : list.items_mutable()) {
+      BKE_material_paint_layer_free(&item);
+    }
+  });
 
   MEM_SAFE_DELETE(layer->channels);
   layer->channels_num = 0;
@@ -153,12 +159,8 @@ static void material_paint_layers_free(Material &material)
   BKE_paint_layers_bake_runtime_free(material);
   BKE_paint_layers_sampler_state_free(material);
   BKE_paint_layers_generate_runtime_free(material);
-  for (MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(material.paint_layers.first);
-       layer != nullptr;)
-  {
-    MaterialPaintLayer *next = layer->next;
-    BKE_material_paint_layer_free(layer);
-    layer = next;
+  for (MaterialPaintLayer &layer : material.paint_layers.items_mutable()) {
+    BKE_material_paint_layer_free(&layer);
   }
   material.paint_layers = {nullptr, nullptr};
   BKE_mesh_maps_material_slots_free(material);
@@ -177,21 +179,27 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
   dst->bake = nullptr;
   dst->properties = nullptr;
 
-  for (const MaterialPaintLayer &child :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&src.children))
-  {
-    BLI_addtail(&dst->children, material_paint_layer_copy(child, flag));
-  }
-  for (const MaterialPaintLayer &effect :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&src.effects))
-  {
-    BLI_addtail(&dst->effects, material_paint_layer_copy(effect, flag));
-  }
-  for (const MaterialPaintLayer &mask_item :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&src.mask_stack))
-  {
-    BLI_addtail(&dst->mask_stack, material_paint_layer_copy(mask_item, flag));
-  }
+  int sublist_index = 0;
+  material_paint_layer_foreach_sublist(
+      src, [&](const ListBaseT<MaterialPaintLayer> &src_list) {
+        ListBaseT<MaterialPaintLayer> *dst_list = nullptr;
+        switch (sublist_index++) {
+          case 0:
+            dst_list = &dst->children;
+            break;
+          case 1:
+            dst_list = &dst->effects;
+            break;
+          case 2:
+            dst_list = &dst->mask_stack;
+            break;
+          default:
+            return;
+        }
+        for (const MaterialPaintLayer &item : src_list) {
+          BLI_addtail(dst_list, material_paint_layer_copy(item, flag));
+        }
+      });
 
   if (src.channels != nullptr && src.channels_num > 0) {
     dst->channels = static_cast<MaterialPaintLayerChannel *>(MEM_dupalloc(src.channels));
@@ -227,49 +235,21 @@ static void material_paint_layer_foreach_id(MaterialPaintLayer *layer, LibraryFo
         BKE_lib_query_idpropertiesForeachIDLink_callback(prop, data);
       }));
 
-  for (MaterialPaintLayer &child :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer->children))
-  {
-    BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&child, data));
-  }
-  for (MaterialPaintLayer &effect :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer->effects))
-  {
-    BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&effect, data));
-  }
-  for (MaterialPaintLayer &mask_item :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer->mask_stack))
-  {
-    BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data,
-                                            material_paint_layer_foreach_id(&mask_item, data));
-  }
+  material_paint_layer_foreach_sublist(*layer, [&](ListBaseT<MaterialPaintLayer> &list) {
+    for (MaterialPaintLayer &item : list) {
+      BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&item, data));
+    }
+  });
 }
 
 static void material_paint_layer_blend_write(BlendWriter *writer, const MaterialPaintLayer &layer)
 {
-  writer->write_struct_list(
-      reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children));
-  for (const MaterialPaintLayer &child :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
-  {
-    material_paint_layer_blend_write(writer, child);
-  }
-
-  writer->write_struct_list(
-      reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.effects));
-  for (const MaterialPaintLayer &effect :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.effects))
-  {
-    material_paint_layer_blend_write(writer, effect);
-  }
-
-  writer->write_struct_list(
-      reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack));
-  for (const MaterialPaintLayer &mask_item :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
-  {
-    material_paint_layer_blend_write(writer, mask_item);
-  }
+  material_paint_layer_foreach_sublist(layer, [&](const ListBaseT<MaterialPaintLayer> &list) {
+    writer->write_struct_list(&list);
+    for (const MaterialPaintLayer &item : list) {
+      material_paint_layer_blend_write(writer, item);
+    }
+  });
 
   if (layer.channels != nullptr && layer.channels_num > 0) {
     writer->write_struct_array(layer.channels_num, layer.channels);
@@ -284,26 +264,12 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
 
 static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPaintLayer &layer)
 {
-  BLO_read_struct_list(reader, MaterialPaintLayer, &layer.children);
-  for (MaterialPaintLayer &child :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.children))
-  {
-    material_paint_layer_blend_read(reader, child);
-  }
-
-  BLO_read_struct_list(reader, MaterialPaintLayer, &layer.effects);
-  for (MaterialPaintLayer &effect :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.effects))
-  {
-    material_paint_layer_blend_read(reader, effect);
-  }
-
-  BLO_read_struct_list(reader, MaterialPaintLayer, &layer.mask_stack);
-  for (MaterialPaintLayer &mask_item :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
-  {
-    material_paint_layer_blend_read(reader, mask_item);
-  }
+  material_paint_layer_foreach_sublist(layer, [&](ListBaseT<MaterialPaintLayer> &list) {
+    BLO_read_struct_list(reader, MaterialPaintLayer, &list);
+    for (MaterialPaintLayer &item : list) {
+      material_paint_layer_blend_read(reader, item);
+    }
+  });
 
   if (layer.channels != nullptr) {
     BLO_read_array_and_validate_size(reader, &layer.channels, &layer.channels_num);
@@ -320,11 +286,8 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
 
 static void material_paint_layers_blend_write(BlendWriter *writer, const Material &material)
 {
-  writer->write_struct_list(
-      reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&material.paint_layers));
-  for (const MaterialPaintLayer &layer :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&material.paint_layers))
-  {
+  writer->write_struct_list(&material.paint_layers);
+  for (const MaterialPaintLayer &layer : material.paint_layers) {
     material_paint_layer_blend_write(writer, layer);
   }
   writer->write_struct_list(
@@ -342,9 +305,7 @@ static void material_paint_layers_blend_read(BlendDataReader *reader, Material &
                                    MA_PAINT_LAYERS_MATERIAL_BAKE_DUE |
                                    MA_PAINT_LAYERS_BAKE_SCHEDULED);
   BLO_read_struct_list(reader, MaterialPaintLayer, &material.paint_layers);
-  for (MaterialPaintLayer &layer :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&material.paint_layers))
-  {
+  for (MaterialPaintLayer &layer : material.paint_layers) {
     material_paint_layer_blend_read(reader, layer);
   }
   BLO_read_struct_list(reader, MaterialMeshMapSlot, &material.mesh_map_slots);
@@ -402,9 +363,7 @@ static void material_copy_data(Main *bmain,
 
   /* The description is owned sub-data: never share the source's list or its elements. */
   material_dst->paint_layers = {nullptr, nullptr};
-  for (const MaterialPaintLayer &layer :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&material_src->paint_layers))
-  {
+  for (const MaterialPaintLayer &layer : material_src->paint_layers) {
     BLI_addtail(&material_dst->paint_layers, material_paint_layer_copy(layer, flag_subdata));
   }
   /* The generated tree is owned 1:1 as well: the copy gets its own deep copy (or shares the
@@ -483,9 +442,7 @@ static void material_foreach_id(ID *id, LibraryForeachIDData *data)
    * in #nodetree; walking it keeps it alive across purge and remaps it on file read. */
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->paint_layers_tree, IDWALK_CB_USER);
 
-  for (MaterialPaintLayer &layer :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&material->paint_layers))
-  {
+  for (MaterialPaintLayer &layer : material->paint_layers) {
     BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&layer, data));
   }
 

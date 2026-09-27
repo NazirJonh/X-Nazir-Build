@@ -17,7 +17,10 @@
 #include "BLI_set.hh"
 #include "BLI_time.h"
 
+#include "MEM_guardedalloc.h"
+
 #include "BKE_context.hh"
+#include "BKE_callbacks.hh"
 #include "BKE_global.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
@@ -190,6 +193,11 @@ bool paint_layers_bake_jobs_in_flight(const wmWindowManager &wm,
   {
     return true;
   }
+  /* A Custom row's job is keyed on a throw-away host material, so neither test above can see it;
+   * only the editor-static active set can. */
+  if (material_bake_custom_in_flight(ma)) {
+    return true;
+  }
   if (!paint_layers_is_layered(ma)) {
     return false;
   }
@@ -209,7 +217,62 @@ bool paint_layers_bake_jobs_in_flight(const wmWindowManager &wm,
   return false;
 }
 
+/**
+ * Clear a #MA_PAINT_LAYERS_BAKE_SCHEDULED mark that a memfile-undo snapshot restored without the
+ * editor state it stood for.
+ *
+ * The flag lives in #Material::paint_layers_flag, so Ctrl+Z restores it from the snapshot; the
+ * process-static debounce timer and the `wmJob`s it may have stood for are *not* part of the
+ * snapshot. A mark that comes back is a lie unless something is still running: keep it exactly when
+ * \a ma has a bake job in flight, or it sits in a live debounce window (an armed timer and a pending
+ * uid). Everything else is cleared here, on the main thread, so `Material.paint_layers_is_stale`
+ * never reads "busy" for a job that no longer exists.
+ *
+ * This is deliberately the inverse of the arm/settle pair: arming sets the flag before any job
+ * exists, so on a normal update the pending set proves the wait is still real; only an undo can
+ * resurrect the flag with no pending entry and no job, which is what this callback catches.
+ */
+void paint_layers_bake_undo_post(Main *bmain,
+                                 PointerRNA ** /*pointers*/,
+                                 const int /*pointers_num*/,
+                                 void * /*arg*/)
+{
+  if (bmain == nullptr) {
+    return;
+  }
+  wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first);
+  const bool debounce_armed = paint_layers_bake_debounce_timer_handle() != nullptr;
+  for (Material &ma : bmain->materials) {
+    if (!BKE_paint_layers_bake_scheduled_get(ma)) {
+      continue;
+    }
+    if (wm != nullptr && paint_layers_bake_jobs_in_flight(*wm, ma)) {
+      continue;
+    }
+    if (debounce_armed && paint_layers_bake_debounce_pending().contains(ma.id.session_uid)) {
+      continue;
+    }
+    BKE_paint_layers_bake_scheduled_set(ma, false);
+  }
+}
+
 }  // namespace
+
+/**
+ * Register the memfile-undo cleanup once, from the editor's startup init
+ * (#ED_operatortypes_paint, after #BKE_callback_global_init), so the callback exists before the
+ * first scene update and for the whole lifetime of the callback system. The store is heap-owned by
+ * the callback system (`alloc = true`), so it is freed by #BKE_callback_global_finalize and no
+ * static object needs to outlive it.
+ */
+void paint_layers_bake_undo_callback_init()
+{
+  bCallbackFuncStore *store = MEM_new<bCallbackFuncStore>(__func__);
+  store->alloc = true;
+  store->arg = nullptr;
+  store->func = paint_layers_bake_undo_post;
+  BKE_callback_add(store, BKE_CB_EVT_UNDO_POST);
+}
 
 void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bmain)
 {
@@ -267,6 +330,11 @@ void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bma
     WM_jobs_timer(wm_job, 0.2, NC_MATERIAL, NC_MATERIAL);
     WM_jobs_callbacks(wm_job, paint_layers_bake_start, nullptr, nullptr, paint_layers_bake_end);
     paint_layers_bake_active().add(ma.id.session_uid);
+    /* The editor now has an outstanding bake for \a ma: stamp it before the job can run, so
+     * Material.paint_layers_is_stale never reads fresh while the worker is writing. The debounce and
+     * "bake now" callers already stamped it; this covers the backstop sweep after a file load, which
+     * starts a heavy job that no arm preceded. */
+    BKE_paint_layers_bake_scheduled_set(ma, true);
     PL_DEBUG_PRINTF("paint layers bake: start kind=heavy material='%s' row='-' reason=stale\n",
                     ma.id.name + 2);
     WM_jobs_start(&wm, wm_job);
@@ -407,21 +475,6 @@ void paint_layers_bake_debounce_reset(wmWindowManager &wm)
     paint_layers_bake_debounce_timer_handle() = nullptr;
   }
   paint_layers_bake_debounce_pending().clear();
-}
-
-PaintLayersBakeGateAction paint_layers_bake_gate_decide(const bool stale,
-                                                        const bool is_invoke,
-                                                        const bool headless)
-{
-  /* Headless first: no timer, no `wmJob`, and no modal loop ever makes a background script's stale
-   * result fresh by itself, so refusing it here would only ever be a false refusal. */
-  if (headless) {
-    return PaintLayersBakeGateAction::Proceed;
-  }
-  if (!stale) {
-    return PaintLayersBakeGateAction::Proceed;
-  }
-  return is_invoke ? PaintLayersBakeGateAction::Wait : PaintLayersBakeGateAction::Refuse;
 }
 
 namespace {

@@ -318,6 +318,19 @@ void material_bake_images_rebake(Main &bmain, Material &ma, Span<Image *> images
 void material_bake_custom_rows_ensure(Main &bmain, Material &ma);
 
 /**
+ * Whether \a ma has a Custom row bake in flight right now.
+ *
+ * A Custom row's #wmJob is owned by a throw-away host material in a private #Main, not by \a ma, so
+ * `WM_jobs_test` keyed on \a ma cannot see it. The editor-static active set is the only witness,
+ * which is what this exposes to the paint-layer bake gate so
+ * #MA_PAINT_LAYERS_BAKE_SCHEDULED stays set while a Custom row is still rendering.
+ *
+ * Pure with respect to window-manager state -- the active set and a session_uid comparison -- so it
+ * needs no #wmWindowManager.
+ */
+bool material_bake_custom_in_flight(const Material &ma);
+
+/**
  * Create a target #Image for (\a material, \a channel) exactly as the bake does, linked back to the
  * material. Exposed for tests so the colorspace contract of a baked map can be checked without a
  * render; production reaches it through #material_bake_to_images.

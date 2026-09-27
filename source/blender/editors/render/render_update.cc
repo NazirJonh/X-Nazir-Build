@@ -176,6 +176,11 @@ void ED_render_scene_update(const DEGEditorUpdateContext *update_ctx, const bool
     {
       continue;
     }
+    /* The editor is about to start bakes for \a ma -- the row jobs below, or the source catch-up
+     * further down. Stamp the outstanding mark here, before either can start a worker, so
+     * Material.paint_layers_is_stale never reads fresh in between; the source-material jobs the
+     * catch-up starts are keyed on the source, not \a ma, and could not stamp it themselves. */
+    BKE_paint_layers_bake_scheduled_set(ma, true);
     ed::material_bake::material_bake_layered_rows_ensure(*bmain, ma);
     /* The source material of a row that just stopped being live had its automatic re-bakes
      * skipped while the row was active (#BKE_paint_layers_source_material_is_live); catch it up

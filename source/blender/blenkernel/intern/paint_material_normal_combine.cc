@@ -9,6 +9,7 @@
 #include "BKE_paint_material_composite.hh"
 
 #include "BKE_idprop.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
@@ -31,8 +32,9 @@ namespace blender {
 /** \name Normal Combine Group
  * \{ */
 
-/** Name of the shared Normal Combine group data-block. NOTE: do not translate. */
-static const char *NORMAL_COMBINE_TREE_NAME = "PBR Normal Combine";
+/** Name of the shared Normal Combine group data-block. The leading dot keeps it out of every ID
+ * picker and #Node Groups list (see #interface_template_id). NOTE: do not translate. */
+static const char *NORMAL_COMBINE_TREE_NAME = ".PBR Normal Combine";
 
 namespace {
 
@@ -114,6 +116,11 @@ static void normal_combine_range_map_set(bNode &node, const float scale, const f
 bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
 {
   if (bNodeTree *existing = normal_combine_group_find(bmain)) {
+    /* A file saved before the dot scheme carries the bare name; rename it in place. Found by
+     * marker, so the name never decides which tree this is. */
+    if (!STREQ(existing->id.name + 2, NORMAL_COMBINE_TREE_NAME)) {
+      BKE_id_rename(bmain, existing->id, NORMAL_COMBINE_TREE_NAME);
+    }
     return existing;
   }
 

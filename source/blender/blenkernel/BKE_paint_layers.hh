@@ -823,7 +823,7 @@ bool BKE_paint_layers_bake_changed_region(const Material &ma,
  * the heavy map work is meant to move to a wmJob later. \a r_changed reports whether any row was
  * re-baked, so the caller knows to rebuild the tree.
  */
-bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed = nullptr);
+bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed = nullptr);
 
 /**
  * The generated-node weight above which an AUTO row is baked instead of evaluated live: the number
@@ -1204,10 +1204,48 @@ void BKE_paint_layers_bake_scheduled_set(Material &ma, bool scheduled);
 bool BKE_paint_layers_is_stale(const Material &ma);
 
 /**
+ * What a caller wanting a paint-layer bake *result* -- a bake/export/"Apply" operator, or the RNA
+ * `Material.paint_layers.composite()` this mirrors -- should do about a stale one, from three
+ * things it already knows about itself: whether the result it read is stale
+ * (#BKE_paint_layers_is_stale, or `ED_paint_layers_stale_or_pending` where a #wmWindowManager is at
+ * hand and the `wmJob`-only window matters), whether it was reached through `invoke` (a person, who
+ * can wait a moment) rather than `exec`/an RNA function (a script, which cannot), and whether it is
+ * running headless at all (\a headless, `wm == nullptr`).
+ *
+ * Headless always resolves to #Proceed regardless of \a stale: #material_changed's headless branch
+ * already runs every bake synchronously before this could ever be asked, so \a stale is normally
+ * false there anyway, and there is no timer, no `wmJob`, and no modal loop for a background script
+ * to ever become fresh through -- refusing it would only ever be a false refusal, never a real
+ * wait. This is the one rule #BKE_paint_layers_is_stale's own doc-comment leaves to the caller: it
+ * has no idea whether it is being asked from a script or a person, headless or not.
+ *
+ * A person (`invoke`) gets #Wait: go modal on a short `wmTimer`, matching the accepted UI decision
+ * ("Waiting for paint layers bake..."), and re-ask once it ticks. A script (`exec`, or the RNA
+ * function) gets #Refuse: report the error named in `Material.paint_layers_is_stale`'s own
+ * doc-comment and stop, since a script cannot go modal at all.
+ *
+ * Pure -- three booleans in, one of three outcomes out -- so the one behavioral rule every result
+ * consumer must share (headless first, then invoke-vs-exec) lives in one place, shared by the RNA
+ * layer and the editor wrappers rather than duplicated.
+ */
+enum class PaintLayersBakeGateAction {
+  /** Nothing is stale, or nothing can be done about it here (headless): go ahead now. */
+  Proceed,
+  /** `invoke` reached a stale result: go modal and re-ask once the bake has had time to run. */
+  Wait,
+  /** `exec`/RNA reached a stale result and cannot go modal: report and stop. */
+  Refuse,
+};
+
+PaintLayersBakeGateAction BKE_paint_layers_bake_gate_decide(bool stale,
+                                                             bool is_invoke,
+                                                             bool headless);
+
+/**
  * Allocate \a layer's bake cache if it has none and return it, without marking anything: the caller
  * owns the edit (mode, size, a baked map) and tags the description itself.
  */
-MaterialPaintLayerBake *BKE_paint_layers_bake_ensure(MaterialPaintLayer &layer);
+MaterialPaintLayerBake *BKE_paint_layers_bake_struct_ensure(MaterialPaintLayer &layer);
 
 /** Drop \a layer's bake cache and mark the generated tree stale. */
 bool BKE_paint_layers_bake_clear(Material &ma, MaterialPaintLayer &layer);
@@ -1337,3 +1375,4 @@ bool BKE_paint_layers_custom_channel_add(Main &bmain,
                                          eMaterialPaintChannel channel);
 
 }  // namespace blender
+

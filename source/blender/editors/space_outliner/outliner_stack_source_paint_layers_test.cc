@@ -510,7 +510,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_move_into_non_folder_groups_the_
   ASSERT_GE(b, 0);
   ASSERT_TRUE(paint_layers_edit_move(*ma, b, a, StackMovePlace::Into, nullptr));
   EXPECT_EQ(BLI_listbase_count(&ma->paint_layers), 1);
-  MaterialPaintLayer *folder = static_cast<MaterialPaintLayer *>(ma->paint_layers.first);
+  MaterialPaintLayer *folder =
+      ma->paint_layers.is_empty() ? nullptr : &*ma->paint_layers.begin();
   EXPECT_TRUE(BKE_paint_layers_is_folder(*folder));
   EXPECT_EQ(BLI_listbase_count(&folder->children), 2);
 }

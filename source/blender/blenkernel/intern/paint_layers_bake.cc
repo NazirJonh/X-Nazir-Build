@@ -76,12 +76,12 @@ bool BKE_paint_layers_bake_mode_set(Material &ma, MaterialPaintLayer &layer, con
   {
     return false;
   }
-  BKE_paint_layers_bake_ensure(layer)->mode = int8_t(mode);
+  BKE_paint_layers_bake_struct_ensure(layer)->mode = int8_t(mode);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
 
-MaterialPaintLayerBake *BKE_paint_layers_bake_ensure(MaterialPaintLayer &layer)
+MaterialPaintLayerBake *BKE_paint_layers_bake_struct_ensure(MaterialPaintLayer &layer)
 {
   if (layer.bake == nullptr) {
     layer.bake = MEM_new<MaterialPaintLayerBake>(__func__);
@@ -99,7 +99,7 @@ bool BKE_paint_layers_bake_size_set(Material &ma, MaterialPaintLayer &layer, con
   if (size <= 0 || paint_layer_owner_list(&ma.paint_layers, &layer) == nullptr) {
     return false;
   }
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
   bake->size = size;
   /* A different resolution invalidates whatever was baked before it. */
   bake->hash[0] = 0;
@@ -110,7 +110,7 @@ bool BKE_paint_layers_bake_size_set(Material &ma, MaterialPaintLayer &layer, con
 
 void BKE_paint_layers_bake_request(MaterialPaintLayer &layer)
 {
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
   bake->hash[0] = 0;
   bake->hash[1] = 0;
 }
@@ -170,7 +170,7 @@ bool BKE_paint_layers_bake_set_map(Material &ma,
   {
     return false;
   }
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
   Image **slot = (channel >= 0) ? &bake->images[channel] : &bake->coverage;
   if (*slot == image) {
     return true;
@@ -210,7 +210,7 @@ void BKE_paint_layers_material_bake_apply(Main &bmain,
   {
     return;
   }
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
   bake->size = size;
   Image *alpha_coverage = nullptr;
   for (const int64_t i : channels.index_range()) {
@@ -346,17 +346,17 @@ static void bake_collect_source_images(const MaterialPaintLayer &layer, Vector<I
     add(layer.channels[i].image);
   }
   for (const MaterialPaintLayer &effect :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.effects))
+       layer.effects)
   {
     bake_collect_source_images(effect, r_images);
   }
   for (const MaterialPaintLayer &mask_item :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
+       layer.mask_stack)
   {
     bake_collect_source_images(mask_item, r_images);
   }
   for (const MaterialPaintLayer &child :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
+       layer.children)
   {
     bake_collect_source_images(child, r_images);
   }
@@ -708,17 +708,17 @@ static int paint_layer_subtree_weight(const MaterialPaintLayer &layer)
 {
   int weight = 4 + layer.channels_num * 6;
   for (const MaterialPaintLayer &effect :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.effects))
+       layer.effects)
   {
     weight += 4 + paint_layer_subtree_weight(effect) / 2;
   }
   for (const MaterialPaintLayer &mask_item :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
+       layer.mask_stack)
   {
     weight += 4 + paint_layer_subtree_weight(mask_item) / 2;
   }
   for (const MaterialPaintLayer &child :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
+       layer.children)
   {
     weight += 8 + paint_layer_subtree_weight(child);
   }
@@ -765,7 +765,7 @@ static void paint_layer_bake_structure_free(Main &bmain, Material &ma, MaterialP
   MEM_SAFE_DELETE(layer.bake);
 }
 
-bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
+bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
 {
   bool changed = false;
   /* An AUTO row that no longer passes the heavy gate is cheaper live and never re-bakes: the bake
@@ -855,7 +855,7 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
         }
         /* Every gate has passed and this folder is about to render: only here is it safe to
          * allocate the bake structure. */
-        bake = BKE_paint_layers_bake_ensure(layer);
+        bake = BKE_paint_layers_bake_struct_ensure(layer);
       }
       else {
         /* A light non-folder row never gets a bake structure: allocating one before it is about
@@ -904,7 +904,7 @@ bool BKE_paint_layers_bake_ensure(Main &bmain, Material &ma, bool *r_changed)
         }
         /* Every gate has passed and this row renders right now: only here is it safe to
          * allocate the bake structure. */
-        bake = BKE_paint_layers_bake_ensure(layer);
+        bake = BKE_paint_layers_bake_struct_ensure(layer);
       }
 
       PL_DEBUG_PRINTF("paint layers bake: start kind=sync material='%s' row='%s' reason=stale\n",
@@ -1344,11 +1344,11 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
   }
   Vector<const MaterialPaintLayer *> layers;
   /* A Stack correction/mask folder is gated exactly like a Layer folder (see
-   * #BKE_paint_layers_bake_ensure), so it must be seen by the same heavy-pending scan. */
+   * #BKE_paint_layers_bake_plan_run), so it must be seen by the same heavy-pending scan. */
   BKE_paint_layers_flatten_all(ma, layers);
   for (const MaterialPaintLayer *layer : layers) {
     /* A leaf effect or mask item has no bake of its own to gate: only a Layer row and a Stack
-     * correction/mask folder do (see #BKE_paint_layers_bake_ensure). */
+     * correction/mask folder do (see #BKE_paint_layers_bake_plan_run). */
     if (layer->role != MA_PAINT_LAYER_ROLE_LAYER && !BKE_paint_layers_is_folder(*layer)) {
       continue;
     }
@@ -1368,7 +1368,7 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
       if (layer->bake != nullptr && BKE_paint_layers_bake_is_valid(ma, *layer)) {
         continue;
       }
-      /* See #BKE_paint_layers_bake_ensure: a bake-less Pass Through folder is never queued. */
+      /* See #BKE_paint_layers_bake_plan_run: a bake-less Pass Through folder is never queued. */
       if (layer->bake == nullptr && BKE_paint_layers_folder_is_pass_through(ma, *layer)) {
         continue;
       }
@@ -1409,6 +1409,21 @@ bool BKE_paint_layers_is_stale(const Material &ma)
   return BKE_paint_layers_bake_heavy_pending(ma);
 }
 
+PaintLayersBakeGateAction BKE_paint_layers_bake_gate_decide(const bool stale,
+                                                            const bool is_invoke,
+                                                            const bool headless)
+{
+  /* Headless first: no timer, no `wmJob`, and no modal loop ever makes a background script's stale
+   * result fresh by itself, so refusing it here would only ever be a false refusal. */
+  if (headless) {
+    return PaintLayersBakeGateAction::Proceed;
+  }
+  if (!stale) {
+    return PaintLayersBakeGateAction::Proceed;
+  }
+  return is_invoke ? PaintLayersBakeGateAction::Wait : PaintLayersBakeGateAction::Refuse;
+}
+
 struct PaintLayersBakeJob {
   Main *bmain = nullptr;
   Material *material = nullptr;
@@ -1436,7 +1451,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
     return nullptr;
   }
   Vector<const MaterialPaintLayer *> layers;
-  /* Mirrors #BKE_paint_layers_bake_ensure's AUTO cycle: a heavy Stack correction/mask folder is
+  /* Mirrors #BKE_paint_layers_bake_plan_run's AUTO cycle: a heavy Stack correction/mask folder is
    * queued into this job exactly like a heavy Layer folder. */
   BKE_paint_layers_flatten_all(ma, layers);
 
@@ -1447,7 +1462,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
 
   for (const MaterialPaintLayer *layer : layers) {
     /* A leaf effect or mask item has no bake of its own to gate: only a Layer row and a Stack
-     * correction/mask folder do (see #BKE_paint_layers_bake_ensure). */
+     * correction/mask folder do (see #BKE_paint_layers_bake_plan_run). */
     if (layer->role != MA_PAINT_LAYER_ROLE_LAYER && !BKE_paint_layers_is_folder(*layer)) {
       continue;
     }
@@ -1467,7 +1482,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
       if (layer->bake != nullptr && BKE_paint_layers_bake_is_valid(ma, *layer)) {
         continue;
       }
-      /* See #BKE_paint_layers_bake_ensure: a bake-less Pass Through folder is never queued. */
+      /* See #BKE_paint_layers_bake_plan_run: a bake-less Pass Through folder is never queued. */
       if (layer->bake == nullptr && BKE_paint_layers_folder_is_pass_through(ma, *layer)) {
         continue;
       }
@@ -1503,7 +1518,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
     /* Every gate has passed and this row is queued right now: only here is it safe to allocate
      * the bake structure (a folder without one gets it here too). */
     MaterialPaintLayer &mutable_layer = *const_cast<MaterialPaintLayer *>(layer);
-    BKE_paint_layers_bake_ensure(mutable_layer);
+    BKE_paint_layers_bake_struct_ensure(mutable_layer);
     PaintLayersBakeJob::RowResult row;
     row.marker = mutable_layer.marker;
     row.size = size;
@@ -1623,7 +1638,7 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
   }
   /* The queue is drained once no baked row is invalid any more, exactly as the synchronous
-   * planner decides it (role-agnostic, see #BKE_paint_layers_bake_ensure). */
+   * planner decides it (role-agnostic, see #BKE_paint_layers_bake_plan_run). */
   bool pending = false;
   Vector<const MaterialPaintLayer *> layers;
   BKE_paint_layers_flatten_all(*ma, layers);
@@ -2356,17 +2371,17 @@ static uint64_t bake_hash_layer(uint64_t h,
    * interleaved hashes differently from before the split, so its bake is invalidated once and
    * re-rendered; that is expected and settles after one re-bake. */
   for (const MaterialPaintLayer &effect :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.effects))
+       layer.effects)
   {
     h = bake_hash_layer(h, ma, effect, true);
   }
   for (const MaterialPaintLayer &mask_item :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
+       layer.mask_stack)
   {
     h = bake_hash_layer(h, ma, mask_item, true);
   }
   for (const MaterialPaintLayer &child :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&layer.children))
+       layer.children)
   {
     h = bake_hash_layer(h, ma, child, true);
   }
@@ -2419,3 +2434,4 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
   return true;
 }
 }  // namespace blender
+

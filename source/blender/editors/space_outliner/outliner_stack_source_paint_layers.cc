@@ -115,19 +115,20 @@ int paint_stack_selected_channel(const StackReadContext &ctx)
  * The list whose direct members include \a target -- the top-level list, a folder's children or a
  * layer's corrections -- or null when \a target is not part of \a list.
  */
-ListBase *layers_owner_list(ListBase *list, const MaterialPaintLayer *target)
+ListBaseT<MaterialPaintLayer> *layers_owner_list(ListBaseT<MaterialPaintLayer> *list,
+                                                 const MaterialPaintLayer *target)
 {
-  for (MaterialPaintLayer &layer : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(list)) {
+  for (MaterialPaintLayer &layer : *list) {
     if (&layer == target) {
       return list;
     }
-    if (ListBase *found = layers_owner_list(&layer.children, target)) {
+    if (ListBaseT<MaterialPaintLayer> *found = layers_owner_list(&layer.children, target)) {
       return found;
     }
-    if (ListBase *found = layers_owner_list(&layer.effects, target)) {
+    if (ListBaseT<MaterialPaintLayer> *found = layers_owner_list(&layer.effects, target)) {
       return found;
     }
-    if (ListBase *found = layers_owner_list(&layer.mask_stack, target)) {
+    if (ListBaseT<MaterialPaintLayer> *found = layers_owner_list(&layer.mask_stack, target)) {
       return found;
     }
   }
@@ -135,26 +136,21 @@ ListBase *layers_owner_list(ListBase *list, const MaterialPaintLayer *target)
 }
 
 /** The layer whose children or corrections directly hold \a target, or null at the top level. */
-MaterialPaintLayer *layers_parent_layer(ListBase &list, const MaterialPaintLayer *target)
+MaterialPaintLayer *layers_parent_layer(ListBaseT<MaterialPaintLayer> &list,
+                                        const MaterialPaintLayer *target)
 {
-  for (MaterialPaintLayer &layer : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&list)) {
-    for (const MaterialPaintLayer &child :
-         *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.children))
-    {
+  for (MaterialPaintLayer &layer : list) {
+    for (const MaterialPaintLayer &child : layer.children) {
       if (&child == target) {
         return &layer;
       }
     }
-    for (const MaterialPaintLayer &effect :
-         *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.effects))
-    {
+    for (const MaterialPaintLayer &effect : layer.effects) {
       if (&effect == target) {
         return &layer;
       }
     }
-    for (const MaterialPaintLayer &mask_item :
-         *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&layer.mask_stack))
-    {
+    for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
       if (&mask_item == target) {
         return &layer;
       }
@@ -177,11 +173,11 @@ MaterialPaintLayer *layers_parent_layer(ListBase &list, const MaterialPaintLayer
  * order the rows are built: a row, then its content corrections, its mask corrections, then its
  * children.
  */
-int layers_ordinal_of(const ListBase &list, const MaterialPaintLayer *target, int &r_index)
+int layers_ordinal_of(const ListBaseT<MaterialPaintLayer> &list,
+                      const MaterialPaintLayer *target,
+                      int &r_index)
 {
-  for (const MaterialPaintLayer &layer :
-       *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
-  {
+  for (const MaterialPaintLayer &layer : list) {
     if (&layer == target) {
       return r_index;
     }
@@ -434,7 +430,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
   /* Forward-declared so #append_corrections can recurse into a Stack correction/mask item's own
    * children (Phase 6, goal 4): the two lambdas call each other, and a `std::function` variable can
    * be referenced before it is assigned as long as nothing actually calls it that early. */
-  std::function<void(const ListBase &, int, int)> append_list;
+  std::function<void(const ListBaseT<MaterialPaintLayer> &, int, int)> append_list;
 
   /* Corrections of \a layer, split by their role so an effect lists under CHANNELS and a mask item
    * under MASK, in storage order. A Stack-sourced correction/mask item is a folder exactly like a
@@ -526,10 +522,8 @@ void paint_stack_rows_from_description_impl(const Material &material,
   };
 
   append_list =
-      [&](const ListBase &list, const int depth, const int parent_ordinal) {
-        for (const MaterialPaintLayer &layer :
-             *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
-        {
+      [&](const ListBaseT<MaterialPaintLayer> &list, const int depth, const int parent_ordinal) {
+        for (const MaterialPaintLayer &layer : list) {
           if (overflow) {
             return;
           }
@@ -1124,10 +1118,9 @@ class PaintLayersStackSource final : public StackSource,
     const Material &material = layers_owner(owner);
     uint64_t hash = uint64_t(material.paint_layers_flag);
     hash = hash * 1000003u ^ uint64_t(paint_stack_selected_channel(ctx));
-    std::function<void(const ListBase &)> walk = [&](const ListBase &list) {
-      for (const MaterialPaintLayer &layer :
-           *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&list))
-      {
+    std::function<void(const ListBaseT<MaterialPaintLayer> &)> walk =
+        [&](const ListBaseT<MaterialPaintLayer> &list) {
+          for (const MaterialPaintLayer &layer : list) {
         hash = hash * 1000003u ^ UUID(layer.marker).hash();
         hash ^= uint64_t(layer.source) | (uint64_t(layer.flag) << 8) |
                 (uint64_t(layer.blend) << 16) | (uint64_t(layer.mesh_map_type) << 24);
@@ -1165,10 +1158,8 @@ class PaintLayersStackSource final : public StackSource,
            * cached rows would keep the "Live" preview after the wrapper failed to build. */
           hash = hash * 1000003u ^ 0xB17D0FFAULL;
         }
-        auto hash_corrections = [&](const ListBase &corrections) {
-          for (const MaterialPaintLayer &correction :
-               *reinterpret_cast<const ListBaseT<MaterialPaintLayer> *>(&corrections))
-          {
+        auto hash_corrections = [&](const ListBaseT<MaterialPaintLayer> &corrections) {
+          for (const MaterialPaintLayer &correction : corrections) {
             hash = hash * 1000003u ^ UUID(correction.marker).hash();
             hash ^= uint64_t(correction.source) | (uint64_t(correction.flag) << 8) |
                     (uint64_t(correction.role) << 16) |
@@ -2168,8 +2159,9 @@ MaterialPaintLayer *paint_description_row_for_ordinal(Material &material, const 
 {
   int index = 0;
   MaterialPaintLayer *found = nullptr;
-  std::function<void(ListBase &)> walk = [&](ListBase &list) {
-    for (MaterialPaintLayer &layer : *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&list)) {
+  std::function<void(ListBaseT<MaterialPaintLayer> &)> walk =
+      [&](ListBaseT<MaterialPaintLayer> &list) {
+        for (MaterialPaintLayer &layer : list) {
       if (found != nullptr) {
         return;
       }

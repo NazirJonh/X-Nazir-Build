@@ -188,22 +188,26 @@ class PaintLayersDescription : public bke::BlenderGTestBase {
   }
 };
 
-/* Walk the description's layers through the untyped #ListBase fields. */
+/* The first row of a typed paint-layer list, or null when it is empty. */
+static MaterialPaintLayer *paint_layer_first(const ListBaseT<MaterialPaintLayer> &list)
+{
+  return list.is_empty() ? nullptr : &*list.begin();
+}
+
 static MaterialPaintLayer *paint_layers_first(Material &ma)
 {
-  return static_cast<MaterialPaintLayer *>(ma.paint_layers.first);
+  return paint_layer_first(ma.paint_layers);
 }
 
 /* Collect every marker of the stack, children, effects and mask items included, by walking. */
-static void paint_layers_collect_markers(ListBase &list, Vector<bUUID> &r_markers)
+static void paint_layers_collect_markers(ListBaseT<MaterialPaintLayer> &list,
+                                         Vector<bUUID> &r_markers)
 {
-  for (MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(list.first); layer != nullptr;
-       layer = layer->next)
-  {
-    r_markers.append(layer->marker);
-    paint_layers_collect_markers(layer->children, r_markers);
-    paint_layers_collect_markers(layer->effects, r_markers);
-    paint_layers_collect_markers(layer->mask_stack, r_markers);
+  for (MaterialPaintLayer &layer : list) {
+    r_markers.append(layer.marker);
+    paint_layers_collect_markers(layer.children, r_markers);
+    paint_layers_collect_markers(layer.effects, r_markers);
+    paint_layers_collect_markers(layer.mask_stack, r_markers);
   }
 }
 
@@ -281,8 +285,7 @@ TEST_F(PaintLayersDescription, blend_round_trip_keeps_layers)
   EXPECT_STREQ(reloaded_parent->name, "Parent");
   EXPECT_TRUE(BLI_uuid_equal(reloaded_parent->marker, parent_marker));
 
-  MaterialPaintLayer *reloaded_child = static_cast<MaterialPaintLayer *>(
-      reloaded_parent->children.first);
+  MaterialPaintLayer *reloaded_child = paint_layer_first(reloaded_parent->children);
   ASSERT_NE(reloaded_child, nullptr);
   EXPECT_STREQ(reloaded_child->name, "Child");
   EXPECT_TRUE(BLI_uuid_equal(reloaded_child->marker, child_marker));
@@ -292,8 +295,7 @@ TEST_F(PaintLayersDescription, blend_round_trip_keeps_layers)
   ASSERT_NE(reloaded_parent->channels[0].image, nullptr);
   EXPECT_STREQ(reloaded_parent->channels[0].image->id.name + 2, "RoundTripImage");
 
-  MaterialPaintLayer *reloaded_mask = static_cast<MaterialPaintLayer *>(
-      reloaded_parent->mask_stack.first);
+  MaterialPaintLayer *reloaded_mask = paint_layer_first(reloaded_parent->mask_stack);
   ASSERT_NE(reloaded_mask, nullptr);
   ASSERT_NE(paint_layer_mask_map(*reloaded_mask), nullptr);
   EXPECT_STREQ(paint_layer_mask_map(*reloaded_mask)->id.name + 2, "RoundTripMask");
@@ -310,8 +312,7 @@ TEST_F(PaintLayersDescription, blend_round_trip_keeps_layers)
   EXPECT_STREQ(reloaded_parent->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]->id.name + 2,
                "RoundTripImage");
 
-  MaterialPaintLayer *reloaded_correction = static_cast<MaterialPaintLayer *>(
-      reloaded_parent->effects.first);
+  MaterialPaintLayer *reloaded_correction = paint_layer_first(reloaded_parent->effects);
   ASSERT_NE(reloaded_correction, nullptr);
   EXPECT_STREQ(reloaded_correction->name, "Correction");
 
@@ -405,8 +406,8 @@ TEST_F(PaintLayersDescription, copy_keeps_layers_but_not_tree)
 
   /* The mask stack and the properties are owned sub-data too, and must be a deep copy; the image
    * they reference stays owned by whoever owned it before. */
-  MaterialPaintLayer *copy_mask = static_cast<MaterialPaintLayer *>(copy_first->mask_stack.first);
-  MaterialPaintLayer *first_mask = static_cast<MaterialPaintLayer *>(first->mask_stack.first);
+  MaterialPaintLayer *copy_mask = paint_layer_first(copy_first->mask_stack);
+  MaterialPaintLayer *first_mask = paint_layer_first(first->mask_stack);
   ASSERT_NE(copy_mask, nullptr);
   EXPECT_NE(copy_mask, first_mask);
   EXPECT_EQ(paint_layer_mask_map(*copy_mask), mask_image);
@@ -419,12 +420,11 @@ TEST_F(PaintLayersDescription, copy_keeps_layers_but_not_tree)
   EXPECT_EQ(copy_first->channels[0].channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
 
   /* Nested children and effects are copied recursively, never aliased. */
-  MaterialPaintLayer *copy_child = static_cast<MaterialPaintLayer *>(copy_first->children.first);
+  MaterialPaintLayer *copy_child = paint_layer_first(copy_first->children);
   ASSERT_NE(copy_child, nullptr);
   EXPECT_NE(copy_child, first_child);
   EXPECT_STREQ(copy_child->name, "FirstChild");
-  MaterialPaintLayer *copy_correction = static_cast<MaterialPaintLayer *>(
-      copy_first->effects.first);
+  MaterialPaintLayer *copy_correction = paint_layer_first(copy_first->effects);
   ASSERT_NE(copy_correction, nullptr);
   EXPECT_NE(copy_correction, first_correction);
   EXPECT_STREQ(copy_correction->name, "FirstCorrection");
@@ -613,7 +613,7 @@ TEST_F(PaintLayersDescription, move_relocates_subtree_and_refuses_own_subtree)
   EXPECT_TRUE(BKE_paint_layers_move(*ma, middle, bottom, PaintLayerPlace::Below));
   EXPECT_EQ(paint_layers_first(*ma), middle);
   EXPECT_EQ(middle->next, bottom);
-  EXPECT_EQ(static_cast<MaterialPaintLayer *>(middle->children.first), child);
+  EXPECT_EQ(paint_layer_first(middle->children), child);
   EXPECT_TRUE(BLI_uuid_equal(BKE_paint_layers_active_get(*ma), child->marker));
 
   /* A row may not be its own anchor, nor move under its own subtree. */
@@ -661,7 +661,7 @@ TEST_F(PaintLayersDescription, reorder_moves_row_within_its_own_list_only)
   MaterialPaintLayer *child2 = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child2", b, PaintLayerPlace::Into);
   EXPECT_TRUE(BKE_paint_layers_reorder(*ma, child2, 0));
-  EXPECT_EQ(static_cast<MaterialPaintLayer *>(b->children.first), child2);
+  EXPECT_EQ(paint_layer_first(b->children), child2);
   EXPECT_EQ(child2->next, child);
   EXPECT_EQ(paint_layers_first(*ma), a);
 
@@ -685,7 +685,7 @@ TEST_F(PaintLayersDescription, group_folds_rows_into_folder_and_ungroup_lifts_th
   EXPECT_EQ(paint_layers_first(*ma), folder);
   EXPECT_EQ(folder->next, c);
   /* Members keep their markers and order; the active marker still resolves. */
-  EXPECT_EQ(static_cast<MaterialPaintLayer *>(folder->children.first), a);
+  EXPECT_EQ(paint_layer_first(folder->children), a);
   EXPECT_EQ(a->next, b);
   EXPECT_TRUE(BLI_uuid_equal(BKE_paint_layers_active_get(*ma), b->marker));
 
@@ -755,7 +755,7 @@ TEST_F(PaintLayersDescription, duplicate_copies_branch_with_fresh_markers_and_im
 
   /* Every row of the branch has a fresh marker, distinct from its original. */
   EXPECT_FALSE(BLI_uuid_equal(copy->marker, folder->marker));
-  MaterialPaintLayer *copy_layer = static_cast<MaterialPaintLayer *>(copy->children.first);
+  MaterialPaintLayer *copy_layer = paint_layer_first(copy->children);
   ASSERT_NE(copy_layer, nullptr);
   EXPECT_FALSE(BLI_uuid_equal(copy_layer->marker, layer->marker));
 
@@ -763,8 +763,7 @@ TEST_F(PaintLayersDescription, duplicate_copies_branch_with_fresh_markers_and_im
   ASSERT_EQ(copy_layer->channels_num, 1);
   EXPECT_NE(copy_layer->channels[0].image, nullptr);
   EXPECT_NE(copy_layer->channels[0].image, channel_image);
-  MaterialPaintLayer *copy_mask_item = static_cast<MaterialPaintLayer *>(
-      copy_layer->mask_stack.first);
+  MaterialPaintLayer *copy_mask_item = paint_layer_first(copy_layer->mask_stack);
   ASSERT_NE(copy_mask_item, nullptr);
   ASSERT_NE(paint_layer_mask_map(*copy_mask_item), nullptr);
   EXPECT_NE(paint_layer_mask_map(*copy_mask_item), mask_image);
@@ -781,7 +780,7 @@ TEST_F(PaintLayersDescription, duplicate_copies_branch_with_fresh_markers_and_im
   /* The originals still point at their own images. */
   EXPECT_EQ(layer->channels[0].image, channel_image);
   EXPECT_EQ(paint_layer_mask_map(
-                *static_cast<MaterialPaintLayer *>(layer->mask_stack.first)),
+                *paint_layer_first(layer->mask_stack)),
             mask_image);
 
   BKE_paint_layers_remove(*ma, copy);
@@ -1223,7 +1222,7 @@ TEST_F(PaintLayersDescription, folder_kind_is_explicit_and_sticky)
   MaterialPaintLayer *child = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
-  EXPECT_EQ(static_cast<MaterialPaintLayer *>(folder->children.first), child);
+  EXPECT_EQ(paint_layer_first(folder->children), child);
 
   /* ... and refuses its own channels. */
   EXPECT_EQ(BKE_paint_layers_channel_add(*ma, folder, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
@@ -1283,7 +1282,7 @@ TEST_F(PaintLayersDescription, into_a_plain_row_is_refused_and_leaves_it_unchang
   MaterialPaintLayer *into_empty = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "IntoEmpty", empty_folder, PaintLayerPlace::Into);
   ASSERT_NE(into_empty, nullptr);
-  EXPECT_EQ(static_cast<MaterialPaintLayer *>(empty_folder->children.first), into_empty);
+  EXPECT_EQ(paint_layer_first(empty_folder->children), into_empty);
 }
 
 /**
@@ -1307,10 +1306,10 @@ TEST_F(PaintLayersDescription, into_a_stack_effect_places_the_new_row_in_its_chi
   MaterialPaintLayer *child = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", correction, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
-  EXPECT_EQ(static_cast<MaterialPaintLayer *>(correction->children.first), child);
+  EXPECT_EQ(paint_layer_first(correction->children), child);
   /* The child never touched the top-level list or the owner's own children. */
   bool found_top_level = false;
-  for (MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ma->paint_layers.first);
+  for (MaterialPaintLayer *layer = paint_layer_first(ma->paint_layers);
        layer != nullptr;
        layer = layer->next)
   {
@@ -1335,7 +1334,7 @@ TEST_F(PaintLayersDescription, into_a_stack_mask_places_the_new_row_in_its_child
   MaterialPaintLayer *child = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", mask, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
-  EXPECT_EQ(static_cast<MaterialPaintLayer *>(mask->children.first), child);
+  EXPECT_EQ(paint_layer_first(mask->children), child);
   EXPECT_TRUE(BLI_listbase_is_empty(&owner->children));
 }
 
@@ -1369,7 +1368,7 @@ TEST_F(PaintLayersDescription, above_below_inside_a_stack_correction_insert_besi
   /* Both landed in the correction's own children, beside `first`, in the requested order --
    * never in the top-level list or the owner's own children. */
   Vector<MaterialPaintLayer *> order;
-  for (MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(correction->children.first);
+  for (MaterialPaintLayer *layer = paint_layer_first(correction->children);
        layer != nullptr;
        layer = layer->next)
   {
@@ -1410,7 +1409,7 @@ TEST_F(PaintLayersDescription, above_below_a_non_stack_correction_still_redirect
   /* Landed beside the owner row in the top-level list, not inside the correction (it has no
    * #children a Layer row could join) and not inside the owner's own children either. */
   bool found_top_level = false;
-  for (MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ma->paint_layers.first);
+  for (MaterialPaintLayer *layer = paint_layer_first(ma->paint_layers);
        layer != nullptr;
        layer = layer->next)
   {
@@ -1882,7 +1881,7 @@ TEST_F(PaintLayersDescription, bake_hash_tracks_structure_and_is_valid)
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
 
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*layer);
   bake->size = 64;
   uint32_t hash[2];
   BKE_paint_layers_bake_hash(*layer, hash);
@@ -1947,7 +1946,7 @@ TEST_F(PaintLayersDescription, bake_subscription_sees_pixel_changes)
   ASSERT_TRUE(
       BKE_paint_layers_channel_set_image(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &image));
 
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*layer);
   uint32_t hash[2];
   BKE_paint_layers_bake_hash(*layer, hash);
   bake->hash[0] = hash[0];
@@ -1976,7 +1975,7 @@ TEST_F(PaintLayersDescription, bake_substitute_only_when_valid_and_present)
   Image &baked = *BKE_image_add_generated(
       bmain, 8, 8, "BakedMap", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
 
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*layer);
   bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = &baked;
   uint32_t hash[2];
   BKE_paint_layers_bake_hash(*layer, hash);
@@ -2011,7 +2010,7 @@ TEST_F(PaintLayersDescription, value_edit_regens_only_a_baked_row_or_its_ancesto
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Plain", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(baked, nullptr);
   ASSERT_NE(plain, nullptr);
-  BKE_paint_layers_bake_ensure(*baked);
+  BKE_paint_layers_bake_struct_ensure(*baked);
   ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
 
   /* A value edit on the unbaked sibling is not topology: the animation stays free. */
@@ -2060,7 +2059,7 @@ TEST_F(PaintLayersDescription, is_stale_combines_cpu_and_scheduled_signals)
    * (`paint_layers_generate_test.cc`, `paint_layers_graph_eval_test.cc`). Here only the
    * delegation itself is checked, through a plain image row's stack-level bake, which
    * #BKE_paint_layers_bake_is_heavy always reports as heavy once it carries an AUTO bake. */
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*layer);
   bake->mode = MA_PAINT_LAYER_BAKE_AUTO;
   bake->size = PAINT_LAYERS_HEAVY_BAKE_SIZE;
   ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *layer));
@@ -2539,10 +2538,9 @@ TEST_F(PaintLayersDescription, mask_channel_defaults_to_alpha_and_survives_mater
 
   Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
   ASSERT_NE(copy, nullptr);
-  MaterialPaintLayer *copy_layer = static_cast<MaterialPaintLayer *>(copy->paint_layers.first);
+  MaterialPaintLayer *copy_layer = paint_layer_first(copy->paint_layers);
   ASSERT_NE(copy_layer, nullptr);
-  MaterialPaintLayer *copy_mask_item = static_cast<MaterialPaintLayer *>(
-      copy_layer->mask_stack.first);
+  MaterialPaintLayer *copy_mask_item = paint_layer_first(copy_layer->mask_stack);
   ASSERT_NE(copy_mask_item, nullptr);
   EXPECT_EQ(copy_mask_item->mask_channel, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
 }
@@ -2603,7 +2601,7 @@ TEST_F(PaintLayersDescription, source_role_survives_layer_duplicate)
   EXPECT_EQ(copy->source, MA_PAINT_LAYER_SOURCE_STACK);
   EXPECT_EQ(copy->role, MA_PAINT_LAYER_ROLE_LAYER);
   ASSERT_FALSE(BLI_listbase_is_empty(&copy->mask_stack));
-  MaterialPaintLayer *copy_mask_item = static_cast<MaterialPaintLayer *>(copy->mask_stack.first);
+  MaterialPaintLayer *copy_mask_item = paint_layer_first(copy->mask_stack);
   EXPECT_EQ(copy_mask_item->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
   EXPECT_EQ(copy_mask_item->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
 }
@@ -2621,11 +2619,11 @@ TEST_F(PaintLayersDescription, source_role_survives_material_copy)
   Material *copy_ma = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
   ASSERT_NE(copy_ma, nullptr);
   ASSERT_FALSE(BLI_listbase_is_empty(&copy_ma->paint_layers));
-  MaterialPaintLayer *copy_owner = static_cast<MaterialPaintLayer *>(copy_ma->paint_layers.first);
+  MaterialPaintLayer *copy_owner = paint_layer_first(copy_ma->paint_layers);
   EXPECT_EQ(copy_owner->source, MA_PAINT_LAYER_SOURCE_MATERIAL);
   EXPECT_EQ(copy_owner->role, MA_PAINT_LAYER_ROLE_LAYER);
   ASSERT_FALSE(BLI_listbase_is_empty(&copy_owner->effects));
-  MaterialPaintLayer *copy_effect = static_cast<MaterialPaintLayer *>(copy_owner->effects.first);
+  MaterialPaintLayer *copy_effect = paint_layer_first(copy_owner->effects);
   EXPECT_EQ(copy_effect->source, MA_PAINT_LAYER_SOURCE_IMAGE);
   EXPECT_EQ(copy_effect->role, MA_PAINT_LAYER_ROLE_EFFECT);
 }
@@ -2769,7 +2767,7 @@ TEST_F(PaintLayersDescription, material_bake_due_survives_the_cpu_bake_ensure)
   MaterialPaintLayer *other = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Other", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(material, nullptr);
-  BKE_paint_layers_bake_ensure(*material)->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
+  BKE_paint_layers_bake_struct_ensure(*material)->mode = MA_PAINT_LAYER_BAKE_ALWAYS;
 
   /* Move off the Material row, which raises the editor's due mark. */
   BKE_paint_layers_active_set(*ma, material->marker);
@@ -2782,7 +2780,7 @@ TEST_F(PaintLayersDescription, material_bake_due_survives_the_cpu_bake_ensure)
    * is pending. The Material-row signal must not be riding on that flag, or it would be gone by
    * the time the editor planner reads it. */
   ma->paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
-  BKE_paint_layers_bake_ensure(*bmain, *ma);
+  BKE_paint_layers_bake_plan_run(*bmain, *ma);
   EXPECT_FALSE(BKE_paint_layers_bake_stale_get(*ma));
   EXPECT_TRUE(BKE_paint_layers_material_bake_due_get(*ma));
 
@@ -3084,9 +3082,9 @@ TEST_F(PaintLayersDescription, bake_image_is_deferred_follows_the_active_row_map
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
   MaterialPaintLayer *sibling = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Sibling", nullptr, PaintLayerPlace::Above);
-  BKE_paint_layers_bake_ensure(*folder);
-  BKE_paint_layers_bake_ensure(*child);
-  BKE_paint_layers_bake_ensure(*sibling);
+  BKE_paint_layers_bake_struct_ensure(*folder);
+  BKE_paint_layers_bake_struct_ensure(*child);
+  BKE_paint_layers_bake_struct_ensure(*sibling);
 
   const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   Image *folder_map = BKE_image_add_generated(
@@ -3627,3 +3625,6 @@ TEST_F(PaintLayersDescription, rna_uv_map_autofill_fills_from_the_object_active_
 /** \} */
 
 }  // namespace blender::bke::tests
+
+
+

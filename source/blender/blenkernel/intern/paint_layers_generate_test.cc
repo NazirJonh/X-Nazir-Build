@@ -461,6 +461,44 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
     return nullptr;
   }
 
+  /**
+   * The root instance input socket that mirrors the named value (A1): values are written there now,
+   * and the layer/folder group sockets are fed from it by links, not written directly.
+   */
+  bNodeSocket *root_instance_input(const char *name)
+  {
+    bNode *instance = instance_find();
+    bNodeTreeInterfaceSocket *iface = interface_input_find(name);
+    if (instance == nullptr || iface == nullptr || iface->identifier == nullptr) {
+      return nullptr;
+    }
+    return bke::node_find_socket(
+        *instance, SOCK_IN, UString::from_ptr_noinline(iface->identifier));
+  }
+
+  /** Whether \a tree carries a value input (source or mirror) for \a marker and \a role. */
+  static bool interface_has_value_for(bNodeTree &tree, const bUUID &marker, const char *role)
+  {
+    char marker_text[UUID_STRING_SIZE];
+    BLI_uuid_format(marker_text, marker);
+    tree.ensure_interface_cache();
+    for (bNodeTreeInterfaceSocket *socket : tree.interface_inputs()) {
+      if (socket->properties == nullptr) {
+        continue;
+      }
+      const IDProperty *role_prop = IDP_GetPropertyTypeFromGroup(
+          socket->properties, "pbr_paint_layers_role", IDP_STRING);
+      const IDProperty *marker_prop = IDP_GetPropertyTypeFromGroup(
+          socket->properties, "pbr_paint_layers_layer", IDP_STRING);
+      if (role_prop != nullptr && STREQ(IDP_string_get(role_prop), role) &&
+          marker_prop != nullptr && STREQ(IDP_string_get(marker_prop), marker_text))
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
   bNodeTreeInterfaceSocket *interface_output_find(const char *name)
   {
     if (ma->paint_layers_tree == nullptr) {
@@ -753,7 +791,8 @@ TEST_F(PaintLayersGenerateTest, fill_constant_has_no_map)
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 0);
-  /* The Fill constant is an input of the layer's own group, not of the root. */
+  /* The Fill constant lives on the layer's own group input, with a mirror on the root for the write
+   * during evaluation (A1). */
   bNodeTree *fill_tree = layer_tree_find(*bmain, "Fill");
   ASSERT_NE(fill_tree, nullptr);
   ASSERT_NE(group_input_find(*fill_tree, "Fill Roughness"), nullptr);
@@ -774,12 +813,9 @@ TEST_F(PaintLayersGenerateTest, values_sync_writes_opacity_and_enabled)
   BKE_paint_layers_set_opacity(*ma, layer, 0.37f);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
-  /* The value lives on the layer group's instance in the root generated tree. */
-  bNodeTree *group = layer_tree_find(*bmain, "Bottom");
-  ASSERT_NE(group, nullptr);
-  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "Bottom Base Color Opacity");
-  ASSERT_NE(iface, nullptr);
-  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *iface);
+  /* The value is mirrored onto the root instance in the material's embedded tree; the layer group's
+   * own socket is fed from it by a link (A1). */
+  bNodeSocket *socket = root_instance_input("Bottom Base Color Opacity");
   ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.37f);
 
@@ -1059,11 +1095,8 @@ TEST_F(PaintLayersGenerateTest, set_enabled_is_a_value_edit)
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 
   BKE_paint_layers_values_sync(*ma);
-  bNodeTree *group = layer_tree_find(*bmain, "Bottom");
-  ASSERT_NE(group, nullptr);
-  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "Bottom Base Color Opacity");
-  ASSERT_NE(iface, nullptr);
-  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *iface);
+  /* The disabled row's factor is written to the root instance mirror (A1). */
+  bNodeSocket *socket = root_instance_input("Bottom Base Color Opacity");
   ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.0f);
 }
@@ -1099,11 +1132,7 @@ TEST_F(PaintLayersGenerateTest, correction_opacity_is_synced_without_regen)
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 
   BKE_paint_layers_values_sync(*ma);
-  bNodeTree *group = layer_tree_find(*bmain, "Bottom");
-  ASSERT_NE(group, nullptr);
-  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "Bottom C Base Color Opacity");
-  ASSERT_NE(iface, nullptr);
-  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *iface);
+  bNodeSocket *socket = root_instance_input("Bottom C Base Color Opacity");
   ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.25f);
 }
@@ -1247,8 +1276,10 @@ TEST_F(PaintLayersGenerateTest, leaf_group_has_the_layer_contract)
 
 TEST_F(PaintLayersGenerateTest, regenerate_reuses_layer_trees)
 {
-  add_paint_layer("Bottom", add_image("Bottom"));
-  add_paint_layer("Top", add_image("Top"));
+  Image *bottom_image = add_image("Bottom");
+  Image *top_image = add_image("Top");
+  add_paint_layer("Bottom", bottom_image);
+  add_paint_layer("Top", top_image);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   bNodeTree *bottom = layer_tree_find(*bmain, "Bottom");
@@ -1258,13 +1289,22 @@ TEST_F(PaintLayersGenerateTest, regenerate_reuses_layer_trees)
   EXPECT_EQ(layer_tree_count(*bmain), 2);
   EXPECT_EQ(ID_REAL_USERS(&bottom->id), 1);
   EXPECT_EQ(ID_REAL_USERS(&top->id), 1);
+  /* The layer groups read their maps, so each image is referenced by the generated graph. */
+  const int bottom_image_users = ID_REAL_USERS(&bottom_image->id);
+  const int top_image_users = ID_REAL_USERS(&top_image->id);
+  EXPECT_GT(bottom_image_users, 0);
+  EXPECT_GT(top_image_users, 0);
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), bottom);
   EXPECT_EQ(layer_tree_find(*bmain, "Top"), top);
   EXPECT_EQ(layer_tree_count(*bmain), 2);
+  /* The scratch build takes and must drop its own user references; the real groups and the maps
+   * keep exactly the users they had, or a kept root would leak one per regeneration. */
   EXPECT_EQ(ID_REAL_USERS(&bottom->id), 1);
   EXPECT_EQ(ID_REAL_USERS(&top->id), 1);
+  EXPECT_EQ(ID_REAL_USERS(&bottom_image->id), bottom_image_users);
+  EXPECT_EQ(ID_REAL_USERS(&top_image->id), top_image_users);
 }
 
 TEST_F(PaintLayersGenerateTest, removed_layer_drops_its_tree)
@@ -1484,7 +1524,7 @@ TEST_F(PaintLayersGenerateTest, copied_material_owns_nested_trees)
 TEST_F(PaintLayersGenerateTest, baked_row_is_its_own_group)
 {
   MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*layer);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*layer);
   ASSERT_NE(bake, nullptr);
   bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("BakedColor");
   bake->coverage = add_image("BakedCoverage");
@@ -1643,7 +1683,7 @@ TEST_F(PaintLayersGenerateTest, correction_add_rebuilds_only_its_layer)
   EXPECT_TRUE(group_mix_sentinel_get(*top_tree, 0.5f));
 }
 
-TEST_F(PaintLayersGenerateTest, folder_mask_keeps_the_root_and_syncs)
+TEST_F(PaintLayersGenerateTest, folder_mask_rebuilds_the_root_and_syncs)
 {
   MaterialPaintLayer *folder = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
@@ -1662,32 +1702,38 @@ TEST_F(PaintLayersGenerateTest, folder_mask_keeps_the_root_and_syncs)
   ASSERT_NE(child_tree, nullptr);
   ASSERT_TRUE(group_mix_sentinel_set(*child_tree, 0.25f));
 
-  /* A mask on the folder grows the folder's own interface; the root must be kept. */
+  /* A mask on the folder adds a value input to the folder's group; the root now carries a mirror for
+   * every value, so its interface and links change and it rebuilds (A1). */
   MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, folder, 0.5f);
   ASSERT_NE(item, nullptr);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   EXPECT_EQ(ma->paint_layers_tree, root);
-  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
-  /* The mask's value input lives on the folder group, and the child group is untouched. */
+  EXPECT_FALSE(same_nodes(root_before, root_nodes(*root)));
+  /* The mask's value lives on the folder group, the child group is untouched, and the value is
+   * mirrored onto the root instance. */
   bNodeTree *folder_tree = folder_tree_find(*bmain, "Folder");
   ASSERT_NE(folder_tree, nullptr);
   bNodeTreeInterfaceSocket *iface = group_input_find(
       *folder_tree, "Folder Mask Base Color Opacity");
   ASSERT_NE(iface, nullptr);
-  bNodeSocket *instance_in = group_instance_input(*root, *folder_tree, *iface);
-  ASSERT_NE(instance_in, nullptr);
+  EXPECT_NE(root_instance_input("Folder Mask Base Color Opacity"), nullptr);
   EXPECT_TRUE(group_mix_sentinel_get(*child_tree, 0.25f));
 }
 
-TEST_F(PaintLayersGenerateTest, root_interface_has_no_value_inputs)
+TEST_F(PaintLayersGenerateTest, root_interface_carries_value_mirrors)
 {
   add_paint_layer("Bottom", add_image("Bottom"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   ASSERT_NE(ma->paint_layers_tree, nullptr);
-  /* The root carries only Result outputs; values live on the layer groups (session 10e). */
-  ma->paint_layers_tree->ensure_interface_cache();
-  EXPECT_TRUE(ma->paint_layers_tree->interface_inputs().is_empty());
+  /* The root carries a mirror for every value in the stack; values are written there and linked
+   * down to the layer groups (A1). */
+  bNodeTreeInterfaceSocket *iface = interface_input_find("Bottom Base Color Opacity");
+  ASSERT_NE(iface, nullptr);
+  const IDProperty *mirror = IDP_GetPropertyTypeFromGroup(
+      iface->properties, "pbr_paint_layers_mirror", IDP_INT);
+  ASSERT_NE(mirror, nullptr);
+  EXPECT_EQ(IDP_int_get(mirror), 1);
   EXPECT_TRUE(interface_has_socket(*ma->paint_layers_tree, "Result Base Color", true));
   EXPECT_FALSE(interface_has_socket(*ma->paint_layers_tree, "Below Base Color", false));
 }
@@ -1724,11 +1770,8 @@ TEST_F(PaintLayersGenerateTest, values_sync_writes_to_the_instance)
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.42f));
   BKE_paint_layers_values_sync(*ma);
 
-  bNodeTree *group = layer_tree_find(*bmain, "Bottom");
-  ASSERT_NE(group, nullptr);
-  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "Bottom Base Color Opacity");
-  ASSERT_NE(iface, nullptr);
-  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *iface);
+  /* The value is written to the root instance mirror (A1). */
+  bNodeSocket *socket = root_instance_input("Bottom Base Color Opacity");
   ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.42f);
 }
@@ -1749,16 +1792,119 @@ TEST_F(PaintLayersGenerateTest, values_sync_writes_to_a_nested_instance)
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, child, 0.33f));
   BKE_paint_layers_values_sync(*ma);
 
+  /* The child's value is written to the root mirror and relayed down through the folder interface
+   * into the child instance (A1). */
+  bNodeSocket *root_socket = root_instance_input("Child Base Color Opacity");
+  ASSERT_NE(root_socket, nullptr);
+  EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(root_socket->default_value)->value, 0.33f);
+
   bNodeTree *folder_tree = folder_tree_find(*bmain, "Folder");
   bNodeTree *child_tree = layer_tree_find(*bmain, "Child");
   ASSERT_NE(folder_tree, nullptr);
   ASSERT_NE(child_tree, nullptr);
   bNodeTreeInterfaceSocket *iface = group_input_find(*child_tree, "Child Base Color Opacity");
   ASSERT_NE(iface, nullptr);
-  /* The child's value lives on its instance inside the folder's tree, not in the root. */
-  bNodeSocket *socket = group_instance_input(*folder_tree, *child_tree, *iface);
-  ASSERT_NE(socket, nullptr);
-  EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.33f);
+  bNodeSocket *child_instance_socket = group_instance_input(*folder_tree, *child_tree, *iface);
+  ASSERT_NE(child_instance_socket, nullptr);
+  EXPECT_NE(child_instance_socket->link, nullptr);
+}
+
+TEST_F(PaintLayersGenerateTest, deleting_a_nested_effect_drops_its_mirrors)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_NE(child, nullptr);
+  add_channel(*child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Child"));
+  /* Isolating: the child's group and its mirrors live inside the folder. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, child, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  const bUUID effect_marker = effect->marker;
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *folder_tree = folder_tree_find(*bmain, "Folder");
+  ASSERT_NE(folder_tree, nullptr);
+  ASSERT_TRUE(interface_has_value_for(*folder_tree, effect_marker, "correction_opacity"));
+  ASSERT_TRUE(
+      interface_has_value_for(*ma->paint_layers_tree, effect_marker, "correction_opacity"));
+
+  /* Removing the effect must prune its relay on the folder's interface and the root's. */
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, effect));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  folder_tree = folder_tree_find(*bmain, "Folder");
+  ASSERT_NE(folder_tree, nullptr);
+  EXPECT_FALSE(interface_has_value_for(*folder_tree, effect_marker, "correction_opacity"));
+  EXPECT_FALSE(
+      interface_has_value_for(*ma->paint_layers_tree, effect_marker, "correction_opacity"));
+}
+
+TEST_F(PaintLayersGenerateTest, deleting_a_folder_child_drops_its_mirrors)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *drop = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Drop", folder, PaintLayerPlace::Into);
+  MaterialPaintLayer *keep = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Keep", folder, PaintLayerPlace::Into);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_NE(drop, nullptr);
+  ASSERT_NE(keep, nullptr);
+  add_channel(*drop, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Drop"));
+  add_channel(*keep, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Keep"));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  const bUUID drop_marker = drop->marker;
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *folder_tree = folder_tree_find(*bmain, "Folder");
+  ASSERT_NE(folder_tree, nullptr);
+  ASSERT_TRUE(interface_has_value_for(*folder_tree, drop_marker, "opacity"));
+  ASSERT_TRUE(interface_has_value_for(*ma->paint_layers_tree, drop_marker, "opacity"));
+
+  /* The folder stays (Keep remains); Drop's relay must be gone from both interfaces. */
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, drop));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  folder_tree = folder_tree_find(*bmain, "Folder");
+  ASSERT_NE(folder_tree, nullptr);
+  EXPECT_FALSE(interface_has_value_for(*folder_tree, drop_marker, "opacity"));
+  EXPECT_FALSE(interface_has_value_for(*ma->paint_layers_tree, drop_marker, "opacity"));
+}
+
+TEST_F(PaintLayersGenerateTest, value_mirrors_are_stable_across_regenerations)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_NE(child, nullptr);
+  add_channel(*child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Child"));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, bottom, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
+  ASSERT_NE(correction, nullptr);
+  ASSERT_NE(
+      BKE_paint_layers_channel_add(*ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> root_before = root_nodes(*root);
+  root->ensure_interface_cache();
+  const int inputs_before = root->interface_inputs().size();
+  ASSERT_GT(inputs_before, 0);
+
+  /* An unchanged material must keep the root and its mirror set exactly. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+  root->ensure_interface_cache();
+  EXPECT_EQ(root->interface_inputs().size(), inputs_before);
 }
 
 TEST_F(PaintLayersGenerateTest, reorder_rebuilds_no_group)
@@ -1807,10 +1953,10 @@ TEST_F(PaintLayersGenerateTest, map_change_keeps_the_root)
   EXPECT_FALSE(group_mix_sentinel_get(*bottom_tree, 0.25f));
 }
 
-TEST_F(PaintLayersGenerateTest, correction_add_keeps_the_root)
+TEST_F(PaintLayersGenerateTest, correction_add_rebuilds_the_root)
 {
-  /* The effect's value inputs now live on the owner layer's own group (session 10e), so adding an
-   * effect rebuilds only that group. The root's nodes, links and interface are untouched. */
+  /* Adding an effect adds a value input to the owner's group; the root mirrors every value, so its
+   * interface and links change and it rebuilds (A1). */
   MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
   add_paint_layer("Top", add_image("Top"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -1831,24 +1977,19 @@ TEST_F(PaintLayersGenerateTest, correction_add_keeps_the_root)
       BKE_paint_layers_channel_add(*ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
-  /* The root is kept; only the owner's group was rebuilt. */
-  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+  /* The root rebuilds; among the rows only the owner's group was rebuilt. */
+  EXPECT_FALSE(same_nodes(root_before, root_nodes(*root)));
   EXPECT_FALSE(group_mix_sentinel_get(*bottom_tree, 0.25f));
   EXPECT_TRUE(group_mix_sentinel_get(*top_tree, 0.5f));
-  /* The correction's value input lives on the owner's group and was synced onto its instance. */
+  /* The correction's value lives on the owner's group and is mirrored onto the root. */
   bNode *instance = group_instance_find(*root, *bottom_tree);
   ASSERT_NE(instance, nullptr);
-  bool found_value_input = false;
-  bottom_tree->ensure_interface_cache();
-  for (bNodeTreeInterfaceSocket *socket : bottom_tree->interface_inputs()) {
-    if (socket->name != nullptr && STREQ(socket->name, "Bottom C Base Color Opacity")) {
-      found_value_input = true;
-      EXPECT_NE(bke::node_find_socket(
-                    *instance, SOCK_IN, UString::from_ptr_noinline(socket->identifier)),
-                nullptr);
-    }
-  }
-  EXPECT_TRUE(found_value_input);
+  bNodeTreeInterfaceSocket *iface = group_input_find(*bottom_tree, "Bottom C Base Color Opacity");
+  ASSERT_NE(iface, nullptr);
+  EXPECT_NE(bke::node_find_socket(
+                *instance, SOCK_IN, UString::from_ptr_noinline(iface->identifier)),
+            nullptr);
+  EXPECT_NE(root_instance_input("Bottom C Base Color Opacity"), nullptr);
 }
 
 TEST_F(PaintLayersGenerateTest, reorder_rebuilds_the_root)
@@ -2028,10 +2169,9 @@ TEST_F(PaintLayersGenerateTest, live_material_constant_edit_syncs_without_rebuil
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
 
-  /* The new value reached the row's group input through the sync at the end of regeneration. */
-  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "Source Roughness Source");
-  ASSERT_NE(iface, nullptr);
-  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *iface);
+  /* The new value reached the root instance mirror through the sync at the end of regeneration; the
+   * row's group input is fed from it by a link (A1). */
+  bNodeSocket *socket = root_instance_input("Source Roughness Source");
   ASSERT_NE(socket, nullptr);
   const float *value = static_cast<bNodeSocketValueRGBA *>(socket->default_value)->value;
   EXPECT_NEAR(value[0], 0.9f, 1e-4f);
@@ -2660,13 +2800,14 @@ TEST_F(PaintLayersGenerateTest, source_group_refusal_falls_back_to_baked)
 }
 
 TEST_F(PaintLayersGenerateTest,
-       source_group_mode_change_keeps_the_root_when_channels_are_untracked)
+       source_group_mode_change_rebuilds_the_root_when_channels_are_untracked)
 {
   /* F2-C4a gives every tracked map channel a content-alpha output, so a Material row whose channel
    * set includes one changes the row group's interface when it moves between Hybrid and SourceGroup
    * and the root is rebuilt (see the tracked-channel test below). This guards the other half: a row
-   * whose only channel is untracked builds no content alpha in either mode, so the interface holds
-   * and the root is kept. */
+   * whose only channel is untracked builds no content alpha in either mode. Its Hybrid live-constant
+   * value input still disappears in SourceGroup, so the root mirror set changes and the root rebuilds
+   * (A1). */
   Material *source = add_principled_source("UntrackedModeSource", 0.3f);
   bNodeTree &source_tree = *source->nodetree;
   bNode *principled = principled_of(*source);
@@ -2741,8 +2882,8 @@ TEST_F(PaintLayersGenerateTest,
   ASSERT_TRUE(group_io_sentinel_set(*group, 0.125f));
 
   /* A Height source turns the Bump into a graph the CPU cannot reproduce: Normal moves to
-   * SourceGroup. The channel set is unchanged and neither mode tracks content alpha, so the row
-   * group rebuilds while the root is kept. */
+   * SourceGroup. The Hybrid live-constant value input disappears, so the root mirror set changes and
+   * the root rebuilds (A1); the row group rebuilds too. */
   bNode *noise = bke::node_add_static_node(nullptr, source_tree, SH_NODE_TEX_NOISE);
   ASSERT_NE(noise, nullptr);
   bke::node_add_link(source_tree,
@@ -2757,17 +2898,18 @@ TEST_F(PaintLayersGenerateTest,
   ASSERT_EQ(layer_tree_find(*bmain, "Source"), group);
   EXPECT_FALSE(group_io_sentinel_get(*group, 0.125f));
   EXPECT_EQ(ma->paint_layers_tree, root);
-  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+  EXPECT_FALSE(same_nodes(root_before, root_nodes(*root)));
 }
 
 TEST_F(PaintLayersGenerateTest,
-       source_group_mode_change_keeps_the_root_on_tracked_channels)
+       source_group_mode_change_rebuilds_the_root_on_tracked_channels)
 {
   /* Base Color is a tracked channel, but a Material row's transparency is its Alpha input, so the
    * row never exports a "Content Alpha Base Color" output in either mode. Constant -> Noise
-   * therefore moves the row to SourceGroup without moving the group's interface: the row's group
-   * rebuilds, the root is kept. The complementary guard to
-   * source_group_mode_change_keeps_the_root_when_channels_are_untracked. */
+   * therefore moves the row to SourceGroup without moving that part of the group's interface. The
+   * Hybrid live-constant value input still disappears, so the root rebuilds (A1); the row group
+   * rebuilds too. The complementary guard to
+   * source_group_mode_change_rebuilds_the_root_when_channels_are_untracked. */
   Material *source = add_principled_source("TrackedModeSource", 0.3f);
   add_paint_layer("Bottom", add_image("Bottom"));
   MaterialPaintLayer *row = BKE_paint_layers_add(
@@ -2787,7 +2929,7 @@ TEST_F(PaintLayersGenerateTest,
   EXPECT_FALSE(interface_has_socket(*group, "Content Alpha Base Color", true));
   ASSERT_TRUE(group_io_sentinel_set(*group, 0.125f));
 
-  /* Constant -> Noise moves the row to SourceGroup: its group rebuilds, the root does not. */
+  /* Constant -> Noise moves the row to SourceGroup: its group rebuilds, and the root too (A1). */
   source_set_noise_base_color(*bmain, *source);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
@@ -2795,10 +2937,10 @@ TEST_F(PaintLayersGenerateTest,
   EXPECT_FALSE(group_io_sentinel_get(*group, 0.125f));
   EXPECT_FALSE(interface_has_socket(*group, "Content Alpha Base Color", true));
   EXPECT_EQ(ma->paint_layers_tree, root);
-  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+  EXPECT_FALSE(same_nodes(root_before, root_nodes(*root)));
 
-  /* The kept root is internally sound: every link still touches sockets its own endpoints own, and
-   * every Compose Color Alpha that survived is fed (the Base Color Paint row below still tracks
+  /* The rebuilt root is internally sound: every link still touches sockets its own endpoints own,
+   * and every Compose Color Alpha that survived is fed (the Base Color Paint row below still tracks
    * content alpha). */
   root->ensure_topology_cache();
   EXPECT_TRUE(root_links_are_consistent(*root));
@@ -3517,7 +3659,7 @@ TEST_F(PaintLayersGenerateTest, active_material_child_keeps_its_folder_unbaked)
 
   /* ALWAYS. */
   bool changed = false;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
 
@@ -3525,7 +3667,7 @@ TEST_F(PaintLayersGenerateTest, active_material_child_keeps_its_folder_unbaked)
   ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_AUTO));
   ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *folder, PAINT_LAYERS_HEAVY_BAKE_SIZE));
   changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
 
@@ -3546,7 +3688,7 @@ TEST_F(PaintLayersGenerateTest, sync_planner_still_bakes_a_plain_row)
   EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *layer));
 
   bool changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_TRUE(changed);
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
 }
@@ -3708,7 +3850,7 @@ TEST_F(PaintLayersGenerateTest, material_row_subscription_ignores_its_mask)
   ASSERT_TRUE(BKE_paint_layers_channel_set_image(
       *layered, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_map));
 
-  ASSERT_NE(BKE_paint_layers_bake_ensure(*row), nullptr);
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*row), nullptr);
   BKE_paint_layers_bake_finalize(*layered, *row);
   BKE_paint_layers_bake_notice_changes(*layered);
   EXPECT_FALSE(BKE_paint_layers_bake_stale_get(*layered));
@@ -3739,7 +3881,7 @@ TEST_F(PaintLayersGenerateTest, paint_row_subscription_sees_its_own_map_edit)
             nullptr);
   ASSERT_TRUE(BKE_paint_layers_channel_set_image(
       *layered, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
-  ASSERT_NE(BKE_paint_layers_bake_ensure(*row), nullptr);
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*row), nullptr);
 
   BKE_paint_layers_bake_finalize(*layered, *row);
   BKE_paint_layers_bake_notice_changes(*layered);
@@ -4088,15 +4230,16 @@ TEST_F(PaintLayersGenerateTest, visibility_toggle_keeps_the_graph)
   EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
   EXPECT_TRUE(same_nodes(group_before, root_nodes(*group)));
 
-  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "Bottom Base Color Opacity");
-  ASSERT_NE(iface, nullptr);
-  bNodeSocket *socket = group_instance_input(*root, *group, *iface);
+  /* The value is written to the root instance mirror (A1). */
+  bNodeSocket *socket = root_instance_input("Bottom Base Color Opacity");
   ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.0f);
 
   ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, true));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+  socket = root_instance_input("Bottom Base Color Opacity");
+  ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value,
                   layer->opacity);
 }
@@ -4173,7 +4316,7 @@ TEST_F(PaintLayersGenerateTest, parent_bake_hash_sees_a_disabled_material_child)
       *layered, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatChild", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*layered, child, source));
-  ASSERT_NE(BKE_paint_layers_bake_ensure(*folder), nullptr);
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*folder), nullptr);
 
   uint32_t before[2];
   BKE_paint_layers_bake_hash(*folder, before);
@@ -4242,9 +4385,9 @@ TEST_F(PaintLayersGenerateTest, visibility_does_not_invalidate_the_rows_own_bake
   ASSERT_NE(folder, nullptr);
   ASSERT_NE(paint, nullptr);
   BKE_paint_layers_move(*ma, paint, folder, PaintLayerPlace::Into);
-  ASSERT_NE(BKE_paint_layers_bake_ensure(*paint), nullptr);
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*paint), nullptr);
   BKE_paint_layers_bake_finalize(*ma, *paint);
-  ASSERT_NE(BKE_paint_layers_bake_ensure(*folder), nullptr);
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*folder), nullptr);
   BKE_paint_layers_bake_finalize(*ma, *folder);
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *paint));
 
@@ -4263,7 +4406,7 @@ TEST_F(PaintLayersGenerateTest, visibility_does_not_invalidate_the_rows_own_bake
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Mat", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(mat, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mat, source));
-  ASSERT_NE(BKE_paint_layers_bake_ensure(*mat), nullptr);
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*mat), nullptr);
   BKE_paint_layers_bake_finalize(*ma, *mat);
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *mat));
   ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, mat, false));
@@ -4274,7 +4417,7 @@ TEST_F(PaintLayersGenerateTest, visibility_does_not_invalidate_the_rows_own_bake
  * Adding a correction to one row rebuilds only that row's group; the root, a sibling and a source
  * wrapper stay untouched (their contracts do not change).
  */
-TEST_F(PaintLayersGenerateTest, adding_a_correction_rebuilds_only_its_row)
+TEST_F(PaintLayersGenerateTest, adding_a_correction_rebuilds_its_row_and_the_root)
 {
   bNodeTree *shared = nullptr;
   bNodeTree *on_path = nullptr;
@@ -4308,8 +4451,10 @@ TEST_F(PaintLayersGenerateTest, adding_a_correction_rebuilds_only_its_row)
       *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Correction")));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
+  /* The effect adds a value input, so the root mirror set changes and the root rebuilds (A1); the
+   * other rows and the source wrapper are untouched. */
   EXPECT_EQ(ma->paint_layers_tree, root);
-  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
+  EXPECT_FALSE(same_nodes(root_before, root_nodes(*root)));
   EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), bottom_group);
   EXPECT_EQ(layer_tree_find(*bmain, "Top"), top_group);
   EXPECT_TRUE(same_nodes(top_before, root_nodes(*top_group)));
@@ -4339,21 +4484,22 @@ TEST_F(PaintLayersGenerateTest, material_row_correction_opacity_syncs)
       *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Correction"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
-  bNodeTree *group = layer_tree_find(*bmain, "MatRow");
-  ASSERT_NE(group, nullptr);
-  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "MatRow C Base Color Opacity");
-  ASSERT_NE(iface, nullptr);
-  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *iface);
+  /* The value is mirrored onto the root instance; the row group's socket is fed from it (A1). */
+  bNodeSocket *socket = root_instance_input("MatRow C Base Color Opacity");
   ASSERT_NE(socket, nullptr);
   const float before = static_cast<bNodeSocketValueFloat *>(socket->default_value)->value;
 
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 0.42f));
   BKE_paint_layers_values_sync(*ma);
+  socket = root_instance_input("MatRow C Base Color Opacity");
+  ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.42f);
   EXPECT_NE(before, 0.42f);
 
   ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, correction, false));
   BKE_paint_layers_values_sync(*ma);
+  socket = root_instance_input("MatRow C Base Color Opacity");
+  ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.0f);
 }
 
@@ -4560,11 +4706,6 @@ TEST_F(PaintLayersGenerateTest, effect_material_live_constant_edit_syncs_without
   const Vector<bNode *> root_before = root_nodes(*root);
   bNodeTree *group = layer_tree_find(*bmain, "Owner");
   ASSERT_NE(group, nullptr);
-  /* The owner row only wires Base Color (#add_paint_layer's one channel record), so that is the
-   * only channel the correction's own live constant can be observed through here -- Roughness is
-   * never a wired channel of this material and would drop the correction's Source socket. */
-  bNodeTreeInterfaceSocket *live_iface = group_input_find(*group, "Owner MC Base Color Source");
-  ASSERT_NE(live_iface, nullptr);
 
   bNode *principled = principled_of(*source);
   ASSERT_NE(principled, nullptr);
@@ -4578,7 +4719,8 @@ TEST_F(PaintLayersGenerateTest, effect_material_live_constant_edit_syncs_without
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
 
-  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *live_iface);
+  /* The live constant is mirrored onto the root instance (A1). */
+  bNodeSocket *socket = root_instance_input("Owner MC Base Color Source");
   ASSERT_NE(socket, nullptr);
   const float *value = static_cast<bNodeSocketValueRGBA *>(socket->default_value)->value;
   EXPECT_NEAR(value[0], 0.9f, 1e-4f);
@@ -4917,9 +5059,7 @@ static MaterialPaintLayer *group_one(Material &ma, MaterialPaintLayer *member)
 /** A top-level row of \a ma by name, or null. */
 static MaterialPaintLayer *find_named_layer(Material &ma, const char *name)
 {
-  for (MaterialPaintLayer &layer :
-       *reinterpret_cast<ListBaseT<MaterialPaintLayer> *>(&ma.paint_layers))
-  {
+  for (MaterialPaintLayer &layer : ma.paint_layers) {
     if (STREQ(layer.name, name)) {
       return &layer;
     }
@@ -5013,14 +5153,12 @@ TEST_F(PaintLayersGenerateTest, pass_through_visibility_is_a_value_edit)
   const Vector<bNode *> nodes_before = root_nodes(*root);
   bNodeTree *group = layer_tree_find(*bmain, "B");
   ASSERT_NE(group, nullptr);
-  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "B Base Color Opacity");
-  ASSERT_NE(iface, nullptr);
-  bNodeSocket *opacity = group_instance_input(*root, *group, *iface);
+  bNodeSocket *opacity = root_instance_input("B Base Color Opacity");
   ASSERT_NE(opacity, nullptr);
   ASSERT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(opacity->default_value)->value, 1.0f);
 
   /* Hiding the folder scales the child's factor through its value input: the root's nodes and links
-   * and the child's group are the same objects, only the value socket moves. */
+   * and the child's group are the same objects, only the value written to the root mirror moves. */
   ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, folder, false));
   ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -5028,10 +5166,14 @@ TEST_F(PaintLayersGenerateTest, pass_through_visibility_is_a_value_edit)
   EXPECT_TRUE(same_nodes(nodes_before, root_nodes(*root)));
   EXPECT_EQ(layer_tree_find(*bmain, "B"), group);
   EXPECT_EQ(folder_tree_find(*bmain, "Folder"), nullptr);
+  opacity = root_instance_input("B Base Color Opacity");
+  ASSERT_NE(opacity, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(opacity->default_value)->value, 0.0f);
 
   ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, folder, true));
   BKE_paint_layers_values_sync(*ma);
+  opacity = root_instance_input("B Base Color Opacity");
+  ASSERT_NE(opacity, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(opacity->default_value)->value, 1.0f);
 }
 
@@ -5091,7 +5233,7 @@ TEST_F(PaintLayersGenerateTest, pass_through_folder_with_a_bake_stays_isolating)
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
 
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*folder);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*folder);
   ASSERT_NE(bake, nullptr);
   bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("BakedColor");
   bake->coverage = add_image("BakedCoverage");
@@ -5217,9 +5359,7 @@ TEST_F(PaintLayersGenerateTest, content_correction_opacity_rna_reaches_its_graph
   ASSERT_NE(group, nullptr);
 
   auto socket_value = [&](const char *name) -> float {
-    bNodeTreeInterfaceSocket *iface = group_input_find(*group, name);
-    EXPECT_NE(iface, nullptr) << name;
-    bNodeSocket *socket = group_instance_input(*root, *group, *iface);
+    bNodeSocket *socket = root_instance_input(name);
     EXPECT_NE(socket, nullptr) << name;
     return static_cast<bNodeSocketValueFloat *>(socket->default_value)->value;
   };
@@ -5267,13 +5407,13 @@ TEST_F(PaintLayersGenerateTest, paint_row_correction_opacity_rna_reaches_its_gra
   bNodeTree *root = ma->paint_layers_tree;
   bNodeTree *group = layer_tree_find(*bmain, "Paint");
   ASSERT_NE(group, nullptr);
-  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "Paint C Base Color Opacity");
-  ASSERT_NE(iface, nullptr);
-  bNodeSocket *socket = group_instance_input(*root, *group, *iface);
+  bNodeSocket *socket = root_instance_input("Paint C Base Color Opacity");
   ASSERT_NE(socket, nullptr);
   ASSERT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 1.0f);
 
   rna_set_channel_opacity(*ma, *corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 30.0f);
+  socket = root_instance_input("Paint C Base Color Opacity");
+  ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.3f);
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_EQ(layer_tree_find(*bmain, "Paint"), group);
@@ -5300,7 +5440,7 @@ TEST_F(PaintLayersGenerateTest, light_row_bake_ensure_leaves_no_bake_structure)
   ASSERT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *light));
 
   bool changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   EXPECT_EQ(light->bake, nullptr);
   /* row_is_substituted's own rule for a non-Material row is exactly this. */
@@ -5327,7 +5467,7 @@ TEST_F(PaintLayersGenerateTest, light_row_opacity_edit_does_not_regen_or_rebuild
   ASSERT_TRUE(group_mix_sentinel_set(*bottom_tree, 0.6f));
 
   bool changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   ASSERT_EQ(bottom->bake, nullptr)
       << "a naive up-front allocation for every non-folder row would leave a bake structure here";
@@ -5364,7 +5504,7 @@ TEST_F(PaintLayersGenerateTest, bake_stale_drains_with_permanently_bakeless_ligh
 
   ma->paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
   bool changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_TRUE(changed);
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *real));
   EXPECT_FALSE(BKE_paint_layers_bake_stale_get(*ma))
@@ -5381,7 +5521,7 @@ TEST_F(PaintLayersGenerateTest, light_row_mode_get_stays_auto_before_and_after_t
   EXPECT_EQ(BKE_paint_layers_bake_mode_get(*light), MA_PAINT_LAYER_BAKE_AUTO);
 
   bool changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   ASSERT_EQ(light->bake, nullptr);
   EXPECT_EQ(BKE_paint_layers_bake_mode_get(*light), MA_PAINT_LAYER_BAKE_AUTO);
@@ -5390,7 +5530,7 @@ TEST_F(PaintLayersGenerateTest, light_row_mode_get_stays_auto_before_and_after_t
 /**
  * Test #7: regression guard for the existing rule that the active row and its ancestors stay live
  * regardless of weight -- #BKE_paint_layers_bake_row_is_deferred is checked before the weight gate in
- * both branches of #BKE_paint_layers_bake_ensure, so an active heavy row is never touched (no
+ * both branches of #BKE_paint_layers_bake_plan_run, so an active heavy row is never touched (no
  * allocation either), the same as before this task.
  */
 TEST_F(PaintLayersGenerateTest, active_heavy_row_stays_live_and_gets_no_bake)
@@ -5412,7 +5552,7 @@ TEST_F(PaintLayersGenerateTest, active_heavy_row_stays_live_and_gets_no_bake)
   ASSERT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *paint));
 
   bool changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   EXPECT_EQ(paint->bake, nullptr);
   EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma))
@@ -5456,7 +5596,7 @@ TEST_F(PaintLayersGenerateTest, baked_row_that_becomes_light_drops_its_bake)
   ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *paint, 4));
 
   bool changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_TRUE(changed);
   ASSERT_NE(paint->bake, nullptr);
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *paint));
@@ -5472,7 +5612,7 @@ TEST_F(PaintLayersGenerateTest, baked_row_that_becomes_light_drops_its_bake)
       << "the structural edit invalidates the stale hash";
 
   changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_TRUE(changed);
   EXPECT_EQ(paint->bake, nullptr);
   for (const uint32_t uid : bake_uids) {
@@ -5500,7 +5640,7 @@ TEST_F(PaintLayersGenerateTest, always_row_that_becomes_light_keeps_its_bake)
   ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *paint, 4));
 
   bool changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *paint));
 
   ASSERT_TRUE(BKE_paint_layers_channel_remove(*ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
@@ -5508,7 +5648,7 @@ TEST_F(PaintLayersGenerateTest, always_row_that_becomes_light_keeps_its_bake)
   ASSERT_FALSE(BKE_paint_layers_bake_is_heavy(*ma, *paint));
 
   changed = false;
-  EXPECT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_NE(paint->bake, nullptr);
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *paint));
 }
@@ -5531,7 +5671,7 @@ TEST_F(PaintLayersGenerateTest, heavy_auto_row_keeps_its_bake)
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *heavy));
 
   bool changed = false;
-  EXPECT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_NE(heavy->bake, nullptr);
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *heavy));
 }
@@ -5548,7 +5688,7 @@ TEST_F(PaintLayersGenerateTest, auto_folder_that_becomes_light_drops_its_bake)
   ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *folder, 4));
 
   bool changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   ASSERT_NE(folder->bake, nullptr);
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
   const Vector<uint32_t> bake_uids = bake_map_session_uids(*folder);
@@ -5562,7 +5702,7 @@ TEST_F(PaintLayersGenerateTest, auto_folder_that_becomes_light_drops_its_bake)
   ASSERT_FALSE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
 
   changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_EQ(folder->bake, nullptr);
   for (const uint32_t uid : bake_uids) {
     EXPECT_EQ(BKE_libblock_find_session_uid(bmain, ID_IM, uid), nullptr);
@@ -5590,7 +5730,7 @@ TEST_F(PaintLayersGenerateTest, heavy_isolating_folder_becomes_a_bake_candidate)
   /* No structure before the gates pass: the synchronous planner leaves a heavy folder to the job. */
   EXPECT_EQ(folder->bake, nullptr);
   bool changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   EXPECT_EQ(folder->bake, nullptr);
   EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
@@ -5616,7 +5756,7 @@ TEST_F(PaintLayersGenerateTest, pass_through_folder_is_never_a_bake_candidate)
   BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
 
   bool changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   EXPECT_EQ(folder->bake, nullptr);
   EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
@@ -5638,7 +5778,7 @@ TEST_F(PaintLayersGenerateTest, pass_through_folder_with_a_manual_bake_is_unchan
          "Through";
 
   bool changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_TRUE(changed);
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder))
@@ -5659,7 +5799,7 @@ TEST_F(PaintLayersGenerateTest, active_child_defers_its_folder_bake)
   ASSERT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *folder));
 
   bool changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   EXPECT_EQ(folder->bake, nullptr);
   EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
@@ -5679,7 +5819,7 @@ TEST_F(PaintLayersGenerateTest, never_mode_folder_is_not_baked)
   BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
 
   bool changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *folder));
   EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
@@ -5698,7 +5838,7 @@ TEST_F(PaintLayersGenerateTest, light_isolating_folder_stays_bakeless_and_does_n
   BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
 
   bool changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   EXPECT_EQ(folder->bake, nullptr);
   EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
@@ -5762,7 +5902,7 @@ TEST_F(PaintLayersGenerateTest, auto_baked_folder_child_value_edit_invalidates_a
   BKE_paint_layers_bake_job_free(*job);
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
   bool changed = true;
-  ASSERT_FALSE(BKE_paint_layers_bake_ensure(*bmain, *ma, &changed));
+  ASSERT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   EXPECT_FALSE(BKE_paint_layers_bake_stale_get(*ma));
 }
@@ -6011,7 +6151,7 @@ TEST_F(PaintLayersGenerateTest, sampler_budget_falls_back_a_live_row_to_its_bake
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
-  ASSERT_NE(BKE_paint_layers_bake_ensure(*row), nullptr);
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*row), nullptr);
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(
       *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("FallbackBaked")));
   BKE_paint_layers_bake_finalize(*ma, *row);
@@ -6086,7 +6226,7 @@ void material_bake_set(PaintLayersGenerateTest &t,
                        const Span<Image *> maps,
                        Image *coverage)
 {
-  EXPECT_NE(BKE_paint_layers_bake_ensure(row), nullptr);
+  EXPECT_NE(BKE_paint_layers_bake_struct_ensure(row), nullptr);
   for (const int channel : maps.index_range()) {
     if (maps[channel] != nullptr) {
       EXPECT_TRUE(BKE_paint_layers_bake_set_map(ma, row, channel, maps[channel]));
@@ -6167,7 +6307,7 @@ TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_an_isolating_folder_bak
   MaterialPaintLayer *folder = group_one(*ma, child);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_ensure(*folder);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*folder);
   ASSERT_NE(bake, nullptr);
   bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("IsBakedColor");
   bake->coverage = add_image("IsBakedCoverage");
@@ -6417,8 +6557,8 @@ TEST_F(PaintLayersGenerateTest, sampler_budget_pinned_active_row_is_bakeable_and
   EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *folder));
 
   /* Edit the source: the bake hash no longer matches, yet the row stays Baked on the stale maps. */
-  BKE_paint_layers_bake_ensure(*child)->hash[0] = 0;
-  BKE_paint_layers_bake_ensure(*child)->hash[1] = 0;
+  BKE_paint_layers_bake_struct_ensure(*child)->hash[0] = 0;
+  BKE_paint_layers_bake_struct_ensure(*child)->hash[1] = 0;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   EXPECT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *child));
   EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *child), PaintLayerMaterialMode::Baked);
@@ -6833,9 +6973,8 @@ TEST_F(PaintLayersGenerateTest, hybrid_base_color_constant_edit_syncs_the_row_gr
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
 
-  bNodeTreeInterfaceSocket *iface = group_input_find(*group, "PartB Base Color Source");
-  ASSERT_NE(iface, nullptr);
-  bNodeSocket *socket = group_instance_input(*ma->paint_layers_tree, *group, *iface);
+  /* The live constant is mirrored onto the root instance (A1). */
+  bNodeSocket *socket = root_instance_input("PartB Base Color Source");
   ASSERT_NE(socket, nullptr);
   const float *value = static_cast<bNodeSocketValueRGBA *>(socket->default_value)->value;
   EXPECT_NEAR(value[0], 0.9f, 1e-4f);
@@ -7302,3 +7441,4 @@ TEST_F(PaintLayersGenerateTest, stack_effect_correction_child_image_counts_as_a_
 }
 
 }  // namespace blender::bke::tests
+

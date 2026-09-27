@@ -7,17 +7,24 @@
  */
 
 #include "AS_asset_representation.hh"
+#include <fmt/format.h>
 #include <string>
 
 #include "BKE_node_socket_value.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
+#include "BLI_path_utils.hh"
+#include "BLI_rect.h"
 #include "BLI_stack.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
+#include "BLI_utildefines.h"
+
+#include "IMB_imbuf_types.hh"
 
 #include "DNA_ID.h"
 #include "DNA_gpencil_legacy_types.h"
+#include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_node_types.h"
@@ -33,6 +40,7 @@
 #include "BKE_compute_contexts.hh"
 #include "BKE_context.hh"
 #include "BKE_gpencil_legacy.h"
+#include "BKE_icons.hh"
 #include "BKE_idprop.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
@@ -54,7 +62,12 @@
 
 #include "../interface/interface_tag_bar.hh"
 
+#include "UI_interface_c.hh"
+#include "UI_interface_icons.hh"
+#include "UI_resources.hh"
 #include "UI_view2d.hh"
+
+#include "GPU_state.hh"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
@@ -1048,9 +1061,117 @@ static bool node_collection_drop_poll(bContext *C, wmDrag *drag, const wmEvent *
   return WM_drag_is_ID_type(drag, ID_GR) && !ui::button_active_drop_name(C);
 }
 
-static bool node_id_im_drop_poll(bContext * /*C*/, wmDrag *drag, const wmEvent * /*event*/)
+/* Number of image items carried by an Asset Browser multi-select drag, without importing. */
+static int node_replace_asset_list_image_count(const wmDrag &drag)
 {
-  return WM_drag_is_ID_type(drag, ID_IM);
+  const ListBaseT<wmDragAssetListItem> *items = WM_drag_asset_list_get(&drag);
+  if (items == nullptr) {
+    return 0;
+  }
+  int count = 0;
+  for (const wmDragAssetListItem &item : *items) {
+    const ID_Type idtype = item.is_external ?
+                               item.asset_data.external_info->asset->get_id_type() :
+                               (item.asset_data.local_id ? GS(item.asset_data.local_id->name) :
+                                                           ID_Type(0));
+    if (idtype == ID_IM) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/* True when the drag carries more than one image, which a single node replace cannot take. */
+static bool node_replace_drag_is_multi(bContext *C, const wmDrag *drag)
+{
+  if (drag->type == WM_DRAG_ASSET_LIST) {
+    return node_replace_asset_list_image_count(*drag) > 1;
+  }
+  if (drag->type == WM_DRAG_PATH) {
+    return WM_drag_get_paths(drag).size() > 1;
+  }
+  if (drag->type == WM_DRAG_ID) {
+    return drag->ids.count() > 1;
+  }
+  if (drag->type == WM_DRAG_ASSET) {
+    /* The Asset Browser drags the item under the cursor together with a list carrying the whole
+     * selection, so a multi-select still presents a single-asset drag that must defer. */
+    const wmWindowManager *wm = CTX_wm_manager(C);
+    if (wm != nullptr && wm->runtime != nullptr) {
+      for (const wmDrag &other : wm->runtime->drags) {
+        if (&other != drag && other.type == WM_DRAG_ASSET_LIST &&
+            node_replace_asset_list_image_count(other) > 1)
+        {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/* True when the drag carries exactly one image eligible for a node replace. */
+static bool node_replace_drag_is_single_image(bContext *C, wmDrag *drag)
+{
+  if (node_replace_drag_is_multi(C, drag)) {
+    return false;
+  }
+  if (WM_drag_is_ID_type(drag, ID_IM)) {
+    return true;
+  }
+  if (drag->type == WM_DRAG_PATH) {
+    const Span<std::string> paths = WM_drag_get_paths(drag);
+    return paths.size() == 1 && BLI_path_extension_check_array(paths[0].c_str(), imb_ext_image);
+  }
+  return false;
+}
+
+/* Image-capable node under the cursor, or null. Hit-tests the whole node bounds. */
+static bNode *node_replace_target_under_cursor(bContext *C, const wmEvent *event)
+{
+  SpaceNode *snode = CTX_wm_space_node(C);
+  ARegion *region = CTX_wm_region(C);
+  if (snode == nullptr || snode->edittree == nullptr || region == nullptr || event == nullptr) {
+    return nullptr;
+  }
+  if (!ELEM(snode->edittree->type, NTREE_SHADER, NTREE_TEXTURE, NTREE_COMPOSIT, NTREE_GEOMETRY)) {
+    return nullptr;
+  }
+  /* #event->mval is only valid for events dispatched to a region's own handlers (as in an
+   * operator's invoke); dropbox poll/copy callbacks run outside that dispatch and must derive the
+   * region-local position from the absolute #event->xy themselves, as #modifier_drop_poll does in
+   * `buttons_dropboxes.cc`. #node_under_mouse_get expects view-space coordinates. */
+  float2 cursor_view;
+  ui::view2d_region_to_view(&region->v2d,
+                            float(event->xy[0] - region->winrct.xmin),
+                            float(event->xy[1] - region->winrct.ymin),
+                            &cursor_view.x,
+                            &cursor_view.y);
+  bNode *node = node_under_mouse_get(*snode, cursor_view);
+  if (node == nullptr || !node_supports_image_replace(*node)) {
+    return nullptr;
+  }
+  return node;
+}
+
+static bool node_id_im_replace_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
+{
+  if (!node_replace_drag_is_single_image(C, drag)) {
+    return false;
+  }
+  return node_replace_target_under_cursor(C, event) != nullptr;
+}
+
+static bool node_id_im_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
+{
+  if (!WM_drag_is_ID_type(drag, ID_IM)) {
+    return false;
+  }
+  /* A drop onto an image node replaces its image instead of adding a new node. */
+  if (node_id_im_replace_drop_poll(C, drag, event)) {
+    return false;
+  }
+  return true;
 }
 
 static bool node_mask_drop_poll(bContext * /*C*/, wmDrag *drag, const wmEvent * /*event*/)
@@ -1157,6 +1278,178 @@ static void node_id_im_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
   }
 }
 
+/* #node_replace_target_under_cursor() needs an event, but dropbox copy/tooltip/draw callbacks are
+ * only handed the drag; they all resolve the same target from the window's current cursor state. */
+static bNode *node_replace_target_from_context(bContext *C)
+{
+  const wmWindow *win = CTX_wm_window(C);
+  const wmEvent *event_state = (win != nullptr && win->runtime != nullptr) ?
+                                   win->runtime->eventstate :
+                                   nullptr;
+  return node_replace_target_under_cursor(C, event_state);
+}
+
+static void node_id_im_replace_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
+{
+  /* #wmDropBox.ptr persists between drops: clear everything a previous drop may have set, so a
+   * stale path or id lookup never wins over (or masks the absence of) this drag's image. */
+  for (const char *prop_id : {"node_name", "filepath", "directory", "files", "session_uid", "name"})
+  {
+    RNA_struct_property_unset(drop->ptr, prop_id);
+  }
+
+  bNode *node = node_replace_target_from_context(C);
+  /* TODO: Temporary diagnostics for the Asset Browser resolve failure, remove once understood. */
+  printf("[replace_image] copy: drag->type=%d node=%s\n",
+         int(drag->type),
+         node ? node->name : "<none>");
+  if (node == nullptr) {
+    return;
+  }
+  RNA_string_set(drop->ptr, "node_name", node->name);
+  /* idcode 0: the poll already confirmed the drag carries an image, and the strict #ID_IM filter
+   * requires an exact #AssetRepresentation::get_id_type() match that some Asset Browser image
+   * assets do not pass, silently dropping the resolved id (matches #node_id_im_drop_copy). */
+  ID *id = WM_drag_get_local_ID_or_import_from_asset(C, drag, 0);
+  printf("[replace_image] copy: resolved id=%s\n", id ? id->name : "<null>");
+  if (id) {
+    RNA_int_set(drop->ptr, "session_uid", int(id->session_uid));
+    return;
+  }
+  if (drag->type == WM_DRAG_PATH) {
+    printf("[replace_image] copy: path=%s\n", WM_drag_get_single_path(drag));
+    io::paths_to_operator_properties(drop->ptr, WM_drag_get_paths(drag));
+    return;
+  }
+  /* An image asset stored as a plain file in an on-disk library has no blend library to import
+   * from, so load it by its file path instead. */
+  if (const wmDragAsset *asset_drag = WM_drag_get_asset_data(drag, ID_IM)) {
+    if (asset_drag->asset->full_library_path().empty()) {
+      const std::string path = asset_drag->asset->full_path();
+      printf("[replace_image] copy: asset file path=%s\n", path.c_str());
+      io::paths_to_operator_properties(drop->ptr, {path});
+    }
+  }
+}
+
+static std::string node_id_im_replace_drop_tooltip(bContext *C,
+                                                   wmDrag * /*drag*/,
+                                                   const int /*xy*/[2],
+                                                   wmDropBox * /*drop*/)
+{
+  bNode *node = node_replace_target_from_context(C);
+  if (node == nullptr) {
+    return {};
+  }
+  /* The dragged image's own name is already drawn separately as the drag's item-name label
+   * (#WM_drag_draw_item_name_fn via #WM_drag_draw_default_fn); naming it again here duplicated it
+   * on screen. */
+  return fmt::format(fmt::runtime(TIP_("Replace image in \"{}\"")), node->name);
+}
+
+/* Draws the default drag preview (dragged image thumbnail + name + tooltip), then, while hovering
+ * a replaceable node, an outline around that node plus a back arrow and the node's current
+ * image, so the default preview and this pairing read as "dragged image -> current image". */
+static void node_id_im_replace_draw_droptip(bContext *C, wmWindow *win, wmDrag *drag, const int xy[2])
+{
+  WM_drag_draw_default_fn(C, win, drag, xy);
+
+  const bNode *node = node_replace_target_from_context(C);
+  if (node == nullptr) {
+    return;
+  }
+  const ARegion *region = CTX_wm_region(C);
+  if (region == nullptr) {
+    return;
+  }
+
+  /* The drag overlay draws in raw window space, over the whole window, so clip everything specific
+   * to this node/region to the region's own rect -- otherwise the outline and preview row bleed
+   * into neighboring areas (e.g. the Properties editor) whenever the node sits near the Shader
+   * Editor's edge. */
+  int prev_scissor[4];
+  GPU_scissor_get(prev_scissor);
+  GPU_scissor_test(true);
+  GPU_scissor(region->winrct.xmin,
+             region->winrct.ymin,
+             BLI_rcti_size_x(&region->winrct),
+             BLI_rcti_size_y(&region->winrct));
+
+  /* Outline the node bounds in window pixels: the drag overlay draws in raw window space, not the
+   * region's own view2d-transformed GL state. */
+  rcti bounds_region;
+  ui::view2d_view_to_region_rcti(&region->v2d, &node->runtime->draw_bounds, &bounds_region);
+  const float outline_width = 2.0f * UI_SCALE_FAC;
+  const rctf bounds_window = {
+      float(bounds_region.xmin + region->winrct.xmin) - outline_width,
+      float(bounds_region.xmax + region->winrct.xmin) + outline_width,
+      float(bounds_region.ymin + region->winrct.ymin) - outline_width,
+      float(bounds_region.ymax + region->winrct.ymin) + outline_width,
+  };
+  float highlight_color[4];
+  ui::theme::get_color_4fv(TH_ACTIVE, highlight_color);
+  highlight_color[3] = 1.0f;
+  ui::draw_roundbox_4fv(&bounds_window, false, BASIS_RAD + outline_width, highlight_color);
+
+  /* Arrow + the node's current image, directly right of what #WM_drag_draw_default_fn drew. With
+   * a thumbnail it is centered on the cursor, the tooltip sits above it and the name below, so the
+   * space right of the thumbnail is free. Without one, the name is drawn right of the cursor on
+   * the cursor's line, so the row starts after the measured name instead. */
+  Image *current_image = node_image_node_current(*node);
+  if (current_image != nullptr) {
+    const int padding = int(6 * UI_SCALE_FAC);
+    const int arrow_size = int(UI_ICON_SIZE);
+    int dragged_width = 0;
+    int preview_size = 0;
+    int center_y = xy[1];
+    if (drag->imb) {
+      dragged_width = int(float(drag->imb->x) * drag->imbuf_scale);
+      preview_size = int(float(drag->imb->y) * drag->imbuf_scale);
+    }
+    else if (drag->preview_icon_id) {
+      dragged_width = int(PREVIEW_DRAG_DRAW_SIZE * UI_SCALE_FAC * drag->preview_icon_scale);
+      preview_size = dragged_width;
+    }
+    int x = xy[0] + dragged_width / 2 + padding;
+    if (dragged_width == 0) {
+      const std::string name = WM_drag_get_item_name(drag);
+      x = xy[0] + int(10 * UI_SCALE_FAC) +
+          ui::fontstyle_string_width(UI_FSTYLE_WIDGET, name.c_str()) + padding;
+      preview_size = int(32 * UI_SCALE_FAC);
+      /* The tooltip starts one icon height above the cursor (#wm_drag_draw_tooltip): top-align
+       * the row with the name line and let it grow downward, clear of the tooltip. */
+      center_y = xy[1] + arrow_size - preview_size / 2;
+    }
+    const int y = center_y - preview_size / 2;
+
+    const uchar arrow_col[4] = {255, 255, 255, 255};
+    ui::icon_draw_ex(float(x),
+                     float(y + (preview_size - arrow_size) / 2),
+                     ICON_BACK,
+                     UI_INV_SCALE_FAC,
+                     1.0f,
+                     0.0f,
+                     arrow_col,
+                     false,
+                     UI_NO_ICON_OVERLAY_TEXT);
+    x += arrow_size + padding;
+
+    /* The async icon-preview job (like any other datablock preview drawn during normal redraws):
+     * cheap and non-blocking. A synchronous decode here (as for the dragged image's own preview,
+     * #DROP_IMAGE_set_preview_for_drag) stalls the OS's native drag-over message pump for an
+     * external file drag, which can make Windows treat the window as unresponsive.
+     * #ICON_SIZE_PREVIEW matches #DROP_IMAGE_update_textures_preview_batch's own preview render
+     * call; #ICON_SIZE_ICON left the preview blank since nothing else in the UI ever renders that
+     * size slot for a plain #Image. */
+    const int current_icon_id = BKE_icon_id_ensure(&current_image->id);
+    ui::icon_render_id(C, nullptr, &current_image->id, ICON_SIZE_PREVIEW, true);
+    ui::icon_draw_preview(float(x), float(y), current_icon_id, 1.0f, 1.0f, preview_size);
+  }
+
+  GPU_scissor(UNPACK4(prev_scissor));
+  GPU_scissor_test(false);
+}
+
 static void node_import_file_drop_copy(bContext * /*C*/, wmDrag *drag, wmDropBox *drop)
 {
   io::paths_to_operator_properties(drop->ptr, WM_drag_get_paths(drag));
@@ -1232,6 +1525,13 @@ static void node_dropboxes()
                  node_group_drop_copy,
                  WM_drag_free_imported_drag_ID,
                  nullptr);
+  wmDropBox *replace_image_dropbox = WM_dropbox_add(lb,
+                                                    "NODE_OT_replace_image",
+                                                    node_id_im_replace_drop_poll,
+                                                    node_id_im_replace_drop_copy,
+                                                    WM_drag_free_imported_drag_ID,
+                                                    node_id_im_replace_drop_tooltip);
+  replace_image_dropbox->draw_droptip = node_id_im_replace_draw_droptip;
   WM_dropbox_add(lb,
                  "NODE_OT_add_image",
                  node_id_im_drop_poll,

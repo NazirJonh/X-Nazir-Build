@@ -926,6 +926,115 @@ static wmOperatorStatus node_add_nodes_modal(bContext *C, wmOperator *op, const 
   return OPERATOR_RUNNING_MODAL;
 }
 
+/* True when the node stores an #Image that a drag can replace. */
+bool node_supports_image_replace(const bNode &node)
+{
+  return ELEM(node.type_legacy,
+              SH_NODE_TEX_IMAGE,
+              SH_NODE_TEX_ENVIRONMENT,
+              TEX_NODE_IMAGE,
+              CMP_NODE_IMAGE,
+              GEO_NODE_IMAGE_TEXTURE);
+}
+
+/* The #Image a replace-capable node currently displays, or null. Used for drag-drop preview only;
+ * callers must have already confirmed #node_supports_image_replace. */
+Image *node_image_node_current(const bNode &node)
+{
+  if (node.type_legacy == GEO_NODE_IMAGE_TEXTURE) {
+    const bNodeSocket *image_socket = bke::node_find_socket(node, SOCK_IN, "Image"_ustr);
+    if (image_socket == nullptr) {
+      image_socket = static_cast<const bNodeSocket *>(node.inputs.first);
+    }
+    if (image_socket == nullptr) {
+      return nullptr;
+    }
+    const bNodeSocketValueImage *socket_value = static_cast<const bNodeSocketValueImage *>(
+        image_socket->default_value);
+    return socket_value ? socket_value->value : nullptr;
+  }
+  return node.id ? id_cast<Image *>(node.id) : nullptr;
+}
+
+/* Resolve the single #Image described by the operator properties.
+ * The returned image carries one extra user owned by the caller, either from
+ * #WM_operator_drop_load_path or from #BKE_image_load_exists. */
+static Image *node_image_resolve_single_image(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  const Vector<std::string> paths = ed::io::paths_from_operator_properties(op->ptr);
+  if (!paths.is_empty()) {
+    RNA_string_set(op->ptr, "filepath", paths[0].c_str());
+  }
+  Image *image = id_cast<Image *>(WM_operator_drop_load_path(C, op, ID_IM));
+  if (!image) {
+    return nullptr;
+  }
+  if (!paths.is_empty()) {
+    /* New file loads need their #ImBuf so the image source is detected correctly. */
+    BKE_image_signal(bmain, image, nullptr, IMA_SIGNAL_RELOAD);
+    WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, image);
+  }
+  return image;
+}
+
+/* Assign the image to the node, releasing the previous reference.
+ * The incoming image already carries one user owned by the caller, which becomes the node's user,
+ * so only the old reference is released here. */
+static void node_image_node_assign(bNodeTree &node_tree, bNode &node, Image &image)
+{
+  if (node.type_legacy == GEO_NODE_IMAGE_TEXTURE) {
+    bNodeSocket *image_socket = bke::node_find_socket(node, SOCK_IN, "Image"_ustr);
+    if (image_socket == nullptr) {
+      image_socket = static_cast<bNodeSocket *>(node.inputs.first);
+    }
+    if (image_socket == nullptr) {
+      /* Release the loader's extra user, the image cannot be assigned. */
+      id_us_min(&image.id);
+      return;
+    }
+    bNodeSocketValueImage *socket_value = static_cast<bNodeSocketValueImage *>(
+        image_socket->default_value);
+    if (socket_value == nullptr) {
+      /* Release the loader's extra user, the image cannot be assigned. */
+      id_us_min(&image.id);
+      return;
+    }
+    if (socket_value->value == &image) {
+      /* Dropping the image already used only consumes the loader's extra user. */
+      id_us_min(&image.id);
+      return;
+    }
+    if (socket_value->value != nullptr) {
+      id_us_min(&socket_value->value->id);
+    }
+    socket_value->value = &image;
+    BKE_ntree_update_tag_socket_property(&node_tree, image_socket);
+  }
+  else {
+    if (node.id == &image.id) {
+      /* Dropping the image already used only consumes the loader's extra user. */
+      id_us_min(&image.id);
+      return;
+    }
+    if (node.id != nullptr) {
+      id_us_min(node.id);
+    }
+    node.id = &image.id;
+    bke::node_tag_update_id(node);
+  }
+  BKE_ntree_update_tag_node_property(&node_tree, &node);
+}
+
+/* Finalize an image assignment shared by the add and replace operators. */
+static void node_image_edit_finish(bContext *C, Main &bmain, bNodeTree &node_tree)
+{
+  ED_preview_kill_jobs(CTX_wm_manager(C), CTX_data_main(C));
+
+  BKE_main_ensure_invariants(bmain, node_tree.id);
+  DEG_relations_tag_update(&bmain);
+}
+
 static wmOperatorStatus node_add_image_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
@@ -987,18 +1096,7 @@ static wmOperatorStatus node_add_image_exec(bContext *C, wmOperator *op)
       BKE_report(op->reports, RPT_WARNING, "Could not add an image node");
       continue;
     }
-    if (type == GEO_NODE_IMAGE_TEXTURE) {
-      bNodeSocket *image_socket = static_cast<bNodeSocket *>(node->inputs.first);
-      bNodeSocketValueImage *socket_value = static_cast<bNodeSocketValueImage *>(
-          image_socket->default_value);
-      socket_value->value = image;
-      BKE_ntree_update_tag_socket_property(&node_tree, image_socket);
-    }
-    else {
-      node->id = id_cast<ID *>(image);
-      bke::node_tag_update_id(*node);
-    }
-    BKE_ntree_update_tag_node_property(&node_tree, node);
+    node_image_node_assign(node_tree, *node, *image);
     nodes.append(node);
     /* Initial offset between nodes. */
     position[1] -= 20.0f;
@@ -1015,10 +1113,7 @@ static wmOperatorStatus node_add_image_exec(bContext *C, wmOperator *op)
   }
   ED_node_set_active(bmain, &snode, &node_tree, nodes[0], nullptr);
 
-  ED_preview_kill_jobs(CTX_wm_manager(C), CTX_data_main(C));
-
-  BKE_main_ensure_invariants(*bmain, snode.edittree->id);
-  DEG_relations_tag_update(bmain);
+  node_image_edit_finish(C, *bmain, node_tree);
 
   if (nodes.size() == 1) {
     return OPERATOR_FINISHED;
@@ -1089,6 +1184,74 @@ void NODE_OT_add_image(wmOperatorType *ot)
                                  FILE_DEFAULTDISPLAY,
                                  FILE_SORT_DEFAULT);
   WM_operator_properties_id_lookup(ot, true);
+}
+
+static wmOperatorStatus node_replace_image_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  SpaceNode *snode = CTX_wm_space_node(C);
+  if (snode == nullptr || snode->edittree == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  bNodeTree &node_tree = *snode->edittree;
+
+  char node_name[MAX_NAME];
+  RNA_string_get(op->ptr, "node_name", node_name);
+  if (node_name[0] == '\0') {
+    return OPERATOR_CANCELLED;
+  }
+  bNode *node = bke::node_find_node_by_name(node_tree, node_name);
+  if (node == nullptr) {
+    BKE_report(op->reports, RPT_WARNING, "Node not found, image not replaced");
+    return OPERATOR_CANCELLED;
+  }
+  if (!node_supports_image_replace(*node)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Image *image = node_image_resolve_single_image(C, op);
+  if (image == nullptr) {
+    /* #WM_operator_drop_load_path already reports a specific error (bad path, missing ID); this
+     * covers the copy callback finding neither a "filepath" nor an id-lookup property set at all
+     * (e.g. an Asset Browser drag whose asset failed to import). */
+    BKE_report(op->reports, RPT_WARNING, "Could not resolve the dropped image, not replaced");
+    return OPERATOR_CANCELLED;
+  }
+
+  node_image_node_assign(node_tree, *node, *image);
+  node_image_edit_finish(C, *bmain, node_tree);
+  WM_event_add_notifier(C, NC_NODE | NA_EDITED, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+void NODE_OT_replace_image(wmOperatorType *ot)
+{
+  /* identifiers */
+  ot->name = "Replace Image in Node";
+  ot->description = "Replace the image used by an existing image node";
+  ot->idname = "NODE_OT_replace_image";
+
+  /* callbacks */
+  ot->exec = node_replace_image_exec;
+  ot->poll = node_add_image_poll;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  WM_operator_properties_filesel(ot,
+                                 FILE_TYPE_FOLDER | FILE_TYPE_IMAGE | FILE_TYPE_MOVIE,
+                                 FILE_SPECIAL,
+                                 FILE_OPENFILE,
+                                 WM_FILESEL_FILEPATH | WM_FILESEL_RELPATH | WM_FILESEL_DIRECTORY |
+                                     WM_FILESEL_FILES,
+                                 FILE_DEFAULTDISPLAY,
+                                 FILE_SORT_DEFAULT);
+  WM_operator_properties_id_lookup(ot, true);
+
+  PropertyRNA *prop = RNA_def_string(
+      ot->srna, "node_name", nullptr, MAX_NAME, "Node Name", "Name of the node to replace");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
 }
 
 /** \} */

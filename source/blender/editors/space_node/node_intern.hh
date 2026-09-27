@@ -492,12 +492,18 @@ void draw_nodespace_back_pix(const bContext &C,
 bNode *add_node(const bContext &C, UString idname, const float2 &location);
 bNode *add_static_node(const bContext &C, int type, const float2 &location);
 
+/* True when the node stores an #Image that a drag can replace. */
+bool node_supports_image_replace(const bNode &node);
+/* The #Image a replace-capable node currently displays, or null. */
+Image *node_image_node_current(const bNode &node);
+
 void NODE_OT_add_reroute(wmOperatorType *ot);
 void NODE_OT_add_group(wmOperatorType *ot);
 void NODE_OT_add_group_asset(wmOperatorType *ot);
 void NODE_OT_add_object(wmOperatorType *ot);
 void NODE_OT_add_collection(wmOperatorType *ot);
 void NODE_OT_add_image(wmOperatorType *ot);
+void NODE_OT_replace_image(wmOperatorType *ot);
 void NODE_OT_add_mask(wmOperatorType *ot);
 void NODE_OT_add_material(wmOperatorType *ot);
 void NODE_OT_add_color(wmOperatorType *ot);

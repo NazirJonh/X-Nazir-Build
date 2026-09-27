@@ -577,14 +577,13 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
     return false;
   }
 
-  std::string drop_tooltip(const ui::DragInfo &drag_info) const override
+  /* The dragged item's name is already drawn as the drag's own label, so it is not repeated. */
+  std::string drop_tooltip(const ui::DragInfo & /*drag_info*/) const override
   {
-    const std::string image_name = WM_drag_get_item_name(
-        const_cast<wmDrag *>(&drag_info.drag_data));
     if (use_mask_slot_) {
-      return fmt::format(fmt::runtime(TIP_("Assign {} to the brush mask texture slot")), image_name);
+      return TIP_("Assign to the brush mask texture slot");
     }
-    return fmt::format(fmt::runtime(TIP_("Assign {} to the brush texture slot")), image_name);
+    return TIP_("Assign to the brush texture slot");
   }
 
   bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override
@@ -1153,12 +1152,11 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
             image_count);
       }
     }
+    /* The dragged item's name is already drawn as the drag's own label, so it is not repeated. */
     if (wrap_in_texture_) {
-      return fmt::format(fmt::runtime(TIP_("Assign {} to the texture slot")),
-                         WM_drag_get_item_name(const_cast<wmDrag *>(&drag_info.drag_data)));
+      return TIP_("Assign to the texture slot");
     }
-    return fmt::format(fmt::runtime(TIP_("Assign {} to the image slot")),
-                       WM_drag_get_item_name(const_cast<wmDrag *>(&drag_info.drag_data)));
+    return TIP_("Assign to the image slot");
   }
 
   /** Assign \a tex to the texture target property. The reference-counted generated setter takes
@@ -1557,17 +1555,17 @@ class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
   std::string drop_tooltip(const ui::DragInfo &drag_info) const override
   {
     const wmDrag &drag = effective_drag(drag_info.drag_data);
-    const std::string item_name = WM_drag_get_item_name(const_cast<wmDrag *>(&drag));
 
+    /* The dragged item's name is already drawn as the drag's own label, so it is not repeated. */
     if (target_.replace_slot) {
-      return fmt::format(fmt::runtime(TIP_("Replace this slot's texture with {}")), item_name);
+      return TIP_("Replace this slot's texture");
     }
 
     const int count = drag_assignable_count(drag);
     if (count > 1) {
       return fmt::format(fmt::runtime(TIP_("Add {} texture slots")), count);
     }
-    return fmt::format(fmt::runtime(TIP_("Assign {} to a new texture slot")), item_name);
+    return TIP_("Assign to a new texture slot");
   }
 
   bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override

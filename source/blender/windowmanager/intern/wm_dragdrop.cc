@@ -1480,9 +1480,12 @@ static void wm_drag_draw_icon(bContext * /*C*/, wmWindow * /*win*/, wmDrag *drag
 
 static void wm_drag_draw_item_name(wmDrag *drag, const int x, const int y)
 {
-  const uiFontStyle *fstyle = UI_FSTYLE_WIDGET;
-  const uchar text_col[] = {255, 255, 255, 255};
-  ui::fontstyle_draw_simple(fstyle, x, y, WM_drag_get_item_name(drag).c_str(), text_col);
+  const std::string name = WM_drag_get_item_name(drag);
+  if (name.empty()) {
+    return;
+  }
+  /* Same backdrop as the operator tooltip, so the name stays readable over any content. */
+  wm_drop_operator_draw(name, x, y);
 }
 
 void WM_drag_draw_item_name_fn(bContext * /*C*/, wmWindow *win, wmDrag *drag, const int xy[2])
@@ -1525,7 +1528,7 @@ static void wm_drag_draw_tooltip(bContext *C, wmWindow *win, wmDrag *drag, const
       y = xy[1] - (icon_height / 2) - padding - iconsize - padding - iconsize;
     }
   }
-  if (WM_drag_get_paths(drag).size() > 1) {
+  else if (WM_drag_get_paths(drag).size() > 1) {
     x = xy[0] - 2 * padding;
 
     if (xy[1] + 2 * 1.15 * iconsize < winsize_y) {

@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <string>
 #include <thread>
 
@@ -7438,6 +7439,567 @@ TEST_F(PaintLayersGenerateTest, stack_effect_correction_child_image_counts_as_a_
    * rows). #SamplerCounter follows the tree from its output nodes regardless of which row's
    * subtree a TEX_IMAGE node was built for. */
   EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), samplers_before + 2);
+}
+
+/* -------------------------------------------------------------------- */
+/** \name C3 refactor guard: deterministic generated-tree snapshots
+ *
+ * These tests lock the exact generated graph (root + every reachable group tree) so the C3
+ * decomposition of #paint_layers_tree_build cannot silently reorder node/link/socket creation,
+ * which would move socket identifiers and the stored topology/root hashes even while the
+ * behaviour-only tests stay green. The serialization is order-based and pointer-free; the only
+ * non-deterministic input, the random UUID markers stamped on value sockets, is normalized to the
+ * order each marker first appears (u0, u1, ...).
+ * \{ */
+
+namespace {
+
+const IDProperty *snapshot_iprop(const IDProperty *props, const char *key, const int type)
+{
+  if (props == nullptr) {
+    return nullptr;
+  }
+  return IDP_GetPropertyTypeFromGroup(props, key, type);
+}
+
+void snapshot_uuid(std::string &out,
+                   const char *uuid_text,
+                   Map<std::string, std::string> &seen,
+                   int &next)
+{
+  if (uuid_text == nullptr || uuid_text[0] == '\0') {
+    out += "-";
+    return;
+  }
+  const std::string key(uuid_text);
+  if (const std::string *found = seen.lookup_ptr(key)) {
+    out += *found;
+    return;
+  }
+  const std::string norm = "u" + std::to_string(next++);
+  seen.add(key, norm);
+  out += norm;
+}
+
+void snapshot_interface(std::string &out,
+                        bNodeTree &tree,
+                        Map<std::string, std::string> &markers,
+                        int &next_marker)
+{
+  tree.ensure_interface_cache();
+  tree.tree_interface.foreach_item([&](bNodeTreeInterfaceItem &item) {
+    if (item.item_type != NodeTreeInterfaceItemType::Socket) {
+      return true;
+    }
+    bNodeTreeInterfaceSocket &socket = reinterpret_cast<bNodeTreeInterfaceSocket &>(item);
+    const IDProperty *props = socket.properties;
+    const IDProperty *role = snapshot_iprop(props, "pbr_paint_layers_role", IDP_STRING);
+    const IDProperty *channel = snapshot_iprop(props, "pbr_paint_layers_channel", IDP_INT);
+    const IDProperty *mirror = snapshot_iprop(props, "pbr_paint_layers_mirror", IDP_INT);
+    const IDProperty *marker = snapshot_iprop(props, "pbr_paint_layers_layer", IDP_STRING);
+    out += "  IFACE ";
+    out += ((socket.flag & NODE_INTERFACE_SOCKET_INPUT) != 0) ? "in" : "out";
+    out += " type=" + std::string((socket.socket_type != nullptr) ? socket.socket_type : "-");
+    out += " name=" + std::string((socket.name != nullptr) ? socket.name : "-");
+    out += " id=" + std::string((socket.identifier != nullptr) ? socket.identifier : "-");
+    out += " role=" + std::string((role != nullptr) ? IDP_string_get(role) : "-");
+    out += " channel=" + std::to_string((channel != nullptr) ? IDP_int_get(channel) : -1);
+    out += " mirror=" + std::to_string((mirror != nullptr) ? IDP_int_get(mirror) : 0);
+    out += " marker=";
+    snapshot_uuid(out, (marker != nullptr) ? IDP_string_get(marker) : nullptr, markers, next_marker);
+    out += "\n";
+    return true;
+  });
+}
+
+/** A float rounded to the same precision the snapshot prints, so the hash is not at the mercy of
+ * the last bits of a float computation. */
+std::string snapshot_f(const float value)
+{
+  char buf[40];
+  BLI_snprintf(buf, sizeof(buf), "%.5f", value);
+  return buf;
+}
+
+/** The default value of an unlinked input socket, by type; "-" for outputs and types not tracked. */
+std::string snapshot_socket_default(const bNodeSocket &sock)
+{
+  switch (sock.type) {
+    case SOCK_FLOAT: {
+      const auto *v = static_cast<const bNodeSocketValueFloat *>(sock.default_value);
+      return snapshot_f(v != nullptr ? v->value : 0.0f);
+    }
+    case SOCK_INT: {
+      const auto *v = static_cast<const bNodeSocketValueInt *>(sock.default_value);
+      return std::to_string(v != nullptr ? v->value : 0);
+    }
+    case SOCK_BOOLEAN: {
+      const auto *v = static_cast<const bNodeSocketValueBoolean *>(sock.default_value);
+      return std::to_string((v != nullptr && v->value) ? 1 : 0);
+    }
+    case SOCK_VECTOR: {
+      const auto *v = static_cast<const bNodeSocketValueVector *>(sock.default_value);
+      return "{" + snapshot_f(v != nullptr ? v->value[0] : 0.0f) + "," +
+             snapshot_f(v != nullptr ? v->value[1] : 0.0f) + "," +
+             snapshot_f(v != nullptr ? v->value[2] : 0.0f) + "}";
+    }
+    case SOCK_RGBA: {
+      const auto *v = static_cast<const bNodeSocketValueRGBA *>(sock.default_value);
+      return "{" + snapshot_f(v != nullptr ? v->value[0] : 0.0f) + "," +
+             snapshot_f(v != nullptr ? v->value[1] : 0.0f) + "," +
+             snapshot_f(v != nullptr ? v->value[2] : 0.0f) + "," +
+             snapshot_f(v != nullptr ? v->value[3] : 0.0f) + "}";
+    }
+    default:
+      return "-";
+  }
+}
+
+/** The storage fields the generator actually writes, for the node types it creates. */
+std::string snapshot_node_storage(const bNode &node)
+{
+  switch (node.type_legacy) {
+    case SH_NODE_MIX: {
+      const auto *s = static_cast<const NodeShaderMix *>(node.storage);
+      if (s == nullptr) {
+        return "mix storage=null";
+      }
+      return "mix data_type=" + std::to_string(int(s->data_type)) +
+             " factor_mode=" + std::to_string(int(s->factor_mode)) +
+             " blend_type=" + std::to_string(int(s->blend_type)) +
+             " clamp_factor=" + std::to_string(int(s->clamp_factor)) +
+             " clamp_result=" + std::to_string(int(s->clamp_result));
+    }
+    case SH_NODE_TEX_IMAGE: {
+      const auto *s = static_cast<const NodeTexImage *>(node.storage);
+      if (s == nullptr) {
+        return "teximage storage=null";
+      }
+      return "teximage interpolation=" + std::to_string(s->interpolation) +
+             " extension=" + std::to_string(s->extension) +
+             " projection=" + std::to_string(s->projection);
+    }
+    case SH_NODE_UVMAP: {
+      const auto *s = static_cast<const NodeShaderUVMap *>(node.storage);
+      return std::string("uvmap uv=") + ((s != nullptr) ? s->uv_map : "-");
+    }
+    /* Math and Vector Math keep their operation/use_clamp in custom1/custom2 (serialized with the
+     * params), and the XYZ/Constant/Color nodes the generator makes carry no storage fields of
+     * their own; label them so a type change is still visible. */
+    case SH_NODE_MATH:
+      return "math";
+    case SH_NODE_VECTOR_MATH:
+      return "vecmath";
+    case SH_NODE_SEPXYZ:
+      return "sepxyz";
+    case SH_NODE_COMBXYZ:
+      return "combxyz";
+    case SH_NODE_RGB:
+      return "rgb";
+    case SH_NODE_VALUE:
+      return "value";
+    case SH_NODE_RGBTOBW:
+      return "rgbtobw";
+    case SH_NODE_COMPOSE_COLOR_ALPHA:
+      return "composealpha";
+    default:
+      return node.is_group() ? "group" : "-";
+  }
+}
+
+void snapshot_tree(std::string &out,
+                   bNodeTree &tree,
+                   Set<const bNodeTree *> &visited,
+                   Map<std::string, std::string> &markers,
+                   int &next_marker)
+{
+  if (!visited.add(&tree)) {
+    out += "  (repeated tree)\n";
+    return;
+  }
+  out += "TREE " + std::string(tree.id.name + 2) + "\n";
+  tree.ensure_topology_cache();
+
+  /* The stored topology/root hashes are deliberately NOT serialized: they fold in each layer's
+   * random UUID marker, so they differ every run and would defeat the snapshot. The node/link/
+   * socket order and the node parameters below are what actually pin the graph; each scenario also
+   * re-regenerates unchanged and checks the snapshot is byte-identical, so a moved hash is caught
+   * indirectly through the "root was not rebuilt" check. */
+
+  Map<const bNode *, int> index;
+  int i = 0;
+  for (bNode &node : tree.nodes) {
+    index.add(&node, i);
+    out += "  NODE " + std::to_string(i) + " type=" + std::to_string(node.type_legacy) +
+           " idname=" + std::string(node.idname) + " name=" + std::string(node.name) +
+           " label=" + std::string(node.label) +
+           " id=" + std::string((node.id != nullptr) ? node.id->name + 2 : "-") +
+           " custom1=" + std::to_string(node.custom1) +
+           " custom2=" + std::to_string(node.custom2) +
+           " custom3=" + std::to_string(node.custom3) +
+           " custom4=" + std::to_string(node.custom4) +
+           " muted=" + std::to_string((node.flag & NODE_MUTED) != 0 ? 1 : 0) + "\n";
+    out += "    STORAGE " + snapshot_node_storage(node) + "\n";
+    i++;
+  }
+  for (bNode &node : tree.nodes) {
+    int si = 0;
+    for (bNodeSocket *sock : node.input_sockets()) {
+      out += "    IN " + std::to_string(si) + " id=" + std::string(sock->identifier) +
+             " name=" + std::string(sock->name);
+      /* The current value of an unlinked input (what value-sync leaves on the root instance). */
+      if (sock->directly_linked_links().is_empty()) {
+        out += " default=" + snapshot_socket_default(*sock);
+      }
+      out += "\n";
+      si++;
+    }
+    si = 0;
+    for (bNodeSocket *sock : node.output_sockets()) {
+      out += "    OUT " + std::to_string(si) + " id=" + std::string(sock->identifier) +
+             " name=" + std::string(sock->name) + "\n";
+      si++;
+    }
+  }
+
+  snapshot_interface(out, tree, markers, next_marker);
+
+  for (bNodeLink &link : tree.links) {
+    const int fi = index.lookup_default(link.fromnode, -1);
+    const int ti = index.lookup_default(link.tonode, -1);
+    int fs = -1;
+    int ts = -1;
+    int k = 0;
+    if (link.fromnode != nullptr) {
+      for (bNodeSocket *sock : link.fromnode->output_sockets()) {
+        if (sock == link.fromsock) {
+          fs = k;
+          break;
+        }
+        k++;
+      }
+    }
+    k = 0;
+    if (link.tonode != nullptr) {
+      for (bNodeSocket *sock : link.tonode->input_sockets()) {
+        if (sock == link.tosock) {
+          ts = k;
+          break;
+        }
+        k++;
+      }
+    }
+    out += "  LINK " + std::to_string(fi) + ":" + std::to_string(fs) + ":" +
+           std::string((link.fromsock != nullptr) ? link.fromsock->identifier : "-") + " -> " +
+           std::to_string(ti) + ":" + std::to_string(ts) + ":" +
+           std::string((link.tosock != nullptr) ? link.tosock->identifier : "-") + "\n";
+  }
+
+  /* Depth-first into the group instances, in node order, so a nested tree's serialization sits
+   * right after the instance that reaches it. */
+  for (bNode &node : tree.nodes) {
+    if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
+      continue;
+    }
+    if (bNodeTree *group = id_cast<bNodeTree *>(node.id)) {
+      snapshot_tree(out, *group, visited, markers, next_marker);
+    }
+  }
+}
+
+uint64_t snapshot_hash(const Material &ma)
+{
+  std::string text;
+  if (ma.nodetree != nullptr) {
+    Set<const bNodeTree *> visited;
+    Map<std::string, std::string> markers;
+    int next_marker = 0;
+    snapshot_tree(text, *ma.nodetree, visited, markers, next_marker);
+  }
+  uint64_t h = 1469598103934665603ull;
+  for (const unsigned char c : text) {
+    h ^= c;
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+/**
+ * Lock \a ma's generated graph: compare its hash to \a expected, then regenerate once more without
+ * any description edit and require the root to be kept and the snapshot to be byte-identical. That
+ * second half is what replaces a stored-hash assertion: a hash the user cannot see moves exactly
+ * when the root topology moves, which this catches.
+ */
+void snapshot_expect(Material &ma, const uint64_t expected, const char *label)
+{
+  Main *bmain = G_MAIN;
+  ASSERT_NE(bmain, nullptr);
+  bNodeTree *const root = ma.paint_layers_tree;
+  Vector<bNode *> nodes_before;
+  if (root != nullptr) {
+    for (bNode &node : root->nodes) {
+      nodes_before.append(&node);
+    }
+  }
+  const uint64_t first = snapshot_hash(ma);
+  std::printf("SNAPSHOT %s %016llx\n", label, static_cast<unsigned long long>(first));
+  EXPECT_EQ(first, expected) << "snapshot " << label;
+
+  /* Unchanged re-regeneration: the root must be kept (its stored hash matched) and nothing may
+   * have moved -- node order, links, interface, params and unlinked-input values alike. */
+  EXPECT_TRUE(BKE_paint_layers_regenerate(*bmain, ma)) << label;
+  EXPECT_EQ(ma.paint_layers_tree, root) << label << " root was rebuilt on an unchanged regenerate";
+  bool same_nodes = root != nullptr && ma.paint_layers_tree == root;
+  if (same_nodes) {
+    int i = 0;
+    for (bNode &node : root->nodes) {
+      if (i >= int(nodes_before.size()) || nodes_before[i] != &node) {
+        same_nodes = false;
+        break;
+      }
+      i++;
+    }
+    if (i != int(nodes_before.size())) {
+      same_nodes = false;
+    }
+  }
+  EXPECT_TRUE(same_nodes) << label << " root node list changed on an unchanged regenerate";
+  EXPECT_EQ(snapshot_hash(ma), first)
+      << label << " second regenerate changed the snapshot (root topology moved)";
+}
+
+}  // namespace
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_simple_layer)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0xd5db6e49ef2f1796ull, "simple_layer");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_fill_layer)
+{
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *fill);
+  const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, green));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0xdee191836bf7ca65ull, "fill_layer");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_isolating)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  add_channel(*child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Child"));
+  /* Opacity below one keeps the folder isolating. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0xe5ae89cde8c3851full, "folder_isolating");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_pass_through)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  add_channel(*child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Child"));
+  /* Default opacity and MIX blend make the folder pass through (children inlined). */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0xf79df9fc3e9443b0ull, "folder_pass_through");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_nested_folder_value_mirrors)
+{
+  MaterialPaintLayer *outer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Outer", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *inner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Inner", outer, PaintLayerPlace::Into);
+  MaterialPaintLayer *leaf = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Leaf", inner, PaintLayerPlace::Into);
+  ASSERT_NE(outer, nullptr);
+  ASSERT_NE(inner, nullptr);
+  ASSERT_NE(leaf, nullptr);
+  add_channel(*leaf, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Leaf"));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, outer, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, inner, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0xeae34bd74f6f4401ull, "nested_folder_value_mirrors");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_content_correction_image)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, bottom, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
+  ASSERT_NE(correction, nullptr);
+  add_channel(*correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Correction"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0x39e6f400a6faa04dull, "content_correction_image");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_correction)
+{
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("Owner"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
+  ASSERT_NE(correction, nullptr);
+  add_paint_layer_into(correction, "Child", add_image("Child"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0xbba951f2b92064beull, "stack_correction");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_mask_image)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, bottom, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "M");
+  ASSERT_NE(mask, nullptr);
+  add_channel(*mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Mask"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0x0bd50cdc8a56d264ull, "mask_image");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_mask_channel)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, bottom, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "StackMask");
+  ASSERT_NE(mask, nullptr);
+  mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  add_paint_layer_into(mask, "Child", add_image("Child"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0x2e7f8bfd2019a70cull, "stack_mask_channel");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_normal_layer)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  add_channel(*bottom, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("Normal"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0x5fa77183a342beb8ull, "normal_layer");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_hybrid)
+{
+  Material *source = add_principled_source("HybridSource", 0.42f);
+  add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("HybridBaked")));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0x87164b7f4480a722ull, "material_row_hybrid");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_source_group)
+{
+  Material *source = add_principled_source("GroupSource", 0.42f);
+  source_set_noise_base_color(*bmain, *source);
+  add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0x4c351d3ea285f38full, "material_row_source_group");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_with_mask_and_effect)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Child", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  add_channel(*child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Child"));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, folder, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "FX");
+  ASSERT_NE(effect, nullptr);
+  add_channel(*effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("FX"));
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, folder, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "MK");
+  ASSERT_NE(mask, nullptr);
+  add_channel(*mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("MK"));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0xa9cacc9357f05776ull, "folder_with_mask_and_effect");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_disabled_row)
+{
+  add_paint_layer("OnLayer", add_image("On"));
+  MaterialPaintLayer *off = add_paint_layer("OffLayer", add_image("Off"));
+  ASSERT_NE(off, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, false));
+  /* Current code needs one settle rebuild after the enabled toggle before the root is stable; the
+   * snapshot baseline is taken after it, then snapshot_expect's own regenerate must not move it. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0x844d78acf587ec49ull, "disabled_row");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_multi_channel_overrides)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Multi", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Base"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("Rough"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_METALLIC, add_image("Metal"));
+  /* Per-channel blend/opacity overrides (channel_settings). */
+  layer->channel_settings[PAINT_MATERIAL_CHANNEL_ROUGHNESS].blend =
+      MA_PAINT_LAYER_BLEND_MULTIPLY;
+  layer->channel_settings[PAINT_MATERIAL_CHANNEL_ROUGHNESS].opacity = 0.5f;
+  layer->channel_settings[PAINT_MATERIAL_CHANNEL_METALLIC].blend = MA_PAINT_LAYER_BLEND_ADD;
+  layer->channel_settings[PAINT_MATERIAL_CHANNEL_METALLIC].opacity = 0.25f;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0xd4c0fb428c07d9c6ull, "multi_channel_overrides");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_custom_node_group_row)
+{
+  MaterialPaintLayer *owner = add_paint_layer("Owner", add_image("OwnerMap"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_NODE_GROUP, "NGC");
+  ASSERT_NE(correction, nullptr);
+  Image *bake_map = add_image("NodeGroupBakeMap");
+  Image *coverage = add_image("NodeGroupBakeCoverage");
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, bake_map));
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *correction, -1, coverage));
+  BKE_paint_layers_bake_finalize(*ma, *correction);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0x7dcce37a83f623dcull, "custom_node_group_row");
+}
+
+TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_mesh_map_row)
+{
+  Image *atlas = add_atlas_image(*bmain, "Atlas", 8);
+  ASSERT_NE(atlas, nullptr);
+  MaterialPaintLayer *mesh_map = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MESH_MAP, "AO", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(mesh_map, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mesh_map, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  snapshot_expect(*ma, 0xd4b0017a64e0e684ull, "mesh_map_row");
 }
 
 }  // namespace blender::bke::tests

@@ -22,6 +22,7 @@
 #include "BLI_string_utf8_symbols.h"
 
 #include "BKE_brush.hh"
+#include "BKE_curve_patch.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -156,6 +157,20 @@ static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_mode_items[] = {
      0,
      "Stamps",
      "Place separate randomized texture stamps spaced along the curve"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_layout_items[] = {
+    {BRUSH_CURVE_PATCH_STAMP_LAYOUT_FILL,
+     "FILL",
+     0,
+     "Fill",
+     "Place stamps along the curve at every Spacing step"},
+    {BRUSH_CURVE_PATCH_STAMP_LAYOUT_POINTS,
+     "POINTS",
+     0,
+     "Points",
+     "Place one stamp centered on every control point"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -2398,6 +2413,38 @@ static void rna_BrushCurvePatchTextureSlot_name_get(PointerRNA *ptr, char *value
   }
 }
 
+/* The per-point browse target lives inside an editor session the RNA layer cannot reach, so the
+ * two callbacks forward through #bke::BKE_curve_patch_point_texture_hooks -- registered by the
+ * sculpt/paint module, null (and the property effectively unset / read-only) when it is not. */
+static PointerRNA rna_BrushCurvePatchSettings_point_image_get(PointerRNA *ptr)
+{
+  using namespace blender::bke;
+  Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  const CurvePatchPointTextureHooks *hooks = BKE_curve_patch_point_texture_hooks;
+  Image *image = (hooks != nullptr && hooks->get != nullptr && br != nullptr) ? hooks->get(*br) :
+                                                                                nullptr;
+  if (image == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_Image, image);
+}
+
+static void rna_BrushCurvePatchSettings_point_image_set(PointerRNA *ptr,
+                                                        const PointerRNA value,
+                                                        ReportList * /*reports*/)
+{
+  using namespace blender::bke;
+  Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  const CurvePatchPointTextureHooks *hooks = BKE_curve_patch_point_texture_hooks;
+  Image *image = static_cast<Image *>(value.data);
+  if (hooks == nullptr || hooks->set == nullptr || br == nullptr || image == nullptr ||
+      G_MAIN == nullptr)
+  {
+    return;
+  }
+  hooks->set(*G_MAIN, *br, *image);
+}
+
 }  // namespace blender
 
 #else
@@ -2586,6 +2633,30 @@ static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
       prop, "Projection", "How each stamp's texture frame is built along the curve");
   RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
 
+  prop = RNA_def_property(srna, "stamp_layout", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stamp_layout");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_stamp_layout_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Stamp Layout",
+      "Where the Stamps mode places its stamps: spaced along the curve or one per control point");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "show_point_radius_handles", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "show_point_radius_handles", 1);
+  RNA_def_property_ui_text(prop,
+                           "Show Radius Handles",
+                           "Show handles to edit each point's own stamp size (Points layout only)");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "show_point_strength_handles", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "show_point_strength_handles", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Show Strength Handles",
+      "Show handles to edit each point's own stamp strength (Points layout only)");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
   prop = RNA_def_property(srna, "stamp_texture_source", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "stamp_texture_source");
   RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_stamp_texture_source_items);
@@ -2669,6 +2740,24 @@ static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
                            "Assign a new face set to the geometry raised by each Curve Patch or "
                            "Roll stroke");
   RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  /* Virtual (no DNA field): the image the point-texture browse flow targets. An Image, not a
+   * Texture: the browse popover assigns the picked image directly, and the editor-side hooks
+   * translate that into a per-point texture-slot assignment -- see
+   * #bke::CurvePatchPointTextureHooks. A Texture target would make the ID browser wrap-and-retarget
+   * the point's slot texture, which silently rewrites the shared Texture List entry. */
+  prop = RNA_def_property(srna, "point_image", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Image");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_BrushCurvePatchSettings_point_image_get",
+                                 "rna_BrushCurvePatchSettings_point_image_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_ui_text(
+      prop, "Point Image", "Image drawn by the control point being browsed for");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchSettings_update");
 
   prop = RNA_def_property(srna, "texture_start", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "tex_start");

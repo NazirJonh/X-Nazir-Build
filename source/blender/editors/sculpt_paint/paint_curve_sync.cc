@@ -8,14 +8,18 @@
  * Screen-space projection of paint-curve geometry and radius-handle helpers.
  */
 
+#include <cmath>
+
 #include "DNA_brush_types.h"
 #include "DNA_curve_types.h"
 #include "DNA_layer_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
+#include "BKE_attribute.hh"
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
+#include "BKE_curve_patch.hh"
 #include "BKE_curve_legacy_convert.hh"
 #include "BKE_curves.hh"
 #include "BKE_layer.hh"
@@ -716,6 +720,157 @@ float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScree
    * by a fixed minimum so the handle clears the pivot. */
   return max_ff((dist - PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET) / PAINT_CURVE_RADIUS_HANDLE_BASE_LEN,
                 0.0f);
+}
+
+void paintcurve_strength_handle_screen_get_from_geometry(
+    const bke::CurvesGeometry &geom,
+    const PaintCurvePoint *screen_points,
+    const int point_index,
+    PaintCurveStrengthHandleScreen *r_handle,
+    const VArray<float> *strength_values)
+{
+  /* Same screen normal as the radius handle, OPPOSITE side: the radius knob owns `+perp`, the
+   * strength track owns `-perp`, so the two never overlap at small radii. */
+  PaintCurveRadiusHandleScreen radius_handle;
+  paintcurve_radius_handle_screen_get_from_geometry(geom, screen_points, point_index, &radius_handle);
+  const float2 perp = -radius_handle.perp;
+
+  r_handle->point = radius_handle.point;
+  r_handle->perp = perp;
+  r_handle->base = r_handle->point + perp * PAINT_CURVE_STRENGTH_HANDLE_OFFSET;
+  r_handle->end = r_handle->base + perp * PAINT_CURVE_STRENGTH_HANDLE_TRACK_LEN;
+  /* A caller looping over points resolves the attribute once and passes it, so this is not a
+   * per-point attribute lookup. */
+  const float strength = strength_values != nullptr ? (*strength_values)[point_index] :
+                                                      paintcurve_geom_stamp_strength_get(
+                                                          geom, point_index);
+  const float value = math::clamp(strength, 0.0f, 1.0f);
+  r_handle->value = value;
+  r_handle->knob = r_handle->point +
+                   perp * (PAINT_CURVE_STRENGTH_HANDLE_OFFSET +
+                           PAINT_CURVE_STRENGTH_HANDLE_TRACK_LEN * value);
+}
+
+int paintcurve_find_strength_handle_at_pos_from_geometry(const bke::CurvesGeometry &geom,
+                                                         const Span<PaintCurvePoint> screen_points,
+                                                         const float pos[2],
+                                                         const float threshold)
+{
+  if (!paintcurve_geometry_is_valid(geom) || screen_points.is_empty()) {
+    return -1;
+  }
+
+  int best_index = -1;
+  float best_dist = threshold;
+
+  /* Resolve the attribute once: the per-point getter would otherwise do a VArray lookup per point. */
+  const VArray<float> strengths = *geom.attributes().lookup_or_default<float>(
+      bke::CURVE_PATCH_ATTR_STAMP_STRENGTH, bke::AttrDomain::Point, 1.0f);
+
+  const int point_num = (geom.points_num() < int(screen_points.size())) ?
+                            geom.points_num() :
+                            int(screen_points.size());
+  for (const int i : IndexRange(point_num)) {
+    PaintCurveStrengthHandleScreen handle;
+    paintcurve_strength_handle_screen_get_from_geometry(
+        geom, screen_points.data(), i, &handle, &strengths);
+    const float knob[2] = {handle.knob.x, handle.knob.y};
+    const float dist = len_v2v2(pos, knob);
+    if (dist < best_dist) {
+      best_dist = dist;
+      best_index = i;
+    }
+  }
+
+  return best_index;
+}
+
+float paintcurve_strength_from_handle_screen_pos(const PaintCurveStrengthHandleScreen *handle,
+                                                 const float pos[2])
+{
+  const float2 delta = float2(pos) - handle->point;
+  /* Project onto the track's own direction, then invert the forward knob mapping. The value is
+   * clamped to [0, 1]: the track's ends are the value's bounds, unlike the radius which is only
+   * floored. */
+  const float dist = math::dot(delta, handle->perp);
+  return math::clamp(
+      (dist - PAINT_CURVE_STRENGTH_HANDLE_OFFSET) / PAINT_CURVE_STRENGTH_HANDLE_TRACK_LEN,
+      0.0f,
+      1.0f);
+}
+
+void paintcurve_angle_handle_screen_get_from_geometry(
+    const bke::CurvesGeometry &geom,
+    const PaintCurvePoint *screen_points,
+    const int point_index,
+    PaintCurveAngleHandleScreen *r_handle,
+    const VArray<float> *angle_values)
+{
+  const BezTriple &bez = screen_points[point_index].bez;
+  const float2 pivot(bez.vec[1]);
+  /* The same screen tangent the radius handle builds its direction from: through the point, along
+   * the difference of its two Bezier handles. The drawn arc is centered on this tangent direction
+   * PLUS the point's own angle, so the arc lines up with how the stamp's texture is oriented on
+   * screen -- and a drag delta measured on the arc maps straight onto the attribute. */
+  float2 tangent = float2(bez.vec[2]) - float2(bez.vec[0]);
+  if (math::length_squared(tangent) < 1e-6f) {
+    tangent = float2(1.0f, 0.0f);
+  }
+  else {
+    tangent = math::normalize(tangent);
+  }
+
+  const float radius_factor = max_ff(geom.radius()[point_index], 0.0f);
+  /* 0.6 * the radius handle's own reach, with a floor so a tiny stamp still draws a grabbable
+   * arc. */
+  const float arc_radius = std::max(0.6f * radius_factor * PAINT_CURVE_RADIUS_HANDLE_BASE_LEN,
+                                    PAINT_CURVE_ANGLE_HANDLE_MIN_RADIUS);
+
+  /* A caller looping over points resolves the attribute once and passes it, so this is not a
+   * per-point attribute lookup. */
+  const float point_angle = angle_values != nullptr ? (*angle_values)[point_index] :
+                                                      paintcurve_geom_stamp_angle_get(
+                                                          geom, point_index);
+  const float screen_angle = std::atan2(tangent.y, tangent.x) + point_angle;
+
+  r_handle->center = pivot;
+  r_handle->radius = arc_radius;
+  r_handle->angle = screen_angle;
+  r_handle->knob = pivot + float2(std::cos(screen_angle), std::sin(screen_angle)) * arc_radius;
+}
+
+int paintcurve_find_angle_handle_at_pos_from_geometry(const bke::CurvesGeometry &geom,
+                                                      const Span<PaintCurvePoint> screen_points,
+                                                      const float pos[2],
+                                                      const float threshold)
+{
+  if (!paintcurve_geometry_is_valid(geom) || screen_points.is_empty()) {
+    return -1;
+  }
+
+  int best_index = -1;
+  float best_dist = threshold;
+
+  /* Resolve the attribute once: the per-point getter would otherwise do a VArray lookup per point. */
+  const VArray<float> angles = *geom.attributes().lookup_or_default<float>(
+      bke::CURVE_PATCH_ATTR_STAMP_ANGLE, bke::AttrDomain::Point, 0.0f);
+
+  const int point_num = (geom.points_num() < int(screen_points.size())) ?
+                            geom.points_num() :
+                            int(screen_points.size());
+  for (const int i : IndexRange(point_num)) {
+    PaintCurveAngleHandleScreen handle;
+    paintcurve_angle_handle_screen_get_from_geometry(
+        geom, screen_points.data(), i, &handle, &angles);
+    const float knob[2] = {handle.knob.x, handle.knob.y};
+    const float dist = len_v2v2(pos, knob);
+    if (dist < best_dist) {
+      best_dist = dist;
+      best_index = i;
+    }
+  }
+
+  return best_index;
 }
 
 bool paintcurve_find_closest_segment_from_geometry(

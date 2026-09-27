@@ -26,6 +26,7 @@ void CurvePatchSpline::clear()
   poly_3d.clear();
   lengths_3d.clear();
   tangents_3d.clear();
+  control_point_lengths.clear();
   radii.clear();
   normals_3d.clear();
   normals_smooth_3d.clear();

@@ -311,8 +311,9 @@ struct BrushCurvePatchTextureSlot {
  *
  * Makesdna does not insert alignment padding on its own (see `check_member_alignment()` in
  * `makesdna.cc`), so `_pad[6]` sits between `end_point_shape` and `stamp_mode` below to align the
- * following pointer-containing members to eight bytes; new `char` settings should be appended
- * after `stamp_mode`'s group, not before the padding.
+ * following pointer-containing members to eight bytes, and `_pad1[5]` sits after the
+ * `stamp_texture_source` char group to do the same for `tex_start`; new `char` settings should be
+ * appended after `stamp_mode`'s group, not before the padding.
  */
 struct BrushCurvePatchSettings {
   /** STAMPS mode texture list, active only when #stamp_texture_source is
@@ -356,6 +357,17 @@ struct BrushCurvePatchSettings {
   /** Whether every stamp samples the brush's own texture or draws one at random from
    * #texture_slots. See #eBrushCurvePatchTexSource. */
   char stamp_texture_source = BRUSH_CURVE_PATCH_TEX_SINGLE;
+  /** STAMPS mode: where the stamps land. #BRUSH_CURVE_PATCH_STAMP_LAYOUT_FILL spaces them every
+   * Spacing along the arc length; #BRUSH_CURVE_PATCH_STAMP_LAYOUT_POINTS centers one stamp on
+   * every control point, which makes Spacing irrelevant (see #eBrushCurvePatchStampLayout). */
+  char stamp_layout = BRUSH_CURVE_PATCH_STAMP_LAYOUT_FILL;
+  /** POINTS layout: show handles to edit each point's own stamp size (the per-point `radius`
+   * attribute) in the curve editor. Only a view toggle: the attribute exists either way. */
+  char show_point_radius_handles = false;
+  /** POINTS layout: show handles to edit each point's own stamp strength (the
+   * `paintcurve_stamp_strength` attribute) in the curve editor. */
+  char show_point_strength_handles = false;
+  char _pad1[5] = {};
   /** Whether the whole ribbon carries the brush's own texture or splits into the Start / Middle /
    * End textures below. See #eBrushCurvePatchTexSource. */
   char ribbon_texture_source = BRUSH_CURVE_PATCH_TEX_SINGLE;

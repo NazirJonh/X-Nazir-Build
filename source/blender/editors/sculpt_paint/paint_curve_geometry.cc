@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
 #include "DNA_brush_types.h"
 #include "DNA_curve_types.h"
@@ -171,6 +172,10 @@ void paintcurve_geometry_remove_points(bke::CurvesGeometry &geom,
   if (!paintcurve_geometry_is_valid(geom) || points_to_remove.is_empty()) {
     return;
   }
+
+  /* Materialize the stable stamp seed first: `remove_points` carries the attribute generically, so
+   * the surviving points keep their draws instead of inheriting a neighbor's. */
+  paintcurve_geom_stamp_seed_ensure(geom);
 
   /* Use the built-in CurvesGeometry remove_points method. */
   geom.remove_points(points_to_remove, {});
@@ -635,6 +640,299 @@ void paintcurve_cycle_point_handle_type(PaintCurve *pc, const int point_index)
   geom.calculate_bezier_auto_handles();
   geom.calculate_bezier_aligned_handles();
   geom.tag_topology_changed();
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Curve Patch Per-Point Stamp Attributes
+ *
+ * The per-point stamp overrides the POINTS stamp layout reads (#CURVE_PATCH_ATTR_STAMP_STRENGTH,
+ * #CURVE_PATCH_ATTR_STAMP_ANGLE, #CURVE_PATCH_ATTR_STAMP_TEXTURE). A missing attribute reads as
+ * its documented default -- that is what keeps curves authored before these existed working --
+ * and each is created lazily, filled with its default, on the first write.
+ * \{ */
+
+/* Read one per-point stamp value with its default for absent attributes. */
+template<typename T>
+static T paintcurve_stamp_attr_get(const bke::CurvesGeometry &geom,
+                                   const StringRefNull name,
+                                   const int point_index,
+                                   const T default_value)
+{
+  const VArray<T> values = *geom.attributes().lookup_or_default<T>(
+      name, bke::AttrDomain::Point, default_value);
+  return values[point_index];
+}
+
+/* Write one per-point stamp value, creating the attribute filled with its default on first
+ * write (a freshly added attribute holds zero-fill, which is NOT the strength default). */
+template<typename T>
+static void paintcurve_stamp_attr_set(bke::CurvesGeometry &geom,
+                                      const StringRefNull name,
+                                      const int point_index,
+                                      const T value,
+                                      const T default_value)
+{
+  bke::MutableAttributeAccessor attrs = geom.attributes_for_write();
+  const bool existed = attrs.contains(name);
+  bke::SpanAttributeWriter<T> attr = attrs.lookup_or_add_for_write_span<T>(name,
+                                                                          bke::AttrDomain::Point);
+  if (!attr) {
+    return;
+  }
+  if (!existed) {
+    attr.span.fill(default_value);
+  }
+  attr.span[point_index] = value;
+  attr.finish();
+}
+
+/* Shift the per-point stamp values right of `insert_index` over by one and write the new point's
+ * value. Call AFTER the geometry was resized by one point: the old values still sit at their
+ * pre-insert indices, and the tail entry is garbage. A newly created attribute is default-filled
+ * across the old points, so the shift carries defaults right of the insertion. */
+template<typename T>
+static void paintcurve_stamp_attr_insert(bke::MutableAttributeAccessor &attrs,
+                                         const StringRefNull name,
+                                         const T default_value,
+                                         const int old_total,
+                                         const int insert_index,
+                                         const T new_value)
+{
+  const bool existed = attrs.contains(name);
+  bke::SpanAttributeWriter<T> attr = attrs.lookup_or_add_for_write_span<T>(name,
+                                                                          bke::AttrDomain::Point);
+  if (!attr) {
+    return;
+  }
+  BLI_assert(attr.span.size() == old_total + 1);
+  if (!existed) {
+    attr.span.drop_back(1).fill(default_value);
+  }
+  for (int i = old_total - 1; i >= insert_index; i--) {
+    attr.span[i + 1] = attr.span[i];
+  }
+  attr.span[insert_index] = new_value;
+  attr.finish();
+}
+
+float paintcurve_geom_stamp_strength_get(const bke::CurvesGeometry &geom, const int point_index)
+{
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
+      point_index >= geom.points_num())
+  {
+    return 1.0f;
+  }
+  return paintcurve_stamp_attr_get<float>(
+      geom, bke::CURVE_PATCH_ATTR_STAMP_STRENGTH, point_index, 1.0f);
+}
+
+void paintcurve_geom_stamp_strength_set(bke::CurvesGeometry &geom,
+                                        const int point_index,
+                                        const float strength)
+{
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
+      point_index >= geom.points_num())
+  {
+    return;
+  }
+  paintcurve_stamp_attr_set<float>(geom,
+                                   bke::CURVE_PATCH_ATTR_STAMP_STRENGTH,
+                                   point_index,
+                                   math::clamp(strength, 0.0f, 1.0f),
+                                   1.0f);
+}
+
+float paintcurve_geom_stamp_angle_get(const bke::CurvesGeometry &geom, const int point_index)
+{
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
+      point_index >= geom.points_num())
+  {
+    return 0.0f;
+  }
+  return paintcurve_stamp_attr_get<float>(
+      geom, bke::CURVE_PATCH_ATTR_STAMP_ANGLE, point_index, 0.0f);
+}
+
+void paintcurve_geom_stamp_angle_set(bke::CurvesGeometry &geom,
+                                     const int point_index,
+                                     const float angle)
+{
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
+      point_index >= geom.points_num())
+  {
+    return;
+  }
+  /* Normalized to (-PI, PI] so a drag accumulation cannot drift out of any range checks or grow
+   * the stored numbers without bound. */
+  float wrapped = std::fmod(angle + float(M_PI), float(2.0 * M_PI));
+  if (wrapped <= 0.0f) {
+    wrapped += float(2.0 * M_PI);
+  }
+  paintcurve_stamp_attr_set<float>(
+      geom, bke::CURVE_PATCH_ATTR_STAMP_ANGLE, point_index, wrapped - float(M_PI), 0.0f);
+}
+
+int paintcurve_geom_stamp_texture_get(const bke::CurvesGeometry &geom, const int point_index)
+{
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
+      point_index >= geom.points_num())
+  {
+    return -1;
+  }
+  return paintcurve_stamp_attr_get<int>(
+      geom, bke::CURVE_PATCH_ATTR_STAMP_TEXTURE, point_index, -1);
+}
+
+void paintcurve_geom_stamp_texture_set(bke::CurvesGeometry &geom,
+                                       const int point_index,
+                                       const int slot_index)
+{
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
+      point_index >= geom.points_num())
+  {
+    return;
+  }
+  paintcurve_stamp_attr_set<int>(
+      geom, bke::CURVE_PATCH_ATTR_STAMP_TEXTURE, point_index, slot_index, -1);
+}
+
+/* How a per-point stamp value is derived for a newly inserted point. `Linear` interpolates between
+ * the bracketing points (an append with no next neighbor copies the previous); `ShortArc` does the
+ * same for an angle and walks the SHORT arc, so a sweep through +/-PI does not spin the new point
+ * the long way round; `Reset` gives a fresh point the default (a new point has no texture opinion
+ * until the user gives it one). */
+enum class StampAttrInterp {
+  Linear,
+  ShortArc,
+  Reset,
+};
+
+/** One per-point stamp attribute, so adding another is one entry here rather than a fourth
+ * hand-written copy of the shift-and-interpolate block. `type` selects the value branch in
+ * #paintcurve_geom_stamp_attrs_insert; `default_*` is what an absent attribute reads as. */
+struct StampAttrDesc {
+  StringRefNull name;
+  eCustomDataType type;
+  StampAttrInterp interp;
+  float default_float;
+  int default_int;
+};
+
+static const StampAttrDesc paintcurve_stamp_attr_descs[] = {
+    {bke::CURVE_PATCH_ATTR_STAMP_STRENGTH,
+     CD_PROP_FLOAT,
+     StampAttrInterp::Linear,
+     1.0f,
+     0},
+    {bke::CURVE_PATCH_ATTR_STAMP_ANGLE,
+     CD_PROP_FLOAT,
+     StampAttrInterp::ShortArc,
+     0.0f,
+     0},
+    {bke::CURVE_PATCH_ATTR_STAMP_TEXTURE,
+     CD_PROP_INT32,
+     StampAttrInterp::Reset,
+     0.0f,
+     -1},
+};
+
+void paintcurve_geom_stamp_seed_ensure(bke::CurvesGeometry &geom)
+{
+  if (!paintcurve_geometry_is_valid(geom)) {
+    return;
+  }
+  bke::MutableAttributeAccessor attrs = geom.attributes_for_write();
+  if (attrs.contains(bke::CURVE_PATCH_ATTR_STAMP_SEED)) {
+    return;
+  }
+  bke::SpanAttributeWriter<int> attr = attrs.lookup_or_add_for_write_span<int>(
+      bke::CURVE_PATCH_ATTR_STAMP_SEED, bke::AttrDomain::Point);
+  if (!attr) {
+    return;
+  }
+  /* Identity: point i keeps the index-keyed draws it had before the attribute existed. */
+  for (const int i : attr.span.index_range()) {
+    attr.span[i] = i;
+  }
+  attr.finish();
+}
+
+/* Shift #CURVE_PATCH_ATTR_STAMP_SEED across a topology insert and give the new point max+1, so
+ * inserting before a point does not re-roll the draws of every point after it. The attribute is
+ * materialized first (see #paintcurve_geom_stamp_seed_ensure), so every old point has a value. */
+static void paintcurve_stamp_seed_insert(bke::MutableAttributeAccessor &attrs,
+                                         const int old_total,
+                                         const int insert_index)
+{
+  bke::SpanAttributeWriter<int> attr = attrs.lookup_for_write_span<int>(
+      bke::CURVE_PATCH_ATTR_STAMP_SEED);
+  if (!attr) {
+    return;
+  }
+  BLI_assert(attr.span.size() == old_total + 1);
+  int max_seed = -1;
+  for (int i = 0; i < old_total; i++) {
+    max_seed = std::max(max_seed, attr.span[i]);
+  }
+  const int new_seed = max_seed + 1;
+  for (int i = old_total - 1; i >= insert_index; i--) {
+    attr.span[i + 1] = attr.span[i];
+  }
+  attr.span[insert_index] = new_seed;
+  attr.finish();
+}
+
+void paintcurve_geom_stamp_attrs_insert(bke::CurvesGeometry &geom,
+                                        const int insert_index,
+                                        const int prev_index,
+                                        const int next_index,
+                                        const float t)
+{
+  if (!paintcurve_geometry_is_valid(geom)) {
+    return;
+  }
+  BLI_assert(insert_index >= 0 && insert_index < geom.points_num());
+  const int old_total = geom.points_num() - 1;
+
+  /* Materialize the seed across the OLD points before touching the attribute accessor below: the
+   * identity fill would otherwise land on the already-resized span and double-shift. */
+  paintcurve_geom_stamp_seed_ensure(geom);
+
+  bke::MutableAttributeAccessor attrs = geom.attributes_for_write();
+
+  for (const StampAttrDesc &desc : paintcurve_stamp_attr_descs) {
+    if (desc.type == CD_PROP_FLOAT) {
+      float value = desc.default_float;
+      if (prev_index >= 0) {
+        const float prev = paintcurve_stamp_attr_get<float>(
+            geom, desc.name, prev_index, desc.default_float);
+        if (desc.interp == StampAttrInterp::ShortArc && next_index >= 0) {
+          const float next = paintcurve_stamp_attr_get<float>(
+              geom, desc.name, next_index, desc.default_float);
+          const float delta = std::atan2(std::sin(next - prev), std::cos(next - prev));
+          value = prev + delta * t;
+        }
+        else if (desc.interp == StampAttrInterp::Linear && next_index >= 0) {
+          const float next = paintcurve_stamp_attr_get<float>(
+              geom, desc.name, next_index, desc.default_float);
+          value = math::interpolate(prev, next, t);
+        }
+        else {
+          value = prev;
+        }
+      }
+      paintcurve_stamp_attr_insert<float>(
+          attrs, desc.name, desc.default_float, old_total, insert_index, value);
+    }
+    else {
+      paintcurve_stamp_attr_insert<int>(
+          attrs, desc.name, desc.default_int, old_total, insert_index, desc.default_int);
+    }
+  }
+
+  paintcurve_stamp_seed_insert(attrs, old_total, insert_index);
 }
 
 /** \} */
@@ -1123,6 +1421,9 @@ bool paintcurve_geometry_merge_curve_endpoints(bke::CurvesGeometry &geom,
   }
 
   if (reverse_removed) {
+    /* Same as #paintcurve_geometry_remove_points: materialize the stable stamp seed so reversing
+     * does not shift every point's randomization to its neighbor. */
+    paintcurve_geom_stamp_seed_ensure(geom);
     IndexMaskMemory reverse_memory;
     const IndexMask reverse_mask = IndexMask::from_indices<int>(Span<int>(&remove_curve, 1),
                                                                 reverse_memory);

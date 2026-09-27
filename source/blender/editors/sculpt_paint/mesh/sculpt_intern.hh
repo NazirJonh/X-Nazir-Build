@@ -1795,6 +1795,10 @@ void SCULPT_OT_curve_patch_delete_point(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_toggle_cyclic(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_switch_direction(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_stamp_reseed(wmOperatorType *ot);
+/** The POINTS layout's "Point Texture" context-menu entries (defined in
+ * `paint_curve_patch_edit.cc`). */
+void SCULPT_OT_curve_patch_point_texture_set(wmOperatorType *ot);
+void SCULPT_OT_curve_patch_point_texture_browse(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint
 

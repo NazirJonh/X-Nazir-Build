@@ -2,11 +2,14 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+#include <cmath>
+
 #include "testing/testing.h"
 
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
 
+#include "BKE_attribute.hh"
 #include "BKE_curve_patch.hh"
 #include "BKE_curves.hh"
 
@@ -135,6 +138,258 @@ TEST(paint_curve_patch_build, a_weight_table_spreads_stamps_over_several_slots)
   EXPECT_TRUE(saw_slot_0);
   EXPECT_TRUE(saw_slot_1);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name POINTS Stamp Layout
+ * \{ */
+
+static CurvePatchParams make_points_params()
+{
+  CurvePatchParams params = make_params();
+  params.stamp_mode = CurvePatchStampMode::Stamps;
+  params.stamp_layout = CurvePatchStampLayout::Points;
+  return params;
+}
+
+TEST(paint_curve_patch_points, one_stamp_per_control_point_open)
+{
+  const CurvesGeometry curve = make_poly_control_curve(5);
+  CurvePatchGeometry geometry;
+  curve_patch_build_from_control_curve(
+      curve, make_points_params(), {}, CurvePatchBuildMode::PlanarSingleWindow, geometry);
+
+  ASSERT_EQ(geometry.spline.control_point_lengths.size(), 5);
+  ASSERT_EQ(geometry.stamps.size(), 5);
+  /* Jitter is zero by default, so each stamp sits exactly on its control point's arc length. */
+  for (const int i : geometry.stamps.index_range()) {
+    EXPECT_NEAR(geometry.stamps[i].center_v, float(i), 1e-5f);
+    /* Every control radius is 1.0 and no size randomization is set: brush radius it is. */
+    EXPECT_NEAR(geometry.stamps[i].half_extent, 1.0f, 1e-6f);
+    EXPECT_NEAR(geometry.stamps[i].strength, 1.0f, 1e-6f);
+  }
+}
+
+TEST(paint_curve_patch_points, cyclic_curve_has_no_seam_duplicate)
+{
+  const CurvesGeometry curve = make_poly_control_curve(4, /*cyclic*/ true);
+  CurvePatchGeometry geometry;
+  curve_patch_build_from_control_curve(
+      curve, make_points_params(), {}, CurvePatchBuildMode::PlanarSingleWindow, geometry);
+
+  ASSERT_EQ(geometry.spline.control_point_lengths.size(), 4);
+  /* Four control points, one stamp each. The seam wrap adds ghosts (copies, not new stamps) for
+   * everything within one stamp reach of the join -- the 0/3 stamps straddle it on this loop --
+   * so the list holds those two ghosts on top. The POINTS invariant under test is that the REAL
+   * stamps stay exactly at the control points' arc lengths, none doubled at the seam. */
+  int real_stamps = 0;
+  for (const CurvePatchStamp &stamp : geometry.stamps) {
+    /* Ghosts sit outside `[0, total)` (at -1 and 4 here); real stamps never can. */
+    const bool is_ghost = stamp.center_v < -1e-5f || stamp.center_v > 4.0f - 1e-5f;
+    if (!is_ghost) {
+      real_stamps++;
+      EXPECT_NEAR(stamp.center_v, std::round(stamp.center_v), 1e-5f);
+    }
+  }
+  EXPECT_EQ(real_stamps, 4);
+}
+
+TEST(paint_curve_patch_points, per_point_strength_texture_and_angle_are_consumed)
+{
+  CurvesGeometry curve = make_poly_control_curve(3);
+  /* Point 1: half strength, its own angle, and a slot assignment. */
+  bke::MutableAttributeAccessor attrs = curve.attributes_for_write();
+  bke::SpanAttributeWriter<float> strengths = attrs.lookup_or_add_for_write_span<float>(
+      CURVE_PATCH_ATTR_STAMP_STRENGTH, AttrDomain::Point);
+  strengths.span.fill(1.0f);
+  strengths.span[1] = 0.5f;
+  strengths.finish();
+  bke::SpanAttributeWriter<float> angles = attrs.lookup_or_add_for_write_span<float>(
+      CURVE_PATCH_ATTR_STAMP_ANGLE, AttrDomain::Point);
+  angles.span.fill(0.0f);
+  angles.span[1] = 0.25f;
+  angles.finish();
+  bke::SpanAttributeWriter<int> textures = attrs.lookup_or_add_for_write_span<int>(
+      CURVE_PATCH_ATTR_STAMP_TEXTURE, AttrDomain::Point);
+  textures.span.fill(-1);
+  textures.span[1] = 1;
+  textures.finish();
+
+  CurvePatchParams params = make_points_params();
+  params.stamp_use_random_angle = false; /* Per-point angles decide. */
+
+  const float cdf[2] = {0.5f, 1.0f};
+  CurvePatchGeometry geometry;
+  curve_patch_build_from_control_curve(
+      curve, params, Span(cdf, 2), CurvePatchBuildMode::PlanarSingleWindow, geometry);
+
+  ASSERT_EQ(geometry.stamps.size(), 3);
+  /* Stamps come back sorted by center_v, which for this even curve is the control-point order. */
+  EXPECT_NEAR(geometry.stamps[1].strength, 0.5f, 1e-6f);
+  EXPECT_NEAR(geometry.stamps[1].angle, 0.25f, 1e-6f);
+  /* An explicit slot index within the resolved table is taken verbatim. */
+  EXPECT_EQ(geometry.stamps[1].tex_index, 1);
+  /* Auto (-1) points draw from the weight table -- with this table the hash picks slot 0 or 1. */
+  EXPECT_GE(geometry.stamps[0].tex_index, -1);
+  EXPECT_LE(geometry.stamps[0].tex_index, 1);
+  EXPECT_GE(geometry.stamps[2].tex_index, -1);
+  EXPECT_LE(geometry.stamps[2].tex_index, 1);
+}
+
+TEST(paint_curve_patch_points, zero_strength_point_is_skipped)
+{
+  CurvesGeometry curve = make_poly_control_curve(3);
+  bke::MutableAttributeAccessor attrs = curve.attributes_for_write();
+  bke::SpanAttributeWriter<float> strengths = attrs.lookup_or_add_for_write_span<float>(
+      CURVE_PATCH_ATTR_STAMP_STRENGTH, AttrDomain::Point);
+  strengths.span.fill(1.0f);
+  strengths.span[1] = 0.0f;
+  strengths.finish();
+
+  CurvePatchGeometry geometry;
+  curve_patch_build_from_control_curve(
+      curve, make_points_params(), {}, CurvePatchBuildMode::PlanarSingleWindow, geometry);
+
+  EXPECT_EQ(geometry.stamps.size(), 2);
+  for (const CurvePatchStamp &stamp : geometry.stamps) {
+    EXPECT_NE(stamp.center_v, 1.0f);
+  }
+}
+
+TEST(paint_curve_patch_points, per_point_radius_sizes_the_stamp_and_the_strip)
+{
+  CurvesGeometry curve = make_poly_control_curve(3);
+  curve.radius_for_write().fill(1.0f);
+  curve.radius_for_write()[1] = 2.0f;
+
+  CurvePatchGeometry geometry;
+  curve_patch_build_from_control_curve(
+      curve, make_points_params(), {}, CurvePatchBuildMode::PlanarSingleWindow, geometry);
+
+  ASSERT_EQ(geometry.stamps.size(), 3);
+  EXPECT_NEAR(geometry.stamps[1].half_extent, 2.0f, 1e-6f);
+  /* The three shared bounds are sized from the LARGEST stamp (radius 2), not the brush radius. */
+  const float expected_reach = curve_patch_stamp_reach(2.0f);
+  EXPECT_NEAR(geometry.ribbon_radius, expected_reach, 1e-5f);
+  EXPECT_NEAR(geometry.ribbon_end_margin, expected_reach, 1e-5f);
+  EXPECT_NEAR(geometry.stamp_search_reach, expected_reach, 1e-5f);
+}
+
+TEST(paint_curve_patch_points, negative_strength_point_is_skipped)
+{
+  CurvesGeometry curve = make_poly_control_curve(3);
+  bke::MutableAttributeAccessor attrs = curve.attributes_for_write();
+  bke::SpanAttributeWriter<float> strengths = attrs.lookup_or_add_for_write_span<float>(
+      CURVE_PATCH_ATTR_STAMP_STRENGTH, AttrDomain::Point);
+  strengths.span.fill(1.0f);
+  strengths.span[1] = -0.5f;
+  strengths.finish();
+
+  CurvePatchGeometry geometry;
+  curve_patch_build_from_control_curve(
+      curve, make_points_params(), {}, CurvePatchBuildMode::PlanarSingleWindow, geometry);
+
+  /* A negative per-point strength (only writable from Python; the editor clamps in [0, 1]) reads
+   * as zero and drops the stamp. */
+  EXPECT_EQ(geometry.stamps.size(), 2);
+  for (const CurvePatchStamp &stamp : geometry.stamps) {
+    EXPECT_NE(stamp.center_v, 1.0f);
+  }
+}
+
+TEST(paint_curve_patch_points, missing_radius_attribute_uses_the_brush_radius)
+{
+  CurvesGeometry curve = make_poly_control_curve(3);
+  /* A paint-curve point with no `radius` attribute means "the brush radius" (1.0), not
+   * `CurvesGeometry::radius()`'s 0.01 fallback. */
+  curve.attributes_for_write().remove("radius");
+
+  CurvePatchGeometry geometry;
+  curve_patch_build_from_control_curve(
+      curve, make_points_params(), {}, CurvePatchBuildMode::PlanarSingleWindow, geometry);
+
+  ASSERT_EQ(geometry.stamps.size(), 3);
+  for (const CurvePatchStamp &stamp : geometry.stamps) {
+    EXPECT_NEAR(stamp.half_extent, 1.0f, 1e-6f);
+  }
+}
+
+TEST(paint_curve_patch_points, stamp_seed_override_drives_randomization)
+{
+  CurvePatchParams params = make_points_params();
+  params.stamp_size_random = 0.5f;
+  /* Jitter stays zero so the stamps stay sorted in control-point order and can be compared
+   * index-wise. */
+
+  const auto set_seed = [](CurvesGeometry &curve, const Span<int> seeds) {
+    bke::SpanAttributeWriter<int> attr = curve.attributes_for_write().lookup_or_add_for_write_span<
+        int>(CURVE_PATCH_ATTR_STAMP_SEED, AttrDomain::Point);
+    attr.span.copy_from(seeds);
+    attr.finish();
+  };
+
+  const CurvesGeometry indexed = make_poly_control_curve(4);
+  CurvePatchGeometry indexed_geometry;
+  curve_patch_build_from_control_curve(
+      indexed, params, {}, CurvePatchBuildMode::PlanarSingleWindow, indexed_geometry);
+
+  /* An explicit identity seed must reproduce the index-keyed draws exactly -- the backward
+   * compatibility promise for curves that never materialized the attribute. */
+  CurvesGeometry identity = make_poly_control_curve(4);
+  int identity_seeds[4] = {0, 1, 2, 3};
+  set_seed(identity, Span(identity_seeds, 4));
+  CurvePatchGeometry identity_geometry;
+  curve_patch_build_from_control_curve(
+      identity, params, {}, CurvePatchBuildMode::PlanarSingleWindow, identity_geometry);
+
+  ASSERT_EQ(indexed_geometry.stamps.size(), identity_geometry.stamps.size());
+  for (const int i : identity_geometry.stamps.index_range()) {
+    EXPECT_NEAR(indexed_geometry.stamps[i].half_extent,
+                identity_geometry.stamps[i].half_extent,
+                1e-6f);
+  }
+
+  /* A swapped seed changes a point's randomized size even though its position did not move,
+   * proving the hash is keyed by the seed and not the index. */
+  CurvesGeometry swapped = make_poly_control_curve(4);
+  int swapped_seeds[4] = {0, 2, 1, 3};
+  set_seed(swapped, Span(swapped_seeds, 4));
+  CurvePatchGeometry swapped_geometry;
+  curve_patch_build_from_control_curve(
+      swapped, params, {}, CurvePatchBuildMode::PlanarSingleWindow, swapped_geometry);
+
+  ASSERT_EQ(swapped_geometry.stamps.size(), 4);
+  bool any_different = false;
+  for (const int i : swapped_geometry.stamps.index_range()) {
+    if (std::abs(swapped_geometry.stamps[i].half_extent -
+                 identity_geometry.stamps[i].half_extent) > 1e-6f)
+    {
+      any_different = true;
+    }
+  }
+  EXPECT_TRUE(any_different);
+}
+
+TEST(paint_curve_patch_points, fill_layout_is_untouched_by_the_points_fields)
+{
+  const CurvesGeometry curve = make_poly_control_curve(6);
+  CurvePatchParams params = make_params();
+  params.stamp_mode = CurvePatchStampMode::Stamps;
+  params.stamp_layout = CurvePatchStampLayout::Fill;
+  params.spacing_frac = 0.5f;
+
+  CurvePatchGeometry geometry;
+  curve_patch_build_from_control_curve(
+      curve, params, {}, CurvePatchBuildMode::PlanarSingleWindow, geometry);
+
+  /* Curve of length 5, spacing 1.0: six stamps at the integer arc lengths. */
+  ASSERT_EQ(geometry.stamps.size(), 6);
+  for (const int i : geometry.stamps.index_range()) {
+    EXPECT_NEAR(geometry.stamps[i].center_v, float(i), 1e-5f);
+    EXPECT_NEAR(geometry.stamps[i].half_extent, 1.0f, 1e-6f);
+  }
+}
+
+/** \} */
 
 TEST(paint_curve_patch_build, empty_normals_span_forces_ribbon_not_frames)
 {

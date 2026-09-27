@@ -39,6 +39,59 @@ struct PaintCurveRadiusHandleDrawData {
   bool hovered = false;
 };
 
+/** Screen-space data of a per-point stamp strength handle (Curve Patch POINTS layout): a short
+ * track on the side of the curve OPPOSITE the radius handle, with a knob at the current value. */
+struct PaintCurveStrengthHandleDrawData {
+  /** The control point's screen position (the track's anchor). */
+  float2 point;
+  /** Track start / track end, at `point - perp * offset` and `point - perp * (offset + len)`. */
+  float2 base;
+  float2 end;
+  /** The knob's current position: `point - perp * (offset + len * value)`. */
+  float2 knob;
+  /** The strength in [0, 1] the knob sits at. */
+  float value = 1.0f;
+  bool hovered = false;
+  float4 color;
+};
+
+/** Screen-space data of a per-point stamp rotation handle (Curve Patch POINTS layout): a 180
+ * degree arc around the point, centered on the stamp's current screen angle, with a knob in the
+ * middle of the arc. */
+struct PaintCurveAngleHandleDrawData {
+  /** The control point's screen position (the arc's center). */
+  float2 center;
+  /** Screen radius of the arc, in pixels. */
+  float radius = 24.0f;
+  /** The stamp's current screen-space rotation (radians; tangent direction plus the per-point
+   * angle). The arc is centered on this. */
+  float angle = 0.0f;
+  /** The knob's position, on the arc at `angle`. */
+  float2 knob;
+  bool hovered = false;
+  float4 color;
+};
+
+/**
+ * Which optional Curve Patch handles the current brush wants on screen. One function builds it so
+ * the overlay engine and the hit tests cannot drift apart -- see
+ * #ED_curve_patch_handle_visibility_get.
+ */
+struct CurvePatchHandleVisibility {
+  /** Radius handles follow the regular Sculpt display-mode settings -- true for a Ribbon-mode or
+   * non-Curve-Patch brush, where #radius_all_points does not apply. The single decision the overlay
+   * and the editor's radius handling read, so they cannot drift. */
+  bool radius_regular = false;
+  /** Radius handles on EVERY point, driven by the brush's own toggle (POINTS layout only). In
+   * Ribbon mode this stays false and the regular Sculpt display-mode settings decide, exactly as
+   * before POINTS existed. */
+  bool radius_all_points = false;
+  /** Per-point stamp strength handles (POINTS layout only). */
+  bool strength = false;
+  /** Per-point stamp rotation handles (POINTS layout only, Random Rotation off). */
+  bool angle = false;
+};
+
 struct PaintCurveHandleDrawData {
   float2 position;
   float2 handle_left;
@@ -71,6 +124,8 @@ struct PaintCurveInsertPreviewDrawData {
 struct PaintCurveScreenHandles {
   blender::Vector<PaintCurveHandleDrawData> points;
   blender::Vector<PaintCurveRadiusHandleDrawData> radius_handles;
+  blender::Vector<PaintCurveStrengthHandleDrawData> strength_handles;
+  blender::Vector<PaintCurveAngleHandleDrawData> angle_handles;
   blender::Vector<PaintCurveSegmentDrawData> segments;
   PaintCurveInsertPreviewDrawData insert_preview;
 };
@@ -200,8 +255,19 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
                                          PaintCurveScreenHandles &r_out);
 
 /**
+ * Which optional Curve Patch handles the brush wants shown. Ribbon mode shows radius handles
+ * through the Sculpt display-mode settings (this reports all-false there), Fill hides everything,
+ * and POINTS turns the per-point sets on from the brush's own toggles -- rotation handles only
+ * while Random Rotation is off, since the random draw would override the attribute anyway.
+ * Returns all-false for a null brush.
+ */
+CurvePatchHandleVisibility ED_curve_patch_handle_visibility_get(const Brush *brush);
+
+/**
  * Core of #ED_paint_curve_screen_handles_build: operates directly on `geometry` so it can be
  * reused without a #PaintCurve (e.g. for a Curve Patch's standalone control curve).
+ * `curve_patch_visibility` adds the per-point strength / rotation handles and the POINTS-mode
+ * show-everywhere radius handles; the plain paint-curve callers leave it default-constructed.
  */
 void ED_paint_curve_screen_handles_build_from_geometry(
     const ViewContext &vc,
@@ -212,7 +278,8 @@ void ED_paint_curve_screen_handles_build_from_geometry(
     float2 mval_region,
     bool compute_segment_hover,
     bool show_insert_preview,
-    PaintCurveScreenHandles &r_out);
+    PaintCurveScreenHandles &r_out,
+    const CurvePatchHandleVisibility &curve_patch_visibility = CurvePatchHandleVisibility());
 
 /**
  * Produce a region-pixel-space copy of the live Image Editor Curve Patch session curve.

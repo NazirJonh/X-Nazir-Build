@@ -283,6 +283,24 @@ class CurvePatchResultTest(unittest.TestCase):
         self.brush.curve_patch.stamp_mode = 'RIBBON'
         self.assertIsNone(self.pc.curve_patch_stamps(self.brush))
 
+    def test_stamp_layout_defaults_to_fill_and_writes(self):
+        # Old files read back as FILL without versioning because the DNA default is 0.
+        cp = self.brush.curve_patch
+        self.assertEqual(cp.stamp_layout, 'FILL')
+        self.assertFalse(cp.show_point_radius_handles)
+        self.assertFalse(cp.show_point_strength_handles)
+        try:
+            cp.stamp_layout = 'POINTS'
+            self.assertEqual(cp.stamp_layout, 'POINTS')
+            cp.show_point_radius_handles = True
+            cp.show_point_strength_handles = True
+            self.assertTrue(cp.show_point_radius_handles)
+            self.assertTrue(cp.show_point_strength_handles)
+        finally:
+            cp.stamp_layout = 'FILL'
+            cp.show_point_radius_handles = False
+            cp.show_point_strength_handles = False
+
     def test_stamps_carry_their_layout_in_stamps_mode(self):
         self.brush.curve_patch.stamp_mode = 'STAMPS'
         points = self.pc.curve_patch_stamps(self.brush)
@@ -292,6 +310,28 @@ class CurvePatchResultTest(unittest.TestCase):
             self.assertIn(name, points.attributes)
         # SINGLE texture source: every stamp samples the brush's own texture.
         self.assertEqual(-1, points.attributes["texture_index"].data[0].value)
+
+    def test_points_layout_puts_a_stamp_on_every_control_point(self):
+        # The fixture curve holds three points a unit apart on X; the POINTS layout centers one
+        # stamp on each of them, so the layout ignores Spacing entirely.
+        cp = self.brush.curve_patch
+        cp.stamp_mode = 'STAMPS'
+        try:
+            cp.stamp_layout = 'POINTS'
+            points = self.pc.curve_patch_stamps(self.brush)
+            self.assertIsNotNone(points)
+            self.assertEqual(3, len(points.points))
+            self.assertEqual(3, len(points.attributes["strength"].data))
+            # Nothing randomizes by default and every control radius is 1.0, so the per-stamp
+            # values sit at their identity: strength 1.0 and equal radii.
+            for i in range(3):
+                self.assertAlmostEqual(
+                    1.0, points.attributes["strength"].data[i].value, places=5)
+            radii = [points.attributes["radius"].data[i].value for i in range(3)]
+            self.assertAlmostEqual(radii[0], radii[1], places=5)
+            self.assertAlmostEqual(radii[1], radii[2], places=5)
+        finally:
+            cp.stamp_layout = 'FILL'
 
     def test_target_lays_the_ribbon_onto_the_surface(self):
         # The grid sits in Z = 0, and the curve with it, so a plane-built ribbon and a
@@ -306,6 +346,24 @@ class CurvePatchResultTest(unittest.TestCase):
         # The live session is what a running modal publishes; nothing is running here, and a script
         # must be able to ask without guarding.
         self.assertIsNone(self.target.curve_patch_session)
+
+    def test_point_image_is_an_image_property(self):
+        # Not a Texture: the browser assigns the picked Image directly, and a Texture target would
+        # make it wrap-and-retarget the point's shared slot texture.
+        prop = bpy.types.BrushCurvePatchSettings.bl_rna.properties["point_image"]
+        self.assertIsNotNone(prop.fixed_type)
+        self.assertEqual("Image", prop.fixed_type.identifier)
+
+    def test_point_image_reads_none_and_write_is_safe_without_a_session(self):
+        # With no live Curve Patch session the hooks answer null / refuse the write; neither must
+        # crash a script that touches the property.
+        self.assertIsNone(self.brush.curve_patch.point_image)
+        image = bpy.data.images.new("PointImageTest", 4, 4)
+        try:
+            self.brush.curve_patch.point_image = image
+            self.assertIsNone(self.brush.curve_patch.point_image)
+        finally:
+            bpy.data.images.remove(image)
 
     def test_spline_index_defaults_to_the_active_spline(self):
         # On a single-spline curve every way of naming the spline has to land on the same one.

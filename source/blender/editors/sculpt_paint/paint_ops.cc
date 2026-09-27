@@ -17,6 +17,7 @@
 
 #include "BLI_fileops.hh"
 #include "BLI_ghash.h"
+#include "BLI_array.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_math_color.h"
@@ -2281,8 +2282,22 @@ static wmOperatorStatus curve_patch_texture_slot_remove_exec(bContext *C, wmOper
 
   BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(
       BLI_findlink(&brush->curve_patch.texture_slots, brush->curve_patch.texture_active_index));
-  if (slot == nullptr || !BKE_brush_curve_patch_texture_slot_remove(*brush, *slot)) {
+  const int removed_index = slot ? BLI_findindex(&brush->curve_patch.texture_slots, slot) : -1;
+  if (slot == nullptr || removed_index == -1 ||
+      !BKE_brush_curve_patch_texture_slot_remove(*brush, *slot))
+  {
     return OPERATOR_CANCELLED;
+  }
+
+  /* POINTS stamps keep per-point slot indices: the removed slot's points fall back to Auto and
+   * the points naming later slots shift down with them. */
+  {
+    const int old_count = int(brush->curve_patch.texture_slots.count()) + 1;
+    Array<int> old_to_new(old_count);
+    for (const int i : old_to_new.index_range()) {
+      old_to_new[i] = (i < removed_index) ? i : (i == removed_index ? -1 : i - 1);
+    }
+    ed::sculpt_paint::curve_patch_point_texture_remap_live(*brush, old_to_new.as_span());
   }
 
   BKE_brush_tag_unsaved_changes(brush);
@@ -2321,6 +2336,23 @@ static wmOperatorStatus curve_patch_texture_slot_move_exec(bContext *C, wmOperat
   BLI_assert(ELEM(direction, -1, 0, 1));
   if (BLI_listbase_link_move(&brush->curve_patch.texture_slots, slot, direction)) {
     brush->curve_patch.texture_active_index += direction;
+    /* POINTS stamps keep per-point slot indices: a moved slot's points follow it. A one-step
+     * move swaps the slot with its neighbor, so the remap is that swap. */
+    if (ELEM(direction, -1, 1)) {
+      const int count = int(brush->curve_patch.texture_slots.count());
+      const int moved = BLI_findindex(&brush->curve_patch.texture_slots, slot);
+      const int old_index = moved - direction;
+      if (moved >= 0 && old_index >= 0 && old_index < count && old_index != moved) {
+        Array<int> old_to_new(count);
+        for (const int i : old_to_new.index_range()) {
+          old_to_new[i] = i;
+        }
+        old_to_new[moved] = old_index;
+        old_to_new[old_index] = moved;
+        ed::sculpt_paint::curve_patch_point_texture_remap_live(*brush, old_to_new.as_span());
+      }
+    }
+
     BKE_brush_tag_unsaved_changes(brush);
     WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
   }
@@ -2422,6 +2454,10 @@ void ED_operatortypes_paint()
   WM_operatortype_append(BRUSH_OT_curve_patch_texture_slot_add);
   WM_operatortype_append(BRUSH_OT_curve_patch_texture_slot_remove);
   WM_operatortype_append(BRUSH_OT_curve_patch_texture_slot_move);
+  /* Publishes the RNA `point_image` hooks the per-point texture browse flow assigns through. Lives
+   * with the paint operators here, not with sculpt's operator registration: the hooks are about the
+   * brush's Curve Patch texture list, which this file already owns. */
+  curve_patch_point_texture_hooks_register();
   WM_operatortype_append(BRUSH_OT_asset_activate);
   WM_operatortype_append(BRUSH_OT_asset_save_as);
   WM_operatortype_append(BRUSH_OT_asset_edit_metadata);

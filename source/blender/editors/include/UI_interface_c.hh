@@ -2950,6 +2950,17 @@ void template_id_browser_button(Layout *layout,
                                 const char *filter_type = nullptr,
                                 const char *image_filter = nullptr);
 
+/**
+ * Open the ID Browser popover at the cursor for \a propname on \a ptr, as if its browser button
+ * had been clicked. \a browse_images makes a Texture target browse images and wrap them on
+ * assignment; an Image target (the Curve Patch per-point texture browse) passes false. For
+ * programmatic flows with no button under the cursor.
+ */
+void id_browser_popover_invoke(bContext *C,
+                               PointerRNA ptr,
+                               const char *propname,
+                               bool browse_images);
+
 /** Pointer to #wmWindowManager::id_browser_grid_view_settings (the ID browser's grid settings). */
 PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm);
 

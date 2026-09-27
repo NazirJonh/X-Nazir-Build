@@ -752,12 +752,27 @@ class StrokePanel(BrushPanel):
                 else:
                     col.label(text="Brush type affects strength, radius and texture only")
             col.row().prop(cp, "stamp_mode", text="Curve Patch", expand=True)
+            if cp.stamp_mode == 'STAMPS':
+                col.row().prop(cp, "stamp_layout", text="Layout", expand=True)
             col.prop(cp, "use_swap_axis", text="Swap Axis")
             if cp.stamp_mode == 'STAMPS':
-                col.prop(brush, "spacing", text="Spacing", slider=True)
+                is_points = cp.stamp_layout == 'POINTS'
+                # Spacing drives the FILL layout only: Points centers one stamp on every
+                # control point, so the value has nothing to act on there.
+                row = col.row()
+                row.active = not is_points
+                row.prop(brush, "spacing", text="Spacing", slider=True)
                 col.prop(brush, "jitter", text="Jitter", slider=True)
-                col.prop(cp, "stamp_size_random", text="Random Size", slider=True)
-                col.prop(cp, "stamp_strength_random", text="Random Strength", slider=True)
+                row = col.row(align=True)
+                row.prop(cp, "stamp_size_random", text="Random Size", slider=True)
+                if is_points:
+                    # Per-point radius handles: edit each point's own stamp size.
+                    row.prop(cp, "show_point_radius_handles", text="", icon='CON_TRACKTO')
+                row = col.row(align=True)
+                row.prop(cp, "stamp_strength_random", text="Random Strength", slider=True)
+                if is_points:
+                    # Per-point strength handles: edit each point's own stamp strength.
+                    row.prop(cp, "show_point_strength_handles", text="", icon='SMOOTHCURVE')
                 col.prop(tex_slot, "use_random", text="Random Rotation")
                 if tex_slot.use_random:
                     col.prop(tex_slot, "random_angle", text="Random Rotation Amount")

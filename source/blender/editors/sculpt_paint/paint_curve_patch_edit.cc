@@ -44,6 +44,7 @@
 #include "BLI_bit_span_ops.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_listbase.h"
+#include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
@@ -58,12 +59,15 @@
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
+#include "BKE_global.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
+#include "BKE_texture.h"
 
 #include "DNA_ID.h"
 #include "DNA_brush_types.h"
@@ -88,6 +92,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
@@ -107,6 +112,7 @@
 #include "paint_curve_patch_host.hh"
 #include "paint_curve_patch_live.hh"
 #include "paint_curve_patch_session.hh"
+#include "paint_image_curve_patch.hh"
 
 namespace blender::ed::sculpt_paint {
 
@@ -437,6 +443,16 @@ class SculptCurvePatchHost : public CurvePatchEditorHost {
     curve_patch_edit_context_menu_open(&C);
   }
 
+  /** The live brush decides which per-point handles are on screen; the editing core hit-tests
+   * exactly those. */
+  CurvePatchHandleVisibility handle_visibility(bContext &C) const override
+  {
+    const ToolSettings *tool_settings = CTX_data_tool_settings(&C);
+    const Sculpt *sd = tool_settings ? tool_settings->sculpt : nullptr;
+    const Brush *brush = sd ? BKE_paint_brush_for_read(&sd->paint) : nullptr;
+    return ED_curve_patch_handle_visibility_get(brush);
+  }
+
   ReportList *reports() override
   {
     return reports_;
@@ -759,6 +775,10 @@ static void curve_patch_edit_context_menu_open(bContext *C)
 
   const CurvePatchSession &patch = patch_cache_of(C);
   const bool is_cyclic = curve_patch_is_cyclic(patch);
+  const ToolSettings *tool_settings = CTX_data_tool_settings(C);
+  Brush *brush = (tool_settings && tool_settings->sculpt) ?
+                     BKE_paint_brush(&tool_settings->sculpt->paint) :
+                     nullptr;
   layout.separator();
   layout.op("SCULPT_OT_curve_patch_toggle_cyclic",
             is_cyclic ? IFACE_("Open Curve") : IFACE_("Close Curve"),
@@ -769,12 +789,24 @@ static void curve_patch_edit_context_menu_open(bContext *C)
    * out -- leave it out entirely there. */
   if (patch.active_item().params.stamp_mode == CurvePatchStampMode::Stamps) {
     layout.op("SCULPT_OT_curve_patch_stamp_reseed", std::nullopt, ICON_NONE);
+
+    /* POINTS layout: the per-point texture assignment, only meaningful when the stamps actually
+     * draw from the texture list. The active point was set by the right-click hit test just
+     * before the menu opened. */
+    if (patch.active_item().params.stamp_layout == bke::CurvePatchStampLayout::Points && brush &&
+        brush->curve_patch.stamp_texture_source == BRUSH_CURVE_PATCH_TEX_MULTI &&
+        curve_patch_active_point_is_valid(patch))
+    {
+      layout.separator();
+      layout.label(IFACE_("Point Texture"), ICON_NONE);
+      layout.op_menu_enum(
+          C, "SCULPT_OT_curve_patch_point_texture_set", "slot", IFACE_("Texture"), ICON_NONE);
+      layout.op("SCULPT_OT_curve_patch_point_texture_browse",
+                IFACE_("Browse Image..."),
+                ICON_IMAGE_DATA);
+    }
   }
 
-  const ToolSettings *tool_settings = CTX_data_tool_settings(C);
-  Brush *brush = (tool_settings && tool_settings->sculpt) ?
-                     BKE_paint_brush(&tool_settings->sculpt->paint) :
-                     nullptr;
   if (brush != nullptr) {
     /* These identifiers are strings the compiler cannot check: they must track
      * #rna_def_brush_curve_patch_settings, and the pointer must be the settings block itself. */
@@ -859,6 +891,11 @@ void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &patch)
    * reach it. Meaningless in Ribbon mode, which has nothing random to re-roll. */
   if (patch.active_item().params.stamp_mode == CurvePatchStampMode::Stamps) {
     status.item(IFACE_("Reseed Stamps"), ICON_MOUSE_RMB);
+    /* In POINTS layout the per-point handles exist only while the brush's toggles ask for them;
+     * the hint says where the rest of the point actions live. */
+    if (patch.active_item().params.stamp_layout == bke::CurvePatchStampLayout::Points) {
+      status.item(IFACE_("Point Texture"), ICON_MOUSE_RMB);
+    }
   }
 }
 
@@ -1133,7 +1170,14 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       const bke::CurvePatchParams live = curve_patch_params_live_overlay(
           *brush, active_item.params, brush_size, brush_swap_axis_changed);
 
-      if (live != active_item.params || live_inputs != patch.doc.last_synced) {
+      /* The per-point texture browse writes its attribute from an RNA setter with no context (see
+       * #CurvePatchDocument::pending_point_texture_restamp): that write is invisible to the
+       * live-input digest, so the flag forces a re-stamp here and owns the undo push the hook
+       * cannot make. */
+      const bool pending_texture_restamp = patch.doc.pending_point_texture_restamp;
+      if (live != active_item.params || live_inputs != patch.doc.last_synced ||
+          pending_texture_restamp)
+      {
         /* Brush-driven fields onto every patch; frozen fields stay per-item. */
         for (CurvePatchItem &item : patch.doc.patches) {
           item.params = curve_patch_params_live_overlay(
@@ -1153,6 +1197,11 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         curve_patch_edit_status_set(C, patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
         curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
+        if (pending_texture_restamp) {
+          /* One history step for the assignment, like every other completed edit. */
+          patch.doc.pending_point_texture_restamp = false;
+          curve_patch_undo_push(patch);
+        }
       }
     }
   }
@@ -2273,6 +2322,444 @@ void SCULPT_OT_curve_patch_stamp_reseed(wmOperatorType *ot)
    * Ribbon-mode refusal lives in the exec, not here: a poll that fails would grey the menu entry
    * out, and the entry is simply omitted in that mode instead. */
   ot->poll = curve_patch_edit_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Per-Point Texture Assignment
+ *
+ * The RNA `point_image` virtual property and the two context-menu operators behind the POINTS
+ * layout's "Point Texture" menu. The property is consumed exclusively by the Images Browser
+ * popover: the browse operator publishes which session/point is being browsed for (the PICK
+ * registry below), the popover assigns through `RNA_property_pointer_set`, and the hook resolves
+ * that into "find or create a slot holding this texture, then point the target point at it".
+ *
+ * The registry exists because the hook receives only the #Brush -- an RNA property getter has no
+ * context, and neither the sculpt session nor the 2D singleton can be found from a brush alone.
+ * It is validated on every use against the live sessions, so a popover outliving its patch
+ * reads as "nothing assigned" rather than writing into freed data.
+ * \{ */
+
+/** The browse target published by #curve_patch_point_texture_browse_invoke. */
+struct CurvePatchPointTexturePick {
+  /** The brush the RNA property was read from. The registry only answers when this matches. */
+  const Brush *brush = nullptr;
+  /** 3D target: the session and the object (by session UID) that must still own it. */
+  CurvePatchSession *session_3d = nullptr;
+  uint32_t object_session_uid = 0;
+  /** 2D target: the module-singleton session. */
+  ImageCurvePatchSession *session_2d = nullptr;
+  /** Point count of the picked curve, so a topology edit (insert/delete/reverse) that made the
+   * stored #CurvePatchDocument::texture_pick_point stale reads as "nothing targeted" instead of
+   * assigning to an index that now means a different point. */
+  int points_num_at_pick = -1;
+};
+
+static CurvePatchPointTexturePick g_curve_patch_point_texture_pick;
+
+/** Everything the assignment needs about the currently browsed point, or nothing. */
+struct CurvePatchPointTextureTarget {
+  CurvePatchDocument *doc = nullptr;
+  bke::CurvesGeometry *curve = nullptr;
+  int point = -1;
+};
+
+static std::optional<CurvePatchPointTextureTarget> curve_patch_point_texture_target_get(
+    const Brush &brush)
+{
+  const CurvePatchPointTexturePick &pick = g_curve_patch_point_texture_pick;
+  if (pick.brush != &brush) {
+    return std::nullopt;
+  }
+
+  CurvePatchPointTextureTarget target;
+  if (pick.session_3d != nullptr) {
+    /* The session must still be published on the object it was captured from: a freed session
+     * can have its address reused by a new allocation, and a pointer match alone would not
+     * catch that. */
+    const Object *ob = (pick.object_session_uid != 0) ?
+                           id_cast<Object *>(BKE_libblock_find_session_uid(
+                               G_MAIN, ID_OB, pick.object_session_uid)) :
+                           nullptr;
+    const SculptSession *ss = ob ? ob->runtime->sculpt_session : nullptr;
+    if (ss == nullptr || ss->curve_patch_session != pick.session_3d) {
+      return std::nullopt;
+    }
+    target.doc = &pick.session_3d->doc;
+    if (!target.doc->has_active_item()) {
+      return std::nullopt;
+    }
+    target.curve = &target.doc->active_item().control_curve;
+  }
+  else if (pick.session_2d != nullptr) {
+    if (image_curve_patch_session_active_get() != pick.session_2d) {
+      return std::nullopt;
+    }
+    target.doc = &pick.session_2d->doc;
+    /* The 2D editor acts on the canonical UV curve, not the pixel-space copy on the item. */
+    target.curve = &pick.session_2d->curve;
+  }
+  else {
+    return std::nullopt;
+  }
+
+  target.point = target.doc->texture_pick_point;
+  if (target.curve == nullptr || !paintcurve_geometry_is_valid(*target.curve) ||
+      target.point < 0 || target.point >= target.curve->points_num() ||
+      target.curve->points_num() != pick.points_num_at_pick)
+  {
+    return std::nullopt;
+  }
+  return target;
+}
+
+static Image *curve_patch_point_texture_hooks_get(const Brush &brush)
+{
+  const std::optional<CurvePatchPointTextureTarget> target = curve_patch_point_texture_target_get(
+      brush);
+  if (!target) {
+    return nullptr;
+  }
+  const int slot_index = paintcurve_geom_stamp_texture_get(*target->curve, target->point);
+  if (slot_index < 0) {
+    return nullptr;
+  }
+  const BrushCurvePatchTextureSlot *slot = static_cast<const BrushCurvePatchTextureSlot *>(
+      BLI_findlink(&brush.curve_patch.texture_slots, slot_index));
+  if (slot == nullptr || slot->tex == nullptr || slot->tex->type != TEX_IMAGE) {
+    return nullptr;
+  }
+  return slot->tex->ima;
+}
+
+static bool curve_patch_point_texture_hooks_set(Main &bmain, Brush &brush, Image &image)
+{
+  std::optional<CurvePatchPointTextureTarget> target = curve_patch_point_texture_target_get(brush);
+  if (!target) {
+    return false;
+  }
+
+  /* Reuse the slot that already holds this image; append a new slot wrapping it when none does.
+   * Existing slots are NEVER retargeted: the point's current slot is shared with every other point
+   * naming it and is visible in the Texture List, so rewriting it (which the old
+   * `BKE_texture_image_wrap_for_slot` flow did) changed the texture of every such point and of the
+   * list entry itself. The new slot's texture is what the slot owns its single user on -- same
+   * contract #BKE_brush_curve_patch_texture_slot_remove releases. */
+  int slot_index = -1;
+  int index = 0;
+  for (const BrushCurvePatchTextureSlot &slot : brush.curve_patch.texture_slots) {
+    if (slot.tex != nullptr && slot.tex->type == TEX_IMAGE && slot.tex->ima == &image) {
+      slot_index = index;
+      break;
+    }
+    index++;
+  }
+  if (slot_index < 0) {
+    /* `BKE_texture_add` returns the texture with one user already; the new slot is that user, so
+     * no extra `id_us_plus` on `tex` (only on the image it now references). */
+    Tex *tex = BKE_texture_add(&bmain, image.id.name + 2);
+    BKE_texture_type_set(tex, TEX_IMAGE);
+    tex->ima = &image;
+    id_us_plus(&image.id);
+    BrushCurvePatchTextureSlot *slot = BKE_brush_curve_patch_texture_slot_add(brush);
+    slot->tex = tex;
+    slot_index = brush.curve_patch.texture_slots.count() - 1;
+  }
+
+  paintcurve_geom_stamp_texture_set(*target->curve, target->point, slot_index);
+  /* The assignment came from the popover: one browse, one assign. The attribute write is invisible
+   * to the live-input digest (that one watches the slot list, not the per-point index), so flag the
+   * session to force a re-stamp and an undo push on its next poll. */
+  target->doc->pending_point_texture_restamp = true;
+  target->doc->texture_pick_point = -1;
+  g_curve_patch_point_texture_pick = {};
+
+  BKE_brush_tag_unsaved_changes(&brush);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, &brush);
+  return true;
+}
+
+/* Rewrite #CURVE_PATCH_ATTR_STAMP_TEXTURE on every live curve of this brush's sessions after
+ * `texture_slots` changed: `old_to_new[old_index]` is the slot's new index, or -1 when the slot
+ * was removed (affected points fall back to Auto).
+ *
+ * Exported rather than hidden behind the hook table: the slot remove / move operators have the
+ * brush in hand already, and a live session can only belong to the brush being edited anyway --
+ * a brush or tool switch ends the session (see #curve_patch_edit_session_superseded), so by the
+ * time the list changed under an operator's hands, whatever session is up was stamped from it. */
+void curve_patch_point_texture_remap_live(Brush &brush, const Span<int> old_to_new)
+{
+  bool any = false;
+  auto remap_curve = [&](bke::CurvesGeometry &curve) {
+    if (!paintcurve_geometry_is_valid(curve)) {
+      return;
+    }
+    bke::MutableAttributeAccessor attrs = curve.attributes_for_write();
+    if (!attrs.contains(bke::CURVE_PATCH_ATTR_STAMP_TEXTURE)) {
+      return;
+    }
+    bke::SpanAttributeWriter<int> attribute = attrs.lookup_for_write_span<int>(
+        bke::CURVE_PATCH_ATTR_STAMP_TEXTURE);
+    if (!attribute) {
+      return;
+    }
+    for (const int i : attribute.span.index_range()) {
+      const int old_index = attribute.span[i];
+      attribute.span[i] = (old_index >= 0 && old_index < old_to_new.size()) ?
+                              old_to_new[old_index] :
+                              -1;
+    }
+    attribute.finish();
+    any = true;
+  };
+
+  if (G_MAIN != nullptr) {
+    for (Object &ob : G_MAIN->objects) {
+      const SculptSession *ss = ob.runtime->sculpt_session;
+      if (ss == nullptr || ss->curve_patch_session == nullptr) {
+        continue;
+      }
+      for (CurvePatchItem &item : ss->curve_patch_session->doc.patches) {
+        remap_curve(item.control_curve);
+      }
+    }
+  }
+  if (ImageCurvePatchSession *session_2d = image_curve_patch_session_active_get()) {
+    /* The 2D editor acts on the canonical UV curve, not the pixel-space copy on the item. */
+    remap_curve(session_2d->curve);
+  }
+
+  if (any) {
+    /* The relief picks a stamp's texture by the stored index, so the remap changes what is
+     * sampled without any parameter moving: push it the way a slider edit would. */
+    WM_main_add_notifier(NC_BRUSH | NA_EDITED, &brush);
+  }
+}
+
+void curve_patch_point_texture_hooks_register()
+{
+  static bke::CurvePatchPointTextureHooks hooks = {};
+  if (hooks.get == nullptr) {
+    hooks.get = curve_patch_point_texture_hooks_get;
+    hooks.set = curve_patch_point_texture_hooks_set;
+  }
+  bke::BKE_curve_patch_point_texture_hooks = &hooks;
+}
+
+void curve_patch_point_texture_pick_reset()
+{
+  g_curve_patch_point_texture_pick = {};
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Point Texture Operators
+ *
+ * The "Point Texture" entries of the POINTS layout's right-click menu. Like every other
+ * context-menu action they act on #CurvePatchDocument::active_point, set by the modal's right
+ * click just before the menu opened; the browse variant additionally parks the index in
+ * #CurvePatchDocument::texture_pick_point, which the RNA `point_image` setter consumes when the
+ * Images Browser popover assigns.
+ * \{ */
+
+/**
+ * The Curve Patch point a context-menu operator acts on: either the active object's 3D Sculpt
+ * session or the Image Editor's 2D singleton. Which one is decided by the editor the menu was
+ * opened from, not by "whichever session happens to exist": the 3D session wins only in the 3D
+ * View, and the 2D singleton only in the Image Editor -- otherwise a 3D session on the active
+ * object would shadow the 2D canvas the user is actually looking at. `session_3d` / `session_2d`
+ * say which owner resolved, and exactly one is set.
+ */
+struct CurvePatchPointTarget {
+  CurvePatchDocument *doc = nullptr;
+  bke::CurvesGeometry *curve = nullptr;
+  /* Null in 2D. */
+  Object *ob = nullptr;
+  CurvePatchSession *session_3d = nullptr;
+  ImageCurvePatchSession *session_2d = nullptr;
+  int point = -1;
+};
+
+static std::optional<CurvePatchPointTarget> curve_patch_point_target_from_context(bContext *C)
+{
+  if (C == nullptr) {
+    return std::nullopt;
+  }
+  const bool image_editor = CTX_wm_space_image(C) != nullptr;
+
+  Object *ob = CTX_data_active_object(C);
+  CurvePatchSession *session_3d = nullptr;
+  if (ob != nullptr && ob->runtime != nullptr) {
+    const SculptSession *ss = ob->runtime->sculpt_session;
+    session_3d = ss ? ss->curve_patch_session : nullptr;
+  }
+  ImageCurvePatchSession *session_2d = image_curve_patch_session_active_get();
+
+  CurvePatchPointTarget target;
+  if (image_editor && session_2d != nullptr) {
+    target.session_2d = session_2d;
+    target.doc = &session_2d->doc;
+    /* The 2D editor acts on the canonical UV curve, not the pixel-space copy on the item. */
+    target.curve = &session_2d->curve;
+    target.point = session_2d->doc.active_point;
+  }
+  else if (session_3d != nullptr && session_3d->doc.has_active_item()) {
+    target.session_3d = session_3d;
+    target.ob = ob;
+    target.doc = &session_3d->doc;
+    target.curve = &session_3d->doc.active_item().control_curve;
+    target.point = session_3d->doc.active_point;
+  }
+  else if (session_2d != nullptr) {
+    target.session_2d = session_2d;
+    target.doc = &session_2d->doc;
+    target.curve = &session_2d->curve;
+    target.point = session_2d->doc.active_point;
+  }
+  else {
+    return std::nullopt;
+  }
+
+  if (target.curve == nullptr || !paintcurve_geometry_is_valid(*target.curve)) {
+    return std::nullopt;
+  }
+  return target;
+}
+
+static bool curve_patch_point_texture_poll(bContext *C)
+{
+  const std::optional<CurvePatchPointTarget> target = curve_patch_point_target_from_context(C);
+  return target && target->point >= 0 && target->point < target->curve->points_num();
+}
+
+/* Enum items for the slot menu: Auto plus one entry per texture slot, with the slot's own name.
+ * `r_free` items are built fresh on every open, so the menu tracks the list live. */
+static const EnumPropertyItem *curve_patch_point_texture_slot_itemf(bContext *C,
+                                                                    PointerRNA * /*ptr*/,
+                                                                    PropertyRNA * /*prop*/,
+                                                                    bool *r_free)
+{
+  /* First pass: collect the slot entries, so Auto can go first only when a list exists at all. */
+  Vector<EnumPropertyItem> slots;
+  if (C != nullptr) {
+    const Paint *paint = BKE_paint_get_active_from_context(C);
+    const Brush *brush = paint ? BKE_paint_brush_for_read(paint) : nullptr;
+    if (brush != nullptr) {
+      int index = 0;
+      for (const BrushCurvePatchTextureSlot &slot : brush->curve_patch.texture_slots) {
+        const char *name = slot.tex ? slot.tex->id.name + 2 : IFACE_("Empty");
+        slots.append({index, "SLOT", 0, name, nullptr});
+        index++;
+      }
+    }
+  }
+
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  if (!slots.is_empty()) {
+    const EnumPropertyItem auto_item = {-1, "AUTO", 0, IFACE_("Auto (Random)"), nullptr};
+    RNA_enum_item_add(&items, &items_num, &auto_item);
+    for (const EnumPropertyItem &slot : slots) {
+      RNA_enum_item_add(&items, &items_num, &slot);
+    }
+  }
+  RNA_enum_item_end(&items, &items_num);
+  *r_free = true;
+  return items;
+}
+
+static wmOperatorStatus curve_patch_point_texture_set_exec(bContext *C, wmOperator *op)
+{
+  const std::optional<CurvePatchPointTarget> target = curve_patch_point_target_from_context(C);
+  if (!target || target->point < 0 || target->point >= target->curve->points_num()) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int slot = RNA_enum_get(op->ptr, "slot");
+  paintcurve_geom_stamp_texture_set(*target->curve, target->point, slot);
+  curve_patch_tag_overlay_redraw_all(C);
+
+  if (target->session_3d != nullptr && target->ob != nullptr) {
+    CurvePatchSession &patch = *target->session_3d;
+    curve_patch_restore_and_restamp(*C, *target->ob, patch);
+    curve_patch_tag_viewports_redraw_after_edit(*C, *target->ob, patch);
+    curve_patch_undo_push(patch);
+  }
+  else if (target->session_2d != nullptr) {
+    /* 2D keeps one live transaction for the whole session, so the assignment only needs a re-stamp
+     * and a redraw -- it is committed with the rest of the session's edits, not pushed separately.
+     */
+    image_curve_patch_session_restore_and_restamp(C, target->session_2d);
+    ED_region_tag_redraw(CTX_wm_region(C));
+  }
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_curve_patch_point_texture_set(wmOperatorType *ot)
+{
+  ot->name = "Set Point Texture";
+  ot->description =
+      "Choose which Curve Patch texture the active point's stamp draws, or leave it Auto";
+  ot->idname = "SCULPT_OT_curve_patch_point_texture_set";
+
+  ot->exec = curve_patch_point_texture_set_exec;
+  ot->poll = curve_patch_point_texture_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
+
+  PropertyRNA *prop = RNA_def_enum(
+      ot->srna, "slot", rna_enum_dummy_NULL_items, -1, "Texture", nullptr);
+  RNA_def_enum_funcs(prop, curve_patch_point_texture_slot_itemf);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+}
+
+static wmOperatorStatus curve_patch_point_texture_browse_invoke(bContext *C,
+                                                                wmOperator * /*op*/,
+                                                                const wmEvent * /*event*/)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  const std::optional<CurvePatchPointTarget> target = curve_patch_point_target_from_context(C);
+  if (brush == nullptr || !target || target->point < 0 ||
+      target->point >= target->curve->points_num())
+  {
+    return OPERATOR_CANCELLED;
+  }
+
+  target->doc->texture_pick_point = target->point;
+  g_curve_patch_point_texture_pick = {};
+  g_curve_patch_point_texture_pick.brush = brush;
+  g_curve_patch_point_texture_pick.points_num_at_pick = target->curve->points_num();
+  if (target->session_3d != nullptr && target->ob != nullptr) {
+    g_curve_patch_point_texture_pick.session_3d = target->session_3d;
+    g_curve_patch_point_texture_pick.object_session_uid = target->ob->id.session_uid;
+  }
+  else if (target->session_2d != nullptr) {
+    g_curve_patch_point_texture_pick.session_2d = target->session_2d;
+  }
+  else {
+    return OPERATOR_CANCELLED;
+  }
+
+  PointerRNA settings_ptr = RNA_pointer_create_discrete(
+      &brush->id, RNA_BrushCurvePatchSettings, &brush->curve_patch);
+  /* The target is an Image property, so the popover must not wrap the pick in a Texture. */
+  ui::id_browser_popover_invoke(C, settings_ptr, "point_image", false);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_curve_patch_point_texture_browse(wmOperatorType *ot)
+{
+  ot->name = "Browse Point Texture";
+  ot->description = "Pick an image for the active point's stamp from the Images Browser";
+  ot->idname = "SCULPT_OT_curve_patch_point_texture_browse";
+
+  ot->invoke = curve_patch_point_texture_browse_invoke;
+  ot->poll = curve_patch_point_texture_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
 }

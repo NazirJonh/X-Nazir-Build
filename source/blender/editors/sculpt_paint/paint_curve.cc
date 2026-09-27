@@ -665,6 +665,17 @@ void paintcurve_geometry_add_point(bke::CurvesGeometry &geom,
       types_right[i] = types_right[i - 1];
       radii[i] = radii[i - 1];
     }
+
+    /* Curve Patch per-point stamp attributes: shift the trailing values over and give the new
+     * point interpolated ones. Pre-insert neighbors, so the first point of a spline has neither
+     * and takes the defaults. */
+    paintcurve_geom_stamp_attrs_insert(geom,
+                                       global_insert_idx,
+                                       add_index_in_spline > 0 ? global_insert_idx - 1 : -1,
+                                       add_index_in_spline < int(spline_range.size()) ?
+                                           global_insert_idx :
+                                           -1,
+                                       0.5f);
   }
 
   for (const int i : IndexRange(normals_shifted.size())) {
@@ -1803,6 +1814,11 @@ int paintcurve_geometry_insert_point_at_segment(bke::CurvesGeometry &geom,
   for (const int i : IndexRange(normals_shifted.size())) {
     paintcurve_geom_set_surface_normal(geom, i, normals_shifted[i]);
   }
+
+  /* Curve Patch per-point stamp attributes: shift trailing values over and give the new point
+   * interpolated ones (texture stays Auto). The stamp attributes were NOT touched by the shift
+   * loop above, so the pre-insert neighbor indices still name their original values. */
+  paintcurve_geom_stamp_attrs_insert(geom, insert_index, segment_index, point_i2, edge_t);
 
   geom.calculate_bezier_auto_handles();
   geom.calculate_bezier_aligned_handles();

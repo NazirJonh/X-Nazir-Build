@@ -726,6 +726,15 @@ enum eBrushCurvePatchStampMode : char {
   BRUSH_CURVE_PATCH_STAMP_STAMPS = 1,
 };
 
+/** #BrushCurvePatchSettings::stamp_layout — where STAMPS mode places its stamps.
+ *
+ * FILL is 0 so a file written before this field existed reads back as the historical
+ * spacing-driven layout and no versioning code is needed. */
+enum eBrushCurvePatchStampLayout : char {
+  BRUSH_CURVE_PATCH_STAMP_LAYOUT_FILL = 0,   /* every Spacing along the arc */
+  BRUSH_CURVE_PATCH_STAMP_LAYOUT_POINTS = 1, /* one stamp per control point */
+};
+
 /** #BrushCurvePatchSettings::stamp_projection — how a stamp's texture frame is built.
  *
  * CURVE keeps the stamp in the ribbon's curvilinear `(s, u)` space, so the texture bends with the

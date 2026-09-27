@@ -256,6 +256,17 @@ void id_browser_add_popover_button(Layout &row,
 void id_browser_popover_context_set(Layout &layout, const IDBrowserTarget &target);
 
 /**
+ * Open the ID-browser popover at the cursor for `propname` on `ptr`, as if its browser button had
+ * been clicked. `browse_images` makes a Texture target browse images and wrap them on assignment;
+ * an Image target (the Curve Patch per-point texture browse) passes false. For programmatic flows
+ * with no button under the cursor.
+ */
+void id_browser_popover_invoke(bContext *C,
+                               PointerRNA ptr,
+                               const char *propname,
+                               bool browse_images);
+
+/**
  * `interface_template_grid_selectors.cc`
  * Ctrl-Wheel cycling shared by the library selectors.
  */

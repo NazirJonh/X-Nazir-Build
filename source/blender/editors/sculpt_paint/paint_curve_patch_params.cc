@@ -88,6 +88,18 @@ static bke::CurvePatchStampMode stamp_mode_from_dna(const int dna_value)
   return bke::CurvePatchStampMode::Ribbon;
 }
 
+static bke::CurvePatchStampLayout stamp_layout_from_dna(const int dna_value)
+{
+  switch (eBrushCurvePatchStampLayout(dna_value)) {
+    case BRUSH_CURVE_PATCH_STAMP_LAYOUT_FILL:
+      return bke::CurvePatchStampLayout::Fill;
+    case BRUSH_CURVE_PATCH_STAMP_LAYOUT_POINTS:
+      return bke::CurvePatchStampLayout::Points;
+  }
+  BLI_assert_unreachable();
+  return bke::CurvePatchStampLayout::Fill;
+}
+
 static bke::CurvePatchStampProjection stamp_projection_from_dna(const int dna_value)
 {
   switch (eBrushCurvePatchStampProjection(dna_value)) {
@@ -151,6 +163,7 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
   params.end_point_shape = point_shape_from_dna(settings.end_point_shape);
 
   params.stamp_mode = stamp_mode_from_dna(settings.stamp_mode);
+  params.stamp_layout = stamp_layout_from_dna(settings.stamp_layout);
   params.stamp_projection = stamp_projection_from_dna(settings.stamp_projection);
   /* The DNA fields are percentages and the core takes fractions in `[0, 1]`. The division belongs
    * here and only here, so that no consumer has to know which of the two conventions it is
@@ -174,10 +187,11 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
   params.base_angle = brush.mtex.rot;
   /* Same gate a dab stroke applies in #PaintStroke::update_brush_rotation: `random_angle` is the
    * amount, #MTEX_ANGLE_RANDOM is the switch. Reading the amount unconditionally would randomize
-   * every stamp by a full turn on any brush left at the MTex default. */
-  params.random_angle = (brush.mtex.brush_angle_mode & MTEX_ANGLE_RANDOM) ?
-                            brush.mtex.random_angle :
-                            0.0f;
+   * every stamp by a full turn on any brush left at the MTex default. The SWITCH itself is part
+   * of the parameters too: POINTS stamps fall back to their per-point rotation attribute while it
+   * is off, so a zero-amount Random Rotation must not silently stop counting as "random". */
+  params.stamp_use_random_angle = (brush.mtex.brush_angle_mode & MTEX_ANGLE_RANDOM) != 0;
+  params.random_angle = params.stamp_use_random_angle ? brush.mtex.random_angle : 0.0f;
 
   return params;
 }

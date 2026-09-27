@@ -103,6 +103,16 @@ class PaintCurveCursor : Overlay {
     Vector<gpu::Batch *> point_end_right;
     Vector<gpu::Batch *> radius_line;
     Vector<gpu::Batch *> radius_circle;
+    /* Per-point strength handles (Curve Patch POINTS): the fixed track, the filled stretch from
+     * the base to the knob, and the knob circle. */
+    Vector<gpu::Batch *> strength_track;
+    Vector<gpu::Batch *> strength_fill;
+    Vector<gpu::Batch *> strength_circle;
+    /* Per-point rotation handles (Curve Patch POINTS): the 180-degree arc, its arrowhead (two
+     * line batches per handle) and the knob circle. */
+    Vector<gpu::Batch *> angle_arc;
+    Vector<gpu::Batch *> angle_arrow;
+    Vector<gpu::Batch *> angle_circle;
   };
   HandleGpuCache handle_gpu_;
   /** Murmur2A of handle geometry. The field is 64-bit for storage, but #BLI_hash_mm2a_end is
@@ -228,11 +238,13 @@ class PaintCurveCursor : Overlay {
       {
         /* Radius handles follow the same Sculpt-side preference the 3D editor uses
          * (`paint_curve_show_radius_handles` / `paint_curve_radius_display_mode`), so the two
-         * editors stay one setting rather than two. Ctrl shows the insert preview, matching
-         * Ctrl+RMB in the modal. */
-        const bool show_radius_handles = (brush == nullptr) ||
-                                         (brush->curve_patch.stamp_mode !=
-                                          BRUSH_CURVE_PATCH_STAMP_STAMPS);
+         * editors stay one setting rather than two -- except in the POINTS stamp layout, where
+         * the brush's own per-point toggles decide (see the visibility helper). Ctrl shows the
+         * insert preview, matching Ctrl+RMB in the modal. */
+        const ed::sculpt_paint::CurvePatchHandleVisibility patch_visibility =
+            ed::sculpt_paint::ED_curve_patch_handle_visibility_get(brush);
+        const bool show_radius_handles = patch_visibility.radius_regular ||
+                                         patch_visibility.radius_all_points;
         ed::sculpt_paint::ED_paint_curve_screen_handles_build_from_geometry(
             vc,
             image_patch_geometry,
@@ -242,7 +254,8 @@ class PaintCurveCursor : Overlay {
             mval_region,
             /*compute_segment_hover=*/state.cursor_mval_valid,
             /*show_insert_preview=*/state.cursor_mval_valid && state.cursor_ctrl_pressed,
-            handles_);
+            handles_,
+            patch_visibility);
         image_patch_drawn = true;
       }
     }
@@ -266,12 +279,15 @@ class PaintCurveCursor : Overlay {
        * still see and click them. */
       handles_.points.clear();
       handles_.radius_handles.clear();
+      handles_.strength_handles.clear();
+      handles_.angle_handles.clear();
       handles_.segments.clear();
       handles_.insert_preview = {};
 
-      const bool show_radius_handles = (brush == nullptr) ||
-                                       (brush->curve_patch.stamp_mode !=
-                                        BRUSH_CURVE_PATCH_STAMP_STAMPS);
+      const ed::sculpt_paint::CurvePatchHandleVisibility patch_visibility =
+          ed::sculpt_paint::ED_curve_patch_handle_visibility_get(brush);
+      const bool show_radius_handles = patch_visibility.radius_regular ||
+                                       patch_visibility.radius_all_points;
       for (const int i : patch_overlay_.splines.index_range()) {
         const bke::CurvesGeometry *control_curve = patch_overlay_.splines[i];
         if (control_curve == nullptr) {
@@ -288,9 +304,12 @@ class PaintCurveCursor : Overlay {
             mval_region,
             is_active ? compute_hover : false,
             is_active ? show_insert_preview : false,
-            tmp_handles);
+            tmp_handles,
+            patch_visibility);
         handles_.points.extend(tmp_handles.points);
         handles_.radius_handles.extend(tmp_handles.radius_handles);
+        handles_.strength_handles.extend(tmp_handles.strength_handles);
+        handles_.angle_handles.extend(tmp_handles.angle_handles);
         handles_.segments.extend(tmp_handles.segments);
         if (is_active) {
           handles_.insert_preview = tmp_handles.insert_preview;
@@ -466,6 +485,12 @@ class PaintCurveCursor : Overlay {
     discard(handle_gpu_.point_end_right);
     discard(handle_gpu_.radius_line);
     discard(handle_gpu_.radius_circle);
+    discard(handle_gpu_.strength_track);
+    discard(handle_gpu_.strength_fill);
+    discard(handle_gpu_.strength_circle);
+    discard(handle_gpu_.angle_arc);
+    discard(handle_gpu_.angle_arrow);
+    discard(handle_gpu_.angle_circle);
     handle_gpu_key_ = 0;
     handle_gpu_valid_ = false;
   }
@@ -485,6 +510,8 @@ class PaintCurveCursor : Overlay {
     BLI_hash_mm2a_add_int(&mm2, int(handles_.points.size()));
     BLI_hash_mm2a_add_int(&mm2, int(handles_.segments.size()));
     BLI_hash_mm2a_add_int(&mm2, int(handles_.radius_handles.size()));
+    BLI_hash_mm2a_add_int(&mm2, int(handles_.strength_handles.size()));
+    BLI_hash_mm2a_add_int(&mm2, int(handles_.angle_handles.size()));
     for (const ed::sculpt_paint::PaintCurveHandleDrawData &hd : handles_.points) {
       add_float2(hd.position);
       add_float2(hd.handle_left);
@@ -501,6 +528,16 @@ class PaintCurveCursor : Overlay {
     for (const ed::sculpt_paint::PaintCurveRadiusHandleDrawData &rd : handles_.radius_handles) {
       add_float2(rd.point);
       add_float2(rd.end);
+    }
+    for (const ed::sculpt_paint::PaintCurveStrengthHandleDrawData &sd :
+         handles_.strength_handles)
+    {
+      add_float2(sd.point);
+      add_float2(sd.knob);
+    }
+    for (const ed::sculpt_paint::PaintCurveAngleHandleDrawData &ad : handles_.angle_handles) {
+      add_float2(ad.center);
+      add_float2(ad.knob);
     }
     return uint64_t(BLI_hash_mm2a_end(&mm2));
   }
@@ -641,6 +678,61 @@ class PaintCurveCursor : Overlay {
         circle[i] = {rd.end.x + r * cosf(angle), rd.end.y + r * sinf(angle)};
       }
       ensure_owned_strip_closed(handle_gpu_.radius_circle, {circle, CIRCLE_SEGS});
+    }
+
+    handle_gpu_.strength_track.reserve(handles_.strength_handles.size());
+    handle_gpu_.strength_fill.reserve(handles_.strength_handles.size());
+    handle_gpu_.strength_circle.reserve(handles_.strength_handles.size());
+    for (const ed::sculpt_paint::PaintCurveStrengthHandleDrawData &sd :
+         handles_.strength_handles)
+    {
+      const float2 track2[2] = {sd.base, sd.end};
+      ensure_owned_strip(handle_gpu_.strength_track, {track2, 2});
+      const float2 fill2[2] = {sd.base, sd.knob};
+      ensure_owned_strip(handle_gpu_.strength_fill, {fill2, 2});
+      float2 circle[CIRCLE_SEGS];
+      for (int i = 0; i < CIRCLE_SEGS; i++) {
+        const float angle = float(i) / float(CIRCLE_SEGS) * float(M_PI) * 2.0f;
+        circle[i] = {sd.knob.x + r * cosf(angle), sd.knob.y + r * sinf(angle)};
+      }
+      ensure_owned_strip_closed(handle_gpu_.strength_circle, {circle, CIRCLE_SEGS});
+    }
+
+    /* The rotation arc: a 180-degree half-circle centered on the stamp's current screen angle,
+     * an arrowhead on the arc's leading end, and a knob circle on the arc. */
+    constexpr int ARC_SEGS = 24;
+    handle_gpu_.angle_arc.reserve(handles_.angle_handles.size());
+    handle_gpu_.angle_circle.reserve(handles_.angle_handles.size());
+    handle_gpu_.angle_arrow.reserve(handles_.angle_handles.size() * 2);
+    for (const ed::sculpt_paint::PaintCurveAngleHandleDrawData &ad : handles_.angle_handles) {
+      float2 arc[ARC_SEGS + 1];
+      for (int i = 0; i <= ARC_SEGS; i++) {
+        const float a = ad.angle + (float(i) / float(ARC_SEGS) - 0.5f) * float(M_PI);
+        arc[i] = {ad.center.x + ad.radius * cosf(a), ad.center.y + ad.radius * sinf(a)};
+      }
+      ensure_owned_strip(handle_gpu_.angle_arc, {arc, ARC_SEGS + 1});
+      /* Arrowhead on the arc's leading end (the arc runs counter-clockwise from
+       * `angle - PI/2` to `angle + PI/2`): two wings folded back from the tip. */
+      const float a_end = ad.angle + 0.5f * float(M_PI);
+      const float2 tip = ad.center + float2(cosf(a_end), sinf(a_end)) * ad.radius;
+      const float2 back_dir = -float2(-sinf(a_end), cosf(a_end)); /* Against the arc's run. */
+      const float wing_len = std::max(ad.radius * 0.25f, 6.0f);
+      const float wing_spread = 0.45f;
+      const float2 side(-back_dir.y, back_dir.x);
+      const float2 wing_a = tip -
+                            (back_dir * cosf(wing_spread) + side * sinf(wing_spread)) * wing_len;
+      const float2 wing_b = tip -
+                            (back_dir * cosf(wing_spread) - side * sinf(wing_spread)) * wing_len;
+      const float2 wing_line_a[2] = {tip, wing_a};
+      const float2 wing_line_b[2] = {tip, wing_b};
+      ensure_owned_strip(handle_gpu_.angle_arrow, {wing_line_a, 2});
+      ensure_owned_strip(handle_gpu_.angle_arrow, {wing_line_b, 2});
+      float2 circle[CIRCLE_SEGS];
+      for (int i = 0; i < CIRCLE_SEGS; i++) {
+        const float angle = float(i) / float(CIRCLE_SEGS) * float(M_PI) * 2.0f;
+        circle[i] = {ad.knob.x + r * cosf(angle), ad.knob.y + r * sinf(angle)};
+      }
+      ensure_owned_strip_closed(handle_gpu_.angle_circle, {circle, CIRCLE_SEGS});
     }
 
     handle_gpu_key_ = key;
@@ -899,6 +991,84 @@ class PaintCurveCursor : Overlay {
                                                       rd.color.z + (1.0f - rd.color.z) * hover_t,
                                                       1.0f) :
                                                rd.color;
+        ps_.push_constant("lineWidth", 1.0f);
+        ps_.push_constant("color", underlay_col);
+        draw_strip(b);
+        ps_.push_constant("color", circle_col);
+        draw_strip(b);
+      }
+    }
+
+    /* --- 8b. Per-point strength handles (Curve Patch POINTS) --- */
+    for (const int i : IndexRange(handles_.strength_handles.size())) {
+      const ed::sculpt_paint::PaintCurveStrengthHandleDrawData &sd =
+          handles_.strength_handles[i];
+      if (gpu::Batch *b = handle_gpu_.strength_track[i]) {
+        ps_.push_constant("lineWidth", 3.0f);
+        ps_.push_constant("color", float4(0.0f, 0.0f, 0.0f, 0.5f));
+        draw_strip(b);
+        ps_.push_constant("lineWidth", 1.0f);
+        ps_.push_constant("color", float4(sd.color.x, sd.color.y, sd.color.z, 0.5f));
+        draw_strip(b);
+      }
+      if (gpu::Batch *b = handle_gpu_.strength_fill[i]) {
+        /* The filled stretch from the track's base to the knob reads as a little gauge. */
+        ps_.push_constant("lineWidth", 3.0f);
+        ps_.push_constant("color", sd.color);
+        draw_strip(b);
+      }
+      if (gpu::Batch *b = handle_gpu_.strength_circle[i]) {
+        const float4 underlay_col = sd.hovered ? float4(1.0f, 1.0f, 1.0f, 0.8f) :
+                                                 float4(1.0f, 1.0f, 1.0f, 0.5f);
+        const float hover_t = 0.65f;
+        const float4 circle_col = sd.hovered ? float4(sd.color.x + (1.0f - sd.color.x) * hover_t,
+                                                      sd.color.y + (1.0f - sd.color.y) * hover_t,
+                                                      sd.color.z + (1.0f - sd.color.z) * hover_t,
+                                                      1.0f) :
+                                               sd.color;
+        ps_.push_constant("lineWidth", 1.0f);
+        ps_.push_constant("color", underlay_col);
+        draw_strip(b);
+        ps_.push_constant("color", circle_col);
+        draw_strip(b);
+      }
+    }
+
+    /* --- 8c. Per-point rotation handles (Curve Patch POINTS) --- */
+    for (const int i : IndexRange(handles_.angle_handles.size())) {
+      const ed::sculpt_paint::PaintCurveAngleHandleDrawData &ad = handles_.angle_handles[i];
+      if (gpu::Batch *b = handle_gpu_.angle_arc[i]) {
+        ps_.push_constant("lineWidth", 3.0f);
+        ps_.push_constant("color", float4(0.0f, 0.0f, 0.0f, 0.5f));
+        draw_strip(b);
+        ps_.push_constant("lineWidth", 1.0f);
+        ps_.push_constant("color", ad.color);
+        draw_strip(b);
+      }
+      /* Arrowhead, underlay then color, matching the arc. */
+      for (int wing = 0; wing < 2; wing++) {
+        const int index = i * 2 + wing;
+        if (index >= handle_gpu_.angle_arrow.size()) {
+          break;
+        }
+        if (gpu::Batch *b = handle_gpu_.angle_arrow[index]) {
+          ps_.push_constant("lineWidth", 3.0f);
+          ps_.push_constant("color", float4(0.0f, 0.0f, 0.0f, 0.5f));
+          draw_strip(b);
+          ps_.push_constant("lineWidth", 1.0f);
+          ps_.push_constant("color", ad.color);
+          draw_strip(b);
+        }
+      }
+      if (gpu::Batch *b = handle_gpu_.angle_circle[i]) {
+        const float4 underlay_col = ad.hovered ? float4(1.0f, 1.0f, 1.0f, 0.8f) :
+                                                 float4(1.0f, 1.0f, 1.0f, 0.5f);
+        const float hover_t = 0.65f;
+        const float4 circle_col = ad.hovered ? float4(ad.color.x + (1.0f - ad.color.x) * hover_t,
+                                                      ad.color.y + (1.0f - ad.color.y) * hover_t,
+                                                      ad.color.z + (1.0f - ad.color.z) * hover_t,
+                                                      1.0f) :
+                                               ad.color;
         ps_.push_constant("lineWidth", 1.0f);
         ps_.push_constant("color", underlay_col);
         draw_strip(b);

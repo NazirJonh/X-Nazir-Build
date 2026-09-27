@@ -16,6 +16,11 @@
 
 namespace blender::bke {
 
+/* Registered by the sculpt/paint module once its operators are in; see
+ * #CurvePatchPointTextureHooks for why this indirection exists at all. Null means "no editors",
+ * which the RNA property surfaces as an unset pointer. */
+CurvePatchPointTextureHooks *BKE_curve_patch_point_texture_hooks = nullptr;
+
 int curve_patch_stamp_pick_texture(const Span<float> weights_cdf, const float random01)
 {
   if (weights_cdf.is_empty()) {

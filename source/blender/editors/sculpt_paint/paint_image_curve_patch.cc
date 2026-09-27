@@ -48,6 +48,7 @@
 
 #include "UI_view2d.hh"
 
+#include "paint_curve_patch_edit_intern.hh"
 #include "paint_image_curve_patch.hh"
 #include "paint_image_curve_patch_raster.hh"
 #include "mesh/paint_image_select_intern.hh"
@@ -157,6 +158,7 @@ ImageCurvePatchSession *image_curve_patch_session_begin(bContext *C,
     }
     MEM_delete(g_active_session);
     g_active_session = nullptr;
+    curve_patch_point_texture_pick_reset();
   }
   SpaceImage *sima = CTX_wm_space_image(C);
   if (sima == nullptr || sima->image == nullptr) {
@@ -239,6 +241,7 @@ void image_curve_patch_session_commit(bContext *C, ImageCurvePatchSession *sessi
     ED_image_undo_push_from_tile_map("Curve Patch", PaintMode::Texture2D, session->tiles);
   }
   g_active_session = nullptr;
+  curve_patch_point_texture_pick_reset();
   MEM_delete(session);
 }
 
@@ -252,6 +255,7 @@ void image_curve_patch_session_cancel(bContext * /*C*/, ImageCurvePatchSession *
    * the undo stack for this session, so there is nothing to discard either. */
   curve_patch_restore_to_anchor(*session);
   g_active_session = nullptr;
+  curve_patch_point_texture_pick_reset();
   MEM_delete(session);
 }
 
@@ -296,9 +300,16 @@ bool image_curve_patch_session_sync_live_brush(bContext *C, ImageCurvePatchSessi
   bke::CurvePatchParams live_params;
   const CurvePatchLiveInputs live = image_curve_patch_live_inputs_capture(
       *session, *paint, *brush, live_params);
-  if (live == session->doc.last_synced && live_params == session->doc.last_synced_params) {
+  /* The per-point texture browse writes its attribute from an RNA setter with no context (see
+   * #CurvePatchDocument::pending_point_texture_restamp); that write is invisible to the live-input
+   * digest, so the flag forces the re-stamp. */
+  const bool pending_texture_restamp = session->doc.pending_point_texture_restamp;
+  if (!pending_texture_restamp && live == session->doc.last_synced &&
+      live_params == session->doc.last_synced_params)
+  {
     return false;
   }
+  session->doc.pending_point_texture_restamp = false;
 
   const bool pool_rebuild = live.needs_texture_pool_rebuild(session->doc.last_synced);
   if (pool_rebuild) {

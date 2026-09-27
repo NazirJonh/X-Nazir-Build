@@ -208,12 +208,12 @@ class CurvePatchCurveEditor {
                       CurvePatchEditorHost &host,
                       CurvePatchScreenAdapter &adapter);
 
-  /** True while any of the four drags is in flight. Targets consult it before starting an action
+  /** True while any of the drags is in flight. Targets consult it before starting an action
    * of their own (3D refuses to hand off to Transform mid-drag). */
   bool is_dragging() const
   {
-    return dragging_point_ || dragging_handle_ || dragging_radius_ || dragging_segment_ ||
-           this->is_xform_active();
+    return dragging_point_ || dragging_handle_ || dragging_radius_ || dragging_strength_ ||
+           dragging_angle_ || dragging_segment_ || this->is_xform_active();
   }
 
   /**
@@ -283,6 +283,9 @@ class CurvePatchCurveEditor {
   bool dragging_point_ = false;
   bool dragging_handle_ = false;
   bool dragging_radius_ = false;
+  /** Per-point stamp strength / rotation drag (Curve Patch POINTS layout). */
+  bool dragging_strength_ = false;
+  bool dragging_angle_ = false;
   bool dragging_segment_ = false;
   /** Which Bezier tangent handle #dragging_handle_ is moving. */
   bool handle_is_left_ = false;
@@ -300,6 +303,15 @@ class CurvePatchCurveEditor {
 
   /** Radius drag axis, fixed in region pixels at drag start. */
   PaintCurveRadiusHandleScreen radius_handle_ = {};
+  /** Strength drag track, fixed in region pixels at drag start. */
+  PaintCurveStrengthHandleScreen strength_handle_ = {};
+  /** Rotation drag geometry, fixed at drag start: the screen center, the screen angle at press,
+   * and the attribute value at press. The drag applies only the SCREEN angle's delta, so a
+   * projection flip mid-drag is the user's business, not ours. */
+  PaintCurveAngleHandleScreen angle_handle_ = {};
+  float angle_value_at_press_ = 0.0f;
+  /** Cursor position, in region pixels, where the rotation drag began. */
+  float2 angle_press_mval_ = float2(0.0f);
 
   /* -------------------------------------------------------------------- */
   /** \name Keyboard Transform (G / R / S)

@@ -265,6 +265,16 @@ class ImageCurvePatchHost : public CurvePatchEditorHost {
     image_curve_patch_context_menu_open(&C, session_);
   }
 
+  /** The live brush decides which per-point handles are on screen; the editing core hit-tests
+   * exactly those. Same brush the session was started with (2D resolves it from the context,
+   * like the 3D host does). */
+  CurvePatchHandleVisibility handle_visibility(bContext &C) const override
+  {
+    const Paint *paint = BKE_paint_get_active_from_context(&C);
+    const Brush *brush = paint ? BKE_paint_brush_for_read(paint) : nullptr;
+    return ED_curve_patch_handle_visibility_get(brush);
+  }
+
   /** Put the canvas hint line back after a transient one (a finished G/R/S) replaced it. */
   void status_refresh(bContext &C) override
   {
@@ -738,6 +748,22 @@ static void image_curve_patch_context_menu_open(bContext *C, const ImageCurvePat
 
   layout.separator();
   layout.op("PAINT_OT_image_curve_patch_delete_point", std::nullopt, ICON_NONE);
+
+  const Paint *paint = BKE_paint_get_active_from_context(C);
+  const Brush *brush = paint ? BKE_paint_brush_for_read(paint) : nullptr;
+  if (session.frozen_patch_params.stamp_mode == bke::CurvePatchStampMode::Stamps &&
+      session.frozen_patch_params.stamp_layout == bke::CurvePatchStampLayout::Points && brush &&
+      brush->curve_patch.stamp_texture_source == BRUSH_CURVE_PATCH_TEX_MULTI &&
+      session.doc.active_point >= 0 && session.doc.active_point < session.curve.points_num())
+  {
+    layout.separator();
+    layout.label(IFACE_("Point Texture"), ICON_NONE);
+    layout.op_menu_enum(
+        C, "SCULPT_OT_curve_patch_point_texture_set", "slot", IFACE_("Texture"), ICON_NONE);
+    layout.op("SCULPT_OT_curve_patch_point_texture_browse",
+              IFACE_("Browse Image..."),
+              ICON_IMAGE_DATA);
+  }
   ui::popup_menu_end(C, pup);
 }
 

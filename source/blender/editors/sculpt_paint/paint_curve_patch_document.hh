@@ -192,6 +192,21 @@ struct CurvePatchDocument {
    * consumers must still validate it against `control_curve.points_num()`. */
   int active_point = -1;
 
+  /** The point the per-point texture BROWSE flow targets (`SCULPT_OT_curve_patch_point_texture_
+   * browse` set it from #active_point; the Images Browser popover assigns through the RNA
+   * `point_image` property into the same index). Kept next to #active_point for the same reason
+   * that one lives here -- the assign lands in an RNA setter that can reach neither the modal nor
+   * its operator data. Reset to -1 when a session ends. */
+  int texture_pick_point = -1;
+
+  /** Set by the per-point texture browse/assign hook (#bke::CurvePatchPointTextureHooks::set) when
+   * it writes #bke::CURVE_PATCH_ATTR_STAMP_TEXTURE outside the modal's input. The live-input digest
+   * watches the texture SLOT LIST, not the per-point index, so an assignment that reuses an
+   * existing slot would otherwise not re-stamp; and the modal, not the RNA hook, owns the undo
+   * push. The modal clears this and forces a re-stamp (plus, in 3D, an undo step) on its next poll.
+   */
+  bool pending_point_texture_restamp = false;
+
   CurvePatchTextureBinding texture;
 
   /** Live brush state as of the last stamp. Compared against a fresh capture on every modal event

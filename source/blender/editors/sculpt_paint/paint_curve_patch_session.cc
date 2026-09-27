@@ -57,6 +57,7 @@
 #include "WM_types.hh"
 
 #include "paint_curve_intern.hh"
+#include "paint_curve_patch_edit_intern.hh"
 #include "paint_curve_patch_sampler.hh"
 #include "paint_image_curve_patch.hh"
 #include "paint_intern.hh"
@@ -547,6 +548,8 @@ static void curve_patch_session_tag_layer_ui(Object &ob)
 
 void curve_patch_session_free(Object &ob)
 {
+  /* The per-point texture browse target cannot outlive its session; drop the pick with it. */
+  curve_patch_point_texture_pick_reset();
   SculptSession &ss = *ob.runtime->sculpt_session;
   MEM_delete(ss.cache);
   ss.cache = nullptr;

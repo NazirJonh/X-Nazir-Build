@@ -29,6 +29,12 @@ namespace blender {
  * declaring #Mesh at global scope would name an unrelated type. */
 struct Mesh;
 struct PointCloud;
+/* DNA types reached only through the point-texture hooks below, so the core header keeps its
+ * "no DNA dependency" property for every other consumer. */
+struct Brush;
+struct Image;
+struct Main;
+struct Tex;
 }  // namespace blender
 
 namespace blender::bke {
@@ -37,6 +43,42 @@ namespace blender::bke {
  * (`paintcurve_geom_set_surface_normal()`), normalized. Shared here so the core build can read it
  * without depending on the editor module -- see #curve_patch_build_from_control_curve. */
 constexpr const char *CURVE_PATCH_ATTR_SURFACE_NORMAL = "paintcurve_surface_normal";
+
+/** Per-point stamp overrides for the POINTS stamp layout, stored as point attributes on the
+ * control curve. A missing attribute reads as its default, so curves authored before these
+ * existed need no migration; each is created lazily on first write.
+ *
+ * Per-point relief strength multiplier in [0, 1]; default 1.0. */
+constexpr const char *CURVE_PATCH_ATTR_STAMP_STRENGTH = "paintcurve_stamp_strength";
+/** Per-point texture rotation in radians; used only when Random Rotation is off. Default 0. */
+constexpr const char *CURVE_PATCH_ATTR_STAMP_ANGLE = "paintcurve_stamp_angle";
+/** Per-point texture slot index into the brush's Curve Patch texture list; default -1 = Auto
+ * (random pick from the weight table). */
+constexpr const char *CURVE_PATCH_ATTR_STAMP_TEXTURE = "paintcurve_stamp_texture";
+/** Stable per-point seed for the stamp randomization channels (jitter/size/strength/Auto texture
+ * pick/depth). A missing attribute reads as the control point's current INDEX -- the pre-existing
+ * behavior. Materialized lazily on the first topology edit, after which insert/delete/reverse carry
+ * it along, so a point's draw does not jump when its index shifts. */
+constexpr const char *CURVE_PATCH_ATTR_STAMP_SEED = "paintcurve_stamp_seed";
+
+/**
+ * Editor-provided entry points behind the RNA `point_image` virtual property and the texture-slot
+ * index remap, registered once by the sculpt/paint module at operator registration. Makesrna must
+ * not depend on the editors, and the live control curve exists only inside an editor session --
+ * so the property's get/set forward here, and a null pointer (no editors loaded, headless) reads
+ * as "nothing assigned" / "nothing to do".
+ */
+struct CurvePatchPointTextureHooks {
+  /** The image of the slot assigned to the browse target point, or null when no session holds this
+   * brush, no point is targeted, the point is set to Auto, or the slot holds no image texture. */
+  Image *(*get)(const Brush &brush);
+  /** Assign `image` to the browse target point: reuse the slot already holding this image, or
+   * append a NEW slot wrapping it in a fresh texture (existing slots are never retargeted). False
+   * when no session targets this brush. `bmain` is the main the new texture is added to. */
+  bool (*set)(Main &bmain, Brush &brush, Image &image);
+};
+/** Set by the sculpt operator-type registration; never freed. */
+extern CurvePatchPointTextureHooks *BKE_curve_patch_point_texture_hooks;
 
 /* -------------------------------------------------------------------- */
 /** \name Build Parameters
@@ -65,6 +107,11 @@ enum class CurvePatchPointShape : int8_t {
 enum class CurvePatchStampMode : int8_t {
   Ribbon = 0,
   Stamps = 1,
+};
+
+enum class CurvePatchStampLayout : int8_t {
+  Fill = 0,
+  Points = 1,
 };
 
 enum class CurvePatchStampProjection : int8_t {
@@ -106,6 +153,13 @@ struct CurvePatchParams {
   CurvePatchPointShape end_point_shape = CurvePatchPointShape::Square;
 
   CurvePatchStampMode stamp_mode = CurvePatchStampMode::Ribbon;
+  /** STAMPS mode only: spaced along the arc or centered on every control point. Points makes
+   * `spacing_frac` irrelevant -- the layout comes from the control points. */
+  CurvePatchStampLayout stamp_layout = CurvePatchStampLayout::Fill;
+  /** Whether the texture's Random Rotation switch is on. Points stamps fall back to their
+   * per-point rotation attribute when it is off (the per-point angle handle is shown then), so
+   * the switch itself -- not just the amount -- is part of the parameters. */
+  bool stamp_use_random_angle = false;
   /** Per-stamp randomization, as fractions in [0, 1] (the DNA fields are percentages). */
   float stamp_size_random = 0.0f;
   float stamp_strength_random = 0.0f;
@@ -169,6 +223,13 @@ struct CurvePatchSpline {
   Vector<float> lengths_3d;
   /** Normalized tangent at each `poly_3d` vertex (central difference at interior points). */
   Vector<float3> tangents_3d;
+  /** Arc length of every CONTROL point of the source curve, in the same units as `lengths_3d`
+   * (index = control point index). This is what the POINTS stamp layout anchors each stamp to --
+   * the evaluated polyline a stamp layout walks has a different resolution. Empty when the caller
+   * did not supply a control-point mapping (`curve_patch_geometry_build_with_points` takes one as
+   * `control_point_eval_offsets`), so consumers must treat emptiness as "no layout anchored to
+   * control points". */
+  Vector<float> control_point_lengths;
   /** Per-`poly_3d`-vertex interpolated width (Curve Patch's per-point `radius` attribute,
    * tessellated to the same resolution as `poly_3d` via
    * `bke::CurvesGeometry::interpolate_to_evaluated()`). Empty unless `build_from_positions()` was
@@ -508,6 +569,53 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
                               uint32_t seed,
                               Span<float> texture_weights_cdf,
                               Vector<CurvePatchStamp> &r_stamps);
+
+/** Per-point stamp overrides for #curve_patch_stamps_build_points. An empty span reads as "use
+ * the documented default for every point"; a non-empty one must match the control-point count.
+ * `radius` is the point's WORLD half extent BEFORE size randomization (the control point's
+ * `radius` attribute already multiplied by the frozen brush radius). */
+struct CurvePatchStampPointOverrides {
+  Span<float> radius;
+  /** Relief strength multiplier in [0, 1]; default 1.0. */
+  Span<float> strength;
+  /** Texture rotation in radians; default 0. Only consumed while Random Rotation is off. */
+  Span<float> angle;
+  /** Texture slot index; -1 = Auto (random pick). */
+  Span<int> texture;
+  /** Stable randomization seed per point. Empty reads as the point's current index, so a curve that
+   * never materialized #CURVE_PATCH_ATTR_STAMP_SEED keeps its original index-keyed draws. */
+  Span<int> seed;
+};
+
+/**
+ * Lay stamps out for the POINTS layout: one stamp centered on every control point, at the arc
+ * length #CurvePatchSpline::control_point_lengths reports for it.
+ *
+ * Every per-point quantity first takes its override, then the randomized jitter/size/strength on
+ * top -- the same channels #curve_patch_stamps_build hashes, keyed by the control point's index,
+ * so a re-stamp keeps each point's draw stable. A point whose strength override (after
+ * randomization) reaches zero contributes no stamp at all.
+ *
+ * `point_s` holds the control points' arc lengths and drives the layout; empty means the caller
+ * had no control-point mapping and no stamps can be placed. `texture_slot_num` is the number of
+ * resolved texture variants (0 in SINGLE mode), which bounds the per-point slot index -- a point
+ * pointing past it, or at Auto (-1), draws from `texture_weights_cdf` like a FILL stamp.
+ *
+ * `r_stamps` is cleared first and comes back sorted by `center_v`, with the same rigid frames and
+ * hash discipline as #curve_patch_stamps_build.
+ */
+void curve_patch_stamps_build_points(const CurvePatchSpline &spline,
+                                     const CurvePatchStampPointOverrides &point_overrides,
+                                     float jitter_amount,
+                                     float size_random,
+                                     float strength_random,
+                                     float base_angle,
+                                     bool use_random_angle,
+                                     float random_angle,
+                                     uint32_t seed,
+                                     int texture_slot_num,
+                                     Span<float> texture_weights_cdf,
+                                     Vector<CurvePatchStamp> &r_stamps);
 
 /**
  * Append wrap-around ghost copies of the stamps that straddle a closed curve's join, so the stamp
@@ -1032,6 +1140,24 @@ void curve_patch_geometry_build(Span<float3> evaluated_positions,
                                 const CurvePatchParams &params,
                                 Span<float> stamp_texture_weights_cdf,
                                 CurvePatchGeometry &r_geometry);
+
+/**
+ * Per-control-point inputs for the POINTS stamp layout, shared by both build entries.
+ *
+ * `control_point_eval_offsets` maps control point `i` to its index in `evaluated_positions`
+ * (bezier tessellation offsets, or identity for a poly curve). Empty disables POINTS anchoring:
+ * `CurvePatchSpline::control_point_lengths` stays empty and the layout places no stamps.
+ * `point_overrides` carries the per-point radius / strength / angle / texture / seed attributes.
+ */
+void curve_patch_geometry_build_with_points(Span<float3> evaluated_positions,
+                                            Span<float> evaluated_radii,
+                                            Span<float3> evaluated_normals,
+                                            bool cyclic,
+                                            const CurvePatchParams &params,
+                                            Span<float> stamp_texture_weights_cdf,
+                                            Span<int> control_point_eval_offsets,
+                                            const CurvePatchStampPointOverrides &point_overrides,
+                                            CurvePatchGeometry &r_geometry);
 
 /** \} */
 

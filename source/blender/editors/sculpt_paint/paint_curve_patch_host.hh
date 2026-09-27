@@ -21,6 +21,8 @@
 
 #include "BKE_curves.hh"
 
+#include "ED_paint_curve_draw.hh"
+
 #include "paint_curve_patch_document.hh"
 
 struct ReportList;
@@ -147,6 +149,18 @@ class CurvePatchEditorHost : public CurvePatchHost {
 
   /** Open the right-click menu over the active point. */
   virtual void context_menu_open(bContext &C) = 0;
+
+  /**
+   * Which optional Curve Patch handles the live brush wants shown (per-point radius / strength /
+   * rotation, POINTS stamp layout). The editing core hit-tests only the handles this reports, so
+   * what is grabbable is exactly what the overlay draws; the overlay asks the brush directly
+   * through #ED_curve_patch_handle_visibility_get.
+   */
+  virtual CurvePatchHandleVisibility handle_visibility(bContext &C) const
+  {
+    UNUSED_VARS(C);
+    return {};
+  }
 
   /* Stepping the session-local history is deliberately NOT part of this interface. It used to be,
    * as a pair of virtuals the editing core never called: 3D Sculpt Mode binds undo/redo to its own

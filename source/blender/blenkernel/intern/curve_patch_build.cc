@@ -13,6 +13,9 @@
  * re-stamp this was lifted out of -- see the notes on `stamp_search_reach`.
  */
 
+#include <algorithm>
+#include <cfloat>
+
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
 /* `BKE_curves.hh` only forward-declares the virtual array types, and the tessellation below reads
@@ -54,22 +57,60 @@ static float curve_patch_smooth_length(const CurvePatchParams &params)
 
 /* Lay the stamps out and resolve the three bounds every consumer of them shares. Ribbon mode
  * leaves the list empty and all three bounds at zero, which is what makes it bit-for-bit what it
- * was before Stamps mode existed. */
+ * was before Stamps mode existed.
+ *
+ * The POINTS layout sizes every bound from the LARGEST per-point stamp, not from `params.radius`:
+ * a point carrying a radius override above 1.0 grows a stamp whose reach the brush radius cannot
+ * cover, and anything bounding reach too tightly silently clips it. */
 static void curve_patch_build_stamps(const CurvePatchParams &params,
                                      const Span<float> stamp_texture_weights_cdf,
+                                     const CurvePatchStampPointOverrides &point_overrides,
                                      CurvePatchGeometry &r_geometry)
 {
-  curve_patch_stamps_build(r_geometry.spline,
-                           params.radius,
-                           params.spacing_frac,
-                           params.jitter_amount,
-                           params.stamp_size_random,
-                           params.stamp_strength_random,
-                           params.base_angle,
-                           params.random_angle,
-                           params.stamp_seed,
-                           stamp_texture_weights_cdf,
-                           r_geometry.stamps);
+  CurvePatchSpline &spline = r_geometry.spline;
+
+  /* The radius every bound below must cover. FILL keeps the frozen brush radius; POINTS takes the
+   * largest per-point stamp (an empty override span means every point stamps at the brush
+   * radius). */
+  float max_r = params.radius;
+  if (params.stamp_layout == CurvePatchStampLayout::Points) {
+    max_r = 0.0f;
+    for (const float r : point_overrides.radius) {
+      max_r = std::max(max_r, r);
+    }
+    max_r = std::max(max_r, params.radius);
+
+    curve_patch_stamps_build_points(spline,
+                                   point_overrides,
+                                   params.jitter_amount,
+                                   params.stamp_size_random,
+                                   params.stamp_strength_random,
+                                   params.base_angle,
+                                   params.stamp_use_random_angle,
+                                   params.random_angle,
+                                   params.stamp_seed,
+                                   int(stamp_texture_weights_cdf.size()),
+                                   stamp_texture_weights_cdf,
+                                   r_geometry.stamps);
+    /* Nothing anchored: the caller had no control-point mapping, so POINTS cannot place a single
+     * stamp. Leaving the bounds at zero keeps the ribbon unextended and the cull tube tight. */
+    if (spline.control_point_lengths.is_empty()) {
+      return;
+    }
+  }
+  else {
+    curve_patch_stamps_build(spline,
+                             params.radius,
+                             params.spacing_frac,
+                             params.jitter_amount,
+                             params.stamp_size_random,
+                             params.stamp_strength_random,
+                             params.base_angle,
+                             params.random_angle,
+                             params.stamp_seed,
+                             stamp_texture_weights_cdf,
+                             r_geometry.stamps);
+  }
 
   /* PLANAR tests candidate vertices against a rigid WORLD-space frame, but this reach is still an
    * ARC-LENGTH window. On a bend the chord is shorter than the arc, so a vertex inside a stamp's
@@ -86,7 +127,7 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
    * adds `jitter_amount`: a stamp pushed sideways off the curve keeps a rigid frame, so its square
    * spans more arc length than its own corner reach accounts for. CURVE takes neither term and
    * keeps the historical value, so that projection is unaffected. */
-  r_geometry.stamp_search_reach = curve_patch_stamp_reach(params.radius);
+  r_geometry.stamp_search_reach = curve_patch_stamp_reach(max_r);
   if (params.stamp_projection == CurvePatchStampProjection::Planar) {
     r_geometry.stamp_search_reach = r_geometry.stamp_search_reach * PLANAR_BEND_SLACK +
                                     params.jitter_amount;
@@ -97,9 +138,9 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
    * the stretch just before the join. Wrap those stamps around instead, so both halves are present
    * and meet exactly at the seam. The bound must be the same one the per-vertex search window
    * uses, hence the shared `stamp_search_reach`. */
-  if (r_geometry.spline.cyclic) {
+  if (spline.cyclic) {
     curve_patch_stamps_add_cyclic_wrap(
-        r_geometry.stamps, r_geometry.spline.total_length(), r_geometry.stamp_search_reach);
+        r_geometry.stamps, spline.total_length(), r_geometry.stamp_search_reach);
   }
 
   /* Stamps pushed sideways by jitter would fall outside the ribbon and be clipped by the LUT's
@@ -115,7 +156,7 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
    * #curve_patch_stamp_reach's doc-string warns about, in the one direction that had been left out
    * of it. This is a lateral half-width, not an increment: `ribbon_radius` was set to
    * `params.radius` by the caller. */
-  r_geometry.ribbon_radius = curve_patch_stamp_reach(params.radius) + params.jitter_amount;
+  r_geometry.ribbon_radius = curve_patch_stamp_reach(max_r) + params.jitter_amount;
 
   /* The layout puts the first stamp's center exactly at `s == 0` and the last one at the last
    * whole step before `total_length`, so an end stamp reaches past the curve's end by its own
@@ -131,7 +172,7 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
    * extrapolation). Slack bought there would only inflate the strip, the PBVH cull tube, and the
    * whole-curve search sphere for no correctness gain, and it would force a full LUT rebuild on
    * every CURVE<->PLANAR toggle since `end_margin` feeds the ribbon's source hash. */
-  r_geometry.ribbon_end_margin = curve_patch_stamp_reach(params.radius) + params.jitter_amount;
+  r_geometry.ribbon_end_margin = curve_patch_stamp_reach(max_r) + params.jitter_amount;
 }
 
 void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
@@ -193,13 +234,135 @@ void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
     }
   }
 
-  curve_patch_geometry_build(evaluated_positions.as_span(),
-                             evaluated_radii.as_span(),
-                             evaluated_normals.as_span(),
-                             cyclic,
-                             params,
-                             stamp_texture_weights_cdf,
-                             r_geometry);
+  /* The POINTS layout's inputs, resolved from the control curve itself: which evaluated sample
+   * each control point owns (bezier tessellation offsets, identity for a poly curve), and the
+   * per-point stamp overrides. Radii convert from the paint-curve multiplier convention (1.0 =
+   * full brush size) to a world half extent here, where the frozen radius lives. */
+  Vector<int> control_point_eval_offsets;
+  const int control_point_num = control_curve.points_num();
+  if (control_point_num > 0 && control_curve.curves_num() > 0) {
+    /* Populates the evaluated-offsets cache `bezier_evaluated_offsets_for_curve` reads. */
+    control_curve.evaluated_points_by_curve();
+    if (control_curve.curve_types()[0] == CURVE_TYPE_BEZIER) {
+      /* Offset-indices semantics: one entry per control point PLUS a final total, so the first
+       * `control_point_num` entries map each control point to its first evaluated sample. */
+      const Span<int> bezier_offsets = control_curve.bezier_evaluated_offsets_for_curve(0);
+      if (bezier_offsets.size() == control_point_num + 1) {
+        control_point_eval_offsets.extend(bezier_offsets.take_front(control_point_num));
+      }
+    }
+    else if (control_curve.curve_types()[0] == CURVE_TYPE_POLY) {
+      /* Evaluated == control points, one to one. */
+      for (const int i : IndexRange(control_point_num)) {
+        control_point_eval_offsets.append(i);
+      }
+    }
+    else if (control_curve.curve_types()[0] == CURVE_TYPE_CATMULL_ROM) {
+      /* Catmull-Rom tessellates a fixed `resolution` samples per segment, so control point `i`
+       * owns evaluated sample `i * resolution`. Bounds-checked because the last segment's sample
+       * count can differ; when it does not fit, the nearest-sample fallback below takes over. */
+      const int resolution = control_curve.resolution()[0];
+      if (resolution > 0 && (control_point_num - 1) * resolution < evaluated_positions.size()) {
+        for (const int i : IndexRange(control_point_num)) {
+          control_point_eval_offsets.append(i * resolution);
+        }
+      }
+    }
+
+    if (control_point_eval_offsets.size() != control_point_num) {
+      /* NURBS & co. (and any Catmull-Rom the resolution mapping above could not place): no direct
+       * control-point index. Fall back to the nearest evaluated sample -- the tessellation keeps the
+       * control points as evaluated samples for every built-in type, so the scan finds each
+       * exactly. A paint curve's control curve is always Bezier, so this path stays rare. */
+      control_point_eval_offsets.clear();
+      const Span<float3> evaluated = evaluated_positions.as_span();
+      const Span<float3> control_positions = control_curve.positions();
+      for (const int i : IndexRange(control_point_num)) {
+        int best = 0;
+        float best_dist_sq = FLT_MAX;
+        for (const int j : evaluated.index_range()) {
+          const float dist_sq = math::distance_squared(control_positions[i], evaluated[j]);
+          if (dist_sq < best_dist_sq) {
+            best_dist_sq = dist_sq;
+            best = j;
+          }
+        }
+        control_point_eval_offsets.append(best);
+      }
+    }
+  }
+  CurvePatchStampPointOverrides point_overrides;
+  Array<float> point_radii(control_point_num);
+  Array<float> point_strengths(control_point_num);
+  Array<float> point_angles(control_point_num);
+  Array<int> point_textures(control_point_num);
+  Array<int> point_seeds(control_point_num);
+  bool has_seed = false;
+  {
+    const AttributeAccessor control_attrs = control_curve.attributes();
+    /* `radius` defaulting to 1.0, not `CurvesGeometry::radius()`'s 0.01: a paint-curve point with
+     * no radius attribute means "the brush radius", not a microscopic stamp. */
+    const VArray<float> control_radii = *control_attrs.lookup_or_default<float>(
+        "radius", AttrDomain::Point, 1.0f);
+    const VArray<float> strengths = *control_attrs.lookup_or_default<float>(
+        CURVE_PATCH_ATTR_STAMP_STRENGTH, AttrDomain::Point, 1.0f);
+    const VArray<float> angles = *control_attrs.lookup_or_default<float>(
+        CURVE_PATCH_ATTR_STAMP_ANGLE, AttrDomain::Point, 0.0f);
+    const VArray<int> textures = *control_attrs.lookup_or_default<int>(
+        CURVE_PATCH_ATTR_STAMP_TEXTURE, AttrDomain::Point, -1);
+    has_seed = control_attrs.contains(CURVE_PATCH_ATTR_STAMP_SEED);
+    const VArray<int> seeds = *control_attrs.lookup_or_default<int>(
+        CURVE_PATCH_ATTR_STAMP_SEED, AttrDomain::Point, 0);
+    for (const int i : IndexRange(control_point_num)) {
+      point_radii[i] = max_ff(control_radii[i], 0.0f) * params.radius;
+      /* Strength is clamped in [0, 1] only by the editor's setter; a Python-written negative would
+       * otherwise give a negative relief strength. */
+      point_strengths[i] = std::max(strengths[i], 0.0f);
+      point_angles[i] = angles[i];
+      point_textures[i] = textures[i];
+      if (has_seed) {
+        point_seeds[i] = seeds[i];
+      }
+    }
+  }
+  point_overrides.radius = point_radii.as_span();
+  point_overrides.strength = point_strengths.as_span();
+  point_overrides.angle = point_angles.as_span();
+  point_overrides.texture = point_textures.as_span();
+  if (has_seed) {
+    point_overrides.seed = point_seeds.as_span();
+  }
+
+  curve_patch_geometry_build_with_points(evaluated_positions.as_span(),
+                                         evaluated_radii.as_span(),
+                                         evaluated_normals.as_span(),
+                                         cyclic,
+                                         params,
+                                         stamp_texture_weights_cdf,
+                                         control_point_eval_offsets.as_span(),
+                                         point_overrides,
+                                         r_geometry);
+}
+
+/* Anchors each control point's arc length onto the built polyline: control point `i` sits at the
+ * evaluated sample `offsets[i]`, whose arc length `lengths_3d` already carries. Called after the
+ * spline was built, so the lengths are final (post-shrinkwrap: the tessellated polyline was
+ * projected BEFORE the build, so these are surface distances, not hovering ones). */
+static void spline_control_point_lengths_fill(CurvePatchSpline &spline,
+                                              const Span<int> control_point_eval_offsets)
+{
+  spline.control_point_lengths.clear();
+  if (control_point_eval_offsets.is_empty() || spline.is_empty()) {
+    return;
+  }
+  spline.control_point_lengths.reserve(control_point_eval_offsets.size());
+  /* On a closed curve the appended join sample means `lengths_3d` has one more entry than the
+   * evaluated polyline; the offsets only ever name the real evaluated samples. */
+  const int max_index = int(spline.lengths_3d.size()) - 1;
+  for (const int offset : control_point_eval_offsets) {
+    spline.control_point_lengths.append(
+        spline.lengths_3d[std::clamp(offset, 0, max_index)]);
+  }
 }
 
 void curve_patch_geometry_build(const Span<float3> evaluated_positions,
@@ -210,12 +373,47 @@ void curve_patch_geometry_build(const Span<float3> evaluated_positions,
                                 const Span<float> stamp_texture_weights_cdf,
                                 CurvePatchGeometry &r_geometry)
 {
+  curve_patch_geometry_build_with_points(evaluated_positions,
+                                         evaluated_radii,
+                                         evaluated_normals,
+                                         cyclic,
+                                         params,
+                                         stamp_texture_weights_cdf,
+                                         {},
+                                         CurvePatchStampPointOverrides(),
+                                         r_geometry);
+}
+
+void curve_patch_geometry_build_with_points(const Span<float3> evaluated_positions,
+                                            const Span<float> evaluated_radii,
+                                            const Span<float3> evaluated_normals,
+                                            const bool cyclic,
+                                            const CurvePatchParams &params,
+                                            const Span<float> stamp_texture_weights_cdf,
+                                            const Span<int> control_point_eval_offsets,
+                                            const CurvePatchStampPointOverrides &point_overrides,
+                                            CurvePatchGeometry &r_geometry)
+{
   r_geometry.spline.plane_normal = params.plane_normal;
   r_geometry.spline.build_from_positions(
       evaluated_positions, evaluated_radii, cyclic, evaluated_normals);
 
   if (r_geometry.spline.is_empty()) {
     return;
+  }
+
+  spline_control_point_lengths_fill(r_geometry.spline, control_point_eval_offsets);
+
+  const bool is_points_layout = params.stamp_mode == CurvePatchStampMode::Stamps &&
+                                params.stamp_layout == CurvePatchStampLayout::Points;
+  if (is_points_layout && !r_geometry.spline.radii.is_empty()) {
+    /* The strip must be uniformly `ribbon_radius` wide in POINTS mode: its width has to cover the
+     * LARGEST stamp everywhere (a jittered big stamp's half crosses small-stamp territory), while
+     * the sampler reconstructs a world lateral offset as `u * radius_at(s) * ribbon_radius`.
+     * Leaving the per-point modulation in would narrow the strip where a small radius sits and
+     * clip the big stamp reaching over it, and the `radius_at(s)` rescale would skew the CURVE
+     * projection. The per-point sizes are already carried by each stamp's own `half_extent`. */
+    r_geometry.spline.radii.fill(1.0f);
   }
 
   /* Stamps mode lays its stamps out here, right after the spline: the relief's parallel per-vertex
@@ -229,7 +427,7 @@ void curve_patch_geometry_build(const Span<float3> evaluated_positions,
   r_geometry.stamp_search_reach = 0.0f;
 
   if (params.stamp_mode == CurvePatchStampMode::Stamps) {
-    curve_patch_build_stamps(params, stamp_texture_weights_cdf, r_geometry);
+    curve_patch_build_stamps(params, stamp_texture_weights_cdf, point_overrides, r_geometry);
   }
 
   /* Round and triangle endpoints extend beyond the control curve, unlike the square endpoint. The

@@ -23,6 +23,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
+#include "BLI_virtual_array_fwd.hh"
 
 #include "ED_paint_curve_draw.hh"
 
@@ -244,6 +245,39 @@ struct PaintCurveRadiusHandleScreen {
   float2 perp;
 };
 
+/** Screen-space strength handle of a Curve Patch POINTS control point: a track opposite the
+ * radius handle with a knob at the current `paintcurve_stamp_strength` value. */
+struct PaintCurveStrengthHandleScreen {
+  /** The control point's screen position; the track runs from here along `-perp`. */
+  float2 point;
+  /** Track start and end (base carries the fixed offset, end adds the track length). */
+  float2 base;
+  float2 end;
+  /** Screen-space normal the track runs along (opposite the radius handle's `perp`). */
+  float2 perp;
+  /** The knob: `point + perp * (offset + len * value)`. */
+  float2 knob;
+  /** The strength in [0, 1] the knob sits at. */
+  float value = 1.0f;
+};
+
+/** Screen-space rotation handle of a Curve Patch POINTS control point: an arc around the point,
+ * centered on the stamp's current screen angle. */
+struct PaintCurveAngleHandleScreen {
+  /** The control point's screen position; the arc's center. */
+  float2 center;
+  /** Screen radius of the arc, in pixels. */
+  float radius = 24.0f;
+  /** The stamp's current screen-space rotation (radians). */
+  float angle = 0.0f;
+  /** The knob, on the arc at `angle`. */
+  float2 knob;
+  /** Sign mapping a screen-space rotation delta onto the stored attribute: +1 normally, -1 when a
+   * 3D patch is seen from the back of its surface and the projection mirrors the turn. Set by the
+   * dragging code, which is where the view/normal are available; unused in 2D. */
+  float sign = 1.0f;
+};
+
 /**
  * Core of #paintcurve_build_screen_points: operates directly on `geom`/`use_3d_space` so it can
  * be reused without a #PaintCurve (e.g. for a standalone control curve).
@@ -372,6 +406,57 @@ int paintcurve_find_radius_handle_at_pos_from_geometry(const bke::CurvesGeometry
                                                        float threshold);
 float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScreen *handle,
                                                const float pos[2]);
+
+/* -------------------------------------------------------------------- */
+/** \name Strength & Rotation Handle Screen-Space Helpers (Curve Patch POINTS)
+ * \{ */
+
+/** Screen track length of a strength handle (pixels at scale 1.0). */
+constexpr float PAINT_CURVE_STRENGTH_HANDLE_TRACK_LEN = 40.0f;
+/** Screen offset from the pivot where a strength track begins. Same clearance as the radius
+ * handle's #PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET (declared with the other constants below), so
+ * the two knobs never overlap at small radii. */
+constexpr float PAINT_CURVE_STRENGTH_HANDLE_OFFSET = 10.0f;
+/** Minimum screen radius of a rotation handle's arc (pixels at scale 1.0). */
+constexpr float PAINT_CURVE_ANGLE_HANDLE_MIN_RADIUS = 18.0f;
+
+/**
+ * Strength handle of `point_index`: a track along the screen normal OPPOSITE the radius handle's,
+ * with the knob at the point's `paintcurve_stamp_strength`. Shared by the overlay builder and the
+ * editing core's hit test, so what is drawn is what is grabbable.
+ */
+void paintcurve_strength_handle_screen_get_from_geometry(
+    const bke::CurvesGeometry &geom,
+    const PaintCurvePoint *screen_points,
+    int point_index,
+    PaintCurveStrengthHandleScreen *r_handle,
+    const VArray<float> *strength_values = nullptr);
+/** Closest strength handle whose KNOB is within `threshold` pixels of `pos`, or -1. */
+int paintcurve_find_strength_handle_at_pos_from_geometry(const bke::CurvesGeometry &geom,
+                                                         Span<PaintCurvePoint> screen_points,
+                                                         const float pos[2],
+                                                         float threshold);
+/** Strength value under `pos`, projected onto the handle's track (inverse of the knob mapping). */
+float paintcurve_strength_from_handle_screen_pos(const PaintCurveStrengthHandleScreen *handle,
+                                                 const float pos[2]);
+
+/**
+ * Rotation handle of `point_index`: an arc around the point centered on the stamp's current
+ * screen angle (the screen tangent direction plus the point's `paintcurve_stamp_angle`).
+ */
+void paintcurve_angle_handle_screen_get_from_geometry(
+    const bke::CurvesGeometry &geom,
+    const PaintCurvePoint *screen_points,
+    int point_index,
+    PaintCurveAngleHandleScreen *r_handle,
+    const VArray<float> *angle_values = nullptr);
+/** Closest rotation handle whose KNOB is within `threshold` pixels of `pos`, or -1. */
+int paintcurve_find_angle_handle_at_pos_from_geometry(const bke::CurvesGeometry &geom,
+                                                      Span<PaintCurvePoint> screen_points,
+                                                      const float pos[2],
+                                                      float threshold);
+
+/** \} */
 
 /** \} */
 

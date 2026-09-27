@@ -318,13 +318,39 @@ static std::optional<ImageBrowserLocation> image_browser_location(const Main &bm
   return ImageBrowserLocation{ID_BROWSER_SOURCE_BLEND_DATA, {}};
 }
 
+/**
+ * The #Image the target pointer property actually names, unwrapping the #Tex wrapper a Texture
+ * target may hold. A `browse_images` Texture target browses images but stores a texture, so its
+ * value is a #Tex whose `ima` is what every image-filter mode must compare against. Blindly
+ * casting the value to #Image (which the callers below used to do) reads Image fields out of a
+ * #Tex and crashes -- the type of the property, not an assumption, decides.
+ */
+static const Image *id_browser_target_assigned_image(PointerRNA &target_ptr,
+                                                     PropertyRNA &target_prop)
+{
+  const PointerRNA value = RNA_property_pointer_get(&target_ptr, &target_prop);
+  const ID *id = value.data ? static_cast<const ID *>(value.data) : nullptr;
+  if (id == nullptr) {
+    return nullptr;
+  }
+  switch (GS(id->name)) {
+    case ID_IM:
+      return id_cast<const Image *>(id);
+    case ID_TE: {
+      const Tex *tex = id_cast<const Tex *>(id);
+      return (tex->type == TEX_IMAGE) ? tex->ima : nullptr;
+    }
+    default:
+      return nullptr;
+  }
+}
+
 static void id_browser_sync_assigned_image_location(const bContext &C,
                                                     PointerRNA target_ptr,
                                                     PropertyRNA &target_prop,
                                                     wmWindowManager &wm)
 {
-  const PointerRNA image_ptr = RNA_property_pointer_get(&target_ptr, &target_prop);
-  const Image *image = image_ptr.data ? static_cast<const Image *>(image_ptr.data) : nullptr;
+  const Image *image = id_browser_target_assigned_image(target_ptr, target_prop);
   if (image == nullptr) {
     return;
   }
@@ -520,8 +546,7 @@ static bUUID id_browser_reference_layer_id(Main &bmain,
     return wm.runtime->id_browser_filter_layer_id;
   }
 
-  const PointerRNA assigned_ptr = RNA_property_pointer_get(&target_ptr, &target_prop);
-  const Image *assigned = static_cast<const Image *>(assigned_ptr.data);
+  const Image *assigned = id_browser_target_assigned_image(target_ptr, target_prop);
   if (assigned != nullptr && material != nullptr && !BLI_uuid_is_nil(assigned->paint_layer_id) &&
       BKE_image_paint_slot_info_is_used_in_material(
           &bmain, assigned, material, char(NODE_TEX_IMAGE_SLOT_NONE)))
@@ -2773,6 +2798,64 @@ void id_browser_popover_context_set(Layout &layout, const IDBrowserTarget &targe
   {
     layout.context_string_set("id_browser_image_filter", target.image_filter);
   }
+}
+
+void id_browser_popover_invoke(bContext *C,
+                               PointerRNA ptr,
+                               const char *propname,
+                               const bool browse_images)
+{
+  id_browser_popover_register();
+  PanelType *pt = WM_paneltype_find("UI_PT_id_browser", true);
+  if (pt == nullptr) {
+    return;
+  }
+
+  /* A keep-open panel popover, NOT a begin/draw/end block. The grid only scrolls, resizes and
+   * changes source by REBUILDING its block (see #force_activate_view_item_but and the preview
+   * helpers), and a begin/end popover has no refresh support -- so the wheel did nothing. This path
+   * matches #popover_panel_invoke's keep-open branch, with the browse target published on the
+   * popover's root layout instead of on an invoking button: the target is programmatic here, there
+   * IS no button under the cursor. The callback re-publishes it on every rebuild, because the
+   * context store lives on the block's layout, not on a button. */
+  const std::string prop = propname;
+  /* The owner may be freed (or moved by undo) while the popover is open, so keep its identity, not
+   * its pointer: the callback re-resolves it by session UID and rebuilds the PointerRNA from the
+   * same sub-struct offset. */
+  ID *owner = ptr.owner_id;
+  StructRNA *target_type = ptr.type;
+  const uint32_t owner_uid = owner != nullptr ? owner->session_uid : 0;
+  const short owner_idcode = owner != nullptr ? GS(owner->name) : 0;
+  const auto data_offset = (owner != nullptr && ptr.data != nullptr) ?
+                               (static_cast<const char *>(ptr.data) -
+                                reinterpret_cast<const char *>(owner)) :
+                               0;
+  PopupBlockHandle *handle = popover_panel_create(
+      C,
+      nullptr,
+      nullptr,
+      [prop, browse_images, target_type, owner, owner_uid, owner_idcode, data_offset](
+          bContext *C, Layout *layout, PanelType *panel_type) {
+        /* Re-resolve by session UID so a freed-then-reallocated owner cannot alias; an owner with
+         * no session UID falls back to the raw pointer, matching the pre-existing behavior. */
+        ID *resolved = (owner_uid != 0 && G_MAIN != nullptr) ?
+                           BKE_libblock_find_session_uid(G_MAIN, owner_idcode, owner_uid) :
+                           owner;
+        if (resolved == nullptr) {
+          layout->label(IFACE_("Data-block no longer available"), ICON_ERROR);
+          return;
+        }
+        void *data = reinterpret_cast<char *>(resolved) + data_offset;
+        PointerRNA target_ptr = RNA_pointer_create_discrete(resolved, target_type, data);
+        const IDBrowserTarget target{
+            &target_ptr, prop.c_str(), nullptr, nullptr, nullptr, browse_images};
+        id_browser_popover_context_set(*layout, target);
+        UI_paneltype_draw(C, panel_type, layout);
+      },
+      pt);
+  /* Same reason as #popover_panel_invoke's keep-open branch: recreate the block with the region
+   * shown, so refreshing works from the very first draw. */
+  ED_region_tag_refresh_ui(handle->region);
 }
 
 void id_browser_add_popover_button(Layout &row,

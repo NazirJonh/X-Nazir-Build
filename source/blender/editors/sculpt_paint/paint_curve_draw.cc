@@ -429,18 +429,51 @@ Paint *ED_paint_curve_resolve_active_paint(Depsgraph *depsgraph,
 /** \name Screen handles provider
  * \{ */
 
-void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
-                                                       const bke::CurvesGeometry &geometry,
-                                                       const bool use_3d_space,
-                                                       const Sculpt *sculpt,
-                                                       const bool show_radius_handles,
-                                                       const float2 mval_region,
-                                                       const bool compute_segment_hover,
-                                                       const bool show_insert_preview,
-                                                       PaintCurveScreenHandles &r_out)
+CurvePatchHandleVisibility ED_curve_patch_handle_visibility_get(const Brush *brush)
+{
+  CurvePatchHandleVisibility visibility;
+  if (brush == nullptr) {
+    /* No brush, no per-point anything: the plain paint-curve overlay still shows its radius
+     * handles through `show_radius_handles`, exactly as before. */
+    visibility.radius_regular = true;
+    return visibility;
+  }
+  if (brush->stroke_method != BRUSH_STROKE_CURVE_PATCH ||
+      brush->curve_patch.stamp_mode != BRUSH_CURVE_PATCH_STAMP_STAMPS)
+  {
+    /* Ribbon: radius handles follow the Sculpt display-mode settings, as they always have. */
+    visibility.radius_regular = true;
+    return visibility;
+  }
+  if (brush->curve_patch.stamp_layout != BRUSH_CURVE_PATCH_STAMP_LAYOUT_POINTS) {
+    /* Stamps + Fill: every per-point handle is hidden -- commit `9030395d`'s behavior. */
+    return visibility;
+  }
+  /* Stamps + POINTS: each set answers to its own brush toggle, and the rotation set exists only
+   * while Random Rotation is off -- with it on, the random draw overrides the per-point angle, so
+   * a handle for it would edit a value nothing reads. */
+  visibility.radius_all_points = brush->curve_patch.show_point_radius_handles != 0;
+  visibility.strength = brush->curve_patch.show_point_strength_handles != 0;
+  visibility.angle = (brush->mtex.brush_angle_mode & MTEX_ANGLE_RANDOM) == 0;
+  return visibility;
+}
+
+void ED_paint_curve_screen_handles_build_from_geometry(
+    const ViewContext &vc,
+    const bke::CurvesGeometry &geometry,
+    const bool use_3d_space,
+    const Sculpt *sculpt,
+    const bool show_radius_handles,
+    const float2 mval_region,
+    const bool compute_segment_hover,
+    const bool show_insert_preview,
+    PaintCurveScreenHandles &r_out,
+    const CurvePatchHandleVisibility &curve_patch_visibility)
 {
   r_out.points.clear();
   r_out.radius_handles.clear();
+  r_out.strength_handles.clear();
+  r_out.angle_handles.clear();
   r_out.segments.clear();
   r_out.insert_preview = {};
 
@@ -504,11 +537,16 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
     r_out.points.append(hd);
   }
 
-  if (show_radius_handles) {
+  if (show_radius_handles || curve_patch_visibility.radius_all_points) {
     float hover_radius_dist = PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS;
     int hover_radius_handle_index = -1;
     for (const int i : screen_points.index_range()) {
-      if (!should_show_radius_handle_draw_from_geometry(sculpt, geometry, screen_points, i)) {
+      /* The Sculpt display-mode filter only decides the plain paint-curve display (and Ribbon
+       * mode's): a POINTS radius handle is shown for every point the brush's own toggle asks
+       * for, whatever those settings say. */
+      if (!curve_patch_visibility.radius_all_points &&
+          !should_show_radius_handle_draw_from_geometry(sculpt, geometry, screen_points, i))
+      {
         continue;
       }
       PaintCurveRadiusHandleScreen handle_screen;
@@ -533,6 +571,75 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
     if (hover_radius_handle_index >= 0) {
       r_out.radius_handles[hover_radius_handle_index].hovered = true;
       radius_handle_hovered = true;
+    }
+  }
+
+  /* Per-point strength handles: a fixed-length track opposite the radius handle with a knob at
+   * the point's current value. Curve Patch POINTS only -- the plain paint-curve callers pass an
+   * all-false visibility and never reach this. */
+  bool strength_handle_hovered = false;
+  if (curve_patch_visibility.strength) {
+    float hover_strength_dist = PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS;
+    int hover_strength_index = -1;
+    for (const int i : screen_points.index_range()) {
+      PaintCurveStrengthHandleScreen handle_screen;
+      paintcurve_strength_handle_screen_get_from_geometry(
+          geometry, screen_points.data(), i, &handle_screen);
+      PaintCurveStrengthHandleDrawData sd;
+      sd.point = handle_screen.point;
+      sd.base = handle_screen.base;
+      sd.end = handle_screen.end;
+      sd.knob = handle_screen.knob;
+      sd.value = handle_screen.value;
+      ui::theme::get_color_type_4fv(TH_GIZMO_B, SPACE_VIEW3D, sd.color);
+      /* Only the nearest knob highlights, and only when no radius handle already owns the
+       * highlight -- the same radius -> strength -> angle priority the press hit test uses. */
+      if (compute_segment_hover && !radius_handle_hovered) {
+        const float mval[2] = {mval_region.x, mval_region.y};
+        const float knob[2] = {sd.knob.x, sd.knob.y};
+        const float dist = len_v2v2(mval, knob);
+        if (dist < hover_strength_dist) {
+          hover_strength_dist = dist;
+          hover_strength_index = int(r_out.strength_handles.size());
+        }
+      }
+      r_out.strength_handles.append(sd);
+    }
+    if (hover_strength_index >= 0) {
+      r_out.strength_handles[hover_strength_index].hovered = true;
+      strength_handle_hovered = true;
+    }
+  }
+
+  /* Per-point rotation handles: an arc around the point, centered on the stamp's current screen
+   * angle, with the knob on the arc. Same POINTS-only gate as the strength handles above. */
+  if (curve_patch_visibility.angle) {
+    float hover_angle_dist = PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS;
+    int hover_angle_index = -1;
+    for (const int i : screen_points.index_range()) {
+      PaintCurveAngleHandleScreen handle_screen;
+      paintcurve_angle_handle_screen_get_from_geometry(
+          geometry, screen_points.data(), i, &handle_screen);
+      PaintCurveAngleHandleDrawData ad;
+      ad.center = handle_screen.center;
+      ad.radius = handle_screen.radius;
+      ad.angle = handle_screen.angle;
+      ad.knob = handle_screen.knob;
+      ui::theme::get_color_type_4fv(TH_GIZMO_PRIMARY, SPACE_VIEW3D, ad.color);
+      /* Same nearest-knob rule as strength, below radius in the priority order. */
+      if (compute_segment_hover && !radius_handle_hovered && !strength_handle_hovered) {
+        const float mval[2] = {mval_region.x, mval_region.y};
+        const float knob[2] = {ad.knob.x, ad.knob.y};
+        const float dist = len_v2v2(mval, knob);
+        if (dist < hover_angle_dist) {
+          hover_angle_dist = dist;
+          hover_angle_index = int(r_out.angle_handles.size());
+        }
+      }
+      r_out.angle_handles.append(ad);
+    }
+    if (hover_angle_index >= 0) {
+      r_out.angle_handles[hover_angle_index].hovered = true;
     }
   }
 

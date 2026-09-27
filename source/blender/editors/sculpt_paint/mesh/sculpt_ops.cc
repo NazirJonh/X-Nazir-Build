@@ -2262,6 +2262,8 @@ void operatormacros_sculpt()
   WM_operatortype_append(SCULPT_OT_curve_patch_toggle_cyclic);
   WM_operatortype_append(SCULPT_OT_curve_patch_switch_direction);
   WM_operatortype_append(SCULPT_OT_curve_patch_stamp_reseed);
+  WM_operatortype_append(SCULPT_OT_curve_patch_point_texture_set);
+  WM_operatortype_append(SCULPT_OT_curve_patch_point_texture_browse);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

@@ -194,6 +194,55 @@ bool paintcurve_geom_any_selected(const bke::CurvesGeometry &geom);
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Curve Patch Per-Point Stamp Attributes
+ *
+ * The per-point stamp overrides the POINTS stamp layout reads, stored as point attributes on the
+ * curve (`BKE_curve_patch.hh` names the attributes). Missing attributes read as their defaults, so
+ * callers may query freely; writes create the attribute lazily.
+ * \{ */
+
+/** Per-point stamp strength multiplier in [0, 1]; 1.0 when the attribute is absent. */
+float paintcurve_geom_stamp_strength_get(const bke::CurvesGeometry &geom, int point_index);
+void paintcurve_geom_stamp_strength_set(bke::CurvesGeometry &geom,
+                                        int point_index,
+                                        float strength);
+/** Per-point stamp rotation in radians, normalized to (-PI, PI]; 0.0 when absent. Only consumed
+ * while the brush's Random Rotation is off. */
+float paintcurve_geom_stamp_angle_get(const bke::CurvesGeometry &geom, int point_index);
+void paintcurve_geom_stamp_angle_set(bke::CurvesGeometry &geom, int point_index, float angle);
+/** Per-point texture slot index into the brush's Curve Patch texture list; -1 = Auto. */
+int paintcurve_geom_stamp_texture_get(const bke::CurvesGeometry &geom, int point_index);
+void paintcurve_geom_stamp_texture_set(bke::CurvesGeometry &geom, int point_index, int slot_index);
+
+/**
+ * Materialize the stable per-point stamp seed (`bke::CURVE_PATCH_ATTR_STAMP_SEED`) if it is absent,
+ * filling each point with its current index. The attribute is otherwise created lazily on the first
+ * topology edit; calling this BEFORE a delete/reverse/insert makes that edit preserve every
+ * surviving point's randomization instead of shifting it to a neighbor's.
+ */
+void paintcurve_geom_stamp_seed_ensure(bke::CurvesGeometry &geom);
+
+/**
+ * Make room at `insert_index` for one new control point in all three stamp attributes, shifting
+ * the trailing values over. Call AFTER the geometry was resized by one point but BEFORE the
+ * caller's own built-in-attribute shift loop becomes irrelevant (the two shifts are independent;
+ * the only hard requirement is that the resize already happened).
+ *
+ * `prev_index` / `next_index` are the PRE-INSERT indices of the neighbors bracketing the
+ * insertion (-1 when absent); `t` is the new point's fraction from `prev` toward `next`. Strength
+ * and angle interpolate across them (angle along the short arc); a missing `next` copies `prev`
+ * (the append case); no neighbors at all leaves the defaults. The new point's texture is always
+ * Auto (-1).
+ */
+void paintcurve_geom_stamp_attrs_insert(bke::CurvesGeometry &geom,
+                                        int insert_index,
+                                        int prev_index,
+                                        int next_index,
+                                        float t);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Radius Semantics
  * \{ */
 

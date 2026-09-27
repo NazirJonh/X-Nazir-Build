@@ -7,6 +7,8 @@
  */
 
 #include "BLI_index_mask.hh"
+#include "BLI_index_range.hh"
+#include "BLI_math_constants.h"
 #include "BLI_rand.hh"
 #include "BLI_span.hh"
 
@@ -132,9 +134,22 @@ bool curve_patch_action_switch_direction(bContext &C, CurvePatchHost &host)
    * `paintcurve_surface_normal`, handle types/positions with the correct left/right swap so the
    * curve's shape is unchanged) in one pass, and tags topology changed itself. */
   const int curve_index = 0;
+  /* Materialize the stable stamp seed before reversing, or every point's randomization shifts to
+   * its neighbor with the index. */
+  paintcurve_geom_stamp_seed_ensure(geom);
   IndexMaskMemory memory;
   const IndexMask reverse_mask = IndexMask::from_indices<int>(Span<int>(&curve_index, 1), memory);
   geom.reverse_curves(reverse_mask);
+
+  /* Reversing flips the tangent direction, which would visually rotate every stamp by PI. Add PI
+   * to each stored angle to keep the drawn orientation; only when the attribute exists, so points
+   * that never customized their rotation are not all materialized into a new one. */
+  if (geom.attributes().contains(bke::CURVE_PATCH_ATTR_STAMP_ANGLE)) {
+    for (const int i : IndexRange(geom.points_num())) {
+      paintcurve_geom_stamp_angle_set(
+          geom, i, paintcurve_geom_stamp_angle_get(geom, i) + float(M_PI));
+    }
+  }
 
   /* The active point followed its old index; after a reversal that index names a different point.
    * Re-set through the host rather than by assigning `document().active_point`, so a target that

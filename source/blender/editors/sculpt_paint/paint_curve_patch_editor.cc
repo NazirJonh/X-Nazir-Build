@@ -10,13 +10,18 @@
 #include <cmath>
 
 #include "BLI_math_matrix.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_utildefines.h"
 
 #include "DNA_curves_types.h"
+#include "DNA_object_types.h"
+#include "DNA_view3d_types.h"
 
+#include "BKE_attribute.hh"
+#include "BKE_context.hh"
 #include "BKE_curves.hh"
 
 #include "BLT_translation.hh"
@@ -35,11 +40,52 @@
 
 namespace blender::ed::sculpt_paint {
 
+/* Whether a screen-space rotation delta maps onto the stored per-point angle directly or negated.
+ * The handle's drawn angle is the screen tangent plus the attribute; a 3D patch seen from the back
+ * of its surface has its projection mirrored, so the cursor appears to turn the opposite way. Sign
+ * by the point's own surface normal against the view direction; +1 where there is no normal or no
+ * RegionView3D (2D, or a curve that never stored normals). */
+static float curve_patch_angle_drag_sign(bContext &C,
+                                         const bke::CurvesGeometry &curve,
+                                         const int point_index)
+{
+  const RegionView3D *rv3d = CTX_wm_region_view3d(&C);
+  if (rv3d == nullptr || point_index < 0 || point_index >= curve.points_num()) {
+    return 1.0f;
+  }
+  const bke::AttributeAccessor attrs = curve.attributes();
+  if (!attrs.contains(bke::CURVE_PATCH_ATTR_SURFACE_NORMAL)) {
+    return 1.0f;
+  }
+  const VArray<float3> normals = *attrs.lookup_or_default<float3>(
+      bke::CURVE_PATCH_ATTR_SURFACE_NORMAL, bke::AttrDomain::Point, float3(0.0f, 0.0f, 1.0f));
+  float3 normal = normals[point_index];
+  if (const Object *ob = CTX_data_active_object(&C)) {
+    normal = math::transform_direction(ob->object_to_world(), normal);
+  }
+  const float3 view_dir(
+      -rv3d->viewinv[2][0], -rv3d->viewinv[2][1], -rv3d->viewinv[2][2]);
+  return math::dot(normal, view_dir) > 0.0f ? -1.0f : 1.0f;
+}
+
+/* Whether radius handles can be interacted with at all, whatever their current visibility: Ribbon
+ * mode always, POINTS per the brush toggle, Stamps+Fill never (`9030395d`). A hidden POINTS handle
+ * stays draggable through Alt+S, so this is deliberately NOT the overlay's visibility check. */
+static bool curve_patch_radius_editable(const bke::CurvePatchParams &params)
+{
+  return params.stamp_mode != bke::CurvePatchStampMode::Stamps ||
+         params.stamp_layout != bke::CurvePatchStampLayout::Fill;
+}
+
 bool CurvePatchCurveEditor::radius_drag_begin(bContext &C,
                                               CurvePatchEditorHost &host,
                                               CurvePatchScreenAdapter &adapter)
 {
-  if (host.document().active_item().params.stamp_mode == bke::CurvePatchStampMode::Stamps) {
+  const bke::CurvePatchParams &params = host.document().active_item().params;
+  /* Radius interaction was refused in Stamps mode while only the FILL layout existed -- the radius
+   * handles were hidden there (`9030395d`). POINTS stamps are still sized by the per-point radius,
+   * so the drag works there whether or not the handles are currently drawn. */
+  if (!curve_patch_radius_editable(params)) {
     return false;
   }
   const int active_point = host.document().active_point;
@@ -64,6 +110,8 @@ void CurvePatchCurveEditor::drag_end()
   dragging_point_ = false;
   dragging_handle_ = false;
   dragging_radius_ = false;
+  dragging_strength_ = false;
+  dragging_angle_ = false;
   dragging_segment_ = false;
 }
 
@@ -372,12 +420,16 @@ bool CurvePatchCurveEditor::drag_start_from_press(bContext &C,
   host.pickable_curves(curves);
   const float pos[2] = {float(event.mval[0]), float(event.mval[1])};
 
-  /* Radius handles take priority: they sit off the wire, so a hit there is unambiguous.
-   * In Stamps mode radius handles are hidden, so radius interaction is skipped. */
+  const bke::CurvePatchParams &active_params = host.document().active_item().params;
+  const CurvePatchHandleVisibility visibility = host.handle_visibility(C);
+  /* Radius handles take priority: they sit off the wire, so a hit there is unambiguous. Whether
+   * they are editable at all is the one decision #curve_patch_radius_editable owns -- see there
+   * why it is not the brush's visibility toggle. */
+  const bool radius_handles_possible = curve_patch_radius_editable(active_params);
   int best_curve = -1;
   int best_point = -1;
   float best_dist = FLT_MAX;
-  if (host.document().active_item().params.stamp_mode != bke::CurvePatchStampMode::Stamps) {
+  if (radius_handles_possible) {
     PaintCurveRadiusHandleScreen best_handle = {};
     for (const int i : curves.index_range()) {
       bke::CurvesGeometry projected;
@@ -408,6 +460,57 @@ bool CurvePatchCurveEditor::drag_start_from_press(bContext &C,
       host.active_point_set(best_point, 0x07);
       dragging_radius_ = true;
       radius_handle_ = best_handle;
+      return true;
+    }
+  }
+
+  /* Per-point stamp strength handles (POINTS layout, brush toggle on): same off-the-wire
+   * priority, on the side of the curve opposite the radius handles. */
+  if (visibility.strength) {
+    for (const int i : curves.index_range()) {
+      bke::CurvesGeometry projected;
+      CurvePatchPickSpace space;
+      Vector<PaintCurvePoint> screen_points;
+      if (!screen_points_get(C, adapter, *curves[i], projected, space, screen_points)) {
+        continue;
+      }
+      const int hit = paintcurve_find_strength_handle_at_pos_from_geometry(
+          *curves[i], screen_points.as_span(), pos, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
+      if (hit < 0) {
+        continue;
+      }
+      host.pickable_curve_activate(i);
+      host.active_point_set(hit, 0x07);
+      paintcurve_strength_handle_screen_get_from_geometry(
+          *curves[i], screen_points.data(), hit, &strength_handle_);
+      dragging_strength_ = true;
+      return true;
+    }
+  }
+
+  /* Per-point stamp rotation handles (POINTS layout, Random Rotation off): the knob sits on the
+   * arc around the point, so like the radius it never shadows a click on the pivot itself. */
+  if (visibility.angle) {
+    for (const int i : curves.index_range()) {
+      bke::CurvesGeometry projected;
+      CurvePatchPickSpace space;
+      Vector<PaintCurvePoint> screen_points;
+      if (!screen_points_get(C, adapter, *curves[i], projected, space, screen_points)) {
+        continue;
+      }
+      const int hit = paintcurve_find_angle_handle_at_pos_from_geometry(
+          *curves[i], screen_points.as_span(), pos, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
+      if (hit < 0) {
+        continue;
+      }
+      host.pickable_curve_activate(i);
+      host.active_point_set(hit, 0x07);
+      paintcurve_angle_handle_screen_get_from_geometry(
+          *curves[i], screen_points.data(), hit, &angle_handle_);
+      angle_handle_.sign = curve_patch_angle_drag_sign(C, *curves[i], hit);
+      angle_value_at_press_ = paintcurve_geom_stamp_angle_get(*curves[i], hit);
+      angle_press_mval_ = float2(pos[0], pos[1]);
+      dragging_angle_ = true;
       return true;
     }
   }
@@ -581,6 +684,47 @@ bool CurvePatchCurveEditor::drag_apply_move(bContext &C,
     curve.radius_for_write()[active_point] = paintcurve_radius_from_handle_screen_pos(
         &radius_handle_, pos);
     curve.tag_positions_changed();
+    host.restamp(C);
+    return true;
+  }
+
+  if (dragging_strength_) {
+    /* Project the cursor onto the fixed track and invert the knob mapping, exactly like the
+     * radius drag above. Shift narrows the change to a tenth from the press value (fine control);
+     * Ctrl snaps the result to 0.1 steps. No `tag_positions_changed()`: the strength attribute
+     * does not move any point, and the re-stamp reads it directly. */
+    const float pos[2] = {mval.x, mval.y};
+    float value = paintcurve_strength_from_handle_screen_pos(&strength_handle_, pos);
+    if ((event.modifier & KM_SHIFT) != 0) {
+      value = strength_handle_.value + (value - strength_handle_.value) * 0.1f;
+    }
+    if ((event.modifier & KM_CTRL) != 0) {
+      value = std::round(value * 10.0f) / 10.0f;
+    }
+    paintcurve_geom_stamp_strength_set(curve, active_point, value);
+    host.restamp(C);
+    return true;
+  }
+
+  if (dragging_angle_) {
+    /* Rotation: the SCREEN angle's delta since the press rides on the press-time attribute
+     * value. The screen angle of the stamp is baked into the fixed handle geometry, so measuring
+     * cursor-to-center on screen is the same measurement the drawn arc makes. Ctrl snaps to 15
+     * degrees. */
+    const float press_delta_x = angle_press_mval_.x - angle_handle_.center.x;
+    const float press_delta_y = angle_press_mval_.y - angle_handle_.center.y;
+    const float now_delta_x = mval.x - angle_handle_.center.x;
+    const float now_delta_y = mval.y - angle_handle_.center.y;
+    float delta = std::atan2(now_delta_y, now_delta_x) - std::atan2(press_delta_y, press_delta_x);
+    if ((event.modifier & KM_CTRL) != 0) {
+      const float snap = float(M_PI) / 12.0f; /* 15 degrees. */
+      delta = std::round(delta / snap) * snap;
+    }
+    /* No `tag_positions_changed()`: the angle attribute does not move any point, and the re-stamp
+     * reads it directly. The sign flips the delta when the surface faces away from the camera, so
+     * the knob follows the cursor instead of mirroring. */
+    paintcurve_geom_stamp_angle_set(
+        curve, active_point, angle_value_at_press_ + angle_handle_.sign * delta);
     host.restamp(C);
     return true;
   }

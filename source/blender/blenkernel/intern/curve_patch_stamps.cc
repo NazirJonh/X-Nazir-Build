@@ -47,6 +47,104 @@ static float stamp_random(const int index, const uint32_t seed, const int channe
  * from overflow. */
 static constexpr int CURVE_PATCH_STAMP_NUM_MAX = 10000;
 
+/* Freeze one stamp's rigid world frame from its (already randomized) `center_v` / `center_u` /
+ * `angle`. Split out of #curve_patch_stamps_build so the POINTS layout resolves frames the exact
+ * same way: `center_v` is jittered and routinely lands outside `[0, total_length]` --
+ * `evaluate()`/`tangent_at()` CLAMP, which would collapse those stamps' frames onto the curve's
+ * endpoints instead of leaving them overhanging where the ribbon's `end_margin` extension renders
+ * them. A loop wraps; an open curve clamps to the end and keeps that end's tangent for both the
+ * extrapolated position and the orientation. */
+static void stamp_frame_resolve(const CurvePatchSpline &spline, CurvePatchStamp &stamp)
+{
+  const float total_length = spline.total_length();
+
+  float frame_s = stamp.center_v;
+  float3 frame_base;
+  float3 tangent;
+  if (spline.cyclic) {
+    frame_s -= std::floor(frame_s / total_length) * total_length;
+    frame_base = spline.evaluate(frame_s);
+    tangent = spline.tangent_at(frame_s);
+  }
+  else {
+    frame_s = std::clamp(frame_s, 0.0f, total_length);
+    tangent = spline.tangent_at(frame_s);
+    frame_base = spline.evaluate(frame_s) + tangent * (stamp.center_v - frame_s);
+  }
+
+  /* Freeze the stamp's rigid world frame. `side` uses `cross(T, plane_normal)`, matching the
+   * ribbon's own convention (`curve_patch_ribbon_build()`: the `+B` side carries `u = +1`), so a
+   * stamp's `center_u` means the same direction in both projections. Getting this backwards
+   * would mirror every PLANAR stamp against its CURVE counterpart. */
+  float3 side = math::cross(tangent, spline.plane_normal);
+  const float side_len = math::length(side);
+  if (side_len > 1e-7f) {
+    side /= side_len;
+  }
+  else {
+    /* The tangent is parallel to the plane normal, so the cross product carries no direction.
+     * Any in-plane axis will do: the stamp is degenerate here either way, and a finite frame
+     * keeps the relief from producing NaNs. Mirrors the ribbon's `axis_x` construction
+     * (`curve_patch_ribbon_build()`), not its degenerate-`B` border fallback -- both are simply
+     * some vector perpendicular to `plane_normal`, which is all that is required here. */
+    float3 fallback = math::cross(spline.plane_normal, float3(0.0f, 0.0f, 1.0f));
+    if (math::length_squared(fallback) < 1e-6f) {
+      fallback = math::cross(spline.plane_normal, float3(1.0f, 0.0f, 0.0f));
+    }
+    side = math::normalize(fallback);
+  }
+  /* Re-derive the along-curve axis from `side` rather than reusing `tangent`: `cross(N, side)`
+   * is `tangent` projected into the anchor plane and re-normalized in one step, which is what
+   * makes the pair exactly orthonormal even where the curve tilts out of the plane. */
+  const float3 tangent_in_plane = math::cross(spline.plane_normal, side);
+  const float cos_a = std::cos(stamp.angle);
+  const float sin_a = std::sin(stamp.angle);
+  stamp.origin = frame_base + side * stamp.center_u;
+  stamp.axis_v = tangent_in_plane * cos_a + side * sin_a;
+  stamp.axis_u = -tangent_in_plane * sin_a + side * cos_a;
+}
+
+/* Shared per-stamp random tail: size / angle / strength / texture / depth from one hash channel
+ * each. Kept in one place so FILL and POINTS stay on the same randomization semantics. */
+static void stamp_randomize(CurvePatchStamp &stamp,
+                            const int index,
+                            const uint32_t seed,
+                            const float radius,
+                            const float size_random,
+                            const float strength_random,
+                            const float base_angle,
+                            const bool use_random_angle,
+                            const float random_angle,
+                            const Span<float> texture_weights_cdf)
+{
+  /* Shrink only. Growing past the brush radius would make the visible patch wider than the brush
+   * cursor promises and would force the ribbon to widen for the size setting too. The 0.05 floor
+   * keeps a fully-randomized stamp from collapsing to nothing. */
+  const float size_factor = 1.0f - size_random * stamp_random(index, seed, STAMP_HASH_SIZE);
+  stamp.half_extent = radius * std::max(size_factor, 0.05f);
+  stamp.angle = use_random_angle ?
+                    base_angle + random_angle * stamp_random(index, seed, STAMP_HASH_ANGLE) :
+                    base_angle;
+  const float strength_factor = 1.0f -
+                                strength_random * stamp_random(index, seed, STAMP_HASH_STRENGTH);
+  stamp.strength = std::max(strength_factor, 0.05f);
+  stamp.tex_index = curve_patch_stamp_pick_texture(texture_weights_cdf,
+                                                   stamp_random(index, seed, STAMP_HASH_TEX));
+  /* Its own channel, so the stacking order stays independent of every other per-stamp draw --
+   * see #CurvePatchStamp::depth for why it must not follow the layout order. */
+  stamp.depth = stamp_random(index, seed, STAMP_HASH_DEPTH);
+}
+
+/* Sort after building: jitter along the curve can reorder neighbours, and the relief
+ * binary-searches the list by `center_v`. */
+static void stamps_sort_by_center_v(Vector<CurvePatchStamp> &r_stamps)
+{
+  std::sort(
+      r_stamps.begin(), r_stamps.end(), [](const CurvePatchStamp &a, const CurvePatchStamp &b) {
+        return a.center_v < b.center_v;
+      });
+}
+
 void curve_patch_stamps_build(const CurvePatchSpline &spline,
                               const float radius,
                               const float spacing_frac,
@@ -99,84 +197,123 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
     stamp.center_v = s +
                      jitter_amount * (2.0f * stamp_random(i, seed, STAMP_HASH_JITTER_V) - 1.0f);
     stamp.center_u = jitter_amount * (2.0f * stamp_random(i, seed, STAMP_HASH_JITTER_U) - 1.0f);
-    /* Shrink only. Growing past the brush radius would make the visible patch wider than the brush
-     * cursor promises and would force the ribbon to widen for the size setting too. The 0.05 floor
-     * keeps a fully-randomized stamp from collapsing to nothing. */
-    const float size_factor = 1.0f - size_random * stamp_random(i, seed, STAMP_HASH_SIZE);
-    stamp.half_extent = radius * std::max(size_factor, 0.05f);
-    stamp.angle = base_angle + random_angle * stamp_random(i, seed, STAMP_HASH_ANGLE);
-    const float strength_factor = 1.0f -
-                                  strength_random * stamp_random(i, seed, STAMP_HASH_STRENGTH);
-    stamp.strength = std::max(strength_factor, 0.05f);
-    stamp.tex_index = curve_patch_stamp_pick_texture(texture_weights_cdf,
-                                                     stamp_random(i, seed, STAMP_HASH_TEX));
-    /* Its own channel, so the stacking order stays independent of every other per-stamp draw --
-     * see #CurvePatchStamp::depth for why it must not follow the layout order. */
-    stamp.depth = stamp_random(i, seed, STAMP_HASH_DEPTH);
+    stamp_randomize(stamp,
+                    i,
+                    seed,
+                    radius,
+                    size_random,
+                    strength_random,
+                    base_angle,
+                    /*use_random_angle=*/true,
+                    random_angle,
+                    texture_weights_cdf);
 
-    /* `center_v` is jittered and routinely lands outside `[0, total_length]` -- the first stamp
-     * goes negative about half the time, the last overshoots. `evaluate()`/`tangent_at()` CLAMP,
-     * which would collapse those stamps' frames -- both position AND orientation -- onto the
-     * curve's endpoints instead of leaving them overhanging where the ribbon's `end_margin`
-     * extension renders them. Resolve a single `frame_s` first and sample both position and
-     * tangent from it, so the frame that ends up rotated is the same one that ends up placed. A
-     * loop has no ends, so wrap; an open curve clamps to the end and keeps that end's tangent for
-     * both the extrapolated position and the orientation, matching how the ribbon extends its own
-     * strip as a rigid straight continuation. */
-    float frame_s = stamp.center_v;
-    float3 frame_base;
-    float3 tangent;
-    if (spline.cyclic) {
-      frame_s -= std::floor(frame_s / total_length) * total_length;
-      frame_base = spline.evaluate(frame_s);
-      tangent = spline.tangent_at(frame_s);
-    }
-    else {
-      frame_s = std::clamp(frame_s, 0.0f, total_length);
-      tangent = spline.tangent_at(frame_s);
-      frame_base = spline.evaluate(frame_s) + tangent * (stamp.center_v - frame_s);
-    }
-
-    /* Freeze the stamp's rigid world frame. `side` uses `cross(T, plane_normal)`, matching the
-     * ribbon's own convention (`curve_patch_ribbon_build()`: the `+B` side carries `u = +1`), so a
-     * stamp's `center_u` means the same direction in both projections. Getting this backwards
-     * would mirror every PLANAR stamp against its CURVE counterpart. */
-    float3 side = math::cross(tangent, spline.plane_normal);
-    const float side_len = math::length(side);
-    if (side_len > 1e-7f) {
-      side /= side_len;
-    }
-    else {
-      /* The tangent is parallel to the plane normal, so the cross product carries no direction.
-       * Any in-plane axis will do: the stamp is degenerate here either way, and a finite frame
-       * keeps the relief from producing NaNs. Mirrors the ribbon's `axis_x` construction
-       * (`curve_patch_ribbon_build()`), not its degenerate-`B` border fallback -- both are simply
-       * some vector perpendicular to `plane_normal`, which is all that is required here. */
-      float3 fallback = math::cross(spline.plane_normal, float3(0.0f, 0.0f, 1.0f));
-      if (math::length_squared(fallback) < 1e-6f) {
-        fallback = math::cross(spline.plane_normal, float3(1.0f, 0.0f, 0.0f));
-      }
-      side = math::normalize(fallback);
-    }
-    /* Re-derive the along-curve axis from `side` rather than reusing `tangent`: `cross(N, side)`
-     * is `tangent` projected into the anchor plane and re-normalized in one step, which is what
-     * makes the pair exactly orthonormal even where the curve tilts out of the plane. */
-    const float3 tangent_in_plane = math::cross(spline.plane_normal, side);
-    const float cos_a = std::cos(stamp.angle);
-    const float sin_a = std::sin(stamp.angle);
-    stamp.origin = frame_base + side * stamp.center_u;
-    stamp.axis_v = tangent_in_plane * cos_a + side * sin_a;
-    stamp.axis_u = -tangent_in_plane * sin_a + side * cos_a;
+    stamp_frame_resolve(spline, stamp);
 
     r_stamps.append(stamp);
   }
 
-  /* Jitter along the curve can reorder neighbours; the relief binary-searches this list by
-   * `center_v`, so restore the ordering rather than assume it. */
-  std::sort(
-      r_stamps.begin(), r_stamps.end(), [](const CurvePatchStamp &a, const CurvePatchStamp &b) {
-        return a.center_v < b.center_v;
-      });
+  stamps_sort_by_center_v(r_stamps);
+}
+
+void curve_patch_stamps_build_points(const CurvePatchSpline &spline,
+                                     const CurvePatchStampPointOverrides &point_overrides,
+                                     const float jitter_amount,
+                                     const float size_random,
+                                     const float strength_random,
+                                     const float base_angle,
+                                     const bool use_random_angle,
+                                     const float random_angle,
+                                     const uint32_t seed,
+                                     const int texture_slot_num,
+                                     const Span<float> texture_weights_cdf,
+                                     Vector<CurvePatchStamp> &r_stamps)
+{
+  r_stamps.clear();
+  const float total_length = spline.total_length();
+  if (spline.is_empty() || total_length <= 1e-6f) {
+    return;
+  }
+  const Span<float> point_s = spline.control_point_lengths;
+  if (point_s.is_empty()) {
+    /* No control-point mapping, no POINTS layout -- the caller treats this as "place nothing"
+     * rather than silently falling back to a spacing the brush never promised. */
+    return;
+  }
+  const int point_num = int(point_s.size());
+  /* An override span, when present, must describe every control point. Assert on the mismatch
+   * but keep the build running with the defaults, since the layout is still well-defined. */
+  BLI_assert(point_overrides.radius.is_empty() ||
+             point_overrides.radius.size() == point_num);
+  BLI_assert(point_overrides.strength.is_empty() ||
+             point_overrides.strength.size() == point_num);
+  BLI_assert(point_overrides.angle.is_empty() || point_overrides.angle.size() == point_num);
+  BLI_assert(point_overrides.texture.is_empty() || point_overrides.texture.size() == point_num);
+  BLI_assert(point_overrides.seed.is_empty() || point_overrides.seed.size() == point_num);
+
+  r_stamps.reserve(point_num);
+  for (const int i : IndexRange(point_num)) {
+    /* The world half extent before randomization: the point's own radius (a multiplier of the
+     * brush radius, resolved by the caller). No override span cannot size a stamp -- skip rather
+     * than stamp a zero-size square, mirroring how the FILL layout refuses a zero brush radius. */
+    const float radius = point_overrides.radius.is_empty() ? 0.0f : point_overrides.radius[i];
+    if (radius <= 0.0f) {
+      continue;
+    }
+
+    /* Randomize by the point's stable seed when it has one, else by its index (the behavior before
+     * the seed attribute existed). */
+    const int hash_index = point_overrides.seed.is_empty() ? i : point_overrides.seed[i];
+
+    CurvePatchStamp stamp;
+    stamp.center_v = point_s[i] + jitter_amount *
+                                      (2.0f * stamp_random(hash_index, seed, STAMP_HASH_JITTER_V) -
+                                       1.0f);
+    stamp.center_u = jitter_amount *
+                     (2.0f * stamp_random(hash_index, seed, STAMP_HASH_JITTER_U) - 1.0f);
+
+    const float point_strength = point_overrides.strength.is_empty() ?
+                                     1.0f :
+                                     point_overrides.strength[i];
+    stamp_randomize(stamp,
+                    hash_index,
+                    seed,
+                    radius,
+                    size_random,
+                    strength_random,
+                    base_angle,
+                    use_random_angle,
+                    random_angle,
+                    texture_weights_cdf);
+    /* The per-point strength rides ON TOP of the randomization, so a point turned all the way
+     * down disappears even with Random Strength at zero. Skipping it entirely (rather than
+     * appending a no-op stamp) keeps the relief from walking it; the hash index stays `i`, so
+     * the remaining stamps' draws do not move. */
+    stamp.strength = point_strength * stamp.strength;
+    if (stamp.strength <= 0.0f) {
+      continue;
+    }
+    if (!use_random_angle) {
+      /* Random Rotation off: the point's own rotation decides, and the angle handle is what the
+       * user edits. */
+      const float point_angle = point_overrides.angle.is_empty() ? 0.0f : point_overrides.angle[i];
+      stamp.angle = base_angle + point_angle;
+    }
+
+    /* A per-point slot, valid only while it names a resolved variant; everything else draws from
+     * the weight table like a FILL stamp. With a SINGLE texture source there is no list at all
+     * (`texture_slot_num == 0`), so the point's assignment cannot name anything. */
+    const int point_texture = point_overrides.texture.is_empty() ? -1 : point_overrides.texture[i];
+    if (point_texture >= 0 && point_texture < texture_slot_num) {
+      stamp.tex_index = point_texture;
+    }
+
+    stamp_frame_resolve(spline, stamp);
+
+    r_stamps.append(stamp);
+  }
+
+  stamps_sort_by_center_v(r_stamps);
 }
 
 void curve_patch_stamps_add_cyclic_wrap(Vector<CurvePatchStamp> &stamps,

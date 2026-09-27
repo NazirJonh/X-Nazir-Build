@@ -29,6 +29,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -102,19 +103,44 @@ SamplerRuntimeState &sampler_runtime()
   return state;
 }
 
+/**
+ * Guards the per-material halves of #sampler_runtime() (`cleanup_owners`, `forced_bake`). They are
+ * written by the K-1 regeneration on the main thread and read from `BKE_material_eval`, which runs
+ * in the depsgraph task pool and on evaluated copies, so an unlocked Map was a data race. The
+ * global `budget`/`max_textures` settings stay outside it: only the main thread touches them.
+ */
+std::mutex &sampler_runtime_mutex()
+{
+  static std::mutex mutex;
+  return mutex;
+}
+
 /** Whether the last over-budget pass is dropping this owner's hidden rows. */
 bool budget_cleanup_active(const Material &ma)
 {
+  std::lock_guard lock(sampler_runtime_mutex());
   return sampler_runtime().cleanup_owners.contains(ma.id.session_uid);
+}
+
+void budget_cleanup_owner_set(const Material &ma, const bool active)
+{
+  std::lock_guard lock(sampler_runtime_mutex());
+  if (active) {
+    sampler_runtime().cleanup_owners.add_overwrite(ma.id.session_uid, &ma);
+  }
+  else {
+    sampler_runtime().cleanup_owners.remove(ma.id.session_uid);
+  }
 }
 
 bool forced_bake_contains(const Material &ma, const bUUID &marker)
 {
-  const Vector<bUUID> *markers = sampler_runtime().forced_bake.lookup_ptr(ma.id.session_uid);
-  if (markers == nullptr) {
+  std::lock_guard lock(sampler_runtime_mutex());
+  const ForcedBakeState *state = sampler_runtime().forced_bake.lookup_ptr(ma.id.session_uid);
+  if (state == nullptr) {
     return false;
   }
-  for (const bUUID &other : *markers) {
+  for (const bUUID &other : state->markers) {
     if (BLI_uuid_equal(other, marker)) {
       return true;
     }
@@ -180,30 +206,36 @@ int sampler_count_tree(const bNodeTree &tree)
 /** Remove any forced-bake marker of \a ma; used before recomputing the fallback from scratch. */
 void forced_bake_clear(const Material &ma)
 {
+  std::lock_guard lock(sampler_runtime_mutex());
   sampler_runtime().forced_bake.remove(ma.id.session_uid);
 }
 
 /** The markers \a ma's last pass pinned, before #forced_bake_clear drops them for this pass. */
 Vector<bUUID> forced_bake_markers(const Material &ma)
 {
-  const Vector<bUUID> *markers = sampler_runtime().forced_bake.lookup_ptr(ma.id.session_uid);
-  return (markers != nullptr) ? *markers : Vector<bUUID>();
+  std::lock_guard lock(sampler_runtime_mutex());
+  const ForcedBakeState *state = sampler_runtime().forced_bake.lookup_ptr(ma.id.session_uid);
+  return (state != nullptr) ? state->markers : Vector<bUUID>();
 }
 
 void forced_bake_add(const Material &ma, const bUUID &marker)
 {
-  sampler_runtime().forced_bake.lookup_or_add_default(ma.id.session_uid).append(marker);
+  std::lock_guard lock(sampler_runtime_mutex());
+  ForcedBakeState &state = sampler_runtime().forced_bake.lookup_or_add_default(ma.id.session_uid);
+  state.owner = &ma;
+  state.markers.append(marker);
 }
 
 void forced_bake_remove(const Material &ma, const bUUID &marker)
 {
-  Vector<bUUID> *markers = sampler_runtime().forced_bake.lookup_ptr(ma.id.session_uid);
-  if (markers == nullptr) {
+  std::lock_guard lock(sampler_runtime_mutex());
+  ForcedBakeState *state = sampler_runtime().forced_bake.lookup_ptr(ma.id.session_uid);
+  if (state == nullptr) {
     return;
   }
-  for (int i = 0; i < markers->size(); i++) {
-    if (BLI_uuid_equal((*markers)[i], marker)) {
-      markers->remove(i);
+  for (int i = 0; i < state->markers.size(); i++) {
+    if (BLI_uuid_equal(state->markers[i], marker)) {
+      state->markers.remove(i);
       return;
     }
   }
@@ -228,8 +260,34 @@ bool BKE_paint_layers_material_forced_bake(const Material &ma, const MaterialPai
 
 void BKE_paint_layers_sampler_state_free(const Material &ma)
 {
-  sampler_runtime().forced_bake.remove(ma.id.session_uid);
-  sampler_runtime().cleanup_owners.remove(ma.id.session_uid);
+  std::lock_guard lock(sampler_runtime_mutex());
+  /* Only the owner may drop its entry: a same-uid old ID freed during a memfile undo must leave
+   * the re-read ID's forced-bake/cleanup state in place. */
+  if (const ForcedBakeState *state =
+          sampler_runtime().forced_bake.lookup_ptr(ma.id.session_uid);
+      state != nullptr && state->owner == &ma)
+  {
+    sampler_runtime().forced_bake.remove(ma.id.session_uid);
+  }
+  if (const Material *const *owner =
+          sampler_runtime().cleanup_owners.lookup_ptr(ma.id.session_uid);
+      owner != nullptr && *owner == &ma)
+  {
+    sampler_runtime().cleanup_owners.remove(ma.id.session_uid);
+  }
+}
+
+void BKE_paint_layers_sampler_state_owner_transfer(Material &dst, Material &src)
+{
+  std::lock_guard lock(sampler_runtime_mutex());
+  ForcedBakeState *state = sampler_runtime().forced_bake.lookup_ptr(src.id.session_uid);
+  if (state != nullptr && state->owner == &src) {
+    state->owner = &dst;
+  }
+  const Material **owner = sampler_runtime().cleanup_owners.lookup_ptr(src.id.session_uid);
+  if (owner != nullptr && *owner == &src) {
+    *owner = &dst;
+  }
 }
 
 

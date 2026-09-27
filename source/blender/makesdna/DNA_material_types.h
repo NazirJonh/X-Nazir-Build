@@ -21,6 +21,10 @@ namespace blender {
 #  define MAX_MTEX 18
 #endif
 
+namespace bke {
+struct MaterialPaintLayersRuntime;
+}
+
 struct AnimData;
 struct Image;
 struct Material;
@@ -836,6 +840,11 @@ struct Material {
    */
   char paint_layers_uv_map[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";
   char _pad2[2] = {};
+  /**
+   * Runtime-only derived state of the generated Paint Layers graph, owned by this material.
+   * Lazily created; never saved, and a copy starts empty. See #MaterialPaintLayersRuntime.
+   */
+  bke::MaterialPaintLayersRuntime *paint_layers_runtime = nullptr;
   /** The material's mesh map atlases, one #MaterialMeshMapSlot per #eMaterialMeshMapType. */
   ListBase mesh_map_slots = {nullptr, nullptr};
   /** Bake/viewport settings shared by every mesh map of this material. */

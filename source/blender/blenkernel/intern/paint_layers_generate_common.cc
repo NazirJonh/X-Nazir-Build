@@ -260,41 +260,13 @@ bNodeSocket *source_group_output(bNodeTree &wrapper,
   return nullptr;
 }
 
-/**
- * Runtime set of row markers the current generated graph was built without. Not saved and not DNA.
- *
- * Disabling a row is a value edit (factor zero) and does not touch this set, so the row stays in the
- * graph. When the graph is rebuilt for another reason, `removed_rows_reconcile` records every
- * disabled row here and the build leaves them out. Enabling a recorded row clears its marker and
- * moves the topology hash, which is the one rebuild that brings it back. Because membership is only
- * honored while the row is disabled, an undo that re-enables a row can never leave it missing: the
- * stale marker is ignored and the moved hash forces the rebuild instead.
- */
-Map<uint32_t, Vector<bUUID>> &removed_rows_state()
-{
-  static Map<uint32_t, Vector<bUUID>> map;
-  return map;
-}
-
-/**
- * The Material rows whose live source wrapper could not be built in the last regeneration, per owner
- * `session_uid`. Runtime only, never saved: the Main-free status and the Outliner read it, and a
- * successful rebuild, a different source or the owner's free drops the marker. Keyed by the row
- * marker because the refusal is a per-row answer even when two rows share a source.
- */
-Map<uint32_t, Vector<bUUID>> &source_group_build_failed_state()
-{
-  static Map<uint32_t, Vector<bUUID>> map;
-  return map;
-}
-
 bool removed_rows_contains(const Material &ma, const bUUID &marker)
 {
-  const Vector<bUUID> *markers = removed_rows_state().lookup_ptr(ma.id.session_uid);
-  if (markers == nullptr) {
+  const MaterialPaintLayersRuntime *runtime = paint_layers_runtime_get(ma);
+  if (runtime == nullptr) {
     return false;
   }
-  for (const bUUID &other : *markers) {
+  for (const bUUID &other : runtime->removed_rows) {
     if (BLI_uuid_equal(other, marker)) {
       return true;
     }
@@ -316,7 +288,7 @@ bool row_is_removed(const Material &ma, const MaterialPaintLayer &layer)
 }
 
 /** Record exactly the rows disabled at this rebuild, so the build omits them from here on. */
-void removed_rows_reconcile(const Material &ma)
+void removed_rows_reconcile(Material &ma)
 {
   Vector<bUUID> markers;
   Vector<const MaterialPaintLayer *> layers;
@@ -330,7 +302,7 @@ void removed_rows_reconcile(const Material &ma)
       markers.append(layer->marker);
     }
   }
-  removed_rows_state().add_overwrite(ma.id.session_uid, std::move(markers));
+  paint_layers_runtime_ensure(ma).removed_rows = std::move(markers);
 }
 
 /**

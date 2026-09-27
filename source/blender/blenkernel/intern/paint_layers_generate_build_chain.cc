@@ -728,14 +728,6 @@ RowResult PaintLayersChainBuilder::build_row(const MaterialPaintLayer *layer,
                                              const int channel)
 {
   const Material &ma = outer_.ma_;
-  const PaintLayersRegenCache *const cache = outer_.cache_;
-  const PaintLayersBuildContext &ctx = outer_.ctx_;
-  auto &opacity_inputs = outer_.opacity_inputs_;
-  auto &fill_inputs = outer_.fill_inputs_;
-  auto &correction_opacity_inputs = outer_.correction_opacity_inputs_;
-  auto &correction_fill_inputs = outer_.correction_fill_inputs_;
-  auto &live_constant_inputs = outer_.live_constant_inputs_;
-  auto &correction_live_constant_inputs = outer_.correction_live_constant_inputs_;
   const bool track_content_alpha =
       BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel));
   /* A row a past rebuild left out of the graph contributes nothing. */
@@ -772,79 +764,28 @@ RowResult PaintLayersChainBuilder::build_row(const MaterialPaintLayer *layer,
    * part even without a channel record, so the early drop below must see them. */
   const RowMaterialSource row_source = outer_.resolve_row_material_source(
       *layer, channel, tree, substituted);
-  float live_value[4];
-  copy_v4_v4(live_value, row_source.live_value);
-  Image *live_map_image = row_source.live_map_image;
-  const ImageUser *live_map_iuser = row_source.live_map_iuser;
   const bool live_constant = row_source.live_constant;
   const bool live_map = row_source.live_map;
-  /* A Material row whose whole source graph goes through the wrapper group. Its instance is
-   * created once per row and reused for every channel. */
-  const PaintLayerMaterialMode material_mode = row_source.mode;
-  bNode *source_group_instance = row_source.source_group_instance;
-  bNodeTree *source_group_tree = row_source.source_group_tree;
-  bNodeSocket *source_group_socket = row_source.source_group_socket;
+  const bNode *source_group_instance = row_source.source_group_instance;
 
   if (!substituted && BKE_paint_layers_is_folder(*layer)) {
     /* A folder: its contents are built in isolation -- pre-multiplied colour and coverage --
      * and then its own row lays the isolated result over what is below (design §5). */
-    bNode *p_zero = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
-    bNodeSocket *p_zero_out = (p_zero != nullptr) ? socket_out(*p_zero, "Color") : nullptr;
-    if (p_zero_out == nullptr) {
+    if (!build_folder_source(layer,
+                             tree,
+                             target,
+                             channel,
+                             track_content_alpha,
+                             location_x,
+                             location_y,
+                             &folder_source_node,
+                             &folder_source,
+                             &folder_coverage_node,
+                             &folder_coverage,
+                             &folder_content_alpha_node,
+                             &folder_content_alpha))
+    {
       return {};
-    }
-    if (p_zero_out->default_value != nullptr) {
-      copy_v4_fl(
-          static_cast<bNodeSocketValueRGBA *>(p_zero_out->default_value)->value, 0.0f);
-    }
-    ChainLayer sub_previous;
-    sub_previous.source_node = p_zero;
-    sub_previous.source = p_zero_out;
-    ChainResult sub = build_list(layer->children, sub_previous, true, target, channel);
-    if (sub.chain.source == nullptr || sub.coverage == nullptr) {
-      return {};
-    }
-    /* S_folder = P / a; the Vector Math divide is per channel and safe (0 on zero), so an
-     * empty folder answers zero and covers nothing. */
-    bNode *divide = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
-    bNodeSocket *div_a = (divide != nullptr) ? socket_in(*divide, "Vector") : nullptr;
-    bNodeSocket *div_b = (divide != nullptr) ? socket_in(*divide, "Vector_001") : nullptr;
-    bNodeSocket *div_out = (divide != nullptr) ? socket_out(*divide, "Vector") : nullptr;
-    if (div_out == nullptr) {
-      return {};
-    }
-    divide->custom1 = NODE_VECTOR_MATH_DIVIDE;
-    divide->location[0] = location_x;
-    divide->location[1] = location_y - 480.0f;
-    bke::node_add_link(tree, *sub.chain.source_node, *sub.chain.source, *divide, *div_a);
-    bke::node_add_link(tree, *sub.coverage_node, *sub.coverage, *divide, *div_b);
-    folder_source_node = divide;
-    folder_source = div_out;
-    folder_coverage_node = sub.coverage_node;
-    folder_coverage = sub.coverage;
-    /* The content alpha is accumulated beside the premultiplied colour, so it is straightened
-     * the same way: S_alpha = P_alpha / a. A null accumulation means no Paint leaf tracked an
-     * alpha here, so the chain stays null and no Content Alpha socket is built. */
-    folder_content_alpha_node = nullptr;
-    folder_content_alpha = nullptr;
-    if (track_content_alpha && sub.content_alpha != nullptr) {
-      bNode *alpha_divide = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
-      bNodeSocket *ad_a = (alpha_divide != nullptr) ? socket_in(*alpha_divide, "Value") :
-                                                      nullptr;
-      bNodeSocket *ad_b = (alpha_divide != nullptr) ? socket_in(*alpha_divide, "Value_001") :
-                                                      nullptr;
-      bNodeSocket *ad_out = (alpha_divide != nullptr) ? socket_out(*alpha_divide, "Value") :
-                                                        nullptr;
-      if (ad_out != nullptr) {
-        alpha_divide->custom1 = NODE_MATH_DIVIDE;
-        alpha_divide->location[0] = location_x;
-        alpha_divide->location[1] = location_y - 400.0f;
-        bke::node_add_link(
-            tree, *sub.content_alpha_node, *sub.content_alpha, *alpha_divide, *ad_a);
-        bke::node_add_link(tree, *sub.coverage_node, *sub.coverage, *alpha_divide, *ad_b);
-        folder_content_alpha_node = alpha_divide;
-        folder_content_alpha = ad_out;
-      }
     }
   }
   else if (!substituted && !BKE_paint_layers_is_folder(*layer) &&
@@ -863,25 +804,435 @@ RowResult PaintLayersChainBuilder::build_row(const MaterialPaintLayer *layer,
     return {};
   }
 
-ChainLayer current;
-current.layer = layer;
-if (Map<int, bNodeTreeInterfaceSocket *> *opacity_by_channel =
-        opacity_inputs.lookup_ptr(layer))
-{
-  if (bNodeTreeInterfaceSocket **opacity_iface = opacity_by_channel->lookup_ptr(channel)) {
-    current.opacity_node = group_input;
-    current.opacity = group_input_socket(group_input, **opacity_iface);
+  ChainLayer current;
+  bNode *leaf_map_node = nullptr;
+  if (!build_row_source(layer,
+                        tree,
+                        group_input,
+                        channel,
+                        substituted,
+                        track_content_alpha,
+                        location_x,
+                        location_y,
+                        row_source,
+                        baked_color,
+                        folder_source_node,
+                        folder_source,
+                        folder_content_alpha_node,
+                        folder_content_alpha,
+                        current,
+                        leaf_map_node))
+  {
+    return {};
   }
+
+/* The grey of \a image (the mean of RGB) as a new node chain, the way the CPU reads a mask
+ * item and a coverage map (#PaintMaterialCompositeImageLayer::mask_reads_grey,
+ * ::coverage_image): masks are painted black and white, and a brush writes colour, not alpha. */
+
+/* A Material/Node Group correction's own coverage: the same Baked/Hybrid/SourceGroup
+ * precedence #resolve_row_material_source uses for content, but always read on the Alpha
+ * channel and ending at the wrapper's dedicated COVERAGE output (SourceGroup) or the
+ * correction's own bake coverage (Baked) -- mirrors `layer_factor` below (~2276-2356)
+ * exactly, with \a row standing in for `*layer`. One helper for a content Effect (its own
+ * coverage multiplier) and a Mask Item (its coverage when `mask_channel` is not Alpha), so
+ * the two cannot disagree about what "the source's coverage" means. */
+
+/* The factor base the mask stack builds on: one, times -- for a Material layer -- its
+ * source's coverage (what the source's own transparency baked into), so a mask on a
+ * transparent source limits it further and never re-bakes it. */
+bNode *layer_factor_node = nullptr;
+bNodeSocket *layer_factor_socket = nullptr;
+resolve_row_factor(layer,
+                   tree,
+                   location_x,
+                   location_y,
+                   substituted,
+                   row_source,
+                   layer_factor_node,
+                   layer_factor_socket);
+
+/* The row's own content coverage, kept apart from the mask: an unpainted texel of a fresh map
+ * is transparent black and must show the rows below, and the content corrections raise this
+ * coverage. The mask multiplies it in afterwards, so a mask always clips a correction.
+ *
+ * A Material row has no such coverage of its own: the Principled's Base Color reads RGB only,
+ * so the channel map's alpha (a real bake is opaque) must not be folded into the factor -- the
+ * material's transparency already arrived as `layer_factor` from the Alpha input. */
+build_row_factor_chain(layer,
+                       target,
+                       tree,
+                       group_input,
+                       channel,
+                       substituted,
+                       track_content_alpha,
+                       location_x,
+                       location_y,
+                       leaf_map_node,
+                       folder_coverage_node,
+                       folder_coverage,
+                       current,
+                       layer_factor_node,
+                       layer_factor_socket);
+
+  RowResult result;
+
+  if (!build_grouped_row_result(layer,
+                                tree,
+                                group_input,
+                                layer_group,
+                                channel,
+                                premul,
+                                location_x,
+                                location_y,
+                                current,
+                                result))
+  {
+    return {};
+  }
+
+  result.valid = true;
+  result.current = current;
+  result.folder_coverage_node = folder_coverage_node;
+  result.folder_coverage = folder_coverage;
+  result.folder_content_alpha_node = folder_content_alpha_node;
+  result.folder_content_alpha = folder_content_alpha;
+  return result;
 }
 
-/* The row's own channel map, when it has one: its alpha is the row's per-pixel coverage, the
- * same read #composite_image_layers_build sets up with #color_alpha_coverage. */
-bNode *leaf_map_node = nullptr;
-if (substituted) {
+bool PaintLayersChainBuilder::build_folder_source(const MaterialPaintLayer *layer,
+                                                  bNodeTree &tree,
+                                                  const RowTarget &target,
+                                                  const int channel,
+                                                  const bool track_content_alpha,
+                                                  const float location_x,
+                                                  const float location_y,
+                                                  bNode **r_source_node,
+                                                  bNodeSocket **r_source,
+                                                  bNode **r_coverage_node,
+                                                  bNodeSocket **r_coverage,
+                                                  bNode **r_content_alpha_node,
+                                                  bNodeSocket **r_content_alpha)
+{
+  bNode *p_zero = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
+  bNodeSocket *p_zero_out = (p_zero != nullptr) ? socket_out(*p_zero, "Color") : nullptr;
+  if (p_zero_out == nullptr) {
+    return false;
+  }
+  if (p_zero_out->default_value != nullptr) {
+    copy_v4_fl(
+        static_cast<bNodeSocketValueRGBA *>(p_zero_out->default_value)->value, 0.0f);
+  }
+  ChainLayer sub_previous;
+  sub_previous.source_node = p_zero;
+  sub_previous.source = p_zero_out;
+  ChainResult sub = build_list(layer->children, sub_previous, true, target, channel);
+  if (sub.chain.source == nullptr || sub.coverage == nullptr) {
+    return false;
+  }
+  /* S_folder = P / a; the Vector Math divide is per channel and safe (0 on zero), so an
+   * empty folder answers zero and covers nothing. */
+  bNode *divide = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+  bNodeSocket *div_a = (divide != nullptr) ? socket_in(*divide, "Vector") : nullptr;
+  bNodeSocket *div_b = (divide != nullptr) ? socket_in(*divide, "Vector_001") : nullptr;
+  bNodeSocket *div_out = (divide != nullptr) ? socket_out(*divide, "Vector") : nullptr;
+  if (div_out == nullptr) {
+    return false;
+  }
+  divide->custom1 = NODE_VECTOR_MATH_DIVIDE;
+  divide->location[0] = location_x;
+  divide->location[1] = location_y - 480.0f;
+  bke::node_add_link(tree, *sub.chain.source_node, *sub.chain.source, *divide, *div_a);
+  bke::node_add_link(tree, *sub.coverage_node, *sub.coverage, *divide, *div_b);
+  *r_source_node = divide;
+  *r_source = div_out;
+  *r_coverage_node = sub.coverage_node;
+  *r_coverage = sub.coverage;
+  /* The content alpha is accumulated beside the premultiplied colour, so it is straightened
+   * the same way: S_alpha = P_alpha / a. A null accumulation means no Paint leaf tracked an
+   * alpha here, so the chain stays null and no Content Alpha socket is built. */
+  *r_content_alpha_node = nullptr;
+  *r_content_alpha = nullptr;
+  if (track_content_alpha && sub.content_alpha != nullptr) {
+    bNode *alpha_divide = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+    bNodeSocket *ad_a = (alpha_divide != nullptr) ? socket_in(*alpha_divide, "Value") :
+                                                    nullptr;
+    bNodeSocket *ad_b = (alpha_divide != nullptr) ? socket_in(*alpha_divide, "Value_001") :
+                                                    nullptr;
+    bNodeSocket *ad_out = (alpha_divide != nullptr) ? socket_out(*alpha_divide, "Value") :
+                                                      nullptr;
+    if (ad_out != nullptr) {
+      alpha_divide->custom1 = NODE_MATH_DIVIDE;
+      alpha_divide->location[0] = location_x;
+      alpha_divide->location[1] = location_y - 400.0f;
+      bke::node_add_link(
+          tree, *sub.content_alpha_node, *sub.content_alpha, *alpha_divide, *ad_a);
+      bke::node_add_link(tree, *sub.coverage_node, *sub.coverage, *alpha_divide, *ad_b);
+      *r_content_alpha_node = alpha_divide;
+      *r_content_alpha = ad_out;
+    }
+  }
+  return true;
+}
+
+bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
+                                               bNodeTree &tree,
+                                               bNode *group_input,
+                                               const int channel,
+                                               const bool substituted,
+                                               const bool track_content_alpha,
+                                               const float location_x,
+                                               const float location_y,
+                                               const RowMaterialSource &row_source,
+                                               Image *baked_color,
+                                               bNode *folder_source_node,
+                                               bNodeSocket *folder_source,
+                                               bNode *folder_content_alpha_node,
+                                               bNodeSocket *folder_content_alpha,
+                                               ChainLayer &r_current,
+                                               bNode *&r_leaf_map_node)
+{
+  const Material &ma = outer_.ma_;
+  const PaintLayersRegenCache *const cache = outer_.cache_;
+  auto &opacity_inputs = outer_.opacity_inputs_;
+  auto &fill_inputs = outer_.fill_inputs_;
+  auto &live_constant_inputs = outer_.live_constant_inputs_;
+  const bool live_constant = row_source.live_constant;
+  const bool live_map = row_source.live_map;
+  Image *live_map_image = row_source.live_map_image;
+  const ImageUser *live_map_iuser = row_source.live_map_iuser;
+  bNode *source_group_instance = row_source.source_group_instance;
+  bNodeSocket *source_group_socket = row_source.source_group_socket;
+
+  ChainLayer &current = r_current;
+  bNode *&leaf_map_node = r_leaf_map_node;
+  current.layer = layer;
+  if (Map<int, bNodeTreeInterfaceSocket *> *opacity_by_channel =
+          opacity_inputs.lookup_ptr(layer))
+  {
+    if (bNodeTreeInterfaceSocket **opacity_iface = opacity_by_channel->lookup_ptr(channel)) {
+      current.opacity_node = group_input;
+      current.opacity = group_input_socket(group_input, **opacity_iface);
+    }
+  }
+
+  /* The row's own channel map, when it has one: its alpha is the row's per-pixel coverage, the
+   * same read #composite_image_layers_build sets up with #color_alpha_coverage. */
+  leaf_map_node = nullptr;
+  if (substituted) {
+    if (!build_substituted_source(
+            layer, tree, track_content_alpha, location_x, location_y, baked_color, current))
+    {
+      return false;
+    }
+  }
+  else {
+    /* A constant answers first: it needs no sampler, so a channel the resolver calls Constant
+     * never falls through to an Image result. */
+    Image *image = (live_constant || live_map || source_group_instance != nullptr) ?
+                       nullptr :
+                       paint_layer_channel_image(ma, *layer, channel);
+    if (live_constant) {
+      /* The active Material row shows its source's live constant rather than its baked map.
+       * The value lives in another material, so it is not topology (ТЗ-26): it is read from
+       * this row's own group input, filled by #create_value_inputs and kept current by
+       * #values_sync_socket, exactly like a row's own Fill constant. */
+      bNodeTreeInterfaceSocket *live_constant_iface = nullptr;
+      if (Map<int, bNodeTreeInterfaceSocket *> *live_constant_by_channel =
+              live_constant_inputs.lookup_ptr(layer))
+      {
+        if (bNodeTreeInterfaceSocket **found = live_constant_by_channel->lookup_ptr(channel)) {
+          live_constant_iface = *found;
+        }
+      }
+      bNodeSocket *constant_out = (live_constant_iface != nullptr) ?
+                                      group_input_socket(group_input, *live_constant_iface) :
+                                      nullptr;
+      if (constant_out == nullptr) {
+        return false;
+      }
+      current.source_node = group_input;
+      current.source = constant_out;
+      /* A Material row's transparency is the Alpha input, never the channel's own value: the
+       * Principled ignores Base Color's RGBA alpha. It tracks no content alpha of its own --
+       * the material alpha already fed `layer_factor` -- so the Result alpha keeps the chain's
+       * blended value, exactly as the CPU computes it. */
+    }
+    else if (live_map) {
+      /* The row shows the source's own texture. Its sampling settings travel with it; no Divide
+       * is built here, exactly like the row's own map branch below -- the Image Texture node
+       * handles a non-data texture's un-premultiply itself. */
+      bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+      if (map == nullptr) {
+        return false;
+      }
+      map->id = &live_map_image->id;
+      id_us_plus(&live_map_image->id);
+      map->location[0] = location_x;
+      map->location[1] = location_y;
+      if (NodeTexImage *dst = static_cast<NodeTexImage *>(map->storage)) {
+        if (live_map_iuser != nullptr) {
+          dst->iuser = *live_map_iuser;
+        }
+        MaterialSourceResolve resolve_local;
+        const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(
+            layer->material, cache, resolve_local);
+        const bNode *src_node = resolve.images[channel].node;
+        if (const NodeTexImage *src_storage =
+                (src_node != nullptr) ? static_cast<const NodeTexImage *>(src_node->storage) :
+                                        nullptr)
+        {
+          dst->interpolation = src_storage->interpolation;
+          dst->extension = src_storage->extension;
+          dst->projection = src_storage->projection;
+        }
+      }
+      current.source_node = map;
+      current.source = socket_out(*map, "Color");
+      leaf_map_node = map;
+      /* A Material row's transparency is the source's Alpha input, not the channel map's own
+       * alpha (the Principled's Base Color reads RGB only). It tracks no content alpha of its
+       * own: the material alpha already fed `layer_factor`, and leaving the chain null keeps
+       * the Result alpha the chain's blended value, exactly as the CPU computes it. */
+    }
+    else if (source_group_instance != nullptr) {
+      /* The whole source graph goes through the wrapper's COLOR:<CHANNEL> output. No map, so
+       * content coverage for this row comes from the wrapper's COVERAGE output below. */
+      if (source_group_socket == nullptr) {
+        PL_DEBUG_PRINTF(
+            "paint layers: row '%s' channel %d: wrapper has no COLOR output, row dropped\n",
+            layer->name,
+            channel);
+        return false;
+      }
+      current.source_node = source_group_instance;
+      current.source = source_group_socket;
+    }
+    else if (folder_source != nullptr) {
+      /* The folder's own row: its source is the isolated sub-chain, not a map. */
+      current.source_node = folder_source_node;
+      current.source = folder_source;
+      current.content_alpha_node = folder_content_alpha_node;
+      current.content_alpha = folder_content_alpha;
+    }
+    else if (image != nullptr) {
+      bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+      if (map == nullptr) {
+        return false;
+      }
+      map->id = &image->id;
+      id_us_plus(&image->id);
+      map->location[0] = location_x;
+      map->location[1] = location_y;
+      /* A MESH_MAP atlas is sampled with Extend (clamp to the edge), the mode the CPU's own
+       * bilinear resample uses, so a differently sized atlas agrees at its borders. A painted
+       * map keeps its Repeat default. Read through the shared resolver so the two sides cannot
+       * disagree about whether the row is a mesh map at all. */
+      const bool mesh_map = layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP &&
+                            paint_layer_mesh_map_image(ma, *layer) == image;
+      if (mesh_map) {
+        if (NodeTexImage *storage = static_cast<NodeTexImage *>(map->storage)) {
+          storage->extension = SHD_IMAGE_EXTENSION_EXTEND;
+        }
+      }
+      current.source_node = map;
+      current.source = socket_out(*map, "Color");
+      /* A scalar atlas (AO, Curvature, Edge) stores its value in R; spread it across RGB so a
+       * colour channel reads it as grey and the CPU reads the same. An RGB atlas (Normal, IDs)
+       * is wired as it is. */
+      if (mesh_map && paint_layer_mesh_map_is_scalar(layer->mesh_map_type)) {
+        bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+        bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineXYZ"_ustr);
+        if (separate != nullptr && combine != nullptr) {
+          bNodeSocket *sep_vector = socket_in(*separate, "Vector");
+          bNodeSocket *sep_x = socket_out(*separate, "X");
+          bNodeSocket *combine_x = socket_in(*combine, "X");
+          bNodeSocket *combine_y = socket_in(*combine, "Y");
+          bNodeSocket *combine_z = socket_in(*combine, "Z");
+          if (sep_vector != nullptr && sep_x != nullptr && combine_x != nullptr &&
+              combine_y != nullptr && combine_z != nullptr)
+          {
+            separate->location[0] = location_x + 80.0f;
+            separate->location[1] = location_y;
+            combine->location[0] = location_x + 160.0f;
+            combine->location[1] = location_y;
+            bke::node_add_link(tree, *map, *current.source, *separate, *sep_vector);
+            bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_x);
+            bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_y);
+            bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_z);
+            current.source_node = combine;
+            current.source = socket_out(*combine, "Vector");
+          }
+        }
+      }
+      leaf_map_node = map;
+      /* A Paint or Fill map carries its content alpha in the Image Texture Alpha output; it
+       * starts the content-alpha chain here rather than being read back out of the Color's own
+       * alpha. Custom stays outside since its bake substitutes above instead of reaching this
+       * branch.
+       *
+       * A Material row never takes its content alpha from the channel map: the Principled's
+       * transparency is the Alpha input, and a real bake map is opaque. It tracks no content
+       * alpha at all, so the Result alpha stays the chain's blended value like the CPU's. */
+      if (track_content_alpha &&
+          (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
+          ELEM(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)))
+      {
+        current.content_alpha_node = map;
+        current.content_alpha = socket_out(*map, "Alpha");
+      }
+    }
+    else {
+      const MaterialPaintLayerChannel *entry = paint_layer_channel_find(*layer, channel);
+      if (bNodeTreeInterfaceSocket **fill_iface = fill_inputs.lookup_ptr(entry)) {
+        current.opacity_node = group_input;
+        current.source_node = group_input;
+        current.source = group_input_socket(group_input, **fill_iface);
+      }
+      /* A Paint or Fill constant's alpha is the constant colour's `.a`, the same number the RGB
+       * Fill input carries; it is frozen into a Value so the content-alpha chain has a scalar
+       * leaf. Custom and Material leaves (F2-C3/C4) supply no such constant. */
+      if (track_content_alpha &&
+          (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
+          ELEM(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) &&
+          current.source != nullptr)
+      {
+        float constant[4];
+        paint_layer_channel_constant(*layer, channel, constant);
+        bNode *alpha_value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+        bNodeSocket *alpha_out = (alpha_value != nullptr) ? socket_out(*alpha_value, "Value") :
+                                                            nullptr;
+        if (alpha_value != nullptr && alpha_out != nullptr &&
+            alpha_out->default_value != nullptr)
+        {
+          alpha_value->location[0] = location_x - 90.0f;
+          alpha_value->location[1] = location_y - 40.0f;
+          static_cast<bNodeSocketValueFloat *>(alpha_out->default_value)->value = constant[3];
+          current.content_alpha_node = alpha_value;
+          current.content_alpha = alpha_out;
+        }
+      }
+    }
+  }
+  if (current.source == nullptr) {
+    return false;
+  }
+  return true;
+}
+
+bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer *layer,
+                                                       bNodeTree &tree,
+                                                       const bool track_content_alpha,
+                                                       const float location_x,
+                                                       const float location_y,
+                                                       Image *baked_color,
+                                                       ChainLayer &r_current)
+{
+  ChainLayer &current = r_current;
   bNode *baked_color_node = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
   bNode *baked_coverage_node = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
   if (baked_color_node == nullptr || baked_coverage_node == nullptr) {
-    return {};
+    return false;
   }
   baked_color_node->id = &baked_color->id;
   id_us_plus(&baked_color->id);
@@ -926,7 +1277,7 @@ if (substituted) {
         xy_a == nullptr || xy_b == nullptr || z_a == nullptr || z_b == nullptr ||
         d_a == nullptr || d_b == nullptr)
     {
-      return {};
+      return false;
     }
     bke::node_add_link(tree,
                        *baked_coverage_node,
@@ -944,411 +1295,266 @@ if (substituted) {
     current.opacity_node = divide;
     current.opacity = socket_out(*divide, "Value");
   }
+  return true;
 }
-else {
-  /* A constant answers first: it needs no sampler, so a channel the resolver calls Constant
-   * never falls through to an Image result. */
-  Image *image = (live_constant || live_map || source_group_instance != nullptr) ?
-                     nullptr :
-                     paint_layer_channel_image(ma, *layer, channel);
-  if (live_constant) {
-    /* The active Material row shows its source's live constant rather than its baked map.
-     * The value lives in another material, so it is not topology (ТЗ-26): it is read from
-     * this row's own group input, filled by #create_value_inputs and kept current by
-     * #values_sync_socket, exactly like a row's own Fill constant. */
-    bNodeTreeInterfaceSocket *live_constant_iface = nullptr;
-    if (Map<int, bNodeTreeInterfaceSocket *> *live_constant_by_channel =
-            live_constant_inputs.lookup_ptr(layer))
-    {
-      if (bNodeTreeInterfaceSocket **found = live_constant_by_channel->lookup_ptr(channel)) {
-        live_constant_iface = *found;
-      }
+
+void PaintLayersChainBuilder::resolve_row_factor(const MaterialPaintLayer *layer,
+                                                 bNodeTree &tree,
+                                                 const float location_x,
+                                                 const float location_y,
+                                                 const bool substituted,
+                                                 const RowMaterialSource &row_source,
+                                                 bNode *&r_factor_node,
+                                                 bNodeSocket *&r_factor_socket)
+{
+  const Material &ma = outer_.ma_;
+  const PaintLayersRegenCache *const cache = outer_.cache_;
+  bNode *&layer_factor_node = r_factor_node;
+  bNodeSocket *&layer_factor_socket = r_factor_socket;
+  bNode *source_group_instance = row_source.source_group_instance;
+  bNodeTree *source_group_tree = row_source.source_group_tree;
+  float live_alpha[4];
+  Image *live_alpha_image = nullptr;
+  const ImageUser *live_alpha_iuser = nullptr;
+  if (!substituted && BKE_paint_layers_material_live_constant(
+                          ma, *layer, PAINT_MATERIAL_CHANNEL_ALPHA, live_alpha, cache))
+  {
+    /* The source's alpha is a constant too, so the coverage stays live with it. When the
+     * source's alpha is not constant while its other channels are, the coverage keeps its last
+     * bake -- a bounded divergence: only channels that can be shown live are. */
+    bNode *value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+    bNodeSocket *value_out = (value != nullptr) ? socket_out(*value, "Value") : nullptr;
+    if (value != nullptr && value_out != nullptr && value_out->default_value != nullptr) {
+      value->location[0] = location_x - 90.0f;
+      value->location[1] = location_y - 320.0f;
+      static_cast<bNodeSocketValueFloat *>(value_out->default_value)->value = live_alpha[0];
+      layer_factor_node = value;
+      layer_factor_socket = value_out;
     }
-    bNodeSocket *constant_out = (live_constant_iface != nullptr) ?
-                                    group_input_socket(group_input, *live_constant_iface) :
-                                    nullptr;
-    if (constant_out == nullptr) {
-      return {};
-    }
-    current.source_node = group_input;
-    current.source = constant_out;
-    /* A Material row's transparency is the Alpha input, never the channel's own value: the
-     * Principled ignores Base Color's RGBA alpha. It tracks no content alpha of its own --
-     * the material alpha already fed `layer_factor` -- so the Result alpha keeps the chain's
-     * blended value, exactly as the CPU computes it. */
   }
-  else if (live_map) {
-    /* The row shows the source's own texture. Its sampling settings travel with it; no Divide
-     * is built here, exactly like the row's own map branch below -- the Image Texture node
-     * handles a non-data texture's un-premultiply itself. */
+  else if (!substituted &&
+           BKE_paint_layers_material_live_image(ma,
+                                                *layer,
+                                                PAINT_MATERIAL_CHANNEL_ALPHA,
+                                                &live_alpha_image,
+                                                &live_alpha_iuser,
+                                                cache))
+  {
+    /* The source's alpha is a live texture: the factor is that map's Alpha output, the same
+     * output the CPU reads as its coverage. */
     bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
-    if (map == nullptr) {
-      return {};
-    }
-    map->id = &live_map_image->id;
-    id_us_plus(&live_map_image->id);
-    map->location[0] = location_x;
-    map->location[1] = location_y;
-    if (NodeTexImage *dst = static_cast<NodeTexImage *>(map->storage)) {
-      if (live_map_iuser != nullptr) {
-        dst->iuser = *live_map_iuser;
-      }
-      MaterialSourceResolve resolve_local;
-      const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(
-          layer->material, cache, resolve_local);
-      const bNode *src_node = resolve.images[channel].node;
-      if (const NodeTexImage *src_storage =
-              (src_node != nullptr) ? static_cast<const NodeTexImage *>(src_node->storage) :
-                                      nullptr)
-      {
-        dst->interpolation = src_storage->interpolation;
-        dst->extension = src_storage->extension;
-        dst->projection = src_storage->projection;
-      }
-    }
-    current.source_node = map;
-    current.source = socket_out(*map, "Color");
-    leaf_map_node = map;
-    /* A Material row's transparency is the source's Alpha input, not the channel map's own
-     * alpha (the Principled's Base Color reads RGB only). It tracks no content alpha of its
-     * own: the material alpha already fed `layer_factor`, and leaving the chain null keeps
-     * the Result alpha the chain's blended value, exactly as the CPU computes it. */
-  }
-  else if (source_group_instance != nullptr) {
-    /* The whole source graph goes through the wrapper's COLOR:<CHANNEL> output. No map, so
-     * content coverage for this row comes from the wrapper's COVERAGE output below. */
-    if (source_group_socket == nullptr) {
-      PL_DEBUG_PRINTF(
-          "paint layers: row '%s' channel %d: wrapper has no COLOR output, row dropped\n",
-          layer->name,
-          channel);
-      return {};
-    }
-    current.source_node = source_group_instance;
-    current.source = source_group_socket;
-  }
-  else if (folder_source != nullptr) {
-    /* The folder's own row: its source is the isolated sub-chain, not a map. */
-    current.source_node = folder_source_node;
-    current.source = folder_source;
-    current.content_alpha_node = folder_content_alpha_node;
-    current.content_alpha = folder_content_alpha;
-  }
-  else if (image != nullptr) {
-    bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
-    if (map == nullptr) {
-      return {};
-    }
-    map->id = &image->id;
-    id_us_plus(&image->id);
-    map->location[0] = location_x;
-    map->location[1] = location_y;
-    /* A MESH_MAP atlas is sampled with Extend (clamp to the edge), the mode the CPU's own
-     * bilinear resample uses, so a differently sized atlas agrees at its borders. A painted
-     * map keeps its Repeat default. Read through the shared resolver so the two sides cannot
-     * disagree about whether the row is a mesh map at all. */
-    const bool mesh_map = layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP &&
-                          paint_layer_mesh_map_image(ma, *layer) == image;
-    if (mesh_map) {
-      if (NodeTexImage *storage = static_cast<NodeTexImage *>(map->storage)) {
-        storage->extension = SHD_IMAGE_EXTENSION_EXTEND;
-      }
-    }
-    current.source_node = map;
-    current.source = socket_out(*map, "Color");
-    /* A scalar atlas (AO, Curvature, Edge) stores its value in R; spread it across RGB so a
-     * colour channel reads it as grey and the CPU reads the same. An RGB atlas (Normal, IDs)
-     * is wired as it is. */
-    if (mesh_map && paint_layer_mesh_map_is_scalar(layer->mesh_map_type)) {
-      bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
-      bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineXYZ"_ustr);
-      if (separate != nullptr && combine != nullptr) {
-        bNodeSocket *sep_vector = socket_in(*separate, "Vector");
-        bNodeSocket *sep_x = socket_out(*separate, "X");
-        bNodeSocket *combine_x = socket_in(*combine, "X");
-        bNodeSocket *combine_y = socket_in(*combine, "Y");
-        bNodeSocket *combine_z = socket_in(*combine, "Z");
-        if (sep_vector != nullptr && sep_x != nullptr && combine_x != nullptr &&
-            combine_y != nullptr && combine_z != nullptr)
+    bNodeSocket *map_alpha = (map != nullptr) ? socket_out(*map, "Alpha") : nullptr;
+    if (map != nullptr && map_alpha != nullptr) {
+      map->id = &live_alpha_image->id;
+      id_us_plus(&live_alpha_image->id);
+      map->location[0] = location_x - 90.0f;
+      map->location[1] = location_y - 320.0f;
+      if (NodeTexImage *dst = static_cast<NodeTexImage *>(map->storage)) {
+        if (live_alpha_iuser != nullptr) {
+          dst->iuser = *live_alpha_iuser;
+        }
+        MaterialSourceResolve resolve_local;
+        const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(
+            layer->material, cache, resolve_local);
+        const bNode *src_node = resolve.images[PAINT_MATERIAL_CHANNEL_ALPHA].node;
+        if (const NodeTexImage *src_storage =
+                (src_node != nullptr) ? static_cast<const NodeTexImage *>(src_node->storage) :
+                                        nullptr)
         {
-          separate->location[0] = location_x + 80.0f;
-          separate->location[1] = location_y;
-          combine->location[0] = location_x + 160.0f;
-          combine->location[1] = location_y;
-          bke::node_add_link(tree, *map, *current.source, *separate, *sep_vector);
-          bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_x);
-          bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_y);
-          bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_z);
-          current.source_node = combine;
-          current.source = socket_out(*combine, "Vector");
+          dst->interpolation = src_storage->interpolation;
+          dst->extension = src_storage->extension;
+          dst->projection = src_storage->projection;
         }
       }
+      layer_factor_node = map;
+      layer_factor_socket = map_alpha;
     }
-    leaf_map_node = map;
-    /* A Paint or Fill map carries its content alpha in the Image Texture Alpha output; it
-     * starts the content-alpha chain here rather than being read back out of the Color's own
-     * alpha. Custom stays outside since its bake substitutes above instead of reaching this
-     * branch.
-     *
-     * A Material row never takes its content alpha from the channel map: the Principled's
-     * transparency is the Alpha input, and a real bake map is opaque. It tracks no content
-     * alpha at all, so the Result alpha stays the chain's blended value like the CPU's. */
-    if (track_content_alpha &&
-        (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
-        ELEM(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)))
+  }
+  else if (!substituted && source_group_instance != nullptr && source_group_tree != nullptr) {
+    /* The wrapper's own COVERAGE output is the row's factor. Without one it behaves like a
+     * source with no live alpha: the baked coverage stands in. */
+    bNodeSocket *coverage_out = source_group_output(
+        *source_group_tree, *source_group_instance, PAINT_MATERIAL_CHANNEL_ALPHA, true);
+    if (coverage_out != nullptr) {
+      layer_factor_node = source_group_instance;
+      layer_factor_socket = coverage_out;
+    }
+    else if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->bake != nullptr &&
+             layer->bake->coverage != nullptr)
     {
-      current.content_alpha_node = map;
-      current.content_alpha = socket_out(*map, "Alpha");
+      std::tie(layer_factor_node, layer_factor_socket) = build_grey_of_map(
+          tree, location_x, location_y, *layer->bake->coverage, -320.0f);
     }
   }
-  else {
-    const MaterialPaintLayerChannel *entry = paint_layer_channel_find(*layer, channel);
-    if (bNodeTreeInterfaceSocket **fill_iface = fill_inputs.lookup_ptr(entry)) {
-      current.opacity_node = group_input;
-      current.source_node = group_input;
-      current.source = group_input_socket(group_input, **fill_iface);
-    }
-    /* A Paint or Fill constant's alpha is the constant colour's `.a`, the same number the RGB
-     * Fill input carries; it is frozen into a Value so the content-alpha chain has a scalar
-     * leaf. Custom and Material leaves (F2-C3/C4) supply no such constant. */
-    if (track_content_alpha &&
-        (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
-        ELEM(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) &&
-        current.source != nullptr)
-    {
-      float constant[4];
-      paint_layer_channel_constant(*layer, channel, constant);
-      bNode *alpha_value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
-      bNodeSocket *alpha_out = (alpha_value != nullptr) ? socket_out(*alpha_value, "Value") :
-                                                          nullptr;
-      if (alpha_value != nullptr && alpha_out != nullptr &&
-          alpha_out->default_value != nullptr)
-      {
-        alpha_value->location[0] = location_x - 90.0f;
-        alpha_value->location[1] = location_y - 40.0f;
-        static_cast<bNodeSocketValueFloat *>(alpha_out->default_value)->value = constant[3];
-        current.content_alpha_node = alpha_value;
-        current.content_alpha = alpha_out;
-      }
-    }
-  }
-}
-if (current.source == nullptr) {
-  return {};
-}
-
-/* The grey of \a image (the mean of RGB) as a new node chain, the way the CPU reads a mask
- * item and a coverage map (#PaintMaterialCompositeImageLayer::mask_reads_grey,
- * ::coverage_image): masks are painted black and white, and a brush writes colour, not alpha. */
-
-/* A Material/Node Group correction's own coverage: the same Baked/Hybrid/SourceGroup
- * precedence #resolve_row_material_source uses for content, but always read on the Alpha
- * channel and ending at the wrapper's dedicated COVERAGE output (SourceGroup) or the
- * correction's own bake coverage (Baked) -- mirrors `layer_factor` below (~2276-2356)
- * exactly, with \a row standing in for `*layer`. One helper for a content Effect (its own
- * coverage multiplier) and a Mask Item (its coverage when `mask_channel` is not Alpha), so
- * the two cannot disagree about what "the source's coverage" means. */
-
-/* The factor base the mask stack builds on: one, times -- for a Material layer -- its
- * source's coverage (what the source's own transparency baked into), so a mask on a
- * transparent source limits it further and never re-bakes it. */
-bNode *layer_factor_node = nullptr;
-bNodeSocket *layer_factor_socket = nullptr;
-float live_alpha[4];
-Image *live_alpha_image = nullptr;
-const ImageUser *live_alpha_iuser = nullptr;
-if (!substituted && BKE_paint_layers_material_live_constant(
-                        ma, *layer, PAINT_MATERIAL_CHANNEL_ALPHA, live_alpha, cache))
-{
-  /* The source's alpha is a constant too, so the coverage stays live with it. When the
-   * source's alpha is not constant while its other channels are, the coverage keeps its last
-   * bake -- a bounded divergence: only channels that can be shown live are. */
-  bNode *value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
-  bNodeSocket *value_out = (value != nullptr) ? socket_out(*value, "Value") : nullptr;
-  if (value != nullptr && value_out != nullptr && value_out->default_value != nullptr) {
-    value->location[0] = location_x - 90.0f;
-    value->location[1] = location_y - 320.0f;
-    static_cast<bNodeSocketValueFloat *>(value_out->default_value)->value = live_alpha[0];
-    layer_factor_node = value;
-    layer_factor_socket = value_out;
-  }
-}
-else if (!substituted &&
-         BKE_paint_layers_material_live_image(ma,
-                                              *layer,
-                                              PAINT_MATERIAL_CHANNEL_ALPHA,
-                                              &live_alpha_image,
-                                              &live_alpha_iuser,
-                                              cache))
-{
-  /* The source's alpha is a live texture: the factor is that map's Alpha output, the same
-   * output the CPU reads as its coverage. */
-  bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
-  bNodeSocket *map_alpha = (map != nullptr) ? socket_out(*map, "Alpha") : nullptr;
-  if (map != nullptr && map_alpha != nullptr) {
-    map->id = &live_alpha_image->id;
-    id_us_plus(&live_alpha_image->id);
-    map->location[0] = location_x - 90.0f;
-    map->location[1] = location_y - 320.0f;
-    if (NodeTexImage *dst = static_cast<NodeTexImage *>(map->storage)) {
-      if (live_alpha_iuser != nullptr) {
-        dst->iuser = *live_alpha_iuser;
-      }
-      MaterialSourceResolve resolve_local;
-      const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(
-          layer->material, cache, resolve_local);
-      const bNode *src_node = resolve.images[PAINT_MATERIAL_CHANNEL_ALPHA].node;
-      if (const NodeTexImage *src_storage =
-              (src_node != nullptr) ? static_cast<const NodeTexImage *>(src_node->storage) :
-                                      nullptr)
-      {
-        dst->interpolation = src_storage->interpolation;
-        dst->extension = src_storage->extension;
-        dst->projection = src_storage->projection;
-      }
-    }
-    layer_factor_node = map;
-    layer_factor_socket = map_alpha;
-  }
-}
-else if (!substituted && source_group_instance != nullptr && source_group_tree != nullptr) {
-  /* The wrapper's own COVERAGE output is the row's factor. Without one it behaves like a
-   * source with no live alpha: the baked coverage stands in. */
-  bNodeSocket *coverage_out = source_group_output(
-      *source_group_tree, *source_group_instance, PAINT_MATERIAL_CHANNEL_ALPHA, true);
-  if (coverage_out != nullptr) {
-    layer_factor_node = source_group_instance;
-    layer_factor_socket = coverage_out;
-  }
-  else if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->bake != nullptr &&
-           layer->bake->coverage != nullptr)
+  else if (!substituted && layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+           layer->bake != nullptr && layer->bake->coverage != nullptr)
   {
-    std::tie(layer_factor_node, layer_factor_socket) = build_grey_of_map(tree, location_x, location_y, *layer->bake->coverage,
-                                                                   -320.0f);
+    std::tie(layer_factor_node, layer_factor_socket) = build_grey_of_map(
+        tree, location_x, location_y, *layer->bake->coverage, -320.0f);
   }
 }
-else if (!substituted && layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
-         layer->bake != nullptr && layer->bake->coverage != nullptr)
-{
-  std::tie(layer_factor_node, layer_factor_socket) = build_grey_of_map(tree, location_x, location_y, *layer->bake->coverage,
-                                                                 -320.0f);
-}
-/* The row's own content coverage, kept apart from the mask: an unpainted texel of a fresh map
- * is transparent black and must show the rows below, and the content corrections raise this
- * coverage. The mask multiplies it in afterwards, so a mask always clips a correction.
- *
- * A Material row has no such coverage of its own: the Principled's Base Color reads RGB only,
- * so the channel map's alpha (a real bake is opaque) must not be folded into the factor -- the
- * material's transparency already arrived as `layer_factor` from the Alpha input. */
-bNode *content_cov_node = nullptr;
-bNodeSocket *content_cov = nullptr;
-if (leaf_map_node != nullptr &&
-    !ELEM(layer->source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_MESH_MAP))
-{
-  content_cov = socket_out(*leaf_map_node, "Alpha");
-  content_cov_node = (content_cov != nullptr) ? leaf_map_node : nullptr;
-}
 
-/* Content corrections adjust the colour the row paints with, before its own blend. Only the
- * exact subset the CPU composites: a Paint correction backed by a map, or a Fill correction
- * carrying a constant. On the Normal channel a content Paint correction rides the same
- * Normal Combine the row does, while a content Fill correction (a constant normal) is left
- * out here too, so the two never disagree about which rows contributed. */
-    build_content_correction(layer, target, substituted, channel, tree, group_input, location_x, location_y, track_content_alpha, current, content_cov_node, content_cov, folder_coverage_node, folder_coverage);
+void PaintLayersChainBuilder::build_row_factor_chain(const MaterialPaintLayer *layer,
+                                                     const RowTarget &target,
+                                                     bNodeTree &tree,
+                                                     bNode *group_input,
+                                                     const int channel,
+                                                     const bool substituted,
+                                                     const bool track_content_alpha,
+                                                     const float location_x,
+                                                     const float location_y,
+                                                     bNode *leaf_map_node,
+                                                     bNode *&folder_coverage_node,
+                                                     bNodeSocket *&folder_coverage,
+                                                     ChainLayer &current,
+                                                     bNode *&r_factor_node,
+                                                     bNodeSocket *&r_factor_socket)
+{
+  bNode *&layer_factor_node = r_factor_node;
+  bNodeSocket *&layer_factor_socket = r_factor_socket;
+  bNode *content_cov_node = nullptr;
+  bNodeSocket *content_cov = nullptr;
+  if (leaf_map_node != nullptr &&
+      !ELEM(layer->source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_MESH_MAP))
+  {
+    content_cov = socket_out(*leaf_map_node, "Alpha");
+    content_cov_node = (content_cov != nullptr) ? leaf_map_node : nullptr;
+  }
 
-/* The layer factor is the mask times the content coverage; either alone when the other is
- * absent. */
-if (content_cov != nullptr && content_cov_node != nullptr) {
-  if (layer_factor_socket == nullptr) {
-    layer_factor_node = content_cov_node;
-    layer_factor_socket = content_cov;
+  /* Content corrections adjust the colour the row paints with, before its own blend. Only the
+   * exact subset the CPU composites: a Paint correction backed by a map, or a Fill correction
+   * carrying a constant. On the Normal channel a content Paint correction rides the same
+   * Normal Combine the row does, while a content Fill correction (a constant normal) is left
+   * out here too, so the two never disagree about which rows contributed. */
+  build_content_correction(layer,
+                           target,
+                           substituted,
+                           channel,
+                           tree,
+                           group_input,
+                           location_x,
+                           location_y,
+                           track_content_alpha,
+                           current,
+                           content_cov_node,
+                           content_cov,
+                           folder_coverage_node,
+                           folder_coverage);
+
+  /* The layer factor is the mask times the content coverage; either alone when the other is
+   * absent. */
+  if (content_cov != nullptr && content_cov_node != nullptr) {
+    if (layer_factor_socket == nullptr) {
+      layer_factor_node = content_cov_node;
+      layer_factor_socket = content_cov;
+    }
+    else {
+      bNode *product = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+      bNodeSocket *p_a = (product != nullptr) ? socket_in(*product, "Value") : nullptr;
+      bNodeSocket *p_b = (product != nullptr) ? socket_in(*product, "Value_001") : nullptr;
+      bNodeSocket *p_out = (product != nullptr) ? socket_out(*product, "Value") : nullptr;
+      if (p_a != nullptr && p_b != nullptr && p_out != nullptr) {
+        product->custom1 = NODE_MATH_MULTIPLY;
+        product->location[0] = location_x + 350.0f;
+        product->location[1] = location_y - 420.0f;
+        bke::node_add_link(tree, *layer_factor_node, *layer_factor_socket, *product, *p_a);
+        bke::node_add_link(tree, *content_cov_node, *content_cov, *product, *p_b);
+        layer_factor_node = product;
+        layer_factor_socket = p_out;
+      }
+    }
+  }
+
+  /* Mask items are a coverage stack over the row factor: each item lays its own coverage
+   * `F = F_below * (1 - A * op) + C * op`, where `C` is the mean of the map's raw Color (a
+   * Non-Color map reads un-premultiplied, so this is the pre-multiplied color) and `A` its
+   * Alpha, and `op` the row's own opacity. MULTIPLY lays `F * C` instead. Later list entries
+   * lay over earlier ones. Every other blend mode reads as MIX; the opacity is row-level, not
+   * per channel. */
+  build_mask_item(layer,
+                  channel,
+                  tree,
+                  group_input,
+                  location_x,
+                  location_y,
+                  target,
+                  current,
+                  layer_factor_node,
+                  layer_factor_socket);
+
+  /* The factor is the correction/mask chain times the row's own opacity, or the opacity alone
+   * when there is neither a mask map nor a correction. */
+  if (layer_factor_socket != nullptr && current.opacity != nullptr &&
+      current.opacity_node != nullptr)
+  {
+    bNode *opacity_multiply = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+    if (opacity_multiply != nullptr) {
+      opacity_multiply->custom1 = NODE_MATH_MULTIPLY;
+      opacity_multiply->location[0] = location_x + 200.0f;
+      opacity_multiply->location[1] = location_y - 320.0f;
+      bNodeSocket *value_a = socket_in(*opacity_multiply, "Value");
+      bNodeSocket *value_b = socket_in(*opacity_multiply, "Value_001");
+      bNodeSocket *value_out = socket_out(*opacity_multiply, "Value");
+      if (value_a != nullptr && value_b != nullptr && value_out != nullptr) {
+        bke::node_add_link(
+            tree, *current.opacity_node, *current.opacity, *opacity_multiply, *value_a);
+        bke::node_add_link(
+            tree, *layer_factor_node, *layer_factor_socket, *opacity_multiply, *value_b);
+        current.factor_node = opacity_multiply;
+        current.factor = value_out;
+      }
+    }
   }
   else {
-    bNode *product = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
-    bNodeSocket *p_a = (product != nullptr) ? socket_in(*product, "Value") : nullptr;
-    bNodeSocket *p_b = (product != nullptr) ? socket_in(*product, "Value_001") : nullptr;
-    bNodeSocket *p_out = (product != nullptr) ? socket_out(*product, "Value") : nullptr;
-    if (p_a != nullptr && p_b != nullptr && p_out != nullptr) {
-      product->custom1 = NODE_MATH_MULTIPLY;
-      product->location[0] = location_x + 350.0f;
-      product->location[1] = location_y - 420.0f;
-      bke::node_add_link(tree, *layer_factor_node, *layer_factor_socket, *product, *p_a);
-      bke::node_add_link(tree, *content_cov_node, *content_cov, *product, *p_b);
-      layer_factor_node = product;
-      layer_factor_socket = p_out;
-    }
+    current.factor_node = current.opacity_node;
+    current.factor = current.opacity;
   }
-}
 
-/* Mask items are a coverage stack over the row factor: each item lays its own coverage
- * `F = F_below * (1 - A * op) + C * op`, where `C` is the mean of the map's raw Color (a
- * Non-Color map reads un-premultiplied, so this is the pre-multiplied color) and `A` its
- * Alpha, and `op` the row's own opacity. MULTIPLY lays `F * C` instead. Later list entries
- * lay over earlier ones. Every other blend mode reads as MIX; the opacity is row-level, not
- * per channel. */
-    build_mask_item(layer, channel, tree, group_input, location_x, location_y, target, current, layer_factor_node, layer_factor_socket);
-
-/* The factor is the correction/mask chain times the row's own opacity, or the opacity alone
- * when there is neither a mask map nor a correction. */
-if (layer_factor_socket != nullptr && current.opacity != nullptr &&
-    current.opacity_node != nullptr)
-{
-  bNode *opacity_multiply = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
-  if (opacity_multiply != nullptr) {
-    opacity_multiply->custom1 = NODE_MATH_MULTIPLY;
-    opacity_multiply->location[0] = location_x + 200.0f;
-    opacity_multiply->location[1] = location_y - 320.0f;
-    bNodeSocket *value_a = socket_in(*opacity_multiply, "Value");
-    bNodeSocket *value_b = socket_in(*opacity_multiply, "Value_001");
-    bNodeSocket *value_out = socket_out(*opacity_multiply, "Value");
-    if (value_a != nullptr && value_b != nullptr && value_out != nullptr) {
-      bke::node_add_link(
-          tree, *current.opacity_node, *current.opacity, *opacity_multiply, *value_a);
-      bke::node_add_link(
-          tree, *layer_factor_node, *layer_factor_socket, *opacity_multiply, *value_b);
-      current.factor_node = opacity_multiply;
-      current.factor = value_out;
-    }
-  }
-}
-else {
-  current.factor_node = current.opacity_node;
-  current.factor = current.opacity;
-}
-
-/* A folder's row blends by its own factor times the coverage its contents accumulated. */
-if (folder_coverage_node != nullptr && folder_coverage != nullptr) {
-  bNode *coverage_multiply = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
-  if (coverage_multiply != nullptr) {
-    coverage_multiply->custom1 = NODE_MATH_MULTIPLY;
-    coverage_multiply->location[0] = location_x + 150.0f;
-    coverage_multiply->location[1] = location_y - 400.0f;
-    bNodeSocket *cv_a = socket_in(*coverage_multiply, "Value");
-    bNodeSocket *cv_b = socket_in(*coverage_multiply, "Value_001");
-    bNodeSocket *cv_out = socket_out(*coverage_multiply, "Value");
-    if (cv_a != nullptr && cv_b != nullptr && cv_out != nullptr) {
-      if (current.factor != nullptr && current.factor_node != nullptr) {
+  /* A folder's row blends by its own factor times the coverage its contents accumulated. */
+  if (folder_coverage_node != nullptr && folder_coverage != nullptr) {
+    bNode *coverage_multiply = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+    if (coverage_multiply != nullptr) {
+      coverage_multiply->custom1 = NODE_MATH_MULTIPLY;
+      coverage_multiply->location[0] = location_x + 150.0f;
+      coverage_multiply->location[1] = location_y - 400.0f;
+      bNodeSocket *cv_a = socket_in(*coverage_multiply, "Value");
+      bNodeSocket *cv_b = socket_in(*coverage_multiply, "Value_001");
+      bNodeSocket *cv_out = socket_out(*coverage_multiply, "Value");
+      if (cv_a != nullptr && cv_b != nullptr && cv_out != nullptr) {
+        if (current.factor != nullptr && current.factor_node != nullptr) {
+          bke::node_add_link(
+              tree, *current.factor_node, *current.factor, *coverage_multiply, *cv_a);
+        }
+        else if (cv_a->default_value != nullptr) {
+          static_cast<bNodeSocketValueFloat *>(cv_a->default_value)->value = 1.0f;
+        }
         bke::node_add_link(
-            tree, *current.factor_node, *current.factor, *coverage_multiply, *cv_a);
+            tree, *folder_coverage_node, *folder_coverage, *coverage_multiply, *cv_b);
+        current.factor_node = coverage_multiply;
+        current.factor = cv_out;
       }
-      else if (cv_a->default_value != nullptr) {
-        static_cast<bNodeSocketValueFloat *>(cv_a->default_value)->value = 1.0f;
-      }
-      bke::node_add_link(
-          tree, *folder_coverage_node, *folder_coverage, *coverage_multiply, *cv_b);
-      current.factor_node = coverage_multiply;
-      current.factor = cv_out;
     }
   }
-  }
+}
 
-  RowResult result;
-
+bool PaintLayersChainBuilder::build_grouped_row_result(const MaterialPaintLayer *layer,
+                                                       bNodeTree &tree,
+                                                       bNode *group_input,
+                                                       LayerGroup *layer_group,
+                                                       const int channel,
+                                                       const bool premul,
+                                                       const float location_x,
+                                                       const float location_y,
+                                                       ChainLayer &current,
+                                                       RowResult &r_result)
+{
+  const PaintLayersBuildContext &ctx = outer_.ctx_;
   /* A leaf in its own group: expose the row's colour, coverage and the two blends the parent
    * may chain through. Below is the group's blend base; Color and Coverage are its straight
    * result; Blend is the row blended at factor one (only the parent's premul chain uses it);
    * Result is the row laid over Below. */
   if (layer_group != nullptr && current.source != nullptr) {
+    RowResult &result = r_result;
     const MaterialPaintChannelInfo &channel_info = BKE_paint_material_channel_info(
         eMaterialPaintChannel(channel));
     auto add_group_socket = [&](const char *kind,
@@ -1377,13 +1583,13 @@ if (folder_coverage_node != nullptr && folder_coverage != nullptr) {
       content_alpha_iface = add_group_socket(
           "Content Alpha", "NodeSocketFloat", NODE_INTERFACE_SOCKET_OUTPUT);
       if (content_alpha_iface == nullptr) {
-        return {};
+        return false;
       }
     }
     if (below_iface == nullptr || color_iface == nullptr || coverage_iface == nullptr ||
         blend_iface == nullptr || result_iface == nullptr)
     {
-      return {};
+      return false;
     }
     bNodeSocket *below = bke::node_find_socket(
         *group_input, SOCK_OUT, UString::from_ptr_noinline(below_iface->identifier));
@@ -1414,7 +1620,7 @@ if (folder_coverage_node != nullptr && folder_coverage != nullptr) {
         blend_out == nullptr || result_out == nullptr ||
         (content_alpha_iface != nullptr && content_alpha_out == nullptr))
     {
-      return {};
+      return false;
     }
     bke::node_add_link(tree, *current.source_node, *current.source,
                        *layer_group->group_output, *color_out);
@@ -1499,7 +1705,7 @@ if (folder_coverage_node != nullptr && folder_coverage != nullptr) {
 
     auto [result_node, result_source] = add_row_blend(current.factor, 1.0f);
     if (result_source == nullptr) {
-      return {};
+      return false;
     }
     bke::node_add_link(
         tree, *result_node, *result_source, *layer_group->group_output, *result_out);
@@ -1532,14 +1738,7 @@ if (folder_coverage_node != nullptr && folder_coverage != nullptr) {
           UString::from_ptr_noinline(content_alpha_iface->identifier));
     }
   }
-
-  result.valid = true;
-  result.current = current;
-  result.folder_coverage_node = folder_coverage_node;
-  result.folder_coverage = folder_coverage;
-  result.folder_content_alpha_node = folder_content_alpha_node;
-  result.folder_content_alpha = folder_content_alpha;
-  return result;
+  return true;
 }
 
 }  // namespace bke::paint_layers

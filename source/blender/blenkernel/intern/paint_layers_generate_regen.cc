@@ -1054,13 +1054,13 @@ using namespace bke::paint_layers;
 
 bool BKE_paint_layers_row_removed_clear(Material &ma, const bUUID &marker)
 {
-  Vector<bUUID> *markers = removed_rows_state().lookup_ptr(ma.id.session_uid);
-  if (markers == nullptr) {
+  bke::MaterialPaintLayersRuntime *runtime = bke::paint_layers_runtime_mutable(ma);
+  if (runtime == nullptr) {
     return false;
   }
-  for (int i = 0; i < markers->size(); i++) {
-    if (BLI_uuid_equal((*markers)[i], marker)) {
-      markers->remove(i);
+  for (int i = 0; i < runtime->removed_rows.size(); i++) {
+    if (BLI_uuid_equal(runtime->removed_rows[i], marker)) {
+      runtime->removed_rows.remove(i);
       return true;
     }
   }
@@ -1284,10 +1284,9 @@ void scratch_user_refs_release(bNodeTree &scratch)
 
 }  // namespace
 
-void BKE_paint_layers_generate_runtime_free(const Material &ma)
+void BKE_paint_layers_generate_runtime_free(Material &ma)
 {
-  removed_rows_state().remove(ma.id.session_uid);
-  source_group_build_failed_state().remove(ma.id.session_uid);
+  bke::paint_layers_runtime_free(ma);
 #if PAINT_LAYERS_DEBUG_LOG
   /* The diagnostic maps only exist with the log on; in a quiet build there is nothing to drop. */
   previous_row_modes().remove(ma.id.session_uid);
@@ -1377,7 +1376,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * a fresh bake lands, instead of reviving live and forcing a rebuild loop. */
   const Vector<bUUID> previously_forced = forced_bake_markers(ma);
   forced_bake_clear(ma);
-  sampler_runtime().cleanup_owners.remove(ma.id.session_uid);
+  budget_cleanup_owner_set(ma, false);
 
   /* Wrapper groups for Material rows that show their whole source graph. The factory needs #Main
    * and runs on the main thread, so it is prepared here, like the Normal combine group, and handed
@@ -1676,7 +1675,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       }
     }
     if (any_disabled) {
-      sampler_runtime().cleanup_owners.add(ma.id.session_uid);
+      budget_cleanup_owner_set(ma, true);
       removed_rows_reconcile(ma);
       sampler_estimate_value = sampler_estimate();
     }

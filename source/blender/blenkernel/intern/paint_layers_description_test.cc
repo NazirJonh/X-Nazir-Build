@@ -1966,6 +1966,48 @@ TEST_F(PaintLayersDescription, bake_subscription_sees_pixel_changes)
   EXPECT_FALSE(BKE_paint_layers_bake_changed_region(*ma, *layer, region));
 }
 
+TEST_F(PaintLayersDescription, bake_subscription_survives_release_of_a_same_uid_old_id)
+{
+  Material *old = BKE_material_add(bmain, "UndoOld");
+  MaterialPaintLayer *old_layer = BKE_paint_layers_add(
+      *old, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image &image = *BKE_image_add_generated(
+      bmain, 4, 4, "UndoMap", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  ASSERT_NE(BKE_paint_layers_channel_add(*old, old_layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *old, old_layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &image));
+  MaterialPaintLayerBake *old_bake = BKE_paint_layers_bake_struct_ensure(*old_layer);
+  uint32_t hash[2];
+  BKE_paint_layers_bake_hash(*old_layer, hash);
+  old_bake->hash[0] = hash[0];
+  old_bake->hash[1] = hash[1];
+  BKE_paint_layers_bake_subscribe(*old, *old_layer);
+
+  /* The re-read ID keeps the uid and carries a row with the same marker. */
+  Material *neu = BKE_material_add(bmain, "UndoNew");
+  neu->id.session_uid = old->id.session_uid;
+  MaterialPaintLayer *neu_layer = BKE_paint_layers_add(
+      *neu, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  neu_layer->marker = old_layer->marker;
+  MaterialPaintLayerBake *neu_bake = BKE_paint_layers_bake_struct_ensure(*neu_layer);
+  BKE_paint_layers_bake_hash(*neu_layer, hash);
+  neu_bake->hash[0] = hash[0];
+  neu_bake->hash[1] = hash[1];
+
+  /* The memfile-undo preserve re-owns the entry before the old ID is released. */
+  BKE_paint_layers_bake_runtime_owner_transfer(*neu, *old);
+
+  /* Releasing the old ID must not drop the entry the new ID still uses. */
+  BKE_id_delete(bmain, old);
+
+  BKE_image_partial_update_mark_full_update(&image);
+  BKE_paint_layers_bake_notice_changes(*neu);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*neu, *neu_layer))
+      << "releasing the same-uid old ID dropped the new ID's bake subscription";
+}
+
 TEST_F(PaintLayersDescription, bake_substitute_only_when_valid_and_present)
 {
   Material *ma = BKE_material_add(bmain, "BakeSubstitute");

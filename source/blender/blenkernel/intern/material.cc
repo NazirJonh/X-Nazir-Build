@@ -88,6 +88,8 @@
 
 #include "NOD_shader.h"
 
+#include "paint_layers_runtime.hh"
+
 #include "BLO_read_write.hh"
 
 namespace blender {
@@ -366,6 +368,8 @@ static void material_copy_data(Main *bmain,
   for (const MaterialPaintLayer &layer : material_src->paint_layers) {
     BLI_addtail(&material_dst->paint_layers, material_paint_layer_copy(layer, flag_subdata));
   }
+  /* Runtime state is derived and per-owner; a copy never shares it with the source. */
+  material_dst->paint_layers_runtime = nullptr;
   /* The generated tree is owned 1:1 as well: the copy gets its own deep copy (or shares the
    * pointer under COW), see the generator. */
   BKE_paint_layers_generate_copy_data(bmain, *material_dst, *material_src, flag);
@@ -512,6 +516,8 @@ static void material_blend_read_data(BlendDataReader *reader, ID *id)
   Material *ma = id_cast<Material *>(id);
 
   ma->texpaintslot = nullptr;
+  /* Runtime-only derived state; never read back from the file. */
+  ma->paint_layers_runtime = nullptr;
   /* #ma->paint_layers_tree is a regular node group in #Main, linked by the file's lib-link pass
    * through #material_foreach_id; the material owns it, so it is kept, not nulled. */
 
@@ -525,6 +531,27 @@ static void material_blend_read_data(BlendDataReader *reader, ID *id)
 
   /* paint layer description */
   material_paint_layers_blend_read(reader, *ma);
+}
+
+/**
+ * Carry the Paint Layers runtime across a memfile undo. A changed material is read back as a new
+ * ID whose runtime is empty, while the global maps it replaced survived undo through an unchanged
+ * `session_uid`; moving the pointer keeps the removed-rows set available, so Ctrl+Z does not cost an
+ * extra root rebuild and EEVEE compile. The old ID is left empty so its free path cannot double
+ * free the runtime.
+ */
+static void material_undo_preserve(BlendLibReader * /*reader*/, ID *id_new, ID *id_old)
+{
+  if (id_new == id_old) {
+    return;
+  }
+  Material *material_new = id_cast<Material *>(id_new);
+  Material *material_old = id_cast<Material *>(id_old);
+  bke::paint_layers_runtime_transfer(*material_new, *material_old);
+  /* The bake subscription and the sampler runtime are global maps keyed by `session_uid`; they must
+   * be re-owned too, or the old ID's free path would drop the re-read ID's entries. */
+  BKE_paint_layers_bake_runtime_owner_transfer(*material_new, *material_old);
+  BKE_paint_layers_sampler_state_owner_transfer(*material_new, *material_old);
 }
 
 IDTypeInfo IDType_ID_MA = {
@@ -553,7 +580,7 @@ IDTypeInfo IDType_ID_MA = {
     .blend_read_data = material_blend_read_data,
     .blend_read_after_liblink = nullptr,
 
-    .blend_read_undo_preserve = nullptr,
+    .blend_read_undo_preserve = material_undo_preserve,
 
     .lib_override_apply_post = nullptr,
 };

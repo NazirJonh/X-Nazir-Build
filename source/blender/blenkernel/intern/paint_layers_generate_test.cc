@@ -7265,6 +7265,93 @@ TEST_F(PaintLayersGenerateTest, removed_rows_state_is_dropped_with_its_material)
       << "a reused session_uid inherited the freed material's removed-rows entry";
 }
 
+/**
+ * The runtime lives on the material that owns the description. A copy is a different owner: it
+ * starts empty and never shares the original's removed-rows set, so disabling a row on one cannot
+ * silently drop it from the other.
+ */
+TEST_F(PaintLayersGenerateTest, runtime_removed_rows_is_not_shared_with_a_copy)
+{
+  add_paint_layer("OnLayer", add_image("On"));
+  MaterialPaintLayer *off = add_paint_layer("OffLayer", add_image("Off"));
+  ASSERT_NE(off, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  ASSERT_NE(bke::paint_layers_runtime_get(*ma), nullptr);
+  ASSERT_FALSE(bke::paint_layers_runtime_get(*ma)->removed_rows.is_empty());
+
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(bke::paint_layers_runtime_get(*copy), nullptr);
+  EXPECT_NE(bke::paint_layers_runtime_get(*ma), nullptr);
+}
+
+/** A file load drops the runtime, which is what #BKE_paint_layers_generate_runtime_free models. */
+TEST_F(PaintLayersGenerateTest, generate_runtime_free_clears_the_runtime)
+{
+  add_paint_layer("OnLayer", add_image("On"));
+  MaterialPaintLayer *off = add_paint_layer("OffLayer", add_image("Off"));
+  ASSERT_NE(off, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(bke::paint_layers_runtime_get(*ma), nullptr);
+
+  BKE_paint_layers_generate_runtime_free(*ma);
+  EXPECT_EQ(bke::paint_layers_runtime_get(*ma), nullptr);
+}
+
+/**
+ * The memfile-undo preserve is a move, not a copy: the runtime ends up on the re-read ID and the
+ * old one is left empty, so its free path cannot double free it. This keeps the removed-rows set
+ * available after Ctrl+Z, exactly as the session-uid-keyed global map used to.
+ */
+TEST_F(PaintLayersGenerateTest, runtime_transfer_moves_the_state_to_the_new_id)
+{
+  add_paint_layer("OnLayer", add_image("On"));
+  MaterialPaintLayer *off = add_paint_layer("OffLayer", add_image("Off"));
+  ASSERT_NE(off, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const MaterialPaintLayersRuntime *original = bke::paint_layers_runtime_get(*ma);
+  ASSERT_NE(original, nullptr);
+
+  Material *restored = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(restored, nullptr);
+  ASSERT_EQ(bke::paint_layers_runtime_get(*restored), nullptr);
+
+  bke::paint_layers_runtime_transfer(*restored, *ma);
+  EXPECT_EQ(bke::paint_layers_runtime_get(*restored), original);
+  EXPECT_EQ(bke::paint_layers_runtime_get(*ma), nullptr);
+}
+
+/**
+ * Like the bake subscription, the sampler's per-material state is keyed by `session_uid`; the
+ * memfile-undo preserve must re-own it, or the old ID's free path drops the re-read ID's forced
+ * rows and cleanup mark.
+ */
+TEST_F(PaintLayersGenerateTest, sampler_runtime_survives_release_of_a_same_uid_old_id)
+{
+  Material *old = BKE_material_add(bmain, "SamplerUndoOld");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *old, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  const bUUID marker = layer->marker;
+  bke::paint_layers::forced_bake_add(*old, marker);
+  bke::paint_layers::budget_cleanup_owner_set(*old, true);
+  ASSERT_TRUE(bke::paint_layers::forced_bake_contains(*old, marker));
+  ASSERT_TRUE(bke::paint_layers::budget_cleanup_active(*old));
+
+  Material *neu = BKE_material_add(bmain, "SamplerUndoNew");
+  neu->id.session_uid = old->id.session_uid;
+  BKE_paint_layers_sampler_state_owner_transfer(*neu, *old);
+
+  BKE_id_delete(bmain, old);
+
+  EXPECT_TRUE(bke::paint_layers::forced_bake_contains(*neu, marker));
+  EXPECT_TRUE(bke::paint_layers::budget_cleanup_active(*neu));
+}
+
 /** \} */
 
 TEST_F(PaintLayersGenerateTest, mesh_map_row_builds_no_nodes_or_samplers)

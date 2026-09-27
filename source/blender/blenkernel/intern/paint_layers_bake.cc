@@ -326,6 +326,11 @@ struct BakeLayerSubscription {
   Vector<BakeSubscriptionSource> sources;
 };
 struct BakeMaterialSubscription {
+  /**
+   * The material that owns this entry. Used so the free path of a same-`session_uid` material (the
+   * old ID during a memfile undo) does not delete the entry the re-read ID still uses.
+   */
+  const Material *owner = nullptr;
   Vector<BakeLayerSubscription> layers;
 };
 
@@ -333,6 +338,18 @@ static Map<uint32_t, BakeMaterialSubscription> &bake_subscriptions()
 {
   static Map<uint32_t, BakeMaterialSubscription> map;
   return map;
+}
+
+/**
+ * Guards #bake_subscriptions(). The map is written by the main-thread regeneration and read from
+ * `BKE_material_eval`, which runs in the depsgraph task pool and on evaluated copies through
+ * #BKE_paint_layers_bake_is_valid, so an unlocked Map was a data race. Every access below holds it
+ * only around the map itself and never calls a function that takes it again.
+ */
+static std::mutex &bake_subscriptions_mutex()
+{
+  static std::mutex mutex;
+  return mutex;
 }
 
 static void bake_collect_source_images(const MaterialPaintLayer &layer, Vector<Image *> &r_images)
@@ -390,19 +407,8 @@ static void bake_subscription_user_drain(Image &image, PartialUpdateUser *user)
 
 void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
 {
-  BakeMaterialSubscription &sub = bake_subscriptions().lookup_or_add(
-      ma.id.session_uid, BakeMaterialSubscription{});
-  for (int i = 0; i < sub.layers.size();) {
-    if (BLI_uuid_equal(sub.layers[i].marker, layer.marker)) {
-      for (BakeSubscriptionSource &src : sub.layers[i].sources) {
-        BKE_image_partial_update_free(src.user);
-      }
-      sub.layers.remove(i);
-    }
-    else {
-      i++;
-    }
-  }
+  /* The subscription users are created outside the lock: they only touch the image partial-update
+   * system, never this map. */
   BakeLayerSubscription entry;
   entry.marker = layer.marker;
   /* A Material row's bake is its source material rendered into maps; the row's own channel images,
@@ -417,7 +423,24 @@ void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
       entry.sources.append({image, user});
     }
   }
-  sub.layers.append(std::move(entry));
+  {
+    std::lock_guard lock(bake_subscriptions_mutex());
+    BakeMaterialSubscription &sub = bake_subscriptions().lookup_or_add(
+        ma.id.session_uid, BakeMaterialSubscription{});
+    sub.owner = &ma;
+    for (int i = 0; i < sub.layers.size();) {
+      if (BLI_uuid_equal(sub.layers[i].marker, layer.marker)) {
+        for (BakeSubscriptionSource &src : sub.layers[i].sources) {
+          BKE_image_partial_update_free(src.user);
+        }
+        sub.layers.remove(i);
+      }
+      else {
+        i++;
+      }
+    }
+    sub.layers.append(std::move(entry));
+  }
   /* Writing a bake changes whether the row is substituted, which is topology: rebuild. */
   ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
 }
@@ -439,6 +462,7 @@ static const char *bake_subscription_row_name(const Material &ma, const bUUID &m
 
 void BKE_paint_layers_bake_notice_changes(Material &ma)
 {
+  std::lock_guard lock(bake_subscriptions_mutex());
   BakeMaterialSubscription *sub = bake_subscriptions().lookup_ptr(ma.id.session_uid);
   if (sub == nullptr) {
     return;
@@ -495,8 +519,11 @@ void BKE_paint_layers_bake_notice_changes(Material &ma)
 
 void BKE_paint_layers_bake_runtime_free(Material &ma)
 {
+  std::lock_guard lock(bake_subscriptions_mutex());
   BakeMaterialSubscription *sub = bake_subscriptions().lookup_ptr(ma.id.session_uid);
-  if (sub == nullptr) {
+  /* Only the owning material may drop the entry: a same-uid old ID freed during a memfile undo
+   * must leave the re-read ID's subscription (and its `PartialUpdateUser`s) in place. */
+  if (sub == nullptr || sub->owner != &ma) {
     return;
   }
   for (BakeLayerSubscription &entry : sub->layers) {
@@ -507,10 +534,20 @@ void BKE_paint_layers_bake_runtime_free(Material &ma)
   bake_subscriptions().remove(ma.id.session_uid);
 }
 
+void BKE_paint_layers_bake_runtime_owner_transfer(Material &dst, Material &src)
+{
+  std::lock_guard lock(bake_subscriptions_mutex());
+  BakeMaterialSubscription *sub = bake_subscriptions().lookup_ptr(src.id.session_uid);
+  if (sub != nullptr && sub->owner == &src) {
+    sub->owner = &dst;
+  }
+}
+
 bool BKE_paint_layers_bake_changed_region(const Material &ma,
                                           const MaterialPaintLayer &layer,
                                           int r_region[4])
 {
+  std::lock_guard lock(bake_subscriptions_mutex());
   BakeMaterialSubscription *sub = bake_subscriptions().lookup_ptr(ma.id.session_uid);
   if (sub == nullptr) {
     return false;
@@ -1335,6 +1372,30 @@ bool BKE_paint_layers_source_material_is_live(const Main &bmain, const Material 
     }
   }
   return false;
+}
+
+void BKE_paint_layers_source_material_consumers(const Main &bmain,
+                                                const Material &source,
+                                                Vector<Material *> &r_consumers)
+{
+  /* Localized and evaluated copies share the description with the original and must not be
+   * marked: only the material that owns its stack answers. */
+  const int no_regen_tags = ID_TAG_LOCALIZED | ID_TAG_COPIED_ON_EVAL | ID_TAG_NO_MAIN;
+  for (Material &ma : bmain.materials) {
+    if ((ma.id.tag & no_regen_tags) != 0 || !paint_layers_is_layered(ma)) {
+      continue;
+    }
+    Vector<const MaterialPaintLayer *> layers;
+    /* An Effect correction reading this source is as much a consumer as a Layer row reading it,
+     * so it must be found by the same walk. */
+    BKE_paint_layers_flatten_all(ma, layers);
+    for (const MaterialPaintLayer *layer : layers) {
+      if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->material == &source) {
+        r_consumers.append(&ma);
+        break;
+      }
+    }
+  }
 }
 
 bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
@@ -2423,11 +2484,14 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
   /* The structural hash cannot see pixel edits; the runtime subscription, drained by
    * #BKE_paint_layers_bake_notice_changes, reports those. A layer with no subscription is trusted
    * on its hash alone. */
-  BakeMaterialSubscription *sub = bake_subscriptions().lookup_ptr(ma.id.session_uid);
-  if (sub != nullptr) {
-    for (const BakeLayerSubscription &entry : sub->layers) {
-      if (BLI_uuid_equal(entry.marker, layer.marker) && entry.changed) {
-        return false;
+  {
+    std::lock_guard lock(bake_subscriptions_mutex());
+    const BakeMaterialSubscription *sub = bake_subscriptions().lookup_ptr(ma.id.session_uid);
+    if (sub != nullptr) {
+      for (const BakeLayerSubscription &entry : sub->layers) {
+        if (BLI_uuid_equal(entry.marker, layer.marker) && entry.changed) {
+          return false;
+        }
       }
     }
   }

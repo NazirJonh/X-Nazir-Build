@@ -154,7 +154,7 @@ bool BKE_paint_layers_source_group_build_failed_get(const Material &owner,
  * Record or clear \a layer's build-failed marker. Called when a regeneration records the row's
  * refusal; a successful rebuild, a different source or the owner's free clears it.
  */
-void BKE_paint_layers_source_group_build_failed_set(const Material &owner,
+void BKE_paint_layers_source_group_build_failed_set(Material &owner,
                                                     const MaterialPaintLayer &layer,
                                                     bool failed);
 
@@ -330,12 +330,13 @@ bool BKE_paint_layers_row_removed_clear(Material &ma, const bUUID &marker);
 void BKE_paint_layers_root_hash_invalidate(Material &ma);
 
 /**
- * Drop the generator's runtime state keyed by \a ma's `session_uid`: the removed-rows set and the
- * mode/embed diagnostic maps. Called when the material is freed so a reused uid cannot inherit
- * another material's entries; the reconcile rebuilds what a live material needs on its next
- * regeneration. Mirrors #BKE_paint_layers_bake_runtime_free and #BKE_paint_layers_sampler_state_free.
+ * Drop the generator's runtime state of \a ma: its #MaterialPaintLayersRuntime (the removed-rows
+ * set and the build-failed markers) and the mode/embed diagnostic maps. Called when the material is
+ * freed, and by tests to model a file load; the reconcile rebuilds what a live material needs on its
+ * next regeneration. Mirrors #BKE_paint_layers_bake_runtime_free and
+ * #BKE_paint_layers_sampler_state_free.
  */
-void BKE_paint_layers_generate_runtime_free(const Material &ma);
+void BKE_paint_layers_generate_runtime_free(Material &ma);
 
 /* -------------------------------------------------------------------- */
 /** \name Sampler budget

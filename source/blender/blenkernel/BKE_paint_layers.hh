@@ -804,6 +804,13 @@ void BKE_paint_layers_bake_notice_changes(Material &ma);
 void BKE_paint_layers_bake_runtime_free(Material &ma);
 
 /**
+ * Move the subscription entry of \a src to \a dst when it is \a src that owns it. Called from the
+ * memfile-undo preserve, where the re-read ID (\a dst) keeps the old ID's `session_uid`: without the
+ * move, releasing the old ID would drop the re-read ID's subscription.
+ */
+void BKE_paint_layers_bake_runtime_owner_transfer(Material &dst, Material &src);
+
+/**
  * The union of the pixel rectangles \a layer's source maps changed in since its last bake, as
  * \a r_region `{xmin, xmax, ymin, ymax}`, or false when nothing is pending.
  *
@@ -1008,6 +1015,13 @@ void BKE_paint_layers_bake_image_pending_remove(uint32_t image_session_uid);
 void BKE_paint_layers_sampler_state_free(const Material &ma);
 
 /**
+ * Move the sampler runtime entry (forced-bake rows and the cleanup owner) of \a src to \a dst when
+ * it is \a src that owns it. Called from the memfile-undo preserve beside
+ * #BKE_paint_layers_bake_runtime_owner_transfer.
+ */
+void BKE_paint_layers_sampler_state_owner_transfer(Material &dst, Material &src);
+
+/**
  * Whether \a image is a baked map of a row that must stay live right now: the active row of
  * some layered material, or an ancestor of it.
  *
@@ -1028,6 +1042,21 @@ bool BKE_paint_layers_bake_image_is_deferred(const Main &bmain, const Image &ima
  * copies are skipped: they share the original's description.
  */
 bool BKE_paint_layers_source_material_is_live(const Main &bmain, const Material &source);
+
+/**
+ * Append every layered material of \a bmain that has at least one `MATERIAL` row -- or Effect
+ * correction -- whose source is \a source, once each.
+ *
+ * A bake job of \a source is keyed on the source material itself, so a layered material reading
+ * it through a row has no `wmJob` of its own to announce the render. This is the list whose
+ * `#MA_PAINT_LAYERS_BAKE_SCHEDULED` mark the editor stamps before starting such a job; the settle
+ * path (#paint_layers_bake_jobs_in_flight) finds the same rows to clear it again.
+ *
+ * Localized and evaluated copies are skipped: they share the original's description.
+ */
+void BKE_paint_layers_source_material_consumers(const Main &bmain,
+                                                const Material &source,
+                                                Vector<Material *> &r_consumers);
 
 /**
  * A heavy-bake job: the description is localized on the main thread at creation, the pixels are

@@ -263,6 +263,91 @@ class PaintLayersChainBuilder {
                       LayerGroup *layer_group,
                       int channel);
 
+  /**
+   * A folder row's isolated sub-chain: builds its children and straightens the pre-multiplied
+   * result into `S = P / a`. Fills the folder bookkeeping the caller keeps local to its row.
+   * Returns false where the row drops out.
+   */
+  bool build_folder_source(const MaterialPaintLayer *layer,
+                           bNodeTree &tree,
+                           const RowTarget &target,
+                           int channel,
+                           bool track_content_alpha,
+                           float location_x,
+                           float location_y,
+                           bNode **r_source_node,
+                           bNodeSocket **r_source,
+                           bNode **r_coverage_node,
+                           bNodeSocket **r_coverage,
+                           bNode **r_content_alpha_node,
+                           bNodeSocket **r_content_alpha);
+
+  /** The row's own channel source and opacity, filling \a r_current and \a r_leaf_map_node. */
+  bool build_row_source(const MaterialPaintLayer *layer,
+                        bNodeTree &tree,
+                        bNode *group_input,
+                        int channel,
+                        bool substituted,
+                        bool track_content_alpha,
+                        float location_x,
+                        float location_y,
+                        const RowMaterialSource &row_source,
+                        Image *baked_color,
+                        bNode *folder_source_node,
+                        bNodeSocket *folder_source,
+                        bNode *folder_content_alpha_node,
+                        bNodeSocket *folder_content_alpha,
+                        ChainLayer &r_current,
+                        bNode *&r_leaf_map_node);
+
+  /** The substituted (baked) row's two Image Texture nodes and its coverage-derived opacity. */
+  bool build_substituted_source(const MaterialPaintLayer *layer,
+                                bNodeTree &tree,
+                                bool track_content_alpha,
+                                float location_x,
+                                float location_y,
+                                Image *baked_color,
+                                ChainLayer &r_current);
+
+  /** The factor base the mask stack builds on: the source's coverage, or one. */
+  void resolve_row_factor(const MaterialPaintLayer *layer,
+                          bNodeTree &tree,
+                          float location_x,
+                          float location_y,
+                          bool substituted,
+                          const RowMaterialSource &row_source,
+                          bNode *&r_factor_node,
+                          bNodeSocket *&r_factor_socket);
+
+  /** Content coverage, corrections, the mask stack, opacity and folder coverage, in order. */
+  void build_row_factor_chain(const MaterialPaintLayer *layer,
+                              const RowTarget &target,
+                              bNodeTree &tree,
+                              bNode *group_input,
+                              int channel,
+                              bool substituted,
+                              bool track_content_alpha,
+                              float location_x,
+                              float location_y,
+                              bNode *leaf_map_node,
+                              bNode *&folder_coverage_node,
+                              bNodeSocket *&folder_coverage,
+                              ChainLayer &current,
+                              bNode *&r_factor_node,
+                              bNodeSocket *&r_factor_socket);
+
+  /** Expose the row's Color/Coverage/Blend/Result on its own group and parent-tree instance. */
+  bool build_grouped_row_result(const MaterialPaintLayer *layer,
+                                bNodeTree &tree,
+                                bNode *group_input,
+                                LayerGroup *layer_group,
+                                int channel,
+                                bool premul,
+                                float location_x,
+                                float location_y,
+                                ChainLayer &current,
+                                RowResult &r_result);
+
   /** The Group Input socket of \a group_input that mirrors interface socket \a iface, or null. */
   bNodeSocket *group_input_socket(bNode *group_input, const bNodeTreeInterfaceSocket &iface);
 

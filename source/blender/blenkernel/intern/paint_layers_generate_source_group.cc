@@ -1001,11 +1001,11 @@ const char *BKE_paint_layers_source_group_refusal_name(
 bool BKE_paint_layers_source_group_build_failed_get(const Material &owner,
                                                     const MaterialPaintLayer &layer)
 {
-  const Vector<bUUID> *markers = source_group_build_failed_state().lookup_ptr(owner.id.session_uid);
-  if (markers == nullptr) {
+  const bke::MaterialPaintLayersRuntime *runtime = bke::paint_layers_runtime_get(owner);
+  if (runtime == nullptr) {
     return false;
   }
-  for (const bUUID &other : *markers) {
+  for (const bUUID &other : runtime->source_group_build_failed) {
     if (BLI_uuid_equal(other, layer.marker)) {
       return true;
     }
@@ -1013,29 +1013,28 @@ bool BKE_paint_layers_source_group_build_failed_get(const Material &owner,
   return false;
 }
 
-void BKE_paint_layers_source_group_build_failed_set(const Material &owner,
+void BKE_paint_layers_source_group_build_failed_set(Material &owner,
                                                     const MaterialPaintLayer &layer,
                                                     const bool failed)
 {
-  Vector<bUUID> *markers = source_group_build_failed_state().lookup_ptr(owner.id.session_uid);
-  for (int i = 0; markers != nullptr && i < markers->size();) {
-    if (BLI_uuid_equal((*markers)[i], layer.marker)) {
-      markers->remove(i);
+  bke::MaterialPaintLayersRuntime *runtime = bke::paint_layers_runtime_mutable(owner);
+  if (runtime == nullptr) {
+    if (!failed) {
+      return;
+    }
+    runtime = &bke::paint_layers_runtime_ensure(owner);
+  }
+  for (int i = 0; i < runtime->source_group_build_failed.size();) {
+    if (BLI_uuid_equal(runtime->source_group_build_failed[i], layer.marker)) {
+      runtime->source_group_build_failed.remove(i);
     }
     else {
       i++;
     }
   }
-  if (!failed) {
-    if (markers != nullptr && markers->is_empty()) {
-      source_group_build_failed_state().remove(owner.id.session_uid);
-    }
-    return;
+  if (failed) {
+    runtime->source_group_build_failed.append(layer.marker);
   }
-  if (markers == nullptr) {
-    markers = &source_group_build_failed_state().lookup_or_add(owner.id.session_uid, {});
-  }
-  markers->append(layer.marker);
 }
 
 /**

@@ -167,6 +167,49 @@ TEST_F(MaterialBakeTest, rebake_stale_skips_a_live_source)
 }
 
 /**
+ * #BKE_paint_layers_source_material_consumers is the list the explicit source-material bake marks
+ * before it starts: a layered material reading the source through a MATERIAL row has no `wmJob` of
+ * its own for that render -- the job is keyed on the source -- so this is the only way its
+ * #MA_PAINT_LAYERS_BAKE_SCHEDULED mark can be stamped. A row reading a different material, an
+ * Effect correction reading the source, and a plain material must all be classified right.
+ */
+TEST_F(MaterialBakeTest, source_material_consumers_lists_layered_readers_once)
+{
+  Material *source = add_material_with_principled("ConsumerSource");
+  Material *other_source = add_material_with_principled("OtherConsumerSource");
+
+  Material *reader = BKE_material_add(bmain, "ConsumerReader");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *reader, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*reader, row, source));
+
+  /* An Effect correction reading the source counts exactly like a Layer row; both live on the same
+   * material, which must still appear once. */
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *reader, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *reader, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "Effect");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*reader, effect, source));
+
+  Material *other_reader = BKE_material_add(bmain, "ConsumerOtherReader");
+  MaterialPaintLayer *other_row = BKE_paint_layers_add(
+      *other_reader, MA_PAINT_LAYER_SOURCE_MATERIAL, "OtherSource", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(other_row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*other_reader, other_row, other_source));
+
+  Vector<Material *> consumers;
+  BKE_paint_layers_source_material_consumers(*bmain, *source, consumers);
+
+  ASSERT_EQ(consumers.size(), 1);
+  EXPECT_TRUE(consumers.contains(reader));
+  EXPECT_FALSE(consumers.contains(other_reader));
+  EXPECT_FALSE(consumers.contains(source));
+}
+
+/**
  * A freshly created color target, reloaded from its own colorspace (what the texture cache does
  * between the bake job starting and its completion callback) and then written with a scene-linear
  * render, must hold those scene-linear values.

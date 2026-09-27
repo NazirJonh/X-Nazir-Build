@@ -65,6 +65,7 @@
 #include "BKE_paint_material_resolve.hh"
 
 #include "paint_layers_intern.hh"
+#include "paint_layers_runtime.hh"
 
 #include "NOD_socket.hh"
 
@@ -135,15 +136,21 @@ inline constexpr const char *ROLE_CORRECTION_FILL = "correction_fill";
 /** #INPUT_ROLE_PROP value of a Hybrid Material row's live constant (ТЗ-26). */
 inline constexpr const char *ROLE_LIVE_CONSTANT = "live_constant";
 
+/** One owner's forced-bake markers, keeping the owning material so a same-uid free is safe. */
+struct ForcedBakeState {
+  const Material *owner = nullptr;
+  Vector<bUUID> markers;
+};
+
 struct SamplerRuntimeState {
   /** Material-texture sampler allowance; zero disables the check. */
   int budget = 0;
   /** `GPU_max_textures()` as reported to #BKE_paint_layers_sampler_budget_set, for the log only. */
   int max_textures = 0;
   /** Owners whose disabled rows the last over-budget pass dropped, by material `session_uid`. */
-  Set<uint32_t> cleanup_owners;
+  Map<uint32_t, const Material *> cleanup_owners;
   /** The markers of rows forced onto their baked maps, per owner `session_uid`. */
-  Map<uint32_t, Vector<bUUID>> forced_bake;
+  Map<uint32_t, ForcedBakeState> forced_bake;
 };
 
 bNode *bump_ensure(Material &ma)
@@ -170,6 +177,8 @@ bNodeSocket *source_group_output(bNodeTree &wrapper,
                                  const bool coverage)
 ;
 bool budget_cleanup_active(const Material &ma)
+;
+void budget_cleanup_owner_set(const Material &ma, bool active)
 ;
 bool custom_bake_missing_warn_once(const Material &ma, const MaterialPaintLayer &layer)
 ;
@@ -237,10 +246,6 @@ IDProperty *properties_ensure(IDProperty *&properties)
 int prop_int_get(const IDProperty *properties, const char *key, const int fallback)
 ;
 int sampler_count_tree(const bNodeTree &tree)
-;
-Map<uint32_t, Vector<bUUID>> &removed_rows_state()
-;
-Map<uint32_t, Vector<bUUID>> &source_group_build_failed_state()
 ;
 uint32_t default_image_sampler_state()
 ;
@@ -318,7 +323,7 @@ void prop_string_set(IDProperty *&properties, const char *key, const char *value
 ;
 void refresh_generated_instances(bNodeTree &tree, const bUUID &owner_uid, Set<bNodeTree *> &visited)
 ;
-void removed_rows_reconcile(const Material &ma)
+void removed_rows_reconcile(Material &ma)
 ;
 void source_groups_prune(Main &bmain, const Material &owner)
 ;

@@ -2120,6 +2120,20 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
     return result;
   }
 
+  /* A layered material that reads \a params.material through a MATERIAL row has no `wmJob` of its
+   * own for this render: the job below is keyed on the source material. Stamp its
+   * #MA_PAINT_LAYERS_BAKE_SCHEDULED mark here, on the main thread, so
+   * `Material.paint_layers_is_stale` never reads fresh while the map is being written. The settle
+   * path (#paint_layers_bake_jobs_in_flight) already finds this source-keyed job through the row
+   * and clears the mark once it lands. */
+  {
+    Vector<Material *> consumers;
+    BKE_paint_layers_source_material_consumers(bmain, *params.material, consumers);
+    for (Material *consumer : consumers) {
+      BKE_paint_layers_bake_scheduled_set(*consumer, true);
+    }
+  }
+
   /* Keyed on the material, so a second bake of the same material restarts this slot rather than
    * racing it: v1's overlap unit is the material, and every target belongs to exactly one. Its own
    * job type keeps it out of the brush source bake's slot for the same material, which would

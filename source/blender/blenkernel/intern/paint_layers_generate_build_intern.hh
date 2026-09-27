@@ -192,6 +192,15 @@ class PaintLayersTreeBuilder {
  private:
   friend class PaintLayersChainBuilder;
 
+  /** Relay every group's value inputs up to the root through the interfaces they pass. */
+  void mirror_scope(bNodeTree &scope_tree,
+                    bNode &scope_group_input,
+                    Map<const bNodeTree *, LayerGroup *> &group_by_tree);
+  /** Drop interface sockets a rebuilt group no longer uses, so its signature stays honest. */
+  void prune_layer_group_sockets();
+  /** Wire every created Image Texture to the one UV Map node the material names. */
+  void wire_generated_uv_maps();
+
   bNode *source_group_instance_get(const MaterialPaintLayer &layer, bNodeTree &tree);
   RowMaterialSource resolve_row_material_source(const MaterialPaintLayer &row,
                                                 int channel,
@@ -253,6 +262,57 @@ class PaintLayersChainBuilder {
                       bool premul,
                       LayerGroup *layer_group,
                       int channel);
+
+  /** The Group Input socket of \a group_input that mirrors interface socket \a iface, or null. */
+  bNodeSocket *group_input_socket(bNode *group_input, const bNodeTreeInterfaceSocket &iface);
+
+  /** The mean of \a image's RGB as a new node chain (the way the CPU reads a mask/coverage map). */
+  std::pair<bNode *, bNodeSocket *> build_grey_of_map(bNodeTree &tree,
+                                                     float location_x,
+                                                     float location_y,
+                                                     Image &image,
+                                                     float offset_y);
+
+  /** The Effect corrections of \a layer, adjusting \a current's colour before its own blend. */
+  void build_content_correction(const MaterialPaintLayer *layer,
+                                const RowTarget &target,
+                                bool substituted,
+                                int channel,
+                                bNodeTree &tree,
+                                bNode *group_input,
+                                float location_x,
+                                float location_y,
+                                bool track_content_alpha,
+                                ChainLayer &current,
+                                bNode *&content_cov_node,
+                                bNodeSocket *&content_cov,
+                                bNode *&folder_coverage_node,
+                                bNodeSocket *&folder_coverage);
+
+  /** The Material/Node Group correction's own coverage, on the Alpha channel. */
+  std::pair<bNode *, bNodeSocket *> resolve_correction_coverage(bNodeTree &tree,
+                                                                float location_x,
+                                                                float location_y,
+                                                                const MaterialPaintLayer &row);
+
+  /** Materialize the factor's neutral base (one) when the mask stack needs one. */
+  void ensure_factor_base(bNodeTree &tree,
+                          float location_x,
+                          float location_y,
+                          bNode *&layer_factor_node,
+                          bNodeSocket *&layer_factor_socket);
+
+  /** The Mask Items of \a layer: a coverage stack over \a layer_factor_node/socket. */
+  void build_mask_item(const MaterialPaintLayer *layer,
+                       int channel,
+                       bNodeTree &tree,
+                       bNode *group_input,
+                       float location_x,
+                       float location_y,
+                       const RowTarget &target,
+                       ChainLayer &current,
+                       bNode *&layer_factor_node,
+                       bNodeSocket *&layer_factor_socket);
 
   PaintLayersTreeBuilder &outer_;
   float location_x_;

@@ -25,6 +25,9 @@
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_material_composite.hh"
+
+/* The D1 root-hash/reload tests below need the stored root hash accessors. */
+#include "paint_layers_generate_intern.hh"
 #include "BKE_paint_material_resolve.hh"
 #include "BKE_scene.hh"
 
@@ -1100,6 +1103,93 @@ TEST_F(PaintLayersGenerateTest, set_enabled_is_a_value_edit)
   bNodeSocket *socket = root_instance_input("Bottom Base Color Opacity");
   ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.0f);
+}
+
+TEST_F(PaintLayersGenerateTest, enabled_toggle_stabilizes_the_root_in_one_pass)
+{
+  add_paint_layer("OnLayer", add_image("On"));
+  MaterialPaintLayer *off = add_paint_layer("OffLayer", add_image("Off"));
+  ASSERT_NE(off, nullptr);
+
+  /* Disabling a row is a value edit while the graph is kept; the rebuild that does happen (here the
+   * first, which creates the tree) records it. The stored root hash must describe the graph that
+   * rebuild produced, so the next unchanged pass keeps the root instead of rebuilding a second
+   * time -- that second rebuild is the extra EEVEE compile D1 removes. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  const Vector<bNode *> nodes_before = root_nodes(*root);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_TRUE(same_nodes(nodes_before, root_nodes(*root)));
+
+  /* Enabling the recorded row moves the topology hash back: exactly one rebuild restores it, and
+   * the pass after that must keep the root again (both directions). */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, true));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *rebuilt = ma->paint_layers_tree;
+  ASSERT_NE(rebuilt, nullptr);
+  const Vector<bNode *> rebuilt_nodes = root_nodes(*rebuilt);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, rebuilt);
+  EXPECT_TRUE(same_nodes(rebuilt_nodes, root_nodes(*rebuilt)));
+}
+
+TEST_F(PaintLayersGenerateTest, disabled_row_survives_a_runtime_state_reload_in_one_pass)
+{
+  add_paint_layer("OnLayer", add_image("On"));
+  MaterialPaintLayer *off = add_paint_layer("OffLayer", add_image("Off"));
+  ASSERT_NE(off, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, false));
+
+  /* A rebuild records the disabled row and drops it from the graph. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+
+  /* Loading the file drops the runtime removed set (#removed_rows_state is not saved), while the
+   * stored root hash still describes the graph that omitted the row -- exactly the mismatch a load
+   * produces. The recovery must take at most one rebuild. */
+  BKE_paint_layers_generate_runtime_free(*ma);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *settled = ma->paint_layers_tree;
+  ASSERT_NE(settled, nullptr);
+  const Vector<bNode *> settled_nodes = root_nodes(*settled);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, settled) << "a load must not rebuild the root forever";
+  EXPECT_TRUE(same_nodes(settled_nodes, root_nodes(*settled)));
+}
+
+TEST_F(PaintLayersGenerateTest, disabled_row_survives_an_undo_of_the_stored_root_in_one_pass)
+{
+  add_paint_layer("OnLayer", add_image("On"));
+  MaterialPaintLayer *off = add_paint_layer("OffLayer", add_image("Off"));
+  ASSERT_NE(off, nullptr);
+
+  /* Build with the row present and remember the hash that describes that graph. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  uint64_t row_present_hash = 0;
+  ASSERT_TRUE(bke::paint_layers::tree_root_hash_get(*ma->paint_layers_tree, row_present_hash));
+
+  /* Disable it; the rebuild drops the row and stores the hash of the graph without it. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* A memfile undo restores the stored root hash from its snapshot but not the runtime removed set,
+   * so write back the pre-drop hash while the row stays recorded. Recovery must take at most one
+   * rebuild. */
+  bke::paint_layers::tree_root_hash_set(*ma->paint_layers_tree, row_present_hash);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *settled = ma->paint_layers_tree;
+  ASSERT_NE(settled, nullptr);
+  const Vector<bNode *> settled_nodes = root_nodes(*settled);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, settled) << "an undone root hash must not rebuild forever";
+  EXPECT_TRUE(same_nodes(settled_nodes, root_nodes(*settled)));
 }
 
 TEST_F(PaintLayersGenerateTest, constant_mask_value_is_a_value_edit)
@@ -7947,11 +8037,10 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_disabled_row)
   MaterialPaintLayer *off = add_paint_layer("OffLayer", add_image("Off"));
   ASSERT_NE(off, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, false));
-  /* Current code needs one settle rebuild after the enabled toggle before the root is stable; the
-   * snapshot baseline is taken after it, then snapshot_expect's own regenerate must not move it. */
+  /* The baseline is the first regeneration after the toggle; snapshot_expect's own unchanged
+   * regeneration must then keep the root (D1: the stored hash describes what was built). */
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x844d78acf587ec49ull, "disabled_row");
+  snapshot_expect(*ma, 0xd7f27666f975374bull, "disabled_row");
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_multi_channel_overrides)

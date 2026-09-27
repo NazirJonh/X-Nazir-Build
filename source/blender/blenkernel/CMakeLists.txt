@@ -263,6 +263,9 @@ set(SRC
     intern/paint_layers_composite.cc
     intern/paint_layers_generate_common.cc
     intern/paint_layers_generate_build.cc
+    intern/paint_layers_generate_build_chain.cc
+    intern/paint_layers_generate_build_correction.cc
+    intern/paint_layers_generate_build_intern.hh
     intern/paint_layers_generate_regen.cc
     intern/paint_layers_generate_source_group.cc
     intern/paint_layers_generate_sampler.cc

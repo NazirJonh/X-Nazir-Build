@@ -1925,7 +1925,13 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       BKE_ntree_update_after_single_tree_change(bmain, *layer_tree);
       DEG_id_tag_update(&layer_tree->id, ID_RECALC_SYNC_TO_EVAL);
     }
-    tree_root_hash_set(*tree, root_hash);
+    /* #removed_rows_reconcile above may have just recorded a row that the pre-reconcile
+     * #root_hash still counted (a row disabled during this very pass): storing the old hash would
+     * leave it describing a graph the build did not make, so the next unchanged pass would see a
+     * mismatch and rebuild the root a second time. Recompute it now that the build -- and every
+     * group interface it touched -- is final. */
+    tree_root_hash_set(*tree,
+                       paint_layers_root_topology_hash(ma, wired_channels, layer_trees, &regen_cache));
     BKE_ntree_update_tag_all(tree);
     BKE_ntree_update_after_single_tree_change(bmain, *tree);
   }

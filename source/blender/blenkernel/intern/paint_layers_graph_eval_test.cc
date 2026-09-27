@@ -39,6 +39,8 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+
+#include "paint_layers_intern.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_material_composite.hh"

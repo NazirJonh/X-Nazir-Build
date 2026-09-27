@@ -24,6 +24,8 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+
+#include "paint_layers_intern.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_target.hh"
 

@@ -51,6 +51,10 @@ enum eMaterialPaintLayerBlend : int8_t;
 
 template<typename T> class Span;
 
+/* -------------------------------------------------------------------- */
+/** \name Layered material and its UV map
+ * \{ */
+
 /**
  * Whether \a ma is a layered material: its stack is the DNA description (#MA_PAINT_LAYERED) and
  * its node graph is generated from it (phase 1).
@@ -60,12 +64,6 @@ template<typename T> class Span;
  * shares; the description API here is what a layered material is edited through.
  */
 bool paint_layers_is_layered(const Material &ma);
-
-/**
- * The UV layer name a Paint Layers stack samples, stored on the material itself. Never null; an
- * empty string means no name is set and callers fall back to the old behavior.
- */
-const char *BKE_paint_layers_uv_map_name(const Material &ma);
 
 /**
  * The one UV layer a Paint Layers stack samples on \a mesh, the single point of choice for the
@@ -94,6 +92,12 @@ const char *BKE_paint_layers_uv_map_resolve(const Mesh &mesh,
  */
 void BKE_paint_layers_uv_map_autofill(Material &ma, const Object *ob);
 
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Rows, roles and sources
+ * \{ */
+
 /**
  * Whether \a layer is a folder: a row that holds its stack in #MaterialPaintLayer::children and
  * takes part in a channel through them alone.
@@ -105,51 +109,6 @@ void BKE_paint_layers_uv_map_autofill(Material &ma, const Object *ob);
  * a leaf.
  */
 bool BKE_paint_layers_is_folder(const MaterialPaintLayer &layer);
-
-/**
- * Whether \a folder can be inlined into its parent's chain instead of isolating its children.
- *
- * A Pass Through folder changes nothing its children do, so the generator expands it in place and
- * the CPU compositor flattens it: the same rows, the same order, no wrapper. The mode is a pure
- * function of the description -- no mask item, no content correction, Mix blend and opacity one on
- * every channel (per-channel overrides included) and no valid bake standing in -- so the generator
- * and the compositor can never disagree about it. Visibility is deliberately not part of the test:
- * a hidden Pass Through folder scales its children's factor to zero as a value edit.
- */
-bool BKE_paint_layers_folder_is_pass_through(const Material &ma,
-                                             const MaterialPaintLayer &folder);
-
-/**
- * Where a row reads its values from, the description-level view of a row's source.
- *
- * Stored directly on the row as #MaterialPaintLayer::source, so callers ask what a row *is*
- * rather than reconstruct it from other fields.
- */
-enum class PaintLayerSourceType : int8_t {
-  /** A painted map; a Paint row with no map yet still reads as Image (its flat value is the
-   * starting point of its first stroke, not a constant source). */
-  Image = 0,
-  /** A flat constant: a Fill row, or a Fill effect. */
-  Constant,
-  /** Another material's channels, baked. */
-  Material,
-  /** A user's node group. */
-  NodeGroup,
-  /** A nested stack: a folder. */
-  Stack,
-  /**
-   * A geometry map of the owning object, read from the material's shared UV atlas; the row stores
-   * the abstract map type in #MaterialPaintLayer::mesh_map_type.
-   */
-  MeshMap,
-};
-
-/**
- * The #PaintLayerSourceType \a layer reads from.
- *
- * Reads #MaterialPaintLayer::source directly; a correction's source is always Image or Constant.
- */
-PaintLayerSourceType BKE_paint_layers_source_type(const MaterialPaintLayer &layer);
 
 /**
  * A row's structural place in its owner, independent of what it reads from.
@@ -182,48 +141,6 @@ Vector<MaterialPaintLayer *> BKE_paint_layers_mask_items(MaterialPaintLayer &lay
 Vector<const MaterialPaintLayer *> BKE_paint_layers_mask_items(const MaterialPaintLayer &layer);
 
 /**
- * Static description of one #eMaterialPaintLayerSource: the per-source switches that used to be
- * `ELEM(kind, ...)` checks scattered across the generator, the CPU compositor and the bake.
- *
- * One table instead of many, so adding a source is one edit here plus its branches, and the
- * Outliner's add-kinds list, the generator and the bake all read the same answer. A row's source
- * alone decides these switches -- including for a correction, whose source is always Image or
- * Constant -- so a caller for whom the structural role also matters (a Fill-effect correction is
- * not a stack Layer) checks #BKE_paint_layers_role separately; see `paint_layers.cc` for where
- * that distinction is load-bearing.
- */
-struct PaintLayerKindInfo {
-  int source;
-  /** Stable identifier shared with the Outliner's add-kinds and the Python API. */
-  const char *identifier;
-  /** Untranslated UI name. */
-  const char *ui_name;
-  /** The row holds its stack in #MaterialPaintLayer::children and takes part through it alone. */
-  bool is_folder;
-  /** The row paints with #MaterialPaintLayer::fill_color rather than a map or value. */
-  bool uses_fill_color;
-  /**
-   * The CPU compositor cannot evaluate the row: an editor bake fills its maps and the
-   * generator/CPU substitute them. MATERIAL bakes its source through the material bake; NODE_GROUP
-   * is rendered through EEVEE/AOV.
-   */
-  bool needs_external_bake;
-};
-
-/** The descriptor for \a source; an unknown source reads back as Image. */
-const PaintLayerKindInfo &BKE_paint_layers_kind_info(int source);
-
-/**
- * Convert a Fill row to Paint, carrying its constant into every channel record first, so a stroke
- * can later give one channel a map while the others stay flat: source -> Image, every existing
- * record's value set to the row's fill colour.
- *
- * \param r_fill: receives the row's fill colour (scene linear), valid after the call.
- * \return true when the row was a Fill and was converted; false when it was already Paint.
- */
-bool BKE_paint_layers_fill_to_paint(Material &ma, MaterialPaintLayer &layer, float r_fill[4]);
-
-/**
  * A flat walk of \a ma's description, bottom to top, with folders emitted and then their children.
  *
  * This is a traversal for identity and participation only, *not* the compositing parser: folders
@@ -247,10 +164,6 @@ void BKE_paint_layers_flatten(const Material &ma, Vector<const MaterialPaintLaye
  */
 void BKE_paint_layers_flatten_all(const Material &ma, Vector<const MaterialPaintLayer *> &r_rows);
 
-/** Whether \a marker names \a layer or anything nested under it (children, effects,
- * mask stack). */
-bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &layer, const bUUID &marker);
-
 /** A description edit: the generated tree is stale until it is rebuilt. */
 void BKE_paint_layers_tag_edited(Material &ma);
 
@@ -263,77 +176,6 @@ void BKE_paint_layers_tag_edited(Material &ma);
  * shows where nothing covers it -- and the alpha is used only where a channel has one.
  */
 void BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel channel, float r_color[4]);
-
-/**
- * The factor \a layer blends by before any per-pixel coverage: its own opacity, zero when it is
- * disabled, and -- when its mask is a constant rather than a map -- the mask's value folded in.
- *
- * The generator, the value sync and the CPU composite all read this one helper, so a constant mask
- * and a switched-off row cannot mean different things on the two sides. A mask that carries a map
- * is not folded here: its per-pixel alpha multiplies the factor at render and composite time.
- */
-float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer);
-
-/**
- * The blend \a layer's \a channel blends by: the channel record's override, or the row's
- * #MaterialPaintLayer::blend when the channel has no record or records `-1` (inherit).
- *
- * The generator, the CPU compositor and the UI all read this one helper, so a per-channel blend
- * cannot mean two different things.
- */
-int BKE_paint_layers_channel_blend_effective(const MaterialPaintLayer &layer, int channel);
-
-/**
- * The factor \a layer's \a channel blends by: the row's effective opacity
- * (#BKE_paint_layers_effective_opacity, which folds enabled and a constant mask) times the
- * channel record's #MaterialPaintLayerChannel::opacity, or the row's effective opacity alone when
- * the channel has no record.
- */
-float BKE_paint_layers_channel_opacity_effective(const MaterialPaintLayer &layer, int channel);
-
-/**
- * The flat colour \a correction contributes to \a channel when its effect is Fill: the correction's
- * own fill colour, or -- for a Paint correction with no map in this channel -- the channel's flat
- * value. The generator and the CPU composite read this one helper, so a constant correction cannot
- * mean two different colours.
- */
-void BKE_paint_layers_correction_constant(const MaterialPaintLayer &correction,
-                                          eMaterialPaintChannel channel,
-                                          float r_color[4]);
-
-/**
- * Decode one straight RGBA sample of \a image out of its stored colorspace and into scene linear.
- *
- * This is the per-element form of the conversion the Image Texture node performs, kept for the
- * cross-test interpreter and for unit-testing the round trip; compositing decodes whole buffers at
- * once (see the CPU composite), never pixel by pixel. A data (Non-Color) or already scene-linear
- * colorspace is the identity.
- */
-void BKE_paint_layers_sample_to_linear(const Image &image, float rgba[4]);
-
-/** The inverse of #BKE_paint_layers_sample_to_linear: encode a scene-linear RGBA sample. */
-void BKE_paint_layers_sample_from_linear(const Image &image, float rgba[4]);
-
-/**
- * Decode a description constant -- a Fill colour or a channel's flat value -- into scene linear.
- *
- * The description stores these as RNA `PROP_COLOR` values, which are already scene linear, so this
- * is the identity today and the one place that would change if a gamma-stored constant appeared.
- * The generator, the value sync and the CPU composite all read it, so the two sides cannot disagree
- * about what a constant means.
- */
-void BKE_paint_layers_constant_to_linear(eMaterialPaintChannel channel,
-                                         const float rgba[4],
-                                         float r_linear[4]);
-
-/**
- * The `MA_RAMP_*` code a description blend stands for -- the one table the generator's Mix nodes
- * and the CPU's `ramp_blend` both read, so a new blend cannot mean two different things.
- *
- * `MA_PAINT_LAYER_BLEND_NORMAL_COMBINE` is not a Mix mode and has no ramp code; it answers
- * `MA_RAMP_BLEND`, and the Normal channel never reaches this function with it.
- */
-int BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend blend);
 
 /** Why a row of a layered material behaves differently than its settings suggest. */
 enum class PaintLayersIssueCode : int8_t {
@@ -414,15 +256,11 @@ PaintLayerCustomRole BKE_paint_layers_custom_role_kind(const char *role);
 /** The channel a `COLOR:<CHANNEL>`/`BELOW:<CHANNEL>` \a role names, or -1 for none. */
 int BKE_paint_layers_custom_role_channel(const char *role);
 
-/** The identifier a Custom role uses for \a channel, e.g. `"BASE_COLOR"`, or null. */
-const char *BKE_paint_layers_custom_channel_identifier(int channel);
+/** \} */
 
-/**
- * Give every role-less input of a Custom layer's group a stored value in
- * `MaterialPaintLayer::properties`, keyed by the socket identifier, so the UI has a value to edit
- * and the bake has something to instantiate with. Existing values are left alone.
- */
-void BKE_paint_layers_custom_properties_sync(Material &ma);
+/* -------------------------------------------------------------------- */
+/** \name Description edits
+ * \{ */
 
 /**
  * Where #BKE_paint_layers_add puts the new row relative to its anchor.
@@ -484,17 +322,6 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
  * alone.
  */
 void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer);
-
-/**
- * The value a new channel record of \a layer starts from: the Principled input's own default
- * (Metallic 0, Roughness 0.5, Specular IOR Level 0.5, ...), or the table fallback for a material
- * with no Principled. Scalar channels come back as a grey RGBA with alpha one, since the generated
- * chain and the CPU read the channel's mean.
- *
- * A Paint record starts transparent instead (see #BKE_paint_layers_channel_add): only a Fill shows
- * these defaults, so a fresh Paint covers nothing.
- */
-void BKE_paint_layers_channel_default_value(const Material &ma, int channel, float r_value[4]);
 
 /**
  * Whether \a target is reachable from \a from by following MATERIAL layers' source materials, so
@@ -735,9 +562,6 @@ bool BKE_paint_layers_role_set(Material &ma, MaterialPaintLayer *correction, int
  */
 bool BKE_paint_layers_correction_source_set(Material &ma, MaterialPaintLayer *correction, int source);
 
-/** The #eMaterialMeshMapType of a #MA_PAINT_LAYER_SOURCE_MESH_MAP row, or -1 for any other row. */
-int BKE_paint_layers_mesh_map_type_get(const MaterialPaintLayer &layer);
-
 /**
  * Set the #eMaterialMeshMapType of \a layer, which must be a #MA_PAINT_LAYER_SOURCE_MESH_MAP row.
  *
@@ -748,15 +572,6 @@ int BKE_paint_layers_mesh_map_type_get(const MaterialPaintLayer &layer);
  * out of range.
  */
 bool BKE_paint_layers_mesh_map_type_set(Material &ma, MaterialPaintLayer *layer, int8_t type);
-
-/**
- * Debug check that the split lists agree with their rows' roles: every row of
- * #MaterialPaintLayer::effects has #PaintLayerRole::Effect and every row of
- * #MaterialPaintLayer::mask_stack has #PaintLayerRole::MaskItem. The body is `BLI_assert`
- * only, so it is a no-op in a release build; the generator calls it once per build to catch a
- * storage bug early.
- */
-void BKE_paint_layers_assert_consistent(const Material &ma);
 
 /** Set the blend of \a layer; see #eMaterialPaintLayerBlend. */
 bool BKE_paint_layers_set_blend(Material &ma,
@@ -775,6 +590,12 @@ bool BKE_paint_layers_set_color_tag(Material &ma, MaterialPaintLayer *layer, int
 /** Rename \a layer. */
 bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char *name);
 
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Bake
+ * \{ */
+
 /** The bake mode of \a layer, an #eMaterialPaintLayerBakeMode (AUTO when nothing is baked). */
 int BKE_paint_layers_bake_mode_get(const MaterialPaintLayer &layer);
 
@@ -790,16 +611,6 @@ bool BKE_paint_layers_bake_size_set(Material &ma, MaterialPaintLayer &layer, int
 /** Mark \a layer's bake stale so the planner re-bakes it; allocates the cache if needed. */
 void BKE_paint_layers_bake_request(MaterialPaintLayer &layer);
 
-/**
- * Start (or restart) the partial-update subscription over the maps \a layer's bake depends on.
- * Called when a bake is written, so pixel edits to those maps are noticed by
- * #BKE_paint_layers_bake_notice_changes.
- */
-void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer);
-
-/** Drain \a ma's subscriptions; a pixel change marks the material stale for the planner. */
-void BKE_paint_layers_bake_notice_changes(Material &ma);
-
 /** Drop \a ma's runtime subscription state (free, copy, file load). */
 void BKE_paint_layers_bake_runtime_free(Material &ma);
 
@@ -809,35 +620,6 @@ void BKE_paint_layers_bake_runtime_free(Material &ma);
  * move, releasing the old ID would drop the re-read ID's subscription.
  */
 void BKE_paint_layers_bake_runtime_owner_transfer(Material &dst, Material &src);
-
-/**
- * The union of the pixel rectangles \a layer's source maps changed in since its last bake, as
- * \a r_region `{xmin, xmax, ymin, ymax}`, or false when nothing is pending.
- *
- * The planner uses it to re-bake only the changed tile-sized rectangle; the first bake and the
- * first check after a load are full (the subscription reports a full update).
- */
-bool BKE_paint_layers_bake_changed_region(const Material &ma,
-                                          const MaterialPaintLayer &layer,
-                                          int r_region[4]);
-
-/**
- * Bring every baked row of \a ma current, the synchronous half of the K-1 planner.
- *
- * A row whose stored hash no longer matches is re-rendered through
- * #BKE_paint_layers_bake_render_node into its service maps, stamped and subscribed. Callers run
- * this on the main thread after draining the subscription (#BKE_paint_layers_bake_notice_changes);
- * the heavy map work is meant to move to a wmJob later. \a r_changed reports whether any row was
- * re-baked, so the caller knows to rebuild the tree.
- */
-bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed = nullptr);
-
-/**
- * The generated-node weight above which an AUTO row is baked instead of evaluated live: the number
- * of nodes the row's subtree would add to the tree. One place to tune -- the planner compares a
- * row's weight against it, so a "heavy enough to be worth caching" row is one number, not a rule.
- */
-constexpr int PAINT_LAYERS_AUTO_BAKE_NODES = 24;
 
 /**
  * Whether \a layer's bake is heavy enough to leave the main thread: its subtree would add more than
@@ -865,50 +647,6 @@ bool BKE_paint_layers_bake_row_is_deferred(const Material &ma,
                                            const MaterialPaintLayer &layer);
 
 /**
- * The live constant a Material row's \a channel takes from its source right now.
- *
- * The row shows its source instead of its baked map when its bake is deferred
- * (#BKE_paint_layers_bake_row_is_deferred) -- so the user sees a slider move without a bake --
- * or when this channel has no baked map yet. The second case keeps the row's channel set from
- * depending on focus: without it, a freshly added Material row would drop out of the viewport
- * the moment the user moved off it, and the root topology would change on every focus move. A
- * channel with no map is better shown as the source's constant than not shown at all.
- *
- * Only channels the resolver calls #ChannelResolution::Constant are answered here; an Image or
- * Baked channel returns false and stays on its baked map. A row that is not deferred and already
- * has a map for the channel wins with the map.
- *
- * The generator and the CPU compositor both ask this, so the two cannot disagree about
- * what the row is showing.
- *
- * \param r_value: the source's socket default -- x for a scalar channel, xyz for a colour
- *                 one, matching #MaterialSourceResolve.constants.
- */
-bool BKE_paint_layers_material_live_constant(const Material &ma,
-                                             const MaterialPaintLayer &layer,
-                                             int channel,
-                                             float r_value[4],
-                                             const PaintLayersRegenCache *cache = nullptr);
-
-/**
- * The live map an active Material row's \a channel takes from its source right now.
- *
- * Mirrors #BKE_paint_layers_material_live_constant for #ChannelResolution::Image, under
- * the same rule: the row is deferred, or this channel has no baked map yet.
- *
- * Only a trivially mapped texture qualifies -- flat projection and nothing linked to the
- * node's Vector input. The CPU compositor samples an #ImBuf straight in UV space and
- * reproduces neither a mapping chain nor a projection, so anything else would make the two
- * sides disagree and the picture jump when the row is left.
- */
-bool BKE_paint_layers_material_live_image(const Material &ma,
-                                          const MaterialPaintLayer &layer,
-                                          int channel,
-                                          Image **r_image,
-                                          const ImageUser **r_iuser,
-                                          const PaintLayersRegenCache *cache = nullptr);
-
-/**
  * Whether any channel of \a layer is currently shown from its source rather than from a
  * baked map -- a constant or a map. The editor uses it to know that an edit to that source
  * has to reach this layered material.
@@ -927,52 +665,6 @@ enum class PaintLayerMaterialMode : int8_t {
 };
 
 /**
- * What one #BKE_paint_layers_regenerate call learns once and reuses: it lives on that call's stack
- * and is handed down, never kept between calls, so nothing outside a regeneration can read a stale
- * answer. Every reader takes it as an optional pointer; without one the answer is recomputed, which
- * is what bake, the CPU composite, RNA and the editors do.
- */
-struct PaintLayersRegenCache {
-  /**
-   * Whether #modes may be filled. The sampler-budget fallback moves rows' modes (a forced bake), so
-   * a mode cached before it is done would outlive the change; the regeneration raises this once the
-   * final forced set is known.
-   */
-  bool modes_frozen = false;
-  /** Rows' modes, filled lazily and only while #modes_frozen. */
-  mutable Map<const MaterialPaintLayer *, PaintLayerMaterialMode> modes;
-  /** #BKE_paint_layers_material_bake_ready per row: hashing the source tree is not free. */
-  mutable Map<const MaterialPaintLayer *, bool> bake_ready;
-  /** The Pass Through visibility multiplier of every row, from one walk of the stack. */
-  mutable Map<const MaterialPaintLayer *, float> pass_through_scales;
-  mutable bool pass_through_scales_valid = false;
-
-  /**
-   * The resolve of \a source, computed on first ask. A source's node tree is not written while a
-   * stack is regenerated (only the owner's is), so the answer holds for the whole call. The entry is
-   * heap-allocated, so the returned reference stays valid when later ones are added.
-   */
-  const MaterialSourceResolve &resolve(const Material *source) const;
-
-  /**
-   * #resolve through \a cache when there is one, else a fresh resolve held in \a r_local. Either way
-   * the caller reads the returned reference and never copies the resolve.
-   */
-  static const MaterialSourceResolve &resolve_get(const Material *source,
-                                                  const PaintLayersRegenCache *cache,
-                                                  MaterialSourceResolve &r_local);
-
-  /**
-   * Drop what depends on the owner's own node tree, for a caller about to rewrite it: a row that
-   * reads its owner as its source would otherwise keep the answer from before the rewrite.
-   */
-  void invalidate_for_owner(const Material &owner);
-
- private:
-  mutable Map<const Material *, std::unique_ptr<MaterialSourceResolve>> resolves_;
-};
-
-/**
  * The mode \a layer is in right now. One answer for the generator and the CPU compositor:
  * they must never disagree about what a row shows.
  *
@@ -984,22 +676,6 @@ struct PaintLayersRegenCache {
 PaintLayerMaterialMode BKE_paint_layers_material_mode(const Material &ma,
                                                       const MaterialPaintLayer &layer,
                                                       const PaintLayersRegenCache *cache = nullptr);
-
-/**
- * Whether a sampler-budget fallback pinned \a layer onto its baked maps for this session. Runtime
- * state only: it is recomputed from the budget on every regeneration, lifted as soon as the budget
- * allows, and never saved. #BKE_paint_layers_material_mode reports #PaintLayerMaterialMode::Baked
- * while this holds, which is what makes the topology hash see the mode change and rebuild once.
- */
-bool BKE_paint_layers_material_forced_bake(const Material &ma, const MaterialPaintLayer &layer);
-
-/**
- * Whether the bake of a Material row can be shown: its stored hash matches the source and none of
- * its maps is being rendered right now. The hash alone is not enough, because the hand-over stamps
- * it before the worker has written any pixel. A row that is not ready stays live, so a stale, blank
- * or half-written map is never shown; it moves to its maps once, when the last map lands.
- */
-bool BKE_paint_layers_material_bake_ready(const Material &ma, const MaterialPaintLayer &layer);
 
 /**
  * Runtime claim on a map that a bake job is rendering, keyed by the image's session UID and counted
@@ -1120,90 +796,6 @@ bool BKE_paint_layers_row_result_job_commit(PaintLayersRowResultJob &job);
 /** Free \a job and its localized copy. */
 void BKE_paint_layers_row_result_job_free(PaintLayersRowResultJob &job);
 
-/**
- * The single substitution decision the generator and the CPU compositor share: whether \a layer's
- * baked map for \a channel may stand in for its live subtree right now, and the map.
- *
- * \return true and sets \a r_image when #BKE_paint_layers_bake_is_valid holds and a baked map exists
- * for the channel. Never reads a baked map any other way, so the two sides cannot disagree.
- */
-bool BKE_paint_layers_bake_substitute(const Material &ma,
-                                      const MaterialPaintLayer &layer,
-                                      int channel,
-                                      Image **r_image);
-
-/**
- * The C-7 fallback for a Custom layer when its bake is not current.
- *
- * A Custom group has no CPU expression at all, so a render without a GPU context -- or one that
- * started before the first bake landed -- has nothing live to fall back on. When maps exist from an
- * earlier bake they are still shown, flagged stale through \a r_stale, rather than dropping the row
- * to black; when no maps exist the row is skipped (the result below passes through). Only NodeGroup
- * is covered: every other source has a live subtree the strict #BKE_paint_layers_bake_substitute
- * leaves in place.
- *
- * \return true and sets \a r_image when a color map and a coverage map exist for \a channel.
- */
-bool BKE_paint_layers_bake_substitute_custom(const Material &ma,
-                                             const MaterialPaintLayer &layer,
-                                             int channel,
-                                             Image **r_image,
-                                             bool *r_stale);
-
-/**
- * Composite \a layer's subtree for \a channel the way a bake of it would: the isolated-group model
- * (`P/a`, the same the CPU already computes for a folder), producing the node's straight scene-
- * linear colour and its grey coverage.
- *
- * \a r_color_rgba is `size * size * 4` floats, \a r_coverage_gray `size * size`. The node's own maps
- * are composited at their resolution and nearest-sampled to \a size. The bake planner and the
- * generator's substitution read this one function's result, so a baked map means one thing.
- *
- * \param dst_rect: when given, only this `{x0, y0, x1, y1}` rectangle of the `size`-square result
- *                  is computed and written; the caller passes it for a partial re-bake so the
- *                  compute follows the changed tile instead of the whole map. The rest of the
- *                  outputs is left untouched. The rectangle is clamped to `size`.
- *
- * \return false when \a layer is not in \a ma, does not take part in \a channel, or the composite
- * fails.
- */
-bool BKE_paint_layers_bake_render_node(const Material &ma,
-                                       const MaterialPaintLayer &layer,
-                                       int channel,
-                                       int size,
-                                       float *r_color_rgba,
-                                       float *r_coverage_gray,
-                                       const int *dst_rect = nullptr);
-
-/** The pixel dimensions of \a layer's content in \a channel, the size a bake defaults to. */
-bool BKE_paint_layers_row_dimensions(const Material &ma,
-                                     const MaterialPaintLayer &layer,
-                                     int channel,
-                                     int &r_width,
-                                     int &r_height);
-
-/**
- * Render \a row's result in \a channel -- the same content a bake of it stores, through
- * #BKE_paint_layers_bake_render_node -- into \a dst, which must already be \a size square and carry
- * the channel's colorspace. Used by the "Use Row Result" operator to copy one row's content into
- * another row's channel map.
- */
-bool BKE_paint_layers_bake_row_to_image(const Material &ma,
-                                        const MaterialPaintLayer &row,
-                                        int channel,
-                                        int size,
-                                        Image &dst);
-
-/**
- * Whether a value edit or a pixel change left some row of \a ma waiting to be re-baked.
- *
- * A scheduler signal only ("something in this material changed"), never the per-row answer: which
- * row is stale is #BKE_paint_layers_bake_is_valid's question.
- */
-bool BKE_paint_layers_bake_stale_get(const Material &ma);
-/** Clear \a ma's pending-bake mark; the planner calls this once the queue is drained. */
-void BKE_paint_layers_bake_stale_clear(Material &ma);
-
 /** Whether \a ma has a Material row left behind by the active row moving. */
 bool BKE_paint_layers_material_bake_due_get(const Material &ma);
 /** Clear \a ma's due mark; the editor planner calls this once it has run. */
@@ -1270,25 +862,8 @@ PaintLayersBakeGateAction BKE_paint_layers_bake_gate_decide(bool stale,
                                                              bool is_invoke,
                                                              bool headless);
 
-/**
- * Allocate \a layer's bake cache if it has none and return it, without marking anything: the caller
- * owns the edit (mode, size, a baked map) and tags the description itself.
- */
-MaterialPaintLayerBake *BKE_paint_layers_bake_struct_ensure(MaterialPaintLayer &layer);
-
 /** Drop \a layer's bake cache and mark the generated tree stale. */
 bool BKE_paint_layers_bake_clear(Material &ma, MaterialPaintLayer &layer);
-
-/**
- * Point \a layer's baked map for \a channel at \a image (negative \a channel is its coverage map),
- * maintaining the image's user count. The caller -- a material bake handing over its result, or the
- * synchronous planner -- owns \a image. Marks the tree stale; the bake hash is only settled by
- * #BKE_paint_layers_bake_finalize once every map of the row is in place.
- */
-bool BKE_paint_layers_bake_set_map(Material &ma,
-                                   MaterialPaintLayer &layer,
-                                   int channel,
-                                   Image *image);
 
 /**
  * Stamp \a layer's bake hash from its description and start the partial-update subscription, after
@@ -1366,6 +941,12 @@ void BKE_paint_layers_bake_hash(const Material &ma,
  */
 bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer &layer);
 
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Custom layer helpers and remaining edits
+ * \{ */
+
 /** Set whether \a layer takes part in the stack. */
 bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool enabled);
 
@@ -1402,6 +983,8 @@ bool BKE_paint_layers_custom_channel_add(Main &bmain,
                                          Material &ma,
                                          MaterialPaintLayer &layer,
                                          eMaterialPaintChannel channel);
+
+/** \} */
 
 }  // namespace blender
 

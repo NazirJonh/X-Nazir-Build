@@ -2239,6 +2239,8 @@ int search_items_find_index(const SearchItems *items, const char *name);
  */
 void button_hint_drawstr_set(Button *but, const char *string);
 void button_icon_scale_set(Button *but, float scale);
+/** Scale the button's text, 1.0 is the style's own size. */
+void button_text_scale_set(Button *but, float scale);
 void button_icon_indicator_number_set(Button *but, const int indicator_number);
 void button_icon_indicator_set(Button *but, const char *string);
 void button_icon_indicator_color_set(Button *but, const uchar color[4]);

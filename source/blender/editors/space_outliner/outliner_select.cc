@@ -6,6 +6,7 @@
  * \ingroup spoutliner
  */
 
+#include <cstdio>
 #include <cstdlib>
 
 #include "DNA_armature_types.h"
@@ -100,6 +101,13 @@ static bool outliner_stack_preview_section_from_cursor(const SpaceOutliner &spac
   for (const int slot_index : row->preview_slots.index_range()) {
     const rctf preview_rect = outliner_stack_row_preview_rect(
         *row, float(te.xs), float(te.ys), slot_index);
+    // TODO(debug): remove
+    printf("[STACK_DBG] preview_section slot=%d rect_x=[%.1f,%.1f] view_x=%.1f section='%s'\n",
+           slot_index,
+           preview_rect.xmin,
+           preview_rect.xmax,
+           view_x,
+           row->preview_slots[slot_index].section_id.c_str());
     if (view_x < preview_rect.xmin || view_x > preview_rect.xmax) {
       continue;
     }
@@ -1945,10 +1953,21 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
 
   ui::view2d_region_to_view(&region->v2d, mval[0], mval[1], &view_mval[0], &view_mval[1]);
 
+  // TODO(debug): remove
+  printf("[STACK_DBG] item_activate enter mval=(%d,%d) view=(%.1f,%.1f)\n",
+         mval[0],
+         mval[1],
+         view_mval[0],
+         view_mval[1]);
+
   if (outliner_is_co_within_restrict_columns(space_outliner, region, view_mval[0])) {
+    // TODO(debug): remove
+    printf("[STACK_DBG] early: within restrict columns\n");
     return OPERATOR_CANCELLED;
   }
   if (outliner_is_co_within_active_mode_column(C, space_outliner, view_mval)) {
+    // TODO(debug): remove
+    printf("[STACK_DBG] early: within active mode column\n");
     return OPERATOR_CANCELLED;
   }
 
@@ -1984,6 +2003,21 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
     }
 
     TreeStoreElem *activate_tselem = TREESTORE(activate_te);
+
+    // TODO(debug): remove
+    printf("[STACK_DBG] click view=(%.1f,%.1f) te=%p activate_te=%p type=%d nr=%d "
+           "outlinevis=%d view=%d recurse=%d extend=%d range=%d\n",
+           view_mval[0],
+           view_mval[1],
+           static_cast<void *>(te),
+           static_cast<void *>(activate_te),
+           int(activate_tselem->type),
+           int(activate_tselem->nr),
+           int(space_outliner->outlinevis),
+           int(space_outliner->stack_layers_view),
+           int(recurse),
+           int(extend),
+           int(use_range));
 
     if (space_outliner->outlinevis == SO_STACK_LAYERS) {
       if (space_outliner->stack_layers_view == SO_SL_VIEW_OBJECTS &&
@@ -2093,6 +2127,39 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
       /* Only switch properties editor tabs when icons are selected. */
       if (is_over_icon) {
         outliner_set_properties_tab(C, activate_te, activate_tselem);
+      }
+
+      if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+          activate_tselem->type == TSE_STACK_LAYER && activate_tselem->id != nullptr)
+      {
+        /* The clicked row's selection has just landed in the tree store; write it into the
+         * identity-keyed state the rebuild restores from, before a section switch triggers that
+         * rebuild. Without this the rebuild would re-apply the previous selection. */
+        outliner_stack_row_ui_state_capture_now(*space_outliner, *activate_tselem->id);
+        // TODO(debug): remove
+        char dbg_stable[UUID_STRING_SIZE];
+        BLI_uuid_format(dbg_stable,
+                        outliner_stack_identity_of(*space_outliner, int(activate_tselem->nr)).row_id);
+        printf("[STACK_DBG] ui_state write stable=%.8s active=%d selected=%d\n",
+               dbg_stable,
+               int((activate_tselem->flag & TSE_ACTIVE) != 0),
+               int((activate_tselem->flag & TSE_SELECTED) != 0));
+      }
+
+      if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+        const StackReadContext dbg_ctx = {
+            CTX_data_main(C), CTX_data_scene(C), CTX_data_view_layer(C)};
+        const bool dbg_row_active = outliner_stack_row_is_active(
+            dbg_ctx, *space_outliner, int(activate_tselem->nr));
+        // TODO(debug): remove
+        printf(
+            "[STACK_DBG] post-click ordinal=%d row_is_active=%d TSE_ACTIVE=%d TSE_SELECTED=%d "
+            "rebuild=%d\n",
+            int(activate_tselem->nr),
+            int(dbg_row_active),
+            int((activate_tselem->flag & TSE_ACTIVE) != 0),
+            int((activate_tselem->flag & TSE_SELECTED) != 0),
+            int(rebuild_tree));
       }
     }
 

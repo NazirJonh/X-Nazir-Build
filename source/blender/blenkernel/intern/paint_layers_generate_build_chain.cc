@@ -174,7 +174,6 @@ ChainResult PaintLayersChainBuilder::build_list(
     }
     Image *baked_color = nullptr;
     const bool substituted = row_channel_substituted(ma, *layer, channel, &baked_color);
-    const bool is_folder = BKE_paint_layers_is_folder(*layer);
 
     RowTarget row_target = parent_target;
     row_target.location_x = location_x;
@@ -204,8 +203,6 @@ ChainResult PaintLayersChainBuilder::build_list(
       continue;
     }
     ChainLayer current = row.current;
-    bNode *folder_coverage_node = row.folder_coverage_node;
-    bNodeSocket *folder_coverage = row.folder_coverage;
     if (row.grouped) {
       /* The parent chains the group through its instance: Color and Coverage are the row's
        * straight result, while Below/Blend/Result are the instance's own sockets. */
@@ -1466,10 +1463,10 @@ void PaintLayersChainBuilder::build_row_factor_chain(const MaterialPaintLayer *l
   }
 
   /* Mask items are a coverage stack over the row factor: each item lays its own coverage
-   * `F = F_below * (1 - A * op) + C * op`, where `C` is the mean of the map's raw Color (a
-   * Non-Color map reads un-premultiplied, so this is the pre-multiplied color) and `A` its
-   * Alpha, and `op` the row's own opacity. MULTIPLY lays `F * C` instead. Later list entries
-   * lay over earlier ones. Every other blend mode reads as MIX; the opacity is row-level, not
+   * `F = mix(F_below, blend(F_below, C), A * op)` by its own blend mode (`#build_mask_item`), where
+   * `C` is the mean of the map's raw Color (a Non-Color map reads un-premultiplied, so this is the
+   * pre-multiplied color) and `A` its Alpha, and `op` the row's own opacity. Mix is the plain over
+   * the chain always used. Later list entries lay over earlier ones; the opacity is row-level, not
    * per channel. */
   build_mask_item(layer,
                   channel,

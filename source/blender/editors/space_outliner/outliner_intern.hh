@@ -676,6 +676,14 @@ void outliner_stack_rows_invalidate(SpaceOutliner &space_outliner);
  */
 void outliner_stack_row_ui_state_sync(SpaceOutliner &space_outliner, const ID &owner);
 /**
+ * Read the tree store's per-row state into #SpaceOutliner_Runtime::stack_row_ui_state without the
+ * guards #outliner_stack_row_ui_state_sync applies.
+ *
+ * The click handler calls this right after the generic selection so the state an edit is about to
+ * rebuild from already names the clicked row, even when the rows were re-read under it.
+ */
+void outliner_stack_row_ui_state_capture_now(SpaceOutliner &space_outliner, const ID &owner);
+/**
  * Drop the #stack_row_ui_state entries seen at neither of the last two builds -- a row removed
  * from the stack has nobody left to remember.
  *
@@ -921,6 +929,7 @@ void OUTLINER_OT_stack_layers_back(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_pin_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
 void OUTLINER_OT_stack_preview_section_activate(wmOperatorType *ot);
+void OUTLINER_OT_stack_column_popup(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_clear_target(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_copy(wmOperatorType *ot);

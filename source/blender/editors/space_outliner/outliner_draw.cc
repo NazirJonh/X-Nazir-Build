@@ -6,6 +6,10 @@
  * \ingroup spoutliner
  */
 
+#include <climits>
+#include <cstdio>
+#include <cstring>
+
 #include "MEM_guardedalloc.h"
 
 #include "DNA_armature_types.h"
@@ -91,6 +95,7 @@
 #include "UI_view2d.hh"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
 
 #include "outliner_intern.hh"
 #include "outliner_stack_source.hh"
@@ -110,6 +115,27 @@ namespace ed::outliner {
  * How far outside the preview its frame sits, in pixels before the interface scale.
  */
 static constexpr float OUTLINER_STACK_PREVIEW_FRAME_MARGIN = 2.0f;
+
+/**
+ * How much the text of a compact row's column label and of the value/mode buttons is shrunk, so
+ * they read in the single unit tall row they share with the rest of the tree.
+ */
+static constexpr float OUTLINER_STACK_COLUMN_TEXT_SCALE = 0.84f;
+
+/** Width of the value/mode popup, in UI units. */
+static constexpr float OUTLINER_STACK_COLUMN_POPUP_WIDTH = 7.0f;
+
+/**
+ * Vertical breathing room kept above and below a column button, so buttons of neighbouring rows do
+ * not touch the text around them. In pixels before the interface scale.
+ */
+static constexpr float OUTLINER_STACK_COLUMN_BUTTON_PAD_Y = 1.0f;
+
+/**
+ * Height of each of the two stacked value/mode buttons in a Large row, in UI units. The row is two
+ * units tall, so at this size each button has room above and below its text.
+ */
+static constexpr float OUTLINER_STACK_COLUMN_STACKED_BUTTON_HEIGHT = 0.86f;
 
 /**
  * The empty-texture placeholder: the texture icon at preview size with a faint frame, standing
@@ -175,6 +201,23 @@ static void stack_preview_color_draw(const rctf &preview_rect,
   draw_roundbox_corner_set(ui::CNR_ALL);
   ui::draw_roundbox_aa(&frame, false, UI_UNIT_Y / 5.0f, swatch_border);
   GPU_blend(GPU_BLEND_ALPHA); /* Round-box disables. */
+}
+
+/**
+ * Width a Stack Layers row's preview slots occupy, from the row's own icon ahead of the first slot
+ * to the frame around the last. The draw advances its content by it, and the rename field starts
+ * after it, so both read one number rather than rebuilding the sum from the slots by hand.
+ *
+ * `leading_icon` is true for a row that keeps its own icon ahead of the slots -- a folder with a
+ * mask. `num_previews` may be zero for a row that only reserves a placeholder slot.
+ */
+static float outliner_stack_preview_row_width(const bool leading_icon, const int num_previews)
+{
+  const int slots = std::max(1, num_previews);
+  const float leading_icon_width = leading_icon ? UI_UNIT_X + 4.0f * (UI_UNIT_X / 20.0f) : 0.0f;
+  const float preview_gap = UI_UNIT_X * 0.25f;
+  return leading_icon_width + slots * outliner_stack_preview_size() + (slots - 1) * preview_gap +
+         2.0f * OUTLINER_STACK_PREVIEW_FRAME_MARGIN * UI_SCALE_FAC;
 }
 
 /* -------------------------------------------------------------------- */
@@ -2506,8 +2549,8 @@ static void outliner_draw_stack_preview_tooltips(ui::Block *block,
 
     if (tselem->type == TSE_STACK_LAYER) {
       const StackRow *row = outliner_stack_row_find(*space_outliner, tselem->nr);
-      if (row == nullptr) {
-        return; /* No row data. */
+      if (row == nullptr || row->compact) {
+        return; /* No row data, or a compact row that draws no preview to hover. */
       }
       for (const int slot_index : row->preview_slots.index_range()) {
         const StackRowPreview &slot = row->preview_slots[slot_index];
@@ -2589,7 +2632,203 @@ static void stack_column_dim(ui::Button *button)
   button_color_set(button, dim);
 }
 
-static void outliner_draw_stack_columns(ui::Block *block,
+/**
+ * The popup a compact row's column label opens: the row's value slider and its blend mode.
+ *
+ * The argument is a copy -- the RNA pointers and property names -- not the row it came from, which
+ * a rebuild may replace while the popup is open.
+ */
+struct StackColumnValueMenuArgs {
+  PointerRNA value_ptr;
+  PointerRNA mode_ptr;
+  char value_prop[64];
+  char mode_prop[64];
+};
+
+/** The value of \a prop as the "NN%" text a compact row's label shows. */
+static void stack_column_value_label(PointerRNA &ptr, PropertyRNA *prop, char r_label[32])
+{
+  const float value = RNA_property_float_get(&ptr, prop);
+  const float percent = (RNA_property_subtype(prop) == PROP_PERCENTAGE) ? value :
+                                                                          value * 100.0f;
+  BLI_snprintf(r_label, 32, "%d%%", int(percent + 0.5f));
+}
+
+/**
+ * The compact row's one label: "NN%" and the first three letters of the mode name, whichever of
+ * the two the row carries.
+ */
+static void stack_column_compact_label(bContext *C,
+                                       const StackColumnValueMenuArgs &args,
+                                       char r_label[64])
+{
+  char value_part[24] = "";
+  char mode_part[24] = "";
+  if (args.value_prop[0] != '\0') {
+    PointerRNA ptr = args.value_ptr;
+    PropertyRNA *prop = RNA_struct_find_property(&ptr, args.value_prop);
+    if (prop != nullptr && RNA_property_type(prop) == PROP_FLOAT) {
+      stack_column_value_label(ptr, prop, value_part);
+    }
+  }
+  if (args.mode_prop[0] != '\0') {
+    PointerRNA ptr = args.mode_ptr;
+    PropertyRNA *prop = RNA_struct_find_property(&ptr, args.mode_prop);
+    const char *name = nullptr;
+    if (prop != nullptr && RNA_property_type(prop) == PROP_ENUM) {
+      RNA_property_enum_name_gettexted(C, &ptr, prop, RNA_property_enum_get(&ptr, prop), &name);
+    }
+    if (name != nullptr) {
+      const int byte_len = BLI_str_utf8_offset_from_index(name, strlen(name), 3);
+      BLI_strncpy(mode_part, name, size_t(byte_len) + 1);
+    }
+  }
+  if (value_part[0] != '\0' && mode_part[0] != '\0') {
+    BLI_snprintf(r_label, 64, "%s %s", value_part, mode_part);
+  }
+  else if (value_part[0] != '\0') {
+    BLI_strncpy(r_label, value_part, 64);
+  }
+  else {
+    BLI_strncpy(r_label, mode_part, 64);
+  }
+}
+
+/**
+ * The popup block: a full-size integer-percent value slider and every mode as its own row.
+ *
+ * Unlike a menu, the popup stays open while the pointer is over it, so the value and the mode can
+ * both be changed in one visit; it closes on mouse-leave or Escape.
+ */
+static ui::Block *stack_column_value_menu(bContext *C, ARegion *region, void *arg)
+{
+  StackColumnValueMenuArgs *args = static_cast<StackColumnValueMenuArgs *>(arg);
+  ui::Block *block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
+  block_theme_style_set(block, ui::BLOCK_THEME_STYLE_POPUP);
+  block_flag_enable(block, ui::BLOCK_KEEP_OPEN | ui::BLOCK_MOVEMOUSE_QUIT);
+  const int width = int(OUTLINER_STACK_COLUMN_POPUP_WIDTH * UI_UNIT_X);
+  const int height = int(UI_UNIT_Y);
+  int y = 0;
+  if (args->value_prop[0] != '\0') {
+    PointerRNA ptr = args->value_ptr;
+    PropertyRNA *prop = RNA_struct_find_property(&ptr, args->value_prop);
+    if (prop != nullptr) {
+      ui::Button *but = uiDefAutoButR(
+          block, &ptr, prop, -1, "", ICON_NONE, 0, y, width, height, ui::ButtonType::NumSlider);
+      if (but != nullptr) {
+        /* Whole percent, as the row's label reads. */
+        button_number_slider_precision_set(but, 0);
+      }
+    }
+    y -= height;
+  }
+  if (args->mode_prop[0] != '\0') {
+    PointerRNA ptr = args->mode_ptr;
+    PropertyRNA *prop = RNA_struct_find_property(&ptr, args->mode_prop);
+    if (prop != nullptr) {
+      /* Every mode on its own menu-style row with a radio mark, as the Category Tab context menu's
+       * Display Mode choices: the current one reads as the filled radio. */
+      const int current = RNA_property_enum_get(&ptr, prop);
+      const EnumPropertyItem *items = nullptr;
+      bool free = false;
+      RNA_property_enum_items_gettexted(C, &ptr, prop, &items, nullptr, &free);
+      y -= int(0.4f * UI_UNIT_Y);
+      const ui::EmbossType prev_emboss = block_emboss_get(block);
+      block_emboss_set(block, ui::EmbossType::Pulldown);
+      for (const EnumPropertyItem *item = items; item->identifier; item++) {
+        if (item->identifier[0] == '\0') {
+          continue;
+        }
+        ui::Button *but = uiDefIconTextButR_prop(
+            block,
+            ui::ButtonType::Row,
+            (item->value == current) ? ICON_RADIOBUT_ON : ICON_RADIOBUT_OFF,
+            item->name,
+            0,
+            y,
+            width,
+            height,
+            &ptr,
+            prop,
+            -1,
+            0,
+            item->value,
+            std::nullopt);
+        if (but != nullptr) {
+          /* Left-align like a menu entry, set here rather than relying on the block flag that is
+           * applied later, so the alignment is the same on the first draw and any refresh. */
+          button_drawflag_enable(but, ui::BUT_TEXT_LEFT | ui::BUT_ICON_LEFT);
+          /* A pick settles the mode, so the popup closes right away, like a menu. */
+          ui::button_func_set(but, [but](bContext & /*C*/) {
+            ui::popup_menu_close_from_but(but);
+          });
+        }
+        y -= height;
+      }
+      block_emboss_set(block, prev_emboss);
+      if (free) {
+        MEM_delete(items);
+      }
+    }
+  }
+  block_bounds_set_popup(block, int(0.3f * UI_UNIT_Y), nullptr);
+  return block;
+}
+
+/**
+ * Open the column popup at the cursor for the clicked row.
+ *
+ * The row's value/mode RNA pointers are read here, when the operator runs, rather than carried on
+ * the button: the rows are rebuilt every draw, so a button only names its ordinal.
+ */
+static wmOperatorStatus stack_column_popup_invoke(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent * /*event*/)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (owner == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  outliner_stack_rows_ensure(ctx, *space_outliner, *owner);
+  const StackRow *row = outliner_stack_row_find(*space_outliner, RNA_int_get(op->ptr, "ordinal"));
+  if (row == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  StackColumnValueMenuArgs *args = MEM_new<StackColumnValueMenuArgs>(__func__);
+  args->value_prop[0] = '\0';
+  args->mode_prop[0] = '\0';
+  if (row->value_ptr && row->value_prop != nullptr) {
+    args->value_ptr = *row->value_ptr;
+    STRNCPY(args->value_prop, row->value_prop);
+  }
+  if (row->mode_ptr && row->mode_prop != nullptr) {
+    args->mode_ptr = *row->mode_ptr;
+    STRNCPY(args->mode_prop, row->mode_prop);
+  }
+  ui::popup_block_invoke_ex(
+      C, stack_column_value_menu, args, ui::but_func_argN_free<StackColumnValueMenuArgs>, false);
+  return OPERATOR_FINISHED;
+}
+
+void OUTLINER_OT_stack_column_popup(wmOperatorType *ot)
+{
+  ot->name = "Edit Stack Column";
+  ot->idname = "OUTLINER_OT_stack_column_popup";
+  ot->description = "Edit the Stack Layer row's value and mode in a popup";
+  ot->invoke = stack_column_popup_invoke;
+  ot->poll = ED_operator_outliner_active;
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_int(ot->srna, "ordinal", 0, 0, SHRT_MAX, "Ordinal", "", 0, SHRT_MAX);
+}
+
+static void outliner_draw_stack_columns(bContext *C,
+                                        ui::Block *block,
                                         ARegion *region,
                                         SpaceOutliner *space_outliner,
                                         const TreeViewContext &tvc)
@@ -2614,9 +2853,10 @@ static void outliner_draw_stack_columns(ui::Block *block,
   /* With Large rows on, the mode and the value stack in one column instead of sitting side by
    * side: the row is two units tall, room enough for one full-height button above the other. Only
    * one of the two is ever visible there, so the column -- and the buttons in it -- are only as
-   * wide as the wider of the two, not both added together. */
-  const bool stacked = show_value && show_mode &&
-                       (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
+   * wide as the wider of the two, not both added together. A compact row is one unit tall and
+   * never stacks; that is decided per row, below. */
+  const bool stacked_layout = show_value && show_mode &&
+                              (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
 
   /* The margin from the right edge is part of that width; see #outliner_right_columns_width.
    * Column widths come in UI units and may be fractional, so they stay floats until the button
@@ -2637,32 +2877,82 @@ static void outliner_draw_stack_columns(ui::Block *block,
     if (row == nullptr || !row->supported) {
       return;
     }
+    const bool stacked = stacked_layout && !row->compact;
 
     /* Full #UI_UNIT_Y tall and centered on the row's single content line normally; stacked, each
      * shrinks a little instead of filling its half of the tall row edge to edge, so the pair reads
      * as one compact control rather than two stretched widgets touching in the middle. `te->ys` is
      * the row's own bottom, written by the tree pass that ran before this one. */
-    const int button_height = stacked ? int(UI_UNIT_Y * 0.5f) : int(UI_UNIT_Y);
+    const int button_height = stacked ? int(UI_UNIT_Y * OUTLINER_STACK_COLUMN_STACKED_BUTTON_HEIGHT) :
+                                        int(UI_UNIT_Y);
+    const int button_pad_y = int(OUTLINER_STACK_COLUMN_BUTTON_PAD_Y * UI_SCALE_FAC);
     int mode_y, value_y;
     if (stacked) {
       const int row_height = outliner_tree_element_height(*space_outliner, *te);
-      const int gap = int(4.0f * UI_SCALE_FAC);
+      const int gap = int(3.2f * UI_SCALE_FAC);
       const int margin = (row_height - 2 * button_height - gap) / 2;
       mode_y = te->ys + row_height - margin - button_height;
       value_y = te->ys + margin;
     }
     else {
-      mode_y = stack_row_content_y(*space_outliner, *te);
+      mode_y = stack_row_content_y(*space_outliner, *te) + button_pad_y;
       value_y = mode_y;
     }
     /* Side by side, value keeps its usual place on the left of mode; stacked, both sit in the same
-     * single column and each fills the combined width the column was reserved with -- the reserved
-     * width and the button width have to agree, or the column looks wider than the buttons that
-     * sit in it. */
+     * single column and each fills the combined width the column was reserved with. A compact row
+     * is one unit tall: it shows one label in that same column -- the stacked column's width when
+     * the rows stack, both columns' width otherwise -- and opens its controls in a popup. */
     const float value_x = column_x;
     const float mode_x = stacked ? column_x : column_x + value_width;
     const float this_value_width = stacked ? stacked_width : value_width;
     const float this_mode_width = stacked ? stacked_width : mode_width;
+    const int this_button_height = row->compact ? int(UI_UNIT_Y) - 1 - 2 * button_pad_y :
+                                   stacked        ? button_height :
+                                                    button_height - 2 * button_pad_y;
+    const float compact_label_width = stacked_layout ? max_ff(value_width, mode_width) :
+                                                       (value_width + mode_width);
+
+    if (row->compact && !stacked) {
+      /* One label for the row's columns; its button opens #OUTLINER_OT_stack_column_popup, which
+       * reads the row's value/mode RNA when it runs -- the rows are rebuilt every draw. */
+      StackColumnValueMenuArgs label_args;
+      label_args.value_prop[0] = '\0';
+      label_args.mode_prop[0] = '\0';
+      if (show_value && row->value_ptr && row->value_prop != nullptr) {
+        label_args.value_ptr = *row->value_ptr;
+        STRNCPY(label_args.value_prop, row->value_prop);
+      }
+      if (show_mode && row->mode_ptr && row->mode_prop != nullptr) {
+        label_args.mode_ptr = *row->mode_ptr;
+        STRNCPY(label_args.mode_prop, row->mode_prop);
+      }
+      char label[64];
+      stack_column_compact_label(C, label_args, label);
+      const ui::EmbossType prev_emboss = block_emboss_get(block);
+      block_emboss_set(block, ui::EmbossType::None);
+      ui::Button *button = uiDefButO(block,
+                                     ui::ButtonType::But,
+                                     "OUTLINER_OT_stack_column_popup",
+                                     wm::OpCallContext::InvokeDefault,
+                                     label,
+                                     int(column_x),
+                                     value_y,
+                                     int(compact_label_width),
+                                     this_button_height,
+                                     std::nullopt);
+      block_emboss_set(block, prev_emboss);
+      if (button != nullptr) {
+        ui::button_text_scale_set(button, OUTLINER_STACK_COLUMN_TEXT_SCALE);
+        RNA_int_set(ui::button_operator_ptr_ensure(button), "ordinal", tselem->nr);
+        if (row->value_inherited || row->mode_inherited) {
+          stack_column_dim(button);
+        }
+        if (!editable) {
+          button_disable(button, disabled_hint);
+        }
+      }
+      return;
+    }
 
     if (show_value) {
       ui::Button *button = nullptr;
@@ -2679,7 +2969,16 @@ static void outliner_draw_stack_columns(ui::Block *block,
                                  int(value_x),
                                  value_y,
                                  int(this_value_width),
-                                 button_height);
+                                 this_button_height);
+          /* Whole percent, as the row's label and the popup slider read. */
+          if (button != nullptr &&
+              ELEM(RNA_property_subtype(prop), PROP_FACTOR, PROP_PERCENTAGE))
+          {
+            button_number_slider_precision_set(button, 0);
+          }
+          if (button != nullptr) {
+            ui::button_text_scale_set(button, OUTLINER_STACK_COLUMN_TEXT_SCALE);
+          }
         }
       }
       if (button != nullptr && row->value_inherited) {
@@ -2705,8 +3004,11 @@ static void outliner_draw_stack_columns(ui::Block *block,
                                  int(mode_x),
                                  mode_y,
                                  int(this_mode_width),
-                                 button_height);
+                                 this_button_height);
         }
+      }
+      if (button != nullptr) {
+        ui::button_text_scale_set(button, OUTLINER_STACK_COLUMN_TEXT_SCALE);
       }
       if (button != nullptr && row->mode_inherited) {
         stack_column_dim(button);
@@ -2843,6 +3145,25 @@ static void outliner_buttons(const bContext *C,
   }
 
   spx = te->xs + 1.8f * UI_UNIT_X;
+  /* A large Stack Layers row spends its icon column on previews, which reach further right than
+   * the unit icon the plain 1.8 offset assumes, so the rename field would sit on top of them.
+   * Start the field where the draw started the name: past the disclosure arrow and the slots,
+   * with the same width the draw advanced by (see #outliner_stack_preview_row_width). A folder
+   * with no slots keeps its unit icon and the plain offset. */
+  if (tselem->type == TSE_STACK_LAYER &&
+      (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) != 0)
+  {
+    const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
+    if (row != nullptr && !row->compact &&
+        (!row->preview_slots.is_empty() || !row->can_hold_children))
+    {
+      const bool leading_icon = !row->preview_slots.is_empty() &&
+                                row->preview_slots[0].keeps_row_icon;
+      spx = te->xs + UI_UNIT_X +
+            int(outliner_stack_preview_row_width(leading_icon, int(row->preview_slots.size())) +
+                2.0f * (UI_UNIT_X / 20.0f));
+    }
+  }
   dx = region->v2d.cur.xmax - (spx + restrict_column_width + 0.2f * UI_UNIT_X);
   /* A tall Stack Layers row keeps its content centered rather than at its bottom edge, which is
    * what `te->ys` is; the field has to sit on the name it replaces. */
@@ -4213,6 +4534,31 @@ static void outliner_draw_tree_element(ui::Block *block,
           active = OL_DRAWSEL_ACTIVE;
         }
       }
+      if (tselem->type == TSE_STACK_LAYER) {
+        const StackReadContext dbg_ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
+        const bool dbg_row_active = outliner_stack_row_is_active(
+            dbg_ctx, *space_outliner, tselem->nr);
+        const bool dbg_tse_active = (tselem->flag & TSE_ACTIVE) != 0;
+        // TODO(debug): remove
+        static int dbg_last_nr = -32768;
+        static bool dbg_last_row_active = false;
+        static bool dbg_last_tse_active = false;
+        if ((dbg_row_active || dbg_tse_active) &&
+            (dbg_last_nr != int(tselem->nr) || dbg_last_row_active != dbg_row_active ||
+             dbg_last_tse_active != dbg_tse_active))
+        {
+          printf(
+              "[STACK_DBG] draw active ordinal=%d row_is_active=%d TSE_ACTIVE=%d "
+              "tree_has_active=%d\n",
+              int(tselem->nr),
+              int(dbg_row_active),
+              int(dbg_tse_active),
+              int(stack_tree_has_active));
+          dbg_last_nr = int(tselem->nr);
+          dbg_last_row_active = dbg_row_active;
+          dbg_last_tse_active = dbg_tse_active;
+        }
+      }
       if (active != OL_DRAWSEL_NONE) {
         ui::theme::get_color_3ubv(TH_TEXT_HI, text_color);
         text_color[3] = 255;
@@ -4280,6 +4626,12 @@ static void outliner_draw_tree_element(ui::Block *block,
     /* Data-type icon. A stack layer row with a preview available shows that instead, filling
      * more of its two-unit-tall row than a unit icon would. */
     const bool stack_big_rows = (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
+    /* A row the source marked compact keeps the unit icon and the usual height even with Large
+     * rows on, and shows no preview slots. */
+    const StackRow *stack_row = (tselem->type == TSE_STACK_LAYER) ?
+                                    outliner_stack_row_find(*space_outliner, tselem->nr) :
+                                    nullptr;
+    const bool stack_row_compact = stack_row != nullptr && stack_row->compact;
     /* Whether to draw the empty texture icon instead of preview. */
     bool draw_empty_texture = false;
     /* A group holds no map of its own: its slot is the folder icon's, and the empty texture icon
@@ -4288,8 +4640,8 @@ static void outliner_draw_tree_element(ui::Block *block,
     int preview_slots_drawn = 0;
     bool icon_drawn = false;
     bool preview_drawn = false;
-    if (tselem->type == TSE_STACK_LAYER && stack_big_rows) {
-      const StackRow *row = outliner_stack_row_find(*space_outliner, tselem->nr);
+    if (tselem->type == TSE_STACK_LAYER && stack_big_rows && !stack_row_compact) {
+      const StackRow *row = stack_row;
       if (row == nullptr) {
         /* The row is gone from the model; the placeholder icon below stands in for it. */
       }
@@ -4318,8 +4670,28 @@ static void outliner_draw_tree_element(ui::Block *block,
           const float alpha = (tselem->flag & TSE_HIGHLIGHTED_ICON) ? alpha_fac + 0.5f : alpha_fac;
           if (slot.is_color_swatch) {
             /* A row that is a colour shows the colour: no thumbnail to fetch, no icon that says
-             * more than the swatch does. */
-            stack_preview_color_draw(preview_rect, slot.color, alpha);
+             * more than the swatch does. Drawn opaque whatever the row state or hover, so the
+             * swatch reports the fill's actual colour rather than the row's shading. */
+            stack_preview_color_draw(preview_rect, slot.color, 1.0f);
+            if (slot.icon != 0) {
+              /* The source also wants a glyph on top of the colour -- a Fill's bucket. Contrast it
+               * against the fill so it reads on any colour: a light fill takes a dark glyph. */
+              const float luma = 0.2126f * slot.color[0] + 0.7152f * slot.color[1] +
+                                 0.0722f * slot.color[2];
+              const uchar glyph_color = (luma > 0.5f) ? 0 : 255;
+              const uchar mono[4] = {glyph_color, glyph_color, glyph_color, 255};
+              ui::icon_draw_ex(preview_rect.xmin,
+                               preview_rect.ymin,
+                               slot.icon,
+                               UI_INV_SCALE_FAC,
+                               1.0f,
+                               0.0f,
+                               mono,
+                               false,
+                               nullptr,
+                               false,
+                               OUTLINER_STACK_PREVIEW_SCALE);
+            }
           }
           else if (slot.is_blank) {
             /* The data-block exists, but its thumbnail has nothing to show yet: the source says
@@ -4385,8 +4757,9 @@ static void outliner_draw_tree_element(ui::Block *block,
         !ELEM(tselem->type, TSE_RNA_PROPERTY, TSE_RNA_ARRAY_ELEM, TSE_ID_BASE) &&
         /* Stack layer rows in Large Rows mode draw a preview or an empty texture icon in place of
          * the placeholder icon -- except a group, whose folder icon stays before its mask
-         * preview. */
-        !(tselem->type == TSE_STACK_LAYER && stack_big_rows && !stack_row_is_group) &&
+         * preview, and a compact row, which keeps the placeholder icon. */
+        !(tselem->type == TSE_STACK_LAYER && stack_big_rows && !stack_row_is_group &&
+          !stack_row_compact) &&
         tselem_draw_icon(block,
                          *space_outliner,
                          xmax,
@@ -4401,15 +4774,8 @@ static void outliner_draw_tree_element(ui::Block *block,
       icon_drawn = true;
     }
     if (preview_drawn) {
-      /* Multiple previews are wider: account for all slots, gaps, and frames. */
-      const int num_previews = std::max(1, preview_slots_drawn);
-      const float preview_size = outliner_stack_preview_size();
-      const float preview_gap = UI_UNIT_X * 0.25f;
-      const float leading_icon_width = stack_row_is_group ? UI_UNIT_X + 4.0f * ufac : 0.0f;
-      const float total_width = leading_icon_width + num_previews * preview_size +
-                                (num_previews - 1) * preview_gap +
-                                2.0f * OUTLINER_STACK_PREVIEW_FRAME_MARGIN * UI_SCALE_FAC;
-      offsx += int(total_width + 2 * ufac);
+      offsx += int(outliner_stack_preview_row_width(stack_row_is_group, preview_slots_drawn) +
+                   2 * ufac);
     }
     else if (icon_drawn) {
       offsx += UI_UNIT_X + 4 * ufac;
@@ -5433,7 +5799,7 @@ void draw_outliner(const bContext *C, bool do_rebuild)
     outliner_draw_stack_row_icons(block, region, space_outliner, *C, tvc);
     outliner_draw_stack_preview_tooltips(block, region, space_outliner, tvc);
     block_emboss_set(block, ui::EmbossType::Emboss);
-    outliner_draw_stack_columns(block, region, space_outliner, tvc);
+    outliner_draw_stack_columns(const_cast<bContext *>(C), block, region, space_outliner, tvc);
     block_emboss_set(block, ui::EmbossType::NoneOrStatus);
   }
   else if (right_column_width > 0.0f) {

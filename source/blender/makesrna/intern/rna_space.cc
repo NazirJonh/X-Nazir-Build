@@ -5735,6 +5735,14 @@ static void rna_def_space_outliner(BlenderRNA *brna)
       prop, "Show Value", "Show the column that modulates each layer, such as its opacity");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 
+  prop = RNA_def_property(srna, "show_stack_layer_move_buttons", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_SHOW_MOVE_BUTTONS);
+  RNA_def_property_ui_text(prop,
+                           "Show Move Buttons",
+                           "Show the buttons that move the active Stack Layer up and down in the "
+                           "header");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
   prop = RNA_def_property(srna, "show_stack_layer_blend", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_BLEND);
   RNA_def_property_ui_text(

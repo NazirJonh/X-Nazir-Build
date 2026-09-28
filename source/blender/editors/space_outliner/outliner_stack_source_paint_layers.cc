@@ -19,6 +19,7 @@
  */
 
 #include <climits>
+#include <cstdio>
 #include <functional>
 #include <optional>
 
@@ -98,6 +99,32 @@ const Material &layers_owner(const ID &owner)
 {
   BLI_assert(GS(owner.name) == ID_MA);
   return id_cast<const Material &>(owner);
+}
+
+/**
+ * Bring \a image up in an Image Editor, turning the Outliner's own area into one when no Image
+ * Editor is open. The same landing point a channel map uses.
+ */
+bool paint_layers_image_open(bContext &C, ID *image)
+{
+  if (image == nullptr) {
+    return true;
+  }
+  ScrArea *area = outliner_image_area_find(C);
+  if (area == nullptr) {
+    area = CTX_wm_area(&C);
+    if (area == nullptr) {
+      return false;
+    }
+    BKE_report(CTX_wm_reports(&C),
+               RPT_INFO,
+               "No Image Editor was open, so this area was turned into one");
+    ED_area_newspace(&C, area, SPACE_IMAGE, false);
+  }
+  SpaceImage *space_image = static_cast<SpaceImage *>(area->spacedata.first);
+  ED_space_image_set(CTX_data_main(&C), space_image, id_cast<Image *>(image), false);
+  WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_IMAGE, space_image);
+  return true;
 }
 
 /** The channel the Stack Layers header selected, from the scene's paint settings; clamped. */
@@ -319,38 +346,20 @@ StackRowPreview paint_mask_slot_build(const bool keeps_row_icon, const bool enab
 }
 
 /**
- * The MASK section of \a layer: one sub-row per mask-stack item that carries a map.
+ * The MASK section of \a layer.
  *
- * The section exists as soon as the layer has any mask item, even a constant one with no map:
- * its presence is what lets a click switch the brush to the mask target. Mask items are scalar
- * and one map for every channel, so a map lives in the item's Base-Color channel record.
+ * The section exists as soon as the layer has any mask item, even a constant one with no map: its
+ * presence is what lets a click switch the brush to the mask target. Its content is the items
+ * themselves -- the source lists them as rows attached to this section by #append_corrections --
+ * so the section carries no sub-rows of its own. Listing each item's map here as well put a second
+ * "Mask" row beside every item.
  */
 StackContentSection paint_mask_section_build(const Material & /*ma*/,
-                                             const MaterialPaintLayer &layer)
+                                             const MaterialPaintLayer & /*layer*/)
 {
   StackContentSection section;
   section.identifier = "MASK";
   section.name = IFACE_("Mask Content");
-  for (const MaterialPaintLayer *item : BKE_paint_layers_mask_items(layer)) {
-    Image *image = nullptr;
-    for (int i = 0; i < item->channels_num; i++) {
-      if (item->channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
-        image = item->channels[i].image;
-        break;
-      }
-    }
-    if (image == nullptr) {
-      continue;
-    }
-    const bool enabled = (item->flag & MA_PAINT_LAYER_ENABLED) != 0;
-    StackSubRow sub;
-    sub.role = PAINT_LAYER_MAP_MASK;
-    sub.name = image->id.name + 2;
-    sub.id = &image->id;
-    sub.icon = paint_mask_state_icon(enabled);
-    sub.inactive = !enabled;
-    section.sub_rows.append(std::move(sub));
-  }
   return section;
 }
 
@@ -376,6 +385,9 @@ void paint_stack_rows_from_description_impl(const Material &material,
       row.value_ptr = layer_ptr;
       row.value_prop = "opacity";
       row.value_inherited = layer.opacity == 1.0f;
+      /* The item's own blend, one of the six modes the mask coverage stack reads. */
+      row.mode_ptr = layer_ptr;
+      row.mode_prop = "blend_type";
       return;
     }
     /* The Normal channel forces its own combine, so it has no blend to set: only its opacity is a
@@ -449,6 +461,15 @@ void paint_stack_rows_from_description_impl(const Material &material,
         overflow = true;
         return;
       }
+      if (role == MA_PAINT_LAYER_ROLE_MASK_ITEM &&
+          correction_ptr == BKE_paint_layers_mask_base(layer))
+      {
+        /* The base mask is drawn by the layer row's own mask slot, not as a row of its own. Its
+         * ordinal is still consumed, so the rows after it keep the numbering
+         * #paint_description_row_for_ordinal hands back. */
+        ordinal++;
+        continue;
+      }
       const bool folder = BKE_paint_layers_is_folder(correction);
       StackRow row;
       row.ordinal = int16_t(ordinal++);
@@ -464,20 +485,41 @@ void paint_stack_rows_from_description_impl(const Material &material,
       row.name_buffer = const_cast<char *>(correction.name);
       row.can_hold_children = folder;
       row.has_children = folder && !BLI_listbase_is_empty(&correction.children);
+      /* A mask item is a dense setting under its layer, not a stack member of its own: it keeps
+       * the usual row height and its plain mask icon, without preview slots. A content effect
+       * stays a full row with the previews its source calls for. */
+      row.compact = (role == MA_PAINT_LAYER_ROLE_MASK_ITEM);
       /* Same icon rule as a Layer row of the same shape (Phase 6, goal 5): a correction is not a
        * visually different kind of row just because it hangs off `effects`/`mask_stack` instead of
-       * the stack proper. */
-      row.icon = folder ? ICON_FILE_FOLDER :
+       * the stack proper. A mask item is the exception: it reads as a mask, so it carries the same
+       * state icon a masked Layer row does. */
+      row.icon = folder                                 ? ICON_FILE_FOLDER :
+                 role == MA_PAINT_LAYER_ROLE_MASK_ITEM ? paint_mask_state_icon(row.enabled) :
                  correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT ? ICON_GP_DRAW_FILL :
                                                                        ICON_IMAGE_RGB;
-      if (correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+      if (role != MA_PAINT_LAYER_ROLE_MASK_ITEM &&
+          correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT)
+      {
         StackRowPreview fill_swatch;
         fill_swatch.is_color_swatch = true;
+        /* The bucket is drawn over the colour at preview size; the row keeps no small icon. */
+        fill_swatch.icon = ICON_GP_DRAW_FILL;
         copy_v4_v4(fill_swatch.color, correction.fill_color);
         fill_swatch.label = IFACE_("Fill Color");
         row.preview_slots.append(std::move(fill_swatch));
       }
-      if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      if (role != MA_PAINT_LAYER_ROLE_MASK_ITEM &&
+          correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL)
+      {
+        if (correction.material != nullptr) {
+          /* A material correction carries no channel image of its own either, so it shows the
+           * material's preview ahead of its live-state icon, like a Material layer row. */
+          StackRowPreview material_slot;
+          material_slot.id_uid = correction.material->id.session_uid;
+          material_slot.id_type = ID_MA;
+          material_slot.is_blank = false;
+          row.preview_slots.append(std::move(material_slot));
+        }
         /* The same Live/Baking/Baked/Refused indicator a Material Layer row shows, read through the
          * same BKE answer the Source Material panel uses -- a correction's bake state is not a
          * second truth. */
@@ -540,18 +582,11 @@ void paint_stack_rows_from_description_impl(const Material &material,
           row.can_hold_children = folder;
           row.has_children = folder && !BLI_listbase_is_empty(&layer.children);
           row.enabled = (layer.flag & MA_PAINT_LAYER_ENABLED) != 0;
-          const Vector<const MaterialPaintLayer *> mask_items = BKE_paint_layers_mask_items(layer);
-          const bool has_mask = !mask_items.is_empty();
-          /* The row reads as masked while any of its items is on; a switched-off first item must
-           * not dim the icon when a lower one still applies. */
-          bool any_mask_enabled = false;
-          for (const MaterialPaintLayer *item : mask_items) {
-            if ((item->flag & MA_PAINT_LAYER_ENABLED) != 0) {
-              any_mask_enabled = true;
-              break;
-            }
-          }
-          row.mask_enabled = !has_mask || any_mask_enabled;
+          /* The row's mask slot stands for the base mask, so its presence and its on/off state
+           * come from that item, not from whichever correction happens to be enabled. */
+          const MaterialPaintLayer *mask_base = BKE_paint_layers_mask_base(layer);
+          const bool has_mask = mask_base != nullptr;
+          row.mask_enabled = !has_mask || ((mask_base->flag & MA_PAINT_LAYER_ENABLED) != 0);
           row.supported = true;
           row.name = layer.name[0] != '\0' ? layer.name :
                      folder                      ? "Folder" :
@@ -564,27 +599,44 @@ void paint_stack_rows_from_description_impl(const Material &material,
                                                           ICON_IMAGE_RGB;
 
           if (!folder) {
-            StackRowPreview channels_slot;
-            channels_slot.section_id = "CHANNELS";
-            for (int c = 0; c < layer.channels_num; c++) {
-              const Image *image = layer.channels[c].image;
-              if (image == nullptr) {
-                continue;
-              }
-              channels_slot.id_uid = image->id.session_uid;
-              channels_slot.id_type = ID_IM;
-              channels_slot.is_blank = paint_image_is_blank(*image);
-              break;
+            if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr) {
+              /* A Material layer holds no channel image of its own -- its data lives in the source
+               * node group -- so the slot shows the material's own preview rather than the empty
+               * first channel, which would otherwise draw as a blank placeholder. */
+              StackRowPreview channels_slot;
+              channels_slot.section_id = "CHANNELS";
+              channels_slot.id_uid = layer.material->id.session_uid;
+              channels_slot.id_type = ID_MA;
+              channels_slot.is_blank = false;
+              row.preview_slots.append(std::move(channels_slot));
             }
-            row.preview_slots.append(std::move(channels_slot));
-            if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
-              /* A Fill is its colour: the swatch is what the row lays down, and clicking it opens
-               * the picker. */
+            else if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+              /* A Fill is its colour: one swatch at preview size with the bucket drawn over it, and
+               * no channel-texture slot -- the first channel is a generated map that would only add
+               * an empty-texture placeholder next to the colour. Clicking the swatch activates the
+               * layer and its channel section, and opens the picker. */
               StackRowPreview fill_swatch;
               fill_swatch.is_color_swatch = true;
+              fill_swatch.icon = ICON_GP_DRAW_FILL;
+              fill_swatch.section_id = "CHANNELS";
               copy_v4_v4(fill_swatch.color, layer.fill_color);
               fill_swatch.label = IFACE_("Fill Color");
               row.preview_slots.append(std::move(fill_swatch));
+            }
+            else {
+              StackRowPreview channels_slot;
+              channels_slot.section_id = "CHANNELS";
+              for (int c = 0; c < layer.channels_num; c++) {
+                const Image *image = layer.channels[c].image;
+                if (image == nullptr) {
+                  continue;
+                }
+                channels_slot.id_uid = image->id.session_uid;
+                channels_slot.id_type = ID_IM;
+                channels_slot.is_blank = paint_image_is_blank(*image);
+                break;
+              }
+              row.preview_slots.append(std::move(channels_slot));
             }
             if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
               /* The row's live state: one BKE answer the Source Material panel reads too, through
@@ -749,6 +801,11 @@ int paint_layers_edit_add(Material &material,
     }
     else if (is_stack_correction) {
       source = MA_PAINT_LAYER_SOURCE_STACK;
+    }
+    if (mask_section && BKE_paint_layers_mask_base(*layer) == nullptr) {
+      /* A correction layers over the base mask; make the base first, so the user can paint in the
+       * mask without adding one by hand and the hierarchy never shifts afterwards. */
+      BKE_paint_layers_mask_add(material, layer, 1.0f);
     }
     created = BKE_paint_layers_correction_add(material,
                                               layer,
@@ -920,10 +977,19 @@ bool paint_layers_edit_mask_set(Material &material, const int ordinal, const boo
     return false;
   }
   if (add) {
+    /* One base mask per layer: a second Add Mask would move the base out from under the user. */
+    if (BKE_paint_layers_mask_base(*layer) != nullptr) {
+      return false;
+    }
     return BKE_paint_layers_mask_add(material, layer, 1.0f) != nullptr;
   }
+  /* Remove Mask takes the base together with every correction over it: the mask is gone. */
   const Vector<MaterialPaintLayer *> items = BKE_paint_layers_mask_items(*layer);
-  return !items.is_empty() && BKE_paint_layers_remove(material, items.first());
+  bool removed = false;
+  for (MaterialPaintLayer *item : items) {
+    removed |= BKE_paint_layers_remove(material, item);
+  }
+  return removed;
 }
 
 bool paint_layers_edit_mask_toggle(Material &material, const int ordinal)
@@ -932,11 +998,11 @@ bool paint_layers_edit_mask_toggle(Material &material, const int ordinal)
   if (layer == nullptr) {
     return false;
   }
-  const Vector<MaterialPaintLayer *> items = BKE_paint_layers_mask_items(*layer);
-  if (items.is_empty()) {
+  /* The layer's mask is its base item. */
+  MaterialPaintLayer *item = BKE_paint_layers_mask_base(*layer);
+  if (item == nullptr) {
     return false;
   }
-  MaterialPaintLayer *item = items.first();
   const bool enable = (item->flag & MA_PAINT_LAYER_ENABLED) == 0;
   return BKE_paint_layers_set_enabled(material, item, enable);
 }
@@ -1208,6 +1274,8 @@ class PaintLayersStackSource final : public StackSource,
 
   StackColumnLayout column_layout() const override
   {
+    /* Wide enough for the compact row's "NN% Abr" label to fit without clipping (the label is
+     * shown in the stacked column, whose width is the wider of the two). */
     return {2.6f, 2.6f};
   }
 
@@ -1226,6 +1294,8 @@ class PaintLayersStackSource final : public StackSource,
       BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Unsupported layer cannot be activated");
       return false;
     }
+    // TODO(debug): remove
+    printf("[STACK_DBG] %s: call active_set\n", __func__);
     BKE_paint_layers_active_set(material, row.stable_id);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
@@ -1263,23 +1333,7 @@ class PaintLayersStackSource final : public StackSource,
     if (sub_row.id == nullptr) {
       return true;
     }
-    /* An Image Editor the user already has open is where the map appears; only when there is none
-     * does the Outliner's own area become one. */
-    ScrArea *area = outliner_image_area_find(C);
-    if (area == nullptr) {
-      area = CTX_wm_area(&C);
-      if (area == nullptr) {
-        return false;
-      }
-      BKE_report(CTX_wm_reports(&C),
-                 RPT_INFO,
-                 "No Image Editor was open, so this area was turned into one");
-      ED_area_newspace(&C, area, SPACE_IMAGE, false);
-    }
-    SpaceImage *space_image = static_cast<SpaceImage *>(area->spacedata.first);
-    ED_space_image_set(CTX_data_main(&C), space_image, id_cast<Image *>(sub_row.id), false);
-    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_IMAGE, space_image);
-    return true;
+    return paint_layers_image_open(C, sub_row.id);
   }
 
   bool preview_activate(bContext &C,
@@ -1291,6 +1345,10 @@ class PaintLayersStackSource final : public StackSource,
     for (const StackContentSection &section : row.content_sections) {
       has_section |= section.identifier == section_id;
     }
+    // TODO(debug): remove
+    printf("[STACK_DBG] paint preview_activate section='%s' has_section=%d\n",
+           section_id.data(),
+           int(has_section));
     if (!has_section) {
       return false;
     }
@@ -1514,6 +1572,8 @@ class PaintLayersStackSource final : public StackSource,
       if (layer == nullptr) {
         return -1;
       }
+      // TODO(debug): remove
+      printf("[STACK_DBG] %s: call active_set\n", __func__);
       BKE_paint_layers_active_set(material, layer->marker);
       WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
       WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
@@ -1671,6 +1731,12 @@ class PaintLayersStackSource final : public StackSource,
             C, material, layer->marker);
       }
     }
+    else if (MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal)) {
+      if (BKE_paint_layers_mask_base(*layer) != nullptr) {
+        BKE_report(CTX_wm_reports(&C), RPT_WARNING, "This layer already has a mask");
+        return false;
+      }
+    }
     if (!paint_layers_edit_mask_set(material, ordinal, add)) {
       return false;
     }
@@ -1680,10 +1746,7 @@ class PaintLayersStackSource final : public StackSource,
       MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
       Main *bmain = CTX_data_main(&C);
       Scene *scene = CTX_data_scene(&C);
-      const Vector<MaterialPaintLayer *> items = (layer != nullptr) ?
-                                                     BKE_paint_layers_mask_items(*layer) :
-                                                     Vector<MaterialPaintLayer *>();
-      MaterialPaintLayer *item = items.is_empty() ? nullptr : items.first();
+      MaterialPaintLayer *item = (layer != nullptr) ? BKE_paint_layers_mask_base(*layer) : nullptr;
       if (layer != nullptr && item != nullptr && bmain != nullptr) {
         PaintLayersTarget target;
         target.material = &material;
@@ -1717,7 +1780,8 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* Turning the mask off takes the coverage the strokes were shaping away: leave mask editing
      * first, the same as a remove. */
-    if ((items.first()->flag & MA_PAINT_LAYER_ENABLED) != 0) {
+    MaterialPaintLayer *base = BKE_paint_layers_mask_base(*layer);
+    if (base != nullptr && (base->flag & MA_PAINT_LAYER_ENABLED) != 0) {
       sculpt_paint::material_layer::mask_edit_end_if_target_removed(C, material, layer->marker);
     }
     if (!paint_layers_edit_mask_toggle(material, ordinal)) {
@@ -1979,6 +2043,8 @@ class PaintLayersStackSource final : public StackSource,
       if (created == nullptr) {
         return false;
       }
+      // TODO(debug): remove
+      printf("[STACK_DBG] %s: call active_set\n", __func__);
       BKE_paint_layers_active_set(material, created->marker);
       WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
       WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
@@ -2344,6 +2410,8 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
     }
     return OPERATOR_CANCELLED;
   }
+  // TODO(debug): remove
+  printf("[STACK_DBG] %s: call active_set\n", __func__);
   BKE_paint_layers_active_set(material, layer->marker);
   WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &material.id);
   return OPERATOR_FINISHED;

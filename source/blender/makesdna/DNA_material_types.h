@@ -519,6 +519,14 @@ enum eMaterialPaintLayerChannelState : int8_t {
 enum eMaterialPaintLayerFlag : int16_t {
   /** The layer takes part in the stack. */
   MA_PAINT_LAYER_ENABLED = 1 << 0,
+  /**
+   * A mask item that is the layer's base mask, rather than a correction layered on top of it.
+   *
+   * The base mask lives in the layer row's own mask slot while it exists; the corrections above it
+   * are listed as rows. Always the first item of the owner's #MaterialPaintLayer::mask_stack, and
+   * removed only together with the whole mask stack.
+   */
+  MA_PAINT_LAYER_MASK_BASE = 1 << 1,
 };
 ENUM_OPERATORS(eMaterialPaintLayerFlag)
 

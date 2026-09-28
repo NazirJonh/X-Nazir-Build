@@ -7150,6 +7150,11 @@ void button_icon_scale_set(Button *but, const float scale)
   but->icon_scale = scale;
 }
 
+void button_text_scale_set(Button *but, const float scale)
+{
+  but->text_scale = scale;
+}
+
 void button_icon_indicator_number_set(Button *but, const int indicator_number)
 {
   icon_text_overlay_init_from_count(&but->icon_overlay_text, indicator_number);

@@ -348,6 +348,9 @@ struct Button : NonMovable {
   BIFIconID icon = ICON_NONE;
   /** Configurable draw scale for the icon. */
   float icon_scale = 1.0f;
+  /** Configurable draw scale for the text, 1.0 is the style's own size. See
+   * #button_text_scale_set. */
+  float text_scale = 1.0f;
 
   /** Affects the order if this Button is used in menu-search. */
   float search_weight = 0.0f;

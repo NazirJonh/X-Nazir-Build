@@ -808,24 +808,30 @@ TEST_F(PaintLayersDescription, mask_add_inserts_a_base_item_and_toggles)
   EXPECT_FLOAT_EQ(item->opacity, 1.0f);
   EXPECT_NE(item->flag & MA_PAINT_LAYER_ENABLED, 0);
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
-  /* The base mask is inserted first in the stack. */
+  /* The base mask is inserted first in the stack, and carries the base flag. */
   EXPECT_EQ(layer->mask_stack.first, item);
+  EXPECT_NE(item->flag & MA_PAINT_LAYER_MASK_BASE, 0);
+  EXPECT_EQ(BKE_paint_layers_mask_base(*layer), item);
 
   EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, item, false));
   EXPECT_EQ(item->flag & MA_PAINT_LAYER_ENABLED, 0);
   EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, item, true));
   EXPECT_NE(item->flag & MA_PAINT_LAYER_ENABLED, 0);
 
-  /* A second mask item is inserted first too, so the newest mask is the base. */
+  /* A second mask item is inserted first too, so the newest mask is the base -- and the only one. */
   MaterialPaintLayer *second = BKE_paint_layers_mask_add(*ma, layer, 0.25f);
   ASSERT_NE(second, nullptr);
   EXPECT_EQ(layer->mask_stack.first, second);
   EXPECT_FLOAT_EQ(second->fill_color[0], 0.25f);
   EXPECT_EQ(BLI_listbase_count(&layer->mask_stack), 2);
+  EXPECT_NE(second->flag & MA_PAINT_LAYER_MASK_BASE, 0);
+  EXPECT_EQ(item->flag & MA_PAINT_LAYER_MASK_BASE, 0);
+  EXPECT_EQ(BKE_paint_layers_mask_base(*layer), second);
 
   EXPECT_TRUE(BKE_paint_layers_remove(*ma, second));
   EXPECT_EQ(BLI_listbase_count(&layer->mask_stack), 1);
   EXPECT_EQ(layer->mask_stack.first, item);
+  EXPECT_EQ(BKE_paint_layers_mask_base(*layer), item);
 }
 
 TEST_F(PaintLayersDescription, fill_channel_value_is_value_only)

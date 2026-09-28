@@ -2575,7 +2575,7 @@ Map<uint64_t, uint32_t> &custom_bake_active()
   return active;
 }
 
-CustomBakeJob *custom_bake_prepare(Main &bmain,
+CustomBakeJob *custom_bake_prepare(Main & /*bmain*/,
                                    const Material &ma,
                                    const MaterialPaintLayer &layer,
                                    const int size)

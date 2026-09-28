@@ -636,6 +636,12 @@ TEST_F(PaintMaterialCompositeEvalTest, mask_item_mix_and_multiply_over_the_facto
 
   EXPECT_NEAR(evaluate(CompositeBlend::Mix)[0], 0.5f, 1e-4f);
   EXPECT_NEAR(evaluate(CompositeBlend::Multiply)[0], 0.4f, 1e-4f);
+  /* Add raises the factor by C (0.8 + 0.5), unclamped at this stage; Subtract lowers it by C. */
+  EXPECT_NEAR(evaluate(CompositeBlend::Add)[0], 1.3f, 1e-4f);
+  EXPECT_NEAR(evaluate(CompositeBlend::Subtract)[0], 0.3f, 1e-4f);
+  /* Darken takes the smaller of F and C, Lighten the larger. */
+  EXPECT_NEAR(evaluate(CompositeBlend::Darken)[0], 0.5f, 1e-4f);
+  EXPECT_NEAR(evaluate(CompositeBlend::Lighten)[0], 0.8f, 1e-4f);
 }
 
 TEST_F(PaintMaterialCompositeEvalTest, mask_item_multiply_with_a_straight_map)

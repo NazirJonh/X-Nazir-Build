@@ -2301,8 +2301,6 @@ static void rna_def_paint_mode(BlenderRNA *brna)
 {
   StructRNA *srna;
   PropertyRNA *prop;
-  FunctionRNA *func;
-  PropertyRNA *parm;
 
   srna = RNA_def_struct(brna, "MaterialPaintChannelLayerBinding", nullptr);
   RNA_def_struct_sdna(srna, "MaterialPaintChannelLayerBinding");

@@ -89,7 +89,7 @@ namespace {
 
 /** Write one value socket of \a instance from its row, or return false for an unknown role. */
 bool values_sync_socket(Material &ma,
-                        bNode &instance,
+                        bNode & /*instance*/,
                         const bNodeTreeInterfaceSocket &iface,
                         bNodeSocket &socket,
                         const PaintLayersRegenCache *cache)

@@ -1269,7 +1269,10 @@ if (current.opacity != nullptr)
         correction_gray = socket_out(*divide, "Value");
       }
       bNode *correction_mix = mix_node_add(
-          tree, MA_RAMP_BLEND, location_x + 60.0f, location_y - 320.0f);
+          tree,
+          BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(correction.blend)),
+          location_x + 60.0f,
+          location_y - 320.0f);
       if (correction_mix == nullptr || correction_gray == nullptr ||
           correction_gray_node == nullptr || factor_socket == nullptr)
       {
@@ -1285,9 +1288,9 @@ if (current.opacity != nullptr)
         continue;
       }
       bke::node_add_link(tree, *factor_node, *factor_socket, *correction_mix, *mix_color1);
-      /* B is what the factor mixes towards: the Fill constant or the map's straightened
-       * grey. MULTIPLY mixes towards `F * C` instead, so the item darkens the factor by its
-       * grey rather than replacing it with the grey; every other mode reads as MIX. */
+      /* B is what the factor blends towards: the Fill constant or the map's straightened grey.
+       * The Mix node above carries the item's own blend mode, so `F = mix(F_below, blend(F_below,
+       * C), A * op)`; Mix reads as the plain over the chain always used. */
       bNode *b_node = correction_gray_node;
       bNodeSocket *b_socket = correction_gray;
       /* A Material/Node Group mask never premultiplies: its grey is either the source's own
@@ -1328,25 +1331,6 @@ if (current.opacity != nullptr)
         }
         /* A non-data map is already straight: the Image Texture node un-premultiplied it,
          * because the chain also reads the Alpha output, so no Divide is built. */
-      }
-      if (correction.blend == MA_PAINT_LAYER_BLEND_MULTIPLY) {
-        bNode *multiply = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
-        if (multiply == nullptr) {
-          continue;
-        }
-        multiply->custom1 = NODE_MATH_MULTIPLY;
-        multiply->location[0] = location_x;
-        multiply->location[1] = location_y - 420.0f;
-        bNodeSocket *mul_a = socket_in(*multiply, "Value");
-        bNodeSocket *mul_b = socket_in(*multiply, "Value_001");
-        bNodeSocket *mul_out = socket_out(*multiply, "Value");
-        if (mul_a == nullptr || mul_b == nullptr || mul_out == nullptr) {
-          continue;
-        }
-        bke::node_add_link(tree, *factor_node, *factor_socket, *multiply, *mul_a);
-        bke::node_add_link(tree, *b_node, *b_socket, *multiply, *mul_b);
-        b_node = multiply;
-        b_socket = mul_out;
       }
       bke::node_add_link(tree, *b_node, *b_socket, *correction_mix, *mix_color2);
       /* Fac is `A * op`: the map alpha times the correction row's own opacity input. The

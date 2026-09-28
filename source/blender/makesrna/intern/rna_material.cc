@@ -8,6 +8,7 @@
 
 #include <cfloat>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -60,6 +61,37 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
     {MA_RAMP_SAT, "SATURATION", 0, "Saturation", ""},
     {MA_RAMP_COLOR, "COLOR", 0, "Color", ""},
     {MA_RAMP_VAL, "VALUE", 0, "Value", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* The full blend list lives here rather than in the runtime-only branch: the runtime itemf
+ * (#rna_MaterialPaintLayer_blend_itemf) returns it for every role but a mask item. */
+static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
+    {MA_PAINT_LAYER_BLEND_MIX, "MIX", 0, "Mix", "Mix blend"},
+    {MA_PAINT_LAYER_BLEND_MULTIPLY, "MULTIPLY", 0, "Multiply", "Multiply blend"},
+    {MA_PAINT_LAYER_BLEND_OVERLAY, "OVERLAY", 0, "Overlay", "Overlay blend"},
+    {MA_PAINT_LAYER_BLEND_ADD, "ADD", 0, "Add", "Add blend"},
+    {MA_PAINT_LAYER_BLEND_DARKEN, "DARKEN", 0, "Darken", "Darken blend"},
+    {MA_PAINT_LAYER_BLEND_BURN, "BURN", 0, "Color Burn", "Color burn blend"},
+    {MA_PAINT_LAYER_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", "Lighten blend"},
+    {MA_PAINT_LAYER_BLEND_SCREEN, "SCREEN", 0, "Screen", "Screen blend"},
+    {MA_PAINT_LAYER_BLEND_DODGE, "DODGE", 0, "Color Dodge", "Color dodge blend"},
+    {MA_PAINT_LAYER_BLEND_SUBTRACT, "SUBTRACT", 0, "Subtract", "Subtract blend"},
+    {MA_PAINT_LAYER_BLEND_DIVIDE, "DIVIDE", 0, "Divide", "Divide blend"},
+    {MA_PAINT_LAYER_BLEND_DIFFERENCE, "DIFFERENCE", 0, "Difference", "Difference blend"},
+    {MA_PAINT_LAYER_BLEND_EXCLUSION, "EXCLUSION", 0, "Exclusion", "Exclusion blend"},
+    {MA_PAINT_LAYER_BLEND_SOFT_LIGHT, "SOFT_LIGHT", 0, "Soft Light", "Soft light blend"},
+    {MA_PAINT_LAYER_BLEND_LINEAR_LIGHT,
+     "LINEAR_LIGHT",
+     0,
+     "Linear Light",
+     "Linear light blend"},
+    {MA_PAINT_LAYER_BLEND_HUE, "HUE", 0, "Hue", "Hue blend"},
+    {MA_PAINT_LAYER_BLEND_SATURATION, "SATURATION", 0, "Saturation", "Saturation blend"},
+    {MA_PAINT_LAYER_BLEND_COLOR, "COLOR", 0, "Color", "Color blend"},
+    {MA_PAINT_LAYER_BLEND_VALUE, "VALUE", 0, "Value", "Value blend"},
+    /* MA_PAINT_LAYER_BLEND_NORMAL_COMBINE is internal: the Normal channel forces it, so it is not
+     * offered as a choice, and #BKE_paint_layers_set_blend refuses it. */
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -577,6 +609,8 @@ static void rna_Material_paint_layers_active_set(PointerRNA *ptr,
 {
   Material *ma = static_cast<Material *>(ptr->data);
   if (value.data == nullptr) {
+    // TODO(debug): remove
+    printf("[STACK_DBG] %s: call active_set\n", __func__);
     BKE_paint_layers_active_set(*ma, {});
     return;
   }
@@ -588,6 +622,8 @@ static void rna_Material_paint_layers_active_set(PointerRNA *ptr,
                 ma->id.name + 2);
     return;
   }
+  // TODO(debug): remove
+  printf("[STACK_DBG] %s: call active_set\n", __func__);
   BKE_paint_layers_active_set(*ma, layer->marker);
 }
 
@@ -601,6 +637,8 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
     /* The default channel set a freshly authored Paint or Fill row takes part in. */
     BKE_paint_layers_default_channels_apply(*ma, *layer);
     /* A fresh row becomes the cursor, mirroring what the UI does when it adds one. */
+    // TODO(debug): remove
+    printf("[STACK_DBG] %s: call active_set\n", __func__);
     BKE_paint_layers_active_set(*ma, layer->marker);
     /* BKE only tags DEG; the Outliner and the Layer Material tab need the WM notifier too. */
     WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
@@ -866,6 +904,31 @@ static void rna_MaterialPaintLayer_blend_set(PointerRNA *ptr, int value)
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
     BKE_paint_layers_set_blend(*ma, layer, eMaterialPaintLayerBlend(value));
   }
+}
+
+/**
+ * The blend choices a row offers. A mask item lays coverage, not colour, so it gets only the modes
+ * the coverage stack reads; every other role offers the full list.
+ */
+static const EnumPropertyItem *rna_MaterialPaintLayer_blend_itemf(bContext * /*C*/,
+                                                                  PointerRNA *ptr,
+                                                                  PropertyRNA * /*prop*/,
+                                                                  bool * /*r_free*/)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (layer == nullptr || BKE_paint_layers_role(*layer) != PaintLayerRole::MaskItem) {
+    return rna_enum_material_paint_layer_blend_items;
+  }
+  static const EnumPropertyItem mask_blend_items[] = {
+      {MA_PAINT_LAYER_BLEND_MIX, "MIX", 0, "Mix", "Mix blend"},
+      {MA_PAINT_LAYER_BLEND_MULTIPLY, "MULTIPLY", 0, "Multiply", "Multiply blend"},
+      {MA_PAINT_LAYER_BLEND_ADD, "ADD", 0, "Add", "Add blend"},
+      {MA_PAINT_LAYER_BLEND_SUBTRACT, "SUBTRACT", 0, "Subtract", "Subtract blend"},
+      {MA_PAINT_LAYER_BLEND_DARKEN, "DARKEN", 0, "Darken", "Darken blend"},
+      {MA_PAINT_LAYER_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", "Lighten blend"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  return mask_blend_items;
 }
 
 static float rna_MaterialPaintLayer_opacity_get(PointerRNA *ptr)
@@ -1802,35 +1865,6 @@ static const EnumPropertyItem rna_enum_material_mesh_map_type_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
-static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
-    {MA_PAINT_LAYER_BLEND_MIX, "MIX", 0, "Mix", "Mix blend"},
-    {MA_PAINT_LAYER_BLEND_MULTIPLY, "MULTIPLY", 0, "Multiply", "Multiply blend"},
-    {MA_PAINT_LAYER_BLEND_OVERLAY, "OVERLAY", 0, "Overlay", "Overlay blend"},
-    {MA_PAINT_LAYER_BLEND_ADD, "ADD", 0, "Add", "Add blend"},
-    {MA_PAINT_LAYER_BLEND_DARKEN, "DARKEN", 0, "Darken", "Darken blend"},
-    {MA_PAINT_LAYER_BLEND_BURN, "BURN", 0, "Color Burn", "Color burn blend"},
-    {MA_PAINT_LAYER_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", "Lighten blend"},
-    {MA_PAINT_LAYER_BLEND_SCREEN, "SCREEN", 0, "Screen", "Screen blend"},
-    {MA_PAINT_LAYER_BLEND_DODGE, "DODGE", 0, "Color Dodge", "Color dodge blend"},
-    {MA_PAINT_LAYER_BLEND_SUBTRACT, "SUBTRACT", 0, "Subtract", "Subtract blend"},
-    {MA_PAINT_LAYER_BLEND_DIVIDE, "DIVIDE", 0, "Divide", "Divide blend"},
-    {MA_PAINT_LAYER_BLEND_DIFFERENCE, "DIFFERENCE", 0, "Difference", "Difference blend"},
-    {MA_PAINT_LAYER_BLEND_EXCLUSION, "EXCLUSION", 0, "Exclusion", "Exclusion blend"},
-    {MA_PAINT_LAYER_BLEND_SOFT_LIGHT, "SOFT_LIGHT", 0, "Soft Light", "Soft light blend"},
-    {MA_PAINT_LAYER_BLEND_LINEAR_LIGHT,
-     "LINEAR_LIGHT",
-     0,
-     "Linear Light",
-     "Linear light blend"},
-    {MA_PAINT_LAYER_BLEND_HUE, "HUE", 0, "Hue", "Hue blend"},
-    {MA_PAINT_LAYER_BLEND_SATURATION, "SATURATION", 0, "Saturation", "Saturation blend"},
-    {MA_PAINT_LAYER_BLEND_COLOR, "COLOR", 0, "Color", "Color blend"},
-    {MA_PAINT_LAYER_BLEND_VALUE, "VALUE", 0, "Value", "Value blend"},
-    /* MA_PAINT_LAYER_BLEND_NORMAL_COMBINE is internal: the Normal channel forces it, so it is not
-     * offered as a choice, and #BKE_paint_layers_set_blend refuses it. */
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
 static const EnumPropertyItem rna_enum_material_paint_layer_channel_state_items[] = {
     {MA_PAINT_LAYER_CHANNEL_ABSENT, "ABSENT", 0, "Absent", "No map: the channel carries no map"},
     {MA_PAINT_LAYER_CHANNEL_ENABLED, "ENABLED", 0, "Enabled", "A map feeds the channel"},
@@ -1993,8 +2027,10 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_blend_items);
-  RNA_def_property_enum_funcs(
-      prop, "rna_MaterialPaintLayer_blend_get", "rna_MaterialPaintLayer_blend_set", nullptr);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_blend_get",
+                              "rna_MaterialPaintLayer_blend_set",
+                              "rna_MaterialPaintLayer_blend_itemf");
   RNA_def_property_ui_text(prop, "Blend Type", "How the layer blends over what is below it");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 

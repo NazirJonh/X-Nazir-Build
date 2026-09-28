@@ -141,6 +141,15 @@ Vector<MaterialPaintLayer *> BKE_paint_layers_mask_items(MaterialPaintLayer &lay
 Vector<const MaterialPaintLayer *> BKE_paint_layers_mask_items(const MaterialPaintLayer &layer);
 
 /**
+ * The layer's base mask item (#MA_PAINT_LAYER_MASK_BASE), or null when it has none.
+ *
+ * The base mask is always the first item of \a layer's mask stack while it exists; a layer with no
+ * base mask may still carry mask corrections.
+ */
+MaterialPaintLayer *BKE_paint_layers_mask_base(MaterialPaintLayer &layer);
+const MaterialPaintLayer *BKE_paint_layers_mask_base(const MaterialPaintLayer &layer);
+
+/**
  * A flat walk of \a ma's description, bottom to top, with folders emitted and then their children.
  *
  * This is a traversal for identity and participation only, *not* the compositing parser: folders

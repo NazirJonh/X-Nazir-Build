@@ -404,10 +404,9 @@ static float composite_correction_pixel_mask_factor(const PaintMaterialComposite
   }
 
   float mask_factor = mask_coverage * alpha;
-  /* Each mask item lays its straight coverage `C` over the factor with the over formula, in list
-   * order with the last entry on top. MIX replaces the factor with `C`, the colour the map stores;
-   * MULTIPLY darkens it by `C`, the same `F * (1 - A * op) + F * C * (A * op)` the generator
-   * builds. Every other mode reads as MIX. */
+  /* Each mask item lays its straight coverage `C` over the factor by its own blend mode, in list
+   * order with the last entry on top: `F = mix(F_below, blend(F_below, C), A * op)`, exactly the
+   * Mix node the generator builds. Mix is the plain over the chain always used. */
   for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.mask_corrections) {
     if (!correction.enabled) {
       continue;
@@ -448,12 +447,7 @@ static float composite_correction_pixel_mask_factor(const PaintMaterialComposite
     }
     const float fac = clamp_f(corr_alpha * correction.opacity, 0.0f, 1.0f);
     const float gray_clamped = clamp_f(gray, 0.0f, 1.0f);
-    if (correction.blend == CompositeBlend::Multiply) {
-      mask_factor = mask_factor * (1.0f - fac) + (mask_factor * gray_clamped) * fac;
-    }
-    else {
-      mask_factor = mask_factor * (1.0f - fac) + gray_clamped * fac;
-    }
+    mask_factor = blend_value_ramp(mask_factor, gray_clamped, correction.blend, fac);
   }
   return mask_factor;
 }
@@ -877,12 +871,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         }
         const float fac = clamp_f(corr_alpha * correction.opacity, 0.0f, 1.0f);
         const float gray_clamped = clamp_f(gray, 0.0f, 1.0f);
-        if (correction.blend == CompositeBlend::Multiply) {
-          r_factor[i] = r_factor[i] * (1.0f - fac) + (r_factor[i] * gray_clamped) * fac;
-        }
-        else {
-          r_factor[i] = r_factor[i] * (1.0f - fac) + gray_clamped * fac;
-        }
+        r_factor[i] = blend_value_ramp(r_factor[i], gray_clamped, correction.blend, fac);
       }
     }
     return;

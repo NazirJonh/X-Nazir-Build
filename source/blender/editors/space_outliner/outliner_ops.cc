@@ -51,6 +51,7 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_pin_toggle);
   WM_operatortype_append(OUTLINER_OT_stack_layer_activate);
   WM_operatortype_append(OUTLINER_OT_stack_preview_section_activate);
+  WM_operatortype_append(OUTLINER_OT_stack_column_popup);
   WM_operatortype_append(OUTLINER_OT_stack_layer_clear_target);
   WM_operatortype_append(OUTLINER_OT_stack_layer_move);
   WM_operatortype_append(OUTLINER_OT_stack_layer_copy);

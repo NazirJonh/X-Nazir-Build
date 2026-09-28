@@ -1235,7 +1235,7 @@ TEST_F(PaintLayersGenerateTest, mask_correction_builds_a_factor_chain)
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
       *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "M");
   ASSERT_NE(correction, nullptr);
-  /* A mask correction lays coverage with the over formula; no blend mode takes part. */
+  /* A mask correction lays its coverage over the factor by its own blend (default Mix here). */
   MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
       *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   ASSERT_NE(record, nullptr);

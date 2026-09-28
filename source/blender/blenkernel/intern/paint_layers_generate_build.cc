@@ -276,8 +276,6 @@ void PaintLayersTreeBuilder::build()
    * used as locals; every one of them is bound to the builder member that now owns it. */
   const Material &ma = ma_;
   bNodeTree &tree = tree_;
-  const PaintLayersBuildContext &ctx = ctx_;
-  const PaintLayersRegenCache *const cache = cache_;
   const Vector<int> &wired_channels = wired_channels_;
   if (wired_channels.is_empty()) {
     return;
@@ -287,13 +285,6 @@ void PaintLayersTreeBuilder::build()
 
   /* Interface sockets are created before the group input/output nodes, so those nodes get their
    * sockets immediately and can be linked right away. */
-
-  auto &opacity_inputs = opacity_inputs_;
-  auto &fill_inputs = fill_inputs_;
-  auto &correction_opacity_inputs = correction_opacity_inputs_;
-  auto &correction_fill_inputs = correction_fill_inputs_;
-  auto &live_constant_inputs = live_constant_inputs_;
-  auto &correction_live_constant_inputs = correction_live_constant_inputs_;
 
   /* One output per wired channel. */
   auto &result_outputs = result_outputs_;

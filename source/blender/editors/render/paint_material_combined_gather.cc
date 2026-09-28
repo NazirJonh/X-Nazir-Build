@@ -314,7 +314,7 @@ static bool combined_ibuf_is_srgb(const ImBuf &ibuf)
   return colorspace != nullptr && IMB_colormanagement_space_name_is_srgb(colorspace);
 }
 
-ImBuf *combined_preview_ensure(Main &bmain,
+ImBuf *combined_preview_ensure(Main & /*bmain*/,
                                const Material &ma,
                                const CombinedPreviewLighting &lighting,
                                const CombinedPreviewRequest &request,

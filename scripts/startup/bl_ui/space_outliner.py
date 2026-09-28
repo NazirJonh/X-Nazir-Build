@@ -45,8 +45,11 @@ class OUTLINER_HT_tool_header(Header):
 
         layout.operator("outliner.stack_layers_back", text="", icon='BACK')
         if space.stack_source == 'PAINT_MATERIAL':
-            # Which channel's blend and opacity the rows below show and edit.
-            layout.prop(context.tool_settings.paint_mode, "stack_layer_channel", text="")
+            # Which channel's blend and opacity the rows below show and edit. Width is capped so
+            # the dropdown does not stretch to the widest possible item and crowd the Add buttons.
+            sub = layout.row()
+            sub.ui_units_x = 6.0
+            sub.prop(context.tool_settings.paint_mode, "stack_layer_channel", text="")
 
         layout.separator_spacer()
 
@@ -78,20 +81,22 @@ class OUTLINER_HT_tool_header(Header):
                 sub.context_pointer_set("id_browser_ptr", context.window_manager)
                 sub.context_string_set("id_browser_prop", "stack_layer_material_pick")
                 sub.popover("UI_PT_id_browser", text="", icon='MATERIAL')
-                # A fresh layered material, its tree generated from a first layer.
-                row.operator("material.new_layered", text="", icon='ADD')
             if any(i.startswith(('CORRECTION', 'MASK_CORRECTION')) for i in kind_ids):
                 # Corrections hang on the row the Add lands on; the kinds share one menu rather than
                 # a button each, since none takes a source or a colour of its own.
                 row.menu("OUTLINER_MT_stack_layer_add_correction", text="", icon='BRUSH_DATA')
 
-        row = layout.row(align=True)
-        row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
-        row.operator("outliner.stack_layer_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
+        if space.show_stack_layer_move_buttons:
+            layout.separator()
+            row = layout.row(align=True)
+            row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
+            row.operator("outliner.stack_layer_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
 
+        layout.separator()
         row = layout.row(align=True)
         row.menu("OUTLINER_MT_stack_layer_mask_add", text="", icon='MOD_MASK')
 
+        layout.separator()
         row = layout.row(align=True)
         row.operator("outliner.stack_layer_group_add", text="", icon='NEWFOLDER')
 
@@ -704,6 +709,7 @@ class OUTLINER_PT_stack_layers_filter(Panel):
         col.prop(space, "use_stack_layer_big_rows", text="Large")
         col.prop(space, "use_stack_layer_pair_channels", text="Pair Channel Rows")
         col.prop(space, "use_stack_layer_sort_by_name", text="Sort by Name")
+        col.prop(space, "show_stack_layer_move_buttons", text="Move Buttons")
 
         layout.prop(space, "use_stack_layer_pin")
 

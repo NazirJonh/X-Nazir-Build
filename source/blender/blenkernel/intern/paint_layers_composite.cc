@@ -533,15 +533,11 @@ bool composite_image_layers_build(const Material &material,
         out_correction.mesh_map_mask_reads_red = mesh_map && !is_content;
       }
       /* A content correction changes the colour, so the Normal channel routes it through the
-       * combine. A mask item lays its coverage over the factor: MIX replaces the factor with the
-       * item's grey, MULTIPLY darkens it by that grey; every other mode reads as MIX. The mask row
-       * is one for all channels, so its opacity comes from the row itself rather than the
-       * per-channel override the content path uses. */
-      out_correction.blend = is_content ?
-                                 layer_channel_blend(correction, channel) :
-                                 ((correction.blend == MA_PAINT_LAYER_BLEND_MULTIPLY) ?
-                                      CompositeBlend::Multiply :
-                                      CompositeBlend::Mix);
+       * combine. A mask item lays its coverage over the factor by its own blend mode, the one
+       * #blend_value_ramp reads. The mask row is one for all channels, so its opacity comes from
+       * the row itself rather than the per-channel override the content path uses. */
+      out_correction.blend = is_content ? layer_channel_blend(correction, channel) :
+                                          blend_from_description(correction.blend);
       out_correction.opacity = is_content ? BKE_paint_layers_channel_opacity_effective(
                                                 correction,
                                                 channel) :

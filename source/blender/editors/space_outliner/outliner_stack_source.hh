@@ -255,6 +255,13 @@ struct StackRow {
   int8_t color_tag = -1;
 
   /**
+   * Keep the row at the usual single-unit height, with a plain icon and no preview slots, even
+   * when Large rows are on. The source marks the rows it wants read as dense settings rather than
+   * as stack members.
+   */
+  bool compact = false;
+
+  /**
    * Preview slots this row shows, left to right.
    *
    * When empty, the row shows no preview at all: the draw answers with the row's plain icon.

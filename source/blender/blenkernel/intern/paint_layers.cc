@@ -15,6 +15,7 @@
 #include "BKE_paint_material_resolve.hh"
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 #include <optional>
 #include <string>
@@ -481,6 +482,26 @@ Vector<const MaterialPaintLayer *> BKE_paint_layers_mask_items(const MaterialPai
   Vector<const MaterialPaintLayer *> items;
   paint_layer_list_collect(layer.mask_stack, items);
   return items;
+}
+
+MaterialPaintLayer *BKE_paint_layers_mask_base(MaterialPaintLayer &layer)
+{
+  for (MaterialPaintLayer &item : layer.mask_stack) {
+    if (item.flag & MA_PAINT_LAYER_MASK_BASE) {
+      return &item;
+    }
+  }
+  return nullptr;
+}
+
+const MaterialPaintLayer *BKE_paint_layers_mask_base(const MaterialPaintLayer &layer)
+{
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if (item.flag & MA_PAINT_LAYER_MASK_BASE) {
+      return &item;
+    }
+  }
+  return nullptr;
 }
 
 bool BKE_paint_layers_fill_to_paint(Material &ma, MaterialPaintLayer &layer, float r_fill[4])
@@ -1365,6 +1386,14 @@ MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
 
 void BKE_paint_layers_active_set(Material &ma, const bUUID &marker)
 {
+  // TODO(debug): remove
+  {
+    char dbg_old[UUID_STRING_SIZE];
+    char dbg_new[UUID_STRING_SIZE];
+    BLI_uuid_format(dbg_old, ma.active_layer_marker);
+    BLI_uuid_format(dbg_new, marker);
+    printf("[STACK_DBG] active_set old=%.8s new=%.8s\n", dbg_old, dbg_new);
+  }
   /* Leaving a row is when its deferred bake becomes due. The editor's Material-row planner reads
    * this after the depsgraph update; the CPU planner's #MA_PAINT_LAYERS_BAKE_STALE cannot carry the
    * signal because it is cleared at the K-1 point, before that update runs. */
@@ -1400,6 +1429,13 @@ bool BKE_paint_layers_move(Material &ma,
     return false;
   }
   if (anchor == layer) {
+    return false;
+  }
+  /* Mask items are ordered by the mask semantics -- the base is always first and corrections sit
+   * above it -- so they are never moved or used as move anchors. */
+  if (BKE_paint_layers_role(*layer) == PaintLayerRole::MaskItem ||
+      (anchor != nullptr && BKE_paint_layers_role(*anchor) == PaintLayerRole::MaskItem))
+  {
     return false;
   }
   if (anchor != nullptr) {
@@ -1440,6 +1476,11 @@ bool BKE_paint_layers_move(Material &ma,
 bool BKE_paint_layers_reorder(Material &ma, MaterialPaintLayer *layer, int index)
 {
   if (layer == nullptr) {
+    return false;
+  }
+  /* A base mask stays first and corrections stay above it; their order is the mask semantics, not
+   * a user rearrangement. */
+  if (BKE_paint_layers_role(*layer) == PaintLayerRole::MaskItem) {
     return false;
   }
   ListBase *owner = paint_layer_owner_list(&ma.paint_layers, layer);
@@ -1602,6 +1643,11 @@ MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma, MaterialPaintLayer *
   item->fill_color[3] = 1.0f;
   item->blend = MA_PAINT_LAYER_BLEND_MULTIPLY;
   item->opacity = 1.0f;
+  /* A layer has exactly one base mask, and it is always the first item. */
+  for (MaterialPaintLayer &existing : layer->mask_stack) {
+    existing.flag &= ~MA_PAINT_LAYER_MASK_BASE;
+  }
+  item->flag |= MA_PAINT_LAYER_MASK_BASE;
   BLI_remlink(&layer->mask_stack, item);
   BLI_addhead(&layer->mask_stack, item);
   return item;

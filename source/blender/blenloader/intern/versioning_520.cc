@@ -1205,6 +1205,41 @@ static void do_versions_paint_layer_channel_settings(MaterialPaintLayer &layer,
   }
 }
 
+/**
+ * Mark the base mask of every layer written before #MA_PAINT_LAYER_MASK_BASE existed.
+ *
+ * The base mask was always created first (#BKE_paint_layers_mask_add inserts at the head), so the
+ * first item of the stack is it. Newer files carry the flag explicitly.
+ */
+static void do_versions_paint_layer_mask_base(MaterialPaintLayer &layer)
+{
+  if (!layer.mask_stack.is_empty()) {
+    bool has_base = false;
+    for (MaterialPaintLayer &item : layer.mask_stack) {
+      if (item.flag & MA_PAINT_LAYER_MASK_BASE) {
+        has_base = true;
+        break;
+      }
+    }
+    if (!has_base) {
+      /* The first item of the stack is the base (#ListBaseT::first is untyped). */
+      for (MaterialPaintLayer &item : layer.mask_stack) {
+        item.flag |= MA_PAINT_LAYER_MASK_BASE;
+        break;
+      }
+    }
+  }
+  for (MaterialPaintLayer &child : layer.children) {
+    do_versions_paint_layer_mask_base(child);
+  }
+  for (MaterialPaintLayer &effect : layer.effects) {
+    do_versions_paint_layer_mask_base(effect);
+  }
+  for (MaterialPaintLayer &mask_item : layer.mask_stack) {
+    do_versions_paint_layer_mask_base(mask_item);
+  }
+}
+
 void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
 {
   /* Per (row, channel) blend/opacity moved out of the sparse channel record into the row's fixed
@@ -1932,6 +1967,16 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
             sbuts.visible_tabs |= (1 << BCONTEXT_LAYER_MATERIAL);
           }
         }
+      }
+    }
+  }
+
+  /* The base-mask flag is new: mark the first item of every mask stack written before it, so the
+   * UI has an explicit handle on the base rather than assuming the first item. */
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 76)) {
+    for (Material &ma : bmain->materials) {
+      for (MaterialPaintLayer &layer : ma.paint_layers) {
+        do_versions_paint_layer_mask_base(layer);
       }
     }
   }

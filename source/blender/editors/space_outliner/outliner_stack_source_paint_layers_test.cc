@@ -120,10 +120,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, layered_material_rows_come_from_the_d
   EXPECT_TRUE(BLI_uuid_equal(rows[0].stable_id, child->marker));
 }
 
-TEST_F(OutlinerStackPaintLayersSourceTest, fresh_mask_is_a_listed_item)
+TEST_F(OutlinerStackPaintLayersSourceTest, fresh_mask_is_shown_by_the_layer_row)
 {
-  /* A mask is a stack item now: adding one lists it under the row's MASK section, and its map
-   * arrives with the first stroke. */
+  /* A base mask is drawn by its layer row's own mask slot, not as a hierarchy row of its own. */
   Material *ma = BKE_material_add(bmain, "Layered");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
@@ -135,14 +134,23 @@ TEST_F(OutlinerStackPaintLayersSourceTest, fresh_mask_is_a_listed_item)
   const StackReadContext ctx{bmain, nullptr, nullptr};
   Vector<StackRow> rows;
   ASSERT_TRUE(source().rows_build(ctx, {}, ma->id, rows));
-  bool has_mask_row = false;
+  const StackRow *layer_row = nullptr;
   for (const StackRow &row : rows) {
-    if (BLI_uuid_equal(row.stable_id, item->marker)) {
-      has_mask_row = true;
-      EXPECT_EQ(row.parent_section_id, "MASK");
+    if (BLI_uuid_equal(row.stable_id, layer->marker)) {
+      layer_row = &row;
+    }
+    /* The base mask itself is not a row. */
+    EXPECT_FALSE(BLI_uuid_equal(row.stable_id, item->marker));
+  }
+  ASSERT_NE(layer_row, nullptr);
+  /* The layer row carries the mask slot that names the MASK section. */
+  bool has_mask_slot = false;
+  for (const StackRowPreview &slot : layer_row->preview_slots) {
+    if (slot.section_id == "MASK") {
+      has_mask_slot = true;
     }
   }
-  EXPECT_TRUE(has_mask_row);
+  EXPECT_TRUE(has_mask_slot);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, mask_section_appears_with_the_first_item)
@@ -194,7 +202,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_section_appears_with_the_first_i
   EXPECT_TRUE(found);
 }
 
-TEST_F(OutlinerStackPaintLayersSourceTest, mask_section_lists_item_maps)
+TEST_F(OutlinerStackPaintLayersSourceTest, mask_section_leaves_item_maps_to_the_item_row)
 {
   Material *ma = BKE_material_add(bmain, "MaskMaps");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
@@ -221,10 +229,58 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_section_lists_item_maps)
     }
   }
   ASSERT_NE(mask, nullptr);
-  ASSERT_EQ(mask->sub_rows.size(), 1);
-  EXPECT_EQ(mask->sub_rows[0].id, &map->id);
-  EXPECT_EQ(mask->sub_rows[0].role, PAINT_LAYER_MAP_MASK);
-  EXPECT_STREQ(mask->sub_rows[0].name.c_str(), map->id.name + 2);
+  /* The item's map is shown by the item's own row -- attached to this section -- not relisted as
+   * a section sub-row, which would put a second "Mask" row beside it. */
+  EXPECT_TRUE(mask->sub_rows.is_empty());
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, mask_correction_creates_and_keeps_a_base)
+{
+  Material *ma = BKE_material_add(bmain, "MaskBase");
+  const int layer_ordinal = paint_layers_edit_add(*ma, PAINT_STACK_ADD_PAINT, -1, {});
+  ASSERT_GE(layer_ordinal, 0);
+  MaterialPaintLayer *layer = paint_description_row_for_ordinal(*ma, layer_ordinal);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_EQ(BKE_paint_layers_mask_base(*layer), nullptr);
+
+  /* Adding a mask correction to a layer with no base creates the base first. */
+  const int corr = paint_layers_edit_add(
+      *ma, PAINT_STACK_ADD_MASK_CORRECTION_FILL, layer_ordinal, {});
+  ASSERT_GE(corr, 0);
+  MaterialPaintLayer *base = BKE_paint_layers_mask_base(*layer);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(layer->mask_stack.first, base);
+  const Vector<MaterialPaintLayer *> items = BKE_paint_layers_mask_items(*layer);
+  ASSERT_EQ(items.size(), 2);
+  EXPECT_EQ(items.first(), base);
+
+  /* A second Add Mask is refused; the base stays single. */
+  EXPECT_FALSE(paint_layers_edit_mask_set(*ma, layer_ordinal, true));
+  EXPECT_EQ(BKE_paint_layers_mask_items(*layer).size(), 2);
+
+  /* The base is shown by the layer row's mask slot, not as a row; the correction is a compact
+   * row of its own. */
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  Vector<StackRow> rows;
+  ASSERT_TRUE(source().rows_build(ctx, {}, ma->id, rows));
+  bool base_row = false;
+  bool correction_row = false;
+  for (const StackRow &row : rows) {
+    if (BLI_uuid_equal(row.stable_id, base->marker)) {
+      base_row = true;
+    }
+    if (BLI_uuid_equal(row.stable_id, items.last()->marker)) {
+      correction_row = true;
+      EXPECT_TRUE(row.compact);
+      EXPECT_EQ(row.parent_section_id, "MASK");
+    }
+  }
+  EXPECT_FALSE(base_row);
+  EXPECT_TRUE(correction_row);
+
+  /* Remove Mask takes the base and every correction over it together. */
+  EXPECT_TRUE(paint_layers_edit_mask_set(*ma, layer_ordinal, false));
+  EXPECT_TRUE(BKE_paint_layers_mask_items(*layer).is_empty());
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, layered_state_hash_moves_with_a_rename)
@@ -813,12 +869,14 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_correction_columns_point_at_the_
   MaterialPaintLayer *layer = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
+  /* A base mask first, so the correction below is a real mask item with a row of its own. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, layer, 1.0f), nullptr);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
       *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "M");
   ASSERT_NE(correction, nullptr);
 
-  /* A mask correction lays coverage with the over formula: its blend plays no part, so only the
-   * row opacity shows and no mode column is offered. */
+  /* A mask correction lays coverage, not colour, so its blend is one of the coverage modes; it
+   * carries both the row opacity and the mode columns. */
   Vector<StackRow> rows;
   paint_stack_rows_from_description(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
   const StackRow *row = nullptr;
@@ -831,10 +889,12 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_correction_columns_point_at_the_
   ASSERT_TRUE(row->value_ptr.has_value());
   EXPECT_STREQ(row->value_prop, "opacity");
   EXPECT_EQ(static_cast<MaterialPaintLayer *>(row->value_ptr->data), correction);
-  EXPECT_FALSE(row->mode_ptr.has_value());
+  ASSERT_TRUE(row->mode_ptr.has_value());
+  EXPECT_STREQ(row->mode_prop, "blend_type");
+  EXPECT_EQ(static_cast<MaterialPaintLayer *>(row->mode_ptr->data), correction);
 }
 
-TEST_F(OutlinerStackPaintLayersSourceTest, folder_takes_a_mask_and_shows_its_row)
+TEST_F(OutlinerStackPaintLayersSourceTest, folder_mask_shows_on_the_folder_row)
 {
   Material *ma = BKE_material_add(bmain, "FolderMaskUI");
   const int folder_ordinal = paint_layers_edit_add(*ma, PAINT_STACK_ADD_FOLDER, -1, {});
@@ -853,14 +913,22 @@ TEST_F(OutlinerStackPaintLayersSourceTest, folder_takes_a_mask_and_shows_its_row
   const StackReadContext ctx{bmain, nullptr, nullptr};
   Vector<StackRow> rows;
   ASSERT_TRUE(source().rows_build(ctx, {}, ma->id, rows));
-  bool folder_has_mask = false;
+  const StackRow *folder_row = nullptr;
   for (const StackRow &row : rows) {
-    if (BLI_uuid_equal(row.stable_id, folder_masks.first()->marker)) {
-      folder_has_mask = true;
-      EXPECT_EQ(row.parent_section_id, "MASK");
+    if (BLI_uuid_equal(row.stable_id, folder->marker)) {
+      folder_row = &row;
+    }
+    /* The base mask is not a row of its own. */
+    EXPECT_FALSE(BLI_uuid_equal(row.stable_id, folder_masks.first()->marker));
+  }
+  ASSERT_NE(folder_row, nullptr);
+  bool has_mask_slot = false;
+  for (const StackRowPreview &slot : folder_row->preview_slots) {
+    if (slot.section_id == "MASK") {
+      has_mask_slot = true;
     }
   }
-  EXPECT_TRUE(folder_has_mask);
+  EXPECT_TRUE(has_mask_slot);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_tracks_a_blank_map_becoming_non_blank)
@@ -905,6 +973,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, stack_correction_and_mask_children_be
   MaterialPaintLayer *owner = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(owner, nullptr);
+  /* A base mask first, so the Stack mask below it is a real correction rather than the base the
+   * layer row's own slot stands for. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, owner, 1.0f), nullptr);
 
   MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
       *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");

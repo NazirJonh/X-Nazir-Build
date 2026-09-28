@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstdio>
 #include <functional>
 
 #include "DNA_defs.h"
@@ -1566,16 +1567,10 @@ void outliner_stack_rows_invalidate(SpaceOutliner &space_outliner)
   runtime.stack_drop_indicator.ordinal = -1;
 }
 
-void outliner_stack_row_ui_state_sync(SpaceOutliner &space_outliner, const ID &owner)
+void outliner_stack_row_ui_state_capture_now(SpaceOutliner &space_outliner, const ID &owner)
 {
   SpaceOutliner_Runtime &runtime = *space_outliner.runtime;
-  /* The tree store speaks the ordinals of the tree it was filled by, so it can only be read
-   * against the rows that tree was built from: the same owner, and not one an edit has re-read
-   * since -- #outliner_stack_rows_ensure marks those, and the build that follows clears the
-   * mark. */
-  if (space_outliner.treestore == nullptr || runtime.stack_owner_uid != owner.session_uid ||
-      runtime.stack_rows_rebuilt_since_build)
-  {
+  if (space_outliner.treestore == nullptr) {
     return;
   }
   BLI_mempool_iter iter;
@@ -1595,6 +1590,21 @@ void outliner_stack_row_ui_state_sync(SpaceOutliner &space_outliner, const ID &o
     state.selected = (tselem->flag & TSE_SELECTED) != 0;
     state.active = (tselem->flag & TSE_ACTIVE) != 0;
   }
+}
+
+void outliner_stack_row_ui_state_sync(SpaceOutliner &space_outliner, const ID &owner)
+{
+  SpaceOutliner_Runtime &runtime = *space_outliner.runtime;
+  /* The tree store speaks the ordinals of the tree it was filled by, so it can only be read
+   * against the rows that tree was built from: the same owner, and not one an edit has re-read
+   * since -- #outliner_stack_rows_ensure marks those, and the build that follows clears the
+   * mark. */
+  if (space_outliner.treestore == nullptr || runtime.stack_owner_uid != owner.session_uid ||
+      runtime.stack_rows_rebuilt_since_build)
+  {
+    return;
+  }
+  outliner_stack_row_ui_state_capture_now(space_outliner, owner);
 }
 
 void outliner_stack_row_ui_state_prune(SpaceOutliner_Runtime &runtime, Set<UUID> &&seen)
@@ -2022,6 +2032,8 @@ bool outliner_stack_focus_set(bContext *C,
 
 bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, const int ordinal)
 {
+  // TODO(debug): remove
+  printf("[STACK_DBG] row_activate ordinal=%d\n", ordinal);
   if (ordinal < 0) {
     return false;
   }
@@ -2035,8 +2047,11 @@ bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, con
   if (row == nullptr) {
     return false;
   }
-  return stack_source_for_space(space_outliner)
-      ->row_activate(*C, space_outliner.runtime->stack_focus, *owner, ordinal, *row);
+  const bool result = stack_source_for_space(space_outliner)
+                          ->row_activate(*C, space_outliner.runtime->stack_focus, *owner, ordinal, *row);
+  // TODO(debug): remove
+  printf("[STACK_DBG] row_activate ordinal=%d result=%d\n", ordinal, int(result));
+  return result;
 }
 
 bool outliner_stack_row_preview_activate(bContext *C,
@@ -2057,7 +2072,14 @@ bool outliner_stack_row_preview_activate(bContext *C,
   if (row == nullptr) {
     return false;
   }
-  return stack_source_for_space(space_outliner)->preview_activate(*C, *owner, *row, section_id);
+  const bool result = stack_source_for_space(space_outliner)
+                          ->preview_activate(*C, *owner, *row, section_id);
+  // TODO(debug): remove
+  printf("[STACK_DBG] row_preview_activate ordinal=%d section='%s' result=%d\n",
+         ordinal,
+         section_id.data(),
+         int(result));
+  return result;
 }
 
 bool outliner_stack_sub_row_activate(bContext *C, SpaceOutliner &space_outliner, const int nr)

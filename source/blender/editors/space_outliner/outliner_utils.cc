@@ -81,10 +81,17 @@ int outliner_tree_element_height(const SpaceOutliner &space_outliner, const Tree
   {
     return UI_UNIT_Y;
   }
-  /* Only the layers themselves grow: their sub-rows are a list of data-blocks and read better at
-   * the usual height, and a taller row for them would only add empty space. */
+  /* Only the layers themselves grow: their content rows -- a mask correction, a channel sub-row --
+   * read better at the usual height, and a taller row for them would only add empty space. */
   const TreeStoreElem *tselem = TREESTORE(&te);
-  return (tselem != nullptr && tselem->type == TSE_STACK_LAYER) ? 2 * UI_UNIT_Y : UI_UNIT_Y;
+  if (tselem == nullptr || tselem->type != TSE_STACK_LAYER) {
+    return UI_UNIT_Y;
+  }
+  const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
+  if (row != nullptr && row->compact) {
+    return UI_UNIT_Y;
+  }
+  return 2 * UI_UNIT_Y;
 }
 
 TreeElement *outliner_find_item_at_y(const SpaceOutliner *space_outliner,
@@ -385,6 +392,8 @@ float outliner_right_columns_width(const SpaceOutliner *space_outliner)
                              (space_outliner->stack_layers_flag & SO_SL_HIDE_BLEND) == 0;
       const bool stacked = show_value && show_mode &&
                            (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
+      /* A compact row shows its value and its mode in one label inside the same column, so it
+       * takes no more room than the columns already reserve. */
       if (stacked) {
         num_columns += max_ff(layout.value_width, layout.mode_width);
       }

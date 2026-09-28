@@ -279,6 +279,13 @@ enum eSpaceOutliner_StackLayersFlag : short {
   SO_SL_VISIBILITY_LEFT = (1 << 6),
   /** Group channel rows into alternating pairs instead of alternating every channel row. */
   SO_SL_PAIR_CHANNELS = (1 << 7),
+  /**
+   * Show the buttons that reorder the active row (move up/down) in the Stack header.
+   *
+   * Off by default: reordering is destructive enough to keep those buttons out of the way until
+   * the user asks for them, unlike the Add and Remove verbs the header always carries.
+   */
+  SO_SL_SHOW_MOVE_BUTTONS = (1 << 8),
 };
 ENUM_OPERATORS(eSpaceOutliner_StackLayersFlag)
 

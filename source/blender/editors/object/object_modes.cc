@@ -529,10 +529,10 @@ static bool object_transfer_mode_to_base(bContext *C,
   const Main *bmain = CTX_data_main(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
 
-  if (mode_dst == OB_MODE_SCULPT) {
+  if (ELEM(mode_dst, OB_MODE_SCULPT, OB_MODE_SCULPT_CURVES)) {
     BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
     Base *base_dst = BKE_view_layer_base_find(view_layer, ob_dst);
-    if (base_dst && (ob_dst->mode & OB_MODE_SCULPT)) {
+    if (base_dst && (ob_dst->mode & mode_dst)) {
       /* The target is already part of the current multi-object sculpt group (its own #Object.mode
        * is already Sculpt) -- no mode transition is needed, regardless of whether it currently
        * happens to be SELECTED in the Outliner: a group member's selection can be toggled off
@@ -545,6 +545,11 @@ static bool object_transfer_mode_to_base(bContext *C,
        * object ends up selected afterwards. Only retarget (and select) the active object here;
        * every other group member's selection and mode stay untouched, so multi-object tools keep
        * seeing the whole group.
+       *
+       * Sculpt Curves collapses the same way: #mode_set_ex(OB_MODE_OBJECT) on the legacy path
+       * runs #curves_sculptmode_toggle_exec, whose #curves_sculptmode_exit walks every curves
+       * object in the view layer and exits all of them, not just the source. The early branch
+       * therefore covers both Sculpt and Sculpt Curves.
        *
        * Wrapped in an undo group like the mode-transfer path below: #ED_undo_push commits
        * whatever is currently in the undo stack's `step_init` slot, and this branch (unlike

@@ -8698,6 +8698,12 @@ class VIEW3D_PT_overlay_edit_curve(Panel):
         sub.active = overlay.show_curve_normals
         sub.prop(overlay, "normals_length", text="Normals")
 
+        row = col.row(align=True)
+        row.prop(overlay, "show_proportional_edit_viz", text="")
+        sub = row.row()
+        sub.active = overlay.show_proportional_edit_viz
+        sub.prop(overlay, "proportional_edit_viz_opacity", text="Proportional Highlight")
+
 
 class VIEW3D_PT_overlay_edit_curves(Panel):
     bl_space_type = 'VIEW_3D'
@@ -8733,6 +8739,13 @@ class VIEW3D_PT_overlay_edit_curves(Panel):
         sub = row.row()
         sub.active = overlay.show_curves_symmetry_plane
         sub.prop(overlay, "symmetry_plane_opacity", text="Symmetry Plane")
+
+        row = col.row(align=True)
+        row.prop(overlay, "show_proportional_edit_viz", text="")
+        sub = row.row()
+        sub.active = overlay.show_proportional_edit_viz
+        sub.prop(overlay, "proportional_edit_viz_opacity", text="Proportional Highlight")
+
 
 class VIEW3D_PT_overlay_sculpt(Panel):
     bl_space_type = 'VIEW_3D'
@@ -8955,14 +8968,29 @@ class VIEW3D_PT_overlay_sculpt_curves(Panel):
 
         row = layout.row(align=True)
         row.active = overlay.show_overlays
-        row.prop(overlay, "show_sculpt_curves_selection_object_color", text="Use Object Color")
-
-        row = layout.row(align=True)
-        row.active = overlay.show_overlays
         row.prop(overlay, "show_sculpt_curves_cage", text="")
         subrow = row.row(align=True)
         subrow.active = overlay.show_sculpt_curves_cage
         subrow.prop(overlay, "sculpt_curves_cage_opacity", text="Cage Opacity")
+
+        header, body = layout.panel("VIEW3D_PT_overlay_sculpt_curves_display_options", default_closed=False)
+        header.active = overlay.show_overlays
+        header.prop(overlay, "show_sculpt_curves_display_options", text="Display Options")
+        if body:
+            col = body.column()
+            col.active = overlay.show_overlays and overlay.show_sculpt_curves_display_options
+            col.prop(overlay, "show_sculpt_curves_selection_object_color", text="Use Object Color for Curves")
+            col.separator(factor=0.5, type='LINE')
+            row = col.row(align=True)
+            row.prop(overlay, "show_sculpt_curves_brush_influence", text="")
+            sub = row.row()
+            sub.active = overlay.show_sculpt_curves_brush_influence
+            sub.prop(overlay, "proportional_edit_viz_opacity", text="Brush Influence")
+            col.separator(type='LINE')
+            col.prop(overlay, "show_sculpt_curves_hover_curves", text="Curves Hover Hit")
+            row = col.row()
+            row.active = overlay.show_sculpt_curves_hover_curves
+            row.prop(context.preferences.themes[0].view_3d, "curves_hover_hit", text="")
 
 
 class VIEW3D_PT_overlay_sculpt_curve_edit(Panel):

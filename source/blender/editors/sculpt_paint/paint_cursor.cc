@@ -1963,6 +1963,9 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
       paint_cursor_setup_2D_drawing(pcontext);
       paint_draw_2D_view_brush_cursor(pcontext);
       paint_cursor_restore_drawing_state();
+
+      /* Sculpt Curves hover brush-zone preview; self-gated on mode, brush and overlay flags. */
+      curves_sculpt_hover_preview_draw(pcontext);
       break;
     case PaintCursorDrawingType::Cursor3D:
       paint_update_mouse_cursor(pcontext);

@@ -70,6 +70,12 @@ void DRW_particle_batch_cache_free(ParticleSystem *psys);
 
 void DRW_curves_batch_cache_dirty_tag(Curves *curves, int mode);
 void DRW_curves_batch_cache_validate(Curves *curves);
+/**
+ * Discard the sculpt brush influence buffers of \a curves_eval when the influence record of
+ * \a curves_orig changed since they were built (see #ED_curves_sculpt.hh).
+ */
+void DRW_curves_batch_cache_validate_sculpt_influence(Curves &curves_eval,
+                                                      const Curves &curves_orig);
 void DRW_curves_batch_cache_free(Curves *curves);
 
 void DRW_pointcloud_batch_cache_dirty_tag(PointCloud *pointcloud, int mode);
@@ -151,6 +157,7 @@ gpu::VertBufPtr &DRW_curves_texture_for_evaluated_attribute(Curves *curves,
 
 gpu::Batch *DRW_curves_batch_cache_get_edit_points(Curves *curves);
 gpu::Batch *DRW_curves_batch_cache_get_sculpt_curves_cage(Curves *curves);
+gpu::Batch *DRW_curves_batch_cache_get_sculpt_influence_lines(Curves *curves);
 gpu::Batch *DRW_curves_batch_cache_get_edit_curves_handles(Curves *curves);
 gpu::Batch *DRW_curves_batch_cache_get_edit_curves_lines(Curves *curves);
 gpu::Batch *DRW_curves_batch_cache_get_edit_normals(Curves *curves);

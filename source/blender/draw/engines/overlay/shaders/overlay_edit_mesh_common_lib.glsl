@@ -56,19 +56,6 @@ float4 EDIT_MESH_vertex_color(uint vertex_flag, float vertex_crease)
   return theme.colors.vert;
 }
 
-/**
- * Heat-map for the proportional editing falloff highlight (theme colors, 3D Viewport section):
- * "Proportional Falloff Low" for low influence through "Mid" to "High" for full influence.
- */
-float3 EDIT_MESH_prop_falloff_color(float factor)
-{
-  if (factor < 0.5f) {
-    return mix(theme.colors.prop_falloff_low.rgb, theme.colors.prop_falloff_mid.rgb, factor * 2.0f);
-  }
-  return mix(theme.colors.prop_falloff_mid.rgb, theme.colors.prop_falloff_high.rgb,
-             factor * 2.0f - 1.0f);
-}
-
 float4 EDIT_MESH_face_color(uint face_flag)
 {
   bool face_freestyle = (face_flag & FACE_FREESTYLE) != 0u;

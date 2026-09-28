@@ -34,6 +34,15 @@ class SmoothOperation : public CurvesSculptStrokeOperation {
 };
 
 /**
+ * Zone intensity of one point: the smooth weight without the brush strength and the operational
+ * weight factor (see #sculpt_influence_viz.cc). Shared by the stroke and the hover preview.
+ */
+float smooth_point_zone_weight(const float radius_falloff, const float point_factor)
+{
+  return radius_falloff * point_factor;
+}
+
+/**
  * Utility class that actually executes the update when the stroke is updated. That's useful
  * because it avoids passing a very large number of parameters between functions.
  */
@@ -59,6 +68,9 @@ struct SmoothOperationExecutor {
   CurvesSurfaceTransforms transforms_;
 
   CurvesBrush3D *brush_3d_ = nullptr;
+
+  /** Per-point brush influence for the highlight visualization, see #sculpt_influence_viz.cc. */
+  Array<float> influence_viz_;
 
   /** Only the active target writes the scene-global stroke position, see #is_active. */
   bool is_active_target_ = false;
@@ -111,6 +123,10 @@ struct SmoothOperationExecutor {
 
     Array<float> point_smooth_factors(curves_->points_num(), 0.0f);
 
+    /* Per-point zone intensity for the influence highlight (see #sculpt_influence_viz.cc). */
+    influence_viz_.reinitialize(curves_->points_num());
+    influence_viz_.fill(0.0f);
+
     if (falloff_shape == PAINT_FALLOFF_SHAPE_TUBE) {
       this->find_projected_smooth_factors_with_symmetry(point_smooth_factors);
     }
@@ -122,6 +138,7 @@ struct SmoothOperationExecutor {
     }
 
     this->smooth(point_smooth_factors);
+    curves_sculpt_influence_viz_publish(*curves_id_, std::move(influence_viz_));
     curves_->tag_positions_changed();
     DEG_id_tag_update(&curves_id_->id, ID_RECALC_GEOMETRY);
     WM_main_add_notifier(NC_GEOM | ND_DATA, &curves_id_->id);
@@ -172,6 +189,10 @@ struct SmoothOperationExecutor {
             const float weight = weight_factor * brush_strength_ * radius_falloff *
                                  point_factors_[point_i];
             math::max_inplace(r_point_smooth_factors[point_i], weight);
+            /* The highlight shows the zone intensity: the weight without the brush strength and
+             * the operational weight factor (see #sculpt_influence_viz.cc). */
+            math::max_inplace(influence_viz_[point_i],
+                              smooth_point_zone_weight(radius_falloff, point_factors_[point_i]));
           }
         },
         exec_mode::grain_size(256));
@@ -226,6 +247,10 @@ struct SmoothOperationExecutor {
             const float weight = weight_factor * brush_strength_ * radius_falloff *
                                  point_factors_[point_i];
             math::max_inplace(r_point_smooth_factors[point_i], weight);
+            /* The highlight shows the zone intensity: the weight without the brush strength and
+             * the operational weight factor (see #sculpt_influence_viz.cc). */
+            math::max_inplace(influence_viz_[point_i],
+                              smooth_point_zone_weight(radius_falloff, point_factors_[point_i]));
           }
         },
         exec_mode::grain_size(256));

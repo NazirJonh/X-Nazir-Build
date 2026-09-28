@@ -29,6 +29,7 @@
 #include "DNA_scene_enums.h"
 #include "DNA_scene_types.h"
 
+#include "ED_curves_sculpt.hh"
 #include "ED_object.hh"
 
 #include "DRW_render.hh"
@@ -71,12 +72,22 @@ class Sculpts : Overlay {
    */
   PassSimple::Sub *mesh_fallback_ps_ = nullptr;
   PassSimple::Sub *curves_ps_ = nullptr;
+  /* The influence pass runs once per object, either for a hover record (gradient and/or flat hit)
+   * or for a running stroke record; the two sub-passes carry the matching flags. */
+  PassSimple::Sub *influence_hover_ps_ = nullptr;
+  PassSimple::Sub *influence_stroke_ps_ = nullptr;
 
   PassSimple sculpt_curve_cage_ = {"SculptCage"};
+  PassSimple sculpt_curves_influence_ = {"SculptCurvesInfluence"};
   SymmetryContourOverlay symmetry_contour_;
   SymmetryPlaneOverlay symmetry_plane_;
 
   bool show_curves_cage_ = false;
+  /* Brush influence highlight for sculpt curves mode, gated by its own toggle and the Sculpt
+   * Curves display-options master flag (see #sculpt_influence_viz.cc). */
+  bool show_curves_influence_ = false;
+  /* Hover preview toggles (see #sculpt_hover_preview.cc). */
+  bool show_curves_hover_curves_ = false;
   bool show_face_set_ = false;
   bool show_mask_ = false;
   float curves_selection_opacity_ = 0.0f;
@@ -215,6 +226,8 @@ class Sculpts : Overlay {
   void begin_sync(Resources &res, const State &state) final
   {
     show_curves_cage_ = state.show_sculpt_curves_cage();
+    show_curves_influence_ = state.show_sculpt_curves_brush_influence();
+    show_curves_hover_curves_ = state.show_sculpt_curves_hover_curves();
     show_face_set_ = state.show_sculpt_face_sets();
     show_mask_ = state.show_sculpt_mask();
     curves_selection_use_object_color_ = state.show_sculpt_curves_selection_object_color();
@@ -230,14 +243,15 @@ class Sculpts : Overlay {
      * #object_sync / #mesh_sync, which return early without a sculpt session. */
     enabled_ = state.is_space_v3d() && !state.is_wire() && !res.is_selection() &&
                !state.is_depth_only_drawing &&
-               (show_curves_cage_ || show_face_set_ || show_mask_ || show_layer_mask_ ||
-                show_layer_preview_ || show_symmetry_plane_ || show_curves_symmetry_plane_ ||
-                show_symmetry_contour_);
+               (show_curves_cage_ || show_curves_influence_ || show_curves_hover_curves_ ||
+                show_face_set_ || show_mask_ || show_layer_mask_ || show_layer_preview_ || show_symmetry_plane_ ||
+                show_curves_symmetry_plane_ || show_symmetry_contour_);
 
     if (!enabled_) {
       /* Not used, but release the data. */
       sculpt_mask_.init();
       sculpt_curve_cage_.init();
+      sculpt_curves_influence_.init();
       symmetry_contour_.begin_sync(res, state, false);
       symmetry_plane_.begin_sync(res, state, false, 0.0f);
       return;
@@ -331,6 +345,29 @@ class Sculpts : Overlay {
       pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
       pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
       pass.push_constant("opacity", curve_cage_opacity);
+      /* Overridden per object in #object_sync when its curves are hit. */
+      pass.push_constant("hide_hit_curves", false);
+    }
+    {
+      auto &pass = sculpt_curves_influence_;
+      pass.init();
+      /* The flags differ between a hover record and a running stroke record but the geometry and
+       * shader are shared, so both are compiled as sub-passes and picked per object. */
+      const auto setup_sub = [&](const char *name, const bool show_influence, const bool show_hit) {
+        auto &sub = pass.sub(name);
+        sub.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | DRW_STATE_BLEND_ALPHA,
+                      state.clipping_plane_count);
+        sub.shader_set(res.shaders->sculpt_curves_influence.get());
+        sub.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+        sub.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+        sub.push_constant("influence_opacity", state.overlay.proportional_edit_viz_opacity);
+        sub.push_constant("show_influence", show_influence);
+        sub.push_constant("show_hover_hit", show_hit);
+        return &sub;
+      };
+      /* The hover shows only the flat hit color: the gradient belongs to the stroke. */
+      influence_hover_ps_ = setup_sub("Hover", false, show_curves_hover_curves_);
+      influence_stroke_ps_ = setup_sub("Stroke", show_curves_influence_, show_curves_hover_curves_);
     }
 
     update_multi_object_sculpt(state);
@@ -452,6 +489,18 @@ class Sculpts : Overlay {
       }
     }
 
+    /* The influence weights are keyed by the original data-block, while the overlay draws the
+     * evaluated object. Resolve once: the cage also needs to know whether its curves are hit. */
+    const Object *ob_orig = DEG_get_original(ob_ref.object);
+    const blender::Curves *curves_orig_id = (ob_orig != nullptr) ?
+                                                &DRW_object_get_data_for_drawing<blender::Curves>(
+                                                    *ob_orig) :
+                                                nullptr;
+    const bool has_influence = curves_orig_id != nullptr &&
+                               ED_curves_sculpt_has_influence(*curves_orig_id);
+    const bool influence_is_hover = has_influence &&
+                                    ED_curves_sculpt_influence_is_hover(*curves_orig_id);
+
     if (show_curves_cage_) {
       ResourceHandleRange handle = manager.unique_handle(ob_ref);
 
@@ -461,9 +510,28 @@ class Sculpts : Overlay {
                                                                         0.0f);
       const float cage_factor = opacity_factor * (1.0f - flash_factor);
 
+      /* Hide the cage exactly on the curves the influence pass draws solid, i.e. the same
+       * per-object flag that pass pushes as show_hover_hit. */
+      const bool hide_hit_curves = has_influence && show_curves_hover_curves_;
+
       gpu::Batch *geometry = DRW_curves_batch_cache_get_sculpt_curves_cage(&curves);
       sculpt_curve_cage_.push_constant("opacity", curves_cage_opacity_ * cage_factor);
+      sculpt_curve_cage_.push_constant("hide_hit_curves", hide_hit_curves);
       sculpt_curve_cage_.draw(geometry, handle);
+    }
+
+    if (has_influence) {
+      /* Hover and stroke records use the same geometry but different toggles, resolved in the
+       * matching sub-pass. */
+      const bool draw_influence = influence_is_hover ?
+                                      show_curves_hover_curves_ :
+                                      (show_curves_influence_ || show_curves_hover_curves_);
+      if (draw_influence) {
+        PassSimple::Sub *pass = influence_is_hover ? influence_hover_ps_ : influence_stroke_ps_;
+        ResourceHandleRange handle = manager.unique_handle(ob_ref);
+        gpu::Batch *geometry = DRW_curves_batch_cache_get_sculpt_influence_lines(&curves);
+        pass->draw(geometry, handle);
+      }
     }
   }
 
@@ -571,6 +639,7 @@ class Sculpts : Overlay {
     }
     GPU_framebuffer_bind(framebuffer);
     manager.submit(sculpt_curve_cage_, view);
+    manager.submit(sculpt_curves_influence_, view);
   }
 
   /**

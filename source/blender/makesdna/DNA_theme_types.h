@@ -334,8 +334,8 @@ typedef struct ThemeSpace {
   unsigned char sculpt_symmetry_contour[4];
   /** Proportional editing highlight gradient: low, mid and high influence. */
   unsigned char prop_falloff_low[4], prop_falloff_mid[4], prop_falloff_high[4];
-  /** Padding so #ThemeSpace keeps a size that is a multiple of 8 (bTheme embeds many). */
-  char _pad5[4];
+  /** Flat color of the curves touched by the Sculpt Curves brush. Keeps struct size. */
+  unsigned char curves_hover_hit[4];
   /** Attribute text overlay colors for boolean values. */
   unsigned char viewer_text_true[4], viewer_text_false[4];
   unsigned char face_back[4], face_front[4];

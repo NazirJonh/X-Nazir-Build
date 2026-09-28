@@ -57,6 +57,16 @@ class PinchOperation : public CurvesSculptStrokeOperation {
                           const StrokeExtension &stroke_extension) override;
 };
 
+/**
+ * Zone intensity of one point: the pinch weight without the brush strength, the invert factor
+ * and the operational scale (see #sculpt_influence_viz.cc). Shared by the stroke and the hover
+ * preview.
+ */
+float pinch_point_zone_weight(const float radius_falloff, const float point_factor)
+{
+  return radius_falloff * point_factor;
+}
+
 struct PinchOperationExecutor {
   PinchOperation *self_ = nullptr;
   CurvesSculptCommonContext ctx_;
@@ -80,6 +90,9 @@ struct PinchOperationExecutor {
   float invert_factor_;
 
   float2 brush_pos_re_;
+
+  /** Per-point brush influence for the highlight visualization, see #sculpt_influence_viz.cc. */
+  Array<float> influence_viz_;
 
   PinchTargetState *target_state_ = nullptr;
 
@@ -142,6 +155,11 @@ struct PinchOperationExecutor {
     }
 
     Array<bool> changed_curves(curves_->curves_num(), false);
+
+    /* Per-point zone intensity for the influence highlight (see #sculpt_influence_viz.cc). */
+    influence_viz_.reinitialize(curves_->points_num());
+    influence_viz_.fill(0.0f);
+
     if (falloff_shape == PAINT_FALLOFF_SHAPE_TUBE) {
       this->pinch_projected_with_symmetry(changed_curves);
     }
@@ -151,6 +169,8 @@ struct PinchOperationExecutor {
     else {
       BLI_assert_unreachable();
     }
+
+    curves_sculpt_influence_viz_publish(*curves_id_, std::move(influence_viz_));
 
     IndexMaskMemory memory;
     const IndexMask changed_curves_mask = IndexMask::from_bools(changed_curves, memory);
@@ -207,6 +227,10 @@ struct PinchOperationExecutor {
               const float dist_to_brush_re = std::sqrt(dist_to_brush_sq_re);
               const float t = math::safe_divide(dist_to_brush_re, brush_radius_base_re_);
               const float radius_falloff = t * BKE_brush_curve_strength(brush_, t, 1.0f);
+              /* The highlight shows the zone intensity: the weight without the brush strength,
+               * the invert factor and the operational scale (see #sculpt_influence_viz.cc). */
+              math::max_inplace(influence_viz_[point_i],
+                                pinch_point_zone_weight(radius_falloff, point_factors_[point_i]));
               const float weight = invert_factor_ * 0.1f * brush_strength_ * radius_falloff *
                                    point_factors_[point_i];
 
@@ -281,6 +305,10 @@ struct PinchOperationExecutor {
               const float dist_to_brush_cu = std::sqrt(dist_to_brush_sq_cu);
               const float t = math::safe_divide(dist_to_brush_cu, brush_radius_cu);
               const float radius_falloff = t * BKE_brush_curve_strength(brush_, t, 1.0f);
+              /* The highlight shows the zone intensity: the weight without the brush strength,
+               * the invert factor and the operational scale (see #sculpt_influence_viz.cc). */
+              math::max_inplace(influence_viz_[point_i],
+                                pinch_point_zone_weight(radius_falloff, point_factors_[point_i]));
               const float weight = invert_factor_ * 0.1f * brush_strength_ * radius_falloff *
                                    point_factors_[point_i];
 

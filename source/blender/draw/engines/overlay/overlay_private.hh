@@ -309,9 +309,31 @@ struct State {
   {
     return (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_CAGE);
   }
+  /** Master toggle of all Sculpt Curves display options (object color, influence, hover). */
+  bool show_sculpt_curves_display_options() const
+  {
+    return (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_HIDE_DISPLAY_OPTIONS) == 0;
+  }
   bool show_sculpt_curves_selection_object_color() const
   {
-    return (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_SELECTION_OBJECT_COLOR);
+    return this->show_sculpt_curves_display_options() &&
+           (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_SELECTION_OBJECT_COLOR);
+  }
+  /**
+   * Brush influence is a Sculpt Curves visualization: reading the master flag and the mode here
+   * keeps its toggle independent from the Edit Mode proportional highlight, which uses the
+   * unrelated #View3DOverlay.show_proportional_edit_viz.
+   */
+  bool show_sculpt_curves_brush_influence() const
+  {
+    return this->object_mode == OB_MODE_SCULPT_CURVES &&
+           this->show_sculpt_curves_display_options() &&
+           (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_HIDE_BRUSH_INFLUENCE) == 0;
+  }
+  bool show_sculpt_curves_hover_curves() const
+  {
+    return this->show_sculpt_curves_display_options() &&
+           (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_HIDE_HOVER_CURVES) == 0;
   }
   bool show_sculpt_symmetry_plane() const
   {
@@ -576,6 +598,7 @@ class ShaderModule {
   StaticShader pointcloud_points = shader_clippable("overlay_edit_pointcloud");
   StaticShader sculpt_curves = shader_clippable("overlay_sculpt_curves_selection");
   StaticShader sculpt_curves_cage = shader_clippable("overlay_sculpt_curves_cage");
+  StaticShader sculpt_curves_influence = shader_clippable("overlay_sculpt_curves_influence");
   StaticShader sculpt_mesh = shader_clippable("overlay_sculpt_mask");
   StaticShader sculpt_symmetry_plane = shader_clippable("overlay_sculpt_symmetry_plane");
   StaticShader uniform_color = shader_clippable("overlay_uniform_color");
@@ -873,6 +896,7 @@ struct Resources : public select::SelectMap {
     shaders->pointcloud_points.ensure_compile_async();
     shaders->sculpt_curves.ensure_compile_async();
     shaders->sculpt_curves_cage.ensure_compile_async();
+    shaders->sculpt_curves_influence.ensure_compile_async();
     shaders->sculpt_mesh.ensure_compile_async();
     shaders->sculpt_symmetry_plane.ensure_compile_async();
     shaders->uniform_color.ensure_compile_async();

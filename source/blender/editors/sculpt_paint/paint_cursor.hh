@@ -157,4 +157,10 @@ void mesh_cursor_inactive_draw(PaintCursorContext &pcontext);
 
 void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext);
 void sculpt_cursor_3d_overlay_draw(PaintCursorContext &pcontext);
+
+/**
+ * Sculpt Curves hover brush-zone preview (see #sculpt_hover_preview.cc). No-op unless the
+ * cursor is over a Sculpt Curves view with a deform brush and the preview is enabled.
+ */
+void curves_sculpt_hover_preview_draw(PaintCursorContext &pcontext);
 }  // namespace blender::ed::sculpt_paint

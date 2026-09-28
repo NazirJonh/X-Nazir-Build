@@ -79,6 +79,15 @@ class SlideOperation : public CurvesSculptStrokeOperation {
 };
 
 /**
+ * Zone intensity of one curve: the slide weight without the brush strength
+ * (see #sculpt_influence_viz.cc). Shared by the stroke and the hover preview.
+ */
+float slide_curve_zone_weight(const float radius_falloff, const float curve_factor)
+{
+  return radius_falloff * curve_factor;
+}
+
+/**
  * Utility class that actually executes the update when the stroke is updated. That's useful
  * because it avoids passing a very large number of parameters between functions.
  */
@@ -219,6 +228,12 @@ struct SlideOperationExecutor {
 
       /* First find all curves to slide. When the mouse moves, only those curves will be moved. */
       this->find_curves_to_slide_with_symmetry();
+
+      /* The curves to slide (and their zone intensity) are resolved once at the start; publish
+       * them so the highlight is visible for the whole stroke. Tag the draw caches explicitly
+       * because the slide itself does not change the geometry in this step. */
+      this->publish_influence_viz();
+      DEG_id_tag_update(&curves_id_orig_->id, ID_RECALC_GEOMETRY);
       return;
     }
     this->slide_with_symmetry();
@@ -227,10 +242,33 @@ struct SlideOperationExecutor {
       BKE_report(stroke_extension.reports, RPT_WARNING, "UV map or surface attachment is invalid");
     }
 
+    this->publish_influence_viz();
+
     curves_orig_->tag_positions_changed();
     DEG_id_tag_update(&curves_id_orig_->id, ID_RECALC_GEOMETRY);
     WM_main_add_notifier(NC_GEOM | ND_DATA, &curves_id_orig_->id);
     ED_region_tag_redraw(ctx_.region);
+  }
+
+  /** Unfold the per-curve slide weights to the per-point influence highlight layout. */
+  void publish_influence_viz()
+  {
+    Array<float> influence_viz(curves_orig_->points_num(), 0.0f);
+    const OffsetIndices<int> points_by_curve = curves_orig_->points_by_curve();
+    for (const SlideInfo &slide_info : target_state_->slide_info) {
+      for (const SlideCurveInfo &slide_curve_info : slide_info.curves_to_slide) {
+        const float curve_influence = slide_curve_zone_weight(
+            slide_curve_info.radius_falloff, curve_factors_[slide_curve_info.curve_i]);
+        if (curve_influence == 0.0f) {
+          continue;
+        }
+        for (const int point_i : points_by_curve[slide_curve_info.curve_i]) {
+          /* Several symmetry brushes may slide the same curve; keep the maximum. */
+          influence_viz[point_i] = std::max(influence_viz[point_i], curve_influence);
+        }
+      }
+    }
+    curves_sculpt_influence_viz_publish(*curves_id_orig_, std::move(influence_viz));
   }
 
   void find_curves_to_slide_with_symmetry()

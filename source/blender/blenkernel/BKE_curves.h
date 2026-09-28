@@ -39,6 +39,8 @@ void BKE_curves_data_update(struct Depsgraph *depsgraph,
 
 enum {
   BKE_CURVES_BATCH_DIRTY_ALL = 0,
+  /** Only the sculpt-curves influence vertex buffer and the batches referencing it. */
+  BKE_CURVES_BATCH_DIRTY_SCULPT_INFLUENCE,
 };
 
 void BKE_curves_batch_cache_dirty_tag(struct Curves *curves, int mode);

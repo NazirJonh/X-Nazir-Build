@@ -72,6 +72,8 @@ set(SRC
   curves/sculpt_delete.cc
   curves/sculpt_density.cc
   curves/sculpt_grow_shrink.cc
+  curves/sculpt_hover_preview.cc
+  curves/sculpt_influence_viz.cc
   curves/sculpt_multi_object.cc
   curves/sculpt_ops.cc
   curves/sculpt_pinch.cc

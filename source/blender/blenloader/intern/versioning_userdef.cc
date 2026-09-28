@@ -480,6 +480,22 @@ static void do_versions_theme(const UserDef *userdef, bTheme *btheme)
   if (btheme->space_view3d.prop_falloff_high[3] == 0) {
     FROM_DEFAULT_V4_UCHAR(space_view3d.prop_falloff_high);
   }
+  /* The hovered-curves flat color occupies the former padding: old themes carry zeroes. */
+  if (btheme->space_view3d.curves_hover_hit[3] == 0) {
+    FROM_DEFAULT_V4_UCHAR(space_view3d.curves_hover_hit);
+  }
+  /* Fork-only build: the first default of this color was a flat gray that was never released, so
+   * migrate that exact value to the current default once. The exact match is self-limiting --
+   * after the migration the value no longer matches -- which keeps this effectively one-time
+   * without needing a version guard. Known limitation: a user cannot deliberately pick exactly
+   * this gray, as it will be reset on every load. */
+  if (btheme->space_view3d.curves_hover_hit[0] == 0xb0 &&
+      btheme->space_view3d.curves_hover_hit[1] == 0xb0 &&
+      btheme->space_view3d.curves_hover_hit[2] == 0xb0 &&
+      btheme->space_view3d.curves_hover_hit[3] == 0xff)
+  {
+    FROM_DEFAULT_V4_UCHAR(space_view3d.curves_hover_hit);
+  }
 
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning

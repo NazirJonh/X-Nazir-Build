@@ -236,7 +236,12 @@ bool SculptCurvesBrushStroke::test_cancel()
   return false;
 }
 
-void SculptCurvesBrushStroke::done(const bool /*is_cancel*/, bool /*stroke_started*/) {}
+void SculptCurvesBrushStroke::done(const bool /*is_cancel*/, bool /*stroke_started*/)
+{
+  /* Stop publishing the brush influence highlight, no matter if the stroke was confirmed or
+   * cancelled (see #sculpt_influence_viz.cc). */
+  curves_sculpt_influence_viz_clear();
+}
 
 static wmOperatorStatus sculpt_curves_stroke_invoke(bContext *C,
                                                     wmOperator *op,
@@ -365,6 +370,8 @@ static void curves_sculptmode_exit(bContext *C)
     DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
     WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
   }
+  /* Drop any hover influence so it does not linger after leaving the mode. */
+  curves_sculpt_hover_viz_clear();
 }
 
 static wmOperatorStatus curves_sculptmode_toggle_exec(bContext *C, wmOperator *op)

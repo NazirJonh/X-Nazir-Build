@@ -43,6 +43,9 @@
 
 #include "DRW_render.hh"
 
+#include "ED_curves_sculpt.hh"
+#include "ED_transform.hh"
+
 #include "draw_attributes.hh"
 #include "draw_cache_impl.hh" /* own include */
 #include "draw_cache_inline.hh"
@@ -134,6 +137,13 @@ struct CurvesBatchCache {
   gpu::Batch *sculpt_cage;
   gpu::IndexBuf *sculpt_cage_ibo;
 
+  /* Brush influence highlight lines for sculpt curves mode: line strips through the
+   * control points (same topology as #sculpt_cage), colored per-vertex by the published
+   * influence weights, so the gradient sits exactly on the cage lines. */
+  gpu::Batch *sculpt_influence_lines;
+  gpu::IndexBuf *sculpt_influence_lines_ibo;
+  gpu::VertBuf *sculpt_influence;
+
   /* Crazy-space point positions for original points. */
   gpu::VertBuf *edit_points_pos;
   gpu::VertBuf *edit_points_rad;
@@ -154,6 +164,10 @@ struct CurvesBatchCache {
   /* Selection of original points. */
   gpu::VertBuf *edit_points_selection;
 
+  /* Proportional editing falloff per point and bezier handle, in the same layout as
+   * #edit_points_pos. Only built while a proportional transform publishes data. */
+  gpu::VertBuf *edit_points_falloff;
+
   gpu::IndexBuf *edit_handles_ibo;
 
   gpu::Batch *edit_curves_lines;
@@ -166,6 +180,13 @@ struct CurvesBatchCache {
 
   /* Whether the cache is invalid. */
   bool is_dirty;
+  /* Set by #BKE_CURVES_BATCH_DIRTY_SCULPT_INFLUENCE: discard only the influence vertex buffer and
+   * the batches built from it at the next draw, where a GPU context is available. */
+  bool sculpt_influence_dirty = false;
+  /* Version of the influence record this cache was built from. The record is keyed by the
+   * original ID while this cache lives on the evaluated copy, so a version mismatch is how hover
+   * changes are noticed without a depsgraph re-evaluation. */
+  uint32_t sculpt_influence_version = 0;
 };
 
 static bool batch_cache_is_dirty(const Curves &curves)
@@ -196,6 +217,7 @@ static void clear_edit_data(CurvesBatchCache *cache)
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_rad);
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_data);
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_selection);
+  GPU_VERTBUF_DISCARD_SAFE(cache->edit_points_falloff);
   GPU_INDEXBUF_DISCARD_SAFE(cache->edit_handles_ibo);
 
   GPU_BATCH_DISCARD_SAFE(cache->edit_points);
@@ -203,6 +225,10 @@ static void clear_edit_data(CurvesBatchCache *cache)
 
   GPU_INDEXBUF_DISCARD_SAFE(cache->sculpt_cage_ibo);
   GPU_BATCH_DISCARD_SAFE(cache->sculpt_cage);
+
+  GPU_INDEXBUF_DISCARD_SAFE(cache->sculpt_influence_lines_ibo);
+  GPU_VERTBUF_DISCARD_SAFE(cache->sculpt_influence);
+  GPU_BATCH_DISCARD_SAFE(cache->sculpt_influence_lines);
 
   GPU_VERTBUF_DISCARD_SAFE(cache->edit_curves_lines_pos);
   GPU_INDEXBUF_DISCARD_SAFE(cache->edit_curves_lines_ibo);
@@ -519,6 +545,84 @@ static void create_edit_points_selection(const OffsetIndices<int> points_by_curv
                                        selection_right,
                                        data.slice(handle_range_right(points_num, bezier_offsets)));
   }
+}
+
+static void create_edit_points_falloff(const Span<float> falloff,
+                                         const int points_num,
+                                         const OffsetIndices<int> bezier_offsets,
+                                         gpu::VertBuf &vbo)
+{
+  static const GPUVertFormat format = GPU_vertformat_from_attribute("falloff",
+                                                                    gpu::VertAttrType::SFLOAT_32);
+
+  /* Match the length of the shared #edit_points_pos buffer (`[points] [left handles]
+   * [right handles]`). The published factors already use this layout
+   * (see #transform_proportional_viz.cc); copy only on exact size match so stale data from
+   * before a topology change cannot write out of bounds in release builds.
+   */
+  GPU_vertbuf_init_with_format(vbo, format);
+  GPU_vertbuf_data_alloc(vbo, handles_and_points_num(points_num, bezier_offsets));
+  MutableSpan<float> data = vbo.data<float>();
+  data.fill(0.0f);
+  if (falloff.size() == data.size()) {
+    data.copy_from(falloff);
+  }
+}
+
+static void create_sculpt_influence_vbo(const Span<float> influence,
+                                          const OffsetIndices<int> points_by_curve,
+                                          const OffsetIndices<int> bezier_offsets,
+                                          gpu::VertBuf &vbo)
+{
+  struct SculptInfluenceVert {
+    float influence;
+    float curve_hit;
+  };
+
+  static const GPUVertFormat format = []() {
+    GPUVertFormat fmt{};
+    GPU_vertformat_attr_add(&fmt, "influence", gpu::VertAttrType::SFLOAT_32);
+    GPU_vertformat_attr_add(&fmt, "curve_hit", gpu::VertAttrType::SFLOAT_32);
+    return fmt;
+  }();
+
+  const int points_num = points_by_curve.total_size();
+
+  /* Match the length of the shared #edit_points_pos buffer (`[points] [left handles]
+   * [right handles]`) so every batch using it sees equal vertex counts. The published weights
+   * are per control point (see #ED_curves_sculpt.hh): handles are not sculpted, fill them with 0.
+   */
+  GPU_vertbuf_init_with_format(vbo, format);
+  GPU_vertbuf_data_alloc(vbo, handles_and_points_num(points_num, bezier_offsets));
+  MutableSpan<SculptInfluenceVert> data = vbo.data<SculptInfluenceVert>();
+  data.fill(SculptInfluenceVert{0.0f, 0.0f});
+
+  /* Copy only on exact size match so stale weights from before a topology change cannot write
+   * out of bounds in release builds (where #BLI_assert is compiled out). */
+  if (influence.size() != points_num) {
+    return;
+  }
+
+  /* Flat hit flag: 1 on every point of a curve that has at least one weighted point, so the
+   * influence pass can draw the whole touched curve in the solid hover-hit color even where the
+   * weight itself faded to zero. */
+  threading::parallel_for(points_by_curve.index_range(), 1024, [&](const IndexRange range) {
+    for (const int curve_i : range) {
+      const IndexRange points = points_by_curve[curve_i];
+      bool hit = false;
+      for (const int point_i : points) {
+        if (influence[point_i] > 0.0f) {
+          hit = true;
+          break;
+        }
+      }
+      const float hit_f = hit ? 1.0f : 0.0f;
+      for (const int point_i : points) {
+        data[point_i].influence = influence[point_i];
+        data[point_i].curve_hit = hit_f;
+      }
+    }
+  });
 }
 
 static void create_lines_ibo_no_cyclic(const OffsetIndices<int> points_by_curve,
@@ -1066,16 +1170,55 @@ void DRW_curves_batch_cache_dirty_tag(Curves *curves, int mode)
     case BKE_CURVES_BATCH_DIRTY_ALL:
       cache->is_dirty = true;
       break;
+    case BKE_CURVES_BATCH_DIRTY_SCULPT_INFLUENCE:
+      /* Deferred: the GPU resources are discarded at the next draw (see
+       * #DRW_curves_batch_cache_validate), where a GPU context is guaranteed. */
+      cache->sculpt_influence_dirty = true;
+      break;
     default:
       BLI_assert_unreachable();
   }
 }
 
+static void discard_sculpt_influence(CurvesBatchCache &cache)
+{
+  /* The cage batch reads the influence vertex buffer (to hide the hit curves), so it has to be
+   * rebuilt together with the influence lines. Index buffers are topology-only. */
+  GPU_VERTBUF_DISCARD_SAFE(cache.sculpt_influence);
+  GPU_BATCH_DISCARD_SAFE(cache.sculpt_influence_lines);
+  GPU_BATCH_DISCARD_SAFE(cache.sculpt_cage);
+}
+
 void DRW_curves_batch_cache_validate(Curves *curves)
 {
+  CurvesBatchCache *cache = curves->batch_cache;
+  if (cache != nullptr && cache->sculpt_influence_dirty) {
+    discard_sculpt_influence(*cache);
+    cache->sculpt_influence_dirty = false;
+  }
+
   if (!batch_cache_is_dirty(*curves)) {
     clear_batch_cache(*curves);
     init_batch_cache(*curves);
+  }
+}
+
+void DRW_curves_batch_cache_validate_sculpt_influence(Curves &curves_eval,
+                                                      const Curves &curves_orig)
+{
+  /* The influence registry is keyed by the original ID while this cache lives on the evaluated
+   * copy. The original has to come from the object: `Curves::id.orig_id` is null whenever the
+   * modifier stack copied the geometry (#BKE_curves_copy_for_eval), which is the usual case for
+   * hair. Hover changes are detected by version, so the influence buffers are rebuilt without
+   * re-evaluating the curves geometry. */
+  CurvesBatchCache *cache = curves_eval.batch_cache;
+  if (cache == nullptr) {
+    return;
+  }
+  const uint32_t influence_version = ED_curves_sculpt_influence_version(curves_orig);
+  if (cache->sculpt_influence_version != influence_version) {
+    discard_sculpt_influence(*cache);
+    cache->sculpt_influence_version = influence_version;
   }
 }
 
@@ -1123,6 +1266,12 @@ gpu::Batch *DRW_curves_batch_cache_get_sculpt_curves_cage(Curves *curves)
 {
   CurvesBatchCache &cache = get_batch_cache(*curves);
   return DRW_batch_request(&cache.sculpt_cage);
+}
+
+gpu::Batch *DRW_curves_batch_cache_get_sculpt_influence_lines(Curves *curves)
+{
+  CurvesBatchCache &cache = get_batch_cache(*curves);
+  return DRW_batch_request(&cache.sculpt_influence_lines);
 }
 
 gpu::Batch *DRW_curves_batch_cache_get_edit_curves_handles(Curves *curves)
@@ -1275,6 +1424,12 @@ void DRW_curves_batch_cache_create_requested(Object *ob, const Scene *scene)
     DRW_vbo_request(cache.edit_points, &cache.edit_points_rad);
     DRW_vbo_request(cache.edit_points, &cache.edit_points_data);
     DRW_vbo_request(cache.edit_points, &cache.edit_points_selection);
+    /* Only build the falloff buffer while the proportional editing highlight actually publishes
+     * data for this curves data-block. Without it the shader input falls back to 0, which
+     * disables the highlight at no cost. */
+    if (blender::ed::transform::has_proportional_falloff_data(curves_orig_id)) {
+      DRW_vbo_request(cache.edit_points, &cache.edit_points_falloff);
+    }
     is_edit_data_needed = true;
   }
   if (DRW_batch_requested(cache.sculpt_cage, GPU_PRIM_LINE_STRIP)) {
@@ -1282,6 +1437,14 @@ void DRW_curves_batch_cache_create_requested(Object *ob, const Scene *scene)
     DRW_vbo_request(cache.sculpt_cage, &cache.edit_points_pos);
     DRW_vbo_request(cache.sculpt_cage, &cache.edit_points_data);
     DRW_vbo_request(cache.sculpt_cage, &cache.edit_points_selection);
+    /* The cage shader hides the hit curves, so it needs the influence/hit attributes. */
+    DRW_vbo_request(cache.sculpt_cage, &cache.sculpt_influence);
+    is_edit_data_needed = true;
+  }
+  if (DRW_batch_requested(cache.sculpt_influence_lines, GPU_PRIM_LINE_STRIP)) {
+    DRW_ibo_request(cache.sculpt_influence_lines, &cache.sculpt_influence_lines_ibo);
+    DRW_vbo_request(cache.sculpt_influence_lines, &cache.edit_points_pos);
+    DRW_vbo_request(cache.sculpt_influence_lines, &cache.sculpt_influence);
     is_edit_data_needed = true;
   }
   if (DRW_batch_requested(cache.edit_handles, GPU_PRIM_LINES)) {
@@ -1310,6 +1473,10 @@ void DRW_curves_batch_cache_create_requested(Object *ob, const Scene *scene)
 
   if (DRW_ibo_requested(cache.sculpt_cage_ibo)) {
     create_lines_ibo_no_cyclic(points_by_curve, *cache.sculpt_cage_ibo);
+  }
+
+  if (DRW_ibo_requested(cache.sculpt_influence_lines_ibo)) {
+    create_lines_ibo_no_cyclic(points_by_curve, *cache.sculpt_influence_lines_ibo);
   }
 
   if (DRW_vbo_requested(cache.edit_curves_lines_pos)) {
@@ -1373,6 +1540,19 @@ void DRW_curves_batch_cache_create_requested(Object *ob, const Scene *scene)
   if (DRW_vbo_requested(cache.edit_points_selection)) {
     create_edit_points_selection(
         points_by_curve, bezier_curves, bezier_offsets, attributes, *cache.edit_points_selection);
+  }
+  if (DRW_vbo_requested(cache.edit_points_falloff)) {
+    create_edit_points_falloff(
+        blender::ed::transform::get_proportional_falloff_factors(curves_orig_id),
+        points_by_curve.total_size(),
+        bezier_offsets,
+        *cache.edit_points_falloff);
+  }
+  if (DRW_vbo_requested(cache.sculpt_influence)) {
+    create_sculpt_influence_vbo(ED_curves_sculpt_get_influence(curves_orig_id),
+                                points_by_curve,
+                                bezier_offsets,
+                                *cache.sculpt_influence);
   }
   if (DRW_ibo_requested(cache.edit_handles_ibo)) {
     calc_edit_handles_ibo(points_by_curve,

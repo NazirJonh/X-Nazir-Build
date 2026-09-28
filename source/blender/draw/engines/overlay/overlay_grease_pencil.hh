@@ -152,6 +152,10 @@ class GreasePencil : Overlay {
         sub.push_constant("use_grease_pencil", true);
         sub.push_constant("do_stroke_endpoints", show_direction);
         sub.push_constant("curve_handle_display", handle_display);
+        /* The proportional editing highlight is a curves/mesh edit feature; the falloff input is
+         * unset for grease pencil batches, so the mixing must be off explicitly. */
+        sub.push_constant("prop_edit_viz_enabled", false);
+        sub.push_constant("prop_edit_viz_opacity", 0.0f);
         edit_points_ = &sub;
       }
     }

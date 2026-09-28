@@ -9,6 +9,7 @@ VERTEX_SHADER_CREATE_INFO(overlay_edit_particle_point)
 #include "draw_model_lib.glsl"
 #include "draw_view_clipping_lib.glsl"
 #include "draw_view_lib.glsl"
+#include "overlay_common_lib.glsl"
 
 #define no_active_weight 666.0f
 
@@ -93,6 +94,21 @@ void main()
     }
 #endif
   }
+
+#ifdef CURVES_POINT
+  /* Proportional editing influence highlight (see #transform_proportional_viz.cc). Blends the
+   * point color towards the heat-map, fading in from the falloff radius, so the point itself
+   * (its alpha) is never affected. */
+  if (prop_edit_viz_enabled && falloff > 0.0f) {
+    const float blend = smoothstep(0.0f, 0.25f, falloff) * prop_edit_viz_opacity;
+    final_color.rgb = mix(final_color.rgb,
+                            prop_falloff_heat_color(falloff,
+                                                    theme.colors.prop_falloff_low,
+                                                    theme.colors.prop_falloff_mid,
+                                                    theme.colors.prop_falloff_high),
+                            blend);
+  }
+#endif
 
   float vsize = use_grease_pencil ? theme.sizes.vertex_gpencil : theme.sizes.vert;
   gl_PointSize = vsize * 2.0f * end_point_size_factor;

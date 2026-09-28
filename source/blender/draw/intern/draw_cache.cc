@@ -31,6 +31,8 @@
 #include "BKE_paint.hh"
 #include "BKE_subdiv_modifier.hh"
 
+#include "DEG_depsgraph_query.hh"
+
 #include "DRW_render.hh"
 #include "GPU_batch.hh"
 #include "GPU_batch_utils.hh"
@@ -522,9 +524,15 @@ void drw_batch_cache_validate(Object *ob)
     case OB_LATTICE:
       DRW_lattice_batch_cache_validate(&DRW_object_get_data_for_drawing<Lattice>(*ob));
       break;
-    case OB_CURVES:
-      DRW_curves_batch_cache_validate(&DRW_object_get_data_for_drawing<Curves>(*ob));
+    case OB_CURVES: {
+      Curves &curves_eval = DRW_object_get_data_for_drawing<Curves>(*ob);
+      DRW_curves_batch_cache_validate(&curves_eval);
+      if (const Object *ob_orig = DEG_get_original(ob)) {
+        DRW_curves_batch_cache_validate_sculpt_influence(
+            curves_eval, *id_cast<const Curves *>(ob_orig->data));
+      }
       break;
+    }
     case OB_POINTCLOUD:
       DRW_pointcloud_batch_cache_validate(&DRW_object_get_data_for_drawing<PointCloud>(*ob));
       break;

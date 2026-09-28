@@ -35,6 +35,8 @@
 
 #include "DRW_render.hh"
 
+#include "ED_transform.hh"
+
 #include "draw_cache_inline.hh"
 #include "draw_curves_private.hh"
 
@@ -306,6 +308,9 @@ struct CurveBatchCache {
     /* Edit points (beztriples and bpoints) */
     gpu::VertBuf *pos;
     gpu::VertBuf *data;
+    /* Proportional editing falloff, same layout as #pos. Only built while a proportional
+     * transform publishes data. */
+    gpu::VertBuf *falloff;
   } edit;
 
   struct {
@@ -409,6 +414,7 @@ void DRW_curve_batch_cache_dirty_tag(Curve *cu, int mode)
       break;
     case BKE_CURVE_BATCH_DIRTY_SELECT:
       GPU_VERTBUF_DISCARD_SAFE(cache->edit.data);
+      GPU_VERTBUF_DISCARD_SAFE(cache->edit.falloff);
 
       GPU_BATCH_DISCARD_SAFE(cache->batch.edit_edges);
       GPU_BATCH_DISCARD_SAFE(cache->batch.edit_verts);
@@ -627,11 +633,13 @@ static uint8_t bpoint_vflag_get(CurveRenderData *rdata, uint8_t flag, int v_idx,
 static void curve_create_edit_data_and_handles(CurveRenderData *rdata,
                                                gpu::VertBuf *vbo_pos,
                                                gpu::VertBuf *vbo_data,
+                                               gpu::VertBuf *vbo_falloff,
+                                               const EditNurb *editnurb,
                                                gpu::IndexBuf *ibo_edit_verts_points,
                                                gpu::IndexBuf *ibo_edit_lines)
 {
   static struct {
-    uint pos, data;
+    uint pos, data, falloff;
   } attr_id;
 
   static const GPUVertFormat format_pos = [&]() {
@@ -643,6 +651,12 @@ static void curve_create_edit_data_and_handles(CurveRenderData *rdata,
   static const GPUVertFormat format_data = [&]() {
     GPUVertFormat format{};
     attr_id.data = GPU_vertformat_attr_add(&format, "data", gpu::VertAttrType::UINT_32);
+    return format;
+  }();
+
+  static const GPUVertFormat format_falloff = [&]() {
+    GPUVertFormat format{};
+    attr_id.falloff = GPU_vertformat_attr_add(&format, "falloff", gpu::VertAttrType::SFLOAT_32);
     return format;
   }();
 
@@ -660,6 +674,10 @@ static void curve_create_edit_data_and_handles(CurveRenderData *rdata,
   if (DRW_TEST_ASSIGN_VBO(vbo_data)) {
     GPU_vertbuf_init_with_format(*vbo_data, format_data);
     GPU_vertbuf_data_alloc(*vbo_data, verts_len_capacity);
+  }
+  if (DRW_TEST_ASSIGN_VBO(vbo_falloff)) {
+    GPU_vertbuf_init_with_format(*vbo_falloff, format_falloff);
+    GPU_vertbuf_data_alloc(*vbo_falloff, verts_len_capacity);
   }
 
   GPUIndexBufBuilder elb_verts, *elbp_verts = nullptr;
@@ -712,6 +730,18 @@ static void curve_create_edit_data_and_handles(CurveRenderData *rdata,
             GPU_vertbuf_attr_set(vbo_pos, attr_id.pos, vbo_len_used + j, bezt->vec[j]);
           }
         }
+        if (vbo_falloff) {
+          for (int j = 0; j < 3; j++) {
+            /* Write the factor exactly where `pos` is written; hidden points are skipped the
+             * same way. Legacy curves are small, a lookup per slot is acceptable. */
+            const float falloff =
+                editnurb ? blender::ed::transform::get_proportional_falloff_factor(
+                               *editnurb, bezt->vec[j])
+                               .value_or(0.0f) :
+                           0.0f;
+            GPU_vertbuf_attr_set(vbo_falloff, attr_id.falloff, vbo_len_used + j, &falloff);
+          }
+        }
         vbo_len_used += 3;
       }
     }
@@ -745,6 +775,14 @@ static void curve_create_edit_data_and_handles(CurveRenderData *rdata,
         if (vbo_pos) {
           GPU_vertbuf_attr_set(vbo_pos, attr_id.pos, vbo_len_used, bp->vec);
         }
+        if (vbo_falloff) {
+          const float falloff = editnurb ?
+                                    blender::ed::transform::get_proportional_falloff_factor(
+                                        *editnurb, bp->vec)
+                                        .value_or(0.0f) :
+                                    0.0f;
+          GPU_vertbuf_attr_set(vbo_falloff, attr_id.falloff, vbo_len_used, &falloff);
+        }
       }
     }
   }
@@ -762,6 +800,9 @@ static void curve_create_edit_data_and_handles(CurveRenderData *rdata,
     }
     if (vbo_data != nullptr) {
       GPU_vertbuf_data_resize(*vbo_data, vbo_len_used);
+    }
+    if (vbo_falloff != nullptr) {
+      GPU_vertbuf_data_resize(*vbo_falloff, vbo_len_used);
     }
   }
 }
@@ -836,6 +877,14 @@ void DRW_curve_batch_cache_create_requested(Object *ob, const Scene *scene)
     DRW_ibo_request(cache->batch.edit_verts, &cache->ibo.edit_verts);
     DRW_vbo_request(cache->batch.edit_verts, &cache->edit.pos);
     DRW_vbo_request(cache->batch.edit_verts, &cache->edit.data);
+    /* Only build the falloff buffer while the proportional editing highlight actually publishes
+     * data for this curve. Without it the shader input falls back to 0, which disables the
+     * highlight at no cost. */
+    if ((cu->editnurb != nullptr) &&
+        blender::ed::transform::has_proportional_falloff_data(*cu->editnurb))
+    {
+      DRW_vbo_request(cache->batch.edit_verts, &cache->edit.falloff);
+    }
   }
   if (DRW_batch_requested(cache->batch.edit_normals, GPU_PRIM_LINES)) {
     DRW_vbo_request(cache->batch.edit_normals, &cache->edit.curves_nor);
@@ -854,6 +903,7 @@ void DRW_curve_batch_cache_create_requested(Object *ob, const Scene *scene)
 
   DRW_ADD_FLAG_FROM_VBO_REQUEST(mr_flag, cache->edit.pos, CU_DATATYPE_OVERLAY);
   DRW_ADD_FLAG_FROM_VBO_REQUEST(mr_flag, cache->edit.data, CU_DATATYPE_OVERLAY);
+  DRW_ADD_FLAG_FROM_VBO_REQUEST(mr_flag, cache->edit.falloff, CU_DATATYPE_OVERLAY);
   DRW_ADD_FLAG_FROM_VBO_REQUEST(mr_flag, cache->edit.curves_nor, CU_DATATYPE_NORMAL);
   DRW_ADD_FLAG_FROM_IBO_REQUEST(mr_flag, cache->ibo.edit_verts, CU_DATATYPE_OVERLAY);
   DRW_ADD_FLAG_FROM_IBO_REQUEST(mr_flag, cache->ibo.edit_lines, CU_DATATYPE_OVERLAY);
@@ -875,10 +925,19 @@ void DRW_curve_batch_cache_create_requested(Object *ob, const Scene *scene)
     curve_create_curves_lines(rdata, cache->ibo.curves_lines);
   }
   if (DRW_vbo_requested(cache->edit.pos) || DRW_vbo_requested(cache->edit.data) ||
-      DRW_ibo_requested(cache->ibo.edit_verts) || DRW_ibo_requested(cache->ibo.edit_lines))
+      DRW_vbo_requested(cache->edit.falloff) || DRW_ibo_requested(cache->ibo.edit_verts) ||
+      DRW_ibo_requested(cache->ibo.edit_lines))
   {
-    curve_create_edit_data_and_handles(
-        rdata, cache->edit.pos, cache->edit.data, cache->ibo.edit_verts, cache->ibo.edit_lines);
+    /* Proportional editing falloff factors looked up per `BezTriple::vec` / `BPoint::vec`
+     * address while a proportional transform is running; the query returns nullopt otherwise
+     * (see #ED_transform.hh). #EditNurb is null outside Edit Mode. */
+    curve_create_edit_data_and_handles(rdata,
+                                       cache->edit.pos,
+                                       cache->edit.data,
+                                       cache->edit.falloff,
+                                       cu->editnurb,
+                                       cache->ibo.edit_verts,
+                                       cache->ibo.edit_lines);
   }
   if (DRW_vbo_requested(cache->edit.curves_nor)) {
     curve_create_edit_curves_nor(rdata, *cache->edit.curves_nor, scene);

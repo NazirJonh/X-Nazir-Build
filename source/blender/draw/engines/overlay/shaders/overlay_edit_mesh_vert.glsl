@@ -57,7 +57,12 @@ void main()
    * (its alpha) is never affected. */
   if (prop_edit_viz_enabled && falloff > 0.0f) {
     const float blend = smoothstep(0.0f, 0.25f, falloff) * prop_edit_viz_opacity;
-    final_color.rgb = mix(final_color.rgb, EDIT_MESH_prop_falloff_color(falloff), blend);
+    final_color.rgb = mix(final_color.rgb,
+                            prop_falloff_heat_color(falloff,
+                                                    theme.colors.prop_falloff_low,
+                                                    theme.colors.prop_falloff_mid,
+                                                    theme.colors.prop_falloff_high),
+                            blend);
   }
   gl_PointSize = theme.sizes.vert * ((vertex_crease > 0.0f) ? 3.0f : 2.0f);
   /* Make selected and active vertex always on top. */

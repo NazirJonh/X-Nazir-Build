@@ -95,6 +95,7 @@ set(SRC_GLSL_VERT
   overlay_particle_shape_vert.glsl
   overlay_particle_vert.glsl
   overlay_sculpt_curves_cage_vert.glsl
+  overlay_sculpt_curves_influence_vert.glsl
   overlay_sculpt_curves_selection_vert.glsl
   overlay_sculpt_mask_vert.glsl
   overlay_viewer_attribute_curve_vert.glsl

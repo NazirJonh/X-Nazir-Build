@@ -70,6 +70,17 @@ class CombOperation : public CurvesSculptStrokeOperation {
 };
 
 /**
+ * Zone intensity of one point: the comb weight without the brush strength
+ * (see #sculpt_influence_viz.cc). Shared by the stroke and the hover preview.
+ */
+float comb_point_zone_weight(const float curve_falloff,
+                             const float radius_falloff,
+                             const float point_factor)
+{
+  return curve_falloff * radius_falloff * point_factor;
+}
+
+/**
  * Utility class that actually executes the update when the stroke is updated. That's useful
  * because it avoids passing a very large number of parameters between functions.
  */
@@ -94,6 +105,9 @@ struct CombOperationExecutor {
   float2 brush_pos_prev_re_;
   float2 brush_pos_re_;
   float2 brush_pos_diff_re_;
+
+  /** Per-point brush influence for the highlight visualization, see #sculpt_influence_viz.cc. */
+  Array<float> influence_viz_;
 
   CurvesSurfaceTransforms transforms_;
 
@@ -165,6 +179,10 @@ struct CombOperationExecutor {
 
     Array<bool> changed_curves(curves_orig_->curves_num(), false);
 
+    /* Per-point zone intensity for the influence highlight (see #sculpt_influence_viz.cc). */
+    influence_viz_.reinitialize(curves_orig_->points_num());
+    influence_viz_.fill(0.0f);
+
     if (falloff_shape == PAINT_FALLOFF_SHAPE_TUBE) {
       this->comb_projected_with_symmetry(changed_curves);
     }
@@ -174,6 +192,8 @@ struct CombOperationExecutor {
     else {
       BLI_assert_unreachable();
     }
+
+    curves_sculpt_influence_viz_publish(*curves_id_orig_, std::move(influence_viz_));
 
     const Mesh *surface = curves_id_orig_->surface && curves_id_orig_->surface->type == OB_MESH ?
                               id_cast<Mesh *>(curves_id_orig_->surface->data) :
@@ -256,6 +276,11 @@ struct CombOperationExecutor {
               const float curve_parameter = current_length * total_length_inv;
               const float curve_falloff = BKE_curvemapping_evaluateF(
                   &curve_parameter_falloff_mapping, 0, curve_parameter);
+              /* The highlight shows the zone intensity: the weight without the brush strength
+               * (see #sculpt_influence_viz.cc). */
+              math::max_inplace(influence_viz_[point_i],
+                                comb_point_zone_weight(
+                                    curve_falloff, radius_falloff, point_factors_[point_i]));
               /* Combine the falloff and brush strength. */
               const float weight = brush_strength_ * curve_falloff * radius_falloff *
                                    point_factors_[point_i];
@@ -371,6 +396,11 @@ struct CombOperationExecutor {
               const float curve_parameter = current_length * total_length_inv;
               const float curve_falloff = BKE_curvemapping_evaluateF(
                   &curve_parameter_falloff_mapping, 0, curve_parameter);
+              /* The highlight shows the zone intensity: the weight without the brush strength
+               * (see #sculpt_influence_viz.cc). */
+              math::max_inplace(influence_viz_[point_i],
+                                comb_point_zone_weight(
+                                    curve_falloff, radius_falloff, point_factors_[point_i]));
               /* Combine the falloff and brush strength. */
               const float weight = brush_strength_ * curve_falloff * radius_falloff *
                                    point_factors_[point_i];

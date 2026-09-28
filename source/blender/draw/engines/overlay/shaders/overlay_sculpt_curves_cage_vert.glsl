@@ -17,6 +17,14 @@ void main()
   /* Small bias to always be on top of the geom. */
   gl_Position.z -= 1e-3f;
 
+  /* The hit curves are drawn solid by the influence pass; cull their cage segments so the two do
+   * not fight in the AA resolve (all points of a hit curve carry curve_hit, and the line-strip
+   * IBO breaks between curves, so exactly those segments are removed). */
+  if (hide_hit_curves && curve_hit > 0.0f) {
+    gl_Position = float4(0.0f, 0.0f, -3e36f, 0.0f);
+    return;
+  }
+
   final_color = float4(selection);
   final_color.a *= opacity;
 

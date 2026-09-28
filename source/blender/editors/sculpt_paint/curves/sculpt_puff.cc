@@ -47,6 +47,15 @@ class PuffOperation : public CurvesSculptStrokeOperation {
 };
 
 /**
+ * Zone intensity of one curve segment: the puff weight, which involves no brush strength
+ * (see #sculpt_influence_viz.cc). Shared by the stroke and the hover preview.
+ */
+float puff_segment_zone_weight(const Brush *brush, const float dist, const float radius)
+{
+  return BKE_brush_curve_strength(brush, dist, radius);
+}
+
+/**
  * Utility class that actually executes the update when the stroke is updated. That's useful
  * because it avoids passing a very large number of parameters between functions.
  */
@@ -162,6 +171,23 @@ struct PuffOperationExecutor {
       BLI_assert_unreachable();
     }
 
+    /* The curve weights already are the zone intensity (no brush strength involved). Unfold
+     * them to the per-point layout of the influence highlight (see #sculpt_influence_viz.cc). */
+    Array<float> influence_viz(curves_->points_num(), 0.0f);
+    const OffsetIndices<int> points_by_curve = curves_->points_by_curve();
+    threading::parallel_for(IndexRange(curves_->curves_num()), 4096, [&](const IndexRange range) {
+      for (const int curve_i : range) {
+        const float curve_influence = curve_weights[curve_i];
+        if (curve_influence == 0.0f) {
+          continue;
+        }
+        for (const int point_i : points_by_curve[curve_i]) {
+          influence_viz[point_i] = curve_influence;
+        }
+      }
+    });
+    curves_sculpt_influence_viz_publish(*curves_id_, std::move(influence_viz));
+
     IndexMaskMemory memory;
     const IndexMask curves_mask = IndexMask::from_predicate(
         curve_selection_, memory, [&](const int64_t curve_i) {
@@ -222,9 +248,9 @@ struct PuffOperationExecutor {
             }
 
             const float dist_to_brush_re = std::sqrt(dist_to_brush_sq_re);
-            const float radius_falloff = BKE_brush_curve_strength(
-                brush_, dist_to_brush_re, brush_radius_re);
-            math::max_inplace(max_weight, radius_falloff);
+            math::max_inplace(
+                max_weight,
+                puff_segment_zone_weight(brush_, dist_to_brush_re, brush_radius_re));
           }
           math::max_inplace(r_curve_weights[curve_i], max_weight);
         },
@@ -275,9 +301,9 @@ struct PuffOperationExecutor {
             }
 
             const float dist_to_brush_cu = std::sqrt(dist_to_brush_sq_cu);
-            const float radius_falloff = BKE_brush_curve_strength(
-                brush_, dist_to_brush_cu, brush_radius_cu);
-            math::max_inplace(max_weight, radius_falloff);
+            math::max_inplace(
+                max_weight,
+                puff_segment_zone_weight(brush_, dist_to_brush_cu, brush_radius_cu));
           }
           math::max_inplace(r_curve_weights[curve_i], max_weight);
         },

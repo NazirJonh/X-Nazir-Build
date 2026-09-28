@@ -10,6 +10,7 @@
 
 #include "sculpt_multi_object.hh"
 
+#include "BLI_array.hh"
 #include "BLI_vector.hh"
 
 #include "BKE_attribute.hh"
@@ -111,6 +112,69 @@ std::optional<CurvesBrush3D> sample_curves_3d_brush(const Depsgraph &depsgraph,
 void remember_stroke_position(CurvesSculpt &curves_sculpt, const float3 &brush_position_wo);
 
 Vector<float4x4> get_symmetry_brush_transforms(eCurvesSymmetryType symmetry);
+
+/**
+ * Publish the per-point brush influence of \a curves_orig for the highlight visualization
+ * (see #sculpt_influence_viz.cc). \a point_weights is consumed.
+ */
+void curves_sculpt_influence_viz_publish(Curves &curves_orig, Array<float> point_weights);
+
+/** Stop publishing the brush influence. Called when the stroke ends (confirmed or cancelled). */
+void curves_sculpt_influence_viz_clear();
+
+/**
+ * Publish the hover (pre-stroke) zone weights of \a curves_orig into the same registry as the
+ * stroke influence. Ignored while a stroke record owns the data-block; an empty \a point_weights
+ * removes a stale hover record.
+ */
+void curves_sculpt_hover_viz_publish(Curves &curves_orig, Array<float> point_weights);
+
+/** Remove every hover record, keeping \a keep when it is not null. Returns whether any record
+ * was removed. */
+bool curves_sculpt_hover_viz_clear(const Curves *keep = nullptr);
+
+/**
+ * Zone-weight formulas shared by the stroke executors and the hover preview
+ * (see #sculpt_hover_preview.cc). Each returns the brush influence without the brush strength
+ * and without the per-brush operational scale factors, normalized to 0..1.
+ */
+float comb_point_zone_weight(float curve_falloff, float radius_falloff, float point_factor);
+float snake_hook_curve_zone_weight(float radius_falloff, float curve_factor);
+float pinch_point_zone_weight(float radius_falloff, float point_factor);
+float puff_segment_zone_weight(const Brush *brush, float dist, float radius);
+float smooth_point_zone_weight(float radius_falloff, float point_factor);
+float slide_curve_zone_weight(float radius_falloff, float curve_factor);
+float grow_shrink_curve_zone_weight(float radius_falloff, float curve_selection_factor);
+
+/**
+ * Brush zone preview for Sculpt Curves hover (see #sculpt_hover_preview.cc). Holds the weights
+ * the first step of a stroke with pressure 1.0 would publish, without mutating any geometry.
+ */
+struct CurvesHoverPreview {
+  /** Curves the brush would affect; drawn as solid lines, with the gradient zone on top. */
+  Vector<int> hit_curves;
+  /** Per-point zone weights (0..1), sized by the curves point count; 0 outside the zone. */
+  Array<float> zone_weights;
+};
+
+/**
+ * Compute the hover preview for one Curves object. Returns false when the brush misses or the
+ * data is too large to preview. Never touches the depsgraph evaluation state: all context
+ * (evaluated depsgraph, region, view) comes from the paint cursor caller.
+ */
+bool curves_sculpt_hover_preview_compute(const Depsgraph &depsgraph,
+                                         const ARegion &region,
+                                         const View3D &v3d,
+                                         const RegionView3D &rv3d,
+                                         const Object &curves_ob_orig,
+                                         Brush &brush,
+                                         float radius_base_re,
+                                         float radius_re,
+                                         const float2 &mouse_re,
+                                         CurvesHoverPreview &r_preview);
+
+/** Drop all cached hover previews, e.g. when a stroke ends and positions may have changed. */
+void curves_sculpt_hover_preview_cache_clear();
 
 bke::SpanAttributeWriter<float> float_selection_ensure(Curves &curves_id);
 

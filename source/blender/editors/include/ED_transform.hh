@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_sys_types.h"
@@ -19,6 +21,8 @@ namespace blender {
 struct ARegion;
 struct bContext;
 struct BMesh;
+struct Curves;
+struct EditNurb;
 struct Main;
 struct Scene;
 struct ReportList;
@@ -100,6 +104,31 @@ blender::Span<float> get_proportional_falloff_factors(const BMesh &bm);
  * in use.
  */
 bool has_proportional_falloff_data(const BMesh &bm);
+
+/**
+ * Proportional editing falloff factors for the control points (and bezier handles) of
+ * \a curves_orig, while a proportional transform is running. Laid out like the edit points
+ * vertex buffer: `[points 0..points_num) [left bezier handles] [right bezier handles]`, so the
+ * draw module can upload it as-is, see #transform_proportional_viz.cc.
+ */
+blender::Span<float> get_proportional_falloff_factors(const Curves &curves_orig);
+
+/** Whether the proportional editing falloff highlight currently publishes factors for
+ * \a curves_orig. See the #BMesh overload for details. */
+bool has_proportional_falloff_data(const Curves &curves_orig);
+
+/**
+ * Proportional editing falloff factor for one edit point of \a editnurb, while a proportional
+ * transform is running. \a loc is the #TransData location pointer, which for legacy curves is the
+ * `BezTriple::vec` / `BPoint::vec` address the draw module writes into its vertex buffers, see
+ * #transform_proportional_viz.cc. Returns nullopt when no proportional transform affects
+ * \a editnurb or the point is not part of it.
+ */
+std::optional<float> get_proportional_falloff_factor(const EditNurb &editnurb, const float *loc);
+
+/** Whether the proportional editing falloff highlight currently publishes factors for
+ * \a editnurb. See the #BMesh overload for details. */
+bool has_proportional_falloff_data(const EditNurb &editnurb);
 
 /* UNUSED */
 // int BIF_snappingSupported(Object *obedit);

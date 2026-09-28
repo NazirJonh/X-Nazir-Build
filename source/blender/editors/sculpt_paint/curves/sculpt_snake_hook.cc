@@ -58,6 +58,15 @@ class SnakeHookOperation : public CurvesSculptStrokeOperation {
 };
 
 /**
+ * Zone intensity of one curve: the snake hook weight without the brush strength
+ * (see #sculpt_influence_viz.cc). Shared by the stroke and the hover preview.
+ */
+float snake_hook_curve_zone_weight(const float radius_falloff, const float curve_factor)
+{
+  return radius_falloff * curve_factor;
+}
+
+/**
  * Utility class that actually executes the update when the stroke is updated. That's useful
  * because it avoids passing a very large number of parameters between functions.
  */
@@ -84,6 +93,9 @@ struct SnakeHookOperatorExecutor {
   float2 brush_pos_prev_re_;
   float2 brush_pos_re_;
   float2 brush_pos_diff_re_;
+
+  /** Per-point brush influence for the highlight visualization, see #sculpt_influence_viz.cc. */
+  Array<float> influence_viz_;
 
   CurvesBrush3D *brush_3d_ = nullptr;
 
@@ -146,6 +158,11 @@ struct SnakeHookOperatorExecutor {
       return;
     }
 
+    /* Per-point zone intensity for the influence highlight (see #sculpt_influence_viz.cc). The
+     * snake hook applies a per-curve weight, which is unfolded to every point of the curve. */
+    influence_viz_.reinitialize(curves_->points_num());
+    influence_viz_.fill(0.0f);
+
     if (falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE) {
       this->spherical_snake_hook_with_symmetry();
     }
@@ -155,6 +172,8 @@ struct SnakeHookOperatorExecutor {
     else {
       BLI_assert_unreachable();
     }
+
+    curves_sculpt_influence_viz_publish(*curves_id_, std::move(influence_viz_));
 
     curves_->tag_positions_changed();
     DEG_id_tag_update(&curves_id_->id, ID_RECALC_GEOMETRY);
@@ -206,6 +225,13 @@ struct SnakeHookOperatorExecutor {
             const float radius_falloff = BKE_brush_curve_strength(
                 brush_, std::sqrt(distance_to_brush_sq_re), brush_radius_re);
             const float weight = brush_strength_ * radius_falloff * curve_factors_[curve_i];
+            /* The highlight shows the zone intensity: the weight without the brush strength
+             * (see #sculpt_influence_viz.cc). */
+            const float curve_influence = snake_hook_curve_zone_weight(radius_falloff,
+                                                                       curve_factors_[curve_i]);
+            for (const int point_i : points) {
+              math::max_inplace(influence_viz_[point_i], curve_influence);
+            }
 
             const float2 new_symm_pos_re = old_symm_pos_re + brush_pos_diff_re_ * weight;
             float3 new_symm_pos_wo;
@@ -291,6 +317,13 @@ struct SnakeHookOperatorExecutor {
             const float radius_falloff = BKE_brush_curve_strength(
                 brush_, distance_to_brush_cu, brush_radius_cu);
             const float weight = brush_strength_ * radius_falloff * curve_factors_[curve_i];
+            /* The highlight shows the zone intensity: the weight without the brush strength
+             * (see #sculpt_influence_viz.cc). */
+            const float curve_influence = snake_hook_curve_zone_weight(radius_falloff,
+                                                                       curve_factors_[curve_i]);
+            for (const int point_i : points) {
+              math::max_inplace(influence_viz_[point_i], curve_influence);
+            }
 
             const float3 translation_eval = weight * brush_diff_cu;
             const float3 translation_orig = deformation.translation_from_deformed_to_original(

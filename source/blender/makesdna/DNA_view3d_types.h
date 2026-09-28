@@ -306,6 +306,14 @@ enum eView3DOverlay_Flag : int {
   V3D_OVERLAY_PERFORMANCE = (1 << 19),
   V3D_OVERLAY_SCULPT_SHOW_LAYER_MASK = (1 << 20),
   V3D_OVERLAY_SCULPT_CURVES_SELECTION_OBJECT_COLOR = (1 << 21),
+  /* (1 << 22) was the Sculpt Curves hover gradient toggle, unused since the hover shows only the
+   * flat hit color. Cleared bit is harmless in older files. */
+  /** Hide the flat highlight of the curves the brush would affect (hover and stroke). */
+  V3D_OVERLAY_SCULPT_CURVES_HIDE_HOVER_CURVES = (1 << 23),
+  /** Hide the brush influence coloring while a curves sculpt deform stroke runs. */
+  V3D_OVERLAY_SCULPT_CURVES_HIDE_BRUSH_INFLUENCE = (1 << 24),
+  /** Hide every display option of Sculpt Curves (object color, influence, hover). */
+  V3D_OVERLAY_SCULPT_CURVES_HIDE_DISPLAY_OPTIONS = (1 << 25),
 };
 ENUM_OPERATORS(eView3DOverlay_Flag)
 

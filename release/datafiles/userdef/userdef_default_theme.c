@@ -397,6 +397,7 @@ const bTheme U_theme_default = {
     .prop_falloff_low = RGBA(0x1a66ffff),
     .prop_falloff_mid = RGBA(0xffd91aff),
     .prop_falloff_high = RGBA(0xff1a1aff),
+    .curves_hover_hit = RGBA(0x00a3ffff),
     .viewer_text_true = RGBA(0x4da3ffff),
     .viewer_text_false = RGBA(0xff7a3dff),
     .face_back = RGBA(0xff0000b3),

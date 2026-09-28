@@ -71,3 +71,19 @@ float mul_project_m4_v3_zfac(float pixel_fac, float3 co)
   return pixel_fac *
          (winmat[0][3] * vP.x + winmat[1][3] * vP.y + winmat[2][3] * vP.z + winmat[3][3]);
 }
+
+/**
+ * Heat-map for the proportional editing falloff highlight (theme colors, 3D Viewport section):
+ * "Proportional Falloff Low" for low influence through "Mid" to "High" for full influence.
+ * Shared by the edit mesh, edit curves, legacy curve and sculpt curves highlights.
+ *
+ * Takes the theme colors as parameters so this header stays free of the `theme` global: it is
+ * included by fragment shaders whose create-info does not provide the overlay globals.
+ */
+float3 prop_falloff_heat_color(float factor, float4 low, float4 mid, float4 high)
+{
+  if (factor < 0.5f) {
+    return mix(low.rgb, mid.rgb, factor * 2.0f);
+  }
+  return mix(mid.rgb, high.rgb, factor * 2.0f - 1.0f);
+}

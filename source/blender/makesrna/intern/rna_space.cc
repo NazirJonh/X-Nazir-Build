@@ -6258,9 +6258,38 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(
       prop, nullptr, "overlay.flag", V3D_OVERLAY_SCULPT_CURVES_SELECTION_OBJECT_COLOR);
   RNA_def_property_ui_text(prop,
-                           "Use Object Color",
+                           "Use Object Color for Curves",
                            "Tint unselected curves with the object's viewport display color "
                            "instead of darkening them, to tell objects apart while sculpting");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_sculpt_curves_brush_influence", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "overlay.flag", V3D_OVERLAY_SCULPT_CURVES_HIDE_BRUSH_INFLUENCE);
+  RNA_def_property_ui_text(
+      prop,
+      "Brush Influence",
+      "Color the curves by the brush influence while a deform stroke runs in curves sculpt "
+      "mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_sculpt_curves_hover_curves", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "overlay.flag", V3D_OVERLAY_SCULPT_CURVES_HIDE_HOVER_CURVES);
+  RNA_def_property_ui_text(
+      prop,
+      "Curves Hover Hit",
+      "Highlight with a flat color the curves the hovered brush would affect in curves sculpt "
+      "mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_sculpt_curves_display_options", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "overlay.flag", V3D_OVERLAY_SCULPT_CURVES_HIDE_DISPLAY_OPTIONS);
+  RNA_def_property_ui_text(prop,
+                           "Display Options",
+                           "Enable the curves sculpt display options (object color, brush "
+                           "influence and hover highlights)");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   prop = RNA_def_property(srna, "sculpt_curves_cage_opacity", PROP_FLOAT, PROP_FACTOR);
@@ -6529,7 +6558,8 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop,
       "Proportional Editing Highlight",
-      "Color edit-mode vertices based on how strongly the proportional falloff affects them");
+      "Color edit-mode vertices / control points based on how strongly the proportional falloff "
+      "affects them");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   prop = RNA_def_property(srna, "proportional_edit_viz_opacity", PROP_FLOAT, PROP_FACTOR);
@@ -6537,7 +6567,8 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop,
       "Proportional Highlight Opacity",
-      "Overall opacity of the proportional editing highlight drawn over the vertices");
+      "Overall opacity of the proportional editing highlight drawn over the vertices / control "
+      "points");
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 }

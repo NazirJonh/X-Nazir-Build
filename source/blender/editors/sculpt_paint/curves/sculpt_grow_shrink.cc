@@ -233,6 +233,16 @@ class CurvesEffectOperation : public CurvesSculptStrokeOperation {
 };
 
 /**
+ * Zone intensity of one curve: the grow/shrink weight without the brush strength
+ * (see #sculpt_influence_viz.cc). Shared by the stroke and the hover preview.
+ */
+float grow_shrink_curve_zone_weight(const float radius_falloff,
+                                           const float curve_selection_factor)
+{
+  return radius_falloff * curve_selection_factor;
+}
+
+/**
  * Utility class that actually executes the update when the stroke is updated. That's useful
  * because it avoids passing a very large number of parameters between functions.
  */
@@ -260,6 +270,9 @@ struct CurvesEffectOperationExecutor {
 
   float2 brush_pos_start_re_;
   float2 brush_pos_end_re_;
+
+  /** Per-curve brush influence for the highlight visualization, see #sculpt_influence_viz.cc. */
+  Array<float> influence_viz_curve_;
 
   CurvesBrush3D *brush_3d_ = nullptr;
 
@@ -323,6 +336,10 @@ struct CurvesEffectOperationExecutor {
 
     Array<float> move_distances_cu(curves_->curves_num());
 
+    /* Per-curve zone intensity for the influence highlight (see #sculpt_influence_viz.cc). */
+    influence_viz_curve_.reinitialize(curves_->curves_num());
+    influence_viz_curve_.fill(0.0f);
+
     /* Compute influences. */
     if (falloff_shape_ == PAINT_FALLOFF_SHAPE_TUBE) {
       this->gather_influences_projected(move_distances_cu);
@@ -330,6 +347,8 @@ struct CurvesEffectOperationExecutor {
     else if (falloff_shape_ == PAINT_FALLOFF_SHAPE_SPHERE) {
       this->gather_influences_spherical(move_distances_cu);
     }
+
+    this->publish_influence_viz();
 
     IndexMaskMemory memory;
     const IndexMask curves_mask = IndexMask::from_predicate(
@@ -345,6 +364,25 @@ struct CurvesEffectOperationExecutor {
     DEG_id_tag_update(&curves_id_->id, ID_RECALC_GEOMETRY);
     WM_main_add_notifier(NC_GEOM | ND_DATA, &curves_id_->id);
     ED_region_tag_redraw(ctx_.region);
+  }
+
+  /** Unfold the per-curve influence to the per-point layout and publish it. */
+  void publish_influence_viz()
+  {
+    Array<float> influence_viz(curves_->points_num(), 0.0f);
+    const OffsetIndices<int> points_by_curve = curves_->points_by_curve();
+    threading::parallel_for(IndexRange(curves_->curves_num()), 4096, [&](const IndexRange range) {
+      for (const int curve_i : range) {
+        const float curve_influence = influence_viz_curve_[curve_i];
+        if (curve_influence == 0.0f) {
+          continue;
+        }
+        for (const int point_i : points_by_curve[curve_i]) {
+          influence_viz[point_i] = curve_influence;
+        }
+      }
+    });
+    curves_sculpt_influence_viz_publish(*curves_id_, std::move(influence_viz));
   }
 
   void gather_influences_projected(MutableSpan<float> move_distances_cu)
@@ -404,6 +442,11 @@ struct CurvesEffectOperationExecutor {
               const float radius_falloff = BKE_brush_curve_strength(
                   brush_, dist_to_brush_re, brush_radius_re);
               const float weight = brush_strength_ * radius_falloff * curve_selection_factor;
+              /* The highlight shows the zone intensity: the weight without the brush strength
+               * (see #sculpt_influence_viz.cc). */
+              math::max_inplace(influence_viz_curve_[curve_i],
+                                grow_shrink_curve_zone_weight(radius_falloff,
+                                                              curve_selection_factor));
 
               const float3 closest_on_segment_cu = math::interpolate(
                   p1_cu, p2_cu, lambda_on_segment);
@@ -497,6 +540,11 @@ struct CurvesEffectOperationExecutor {
               const float radius_falloff = BKE_brush_curve_strength(
                   brush_, dist_to_brush_cu, brush_radius_cu);
               const float weight = brush_strength_ * radius_falloff * curve_selection_factor;
+              /* The highlight shows the zone intensity: the weight without the brush strength
+               * (see #sculpt_influence_viz.cc). */
+              math::max_inplace(influence_viz_curve_[curve_i],
+                                grow_shrink_curve_zone_weight(radius_falloff,
+                                                              curve_selection_factor));
 
               const float move_distance_cu = weight * brush_pos_diff_length_cu;
               max_move_distance_cu = std::max(max_move_distance_cu, move_distance_cu);

@@ -454,6 +454,9 @@ const uchar *get_color_ptr(bTheme *btheme, int spacetype, int colorid)
         case TH_PROP_FALLOFF_HIGH:
           cp = ts->prop_falloff_high;
           break;
+        case TH_CURVES_HOVER_HIT:
+          cp = ts->curves_hover_hit;
+          break;
         case TH_VERTEX_SIZE:
           cp = &ts->vertex_size;
           break;

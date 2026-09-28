@@ -133,6 +133,10 @@ class Curves : Overlay {
         sub.push_constant("use_grease_pencil", false);
         sub.push_constant("do_stroke_endpoints", false);
         sub.push_constant("curve_handle_display", int(state.overlay.handle_display));
+        sub.push_constant("prop_edit_viz_enabled",
+                          state.overlay.show_proportional_edit_viz != 0);
+        sub.push_constant("prop_edit_viz_opacity",
+                          state.overlay.proportional_edit_viz_opacity);
         edit_curves_points_ = &sub;
       }
     }
@@ -187,6 +191,10 @@ class Curves : Overlay {
         sub.push_constant("curve_handle_display", int(state.overlay.handle_display));
         sub.push_constant("use_grease_pencil", false);
         sub.push_constant("do_stroke_endpoints", false);
+        sub.push_constant("prop_edit_viz_enabled",
+                          state.overlay.show_proportional_edit_viz != 0);
+        sub.push_constant("prop_edit_viz_opacity",
+                          state.overlay.proportional_edit_viz_opacity);
         edit_legacy_curve_points_ = &sub;
       }
     }

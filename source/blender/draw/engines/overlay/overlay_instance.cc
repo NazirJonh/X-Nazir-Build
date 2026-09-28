@@ -310,6 +310,7 @@ void Resources::update_theme_settings(const DRWContext *ctx, const State &state)
   ui::theme::get_color_4fv(TH_PROP_FALLOFF_LOW, gb.colors.prop_falloff_low);
   ui::theme::get_color_4fv(TH_PROP_FALLOFF_MID, gb.colors.prop_falloff_mid);
   ui::theme::get_color_4fv(TH_PROP_FALLOFF_HIGH, gb.colors.prop_falloff_high);
+  ui::theme::get_color_4fv(TH_CURVES_HOVER_HIT, gb.colors.curves_hover_hit);
   gb.colors.vert_missing_data = rgba_uchar_to_float(0xB0, 0x00, 0xB0, 0xFF);
   ui::theme::get_color_4fv(TH_EDITMESH_ACTIVE, gb.colors.edit_mesh_active);
   ui::theme::get_color_4fv(TH_EDGE_SELECT, gb.colors.edge_select);

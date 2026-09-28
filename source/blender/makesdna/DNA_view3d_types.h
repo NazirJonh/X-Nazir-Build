@@ -670,6 +670,13 @@ struct View3DOverlay {
   float normals_length = 0.1f;
   float normals_constant_screen_size = 7.0f;
 
+  /** Overall opacity of the proportional editing highlight. */
+  float proportional_edit_viz_opacity = 1.0f;
+  /** Highlight edit-mode vertices colored by their proportional editing influence. */
+  char show_proportional_edit_viz = 1;
+  /** Padding so #View3DOverlay keeps a size that is a multiple of 8 (see the struct end). */
+  char _pad0[3] = {};
+
   /** Paint mode settings. */
   eView3DOverlay_PaintFlag paint_flag = V3D_OVERLAY_PAINT_FACE_SELECTION;
 

@@ -2085,6 +2085,45 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The proportional editing highlight is new, and a file written before it leaves the flag
+   * cleared. Enable it so the feature is visible right away, matching the DNA default.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion so this fork-only change
+   * doesn't claim a subversion number that upstream will use for its own versioning. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "View3DOverlay", "char", "show_proportional_edit_viz"))
+  {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D &v3d = reinterpret_cast<View3D &>(sl);
+            v3d.overlay.show_proportional_edit_viz = 1;
+          }
+        }
+      }
+    }
+  }
+
+  /* The opacity slider for the proportional editing highlight was added after the highlight
+   * itself; files in between zero-fill the opacity, which would hide the highlight entirely.
+   *
+   * NOTE: Keyed on the member existence, like the highlight flag above. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "View3DOverlay", "float", "proportional_edit_viz_opacity"))
+  {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D &v3d = reinterpret_cast<View3D &>(sl);
+            v3d.overlay.proportional_edit_viz_opacity = 1.0f;
+          }
+        }
+      }
+    }
+  }
+
   /* The canvas-space symmetry line settings are new. A file written before them zero-fills the
    * pivot (the tile corner) and the overlay opacity (fully transparent).
    *

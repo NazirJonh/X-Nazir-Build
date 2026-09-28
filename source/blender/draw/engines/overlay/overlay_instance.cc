@@ -307,6 +307,9 @@ void Resources::update_theme_settings(const DRWContext *ctx, const State &state)
   ui::theme::get_color_4fv(TH_VERTEX, gb.colors.vert);
   ui::theme::get_color_4fv(TH_VERTEX_SELECT, gb.colors.vert_select);
   ui::theme::get_color_4fv(TH_VERTEX_UNREFERENCED, gb.colors.vert_unreferenced);
+  ui::theme::get_color_4fv(TH_PROP_FALLOFF_LOW, gb.colors.prop_falloff_low);
+  ui::theme::get_color_4fv(TH_PROP_FALLOFF_MID, gb.colors.prop_falloff_mid);
+  ui::theme::get_color_4fv(TH_PROP_FALLOFF_HIGH, gb.colors.prop_falloff_high);
   gb.colors.vert_missing_data = rgba_uchar_to_float(0xB0, 0x00, 0xB0, 0xFF);
   ui::theme::get_color_4fv(TH_EDITMESH_ACTIVE, gb.colors.edit_mesh_active);
   ui::theme::get_color_4fv(TH_EDGE_SELECT, gb.colors.edge_select);

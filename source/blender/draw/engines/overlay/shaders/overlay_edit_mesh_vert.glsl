@@ -52,6 +52,13 @@ void main()
 #if defined(VERT)
   vertex_crease = float(m_data.z >> 4) / 15.0f;
   final_color = EDIT_MESH_vertex_color(m_data.y, vertex_crease);
+  /* Proportional editing influence highlight (see #transform_proportional_viz.cc). Blends the
+   * vertex color towards the heat-map, fading in from the falloff radius, so the vertex itself
+   * (its alpha) is never affected. */
+  if (prop_edit_viz_enabled && falloff > 0.0f) {
+    const float blend = smoothstep(0.0f, 0.25f, falloff) * prop_edit_viz_opacity;
+    final_color.rgb = mix(final_color.rgb, EDIT_MESH_prop_falloff_color(falloff), blend);
+  }
   gl_PointSize = theme.sizes.vert * ((vertex_crease > 0.0f) ? 3.0f : 2.0f);
   /* Make selected and active vertex always on top. */
   if ((data.x & VERT_SELECTED) != 0u) {

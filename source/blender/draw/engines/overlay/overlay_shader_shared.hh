@@ -226,6 +226,9 @@ struct [[host_shared]] ThemeColors {
   float4 vert_select;
   float4 vert_unreferenced;
   float4 vert_missing_data;
+  float4 prop_falloff_low;
+  float4 prop_falloff_mid;
+  float4 prop_falloff_high;
   float4 edit_mesh_active;
   float4 edge_select;      /* Stands for edge selection, not edge select mode. */
   float4 edge_mode_select; /* Stands for edge mode selection. */

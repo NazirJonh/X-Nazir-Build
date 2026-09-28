@@ -8477,6 +8477,12 @@ class VIEW3D_PT_overlay_edit_mesh(Panel):
         col.prop(overlay, "show_extra_indices", text="Indices")
 
         row = col.row(align=True)
+        row.prop(overlay, "show_proportional_edit_viz", text="")
+        sub = row.row()
+        sub.active = overlay.show_proportional_edit_viz
+        sub.prop(overlay, "proportional_edit_viz_opacity", text="Proportional Highlight")
+
+        row = col.row(align=True)
         row.prop(overlay, "show_edit_mesh_symmetry_contour", text="")
         sub = row.row()
         sub.active = overlay.show_edit_mesh_symmetry_contour

@@ -400,6 +400,237 @@ gpu::VertBufPtr extract_edit_data_subdiv(const MeshRenderData &mr,
   return vbo;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Proportional Editing Falloff
+ *
+ * Per-corner copy of the per-vertex proportional editing falloff factors (see
+ * #blender::ed::transform::get_proportional_falloff_factors). Only the edit vertices points
+ * batch consumes this data. Values are zero while no proportional transform is running.
+ * \{ */
+
+static const GPUVertFormat &get_edit_falloff_format()
+{
+  static const GPUVertFormat format = []() {
+    GPUVertFormat format{};
+    GPU_vertformat_attr_add(&format, "falloff", gpu::VertAttrType::SFLOAT_32);
+    return format;
+  }();
+  return format;
+}
+
+static void extract_edit_falloff_bm(const MeshRenderData &mr, MutableSpan<float> vbo_data)
+{
+  const Span<float> falloff = mr.prop_falloff;
+  MutableSpan corners_data = vbo_data.take_front(mr.corners_num);
+  MutableSpan loose_edge_data = vbo_data.slice(mr.corners_num, mr.loose_edges.size() * 2);
+  MutableSpan loose_vert_data = vbo_data.take_back(mr.loose_verts.size());
+
+  const BMesh &bm = *mr.bm;
+  threading::parallel_for(IndexRange(bm.totface), 2048, [&](const IndexRange range) {
+    for (const int face_index : range) {
+      const BMFace &face = *BM_face_at_index(&const_cast<BMesh &>(bm), face_index);
+      const BMLoop *loop = BM_FACE_FIRST_LOOP(&face);
+      for ([[maybe_unused]] const int i : IndexRange(face.len)) {
+        corners_data[BM_elem_index_get(loop)] = falloff[BM_elem_index_get(loop->v)];
+        loop = loop->next;
+      }
+    }
+  });
+
+  mr.loose_edges.foreach_index(
+      [&](const int edge_i, const int pos) {
+        const BMEdge &edge = *BM_edge_at_index(&const_cast<BMesh &>(bm), edge_i);
+        loose_edge_data[pos * 2 + 0] = falloff[BM_elem_index_get(edge.v1)];
+        loose_edge_data[pos * 2 + 1] = falloff[BM_elem_index_get(edge.v2)];
+      },
+      exec_mode::grain_size(2048));
+
+  mr.loose_verts.foreach_index(
+      [&](const int vert_i, const int pos) {
+        const BMVert &vert = *BM_vert_at_index(&const_cast<BMesh &>(bm), vert_i);
+        loose_vert_data[pos] = falloff[BM_elem_index_get(&vert)];
+      },
+      exec_mode::grain_size(2048));
+}
+
+static void extract_edit_falloff_mesh(const MeshRenderData &mr, MutableSpan<float> vbo_data)
+{
+  const Span<float> falloff = mr.prop_falloff;
+  MutableSpan corners_data = vbo_data.take_front(mr.corners_num);
+  MutableSpan loose_edge_data = vbo_data.slice(mr.corners_num, mr.loose_edges.size() * 2);
+  MutableSpan loose_vert_data = vbo_data.take_back(mr.loose_verts.size());
+
+  const OffsetIndices faces = mr.faces;
+  const Span<int> corner_verts = mr.corner_verts;
+  const Span<int2> edges = mr.edges;
+  threading::parallel_for(faces.index_range(), 2048, [&](const IndexRange range) {
+    for (const int face : range) {
+      for (const int corner : faces[face]) {
+        if (const BMVert *bm_vert = bm_original_vert_get(mr, corner_verts[corner])) {
+          corners_data[corner] = falloff[BM_elem_index_get(bm_vert)];
+        }
+      }
+    }
+  });
+
+  mr.loose_edges.foreach_index(
+      [&](const int edge_i, const int pos) {
+        const int2 edge = edges[edge_i];
+        if (const BMVert *bm_vert = bm_original_vert_get(mr, edge[0])) {
+          loose_edge_data[pos * 2 + 0] = falloff[BM_elem_index_get(bm_vert)];
+        }
+        if (const BMVert *bm_vert = bm_original_vert_get(mr, edge[1])) {
+          loose_edge_data[pos * 2 + 1] = falloff[BM_elem_index_get(bm_vert)];
+        }
+      },
+      exec_mode::grain_size(2048));
+
+  mr.loose_verts.foreach_index(
+      [&](const int vert, const int pos) {
+        if (const BMVert *eve = bm_original_vert_get(mr, vert)) {
+          loose_vert_data[pos] = falloff[BM_elem_index_get(eve)];
+        }
+      },
+      exec_mode::grain_size(2048));
+}
+
+gpu::VertBufPtr extract_edit_falloff(const MeshRenderData &mr)
+{
+  gpu::VertBufPtr vbo = gpu::VertBufPtr(GPU_vertbuf_create_with_format(get_edit_falloff_format()));
+  const int size = mr.corners_num + mr.loose_indices_num;
+  GPU_vertbuf_data_alloc(*vbo, size);
+  MutableSpan<float> vbo_data = vbo->data<float>();
+  vbo_data.fill(0.0f);
+  if (mr.bm != nullptr && !mr.prop_falloff.is_empty() && mr.prop_falloff.size() == mr.bm->totvert)
+  {
+    if (mr.extract_type == MeshExtractType::Mesh) {
+      extract_edit_falloff_mesh(mr, vbo_data);
+    }
+    else {
+      extract_edit_falloff_bm(mr, vbo_data);
+    }
+  }
+  return vbo;
+}
+
+static void extract_edit_falloff_subdiv_bm(const MeshRenderData &mr,
+                                           const DRWSubdivCache &subdiv_cache,
+                                           MutableSpan<float> vbo_data)
+{
+  const Span<float> falloff = mr.prop_falloff;
+  const int corners_num = subdiv_cache.num_subdiv_loops;
+  const int loose_edges_num = mr.loose_edges.size();
+  const int verts_per_edge = subdiv_verts_per_coarse_edge(subdiv_cache);
+  const Span<int> subdiv_loop_vert_index = subdiv_cache.verts_orig_index->data<int>();
+
+  MutableSpan corners_data = vbo_data.take_front(corners_num);
+  MutableSpan loose_edge_data = vbo_data.slice(corners_num, loose_edges_num * verts_per_edge);
+  MutableSpan loose_vert_data = vbo_data.take_back(mr.loose_verts.size());
+
+  BMesh &bm = *mr.bm;
+  threading::parallel_for(IndexRange(subdiv_cache.num_subdiv_quads), 2048,
+                          [&](const IndexRange range) {
+    for (const int subdiv_quad : range) {
+      for (const int subdiv_corner : IndexRange(subdiv_quad * 4, 4)) {
+        const int vert_origindex = subdiv_loop_vert_index[subdiv_corner];
+        if (vert_origindex != -1) {
+          const BMVert *bm_vert = BM_vert_at_index(&bm, vert_origindex);
+          corners_data[subdiv_corner] = falloff[BM_elem_index_get(bm_vert)];
+        }
+      }
+    }
+  });
+
+  mr.loose_edges.foreach_index(
+      [&](const int edge_i, const int pos) {
+        MutableSpan<float> data = loose_edge_data.slice(pos * verts_per_edge, verts_per_edge);
+        const BMEdge &edge = *BM_edge_at_index(&bm, edge_i);
+        data.first() = falloff[BM_elem_index_get(edge.v1)];
+        data.last() = falloff[BM_elem_index_get(edge.v2)];
+      },
+      exec_mode::grain_size(2048));
+
+  mr.loose_verts.foreach_index(
+      [&](const int vert_i, const int pos) {
+        const BMVert &vert = *BM_vert_at_index(&bm, vert_i);
+        loose_vert_data[pos] = falloff[BM_elem_index_get(&vert)];
+      },
+      exec_mode::grain_size(2048));
+}
+
+static void extract_edit_falloff_subdiv_mesh(const MeshRenderData &mr,
+                                             const DRWSubdivCache &subdiv_cache,
+                                             MutableSpan<float> vbo_data)
+{
+  const Span<float> falloff = mr.prop_falloff;
+  const int corners_num = subdiv_cache.num_subdiv_loops;
+  const int loose_edges_num = mr.loose_edges.size();
+  const int verts_per_edge = subdiv_verts_per_coarse_edge(subdiv_cache);
+  const Span<int> subdiv_loop_vert_index = subdiv_cache.verts_orig_index->data<int>();
+
+  MutableSpan corners_data = vbo_data.take_front(corners_num);
+  MutableSpan loose_edge_data = vbo_data.slice(corners_num, loose_edges_num * verts_per_edge);
+  MutableSpan loose_vert_data = vbo_data.take_back(mr.loose_verts.size());
+
+  threading::parallel_for(IndexRange(subdiv_cache.num_subdiv_quads), 2048,
+                          [&](const IndexRange range) {
+    for (const int subdiv_quad : range) {
+      for (const int subdiv_corner : IndexRange(subdiv_quad * 4, 4)) {
+        const int vert_origindex = subdiv_loop_vert_index[subdiv_corner];
+        if (vert_origindex != -1) {
+          if (const BMVert *bm_vert = bm_original_vert_get(mr, vert_origindex)) {
+            corners_data[subdiv_corner] = falloff[BM_elem_index_get(bm_vert)];
+          }
+        }
+      }
+    }
+  });
+
+  const Span<int2> edges = mr.edges;
+  mr.loose_edges.foreach_index(
+      [&](const int edge_i, const int pos) {
+        MutableSpan<float> data = loose_edge_data.slice(pos * verts_per_edge, verts_per_edge);
+        const int2 edge = edges[edge_i];
+        if (const BMVert *bm_vert = bm_original_vert_get(mr, edge[0])) {
+          data.first() = falloff[BM_elem_index_get(bm_vert)];
+        }
+        if (const BMVert *bm_vert = bm_original_vert_get(mr, edge[1])) {
+          data.last() = falloff[BM_elem_index_get(bm_vert)];
+        }
+      },
+      exec_mode::grain_size(2048));
+
+  mr.loose_verts.foreach_index(
+      [&](const int vert, const int pos) {
+        if (const BMVert *eve = bm_original_vert_get(mr, vert)) {
+          loose_vert_data[pos] = falloff[BM_elem_index_get(eve)];
+        }
+      },
+      exec_mode::grain_size(2048));
+}
+
+gpu::VertBufPtr extract_edit_falloff_subdiv(const MeshRenderData &mr,
+                                            const DRWSubdivCache &subdiv_cache)
+{
+  gpu::VertBufPtr vbo = gpu::VertBufPtr(GPU_vertbuf_create_with_format(get_edit_falloff_format()));
+  const int size = subdiv_full_vbo_size(mr, subdiv_cache);
+  GPU_vertbuf_data_alloc(*vbo, size);
+  MutableSpan<float> vbo_data = vbo->data<float>();
+  vbo_data.fill(0.0f);
+  if (mr.bm != nullptr && !mr.prop_falloff.is_empty() && mr.prop_falloff.size() == mr.bm->totvert)
+  {
+    if (mr.extract_type == MeshExtractType::Mesh) {
+      extract_edit_falloff_subdiv_mesh(mr, subdiv_cache, vbo_data);
+    }
+    else {
+      extract_edit_falloff_subdiv_bm(mr, subdiv_cache, vbo_data);
+    }
+  }
+  return vbo;
+}
+
+/** \} */
+
 static const GPUVertFormat &get_edit_face_set_format()
 {
   static const GPUVertFormat format = []() {

@@ -258,6 +258,9 @@ void mesh_buffer_cache_create_requested(TaskGraph & /*task_graph*/,
       case VBOType::EditFaceSet:
         created_vbos[i] = extract_edit_face_set(mr);
         break;
+      case VBOType::EditFalloff:
+        created_vbos[i] = extract_edit_falloff(mr);
+        break;
       case VBOType::EditUVData:
         created_vbos[i] = extract_edituv_data(mr);
         break;
@@ -429,6 +432,9 @@ void mesh_buffer_cache_create_requested_subdiv(MeshBatchCache &cache,
   }
   if (vbos_to_create.contains(VBOType::EditFaceSet)) {
     buffers.vbos.add_new(VBOType::EditFaceSet, extract_edit_face_set_subdiv(mr, subdiv_cache));
+  }
+  if (vbos_to_create.contains(VBOType::EditFalloff)) {
+    buffers.vbos.add_new(VBOType::EditFalloff, extract_edit_falloff_subdiv(mr, subdiv_cache));
   }
   if (vbos_to_create.contains(VBOType::Tangents)) {
     buffers.vbos.add_new(VBOType::Tangents, extract_tangents_subdiv(mr, subdiv_cache, cache));

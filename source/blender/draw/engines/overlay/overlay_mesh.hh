@@ -317,6 +317,9 @@ class Meshes : Overlay {
                      state.clipping_plane_count);
       pass.shader_set(res.shaders->mesh_edit_vert.get());
       mesh_edit_common_resource_bind(pass, backwire_opacity, vert_ndc_offset_);
+      pass.push_constant("prop_edit_viz_enabled",
+                         state.v3d->overlay.show_proportional_edit_viz != 0);
+      pass.push_constant("prop_edit_viz_opacity", state.v3d->overlay.proportional_edit_viz_opacity);
     }
     {
       auto &pass = edit_mesh_facedots_ps_;

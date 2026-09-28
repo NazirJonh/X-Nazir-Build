@@ -91,6 +91,11 @@ struct MeshRenderData {
   int bweight_ofs;
   int freestyle_edge_ofs;
   int freestyle_face_ofs;
+  /**
+   * Proportional editing falloff factors per edit-mesh vertex, indexed by #BMVert index.
+   * Empty when no proportional transform is running (see #ED_transform.hh).
+   */
+  Span<float> prop_falloff;
   /** Mesh */
   const Mesh *mesh;
   Span<float3> vert_positions;
@@ -307,6 +312,9 @@ gpu::VertBufPtr extract_edit_data_subdiv(const MeshRenderData &mr,
 gpu::VertBufPtr extract_edit_face_set(const MeshRenderData &mr);
 gpu::VertBufPtr extract_edit_face_set_subdiv(const MeshRenderData &mr,
                                              const DRWSubdivCache &subdiv_cache);
+gpu::VertBufPtr extract_edit_falloff(const MeshRenderData &mr);
+gpu::VertBufPtr extract_edit_falloff_subdiv(const MeshRenderData &mr,
+                                            const DRWSubdivCache &subdiv_cache);
 
 gpu::VertBufPtr extract_tangents(const MeshRenderData &mr,
                                  const MeshBatchCache &cache,

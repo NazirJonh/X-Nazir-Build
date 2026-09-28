@@ -6522,6 +6522,24 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "debug_flag", V3D_DEBUG_FREEZE_CULLING);
   RNA_def_property_ui_text(prop, "Freeze Culling", "Freeze view culling bounds");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  /* Proportional Edit Visualization */
+  prop = RNA_def_property(srna, "show_proportional_edit_viz", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.show_proportional_edit_viz", 0);
+  RNA_def_property_ui_text(
+      prop,
+      "Proportional Editing Highlight",
+      "Color edit-mode vertices based on how strongly the proportional falloff affects them");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "proportional_edit_viz_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "overlay.proportional_edit_viz_opacity");
+  RNA_def_property_ui_text(
+      prop,
+      "Proportional Highlight Opacity",
+      "Overall opacity of the proportional editing highlight drawn over the vertices");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 }
 
 static void rna_def_space_view3d(BlenderRNA *brna)

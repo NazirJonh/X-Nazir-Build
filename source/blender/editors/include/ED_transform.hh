@@ -9,6 +9,7 @@
 #pragma once
 
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 #include "BLI_sys_types.h"
 
 namespace blender {
@@ -17,6 +18,7 @@ namespace blender {
 
 struct ARegion;
 struct bContext;
+struct BMesh;
 struct Main;
 struct Scene;
 struct ReportList;
@@ -82,6 +84,22 @@ enum eTfmMode {
  * (if false is returns, `cent3d` is unmodified).
  */
 bool calculateTransformCenter(bContext *C, int centerMode, float cent3d[3], float cent2d[2]);
+
+/**
+ * Proportional editing falloff factors for the vertices of \a bm, while a proportional
+ * transform is running. Indexed by #BMVert index (#BM_elem_index_get), empty when no
+ * proportional transform affects \a bm. Used by the draw module to highlight vertices by
+ * their influence, see #transform_proportional_viz.cc.
+ */
+blender::Span<float> get_proportional_falloff_factors(const BMesh &bm);
+
+/**
+ * Whether the proportional editing falloff highlight currently publishes factors for \a bm
+ * (a proportional transform affecting it is running and the mesh is within the vertex budget).
+ * Used by the draw module to skip the falloff vertex buffer entirely when the feature is not
+ * in use.
+ */
+bool has_proportional_falloff_data(const BMesh &bm);
 
 /* UNUSED */
 // int BIF_snappingSupported(Object *obedit);

@@ -24,6 +24,7 @@
 #include "BKE_object_types.hh"
 
 #include "ED_mesh.hh"
+#include "ED_transform.hh"
 
 #include "DRW_render.hh"
 
@@ -455,6 +456,10 @@ MeshRenderData mesh_render_data_create(Object &object,
 
     BM_mesh_elem_index_ensure(mr.bm, bm_ensure_types);
     BM_mesh_elem_table_ensure(mr.bm, bm_ensure_types & ~BM_LOOP);
+
+    /* Per-vertex proportional editing falloff factors for the highlight visualization
+     * (empty unless a proportional transform is running). */
+    mr.prop_falloff = blender::ed::transform::get_proportional_falloff_factors(*mr.bm);
 
     mr.efa_act_uv = EDBM_uv_active_face_get(mr.edit_bmesh, false, false);
     mr.efa_act = BM_mesh_active_face_get(mr.bm, false, true);

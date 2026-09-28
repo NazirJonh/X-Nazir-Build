@@ -1153,6 +1153,11 @@ bool calculateCenterActive(TransInfo *t, bool select_only, float r_center[3]);
 
 void calculatePropRatio(TransInfo *t);
 
+/* Publish the computed falloff factors for the proportional editing visualization
+ * (see #transform_proportional_viz.cc). */
+void prop_falloff_viz_update(const TransInfo &t);
+void prop_falloff_viz_clear();
+
 /**
  * Rotate an element, low level code, ignore protected channels.
  * (use for objects or pose-bones)

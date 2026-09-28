@@ -3387,6 +3387,26 @@ static void rna_def_userdef_theme_space_view3d(BlenderRNA *brna)
       prop, "Sculpt Symmetry Contour", "Contour color for sculpt symmetry overlay");
   RNA_def_property_update(prop, 0, "rna_userdef_theme_update");
 
+  prop = RNA_def_property(srna, "prop_falloff_low", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_ui_text(
+      prop, "Proportional Falloff Low", "Highlight color for low proportional editing influence");
+  RNA_def_property_update(prop, 0, "rna_userdef_theme_update");
+
+  prop = RNA_def_property(srna, "prop_falloff_mid", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_ui_text(
+      prop, "Proportional Falloff Mid", "Highlight color for mid proportional editing influence");
+  RNA_def_property_update(prop, 0, "rna_userdef_theme_update");
+
+  prop = RNA_def_property(srna, "prop_falloff_high", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Proportional Falloff High",
+      "Highlight color for full proportional editing influence");
+  RNA_def_property_update(prop, 0, "rna_userdef_theme_update");
+
   /* Curve Object specific */
 
   prop = RNA_def_property(srna, "nurb_uline", PROP_FLOAT, PROP_COLOR_GAMMA);

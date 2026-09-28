@@ -34,6 +34,8 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_modifier.hh"
 
+#include "ED_transform.hh"
+
 #include "GPU_batch.hh"
 #include "GPU_material.hh"
 
@@ -543,8 +545,10 @@ void DRW_mesh_batch_cache_dirty_tag(Mesh *mesh, eMeshBatchDirtyMode mode)
   MeshBatchCache &cache = *mesh->runtime->batch_cache;
   switch (mode) {
     case BKE_MESH_BATCH_DIRTY_SELECT:
-      discard_buffers(
-          cache, {VBOType::EditData, VBOType::EditFaceSet, VBOType::FaceDotNormal}, {});
+      discard_buffers(cache,
+                      {VBOType::EditData, VBOType::EditFaceSet, VBOType::EditFalloff,
+                       VBOType::FaceDotNormal},
+                      {});
 
       /* Because visible UVs depends on edit mode selection, discard topology. */
       mesh_batch_cache_discard_uvedit_select(cache);
@@ -1519,6 +1523,15 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
                               list,
                               IBOType::Points,
                               {VBOType::Position, VBOType::EditData}};
+        /* Only build the falloff buffer while the proportional editing highlight actually
+         * publishes data for this edit-mesh. Without it the shader input falls back to the
+         * constant (0, 0, 0, 1), which disables the highlight at no cost. */
+        if (orig_edit_mesh != nullptr && orig_edit_mesh->runtime->edit_mesh != nullptr &&
+            blender::ed::transform::has_proportional_falloff_data(
+                *orig_edit_mesh->runtime->edit_mesh->bm))
+        {
+          batch.vbos.append(VBOType::EditFalloff);
+        }
         if (!do_subdivision || do_cage) {
           batch.vbos.append(VBOType::CornerNormal);
         }

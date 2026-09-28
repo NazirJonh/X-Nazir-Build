@@ -445,6 +445,15 @@ const uchar *get_color_ptr(bTheme *btheme, int spacetype, int colorid)
         case TH_VERTEX_UNREFERENCED:
           cp = ts->vertex_unreferenced;
           break;
+        case TH_PROP_FALLOFF_LOW:
+          cp = ts->prop_falloff_low;
+          break;
+        case TH_PROP_FALLOFF_MID:
+          cp = ts->prop_falloff_mid;
+          break;
+        case TH_PROP_FALLOFF_HIGH:
+          cp = ts->prop_falloff_high;
+          break;
         case TH_VERTEX_SIZE:
           cp = &ts->vertex_size;
           break;

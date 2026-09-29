@@ -296,6 +296,13 @@ void removed_rows_reconcile(Material &ma)
   for (const MaterialPaintLayer *layer : layers) {
     /* A hidden Pass Through folder keeps its subtree in the graph with a zero factor, so it is
      * never written to the removed set -- unless the over-budget pass is dropping hidden rows. */
+    /* The row the user is working in, and the folders around it, stay in the graph while hidden:
+     * hiding it is only a check of how the result looks, and showing it again must not rebuild. */
+    if (!budget_cleanup_active(ma) &&
+        BKE_paint_layers_subtree_contains(*layer, ma.active_layer_marker))
+    {
+      continue;
+    }
     if ((layer->flag & MA_PAINT_LAYER_ENABLED) == 0 &&
         (!BKE_paint_layers_folder_is_pass_through(ma, *layer) || budget_cleanup_active(ma)))
     {

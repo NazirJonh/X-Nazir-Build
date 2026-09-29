@@ -439,6 +439,23 @@ void paint_stack_rows_from_description_impl(const Material &material,
     }
   };
 
+  /* A Material row shows no Live/Baked indicator: how it is currently drawn is not the user's
+   * concern. Only a refusal (the source cannot be shown at all) is worth a row icon; the answer is
+   * the same BKE one the Source Material panel reads. */
+  auto append_material_refusal_slot = [&](StackRow &row, const MaterialPaintLayer &source_row) {
+    PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
+    if (BKE_paint_layers_material_live_status(material, source_row, &refusal) !=
+        PaintLayerMaterialLiveStatus::Refused)
+    {
+      return;
+    }
+    StackRowPreview refused_slot;
+    refused_slot.icon = ICON_ERROR;
+    refused_slot.label = "Refused: " +
+                         std::string(BKE_paint_layers_source_group_refusal_name(refusal));
+    row.preview_slots.append(std::move(refused_slot));
+  };
+
   /* Forward-declared so #append_corrections can recurse into a Stack correction/mask item's own
    * children (Phase 6, goal 4): the two lambdas call each other, and a `std::function` variable can
    * be referenced before it is assigned as long as nothing actually calls it that early. */
@@ -485,68 +502,43 @@ void paint_stack_rows_from_description_impl(const Material &material,
       row.name_buffer = const_cast<char *>(correction.name);
       row.can_hold_children = folder;
       row.has_children = folder && !BLI_listbase_is_empty(&correction.children);
-      /* A mask item is a dense setting under its layer, not a stack member of its own: it keeps
-       * the usual row height and its plain mask icon, without preview slots. A content effect
-       * stays a full row with the previews its source calls for. */
-      row.compact = (role == MA_PAINT_LAYER_ROLE_MASK_ITEM);
-      /* Same icon rule as a Layer row of the same shape (Phase 6, goal 5): a correction is not a
-       * visually different kind of row just because it hangs off `effects`/`mask_stack` instead of
-       * the stack proper. A mask item is the exception: it reads as a mask, so it carries the same
-       * state icon a masked Layer row does. */
-      row.icon = folder                                 ? ICON_FILE_FOLDER :
-                 role == MA_PAINT_LAYER_ROLE_MASK_ITEM ? paint_mask_state_icon(row.enabled) :
-                 correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT ? ICON_GP_DRAW_FILL :
-                                                                       ICON_IMAGE_RGB;
-      if (role != MA_PAINT_LAYER_ROLE_MASK_ITEM &&
-          correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT)
-      {
-        StackRowPreview fill_swatch;
-        fill_swatch.is_color_swatch = true;
-        /* The bucket is drawn over the colour at preview size; the row keeps no small icon. */
-        fill_swatch.icon = ICON_GP_DRAW_FILL;
-        copy_v4_v4(fill_swatch.color, correction.fill_color);
-        fill_swatch.label = IFACE_("Fill Color");
-        row.preview_slots.append(std::move(fill_swatch));
+      /* Every correction is a dense setting under its layer, not a stack member of its own: it
+       * keeps the usual row height and shows what it is through a small icon instead of a preview.
+       * A mask item reads as a mask and carries the state icon a masked Layer row does; a content
+       * effect takes the icon of its source. */
+      row.compact = true;
+      if (folder) {
+        row.icon = ICON_FILE_FOLDER;
       }
-      if (role != MA_PAINT_LAYER_ROLE_MASK_ITEM &&
-          correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL)
-      {
-        if (correction.material != nullptr) {
-          /* A material correction carries no channel image of its own either, so it shows the
-           * material's preview ahead of its live-state icon, like a Material layer row. */
-          StackRowPreview material_slot;
-          material_slot.id_uid = correction.material->id.session_uid;
-          material_slot.id_type = ID_MA;
-          material_slot.is_blank = false;
-          row.preview_slots.append(std::move(material_slot));
-        }
-        /* The same Live/Baking/Baked/Refused indicator a Material Layer row shows, read through the
-         * same BKE answer the Source Material panel uses -- a correction's bake state is not a
-         * second truth. */
-        StackRowPreview live_slot;
-        PaintLayersSourceGroupRefusal live_refusal = PaintLayersSourceGroupRefusal::None;
-        const PaintLayerMaterialLiveStatus live_status = BKE_paint_layers_material_live_status(
-            material, correction, &live_refusal);
-        switch (live_status) {
-          case PaintLayerMaterialLiveStatus::Live:
-            live_slot.icon = ICON_HIDE_OFF;
-            live_slot.label = IFACE_("Live");
+      else if (role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+        row.icon = paint_mask_state_icon(row.enabled);
+      }
+      else {
+        switch (correction.source) {
+          case MA_PAINT_LAYER_SOURCE_CONSTANT:
+            row.icon = ICON_GP_DRAW_FILL;
             break;
-          case PaintLayerMaterialLiveStatus::Baking:
-            live_slot.icon = ICON_FILE_REFRESH;
-            live_slot.label = IFACE_("Baking...");
+          case MA_PAINT_LAYER_SOURCE_MATERIAL:
+            row.icon = ICON_MATERIAL;
             break;
-          case PaintLayerMaterialLiveStatus::Baked:
-            live_slot.icon = ICON_IMAGE_DATA;
-            live_slot.label = IFACE_("Baked");
+          case MA_PAINT_LAYER_SOURCE_NODE_GROUP:
+            row.icon = ICON_NODETREE;
             break;
-          case PaintLayerMaterialLiveStatus::Refused:
-            live_slot.icon = ICON_ERROR;
-            live_slot.label = "Refused: " + std::string(BKE_paint_layers_source_group_refusal_name(
-                                                 live_refusal));
+          case MA_PAINT_LAYER_SOURCE_MESH_MAP:
+            row.icon = ICON_MESH_DATA;
+            break;
+          default:
+            row.icon = ICON_IMAGE_RGB;
             break;
         }
-        row.preview_slots.append(std::move(live_slot));
+        /* A compact row draws no preview slots, so a refused source is shown by the icon itself. */
+        PaintLayersSourceGroupRefusal refusal = PaintLayersSourceGroupRefusal::None;
+        if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+            BKE_paint_layers_material_live_status(material, correction, &refusal) ==
+                PaintLayerMaterialLiveStatus::Refused)
+        {
+          row.icon = ICON_ERROR;
+        }
       }
       append_issue_slots(row, layer.marker, correction.marker);
       set_pair_columns(row, correction);
@@ -639,34 +631,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
               row.preview_slots.append(std::move(channels_slot));
             }
             if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
-              /* The row's live state: one BKE answer the Source Material panel reads too, through
-               * RNA. Compact: an icon with the full status in its tooltip. */
-              StackRowPreview live_slot;
-              PaintLayersSourceGroupRefusal live_refusal =
-                  PaintLayersSourceGroupRefusal::None;
-              const PaintLayerMaterialLiveStatus live_status =
-                  BKE_paint_layers_material_live_status(material, layer, &live_refusal);
-              switch (live_status) {
-                case PaintLayerMaterialLiveStatus::Live:
-                  live_slot.icon = ICON_HIDE_OFF;
-                  live_slot.label = IFACE_("Live");
-                  break;
-                case PaintLayerMaterialLiveStatus::Baking:
-                  live_slot.icon = ICON_FILE_REFRESH;
-                  live_slot.label = IFACE_("Baking...");
-                  break;
-                case PaintLayerMaterialLiveStatus::Baked:
-                  live_slot.icon = ICON_IMAGE_DATA;
-                  live_slot.label = IFACE_("Baked");
-                  break;
-                case PaintLayerMaterialLiveStatus::Refused:
-                  live_slot.icon = ICON_ERROR;
-                  live_slot.label = "Refused: " +
-                                    std::string(BKE_paint_layers_source_group_refusal_name(
-                                        live_refusal));
-                  break;
-              }
-              row.preview_slots.append(std::move(live_slot));
+              append_material_refusal_slot(row, layer);
             }
 
             StackContentSection channels;
@@ -1221,7 +1186,7 @@ class PaintLayersStackSource final : public StackSource,
             BKE_paint_layers_source_group_build_failed_get(material, layer))
         {
           /* A build failure is runtime data, not in `paint_layers_flag`: without mixing it in the
-           * cached rows would keep the "Live" preview after the wrapper failed to build. */
+           * cached rows would miss the "Refused" icon after the wrapper failed to build. */
           hash = hash * 1000003u ^ 0xB17D0FFAULL;
         }
         auto hash_corrections = [&](const ListBaseT<MaterialPaintLayer> &corrections) {
@@ -1606,6 +1571,18 @@ class PaintLayersStackSource final : public StackSource,
           }
         }
       }
+    }
+    /* A mask the user just added is the one they mean to work on: the caller activates its row, and
+     * the brush has to target the mask rather than keep painting the layer's content. */
+    if (ELEM(kind,
+             PAINT_STACK_ADD_MASK_CORRECTION_PAINT,
+             PAINT_STACK_ADD_MASK_CORRECTION_FILL,
+             PAINT_STACK_ADD_MASK_CORRECTION_MESH_MAP,
+             PAINT_STACK_ADD_MASK_CORRECTION_MATERIAL,
+             PAINT_STACK_ADD_MASK_CORRECTION_NODE_GROUP,
+             PAINT_STACK_ADD_MASK_CORRECTION_STACK))
+    {
+      layers_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return created;

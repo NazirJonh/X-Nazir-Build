@@ -25,10 +25,10 @@ struct Material;
 namespace blender::ed::sculpt_paint::material_layer {
 
 /**
- * Add a Material row to \a owner's description stack, baked from \a source's Principled channels
- * through the existing material bake, and store the result as the row's baked maps. The row takes
- * part through its bake alone: it has no generated subtree, so the generator and the CPU both
- * substitute the maps.
+ * Add a Material row to \a owner's description stack that reads \a source's Principled channels.
+ * With a window manager the row starts without maps and is shown live from its source; the bake
+ * planner renders its first maps once the row is no longer active. Without one (file read,
+ * background) the maps are rendered right away, blocking.
  *
  * \a anchor and \a place are the same placement rules as #BKE_paint_layers_add. A linked \a source
  * is made local first. \return the new row, or null when it could not be added.

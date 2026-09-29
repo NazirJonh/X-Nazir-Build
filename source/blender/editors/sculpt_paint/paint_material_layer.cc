@@ -17,6 +17,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_resolve.hh"
 #include "BKE_report.hh"
 
 #include "BLI_listbase_iterator.hh"
@@ -121,6 +122,20 @@ MaterialPaintLayer *add_material_layer_from_material(bContext &C,
     size = 1024;
   }
 
+  /* Checked before the row exists: a source that feeds no channel would only be an empty row. */
+  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(picked);
+  bool feeds_any_channel = false;
+  for (const eMaterialPaintChannel channel : BKE_paint_material_bakeable_channels()) {
+    feeds_any_channel |= resolve.channels[channel] != ChannelResolution::Unavailable;
+  }
+  if (!feeds_any_channel) {
+    BKE_reportf(CTX_wm_reports(&C),
+                RPT_WARNING,
+                "Material \"%s\" feeds none of the paint channels",
+                picked->id.name + 2);
+    return nullptr;
+  }
+
   MaterialPaintLayer *layer = BKE_paint_layers_add(
       owner, MA_PAINT_LAYER_SOURCE_MATERIAL, picked->id.name + 2, anchor, place);
   if (layer == nullptr) {
@@ -129,19 +144,29 @@ MaterialPaintLayer *add_material_layer_from_material(bContext &C,
   layer->material = picked;
   id_us_plus(&picked->id);
 
+  wmWindowManager *wm = CTX_wm_manager(&C);
+  if (wm != nullptr) {
+    /* No bake here: the user usually edits the source right after adding it, and a map rendered now
+     * would be stale by the time the row is left. A row without maps is shown live from its source,
+     * and the bake planner renders the first maps once the row is no longer active. Only the size is
+     * recorded, which also makes the row's bake invalid (hash 0) until that first render. */
+    BKE_paint_layers_bake_size_set(owner, *layer, size);
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &owner.id);
+    return layer;
+  }
+
+  /* Without a window manager (file read, background) nothing would ever run the planner, so the
+   * maps are rendered right away. */
   Vector<BakeTargetSpec> targets;
   for (const eMaterialPaintChannel channel : BKE_paint_material_bakeable_channels()) {
     targets.append({channel});
   }
 
-  wmWindowManager *wm = CTX_wm_manager(&C);
   MaterialBakeToImagesParams params;
   params.material = picked;
   params.targets = targets;
   params.size = size;
-  /* The rows are taken over on the main thread before the render, so the heavy work can run in a
-   * wmJob. Only without a window manager (file read, background) does it block. */
-  params.blocking = (wm == nullptr);
+  params.blocking = true;
   bool taken_over = false;
   /* Named: #FunctionRef does not own the callable, so a temporary lambda would dangle. */
   const auto hand_over = [&](const MaterialBakeToImagesResult &result) -> bool {

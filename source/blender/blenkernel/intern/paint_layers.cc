@@ -104,10 +104,14 @@ namespace {
  * Whether \a target, or any ancestor of it, carries a bake: only then does a value edit on \a target
  * invalidate a substituted node. Walks \a list and reports through the return whether the target was
  * found with a baked ancestor on the way.
+ *
+ * \param include_self: whether \a target's own bake counts. A row's own visibility is not part of its
+ * bake hash, so a visibility edit passes false and only a baked ancestor makes it topology.
  */
 static bool paint_layer_or_ancestor_has_bake(const ListBaseT<MaterialPaintLayer> &list,
                                              const MaterialPaintLayer *target,
-                                             const bool ancestor_has_bake)
+                                             const bool ancestor_has_bake,
+                                             const bool include_self = true)
 {
   for (const MaterialPaintLayer &layer : list) {
     /* A Material layer's bake is its source's maps, not a cache of the row: its values stay live
@@ -115,21 +119,23 @@ static bool paint_layer_or_ancestor_has_bake(const ListBaseT<MaterialPaintLayer>
     const bool has_bake = ancestor_has_bake ||
                           (layer.bake != nullptr && layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL);
     if (&layer == target) {
-      return has_bake;
+      return include_self ? has_bake : ancestor_has_bake;
     }
-    if (paint_layer_or_ancestor_has_bake(layer.effects, target, has_bake) ||
-        paint_layer_or_ancestor_has_bake(layer.mask_stack, target, has_bake))
+    if (paint_layer_or_ancestor_has_bake(layer.effects, target, has_bake, include_self) ||
+        paint_layer_or_ancestor_has_bake(layer.mask_stack, target, has_bake, include_self))
     {
       return true;
     }
-    if (paint_layer_or_ancestor_has_bake(layer.children, target, has_bake)) {
+    if (paint_layer_or_ancestor_has_bake(layer.children, target, has_bake, include_self)) {
       return true;
     }
   }
   return false;
 }
 
-void paint_layers_tag_value_edited(Material &ma, const MaterialPaintLayer *edited)
+void paint_layers_tag_value_edited(Material &ma,
+                                   const MaterialPaintLayer *edited,
+                                   const bool value_in_own_bake = true)
 {
   /* A value can be baked into a row's cache (the hash covers opacity/fill), and the value-only path
    * does not rebuild the tree, so it has to ask the bake planner for a re-bake as well. The planner
@@ -137,7 +143,9 @@ void paint_layers_tag_value_edited(Material &ma, const MaterialPaintLayer *edite
   ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
   /* The generated tree substituted only the baked rows, so only a value change to such a row (or
    * one of its ancestors) is topology. Anything else stays the free path an animation needs. */
-  if (edited != nullptr && paint_layer_or_ancestor_has_bake(ma.paint_layers, edited, false)) {
+  if (edited != nullptr &&
+      paint_layer_or_ancestor_has_bake(ma.paint_layers, edited, false, value_in_own_bake))
+  {
     ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
   }
   /* The evaluated copy syncs the instance's values from its own copy of the description (see
@@ -2271,7 +2279,9 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool 
     ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
     BKE_paint_layers_root_hash_invalidate(ma);
   }
-  paint_layers_tag_value_edited(ma, layer);
+  /* A row's own visibility is not in its bake hash, so its own bake is no reason to rebuild:
+   * toggling the row being looked at must not cost a graph rebuild. */
+  paint_layers_tag_value_edited(ma, layer, /*value_in_own_bake=*/false);
   return true;
 }
 

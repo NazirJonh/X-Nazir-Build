@@ -48,7 +48,9 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_rotation.h"
+#include "BLI_set.hh"
 #include "BLI_vector.hh"
+#include "BLI_vector_set.hh"
 
 #include "BKE_attribute.hh"
 #include "BKE_collection.hh"
@@ -83,6 +85,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_prototypes.hh"
 
 #include "WM_api.hh"
 #include "WM_toolsystem.hh"
@@ -339,6 +342,36 @@ static int prepare_asset_face_sets(Mesh &asset_mesh, const int offset, const boo
   return max_id + 1;
 }
 
+/** Replace the asset mesh's face sets with a single set of the given default ID, so it joins the
+ * mesh's default set (drawn without a color) instead of getting sets of its own. Shared by the
+ * single-object drop and its batch form. */
+static void asset_face_sets_to_default(Mesh &asset_mesh, const int default_face_set_id)
+{
+  bke::MutableAttributeAccessor attributes = asset_mesh.attributes_for_write();
+  attributes.remove(".sculpt_face_set");
+  attributes.add<int>(
+      ".sculpt_face_set", bke::AttrDomain::Face, bke::AttributeInitValue(default_face_set_id));
+}
+
+/** The face set IDs actually present on `mesh` (positive ones: 0 means "no set"). Coloring has to
+ * walk these, not the range between the lowest and highest ID: #BKE_paint_face_set_custom_color_set
+ * searches (and appends) linearly, so a sparse ID range would scale badly and would add colors for
+ * sets no face uses. */
+static void asset_face_set_ids_get(const Mesh &mesh, Set<int> &r_face_set_ids)
+{
+  const bke::AttributeReader<int> face_sets = mesh.attributes().lookup<int>(".sculpt_face_set",
+                                                                            bke::AttrDomain::Face);
+  if (!face_sets) {
+    return;
+  }
+  for (const int i : face_sets.varray.index_range()) {
+    const int face_set_id = face_sets.varray[i];
+    if (face_set_id > 0) {
+      r_face_set_ids.add(face_set_id);
+    }
+  }
+}
+
 /**
  * Mask everything on `mesh` up to `existing_verts_num`, leaving the vertices past that point
  * unmasked. #join_geometries concatenates the active sculpt mesh first, so the vertices dropped in
@@ -387,7 +420,9 @@ static void refresh_sculpt_overlays_after_drop(bContext &C, wmOperator &op, Obje
 
 static void join_asset_into_active(Object &active_ob,
                                    Mesh &asset_mesh,
+                                   const bool use_face_sets,
                                    const bool replace_face_sets,
+                                   const std::optional<float3> face_set_color,
                                    const bool apply_mask)
 {
   Mesh &sculpt_mesh = *id_cast<Mesh *>(active_ob.data);
@@ -398,9 +433,15 @@ static void join_asset_into_active(Object &active_ob,
 
   /* Assign the dropped mesh's face sets above the active mesh's IDs. In replace mode the asset
    * collapses to a single new set; otherwise its own set structure is preserved. Either way the
-   * active mesh's existing sets are left untouched. */
-  prepare_asset_face_sets(
-      asset_mesh, face_set::find_next_available_id(active_ob), replace_face_sets);
+   * active mesh's existing sets are left untouched. Without face sets the asset joins the mesh's
+   * default set (drawn without a color) instead of getting sets of its own. */
+  if (use_face_sets) {
+    prepare_asset_face_sets(
+        asset_mesh, face_set::find_next_available_id(active_ob), replace_face_sets);
+  }
+  else {
+    asset_face_sets_to_default(asset_mesh, sculpt_mesh.face_sets_color_default);
+  }
 
   /* Vertex count of the active mesh before the join; the appended asset vertices start here. */
   const int existing_verts_num = sculpt_mesh.verts_num;
@@ -431,6 +472,17 @@ static void join_asset_into_active(Object &active_ob,
     BKE_id_free(nullptr, copy);
   }
 
+  /* Every set the asset brought in gets the same custom color, after the join since that
+   * rebuilds the destination mesh. Only the set IDs present on the asset geometry are colored,
+   * see #asset_face_set_ids_get. */
+  if (use_face_sets && face_set_color) {
+    Set<int> face_set_ids;
+    asset_face_set_ids_get(asset_mesh, face_set_ids);
+    for (const int face_set_id : face_set_ids) {
+      BKE_paint_face_set_custom_color_set(&sculpt_mesh, face_set_id, &(*face_set_color)[0]);
+    }
+  }
+
   /* Mask the pre-existing geometry so only the dropped asset (all symmetry sides) is left
    * sculptable. Skipped entirely when the user disabled Mask during hover, leaving any existing
    * mask untouched. */
@@ -448,6 +500,17 @@ static void join_asset_into_active(Object &active_ob,
 /* -------------------------------------------------------------------- */
 /** \name Operator
  * \{ */
+
+/** The custom face set color from the shared options, or none when the automatic one is used. */
+static std::optional<float3> asset_drop_face_set_color_get(wmOperator &op)
+{
+  if (!RNA_boolean_get(op.ptr, "use_face_set_color")) {
+    return std::nullopt;
+  }
+  float3 color;
+  RNA_float_get_array(op.ptr, "face_set_color", &color[0]);
+  return color;
+}
 
 static bool sculpt_mesh_asset_drop_poll(bContext *C)
 {
@@ -769,7 +832,7 @@ static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
 static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
-  const Scene *scene = CTX_data_scene(C);
+  Scene *scene = CTX_data_scene(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
 
   Object *active_ob = CTX_data_active_object(C);
@@ -821,7 +884,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
       DEG_relations_tag_update(bmain);
       WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, target_ob);
       WM_event_add_notifier(C, NC_GEOM | ND_DATA, target_ob->data);
-      WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, const_cast<Scene *>(scene));
+      WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, scene);
     }
     return status;
   }
@@ -843,7 +906,13 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
       return OPERATOR_CANCELLED;
     }
 
-    join_asset_into_active(*active_ob, *asset_mesh, replace_face_sets, apply_mask);
+    std::optional<float3> face_set_color = asset_drop_face_set_color_get(*op);
+    join_asset_into_active(*active_ob,
+                           *asset_mesh,
+                           RNA_boolean_get(op->ptr, "use_face_sets"),
+                           replace_face_sets,
+                           face_set_color,
+                           apply_mask);
     BKE_id_free(nullptr, asset_mesh);
 
     /* Placement origin for the cursor: the snap matrix when set, else the asset's own world
@@ -865,7 +934,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
     /* Remove the carrier object from the scene only if it was imported for this drop.
      * Local assets already existed in the file and must not be deleted. */
     if (!keep_source) {
-      ed::object::base_free_and_unlink(bmain, const_cast<Scene *>(scene), asset_ob);
+      ed::object::base_free_and_unlink(bmain, scene, asset_ob);
     }
 
     /* Move the cursor (and enter Deform positioning) before the undo push so the cursor and tool
@@ -888,7 +957,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
     DEG_relations_tag_update(bmain);
     WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, active_ob);
     WM_event_add_notifier(C, NC_GEOM | ND_DATA, active_ob->data);
-    WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, const_cast<Scene *>(scene));
+    WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, scene);
     return OPERATOR_FINISHED;
   }
 
@@ -942,7 +1011,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
         return OPERATOR_CANCELLED;
       }
       Base *dupe_base = ed::object::add_duplicate(
-          bmain, const_cast<Scene *>(scene), view_layer, source_base, dupflag);
+          bmain, scene, view_layer, source_base, dupflag);
       if (!dupe_base) {
         BKE_report(op->reports, RPT_ERROR, "Failed to duplicate dropped asset");
         return OPERATOR_CANCELLED;
@@ -994,7 +1063,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
   DEG_relations_tag_update(bmain);
   BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
   WM_event_add_notifier(C, NC_OBJECT | ND_TRANSFORM, place_ob);
-  WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, const_cast<Scene *>(scene));
+  WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, scene);
   return OPERATOR_FINISHED;
 }
 
@@ -1028,6 +1097,48 @@ static void sculpt_mesh_asset_drop_ui(bContext * /*C*/, wmOperator *op)
 
   layout.prop(op->ptr, "apply_mask", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   layout.prop(op->ptr, "cursor_placement", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+}
+
+/** The face-set options shared by the drop and its batch form. */
+static void asset_drop_face_set_properties_define(wmOperatorType *ot)
+{
+  PropertyRNA *prop;
+  prop = RNA_def_boolean(ot->srna,
+                         "replace_face_sets",
+                         false,
+                         "Replace Face Sets",
+                         "Collapse the dropped mesh into a single new face set instead of keeping "
+                         "its own face sets (the active mesh's face sets are always preserved)");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "use_face_sets",
+                         true,
+                         "Use Face Sets",
+                         "Give the dropped mesh face sets of its own; when off it joins the mesh's "
+                         "default face set");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "use_face_set_color",
+                         false,
+                         "Custom Face Set Color",
+                         "Color the dropped mesh's face sets with the color below instead of the "
+                         "automatic one");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  static const float face_set_color_default[3] = {0.8f, 0.8f, 0.8f};
+  prop = RNA_def_float_color(ot->srna,
+                             "face_set_color",
+                             3,
+                             face_set_color_default,
+                             0.0f,
+                             1.0f,
+                             "Face Set Color",
+                             "Overlay color of the dropped mesh's face sets",
+                             0.0f,
+                             1.0f);
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 }
 
 void SCULPT_OT_mesh_asset_drop(wmOperatorType *ot)
@@ -1066,13 +1177,7 @@ void SCULPT_OT_mesh_asset_drop(wmOperatorType *ot)
                          "it as a separate object");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 
-  prop = RNA_def_boolean(ot->srna,
-                         "replace_face_sets",
-                         false,
-                         "Replace Face Sets",
-                         "Collapse the dropped mesh into a single new face set instead of keeping "
-                         "its own face sets (the active mesh's face sets are always preserved)");
-  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  asset_drop_face_set_properties_define(ot);
 
   prop = RNA_def_boolean(ot->srna,
                          "linked",
@@ -1118,6 +1223,457 @@ void SCULPT_OT_mesh_asset_drop(wmOperatorType *ot)
                      INT32_MIN,
                      INT32_MAX);
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Batch Placement
+ *
+ * The reusable core of the drop, exposed as #SCULPT_OT_mesh_asset_drop_batch: place a list of
+ * objects at world matrices into the active sculpt mesh (join) or the scene (separate objects)
+ * as a single undo step, so a Python insert tool can insert a whole hierarchy with its symmetry
+ * and radial copies in one call. The single-object operator above stays the drag-and-drop
+ * wrapper and hands out the same per-placement behavior: mirror passes are expanded per
+ * placement, face set IDs run across the batch in order, and masking applies to the geometry
+ * that existed before the batch.
+ * \{ */
+
+/** One placement from the operator's `items` collection. */
+struct AssetDropPlacement {
+  Object *object;
+  float4x4 matrix;
+};
+
+static bool asset_drop_placements_get(wmOperator &op,
+                                      Main &bmain,
+                                      Vector<AssetDropPlacement> &r_placements)
+{
+  PropertyRNA *items_prop = RNA_struct_find_property(op.ptr, "items");
+  if (items_prop == nullptr || RNA_property_type(items_prop) != PROP_COLLECTION) {
+    BKE_report(op.reports, RPT_ERROR, "No objects to place");
+    return false;
+  }
+
+  CollectionPropertyIterator iter;
+  RNA_property_collection_begin(op.ptr, items_prop, &iter);
+  for (; iter.valid; RNA_property_collection_next(&iter)) {
+    const uint32_t session_uid = uint32_t(RNA_int_get(&iter.ptr, "session_uid"));
+    Object *object = (session_uid != 0) ?
+                         id_cast<Object *>(BKE_libblock_find_session_uid(&bmain, ID_OB, session_uid)) :
+                         nullptr;
+    if (object == nullptr || object->type != OB_MESH) {
+      if (r_placements.is_empty()) {
+        /* The first placement failing means nothing would be placed at all; a later one only
+         * drops its own copy, mirroring a sequence of single-object calls. */
+        RNA_property_collection_end(&iter);
+        BKE_report(op.reports, RPT_ERROR, "Placement object not found");
+        return false;
+      }
+      BKE_report(op.reports, RPT_WARNING, "Some of the placement objects could not be resolved");
+      continue;
+    }
+    float4x4 matrix;
+    RNA_float_get_array(&iter.ptr, "matrix", matrix.base_ptr());
+    r_placements.append({object, matrix});
+  }
+  RNA_property_collection_end(&iter);
+
+  if (r_placements.is_empty()) {
+    BKE_report(op.reports, RPT_ERROR, "No objects to place");
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Join every placement's evaluated mesh (plus its mirror-symmetry copies, expanded per placement
+ * exactly like the single-object drop) into the active sculpt mesh in one operation. Face set IDs
+ * run across the placements in order, mirroring a sequence of single-object joins, and the mask
+ * covers the geometry that existed before the batch. Returns false when the first placement had
+ * no faces to join (nothing was changed); `r_partial` is set when a later placement was skipped.
+ */
+static bool asset_drop_batch_join(Depsgraph &depsgraph,
+                                  wmOperator &op,
+                                  Object &active_ob,
+                                  const Span<AssetDropPlacement> placements,
+                                  const bool use_face_sets,
+                                  const bool replace_face_sets,
+                                  const std::optional<float3> face_set_color,
+                                  const bool apply_mask,
+                                  bool &r_partial)
+{
+  Mesh &sculpt_mesh = *id_cast<Mesh *>(active_ob.data);
+  const int existing_verts_num = sculpt_mesh.verts_num;
+
+  Vector<Mesh *> temp_meshes;
+  Vector<bke::GeometrySet> geosets;
+  geosets.append(bke::GeometrySet::from_mesh(&sculpt_mesh, bke::GeometryOwnershipType::ReadOnly));
+  /* The face set IDs the placements actually brought in, for the custom colors after the join. */
+  Set<int> color_face_set_ids;
+
+  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(active_ob);
+  /* Face set preparation runs once the first usable placement is in, so a first-placement
+   * failure above leaves the active mesh untouched (same as the single-object cancel path). */
+  int face_set_offset = 0;
+  bool face_sets_ready = false;
+
+  for (const AssetDropPlacement &placement : placements) {
+    Mesh *asset_mesh = asset_mesh_in_active_space(
+        depsgraph, active_ob, *placement.object, &placement.matrix);
+    if (asset_mesh == nullptr) {
+      if (temp_meshes.is_empty()) {
+        BKE_report(op.reports, RPT_ERROR, "Dropped asset has no faces to join");
+        return false;
+      }
+      BKE_report(op.reports, RPT_WARNING, "Some of the copies could not be placed");
+      r_partial = true;
+      continue;
+    }
+
+    if (!face_sets_ready) {
+      /* Make sure the active mesh carries a face set attribute so existing geometry keeps a
+       * valid ID across the join (matches #SCULPT_OT_trim_box_gesture). */
+      face_set::create_face_sets_mesh(active_ob);
+      face_set_offset = face_set::find_next_available_id(active_ob);
+      face_sets_ready = true;
+    }
+    if (use_face_sets) {
+      face_set_offset = prepare_asset_face_sets(*asset_mesh, face_set_offset, replace_face_sets);
+    }
+    else {
+      asset_face_sets_to_default(*asset_mesh, sculpt_mesh.face_sets_color_default);
+    }
+    temp_meshes.append(asset_mesh);
+    geosets.append(bke::GeometrySet::from_mesh(asset_mesh, bke::GeometryOwnershipType::ReadOnly));
+    if (use_face_sets && face_set_color) {
+      asset_face_set_ids_get(*asset_mesh, color_face_set_ids);
+    }
+
+    /* Mirror-symmetry copies share the placement's prepared face-set IDs (same as the
+     * single-object join repeating the shape per pass). */
+    for (int symmpass = 1; symmpass <= int(symm); symmpass++) {
+      if (!is_symmetry_iteration_valid(char(symmpass), char(symm))) {
+        continue;
+      }
+      Mesh *copy = BKE_mesh_copy_for_eval(*asset_mesh);
+      mesh_flip_positions_for_symmetry(*copy, ePaintSymmetryFlags(symmpass));
+      temp_meshes.append(copy);
+      geosets.append(bke::GeometrySet::from_mesh(copy, bke::GeometryOwnershipType::ReadOnly));
+    }
+  }
+
+  bke::GeometrySet joined = geometry::join_geometries(geosets.as_span(), {});
+  Mesh *result = joined.get_component_for_write<bke::MeshComponent>().release();
+  BKE_mesh_nomain_to_mesh(result, &sculpt_mesh, &active_ob);
+
+  for (Mesh *copy : temp_meshes) {
+    BKE_id_free(nullptr, copy);
+  }
+
+  /* Every set the placements brought in gets the same custom color, after the join since that
+   * rebuilds the destination mesh. Only the set IDs present on the placement geometry are
+   * colored, see #asset_face_set_ids_get. */
+  if (use_face_sets && face_set_color) {
+    for (const int face_set_id : color_face_set_ids) {
+      BKE_paint_face_set_custom_color_set(&sculpt_mesh, face_set_id, &(*face_set_color)[0]);
+    }
+  }
+
+  if (apply_mask) {
+    mask_existing_geometry(sculpt_mesh, existing_verts_num);
+  }
+
+  BKE_sculptsession_free_pbvh(active_ob);
+  BKE_mesh_batch_cache_dirty_tag(&sculpt_mesh, BKE_MESH_BATCH_DIRTY_ALL);
+  DEG_id_tag_update(&active_ob.id, ID_RECALC_GEOMETRY);
+  return true;
+}
+
+/**
+ * Place every placement as its own object: one duplicate per symmetry pass, matrices mirrored
+ * through the active object's axes exactly like the single-object drop. Unlike that operator's
+ * keep_source=false path, the source objects themselves are never placed (they are freed by the
+ * caller's keep_source handling). With `parent_to_active`, every copy is parented to the active
+ * object before its matrix is applied (see below); sets `r_partial` when a later placement could
+ * not be made.
+ */
+static void asset_drop_batch_place_separate(Main &bmain,
+                                            Scene &scene,
+                                            ViewLayer &view_layer,
+                                            Depsgraph &depsgraph,
+                                            wmOperator &op,
+                                            Object &active_ob,
+                                            const Span<AssetDropPlacement> placements,
+                                            const bool linked,
+                                            const bool parent_to_active,
+                                            const float4x4 &parent_inverse,
+                                            bool &r_partial,
+                                            Vector<Object *> &r_created)
+{
+  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(active_ob);
+  const Object *active_ob_eval = DEG_get_evaluated(&depsgraph, &active_ob);
+  const eDupli_ID_Flags dupflag = linked ? eDupli_ID_Flags{} : eDupli_ID_Flags(U.dupflag);
+
+  BKE_view_layer_synced_ensure(bmain, &scene, &view_layer);
+
+  for (const AssetDropPlacement &placement : placements) {
+    Base *source_base = BKE_view_layer_base_find(&view_layer, placement.object);
+    if (source_base == nullptr) {
+      if (r_created.is_empty()) {
+        BKE_report(op.reports,
+                   RPT_ERROR,
+                   "Placement object has no view layer base to duplicate");
+      }
+      else {
+        BKE_report(op.reports, RPT_WARNING, "Some of the copies could not be placed");
+        r_partial = true;
+      }
+      return;
+    }
+
+    for (int symmpass = 0; symmpass <= int(symm); symmpass++) {
+      if (!is_symmetry_iteration_valid(char(symmpass), char(symm))) {
+        continue;
+      }
+      Base *dupe_base = ed::object::add_duplicate(
+          &bmain, &scene, &view_layer, source_base, dupflag);
+      if (dupe_base == nullptr) {
+        BKE_report(op.reports, RPT_WARNING, "Some of the copies could not be placed");
+        r_partial = true;
+        break;
+      }
+      Object *ob = dupe_base->object;
+      r_created.append(ob);
+      if (parent_to_active) {
+        /* Parent first, then apply the world matrix: #BKE_object_apply_mat4 resolves the local
+         * matrix through the current parent and #parentinv (active world @ inverse active world
+         * = identity here), so the copy keeps its placement. Parenting only after the fact
+         * would keep copies of parented sources at their basis relative to the old parent. */
+        ed::object::parent_set(ob, &active_ob, PAROBJECT, "");
+        copy_m4_m4(ob->parentinv, parent_inverse.ptr());
+      }
+      const float4x4 world_mat = world_matrix_for_symmetry_pass(
+          *active_ob_eval, placement.matrix, ePaintSymmetryFlags(symmpass));
+      BKE_object_apply_mat4(ob, world_mat.ptr(), false, true);
+      DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
+    }
+    if (r_partial) {
+      break;
+    }
+  }
+
+  BKE_view_layer_synced_ensure(bmain, &scene, &view_layer);
+}
+
+static wmOperatorStatus sculpt_mesh_asset_drop_batch_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+
+  Object *active_ob = CTX_data_active_object(C);
+  if (!active_ob || active_ob->type != OB_MESH) {
+    BKE_report(op->reports, RPT_ERROR, "No active sculpt mesh");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Plain mesh sculpt target only (no multires/dyntopo), same as the single-object drop. */
+  const bool is_dyntopo = active_ob->runtime->sculpt_session &&
+                          active_ob->runtime->sculpt_session->bm;
+  if (is_dyntopo || BKE_sculpt_multires_active(scene, active_ob)) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Placing mesh assets is only supported on plain meshes (no multires or dynamic "
+               "topology)");
+    return OPERATOR_CANCELLED;
+  }
+
+  Vector<AssetDropPlacement> placements;
+  if (!asset_drop_placements_get(*op, *bmain, placements)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool join_to_active = RNA_boolean_get(op->ptr, "join_to_active");
+  const bool linked = RNA_boolean_get(op->ptr, "linked");
+  const bool replace_face_sets = RNA_boolean_get(op->ptr, "replace_face_sets");
+  const bool use_face_sets = RNA_boolean_get(op->ptr, "use_face_sets");
+  const bool apply_mask = RNA_boolean_get(op->ptr, "apply_mask");
+  const bool keep_source = RNA_boolean_get(op->ptr, "keep_source");
+  const bool parent_to_active = RNA_boolean_get(op->ptr, "parent_to_active");
+  const int cursor_placement = RNA_enum_get(op->ptr, "cursor_placement");
+
+  const std::optional<float3> face_set_color = asset_drop_face_set_color_get(*op);
+
+  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  /* Evaluated active transform: the original can be stale under constraints, drivers or an
+   * animated parent (same as the single-object drop). */
+  const Object *active_ob_eval = DEG_get_evaluated(depsgraph, active_ob);
+  const float4x4 parent_inverse = active_ob_eval->world_to_object();
+
+  Vector<Object *> created;
+  bool partial = false;
+
+  if (join_to_active) {
+    if (!asset_drop_batch_join(*depsgraph,
+                               *op,
+                               *active_ob,
+                               placements,
+                               use_face_sets,
+                               replace_face_sets,
+                               face_set_color,
+                               apply_mask,
+                               partial))
+    {
+      return OPERATOR_CANCELLED;
+    }
+  }
+  else {
+    asset_drop_batch_place_separate(*bmain,
+                                    *scene,
+                                    *view_layer,
+                                    *depsgraph,
+                                    *op,
+                                    *active_ob,
+                                    placements,
+                                    linked,
+                                    parent_to_active,
+                                    parent_inverse,
+                                    partial,
+                                    created);
+    if (created.is_empty()) {
+      return OPERATOR_CANCELLED;
+    }
+
+    /* The placed objects live outside the active sculpt mesh, so "mask everything except the new
+     * geometry" means masking the whole active mesh (same as the single-object drop). */
+    if (apply_mask) {
+      Mesh &active_mesh = *id_cast<Mesh *>(active_ob->data);
+      mask_existing_geometry(active_mesh, active_mesh.verts_num);
+      BKE_sculptsession_free_pbvh(*active_ob);
+      BKE_mesh_batch_cache_dirty_tag(&active_mesh, BKE_MESH_BATCH_DIRTY_ALL);
+      DEG_id_tag_update(&active_ob->id, ID_RECALC_GEOMETRY);
+    }
+  }
+
+  /* Sources are the caller's business unless flagged temporary: freeing them here (and not
+   * during placement) keeps their removal inside the batch's undo step, so undo/redo can neither
+   * resurrect them nor lose them. The same goes for their now-orphaned mesh data (a throwaway
+   * carrier's mesh has no user left after a join), so it is freed right here too, instead of
+   * lingering until the caller's next cleanup -- after the undo push. */
+  if (!keep_source) {
+    Vector<Object *> sources_to_free;
+    for (const AssetDropPlacement &placement : placements) {
+      if (placement.object != active_ob && !sources_to_free.contains(placement.object)) {
+        sources_to_free.append(placement.object);
+      }
+    }
+    VectorSet<Mesh *> orphaned_meshes;
+    for (Object *source : sources_to_free) {
+      if (source->type == OB_MESH && source->data != nullptr) {
+        orphaned_meshes.add(id_cast<Mesh *>(source->data));
+      }
+      ed::object::base_free_and_unlink(bmain, scene, source);
+    }
+    for (Mesh *mesh : orphaned_meshes) {
+      /* Linked copies made from the carriers keep using their mesh, which then still has users. */
+      if (mesh->id.us == 0) {
+        BKE_id_delete(bmain, mesh);
+      }
+    }
+  }
+
+  /* The first placement defines the origin the cursor moves to (the batch's "first call"). */
+  if (cursor_placement != SCULPT_ASSET_DROP_CURSOR_NONE) {
+    cursor_placement_apply(*C, *active_ob, placements[0].matrix, join_to_active);
+  }
+
+  /* One plain #ED_undo_push for the whole batch, for the same reasons as the single-object drop
+   * (see the matching comment in #sculpt_mesh_asset_drop_exec). */
+  ED_undo_push(C, op->type->name);
+
+  refresh_sculpt_overlays_after_drop(*C, *op, *active_ob);
+  DEG_relations_tag_update(bmain);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, active_ob);
+  WM_event_add_notifier(C, NC_GEOM | ND_DATA, active_ob->data);
+  if (!created.is_empty()) {
+    WM_event_add_notifier(C, NC_OBJECT | ND_TRANSFORM, active_ob);
+  }
+  WM_event_add_notifier(C, NC_SCENE | ND_LAYER_CONTENT, scene);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_mesh_asset_drop_batch(wmOperatorType *ot)
+{
+  ot->name = "Place Mesh Assets (Sculpt)";
+  ot->description =
+      "Place a list of mesh objects into the active sculpt object or the scene as one undo step "
+      "(the reusable batch form of the sculpt asset drop)";
+  ot->idname = "SCULPT_OT_mesh_asset_drop_batch";
+
+  ot->exec = sculpt_mesh_asset_drop_batch_exec;
+  ot->poll = sculpt_mesh_asset_drop_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+
+  PropertyRNA *prop;
+  prop = RNA_def_collection_runtime(ot->srna,
+                                    "items",
+                                    RNA_OperatorObjectPlacementElement,
+                                    "Items",
+                                    "Objects to place, each with the world matrix placing it");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "join_to_active",
+                         true,
+                         "Join to Active",
+                         "Merge the placed meshes into the active sculpt object instead of adding "
+                         "them as separate objects");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  asset_drop_face_set_properties_define(ot);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "linked",
+                         true,
+                         "Linked",
+                         "When placing separate objects, share (link) their mesh data with the "
+                         "source instead of making a full independent copy");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "apply_mask",
+                         false,
+                         "Mask",
+                         "Mask the active mesh's pre-existing geometry so only the placed "
+                         "geometry stays sculptable; when off, its existing mask is left "
+                         "untouched");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "keep_source",
+                         true,
+                         "Keep Source",
+                         "Keep the source objects in the file; when off they are removed as part "
+                         "of the same undo step (for throwaway import carriers)");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "parent_to_active",
+                         false,
+                         "Parent to Active",
+                         "Parent the placed objects to the active sculpt object (a joined insert "
+                         "adds nothing to parent)");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_enum(ot->srna,
+                      "cursor_placement",
+                      cursor_placement_items,
+                      SCULPT_ASSET_DROP_CURSOR_NONE,
+                      "Cursor Placement",
+                      "Where the placement origin sits relative to the sculpt 3D cursor");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 }
 
 /** \} */

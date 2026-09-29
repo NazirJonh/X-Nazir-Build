@@ -25,6 +25,8 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_windowmanager_types.h"
+
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 
@@ -1438,6 +1440,39 @@ static bool WIDGETGROUP_placement_poll(const bContext *C, wmGizmoGroupType *gzgt
   return false;
 }
 
+/**
+ * Whether the sculpt insert tool wants the placement plane drawn. The plane is not drawn by this
+ * gizmo group but by the snap cursor's paint cursor (`v3d_cursor_snap_draw_fn`), which reads the
+ * state's `draw_plane`; so the state must be driven here (the group's poll cannot hide it). Every
+ * other tool keeps the plane as set up (`true`). The flag is window-manager runtime state set by
+ * the tool itself (see `SculptInsertModalBase._set_plane` in `bl_operators/sculpt_insert_asset.py`).
+ */
+static bool sculpt_insert_placement_plane_visible(const bContext *C)
+{
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr) {
+    return true;
+  }
+  return wm->sculpt_insert_hide_plane == 0;
+}
+
+static void WIDGETGROUP_placement_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
+{
+  V3DSnapCursorState *snap_state = static_cast<V3DSnapCursorState *>(gzgroup->customdata);
+  if (snap_state == nullptr) {
+    return;
+  }
+
+  bool visible = true;
+  const ScrArea *area = CTX_wm_area(C);
+  if (area != nullptr && area->runtime.tool != nullptr &&
+      STREQ(area->runtime.tool->idname, "builtin.sculpt_insert_asset"))
+  {
+    visible = sculpt_insert_placement_plane_visible(C);
+  }
+  snap_state->draw_plane = visible;
+}
+
 void VIEW3D_GGT_placement(wmGizmoGroupType *gzgt)
 {
   gzgt->name = "Placement Widget";
@@ -1450,6 +1485,7 @@ void VIEW3D_GGT_placement(wmGizmoGroupType *gzgt)
 
   gzgt->poll = WIDGETGROUP_placement_poll;
   gzgt->setup = WIDGETGROUP_placement_setup;
+  gzgt->draw_prepare = WIDGETGROUP_placement_draw_prepare;
 }
 
 /** \} */

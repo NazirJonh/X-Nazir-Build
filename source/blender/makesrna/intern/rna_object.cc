@@ -3798,6 +3798,15 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "In Front", "Make the object display in front of others");
   RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_grease_pencil_update");
 
+  prop = RNA_def_property(srna, "show_sculpt_preview", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "show_sculpt_preview", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Show Sculpt Preview",
+      "Draw the sculpt overlays (face sets) for this object while it has no sculpt session, "
+      "e.g. for the preview of a sculpt-mode insert tool");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
   /* pose */
   prop = RNA_def_property(srna, "pose", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "pose");

@@ -2460,6 +2460,12 @@ void UI_OT_id_browser_show_recent(wmOperatorType *ot);
 void UI_OT_id_browser_show_favorites(wmOperatorType *ot);
 void UI_OT_id_browser_show_current_file(wmOperatorType *ot);
 
+/* `templates/interface_template_id_browser.cc` */
+
+void UI_OT_id_browser_open_target(wmOperatorType *ot);
+void UI_OT_id_browser_random_asset(wmOperatorType *ot);
+void UI_OT_id_browser_refresh(wmOperatorType *ot);
+
 /* interface_ops_color.cc */
 
 MenuType *UI_MT_color_space_select();

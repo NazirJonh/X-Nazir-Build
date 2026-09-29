@@ -44,6 +44,7 @@
 #include "ED_outliner.hh"
 #include "ED_paint.hh"
 #include "ED_physics.hh"
+#include "ED_screen.hh"
 #include "ED_sculpt.hh"
 #include "ED_undo.hh"
 #include "ED_view3d.hh"
@@ -688,6 +689,54 @@ void OBJECT_OT_transfer_mode(wmOperatorType *ot)
                   true,
                   "Flash On Transfer",
                   "Flash the target object when transferring the mode");
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Overlay Flash
+ *
+ * Exposes #object_overlay_mode_transfer_animation_start to Python tools (e.g. the sculpt asset
+ * insert tool flashes its preview objects when switching between scale, snap and rotation).
+ * \{ */
+
+static wmOperatorStatus object_overlay_flash_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  const int32_t session_uid = RNA_int_get(op->ptr, "session_uid");
+  Object *ob = (session_uid != 0) ?
+                   id_cast<Object *>(BKE_libblock_find_session_uid(bmain, ID_OB, session_uid)) :
+                   nullptr;
+  if (ob == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Object not found");
+    return OPERATOR_CANCELLED;
+  }
+  object_overlay_mode_transfer_animation_start(ob);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  return OPERATOR_FINISHED;
+}
+
+void OBJECT_OT_overlay_flash(wmOperatorType *ot)
+{
+  ot->name = "Flash Object Overlay";
+  ot->idname = "OBJECT_OT_overlay_flash";
+  ot->description = "Play the short mode-transfer highlight on an object";
+
+  ot->exec = object_overlay_flash_exec;
+  ot->poll = ED_operator_view3d_active;
+
+  /* UI feedback only: no undo push. */
+  ot->flag = OPTYPE_INTERNAL;
+
+  PropertyRNA *prop = RNA_def_int(ot->srna,
+                                  "session_uid",
+                                  0,
+                                  INT32_MIN,
+                                  INT32_MAX,
+                                  "Object Session UUID",
+                                  "Session UUID of the object to flash (like the batch drop "
+                                  "operator's placement items)",
+                                  INT32_MIN,
+                                  INT32_MAX);
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 }
 
 /** \} */

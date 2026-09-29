@@ -26,6 +26,7 @@
 #include "BKE_asset_catalog_memory.hh"
 #include "BKE_global.hh"
 #include "BKE_idprop.hh"
+#include "BKE_icons.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
@@ -33,6 +34,7 @@
 #include "BKE_material.hh"
 #include "BKE_preferences.h"
 #include "BKE_preview_image.hh"
+#include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_texture.h"
 #include "BKE_wm_runtime.hh"
@@ -41,6 +43,7 @@
 #include "BLI_hash.hh"
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
+#include "BLI_rand.hh"
 #include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -54,6 +57,7 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 #include "DNA_texture_types.h"
 #include "DNA_userdef_types.h"
@@ -61,6 +65,8 @@
 #include "DNA_windowmanager_types.h"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 #include "RNA_path.hh"
 #include "RNA_prototypes.hh"
 
@@ -70,6 +76,7 @@
 #include "ED_asset_list.hh"
 #include "ED_asset_menu_utils.hh"
 #include "ED_image_grid.hh"
+#include "ED_render.hh"
 #include "ED_screen.hh"
 
 #include "IMB_imbuf.hh"
@@ -1029,6 +1036,27 @@ static NameMatchFilterState id_browser_name_match_state_get(wmWindowManager &wm,
 }
 
 /**
+ * Icon of a browsed local data-block, for the browsers opened with a script-defined filter (see
+ * the call in #build_items): #id_icon_get only gives objects their type icon, which does not tell
+ * them apart in a grid, so a renderable object gets its rendered preview. It is cached in the
+ * object's #PreviewImage (rendered once by a job, shown as a placeholder until it is ready), so
+ * reopening the browser does not render again. Everything else (list mode, empties, other types)
+ * keeps #id_icon_get.
+ */
+static int id_browser_icon_get(const bContext *C, ID *id, const bool big)
+{
+  if (big && GS(id->name) == ID_OB && ED_preview_id_render_is_supported(id)) {
+    const int icon = BKE_icon_id_ensure(id);
+    /* The browser shows hierarchies as inserted, so the preview job also renders the children. */
+    ED_preview_object_include_children_set(true);
+    icon_render_id(C, nullptr, id, ICON_SIZE_PREVIEW, true);
+    ED_preview_object_include_children_set(false);
+    return icon;
+  }
+  return id_icon_get(C, id, big);
+}
+
+/**
  * Assign \a id to the browsed pointer property. With \a wrap_images, a local #Image is wrapped
  * into a #TEX_IMAGE texture first (see #BKE_texture_image_wrap_for_slot) so a #Texture property
  * can take the image the user picked. \a id_has_extra_user releases a load reference the caller
@@ -1205,7 +1233,13 @@ class IDBrowserView : public AbstractGridView {
       if (!BKE_name_match_resolved_asset_passes(name_match_resolved, name, {})) {
         continue;
       }
-      const int preview_icon = id_icon_get(context_, &id, !list_mode_);
+      /* Rendered object previews are only generated for browsers opened with a script-defined
+       * filter (the sculpt insert tool's): the established browsers keep their plain type icons,
+       * since rendering starts jobs for every shown object and the cached preview is written
+       * into the file (#BKE_previewimg_blend_write). */
+      const int preview_icon = (filter_.custom != nullptr) ?
+                                   id_browser_icon_get(context_, &id, !list_mode_) :
+                                   id_icon_get(context_, &id, !list_mode_);
       IDBrowserGridItem &item = this->add_item<IDBrowserGridItem>(
           name, name, preview_icon, &id, list_mode_);
 
@@ -2146,12 +2180,13 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
    * tree is shown. #popover_units_x itself keeps meaning the grid column width. */
   layout.ui_units_x_set(total_units_x);
 
-  if (asset_source || show_paint_filters) {
-    /* Asset library async load / catalog changes, and GridViewSettings name-match updates
-     * (NC_ASSET | ND_ASSET_LIST). Without this listener Blend Data mode would not rebuild the
-     * grid when map types are toggled from the nested popover. See #id_browser_asset_block_listen. */
-    block_add_dynamic_listener(layout.block(), id_browser_asset_block_listen);
-  }
+  /* Asset library async load / catalog changes, and GridViewSettings name-match updates
+   * (NC_ASSET | ND_ASSET_LIST). Without this listener Blend Data mode would not rebuild the
+   * grid when map types are toggled from the nested popover. See #id_browser_asset_block_listen.
+   * Always attached: the preview-size slider also notifies through
+   * #ND_ASSET_LIST, and for a plain Blend Data target (objects) nothing else listens, so the grid
+   * only followed the slider once it was released. */
+  block_add_dynamic_listener(layout.block(), id_browser_asset_block_listen);
 
   /* Open direction, and whether it is known yet. #block_func_POPOVER resolves
    * #Block::handle->direction *after* this draw runs, so it is zero on the very first frame and
@@ -2532,6 +2567,24 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
 
   asset_controls->separator(half_unit_gap_factor);
 
+  /* The browsed filter's script-defined header (#IDFilterType::draw_header): the popover reserves
+   * this row (one unit) plus the surrounding gaps in #non_grid_units below, and the filter draws
+   * its own narrowing options into it (e.g. a collection selector). Blend Data source only, like
+   * the grid's script-defined filtering itself. */
+  const std::optional<StringRefNull> filter_idname = CTX_data_string_get(
+      C, "id_browser_filter_type");
+  const ui::IDFilterType *header_filter = (!asset_source && filter_idname) ?
+                                              id_filter_type_find(*filter_idname) :
+                                              nullptr;
+  const bool show_filter_header = (header_filter != nullptr) &&
+                                  (header_filter->draw_header != nullptr);
+  if (show_filter_header) {
+    Layout &filter_header_row = asset_controls->row(false);
+    filter_header_row.alignment_set(LayoutAlign::Expand);
+    header_filter->draw_header(header_filter, C, &filter_header_row);
+    asset_controls->separator(half_unit_gap_factor);
+  }
+
   {
     Layout &search_row = asset_controls->row(true);
     Block *search_block = search_row.block();
@@ -2564,8 +2617,8 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
    * separator, the search row, the 1-unit gap above the grid, the 0.5-unit gap below it, and the
    * always-present 0.7-unit bottom resize-grip row (a spacer of the same height when the grip is in
    * row 1). */
-  const float non_grid_units =
-      1.0f + 0.5f + 1.0f + 0.5f + 1.0f + grid_top_gap_units + 0.5f + 0.7f;
+  const float non_grid_units = 1.0f + 0.5f + 1.0f + 0.5f + (show_filter_header ? 1.5f : 0.0f) +
+                               1.0f + grid_top_gap_units + 0.5f + 0.7f;
   const bool list_mode = RNA_enum_get(&wm_ptr, "id_browser_view_mode") ==
                          IMAGE_BROWSER_VIEW_LIST;
   const float tile_units = list_mode ? float(UI_UNIT_X) / float(UI_UNIT_Y) : 3.0f;
@@ -2800,24 +2853,42 @@ void id_browser_popover_context_set(Layout &layout, const IDBrowserTarget &targe
   }
 }
 
+/**
+ * Create the keep-open ID-browser popover: \a popover_func re-publishes the browse target on
+ * every rebuild (see #id_browser_popover_context_set), because the context store lives on the
+ * block's layout, not on a button -- the target is programmatic here, there is no button under
+ * the cursor. Returns null when the popover type is not (yet) registered.
+ */
+static PopupBlockHandle *id_browser_popover_panel_create(bContext *C,
+                                                        PopoverCreateFunc popover_func)
+{
+  id_browser_popover_register();
+  PanelType *pt = WM_paneltype_find("UI_PT_id_browser", true);
+  if (pt == nullptr) {
+    return nullptr;
+  }
+  PopupBlockHandle *handle = popover_panel_create(
+      C, nullptr, nullptr, std::move(popover_func), pt);
+  /* No button to resolve the open direction from (only button popups get one, see
+   * #ui_popup_block_refresh), so it is set here: the popover extends downward from the cursor.
+   * The resize grip picks its slot from it and is not drawn while it is unknown. */
+  handle->direction = UI_DIR_DOWN;
+  /* Recreate the block with the region shown, so refreshing works from the very first draw (same
+   * reason as #popover_panel_invoke's keep-open branch). */
+  ED_region_tag_refresh_ui(handle->region);
+  return handle;
+}
+
 void id_browser_popover_invoke(bContext *C,
                                PointerRNA ptr,
                                const char *propname,
                                const bool browse_images)
 {
-  id_browser_popover_register();
-  PanelType *pt = WM_paneltype_find("UI_PT_id_browser", true);
-  if (pt == nullptr) {
-    return;
-  }
-
   /* A keep-open panel popover, NOT a begin/draw/end block. The grid only scrolls, resizes and
    * changes source by REBUILDING its block (see #force_activate_view_item_but and the preview
    * helpers), and a begin/end popover has no refresh support -- so the wheel did nothing. This path
    * matches #popover_panel_invoke's keep-open branch, with the browse target published on the
-   * popover's root layout instead of on an invoking button: the target is programmatic here, there
-   * IS no button under the cursor. The callback re-publishes it on every rebuild, because the
-   * context store lives on the block's layout, not on a button. */
+   * popover's root layout instead of on an invoking button. */
   const std::string prop = propname;
   /* The owner may be freed (or moved by undo) while the popover is open, so keep its identity, not
    * its pointer: the callback re-resolves it by session UID and rebuilds the PointerRNA from the
@@ -2830,10 +2901,8 @@ void id_browser_popover_invoke(bContext *C,
                                (static_cast<const char *>(ptr.data) -
                                 reinterpret_cast<const char *>(owner)) :
                                0;
-  PopupBlockHandle *handle = popover_panel_create(
+  PopupBlockHandle *handle = id_browser_popover_panel_create(
       C,
-      nullptr,
-      nullptr,
       [prop, browse_images, target_type, owner, owner_uid, owner_idcode, data_offset](
           bContext *C, Layout *layout, PanelType *panel_type) {
         /* Re-resolve by session UID so a freed-then-reallocated owner cannot alias; an owner with
@@ -2851,11 +2920,72 @@ void id_browser_popover_invoke(bContext *C,
             &target_ptr, prop.c_str(), nullptr, nullptr, nullptr, browse_images};
         id_browser_popover_context_set(*layout, target);
         UI_paneltype_draw(C, panel_type, layout);
-      },
-      pt);
-  /* Same reason as #popover_panel_invoke's keep-open branch: recreate the block with the region
-   * shown, so refreshing works from the very first draw. */
-  ED_region_tag_refresh_ui(handle->region);
+      });
+  if (handle == nullptr) {
+    return;
+  }
+}
+
+void id_browser_popover_invoke_direct(bContext *C,
+                                      PointerRNA ptr,
+                                      const char *propname,
+                                      const bool browse_images,
+                                      const char *data_path,
+                                      const char *filter_type)
+{
+  /* Variant of #id_browser_popover_invoke for targets that are not DNA sub-structs of an ID (a
+   * python-defined PropertyGroup is heap-allocated): re-deriving the data from an owner-ID +
+   * offset is meaningless for those. Instead the target is re-resolved on every rebuild from
+   * \a data_path, relative to the owner ID (kept by session UID so a freed-then-reallocated
+   * owner cannot alias, like #id_browser_popover_invoke). The owner must have a session UID and
+   * \a data_path must resolve to the same struct as \a ptr; undo while the popover is open then
+   * simply re-resolves (or shows the unavailable label), it cannot dangle. Pass a null \a
+   * data_path when the target did not come from it, so the raw pointer is kept instead of
+   * resolving a path against a foreign owner. */
+  const std::string prop = propname;
+  const std::string path = data_path != nullptr ? data_path : "";
+  ID *owner = ptr.owner_id;
+  StructRNA *target_type = ptr.type;
+  void *target_data = ptr.data;
+  const std::string filter = filter_type != nullptr ? filter_type : "";
+  const uint32_t owner_uid = owner != nullptr ? owner->session_uid : 0;
+  const short owner_idcode = owner != nullptr ? GS(owner->name) : 0;
+  PopupBlockHandle *handle = id_browser_popover_panel_create(
+      C,
+      [prop, browse_images, target_type, target_data, owner_uid, owner_idcode, path, filter](
+          bContext *C, Layout *layout, PanelType *panel_type) {
+        PointerRNA target_ptr{};
+        if (owner_uid != 0 && !path.empty()) {
+          /* Re-resolve from the owner's session UID so a freed-then-reallocated owner cannot
+           * alias, and so undo restoring the owner while the popover is open is picked up. A
+           * failed resolution means the target is really gone: show the unavailable label
+           * rather than falling back to the (possibly freed) raw pointer. */
+          if (G_MAIN != nullptr) {
+            ID *resolved_owner = BKE_libblock_find_session_uid(
+                G_MAIN, owner_idcode, owner_uid);
+            if (resolved_owner != nullptr) {
+              PointerRNA owner_ptr = RNA_id_pointer_create(resolved_owner);
+              RNA_path_resolve(&owner_ptr, path.c_str(), &target_ptr, nullptr);
+            }
+          }
+        }
+        else {
+          /* No owner with a session UID to re-resolve from (or no path given): keep the raw
+           * pointer, matching #id_browser_popover_invoke's session-UID-less owners. */
+          target_ptr = RNA_pointer_create_discrete(nullptr, target_type, target_data);
+        }
+        if (target_ptr.data == nullptr) {
+          layout->label(IFACE_("Data-block no longer available"), ICON_ERROR);
+          return;
+        }
+        const IDBrowserTarget target{
+            &target_ptr, prop.c_str(), nullptr, filter.c_str(), nullptr, browse_images};
+        id_browser_popover_context_set(*layout, target);
+        UI_paneltype_draw(C, panel_type, layout);
+      });
+  if (handle == nullptr) {
+    return;
+  }
 }
 
 void id_browser_add_popover_button(Layout &row,
@@ -3102,6 +3232,304 @@ void template_id_browser_button(Layout *layout,
 
   const IDBrowserTarget target{ptr, propname, material, filter_type, image_filter};
   id_browser_add_popover_button(layout->row(true), C, target, /*use_preview_icon=*/false);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Programmatic browser access for modal tools
+ *
+ * The sculpt asset-insert tool opens this browser over the viewport with the right mouse button
+ * and picks a random object asset from whatever the user is currently browsing, so it needs the
+ * popover and the import path without a button under the mouse. Both operators resolve the
+ * browse target from an RNA `data_path` relative to the context scene, falling back to the
+ * `id_browser_ptr` context member.
+ * \{ */
+
+static bool id_browser_target_from_context(bContext *C,
+                                           PointerRNA *r_target_ptr,
+                                           PropertyRNA **r_target_prop,
+                                           const char *propname)
+{
+  *r_target_ptr = CTX_data_pointer_get(C, "id_browser_ptr");
+  if (r_target_ptr->data == nullptr) {
+    return false;
+  }
+  *r_target_prop = RNA_struct_find_property(r_target_ptr, propname);
+  return *r_target_prop != nullptr &&
+         RNA_property_type(*r_target_prop) == PROP_POINTER;
+}
+
+/**
+ * Resolve the browse target from the operator's RNA `data_path` (relative to the context scene)
+ * when given, falling back to the `id_browser_ptr` context member. The data path keeps callers
+ * independent of Python context overrides. \a r_resolved_from_path tells whether the target
+ * actually came from the data path (as opposed to the fallback), so callers re-resolving on
+ * every rebuild only pass on a path that produced the target.
+ */
+static bool id_browser_target_from_operator(bContext *C,
+                                            wmOperator *op,
+                                            PointerRNA *r_target_ptr,
+                                            PropertyRNA **r_target_prop,
+                                            const std::string &propname,
+                                            bool *r_resolved_from_path)
+{
+  *r_resolved_from_path = false;
+  const std::string data_path = RNA_string_get(op->ptr, "data_path");
+  if (!data_path.empty()) {
+    if (Scene *scene = CTX_data_scene(C)) {
+      PointerRNA scene_ptr = RNA_id_pointer_create(&scene->id);
+      PointerRNA resolved{};
+      if (RNA_path_resolve(&scene_ptr, data_path.c_str(), &resolved, nullptr) &&
+          resolved.data != nullptr)
+      {
+        *r_target_ptr = resolved;
+        *r_target_prop = RNA_struct_find_property(&resolved, propname.c_str());
+        *r_resolved_from_path = *r_target_prop != nullptr &&
+                                RNA_property_type(*r_target_prop) == PROP_POINTER;
+        return *r_resolved_from_path;
+      }
+    }
+  }
+  return id_browser_target_from_context(C, r_target_ptr, r_target_prop, propname.c_str());
+}
+
+static wmOperatorStatus id_browser_open_target_exec(bContext *C, wmOperator *op)
+{
+  const std::string propname = RNA_string_get(op->ptr, "prop");
+  const std::string data_path = RNA_string_get(op->ptr, "data_path");
+
+  PointerRNA target_ptr;
+  PropertyRNA *target_prop;
+  bool resolved_from_path = false;
+  if (!id_browser_target_from_operator(
+          C, op, &target_ptr, &target_prop, propname, &resolved_from_path))
+  {
+    BKE_report(op->reports, RPT_ERROR, "No ID browser target found");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Only forward the data path when it actually produced the target: the popover re-resolves it
+   * on every rebuild relative to the target's owner, and a fallback target from the context
+   * member may have an owner the scene-relative path does not resolve against. */
+  id_browser_popover_invoke_direct(
+      C,
+      target_ptr,
+      propname.c_str(),
+      false,
+      resolved_from_path ? data_path.c_str() : nullptr,
+      RNA_string_get(op->ptr, "filter_type").c_str());
+  return OPERATOR_FINISHED;
+}
+
+void UI_OT_id_browser_open_target(wmOperatorType *ot)
+{
+  ot->name = "Open ID Browser for Target";
+  ot->description = "Open the ID browser popover for a data-block pointer property, given by an "
+                    "RNA data path or the context member 'id_browser_ptr'";
+  ot->idname = "UI_OT_id_browser_open_target";
+
+  ot->exec = id_browser_open_target_exec;
+  ot->poll = ED_operator_screenactive;
+
+  /* UI state only, no undo push. */
+  ot->flag = OPTYPE_REGISTER;
+
+  PropertyRNA *prop = RNA_def_string(ot->srna,
+                                     "data_path",
+                                     nullptr,
+                                     0,
+                                     "Data Path",
+                                     "RNA path to the struct owning the pointer property, "
+                                     "relative to the context scene");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  prop = RNA_def_string(ot->srna,
+                        "prop",
+                        nullptr,
+                        0,
+                        "Property",
+                        "Name of the pointer property on the target that receives the browser's "
+                        "assignment");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  prop = RNA_def_string(ot->srna,
+                        "filter_type",
+                        nullptr,
+                        0,
+                        "Filter Type",
+                        "Identifier of a registered ID filter narrowing the offered data-blocks");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+}
+
+/** One candidate for #UI_OT_id_browser_random_asset: either a local data-block or an asset that
+ * still has to be imported. */
+struct IDBrowserRandomCandidate {
+  asset_system::AssetRepresentation *asset = nullptr;
+  ID *local_id = nullptr;
+};
+
+static wmOperatorStatus id_browser_random_asset_exec(bContext *C, wmOperator *op)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const short idcode = short(RNA_enum_get(op->ptr, "id_type"));
+  const std::string filter_idname = RNA_string_get(op->ptr, "filter_type");
+  const IDFilterType *filter = filter_idname.empty() ?
+                                   nullptr :
+                                   id_filter_type_find(filter_idname);
+
+  /* Candidates follow what the browser shows for the current source: the asset library (narrowed
+   * by the catalog selection #id_browser_foreach_asset reads), its Recent/Favorites lists, or the
+   * local data-block list. The name filter is not applied. */
+  Vector<IDBrowserRandomCandidate> candidates;
+  if (wm->id_browser_source == ID_BROWSER_SOURCE_ASSET_LIBRARY) {
+    const auto add_candidate = [&](asset_system::AssetRepresentation &asset) -> bool {
+      candidates.append({&asset, nullptr});
+      return true;
+    };
+    grid_settings::CatalogMode catalog_mode = grid_settings::CatalogMode::All;
+    PointerRNA settings_ptr = id_browser_grid_settings_ptr(*wm);
+    if (settings_ptr.data != nullptr) {
+      catalog_mode = grid_settings::catalog_mode_get(settings_ptr);
+    }
+    if (ELEM(catalog_mode, grid_settings::CatalogMode::Recent, grid_settings::CatalogMode::Favorites))
+    {
+      id_browser_foreach_membership_asset(*C, catalog_mode, idcode, add_candidate);
+    }
+    else {
+      id_browser_foreach_asset(*C, id_browser_library_ref_get(*wm), idcode, add_candidate);
+    }
+  }
+  else if (ListBaseT<ID> *idlb = which_libbase(CTX_data_main(C), idcode)) {
+    for (ID &id : *idlb) {
+      /* Narrow like the browser's grid does (#IDBrowserFilter::custom): without the filter every
+       * object data-block in the file becomes a candidate (cameras, lights, the sculpt object
+       * itself, ...), which the caller could only reject after the pick. The filter is only
+       * applied to local data-blocks: an asset that is not imported yet has no ID to test. */
+      if (filter == nullptr || id_filter_type_poll(*filter, *C, id)) {
+        candidates.append({nullptr, &id});
+      }
+    }
+  }
+
+  if (candidates.is_empty()) {
+    BKE_report(op->reports, RPT_WARNING, "No matching items to pick from");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* A default-constructed generator is seeded with 0 and would pick the same item every time. */
+  RandomNumberGenerator rng = RandomNumberGenerator::from_random_seed();
+  const IDBrowserRandomCandidate &candidate = candidates[rng.get_int32(int32_t(candidates.size()))];
+
+  ID *id = candidate.local_id;
+  if (id == nullptr) {
+    id = ed::asset::asset_local_id_ensure_imported(*CTX_data_main(C),
+                                                   *candidate.asset,
+                                                   /*flags*/ 0,
+                                                   /*import_method*/ std::nullopt,
+                                                   /*instantiate_context*/ std::nullopt,
+                                                   CTX_wm_reports(C));
+  }
+  if (id == nullptr || GS(id->name) != idcode) {
+    BKE_report(op->reports, RPT_ERROR, "Failed to import the picked asset");
+    return OPERATOR_CANCELLED;
+  }
+
+  if (candidate.asset != nullptr) {
+    /* Same as a browser click: every selection counts as the most recently used asset. */
+    ed::asset::shelf::shelf_asset_lists_record_recent(id_browser_shelf_idname(idcode),
+                                                      candidate.asset->make_weak_reference());
+  }
+
+  /* When a target property is given, assign like a browser click would, so the caller (and the
+   * tool settings row it hosts) shows what got picked. */
+  const std::string propname = RNA_string_get(op->ptr, "prop");
+  PointerRNA target_ptr;
+  PropertyRNA *target_prop;
+  bool resolved_from_path = false;
+  if (!propname.empty() &&
+      id_browser_target_from_operator(
+          C, op, &target_ptr, &target_prop, propname, &resolved_from_path))
+  {
+    id_browser_assign_id_to_target(
+        *C, target_ptr, target_prop, id, /*wrap_images=*/false, /*id_has_extra_user=*/false);
+  }
+
+  BKE_reportf(op->reports, RPT_INFO, "Picked %s", id->name + 2);
+  WM_event_add_notifier(C, NC_WINDOW, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void UI_OT_id_browser_random_asset(wmOperatorType *ot)
+{
+  ot->name = "Random ID Browser Item";
+  ot->description = "Import and assign a random item from whatever the ID browser currently "
+                    "shows (asset library and its catalog selection, or the local data-blocks)";
+  ot->idname = "UI_OT_id_browser_random_asset";
+
+  ot->exec = id_browser_random_asset_exec;
+  ot->poll = ED_operator_screenactive;
+
+  ot->flag = OPTYPE_REGISTER;
+
+  PropertyRNA *prop = RNA_def_enum(ot->srna,
+                                   "id_type",
+                                   rna_enum_id_type_items,
+                                   ID_OB,
+                                   "ID Type",
+                                   "Type of the items to pick from");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  prop = RNA_def_string(ot->srna,
+                        "data_path",
+                        nullptr,
+                        0,
+                        "Data Path",
+                        "RNA path to the struct owning the pointer property, relative to the "
+                        "context scene");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  prop = RNA_def_string(ot->srna,
+                        "prop",
+                        nullptr,
+                        0,
+                        "Property",
+                        "Name of the pointer property on the target that receives the pick "
+                        "(empty to only report it)");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  prop = RNA_def_string(ot->srna,
+                        "filter_type",
+                        nullptr,
+                        0,
+                        "Filter Type",
+                        "Identifier of a registered ID filter narrowing the local data-blocks "
+                        "the pick comes from");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+}
+
+static wmOperatorStatus id_browser_refresh_exec(bContext *C, wmOperator * /*op*/)
+{
+  /* The notifier reaches every region hosting an open ID browser (its block listens for
+   * #ND_ASSET_LIST, so the grid re-collects its items with the current filter state); the direct
+   * tag covers the current region even when no block is listening there yet. */
+  WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+    ED_region_tag_refresh_ui(region);
+  }
+  return OPERATOR_FINISHED;
+}
+
+void UI_OT_id_browser_refresh(wmOperatorType *ot)
+{
+  ot->name = "Refresh ID Browser";
+  ot->description =
+      "Rebuild an open ID browser, so changes to its filter or grid settings take effect";
+  ot->idname = "UI_OT_id_browser_refresh";
+
+  ot->exec = id_browser_refresh_exec;
+
+  /* UI state only, no undo push. */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /** \} */

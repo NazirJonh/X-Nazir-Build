@@ -267,6 +267,20 @@ void id_browser_popover_invoke(bContext *C,
                                bool browse_images);
 
 /**
+ * Same as #id_browser_popover_invoke, but for targets that are not DNA sub-structs of an ID
+ * (e.g. a python-defined PropertyGroup): those cannot be re-derived from an owner-ID + data
+ * offset, so \a data_path (relative to \a ptr's owner ID) is re-resolved on every rebuild while
+ * the popover is open, keeping it valid across undo. An owner without a session UID or an empty
+ * \a data_path falls back to keeping \a ptr's data by value.
+ */
+void id_browser_popover_invoke_direct(bContext *C,
+                                      PointerRNA ptr,
+                                      const char *propname,
+                                      bool browse_images,
+                                      const char *data_path,
+                                      const char *filter_type = nullptr);
+
+/**
  * `interface_template_grid_selectors.cc`
  * Ctrl-Wheel cycling shared by the library selectors.
  */

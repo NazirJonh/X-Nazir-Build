@@ -2181,6 +2181,25 @@ static bool id_filter_filter_id(const ui::IDFilterType *filter_type, const bCont
   return is_visible;
 }
 
+static void id_filter_draw_header(const ui::IDFilterType *filter_type,
+                                  const bContext *C,
+                                  ui::Layout *layout)
+{
+  extern FunctionRNA *rna_IDFilter_draw_header_func;
+
+  PointerRNA ptr = RNA_pointer_create_discrete(
+      nullptr, filter_type->rna_ext.srna, nullptr); /* dummy */
+  FunctionRNA *func = rna_IDFilter_draw_header_func;
+
+  ParameterList list;
+  RNA_parameter_list_create(&list, &ptr, func);
+  RNA_parameter_set_lookup(&list, "context", &C);
+  RNA_parameter_set_lookup(&list, "layout", &layout);
+  filter_type->rna_ext.call(const_cast<bContext *>(C), &ptr, func, &list);
+
+  RNA_parameter_list_free(&list);
+}
+
 static void rna_IDFilter_bl_idname_get(PointerRNA *ptr, char *value)
 {
   const ui::IDFilterType *filter_type = static_cast<ui::IDFilterType *>(ptr->data);
@@ -2230,7 +2249,7 @@ static StructRNA *rna_IDFilter_register(Main *bmain,
   ui::IDFilterType dummy_filter_type = {};
   PointerRNA dummy_ptr = RNA_pointer_create_discrete(nullptr, RNA_IDFilter, &dummy_filter_type);
 
-  bool have_function[1];
+  bool have_function[2];
 
   /* Validate the python class. */
   if (validate(&dummy_ptr, data, have_function) != 0) {
@@ -2276,6 +2295,7 @@ static StructRNA *rna_IDFilter_register(Main *bmain,
   RNA_struct_blender_type_set(filter_type->rna_ext.srna, filter_type.get());
 
   filter_type->filter_id = have_function[0] ? id_filter_filter_id : nullptr;
+  filter_type->draw_header = have_function[1] ? id_filter_draw_header : nullptr;
 
   StructRNA *srna = filter_type->rna_ext.srna;
   ui::id_filter_type_register(std::move(filter_type));
@@ -3263,6 +3283,19 @@ static void rna_def_id_filter(BlenderRNA *brna)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_pointer(func, "id", "ID", "", "The data-block to test");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  /* Popover header callback: draws into the row the ID-browser popover reserves above the grid
+   * (a Blend Data source only), so a filter can offer its own narrowing options there. */
+  func = RNA_def_function(srna, "draw_header", nullptr);
+  RNA_def_function_ui_description(
+      func,
+      "Draw filter-specific content into the row the ID-browser popover reserves above the "
+      "grid (a Blend Data source only)");
+  RNA_def_function_flag(func, FUNC_NO_SELF | FUNC_REGISTER_OPTIONAL);
+  parm = RNA_def_pointer(func, "context", "Context", "", "The context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "layout", "UILayout", "", "Layout to draw into");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
 }
 
 static void rna_def_asset_shelf(BlenderRNA *brna)

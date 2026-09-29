@@ -53,6 +53,7 @@ void operatortypes_object()
   WM_operatortype_append(OBJECT_OT_forcefield_toggle);
 
   WM_operatortype_append(OBJECT_OT_transfer_mode);
+  WM_operatortype_append(OBJECT_OT_overlay_flash);
 
   WM_operatortype_append(OBJECT_OT_parent_set);
   WM_operatortype_append(OBJECT_OT_parent_no_inverse_set);

@@ -1970,6 +1970,12 @@ struct IDFilterType {
    * method. Null when the registered class did not implement it (then everything passes).
    */
   bool (*filter_id)(const IDFilterType *type, const bContext *C, ID *id);
+  /**
+   * Draw filter-specific content into the row the ID-browser popover reserves above the grid (a
+   * Blend Data source only). For Python types this bridges to the class's `draw_header`
+   * class-method. Null when the registered class did not implement it (then no row is reserved).
+   */
+  void (*draw_header)(const IDFilterType *type, const bContext *C, blender::ui::Layout *layout);
   /** RNA integration. */
   ExtensionRNA rna_ext;
 };

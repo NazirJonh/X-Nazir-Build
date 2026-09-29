@@ -700,6 +700,12 @@ struct Object {
 
   bke::ObjectRuntime *runtime = nullptr;
 
+  /** Draw the sculpt overlays (face sets) for this object while it has no sculpt session, e.g.
+   * for the preview of a sculpt-mode insert tool. The overlay reads the face set attribute of the
+   * object's mesh directly in that case; Python sets the flag for the lifetime of a preview. */
+  char show_sculpt_preview = 0;
+  char _pad_preview[7] = {};
+
 #ifdef __cplusplus
   const float4x4 &object_to_world() const;
   const float4x4 &world_to_object() const;

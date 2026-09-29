@@ -2949,6 +2949,27 @@ static void rna_def_operator_filelist_element(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Name", "Name of a file or directory within a file list");
 }
 
+static void rna_def_operator_object_placement_element(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "OperatorObjectPlacementElement", "PropertyGroup");
+  RNA_def_struct_ui_text(srna,
+                         "Operator Object Placement Element",
+                         "An object reference with the world matrix placing it, for operators "
+                         "that take a list of placements");
+
+  prop = RNA_def_property(srna, "session_uid", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(prop, "Session UUID", "Session UUID of the object to place");
+
+  prop = RNA_def_property(srna, "matrix", PROP_FLOAT, PROP_MATRIX);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_multi_array(prop, 2, rna_matrix_dimsize_4x4);
+  RNA_def_property_ui_text(prop, "Matrix", "World matrix placing the object");
+}
+
 static void rna_def_operator_asset_image_import_element(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3971,6 +3992,15 @@ static void rna_def_windowmanager(BlenderRNA *brna)
       prop, "Category Tab Save Category", "Temporary storage for category name during save dialog");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
+  prop = RNA_def_property(srna, "sculpt_insert_hide_plane", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_insert_hide_plane", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Hide Sculpt Insert Placement Plane",
+      "Runtime state of the sculpt-mode insert tools: hide the placement gizmo's aiming plane "
+      "once the placement moves on from picking the surface (not part of undo)");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
   prop = RNA_def_property(srna, "xr_session_settings", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "xr.session_settings");
   RNA_def_property_flag(prop, PROP_NEVER_NULL);
@@ -4496,6 +4526,7 @@ void RNA_def_wm(BlenderRNA *brna)
   rna_def_operator_options_runtime(brna);
   rna_def_operator_utils(brna);
   rna_def_operator_filelist_element(brna);
+  rna_def_operator_object_placement_element(brna);
   rna_def_operator_asset_image_import_element(brna);
   rna_def_operator_paint_channel_image_element(brna);
   rna_def_macro_operator(brna);

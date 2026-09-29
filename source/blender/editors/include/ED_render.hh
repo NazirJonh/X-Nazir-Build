@@ -151,6 +151,14 @@ void ED_preview_draw(
  */
 void ED_previews_tag_dirty_by_id(const Main &bmain, const ID &id);
 
+/**
+ * While enabled, object preview jobs started from this thread also render the object's children.
+ * Meant to be set around a single icon request by callers that show hierarchies (the ID browser of
+ * the sculpt insert tool); every other preview keeps rendering the object alone. The state is read
+ * when the job is created, so it does not need to outlive the request.
+ */
+void ED_preview_object_include_children_set(bool enable);
+
 void ED_render_clear_mtex_copybuf();
 
 void ED_render_internal_init();

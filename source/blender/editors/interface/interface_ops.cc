@@ -3514,6 +3514,9 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_id_browser_show_recent);
   WM_operatortype_append(UI_OT_id_browser_show_favorites);
   WM_operatortype_append(UI_OT_id_browser_show_current_file);
+  WM_operatortype_append(UI_OT_id_browser_open_target);
+  WM_operatortype_append(UI_OT_id_browser_random_asset);
+  WM_operatortype_append(UI_OT_id_browser_refresh);
 
   /* external */
   WM_operatortype_append(UI_OT_eyedropper_color);

@@ -363,6 +363,17 @@ struct wmWindowManager {
   // #endif
 
   bke::WindowManagerRuntime *runtime = nullptr;
+
+  /**
+   * Runtime state of the sculpt-mode insert tools (`bpy_extras.sculpt_insert`): the aiming plane
+   * of the placement gizmo is hidden once the placement moves on from picking the surface. Kept in
+   * the window manager rather than in tool settings, so toggling it (on every phase change) tags
+   * no depsgraph update and is not part of undo steps. The window manager struct is written to
+   * files and may be zero-initialized, so the flag is "hide" (0 = plane shown) and the tool resets
+   * it whenever a run ends.
+   */
+  char sculpt_insert_hide_plane = 0;
+  char _pad_insert_plane[7] = {};
 };
 
 #define WM_KEYCONFIG_ARRAY_P(wm) \

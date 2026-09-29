@@ -15,6 +15,7 @@ __all__ = (
     "keyconfig_utils",
     "mesh_utils",
     "node_utils",
+    "sculpt_insert",
     "view3d_utils",
     "id_map_utils",
 )

@@ -8194,6 +8194,24 @@ def km_3d_view_tool_interactive_add(params):
     )
 
 
+def km_3d_view_tool_insert_asset(params):
+    return (
+        "3D View Tool: Sculpt, Insert Asset",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            # A plain press (not a tweak) starts the placement: the click itself creates the
+            # object at the surface point under the mouse.
+            ("sculpt.insert_asset",
+             {"type": 'LEFTMOUSE', "value": 'PRESS', **params.tool_modifier}, None),
+            # Right click opens the asset browser for picking the source instead of the brush
+            # context menu.
+            ("sculpt.insert_asset",
+             {"type": 'RIGHTMOUSE', "value": 'PRESS', **params.tool_modifier},
+             {"properties": [("invoke_browser", True)]}),
+        ]},
+    )
+
+
 # ------------------------------------------------------------------------------
 # Tool System (3D View, Edit Mesh)
 
@@ -9672,6 +9690,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_bend(params),
         km_3d_view_tool_measure(params),
         km_3d_view_tool_interactive_add(params),
+        km_3d_view_tool_insert_asset(params),
         km_3d_view_tool_pose_breakdowner(params),
         km_3d_view_tool_pose_push(params),
         km_3d_view_tool_pose_relax(params),

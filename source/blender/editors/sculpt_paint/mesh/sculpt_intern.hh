@@ -1811,6 +1811,7 @@ void modal_keymap(wmKeyConfig *keyconf);
 
 namespace ed::sculpt_paint::asset_drop {
 void SCULPT_OT_mesh_asset_drop(wmOperatorType *ot);
+void SCULPT_OT_mesh_asset_drop_batch(wmOperatorType *ot);
 }
 
 namespace ed::sculpt_paint::project {

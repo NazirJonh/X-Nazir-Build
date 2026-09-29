@@ -3841,6 +3841,22 @@ def km_3d_view_tool_interactive_add(params):
     )
 
 
+def km_3d_view_tool_insert_asset(params):
+    return (
+        "3D View Tool: Sculpt, Insert Asset",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            # A plain press (not a tweak) starts the placement: the click itself creates the
+            # object at the surface point under the mouse.
+            ("sculpt.insert_asset", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+            # Right click opens the asset browser for picking the source instead of the brush
+            # context menu.
+            ("sculpt.insert_asset", {"type": 'RIGHTMOUSE', "value": 'PRESS'},
+             {"properties": [("invoke_browser", True)]}),
+        ]},
+    )
+
+
 # Fallback for gizmos that don't have custom a custom key-map.
 
 
@@ -3959,6 +3975,7 @@ def generate_keymaps_impl(params=None):
         # Tool System.
         km_3d_view_tool_select(params),
         km_3d_view_tool_interactive_add(params),
+        km_3d_view_tool_insert_asset(params),
         km_3d_view_tool_sculpt_curves_edit(params),
         km_image_editor_tool_uv_select(params),
         km_sequencer_editor_tool_select_preview(params),

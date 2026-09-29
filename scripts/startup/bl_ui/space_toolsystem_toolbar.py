@@ -739,6 +739,194 @@ class _defs_view3d_add:
             draw_settings=draw_settings,
         )
 
+    @ToolDef.from_fn
+    def insert_asset():
+        def draw_settings(context, layout, tool, *, extra=False):
+            settings = context.scene.sculpt_insert_asset
+
+            if not extra:
+                row = layout.row(align=True)
+                row.label(text="Object")
+                row.prop(settings, "insert_type", expand=True)
+                row = layout.row(align=True)
+                row.label(text="Source")
+                row.prop(settings, "source_mode", text="")
+
+                if settings.source_mode == 'OBJECT':
+                    row = layout.row(align=True)
+                    row.prop(settings, "object", text="")
+                    row.operator(
+                        "sculpt.insert_asset_open_browser", text="Browser",
+                        icon='FILEBROWSER')
+                elif settings.source_mode == 'COLLECTION':
+                    row = layout.row(align=True)
+                    row.prop(settings, "collection", text="")
+                    row.operator(
+                        "sculpt.insert_asset_open_browser", text="Browser",
+                        icon='FILEBROWSER')
+                else:
+                    # No source field: picking goes through the "Browser" operator (only objects
+                    # the tool can insert are offered, see `SCULPT_IDF_insert_root`).
+                    row = layout.row(align=True)
+                    row.operator(
+                        "sculpt.insert_asset_open_browser", text="Browser",
+                        icon='FILEBROWSER')
+
+                # Random applies to collections and to asset-browser picks only; a single scene
+                # object is always inserted as-is.
+                if settings.source_mode != 'OBJECT':
+                    row = layout.row(align=True)
+                    row.prop(settings, "insert_mode", expand=True)
+
+                # Object assets cannot become instances; scene objects and collections can.
+                # The list itself leaves Instance out for the asset browser source.
+                layout.prop(settings, "placement", text="")
+
+                row = layout.row(align=True)
+                row.label(text="Point")
+                row.prop(settings, "snap_mode", expand=True)
+                row = layout.row(align=True)
+                row.prop(settings, "interaction_mode", expand=True)
+                row = layout.row(align=True)
+                row.label(text="Start Scale")
+                row.prop(settings, "scale_mode_quick", text="")
+                if settings.scale_mode == 'FIXED':
+                    row.prop(settings, "fixed_scale", text="")
+
+                row = layout.row(align=True)
+                row.prop(settings, "use_correction", toggle=True)
+                # A text-less toggle: the icon shows the recording state.
+                row.prop(
+                    settings, "use_record", text="", toggle=True,
+                    icon='REC' if settings.use_record else 'RADIOBUT_OFF')
+                row.popover(
+                    panel="SCULPT_PT_insert_asset_correction", text="", icon='DOWNARROW_HLT')
+
+                region_is_header = context.region.type == 'TOOL_HEADER'
+                if region_is_header:
+                    # Don't draw the "extra" popover here as we might have other settings & this should be last.
+                    layout.popover("SCULPT_PT_insert_asset_extra", text="", icon='PREFERENCES')
+                    return
+
+            # Extended settings (extra popover or non-header region).
+            draw_insert_asset_extra(context, layout)
+
+        return dict(
+            idname="builtin.sculpt_insert_asset",
+            label="Insert Asset",
+            icon="PACKAGE",
+            description=tip_(
+                "Insert an object or asset on the sculpt surface\n"
+                " \u2022 Click snaps the point onto the surface and follows the mouse\n"
+                " \u2022 Release switches to scale: move the mouse away from or toward the origin, click to accept\n"
+                " \u2022 Then rotate: mouse spins the object, X/Y/Z rotate around its own axes\n"
+                " \u2022 S, G and R jump back to scale, surface move and rotation\n"
+                " \u2022 Click again to confirm, Esc or right click cancels\n"
+                " \u2022 Right click opens the browser to pick the source"),
+            # The placement gizmo group draws the snap cursor's preview plane under the mouse, like
+            # the interactive Add Cube/Cone tools, so the insert position is visible before the click.
+            widget="VIEW3D_GGT_placement",
+            keymap="3D View Tool: Sculpt, Insert Asset",
+            draw_settings=draw_settings,
+        )
+
+
+# -----------------------------------------------------------------------------
+# Sculpt Insert Asset panels
+
+# RNA path (relative to the scene) of the tool's settings struct, and the reset operator of its
+# correction panel. Kept in sync with `_SETTINGS_DATA_PATH` / `_RESET_OP_IDNAME` in
+# `bl_operators/sculpt_insert_asset.py` (the settings themselves and the operators live there;
+# the UI lives here, like everywhere else in `bl_ui`).
+_INSERT_ASSET_SETTINGS_DATA_PATH = "sculpt_insert_asset"
+_INSERT_ASSET_RESET_OP_IDNAME = "sculpt.insert_asset_correction_reset"
+
+
+def draw_insert_asset_extra(context, layout):
+    """Extended tool options, shared by the Extra Options popover and the non-header tool
+    settings draw."""
+    settings = getattr(context.scene, _INSERT_ASSET_SETTINGS_DATA_PATH)
+    layout.use_property_split = False
+
+    header, body = layout.panel("SCULPT_INSERT_face_sets", default_closed=False)
+    header.prop(settings, "use_face_sets", text="Use Face Sets")
+    if body is not None:
+        body.active = settings.use_face_sets
+        body.prop(settings, "replace_face_sets")
+        row = body.row(align=True)
+        row.prop(settings, "use_face_set_color", text="Custom Face Set Color")
+        sub = row.row(align=True)
+        sub.active = settings.use_face_set_color
+        sub.prop(settings, "face_set_color", text="")
+
+    # Cursor-driven Start Scale modes, as quick buttons here as well as in the header menu.
+    layout.separator()
+    row = layout.row(align=True)
+    row.label(text="Start Scale")
+    row.prop_enum(settings, "scale_mode", 'ZERO')
+    row.prop_enum(settings, "scale_mode", 'ORIGINAL')
+    layout.separator()
+
+    header, body = layout.panel("SCULPT_INSERT_snap", default_closed=False)
+    header.label(text="Snap")
+    if body is not None:
+        col = body.column()
+        col.use_property_split = True
+        col.prop(settings, "scale_sensitivity")
+        col.prop(settings, "rotation_snap_step")
+
+    header, body = layout.panel("SCULPT_INSERT_advanced", default_closed=False)
+    header.label(text="Advanced")
+    if body is not None:
+        col = body.column()
+        col.prop(settings, "apply_mask")
+        col.prop(settings, "use_gizmo")
+
+
+class SCULPT_PT_insert_asset_correction(Panel):
+    bl_label = "Correction"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 14
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        settings = getattr(context.scene, _INSERT_ASSET_SETTINGS_DATA_PATH)
+
+        layout.prop(settings, "use_correction")
+        col = layout.column()
+        col.active = settings.use_correction
+
+        sub = col.column(heading="Offset Position", align=True)
+        sub.prop(settings, "corr_use_offset", text="Use")
+        row = sub.column(align=True)
+        row.active = settings.corr_use_offset
+        row.prop(settings, "corr_offset", text="")
+
+        sub = col.column(heading="Rotation", align=True)
+        sub.prop(settings, "corr_use_rotation", text="Use")
+        row = sub.column(align=True)
+        row.active = settings.corr_use_rotation
+        row.prop(settings, "corr_rotation", text="")
+
+        layout.separator()
+        layout.operator(_INSERT_ASSET_RESET_OP_IDNAME)
+
+
+class SCULPT_PT_insert_asset_extra(Panel):
+    bl_label = "Extra Options"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 14
+
+    @classmethod
+    def poll(cls, context):
+        return hasattr(context.scene, _INSERT_ASSET_SETTINGS_DATA_PATH)
+
+    def draw(self, context):
+        draw_insert_asset_extra(context, self.layout)
+
 
 # -----------------------------------------------------------------------------
 # Object Modes (named based on context.mode)
@@ -4184,6 +4372,13 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         _defs_view3d_add.ico_sphere_add,
     )
 
+    # Sculpt only: the insert tool's operator (and its settings) is sculpt-mode specific, while
+    # the plain Add tools above are shared with Object and Edit Mesh.
+    _tools_sculpt_add = (
+        *_tools_view3d_add,
+        _defs_view3d_add.insert_asset,
+    )
+
     _tools_pose = (
         _defs_pose.breakdown,
         _defs_pose.push,
@@ -4386,7 +4581,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
                 else ()
             ),
             None,
-            _tools_view3d_add,
+            _tools_sculpt_add,
             None,
             (
                 _defs_sculpt.mask_border,
@@ -4634,6 +4829,8 @@ classes = (
     NODE_PT_tools_active,
     VIEW3D_PT_tools_active,
     SEQUENCER_PT_tools_active,
+    SCULPT_PT_insert_asset_correction,
+    SCULPT_PT_insert_asset_extra,
 )
 
 if __name__ == "__main__":  # only for live edit.

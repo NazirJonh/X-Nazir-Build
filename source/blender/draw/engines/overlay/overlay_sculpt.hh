@@ -10,6 +10,7 @@
 
 #include <optional>
 
+#include "BKE_attribute.hh"
 #include "BKE_curves.hh"
 #include "BKE_layer.hh"
 #include "BKE_mesh.hh"
@@ -544,6 +545,24 @@ class Sculpts : Overlay {
 
     const SculptSession *sculpt_session = ob_ref.object->runtime->sculpt_session;
     if (sculpt_session == nullptr) {
+      /* Objects marked as sculpt previews (e.g. by a sculpt-mode insert tool) draw their face
+       * sets outside of any sculpt session, from the mesh attribute like the cached mesh path
+       * below. */
+      if (show_face_set_ && ob_ref.object->show_sculpt_preview &&
+          ob_ref.object->type == OB_MESH)
+      {
+        Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*ob_ref.object);
+        /* An empty mesh (e.g. the base of a geometry-nodes asset) or a missing face set attribute
+         * builds a batch with no usable index buffer, which some backends (Vulkan) cannot draw.
+         * Skip those instead of submitting the batch. (A Face-domain attribute lookup that exists
+         * always matches the mesh's face count.) */
+        const bke::AttributeReader<int> face_sets = mesh.attributes().lookup<int>(
+            ".sculpt_face_set", bke::AttrDomain::Face);
+        if (mesh.faces_num > 0 && mesh.corners_num > 0 && face_sets) {
+          mesh_fallback_ps_->draw(DRW_mesh_batch_cache_get_sculpt_overlays(mesh),
+                                  manager.unique_handle(ob_ref));
+        }
+      }
       return;
     }
 

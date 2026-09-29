@@ -14,6 +14,7 @@
 #include "DNA_cachefile_types.h"
 #include "DNA_light_types.h"
 #include "DNA_material_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -292,6 +293,38 @@ static void world_changed(Main *bmain, World *wo)
   ED_previews_tag_dirty_by_id(*bmain, wo->id);
 }
 
+/**
+ * Object previews (shown by the ID browser) are cached in the object's #PreviewImage, which is only
+ * re-rendered once it is tagged changed. Editing the geometry (sculpt, modifiers) never told it,
+ * so the browser kept showing the old shape. Only an icon that already exists is tagged: an object
+ * that was never browsed has no preview to invalidate.
+ */
+static void object_geometry_icon_tag(Object *ob)
+{
+  if (ob->id.icon_id != 0) {
+    BKE_icon_changed(ob->id.icon_id);
+  }
+}
+
+static void object_changed(Object *ob)
+{
+  if (ob->id.recalc & ID_RECALC_GEOMETRY) {
+    object_geometry_icon_tag(ob);
+  }
+}
+
+static void mesh_changed(Main *bmain, Mesh *mesh)
+{
+  if ((mesh->id.recalc & ID_RECALC_GEOMETRY) == 0) {
+    return;
+  }
+  for (Object &ob : bmain->objects) {
+    if (ob.data == &mesh->id) {
+      object_geometry_icon_tag(&ob);
+    }
+  }
+}
+
 static void image_changed(Main *bmain, Image *ima)
 {
   Tex *tex;
@@ -407,6 +440,12 @@ void ED_render_id_flush_update(const DEGEditorUpdateContext *update_ctx, ID *id)
       break;
     case ID_IM:
       image_changed(bmain, id_cast<Image *>(id));
+      break;
+    case ID_OB:
+      object_changed(id_cast<Object *>(id));
+      break;
+    case ID_ME:
+      mesh_changed(bmain, id_cast<Mesh *>(id));
       break;
     case ID_SCE:
       scene_changed(bmain, id_cast<Scene *>(id));

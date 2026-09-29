@@ -21,12 +21,14 @@
 #endif
 #include "MEM_guardedalloc.h"
 
+#include "BLI_listbase.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_rotation.h"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
@@ -149,6 +151,9 @@ struct IconPreview {
   /** May be nullptr! (see #ICON_TYPE_PREVIEW case in #icon_ensure_deferred()). */
   ID *id;
   ID *id_copy;
+  /** Copies of the descendants of an object preview's object (see #object_preview_children_copy),
+   * so its children show up in the preview like they do in the viewport. */
+  ListBase child_copies;
   /* Which icon sizes to render. */
   bool render_size[NUM_ICON_SIZES];
 
@@ -396,6 +401,73 @@ void ED_preview_world_simple_set_rgb(World *world, const float color[4])
   auto *color_socket = static_cast<bNodeSocketValueRGBA *>(
       bke::node_find_socket(*background, SOCK_IN, "Color"_ustr)->default_value);
   copy_v4_v4(color_socket->value, color);
+}
+
+static void preview_id_copy_free(ID *id);
+
+/** See #ED_preview_object_include_children_set. Only touched from the main thread. */
+static bool g_object_preview_include_children = false;
+
+void ED_preview_object_include_children_set(const bool enable)
+{
+  g_object_preview_include_children = enable;
+}
+
+/**
+ * Copy every descendant of the previewed object into \a r_child_copies and parent the copies to
+ * each other (and to \a root_copy) instead of to the originals, which live in another main. Without
+ * this only the object itself is rendered and its children are missing from the preview.
+ */
+static void object_preview_children_copy(const Main &bmain,
+                                         const Object &root,
+                                         Object &root_copy,
+                                         ListBase &r_child_copies)
+{
+  Vector<std::pair<const Object *, Object *>> copies;
+  copies.append({&root, &root_copy});
+
+  for (const Object &ob : bmain.objects) {
+    bool is_descendant = false;
+    for (const Object *parent = ob.parent; parent != nullptr; parent = parent->parent) {
+      if (parent == &root) {
+        is_descendant = true;
+        break;
+      }
+    }
+    if (!is_descendant) {
+      continue;
+    }
+    ID *id_copy = BKE_id_copy_ex(nullptr,
+                                 &ob.id,
+                                 nullptr,
+                                 LIB_ID_CREATE_LOCAL | LIB_ID_COPY_LOCALIZE |
+                                     LIB_ID_COPY_NO_ANIMDATA);
+    if (id_copy == nullptr) {
+      continue;
+    }
+    Object *ob_copy = id_cast<Object *>(id_copy);
+    copies.append({&ob, ob_copy});
+    BLI_addtail(&r_child_copies, ob_copy);
+  }
+
+  for (const auto &[original, copy] : copies) {
+    if (copy == &root_copy || original->parent == nullptr) {
+      continue;
+    }
+    for (const auto &[parent_original, parent_copy] : copies) {
+      if (parent_original == original->parent) {
+        copy->parent = parent_copy;
+        break;
+      }
+    }
+  }
+}
+
+static void object_preview_children_free(ListBase &child_copies)
+{
+  while (ID *id = static_cast<ID *>(BLI_pophead(&child_copies))) {
+    preview_id_copy_free(id);
+  }
 }
 
 static ID *duplicate_ids(ID *id, const bool allow_failure)
@@ -806,6 +878,9 @@ struct ObjectPreviewData {
   /* Copy of the object to create the preview for. The copy is for thread safety (and to insert
    * it into its own main). */
   Object *object;
+  /* Copies of the object's descendants, moved into the preview main (see
+   * #object_preview_children_copy). May be null. */
+  ListBase *child_copies;
   /* Current frame. */
   int cfra;
   int sizex;
@@ -860,6 +935,15 @@ static Scene *object_preview_scene_create(const ObjectPreviewData *preview_data,
 
   BKE_collection_object_add(preview_data->pr_main, scene->master_collection, preview_data->object);
 
+  Vector<Object *> child_objects;
+  if (preview_data->child_copies != nullptr) {
+    while (Object *child = static_cast<Object *>(BLI_pophead(preview_data->child_copies))) {
+      BLI_addtail(&preview_data->pr_main->objects, child);
+      BKE_collection_object_add(preview_data->pr_main, scene->master_collection, child);
+      child_objects.append(child);
+    }
+  }
+
   Object *camera_object = object_preview_camera_create(
       preview_data->pr_main, scene, view_layer, preview_data->object);
 
@@ -872,6 +956,11 @@ static Scene *object_preview_scene_create(const ObjectPreviewData *preview_data,
   Base *preview_base = BKE_view_layer_base_find(view_layer, preview_data->object);
   /* For 'view selected' below. */
   preview_base->flag |= BASE_SELECTED;
+  for (Object *child : child_objects) {
+    if (Base *child_base = BKE_view_layer_base_find(view_layer, child)) {
+      child_base->flag |= BASE_SELECTED;
+    }
+  }
 
   DEG_graph_build_from_view_layer(depsgraph);
   DEG_evaluate_on_refresh(depsgraph);
@@ -898,6 +987,7 @@ static void object_preview_render(const PreviewImage *prv_img,
   preview_data.pr_main = preview_main;
   /* Act on a copy. */
   preview_data.object = id_cast<Object *>(preview->id_copy);
+  preview_data.child_copies = &preview->child_copies;
   preview_data.cfra = preview->scene->r.cfra;
   preview_data.sizex = prv_img->w[icon_size];
   preview_data.sizey = prv_img->h[icon_size];
@@ -2144,6 +2234,7 @@ static void icon_preview_free(void *customdata)
   if (ip->id_copy) {
     preview_id_copy_free(ip->id_copy);
   }
+  object_preview_children_free(ip->child_copies);
 
   MEM_delete(ip);
 }
@@ -2242,6 +2333,10 @@ void ED_preview_icon_render(
     /* Control isn't given back to the caller until the preview is done. So we don't need to copy
      * the ID to avoid thread races. */
     ip.id_copy = duplicate_ids(id, true);
+    if (ip.id_copy != nullptr && GS(id->name) == ID_OB && g_object_preview_include_children) {
+      object_preview_children_copy(
+          *ip.bmain, *id_cast<Object *>(id), *id_cast<Object *>(ip.id_copy), ip.child_copies);
+    }
     ip.active_object = CTX_data_active_object(C);
   }
   ip.owner = BKE_previewimg_id_ensure(id);
@@ -2258,6 +2353,7 @@ void ED_preview_icon_render(
   if (ip.id_copy != nullptr) {
     preview_id_copy_free(ip.id_copy);
   }
+  object_preview_children_free(ip.child_copies);
 }
 
 void ED_preview_icon_job(
@@ -2316,6 +2412,10 @@ void ED_preview_icon_job(
     ip->depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
     ip->scene = DEG_get_input_scene(ip->depsgraph);
     ip->id_copy = duplicate_ids(id, false);
+    if (ip->id_copy != nullptr && GS(id->name) == ID_OB && g_object_preview_include_children) {
+      object_preview_children_copy(
+          *ip->bmain, *id_cast<Object *>(id), *id_cast<Object *>(ip->id_copy), ip->child_copies);
+    }
     ip->active_object = CTX_data_active_object(C);
   }
   ip->owner = prv_img;

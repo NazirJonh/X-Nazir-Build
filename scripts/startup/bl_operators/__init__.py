@@ -36,6 +36,7 @@ _modules = [
     "rigidbody",
     "screen_play_rendered_anim",
     "sequencer",
+    "sculpt_insert_asset",
     "spreadsheet",
     "userpref",
     "userpref_sync",
@@ -65,6 +66,7 @@ def register():
     from . import (
         bone_selection_sets,
         copy_global_transform,
+        sculpt_insert_asset,
         userpref_sync,
     )
 
@@ -76,6 +78,7 @@ def register():
 
     bone_selection_sets.register()
     copy_global_transform.register()
+    sculpt_insert_asset.register()
 
 
 def unregister():
@@ -83,10 +86,12 @@ def unregister():
     from . import (
         bone_selection_sets,
         copy_global_transform,
+        sculpt_insert_asset,
     )
 
     bone_selection_sets.unregister()
     copy_global_transform.unregister()
+    sculpt_insert_asset.unregister()
 
     if hasattr(bpy.types.WindowManager, "sync_settings"):
         del bpy.types.WindowManager.sync_settings

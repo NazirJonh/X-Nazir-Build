@@ -103,6 +103,7 @@ void move_to_collection_menu_register();
 void link_to_collection_menu_register();
 
 void OBJECT_OT_transfer_mode(wmOperatorType *ot);
+void OBJECT_OT_overlay_flash(wmOperatorType *ot);
 
 /* `object_select.cc` */
 

@@ -16,6 +16,9 @@ are accessed through lazy imports inside the functions that call them to avoid a
 circular dependency at import time.
 """
 
+import os
+import shutil
+
 import bpy
 from bpy.types import Operator
 
@@ -84,6 +87,76 @@ def _get_su():
 
 
 # -----------------------------------------------------------------------------
+# Clipboard-pasted icons of tag dialogs
+# -----------------------------------------------------------------------------
+# While a tag dialog is open, a pasted icon lives in the session temp folder (see
+# SCREEN_OT_category_tab_paste_clipboard_icon). It is only moved to the real icon folder once the
+# dialog is confirmed, and deleted when the dialog is cancelled.
+
+_PASTED_ICON_PREFIX = "pasted_icon_"
+
+
+def _is_temp_pasted_icon(filepath):
+    """Return whether ``filepath`` is a pasted icon still sitting in the session temp folder."""
+    if not filepath or not bpy.app.tempdir:
+        return False
+    temp_dir = os.path.normcase(os.path.abspath(bpy.app.tempdir))
+    path = os.path.normcase(os.path.abspath(filepath))
+    return (os.path.dirname(path) == temp_dir and
+            os.path.basename(path).startswith(_PASTED_ICON_PREFIX))
+
+
+def _pasted_icon_final_dir():
+    """Resolve the folder for confirmed pasted icons; mirrors the C++ lookup of the paste operator."""
+    view = bpy.context.preferences.view
+    if view.category_tabs_clipboard_use_default_dir:
+        base_dir = bpy.utils.resource_path('USER')
+        if base_dir:
+            return os.path.join(base_dir, "Icons")
+        return bpy.utils.user_resource('CONFIG', path="Icons", create=True)
+    return view.category_tabs_clipboard_directory
+
+
+def discard_pasted_icon(filepath):
+    """Delete a temporary pasted icon (a no-op for any other file)."""
+    if _is_temp_pasted_icon(filepath):
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+
+
+def commit_pasted_icon(dialog_icon_path, used_icon_path):
+    """Finalize the temporary pasted icon of a confirmed tag dialog.
+
+    Returns ``(icon_path, error)``. ``icon_path`` is where the tag must point: the moved file when
+    the pasted icon is used, otherwise ``used_icon_path`` unchanged (an unused temp file is deleted).
+    """
+    if not _is_temp_pasted_icon(dialog_icon_path):
+        return used_icon_path, ""
+    if used_icon_path != dialog_icon_path:
+        discard_pasted_icon(dialog_icon_path)
+        return used_icon_path, ""
+
+    target_dir = _pasted_icon_final_dir()
+    if not target_dir or not os.path.isabs(target_dir):
+        return used_icon_path, "Icon folder must be an absolute path: {:s}".format(target_dir)
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        name, ext = os.path.splitext(os.path.basename(dialog_icon_path))
+        target_path = os.path.join(target_dir, name + ext)
+        suffix = 0
+        while os.path.exists(target_path):
+            suffix += 1
+            target_path = os.path.join(target_dir, "{:s}_{:d}{:s}".format(name, suffix, ext))
+        # `shutil.move` also works across drives, where temp and icon folder may differ.
+        shutil.move(dialog_icon_path, target_path)
+    except OSError as ex:
+        return used_icon_path, "Cannot save pasted icon: {:s}".format(str(ex))
+    return target_path, ""
+
+
+# -----------------------------------------------------------------------------
 # Shared dialog drawing
 # -----------------------------------------------------------------------------
 
@@ -129,6 +202,9 @@ def _draw_tag_custom_icon_row(layout, dialog):
     reload_op = path_row.operator(
         "screen.category_tab_reload_custom_icon", text="", icon='FILE_REFRESH')
     reload_op.target_operator_ptr = target_ptr
+    paste_op = path_row.operator(
+        "screen.category_tab_paste_clipboard_icon", text="", icon='PASTEDOWN')
+    paste_op.target_operator_ptr = target_ptr
 
     if not dialog.icon_path:
         return
@@ -392,14 +468,15 @@ class USERPREF_OT_category_tag_create(Operator):
         context.window_manager.category_tag_glyph_hex = ""
         self.glyph_search = ""
 
-        # Reset icon fields to defaults
-        self.display_mode_ui = 'GLYPH'
-        self.icon_key = ""
-        self.custom_icon_mode_ui = 'BLENDER'
-        self.icon_path = ""
-
         # Only set defaults if this is a fresh dialog (not a re-opening after validation failure)
         if not self.validation_attempted:
+            # Reset icon fields to defaults. On a re-opening they carry the user's choice,
+            # including a pasted icon that still lives in the temp folder.
+            self.display_mode_ui = 'GLYPH'
+            self.icon_key = ""
+            self.custom_icon_mode_ui = 'BLENDER'
+            self.icon_path = ""
+
             # Set default glyph for tags (not category glyph)
             self.glyph = DEFAULT_TAG_GLYPH_HEX
             self.current_mode_only = True
@@ -447,6 +524,13 @@ class USERPREF_OT_category_tag_create(Operator):
                     'color': list(self.color),
                     'current_mode_only': self.current_mode_only,
                     'space_type': self.space_type,
+                    # Icon fields must ride along, otherwise a picked/pasted icon is
+                    # silently reset when the dialog reopens after a validation failure.
+                    'display_mode_ui': self.display_mode_ui,
+                    'icon_key': self.icon_key,
+                    'icon_source': self.icon_source,
+                    'custom_icon_mode_ui': self.custom_icon_mode_ui,
+                    'icon_path': self.icon_path,
                     'validation_attempted': True,
                     'error_message': "Tag name is required"
                 }
@@ -524,17 +608,29 @@ class USERPREF_OT_category_tag_create(Operator):
         # Skip WM sync if we're in edit dialog - will be done by Save button
         skip_wm_sync = is_in_edit_dialog if 'is_in_edit_dialog' in locals() else False
 
+        # The dialog is confirmed: only now does a pasted icon leave the temp folder.
+        final_icon_path, icon_error = commit_pasted_icon(self.icon_path, icon_path)
+        if icon_error:
+            self.report({'ERROR'}, icon_error)
+            return {'CANCELLED'}
+
         success, message = create_tag(
             self.name,
             glyph=glyph,
             color=list(self.color),
             mode_flags=mode_flags,
             icon_key=icon_key,
-            icon_path=icon_path,
+            icon_path=final_icon_path,
             icon_source=icon_source,
             auto_save=True,
             skip_wm_sync=skip_wm_sync
         )
+        if not success and final_icon_path != icon_path:
+            # The tag was not created, so do not leave its moved icon behind.
+            try:
+                os.remove(final_icon_path)
+            except OSError:
+                pass
         if success:
             # Check if we're being called from the category edit dialog
             # If category is specified and we're not already in preview mode, enable it
@@ -643,6 +739,10 @@ class USERPREF_OT_category_tag_create(Operator):
                 # Set target_operator_ptr as decimal string of operator memory address
                 icon_picker_op.target_operator_ptr = str(id(self))
                 icon_row.separator()
+                # Paste icon from clipboard (saves a PNG and switches to the custom file mode)
+                paste_op = icon_row.operator(
+                    "screen.category_tab_paste_clipboard_icon", text="", icon='PASTEDOWN')
+                paste_op.target_operator_ptr = str(id(self))
 
                 # Preview - always show (empty button when no icon)
                 preview_row = layout.row()
@@ -704,6 +804,9 @@ class USERPREF_OT_category_tag_create(Operator):
             self.error_message = ""
         # Trigger redraw when name changes to update the warning message
         return True
+
+    def cancel(self, _context):
+        discard_pasted_icon(self.icon_path)
 
 
 class USERPREF_OT_category_tag_add(Operator):
@@ -892,6 +995,10 @@ class USERPREF_OT_category_tag_edit(Operator):
                 # Set target_operator_ptr as decimal string of operator memory address
                 icon_picker_op.target_operator_ptr = str(id(self))
                 icon_row.separator()
+                # Paste icon from clipboard (saves a PNG and switches to the custom file mode)
+                paste_op = icon_row.operator(
+                    "screen.category_tab_paste_clipboard_icon", text="", icon='PASTEDOWN')
+                paste_op.target_operator_ptr = str(id(self))
 
                 # Preview
                 if self.icon_key:
@@ -959,16 +1066,27 @@ class USERPREF_OT_category_tag_edit(Operator):
                 return {'CANCELLED'}
             working_name = new_name
 
+        # The dialog is confirmed: only now does a pasted icon leave the temp folder.
+        final_icon_path, icon_error = commit_pasted_icon(self.icon_path, icon_path)
+        if icon_error:
+            self.report({'ERROR'}, icon_error)
+            return {'CANCELLED'}
+
         # Update glyph/color/icon using the (possibly renamed) key
         success, message = update_tag(
             working_name,
             glyph=glyph,
             color=list(self.color),
             icon_key=icon_key,
-            icon_path=icon_path,
+            icon_path=final_icon_path,
             icon_source=icon_source,
             auto_save=True
         )
+        if not success and final_icon_path != icon_path:
+            try:
+                os.remove(final_icon_path)
+            except OSError:
+                pass
         if success:
             self.report({'INFO'}, message)
             category_debug_print(f"[EDIT_TAG] Deferring save - no heavy sync")
@@ -977,6 +1095,9 @@ class USERPREF_OT_category_tag_edit(Operator):
             return {'FINISHED'}
         self.report({'ERROR'}, message)
         return {'CANCELLED'}
+
+    def cancel(self, _context):
+        discard_pasted_icon(self.icon_path)
 
 
 class WM_OT_category_tag_pick_icon(Operator):

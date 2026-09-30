@@ -894,8 +894,6 @@ def km_screen(params):
         ("render.view_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
         ("render.view_show", {"type": 'F11', "value": 'PRESS'}, None),
         ("render.play_rendered_anim", {"type": 'F11', "value": 'PRESS', "ctrl": True}, None),
-        # Sidebar category quick focus
-        ("ui.category_quick_focus", {"type": 'F7', "value": 'PRESS'}, None),
     ])
 
     if not params.legacy:
@@ -934,6 +932,25 @@ def km_screen(params):
         items.extend([
             ("screen.userpref_show", {"type": 'U', "value": 'PRESS', "ctrl": True, "alt": True}, None),
         ])
+
+    return keymap
+
+
+def km_category_tabs(params):
+    items = []
+    keymap = (
+        "Category Tabs",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW'},
+        {"items": items},
+    )
+
+    items.extend([
+        # Sidebar category quick focus (search popup), unassigned by default.
+        ("ui.category_quick_focus", {"type": 'NONE', "value": 'PRESS'}, None),
+        # Tag switcher pie menu, unassigned by default.
+        ("wm.call_menu_pie", {"type": 'NONE', "value": 'PRESS'},
+         {"properties": [("name", 'SCREEN_MT_category_tag_pie')]}),
+    ])
 
     return keymap
 
@@ -9493,6 +9510,7 @@ def generate_keymaps(params=None):
         # Window, screen, area, region.
         km_window(params),
         km_screen(params),
+        km_category_tabs(params),
         km_screen_editing(params),
         km_screen_region_context_menu(params),
         km_view2d(params),

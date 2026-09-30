@@ -351,6 +351,7 @@ bool tag_filter_state_from_area(const ScrArea *area, TagFilterStateRef *r_state)
       r_state->active_tags = v3d->tabs_state.active_tag_filter_tags;
       r_state->filter_enabled = &v3d->tabs_state.tag_filter_enabled;
       r_state->scroll_offset = &v3d->tabs_state.tag_bar_scroll_offset;
+      r_state->quick_focus_temp_category = v3d->tabs_state.quick_focus_temp_category;
       return true;
     }
     case SPACE_PROPERTIES: {
@@ -358,6 +359,7 @@ bool tag_filter_state_from_area(const ScrArea *area, TagFilterStateRef *r_state)
       r_state->active_tags = sbuts->tabs_state.active_tag_filter_tags;
       r_state->filter_enabled = &sbuts->tabs_state.tag_filter_enabled;
       r_state->scroll_offset = &sbuts->tabs_state.tag_bar_scroll_offset;
+      r_state->quick_focus_temp_category = sbuts->tabs_state.quick_focus_temp_category;
       return true;
     }
     case SPACE_NODE: {
@@ -365,6 +367,7 @@ bool tag_filter_state_from_area(const ScrArea *area, TagFilterStateRef *r_state)
       r_state->active_tags = snode->tabs_state.active_tag_filter_tags;
       r_state->filter_enabled = &snode->tabs_state.tag_filter_enabled;
       r_state->scroll_offset = &snode->tabs_state.tag_bar_scroll_offset;
+      r_state->quick_focus_temp_category = snode->tabs_state.quick_focus_temp_category;
       return true;
     }
     case SPACE_IMAGE: {
@@ -372,6 +375,7 @@ bool tag_filter_state_from_area(const ScrArea *area, TagFilterStateRef *r_state)
       r_state->active_tags = sima->tabs_state.active_tag_filter_tags;
       r_state->filter_enabled = &sima->tabs_state.tag_filter_enabled;
       r_state->scroll_offset = &sima->tabs_state.tag_bar_scroll_offset;
+      r_state->quick_focus_temp_category = sima->tabs_state.quick_focus_temp_category;
       return true;
     }
   }
@@ -947,6 +951,7 @@ static bool activate_tag_by_index(bContext *C, int tag_index)
 
   /* Set the new active tag */
   BLI_strncpy(state.active_tags, target_btn->tag_name, 256);
+  tag_filter_quick_focus_temp_clear(state);
 
   /* Enable tag filter */
   *state.filter_enabled = 1;
@@ -1191,6 +1196,7 @@ static void tag_toggle_impl(bContext &C, const char *tag_name)
 
   /* Update the active tags string */
   BLI_strncpy(state.active_tags, new_tags, 256);
+  tag_filter_quick_focus_temp_clear(state);
 
   /* Handle filter state based on whether tags were removed or added. */
   if (was_removing_tag) {
@@ -1411,6 +1417,8 @@ static int draw_new_addon_button(const bContext * /*C*/,
         ED_area_tag_redraw(cb_area);
         return;
       }
+
+      tag_filter_quick_focus_temp_clear(state);
 
       if (!currently_active) {
         /* Activating: save current tags, clear active tags to show only pending categories */

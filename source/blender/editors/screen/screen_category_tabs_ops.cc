@@ -27,6 +27,7 @@
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
+#include "BLI_time.h"
 #include "BLI_utildefines.h"
 
 #include "BLT_translation.hh"
@@ -35,6 +36,7 @@
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
 
+#include "BKE_appdir.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_preview_image.hh"
@@ -47,6 +49,8 @@
 #endif
 
 #include "ED_screen.hh"
+#include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
 
 /* Debug flag for category tab operations - set to 0 to disable debug output.
  * Keep this value in sync with CATEGORY_TAB_DEBUG_ENABLED in interface_tab_categories_edit.cc;
@@ -1088,6 +1092,45 @@ static void category_tab_custom_icon_apply_to_tag(bContext *C,
   RNA_property_update(C, &tag_ptr, source_prop);
 }
 
+/**
+ * Write a custom icon file path into a dialog operator (the category tab dialog or one of the
+ * Python tag dialogs) and refresh its live preview.
+ *
+ * Mirrors #category_tab_custom_icon_apply_to_tag for the operator-backed editors: the tag dialogs
+ * have no #CategoryTagDef to write into until they are confirmed, so the dialog operator
+ * properties are the source of truth while the dialog is open.
+ */
+static void category_tab_custom_icon_apply_to_dialog(bContext *C,
+                                                     wmOperator *target_op,
+                                                     const char *filepath)
+{
+  const bool is_tag = category_tab_custom_icon_target_is_tag(target_op);
+
+  RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON);
+  /* Looked up rather than set blindly: not every dialog that owns an `icon_path` also offers the
+   * Blender/Custom sub-mode toggle. */
+  if (RNA_struct_find_property(target_op->ptr, "custom_icon_mode_ui") != nullptr) {
+    RNA_enum_set(target_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
+  }
+  RNA_string_set(target_op->ptr, "icon_path", filepath);
+  RNA_string_set(target_op->ptr, "icon_key", "");
+  if (is_tag) {
+    /* Tags have no icon provider; their icon_source enum carries the custom-file value. */
+    RNA_enum_set(target_op->ptr, "icon_source", CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE);
+  }
+  else {
+    RNA_string_set(target_op->ptr, "icon_provider", "");
+  }
+
+  if (is_tag) {
+    ui::tag_icon_live_update_cb(C, target_op, 0);
+  }
+  else {
+    category_tab_edit_live_update_cb(C, target_op, 0);
+  }
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
 static bool category_tab_pick_custom_icon_poll(bContext *C)
 {
   /* Deliberately not checking #category_tab_current_dialog_op: the tag dialogs are Python
@@ -1175,31 +1218,7 @@ static wmOperatorStatus category_tab_pick_custom_icon_exec(bContext *C, wmOperat
     return OPERATOR_FINISHED;
   }
 
-  const bool is_tag = category_tab_custom_icon_target_is_tag(target_op);
-
-  RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON);
-  /* Looked up rather than set blindly: not every dialog that owns an `icon_path` also offers the
-   * Blender/Custom sub-mode toggle. */
-  if (RNA_struct_find_property(target_op->ptr, "custom_icon_mode_ui") != nullptr) {
-    RNA_enum_set(target_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
-  }
-  RNA_string_set(target_op->ptr, "icon_path", filepath);
-  RNA_string_set(target_op->ptr, "icon_key", "");
-  if (is_tag) {
-    /* Tags have no icon provider; their icon_source enum carries the custom-file value. */
-    RNA_enum_set(target_op->ptr, "icon_source", CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE);
-  }
-  else {
-    RNA_string_set(target_op->ptr, "icon_provider", "");
-  }
-
-  if (is_tag) {
-    ui::tag_icon_live_update_cb(C, target_op, 0);
-  }
-  else {
-    category_tab_edit_live_update_cb(C, target_op, 0);
-  }
-  WM_main_add_notifier(NC_WINDOW, nullptr);
+  category_tab_custom_icon_apply_to_dialog(C, target_op, filepath);
 
   BKE_report(op->reports, RPT_INFO, "Custom icon file selected");
   return OPERATOR_FINISHED;
@@ -1325,6 +1344,200 @@ static void SCREEN_OT_category_tab_reload_custom_icon(wmOperatorType *ot)
 
   ot->exec = category_tab_reload_custom_icon_exec;
   ot->poll = category_tab_reload_custom_icon_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+
+  PropertyRNA *target_prop = RNA_def_string(ot->srna,
+                                            "target_operator_ptr",
+                                            nullptr,
+                                            64,
+                                            "Target Operator Pointer",
+                                            "Internal: address of the dialog operator to write into");
+  RNA_def_property_flag(target_prop, PROP_HIDDEN);
+
+  PropertyRNA *target_tag_prop = RNA_def_string(
+      ot->srna,
+      "target_tag",
+      nullptr,
+      64,
+      "Target Tag",
+      "Internal: name of the tag to write into, used when no dialog is open");
+  RNA_def_property_flag(target_tag_prop, PROP_HIDDEN);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Category Tab Paste Clipboard Icon Operator
+ * \{ */
+
+/**
+ * Resolve the directory pasted clipboard icons are written into, per the Preferences
+ * "Custom Icon Picker" panel: either the "Icons" subfolder of the user resource directory
+ * (next to `extensions` and `config`), or the user-chosen paste folder.
+ *
+ * Returns false (with a report) when the required setting is empty or relative. The directory is
+ * created when missing.
+ */
+static bool category_tab_clipboard_icon_dir_get(wmOperator *op, char (&r_dir)[FILE_MAXDIR])
+{
+  if (U.category_tabs_clipboard_use_default_dir) {
+    /* The per-version user directory (holding `extensions` and `config`), so the default works
+     * without any user setup. Portable installs and `BLENDER_USER_RESOURCES` overrides have no
+     * such directory, so fall back to the user config directory. */
+    std::optional<std::string> base_dir = BKE_appdir_resource_path_id(BLENDER_RESOURCE_PATH_USER,
+                                                                      false);
+    if (base_dir) {
+      BLI_path_join(r_dir, sizeof(r_dir), base_dir->c_str(), "Icons");
+    }
+    else if (std::optional<std::string> config_dir = BKE_appdir_folder_id_create(
+                 BLENDER_USER_CONFIG, "Icons"))
+    {
+      STRNCPY(r_dir, config_dir->c_str());
+    }
+    else {
+      BKE_report(op->reports, RPT_ERROR, "Cannot resolve the user directory for pasted icons");
+      return false;
+    }
+  }
+  else {
+    if (U.category_tabs_clipboard_dir[0] == '\0') {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "Paste icon folder is not set (Preferences > Custom Icon Picker)");
+      return false;
+    }
+    STRNCPY(r_dir, U.category_tabs_clipboard_dir);
+  }
+
+  if (BLI_path_is_rel(r_dir)) {
+    /* There is no meaningful base for blend-relative (`//`) preference paths here, and
+     * #IMB_save_image rejects relative paths, so require an absolute folder. */
+    BKE_reportf(
+        op->reports, RPT_ERROR, "Icon folder must be an absolute path: %s", r_dir);
+    return false;
+  }
+
+  if (!BLI_dir_create_recursive(r_dir)) {
+    BKE_reportf(op->reports, RPT_ERROR, "Cannot create icon folder: %s", r_dir);
+    return false;
+  }
+  return true;
+}
+
+static bool category_tab_paste_clipboard_icon_poll(bContext *C)
+{
+  /* See #category_tab_pick_custom_icon_poll for why the dialog globals are not checked here. */
+  if (CTX_wm_manager(C) == nullptr) {
+    return false;
+  }
+  if (!WM_clipboard_image_available()) {
+    CTX_wm_operator_poll_msg_set(C, "No compatible image on the clipboard");
+    return false;
+  }
+  return true;
+}
+
+static wmOperatorStatus category_tab_paste_clipboard_icon_exec(bContext *C, wmOperator *op)
+{
+  CategoryTagDef *target_tag = category_tab_custom_icon_target_tag_get(C, op);
+  wmOperator *target_op = target_tag ? nullptr : category_tab_custom_icon_target_op_get(C, op);
+  if (target_tag == nullptr && target_op == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No icon editor is active");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* A tag dialog may still be cancelled, so its pasted icon only goes to the session temp folder
+   * (purged on exit); the Python dialog moves it to the real icon folder once confirmed and
+   * deletes it on cancel. Everything else applies immediately and writes the real folder. */
+  const bool use_temp_dir = target_op != nullptr && category_tab_custom_icon_target_is_tag(target_op);
+
+  char target_dir[FILE_MAXDIR] = "";
+  if (use_temp_dir) {
+    STRNCPY(target_dir, BKE_tempdir_session());
+  }
+  else if (!category_tab_clipboard_icon_dir_get(op, target_dir)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  WM_cursor_wait(true);
+  ImBuf *ibuf = WM_clipboard_image_get();
+  if (ibuf == nullptr) {
+    WM_cursor_wait(false);
+    BKE_report(op->reports, RPT_ERROR, "No compatible image found on the clipboard");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Build a unique destination filename; one file per paste, never overwriting. */
+  const int64_t now_seconds = BLI_time_now_seconds_i();
+  char filename[FILE_MAXFILE] = "";
+  char filepath[FILE_MAX] = "";
+  for (int suffix = 0; suffix < 1000; suffix++) {
+    if (suffix == 0) {
+      SNPRINTF(filename, "pasted_icon_%lld.png", (long long)now_seconds);
+    }
+    else {
+      SNPRINTF(filename, "pasted_icon_%lld_%d.png", (long long)now_seconds, suffix);
+    }
+    BLI_path_join(filepath, sizeof(filepath), target_dir, filename);
+    if (!BLI_exists(filepath)) {
+      break;
+    }
+  }
+
+  /* The clipboard provides display-space bytes, which is also what icon previews expect, so the
+   * buffer is written as-is (an 8 bit PNG). #IMB_save_image picks the writer from #ImBuf::ftype,
+   * not from the file extension. */
+  ibuf->ftype = IMB_FTYPE_PNG;
+  /* The PNG writer maps `compress` to the zlib level; a fresh buffer has 0, meaning uncompressed.
+   * 15 is the default compression of the image save options. */
+  ibuf->foptions.compress = 15;
+  const bool saved = IMB_save_image(ibuf, filepath, ImBufFlags::ByteData);
+  IMB_freeImBuf(ibuf);
+  WM_cursor_wait(false);
+
+  if (!saved) {
+    BKE_reportf(op->reports, RPT_ERROR, "Failed to write pasted icon: %s", filepath);
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Drop any cached preview for the new path (defensive; the file was just created). */
+  BKE_previewimg_cached_release(filepath);
+
+  if (target_tag != nullptr) {
+    category_tab_custom_icon_apply_to_tag(C, target_tag, filepath);
+    WM_main_add_notifier(NC_WINDOW, nullptr);
+    BKE_reportf(op->reports, RPT_INFO, "Icon pasted from clipboard: %s", filename);
+    return OPERATOR_FINISHED;
+  }
+
+  if (use_temp_dir) {
+    /* Replacing an earlier paste in the same dialog: its temp file is now unreferenced. */
+    char previous_path[FILE_MAX] = "";
+    RNA_string_get(target_op->ptr, "icon_path", previous_path);
+    if (previous_path[0] != '\0' && !STREQ(previous_path, filepath) &&
+        BLI_path_contains(BKE_tempdir_session(), previous_path) &&
+        STRPREFIX(BLI_path_basename(previous_path), "pasted_icon_"))
+    {
+      BLI_delete(previous_path, false, false);
+      BKE_previewimg_cached_release(previous_path);
+    }
+  }
+
+  category_tab_custom_icon_apply_to_dialog(C, target_op, filepath);
+
+  BKE_reportf(op->reports, RPT_INFO, "Icon pasted from clipboard: %s", filename);
+  return OPERATOR_FINISHED;
+}
+
+static void SCREEN_OT_category_tab_paste_clipboard_icon(wmOperatorType *ot)
+{
+  ot->name = "Paste Icon from Clipboard";
+  ot->idname = "SCREEN_OT_category_tab_paste_clipboard_icon";
+  ot->description = "Paste a new icon from the clipboard image and assign it to the tag or tab";
+
+  ot->exec = category_tab_paste_clipboard_icon_exec;
+  ot->poll = category_tab_paste_clipboard_icon_poll;
 
   ot->flag = OPTYPE_REGISTER;
 
@@ -1728,6 +1941,7 @@ void ED_operatortypes_screen_category_tabs()
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog);
   WM_operatortype_append(SCREEN_OT_category_tab_pick_custom_icon);
   WM_operatortype_append(SCREEN_OT_category_tab_reload_custom_icon);
+  WM_operatortype_append(SCREEN_OT_category_tab_paste_clipboard_icon);
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_cancel);
   WM_operatortype_append(SCREEN_OT_category_tab_edit_dialog_save);
   WM_operatortype_append(SCREEN_OT_category_tab_color_preset);

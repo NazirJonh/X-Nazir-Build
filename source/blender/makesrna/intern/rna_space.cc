@@ -6974,6 +6974,17 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
+  /* Category temporarily shown by the quick-focus search from another tag block */
+  prop = RNA_def_property(srna, "quick_focus_temp_category", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "tabs_state.quick_focus_temp_category");
+  RNA_def_property_ui_text(
+      prop,
+      "Quick Focus Temp Category",
+      "Category temporarily shown in the tab bar by the quick-focus search, even though it "
+      "does not belong to the currently active tag block (empty = none)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
   /* New Add-on filter active state */
   prop = RNA_def_property(srna, "new_addon_filter_active", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "tabs_state.new_addon_filter_active", 1);
@@ -7314,6 +7325,17 @@ static void rna_def_space_properties(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
+  /* Category temporarily shown by the quick-focus search from another tag block */
+  prop = RNA_def_property(srna, "quick_focus_temp_category", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "tabs_state.quick_focus_temp_category");
+  RNA_def_property_ui_text(
+      prop,
+      "Quick Focus Temp Category",
+      "Category temporarily shown in the tab bar by the quick-focus search, even though it "
+      "does not belong to the currently active tag block (empty = none)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
   prop = RNA_def_property(srna, "category_tabs_display_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "tabs_state.category_tabs_display_mode");
   RNA_def_property_enum_items(prop, rna_enum_space_category_tabs_display_mode_items);
@@ -7619,6 +7641,17 @@ static void rna_def_space_image(BlenderRNA *brna)
       prop,
       "Tag Filter Enabled",
       "Whether tag filtering is enabled (when disabled, all categories are shown)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
+  /* Category temporarily shown by the quick-focus search from another tag block */
+  prop = RNA_def_property(srna, "quick_focus_temp_category", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "tabs_state.quick_focus_temp_category");
+  RNA_def_property_ui_text(
+      prop,
+      "Quick Focus Temp Category",
+      "Category temporarily shown in the tab bar by the quick-focus search, even though it "
+      "does not belong to the currently active tag block (empty = none)");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 
@@ -10051,6 +10084,17 @@ static void rna_def_space_node(BlenderRNA *brna)
       prop,
       "Tag Filter Enabled",
       "Whether tag filtering is enabled (when disabled, all categories are shown)");
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
+  /* Category temporarily shown by the quick-focus search from another tag block */
+  prop = RNA_def_property(srna, "quick_focus_temp_category", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "tabs_state.quick_focus_temp_category");
+  RNA_def_property_ui_text(
+      prop,
+      "Quick Focus Temp Category",
+      "Category temporarily shown in the tab bar by the quick-focus search, even though it "
+      "does not belong to the currently active tag block (empty = none)");
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, nullptr);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
 

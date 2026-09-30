@@ -44,6 +44,8 @@ struct TagFilterStateRef {
   char *active_tags = nullptr;
   char *filter_enabled = nullptr;
   int *scroll_offset = nullptr;
+  /** Category temporarily shown by the quick-focus search from another tag block (may be null). */
+  char *quick_focus_temp_category = nullptr;
 };
 
 /**
@@ -101,6 +103,17 @@ TagBarRuntimeData *get_tag_bar_data_global(const bContext *C);
  * Supports View3D, Properties, Node Editor and Image Editor.
  */
 bool tag_filter_state_from_area(const ScrArea *area, TagFilterStateRef *r_state);
+
+/**
+ * Clear the quick-focus temporarily-shown category (if any).
+ * Called whenever the user changes the tag filter or picks a tab directly.
+ */
+inline void tag_filter_quick_focus_temp_clear(TagFilterStateRef &state)
+{
+  if (state.quick_focus_temp_category) {
+    state.quick_focus_temp_category[0] = '\0';
+  }
+}
 
 /**
  * Resolve pointers to tag-filter state fields for current context area.

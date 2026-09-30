@@ -62,6 +62,10 @@ from bl_ui.glyph_tag_system.api import (
     USERPREF_PT_tag_management,
     USERPREF_PT_custom_icon_picker,
     USERPREF_UL_category_tags,
+    # UI: tag pie menu and hotkey preferences.
+    USERPREF_OT_category_tag_activate,
+    SCREEN_MT_category_tag_pie,
+    USERPREF_PT_category_tabs_keymap,
 )
 
 
@@ -3635,6 +3639,9 @@ classes = (
     USERPREF_PT_developer_tools,
 
     USERPREF_PT_tag_management,
+    USERPREF_OT_category_tag_activate,
+    SCREEN_MT_category_tag_pie,
+    USERPREF_PT_category_tabs_keymap,
     USERPREF_PT_custom_icon_picker,
     # UI lists
     USERPREF_UL_extension_repos,

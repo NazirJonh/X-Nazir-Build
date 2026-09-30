@@ -23,6 +23,7 @@ use lazy imports inside their bodies to avoid a circular-import cycle.
 """
 
 import bpy
+import os
 from bpy.types import Menu, Operator, Panel, UIList
 
 from bl_ui.glyph_tag_system.defaults import (
@@ -742,6 +743,9 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
                 reload_op = path_row.operator(
                     "screen.category_tab_reload_custom_icon", text="", icon='FILE_REFRESH')
                 reload_op.target_tag = tag.name
+                paste_op = path_row.operator(
+                    "screen.category_tab_paste_clipboard_icon", text="", icon='PASTEDOWN')
+                paste_op.target_tag = tag.name
 
                 if icon_path_val:
                     is_valid, error_msg = _validate_custom_icon_path(icon_path_val)
@@ -767,6 +771,10 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
                 icon_row.alignment = 'LEFT'
                 icon_row.operator("wm.category_tag_pick_icon", text="        Choose        ", icon='VIEWZOOM')
                 icon_row.separator()
+                # Paste icon from clipboard (saves a PNG and switches the tag to the Custom source)
+                paste_op = icon_row.operator(
+                    "screen.category_tab_paste_clipboard_icon", text="", icon='PASTEDOWN')
+                paste_op.target_tag = tag.name
                 # Preview below
                 if icon_key_val:
                     box.separator()
@@ -896,6 +904,22 @@ class USERPREF_PT_custom_icon_picker(TagsPanel, Panel):
         col.use_property_split = True
         col.use_property_decorate = False
         col.prop(view, "category_tabs_custom_icon_directory", text="Default Icon Folder")
+
+        # Where icons pasted from the clipboard ("Paste" buttons) are saved.
+        col.separator()
+        col.prop(view, "category_tabs_clipboard_use_default_dir",
+                 text="Save Paste Icon to Default Icon Folder")
+
+        if view.category_tabs_clipboard_use_default_dir:
+            # Show the resolved folder so the destination is explicit (mirrors the C++ lookup).
+            base_dir = bpy.utils.resource_path('USER') or bpy.utils.user_resource('CONFIG')
+            if base_dir:
+                # Draw outside the property-split column so a long path is not clipped.
+                icons_col = col.column()
+                icons_col.use_property_split = False
+                icons_col.label(text=os.path.join(base_dir, "Icons"), icon='FILE_FOLDER')
+        else:
+            col.prop(view, "category_tabs_clipboard_directory", text="Paste Icon Folder")
 
 
 # -----------------------------------------------------------------------------

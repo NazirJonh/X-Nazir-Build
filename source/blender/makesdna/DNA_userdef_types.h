@@ -1236,6 +1236,17 @@ struct UserDef {
   /** Default directory used by the "Pick Custom Icon File" browser for category tabs. */
   char category_tabs_custom_icon_dir[/*FILE_MAXDIR*/ 768] = "";
   /**
+   * True: icons pasted from the clipboard are saved into the "Icons" subfolder of the per-version
+   * user resource directory (falling back to the user config directory).
+   */
+  char category_tabs_clipboard_use_default_dir = true;
+  /**
+   * Directory used for icons pasted from the clipboard when
+   * #category_tabs_clipboard_use_default_dir is false.
+   */
+  char category_tabs_clipboard_dir[/*FILE_MAXDIR*/ 768] = "";
+  char _pad20[7] = {};
+  /**
    * Setting for UI line width.
    *
    * In most cases this should not be used directly it is an offset used to calculate `pixelsize`

@@ -1435,6 +1435,9 @@ static void category_tab_edit_draw_icon_panel(bContext *C,
                                         std::nullopt);
       more_icons_but->tip_quick_func = [](const Button *) { return "More icons"; };
       button_func_set(more_icons_but, icon_more_icons_button_cb, op, nullptr);
+
+      /* Paste icon from clipboard (creates a custom icon file and switches to Custom mode). */
+      icon_select_row.op("SCREEN_OT_category_tab_paste_clipboard_icon", "", ICON_PASTEDOWN);
     }
     else {
       char custom_icon_path[1024] = "";
@@ -1466,6 +1469,7 @@ static void category_tab_edit_draw_icon_panel(bContext *C,
 
       custom_icon_row.op("SCREEN_OT_category_tab_pick_custom_icon", "", ICON_FILE_FOLDER);
       custom_icon_row.op("SCREEN_OT_category_tab_reload_custom_icon", "", ICON_FILE_REFRESH);
+      custom_icon_row.op("SCREEN_OT_category_tab_paste_clipboard_icon", "", ICON_PASTEDOWN);
     }
   }
   else if (show_text_mode_hint) {

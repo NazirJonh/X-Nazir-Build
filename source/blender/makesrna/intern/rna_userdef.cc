@@ -5542,6 +5542,25 @@ static void rna_def_userdef_view(BlenderRNA *brna)
       "Default directory opened by the custom icon picker for category tabs");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 
+  prop = RNA_def_property(srna, "category_tabs_clipboard_use_default_dir", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "category_tabs_clipboard_use_default_dir", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Save Paste Icon to Default Icon Folder",
+      "Save icons pasted from the clipboard into the \"Icons\" subfolder of the user "
+      "resource directory (next to the extensions folder)");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "category_tabs_clipboard_directory", PROP_STRING, PROP_DIRPATH);
+  RNA_def_property_string_sdna(prop, nullptr, "category_tabs_clipboard_dir");
+  RNA_def_property_string_maxlength(prop, FILE_MAXDIR);
+  RNA_def_property_ui_text(
+      prop,
+      "Paste Icon Folder",
+      "Folder where icons pasted from the clipboard are saved when Save Paste Icon to Default "
+      "Icon Folder is disabled");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
   prop = RNA_def_property(srna, "border_width", PROP_INT, PROP_NONE);
   RNA_def_property_ui_text(prop, "Border Width", "Size of the padding around each editor.");
   RNA_def_property_range(prop, 1.0f, 10.0f);

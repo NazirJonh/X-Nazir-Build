@@ -2916,6 +2916,18 @@ int handler_panel_region(bContext *C,
             }
           }
 
+          /* Clicking another tab dismisses a category temporarily shown by quick-focus. Clicking
+           * that category itself must keep it, otherwise the active tab would vanish. */
+          {
+            TagFilterStateRef qf_state{};
+            if (tag_filter_state_from_area(CTX_wm_area(C), &qf_state) &&
+                !(qf_state.quick_focus_temp_category &&
+                  STREQ(qf_state.quick_focus_temp_category, pc_dyn->idname)))
+            {
+              tag_filter_quick_focus_temp_clear(qf_state);
+            }
+          }
+
           panel_category_active_set(region, pc_dyn->idname);
 
           /* Save to tag category memory. */

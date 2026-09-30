@@ -22,6 +22,8 @@
 #include "BLI_string.h"
 #include "BLI_vector.hh"
 
+#include "BLT_translation.hh"
+
 #include "DNA_screen_types.h"
 
 #include "BKE_context.hh"
@@ -174,7 +176,36 @@ static const EnumPropertyItem *category_quick_focus_enum_items(bContext *C,
   static Vector<std::string> g_quick_focus_enum_strings;
   g_quick_focus_enum_strings = ordered;
 
+  /* Display names (with tag-block annotations) need the same stable storage treatment. */
+  static Vector<std::string> g_quick_focus_enum_display_names;
+  g_quick_focus_enum_display_names.clear();
+
+  const wmWindowManager *wm = CTX_wm_manager(C);
+  const int space_type = CTX_wm_area(C) ? CTX_wm_area(C)->spacetype : -1;
+
   const int count = g_quick_focus_enum_strings.size();
+
+  /* Build every display name before taking `c_str()` pointers: appending to the vector may
+   * reallocate and move the strings (small-string optimization), invalidating earlier pointers.
+   * Categories hidden by the tag filter are annotated with their tag block, so the user can tell
+   * which block a search result belongs to. Selecting such an entry temporarily shows the
+   * category in the current tab bar. */
+  g_quick_focus_enum_display_names.reserve(count);
+  for (int i = 0; i < count; i++) {
+    std::string display_name = g_quick_focus_enum_strings[i];
+    const char *idname = g_quick_focus_enum_strings[i].c_str();
+    if (wm && !panel_category_is_visible_by_tags(C, wm, idname)) {
+      const char *tags_string = category_tags_string_lookup(wm, idname, space_type);
+      if (tags_string && tags_string[0] != '\0') {
+        display_name += "  [" + std::string(tags_string) + "]";
+      }
+      else {
+        display_name += "  [" + std::string(IFACE_("No Tag")) + "]";
+      }
+    }
+    g_quick_focus_enum_display_names.append(std::move(display_name));
+  }
+
   EnumPropertyItem *items = nullptr;
   int totitem = 0;
   for (int i = 0; i < count; i++) {
@@ -182,7 +213,7 @@ static const EnumPropertyItem *category_quick_focus_enum_items(bContext *C,
     item_tmp.value = i;
     item_tmp.identifier = g_quick_focus_enum_strings[i].c_str();
     item_tmp.icon = ICON_NONE;
-    item_tmp.name = g_quick_focus_enum_strings[i].c_str();
+    item_tmp.name = g_quick_focus_enum_display_names[i].c_str();
     item_tmp.description = "";
     RNA_enum_item_add(&items, &totitem, &item_tmp);
   }
@@ -244,8 +275,25 @@ static wmOperatorStatus category_quick_focus_exec(bContext *C, wmOperator *op)
 
   wmOperatorStatus result = OPERATOR_CANCELLED;
   if (idname && idname[0] != '\0') {
+    const wmWindowManager *wm = CTX_wm_manager(C);
+
+    /* If the category is hidden by the tag filter (belongs to another tag block),
+     * temporarily promote it so it shows up in the current tab bar. The temporary
+     * state is cleared when the user clicks another tab or changes the tag filter. */
+    TagFilterStateRef tag_state{};
+    const bool has_tag_state = tag_filter_state_from_area(CTX_wm_area(C), &tag_state);
+    if (has_tag_state) {
+      tag_filter_quick_focus_temp_clear(tag_state);
+    }
+    if (wm && !panel_category_is_visible_by_tags(C, wm, idname) && has_tag_state &&
+        tag_state.quick_focus_temp_category)
+    {
+      BLI_strncpy(tag_state.quick_focus_temp_category, idname, 64);
+    }
+
     panel_category_active_set_safe(C, region_ui, idname);
     quick_focus_recent_add(idname);
+    ED_region_tag_redraw(region_ui);
     result = OPERATOR_FINISHED;
     if (CATEGORY_QUICK_FOCUS_DEBUG) {
       printf("[QuickFocus] exec: activated '%s'\n", idname);

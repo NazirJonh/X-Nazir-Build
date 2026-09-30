@@ -370,6 +370,13 @@ from .tag_ui import (
     WM_OT_debug_tag_bar_state,
 )
 
+# -- Tag pie menu and hotkey preferences -------------------------------------
+from .quick_pie import (
+    USERPREF_OT_category_tag_activate,
+    SCREEN_MT_category_tag_pie,
+    USERPREF_PT_category_tabs_keymap,
+)
+
 
 # -----------------------------------------------------------------------------
 # Post-extension-install orchestration

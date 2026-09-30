@@ -114,6 +114,13 @@ struct CategoryTabsState {
    * Restored when the filter is deactivated.
    */
   char saved_tag_filter_tags[256] = "";
+
+  /**
+   * Category temporarily shown in this editor's tab bar by the quick-focus search
+   * (search popup) even though it does not belong to the currently active tag block.
+   * Cleared when the user activates another tab or changes the tag filter.
+   */
+  char quick_focus_temp_category[64] = "";
 };
 
 }  // namespace blender

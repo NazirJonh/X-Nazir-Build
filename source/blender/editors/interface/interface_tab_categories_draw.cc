@@ -3470,8 +3470,9 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
   state->is_reserved = is_reserved_glyph;
 
   if (is_reserved_glyph) {
-    /* Create persistent tooltip parked strictly outside the panel region (shared helper,
-     * region-wide anchor) so it never covers panel content. */
+    /* Create a persistent tooltip anchored to the dragged tab (shared helper). It prefers the
+     * outside of the tab strip, but when there is no room (e.g. the N-panel strip sits flush
+     * with the window edge) it lands right next to the tab, never a region-width away. */
     char msg[128];
     SNPRINTF(msg, "%s (Cannot Reorder)", IFACE_(clicked_pc->idname));
 
@@ -3481,7 +3482,7 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
     {
       const int cursor_xy[2] = {event->xy[0], event->xy[1]};
       category_tab_tooltip_placement_get(
-          region, nullptr, cursor_xy, &tab_rect_screen, position, &prefer_left);
+          region, &clicked_pc->rect, cursor_xy, &tab_rect_screen, position, &prefer_left);
     }
     state->tooltip_region = tooltip_create_from_text(
         C, msg, position, &tab_rect_screen, prefer_left);
@@ -3515,15 +3516,16 @@ static wmOperatorStatus category_tab_drag_invoke(bContext *C,
       /* Get category display name using the same method as hover tooltips. */
       const char *category_display_name = panel_category_tooltip_name_get(region, wm, clicked_pc->idname);
       if (category_display_name && category_display_name[0]) {
-        /* Park the tooltip strictly outside the panel region (shared helper,
-         * region-wide anchor). */
+        /* Anchor the tooltip to the dragged tab (shared helper): it prefers the outside of the
+         * tab strip, but when there is no room (e.g. the N-panel strip sits flush with the
+         * window edge) it lands right next to the tab, never a region-width away. */
         rcti tab_rect_screen;
         int position[2];
         bool prefer_left = false;
         {
           const int cursor_xy[2] = {event->xy[0], event->xy[1]};
           category_tab_tooltip_placement_get(
-              region, nullptr, cursor_xy, &tab_rect_screen, position, &prefer_left);
+              region, &clicked_pc->rect, cursor_xy, &tab_rect_screen, position, &prefer_left);
         }
         state->tooltip_region = tooltip_create_from_text(
             C, IFACE_(category_display_name), position, &tab_rect_screen, prefer_left);

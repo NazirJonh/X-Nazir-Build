@@ -1416,7 +1416,8 @@ void draw_category_tab_builtin_icon(const rcti *rct,
  *   tab strips such as the N-panel sidebar, left of left-aligned ones), falling back to the
  *   opposite outside side near the screen edge -- panel content is never covered;
  * - tab anchor: tooltip still prefers the outside, but when there is no room it lands right
- *   next to the tab (hover use-case).
+ *   next to the tab (hover and drag use-cases). With a tab anchor the fallback never jumps to
+ *   the far side of the panel region, so the tooltip stays next to the cursor.
  */
 void category_tab_tooltip_placement_get(const ARegion *region,
                                         const rcti *tab_rect_local,
@@ -1780,6 +1781,20 @@ bool panel_category_is_visible_by_tags(const bContext *C,
   /* Reserved categories are always visible (when New Add-on filter is NOT active) */
   if (category_is_reserved_for_reorder(wm, category)) {
     return true;
+  }
+
+  /* Category temporarily promoted by the quick-focus search: a category picked from
+   * another tag block stays visible in the current tab bar until the user selects another
+   * tab or changes the tag filter. */
+  {
+    TagFilterStateRef temp_state{};
+    if (tag_filter_state_from_area(area, &temp_state) &&
+        temp_state.quick_focus_temp_category &&
+        temp_state.quick_focus_temp_category[0] != '\0' &&
+        STREQ(temp_state.quick_focus_temp_category, category))
+    {
+      return true;
+    }
   }
 
   /* Tag filtering - check horizontal tag bar filter */

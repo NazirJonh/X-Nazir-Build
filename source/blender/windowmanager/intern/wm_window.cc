@@ -1167,6 +1167,10 @@ static void wm_window_ghostwindow_ensure(wmWindowManager *wm, wmWindow *win, boo
   WM_event_add_keymap_handler(&win->runtime->handlers, keymap);
 
   keymap = WM_keymap_ensure(
+      wm->runtime->defaultconf, "Category Tabs", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  WM_event_add_keymap_handler(&win->runtime->handlers, keymap);
+
+  keymap = WM_keymap_ensure(
       wm->runtime->defaultconf, "Screen Editing", SPACE_EMPTY, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler(&win->runtime->modalhandlers, keymap);
 

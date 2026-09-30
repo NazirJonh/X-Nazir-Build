@@ -8872,6 +8872,9 @@ void ED_keymap_screen(wmKeyConfig *keyconf)
   /* Screen General ------------------------------------------------ */
   WM_keymap_ensure(keyconf, "Screen", SPACE_EMPTY, RGN_TYPE_WINDOW);
 
+  /* Category Tabs (sidebar quick focus, tag pie menu) ------------- */
+  WM_keymap_ensure(keyconf, "Category Tabs", SPACE_EMPTY, RGN_TYPE_WINDOW);
+
   /* Anim Playback ------------------------------------------------ */
   WM_keymap_ensure(keyconf, "Frames", SPACE_EMPTY, RGN_TYPE_WINDOW);
 

@@ -1911,6 +1911,12 @@ void blo_do_versions_userdef(UserDef *userdef)
     userdef->active_name_match_filter_tag = 0;
   }
 
+  if (!USER_VERSION_ATLEAST(502, 79)) {
+    /* Icons pasted from the clipboard default to the "Icons" subfolder of the user resource
+     * directory. Preferences saved before the field existed read back as zero (disabled). */
+    userdef->category_tabs_clipboard_use_default_dir = true;
+  }
+
   /* Seed core Principled BSDF map types when the list is empty.
    * Call unconditionally (not version-gated): #BKE_name_matching_userdef_ensure_defaults is
    * idempotent, and prefs may already be at the current subversion with an empty list

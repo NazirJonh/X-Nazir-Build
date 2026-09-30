@@ -526,6 +526,19 @@ uint64_t topology_hash_correction(uint64_t hash,
   return hash;
 }
 
+#if PAINT_LAYERS_DEBUG_LOG
+/** Set while #paint_layers_layer_topology_hash hashes a Material row, so its parts are printed. */
+static thread_local bool topology_hash_trace_active = false;
+#  define PL_HASH_TRACE(...) \
+    do { \
+      if (topology_hash_trace_active) { \
+        printf(__VA_ARGS__); \
+      } \
+    } while (false)
+#else
+#  define PL_HASH_TRACE(...) ((void)0)
+#endif
+
 /**
  * The full topology hash of one row, recursing into its effects, mask items and -- for a folder --
  * its children. A folder's own chain is a function of which children take part in which channel and
@@ -553,6 +566,10 @@ uint64_t topology_hash_layer(uint64_t hash,
   hash = topology_hash_mix(hash, row_is_substituted(ma, layer) ? 1 : 0);
   /* The name reaches the mirror input names a preserved group carries, so a rename invalidates. */
   topology_hash_string(hash, layer.name);
+  PL_HASH_TRACE("paint layers hash: '%s' head=%llx substituted=%d\n",
+                layer.name,
+                static_cast<unsigned long long>(hash),
+                int(row_is_substituted(ma, layer)));
 
   for (const int channel : wired_channels) {
     Image *baked = nullptr;
@@ -584,8 +601,16 @@ uint64_t topology_hash_layer(uint64_t hash,
      * target (#BKE_paint_layers_material_bake_apply), even though the graph never references it
      * until the row actually turns Baked. Non-Material rows have no such live path, so their map
      * always counts. */
-    const bool image_wired = layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL ||
-                             !(live_constant || live_map_probe);
+    const PaintLayerMaterialMode material_mode = (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) ?
+                                                     BKE_paint_layers_material_mode(ma, layer, cache) :
+                                                     PaintLayerMaterialMode::Baked;
+    /* A SourceGroup row goes through the source wrapper instance and never samples the channel map
+     * (the build passes a null image when `source_group_instance` is set), so a fresh bake target
+     * must not rebuild the group. The mode itself is hashed below, so leaving SourceGroup still
+     * changes the hash. A substituted channel keeps its own map hash further down. */
+    const bool image_wired = (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL ||
+                              !(live_constant || live_map_probe)) &&
+                             material_mode != PaintLayerMaterialMode::SourceGroup;
     hash = topology_hash_mix(
         hash,
         image_wired ? topology_hash_map_id(paint_layer_channel_image(ma, layer, channel)) : 0);
@@ -600,9 +625,6 @@ uint64_t topology_hash_layer(uint64_t hash,
       /* Which map the row shows is topology, like any other map a row reads. */
       hash = topology_hash_mix(hash, topology_hash_map_id(live_map_image_probe));
     }
-    const PaintLayerMaterialMode material_mode = (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) ?
-                                                     BKE_paint_layers_material_mode(ma, layer, cache) :
-                                                     PaintLayerMaterialMode::Baked;
     hash = topology_hash_mix(hash, uint64_t(material_mode));
     if (material_mode == PaintLayerMaterialMode::SourceGroup && layer.material != nullptr) {
       /* Only the source's topology is part of this group's topology; a value edit is synced into
@@ -616,14 +638,41 @@ uint64_t topology_hash_layer(uint64_t hash,
           hash,
           (layer.bake != nullptr) ? topology_hash_map_id(layer.bake->coverage) : 0);
     }
+    PL_HASH_TRACE(
+        "paint layers hash: '%s' ch=%d subst=%d part=%d blend=%d live_const=%d live_map=%d "
+        "image_wired=%d map=%s mode=%d run=%llx\n",
+        layer.name,
+        channel,
+        int(substituted),
+        int(participates),
+        int(BKE_paint_layers_channel_blend_effective(layer, channel)),
+        int(live_constant),
+        int(live_map_probe),
+        int(image_wired),
+        paint_layer_channel_image(ma, layer, channel) != nullptr ?
+            paint_layer_channel_image(ma, layer, channel)->id.name + 2 :
+            "-",
+        int(material_mode),
+        static_cast<unsigned long long>(hash));
   }
   /* The warm items stand in the chain like real ones, so consuming or replenishing one moves the
    * group's hash and rebuilds it. */
   for (const MaterialPaintLayer *effect : paint_layers_build_effects(ma, layer)) {
     hash = topology_hash_correction(hash, ma, *effect, wired_channels, false, cache);
+    PL_HASH_TRACE("paint layers hash: '%s' effect '%s' src=%d run=%llx\n",
+                  layer.name,
+                  effect->name,
+                  int(effect->source),
+                  static_cast<unsigned long long>(hash));
   }
   for (const MaterialPaintLayer *mask_item : paint_layers_build_mask_items(ma, layer)) {
     hash = topology_hash_correction(hash, ma, *mask_item, wired_channels, true, cache);
+    PL_HASH_TRACE("paint layers hash: '%s' mask item '%s' src=%d flag=%d run=%llx\n",
+                  layer.name,
+                  mask_item->name,
+                  int(mask_item->source),
+                  int(mask_item->flag),
+                  static_cast<unsigned long long>(hash));
   }
   for (const MaterialPaintLayer &child :
        layer.children)
@@ -1084,7 +1133,21 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   uint64_t hash = 1469598103934665603ull;
   /* The UV layer a group's Image Texture nodes read is topology: changing it must rebuild them. */
   topology_hash_string(hash, BKE_paint_layers_uv_map_name(ma));
+#if PAINT_LAYERS_DEBUG_LOG
+  /* Only Material rows are traced: the extra regeneration after adding one is what is being chased. */
+  const bool trace = layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
+  const bool trace_before = topology_hash_trace_active;
+  topology_hash_trace_active = trace;
+  const uint64_t result = topology_hash_layer(hash, ma, layer, wired_channels, cache);
+  PL_HASH_TRACE("paint layers hash: '%s' FINAL=%llx wired=%d\n",
+                layer.name,
+                static_cast<unsigned long long>(result),
+                int(wired_channels.size()));
+  topology_hash_trace_active = trace_before;
+  return result;
+#else
   return topology_hash_layer(hash, ma, layer, wired_channels, cache);
+#endif
 }
 
 /**

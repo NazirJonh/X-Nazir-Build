@@ -42,6 +42,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_threads.h"
 #include "BLI_ustring.hh"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
@@ -204,7 +205,8 @@ void BKE_paint_layers_material_bake_apply(Main &bmain,
                                           MaterialPaintLayer &layer,
                                           const int size,
                                           const Span<int> channels,
-                                          const Span<Image *> images)
+                                          const Span<Image *> images,
+                                          const Span<int> detach_channels)
 {
   if (paint_layer_owner_list(&ma.paint_layers, &layer) == nullptr || size <= 0 ||
       channels.size() != images.size())
@@ -213,6 +215,12 @@ void BKE_paint_layers_material_bake_apply(Main &bmain,
   }
   MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
   bake->size = size;
+  /* Detaching drops the row's user, so the editor's orphan sweep can free a superseded map. */
+  for (const int channel : detach_channels) {
+    if (channel != PAINT_MATERIAL_CHANNEL_ALPHA) {
+      BKE_paint_layers_bake_set_map(ma, layer, channel, nullptr);
+    }
+  }
   Image *alpha_coverage = nullptr;
   for (const int64_t i : channels.index_range()) {
     if (channels[i] == PAINT_MATERIAL_CHANNEL_ALPHA) {
@@ -2215,6 +2223,9 @@ static void source_tree_values_hash_recursive(const bNodeTree &tree,
                                               Set<const bNodeTree *> &visited,
                                               uint64_t &r_hash);
 
+/** Set to 1 to print the storage hash of every node the values hash visits (spammy). */
+#define PL_HASH_TRACE_NODES 0
+
 #if PAINT_LAYERS_DEBUG_LOG
 
 /**
@@ -2237,8 +2248,29 @@ static std::mutex g_source_hash_trace_mutex;
 /** Trace, named in the log, of which nested tree an update came from. */
 static void source_hash_trace(const Material &ma,
                               const uint64_t hash,
+                              const uint64_t topology_hash,
+                              const uint64_t values_hash,
                               const Set<const bNodeTree *> &visited)
 {
+  const char *caller = g_source_hash_caller != nullptr ? g_source_hash_caller : "?";
+  const int thread_main = BLI_thread_is_main() ? 1 : 0;
+  /* Localized copies (preview renders) outside Main may carry `session_uid == 0`, which would
+   * match the empty table slot and make every copy share one entry. */
+  if (ma.id.session_uid == 0 || (ma.id.tag & (ID_TAG_NO_MAIN | ID_TAG_LOCALIZED)) != 0) {
+    printf(
+        "paint layers hash: source='%s' COPY uid=%u ptr=%p tag=0x%x hash=%llx topo=%llx "
+        "values=%llx caller=%s thread_main=%d\n",
+        ma.id.name + 2,
+        uint32_t(ma.id.session_uid),
+        static_cast<const void *>(&ma),
+        uint32_t(ma.id.tag),
+        static_cast<unsigned long long>(hash),
+        static_cast<unsigned long long>(topology_hash),
+        static_cast<unsigned long long>(values_hash),
+        caller,
+        thread_main);
+    return;
+  }
   std::lock_guard<std::mutex> lock(g_source_hash_trace_mutex);
   SourceHashTrace *slot = nullptr;
   SourceHashTrace *empty = nullptr;
@@ -2260,10 +2292,18 @@ static void source_hash_trace(const Material &ma,
     slot->session_uid = ma.id.session_uid;
   }
   if (slot->hash != 0 && slot->hash != hash) {
-    printf("paint layers hash: source='%s' old=%llx new=%llx changed_trees=",
-           ma.id.name + 2,
-           static_cast<unsigned long long>(slot->hash),
-           static_cast<unsigned long long>(hash));
+    printf(
+        "paint layers hash: source='%s' uid=%u ptr=%p old=%llx new=%llx topo=%llx values=%llx "
+        "caller=%s thread_main=%d changed_trees=",
+        ma.id.name + 2,
+        uint32_t(ma.id.session_uid),
+        static_cast<const void *>(&ma),
+        static_cast<unsigned long long>(slot->hash),
+        static_cast<unsigned long long>(hash),
+        static_cast<unsigned long long>(topology_hash),
+        static_cast<unsigned long long>(values_hash),
+        caller,
+        thread_main);
     bool any = false;
     for (const bNodeTree *tree : visited) {
       const uint32_t now = tree->runtime->previews_refresh_state;
@@ -2309,7 +2349,11 @@ uint64_t BKE_paint_layers_source_material_tree_hash(const Material &ma)
   Set<const bNodeTree *> value_visited;
   source_tree_values_hash_recursive(*ma.nodetree, value_visited, hash);
 #if PAINT_LAYERS_DEBUG_LOG
-  source_hash_trace(ma, hash, visited);
+  /* Values alone, recomputed only for the trace so the returned hash is untouched. */
+  uint64_t values_only = 0;
+  Set<const bNodeTree *> trace_visited;
+  source_tree_values_hash_recursive(*ma.nodetree, trace_visited, values_only);
+  source_hash_trace(ma, hash, topology_hash, values_only, visited);
 #endif
   return hash;
 }
@@ -2417,6 +2461,14 @@ static void source_tree_values_hash_recursive(const bNodeTree &tree,
     r_hash = node->id != nullptr ? source_hash_string(r_hash, node->id->name) :
                                    bake_hash_mix(r_hash, 0);
     r_hash = source_hash_node_storage(r_hash, *node);
+#if PAINT_LAYERS_DEBUG_LOG && PL_HASH_TRACE_NODES
+    printf("paint layers hash node: tree='%s' node='%s' idname=%s storage=%llx\n",
+           tree.id.name + 2,
+           node->name,
+           node->idname,
+           static_cast<unsigned long long>(
+               source_hash_node_storage(1469598103934665603ull, *node)));
+#endif
     for (const bNodeSocket &socket : node->inputs) {
       r_hash = source_hash_socket_value(r_hash, socket.type, socket.default_value);
     }
@@ -2488,6 +2540,7 @@ static uint64_t bake_hash_layer(uint64_t h,
     h = bake_hash_mix(h, uint8_t(layer.source));
     h = bake_hash_mix(h, layer.material != nullptr ? layer.material->id.session_uid : 0);
     if (layer.material != nullptr) {
+      PL_HASH_CALLER("bake_hash_layer_a");
       h = bake_hash_mix(h, BKE_paint_layers_source_material_tree_hash(*layer.material));
     }
     h = bake_hash_mix(h, layer.bake != nullptr ? uint32_t(layer.bake->size) : 0);
@@ -2557,6 +2610,7 @@ static uint64_t bake_hash_layer(uint64_t h,
   /* A Material layer's bake follows edits to the source graph, which do not change its session
    * UID, so the source tree's state is part of what the bake is valid for. */
   if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr) {
+    PL_HASH_CALLER("bake_hash_layer_b");
     h = bake_hash_mix(h, BKE_paint_layers_source_material_tree_hash(*layer.material));
   }
   h = bake_hash_mix(h, layer.custom_group != nullptr ? layer.custom_group->id.session_uid : 0);

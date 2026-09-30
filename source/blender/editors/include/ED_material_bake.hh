@@ -334,13 +334,17 @@ bool material_bake_custom_in_flight(const Material &ma);
  * Create a target #Image for (\a material, \a channel) exactly as the bake does, linked back to the
  * material. Exposed for tests so the colorspace contract of a baked map can be checked without a
  * render; production reaches it through #material_bake_to_images.
+ *
+ * With \a placeholder the image only holds a 1x1 buffer (the link still records \a size); the
+ * caller is expected to hand it a full-size render buffer afterwards.
  */
 Image *bake_target_image_create(Main &bmain,
                                 Material &material,
                                 eMaterialPaintChannel channel,
                                 int size,
                                 const char *layer_id,
-                                uint64_t current_hash);
+                                uint64_t current_hash,
+                                bool placeholder = false);
 
 /**
  * Write a rendered scene-linear buffer into \a image exactly as the completion callback does.

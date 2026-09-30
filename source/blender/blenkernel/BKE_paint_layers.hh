@@ -916,13 +916,17 @@ void BKE_paint_layers_bake_finalize(Material &ma, MaterialPaintLayer &layer);
  * actually landed pixels (the async material-images job pattern) must call
  * #BKE_paint_layers_bake_finalize itself only once that render is known to have succeeded, or a
  * cancelled/failed job leaves the row stamped valid over blank or stale maps.
+ *
+ * \a detach_channels are channels the bake deliberately skipped because the source shows them as a
+ * constant; a map left from an earlier bake is detached so the row shows the live value.
  */
 void BKE_paint_layers_material_bake_apply(Main &bmain,
                                           Material &ma,
                                           MaterialPaintLayer &layer,
                                           int size,
                                           Span<int> channels,
-                                          Span<Image *> images);
+                                          Span<Image *> images,
+                                          Span<int> detach_channels = {});
 
 /**
  * Store the result of a Custom group's GPU bake on \a layer.

@@ -1149,6 +1149,7 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
   if (BLI_uuid_is_nil(owner.paint_layers_owner_uid)) {
     owner.paint_layers_owner_uid = BLI_uuid_generate_random();
   }
+  PL_HASH_CALLER("generate_source_group");
   const uint64_t source_values = BKE_paint_layers_source_material_tree_hash(source);
   uint64_t source_topology = BKE_paint_layers_source_material_topology_hash(source);
   /* The owner's UV layer name decides the UV Map wiring inside the wrapper, so it is part of what

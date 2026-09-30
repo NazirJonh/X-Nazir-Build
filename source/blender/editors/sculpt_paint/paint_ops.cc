@@ -2439,6 +2439,8 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINTCURVE_OT_separate_to_curve_object);
   WM_operatortype_append(PAINTCURVE_OT_cursor);
   WM_operatortype_append(PAINTCURVE_OT_sculpt_pick);
+  WM_operatortype_append(PAINTCURVE_OT_sculpt_source_draw_enter);
+  WM_operatortype_append(PAINTCURVE_OT_sculpt_source_draw_finish);
   WM_operatortype_append(PAINTCURVE_OT_handle_type_set);
   WM_operatortype_append(PAINTCURVE_OT_split);
   WM_operatortype_append(PAINTCURVE_OT_make_segment);

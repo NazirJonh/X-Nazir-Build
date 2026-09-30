@@ -72,6 +72,8 @@ void PAINTCURVE_OT_from_curve_object(wmOperatorType *ot);
 void PAINTCURVE_OT_to_curve_object(wmOperatorType *ot);
 void PAINTCURVE_OT_separate_to_curve_object(wmOperatorType *ot);
 void PAINTCURVE_OT_sculpt_pick(wmOperatorType *ot);
+void PAINTCURVE_OT_sculpt_source_draw_enter(wmOperatorType *ot);
+void PAINTCURVE_OT_sculpt_source_draw_finish(wmOperatorType *ot);
 void PAINTCURVE_OT_handle_type_set(wmOperatorType *ot);
 void PAINTCURVE_OT_split(wmOperatorType *ot);
 void PAINTCURVE_OT_make_segment(wmOperatorType *ot);

@@ -26,6 +26,7 @@
 #include "DNA_view3d_types.h"
 #include "DNA_workspace_types.h"
 
+#include "BLI_listbase.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_rotation.hh"
@@ -54,6 +55,7 @@
 #include "DEG_depsgraph_query.hh"
 
 #include "ED_image.hh"
+#include "ED_object.hh"
 #include "ED_paint.hh"
 #include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
@@ -2337,6 +2339,318 @@ void PAINTCURVE_OT_sculpt_pick(wmOperatorType *ot)
   ot->poll = paintcurve_sculpt_pick_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Sculpt Mode Curve Edit Tool — Draw Source Curve Round Trip
+ *
+ * Pressing D with the Curve Edit tool active hands the source curve object
+ * (#Sculpt.paint_curve_source_object, or a new child Curves object when none is picked) to its own
+ * curve edit mode with the Draw tool active, so a new spline can be drawn at the 3D cursor or onto
+ * the surface the user is sculpting (#CurvePaintSettings::depth_mode). Releasing D or pressing Esc
+ * ends the round trip: the edit session commits, control returns to the sculpt object with the
+ * Curve Edit tool, and the drawn curve is pulled back into the brush paint curve.
+ * \{ */
+
+/** State of the round trip. File-local is enough: it never spans a restart, and it is only
+ * meaningful between #PAINTCURVE_OT_sculpt_source_draw_enter and
+ * #PAINTCURVE_OT_sculpt_source_draw_finish. */
+static struct {
+  /** True between enter and finish, so Esc only ends a round trip started by enter and leaves a
+   * manually entered curve edit mode alone. */
+  bool active = false;
+  /** D was released while a stroke was still being drawn. */
+  bool release_pending = false;
+  /** True when enter cleared #CURVE_PAINT_FLAG_CORNERS_DETECT and finish must set it again. */
+  bool corners_detect_forced = false;
+} paintcurve_source_draw_state;
+
+/** First mesh object still holding its sculpt mode. The round trip leaves the sculpt object's
+ * mode untouched while the curve object is being edited, so this is the session Esc hands
+ * control back to. */
+static Object *paintcurve_sculpt_object_find(Main *bmain, Scene *scene, ViewLayer *view_layer)
+{
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
+    Object *ob = base.object;
+    if (ob->type == OB_MESH && (ob->mode & OB_MODE_SCULPT)) {
+      return ob;
+    }
+  }
+  return nullptr;
+}
+
+static bool paintcurve_sculpt_source_draw_enter_poll(bContext *C)
+{
+  return paintcurve_sculpt_pick_poll(C);
+}
+
+static wmOperatorStatus paintcurve_sculpt_source_draw_enter_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  Sculpt *sculpt = scene->toolsettings ? scene->toolsettings->sculpt : nullptr;
+  Object *source_ob = sculpt ? sculpt->paint_curve_source_object : nullptr;
+
+  if (source_ob == nullptr && sculpt != nullptr) {
+    /* No curve picked: draw into a new empty Curves object parented to the sculpt object. It
+     * takes the sculpt object's world transform first so paint-curve local coordinates map 1:1
+     * (same as the paint-curve export), and the parent inverse keeps that transform. */
+    Object *sculpt_parent = CTX_data_active_object(C);
+    Object *hair_ob = BKE_object_add(bmain, scene, view_layer, OB_CURVES, "Hair Curves");
+    BKE_object_apply_mat4(hair_ob, sculpt_parent->object_to_world().ptr(), true, false);
+    ed::object::parent_set(
+        op->reports, C, scene, hair_ob, sculpt_parent, ed::object::PAR_OBJECT, false, false, nullptr);
+    sculpt->paint_curve_source_object = hair_ob;
+    sculpt->paint_curve_sync_to_source = 1;
+    DEG_relations_tag_update(bmain);
+    source_ob = hair_ob;
+  }
+  if (source_ob == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  if (!ELEM(source_ob->type, OB_CURVES, OB_CURVES_LEGACY)) {
+    BKE_report(op->reports, RPT_ERROR, "Source object must be a Curves or Curve object");
+    return OPERATOR_CANCELLED;
+  }
+  if (!ID_IS_EDITABLE(source_ob) || !ID_IS_EDITABLE(source_ob->data) ||
+      ID_IS_OVERRIDE_LIBRARY(source_ob) || ID_IS_OVERRIDE_LIBRARY(source_ob->data))
+  {
+    BKE_report(op->reports, RPT_ERROR, "Source object data is not editable");
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  Base *source_base = BKE_view_layer_base_find(view_layer, source_ob);
+  if (source_base == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Source object is not in the active view layer");
+    return OPERATOR_CANCELLED;
+  }
+
+  Object *sculpt_ob = CTX_data_active_object(C);
+
+  /* Make the curve object active WITHOUT touching any object's mode: the sculpt object keeps its
+   * OB_MODE_SCULPT flag, which is what the finish step hands control back to. Only the selection
+   * moves, so the curve object is the sole selected one while it is edited. */
+  if (Base *sculpt_base = BKE_view_layer_base_find(view_layer, sculpt_ob)) {
+    ed::object::base_select(sculpt_base, ed::object::BA_DESELECT);
+  }
+  ed::object::base_select(source_base, ed::object::BA_SELECT);
+  ed::object::base_activate(C, source_base);
+
+  /* The full mode machinery (the editmode toggle operator): commits session state, pushes undo
+   * and updates the tool system for the new context. */
+  if ((source_ob->mode & OB_MODE_EDIT) == 0) {
+    if (!ed::object::mode_set_ex(C, OB_MODE_EDIT, true, op->reports)) {
+      /* Do not leave the user stranded on the curve object in object mode. */
+      Base *sculpt_base = BKE_view_layer_base_find(view_layer, sculpt_ob);
+      if (sculpt_base != nullptr) {
+        ed::object::base_activate(C, sculpt_base);
+      }
+      return OPERATOR_CANCELLED;
+    }
+  }
+
+  /* The Draw tool's Depth mode (Cursor or Surface) is the user's choice, set from the Curve Edit
+   * tool header popover, so it is left untouched here. */
+  CurvePaintSettings *cps = &scene->toolsettings->curve_paint_settings;
+
+  /* WORKAROUND: the refit stroke fitter asserts (corner count mismatch) on some strokes when
+   * corner detection is on, so it is switched off for the round trip. */
+  if ((cps->flag & CURVE_PAINT_FLAG_CORNERS_DETECT) != 0) {
+    cps->flag &= ~CURVE_PAINT_FLAG_CORNERS_DETECT;
+    paintcurve_source_draw_state.corners_detect_forced = true;
+  }
+  paintcurve_source_draw_state.active = true;
+  paintcurve_source_draw_state.release_pending = false;
+
+  /* Select the Draw tool for the curve edit mode just entered. This must run after the mode
+   * switch: WM_OT_tool_set_by_id resolves the tool list from the context mode. */
+  bToolKey tkey{};
+  tkey.space_type = SPACE_VIEW3D;
+  tkey.mode = (source_ob->type == OB_CURVES) ? CTX_MODE_EDIT_CURVES : CTX_MODE_EDIT_CURVE;
+  WM_toolsystem_ref_set_by_id_ex(C, CTX_wm_workspace(C), &tkey, "builtin.draw", false);
+
+  WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, scene);
+  paintcurve_tag_redraw_all(C);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus paintcurve_sculpt_source_draw_finish_exec(bContext *C, wmOperator *op);
+
+/* Hold-to-draw, like the Annotate D key: the curve edit mode is entered on press, and releasing D
+ * returns to Sculpt Mode. The modal handler stays alive only to watch the release and to swallow
+ * D itself, so key repeat never reaches the Annotate tool cycle. */
+static wmOperatorStatus paintcurve_sculpt_source_draw_enter_invoke(bContext *C,
+                                                                   wmOperator *op,
+                                                                   const wmEvent * /*event*/)
+{
+  if (paintcurve_sculpt_source_draw_enter_exec(C, op) != OPERATOR_FINISHED) {
+    return OPERATOR_CANCELLED;
+  }
+  WM_event_add_modal_handler(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus paintcurve_sculpt_source_draw_enter_modal(bContext *C,
+                                                                  wmOperator *op,
+                                                                  const wmEvent *event)
+{
+  /* Ended elsewhere (Esc via #PAINTCURVE_OT_sculpt_source_draw_finish). */
+  if (!paintcurve_source_draw_state.active) {
+    return OPERATOR_FINISHED | OPERATOR_PASS_THROUGH;
+  }
+  Object *ob = CTX_data_active_object(C);
+  wmOperatorType *ot_draw = WM_operatortype_find(
+      (ob && ob->type == OB_CURVES) ? "CURVES_OT_draw" : "CURVE_OT_draw", false);
+  const bool stroke_running = ot_draw && WM_operator_find_modal_by_type(CTX_wm_window(C), ot_draw);
+
+  if (event->type == EVT_DKEY) {
+    if (event->val == KM_RELEASE) {
+      if (stroke_running) {
+        /* Finish after the stroke ends, never in the middle of it. */
+        paintcurve_source_draw_state.release_pending = true;
+        return OPERATOR_RUNNING_MODAL;
+      }
+      paintcurve_sculpt_source_draw_finish_exec(C, op);
+      return OPERATOR_FINISHED;
+    }
+    return OPERATOR_RUNNING_MODAL;
+  }
+
+  if (paintcurve_source_draw_state.release_pending && !stroke_running) {
+    paintcurve_sculpt_source_draw_finish_exec(C, op);
+    return OPERATOR_FINISHED;
+  }
+
+  /* Start the stroke directly instead of relying on the Draw tool keymap: with D held, the
+   * event carries D as its key modifier and the Annotate keymap (D + mouse) competes for it. */
+  if (event->type == LEFTMOUSE && event->val == KM_PRESS && ot_draw && !stroke_running) {
+    PointerRNA ptr = WM_operator_properties_create_ptr(ot_draw);
+    RNA_boolean_set(&ptr, "wait_for_input", false);
+    WM_operator_name_call_ptr(C, ot_draw, wm::OpCallContext::InvokeDefault, &ptr, event);
+    WM_operator_properties_free(&ptr);
+    return OPERATOR_RUNNING_MODAL;
+  }
+  return OPERATOR_RUNNING_MODAL | OPERATOR_PASS_THROUGH;
+}
+
+void PAINTCURVE_OT_sculpt_source_draw_enter(wmOperatorType *ot)
+{
+  ot->name = "Draw Source Curve";
+  ot->description =
+      "Draw a new curve onto the sculpted surface: temporarily hands the source curve object to "
+      "its curve edit mode with the Draw tool (a new child Curves object when none is picked); "
+      "releasing the key or Esc returns to Sculpt Mode with the Curve Edit tool";
+  ot->idname = "PAINTCURVE_OT_sculpt_source_draw_enter";
+
+  ot->invoke = paintcurve_sculpt_source_draw_enter_invoke;
+  ot->modal = paintcurve_sculpt_source_draw_enter_modal;
+  ot->poll = paintcurve_sculpt_source_draw_enter_poll;
+
+  /* No OPTYPE_UNDO: the mode switch and the later paint-curve import push their own undo steps,
+   * matching #PAINTCURVE_OT_draw. */
+  ot->flag = 0;
+}
+
+static bool paintcurve_sculpt_source_draw_finish_poll(bContext *C)
+{
+  if (!paintcurve_source_draw_state.active) {
+    return false;
+  }
+  const Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr || scene->toolsettings == nullptr ||
+      scene->toolsettings->sculpt == nullptr)
+  {
+    return false;
+  }
+  const Object *ob = CTX_data_active_object(C);
+  /* Only while the Curve Edit source object itself is in edit mode, so Esc stays free for every
+   * other edit-mode session. */
+  if (ob == nullptr || ob != scene->toolsettings->sculpt->paint_curve_source_object) {
+    return false;
+  }
+  return ((ob->mode & OB_MODE_EDIT) != 0) && ELEM(ob->type, OB_CURVES, OB_CURVES_LEGACY);
+}
+
+static wmOperatorStatus paintcurve_sculpt_source_draw_finish_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  Sculpt *sculpt = scene->toolsettings ? scene->toolsettings->sculpt : nullptr;
+  Object *source_ob = CTX_data_active_object(C);
+  if (sculpt == nullptr || source_ob == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* 1. Leave the curve's edit mode through the regular mode machinery: the toggle commits the
+   * edit session -- including the freshly drawn splines -- back to the object data and pushes
+   * its own undo step. */
+  if ((source_ob->mode & OB_MODE_EDIT) != 0) {
+    if (!ed::object::mode_set_ex(C, OB_MODE_OBJECT, true, op->reports)) {
+      return OPERATOR_CANCELLED;
+    }
+  }
+
+  /* 2. Hand control back to the sculpt object, which kept its OB_MODE_SCULPT flag for the whole
+   * round trip, so the context mode reads Sculpt again without re-entering it. */
+  Object *sculpt_ob = paintcurve_sculpt_object_find(bmain, scene, view_layer);
+  if (sculpt_ob != nullptr) {
+    if (Base *sculpt_base = BKE_view_layer_base_find(view_layer, sculpt_ob)) {
+      ed::object::base_activate(C, sculpt_base);
+    }
+    if ((sculpt_ob->mode & OB_MODE_SCULPT) == 0) {
+      ed::object::mode_set_ex(C, OB_MODE_SCULPT, true, op->reports);
+    }
+  }
+  else {
+    BKE_report(op->reports, RPT_WARNING, "No sculpt object to return to");
+  }
+
+  /* 3. Continue with the Curve Edit tool, whatever tool the sculpt mode kept while away. */
+  bToolKey tkey{};
+  tkey.space_type = SPACE_VIEW3D;
+  tkey.mode = CTX_MODE_SCULPT;
+  WM_toolsystem_ref_set_by_id_ex(
+      C, CTX_wm_workspace(C), &tkey, PAINT_CURVE_EDIT_TOOL_IDNAME, false);
+
+  /* 4. Restore the corner detection switched off on entry. */
+  paintcurve_source_draw_state.active = false;
+  CurvePaintSettings *cps = &scene->toolsettings->curve_paint_settings;
+  if (paintcurve_source_draw_state.corners_detect_forced) {
+    cps->flag |= CURVE_PAINT_FLAG_CORNERS_DETECT;
+    paintcurve_source_draw_state.corners_detect_forced = false;
+  }
+
+  /* 5. Pull the committed source curve back into the brush paint curve, so the Curve Edit tool
+   * shows and keeps editing what was just drawn (the import also re-arms sync-to-source). */
+  ED_paintcurve_import_from_source_object(C, op->reports, true);
+
+  WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, scene);
+  paintcurve_tag_redraw_all(C);
+  if (CTX_wm_region(C) != nullptr) {
+    ED_region_tag_redraw(CTX_wm_region(C));
+  }
+  return OPERATOR_FINISHED;
+}
+
+void PAINTCURVE_OT_sculpt_source_draw_finish(wmOperatorType *ot)
+{
+  ot->name = "Finish Drawing Source Curve";
+  ot->description =
+      "Return to Sculpt Mode with the Curve Edit tool and pull the drawn curve back into the "
+      "brush paint curve";
+  ot->idname = "PAINTCURVE_OT_sculpt_source_draw_finish";
+
+  ot->exec = paintcurve_sculpt_source_draw_finish_exec;
+  ot->poll = paintcurve_sculpt_source_draw_finish_poll;
+
+  /* No OPTYPE_UNDO: the mode toggle and the paint-curve import each push their own undo steps. */
+  ot->flag = 0;
 }
 
 /** \} */

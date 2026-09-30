@@ -2704,6 +2704,10 @@ def km_curve(params):
     )
 
     items.extend([
+        # Sculpt Mode Curve Edit round trip: Esc while the paint-curve source object is in edit
+        # mode returns to Sculpt Mode with the Curve Edit tool (poll-gated, Esc stays free
+        # otherwise).
+        ("paintcurve.sculpt_source_draw_finish", {"type": 'ESC', "value": 'PRESS'}, None),
         ("curve.select_all", {"type": 'A', "value": 'PRESS', "ctrl": True}, {"properties": [("action", 'SELECT')]}),
         ("curve.select_all", {"type": 'A', "value": 'PRESS', "ctrl": True,
          "shift": True}, {"properties": [("action", 'DESELECT')]}),
@@ -3492,6 +3496,10 @@ def km_curves(params):
     )
 
     items.extend([
+        # Sculpt Mode Curve Edit round trip: Esc while the paint-curve source object is in edit
+        # mode returns to Sculpt Mode with the Curve Edit tool (poll-gated, Esc stays free
+        # otherwise).
+        ("paintcurve.sculpt_source_draw_finish", {"type": 'ESC', "value": 'PRESS'}, None),
         # Selection Modes
         ("curves.set_selection_domain", {"type": 'ONE', "value": 'PRESS'}, {"properties": [("domain", 'POINT')]}),
         ("curves.set_selection_domain", {"type": 'TWO', "value": 'PRESS'}, {"properties": [("domain", 'CURVE')]}),
@@ -3833,6 +3841,9 @@ def _template_node_select(*, type, value, select_passthrough):
 def km_3d_view_tool_sculpt_curves_edit(_params):
     items = _template_paintcurve_edit_core_items('LEFTMOUSE', sculpt_pick=True)
     items.extend([
+        # Draw a new spline onto the sculpted surface: hands the source curve object to its curve
+        # edit mode with the Draw tool until Esc returns to Sculpt Mode with the Curve Edit tool.
+        ("paintcurve.sculpt_source_draw_enter", {"type": 'D', "value": 'PRESS'}, None),
         ("paintcurve.slide_radius", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("transform.translate", {"type": 'G', "value": 'PRESS'}, None),
         ("transform.rotate", {"type": 'R', "value": 'PRESS'}, None),

@@ -2317,6 +2317,20 @@ class _defs_sculpt:
 
     @ToolDef.from_fn
     def curves_edit():
+        def draw_settings(context, layout, _tool, *, extra=False):
+            cps = context.tool_settings.curve_paint_settings
+
+            if context.region.type == 'TOOL_HEADER' and not extra:
+                # The header button is placed after "Overlay Curve" by
+                # `_draw_tool_settings_context_mode.SCULPT`.
+                return
+
+            # The D key hands the source curve to the Draw tool, which reads these settings.
+            layout.use_property_split = True
+            layout.use_property_decorate = False
+            layout.label(text="Fast Curves Create Tool")
+            layout.row().prop(cps, "depth_mode", expand=True)
+
         return dict(
             idname="builtin.curves_edit",
             label="Curve Edit",
@@ -2324,6 +2338,7 @@ class _defs_sculpt:
             widget=None,
             cursor='CROSSHAIR',
             keymap="3D View Tool: Sculpt, Curves Edit",
+            draw_settings=draw_settings,
         )
 
     @ToolDef.from_fn

@@ -6205,6 +6205,10 @@ def km_edit_curve_legacy(params):
         # Transform Actions.
         *_template_items_transform_actions(params, use_bend=True, use_mirror=True),
 
+        # Sculpt Mode Curve Edit round trip: Esc while the paint-curve source object is in edit
+        # mode returns to Sculpt Mode with the Curve Edit tool (poll-gated, Esc stays free
+        # otherwise).
+        ("paintcurve.sculpt_source_draw_finish", {"type": 'ESC', "value": 'PRESS'}, None),
         op_menu("TOPBAR_MT_edit_curve_add", {"type": 'A', "value": 'PRESS', "shift": True}),
         ("curve.handle_type_set", {"type": 'V', "value": 'PRESS'}, None),
         ("curve.vertex_add", {"type": params.action_mouse, "value": 'CLICK', "ctrl": True}, None),
@@ -6264,6 +6268,10 @@ def km_edit_curves(params):
         # Transform Actions.
         *_template_items_transform_actions(params, use_bend=True, use_mirror=True),
 
+        # Sculpt Mode Curve Edit round trip: Esc while the paint-curve source object is in edit
+        # mode returns to Sculpt Mode with the Curve Edit tool (poll-gated, Esc stays free
+        # otherwise).
+        ("paintcurve.sculpt_source_draw_finish", {"type": 'ESC', "value": 'PRESS'}, None),
         ("curves.set_selection_domain", {"type": 'ONE', "value": 'PRESS'}, {"properties": [("domain", 'POINT')]}),
         ("curves.set_selection_domain", {"type": 'TWO', "value": 'PRESS'}, {"properties": [("domain", 'CURVE')]}),
         ("curves.duplicate_move", {"type": 'D', "value": 'PRESS', "shift": True}, None),
@@ -8923,6 +8931,9 @@ def km_3d_view_tool_sculpt_face_set_edit(params):
 def km_3d_view_tool_sculpt_curves_edit(params):
     items = _template_paintcurve_edit_core_items(params.tool_mouse, sculpt_pick=True)
     items.extend([
+        # Draw a new spline onto the sculpted surface: hands the source curve object to its curve
+        # edit mode with the Draw tool until Esc returns to Sculpt Mode with the Curve Edit tool.
+        ("paintcurve.sculpt_source_draw_enter", {"type": 'D', "value": 'PRESS'}, None),
         ("paintcurve.slide_radius", {"type": params.tool_mouse, "value": 'PRESS'}, None),
         ("transform.translate", {"type": 'G', "value": 'PRESS'}, None),
         ("transform.rotate", {"type": 'R', "value": 'PRESS'}, None),

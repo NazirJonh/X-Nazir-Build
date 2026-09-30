@@ -394,6 +394,7 @@ class _draw_tool_settings_context_mode:
                     panel="VIEW3D_PT_overlay_sculpt_curve_edit",
                     text="Overlay Curve"
                 )
+                layout.popover("TOPBAR_PT_tool_settings_extra", text="Fast Curves Create Tool")
             VIEW3D_HT_header.draw_paint_curve_snap_template(layout, context)
             return False
 

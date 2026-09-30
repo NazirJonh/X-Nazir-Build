@@ -1376,10 +1376,20 @@ bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
 
   const bool clears_active = !BLI_uuid_is_nil(ma.active_layer_marker) &&
                              BKE_paint_layers_subtree_contains(*layer, ma.active_layer_marker);
+  /* The base flag goes away with its item; the row's remaining first mask item takes over, so the
+   * row keeps the one base a stroke lands on (#BKE_paint_layers_mask_add). */
+  const bool was_mask_base = (layer->flag & MA_PAINT_LAYER_MASK_BASE) != 0;
+  MaterialPaintLayer *mask_owner = was_mask_base ?
+                                       paint_layer_correction_owner(ma.paint_layers, *layer) :
+                                       nullptr;
 
   BLI_remlink(owner, layer);
   BKE_material_paint_layer_free(layer);
 
+  if (mask_owner != nullptr && mask_owner->mask_stack.first != nullptr) {
+    static_cast<MaterialPaintLayer *>(mask_owner->mask_stack.first)->flag |=
+        MA_PAINT_LAYER_MASK_BASE;
+  }
   if (clears_active) {
     ma.active_layer_marker = {};
   }

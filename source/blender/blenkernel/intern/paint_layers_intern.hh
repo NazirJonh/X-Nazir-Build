@@ -528,6 +528,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed =
  */
 constexpr int PAINT_LAYERS_AUTO_BAKE_NODES = 24;
 
+/** What a child whose valid bake stands in costs its parent's weight: one map, like one channel. */
+constexpr int PAINT_LAYERS_BAKED_CHILD_WEIGHT = 6;
+
 /**
  * The live constant a Material row's \a channel takes from its source right now.
  *

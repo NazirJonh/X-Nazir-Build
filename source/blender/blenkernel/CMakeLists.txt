@@ -267,6 +267,7 @@ set(SRC
     intern/paint_layers_generate_build_correction.cc
     intern/paint_layers_generate_build_intern.hh
     intern/paint_layers_generate_regen.cc
+    intern/paint_layers_generate_warm.cc
     intern/paint_layers_generate_source_group.cc
     intern/paint_layers_generate_sampler.cc
     intern/paint_layers_generate_values.cc

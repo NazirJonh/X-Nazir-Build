@@ -9800,6 +9800,9 @@ TEST_F(PaintLayersGraphEvalTest, auto_baked_folder_matches_live)
   MaterialPaintLayer *folder = BKE_paint_layers_group(
       *ma, Span<MaterialPaintLayer *>(members, 1));
   ASSERT_NE(folder, nullptr);
+  /* AUTO bakes only folders nested in another folder (level 2), so wrap it. */
+  MaterialPaintLayer *outer_members[1] = {folder};
+  ASSERT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(outer_members, 1)), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
@@ -9853,6 +9856,9 @@ TEST_F(PaintLayersGraphEvalTest, stack_effect_correction_folder_auto_baked_match
   ma = BKE_material_add(bmain, "C6AutoStackFX");
   MaterialPaintLayer *owner = add_layer(
       "Owner", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("StackFXOwner", size, 255, 0, 0, 255), bc);
+  /* AUTO bakes only folders nested in another folder (level 2), so the owner sits in one. */
+  MaterialPaintLayer *owner_members[1] = {owner};
+  ASSERT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(owner_members, 1)), nullptr);
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
       *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
   ASSERT_NE(correction, nullptr);
@@ -9910,6 +9916,9 @@ TEST_F(PaintLayersGraphEvalTest, stack_mask_item_folder_auto_baked_matches_live)
   ma = BKE_material_add(bmain, "C6AutoStackMask");
   MaterialPaintLayer *owner = add_layer(
       "Owner", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("StackMaskOwner", size, 255, 0, 0, 255), bc);
+  /* AUTO bakes only folders nested in another folder (level 2), so the owner sits in one. */
+  MaterialPaintLayer *owner_members[1] = {owner};
+  ASSERT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(owner_members, 1)), nullptr);
   MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
       *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_STACK, "StackMask");
   ASSERT_NE(mask, nullptr);

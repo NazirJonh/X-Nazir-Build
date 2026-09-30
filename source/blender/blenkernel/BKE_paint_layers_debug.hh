@@ -14,7 +14,7 @@
 
 #include <cstdio>
 
-#define PAINT_LAYERS_DEBUG_LOG 0
+#define PAINT_LAYERS_DEBUG_LOG 1
 
 #if PAINT_LAYERS_DEBUG_LOG
 #  define PL_DEBUG_PRINTF(...) printf(__VA_ARGS__)

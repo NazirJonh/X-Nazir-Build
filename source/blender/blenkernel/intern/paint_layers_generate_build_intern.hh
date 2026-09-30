@@ -170,7 +170,8 @@ bNodeTreeInterfaceSocket *layer_group_value_input(LayerGroup &group,
                                                   StringRef socket_type,
                                                   const char *role,
                                                   const bUUID &marker,
-                                                  int channel);
+                                                  int channel,
+                                                  const bUUID &slot = {});
 
 /** `marker|role|channel`, the key the mirror pass finds an existing value socket by. */
 std::string value_key(const bUUID &marker, const char *role, int channel);

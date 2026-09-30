@@ -617,10 +617,12 @@ uint64_t topology_hash_layer(uint64_t hash,
           (layer.bake != nullptr) ? topology_hash_map_id(layer.bake->coverage) : 0);
     }
   }
-  for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(layer)) {
+  /* The warm items stand in the chain like real ones, so consuming or replenishing one moves the
+   * group's hash and rebuilds it. */
+  for (const MaterialPaintLayer *effect : paint_layers_build_effects(ma, layer)) {
     hash = topology_hash_correction(hash, ma, *effect, wired_channels, false, cache);
   }
-  for (const MaterialPaintLayer *mask_item : BKE_paint_layers_mask_items(layer)) {
+  for (const MaterialPaintLayer *mask_item : paint_layers_build_mask_items(ma, layer)) {
     hash = topology_hash_correction(hash, ma, *mask_item, wired_channels, true, cache);
   }
   for (const MaterialPaintLayer &child :
@@ -1250,7 +1252,9 @@ uint64_t paint_layers_root_topology_hash(
           hash, uint64_t(prop_int_get(socket.properties, INPUT_CHANNEL_PROP, -1)));
       bUUID marker = BLI_uuid_nil();
       if (uid_prop_get(socket.properties, INPUT_MARKER_PROP, marker)) {
-        topology_hash_uid(hash, marker);
+        /* A value in a warm slot is identified by the slot: the real item that takes a spare's place
+         * keeps the spare's sockets and must not move the root's hash. */
+        topology_hash_uid(hash, value_slot_or_marker(socket.properties, marker));
       }
       return true;
     });
@@ -1283,6 +1287,32 @@ void scratch_user_refs_release(bNodeTree &scratch)
 }
 
 }  // namespace
+
+/**
+ * A shared 1x1 image the warm items are bound to; a fake user keeps it out of orphan purges.
+ *
+ * It is made like the maps a stroke creates (#paint_layers_map_create: 24 bit, straight alpha, and
+ * #IMA_GPU_LINEAR_PREMUL), because the colorspace, alpha mode and flags of a texture are part of the
+ * code its Image Texture node generates. \a is_color picks the sRGB twin used for color channels;
+ * masks and every other channel read Non-Color data.
+ */
+static Image *warm_image_ensure(Main &bmain, const char *name, const bool is_color)
+{
+  /* A linked library may carry its own copy; the warm items must bind to this file's, so the lookup
+   * stays local (the unset optional would return the first match of either). */
+  if (ID *found = BKE_libblock_find_name(&bmain, ID_IM, name, nullptr)) {
+    return id_cast<Image *>(found);
+  }
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      &bmain, 1, 1, name, 24, false, IMA_GENTYPE_BLANK, white, false, !is_color, false);
+  if (image != nullptr) {
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    image->flag |= IMA_GPU_LINEAR_PREMUL;
+    id_fake_user_set(&image->id);
+  }
+  return image;
+}
 
 void BKE_paint_layers_generate_runtime_free(Material &ma)
 {
@@ -1360,7 +1390,20 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   /* What this call learns once (a source's resolve, a row's mode, the Pass Through scales) and hands
    * to every reader below. It lives and dies with this call; nothing keeps it between two. */
   PaintLayersRegenCache regen_cache;
-  ctx.regen_cache = &regen_cache;  {
+  ctx.regen_cache = &regen_cache;
+  /* The shared image the warm items point at is created here, on the main thread: the pure build
+   * never touches #Main. The reconcile runs before anything reads a hash, so the graph and its hashes
+   * agree about which slots stand ready. It also runs before the forced set below is dropped, on
+   * purpose: the plan reads each Material row's mode, and a row the sampler budget pinned onto its
+   * bake must keep its slot while the pin is visible (#paint_layers_warm_plan), or the slot would
+   * flip off here and back on once the pin lifts, rebuilding the root each time. */
+  const bool warm_needed = paint_layers_warm_needed(ma, &regen_cache);
+  paint_layers_warm_reconcile(
+      ma,
+      warm_needed ? warm_image_ensure(bmain, ".PL Warm", false) : nullptr,
+      &regen_cache,
+      warm_needed ? warm_image_ensure(bmain, ".PL Warm Color", true) : nullptr);
+  {
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
@@ -1490,7 +1533,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
      * Constant (Fill) correction builds a group input, not a map: a stale image on it is ignored by
      * the build and must not be counted. */
     auto add_corrections = [&](const MaterialPaintLayer &layer) {
-      for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(layer)) {
+      for (const MaterialPaintLayer *effect : paint_layers_build_effects(ma, layer)) {
         if (BKE_paint_layers_source_type(*effect) == PaintLayerSourceType::Constant) {
           continue;
         }
@@ -1500,7 +1543,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
           }
         }
       }
-      for (const MaterialPaintLayer *mask_item : BKE_paint_layers_mask_items(layer)) {
+      for (const MaterialPaintLayer *mask_item : paint_layers_build_mask_items(ma, layer)) {
         if (BKE_paint_layers_source_type(*mask_item) == PaintLayerSourceType::Constant) {
           continue;
         }
@@ -1775,6 +1818,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   Map<const MaterialPaintLayer *, bNodeTree *> layer_trees;
   bool groups_created = false;
   bool groups_deleted = false;
+  int layer_groups_rebuilt = 0;
   auto layer_tree_get = [&](const MaterialPaintLayer &layer) -> bNodeTree * {
     char name[MAX_ID_NAME - 2];
     if (BKE_paint_layers_is_folder(layer)) {
@@ -1801,13 +1845,22 @@ bool BKE_paint_layers_regenerate(Main &bmain,
         /* Clear the nodes but keep the interface: a rebuilt group reuses its sockets by name, so
          * their identifiers -- and the parent's links into them -- survive. Unused sockets are
          * pruned at the end of the build. */
-        PL_DEBUG_PRINTF("paint layers regen diff: layer '%s' source=%d role=%d old=%llx new=%llx\n",
-                        layer.name,
-                        int(layer.source),
-                        int(layer.role),
-                        static_cast<unsigned long long>(stored),
-                        static_cast<unsigned long long>(topology));
+        PL_DEBUG_PRINTF(
+            "paint layers regen diff: layer '%s' source=%d role=%d old=%llx new=%llx warm(base=%d "
+            "mask=%d effect=%d) mode=%d deferred=%d wired=%d\n",
+            layer.name,
+            int(layer.source),
+            int(layer.role),
+            static_cast<unsigned long long>(stored),
+            static_cast<unsigned long long>(topology),
+            int(paint_layers_warm_item(ma, layer, WarmKind::MaskBase) != nullptr),
+            int(paint_layers_warm_item(ma, layer, WarmKind::Mask) != nullptr),
+            int(paint_layers_warm_item(ma, layer, WarmKind::Effect) != nullptr),
+            int(BKE_paint_layers_material_mode(ma, layer, &regen_cache)),
+            int(BKE_paint_layers_bake_row_is_deferred(ma, layer)),
+            int(wired_channels.size()));
         tree_clear_nodes(bmain, *candidate);
+        layer_groups_rebuilt++;
         if (!STREQ(candidate->id.name + 2, name)) {
           BKE_id_rename(bmain, candidate->id, name);
         }
@@ -1829,6 +1882,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     used_layer_trees.append(fresh);
     layer_trees.add(&layer, fresh);
     groups_created = true;
+    layer_groups_rebuilt++;
     return fresh;
   };
   auto layer_tree_unchanged = [&](const MaterialPaintLayer &layer) {
@@ -1853,12 +1907,19 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     Set<bNodeTree *> refreshed;
     refresh_generated_instances(*tree, ma.paint_layers_owner_uid, refreshed);
   }
+  /* A pass that rebuilt, created or dropped nothing leaves every group exactly as it was. Tagging
+   * the trees updated anyway makes the shading system treat the material as edited and compile it
+   * again for a change that is not there (a click that only re-tagged a regeneration was enough). */
+  const bool groups_touched = groups_created || groups_deleted || layer_groups_rebuilt > 0 ||
+                              source_groups_changed;
   for (bNodeTree *layer_tree : used_layer_trees) {
     Set<bNodeTree *> refreshed;
     refresh_generated_instances(*layer_tree, ma.paint_layers_owner_uid, refreshed);
-    BKE_ntree_update_tag_all(layer_tree);
-    BKE_ntree_update_after_single_tree_change(bmain, *layer_tree);
-    DEG_id_tag_update(&layer_tree->id, ID_RECALC_SYNC_TO_EVAL);
+    if (groups_touched) {
+      BKE_ntree_update_tag_all(layer_tree);
+      BKE_ntree_update_after_single_tree_change(bmain, *layer_tree);
+      DEG_id_tag_update(&layer_tree->id, ID_RECALC_SYNC_TO_EVAL);
+    }
   }
   const uint64_t root_hash = paint_layers_root_topology_hash(
       ma, wired_channels, layer_trees, &regen_cache);
@@ -1882,6 +1943,8 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   }
   const bool keep_root = !undo_forces_rebuild && !created_tree && have_stored_root &&
                          stored_root == root_hash;
+  report.root_rebuilt = !keep_root;
+  report.layer_groups_rebuilt = layer_groups_rebuilt;
 #if PAINT_LAYERS_DEBUG_LOG
   if (!keep_root && have_stored_root) {
     printf("paint layers regen diff: root old=%llx new=%llx undo=%d\n",
@@ -1897,8 +1960,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       BKE_id_free(nullptr, scratch);
     }
     BLI_assert_msg(root_hash == stored_root, "a kept root must match its own stored hash");
-    BKE_ntree_update_tag_all(tree);
-    BKE_ntree_update_after_single_tree_change(bmain, *tree);
+    if (groups_touched) {
+      BKE_ntree_update_tag_all(tree);
+      BKE_ntree_update_after_single_tree_change(bmain, *tree);
+    }
   }
   else {
     /* Full root rebuild: the groups are current now, so the build only lays out the root skeleton
@@ -1935,11 +2000,12 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     BKE_ntree_update_after_single_tree_change(bmain, *tree);
   }
 #if PAINT_LAYERS_DEBUG_LOG
-  printf("paint layers regen: root=%s groups_created=%d groups_deleted=%d source_groups_changed=%d "
-         "total=%.2fms\n",
+  printf("paint layers regen: root=%s groups_created=%d groups_deleted=%d groups_rebuilt=%d "
+         "source_groups_changed=%d total=%.2fms\n",
          keep_root ? "kept" : "rebuilt",
          int(groups_created),
          int(groups_deleted),
+         layer_groups_rebuilt,
          int(source_groups_changed),
          (BLI_time_now_seconds() - regen_start) * 1000.0);
   std::function<void(const ListBaseT<MaterialPaintLayer> &, const char *)> log_layers =

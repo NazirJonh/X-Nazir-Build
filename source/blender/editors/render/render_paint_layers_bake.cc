@@ -445,6 +445,9 @@ void paint_layers_bake_debounce_timer(Main &bmain, wmWindowManager &wm, wmTimer 
      * deleted while waiting is simply absent from \a found and never reaches them. */
     material_bake_images_rebake_stale(bmain, *ma);
     material_bake_layered_rows_ensure(bmain, *ma);
+    /* The idle moment after an edit: put back the warm slot the edit used, so the next add of the
+     * same kind is instant again. The recompile this causes happens here, off the user's action. */
+    BKE_paint_layers_warm_replenish(*ma);
     if (paint_layers_bake_debounce_settles_immediately(paint_layers_bake_jobs_in_flight(wm, *ma),
                                                         BKE_paint_layers_bake_heavy_pending(*ma)))
     {
@@ -521,6 +524,7 @@ wmOperatorStatus paint_layers_bake_now_exec(bContext *C, wmOperator *op)
    * #material_bake_layered_rows_ensure are idempotent against an already-fresh result). */
   material_bake_images_rebake_stale(*bmain, *ma);
   material_bake_layered_rows_ensure(*bmain, *ma);
+  BKE_paint_layers_warm_replenish(*ma);
   paint_layers_bake_jobs_ensure(*wm, CTX_wm_window(C), *bmain);
   if (paint_layers_bake_debounce_settles_immediately(paint_layers_bake_jobs_in_flight(*wm, *ma),
                                                       BKE_paint_layers_bake_heavy_pending(*ma)))

@@ -638,6 +638,28 @@ void BKE_paint_layers_bake_runtime_owner_transfer(Material &dst, Material &src);
  */
 bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer &layer);
 
+/**
+ * How many folders enclose \a layer, counting \a layer itself when it is a folder: a layer in the
+ * stack root is 0, a folder in the stack root is 1, a folder nested in it is 2. A leaf correction
+ * has its owner's level; a Stack correction is itself a folder and counts itself like one (a Stack
+ * correction on a root layer is 1). \return -1 when \a layer is not in \a ma.
+ */
+int BKE_paint_layers_folder_level(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether the AUTO bake mode may bake \a layer: only folders nested inside another folder (level 2
+ * and deeper). A folder in the stack root stays live. A manual ALWAYS is the user's choice and is
+ * not gated by this.
+ */
+bool BKE_paint_layers_folder_auto_bake_allowed(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Set every warm slot the plan entitles a row to present again after the user used it, and tag the
+ * material for regeneration. Meant for the idle tick after an edit: the graph change it causes is
+ * the background recompile that keeps the next add instant. \return whether anything changed.
+ */
+bool BKE_paint_layers_warm_replenish(Material &ma);
+
 /** The map side at or above which a bake counts as heavy regardless of the subtree's weight. */
 constexpr int PAINT_LAYERS_HEAVY_BAKE_SIZE = 2048;
 

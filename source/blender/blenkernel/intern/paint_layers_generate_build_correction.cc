@@ -162,7 +162,7 @@ void PaintLayersChainBuilder::build_content_correction(
   auto &correction_live_constant_inputs = outer_.correction_live_constant_inputs_;
 if (!substituted) {
   const bool normal_channel = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(*layer)) {
+  for (const MaterialPaintLayer *effect : paint_layers_build_effects(ma, *layer)) {
     const MaterialPaintLayer &correction = *effect;
     if (!ELEM(correction.source,
               MA_PAINT_LAYER_SOURCE_IMAGE,
@@ -890,12 +890,13 @@ void PaintLayersChainBuilder::build_mask_item(
   auto &correction_live_constant_inputs = outer_.correction_live_constant_inputs_;
 if (current.opacity != nullptr)
 {
-  const bool has_mask_corrections = !BKE_paint_layers_mask_items(*layer).is_empty();
+  const Vector<const MaterialPaintLayer *> mask_items = paint_layers_build_mask_items(ma, *layer);
+  const bool has_mask_corrections = !mask_items.is_empty();
   if (has_mask_corrections) {
     ensure_factor_base(tree, location_x, location_y, layer_factor_node, layer_factor_socket);
     bNode *factor_node = layer_factor_node;
     bNodeSocket *factor_socket = layer_factor_socket;
-    for (const MaterialPaintLayer *mask_item : BKE_paint_layers_mask_items(*layer)) {
+    for (const MaterialPaintLayer *mask_item : mask_items) {
       const MaterialPaintLayer &correction = *mask_item;
       const bool fill = BKE_paint_layers_source_type(correction) ==
                         PaintLayerSourceType::Constant;

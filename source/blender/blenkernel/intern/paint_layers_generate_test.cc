@@ -154,6 +154,19 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
     return nullptr;
   }
 
+  /** The `.PL Folder <name>` group in \a bmain, or null. */
+  static bNodeTree *layer_tree_find_folder(Main &bmain, const char *folder_name)
+  {
+    char full[96];
+    BLI_snprintf(full, sizeof(full), ".PL Folder %s", folder_name);
+    for (bNodeTree &tree : bmain.nodetrees) {
+      if (STREQ(tree.id.name + 2, full)) {
+        return &tree;
+      }
+    }
+    return nullptr;
+  }
+
   static int layer_tree_count(Main &bmain)
   {
     int count = 0;
@@ -679,7 +692,8 @@ TEST_F(PaintLayersGenerateTest, authored_paint_participates_but_covers_nothing)
   ASSERT_NE(base_color, nullptr);
   EXPECT_FALSE(base_color->directly_linked_links().is_empty());
   /* Only the bottom map and no fill input for the paint row. */
-  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 1);
+  /* +warm: Bottom adds Warm Mask and Warm Effect maps. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 3);
 }
 
 TEST_F(PaintLayersGenerateTest, uv_map_name_wires_every_image_texture)
@@ -778,7 +792,8 @@ TEST_F(PaintLayersGenerateTest, folder_builds_an_isolated_subchain)
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   /* The child's map is emitted, and the folder builds its isolated accumulation and overlay on top
    * of it (design §5): the sub-chain's Mix nodes, the P/a divide, the coverage chain. */
-  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 1);
+  /* +warm: the root folder adds a Warm Mask map. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 2);
   EXPECT_GE(count_type(*ma->paint_layers_tree, SH_NODE_MIX), 2);
   EXPECT_GE(count_type(*ma->paint_layers_tree, SH_NODE_MATH), 1);
   EXPECT_NE(interface_output_find("Result Base Color"), nullptr);
@@ -794,7 +809,8 @@ TEST_F(PaintLayersGenerateTest, fill_constant_has_no_map)
   add_channel(*layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS, nullptr);
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 0);
+  /* +warm: the root Fill row adds a Warm Mask map. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 1);
   /* The Fill constant lives on the layer's own group input, with a mirror on the root for the write
    * during evaluation (A1). */
   bNodeTree *fill_tree = layer_tree_find(*bmain, "Fill");
@@ -890,7 +906,8 @@ TEST_F(PaintLayersGenerateTest, tagged_regenerate_is_the_single_scheduling_point
   BKE_paint_layers_regenerate_tagged(*bmain);
   EXPECT_EQ(ma->paint_layers_tree, tree);
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
-  EXPECT_EQ(count_type(*tree, SH_NODE_TEX_IMAGE), 2);
+  /* +warm: 2 root layers, each map + Warm Mask + Warm Effect. */
+  EXPECT_EQ(count_type(*tree, SH_NODE_TEX_IMAGE), 6);
 }
 
 TEST_F(PaintLayersGenerateTest, mask_item_map_builds_its_chain)
@@ -963,8 +980,9 @@ TEST_F(PaintLayersGenerateTest, content_correction_adds_a_mix_over_the_map)
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   /* Two layer maps and the correction map, each layer and the correction with one Mix. */
-  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 3);
-  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_MIX), 3);
+  /* +warm: a fresh Warm Mask and Warm Effect stay beside the real correction. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 7);
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_MIX), 9); /* +warm: as above, plus a base. */
 }
 
 /** Give \a image the data colorspace, so a correction map is read as colour data. */
@@ -1029,9 +1047,11 @@ TEST_F(PaintLayersGenerateTest, fill_effect_correction_builds_a_constant_mix)
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   /* The layer's map and the channel's bottom constant; the Fill correction's colour comes from a
    * group input, not a node, and each row contributes a Mix. */
-  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 1);
+  /* +warm: Warm Mask and Warm Effect maps. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 3);
   EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_RGB), 1);
-  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_MIX), 2);
+  /* +warm: Warm Mask, Warm Effect and mask base Mix. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_MIX), 5);
 }
 
 TEST_F(PaintLayersGenerateTest, scene_graph_update_runs_the_scheduling_point)
@@ -1245,7 +1265,8 @@ TEST_F(PaintLayersGenerateTest, mask_correction_builds_a_factor_chain)
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   /* The chain builds and updates without a malformed graph, and the channel is still wired. */
   EXPECT_NE(interface_output_find("Result Base Color"), nullptr);
-  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 3);
+  /* +warm: a fresh Warm Mask and Warm Effect stay beside the real mask. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 7);
 }
 
 TEST_F(PaintLayersGenerateTest, pure_build_instantiates_normal_combine_with_links)
@@ -1634,7 +1655,7 @@ TEST_F(PaintLayersGenerateTest, baked_row_is_its_own_group)
   EXPECT_TRUE(interface_has_socket(*group, "Result Base Color", true));
   EXPECT_NE(group_instance_find(*ma->paint_layers_tree, *group), nullptr);
   /* The bake's colour and coverage stand in: two Image Texture nodes, not the live map. */
-  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 2);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 3); /* +warm: Warm Mask map. */
 }
 
 TEST_F(PaintLayersGenerateTest, root_holds_only_instances_and_chain_ends)
@@ -1800,15 +1821,18 @@ TEST_F(PaintLayersGenerateTest, folder_mask_rebuilds_the_root_and_syncs)
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   EXPECT_EQ(ma->paint_layers_tree, root);
-  EXPECT_FALSE(same_nodes(root_before, root_nodes(*root)));
+  /* +warm: the mask takes the spare's slot and its mirrors are keyed by the slot, so the root keeps
+   * its nodes. */
+  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
   /* The mask's value lives on the folder group, the child group is untouched, and the value is
    * mirrored onto the root instance. */
   bNodeTree *folder_tree = folder_tree_find(*bmain, "Folder");
   ASSERT_NE(folder_tree, nullptr);
+  /* +warm: the base takes the spare's slot, so its value lives in the spare's socket. */
   bNodeTreeInterfaceSocket *iface = group_input_find(
-      *folder_tree, "Folder Mask Base Color Opacity");
+      *folder_tree, "Folder Warm Base Base Color Opacity");
   ASSERT_NE(iface, nullptr);
-  EXPECT_NE(root_instance_input("Folder Mask Base Color Opacity"), nullptr);
+  EXPECT_NE(root_instance_input("Folder Warm Base Base Color Opacity"), nullptr);
   EXPECT_TRUE(group_mix_sentinel_get(*child_tree, 0.25f));
 }
 
@@ -2061,8 +2085,10 @@ TEST_F(PaintLayersGenerateTest, correction_add_rebuilds_the_root)
   ASSERT_TRUE(group_mix_sentinel_set(*bottom_tree, 0.25f));
   ASSERT_TRUE(group_mix_sentinel_set(*top_tree, 0.5f));
 
+  /* +warm: a Paint effect would take the spare's slot (or wait for it without a map) and leave the
+   * root alone, so a Fill effect, which does not fit the slot, stands for a new correction. */
   MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-      *ma, bottom, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
+      *ma, bottom, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "C");
   ASSERT_NE(correction, nullptr);
   ASSERT_NE(
       BKE_paint_layers_channel_add(*ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
@@ -2198,7 +2224,8 @@ TEST_F(PaintLayersGenerateTest, live_material_constant_builds_a_group_input)
   ASSERT_NE(group, nullptr);
   /* Live: the source's constant is a group input, no RGB node baked into the topology, and the
    * row's baked map is not read. */
-  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 0);
+  /* +warm: a Warm Mask map per channel of the live row. */
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 6);
   bNodeTreeInterfaceSocket *live_input = group_input_find(*group, "Source Roughness Source");
   ASSERT_NE(live_input, nullptr);
   ASSERT_NE(live_input->properties, nullptr);
@@ -2215,7 +2242,8 @@ TEST_F(PaintLayersGenerateTest, live_material_constant_builds_a_group_input)
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   group = layer_tree_find(*bmain, "Source");
   ASSERT_NE(group, nullptr);
-  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
+  /* +warm: baked map plus a Warm Mask map per channel. */
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 7);
 }
 
 /**
@@ -2839,7 +2867,7 @@ TEST_F(PaintLayersGenerateTest, source_group_instantiates_one_wrapper_node)
     }
   }
   EXPECT_EQ(instances, 1);
-  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 0);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 6); /* +warm: a Warm Mask map per channel. */
   /* Its COLOR:BASE_COLOR output reaches the row's chain. */
   wrapper->ensure_interface_cache();
   for (bNodeTreeInterfaceSocket *iface : wrapper->interface_outputs()) {
@@ -2887,7 +2915,7 @@ TEST_F(PaintLayersGenerateTest, source_group_refusal_falls_back_to_baked)
   bNodeTree *group = layer_tree_find(*bmain, "Source");
   ASSERT_NE(group, nullptr);
   /* The row did not get a wrapper instance; it reads its baked map. */
-  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 2); /* +warm: Warm Mask map. */
 }
 
 TEST_F(PaintLayersGenerateTest,
@@ -3721,6 +3749,8 @@ static bNode *source_rgb_node(Material &source)
   return nullptr;
 }
 
+static MaterialPaintLayer *group_one(Material &ma, MaterialPaintLayer *member);
+
 TEST_F(PaintLayersGenerateTest, active_material_child_keeps_its_folder_unbaked)
 {
   Material *source = make_interface_wired_source(*bmain, "ActiveBakeSource");
@@ -3734,6 +3764,8 @@ TEST_F(PaintLayersGenerateTest, active_material_child_keeps_its_folder_unbaked)
   ASSERT_NE(BKE_paint_layers_add(
                 *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "PaintChild", folder, PaintLayerPlace::Into),
             nullptr);
+  /* AUTO bakes only folders nested in another folder (level 2), so wrap it. */
+  ASSERT_NE(group_one(*ma, folder), nullptr);
 
   /* A heavy folder cache, so the synchronous planner and the wmJob path would both take it. */
   ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_ALWAYS));
@@ -4364,6 +4396,72 @@ TEST_F(PaintLayersGenerateTest, visibility_toggle_of_a_correction_keeps_the_grap
   EXPECT_TRUE(same_nodes(group_before, root_nodes(*group)));
 }
 
+/** Nothing changed between two regenerations: nothing is rebuilt (spec §8 counters). */
+TEST_F(PaintLayersGenerateTest, regenerate_reports_no_rebuild_when_nothing_changed)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  PaintLayersRegenerateReport first;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &first));
+  EXPECT_TRUE(first.root_rebuilt);
+  EXPECT_GE(first.layer_groups_rebuilt, 1);
+
+  PaintLayersRegenerateReport second;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &second));
+  EXPECT_FALSE(second.root_rebuilt);
+  EXPECT_EQ(second.layer_groups_rebuilt, 0);
+}
+
+/** A row's own visibility is not in its bake hash, so its own bake is no reason to rebuild. */
+TEST_F(PaintLayersGenerateTest, own_visibility_of_a_baked_layer_does_not_tag_a_rebuild)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*layer), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, false));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+}
+
+/** A child's visibility is part of its baked parent's hash, so it must rebuild. */
+TEST_F(PaintLayersGenerateTest, child_visibility_under_a_baked_folder_tags_a_rebuild)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  MaterialPaintLayer *child = add_paint_layer_into(folder, "Child", add_image("Child"));
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*folder), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, child, false));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+}
+
+/**
+ * The active row stays in the graph while hidden, so an unrelated rebuild does not drop it and
+ * showing it again is a value edit (the user is only checking how the result looks).
+ */
+TEST_F(PaintLayersGenerateTest, active_hidden_row_survives_an_incidental_rebuild)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  add_paint_layer("Top", add_image("Top"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  BKE_paint_layers_active_set(*ma, bottom->marker);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, bottom, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  add_paint_layer("Extra", add_image("Extra"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(layer_tree_find(*bmain, "Bottom"), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, bottom, true));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_FALSE(report.root_rebuilt);
+}
+
 /**
  * Turning a row off keeps it in the graph; an unrelated topology change is the chance to drop it,
  * and turning it back on is the one rebuild that brings it back.
@@ -4545,7 +4643,8 @@ TEST_F(PaintLayersGenerateTest, adding_a_correction_rebuilds_its_row_and_the_roo
   /* The effect adds a value input, so the root mirror set changes and the root rebuilds (A1); the
    * other rows and the source wrapper are untouched. */
   EXPECT_EQ(ma->paint_layers_tree, root);
-  EXPECT_FALSE(same_nodes(root_before, root_nodes(*root)));
+  /* +warm: the real effect takes the spare's slot, so the root is unchanged. */
+  EXPECT_TRUE(same_nodes(root_before, root_nodes(*root)));
   EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), bottom_group);
   EXPECT_EQ(layer_tree_find(*bmain, "Top"), top_group);
   EXPECT_TRUE(same_nodes(top_before, root_nodes(*top_group)));
@@ -4660,7 +4759,8 @@ TEST_F(PaintLayersGenerateTest, effect_material_source_group_uses_the_wrapper)
   ASSERT_NE(group, nullptr);
   /* Only the owner row's own map is an Image Texture; the correction's whole source graph goes
    * through the wrapper instance instead. */
-  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
+  /* +warm: Warm Mask and Warm Effect maps of the owner. */
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 3);
   bool wrapper_found = false;
   for (bNode &node : group->nodes) {
     if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
@@ -4750,7 +4850,8 @@ TEST_F(PaintLayersGenerateTest, effect_node_group_without_bake_does_not_particip
   ASSERT_NE(group, nullptr);
   /* No bake yet: the correction contributes no node at all. */
   EXPECT_EQ(node_count(*group), nodes_before);
-  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
+  /* +warm: Warm Mask and Warm Effect maps of the owner. */
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 3);
 }
 
 /**
@@ -4943,6 +5044,10 @@ TEST_F(PaintLayersGenerateTest, unnamed_row_and_material_stack_are_stable)
  * Moving a row into a folder rebuilds the folder and the root, but keeps the moved row's own group
  * (its content did not change); moving it back out does the same in reverse.
  */
+/* Defined with the warm-slot tests below. */
+static uint64_t code_shape_signature(const bNodeTree &tree);
+static uint64_t code_shape_deep(const bNodeTree &tree, int depth = 0);
+
 TEST_F(PaintLayersGenerateTest, folder_move_rebuilds_the_folder_and_keeps_the_row)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
@@ -4955,20 +5060,26 @@ TEST_F(PaintLayersGenerateTest, folder_move_rebuilds_the_folder_and_keeps_the_ro
   bNodeTree *root = ma->paint_layers_tree;
   bNodeTree *row_group = layer_tree_find(*bmain, "Row");
   ASSERT_NE(row_group, nullptr);
-  const Vector<bNode *> row_before = root_nodes(*row_group);
+  const uint64_t root_signature = code_shape_signature(*row_group);
+  /* The row's map plus the Warm Mask and Warm Effect maps. */
+  EXPECT_EQ(count_type(*row_group, SH_NODE_TEX_IMAGE), 3);
 
   ASSERT_TRUE(BKE_paint_layers_move(*ma, row, folder, PaintLayerPlace::Into));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   bNodeTree *folder_group = folder_tree_find(*bmain, "Folder");
   ASSERT_NE(folder_group, nullptr);
   EXPECT_EQ(layer_tree_find(*bmain, "Row"), row_group);
-  EXPECT_TRUE(same_nodes(row_before, root_nodes(*row_group)));
+  /* Nested, the row loses its warm chains: its group rebuilds without them. */
+  EXPECT_EQ(count_type(*row_group, SH_NODE_TEX_IMAGE), 1);
+  EXPECT_NE(code_shape_signature(*row_group), root_signature);
 
   ASSERT_TRUE(BKE_paint_layers_move(*ma, row, folder, PaintLayerPlace::Above));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_EQ(layer_tree_find(*bmain, "Row"), row_group);
-  EXPECT_TRUE(same_nodes(row_before, root_nodes(*row_group)));
+  /* Back at the root the row gets its warm chains again: the shape is what it was. */
+  EXPECT_EQ(count_type(*row_group, SH_NODE_TEX_IMAGE), 3);
+  EXPECT_EQ(code_shape_signature(*row_group), root_signature);
 }
 
 /* -------------------------------------------------------------------- */
@@ -5169,22 +5280,31 @@ TEST_F(PaintLayersGenerateTest, pass_through_group_and_ungroup_keep_the_root_sig
 
   bNodeTree *root = ma->paint_layers_tree;
   const std::string before = root_signature(*root);
+  /* The interface order of a rebuilt group renumbers its uniform slots without changing the code,
+   * so the strict comparison is the code shape of the root with everything it instances. */
+  const uint64_t before_shape = code_shape_deep(*root);
+  const uint64_t code_shape_b = code_shape_signature(*layer_tree_find(*bmain, "B"));
 
   MaterialPaintLayer *folder = group_one(*ma, b);
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
-  /* The folder owns no group and no node; the root is the same tree it was before the group. */
+  /* The folder owns no group and no node; the root is the same tree it was before the group, and
+   * B keeps its warm chains inside the Pass Through folder. */
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_EQ(folder_tree_find(*bmain, "Folder"), nullptr);
-  EXPECT_EQ(root_signature(*root), before);
+  EXPECT_EQ(code_shape_deep(*root), before_shape);
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "B")), code_shape_b);
+  EXPECT_EQ(root_signature(*root).size(), before.size());
 
   ASSERT_TRUE(BKE_paint_layers_ungroup(*ma, folder));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_NE(layer_tree_find(*bmain, "B"), nullptr);
-  EXPECT_EQ(root_signature(*root), before);
+  EXPECT_EQ(code_shape_deep(*root), before_shape);
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "B")), code_shape_b);
+  EXPECT_EQ(root_signature(*root).size(), before.size());
 }
 
 TEST_F(PaintLayersGenerateTest, empty_pass_through_folder_keeps_the_root)
@@ -5215,7 +5335,8 @@ TEST_F(PaintLayersGenerateTest, nested_pass_through_folders_keep_the_root_signat
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   bNodeTree *root = ma->paint_layers_tree;
-  const std::string before = root_signature(*root);
+  const uint64_t before = code_shape_deep(*root);
+  const uint64_t shape_b = code_shape_signature(*layer_tree_find(*bmain, "B"));
 
   MaterialPaintLayer *b = find_named_layer(*ma, "B");
   ASSERT_NE(b, nullptr);
@@ -5229,7 +5350,9 @@ TEST_F(PaintLayersGenerateTest, nested_pass_through_folders_keep_the_root_signat
 
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_EQ(folder_tree_find(*bmain, "Folder"), nullptr);
-  EXPECT_EQ(root_signature(*root), before);
+  /* Rows in Pass Through folders keep their warm chains, so the code is the same. */
+  EXPECT_EQ(code_shape_deep(*root), before);
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "B")), shape_b);
 }
 
 TEST_F(PaintLayersGenerateTest, pass_through_visibility_is_a_value_edit)
@@ -5291,7 +5414,8 @@ TEST_F(PaintLayersGenerateTest, pass_through_folder_opacity_and_blend_switch_mod
   ASSERT_NE(folder, nullptr);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   bNodeTree *root = ma->paint_layers_tree;
-  const std::string before = root_signature(*root);
+  /* The code shape, not the raw signature: a rebuilt group renumbers its uniform slots. */
+  const uint64_t before = code_shape_deep(*root);
   ASSERT_EQ(folder_tree_find(*bmain, "Folder"), nullptr);
 
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
@@ -5303,7 +5427,7 @@ TEST_F(PaintLayersGenerateTest, pass_through_folder_opacity_and_blend_switch_mod
   EXPECT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_EQ(folder_tree_find(*bmain, "Folder"), nullptr);
-  EXPECT_EQ(root_signature(*root), before);
+  EXPECT_EQ(code_shape_deep(*root), before);
 
   ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, folder, MA_PAINT_LAYER_BLEND_MULTIPLY));
   EXPECT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
@@ -5314,7 +5438,7 @@ TEST_F(PaintLayersGenerateTest, pass_through_folder_opacity_and_blend_switch_mod
   EXPECT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_EQ(folder_tree_find(*bmain, "Folder"), nullptr);
-  EXPECT_EQ(root_signature(*root), before);
+  EXPECT_EQ(code_shape_deep(*root), before);
 }
 
 TEST_F(PaintLayersGenerateTest, pass_through_folder_with_a_bake_stays_isolating)
@@ -5363,7 +5487,7 @@ TEST_F(PaintLayersGenerateTest, pass_through_folder_around_a_material_row_keeps_
   ASSERT_NE(wrapper, nullptr);
 
   bNodeTree *root = ma->paint_layers_tree;
-  const std::string before = root_signature(*root);
+  const uint64_t before = code_shape_deep(*root);
 
   MaterialPaintLayer *folder = group_one(*ma, mat);
   ASSERT_NE(folder, nullptr);
@@ -5373,7 +5497,8 @@ TEST_F(PaintLayersGenerateTest, pass_through_folder_around_a_material_row_keeps_
   EXPECT_EQ(ma->paint_layers_tree, root);
   EXPECT_EQ(folder_tree_find(*bmain, "Folder"), nullptr);
   EXPECT_EQ(source_wrapper_find(*bmain, "HashSource"), wrapper);
-  EXPECT_EQ(root_signature(*root), before);
+  /* The nested Material row keeps its warm chains, so the shader code is the same. */
+  EXPECT_EQ(code_shape_deep(*root), before);
 }
 
 /* -------------------------------------------------------------------- */
@@ -5810,6 +5935,8 @@ TEST_F(PaintLayersGenerateTest, heavy_isolating_folder_becomes_a_bake_candidate)
   MaterialPaintLayer *child = add_paint_layer("IsChild", add_image("IsChildMap"));
   MaterialPaintLayer *folder = group_one(*ma, child);
   ASSERT_NE(folder, nullptr);
+  /* AUTO bakes only folders nested in another folder (level 2), so wrap it. */
+  ASSERT_NE(group_one(*ma, folder), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
@@ -5954,6 +6081,8 @@ TEST_F(PaintLayersGenerateTest, auto_baked_folder_child_value_edit_invalidates_a
   MaterialPaintLayer *child = add_paint_layer("EditChild", add_image("EditChildImg"));
   MaterialPaintLayer *folder = group_one(*ma, child);
   ASSERT_NE(folder, nullptr);
+  /* AUTO bakes only folders nested in another folder (level 2), so wrap it. */
+  ASSERT_NE(group_one(*ma, folder), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
@@ -6007,6 +6136,8 @@ TEST_F(PaintLayersGenerateTest, editing_a_sibling_outside_the_folder_leaves_the_
   MaterialPaintLayer *child = add_paint_layer("SibChild", add_image("SibChildImg"));
   MaterialPaintLayer *folder = group_one(*ma, child);
   ASSERT_NE(folder, nullptr);
+  /* AUTO bakes only folders nested in another folder (level 2), so wrap it. */
+  ASSERT_NE(group_one(*ma, folder), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
@@ -6035,6 +6166,954 @@ TEST_F(PaintLayersGenerateTest, editing_a_sibling_outside_the_folder_leaves_the_
   EXPECT_FALSE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0)
       << "no bake covers the sibling, so its value edit must stay the free path";
   EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+}
+
+TEST_F(PaintLayersGenerateTest, folder_level_counts_enclosing_folders)
+{
+  MaterialPaintLayer *root_row = add_paint_layer("Root", add_image("Root"));
+  MaterialPaintLayer *outer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Outer", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *inner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Inner", outer, PaintLayerPlace::Into);
+  ASSERT_NE(outer, nullptr);
+  ASSERT_NE(inner, nullptr);
+  MaterialPaintLayer *leaf = add_paint_layer_into(inner, "Leaf", add_image("Leaf"));
+  EXPECT_EQ(BKE_paint_layers_folder_level(*ma, *root_row), 0);
+  EXPECT_EQ(BKE_paint_layers_folder_level(*ma, *outer), 1);
+  EXPECT_EQ(BKE_paint_layers_folder_level(*ma, *inner), 2);
+  EXPECT_EQ(BKE_paint_layers_folder_level(*ma, *leaf), 2);
+  MaterialPaintLayer stray{};
+  EXPECT_EQ(BKE_paint_layers_folder_level(*ma, stray), -1);
+}
+
+/** Builds a heavy folder (weight above the AUTO threshold) holding one row with four channels. */
+static MaterialPaintLayer *heavy_folder_make(PaintLayersGenerateTest &test)
+{
+  MaterialPaintLayer *child = test.add_paint_layer("HeavyChild", test.add_image("HeavyChildMap"));
+  /* Three channels keep the child itself light (22) while the folder is heavy (34). */
+  for (const eMaterialPaintChannel channel :
+       {PAINT_MATERIAL_CHANNEL_ROUGHNESS, PAINT_MATERIAL_CHANNEL_METALLIC})
+  {
+    EXPECT_NE(BKE_paint_layers_channel_add(*test.ma, child, channel), nullptr);
+  }
+  MaterialPaintLayer *folder = group_one(*test.ma, child);
+  EXPECT_NE(folder, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(*test.ma, folder, 0.5f));
+  return folder;
+}
+
+TEST_F(PaintLayersGenerateTest, auto_bake_skips_a_folder_in_the_stack_root)
+{
+  MaterialPaintLayer *folder = heavy_folder_make(*this);
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+  EXPECT_EQ(BKE_paint_layers_bake_job_create(*bmain, *ma), nullptr);
+}
+
+TEST_F(PaintLayersGenerateTest, auto_bake_takes_a_folder_nested_in_another_folder)
+{
+  MaterialPaintLayer *inner = heavy_folder_make(*this);
+  MaterialPaintLayer *outer = group_one(*ma, inner);
+  ASSERT_NE(outer, nullptr);
+  ASSERT_EQ(BKE_paint_layers_folder_level(*ma, *inner), 2);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  EXPECT_NE(inner->bake, nullptr);
+  EXPECT_EQ(outer->bake, nullptr) << "the outer folder is at level 1 and stays live";
+  BKE_paint_layers_bake_job_free(*job);
+}
+
+/** A manual ALWAYS is the user's choice: the root folder still bakes. */
+TEST_F(PaintLayersGenerateTest, always_mode_still_bakes_a_folder_in_the_stack_root)
+{
+  MaterialPaintLayer *child = add_paint_layer("AlwaysChild", add_image("AlwaysChildMap"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *folder, 4));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+}
+
+/** A bake an AUTO root folder carried from before the rule is released once. */
+TEST_F(PaintLayersGenerateTest, auto_root_folder_bake_from_before_the_rule_is_released)
+{
+  MaterialPaintLayer *child = add_paint_layer("OldChild", add_image("OldChildMap"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *folder, 4));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(folder->bake, nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_AUTO));
+  /* The mode is not in the bake hash; the level rule releases the root folder's bake before any
+   * gate reads it, and the value move keeps this test independent of the gate order. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.25f));
+  changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_EQ(folder->bake, nullptr);
+}
+
+/** The size of a root folder's released bake is the user's choice: the folder's next bake uses it. */
+TEST_F(PaintLayersGenerateTest, root_folder_bake_size_survives_the_auto_release)
+{
+  MaterialPaintLayer *child = add_paint_layer("KeptChild", add_image("KeptChildMap"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *folder, 4));
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(folder->bake, nullptr);
+
+  /* Back to AUTO: the rule releases the root folder's bake, structure and all. */
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_AUTO));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.25f));
+  changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_EQ(folder->bake, nullptr);
+
+  /* Baking the folder again (a manual ALWAYS) uses the kept size, not the map's own 8x8. */
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_ALWAYS));
+  changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(folder->bake, nullptr);
+  EXPECT_EQ(folder->bake->size, 4);
+}
+
+/** A child folder whose bake stands in costs the parent one map, not its whole subtree. */
+TEST_F(PaintLayersGenerateTest, baked_child_folder_counts_as_one_map_in_the_parent_weight)
+{
+  MaterialPaintLayer *inner = heavy_folder_make(*this);
+  MaterialPaintLayer *outer = group_one(*ma, inner);
+  ASSERT_NE(outer, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *outer));
+
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*inner), nullptr);
+  BKE_paint_layers_bake_finalize(*ma, *inner);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *inner));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_heavy(*ma, *outer))
+      << "a valid child bake must not be counted as its full subtree";
+}
+
+/** The maps that stand in for a Material child are part of what its parent's bake is valid for. */
+TEST_F(PaintLayersGenerateTest, parent_bake_hash_sees_the_maps_of_a_material_child)
+{
+  Material *source = add_principled_source("MapSource", 0.3f);
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatChild", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, child, source));
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*folder), nullptr);
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*child), nullptr);
+
+  uint32_t folder_before[2];
+  uint32_t child_before[2];
+  BKE_paint_layers_bake_hash(*folder, folder_before);
+  BKE_paint_layers_bake_hash(*child, child_before);
+
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("ChildMap")));
+
+  uint32_t folder_after[2];
+  uint32_t child_after[2];
+  BKE_paint_layers_bake_hash(*folder, folder_after);
+  BKE_paint_layers_bake_hash(*child, child_after);
+  EXPECT_TRUE(folder_before[0] != folder_after[0] || folder_before[1] != folder_after[1]);
+  /* The row's own bake *is* those maps, so its own hash must not move with them. */
+  EXPECT_EQ(child_before[0], child_after[0]);
+  EXPECT_EQ(child_before[1], child_after[1]);
+}
+
+/** A pixel change in a Material child's map makes its parent's bake stale. */
+TEST_F(PaintLayersGenerateTest, parent_bake_is_stale_when_a_material_childs_map_pixels_change)
+{
+  Material *source = add_principled_source("PixelSource", 0.3f);
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatChild", folder, PaintLayerPlace::Into);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, child, source));
+  Image *map = add_image("ChildPixels");
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*folder), nullptr);
+  BKE_paint_layers_bake_finalize(*ma, *folder);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+
+  BKE_image_partial_update_mark_full_update(map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+}
+
+TEST_F(PaintLayersGenerateTest, deleting_a_row_source_keeps_the_row_on_its_maps)
+{
+  Material *source = add_principled_source("DoomedSource", 0.3f);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Row", nullptr, PaintLayerPlace::Above);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  Image *map = add_image("RowMap");
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  BKE_id_delete(bmain, source);
+  EXPECT_EQ(row->material, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+  ASSERT_NE(row->bake, nullptr);
+  EXPECT_EQ(row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], map);
+}
+
+TEST_F(PaintLayersGenerateTest, deleting_a_child_source_invalidates_the_parent_bake_once)
+{
+  Material *source = add_principled_source("DoomedChildSource", 0.3f);
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Child", folder, PaintLayerPlace::Into);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, child, source));
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("ChildMap")));
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*folder), nullptr);
+  BKE_paint_layers_bake_finalize(*ma, *folder);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+
+  BKE_id_delete(bmain, source);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  /* The child's source is gone from the hash, so the folder re-renders once from the child's maps. */
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+}
+
+/**
+ * What EEVEE compiles from a group: node types, the operation/blend a node carries and the wiring
+ * between node kinds -- never a value, a name or a data-block choice. Two groups with the same
+ * signature generate the same shader code, which is the acceptance rule of the warm slots.
+ */
+static uint64_t code_shape_signature(const bNodeTree &tree)
+{
+  const auto mix = [](uint64_t h, const uint64_t v) { return (h ^ v) * 1099511628211ull; };
+  Vector<uint64_t> keys;
+  for (const bNode &node : tree.nodes) {
+    uint64_t key = 1469598103934665603ull;
+    key = mix(key, uint64_t(node.type_legacy));
+    key = mix(key, uint64_t(uint16_t(node.custom1)));
+    key = mix(key, uint64_t(uint16_t(node.custom2)));
+    if (node.is_group()) {
+      /* The interface order of an instance is not part of the code: count, do not sequence. */
+      int linked = 0;
+      int unlinked = 0;
+      for (const bNodeSocket *socket : node.input_sockets()) {
+        (socket->is_directly_linked() ? linked : unlinked)++;
+      }
+      key = mix(key, uint64_t(linked));
+      key = mix(key, uint64_t(unlinked));
+    }
+    else {
+      for (const bNodeSocket *socket : node.input_sockets()) {
+        key = mix(key, socket->is_directly_linked() ? 1 : 2);
+      }
+    }
+    if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id != nullptr && GS(node.id->name) == ID_IM) {
+      /* How the map is decoded changes the code: a data map is straightened, a colour one is not. */
+      const Image &image = *reinterpret_cast<const Image *>(node.id);
+      key = mix(key, IMB_colormanagement_space_name_is_data(image.colorspace_settings.name) ? 3 : 4);
+      key = mix(key, uint64_t(image.alpha_mode));
+      key = mix(key, (image.flag & IMA_GPU_LINEAR_PREMUL) ? 5 : 6);
+    }
+    keys.append(key);
+  }
+  for (const bNodeLink *link : tree.all_links()) {
+    uint64_t key = 7919;
+    key = mix(key, uint64_t(link->fromnode->type_legacy));
+    /* A Group Input socket is a uniform the parent fills in: which slot of the interface it sits in
+     * changes no generated code, and a real item's sockets legitimately land after the spare's. */
+    key = mix(key,
+              link->fromnode->is_group_input() ? uint64_t(0) : uint64_t(link->fromsock->index()));
+    key = mix(key, uint64_t(link->tonode->type_legacy));
+    /* Likewise a group instance's input slot: the shader inlines the group, so the interface order
+     * of its uniforms is not part of the code. */
+    key = mix(key, link->tonode->is_group() ? uint64_t(0) : uint64_t(link->tosock->index()));
+    keys.append(key);
+  }
+  std::sort(keys.begin(), keys.end());
+  uint64_t signature = 1469598103934665603ull;
+  for (const uint64_t key : keys) {
+    signature = mix(signature, key);
+  }
+  return signature;
+}
+
+/**
+ * #code_shape_signature of \a tree combined with that of every group it instances, recursively and
+ * without regard to the instance order or names: the shape of the code the shader inlines.
+ */
+static uint64_t code_shape_deep(const bNodeTree &tree, const int depth)
+{
+  Vector<uint64_t> parts;
+  parts.append(code_shape_signature(tree));
+  if (depth < 8) {
+    for (const bNode &node : tree.nodes) {
+      if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+          !BKE_paint_material_is_normal_combine_group(node))
+      {
+        parts.append(code_shape_deep(*reinterpret_cast<const bNodeTree *>(node.id), depth + 1));
+      }
+    }
+  }
+  std::sort(parts.begin() + 1, parts.end());
+  uint64_t signature = 1469598103934665603ull;
+  for (const uint64_t part : parts) {
+    signature = (signature ^ part) * 1099511628211ull;
+  }
+  return signature;
+}
+
+/** A map like the ones the UI creates for a mask: Non-Color data, straight alpha, linear premul. */
+static void make_generate_image_mask_like(Image &image)
+{
+  make_generate_image_data(image);
+  image.alpha_mode = IMA_ALPHA_STRAIGHT;
+  image.flag |= IMA_GPU_LINEAR_PREMUL;
+}
+
+/** The oracle notices a structural change (guards the helper itself). */
+TEST_F(PaintLayersGenerateTest, code_shape_signature_moves_when_the_structure_changes)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const uint64_t before = code_shape_signature(*layer_tree_find(*bmain, "Bottom"));
+
+  /* A Fill (constant) effect does not fit the Paint layer's warm effect slot, so the code changes;
+   * a Paint effect would take the slot and keep it. */
+  MaterialPaintLayer *fx = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fx");
+  ASSERT_NE(fx, nullptr);
+  const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fx, green));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(code_shape_signature(*layer_tree_find(*bmain, "Bottom")), before);
+}
+
+/** Target behavior: adding a Paint mask to a root Paint layer does not change the shader code. */
+TEST_F(PaintLayersGenerateTest, adding_a_paint_mask_to_a_root_paint_layer_keeps_the_code_shape)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const uint64_t before = code_shape_signature(*layer_tree_find(*bmain, "Bottom"));
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask");
+  ASSERT_NE(mask, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  /* +warm: the spare reads a Non-Color straight map, so the real one must decode the same way. */
+  Image *mask_map = add_image("MaskMap");
+  make_generate_image_mask_like(*mask_map);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_map));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Bottom")), before);
+}
+
+/**
+ * The UI adds the correction first and its source is picked afterward, so the spare must keep
+ * standing in until the real chain is actually built: consuming on an imageless mask would drop
+ * the spare's chain while nothing replaces it, and one user action would change the shader code
+ * twice.
+ */
+TEST_F(PaintLayersGenerateTest, adding_an_imageless_paint_mask_keeps_the_code_shape)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const uint64_t before = code_shape_signature(*layer_tree_find(*bmain, "Bottom"));
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask");
+  ASSERT_NE(mask, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Bottom")), before);
+  EXPECT_NE(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+
+  /* The map's arrival is the moment the real chain replaces the spare: same shape, same code. */
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  Image *mask_map = add_image("MaskMap");
+  make_generate_image_mask_like(*mask_map);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_map));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Bottom")), before);
+  EXPECT_EQ(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+}
+
+/**
+ * Negative control: a row inside an isolating folder has no warm slot, so the same edit changes the
+ * code. (Rows inside a Pass Through folder do carry warm slots now, hence the opacity.)
+ */
+TEST_F(PaintLayersGenerateTest, adding_a_paint_mask_to_a_nested_row_changes_the_code_shape)
+{
+  MaterialPaintLayer *child = add_paint_layer("Nested", add_image("Nested"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const uint64_t before = code_shape_signature(*layer_tree_find(*bmain, "Nested"));
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, child, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask");
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("NestedMask")));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(code_shape_signature(*layer_tree_find(*bmain, "Nested")), before);
+}
+
+TEST_F(PaintLayersGenerateTest, warm_plan_follows_role_source_and_level)
+{
+  MaterialPaintLayer *paint = add_paint_layer("Paint", add_image("PaintMap"));
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *nested = add_paint_layer_into(folder, "Nested", add_image("NestedMap"));
+  ASSERT_NE(fill, nullptr);
+  ASSERT_NE(nested, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+
+  PaintLayerWarmPlan plan = paint_layers_warm_plan(*ma, *paint);
+  EXPECT_TRUE(plan.mask);
+  EXPECT_EQ(plan.effect, PaintLayerWarmEffect::Paint);
+
+  plan = paint_layers_warm_plan(*ma, *fill);
+  EXPECT_TRUE(plan.mask);
+  EXPECT_EQ(plan.effect, PaintLayerWarmEffect::Fill);
+
+  /* A folder in the root gets a mask only. */
+  plan = paint_layers_warm_plan(*ma, *folder);
+  EXPECT_TRUE(plan.mask);
+  EXPECT_EQ(plan.effect, PaintLayerWarmEffect::None);
+
+  /* Rows inside a folder get nothing. */
+  plan = paint_layers_warm_plan(*ma, *nested);
+  EXPECT_FALSE(plan.mask);
+  EXPECT_EQ(plan.effect, PaintLayerWarmEffect::None);
+}
+
+TEST_F(PaintLayersGenerateTest, warm_plan_gives_a_correction_nothing)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Owner", add_image("OwnerMap"));
+  MaterialPaintLayer *fx = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "Fx");
+  ASSERT_NE(fx, nullptr);
+  const PaintLayerWarmPlan plan = paint_layers_warm_plan(*ma, *fx);
+  EXPECT_FALSE(plan.mask);
+  EXPECT_EQ(plan.effect, PaintLayerWarmEffect::None);
+}
+
+TEST_F(PaintLayersGenerateTest, warm_plan_skips_a_pass_through_folder)
+{
+  MaterialPaintLayer *a = add_paint_layer("PtA", add_image("PtAImg"));
+  MaterialPaintLayer *b = add_paint_layer("PtB", add_image("PtBImg"));
+  MaterialPaintLayer *members[2] = {a, b};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 2));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  EXPECT_FALSE(paint_layers_warm_plan(*ma, *folder).mask)
+      << "a Pass Through folder inlines its children, so a mask chain could not apply";
+}
+
+TEST_F(PaintLayersGenerateTest, warm_state_is_created_consumed_and_forgotten)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  Image *warm = add_image("Warm");
+  paint_layers_warm_reconcile(*ma, warm);
+  const MaterialPaintLayer *mask = paint_layers_warm_item(*ma, *layer, WarmKind::Mask);
+  ASSERT_NE(mask, nullptr);
+  EXPECT_EQ(mask->opacity, 0.0f);
+  EXPECT_EQ(mask->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  /* +warm: the virtual mask base stands first, then the spare mask. */
+  EXPECT_EQ(paint_layers_build_mask_items(*ma, *layer).size(), 2);
+
+  /* A compatible real mask takes the slot once it builds its chain: the UI picks the map after the
+   * correction exists, and only the built chain replaces the spare's. */
+  MaterialPaintLayer *real = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask");
+  ASSERT_NE(real, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, real, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, real, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("RealMaskMap")));
+  paint_layers_warm_reconcile(*ma, warm);
+  EXPECT_EQ(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+  const Vector<const MaterialPaintLayer *> items = paint_layers_build_mask_items(*ma, *layer);
+  /* +warm: the virtual mask base, then the real mask that took the spare's slot. */
+  ASSERT_EQ(items.size(), 2);
+  EXPECT_EQ(items[1], real);
+
+  /* Losing the runtime models a file load: the entry comes back present. */
+  BKE_paint_layers_generate_runtime_free(*ma);
+  paint_layers_warm_reconcile(*ma, warm);
+  EXPECT_NE(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+}
+
+/** An incompatible real item does not take the slot. */
+TEST_F(PaintLayersGenerateTest, warm_slot_is_kept_by_an_incompatible_real_item)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  Image *warm = add_image("Warm");
+  paint_layers_warm_reconcile(*ma, warm);
+  ASSERT_NE(BKE_paint_layers_correction_add(
+                *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, "FillMask"),
+            nullptr);
+  paint_layers_warm_reconcile(*ma, warm);
+  EXPECT_NE(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+  /* +warm: the virtual mask base as well. */
+  EXPECT_EQ(paint_layers_build_mask_items(*ma, *layer).size(), 3)
+      << "the virtual base, the real Fill mask, then the untouched spare";
+}
+
+/** Reload: losing the runtime state costs at most one rebuild, and the next pass keeps the root. */
+TEST_F(PaintLayersGenerateTest, warm_slots_survive_a_runtime_reload_in_one_pass)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  BKE_paint_layers_generate_runtime_free(*ma);
+  PaintLayersRegenerateReport first;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &first));
+  PaintLayersRegenerateReport second;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &second));
+  EXPECT_FALSE(second.root_rebuilt);
+  EXPECT_EQ(second.layer_groups_rebuilt, 0);
+}
+
+/** The warm chain is neutral: the row's opacity input for the spare is zero. */
+TEST_F(PaintLayersGenerateTest, warm_mask_is_built_with_a_zero_opacity_input)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Bottom");
+  ASSERT_NE(group, nullptr);
+  bool found = false;
+  group->ensure_interface_cache();
+  for (const bNodeTreeInterfaceSocket *socket : group->interface_inputs()) {
+    /* The real item that takes a slot builds its values in the spare's sockets (by slot). */
+    if (STRPREFIX(socket->name, "Bottom Warm Mask")) {
+      found = true;
+      EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(socket->socket_data)->value, 0.0f);
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+/** A hidden root row keeps its warm chain (visibility stays a value). */
+TEST_F(PaintLayersGenerateTest, warm_slot_does_not_rebuild_on_visibility_toggle)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, false));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_FALSE(report.root_rebuilt);
+  EXPECT_EQ(report.layer_groups_rebuilt, 0);
+}
+
+TEST_F(PaintLayersGenerateTest, adding_a_paint_correction_to_a_root_paint_layer_keeps_the_code_shape)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const uint64_t before = code_shape_signature(*layer_tree_find(*bmain, "Bottom"));
+
+  MaterialPaintLayer *fx = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "Fx");
+  ASSERT_NE(fx, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fx, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, fx, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("FxMap")));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Bottom")), before);
+}
+
+TEST_F(PaintLayersGenerateTest, adding_a_fill_correction_to_a_fill_layer_keeps_the_code_shape)
+{
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *fill);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const uint64_t before = code_shape_signature(*layer_tree_find(*bmain, "Fill"));
+
+  ASSERT_NE(BKE_paint_layers_correction_add(
+                *ma, fill, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "FillFx"),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Fill")), before);
+}
+
+TEST_F(PaintLayersGenerateTest, adding_a_mask_to_a_root_folder_keeps_the_code_shape)
+{
+  MaterialPaintLayer *child = add_paint_layer("FolderChild", add_image("FolderChildMap"));
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const uint64_t before = code_shape_signature(*layer_tree_find_folder(*bmain, "Folder"));
+
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, folder, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask");
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  Image *folder_mask_map = add_image("FolderMask");
+  make_generate_image_mask_like(*folder_mask_map);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, folder_mask_map));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find_folder(*bmain, "Folder")), before);
+}
+
+/** A Fill correction on the Normal channel is not built, so the spare must not be either. */
+TEST_F(PaintLayersGenerateTest, warm_fill_effect_is_not_built_for_the_normal_channel)
+{
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  /* The spare's Fill effect is skipped on Normal exactly like a real one: a real Fill correction
+   * taking the slot must not move the code either. */
+  const uint64_t before = code_shape_signature(*group);
+
+  ASSERT_NE(BKE_paint_layers_correction_add(
+                *ma, fill, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "FillFx"),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Fill")), before);
+}
+
+TEST_F(PaintLayersGenerateTest, replenish_puts_a_consumed_warm_slot_back)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask");
+  ASSERT_NE(mask, nullptr);
+  /* The slot is spent when the real chain is built: the UI picks the map after the correction. */
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("MaskMap")));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+
+  EXPECT_TRUE(BKE_paint_layers_warm_replenish(*ma));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+  /* +warm: the virtual mask base, the real mask and the replenished spare. */
+  EXPECT_EQ(paint_layers_build_mask_items(*ma, *layer).size(), 3);
+
+  /* Nothing left to replenish. */
+  EXPECT_FALSE(BKE_paint_layers_warm_replenish(*ma));
+}
+
+/**
+ * The UI path: Add Mask creates the base, the mask item is added without a map, and the map is
+ * picked last. None of the three steps may change the shader code of the row.
+ */
+TEST_F(PaintLayersGenerateTest, ui_path_mask_base_item_and_map_keep_the_code_shape)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const uint64_t before = code_shape_signature(*layer_tree_find(*bmain, "Bottom"));
+
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, layer, 1.0f), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Bottom")), before) << "mask base";
+
+  MaterialPaintLayer *item = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask");
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Bottom")), before) << "imageless item";
+
+  Image *map = add_image("UiMaskMap");
+  make_generate_image_mask_like(*map);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Bottom")), before) << "item map";
+}
+
+/** I2: a slot spent by a real mask comes back in the same regeneration that removes the mask. */
+TEST_F(PaintLayersGenerateTest, removing_the_real_mask_brings_the_spare_back_at_once)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask");
+  ASSERT_NE(mask, nullptr);
+  Image *map = add_image("RemovedMaskMap");
+  make_generate_image_mask_like(*map);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, mask));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+}
+
+/**
+ * A real mask that took the slot and the spare that replenishes after it do not share a socket: the
+ * real one keeps its own value (here 0.7), the new spare stays neutral (0).
+ */
+TEST_F(PaintLayersGenerateTest, replenished_spare_does_not_share_the_real_masks_socket)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask");
+  ASSERT_NE(mask, nullptr);
+  Image *map = add_image("SlotMaskMap");
+  make_generate_image_mask_like(*map);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, mask, 0.7f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_warm_replenish(*ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(paint_layers_warm_item(*ma, *layer, WarmKind::Mask), nullptr);
+  BKE_paint_layers_values_sync(*ma);
+
+  bNodeTree *group = layer_tree_find(*bmain, "Bottom");
+  ASSERT_NE(group, nullptr);
+  group->ensure_interface_cache();
+  int real_sockets = 0;
+  int spare_sockets = 0;
+  int root_real = 0;
+  for (const bNodeTreeInterfaceSocket *socket : group->interface_inputs()) {
+    if (!STRPREFIX(socket->name, "Bottom Warm Mask Base Color Opacity")) {
+      continue;
+    }
+    const float value = static_cast<const bNodeSocketValueFloat *>(socket->socket_data)->value;
+    if (std::abs(value - 0.7f) < 1e-4f) {
+      real_sockets++;
+      const bNodeSocket *mirror = root_instance_input(socket->name);
+      if (mirror != nullptr &&
+          std::abs(static_cast<const bNodeSocketValueFloat *>(mirror->default_value)->value -
+                   0.7f) < 1e-4f)
+      {
+        root_real++;
+      }
+    }
+    else if (std::abs(value) < 1e-4f) {
+      spare_sockets++;
+    }
+  }
+  EXPECT_EQ(real_sockets, 1) << "the real mask keeps its own opacity socket";
+  EXPECT_EQ(spare_sockets, 1) << "the replenished spare has its own neutral socket";
+  EXPECT_EQ(root_real, 1) << "values_sync writes the real value to the root mirror";
+}
+
+/** I3: the spare's marker survives losing the runtime, and the reload rebuilds nothing. */
+TEST_F(PaintLayersGenerateTest, warm_marker_is_stable_across_a_runtime_loss)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const MaterialPaintLayer *before = paint_layers_warm_item(*ma, *layer, WarmKind::Mask);
+  ASSERT_NE(before, nullptr);
+  const bUUID marker_before = before->marker;
+
+  BKE_paint_layers_generate_runtime_free(*ma);
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  const MaterialPaintLayer *after = paint_layers_warm_item(*ma, *layer, WarmKind::Mask);
+  ASSERT_NE(after, nullptr);
+  EXPECT_TRUE(BLI_uuid_equal(after->marker, marker_before));
+  EXPECT_FALSE(report.root_rebuilt);
+  EXPECT_EQ(report.layer_groups_rebuilt, 0);
+}
+
+
+
+/* -------------------------------------------------------------------- */
+/** \name Adding a mask from the UI must not recompile the shader
+ *
+ * A live report: adding a mask to a just-added Material row showed EEVEE's "Compilation" at once.
+ * Every row kind is driven through the exact call sequence of the Outliner (see
+ * `paint_layers_edit_mask_set` and `BKE_paint_layers_target_ensure_writable`), and the shader code
+ * of the whole graph has to stay the same at every step.
+ * \{ */
+
+namespace {
+
+enum class UiRowKind { Material, Paint, Fill, IsolatingFolder };
+
+MaterialPaintLayer *ui_row_make(PaintLayersGenerateTest &t, const UiRowKind kind)
+{
+  Material &ma = *t.ma;
+  switch (kind) {
+    case UiRowKind::Material: {
+      bNodeTree *shared = nullptr;
+      bNodeTree *on_path = nullptr;
+      Material *source = make_hash_source(*t.bmain, &shared, &on_path);
+      MaterialPaintLayer *row = BKE_paint_layers_add(
+          ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Row", nullptr, PaintLayerPlace::Above);
+      BKE_paint_layers_set_material(ma, row, source);
+      /* The layer that was just added is the active one. */
+      BKE_paint_layers_active_set(ma, row->marker);
+      return row;
+    }
+    case UiRowKind::Paint:
+      return t.add_paint_layer("Row", t.add_image("RowMap"));
+    case UiRowKind::Fill: {
+      MaterialPaintLayer *row = BKE_paint_layers_add(
+          ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Row", nullptr, PaintLayerPlace::Above);
+      BKE_paint_layers_default_channels_apply(ma, *row);
+      return row;
+    }
+    case UiRowKind::IsolatingFolder: {
+      MaterialPaintLayer *child = t.add_paint_layer("Child", t.add_image("ChildMap"));
+      MaterialPaintLayer *folder = group_one(ma, child);
+      BKE_paint_layers_set_opacity(ma, folder, 0.5f);
+      BKE_paint_layers_rename(ma, folder, "Row");
+      return folder;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * \param via_correction: the Add Mask Correction verb (base, then an imageless item, its map
+ * picked afterward) instead of the Add Mask verb (base, its map and the switch to an image).
+ */
+void ui_mask_shape_check(PaintLayersGenerateTest &t, const UiRowKind kind, const bool via_correction)
+{
+  Material &ma = *t.ma;
+  MaterialPaintLayer *row = ui_row_make(t, kind);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*t.bmain, ma));
+  const uint64_t before = code_shape_deep(*ma.paint_layers_tree);
+  const int mode_before = int(BKE_paint_layers_material_mode(ma, *row));
+  const auto row_group = [&]() -> bNodeTree * {
+    return kind == UiRowKind::IsolatingFolder ? t.layer_tree_find_folder(*t.bmain, "Row") :
+                                                t.layer_tree_find(*t.bmain, "Row");
+  };
+  ASSERT_NE(row_group(), nullptr);
+  const uint64_t group_before = code_shape_signature(*row_group());
+
+  const auto step = [&](const char *label, const bool shape_must_change = false) {
+    PaintLayersRegenerateReport report;
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*t.bmain, ma, &report)) << label;
+    ASSERT_NE(row_group(), nullptr) << label;
+    if (shape_must_change) {
+      /* Documented and unavoidable: the constant base becomes an image read (a sampler plus the
+       * straighten Divide), which is new shader code. */
+      EXPECT_NE(code_shape_signature(*row_group()), group_before) << label;
+      return;
+    }
+    EXPECT_EQ(code_shape_signature(*row_group()), group_before)
+        << label << ": the row's own group changed shape";
+    EXPECT_EQ(code_shape_deep(*ma.paint_layers_tree), before) << label << ": the code changed";
+    EXPECT_FALSE(report.root_rebuilt) << label << ": the root was rebuilt";
+    EXPECT_EQ(int(BKE_paint_layers_material_mode(ma, *row)), mode_before) << label << ": mode";
+  };
+
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(ma, row, 1.0f);
+  ASSERT_NE(base, nullptr);
+  step("mask_add");
+  Image *map = t.add_image("UiMask");
+  make_generate_image_mask_like(*map);
+  if (via_correction) {
+    MaterialPaintLayer *item = BKE_paint_layers_correction_add(
+        ma, row, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Correction");
+    ASSERT_NE(item, nullptr);
+    step("imageless correction");
+    ASSERT_NE(BKE_paint_layers_channel_add(ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+    ASSERT_TRUE(BKE_paint_layers_channel_set_image(ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+    step("correction map");
+  }
+  else {
+    ASSERT_NE(BKE_paint_layers_channel_add(ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+    ASSERT_TRUE(BKE_paint_layers_channel_set_image(ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+    BKE_paint_layers_correction_source_set(ma, base, MA_PAINT_LAYER_SOURCE_IMAGE);
+    step("base map", true);
+  }
+}
+
+}  // namespace
+
+TEST_F(PaintLayersGenerateTest, ui_add_mask_material_row_keeps_the_code)
+{
+  ui_mask_shape_check(*this, UiRowKind::Material, false);
+}
+TEST_F(PaintLayersGenerateTest, ui_add_mask_paint_row_keeps_the_code)
+{
+  ui_mask_shape_check(*this, UiRowKind::Paint, false);
+}
+TEST_F(PaintLayersGenerateTest, ui_add_mask_fill_row_keeps_the_code)
+{
+  ui_mask_shape_check(*this, UiRowKind::Fill, false);
+}
+TEST_F(PaintLayersGenerateTest, ui_add_mask_isolating_folder_keeps_the_code)
+{
+  ui_mask_shape_check(*this, UiRowKind::IsolatingFolder, false);
+}
+TEST_F(PaintLayersGenerateTest, ui_add_mask_correction_material_row_keeps_the_code)
+{
+  ui_mask_shape_check(*this, UiRowKind::Material, true);
+}
+TEST_F(PaintLayersGenerateTest, ui_add_mask_correction_paint_row_keeps_the_code)
+{
+  ui_mask_shape_check(*this, UiRowKind::Paint, true);
+}
+TEST_F(PaintLayersGenerateTest, ui_add_mask_correction_fill_row_keeps_the_code)
+{
+  ui_mask_shape_check(*this, UiRowKind::Fill, true);
+}
+TEST_F(PaintLayersGenerateTest, ui_add_mask_correction_isolating_folder_keeps_the_code)
+{
+  ui_mask_shape_check(*this, UiRowKind::IsolatingFolder, true);
+}
+
+/** \} */
+
+/** I1: grouping a root Paint row into a Pass Through folder and back does not change its code. */
+TEST_F(PaintLayersGenerateTest, grouping_a_root_paint_row_keeps_its_code_shape)
+{
+  MaterialPaintLayer *row = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const uint64_t before = code_shape_signature(*layer_tree_find(*bmain, "Bottom"));
+
+  MaterialPaintLayer *folder = group_one(*ma, row);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Bottom")), before) << "grouped";
+
+  ASSERT_TRUE(BKE_paint_layers_ungroup(*ma, folder));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(code_shape_signature(*layer_tree_find(*bmain, "Bottom")), before) << "ungrouped";
 }
 
 /** \} */
@@ -6224,7 +7303,8 @@ TEST_F(PaintLayersGenerateTest, sampler_budget_cleanup_drops_hidden_pass_through
 
   /* With a budget that only the visible row fits, the hidden folder and its child are dropped
    * instead of refusing the visible material. */
-  BKE_paint_layers_sampler_budget_set(1, 1);
+  /* +warm: the visible row is its map plus the two shared warm images. */
+  BKE_paint_layers_sampler_budget_set(3, 3);
   PaintLayersRegenerateReport report;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   EXPECT_FALSE(report.sampler_budget_exceeded);
@@ -6332,6 +7412,87 @@ void material_bake_set(PaintLayersGenerateTest &t,
 
 }  // namespace
 
+/** A Material row carries the warm mask only while it is live; once it is on its maps it does not. */
+TEST_F(PaintLayersGenerateTest, material_row_carries_a_warm_mask_only_while_live)
+{
+  bNodeTree *shared = nullptr;
+  bNodeTree *on_path = nullptr;
+  Material *source = make_hash_source(*bmain, &shared, &on_path);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatRow", nullptr, PaintLayerPlace::Above);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+  EXPECT_NE(paint_layers_warm_item(*ma, *row, WarmKind::Mask), nullptr);
+
+  /* Give the row maps and delete its source: it can only stay on those maps (Baked), so the spare
+   * goes with it. */
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
+  maps[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_image("RowMap");
+  material_bake_set(*this, *ma, *row, maps, nullptr);
+  BKE_id_delete(bmain, source);
+  ASSERT_EQ(row->material, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+  EXPECT_EQ(paint_layers_warm_item(*ma, *row, WarmKind::Mask), nullptr);
+}
+
+/**
+ * Leaving the row (not deleting its source) bakes it. +warm: the spare now stays with any Material
+ * row that still has a source, whatever its mode, so leaving the active spot does not change the
+ * root.
+ */
+TEST_F(PaintLayersGenerateTest, material_row_leaving_the_active_spot_keeps_its_warm_mask)
+{
+  bNodeTree *shared = nullptr;
+  bNodeTree *on_path = nullptr;
+  Material *source = make_hash_source(*bmain, &shared, &on_path);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatRowLeave", nullptr, PaintLayerPlace::Above);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+  EXPECT_NE(paint_layers_warm_item(*ma, *row, WarmKind::Mask), nullptr);
+
+  /* The user moves to another row; every resolved channel gets a map, so nothing stays live and
+   * the row turns Baked where it stands, spare included. */
+  MaterialPaintLayer *other = add_paint_layer("OtherRow", add_image("OtherRow"));
+  ASSERT_NE(other, nullptr);
+  BKE_paint_layers_active_set(*ma, other->marker);
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (channel != PAINT_MATERIAL_CHANNEL_ALPHA) {
+      maps[channel] = add_image("LeftRowMap");
+    }
+  }
+  /* Alpha has no slot of its own: the coverage map is what stands in for it. */
+  material_bake_set(*this, *ma, *row, maps, add_image("LeftRowCoverage"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
+  EXPECT_NE(paint_layers_warm_item(*ma, *row, WarmKind::Mask), nullptr);
+}
+
+/** A Material row that was just added carries its spare from the first regeneration on. */
+TEST_F(PaintLayersGenerateTest, freshly_added_material_row_needs_no_second_rebuild)
+{
+  bNodeTree *shared = nullptr;
+  bNodeTree *on_path = nullptr;
+  Material *source = make_hash_source(*bmain, &shared, &on_path);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "FreshRow", nullptr, PaintLayerPlace::Above);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(paint_layers_warm_item(*ma, *row, WarmKind::Mask), nullptr);
+
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_FALSE(report.root_rebuilt);
+  EXPECT_EQ(report.layer_groups_rebuilt, 0);
+}
+
 /**
  * The estimate must equal the finished count for a Material row, and the row's mask and correction
  * maps must be part of it in every mode. Arithmetic: the live SourceGroup row embeds a wrapper of
@@ -6380,7 +7541,7 @@ TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_a_material_row_with_mas
   ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
   EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   const int live_count = BKE_paint_layers_sampler_count(*ma);
-  EXPECT_EQ(live_count, 5);
+  EXPECT_EQ(live_count, 6); /* +warm: the shared warm image is one more sampler. */
 
   /* A budget of live-1 forces the pin; the count becomes the four baked/correction maps and the
    * estimate follows it. */
@@ -6388,7 +7549,7 @@ TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_a_material_row_with_mas
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Baked);
   EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
-  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 4);
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 5); /* +warm: the shared warm image. */
 }
 
 /** An isolating folder with a valid bake is its maps: one baked color plus one coverage = 2. */
@@ -6425,7 +7586,8 @@ TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_a_pass_through_folder)
   PaintLayersRegenerateReport report;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
-  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
+  /* +warm: the child's map plus the two shared warm images (rows in Pass Through folders too). */
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 3);
 }
 
 /**
@@ -6450,7 +7612,8 @@ TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_a_hybrid_row)
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
   EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
-  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 0);
+  /* +warm: only the shared warm image is sampled. */
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
 }
 
 /**
@@ -6461,7 +7624,8 @@ TEST_F(PaintLayersGenerateTest, sampler_estimate_dedups_a_map_shared_with_the_us
   Image *shared = add_image("SharedMap");
   add_paint_layer("SharedRow", shared);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  ASSERT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
+  /* +warm: the row map plus the two shared warm images. */
+  ASSERT_EQ(BKE_paint_layers_sampler_count(*ma), 3);
 
   bNode *principled = nullptr;
   for (bNode &node : ma->nodetree->nodes) {
@@ -6482,7 +7646,8 @@ TEST_F(PaintLayersGenerateTest, sampler_estimate_dedups_a_map_shared_with_the_us
   PaintLayersRegenerateReport report;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
-  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
+  /* +warm: the shared map plus the two warm images. */
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 3);
 }
 
 /**
@@ -6604,7 +7769,8 @@ TEST_F(PaintLayersGenerateTest, sampler_budget_settles_without_a_rebuild_loop)
   PaintLayersRegenerateReport report;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   EXPECT_TRUE(BKE_paint_layers_material_forced_bake(*ma, *row));
-  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
+  /* +warm: the baked map plus the shared warm image. */
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 2);
 
   bNodeTree *root = ma->paint_layers_tree;
   ASSERT_NE(root, nullptr);
@@ -7462,7 +8628,8 @@ TEST_F(PaintLayersGenerateTest, mesh_map_mask_and_effect_atlas_build_tex_images)
 
   /* The owner's Paint map plus one atlas read for the content correction and one for the mask
    * item; the mask reads its R through a Separate XYZ, so an extra one sits in the tree. */
-  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 3);
+  /* +warm: the real atlas corrections do not fit the warm slots, so both warm maps stay (5). */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 5);
   Vector<bNode *> tex_images;
   collect_tex_images_of_image(*ma->paint_layers_tree, atlas, tex_images);
   ASSERT_EQ(tex_images.size(), 2);
@@ -7615,7 +8782,8 @@ TEST_F(PaintLayersGenerateTest, stack_effect_correction_child_image_counts_as_a_
   /* The owner's own map plus the correction child's map: two samplers over the baseline (zero
    * rows). #SamplerCounter follows the tree from its output nodes regardless of which row's
    * subtree a TEX_IMAGE node was built for. */
-  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), samplers_before + 2);
+  /* +warm: and the two shared warm images of the owner. */
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), samplers_before + 4);
 }
 
 /* -------------------------------------------------------------------- */
@@ -7951,7 +9119,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_simple_layer)
 {
   add_paint_layer("Bottom", add_image("Bottom"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xd5db6e49ef2f1796ull, "simple_layer");
+  /* +warm: root layers carry warm chains. */
+  snapshot_expect(*ma, 0x88217e8fe6ccd684ull, "simple_layer"); /* +warm: slots and spare names. */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_fill_layer)
@@ -7963,7 +9132,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_fill_layer)
   const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
   ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, green));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xdee191836bf7ca65ull, "fill_layer");
+  snapshot_expect(*ma, 0x998ad7a6ea1b8737ull, "fill_layer"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_isolating)
@@ -7978,7 +9147,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_isolati
   /* Opacity below one keeps the folder isolating. */
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xe5ae89cde8c3851full, "folder_isolating");
+  snapshot_expect(*ma, 0x983f3e1ae7f09ff6ull, "folder_isolating"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_pass_through)
@@ -7992,7 +9161,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_pass_th
   add_channel(*child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Child"));
   /* Default opacity and MIX blend make the folder pass through (children inlined). */
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xf79df9fc3e9443b0ull, "folder_pass_through");
+  snapshot_expect(*ma, 0xb7e6a353eed4ffaeull, "folder_pass_through"); /* +warm: rows inside a Pass Through folder carry warm chains. */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_nested_folder_value_mirrors)
@@ -8010,7 +9179,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_nested_folder_
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, outer, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, inner, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xeae34bd74f6f4401ull, "nested_folder_value_mirrors");
+  snapshot_expect(*ma, 0x955f17fff2d525a1ull, "nested_folder_value_mirrors"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_content_correction_image)
@@ -8021,7 +9190,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_content_correc
   ASSERT_NE(correction, nullptr);
   add_channel(*correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Correction"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x39e6f400a6faa04dull, "content_correction_image");
+  snapshot_expect(*ma, 0x97c3f81c5fc475d8ull, "content_correction_image"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_correction)
@@ -8032,7 +9201,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_correcti
   ASSERT_NE(correction, nullptr);
   add_paint_layer_into(correction, "Child", add_image("Child"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xbba951f2b92064beull, "stack_correction");
+  snapshot_expect(*ma, 0x09c3a172cefdf180ull, "stack_correction"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_mask_image)
@@ -8043,7 +9212,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_mask_image)
   ASSERT_NE(mask, nullptr);
   add_channel(*mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Mask"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x0bd50cdc8a56d264ull, "mask_image");
+  snapshot_expect(*ma, 0x9389951f02f59b9eull, "mask_image"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_mask_channel)
@@ -8055,7 +9224,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_mask_cha
   mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
   add_paint_layer_into(mask, "Child", add_image("Child"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x2e7f8bfd2019a70cull, "stack_mask_channel");
+  snapshot_expect(*ma, 0x357462d398462b03ull, "stack_mask_channel"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_normal_layer)
@@ -8063,7 +9232,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_normal_layer)
   MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
   add_channel(*bottom, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("Normal"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x5fa77183a342beb8ull, "normal_layer");
+  snapshot_expect(*ma, 0x1873b4c54740e73full, "normal_layer"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_hybrid)
@@ -8078,7 +9247,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_h
       *ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("HybridBaked")));
   BKE_paint_layers_active_set(*ma, row->marker);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x87164b7f4480a722ull, "material_row_hybrid");
+  snapshot_expect(*ma, 0x703376411243ed9bull, "material_row_hybrid"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_source_group)
@@ -8091,7 +9260,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_s
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x4c351d3ea285f38full, "material_row_source_group");
+  snapshot_expect(*ma, 0x97c2879344f39406ull, "material_row_source_group"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_with_mask_and_effect)
@@ -8115,7 +9284,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_with_ma
   add_channel(*mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("MK"));
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xa9cacc9357f05776ull, "folder_with_mask_and_effect");
+  snapshot_expect(*ma, 0x17e0ba8cc432ed92ull, "folder_with_mask_and_effect"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_disabled_row)
@@ -8127,7 +9296,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_disabled_row)
   /* The baseline is the first regeneration after the toggle; snapshot_expect's own unchanged
    * regeneration must then keep the root (D1: the stored hash describes what was built). */
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xd7f27666f975374bull, "disabled_row");
+  snapshot_expect(*ma, 0x6f88403e126b5ab9ull, "disabled_row"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_multi_channel_overrides)
@@ -8145,7 +9314,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_multi_channel_
   layer->channel_settings[PAINT_MATERIAL_CHANNEL_METALLIC].blend = MA_PAINT_LAYER_BLEND_ADD;
   layer->channel_settings[PAINT_MATERIAL_CHANNEL_METALLIC].opacity = 0.25f;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xd4c0fb428c07d9c6ull, "multi_channel_overrides");
+  snapshot_expect(*ma, 0xda13cd10011b7689ull, "multi_channel_overrides"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_custom_node_group_row)
@@ -8161,7 +9330,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_custom_node_gr
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *correction, -1, coverage));
   BKE_paint_layers_bake_finalize(*ma, *correction);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x7dcce37a83f623dcull, "custom_node_group_row");
+  snapshot_expect(*ma, 0x43bf0140e84d6a0bull, "custom_node_group_row"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_mesh_map_row)

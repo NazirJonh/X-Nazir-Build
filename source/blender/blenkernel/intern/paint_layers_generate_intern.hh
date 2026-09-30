@@ -125,6 +125,11 @@ inline constexpr const char *INPUT_CHANNEL_PROP = "pbr_paint_layers_channel";
  * tell the two apart, so adding or removing a relay never changes the topology signature. */
 inline constexpr const char *INPUT_MIRROR_PROP = "pbr_paint_layers_mirror";
 
+/** On a generated group interface input that belongs to a warm slot: the slot's marker. The spare
+ * and the real item that takes it over both carry it, so the real item reuses the spare's socket
+ * (same identifier and position) and neither the group's nor the root's interface changes. */
+inline constexpr const char *INPUT_SLOT_PROP = "pbr_paint_layers_slot";
+
 /** #INPUT_ROLE_PROP value of a layer's opacity (enabled already folded in). */
 inline constexpr const char *ROLE_OPACITY = "opacity";
 /** #INPUT_ROLE_PROP value of a Fill layer's constant. */
@@ -230,6 +235,10 @@ bool tree_root_hash_get(bNodeTree &tree, uint64_t &r_hash)
 bool tree_topology_hash_get(bNodeTree &tree, uint64_t &r_hash)
 ;
 bool uid_prop_get(const IDProperty *properties, const char *key, bUUID &r_uid)
+;
+/** The identity of a value input for keys and hashes: its warm slot when it has one, else the
+ * marker of the layer it stands for (see #INPUT_SLOT_PROP). */
+bUUID value_slot_or_marker(const IDProperty *properties, const bUUID &marker)
 ;
 bUUID tree_owner_uid_get(const bNodeTree &tree)
 ;
@@ -531,4 +540,82 @@ class SamplerCounter {
   }
 };
 }  // namespace bke::paint_layers
+
+/* -------------------------------------------------------------------- */
+/** \name Warm slots
+ *
+ * A root row carries a virtual, neutral (zero opacity) mask and/or effect in its group, built by the
+ * same code as a real one. When the user adds a real item of that kind it takes the virtual one's
+ * place, the shader code keeps its shape and no recompile is needed (the acceptance rule of
+ * the warm slots: two groups with one code shape generate one shader code).
+ * \{ */
+
+enum class PaintLayerWarmEffect : int8_t { None = 0, Paint, Fill };
+
+struct PaintLayerWarmPlan {
+  /** A virtual Paint mask item stands ready under the row. */
+  bool mask = false;
+  /** Which virtual effect item stands ready. */
+  PaintLayerWarmEffect effect = PaintLayerWarmEffect::None;
+};
+
+/** #MaskBase is the constant `x * 1` base mask the UI creates first, ahead of every other mask. */
+enum class WarmKind : int8_t { Mask, Effect, MaskBase };
+
+/** What \a layer is entitled to, from its place, role and source alone. */
+PaintLayerWarmPlan paint_layers_warm_plan(const Material &ma,
+                                          const MaterialPaintLayer &layer,
+                                          const PaintLayersRegenCache *cache = nullptr);
+
+/** Whether any row of \a ma is entitled to a warm slot, so the shared image is worth creating. */
+bool paint_layers_warm_needed(const Material &ma, const PaintLayersRegenCache *cache = nullptr);
+
+/**
+ * Bring \a ma's warm state up to date with its description: create entries for rows that are
+ * entitled to a slot and have none (present), drop entries of rows that no longer are, and mark a
+ * slot consumed when the row gained a compatible real item since the last call. \a warm_image is the
+ * shared data-block the virtual items point at. Main thread only.
+ */
+void paint_layers_warm_reconcile(Material &ma,
+                                 Image *warm_image,
+                                 const PaintLayersRegenCache *cache = nullptr,
+                                 Image *warm_color_image = nullptr);
+
+/**
+ * The marker of the warm slot the item \a item_marker of the row \a owner_marker stands in, or nil.
+ * A spare stands in its own slot; a real item that took a slot stands in the one it took. The group
+ * finds the interface sockets of such an item by this marker instead of by name, so the item that
+ * takes over a spare keeps the spare's sockets (see #INPUT_SLOT_PROP).
+ */
+bUUID paint_layers_warm_slot_of(const Material &ma,
+                                const bUUID &owner_marker,
+                                const bUUID &item_marker);
+
+/**
+ * Whether the real \a item of \a owner has no chain to build yet (an IMAGE-source item still
+ * without its map) while a spare of its kind stands in the graph. Such an item gets no value
+ * sockets: they would be new sockets next to the spare's, and the ones it takes over when its map
+ * arrives would then be a second change of the interface.
+ */
+bool paint_layers_warm_defers_item(const Material &ma,
+                                   const MaterialPaintLayer &owner,
+                                   const MaterialPaintLayer &item,
+                                   bool mask_item);
+
+/** Whether \a marker is the marker of a spare that is in the graph right now. */
+bool paint_layers_warm_item_present(const Material &ma, const bUUID &marker);
+
+/** The virtual item to append after \a layer's real ones, or null when none stands ready. */
+const MaterialPaintLayer *paint_layers_warm_item(const Material &ma,
+                                                 const MaterialPaintLayer &layer,
+                                                 WarmKind kind);
+
+/** Real items then the virtual one, in the order the generator builds them. */
+Vector<const MaterialPaintLayer *> paint_layers_build_effects(const Material &ma,
+                                                              const MaterialPaintLayer &layer);
+Vector<const MaterialPaintLayer *> paint_layers_build_mask_items(const Material &ma,
+                                                                 const MaterialPaintLayer &layer);
+
+/** \} */
+
 }  // namespace blender

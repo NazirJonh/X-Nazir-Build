@@ -229,18 +229,74 @@ bNodeTreeInterfaceSocket *layer_group_add_socket(LayerGroup &group,
   return socket;
 }
 
+/* The value input of \a group that stands in the warm slot \a slot for \a role and \a channel. */
+static bNodeTreeInterfaceSocket *group_interface_socket_find_by_slot(LayerGroup &group,
+                                                                     const bUUID &slot,
+                                                                     const char *role,
+                                                                     const int channel,
+                                                                     const StringRef socket_type)
+{
+  bNodeTreeInterfaceSocket *found = nullptr;
+  group.tree->tree_interface.foreach_item([&](bNodeTreeInterfaceItem &item) {
+    if (item.item_type != NodeTreeInterfaceItemType::Socket) {
+      return true;
+    }
+    bNodeTreeInterfaceSocket &socket = reinterpret_cast<bNodeTreeInterfaceSocket &>(item);
+    if ((socket.flag & NODE_INTERFACE_SOCKET_INPUT) == 0 || socket.socket_type == nullptr ||
+        StringRef(socket.socket_type) != socket_type)
+    {
+      return true;
+    }
+    bUUID socket_slot = BLI_uuid_nil();
+    const char *socket_role = prop_string_get(socket.properties, INPUT_ROLE_PROP);
+    if (socket_role == nullptr || !STREQ(socket_role, role) ||
+        prop_int_get(socket.properties, INPUT_CHANNEL_PROP, -1) != channel ||
+        !uid_prop_get(socket.properties, INPUT_SLOT_PROP, socket_slot) ||
+        !BLI_uuid_equal(socket_slot, slot))
+    {
+      return true;
+    }
+    found = &socket;
+    return false;
+  });
+  return found;
+}
+
 bNodeTreeInterfaceSocket *layer_group_value_input(LayerGroup &group,
                                                  const char *base,
                                                  const StringRef socket_type,
                                                  const char *role,
                                                  const bUUID &marker,
-                                                 const int channel)
+                                                 const int channel,
+                                                 const bUUID &slot)
 {
-  bNodeTreeInterfaceSocket *socket = layer_group_add_socket(
-      group, base, socket_type, NODE_INTERFACE_SOCKET_INPUT);
+  bNodeTreeInterfaceSocket *socket = nullptr;
+  if (!BLI_uuid_is_nil(slot)) {
+    /* An item in a warm slot builds into the slot's sockets, whatever it is called: the spare and
+     * the real item that takes its place then have one and the same interface. A slot never falls
+     * back to the name, or a replacement spare would find the sockets the real item now owns. */
+    socket = group_interface_socket_find_by_slot(group, slot, role, channel, socket_type);
+    if (socket != nullptr) {
+      group.used_sockets.add(socket);
+    }
+    else {
+      char name[256];
+      interface_name_unique(group.tree->tree_interface, base, name, sizeof(name));
+      socket = group.tree->tree_interface.add_socket(
+          name, "", socket_type, NODE_INTERFACE_SOCKET_INPUT, nullptr);
+      if (socket != nullptr) {
+        group.used_sockets.add(socket);
+        refresh_layer_group(group);
+      }
+    }
+  }
+  else {
+    socket = layer_group_add_socket(group, base, socket_type, NODE_INTERFACE_SOCKET_INPUT);
+  }
   if (socket == nullptr) {
     return nullptr;
   }
+  uid_prop_set(socket->properties, INPUT_SLOT_PROP, slot);
   uid_prop_set(socket->properties, INPUT_MARKER_PROP, marker);
   prop_string_set(socket->properties, INPUT_ROLE_PROP, role);
   prop_int_set(socket->properties, INPUT_CHANNEL_PROP, channel);
@@ -662,6 +718,8 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     }
   }
   auto add_correction = [&](const MaterialPaintLayer &correction, const bool mask_item) {
+    /* A spare, and the real item that took its place, build into the same interface sockets. */
+    const bUUID warm_slot = paint_layers_warm_slot_of(ma, layer.marker, correction.marker);
     for (const int channel : wired_channels) {
       const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
           eMaterialPaintChannel(channel));
@@ -672,7 +730,13 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
                correction.name[0] != '\0' ? correction.name : "Correction",
                info.ui_name);
       bNodeTreeInterfaceSocket *socket = layer_group_value_input(
-          group, base, "NodeSocketFloat", ROLE_CORRECTION_OPACITY, correction.marker, channel);
+          group,
+          base,
+          "NodeSocketFloat",
+          ROLE_CORRECTION_OPACITY,
+          correction.marker,
+          channel,
+          warm_slot);
       if (socket == nullptr) {
         continue;
       }
@@ -758,7 +822,8 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
         "NodeSocketColor",
         ROLE_CORRECTION_FILL,
         correction.marker,
-        PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+        PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+        warm_slot);
     if (socket != nullptr && socket->socket_data != nullptr) {
       float color[4];
       BKE_paint_layers_correction_constant(
@@ -767,15 +832,15 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     }
     correction_fill_inputs.add(&correction, socket);
   };
-  for (const MaterialPaintLayer &effect :
-       layer.effects)
-  {
-    add_correction(effect, false);
+  for (const MaterialPaintLayer *effect : paint_layers_build_effects(ma_, layer)) {
+    if (!paint_layers_warm_defers_item(ma_, layer, *effect, false)) {
+      add_correction(*effect, false);
+    }
   }
-  for (const MaterialPaintLayer &mask_item :
-       layer.mask_stack)
-  {
-    add_correction(mask_item, true);
+  for (const MaterialPaintLayer *mask_item : paint_layers_build_mask_items(ma_, layer)) {
+    if (!paint_layers_warm_defers_item(ma_, layer, *mask_item, true)) {
+      add_correction(*mask_item, true);
+    }
   }
 }
 
@@ -928,9 +993,9 @@ for (bNodeTreeInterfaceSocket *candidate : scope_tree.interface_inputs()) {
   {
     continue;
   }
-  mirrors.add(value_key(marker, role, prop_int_get(candidate->properties,
-                                                   INPUT_CHANNEL_PROP,
-                                                   -1)),
+  mirrors.add(value_key(value_slot_or_marker(candidate->properties, marker),
+                        role,
+                        prop_int_get(candidate->properties, INPUT_CHANNEL_PROP, -1)),
               candidate);
 }
 
@@ -958,12 +1023,23 @@ for (bNode *node : group_nodes) {
      * its old interface and its own stale-socket prune has not run yet, so it must not be
      * mirrored up (that would leak the value into every parent scope and keep the socket
      * alive). Mirrors for values that do still exist resolve here. */
-    if (BKE_paint_layers_find(const_cast<Material &>(ma_), marker) == nullptr) {
+    if (BKE_paint_layers_find(const_cast<Material &>(ma_), marker) == nullptr &&
+        !paint_layers_warm_item_present(ma_, marker))
+    {
       continue;
     }
     const int channel = prop_int_get(iface->properties, INPUT_CHANNEL_PROP, -1);
-    const std::string key = value_key(marker, role, channel);
+    /* A value in a warm slot is keyed by the slot, so the real item that takes the spare's place
+     * finds the spare's mirror and the root's interface stays as it was. */
+    const bUUID slot = value_slot_or_marker(iface->properties, marker);
+    const std::string key = value_key(slot, role, channel);
     bNodeTreeInterfaceSocket *scope_iface = mirrors.lookup_default(key, nullptr);
+    if (scope_iface != nullptr) {
+      uid_prop_set(scope_iface->properties, INPUT_MARKER_PROP, marker);
+      uid_prop_set(scope_iface->properties,
+                   INPUT_SLOT_PROP,
+                   BLI_uuid_equal(slot, marker) ? BLI_uuid_nil() : slot);
+    }
     if (scope_iface == nullptr) {
       const char *base = (iface->name != nullptr) ? iface->name : "Value";
       char name[256];
@@ -975,6 +1051,9 @@ for (bNode *node : group_nodes) {
       }
       prop_int_set(scope_iface->properties, INPUT_MIRROR_PROP, 1);
       uid_prop_set(scope_iface->properties, INPUT_MARKER_PROP, marker);
+      uid_prop_set(scope_iface->properties,
+                   INPUT_SLOT_PROP,
+                   BLI_uuid_equal(slot, marker) ? BLI_uuid_nil() : slot);
       prop_string_set(scope_iface->properties, INPUT_ROLE_PROP, role);
       prop_int_set(scope_iface->properties, INPUT_CHANNEL_PROP, channel);
       mirrors.add(key, scope_iface);

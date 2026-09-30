@@ -150,6 +150,15 @@ bool uid_prop_get(const IDProperty *properties, const char *key, bUUID &r_uid)
   return BLI_uuid_parse_string(&r_uid, formatted);
 }
 
+bUUID value_slot_or_marker(const IDProperty *properties, const bUUID &marker)
+{
+  bUUID slot = BLI_uuid_nil();
+  if (uid_prop_get(properties, INPUT_SLOT_PROP, slot) && !BLI_uuid_is_nil(slot)) {
+    return slot;
+  }
+  return marker;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

@@ -62,6 +62,7 @@
 #include "DNA_uuid_types.h"
 
 #include "paint_layers_intern.hh"
+#include "paint_layers_runtime.hh"
 
 namespace blender {
 int BKE_paint_layers_bake_mode_get(const MaterialPaintLayer &layer)
@@ -359,6 +360,15 @@ static void bake_collect_source_images(const MaterialPaintLayer &layer, Vector<I
       r_images.append(image);
     }
   };
+  /* A Material row inside a baked subtree is drawn from the maps its source was rendered into, and
+   * they are re-rendered in place when the source changes; the subtree's bake is stale with them.
+   * The row's own subscription still skips them (see #BKE_paint_layers_bake_subscribe). */
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.bake != nullptr) {
+    for (Image *image : layer.bake->images) {
+      add(image);
+    }
+    add(layer.bake->coverage);
+  }
   for (int i = 0; i < layer.channels_num; i++) {
     add(layer.channels[i].image);
   }
@@ -741,25 +751,78 @@ bool BKE_paint_layers_bake_row_to_image(const Material &ma,
 }
 
 /** The generated nodes \a layer's subtree would add, the AUTO threshold's unit. */
-static int paint_layer_subtree_weight(const MaterialPaintLayer &layer)
+static int paint_layer_subtree_weight(const Material &ma, const MaterialPaintLayer &layer)
 {
   int weight = 4 + layer.channels_num * 6;
   for (const MaterialPaintLayer &effect :
        layer.effects)
   {
-    weight += 4 + paint_layer_subtree_weight(effect) / 2;
+    weight += 4 + paint_layer_subtree_weight(ma, effect) / 2;
   }
   for (const MaterialPaintLayer &mask_item :
        layer.mask_stack)
   {
-    weight += 4 + paint_layer_subtree_weight(mask_item) / 2;
+    weight += 4 + paint_layer_subtree_weight(ma, mask_item) / 2;
   }
   for (const MaterialPaintLayer &child :
        layer.children)
   {
-    weight += 8 + paint_layer_subtree_weight(child);
+    /* A valid bake stands in for the child's whole subtree in the generated graph, so the parent
+     * pays for one map instead of everything below it. A Material row is never substituted whole
+     * (its bake is its source's maps), so it keeps its structural weight. */
+    const bool substituted = child.bake != nullptr &&
+                             child.source != MA_PAINT_LAYER_SOURCE_MATERIAL &&
+                             BKE_paint_layers_bake_is_valid(ma, child);
+    weight += 8 + (substituted ? PAINT_LAYERS_BAKED_CHILD_WEIGHT :
+                                 paint_layer_subtree_weight(ma, child));
   }
   return weight;
+}
+
+/**
+ * The level of \a target inside \a list, whose rows are enclosed by \a enclosing folders; -1 when
+ * \a target is not in it. A folder's own level counts itself, so a folder in the stack root is 1.
+ */
+static int paint_layer_level_in_list(const ListBaseT<MaterialPaintLayer> &list,
+                                     const MaterialPaintLayer *target,
+                                     const int enclosing)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    const bool folder = BKE_paint_layers_is_folder(layer);
+    const int own = enclosing + (folder ? 1 : 0);
+    if (&layer == target) {
+      return own;
+    }
+    /* A correction hangs off its row inside the row's own enclosing folders; only a folder's
+     * children sit one level deeper. */
+    int found = paint_layer_level_in_list(layer.effects, target, enclosing);
+    if (found >= 0) {
+      return found;
+    }
+    found = paint_layer_level_in_list(layer.mask_stack, target, enclosing);
+    if (found >= 0) {
+      return found;
+    }
+    if (folder) {
+      found = paint_layer_level_in_list(layer.children, target, own);
+      if (found >= 0) {
+        return found;
+      }
+    }
+  }
+  return -1;
+}
+
+int BKE_paint_layers_folder_level(const Material &ma, const MaterialPaintLayer &layer)
+{
+  return paint_layer_level_in_list(ma.paint_layers, &layer, 0);
+}
+
+bool BKE_paint_layers_folder_auto_bake_allowed(const Material &ma, const MaterialPaintLayer &layer)
+{
+  /* A folder in the stack root is what the user keeps working in; only folders nested in another
+   * folder are cold enough to be worth a cache. */
+  return BKE_paint_layers_folder_level(ma, layer) >= 2;
 }
 
 /**
@@ -802,6 +865,29 @@ static void paint_layer_bake_structure_free(Main &bmain, Material &ma, MaterialP
   MEM_SAFE_DELETE(layer.bake);
 }
 
+/**
+ * Remember \a layer's bake size in the runtime before its structure is released: the structure is
+ * the only copy of the size, but the size is the user's choice rather than part of the cache, so
+ * the row's next bake takes it from there instead of the content dimensions.
+ */
+static void paint_layer_dropped_bake_size_keep(Material &ma, const MaterialPaintLayer &layer)
+{
+  if (layer.bake != nullptr && layer.bake->size > 0) {
+    bke::paint_layers_runtime_ensure(ma).dropped_bake_size.lookup_or_add_default(layer.marker) =
+        layer.bake->size;
+  }
+}
+
+/** The bake size an AUTO release remembered for \a layer, or 0 when none was kept. */
+static int paint_layer_dropped_bake_size(const Material &ma, const MaterialPaintLayer &layer)
+{
+  const bke::MaterialPaintLayersRuntime *runtime = bke::paint_layers_runtime_get(ma);
+  const int *size = (runtime != nullptr) ?
+                        runtime->dropped_bake_size.lookup_ptr(layer.marker) :
+                        nullptr;
+  return (size != nullptr) ? *size : 0;
+}
+
 bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
 {
   bool changed = false;
@@ -821,7 +907,11 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
     /* An Effect/Mask Item Stack folder now bakes exactly like a Layer folder (cache-bake-by-
      * default), so the AUTO cycle must see every role, not only Layer rows. */
     BKE_paint_layers_flatten_all(ma, layers);
-    for (const MaterialPaintLayer *layer_const : layers) {
+    /* Children before their parents: a parent's render composites its children, and a child that is
+     * already baked stands in for its whole subtree, so the reverse of the pre-order walk does the
+     * least work. */
+    for (int index = int(layers.size()) - 1; index >= 0; index--) {
+      const MaterialPaintLayer *layer_const = layers[index];
       MaterialPaintLayer &layer = *const_cast<MaterialPaintLayer *>(layer_const);
       /* A leaf effect or mask item (its own image/constant, not a Stack folder) has no bake of its
        * own to gate: only a Layer row and a Stack correction/mask folder do. */
@@ -840,6 +930,16 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
       if (BKE_paint_layers_is_folder(layer)) {
         const int mode = BKE_paint_layers_bake_mode_get(layer);
         if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
+          continue;
+        }
+        if (mode == MA_PAINT_LAYER_BAKE_AUTO &&
+            !BKE_paint_layers_folder_auto_bake_allowed(ma, layer))
+        {
+          /* A folder in the stack root stays live for responsiveness; a bake it carried from
+           * before the rule is released. A manual ALWAYS is the user's and is left alone. The
+           * chosen size is kept for the folder's next bake. */
+          paint_layer_dropped_bake_size_keep(ma, layer);
+          drop_light_bake(layer);
           continue;
         }
         if (layer.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, layer)) {
@@ -866,7 +966,7 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
           continue;
         }
         if (mode == MA_PAINT_LAYER_BAKE_AUTO &&
-            paint_layer_subtree_weight(layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
+            paint_layer_subtree_weight(ma, layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
         {
           /* A light subtree is cheaper live; a bake carried over from when it was heavy is
            * released and never re-rendered. */
@@ -874,6 +974,11 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
           continue;
         }
         size = (layer.bake != nullptr) ? layer.bake->size : 0;
+        if (size <= 0) {
+          /* A size an AUTO release kept for the row beats the content dimensions: it is what the
+           * user chose or the row last baked at. */
+          size = paint_layer_dropped_bake_size(ma, layer);
+        }
         if (size <= 0) {
           /* A zero size means "the node's own map size": read it from the content. */
           int width = 0;
@@ -891,8 +996,10 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
           continue;
         }
         /* Every gate has passed and this folder is about to render: only here is it safe to
-         * allocate the bake structure. */
+         * allocate the bake structure. The maps below are created at \a size, so that is what the
+         * structure records. */
         bake = BKE_paint_layers_bake_struct_ensure(layer);
+        bake->size = size;
       }
       else {
         /* A light non-folder row never gets a bake structure: allocating one before it is about
@@ -914,7 +1021,7 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
           continue;
         }
         if (mode == MA_PAINT_LAYER_BAKE_AUTO &&
-            paint_layer_subtree_weight(layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
+            paint_layer_subtree_weight(ma, layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
         {
           /* A light subtree is cheaper live, and stays without a bake structure: this is a final
            * state for it, not a step toward one. A stale bake from a heavier past is released. */
@@ -940,8 +1047,10 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
           continue;
         }
         /* Every gate has passed and this row renders right now: only here is it safe to
-         * allocate the bake structure. */
+         * allocate the bake structure. The maps below are created at \a size, so that is what the
+         * structure records. */
         bake = BKE_paint_layers_bake_struct_ensure(layer);
+        bake->size = size;
       }
 
       PL_DEBUG_PRINTF("paint layers bake: start kind=sync material='%s' row='%s' reason=stale\n",
@@ -1052,8 +1161,7 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
 
 bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer &layer)
 {
-  UNUSED_VARS(ma);
-  if (paint_layer_subtree_weight(layer) > PAINT_LAYERS_AUTO_BAKE_NODES) {
+  if (paint_layer_subtree_weight(ma, layer) > PAINT_LAYERS_AUTO_BAKE_NODES) {
     return true;
   }
   return layer.bake != nullptr && layer.bake->size >= PAINT_LAYERS_HEAVY_BAKE_SIZE;
@@ -1426,6 +1534,11 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
       if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
         continue;
       }
+      if (mode == MA_PAINT_LAYER_BAKE_AUTO &&
+          !BKE_paint_layers_folder_auto_bake_allowed(ma, *layer))
+      {
+        continue;
+      }
       if (layer->bake != nullptr && BKE_paint_layers_bake_is_valid(ma, *layer)) {
         continue;
       }
@@ -1521,7 +1634,11 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
   job->material = &ma;
   job->material_session_uid = ma.id.session_uid;
 
-  for (const MaterialPaintLayer *layer : layers) {
+  /* Children before their parents: the job renders the queued rows of #material_copy in this
+   * order, and a parent's render composites its children, so a child that renders first hands its
+   * parent fresh maps instead of the parent rendering the child's subtree live. */
+  for (int index = int(layers.size()) - 1; index >= 0; index--) {
+    const MaterialPaintLayer *layer = layers[index];
     /* A leaf effect or mask item has no bake of its own to gate: only a Layer row and a Stack
      * correction/mask folder do (see #BKE_paint_layers_bake_plan_run). */
     if (layer->role != MA_PAINT_LAYER_ROLE_LAYER && !BKE_paint_layers_is_folder(*layer)) {
@@ -1538,6 +1655,11 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
     if (BKE_paint_layers_is_folder(*layer)) {
       const int mode = BKE_paint_layers_bake_mode_get(*layer);
       if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
+        continue;
+      }
+      if (mode == MA_PAINT_LAYER_BAKE_AUTO &&
+          !BKE_paint_layers_folder_auto_bake_allowed(ma, *layer))
+      {
         continue;
       }
       if (layer->bake != nullptr && BKE_paint_layers_bake_is_valid(ma, *layer)) {
@@ -1560,6 +1682,10 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
       }
     }
     int size = (layer->bake != nullptr) ? layer->bake->size : 0;
+    if (size <= 0) {
+      /* A size an AUTO release kept for the row beats the content dimensions. */
+      size = paint_layer_dropped_bake_size(ma, *layer);
+    }
     if (size <= 0) {
       int width = 0;
       int height = 0;
@@ -2365,6 +2491,17 @@ static uint64_t bake_hash_layer(uint64_t h,
       h = bake_hash_mix(h, BKE_paint_layers_source_material_tree_hash(*layer.material));
     }
     h = bake_hash_mix(h, layer.bake != nullptr ? uint32_t(layer.bake->size) : 0);
+    /* A parent's bake renders this row through its maps, and they can appear or be replaced after
+     * the parent was baked (a row's first bake is deferred until it is left), so which maps stand in
+     * is part of what the parent's bake is valid for. The row's own hash stays independent of them:
+     * its bake *is* those maps. */
+    if (is_child && layer.bake != nullptr) {
+      for (const Image *image : layer.bake->images) {
+        h = bake_hash_mix(h, image != nullptr ? image->id.session_uid : 0);
+      }
+      h = bake_hash_mix(h,
+                        layer.bake->coverage != nullptr ? layer.bake->coverage->id.session_uid : 0);
+    }
     /* Visibility of a top-level row is a live factor and must not move its own bake. A parent
      * folder's bake renders its children, so a child's visibility does change the parent's result
      * and is appended here. */

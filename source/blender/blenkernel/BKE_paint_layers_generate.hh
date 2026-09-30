@@ -205,6 +205,11 @@ struct PaintLayersRegenerateReport {
    */
   int sampler_estimate = 0;
 
+  /** The root group was rebuilt (its topology hash moved or was invalidated) rather than kept. */
+  bool root_rebuilt = false;
+  /** Layer groups whose nodes were cleared and rebuilt in place, plus newly created ones. */
+  int layer_groups_rebuilt = 0;
+
   /** Per Material row: its marker, the mode it was built in and, for SourceGroup, why the
    * wrapper was refused. Diagnostic: the mode is otherwise invisible from outside. */
   struct MaterialRowModeReport {

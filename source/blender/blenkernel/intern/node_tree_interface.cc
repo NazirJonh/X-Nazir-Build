@@ -1939,6 +1939,12 @@ void bNodeTreeInterface::copy_data(const bNodeTreeInterface &src, int flag)
 {
   item_types::panel_init(this->root_panel, src.root_panel.items(), flag, nullptr);
   this->active_index = src.active_index;
+  /* Keep the identifier counter in step with the copied items: `item_copy` reuses their
+   * identifiers (the uid generator is null here), so a later `add_socket` must not hand one of
+   * them out again. A copy that then grows its interface -- the source-group wrapper does -- would
+   * otherwise get duplicate `Socket_<n>` identifiers, and a lookup by identifier would pick the
+   * wrong socket (the copied `BSDF` output, say, instead of the new `Specular` one). */
+  this->next_uid = src.next_uid;
 
   this->runtime = MEM_new<bke::bNodeTreeInterfaceRuntime>(__func__);
   this->tag_missing_runtime_data();

@@ -35,6 +35,7 @@ void register_node_type_sh_camera();
 void register_node_type_sh_clamp();
 void register_node_type_sh_combcolor();
 void register_node_type_sh_combxyz();
+void register_node_type_sh_compose_color_alpha();
 void register_node_type_sh_curve_float();
 void register_node_type_sh_curve_rgb();
 void register_node_type_sh_curve_vec();

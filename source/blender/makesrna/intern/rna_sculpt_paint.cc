@@ -710,14 +710,12 @@ static void rna_Paint_symmetry_space_update(Main * /*bmain*/,
 
 static void rna_ImagePaintSettings_symmetry_mode_update(Main * /*bmain*/,
                                                         Scene * /*scene*/,
-                                                        PointerRNA *ptr)
+                                                        PointerRNA * /*ptr*/)
 {
-  /* Picking 2D Canvas means using it: switch the canvas symmetry on so the mode takes effect
-   * right away instead of leaving the user to find the separate toggle. */
-  ImagePaintSettings *imapaint = static_cast<ImagePaintSettings *>(ptr->data);
-  if (imapaint->symmetry_line_flag & IMAGE_PAINT_SYMMETRY_MODE_CANVAS) {
-    imapaint->symmetry_line_flag |= IMAGE_PAINT_SYMMETRY_LINE_ENABLED;
-  }
+  /* Choosing 2D Canvas only selects the mode: the symmetry checkbox stays under the user's
+   * control and is never switched on implicitly (creating a canvas switches the mode to 2D
+   * Canvas, which must not enable the symmetry itself). The Image Editor still redraws so the
+   * overlay follows the mode. */
   WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
 }
 

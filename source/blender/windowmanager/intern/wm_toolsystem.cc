@@ -500,7 +500,14 @@ static void toolsystem_brush_sync_for_texture_paint(Main *bmain,
       tkey.space_type = SPACE_IMAGE;
       tkey.mode = SI_MODE_PAINT;
       bToolRef *tref_other = WM_toolsystem_ref_find(workspace, &tkey);
-      if (tref_other) {
+      /* Only skip the sync when the paired space already has an initialized non-brush tool
+       * (Shape / Select / Move / ...), which must keep its own tool: this function also runs from
+       * the blanket #WM_toolsystem_refresh_active() of every undo, where overriding the other
+       * editor's tool with the brush tool would silently revert the user's tool switch. When the
+       * runtime is not initialized yet, keep the vanilla behavior of setting a pending change. */
+      if (tref_other && (tref_other->runtime == nullptr ||
+                         (tref_other->runtime->flag & TOOLREF_FLAG_USE_BRUSHES)))
+      {
         toolsystem_ref_set_by_id_pending(bmain, tref_other, tref->idname);
       }
     }
@@ -511,7 +518,9 @@ static void toolsystem_brush_sync_for_texture_paint(Main *bmain,
       tkey.space_type = SPACE_VIEW3D;
       tkey.mode = CTX_MODE_PAINT_TEXTURE;
       bToolRef *tref_other = WM_toolsystem_ref_find(workspace, &tkey);
-      if (tref_other) {
+      if (tref_other && (tref_other->runtime == nullptr ||
+                         (tref_other->runtime->flag & TOOLREF_FLAG_USE_BRUSHES)))
+      {
         toolsystem_ref_set_by_id_pending(bmain, tref_other, tref->idname);
       }
     }

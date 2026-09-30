@@ -2998,7 +2998,8 @@ static void image_new_paint_canvas_follow(bContext *C, Scene *scene, Image *ima)
   RNA_property_update(C, &paint_mode_ptr, source_prop);
 
   /* Painting on a flat texture mirrors in canvas space, not across the mesh. Going through RNA
-   * lets the mode update switch the canvas symmetry on, like picking 2D Canvas in the panel. */
+   * switches the mode and redraws the overlay, like picking 2D Canvas in the panel; the symmetry
+   * checkbox itself is never enabled here (the user turns symmetry on explicitly). */
   PointerRNA imapaint_ptr = RNA_pointer_create_discrete(
       &scene->id, RNA_ImagePaint, &scene->toolsettings->imapaint);
   PropertyRNA *symmetry_mode_prop = RNA_struct_find_property(&imapaint_ptr, "symmetry_mode");
